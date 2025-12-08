@@ -372,4 +372,264 @@ TEST(AppTest, DataTypeEnumRegistration) {
   cvcapp.data("test.enum.int", boost::any());
 }
 
+// ===========================
+// Additional Property Map Tests
+// ===========================
+
+TEST(AppTest, PropertyMapOperations) {
+  property_map test_map;
+  test_map["prop1"] = "value1";
+  test_map["prop2"] = "value2";
+  test_map["prop3"] = "value3";
+  
+  cvcapp.properties(test_map);
+  
+  EXPECT_EQ(cvcapp.properties("prop1"), "value1");
+  EXPECT_EQ(cvcapp.properties("prop2"), "value2");
+  EXPECT_EQ(cvcapp.properties("prop3"), "value3");
+  
+  // Clean up
+  cvcapp.properties("prop1", "");
+  cvcapp.properties("prop2", "");
+  cvcapp.properties("prop3", "");
+}
+
+TEST(AppTest, AddProperties) {
+  property_map test_map;
+  test_map["addprop1"] = "addvalue1";
+  test_map["addprop2"] = "addvalue2";
+  
+  cvcapp.addProperties(test_map);
+  
+  EXPECT_TRUE(cvcapp.hasProperty("addprop1"));
+  EXPECT_TRUE(cvcapp.hasProperty("addprop2"));
+  EXPECT_EQ(cvcapp.properties("addprop1"), "addvalue1");
+  
+  // Clean up
+  cvcapp.properties("addprop1", "");
+  cvcapp.properties("addprop2", "");
+}
+
+TEST(AppTest, PropertyListOperations) {
+  // Test comma-separated list property
+  cvcapp.properties("test.list", "item1,item2,item3");
+  std::vector<std::string> items = cvcapp.listProperty("test.list");
+  
+  ASSERT_EQ(items.size(), 3);
+  EXPECT_EQ(items[0], "item1");
+  EXPECT_EQ(items[1], "item2");
+  EXPECT_EQ(items[2], "item3");
+  
+  // Clean up
+  cvcapp.properties("test.list", "");
+}
+
+TEST(AppTest, PropertyListUniqueElements) {
+  cvcapp.properties("test.list.unique", "a,b,a,c,b,d");
+  std::vector<std::string> items = cvcapp.listProperty("test.list.unique", true);
+  
+  // Should only contain unique elements
+  EXPECT_EQ(items.size(), 4);
+  
+  // Clean up
+  cvcapp.properties("test.list.unique", "");
+}
+
+TEST(AppTest, ListPropertyAppendRemove) {
+  cvcapp.properties("test.list.modify", "alpha,beta");
+  
+  cvcapp.listPropertyAppend("test.list.modify", "gamma");
+  std::vector<std::string> items = cvcapp.listProperty("test.list.modify");
+  EXPECT_EQ(items.size(), 3);
+  EXPECT_EQ(items[2], "gamma");
+  
+  cvcapp.listPropertyRemove("test.list.modify", "beta");
+  items = cvcapp.listProperty("test.list.modify");
+  EXPECT_EQ(items.size(), 2);
+  
+  // Clean up
+  cvcapp.properties("test.list.modify", "");
+}
+
+TEST(AppTest, PropertyTypedAccess) {
+  cvcapp.properties("test.int.prop", 12345);
+  int val = cvcapp.properties<int>("test.int.prop");
+  EXPECT_EQ(val, 12345);
+  
+  cvcapp.properties("test.double.prop", 3.14159);
+  double dval = cvcapp.properties<double>("test.double.prop");
+  EXPECT_NEAR(dval, 3.14159, 0.00001);
+  
+  // Clean up
+  cvcapp.properties("test.int.prop", "");
+  cvcapp.properties("test.double.prop", "");
+}
+
+// ===========================
+// Data Map Bulk Operations
+// ===========================
+
+TEST(AppTest, DataMapBulkOperations) {
+  data_map test_data;
+  test_data["bulk1"] = std::string("value1");
+  test_data["bulk2"] = int(42);
+  test_data["bulk3"] = double(3.14);
+  
+  cvcapp.data(test_data);
+  
+  EXPECT_TRUE(cvcapp.isData<std::string>("bulk1"));
+  EXPECT_TRUE(cvcapp.isData<int>("bulk2"));
+  EXPECT_TRUE(cvcapp.isData<double>("bulk3"));
+  
+  data_map retrieved = cvcapp.data();
+  EXPECT_TRUE(retrieved.find("bulk1") != retrieved.end());
+  EXPECT_TRUE(retrieved.find("bulk2") != retrieved.end());
+  
+  // Clean up
+  cvcapp.data("bulk1", boost::any());
+  cvcapp.data("bulk2", boost::any());
+  cvcapp.data("bulk3", boost::any());
+}
+
+TEST(AppTest, DataVectorOperations) {
+  std::vector<std::string> keys = {"vec1", "vec2", "vec3"};
+  std::vector<int> values = {10, 20, 30};
+  
+  cvcapp.data(keys, values);
+  
+  EXPECT_EQ(cvcapp.data<int>("vec1"), 10);
+  EXPECT_EQ(cvcapp.data<int>("vec2"), 20);
+  EXPECT_EQ(cvcapp.data<int>("vec3"), 30);
+  
+  // Test retrieving as vector
+  std::vector<int> retrieved = cvcapp.data<int>(keys);
+  ASSERT_EQ(retrieved.size(), 3);
+  EXPECT_EQ(retrieved[0], 10);
+  EXPECT_EQ(retrieved[1], 20);
+  EXPECT_EQ(retrieved[2], 30);
+  
+  // Clean up
+  cvcapp.data("vec1", boost::any());
+  cvcapp.data("vec2", boost::any());
+  cvcapp.data("vec3", boost::any());
+}
+
+TEST(AppTest, DataTypesByType) {
+  // Store several strings
+  cvcapp.data("str1", std::string("test1"));
+  cvcapp.data("str2", std::string("test2"));
+  cvcapp.data("int1", int(42));
+  
+  // Get all string keys
+  std::vector<std::string> str_keys = cvcapp.data<std::string>();
+  EXPECT_GE(str_keys.size(), 2);
+  
+  // Clean up
+  cvcapp.data("str1", boost::any());
+  cvcapp.data("str2", boost::any());
+  cvcapp.data("int1", boost::any());
+}
+
+TEST(AppTest, DataTypeNameFromAny) {
+  boost::any any_val = std::string("test");
+  std::string type_name = cvcapp.dataTypeName(any_val);
+  EXPECT_FALSE(type_name.empty());
+}
+
+TEST(AppTest, DataTypeTemplate) {
+  // Test template version
+  std::string type_name = cvcapp.dataTypeName<std::string>();
+  EXPECT_FALSE(type_name.empty());
+  
+  std::string type_name2 = cvcapp.dataTypeName<int>();
+  EXPECT_FALSE(type_name2.empty());
+}
+
+// ===========================
+// Thread Progress and Info Tests
+// ===========================
+
+TEST(AppTest, ThreadProgressBasic) {
+  std::string thread_key = "test.thread.progress";
+  
+  // Simulate thread registration
+  cvcapp.threads(thread_key, thread_ptr(new boost::thread([](){})));
+  
+  cvcapp.threadProgress(thread_key, 0.5);
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 0.5, 0.01);
+  
+  cvcapp.threadProgress(thread_key, 1.0);
+  progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01);
+  
+  // Clean up
+  cvcapp.threads(thread_key, thread_ptr());
+}
+
+TEST(AppTest, ThreadInfoOperations) {
+  std::string thread_key = "test.thread.info";
+  std::string info = "Processing data...";
+  
+  cvcapp.threads(thread_key, thread_ptr(new boost::thread([](){})));
+  
+  cvcapp.threadInfo(thread_key, info);
+  std::string retrieved = cvcapp.threadInfo(thread_key);
+  EXPECT_EQ(retrieved, info);
+  
+  // Clean up
+  cvcapp.threads(thread_key, thread_ptr());
+}
+
+TEST(AppTest, HasThread) {
+  std::string thread_key = "test.thread.exists";
+  
+  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+  
+  cvcapp.threads(thread_key, thread_ptr(new boost::thread([](){})));
+  EXPECT_TRUE(cvcapp.hasThread(thread_key));
+  
+  cvcapp.threads(thread_key, thread_ptr());
+  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+}
+
+TEST(AppTest, UniqueThreadKey) {
+  // Register a thread with first key
+  std::string key1 = cvcapp.uniqueThreadKey("test");
+  cvcapp.threads(key1, thread_ptr(new boost::thread([](){})));
+  
+  // Should get a different unique key
+  std::string key2 = cvcapp.uniqueThreadKey("test");
+  
+  // Keys should be unique
+  EXPECT_NE(key1, key2);
+  
+  // Clean up
+  cvcapp.threads(key1, thread_ptr());
+}
+
+// ===========================
+// Listify Tests
+// ===========================
+
+TEST(AppTest, ListifyString) {
+  std::string list = "a,b,c";
+  std::vector<std::string> vec = cvcapp.listify(list);
+  
+  ASSERT_EQ(vec.size(), 3);
+  EXPECT_EQ(vec[0], "a");
+  EXPECT_EQ(vec[1], "b");
+  EXPECT_EQ(vec[2], "c");
+}
+
+TEST(AppTest, ListifyVector) {
+  std::vector<std::string> vec = {"x", "y", "z"};
+  std::string list = cvcapp.listify(vec);
+  
+  EXPECT_FALSE(list.empty());
+  EXPECT_NE(list.find("x"), std::string::npos);
+  EXPECT_NE(list.find("y"), std::string::npos);
+  EXPECT_NE(list.find("z"), std::string::npos);
+}
+
 // Main function is provided by gtest_main library
