@@ -282,6 +282,171 @@ INSTANTIATE_TEST_SUITE_P(
 );
 ```
 
+## Code Coverage
+
+### Overview
+
+Trans-cvc includes integrated code coverage support using gcov/lcov. Coverage analysis shows which lines of code are executed by your tests, helping identify untested areas.
+
+### Prerequisites
+
+Install coverage tools (Ubuntu/Debian):
+
+```bash
+sudo apt-get install lcov
+```
+
+GCC or Clang compiler is required (MSVC not currently supported for coverage).
+
+### Quick Start - Automated Script
+
+The easiest way to generate coverage:
+
+```bash
+./generate_coverage.sh
+```
+
+This script automatically:
+1. Configures the build with coverage enabled
+2. Builds the project
+3. Runs all tests
+4. Generates HTML coverage report
+5. Shows coverage summary
+
+The report will be in `build-coverage/coverage_html/index.html`.
+
+### Manual Coverage Generation
+
+If you prefer manual control:
+
+```bash
+# Step 1: Configure with coverage enabled
+cmake -B build-coverage -S . \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCVC_BUILD_TESTS=ON \
+  -DCVC_ENABLE_COVERAGE=ON
+
+# Step 2: Build the project
+cmake --build build-coverage -j$(nproc)
+
+# Step 3: Generate coverage report
+cmake --build build-coverage --target coverage
+
+# Step 4: View the report
+xdg-open build-coverage/coverage_html/index.html
+# Or use the convenience target
+cmake --build build-coverage --target coverage-view
+```
+
+### Coverage Targets
+
+- **`coverage`** - Runs tests and generates HTML report
+- **`coverage-view`** - Opens the coverage report in a browser
+
+### Understanding Coverage Reports
+
+The HTML report shows:
+
+- **Line Coverage**: Percentage of code lines executed
+- **Function Coverage**: Percentage of functions called
+- **Branch Coverage**: Percentage of conditional branches taken
+
+Color coding:
+- **Green**: Code executed by tests
+- **Red**: Code not executed
+- **Orange**: Partially executed (branches)
+
+### Coverage Workflow
+
+1. **Initial Coverage**: Run coverage on current tests
+   ```bash
+   ./generate_coverage.sh
+   ```
+
+2. **Identify Gaps**: Look for red (uncovered) sections in the report
+
+3. **Add Tests**: Write tests for uncovered code
+
+4. **Re-run Coverage**: Verify improvement
+   ```bash
+   ./generate_coverage.sh
+   ```
+
+5. **Iterate**: Repeat until target coverage reached
+
+### Coverage Goals
+
+Recommended coverage targets:
+- **Core Libraries**: 80%+ line coverage
+- **Critical Paths**: 100% coverage
+- **Utility Functions**: 70%+ coverage
+- **Overall Project**: 75%+ coverage
+
+### Filtering Coverage
+
+The coverage report automatically excludes:
+- System headers (`/usr/*`)
+- Test files (`*/test/*`, `*/tests/*`)
+- Third-party dependencies (`*/_deps/*`, `*/googletest/*`)
+
+To customize filtering, edit the `coverage` target in `CMakeLists.txt`.
+
+### Coverage with Specific Tests
+
+Run coverage for specific test suites:
+
+```bash
+cd build-coverage
+
+# Clear previous data
+lcov --directory . --zerocounters
+
+# Run specific tests
+./bin/app_test --gtest_filter=AppTest.Data*
+
+# Capture and generate report
+lcov --directory . --capture --output-file coverage.info
+lcov --remove coverage.info '/usr/*' '*/test/*' -o coverage_filtered.info
+genhtml coverage_filtered.info -o coverage_html
+```
+
+### Coverage in CI/CD
+
+Example GitHub Actions workflow:
+
+```yaml
+- name: Configure with Coverage
+  run: cmake -B build -DCVC_ENABLE_COVERAGE=ON -DCVC_BUILD_TESTS=ON
+
+- name: Build
+  run: cmake --build build
+
+- name: Generate Coverage
+  run: cmake --build build --target coverage
+
+- name: Upload Coverage to Codecov
+  uses: codecov/codecov-action@v3
+  with:
+    files: ./build/coverage_filtered.info
+```
+
+### Troubleshooting Coverage
+
+**Issue**: "lcov not found"
+```bash
+sudo apt-get install lcov
+```
+
+**Issue**: Coverage data is empty
+- Ensure you built with `-DCVC_ENABLE_COVERAGE=ON`
+- Verify tests actually ran (`ctest` output)
+- Check that Debug build is used (coverage works best with Debug)
+
+**Issue**: Low coverage on new code
+- Make sure tests exercise the new code paths
+- Check for untested error handling branches
+- Add tests for edge cases
+
 ## Continuous Integration
 
 ### Running Tests in CI

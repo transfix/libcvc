@@ -85,6 +85,7 @@ option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
 option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of trans-cvc subdirectory" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
+option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 
 # Include macros for setting up library dependencies
 include(SetupFFTW)
@@ -114,6 +115,82 @@ endif()
 
 # Include GNUInstallDirs for standard installation paths
 include(GNUInstallDirs)
+
+# Code coverage support
+if(CVC_ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS "Code coverage enabled")
+    
+    # Add coverage flags to all targets
+    set(COVERAGE_COMPILE_FLAGS "--coverage -fprofile-arcs -ftest-coverage")
+    set(COVERAGE_LINK_FLAGS "--coverage")
+    
+    # Apply to C and C++ compilation
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COVERAGE_COMPILE_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COVERAGE_COMPILE_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${COVERAGE_LINK_FLAGS}")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${COVERAGE_LINK_FLAGS}")
+    
+    # Find required coverage tools
+    find_program(GCOV_PATH gcov)
+    find_program(LCOV_PATH lcov)
+    find_program(GENHTML_PATH genhtml)
+    
+    if(LCOV_PATH AND GENHTML_PATH)
+      message(STATUS "Found lcov: ${LCOV_PATH}")
+      message(STATUS "Found genhtml: ${GENHTML_PATH}")
+      
+      # Add custom target for generating coverage report
+      add_custom_target(coverage
+        COMMAND ${CMAKE_COMMAND} -E echo "Clearing previous coverage data..."
+        COMMAND ${LCOV_PATH} --directory . --zerocounters
+        
+        COMMAND ${CMAKE_COMMAND} -E echo "Running tests..."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        
+        COMMAND ${CMAKE_COMMAND} -E echo "Capturing coverage data..."
+        COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --ignore-errors mismatch
+        
+        COMMAND ${CMAKE_COMMAND} -E echo "Filtering coverage data..."
+        COMMAND ${LCOV_PATH} --remove coverage.info 
+          '/usr/*' 
+          '*/test/*' 
+          '*/tests/*'
+          '*/_deps/*'
+          '*/googletest/*'
+          --output-file coverage_filtered.info
+        
+        COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML report..."
+        COMMAND ${GENHTML_PATH} coverage_filtered.info 
+          --output-directory coverage_html
+          --title "trans-cvc Code Coverage"
+          --legend
+          --demangle-cpp
+          --ignore-errors source
+        
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated in: ${CMAKE_BINARY_DIR}/coverage_html/index.html"
+        
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Generating code coverage report"
+      )
+      
+      # Add target to just view the report
+      add_custom_target(coverage-view
+        COMMAND ${CMAKE_COMMAND} -E echo "Opening coverage report..."
+        COMMAND xdg-open coverage_html/index.html || open coverage_html/index.html || start coverage_html/index.html
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Opening code coverage report in browser"
+      )
+      
+    else()
+      message(WARNING "lcov or genhtml not found. Install with: sudo apt-get install lcov")
+      message(WARNING "Coverage target will not be available")
+    endif()
+  else()
+    message(WARNING "Code coverage only supported with GCC or Clang compilers")
+  endif()
+endif()
 
 # Enable testing with Google Test
 if(CVC_BUILD_TESTS)
