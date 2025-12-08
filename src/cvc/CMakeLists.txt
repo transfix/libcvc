@@ -566,3 +566,8 @@ if(WIN32)
     ${CMAKE_BINARY_DIR}/trans-cvc.bat
   )
 endif()
+
+# Add unit tests if enabled
+if(CVC_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()

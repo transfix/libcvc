@@ -84,6 +84,7 @@ endif()
 option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
 option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of trans-cvc subdirectory" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 
 # Include macros for setting up library dependencies
 include(SetupFFTW)
@@ -113,5 +114,26 @@ endif()
 
 # Include GNUInstallDirs for standard installation paths
 include(GNUInstallDirs)
+
+# Enable testing with Google Test
+if(CVC_BUILD_TESTS)
+  enable_testing()
+  
+  # Fetch Google Test
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.14.0
+  )
+  
+  # For Windows: Prevent overriding the parent project's compiler/linker settings
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  
+  # Make Google Test available
+  FetchContent_MakeAvailable(googletest)
+  
+  message(STATUS "Google Test enabled - tests will be built")
+endif()
 
 add_subdirectory(src)

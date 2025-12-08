@@ -126,6 +126,7 @@ trans-cvc/
 - `CMAKE_BUILD_TYPE` - Debug, Release, RelWithDebInfo, MinSizeRel
 - `CMAKE_CXX_STANDARD` (14) - C++ standard version (14/17/20/23)
 - `CMAKE_INSTALL_PREFIX` - Installation directory
+- `CVC_BUILD_TESTS` (ON) - Build unit tests with Google Test
 
 ### Feature Options
 
@@ -302,32 +303,89 @@ cmake --build . --config Release
 
 4. **File Globbing**
    - XMLRPC uses `file(GLOB)` which is not recommended for production
+
+5. **Test Coverage**
+   - Core `cvc::app` and `cvc::state` tests implemented (58 test cases)
+   - Additional coverage needed for volume I/O, geometry, filtering, meshing, SDF
+   - Integration tests for end-to-end workflows
    - Should list files explicitly for better dependency tracking
 
-## Testing Requirements
+## Testing
 
-Currently, the project **does not include unit tests**. Recommended testing framework:
+The project includes comprehensive unit tests using **Google Test v1.14.0**. Tests are **enabled by default** and cover the core `cvc::app` and `cvc::state` functionality.
 
-### Recommended Testing Approach
+### Test Infrastructure
 
-1. **Unit Testing Framework**
-   - **Catch2** or **Google Test** - Modern C++ test frameworks
-   - Add `test/` directory structure
-   - Enable with `BUILD_TESTING` option
+- **Framework**: Google Test (automatically fetched via CMake FetchContent)
+- **CMake Option**: `CVC_BUILD_TESTS` (default: ON)
+- **Test Executables**:
+  - `app_test` - Tests for `cvc::app` singleton and data/property management
+  - `state_test` - Tests for `cvc::state` hierarchical state system
 
-2. **Test Coverage Areas**
-   - Volume I/O (all formats)
-   - Geometry I/O (all formats)
-   - Image filtering algorithms
-   - Meshing/isosurfacing
-   - SDF calculations
-   - XMLRPC communication
-   - State serialization
+### Running Tests
 
-3. **Integration Tests**
-   - End-to-end file conversion
-   - Pipeline processing
-   - Cross-platform compatibility
+```bash
+# Build with tests enabled (default)
+cmake -B build -S . -DCVC_BUILD_TESTS=ON
+cmake --build build
+
+# Run all tests with CTest
+cd build && ctest --output-on-failure
+
+# Run specific test executable
+./build/bin/app_test
+./build/bin/state_test
+
+# Use the convenience target
+cmake --build build --target check
+```
+
+### Current Test Coverage
+
+**cvc::app Tests** (28 test cases):
+- Singleton pattern verification
+- Data management (set/get/remove with various types)
+- Data type registry and enumeration
+- Property management and serialization
+- Property list operations (comma-separated values, unique elements)
+- Thread management (keys, progress, info)
+- Mutex management (named mutexes)
+- Utility functions (listify conversions)
+
+**cvc::state Tests** (30 test cases):
+- Singleton pattern verification
+- Value management with type conversions
+- Comma-separated value lists
+- Arbitrary data storage via boost::any
+- Hierarchical parent-child relationships
+- Child enumeration and regex filtering
+- Metadata (comments, hidden flag, timestamps)
+- State manipulation (touch, reset)
+- Property tree conversion and JSON serialization
+- ValueData (referencing data objects by keys)
+- Tree traversal with callbacks
+
+### Test Design
+
+All tests follow best practices:
+- **Isolation**: Each test cleans up after itself
+- **Unique Namespaces**: Tests use `test.*` prefixes to avoid conflicts
+- **Assertions**: Appropriate use of EXPECT/ASSERT macros
+- **Documentation**: Inline comments explain test purpose
+
+See **[TESTING.md](TESTING.md)** for comprehensive testing documentation.
+
+### Future Test Coverage Areas
+
+Potential additions to expand test coverage:
+- Volume I/O (all formats)
+- Geometry I/O (all formats)
+- Image filtering algorithms
+- Meshing/isosurfacing
+- SDF calculations
+- XMLRPC communication
+- Multi-threaded concurrency tests
+- Integration tests for end-to-end workflows
 
 ## Installation Structure
 
@@ -473,11 +531,11 @@ The trans-cvc project has been successfully modernized to use CMake 3.15+ with m
 - Provides better dependency management
 - Supports C++14/17/20/23 standards
 - Has clearer build options and documentation
-- Is ready for integration of unit tests
+- Includes comprehensive unit tests for core functionality (58 test cases)
 - Maintains backward compatibility with existing code
 
 The next recommended steps are:
-1. Add comprehensive unit tests
+1. Expand unit test coverage to volume I/O, geometry, and algorithms
 2. Set up continuous integration (CI)
 3. Address the duplicate VolMagick code TODO
 4. Consider updating CUDA support to modern CMake

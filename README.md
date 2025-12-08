@@ -88,6 +88,7 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release \          # Build type (Debug/Release)
   -DCMAKE_CXX_STANDARD=17 \             # C++ standard (14/17/20/23)
   -DBUILD_SHARED_LIBS=ON \              # Build shared libraries
+  -DCVC_BUILD_TESTS=ON \                # Enable unit tests (ON by default)
   -DCVC_USING_HDF5=ON \                 # Enable HDF5 support
   -DCVC_ENABLE_MESHER=ON \              # Enable meshing features
   -DCVC_ENABLE_SDF=ON \                 # Enable SDF calculations
@@ -96,6 +97,32 @@ cmake .. \
 ```
 
 See `PROJECT_REPORT.md` for a complete list of build options.
+
+## Testing
+
+Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
+
+```bash
+# Build with tests (default)
+cmake --build build
+
+# Run all tests
+cd build && ctest --output-on-failure
+
+# Or use the convenience target
+cmake --build build --target check
+
+# Run specific test suites
+./build/bin/app_test    # Test cvc::app functionality
+./build/bin/state_test  # Test cvc::state functionality
+```
+
+See **[TESTING.md](TESTING.md)** for detailed testing documentation, including:
+- How to run tests
+- Test coverage details
+- Adding new tests
+- CI/CD integration
+- Troubleshooting
 
 ## Usage Example
 
@@ -139,6 +166,22 @@ mesh.save("output.off");
   - Architecture overview
   - Migration guide from version 1.x to 2.0
 
+- **[TESTING.md](TESTING.md)** - Unit testing guide
+  - Running tests with CTest and Google Test
+  - Test organization and coverage
+  - Adding new tests
+  - CI/CD integration examples
+
+- **[CUDA_GUIDE.md](CUDA_GUIDE.md)** - CUDA development guide
+  - Modern CMake CUDA integration
+  - CUDA architecture configuration
+  - Example CUDA code patterns
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development guidelines
+  - Code style and conventions
+  - Build system best practices
+  - Git workflow recommendations
+
 ## Project Structure
 
 ```
@@ -176,7 +219,7 @@ This is a modernization of legacy research software. Contributions welcome:
 
 - Duplicate VolMagick code in mesher component (historical TODO)
 - No CUDA source files yet (infrastructure ready - see CUDA_GUIDE.md)
-- Unit tests not yet implemented
+- Additional test coverage welcomed (core tests implemented)
 
 ## License
 

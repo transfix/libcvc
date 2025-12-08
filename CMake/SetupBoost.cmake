@@ -14,6 +14,7 @@ function(SetupBoost TargetName)
     regex 
     filesystem 
     system
+    chrono
   )
   
   if(Boost_FOUND)
