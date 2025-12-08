@@ -88,7 +88,7 @@ SimpleVolumeData* RawVFile::loadFile(const string& fileName)
 	if (!fp) {
 		printf("Error: could not open file\n");
 		delete simpleVolumeData; simpleVolumeData = 0;
-		return false;
+		return nullptr;
 	}
 
 	// read the header
@@ -100,7 +100,7 @@ SimpleVolumeData* RawVFile::loadFile(const string& fileName)
 		// doh! this isn't a RawV file
 		printf("Error: file format is not recognized. (expecting RawV)\n");
 		fclose(fp);
-		return false;
+		return nullptr;
 	}
 	// the dimensions, # of timesteps, # of variables, and min/max extents
 	fread(dims, 3, sizeof(unsigned int), fp);

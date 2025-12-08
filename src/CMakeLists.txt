@@ -1,14 +1,13 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.15)
+
+# Build options
+option(CVC_USING_XMLRPC "Enable cvc::state network sharing with XMLRPC" OFF)
 
 add_subdirectory(cvc)
 
-option(CVC_USING_XMLRPC "If this is enabled, cvc::state will support state sharing with other processes on the network" OFF)
-mark_as_advanced(CVC_USING_XMLRPC)
 if(CVC_USING_XMLRPC)
   add_subdirectory(xmlrpc)
 endif()
 
-# Add a special target to clean nvcc generated files.
-if(CUDA_BUILD_ENABLED)
-  cuda_build_clean_target()
-endif(CUDA_BUILD_ENABLED)
+# Note: CUDA is now integrated via native CMake support (3.17+)
+# No special clean targets needed - handled automatically

@@ -1,0 +1,158 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 15,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default Config",
+      "description": "Default build configuration",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_STANDARD": "17",
+        "BUILD_SHARED_LIBS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug Build",
+      "description": "Debug build with all features enabled",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release Build",
+      "description": "Optimized release build",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON"
+      }
+    },
+    {
+      "name": "full-features",
+      "displayName": "All Features Enabled",
+      "description": "Build with all optional features enabled",
+      "inherits": "release",
+      "cacheVariables": {
+        "CVC_USING_HDF5": "ON",
+        "CVC_USING_XMLRPC": "ON",
+        "CVC_ENABLE_MESHER": "ON",
+        "CVC_ENABLE_SDF": "ON",
+        "CVC_USING_IMOD_MRC": "ON",
+        "CVC_GEOMETRY_ENABLE_BUNNY": "ON",
+        "CVC_LOG4CPLUS_DEFAULT": "OFF",
+        "DISABLE_CGAL": "OFF"
+      }
+    },
+    {
+      "name": "minimal",
+      "displayName": "Minimal Build",
+      "description": "Minimal build with only required dependencies",
+      "inherits": "release",
+      "cacheVariables": {
+        "CVC_USING_HDF5": "OFF",
+        "CVC_USING_XMLRPC": "OFF",
+        "CVC_ENABLE_MESHER": "OFF",
+        "CVC_ENABLE_SDF": "OFF",
+        "CVC_LOG4CPLUS_DEFAULT": "OFF",
+        "DISABLE_CGAL": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development Build",
+      "description": "Development build with compile commands for IDE support",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_SHARED_LIBS": "ON"
+      }
+    },
+    {
+      "name": "cpp14",
+      "displayName": "C++14 Build",
+      "description": "Build with C++14 standard (minimum requirement)",
+      "inherits": "release",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "14"
+      }
+    },
+    {
+      "name": "cpp20",
+      "displayName": "C++20 Build",
+      "description": "Build with C++20 standard",
+      "inherits": "release",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "cuda",
+      "displayName": "CUDA Build",
+      "description": "Build with CUDA GPU acceleration enabled",
+      "inherits": "release",
+      "cacheVariables": {
+        "CVC_ENABLE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "75;80;86"
+      }
+    },
+    {
+      "name": "cuda-debug",
+      "displayName": "CUDA Debug Build",
+      "description": "Debug build with CUDA enabled",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CVC_ENABLE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "75;80;86"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "jobs": 0,
+      "verbose": false
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "jobs": 0
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "jobs": 0
+    },
+    {
+      "name": "full-features",
+      "configurePreset": "full-features",
+      "jobs": 0
+    },
+    {
+      "name": "verbose",
+      "configurePreset": "default",
+      "jobs": 0,
+      "verbose": true
+    },
+    {
+      "name": "cuda",
+      "configurePreset": "cuda",
+      "jobs": 0
+    },
+    {
+      "name": "cuda-debug",
+      "configurePreset": "cuda-debug",
+      "jobs": 0
+    }
+  ]
+}

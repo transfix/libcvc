@@ -1,0 +1,484 @@
+# Trans-CVC Project Report
+
+## Project Overview
+
+**Project Name:** trans-cvc  
+**Version:** 2.0.0 (updated from 1.0.0)  
+**Description:** Computational Visualization Center library from the VolumeRover package at UT Austin  
+**Language:** C++ (with C components)  
+**Build System:** CMake (modernized to 3.15+)  
+**C++ Standard:** C++14 minimum (configurable to newer standards)
+
+## Project Structure
+
+```
+trans-cvc/
+├── CMakeLists.txt                 # Root build configuration
+├── CMake/                         # CMake helper modules
+│   ├── SetupBoost.cmake          # Boost configuration
+│   ├── SetupCGAL.cmake           # CGAL configuration
+│   ├── SetupFFTW.cmake           # FFTW configuration
+│   ├── SetupGSL.cmake            # GSL configuration
+│   └── cuda/                     # CUDA support (optional)
+├── inc/                          # Public header files
+│   ├── cvc/                      # Main library headers
+│   └── xmlrpc/                   # XMLRPC headers
+└── src/                          # Source files
+    ├── cvc/                      # Main library implementation
+    │   ├── libiimod/             # IMOD MRC file support
+    │   ├── cvc-mesher/           # Meshing/isosurfacing
+    │   └── SDF/                  # Signed distance functions
+    └── xmlrpc/                   # XMLRPC implementation
+```
+
+## Dependencies
+
+### Required Dependencies
+
+1. **CMake** (>= 3.15)
+   - Modern build system
+   - Required for configuration and building
+
+2. **Boost** (>= 1.58)
+   - **Components:** thread, date_time, regex, filesystem, system
+   - **Purpose:** Core utilities, threading, file I/O
+   - **Link Type:** Dynamic linking (BOOST_ALL_DYN_LINK)
+   - **Installation:** `libboost-all-dev` or `boost-devel`
+
+3. **C++ Compiler**
+   - GCC >= 5.0, Clang >= 3.8, or MSVC >= 2017
+   - C++14 standard support required
+   - C++17/20/23 compatible
+
+### Optional Dependencies
+
+4. **HDF5** (C and C++ components)
+   - **Purpose:** Support for *.cvc file format
+   - **Build Option:** `CVC_USING_HDF5` (default: OFF)
+   - **Installation:** `libhdf5-dev` or `hdf5-devel`
+
+5. **CGAL** (Computational Geometry Algorithms Library)
+   - **Purpose:** Advanced geometry operations, vertex projection
+   - **Build Option:** `DISABLE_CGAL` (default: OFF, meaning enabled)
+   - **Requires:** GMP, GMPXX
+   - **Installation:** `libcgal-dev` or `CGAL-devel`
+   - **Note:** GCC requires `-frounding-math` flag
+
+6. **FFTW** (Fastest Fourier Transform in the West)
+   - **Purpose:** Signal processing, frequency domain operations
+   - **Versions:** Single precision (float) and/or double precision
+   - **Build Options:** `USE_FFTWD`, `USE_FFTWF` (default: ON)
+   - **Installation:** `libfftw3-dev` or `fftw-devel`
+
+7. **GSL** (GNU Scientific Library)
+   - **Purpose:** Scientific computing, numerical algorithms
+   - **Installation:** `libgsl-dev` or `gsl-devel`
+
+8. **Log4cplus**
+   - **Purpose:** Advanced logging capabilities
+   - **Build Option:** `CVC_LOG4CPLUS_DEFAULT` (default: OFF)
+   - **Installation:** `liblog4cplus-dev`
+
+9. **CUDA** (Optional, modern support)
+   - **Purpose:** GPU acceleration
+   - **Requirements:** CMake 3.17+, CUDA Toolkit 10.0+
+   - **Build Option:** `CVC_ENABLE_CUDA` (default: OFF)
+   - **Note:** Uses native CMake CUDA language support (modernized)
+
+### Embedded/Built-in Components
+
+10. **XMLRPC** (XML-RPC implementation)
+    - **Source:** Included in `src/xmlrpc/`
+    - **Purpose:** Network state sharing between processes
+    - **Build Option:** `CVC_USING_XMLRPC` (default: OFF)
+    - **Platform:** Cross-platform (Linux, Windows, BSD)
+
+11. **IMOD libiimod** (MRC file format)
+    - **Source:** Included in `src/cvc/libiimod/`
+    - **Purpose:** Loading MRC microscopy image files
+    - **Build Option:** `CVC_USING_IMOD_MRC` (default: ON)
+
+12. **Mesher Components** (Isosurfacing/Meshing)
+    - **Source:** Included in `src/cvc/cvc-mesher/`
+    - **Purpose:** Surface extraction, marching cubes, LBIE meshing
+    - **Build Option:** `CVC_ENABLE_MESHER` (default: ON)
+    - **Components:**
+      - Contour extraction
+      - Fast contouring
+      - LBIE (Level-set Boundary Interior and Exterior) meshing
+      - Duplicate VolMagick code (TODO: needs refactoring)
+
+13. **SDF (Signed Distance Function)**
+    - **Source:** Included in `src/cvc/SDF/`
+    - **Purpose:** Distance field calculation for geometries
+    - **Build Option:** `CVC_ENABLE_SDF` (default: ON)
+    - **Components:**
+      - UsefulMath utilities
+      - Geometry file types (RAW, OBJ, etc.)
+      - Volume file types
+      - Two SDF implementations (v1 and v2)
+
+## Build Options
+
+### Core Options
+
+- `BUILD_SHARED_LIBS` (ON) - Build shared libraries instead of static
+- `CMAKE_BUILD_TYPE` - Debug, Release, RelWithDebInfo, MinSizeRel
+- `CMAKE_CXX_STANDARD` (14) - C++ standard version (14/17/20/23)
+- `CMAKE_INSTALL_PREFIX` - Installation directory
+
+### Feature Options
+
+- `CVC_USING_HDF5` (OFF) - Enable HDF5 support for *.cvc files
+- `CVC_USING_XMLRPC` (OFF) - Enable network state sharing
+- `CVC_USING_IMOD_MRC` (ON) - Use IMOD's MRC loading routines
+- `CVC_ENABLE_MESHER` (ON) - Enable isosurfacing/meshing
+- `CVC_ENABLE_SDF` (ON) - Enable signed distance function calculation
+- `CVC_ENABLE_CUDA` (OFF) - Enable CUDA GPU acceleration (requires CMake 3.17+)
+- `CVC_GEOMETRY_ENABLE_BUNNY` (ON) - Include test bunny geometry
+- `DISABLE_CGAL` (OFF) - Disable CGAL even if available
+
+### Advanced Options
+
+- `CVC_LOG4CPLUS_DEFAULT` (OFF) - Use log4cplus for logging
+- `LOG4CPLUS_DISABLE_TRACE` (OFF) - Disable trace logging
+- `CVC_APP_XML_PROPERTY_TREE` (OFF) - Use XML vs Boost INFO format
+- `CVC_GEOMETRY_CORRECT_INDEX_START` (OFF) - Adjust 1-based indices
+- `USING_STANDARD_INSTALL_LOCATION` (ON) - Use standard paths
+- `CVC_NAMESPACE` (cvc) - C++ namespace name
+
+## Supported File Formats
+
+### Volume/Image Formats
+- **RAWIV** - Raw image volume
+- **RAWV** - Raw volume
+- **MRC** - Medical Research Council (via IMOD)
+- **Spider** - SPIDER image format
+- **VTK** - VTK legacy format
+- **CVC** - Custom CVC format (requires HDF5)
+- **CVCRAW** - CVC raw format
+- **DX** - OpenDX format
+- **Null** - Null I/O handler
+
+### Geometry Formats
+- **OFF** - Object File Format
+- **RAW/RAWN/RAWC/RAWNC** - Raw geometry formats
+- **OBJ** - Wavefront OBJ (via SDF)
+- **Bunny** - Built-in test geometry
+
+## Platform Support
+
+### Operating Systems
+- **Linux** - Primary platform, fully supported
+- **Windows** - Supported with MSVC
+- **macOS** - Supported (includes Lion+ compatibility fixes)
+- **BSD** - Basic support
+
+### Compilers
+- **GCC** - Version 5.0+ (requires `-frounding-math` for CGAL)
+- **Clang** - Version 3.8+
+- **MSVC** - Visual Studio 2017+ (requires special variadic template handling)
+
+## Build Instructions
+
+### Basic Build (Linux/macOS)
+
+```bash
+# Clone or navigate to repository
+cd /home/joe/src/trans-cvc
+
+# Create build directory
+mkdir build && cd build
+
+# Configure with CMake
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_STANDARD=17 \
+  -DBUILD_SHARED_LIBS=ON
+
+# Build
+cmake --build . -j$(nproc)
+
+# Optional: Install
+sudo cmake --install .
+```
+
+### Build with Optional Features
+
+```bash
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCVC_USING_HDF5=ON \
+  -DCVC_USING_XMLRPC=ON \
+  -DCVC_LOG4CPLUS_DEFAULT=ON
+```
+
+### Windows Build
+
+```bash
+# Using Visual Studio
+cmake .. -G "Visual Studio 16 2019" -A x64
+cmake --build . --config Release
+```
+
+## Library Components
+
+### Main Library: libcvc
+
+**Target:** `cvc` (alias: `cvc::cvc`)  
+**Type:** Shared/Static library  
+**Headers:** `inc/cvc/*.h`  
+**Version:** 2.0.0
+
+**Key Features:**
+- Volume data processing and I/O
+- Geometry processing and I/O
+- Image filtering (bilateral, anisotropic diffusion, GDTV)
+- Contrast enhancement
+- Smoothing algorithms
+- State management and serialization
+- Application framework
+
+### XMLRPC Library
+
+**Target:** `xmlrpc` (alias: `cvc::xmlrpc`)  
+**Purpose:** XML-RPC client/server for network communication  
+**Platform Support:** Cross-platform with platform-specific socket handling
+
+### Executable: trans-cvc
+
+**Target:** `trans-cvc`  
+**Purpose:** Command-line tool for volume/geometry operations  
+**Dependencies:** Links to libcvc
+
+## CMake Modernization Summary
+
+### Changes Made
+
+1. **CMake Version**
+   - Updated from 2.6/2.8 to 3.15+ (range: 3.15...3.28)
+   - Enables modern CMake features and policies
+
+2. **Modern Practices**
+   - Used `project()` with VERSION and LANGUAGES
+   - Replaced `add_definitions()` with `target_compile_definitions()`
+   - Replaced `include_directories()` with `target_include_directories()`
+   - Used generator expressions for build/install interface
+   - Created library aliases (e.g., `cvc::cvc`)
+   - Proper target property propagation (PUBLIC/PRIVATE/INTERFACE)
+
+3. **Standards**
+   - Set C++14 as minimum standard
+   - Enabled `CMAKE_CXX_STANDARD_REQUIRED`
+   - Disabled compiler extensions
+   - Set modern policies (CMP0074, CMP0091)
+
+4. **Organization**
+   - Better structured options with descriptions
+   - Used `list(APPEND)` instead of `set(VAR ${VAR} ...)`
+   - Cleaner conditional logic
+   - Better status messages
+
+5. **Build Output**
+   - Modern output directories using CMAKE_*_OUTPUT_DIRECTORY
+   - Removed deprecated LIBRARY_OUTPUT_PATH
+   - Proper SOVERSION handling
+
+## Known Issues and TODOs
+
+1. **Duplicate VolMagick Code**
+   - Location: `src/cvc/cvc-mesher/VolMagick/`
+   - Issue: Duplicate implementation exists
+   - Note: Original TODO from 1/9/2014
+
+2. **CUDA Source Files**
+   - No .cu files currently in project
+   - CUDA infrastructure ready for GPU-accelerated algorithms
+   - See CUDA_GUIDE.md for adding CUDA support
+
+3. **Commented Code**
+   - Poco HTTP server support disabled (optional future feature)
+   - Some SDF test files commented out
+
+4. **File Globbing**
+   - XMLRPC uses `file(GLOB)` which is not recommended for production
+   - Should list files explicitly for better dependency tracking
+
+## Testing Requirements
+
+Currently, the project **does not include unit tests**. Recommended testing framework:
+
+### Recommended Testing Approach
+
+1. **Unit Testing Framework**
+   - **Catch2** or **Google Test** - Modern C++ test frameworks
+   - Add `test/` directory structure
+   - Enable with `BUILD_TESTING` option
+
+2. **Test Coverage Areas**
+   - Volume I/O (all formats)
+   - Geometry I/O (all formats)
+   - Image filtering algorithms
+   - Meshing/isosurfacing
+   - SDF calculations
+   - XMLRPC communication
+   - State serialization
+
+3. **Integration Tests**
+   - End-to-end file conversion
+   - Pipeline processing
+   - Cross-platform compatibility
+
+## Installation Structure
+
+Default installation layout (with `USING_STANDARD_INSTALL_LOCATION=ON`):
+
+```
+${CMAKE_INSTALL_PREFIX}/
+├── bin/
+│   └── trans-cvc
+├── lib/
+│   ├── libcvc.so (or .dylib, .dll)
+│   └── libxmlrpc.so (if enabled)
+└── include/
+    ├── cvc/
+    │   └── *.h
+    └── xmlrpc/
+        └── *.h
+```
+
+## Performance Considerations
+
+1. **Build Performance**
+   - Parallel builds: Use `-j` flag
+   - Unity builds: Consider `CMAKE_UNITY_BUILD=ON`
+   - Precompiled headers: Can be added for Boost headers
+
+2. **Runtime Performance**
+   - SIMD optimizations available through Boost
+   - CUDA support for GPU acceleration (if enabled)
+   - CGAL provides optimized geometry algorithms
+
+## Migration Guide (from 1.0 to 2.0)
+
+### For Developers
+
+1. **CMake Minimum Version**
+   - Old: 2.6/2.8
+   - New: 3.15+
+   - Action: Update your CMake installation
+
+2. **Include Directories**
+   - Old: Handled by parent scope
+   - New: Propagated via target properties
+   - Action: Use `target_link_libraries(mytarget cvc::cvc)`
+
+3. **Macro vs Function**
+   - Old: SetupBoost, SetupGSL, etc. were macros
+   - New: Converted to functions with PARENT_SCOPE where needed
+   - Action: No code changes needed
+
+4. **Definitions**
+   - Old: Global `add_definitions()`
+   - New: Target-specific `target_compile_definitions()`
+   - Action: Link to targets properly
+
+### For Users
+
+1. **Build Commands**
+   - Modern CMake workflow unchanged
+   - Configuration caching improved
+   - Better error messages
+
+2. **Binary Compatibility**
+   - SOVERSION managed properly
+   - Shared library versioning improved
+
+## Resources
+
+### Documentation
+- CMake Documentation: https://cmake.org/documentation/
+- Boost Documentation: https://www.boost.org/doc/
+- CGAL Manual: https://doc.cgal.org/
+
+### Community
+- Original Project: Computational Visualization Center, UT Austin
+- VolumeRover: Historical context for this library
+
+## Appendix: Full Dependency Installation
+
+### Ubuntu/Debian
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    cmake \
+    cmake-curses-gui \
+    libboost-all-dev \
+    libfftw3-dev \
+    libgsl-dev \
+    libhdf5-dev \
+    libcgal-dev \
+    libgmp-dev \
+    liblog4cplus-dev
+```
+
+### Fedora/RHEL/CentOS
+
+```bash
+sudo dnf install -y \
+    gcc-c++ \
+    cmake \
+    boost-devel \
+    fftw-devel \
+    gsl-devel \
+    hdf5-devel \
+    CGAL-devel \
+    gmp-devel \
+    log4cplus-devel
+```
+
+### macOS (Homebrew)
+
+```bash
+brew install \
+    cmake \
+    boost \
+    fftw \
+    gsl \
+    hdf5 \
+    cgal \
+    gmp \
+    log4cplus
+```
+
+### Windows (vcpkg)
+
+```cmd
+vcpkg install ^
+    boost:x64-windows ^
+    fftw3:x64-windows ^
+    gsl:x64-windows ^
+    hdf5:x64-windows ^
+    cgal:x64-windows ^
+    gmp:x64-windows
+```
+
+## Summary
+
+The trans-cvc project has been successfully modernized to use CMake 3.15+ with modern best practices. The build system now:
+
+- Uses contemporary CMake idioms and target-based design
+- Provides better dependency management
+- Supports C++14/17/20/23 standards
+- Has clearer build options and documentation
+- Is ready for integration of unit tests
+- Maintains backward compatibility with existing code
+
+The next recommended steps are:
+1. Add comprehensive unit tests
+2. Set up continuous integration (CI)
+3. Address the duplicate VolMagick code TODO
+4. Consider updating CUDA support to modern CMake
+5. Add Doxygen documentation generation

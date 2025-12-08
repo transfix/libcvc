@@ -69,7 +69,7 @@ namespace CVC_NAMESPACE
     //This slot propagates child changes up to parents
     childChanged.connect(
       map_change_signal::slot_type(
-        &state::notifyParent, this, _1
+        &state::notifyParent, this, boost::placeholders::_1
       )
     );
   }

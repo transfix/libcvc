@@ -142,7 +142,7 @@ SimpleVolumeData* RawIVFile::loadFile(const string& fileName)
 	if ((dataSize % ((Q_ULLONG)dims[0]*dims[1]*dims[2])) != 0) {
 		printf("Error: rawiv file header dimensions don't match file size");
 		fclose(fp);
-		return false;
+		return nullptr;
 	}
 	
 	// call some set...() functions

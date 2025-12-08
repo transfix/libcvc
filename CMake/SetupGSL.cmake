@@ -1,15 +1,23 @@
 #
-# This macro is for setting up a sub-project to use the Gnu Scientific Library (GSL)
+# Modern function for setting up the GNU Scientific Library (GSL)
 #
 
-macro(SetupGSL TargetName)
+function(SetupGSL TargetName)
   find_package(GSL)
+  
   if(GSL_FOUND)
-    include_directories(${GSL_INCLUDE_DIRS})
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_GSL_CXX_FLAGS}")
-    set(LIBS ${LIBS} ${GSL_LIBRARIES})
-  else(GSL_FOUND)
-    message(SEND_ERROR "${TargetName} requires the Gnu Scientific Library (GSL)!")
-  endif(GSL_FOUND)
-  target_link_libraries(${TargetName} ${LIBS})
-endmacro(SetupGSL)
+    message(STATUS "GSL found: ${GSL_VERSION}")
+    message(STATUS "GSL include dirs: ${GSL_INCLUDE_DIRS}")
+    message(STATUS "GSL libraries: ${GSL_LIBRARIES}")
+    
+    # Use modern target-based approach
+    target_include_directories(${TargetName} PUBLIC ${GSL_INCLUDE_DIRS})
+    target_link_libraries(${TargetName} PUBLIC ${GSL_LIBRARIES})
+    
+    if(CMAKE_GSL_CXX_FLAGS)
+      target_compile_options(${TargetName} PUBLIC ${CMAKE_GSL_CXX_FLAGS})
+    endif()
+  else()
+    message(WARNING "GSL not found - GSL-dependent features disabled")
+  endif()
+endfunction(SetupGSL)

@@ -1,51 +1,117 @@
-cmake_minimum_required(VERSION 2.8)
-project(trans-cvc)
+cmake_minimum_required(VERSION 3.15...3.28)
+
+# Check for CUDA early to add it to project languages
+option(CVC_ENABLE_CUDA "Enable CUDA support for GPU acceleration" OFF)
+
+if(CVC_ENABLE_CUDA)
+  # Require CMake 3.17+ for native CUDA support
+  cmake_minimum_required(VERSION 3.17...3.28)
+endif()
+
+# Define project with languages
+if(CVC_ENABLE_CUDA)
+  project(trans-cvc
+    VERSION 2.0.0
+    DESCRIPTION "Computational Visualization Center library from VolumeRover package"
+    LANGUAGES C CXX CUDA
+  )
+else()
+  project(trans-cvc
+    VERSION 2.0.0
+    DESCRIPTION "Computational Visualization Center library from VolumeRover package"
+    LANGUAGES C CXX
+  )
+endif()
+
+# Require C++14 as a minimum, but allow newer standards
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Use modern CMake policies
+if(POLICY CMP0074)
+  cmake_policy(SET CMP0074 NEW) # Use <Package>_ROOT variables
+endif()
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags
+endif()
+
+# Only build what's being actively developed
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # CMake Modules
-set(CMAKE_MODULE_PATH
-  ${CMAKE_SOURCE_DIR}/CMake
-  ${CMAKE_SOURCE_DIR}/CMake/cuda
-  ${CMAKE_MODULE_PATH})
+list(PREPEND CMAKE_MODULE_PATH
+  "${CMAKE_SOURCE_DIR}/CMake"
+)
 
-# Build output 
-set(LIBRARY_OUTPUT_PATH "${CMAKE_BINARY_DIR}/lib")
-set(EXECUTABLE_OUTPUT_PATH "${CMAKE_BINARY_DIR}/bin")
-mark_as_advanced(LIBRARY_OUTPUT_PATH EXECUTABLE_OUTPUT_PATH)
+# Use modern output directories
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
-# The version number.
-set(transcvc_VERSION_MAJOR 1)
-set(transcvc_VERSION_MINOR 0)
-
-# The full version string
-set(transcvc_VERSION ${transcvc_VERSION_MAJOR}.${transcvc_VERSION_MINOR})
+# The version number (now using project VERSION)
+set(transcvc_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(transcvc_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(transcvc_VERSION ${PROJECT_VERSION})
 message(STATUS "trans-cvc version: ${transcvc_VERSION}")
 
-# include macros for setting up some library dependencies
-#include( SetupQt )
+# Configure CUDA if enabled
+if(CVC_ENABLE_CUDA)
+  # Set CUDA standard to match C++ standard
+  if(NOT DEFINED CMAKE_CUDA_STANDARD)
+    set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  endif()
+  
+  # Enable CUDA separable compilation for device code
+  set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+  
+  # Set CUDA architectures (adjust as needed for your target GPUs)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    # Default to common architectures: Maxwell, Pascal, Volta, Turing, Ampere
+    set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80")
+  endif()
+  
+  message(STATUS "CUDA support enabled")
+  message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+  message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  message(STATUS "CUDA standard: ${CMAKE_CUDA_STANDARD}")
+else()
+  message(STATUS "CUDA support disabled")
+endif()
+
+# Build options
+option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
+option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of trans-cvc subdirectory" ON)
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+
+# Include macros for setting up library dependencies
 include(SetupFFTW)
 include(SetupBoost)
 include(SetupGSL)
 
-option(DISABLE_CGAL "This disables CGAL even if it is available on the build system." OFF)
-mark_as_advanced(DISABLE_CGAL)
-if (NOT DISABLE_CGAL)
-  include( SetupCGAL )
-endif (NOT DISABLE_CGAL)
+if(NOT DISABLE_CGAL)
+  include(SetupCGAL)
+endif()
 
-# 05/11/2012 - transfix
-# Possibly prevent crashing on OSX Lion
-# http://groups.google.com/group/boost-list/browse_thread/thread/1c5a614a9e8c9808
+if(CVC_ENABLE_CUDA)
+  include(SetupCUDA)
+endif()
+
+# Platform-specific settings
 if(APPLE)
-  add_definitions(-D_GLIBCXX_FULLY_DYNAMIC_STRING)
-endif(APPLE)
+  # Possibly prevent crashing on OSX (historical fix from 05/11/2012)
+  add_compile_definitions(_GLIBCXX_FULLY_DYNAMIC_STRING)
+endif()
 
-# experimental
-option(USING_STANDARD_INSTALL_LOCATION "If on, it will not put everything under $prefix/trans-cvc" ON)
-mark_as_advanced(USING_STANDARD_INSTALL_LOCATION)
+# Installation prefix handling
 if(USING_STANDARD_INSTALL_LOCATION)
   set(ADDED_PREFIX ".")
-else(USING_STANDARD_INSTALL_LOCATION)
+else()
   set(ADDED_PREFIX "trans-cvc")
-endif(USING_STANDARD_INSTALL_LOCATION)
+endif()
 
-add_subdirectory (src)
+# Include GNUInstallDirs for standard installation paths
+include(GNUInstallDirs)
+
+add_subdirectory(src)

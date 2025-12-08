@@ -409,19 +409,19 @@ namespace CVC_NAMESPACE
 
 	  if(haveNormals && printNormals)
 	    outf << " " 
-		 << geom.normals()[distance(geom.points().begin(),i)][0] << " " 
-		 << geom.normals()[distance(geom.points().begin(),i)][1] << " " 
-		 << geom.normals()[distance(geom.points().begin(),i)][2];
+		 << geom.normals()[std::distance(geom.points().begin(),i)][0] << " " 
+		 << geom.normals()[std::distance(geom.points().begin(),i)][1] << " " 
+		 << geom.normals()[std::distance(geom.points().begin(),i)][2];
 	  if(haveColors && printColors)
 	    outf << " " 
-		 << geom.colors()[distance(geom.points().begin(),i)][0] << " " 
-		 << geom.colors()[distance(geom.points().begin(),i)][1] << " " 
-		 << geom.colors()[distance(geom.points().begin(),i)][2];
+		 << geom.colors()[std::distance(geom.points().begin(),i)][0] << " " 
+		 << geom.colors()[std::distance(geom.points().begin(),i)][1] << " " 
+		 << geom.colors()[std::distance(geom.points().begin(),i)][2];
 	  if(geom.boundary().size() == geom.points().size())
-	    outf << " " << geom.boundary()[distance(geom.points().begin(),i)];
+	    outf << " " << geom.boundary()[std::distance(geom.points().begin(),i)];
 	  outf << endl;
 	  if(!outf)
-	    throw write_error(str(format("Error writing vertex %1%") % distance(geom.points().begin(),i)));
+	    throw write_error(str(format("Error writing vertex %1%") % std::distance(geom.points().begin(),i)));
 	}
     
       if(geom.lines().size() != 0)
@@ -437,7 +437,7 @@ namespace CVC_NAMESPACE
 		}
 
 	      if(!outf)
-		throw write_error(str(format("Error writing line %1%") % distance(geom.lines().begin(),i)));
+		throw write_error(str(format("Error writing line %1%") % std::distance(geom.lines().begin(),i)));
 	    }
 	}
       else if(geom.tris().size() != 0)
@@ -455,7 +455,7 @@ namespace CVC_NAMESPACE
 		    }
                 
 		  if(!outf)
-		    throw write_error(str(format("Error writing triangle %1%") % distance(geom.tris().begin(),i)));
+		    throw write_error(str(format("Error writing triangle %1%") % std::distance(geom.tris().begin(),i)));
 		}
 	    }
 	  else
@@ -484,7 +484,7 @@ namespace CVC_NAMESPACE
 		    }
                 
 		  if(!outf)
-		    throw write_error(str(format("Error writing quad %1%") % distance(geom.quads().begin(),i)));
+		    throw write_error(str(format("Error writing quad %1%") % std::distance(geom.quads().begin(),i)));
 		}
 	    }
 	  else

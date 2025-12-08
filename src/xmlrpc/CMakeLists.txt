@@ -1,30 +1,34 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.15)
 
+# Collect source and header files
 file(GLOB SOURCE_FILES *.cpp)
 file(GLOB INCLUDE_FILES ../../inc/xmlrpc/*.[Hh])
 
+# IDE source organization
 source_group("Source Files" FILES ${SOURCE_FILES})
 source_group("Header Files" FILES ${INCLUDE_FILES})
 
-include_directories(
-  ../../inc
+# Create library
+add_library(xmlrpc ${SOURCE_FILES} ${INCLUDE_FILES})
+add_library(cvc::xmlrpc ALIAS xmlrpc)
+
+# Modern include directory handling
+target_include_directories(xmlrpc
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/inc>
+    $<INSTALL_INTERFACE:include>
 )
 
+# Platform-specific definitions
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_definitions(-D__LINUX__)
-endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(xmlrpc PRIVATE __LINUX__)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  target_compile_definitions(xmlrpc PRIVATE __WIN32__ __WINDOWS__ _WINDOWS)
+elseif(CMAKE_SYSTEM_NAME MATCHES ".*BSD")
+  target_compile_definitions(xmlrpc PRIVATE __BSD__)
+endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-  add_definitions(-D__WIN32__ -D__WINDOWS__ -D_WINDOWS)
-endif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-
-if(CMAKE_SYSTEM_NAME MATCHES ".*BSD")
-  add_definitions(-D__BSD__)
-endif(CMAKE_SYSTEM_NAME MATCHES ".*BSD")
-
-add_library(xmlrpc ${SOURCE_FILES} ${INCLUDE_FILES})
-
-#Windows requires wsock32
+# Platform-specific libraries
 if(WIN32)
-  target_link_libraries(xmlrpc wsock32)
-endif(WIN32)
+  target_link_libraries(xmlrpc PRIVATE wsock32 ws2_32)
+endif()
