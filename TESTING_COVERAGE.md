@@ -25,11 +25,12 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 145 (Updated December 2025)
+### Total Tests: 216 (Updated December 2025)
 
 - **App Tests**: 53
 - **State Tests**: 92 (includes 12 concurrent + 11 futures tests)
-- **Success Rate**: 100% (145/145 passing)
+- **Voxels Tests**: 71 (comprehensive volume data structure coverage)
+- **Success Rate**: 100% (216/216 passing)
 
 ## Coverage Metrics
 
@@ -39,16 +40,22 @@ This document describes the comprehensive testing strategy and code coverage imp
 |-----------|---------------|-------------------|--------|--------|
 | `inc/cvc/app.h` | 78.4% | 0.0% (inline) | 80% | ✅ Near Target |
 | `inc/cvc/state.h` | 83.3% | 0.0% (inline) | 80% | ✅ Exceeds Target |
+| `inc/cvc/voxels.h` | 94.0% | 0.0% (inline) | 80% | ✅ Exceeds Target |
 | `inc/cvc/state_object.h` | 33.3% | 0.0% (inline) | 80% | 🔄 In Progress |
 | `src/cvc/app.cpp` | 12.1% | 0.0% | 80% | 🔄 In Progress |
 | `src/cvc/state.cpp` | 13.7% | 0.0% | 80% | 🔄 In Progress |
+| `src/cvc/voxels.cpp` | 92.2% | 0.0% | 80% | ✅ Exceeds Target |
 
-**Overall Project**: 2.8% (990/35,082 lines)
+**Overall Project**: 5.5% (1,941/35,215 lines)
 
 **Recent Improvements:**
 - `state.h` coverage increased from 78.6% to 83.3% with futures API tests
 - Added 23 new tests (12 concurrent + 11 futures)
 - All critical synchronization paths now tested
+- **Voxels tests expanded from 37 to 71 tests (+34 tests)**
+- `voxels.h` coverage increased from 39.1% to 94.0% (+54.9%)
+- `voxels.cpp` coverage increased from 6.8% to 92.2% (+85.4%)
+- Comprehensive algorithm coverage: bilateral filter, anisotropic diffusion, GDTV, contrast enhancement
 
 *Note: The low .cpp coverage percentages reflect that many functions require complex dependencies (threads, file I/O, network) that are tested but harder to measure with basic line coverage.*
 
@@ -206,6 +213,113 @@ This document describes the comprehensive testing strategy and code coverage imp
 - Data with timeout
 - Multiple futures on same state (5 threads)
 - Producer-consumer pattern
+
+### Voxels Component Tests (71 tests)
+
+The voxels class is the core volume data structure supporting 6 data types (UChar, UShort, UInt, Float, Double, UInt64) with comprehensive image processing algorithms.
+
+**Coverage Achievement**: 94.0% (voxels.h), 92.2% (voxels.cpp)
+
+#### 1. Construction and Properties (5 tests)
+- Default construction (empty volume)
+- Dimension-based construction (XxYxZ)
+- Data type specification
+- Copy construction (deep copy)
+- Pointer-based construction
+
+#### 2. Voxel Access (5 tests)
+- Linear indexing (1D access to 3D data)
+- 3D coordinate access (x, y, z)
+- Out-of-bounds read handling
+- Out-of-bounds write handling
+- Type conversion during access
+
+#### 3. Dimension and Type Modification (4 tests)
+- Dimension expansion (upsizing)
+- Dimension reduction (downsizing)
+- Data type conversion
+- Precision preservation during type changes
+
+#### 4. Min/Max Operations (9 tests)
+- Automatic min/max calculation
+- Manual min/max setting
+- Min/max unset behavior
+- Subvolume min/max extraction
+- All data types verification
+- Large volume optimization (50³ voxels)
+- Edge cases (all zeros, all same value)
+- Type change recalculation
+- Uninitialized min/max handling
+
+#### 5. Core Operations (7 tests)
+- Assignment operator
+- Equality operator
+- Inequality operator
+- Fill (entire volume)
+- FillSub (subvolume filling)
+- Map (value range remapping)
+- Sub (subvolume extraction)
+
+#### 6. Advanced Operations (7 tests)
+- Resize with interpolation
+- Histogram generation
+- Copy-on-write semantics
+- Composite operations (add, copy)
+- Negative offset compositing
+- Raw data access
+- Shared array access
+
+#### 7. Type Conversions (4 tests)
+- UChar to all types (UShort, UInt, Float, Double, UInt64)
+- Precision loss handling (Double → Float → UInt)
+- Negative value handling in unsigned types
+- All 30 type conversion combinations (6 × 5)
+
+#### 8. Resize and Interpolation (4 tests)
+- Upsample with trilinear interpolation (2³ → 4³)
+- Downsample with filtering (8³ → 4³)
+- Same-size resize (identity operation)
+- Non-uniform dimension changes (4³ → 8×4×2)
+
+#### 9. Map Operations (4 tests)
+- Range expansion ([0,9] → [0,100])
+- Range shrinking ([0,90] → [0,1])
+- Negative ranges ([0,4] → [-10,10])
+- Identity mapping (same range)
+
+#### 10. Subvolume Extraction (3 tests)
+- Center extraction (4³ from 10³)
+- Corner extraction (5³ from origin)
+- Single slice extraction (10×10×1)
+
+#### 11. Image Processing Algorithms (8 tests)
+- **Bilateral Filter** (2 tests)
+  - Basic smoothing with edge preservation
+  - Parameter variations (sigma, iterations)
+- **Contrast Enhancement** (2 tests)
+  - Standard enhancement (resistor = 0.9)
+  - Alternative resistor values (0.5)
+- **Anisotropic Diffusion** (2 tests)
+  - Edge-preserving smoothing (5 iterations)
+  - Iteration count variations (10 iterations)
+- **GDTV Filter** (2 tests)
+  - Gradient-domain total variation
+  - Parameter tuning (lambda, epsilon, iterations)
+
+#### 12. Composite Functions (3 tests)
+- Add operation
+- Subtract operation (subtract_func)
+- Partial overlap handling (boundary compositing)
+
+#### 13. Edge Cases and Error Conditions (4 tests)
+- Out-of-bounds fillsub (throws index_out_of_bounds)
+- Uninitialized min/max behavior
+- Large volume creation and copying (50³ = 125,000 voxels)
+- Resize then fill operation
+
+#### 14. Data Type Coverage (2 tests)
+- All 6 data types construction
+- Zero-volume min/max
 
 ## Testing Strategy
 

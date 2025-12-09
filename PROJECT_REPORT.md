@@ -35,7 +35,7 @@
 **Language:** C++ (with C components)  
 **Build System:** CMake (modernized to 3.15+)  
 **C++ Standard:** C++14 minimum (configurable to newer standards)  
-**Test Suite:** 145 tests (100% passing)
+**Test Suite:** 216 tests (100% passing)
 
 ## Project Structure
 
@@ -333,7 +333,7 @@ cmake --build . --config Release
    - XMLRPC uses `file(GLOB)` which is not recommended for production
 
 5. **Test Coverage**
-   - Core `cvc::app` and `cvc::state` tests implemented (145 test cases, 100% passing)
+   - Core `cvc::app`, `cvc::state`, and `cvc::voxels` tests implemented (216 test cases, 100% passing)
    - Multithreaded testing: 12 concurrent access tests
    - Futures API: 11 async value retrieval tests
    - Additional coverage needed for volume I/O, geometry, filtering, meshing, SDF
@@ -353,10 +353,14 @@ The project includes comprehensive unit tests using **Google Test v1.14.0**. Tes
 
 - **Framework**: Google Test (automatically fetched via CMake FetchContent)
 - **CMake Option**: `CVC_BUILD_TESTS` (default: ON)
-- **Total Tests**: 145 (100% passing)
+- **Total Tests**: 216 (100% passing)
+  - App: 53 tests
+  - State: 92 tests (includes concurrency + futures)
+  - Voxels: 71 tests (comprehensive volume data coverage)
 - **Test Executables**:
   - `app_test` - 53 tests for `cvc::app` singleton and data/property management
   - `state_test` - 92 tests for `cvc::state` hierarchical state system
+  - `voxels_test` - 71 tests for `cvc::voxels` volume data structure and algorithms
 
 ### Running Tests
 
@@ -371,6 +375,7 @@ cd build && ctest --output-on-failure
 # Run specific test executable
 ./build/bin/app_test     # 53 tests
 ./build/bin/state_test   # 92 tests (includes futures & multithreading)
+./build/bin/voxels_test  # 71 tests (volume data & image processing)
 
 # Use the convenience target
 cmake --build build --target check
@@ -378,7 +383,7 @@ cmake --build build --target check
 
 ### Current Test Coverage
 
-**cvc::app Tests** (28 test cases):
+**cvc::app Tests** (53 test cases):
 - Singleton pattern verification
 - Data management (set/get/remove with various types)
 - Data type registry and enumeration
@@ -387,19 +392,51 @@ cmake --build build --target check
 - Thread management (keys, progress, info)
 - Mutex management (named mutexes)
 - Utility functions (listify conversions)
+- Thread feedback RAII pattern
+- Property file I/O
 
-**cvc::state Tests** (30 test cases):
+**cvc::state Tests** (92 test cases):
 - Singleton pattern verification
 - Value management with type conversions
 - Comma-separated value lists
 - Arbitrary data storage via boost::any
-- Hierarchical parent-child relationships
+- Hierarchical parent-child relationships (deep nesting, 5+ levels)
 - Child enumeration and regex filtering
 - Metadata (comments, hidden flag, timestamps)
-- State manipulation (touch, reset)
+- State manipulation (touch, reset, recursive operations)
 - Property tree conversion and JSON serialization
 - ValueData (referencing data objects by keys)
 - Tree traversal with callbacks
+- Signal propagation (value_changed, data_changed, child_changed)
+- Multithreaded concurrency (12 tests, up to 20 threads)
+- Futures API (11 tests, async patterns, producer-consumer)
+- Deadlock detection and reentrancy validation
+
+**cvc::voxels Tests** (71 test cases) - **94% coverage**:
+- Construction and properties (5 tests)
+- Voxel access patterns (5 tests)
+- Dimension and type modifications (4 tests)
+- Min/max operations (9 tests, all data types)
+- Core operations (7 tests: assignment, fill, map, sub, resize)
+- Advanced operations (7 tests: histogram, copy-on-write, composite)
+- Type conversions (4 tests: all 30 conversion paths)
+- Resize and interpolation (4 tests: upsample, downsample, non-uniform)
+- Map operations (4 tests: range remapping)
+- Subvolume extraction (3 tests)
+- **Image processing algorithms (8 tests)**:
+  - Bilateral filter (edge-preserving smoothing)
+  - Contrast enhancement (histogram-based)
+  - Anisotropic diffusion (feature-preserving)
+  - GDTV filter (gradient-domain total variation)
+- Composite functions (3 tests: add, subtract, partial overlap)
+- Edge cases and error conditions (4 tests)
+- All 6 data types (UChar, UShort, UInt, Float, Double, UInt64)
+
+**Coverage Metrics**:
+- `voxels.h`: 94.0% line coverage (78/83 lines)
+- `voxels.cpp`: 92.2% line coverage (306/332 lines)
+- `state.h`: 83.3% line coverage
+- `app.h`: 78.4% line coverage
 
 ### Test Design
 
@@ -414,14 +451,21 @@ See **[TESTING.md](TESTING.md)** for comprehensive testing documentation.
 ### Future Test Coverage Areas
 
 Potential additions to expand test coverage:
-- Volume I/O (all formats)
-- Geometry I/O (all formats)
-- Image filtering algorithms
-- Meshing/isosurfacing
-- SDF calculations
-- XMLRPC communication
-- Multi-threaded concurrency tests
+- Volume I/O (all formats: RAWIV, MRC, Spider, HDF5, VTK)
+- Geometry I/O (all formats: OFF, OBJ, STL, RAW variants)
+- Volume class (higher-level volume operations)
+- Geometry class (mesh operations and transformations)
+- Meshing/isosurfacing (marching cubes, LBIE)
+- SDF calculations (signed distance functions)
+- XMLRPC communication (client/server tests)
 - Integration tests for end-to-end workflows
+
+**Recently Added**:
+- ✅ Voxels comprehensive testing (71 tests, 94% coverage)
+- ✅ Image processing algorithms (bilateral, diffusion, GDTV, contrast)
+- ✅ Type conversions and interpolation
+- ✅ Multithreaded state operations
+- ✅ Futures API for async state management
 
 ## Installation Structure
 
@@ -577,7 +621,10 @@ cmake --build build-coverage --target coverage
 - `inc/cvc/app.h`: 78.4% line coverage
 - `inc/cvc/state.h`: 83.3% line coverage (after futures API)
 - `inc/cvc/state_object.h`: 33.3% line coverage
-- Overall: 145 tests exercising critical paths
+- Overall: 216 tests exercising critical paths
+  - App component: 53 tests (singleton, properties, threads)
+  - State component: 92 tests (tree structure, signals, concurrency, futures)
+  - Voxels component: 71 tests (algorithms, type conversions, operations)
 
 **Note:** Multithreaded tests may cause coverage data race conditions. Use `lcov --ignore-errors negative` to handle this.
 
@@ -602,7 +649,7 @@ cmake --build build-coverage --target coverage
    - State object CRTP pattern validation
 
 3. **Enhanced Testing Infrastructure**
-   - Total: 145 tests (100% passing)
+   - Total: 216 tests (100% passing)
    - App tests: 53 (data, properties, threads, mutexes)
    - State tests: 92 (values, hierarchy, signals, futures)
    - Coverage targets for critical components (80%+)
@@ -653,7 +700,7 @@ The trans-cvc project has been successfully modernized to use CMake 3.15+ with m
 - Provides better dependency management
 - Supports C++14/17/20/23 standards
 - Has clearer build options and documentation
-- Includes comprehensive unit tests for core functionality (145 test cases)
+- Includes comprehensive unit tests for core functionality (216 test cases)
 - Features advanced async programming with futures API
 - Provides multithreaded validation and deadlock detection
 - Maintains backward compatibility with existing code

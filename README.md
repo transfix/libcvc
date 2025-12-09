@@ -3,7 +3,7 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-145%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-216%20passing-brightgreen.svg)](#testing)
 
 ## Table of Contents
 
