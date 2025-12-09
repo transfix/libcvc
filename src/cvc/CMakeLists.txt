@@ -541,8 +541,16 @@ target_compile_definitions(cvc
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
 
-# Setup Boost dependency
+# Setup dependencies
 SetupBoost(cvc)
+
+if(NOT DISABLE_CGAL)
+  SetupCGAL(cvc)
+endif()
+
+if(CVC_ENABLE_CUDA)
+  SetupCUDA(cvc)
+endif()
 
 # Link libraries
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})

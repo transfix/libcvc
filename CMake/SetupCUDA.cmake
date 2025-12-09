@@ -29,10 +29,17 @@ function(SetupCUDA TargetName)
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
   )
   
+  # Find and link CUDA toolkit libraries
+  find_package(CUDAToolkit REQUIRED)
+  
   # Link CUDA runtime
-  target_link_libraries(${TargetName} PUBLIC 
-    CUDA::cudart
-  )
+  if(TARGET CUDA::cudart)
+    target_link_libraries(${TargetName} PUBLIC CUDA::cudart)
+  else()
+    # Fallback for older CMake/CUDA versions
+    target_link_libraries(${TargetName} PUBLIC ${CUDA_LIBRARIES})
+    target_include_directories(${TargetName} PRIVATE ${CUDA_INCLUDE_DIRS})
+  endif()
   
   # Optional: Link additional CUDA libraries as needed
   # target_link_libraries(${TargetName} PUBLIC 
