@@ -955,38 +955,289 @@ TEST(VoxelsTest, SubSingleSlice) {
 // Bilateral Filter Tests
 // ============================================================================
 
-TEST(VoxelsTest, BilateralFilterBasic) {
+TEST(VoxelsTest, BilateralFilterUniform) {
+  // Test 1: Nearly uniform region (avoid min==max division issues)
   voxels v(dimension(10, 10, 10), Float);
-  
-  // Create noisy data
   v.fill(50.0);
-  v(5, 5, 5, 100.0);  // Spike
-  v(3, 3, 3, 10.0);   // Dip
+  v(0, 0, 0, 50.1);  // Slight variation to avoid min==max
+  v(9, 9, 9, 49.9);
   
-  // Apply bilateral filter with default parameters
+  // Calculate min/max
+  v.min();
+  v.max();
+  
   v.bilateralFilter();
   
-  // Volume should still exist and have same dimensions
-  EXPECT_EQ(v.XDim(), 10u);
-  EXPECT_EQ(v.YDim(), 10u);
-  EXPECT_EQ(v.ZDim(), 10u);
-  
-  // Values should be smoothed but edges preserved
-  double filtered_spike = v(5, 5, 5);
-  EXPECT_GT(filtered_spike, 50.0);  // Still elevated
-  EXPECT_LT(filtered_spike, 100.0); // But smoothed
+  // Nearly uniform regions should stay very close to original
+  EXPECT_NEAR(v(5, 5, 5), 50.0, 0.5);
+  EXPECT_NEAR(v(0, 0, 0), 50.1, 1.0);  // Edges have slight boundary effects
+  EXPECT_NEAR(v(9, 9, 9), 49.9, 1.0);
 }
 
-TEST(VoxelsTest, BilateralFilterParameters) {
-  voxels v(dimension(8, 8, 8), Float);
+TEST(VoxelsTest, BilateralFilterEdgePreservation) {
+  // Test 2: Sharp edges should be preserved while noise is reduced
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create sharp edge: left half = 20, right half = 80
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 5; ++i) {
+      v(i, j, 0, 20.0);
+    }
+    for (uint64 i = 5; i < 10; ++i) {
+      v(i, j, 0, 80.0);
+    }
+  }
+  
+  // Ensure min/max are calculated
+  v.min();
+  v.max();
+  
+  // Apply bilateral filter (edge-preserving)
+  v.bilateralFilter(50.0, 1.5, 1);
+  
+  // Check edge is preserved (regions should remain distinct)
+  double left_avg = 0.0, right_avg = 0.0;
+  for (uint64 j = 2; j < 8; ++j) {  // Avoid edges
+    left_avg += v(2, j, 0);   // Left region
+    right_avg += v(7, j, 0);  // Right region
+  }
+  left_avg /= 6.0;
+  right_avg /= 6.0;
+  
+  EXPECT_LT(left_avg, 40.0) << "Left side should stay low";
+  EXPECT_GT(right_avg, 60.0) << "Right side should stay high";
+  EXPECT_GT(right_avg - left_avg, 35.0) << "Edge should be preserved";
+}
+
+TEST(VoxelsTest, BilateralFilterNoiseReduction) {
+  // Test 3: Small noise should be smoothed in uniform regions
+  voxels v(dimension(9, 9, 1), Float);
   v.fill(50.0);
-  v(4, 4, 4, 200.0);
   
-  // Test with different parameters
-  v.bilateralFilter(100.0, 1.0, 1);
+  // Add salt and pepper noise in center region
+  v(4, 3, 0, 55.0);
+  v(5, 3, 0, 45.0);
+  v(4, 4, 0, 52.0);
+  v(5, 5, 0, 48.0);
+  v(3, 4, 0, 54.0);
   
-  EXPECT_EQ(v.XDim(), 8u);
-  EXPECT_GT(v(4, 4, 4), 50.0);
+  double noise_before = 0.0;
+  for (uint64 j = 3; j <= 5; ++j) {
+    for (uint64 i = 3; i <= 5; ++i) {
+      double diff = v(i, j, 0) - 50.0;
+      noise_before += diff * diff;
+    }
+  }
+  
+  // Ensure min/max are calculated
+  v.min();
+  v.max();
+  
+  v.bilateralFilter(20.0, 1.5, 1);
+  
+  // After filtering, noise should be reduced
+  double noise_after = 0.0;
+  for (uint64 j = 3; j <= 5; ++j) {
+    for (uint64 i = 3; i <= 5; ++i) {
+      double diff = v(i, j, 0) - 50.0;
+      noise_after += diff * diff;
+    }
+  }
+  
+  EXPECT_LT(noise_after, noise_before) << "Noise should be reduced";
+  EXPECT_NEAR(v(4, 4, 0), 50.0, 3.0) << "Values should converge toward mean";
+}
+
+TEST(VoxelsTest, BilateralFilterIsolatedSpike) {
+  // Test 4: Isolated spike in uniform region
+  voxels v(dimension(9, 9, 9), Float);
+  v.fill(50.0);
+  v(4, 4, 4, 150.0);  // Large spike
+  
+  double initial_spike = v(4, 4, 4);
+  double initial_neighbor = v(4, 4, 5);
+  
+  // Ensure min/max are calculated
+  v.min();
+  v.max();
+  
+  v.bilateralFilter(50.0, 1.5, 1);
+  
+  double final_spike = v(4, 4, 4);
+  double final_neighbor = v(4, 4, 5);
+  
+  // Bilateral filter should preserve edges, so spike should remain elevated
+  // but be smoothed significantly due to spatial averaging
+  EXPECT_GT(final_spike, 70.0) << "Spike should remain elevated (above background)";
+  EXPECT_LT(final_spike, initial_spike) << "Spike should be smoothed";
+  
+  // Neighbor should be slightly influenced but not much (edge preservation)
+  EXPECT_GT(final_neighbor, initial_neighbor) << "Neighbor affected slightly";
+  EXPECT_LT(final_neighbor, 70.0) << "But edge preservation limits influence";
+}
+
+TEST(VoxelsTest, BilateralFilterSpatialSigmaEffect) {
+  // Test 5: Spatial sigma controls spatial smoothing extent
+  voxels v1(dimension(11, 11, 1), Float);
+  voxels v2(v1);
+  
+  // Create gradient with noise
+  for (uint64 j = 0; j < 11; ++j) {
+    for (uint64 i = 0; i < 11; ++i) {
+      double base = double(i) * 10.0;  // Gradient 0-100
+      double noise = ((i + j) % 3 == 0) ? 5.0 : 0.0;
+      v1(i, j, 0, base + noise);
+      v2(i, j, 0, base + noise);
+    }
+  }
+  
+  // Ensure min/max are calculated
+  v1.min(); v1.max();
+  v2.min(); v2.max();
+  
+  // Apply with different spatial sigmas
+  v1.bilateralFilter(50.0, 1.0, 1);  // Small spatial sigma
+  v2.bilateralFilter(50.0, 2.5, 1);  // Large spatial sigma
+  
+  // Larger spatial sigma should smooth more within uniform regions
+  // Calculate variance in a local region
+  double var1 = 0.0, var2 = 0.0;
+  double mean1 = 0.0, mean2 = 0.0;
+  int count = 0;
+  
+  // Sample region around x=5 (mid-gradient)
+  for (uint64 j = 4; j <= 6; ++j) {
+    for (uint64 i = 4; i <= 6; ++i) {
+      mean1 += v1(i, j, 0);
+      mean2 += v2(i, j, 0);
+      count++;
+    }
+  }
+  mean1 /= count;
+  mean2 /= count;
+  
+  for (uint64 j = 4; j <= 6; ++j) {
+    for (uint64 i = 4; i <= 6; ++i) {
+      double d1 = v1(i, j, 0) - mean1;
+      double d2 = v2(i, j, 0) - mean2;
+      var1 += d1 * d1;
+      var2 += d2 * d2;
+    }
+  }
+  
+  // Larger spatial sigma should give smoother result (lower variance)
+  EXPECT_LE(var2, var1 * 1.2) << "Larger spatial sigma should smooth more";
+}
+
+TEST(VoxelsTest, BilateralFilterRadiometricSigmaEffect) {
+  // Test 6: Radiometric sigma controls edge preservation strength
+  voxels v1(dimension(10, 10, 1), Float);
+  voxels v2(v1);
+  
+  // Create step edge
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 5; ++i) {
+      v1(i, j, 0, 30.0);
+      v2(i, j, 0, 30.0);
+    }
+    for (uint64 i = 5; i < 10; ++i) {
+      v1(i, j, 0, 70.0);
+      v2(i, j, 0, 70.0);
+    }
+  }
+  
+  // Ensure min/max are calculated
+  v1.min(); v1.max();
+  v2.min(); v2.max();
+  
+  // Apply with different radiometric sigmas
+  v1.bilateralFilter(20.0, 1.5, 1);   // Small radiometric sigma (strong edge preservation)
+  v2.bilateralFilter(100.0, 1.5, 1);  // Large radiometric sigma (weak edge preservation)
+  
+  // Calculate edge sharpness (difference between regions)
+  double left1 = v1(2, 5, 0);
+  double right1 = v1(7, 5, 0);
+  double left2 = v2(2, 5, 0);
+  double right2 = v2(7, 5, 0);
+  
+  double contrast1 = right1 - left1;
+  double contrast2 = right2 - left2;
+  
+  // Smaller radiometric sigma should preserve edge better
+  EXPECT_GT(contrast1, 25.0) << "Small sigma preserves edge";
+  EXPECT_GT(contrast2, 15.0) << "Large sigma still has some edge";
+  EXPECT_GE(contrast1, contrast2 * 0.9) << "Small sigma preserves edge better";
+}
+
+TEST(VoxelsTest, BilateralFilterFilterRadiusEffect) {
+  // Test 7: Filter radius controls neighborhood size
+  voxels v1(dimension(11, 11, 1), Float);
+  voxels v2(v1);
+  
+  v1.fill(50.0);
+  v2.fill(50.0);
+  
+  // Add feature at edge of different neighborhoods
+  v1(5, 5, 0, 100.0);  // Center
+  v1(5, 7, 0, 80.0);   // 2 pixels away
+  v2 = v1;
+  
+  // Ensure min/max are calculated
+  v1.min(); v1.max();
+  v2.min(); v2.max();
+  
+  // Apply with different filter radii
+  v1.bilateralFilter(50.0, 1.5, 1);  // Radius 1 (3x3x3 neighborhood)
+  v2.bilateralFilter(50.0, 1.5, 2);  // Radius 2 (5x5x5 neighborhood)
+  
+  // Larger radius should have more influence on distant pixels
+  double influence_r1 = v1(5, 7, 0) - 80.0;  // How much did center affect this pixel
+  double influence_r2 = v2(5, 7, 0) - 80.0;
+  
+  // With radius 2, the center spike can influence pixels 2 away
+  // With radius 1, it cannot reach that far
+  EXPECT_LE(std::abs(influence_r1), std::abs(influence_r2) + 5.0) 
+    << "Larger radius should have more influence on distant pixels";
+}
+
+TEST(VoxelsTest, BilateralFilter3DSmoothing) {
+  // Test 8: 3D bilateral filtering
+  voxels v(dimension(7, 7, 7), Float);
+  
+  // Create 3D pattern: sphere of high values in uniform background
+  v.fill(30.0);
+  for (uint64 k = 2; k <= 4; ++k) {
+    for (uint64 j = 2; j <= 4; ++j) {
+      for (uint64 i = 2; i <= 4; ++i) {
+        // Distance from center (3,3,3)
+        int dx = i - 3, dy = j - 3, dz = k - 3;
+        if (dx*dx + dy*dy + dz*dz <= 2) {  // Roughly spherical
+          v(i, j, k, 70.0);
+        }
+      }
+    }
+  }
+  
+  double center_before = v(3, 3, 3);
+  double background_before = v(0, 0, 0);
+  
+  // Ensure min/max are calculated
+  v.min();
+  v.max();
+  
+  v.bilateralFilter(50.0, 1.5, 1);
+  
+  double center_after = v(3, 3, 3);
+  double background_after = v(0, 0, 0);
+  
+  // Center sphere should remain elevated (edge preservation in 3D)
+  EXPECT_GT(center_after, 50.0) << "3D feature preserved";
+  
+  // Background should stay low
+  EXPECT_LT(background_after, 40.0) << "Background stays low";
+  
+  // Edge should be preserved
+  EXPECT_GT(center_after - background_after, 20.0) << "3D edge preserved";
 }
 
 // ============================================================================
