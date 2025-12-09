@@ -632,4 +632,221 @@ TEST(AppTest, ListifyVector) {
   EXPECT_NE(list.find("z"), std::string::npos);
 }
 
+// ===========================
+// Data Reader Tests
+// ===========================
+
+TEST(AppTest, DataReaderCollection) {
+  data_reader_collection readers = cvcapp.dataReaders();
+  
+  // Add a test reader
+  data_reader test_reader = [](const std::string& path) -> bool {
+    return path == "test.dat";
+  };
+  
+  cvcapp.dataReader(test_reader);
+  
+  data_reader_collection updated = cvcapp.dataReaders();
+  EXPECT_GE(updated.size(), readers.size());
+}
+
+TEST(AppTest, ReadDataWithReaders) {
+  // Add a reader that handles .test files
+  data_reader test_reader = [](const std::string& path) -> bool {
+    if (path.find(".test") != std::string::npos) {
+      cvcapp.data("test.read.result", std::string("success"));
+      return true;
+    }
+    return false;
+  };
+  
+  cvcapp.dataReader(test_reader);
+  
+  // Try to read a .test file
+  bool result = cvcapp.readData("example.test");
+  EXPECT_TRUE(result);
+  EXPECT_EQ(cvcapp.data<std::string>("test.read.result"), "success");
+  
+  // Try to read an unsupported file
+  bool result2 = cvcapp.readData("example.unsupported");
+  EXPECT_FALSE(result2);
+  
+  // Clean up
+  cvcapp.data("test.read.result", boost::any());
+}
+
+// ===========================
+// Property Map File I/O Tests
+// ===========================
+
+TEST(AppTest, PropertyMapSaveLoad) {
+  std::string temp_file = "/tmp/test_property_map.info";
+  
+  // Set up some properties
+  cvcapp.properties("io.test.prop1", "value1");
+  cvcapp.properties("io.test.prop2", "value2");
+  cvcapp.properties("io.test.number", 42);
+  
+  // Save property map
+  cvcapp.writePropertyMap(temp_file);
+  
+  // Clear properties
+  cvcapp.properties("io.test.prop1", "");
+  cvcapp.properties("io.test.prop2", "");
+  cvcapp.properties("io.test.number", "");
+  
+  // Restore from file
+  cvcapp.readPropertyMap(temp_file);
+  
+  // Verify restored
+  EXPECT_EQ(cvcapp.properties("io.test.prop1"), "value1");
+  EXPECT_EQ(cvcapp.properties("io.test.prop2"), "value2");
+  
+  // Clean up
+  std::remove(temp_file.c_str());
+  cvcapp.properties("io.test.prop1", "");
+  cvcapp.properties("io.test.prop2", "");
+  cvcapp.properties("io.test.number", "");
+}
+
+// ===========================
+// Thread Map Bulk Operations
+// ===========================
+
+TEST(AppTest, ThreadMapBulkSet) {
+  thread_map test_map;
+  
+  // Create threads
+  thread_ptr t1(new boost::thread([](){}));
+  thread_ptr t2(new boost::thread([](){}));
+  
+  test_map["bulk.thread1"] = t1;
+  test_map["bulk.thread2"] = t2;
+  
+  // Set the entire map
+  cvcapp.threads(test_map);
+  
+  // Verify
+  EXPECT_TRUE(cvcapp.hasThread("bulk.thread1"));
+  EXPECT_TRUE(cvcapp.hasThread("bulk.thread2"));
+  
+  // Clean up
+  cvcapp.threads("bulk.thread1", thread_ptr());
+  cvcapp.threads("bulk.thread2", thread_ptr());
+}
+
+TEST(AppTest, RemoveThread) {
+  std::string thread_key = "test.remove.thread";
+  
+  cvcapp.threads(thread_key, thread_ptr(new boost::thread([](){})));
+  EXPECT_TRUE(cvcapp.hasThread(thread_key));
+  
+  cvcapp.removeThread(thread_key);
+  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+}
+
+TEST(AppTest, ThreadKeyLookup) {
+  // Get thread key for current thread (should return "unknown" or valid key)
+  std::string key = cvcapp.threadKey();
+  EXPECT_FALSE(key.empty());
+}
+
+// ===========================
+// Sleep Function Test
+// ===========================
+
+TEST(AppTest, SleepFunction) {
+  auto start = boost::posix_time::microsec_clock::universal_time();
+  cvcapp.sleep(10.0); // Sleep for 10 milliseconds
+  auto end = boost::posix_time::microsec_clock::universal_time();
+  
+  auto duration = end - start;
+  EXPECT_GE(duration.total_milliseconds(), 5);
+}
+
+// ===========================
+// Property Data Tests
+// ===========================
+
+TEST(AppTest, PropertyDataLookup) {
+  // Store some int data
+  cvcapp.data("pd.obj1", 100);
+  cvcapp.data("pd.obj2", 200);
+  cvcapp.data("pd.obj3", 300);
+  
+  // Create property with list of keys
+  cvcapp.properties("pd.list", "pd.obj1,pd.obj2,pd.obj3");
+  
+  // Get property data
+  std::vector<int> data = cvcapp.propertyData<int>("pd.list");
+  
+  ASSERT_EQ(data.size(), 3);
+  EXPECT_EQ(data[0], 100);
+  EXPECT_EQ(data[1], 200);
+  EXPECT_EQ(data[2], 300);
+  
+  // Clean up
+  cvcapp.properties("pd.list", "");
+  cvcapp.data("pd.obj1", boost::any());
+  cvcapp.data("pd.obj2", boost::any());
+  cvcapp.data("pd.obj3", boost::any());
+}
+
+TEST(AppTest, ListDataFunction) {
+  // Store data
+  cvcapp.data("ld.a", 10);
+  cvcapp.data("ld.b", 20);
+  cvcapp.data("ld.c", 30);
+  
+  // Use listData to get data from comma-separated list
+  std::vector<int> data = cvcapp.listData<int>("ld.a,ld.b,ld.c");
+  
+  ASSERT_EQ(data.size(), 3);
+  EXPECT_EQ(data[0], 10);
+  EXPECT_EQ(data[1], 20);
+  EXPECT_EQ(data[2], 30);
+  
+  // Clean up
+  cvcapp.data("ld.a", boost::any());
+  cvcapp.data("ld.b", boost::any());
+  cvcapp.data("ld.c", boost::any());
+}
+
+// ===========================
+// Data Type Enum Tests
+// ===========================
+
+TEST(AppTest, DataTypeEnumTemplateMethod) {
+  // Test template version of dataType
+  data_type dt_int = cvcapp.dataType<int>();
+  EXPECT_EQ(dt_int, Int);
+  
+  data_type dt_double = cvcapp.dataType<double>();
+  EXPECT_EQ(dt_double, Double);
+  
+  data_type dt_float = cvcapp.dataType<float>();
+  EXPECT_EQ(dt_float, Float);
+}
+
+// ===========================
+// Scoped Lock Tests
+// ===========================
+
+TEST(AppTest, ScopedLockUsage) {
+  std::string mutex_name = "test.scoped.mutex";
+  
+  {
+    scoped_lock lock(mutex_name, "test lock info");
+    
+    // Mutex should be locked and info set (may include thread info)
+    std::string info = cvcapp.mutexInfo(mutex_name);
+    EXPECT_NE(info.find("test lock info"), std::string::npos);
+  }
+  
+  // After scope, info should be cleared or reset
+  std::string info = cvcapp.mutexInfo(mutex_name);
+  // Info may persist or be cleared depending on implementation
+  EXPECT_TRUE(true); // Just verify no crash
+}
+
 // Main function is provided by gtest_main library

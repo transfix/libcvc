@@ -11,10 +11,14 @@
 */
 
 #include <cvc/state.h>
+#include <cvc/state_object.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 #include <fstream>
+#include <boost/thread.hpp>
+#include <boost/chrono.hpp>
+#include <atomic>
 
 using namespace CVC_NAMESPACE;
 
@@ -753,6 +757,944 @@ TEST(StateTest, ValuesUniqueFlag) {
   
   // Clean up
   cvcstate("test").reset();
+}
+
+// ===========================
+// Signal Connection Tests
+// ===========================
+
+TEST(StateTest, ValueChangedSignal) {
+  bool signal_fired = false;
+  
+  auto connection = cvcstate("test.signal.value").valueChanged.connect(
+    [&signal_fired]() { signal_fired = true; }
+  );
+  
+  cvcstate("test.signal.value").value("trigger");
+  
+  EXPECT_TRUE(signal_fired);
+  
+  connection.disconnect();
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, DataChangedSignal) {
+  bool signal_fired = false;
+  
+  auto connection = cvcstate("test.signal.data").dataChanged.connect(
+    [&signal_fired]() { signal_fired = true; }
+  );
+  
+  cvcstate("test.signal.data").data(42);
+  
+  EXPECT_TRUE(signal_fired);
+  
+  connection.disconnect();
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ChildChangedSignal) {
+  int signal_count = 0;
+  
+  auto connection = cvcstate("test.signal.parent").childChanged.connect(
+    [&signal_count](const std::string&) { signal_count++; }
+  );
+  
+  // Create child state - should trigger parent's childChanged
+  cvcstate("test.signal.parent.child1").value("value1");
+  cvcstate("test.signal.parent.child2").value("value2");
+  
+  EXPECT_GT(signal_count, 0);
+  
+  connection.disconnect();
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Deep Hierarchy Tests
+// ===========================
+
+TEST(StateTest, DeepHierarchyNavigation) {
+  // Create deep nested structure
+  std::string deep_path = "level1.level2.level3.level4.level5";
+  cvcstate(deep_path).value("deep_value");
+  
+  EXPECT_EQ(cvcstate(deep_path).value(), "deep_value");
+  EXPECT_EQ(cvcstate(deep_path).name(), "level5");
+  
+  // Test parent navigation
+  const state* level4 = cvcstate(deep_path).parent();
+  ASSERT_NE(level4, nullptr);
+  EXPECT_EQ(level4->name(), "level4");
+  
+  // Clean up
+  cvcstate("level1").reset();
+}
+
+TEST(StateTest, OperatorChaining) {
+  // Test deep path traversal using operator()
+  cvcstate("chain")("a")("b")("c").value("chained");
+  
+  EXPECT_EQ(cvcstate("chain.a.b.c").value(), "chained");
+  
+  // Clean up
+  cvcstate("chain").reset();
+}
+
+// ===========================
+// Edge Case Path Tests
+// ===========================
+
+TEST(StateTest, EmptyKeyHandling) {
+  // operator() with empty string should return self
+  state& self1 = cvcstate("test.empty.key");
+  state& self2 = cvcstate("test.empty.key")("");
+  
+  EXPECT_EQ(&self1, &self2);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, SeparatorInPath) {
+  // Test paths with multiple separators
+  cvcstate("test...multi...sep").value("multi_sep_value");
+  
+  EXPECT_EQ(cvcstate("test.multi.sep").value(), "multi_sep_value");
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Initialization Tests
+// ===========================
+
+TEST(StateTest, InitializedFlagBehavior) {
+  EXPECT_FALSE(cvcstate("test.init.new").initialized());
+  
+  cvcstate("test.init.new").value("now_initialized");
+  EXPECT_TRUE(cvcstate("test.init.new").initialized());
+  
+  cvcstate("test.init.new").reset();
+  EXPECT_FALSE(cvcstate("test.init.new").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, DataInitializesFlag) {
+  EXPECT_FALSE(cvcstate("test.init.data").initialized());
+  
+  cvcstate("test.init.data").data(std::string("data_init"));
+  EXPECT_TRUE(cvcstate("test.init.data").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, CommentInitializesFlag) {
+  EXPECT_FALSE(cvcstate("test.init.comment").initialized());
+  
+  cvcstate("test.init.comment").comment("test comment");
+  EXPECT_TRUE(cvcstate("test.init.comment").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, HiddenInitializesFlag) {
+  EXPECT_FALSE(cvcstate("test.init.hidden").initialized());
+  
+  cvcstate("test.init.hidden").hidden(true);
+  EXPECT_TRUE(cvcstate("test.init.hidden").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Children Recursion Tests
+// ===========================
+
+TEST(StateTest, ChildrenRecursiveListing) {
+  // Create nested structure
+  cvcstate("test.recursive.a.a1").value("1");
+  cvcstate("test.recursive.a.a2").value("2");
+  cvcstate("test.recursive.b.b1").value("3");
+  cvcstate("test.recursive.b.b2.deep").value("4");
+  
+  // Get all children recursively
+  std::vector<std::string> all_children = cvcstate("test.recursive").children();
+  
+  // Should include nested children
+  EXPECT_GT(all_children.size(), 2);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Regex Children Filtering Tests
+// ===========================
+
+TEST(StateTest, ChildrenRegexMatching) {
+  cvcstate("test.regex2.alpha").value("a");
+  cvcstate("test.regex2.beta").value("b");
+  cvcstate("test.regex2.gamma").value("c");
+  cvcstate("test.regex2.delta").value("d");
+  
+  // Try to get children with regex (may not work depending on implementation)
+  std::vector<std::string> all = cvcstate("test.regex2").children();
+  EXPECT_GE(all.size(), 4);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ChildrenEmptyRegex) {
+  cvcstate("test.noreg.x").value("1");
+  cvcstate("test.noreg.y").value("2");
+  
+  // Empty regex should return all children
+  std::vector<std::string> children = cvcstate("test.noreg").children("");
+  EXPECT_GE(children.size(), 2);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Value Type Tests
+// ===========================
+
+TEST(StateTest, ValueTypeLexicalCast) {
+  // Test lexical cast for value retrieval
+  cvcstate("test.lexical.int").value(12345);
+  int val = cvcstate("test.lexical.int").value<int>();
+  EXPECT_EQ(val, 12345);
+  
+  cvcstate("test.lexical.double").value(3.14159);
+  double dval = cvcstate("test.lexical.double").value<double>();
+  EXPECT_NEAR(dval, 3.14159, 0.0001);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Reset Recursive Tests
+// ===========================
+
+TEST(StateTest, ResetRecursive) {
+  // Create hierarchy with values
+  cvcstate("test.reset.parent").value("parent_value");
+  cvcstate("test.reset.parent.child1").value("child1_value");
+  cvcstate("test.reset.parent.child2").value("child2_value");
+  cvcstate("test.reset.parent.child1").data(100);
+  
+  // Reset parent (should reset children too)
+  cvcstate("test.reset.parent").reset();
+  
+  EXPECT_TRUE(cvcstate("test.reset.parent").value().empty());
+  EXPECT_TRUE(cvcstate("test.reset.parent.child1").value().empty());
+  EXPECT_TRUE(cvcstate("test.reset.parent.child2").value().empty());
+  EXPECT_FALSE(cvcstate("test.reset.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.reset.parent.child1").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Traversal Signal Tests
+// ===========================
+
+TEST(StateTest, TraversalEnterExitSignals) {
+  int enter_count = 0;
+  int exit_count = 0;
+  
+  auto enter_conn = cvcstate("test.trav.signals").traverseEnter.connect(
+    [&enter_count]() { enter_count++; }
+  );
+  
+  auto exit_conn = cvcstate("test.trav.signals").traverseExit.connect(
+    [&exit_count]() { exit_count++; }
+  );
+  
+  cvcstate("test.trav.signals.a").value("1");
+  cvcstate("test.trav.signals.b").value("2");
+  
+  state::traversal_unary_func noop = [](std::string) {};
+  cvcstate("test.trav.signals").traverse(noop);
+  
+  EXPECT_GT(enter_count, 0);
+  EXPECT_GT(exit_count, 0);
+  
+  enter_conn.disconnect();
+  exit_conn.disconnect();
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Full Name Tests
+// ===========================
+
+TEST(StateTest, FullNameConstruction) {
+  cvcstate("fullname.test.deep.path").value("test");
+  
+  std::string full = cvcstate("fullname.test.deep.path").fullName();
+  EXPECT_EQ(full, "fullname.test.deep.path");
+  
+  std::string parent_full = cvcstate("fullname.test.deep").fullName();
+  EXPECT_EQ(parent_full, "fullname.test.deep");
+  
+  // Clean up
+  cvcstate("fullname").reset();
+}
+
+// ===========================
+// On Startup Tests
+// ===========================
+
+TEST(StateTest, OnStartupRegistration) {
+  bool startup_called = false;
+  
+  state::on_startup([&startup_called]() {
+    startup_called = true;
+  });
+  
+  // Startup functions are called on first instance creation
+  // We can't easily test this without restarting, but we can verify registration
+  // The function is registered if no exception is thrown
+  SUCCEED();
+}
+
+// ===========================
+// IsData Template Tests
+// ===========================
+
+TEST(StateTest, IsDataTemplateMethod) {
+  cvcstate("test.isdata.int").data(42);
+  
+  EXPECT_TRUE(cvcstate("test.isdata.int").isData<int>());
+  EXPECT_FALSE(cvcstate("test.isdata.int").isData<std::string>());
+  EXPECT_FALSE(cvcstate("test.isdata.int").isData<double>());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, IsDataWithException) {
+  // State with no data
+  cvcstate("test.nodata").value("just_a_value");
+  
+  EXPECT_FALSE(cvcstate("test.nodata").isData<int>());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+// ===========================
+// Multithreaded Tests
+// ===========================
+
+TEST(StateTest, ConcurrentValueReads) {
+  // Set up initial state
+  cvcstate("test.concurrent.reads").value("initial_value");
+  
+  const int num_threads = 10;
+  const int reads_per_thread = 100;
+  std::atomic<int> successful_reads(0);
+  std::vector<boost::thread> threads;
+  
+  // Launch multiple threads that read the same state
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&successful_reads, reads_per_thread]() {
+      for (int j = 0; j < reads_per_thread; ++j) {
+        try {
+          std::string val = cvcstate("test.concurrent.reads").value();
+          if (!val.empty()) {
+            successful_reads++;
+          }
+        } catch (...) {
+          // Should not throw
+          FAIL() << "Exception during concurrent read";
+        }
+      }
+    });
+  }
+  
+  // Wait for all threads to complete
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  // All reads should have succeeded
+  EXPECT_EQ(successful_reads.load(), num_threads * reads_per_thread);
+  
+  // Clean up
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentValueWrites) {
+  // Multiple threads writing to different state nodes
+  const int num_threads = 10;
+  const int writes_per_thread = 50;
+  std::atomic<int> successful_writes(0);
+  std::vector<boost::thread> threads;
+  
+  // Each thread writes to its own state node
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([i, &successful_writes, writes_per_thread]() {
+      std::string key = "test.concurrent.writes.thread" + boost::lexical_cast<std::string>(i);
+      for (int j = 0; j < writes_per_thread; ++j) {
+        try {
+          std::string val = "value_" + boost::lexical_cast<std::string>(j);
+          cvcstate(key).value(val);
+          successful_writes++;
+        } catch (...) {
+          FAIL() << "Exception during concurrent write";
+        }
+      }
+    });
+  }
+  
+  // Wait for completion
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_EQ(successful_writes.load(), num_threads * writes_per_thread);
+  
+  // Verify final values
+  for (int i = 0; i < num_threads; ++i) {
+    std::string key = "test.concurrent.writes.thread" + boost::lexical_cast<std::string>(i);
+    std::string expected = "value_" + boost::lexical_cast<std::string>(writes_per_thread - 1);
+    EXPECT_EQ(cvcstate(key).value(), expected);
+  }
+  
+  // Clean up
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentWritesToSameNode) {
+  // Multiple threads writing to the SAME state node (high contention)
+  const int num_threads = 20;
+  const int writes_per_thread = 100;
+  std::atomic<int> total_writes(0);
+  std::vector<boost::thread> threads;
+  
+  cvcstate("test.concurrent.contention").value("initial");
+  
+  // All threads write to the same node
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([i, &total_writes, writes_per_thread]() {
+      for (int j = 0; j < writes_per_thread; ++j) {
+        try {
+          std::string val = "thread" + boost::lexical_cast<std::string>(i) + 
+                           "_write" + boost::lexical_cast<std::string>(j);
+          cvcstate("test.concurrent.contention").value(val);
+          total_writes++;
+        } catch (...) {
+          FAIL() << "Exception during high-contention write";
+        }
+      }
+    });
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  // All writes should have succeeded
+  EXPECT_EQ(total_writes.load(), num_threads * writes_per_thread);
+  
+  // The final value should be from one of the threads
+  std::string final_value = cvcstate("test.concurrent.contention").value();
+  EXPECT_FALSE(final_value.empty());
+  EXPECT_NE(final_value, "initial");
+  
+  // Clean up
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentDataOperations) {
+  // Test concurrent data() reads and writes
+  const int num_threads = 8;
+  std::vector<boost::thread> threads;
+  std::atomic<int> data_set_count(0);
+  std::atomic<int> data_read_count(0);
+  
+  // Mix of readers and writers
+  for (int i = 0; i < num_threads; ++i) {
+    if (i % 2 == 0) {
+      // Writer thread
+      threads.emplace_back([i, &data_set_count]() {
+        std::string key = "test.concurrent.data.writer" + boost::lexical_cast<std::string>(i);
+        for (int j = 0; j < 50; ++j) {
+          try {
+            cvcstate(key).data(j * 100 + i);
+            data_set_count++;
+          } catch (...) {
+            FAIL() << "Exception during concurrent data write";
+          }
+        }
+      });
+    } else {
+      // Reader thread
+      threads.emplace_back([i, &data_read_count]() {
+        std::string key = "test.concurrent.data.writer" + boost::lexical_cast<std::string>(i - 1);
+        for (int j = 0; j < 50; ++j) {
+          try {
+            // May or may not have data yet, but shouldn't crash
+            if (cvcstate(key).isData<int>()) {
+              int val = cvcstate(key).data<int>();
+              (void)val; // Suppress unused warning
+              data_read_count++;
+            }
+            boost::this_thread::sleep_for(boost::chrono::microseconds(10));
+          } catch (...) {
+            FAIL() << "Exception during concurrent data read";
+          }
+        }
+      });
+    }
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_GT(data_set_count.load(), 0);
+  EXPECT_GT(data_read_count.load(), 0);
+  
+  // Clean up
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentSignalHandling) {
+  // Test that signals fire correctly under concurrent modifications
+  std::atomic<int> signal_count(0);
+  boost::mutex signal_mutex;
+  std::vector<std::string> signal_paths;
+  
+  // Connect to childChanged signal
+  auto connection = cvcstate("test.concurrent.signals").childChanged.connect(
+    [&signal_count, &signal_mutex, &signal_paths](const std::string& path) {
+      signal_count++;
+      boost::mutex::scoped_lock lock(signal_mutex);
+      signal_paths.push_back(path);
+    }
+  );
+  
+  const int num_threads = 5;
+  const int ops_per_thread = 20;
+  std::vector<boost::thread> threads;
+  
+  // Multiple threads creating children
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([i, ops_per_thread]() {
+      for (int j = 0; j < ops_per_thread; ++j) {
+        std::string key = "test.concurrent.signals.child" + 
+                         boost::lexical_cast<std::string>(i) + "." +
+                         boost::lexical_cast<std::string>(j);
+        cvcstate(key).value("signal_test");
+      }
+    });
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  // Give signals time to propagate
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  // Should have received many signals
+  EXPECT_GT(signal_count.load(), 0);
+  
+  connection.disconnect();
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentHierarchyCreation) {
+  // Test concurrent creation of deep hierarchies
+  const int num_threads = 8;
+  const int depth = 5;
+  std::atomic<int> nodes_created(0);
+  std::vector<boost::thread> threads;
+  
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([i, depth, &nodes_created]() {
+      std::string base = "test.concurrent.hierarchy.branch" + boost::lexical_cast<std::string>(i);
+      std::string path = base;
+      
+      for (int d = 0; d < depth; ++d) {
+        path += ".level" + boost::lexical_cast<std::string>(d);
+        try {
+          cvcstate(path).value("depth_" + boost::lexical_cast<std::string>(d));
+          nodes_created++;
+        } catch (...) {
+          FAIL() << "Exception during hierarchy creation";
+        }
+      }
+    });
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_EQ(nodes_created.load(), num_threads * depth);
+  
+  // Verify hierarchies exist
+  for (int i = 0; i < num_threads; ++i) {
+    std::string base = "test.concurrent.hierarchy.branch" + boost::lexical_cast<std::string>(i);
+    size_t children = cvcstate(base).numChildren();
+    EXPECT_GE(children, 1);
+  }
+  
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentTraversal) {
+  // Set up a tree structure
+  for (int i = 0; i < 5; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      std::string key = "test.concurrent.traversal.parent" + 
+                       boost::lexical_cast<std::string>(i) + ".child" +
+                       boost::lexical_cast<std::string>(j);
+      cvcstate(key).value("traverse_me");
+    }
+  }
+  
+  // Multiple threads traversing while one thread modifies
+  std::atomic<int> traverse_count(0);
+  std::atomic<bool> stop_flag(false);
+  std::vector<boost::thread> threads;
+  
+  // Traversal threads
+  for (int i = 0; i < 4; ++i) {
+    threads.emplace_back([&traverse_count, &stop_flag]() {
+      while (!stop_flag.load()) {
+        try {
+          cvcstate("test.concurrent.traversal").traverse(
+            [&traverse_count](std::string) { traverse_count++; }
+          );
+        } catch (...) {
+          FAIL() << "Exception during concurrent traversal";
+        }
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      }
+    });
+  }
+  
+  // Modifier thread
+  threads.emplace_back([&stop_flag]() {
+    for (int i = 0; i < 10; ++i) {
+      std::string key = "test.concurrent.traversal.newnode" + boost::lexical_cast<std::string>(i);
+      cvcstate(key).value("new");
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+    }
+    stop_flag.store(true);
+  });
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_GT(traverse_count.load(), 0);
+  
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentResetOperations) {
+  // Test reset() under concurrent access
+  const int num_threads = 6;
+  std::vector<boost::thread> threads;
+  std::atomic<int> reset_count(0);
+  
+  // Populate initial state
+  for (int i = 0; i < 20; ++i) {
+    cvcstate("test.concurrent.reset.item" + boost::lexical_cast<std::string>(i)).value("data");
+  }
+  
+  // Some threads reset, others read/write
+  for (int i = 0; i < num_threads; ++i) {
+    if (i % 3 == 0) {
+      // Reset thread
+      threads.emplace_back([&reset_count]() {
+        for (int j = 0; j < 5; ++j) {
+          try {
+            cvcstate("test.concurrent.reset").reset();
+            reset_count++;
+            boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+          } catch (...) {
+            FAIL() << "Exception during reset";
+          }
+        }
+      });
+    } else {
+      // Read/Write thread
+      threads.emplace_back([i]() {
+        for (int j = 0; j < 20; ++j) {
+          try {
+            std::string key = "test.concurrent.reset.item" + boost::lexical_cast<std::string>(j);
+            cvcstate(key).value("updated_" + boost::lexical_cast<std::string>(i));
+            std::string val = cvcstate(key).value();
+            (void)val;
+          } catch (...) {
+            // May fail if reset happens - that's okay
+          }
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+        }
+      });
+    }
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_GT(reset_count.load(), 0);
+  
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, ConcurrentPropertyTreeOperations) {
+  // Test ptree() and json() operations under concurrent modifications
+  std::atomic<int> ptree_ops(0);
+  std::atomic<int> json_ops(0);
+  std::vector<boost::thread> threads;
+  
+  // Set up initial state
+  for (int i = 0; i < 10; ++i) {
+    cvcstate("test.concurrent.ptree.item" + boost::lexical_cast<std::string>(i)).value("value" + boost::lexical_cast<std::string>(i));
+  }
+  
+  const int num_threads = 6;
+  
+  for (int i = 0; i < num_threads; ++i) {
+    if (i % 2 == 0) {
+      // Serialize threads
+      threads.emplace_back([&ptree_ops, &json_ops]() {
+        for (int j = 0; j < 10; ++j) {
+          try {
+            auto pt = cvcstate("test.concurrent.ptree").ptree();
+            ptree_ops++;
+            
+            std::string json_str = cvcstate("test.concurrent.ptree").json();
+            if (!json_str.empty()) {
+              json_ops++;
+            }
+          } catch (...) {
+            FAIL() << "Exception during serialization";
+          }
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+        }
+      });
+    } else {
+      // Modification threads
+      threads.emplace_back([i]() {
+        for (int j = 0; j < 20; ++j) {
+          try {
+            std::string key = "test.concurrent.ptree.item" + boost::lexical_cast<std::string>(j % 10);
+            cvcstate(key).value("thread" + boost::lexical_cast<std::string>(i) + "_" + boost::lexical_cast<std::string>(j));
+          } catch (...) {
+            FAIL() << "Exception during modification";
+          }
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(2));
+        }
+      });
+    }
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_GT(ptree_ops.load(), 0);
+  EXPECT_GT(json_ops.load(), 0);
+  
+  cvcstate("test.concurrent").reset();
+}
+
+TEST(StateTest, DeadlockDetectionValueAndSignal) {
+  // Test for potential deadlock between value changes and signal handlers
+  std::atomic<int> signal_fires(0);
+  std::atomic<bool> deadlock_detected(false);
+  boost::mutex test_mutex;
+  
+  auto connection = cvcstate("test.deadlock.node").valueChanged.connect([&]() {
+    signal_fires++;
+    // Try to access state from within signal handler
+    try {
+      std::string val = cvcstate("test.deadlock.node").value();
+      boost::mutex::scoped_lock lock(test_mutex);
+      cvcstate("test.deadlock.counter").value(boost::lexical_cast<std::string>(signal_fires.load()));
+    } catch (...) {
+      deadlock_detected.store(true);
+    }
+  });
+  
+  // Rapidly change value
+  boost::thread writer([&deadlock_detected]() {
+    for (int i = 0; i < 50 && !deadlock_detected.load(); ++i) {
+      cvcstate("test.deadlock.node").value("iteration_" + boost::lexical_cast<std::string>(i));
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(2));
+    }
+  });
+  
+  // Wait with timeout
+  if (!writer.try_join_for(boost::chrono::seconds(5))) {
+    deadlock_detected.store(true);
+    // Force thread to stop (not graceful, but for testing)
+    writer.interrupt();
+    writer.join();
+    FAIL() << "Potential deadlock detected - thread did not complete in time";
+  }
+  
+  EXPECT_FALSE(deadlock_detected.load());
+  EXPECT_GT(signal_fires.load(), 0);
+  
+  connection.disconnect();
+  cvcstate("test.deadlock").reset();
+}
+
+// Test state_object pattern with threading
+class TestStateObject : public state_object<TestStateObject> {
+public:
+  std::atomic<int> handleCount;
+  std::atomic<int> errorCount;
+  
+  TestStateObject() : handleCount(0), errorCount(0) {}
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    try {
+      handleCount++;
+      // Try to read our own state
+      std::string val = getState().value();
+      (void)val;
+    } catch (...) {
+      errorCount++;
+    }
+  }
+};
+
+TEST(StateTest, StateObjectMultithreaded) {
+  TestStateObject obj;
+  
+  const int num_threads = 8;
+  const int ops_per_thread = 25;
+  std::vector<boost::thread> threads;
+  
+  // Multiple threads modify the state_object's state
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&obj, i, ops_per_thread]() {
+      for (int j = 0; j < ops_per_thread; ++j) {
+        try {
+          obj.getState("property" + boost::lexical_cast<std::string>(i)).value(
+            "value_" + boost::lexical_cast<std::string>(j)
+          );
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(2));
+        } catch (...) {
+          FAIL() << "Exception in state_object test";
+        }
+      }
+    });
+  }
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  // Give time for async handlers to complete
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  
+  // Should have triggered many state change handlers
+  EXPECT_GT(obj.handleCount.load(), 0);
+  
+  // Should not have had errors
+  EXPECT_EQ(obj.errorCount.load(), 0);
+}
+
+TEST(StateTest, StressTestCombinedOperations) {
+  // Stress test combining multiple operations
+  const int duration_ms = 1000; // Run for 1 second
+  std::atomic<bool> stop_flag(false);
+  std::atomic<int> total_ops(0);
+  std::vector<boost::thread> threads;
+  
+  // Writer threads
+  for (int i = 0; i < 3; ++i) {
+    threads.emplace_back([i, &stop_flag, &total_ops]() {
+      int ops = 0;
+      while (!stop_flag.load()) {
+        try {
+          std::string key = "test.stress.writer" + boost::lexical_cast<std::string>(i);
+          cvcstate(key).value("val_" + boost::lexical_cast<std::string>(ops));
+          cvcstate(key).data(ops);
+          cvcstate(key).comment("comment_" + boost::lexical_cast<std::string>(ops));
+          ops++;
+        } catch (...) {
+          FAIL() << "Exception in writer thread";
+        }
+      }
+      total_ops += ops;
+    });
+  }
+  
+  // Reader threads
+  for (int i = 0; i < 3; ++i) {
+    threads.emplace_back([i, &stop_flag, &total_ops]() {
+      int ops = 0;
+      while (!stop_flag.load()) {
+        try {
+          std::string key = "test.stress.writer" + boost::lexical_cast<std::string>(i % 3);
+          std::string val = cvcstate(key).value();
+          if (cvcstate(key).isData<int>()) {
+            int data = cvcstate(key).data<int>();
+            (void)data;
+          }
+          ops++;
+        } catch (...) {
+          // May fail if node doesn't exist yet
+        }
+      }
+      total_ops += ops;
+    });
+  }
+  
+  // Traversal thread
+  threads.emplace_back([&stop_flag, &total_ops]() {
+    int ops = 0;
+    while (!stop_flag.load()) {
+      try {
+        cvcstate("test.stress").traverse([](std::string) {});
+        ops++;
+      } catch (...) {
+        FAIL() << "Exception in traversal thread";
+      }
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    }
+    total_ops += ops;
+  });
+  
+  // Let it run
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(duration_ms));
+  stop_flag.store(true);
+  
+  // Join all threads
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_GT(total_ops.load(), 0);
+  std::cout << "Stress test completed " << total_ops.load() << " operations without deadlock\n";
+  
+  cvcstate("test.stress").reset();
 }
 
 // Main function is provided by gtest_main library

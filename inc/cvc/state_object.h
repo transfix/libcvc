@@ -66,7 +66,7 @@ namespace CVC_NAMESPACE
       //watch this object's state
       _stateConnection = getState().childChanged.connect(
          map_change_signal::slot_type(
-           &state_object<This>::stateChanged, this, _1
+           &state_object<This>::stateChanged, this, boost::placeholders::_1
          )
       );
     }
@@ -76,11 +76,11 @@ namespace CVC_NAMESPACE
     //Use this to easily get the name of this viewer's state object.
     std::string stateName(const std::string& childState = std::string()) const { 
       std::string viewer_root = cvcapp.dataTypeName<This>()+
-        CVC::State::SEPARATOR+
+        CVC_NAMESPACE::state::SEPARATOR+
         boost::lexical_cast<std::string>(this);
       return 
         !childState.empty() ? 
-        viewer_root + CVC::State::SEPARATOR + childState :
+        viewer_root + CVC_NAMESPACE::state::SEPARATOR + childState :
         viewer_root;
     }
 
