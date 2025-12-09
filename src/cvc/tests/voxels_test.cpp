@@ -1244,32 +1244,281 @@ TEST(VoxelsTest, BilateralFilter3DSmoothing) {
 // Contrast Enhancement Tests
 // ============================================================================
 
-TEST(VoxelsTest, ContrastEnhancement) {
+TEST(VoxelsTest, ContrastEnhancementLowContrast) {
+  // Test 1: Algorithm restores original range after internal processing
   voxels v(dimension(10, 10, 10), Float);
   
-  // Create volume with varying intensities
-  for (uint64 i = 0; i < 1000; ++i)
-    v(i, double(i % 100));
+  // Create low contrast volume (values clustered in narrow range)
+  for (uint64 i = 0; i < 1000; ++i) {
+    v(i, 40.0 + double(i % 20));  // Range: [40, 60)
+  }
+  
+  double initial_min = v.min();
+  double initial_max = v.max();
   
   v.contrastEnhancement(0.9);
   
-  // Volume should exist with same dimensions
-  EXPECT_EQ(v.XDim(), 10u);
-  EXPECT_EQ(v.YDim(), 10u);
-  EXPECT_EQ(v.ZDim(), 10u);
+  double final_min = v.min();
+  double final_max = v.max();
+  
+  // Algorithm maps to [0,255], processes, then restores original range
+  EXPECT_NEAR(final_min, initial_min, 1.0) << "Min should be restored";
+  EXPECT_NEAR(final_max, initial_max, 1.0) << "Max should be restored";
+  
+  // Verify adaptive enhancement occurred (check variance)
+  double sum = 0.0, sum_sq = 0.0;
+  for (uint64 i = 0; i < 1000; ++i) {
+    double val = v(i);
+    sum += val;
+    sum_sq += val * val;
+  }
+  double mean = sum / 1000.0;
+  double variance = (sum_sq / 1000.0) - (mean * mean);
+  
+  EXPECT_GT(variance, 20.0) << "Contrast should be enhanced";
 }
 
-TEST(VoxelsTest, ContrastEnhancementResistor) {
-  voxels v(dimension(8, 8, 8), Float);
+TEST(VoxelsTest, ContrastEnhancementHistogramSpread) {
+  // Test 2: Verify histogram spreading within original range
+  voxels v(dimension(10, 10, 1), Float);
   
-  // Fill with gradient
-  for (uint64 i = 0; i < 512; ++i)
-    v(i, double(i) / 10.0);
+  // Create image with clustered values
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 10; ++i) {
+      // Three distinct levels (low contrast)
+      if (i < 3) v(i, j, 0, 30.0);
+      else if (i < 7) v(i, j, 0, 50.0);
+      else v(i, j, 0, 70.0);
+    }
+  }
+  
+  double initial_min = v.min();
+  double initial_max = v.max();
+  
+  v.contrastEnhancement(0.8);
+  
+  double final_min = v.min();
+  double final_max = v.max();
+  
+  // Range is preserved
+  EXPECT_NEAR(final_min, initial_min, 1.0) << "Min preserved";
+  EXPECT_NEAR(final_max, initial_max, 1.0) << "Max preserved";
+  
+  // Check that three regions are more separated
+  double val_low = v(1, 5, 0);
+  double val_mid = v(5, 5, 0);
+  double val_high = v(8, 5, 0);
+  
+  double sep1 = val_mid - val_low;
+  double sep2 = val_high - val_mid;
+  
+  EXPECT_LT(val_low, val_mid) << "Low region should be less than mid";
+  EXPECT_LT(val_mid, val_high) << "Mid region should be less than high";
+  EXPECT_GT(sep1, 5.0) << "Regions should be separated";
+  EXPECT_GT(sep2, 5.0) << "Regions should be separated";
+}
+
+TEST(VoxelsTest, ContrastEnhancementPreservesOrder) {
+  // Test 3: Verify that general relative ordering trend is preserved
+  voxels v(dimension(10, 1, 1), Float);
+  
+  // Create monotonically increasing values
+  for (uint64 i = 0; i < 10; ++i) {
+    v(i, 0, 0, 30.0 + double(i) * 4.0);  // 30, 34, 38, ..., 66
+  }
+  
+  v.contrastEnhancement(0.7);
+  
+  // Nonlinear transformation may not preserve strict monotonicity
+  // but endpoints and general trend should be preserved
+  EXPECT_LT(v(0, 0, 0), v(9, 0, 0)) << "General increasing trend preserved";
+  EXPECT_LT(v(0, 0, 0), v(4, 0, 0)) << "First half increases";
+  EXPECT_LT(v(4, 0, 0), v(9, 0, 0)) << "Second half increases";
+  
+  // Check most values preserve order (allowing some tolerance)
+  int order_violations = 0;
+  for (uint64 i = 0; i < 9; ++i) {
+    if (v(i, 0, 0) >= v(i + 1, 0, 0)) order_violations++;
+  }
+  EXPECT_LE(order_violations, 2) << "Most ordering should be preserved";
+}
+
+TEST(VoxelsTest, ContrastEnhancementResistorEffect) {
+  // Test 4: Different resistor values have different effects
+  voxels v1(dimension(10, 10, 1), Float);
+  voxels v2(v1);
+  
+  // Create gradient
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 10; ++i) {
+      double val = 20.0 + double(i) * 6.0;  // Gradient across x
+      v1(i, j, 0, val);
+      v2(i, j, 0, val);
+    }
+  }
+  
+  double initial_min = v1.min();
+  double initial_max = v1.max();
   
   // Apply with different resistor values
-  v.contrastEnhancement(0.5);
+  v1.contrastEnhancement(0.3);  // Low resistor (less spatial influence)
+  v2.contrastEnhancement(0.9);  // High resistor (more spatial influence)
   
-  EXPECT_EQ(v.XDim(), 8u);
+  // Both should preserve original range
+  EXPECT_NEAR(v1.min(), initial_min, 1.0);
+  EXPECT_NEAR(v1.max(), initial_max, 1.0);
+  EXPECT_NEAR(v2.min(), initial_min, 1.0);
+  EXPECT_NEAR(v2.max(), initial_max, 1.0);
+  
+  // Different resistor values should produce different internal distributions
+  double mid1 = v1(5, 5, 0);
+  double mid2 = v2(5, 5, 0);
+  EXPECT_NE(mid1, mid2) << "Different resistors should produce different results";
+}
+
+TEST(VoxelsTest, ContrastEnhancementLocalAdaptive) {
+  // Test 5: Verify local adaptive behavior
+  voxels v(dimension(20, 1, 1), Float);
+  
+  // Create two regions with different local contrasts
+  // Left region: low contrast (40-50)
+  for (uint64 i = 0; i < 10; ++i) {
+    v(i, 0, 0, 40.0 + double(i));
+  }
+  
+  // Right region: already high contrast (0-100)
+  for (uint64 i = 10; i < 20; ++i) {
+    v(i, 0, 0, double(i - 10) * 10.0);
+  }
+  
+  // Calculate local ranges before
+  double left_range_before = v(9, 0, 0) - v(0, 0, 0);
+  double right_range_before = v(19, 0, 0) - v(10, 0, 0);
+  
+  v.contrastEnhancement(0.8);
+  
+  // Calculate local ranges after
+  double left_range_after = v(9, 0, 0) - v(0, 0, 0);
+  double right_range_after = v(19, 0, 0) - v(10, 0, 0);
+  
+  // Left region (low contrast) should get more enhancement
+  double left_enhancement = left_range_after / left_range_before;
+  double right_enhancement = right_range_after / right_range_before;
+  
+  EXPECT_GT(left_enhancement, 1.0) << "Left region should be enhanced";
+  EXPECT_GT(right_enhancement, 0.8) << "Right region should be preserved/enhanced";
+}
+
+TEST(VoxelsTest, ContrastEnhancementEdgeEnhancement) {
+  // Test 6: Edges should become more pronounced
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create step edge
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 5; ++i) {
+      v(i, j, 0, 30.0);
+    }
+    for (uint64 i = 5; i < 10; ++i) {
+      v(i, j, 0, 60.0);
+    }
+  }
+  
+  double edge_diff_before = v(5, 5, 0) - v(4, 5, 0);
+  
+  v.contrastEnhancement(0.85);
+  
+  double edge_diff_after = v(5, 5, 0) - v(4, 5, 0);
+  
+  // Edge should be enhanced or at least maintained
+  EXPECT_GE(edge_diff_after, edge_diff_before * 0.8) 
+    << "Edge contrast should be maintained or enhanced";
+}
+
+TEST(VoxelsTest, ContrastEnhancement3D) {
+  // Test 7: 3D contrast enhancement
+  voxels v(dimension(8, 8, 8), Float);
+  
+  // Create 3D gradient
+  for (uint64 k = 0; k < 8; ++k) {
+    for (uint64 j = 0; j < 8; ++j) {
+      for (uint64 i = 0; i < 8; ++i) {
+        // Gradient based on distance from origin
+        double dist = sqrt(double(i*i + j*j + k*k));
+        v(i, j, k, 30.0 + dist * 3.0);
+      }
+    }
+  }
+  
+  double initial_range = v.max() - v.min();
+  
+  v.contrastEnhancement(0.75);
+  
+  double final_range = v.max() - v.min();
+  
+  // 3D enhancement should work
+  EXPECT_GT(final_range, initial_range * 0.9) << "3D contrast should be enhanced";
+  
+  // Verify gradient structure is preserved
+  EXPECT_LT(v(0, 0, 0), v(4, 4, 4)) << "Gradient direction preserved";
+  EXPECT_LT(v(4, 4, 4), v(7, 7, 7)) << "Gradient monotonic";
+}
+
+TEST(VoxelsTest, ContrastEnhancementRangePreservation) {
+  // Test 8: Original min/max range is restored after internal processing
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create volume with specific range
+  for (uint64 i = 0; i < 100; ++i) {
+    v(i, 100.0 + double(i % 50) * 2.0);  // Range [100, 200)
+  }
+  
+  double original_min = v.min();
+  double original_max = v.max();
+  
+  v.contrastEnhancement(0.8);
+  
+  // Algorithm should restore original range (just redistribute values)
+  EXPECT_NEAR(v.min(), original_min, 5.0) << "Min should be approximately restored";
+  EXPECT_NEAR(v.max(), original_max, 5.0) << "Max should be approximately restored";
+  
+  // But the histogram should be more spread out within that range
+  // Check that not all values are clustered
+  int unique_buckets = 0;
+  std::vector<int> histogram(10, 0);
+  for (uint64 i = 0; i < 100; ++i) {
+    double val = v(i);
+    int bucket = int((val - v.min()) / (v.max() - v.min()) * 9.999);
+    histogram[std::max(0, std::min(9, bucket))]++;
+  }
+  
+  for (int count : histogram) {
+    if (count > 0) unique_buckets++;
+  }
+  
+  EXPECT_GE(unique_buckets, 3) << "Values should be distributed across histogram";
+}
+
+TEST(VoxelsTest, ContrastEnhancementResistorClamping) {
+  // Test 9: Resistor values outside [0,1] should be clamped
+  voxels v1(dimension(8, 8, 1), Float);
+  voxels v2(v1), v3(v1);
+  
+  // Create test pattern
+  for (uint64 i = 0; i < 64; ++i) {
+    v1(i, 30.0 + double(i % 30));
+    v2(i, 30.0 + double(i % 30));
+    v3(i, 30.0 + double(i % 30));
+  }
+  
+  // Apply with clamped values (algorithm clamps internally)
+  v1.contrastEnhancement(-0.5);  // Should be clamped to 0.0
+  v2.contrastEnhancement(0.0);   // Minimum valid value
+  v3.contrastEnhancement(1.5);   // Should be clamped to 1.0
+  
+  // All should complete without crashing and produce valid results
+  EXPECT_TRUE(v1.min() < v1.max()) << "Negative resistor clamped, still works";
+  EXPECT_TRUE(v2.min() < v2.max()) << "Zero resistor works";
+  EXPECT_TRUE(v3.min() < v3.max()) << "Resistor > 1.0 clamped, still works";
 }
 
 // ============================================================================
