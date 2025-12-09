@@ -1025,30 +1025,200 @@ TEST(VoxelsTest, ContrastEnhancementResistor) {
 // Anisotropic Diffusion Tests
 // ============================================================================
 
-TEST(VoxelsTest, AnisotropicDiffusion) {
+TEST(VoxelsTest, AnisotropicDiffusionUniform) {
+  // Test 1: Uniform volume should remain unchanged
   voxels v(dimension(10, 10, 10), Float);
-  
-  // Create noisy volume
-  for (uint64 i = 0; i < 1000; ++i)
-    v(i, 50.0 + (i % 10) - 5.0);
+  v.fill(50.0);
   
   v.anisotropicDiffusion(5);
   
-  // Should smooth while preserving edges
-  EXPECT_EQ(v.XDim(), 10u);
-  EXPECT_EQ(v.YDim(), 10u);
-  EXPECT_EQ(v.ZDim(), 10u);
+  // Uniform regions should remain stable
+  EXPECT_NEAR(v(5, 5, 5), 50.0, 0.01);
+  EXPECT_NEAR(v(0, 0, 0), 50.0, 0.01);
+  EXPECT_NEAR(v(9, 9, 9), 50.0, 0.01);
 }
 
-TEST(VoxelsTest, AnisotropicDiffusionIterations) {
-  voxels v(dimension(8, 8, 8), Float);
-  v.fill(50.0);
-  v(4, 4, 4, 100.0);
+TEST(VoxelsTest, AnisotropicDiffusionSmoothGradient) {
+  // Test 2: Smooth gradient should be preserved
+  voxels v(dimension(10, 1, 1), Float);
   
-  // Test with different iteration counts
+  // Create linear gradient: 0, 10, 20, ..., 90
+  for (uint64 i = 0; i < 10; ++i)
+    v(i, 0, 0, double(i * 10));
+  
+  voxels original(v);
+  v.anisotropicDiffusion(3);
+  
+  // Smooth gradients should be relatively unchanged (anisotropic diffusion preserves edges)
+  // Check that gradient is still monotonically increasing
+  for (uint64 i = 0; i < 9; ++i) {
+    EXPECT_LT(v(i, 0, 0), v(i + 1, 0, 0)) 
+      << "Gradient should remain monotonic at position " << i;
+  }
+  
+  // End points should be relatively stable
+  EXPECT_NEAR(v(0, 0, 0), 0.0, 5.0);
+  EXPECT_NEAR(v(9, 0, 0), 90.0, 5.0);
+}
+
+TEST(VoxelsTest, AnisotropicDiffusionEdgePreservation) {
+  // Test 3: Sharp edges should be preserved
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create step edge: left half = 0, right half = 100
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 5; ++i) {
+      v(i, j, 0, 0.0);
+    }
+    for (uint64 i = 5; i < 10; ++i) {
+      v(i, j, 0, 100.0);
+    }
+  }
+  
+  v.anisotropicDiffusion(5);
+  
+  // Check edge is preserved (should still have clear distinction)
+  // Left side should be much less than right side
+  double left_avg = 0.0;
+  double right_avg = 0.0;
+  for (uint64 j = 0; j < 10; ++j) {
+    left_avg += v(2, j, 0);  // Sample from left region
+    right_avg += v(7, j, 0); // Sample from right region
+  }
+  left_avg /= 10.0;
+  right_avg /= 10.0;
+  
+  EXPECT_LT(left_avg, 40.0) << "Left side should remain relatively dark";
+  EXPECT_GT(right_avg, 60.0) << "Right side should remain relatively bright";
+  EXPECT_GT(right_avg - left_avg, 30.0) << "Edge contrast should be preserved";
+}
+
+TEST(VoxelsTest, AnisotropicDiffusionNoiseReduction) {
+  // Test 4: Small noise should be smoothed while preserving structure
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create noisy constant region with small fluctuations
+  v.fill(50.0);
+  v(3, 3, 0, 55.0);  // Small noise
+  v(3, 4, 0, 45.0);
+  v(6, 6, 0, 53.0);
+  v(7, 7, 0, 47.0);
+  
   v.anisotropicDiffusion(10);
   
-  EXPECT_EQ(v.XDim(), 8u);
+  // After diffusion, values should be closer to mean
+  // Small gradients get smoothed
+  EXPECT_NEAR(v(3, 3, 0), 50.0, 3.0);
+  EXPECT_NEAR(v(3, 4, 0), 50.0, 3.0);
+  EXPECT_NEAR(v(6, 6, 0), 50.0, 3.0);
+}
+
+TEST(VoxelsTest, AnisotropicDiffusionIsolatedSpike) {
+  // Test 5: Isolated spike behavior
+  voxels v(dimension(7, 7, 7), Float);
+  v.fill(50.0);
+  
+  // Add isolated spike
+  v(3, 3, 3, 150.0);
+  
+  double initial_spike = v(3, 3, 3);
+  double initial_neighbor = v(3, 3, 4);
+  
+  v.anisotropicDiffusion(5);
+  
+  double final_spike = v(3, 3, 3);
+  double final_neighbor = v(3, 3, 4);
+  
+  // Spike should diffuse outward (decrease)
+  EXPECT_LT(final_spike, initial_spike) << "Spike should be smoothed";
+  
+  // Neighbors should increase as they receive diffused values
+  EXPECT_GT(final_neighbor, initial_neighbor) << "Neighbors should receive diffused values";
+  
+  // But spike should still be higher than its neighbors
+  EXPECT_GT(final_spike, final_neighbor) << "Spike should remain locally maximal";
+}
+
+TEST(VoxelsTest, AnisotropicDiffusionMultipleIterations) {
+  // Test 6: More iterations = more smoothing (but edges preserved)
+  voxels v1(dimension(10, 10, 1), Float);
+  voxels v2(v1);
+  
+  // Create pattern with both smooth regions and edges
+  for (uint64 i = 0; i < 10; ++i) {
+    for (uint64 j = 0; j < 10; ++j) {
+      if (i < 5) {
+        v1(i, j, 0, 20.0 + (i % 2) * 5.0);  // Noisy low region
+      } else {
+        v1(i, j, 0, 80.0 + (i % 2) * 5.0);  // Noisy high region
+      }
+    }
+  }
+  v2 = v1;
+  
+  // Apply different iteration counts
+  v1.anisotropicDiffusion(3);
+  v2.anisotropicDiffusion(10);
+  
+  // More iterations should smooth noise more in uniform regions
+  // Calculate variance in left region (should decrease)
+  double var1 = 0.0, var2 = 0.0;
+  double mean1 = 0.0, mean2 = 0.0;
+  int count = 0;
+  
+  for (uint64 i = 1; i < 4; ++i) {
+    for (uint64 j = 0; j < 10; ++j) {
+      mean1 += v1(i, j, 0);
+      mean2 += v2(i, j, 0);
+      count++;
+    }
+  }
+  mean1 /= count;
+  mean2 /= count;
+  
+  for (uint64 i = 1; i < 4; ++i) {
+    for (uint64 j = 0; j < 10; ++j) {
+      double diff1 = v1(i, j, 0) - mean1;
+      double diff2 = v2(i, j, 0) - mean2;
+      var1 += diff1 * diff1;
+      var2 += diff2 * diff2;
+    }
+  }
+  
+  // More iterations should reduce variance (more smoothing)
+  EXPECT_LT(var2, var1) << "More iterations should reduce noise (lower variance)";
+}
+
+TEST(VoxelsTest, AnisotropicDiffusion3DEdgePreservation) {
+  // Test 7: 3D edge preservation
+  voxels v(dimension(8, 8, 8), Float);
+  
+  // Create 3D step: bottom half = 20, top half = 80
+  for (uint64 k = 0; k < 8; ++k) {
+    double val = (k < 4) ? 20.0 : 80.0;
+    for (uint64 j = 0; j < 8; ++j) {
+      for (uint64 i = 0; i < 8; ++i) {
+        v(i, j, k, val);
+      }
+    }
+  }
+  
+  v.anisotropicDiffusion(5);
+  
+  // Check that layers far from edge are relatively preserved
+  double bottom_avg = 0.0, top_avg = 0.0;
+  for (uint64 j = 0; j < 8; ++j) {
+    for (uint64 i = 0; i < 8; ++i) {
+      bottom_avg += v(i, j, 1);  // Second layer from bottom
+      top_avg += v(i, j, 6);     // Second layer from top
+    }
+  }
+  bottom_avg /= 64.0;
+  top_avg /= 64.0;
+  
+  EXPECT_LT(bottom_avg, 40.0) << "Bottom region should stay relatively low";
+  EXPECT_GT(top_avg, 60.0) << "Top region should stay relatively high";
+  EXPECT_GT(top_avg - bottom_avg, 25.0) << "3D edge should be preserved";
 }
 
 // ============================================================================
