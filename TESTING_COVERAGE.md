@@ -25,12 +25,12 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 234 (Updated December 2025)
+### Total Tests: 242 (Updated December 2025)
 
 - **App Tests**: 53
 - **State Tests**: 92 (includes 12 concurrent + 11 futures tests)
 - **Voxels Tests**: 71 (comprehensive volume data structure coverage)
-- **Success Rate**: 100% (234/234 passing)
+- **Success Rate**: 100% (242/242 passing)
 
 ## Coverage Metrics
 
@@ -52,7 +52,7 @@ This document describes the comprehensive testing strategy and code coverage imp
 - `state.h` coverage increased from 78.6% to 83.3% with futures API tests
 - Added 23 new tests (12 concurrent + 11 futures)
 - All critical synchronization paths now tested
-- **Voxels tests expanded from 37 to 89 tests (+34 tests)**
+- **Voxels tests expanded from 37 to 97 tests (+34 tests)**
 - `voxels.h` coverage increased from 39.1% to 94.0% (+54.9%)
 - `voxels.cpp` coverage increased from 6.8% to 92.2% (+85.4%)
 - Comprehensive algorithm coverage: bilateral filter, anisotropic diffusion, GDTV, contrast enhancement
@@ -214,7 +214,7 @@ This document describes the comprehensive testing strategy and code coverage imp
 - Multiple futures on same state (5 threads)
 - Producer-consumer pattern
 
-### Voxels Component Tests (89 tests)
+### Voxels Component Tests (97 tests)
 
 The voxels class is the core volume data structure supporting 6 data types (UChar, UShort, UInt, Float, Double, UInt64) with comprehensive image processing algorithms.
 

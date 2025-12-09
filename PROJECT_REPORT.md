@@ -35,7 +35,7 @@
 **Language:** C++ (with C components)  
 **Build System:** CMake (modernized to 3.15+)  
 **C++ Standard:** C++14 minimum (configurable to newer standards)  
-**Test Suite:** 234 tests (100% passing)
+**Test Suite:** 242 tests (100% passing)
 
 ## Project Structure
 
@@ -333,7 +333,7 @@ cmake --build . --config Release
    - XMLRPC uses `file(GLOB)` which is not recommended for production
 
 5. **Test Coverage**
-   - Core `cvc::app`, `cvc::state`, and `cvc::voxels` tests implemented (234 test cases, 100% passing)
+   - Core `cvc::app`, `cvc::state`, and `cvc::voxels` tests implemented (242 test cases, 100% passing)
    - Multithreaded testing: 12 concurrent access tests
    - Futures API: 11 async value retrieval tests
    - Additional coverage needed for volume I/O, geometry, filtering, meshing, SDF
@@ -353,14 +353,14 @@ The project includes comprehensive unit tests using **Google Test v1.14.0**. Tes
 
 - **Framework**: Google Test (automatically fetched via CMake FetchContent)
 - **CMake Option**: `CVC_BUILD_TESTS` (default: ON)
-- **Total Tests**: 234 (100% passing)
+- **Total Tests**: 242 (100% passing)
   - App: 53 tests
   - State: 92 tests (includes concurrency + futures)
-  - Voxels: 89 tests (comprehensive volume data coverage)
+  - Voxels: 97 tests (comprehensive volume data coverage)
 - **Test Executables**:
   - `app_test` - 53 tests for `cvc::app` singleton and data/property management
   - `state_test` - 92 tests for `cvc::state` hierarchical state system
-  - `voxels_test` - 89 tests for `cvc::voxels` volume data structure and algorithms
+  - `voxels_test` - 97 tests for `cvc::voxels` volume data structure and algorithms
 
 ### Running Tests
 
@@ -375,7 +375,7 @@ cd build && ctest --output-on-failure
 # Run specific test executable
 ./build/bin/app_test     # 53 tests
 ./build/bin/state_test   # 92 tests (includes futures & multithreading)
-./build/bin/voxels_test  # 89 tests (volume data & image processing)
+./build/bin/voxels_test  # 97 tests (volume data & image processing)
 
 # Use the convenience target
 cmake --build build --target check
@@ -461,7 +461,7 @@ Potential additions to expand test coverage:
 - Integration tests for end-to-end workflows
 
 **Recently Added**:
-- ✅ Voxels comprehensive testing (89 tests, 94% coverage)
+- ✅ Voxels comprehensive testing (97 tests, 94% coverage)
 - ✅ Image processing algorithms (bilateral, diffusion, GDTV, contrast)
 - ✅ Type conversions and interpolation
 - ✅ Multithreaded state operations
@@ -621,10 +621,10 @@ cmake --build build-coverage --target coverage
 - `inc/cvc/app.h`: 78.4% line coverage
 - `inc/cvc/state.h`: 83.3% line coverage (after futures API)
 - `inc/cvc/state_object.h`: 33.3% line coverage
-- Overall: 234 tests exercising critical paths
+- Overall: 242 tests exercising critical paths
   - App component: 53 tests (singleton, properties, threads)
   - State component: 92 tests (tree structure, signals, concurrency, futures)
-  - Voxels component: 89 tests (algorithms, type conversions, operations)
+  - Voxels component: 97 tests (algorithms, type conversions, operations)
 
 **Note:** Multithreaded tests may cause coverage data race conditions. Use `lcov --ignore-errors negative` to handle this.
 
@@ -649,7 +649,7 @@ cmake --build build-coverage --target coverage
    - State object CRTP pattern validation
 
 3. **Enhanced Testing Infrastructure**
-   - Total: 234 tests (100% passing)
+   - Total: 242 tests (100% passing)
    - App tests: 53 (data, properties, threads, mutexes)
    - State tests: 92 (values, hierarchy, signals, futures)
    - Coverage targets for critical components (80%+)
@@ -700,7 +700,7 @@ The trans-cvc project has been successfully modernized to use CMake 3.15+ with m
 - Provides better dependency management
 - Supports C++14/17/20/23 standards
 - Has clearer build options and documentation
-- Includes comprehensive unit tests for core functionality (234 test cases)
+- Includes comprehensive unit tests for core functionality (242 test cases)
 - Features advanced async programming with futures API
 - Provides multithreaded validation and deadlock detection
 - Maintains backward compatibility with existing code

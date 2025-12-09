@@ -35,10 +35,10 @@
 
 ## Overview
 
-The trans-cvc library uses Google Test (gtest) for unit testing. The test suite includes **234 comprehensive tests** (100% passing) covering:
+The trans-cvc library uses Google Test (gtest) for unit testing. The test suite includes **242 comprehensive tests** (100% passing) covering:
 - `cvc::app`: Application singleton and data/property management (53 tests)
 - `cvc::state`: Hierarchical state system with signals and futures (92 tests)
-- `cvc::voxels`: Volume data structure and image processing algorithms (89 tests)
+- `cvc::voxels`: Volume data structure and image processing algorithms (97 tests)
 
 ## Building Tests
 
@@ -110,7 +110,7 @@ You can also run the test executables directly for more control:
 # Run state tests (92 tests, includes concurrency + futures)
 ./build/bin/state_test
 
-# Run voxels tests (89 tests, image processing algorithms)
+# Run voxels tests (97 tests, image processing algorithms)
 ./build/bin/voxels_test
 
 # Run with filters
@@ -131,7 +131,7 @@ You can also run the test executables directly for more control:
 
 - **`src/cvc/tests/app_test.cpp`**: Unit tests for `cvc::app` class (53 tests)
 - **`src/cvc/tests/state_test.cpp`**: Unit tests for `cvc::state` class (92 tests)
-- **`src/cvc/tests/voxels_test.cpp`**: Unit tests for `cvc::voxels` class (89 tests)
+- **`src/cvc/tests/voxels_test.cpp`**: Unit tests for `cvc::voxels` class (97 tests)
 - **`src/cvc/tests/CMakeLists.txt`**: Test build configuration
 
 ### Test Coverage
@@ -684,15 +684,15 @@ All multithreaded tests use:
 - Tests run sequentially by default (CTest can parallelize test executables)
 - Multithreaded tests may take 100-500ms each
 - Stress test runs for 1 second
-- Total test execution time: ~14 seconds for all 234 tests
+- Total test execution time: ~14 seconds for all 242 tests
   - App tests: <1 second (53 tests)
   - State tests: ~8 seconds (92 tests, includes multithreading)
-  - Voxels tests: ~120ms (89 tests, includes algorithms)
+  - Voxels tests: ~120ms (97 tests, includes algorithms)
 
 ## Future Enhancements
 
 **Recently Added** (December 2025):
-- ✅ Voxels comprehensive testing (89 tests, 94% coverage)
+- ✅ Voxels comprehensive testing (97 tests, 94% coverage)
 - ✅ Image processing algorithms (bilateral, diffusion, GDTV, contrast)
 - ✅ Type conversions and interpolation (30 conversion paths)
 - ✅ Multithreaded state operations (12 concurrent tests)
