@@ -35,7 +35,7 @@
 **Language:** C++ (with C components)  
 **Build System:** CMake (modernized to 3.15+)  
 **C++ Standard:** C++14 minimum (configurable to newer standards)  
-**Test Suite:** 242 tests (100% passing)
+**Test Suite:** 271 tests (100% passing)
 
 ## Project Structure
 
@@ -333,7 +333,7 @@ cmake --build . --config Release
    - XMLRPC uses `file(GLOB)` which is not recommended for production
 
 5. **Test Coverage**
-   - Core `cvc::app`, `cvc::state`, and `cvc::voxels` tests implemented (242 test cases, 100% passing)
+   - Core `cvc::app`, `cvc::state`, `cvc::voxels`, and `cvc::volume` tests implemented (271 test cases, 100% passing)
    - Multithreaded testing: 12 concurrent access tests
    - Futures API: 11 async value retrieval tests
    - Additional coverage needed for volume I/O, geometry, filtering, meshing, SDF
@@ -353,14 +353,16 @@ The project includes comprehensive unit tests using **Google Test v1.14.0**. Tes
 
 - **Framework**: Google Test (automatically fetched via CMake FetchContent)
 - **CMake Option**: `CVC_BUILD_TESTS` (default: ON)
-- **Total Tests**: 242 (100% passing)
+- **Total Tests**: 271 (100% passing)
   - App: 53 tests
   - State: 92 tests (includes concurrency + futures)
   - Voxels: 97 tests (comprehensive volume data coverage)
+  - Volume: 29 tests (spatial coordinates and interpolation)
 - **Test Executables**:
   - `app_test` - 53 tests for `cvc::app` singleton and data/property management
   - `state_test` - 92 tests for `cvc::state` hierarchical state system
   - `voxels_test` - 97 tests for `cvc::voxels` volume data structure and algorithms
+  - `volume_test` - 29 tests for `cvc::volume` spatial coordinate system
 
 ### Running Tests
 
@@ -376,6 +378,7 @@ cd build && ctest --output-on-failure
 ./build/bin/app_test     # 53 tests
 ./build/bin/state_test   # 92 tests (includes futures & multithreading)
 ./build/bin/voxels_test  # 97 tests (volume data & image processing)
+./build/bin/volume_test  # 29 tests (spatial coordinates & interpolation)
 
 # Use the convenience target
 cmake --build build --target check
@@ -621,8 +624,9 @@ cmake --build build-coverage --target coverage
 - `inc/cvc/app.h`: 78.4% line coverage
 - `inc/cvc/state.h`: 83.3% line coverage (after futures API)
 - `inc/cvc/state_object.h`: 33.3% line coverage
-- Overall: 242 tests exercising critical paths
+- Overall: 271 tests exercising critical paths
   - App component: 53 tests (singleton, properties, threads)
+  - Volume component: 29 tests (spatial coordinates, interpolation, subvolumes)
   - State component: 92 tests (tree structure, signals, concurrency, futures)
   - Voxels component: 97 tests (algorithms, type conversions, operations)
 
@@ -649,7 +653,7 @@ cmake --build build-coverage --target coverage
    - State object CRTP pattern validation
 
 3. **Enhanced Testing Infrastructure**
-   - Total: 242 tests (100% passing)
+   - Total: 271 tests (100% passing)
    - App tests: 53 (data, properties, threads, mutexes)
    - State tests: 92 (values, hierarchy, signals, futures)
    - Coverage targets for critical components (80%+)
@@ -700,7 +704,7 @@ The trans-cvc project has been successfully modernized to use CMake 3.15+ with m
 - Provides better dependency management
 - Supports C++14/17/20/23 standards
 - Has clearer build options and documentation
-- Includes comprehensive unit tests for core functionality (242 test cases)
+- Includes comprehensive unit tests for core functionality (271 test cases)
 - Features advanced async programming with futures API
 - Provides multithreaded validation and deadlock detection
 - Maintains backward compatibility with existing code

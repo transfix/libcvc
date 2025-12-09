@@ -35,7 +35,7 @@
 
 ## Overview
 
-The trans-cvc library uses Google Test (gtest) for unit testing. The test suite includes **242 comprehensive tests** (100% passing) covering:
+The trans-cvc library uses Google Test (gtest) for unit testing. The test suite includes **271 comprehensive tests** (100% passing) covering:
 - `cvc::app`: Application singleton and data/property management (53 tests)
 - `cvc::state`: Hierarchical state system with signals and futures (92 tests)
 - `cvc::voxels`: Volume data structure and image processing algorithms (97 tests)
@@ -132,6 +132,7 @@ You can also run the test executables directly for more control:
 - **`src/cvc/tests/app_test.cpp`**: Unit tests for `cvc::app` class (53 tests)
 - **`src/cvc/tests/state_test.cpp`**: Unit tests for `cvc::state` class (92 tests)
 - **`src/cvc/tests/voxels_test.cpp`**: Unit tests for `cvc::voxels` class (97 tests)
+- **`src/cvc/tests/volume_test.cpp`**: Unit tests for `cvc::volume` class (29 tests)
 - **`src/cvc/tests/CMakeLists.txt`**: Test build configuration
 
 ### Test Coverage
@@ -684,7 +685,7 @@ All multithreaded tests use:
 - Tests run sequentially by default (CTest can parallelize test executables)
 - Multithreaded tests may take 100-500ms each
 - Stress test runs for 1 second
-- Total test execution time: ~14 seconds for all 242 tests
+- Total test execution time: ~16 seconds for all 271 tests
   - App tests: <1 second (53 tests)
   - State tests: ~8 seconds (92 tests, includes multithreading)
   - Voxels tests: ~120ms (97 tests, includes algorithms)

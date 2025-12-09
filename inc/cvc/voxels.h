@@ -38,6 +38,34 @@ namespace CVC_NAMESPACE
 {
   class composite_function;
 
+  /**
+   * @class voxels
+   * @brief Multi-dimensional voxel data container with shallow copy semantics
+   * 
+   * IMPORTANT - MEMORY SEMANTICS:
+   * =============================
+   * Voxels uses SHALLOW COPY semantics via boost::shared_array.
+   * 
+   * - Copy constructor: voxels v2(v1);   // Shares underlying data
+   * - Assignment operator: v2 = v1;       // Shares underlying data  
+   * - copy() method: v2.copy(v1);        // Shares underlying data
+   * 
+   * All copy operations share the same underlying voxel data array.
+   * Modifications through any copy will affect all other copies!
+   * 
+   * To create a DEEP COPY with independent data:
+   * 
+   *   voxels v2(v1.voxel_dimensions(), v1.voxelType());
+   *   for(uint64 i = 0; i < v1.voxel_dimensions().size(); ++i)
+   *     v2(i, v1(i));
+   * 
+   * Or use sub() which creates a new array:
+   * 
+   *   voxels v2(v1);
+   *   v2.sub(0, 0, 0, v1.voxel_dimensions());  // Deep copy via sub
+   * 
+   * This design enables efficient passing without copying large arrays.
+   */
   class voxels
   {
   public:
@@ -148,10 +176,17 @@ namespace CVC_NAMESPACE
 
     bool operator==(const voxels& vox) const 
       { 
-        return (_voxels == vox._voxels) ||
-          (strncmp(reinterpret_cast<const char*>(_voxels.get()),
-                   reinterpret_cast<const char*>(vox._voxels.get()),
-                   std::min(voxel_dimensions().size(),vox.voxel_dimensions().size()))==0);
+        // Check if same shared_array pointer (shared data)
+        if(_voxels == vox._voxels) return true;
+        
+        // Check if different dimensions or types
+        if(voxel_dimensions() != vox.voxel_dimensions()) return false;
+        if(voxelType() != vox.voxelType()) return false;
+        
+        // Compare actual data bytes (size * voxelSize, not just size!)
+        return strncmp(reinterpret_cast<const char*>(_voxels.get()),
+                       reinterpret_cast<const char*>(vox._voxels.get()),
+                       voxel_dimensions().size() * voxelSize()) == 0;
       }
 
     bool operator!=(const voxels& vox) const

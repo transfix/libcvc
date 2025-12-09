@@ -32,6 +32,39 @@ namespace CVC_NAMESPACE
 {
   CVC_DEF_EXCEPTION(sub_volume_out_of_bounds);
 
+  /**
+   * @class volume
+   * @brief Volume data with spatial coordinate system (extends voxels)
+   * 
+   * The volume class extends voxels by adding a bounding box in object space,
+   * enabling spatial operations like interpolation at arbitrary coordinates.
+   * 
+   * IMPORTANT - MEMORY SEMANTICS:
+   * =============================
+   * Volume and voxels use SHALLOW COPY semantics via boost::shared_array.
+   * 
+   * - Copy constructor: volume vol2(vol1);        // Shares underlying data
+   * - Assignment operator: vol2 = vol1;           // Shares underlying data
+   * - copy() method: vol2.copy(vol1);             // Shares underlying data
+   * 
+   * All three methods create a NEW volume object but share the SAME underlying
+   * voxel data array. Modifications to one volume will affect all copies!
+   * 
+   * To create a true DEEP COPY with independent data:
+   * 
+   *   volume vol2(vol1.voxel_dimensions(), vol1.voxelType(), vol1.boundingBox());
+   *   for(uint64 i = 0; i < vol1.voxel_dimensions().size(); ++i)
+   *     vol2(i, vol1(i));
+   *   vol2.desc(vol1.desc());
+   * 
+   * Or use sub() to extract a subvolume, which creates a new data array:
+   * 
+   *   volume vol2(vol1);
+   *   vol2.sub(0, 0, 0, vol1.voxel_dimensions());  // Full volume deep copy
+   * 
+   * This shallow copy design enables efficient passing of volumes without
+   * copying large data arrays, but requires awareness when modifying shared data.
+   */
   class volume : public voxels
   {
   public:
@@ -94,7 +127,19 @@ namespace CVC_NAMESPACE
     /*
       Operations!
     */
-    virtual volume& copy(const volume& vol); // makes this a copy of vol
+    /**
+     * @brief Shallow copy - shares underlying voxel data with vol
+     * 
+     * WARNING: This is NOT a deep copy! The underlying voxel data array
+     * is shared via boost::shared_array. Both volumes will reference the
+     * same memory, so modifications to one affect the other.
+     * 
+     * Use sub() or manual element-by-element copy for deep copies.
+     * 
+     * @param vol Source volume to copy from
+     * @return Reference to this volume
+     */
+    virtual volume& copy(const volume& vol);
     virtual volume& sub(uint64 off_x, uint64 off_y, uint64 off_z,
 			const dimension& subvoldim
 #ifdef _MSC_VER

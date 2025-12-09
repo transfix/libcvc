@@ -3,7 +3,7 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-242%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-271%20passing-brightgreen.svg)](#testing)
 
 ## Table of Contents
 
@@ -247,7 +247,7 @@ mesh.save("output.off");
   - **Contrast Enhancement**: Adaptive histogram equalization with resistor propagation
   - **GDTV Filter**: Gradient-dependent total variation regularization
   - Complete algorithm details, parameters, usage examples, and best practices
-  - Based on 242-test validation suite
+  - Based on 271-test validation suite
 
 ### Advanced Features
 

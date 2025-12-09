@@ -25,12 +25,13 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 242 (Updated December 2025)
+### Total Tests: 271 (Updated December 2025)
 
 - **App Tests**: 53
 - **State Tests**: 92 (includes 12 concurrent + 11 futures tests)
-- **Voxels Tests**: 71 (comprehensive volume data structure coverage)
-- **Success Rate**: 100% (242/242 passing)
+- **Voxels Tests**: 97 (comprehensive volume data structure coverage)
+- **Volume Tests**: 29 (spatial coordinate system and interpolation)
+- **Success Rate**: 100% (271/271 passing)
 
 ## Coverage Metrics
 
@@ -320,6 +321,60 @@ The voxels class is the core volume data structure supporting 6 data types (UCha
 #### 14. Data Type Coverage (2 tests)
 - All 6 data types construction
 - Zero-volume min/max
+
+### Volume Component Tests (29 tests)
+
+The volume class extends voxels with a spatial coordinate system, enabling object-space operations and interpolation.
+
+**Coverage**: volume.h (inline), volume.cpp
+
+#### 1. Construction and Properties (7 tests)
+- Default construction with 4x4x4 dimension and [-0.5, 0.5]³ bounding box
+- Custom construction with dimensions, voxel type, and bounding box
+- Copy construction (shares data via boost::shared_array)
+- Assignment operator
+- Span calculation: XSpan/YSpan/ZSpan = (Max-Min)/(Dim-1)
+- Non-uniform bounding boxes with different spans
+- Single voxel dimensions (span = 0)
+
+#### 2. Interpolation (5 tests)
+- Trilinear interpolation at corner values (exact matches)
+- Midpoint interpolation (weighted average of 8 neighbors)
+- Linear gradient interpolation accuracy
+- Out-of-bounds exception (index_out_of_bounds)
+- Boundary edge interpolation
+
+#### 3. Subvolume Operations (5 tests)
+- Sub by offset and dimension: `vol.sub(x, y, z, dim)` updates bounding box
+- Sub by bounding box: `vol.sub(bbox)` preserves span ratios
+- Sub with different resolution: `vol.sub(bbox, dim)` uses interpolation
+- Out-of-bounds detection (sub_volume_out_of_bounds exception)
+- Value preservation and interpolation accuracy in subvolumes
+
+#### 4. Volume Combination (3 tests)
+- CombineWith non-overlapping volumes: creates union bounding box
+- CombineWith overlapping volumes: interpolates from appropriate source
+- CombineWith custom dimension: explicit resolution control
+
+#### 5. Equality and Metadata (5 tests)
+- Equality operator: checks voxels equality AND bounding box equality
+- Inequality with different bounding boxes
+- Inequality with different data (Note: shallow copy semantics)
+- Description metadata get/set
+- Description persistence through copy constructor
+
+#### 6. Edge Cases (4 tests)
+- Very small bounding boxes (0.001³)
+- Negative coordinate spaces ([-10,-6]³)
+- Large bounding boxes (1000³) with large spans
+- Single voxel dimensions with zero span
+
+**Key Implementation Details Tested**:
+- Shallow copy semantics: copy constructor and copy() share boost::shared_array
+- Bounding box update in sub() uses NEW spans after dimension change
+- combineWith() without dimension parameter uses current voxel_dimensions()
+- Interpolation uses 8-neighbor trilinear weighting
+- Float storage precision requires EXPECT_NEAR instead of EXPECT_DOUBLE_EQ
 
 ## Testing Strategy
 

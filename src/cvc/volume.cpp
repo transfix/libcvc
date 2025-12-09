@@ -46,13 +46,27 @@ namespace CVC_NAMESPACE
 #endif
                           )
   {
+    // CRITICAL: Save the original bounding box and spans BEFORE modifying dimensions
+    // The bounding box update must use the OLD coordinate system to correctly
+    // map voxel indices to object space coordinates.
+    double origXMin = XMin(), origYMin = YMin(), origZMin = ZMin();
+    double origXSpan = XSpan();
+    double origYSpan = YSpan();
+    double origZSpan = ZSpan();
+    
     voxels::sub(off_x,off_y,off_z,subvoldim);
-    boundingBox().setMin(XMin()+XSpan()*off_x,
-                         YMin()+YSpan()*off_y,
-                         ZMin()+ZSpan()*off_z);
-    boundingBox().setMax(XMin()+XSpan()*(off_x+XDim()-1),
-                         YMin()+YSpan()*(off_y+YDim()-1),
-                         ZMin()+YSpan()*(off_z+ZDim()-1));
+    
+    // Update bounding box using the ORIGINAL Min and spans to map voxel indices
+    // to object space coordinates correctly
+    double newXMin = origXMin + origXSpan * off_x;
+    double newYMin = origYMin + origYSpan * off_y;
+    double newZMin = origZMin + origZSpan * off_z;
+    double newXMax = newXMin + origXSpan * (subvoldim[0] - 1);
+    double newYMax = newYMin + origYSpan * (subvoldim[1] - 1);
+    double newZMax = newZMin + origZSpan * (subvoldim[2] - 1);
+    
+    boundingBox().setMin(newXMin, newYMin, newZMin);
+    boundingBox().setMax(newXMax, newYMax, newZMax);
     return *this;
   }
 
