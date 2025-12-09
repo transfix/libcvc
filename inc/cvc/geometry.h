@@ -166,7 +166,7 @@ namespace CVC_NAMESPACE
     //LBIE mesh quality improvement
     geometry& quality_improve(int iterations, const std::string& improve_method = "geo_flow");
 
-    //read file directly info data structure
+    //read file directly into data structure
     geometry& read(const std::string& filename);
 
     //write data structure to file
