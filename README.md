@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-271%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/core%20coverage-91.6%25-brightgreen.svg)](TESTING_COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/core%20coverage-89.6%25-brightgreen.svg)](TESTING_COVERAGE.md)
 
 ## Table of Contents
 
@@ -129,21 +129,23 @@ See `PROJECT_REPORT.md` for a complete list of build options.
 
 Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 271 Tests (100% Passing)
+### Test Suite: 308 Tests (100% Passing)
 
 - **114 App Tests** - Core application framework, data/property management, threading
 - **128 State Tests** - State tree, hierarchies, serialization, signals, async operations
 - **29 Volume Tests** - Spatial coordinates, interpolation, subvolumes, bounding boxes
+- **37 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
 
-### Code Coverage: 91.6% on Core Components
+### Code Coverage: 89.6% on Core Components
 
-The actively tested core modules (app, state, voxels, volume) achieve excellent coverage:
+The actively tested core modules (app, state, voxels, volume, geometry) achieve excellent coverage:
 
-- **voxels.cpp**: 91.92% (307/334 lines)
-- **volume.cpp**: 91.18% (124/136 lines)  
 - **state.cpp**: 92.88% (248/267 lines)
+- **voxels.cpp**: 91.92% (307/334 lines)
+- **volume.cpp**: 91.18% (124/136 lines)
 - **app.cpp**: 89.82% (441/491 lines)
-- **Functions**: 94.4% (304/322 functions)
+- **geometry.cpp**: 80.80% (282/349 lines)
+- **Functions**: 94.7% (355/375 functions)
 
 See [TESTING_COVERAGE.md](TESTING_COVERAGE.md) for detailed coverage analysis
 
@@ -188,23 +190,59 @@ See **[FUTURES_API.md](FUTURES_API.md)** for async programming patterns:
 - Producer-consumer examples
 - Timeout handling
 
-## Usage Example
+## Core APIs
+
+### Volume Processing
 
 ```cpp
 #include <cvc/volume.h>
-#include <cvc/geometry.h>
 
 // Load a volume file
 cvc::volume vol("data.rawiv");
 
-// Apply filtering
+// Access voxel data
+double value = vol(x, y, z);  // Trilinear interpolation
+
+// Create subvolume with coordinate mapping
+cvc::bounding_box region(x0, y0, z0, x1, y1, z1);
+cvc::volume subvol = vol.sub(region);
+
+// Apply image processing filters
 vol.bilateral_filter(sigma_space, sigma_range);
+vol.anisotropic_diffusion(iterations, k, lambda);
+vol.contrast_enhancement(min_val, max_val);
 
-// Extract isosurface
-cvc::geometry mesh = vol.isosurface(isovalue);
+// Save processed volume
+vol.write("output.rawiv");
+```
 
-// Save result
-mesh.save("output.off");
+### Geometry Processing
+
+```cpp
+#include <cvc/geometry.h>
+
+// Load triangle mesh
+cvc::geometry mesh("bunny.off");
+
+// Access mesh data
+std::cout << "Vertices: " << mesh.num_points() << std::endl;
+std::cout << "Triangles: " << mesh.num_tris() << std::endl;
+
+// Calculate surface normals
+mesh.calculate_surf_normals();
+
+// Merge multiple geometries
+cvc::geometry combined = mesh1;
+combined.merge(mesh2);  // Indices automatically remapped
+
+// Extract boundary surface
+cvc::geometry surface = mesh.tri_surface();
+
+// Get bounding box
+cvc::bounding_box bbox = mesh.extents();
+
+// Save mesh
+mesh.write("output.raw");
 ```
 
 ## Supported File Formats
@@ -218,9 +256,10 @@ mesh.save("output.off");
 - DX (OpenDX format)
 
 ### Geometry Formats
-- OFF (Object File Format)
-- OBJ (Wavefront OBJ via SDF)
-- RAW/RAWN/RAWC/RAWNC (Raw geometry variants)
+- OFF (Object File Format) - Read/Write
+- RAW/RAWN/RAWC/RAWNC (Raw geometry variants) - Read/Write
+- BUNNY (Stanford Bunny for testing/demos) - Read-only
+- OBJ (Wavefront OBJ via SDF) - Experimental
 
 ## Documentation
 
@@ -237,15 +276,15 @@ mesh.save("output.off");
 
 - **[TESTING.md](TESTING.md)** - Unit testing guide
   - Running tests with CTest and Google Test
-  - Test organization and coverage (271 tests)
+  - Test organization and coverage (308 tests)
   - Adding new tests
   - CI/CD integration examples
   - Code coverage with lcov/genhtml
 
 - **[TESTING_COVERAGE.md](TESTING_COVERAGE.md)** - Coverage analysis
-  - 271 tests across app, state, voxels, and volume components
-  - **91.6% coverage on core components** (1,467/1,601 lines)
-  - Detailed per-file coverage metrics
+  - 308 tests across app, state, voxels, volume, and geometry components
+  - **89.6% coverage on core components** (1,740/1,941 lines)
+  - Detailed per-file coverage metrics including geometry API
   - Bug fixes and API improvements from testing
   - Coverage report generation with lcov/genhtml/gcov
 
@@ -331,12 +370,13 @@ This is a modernization of legacy research software. Contributions welcome:
 
 ## Recent Additions (December 2024)
 
-- ✅ **Volume Class Tests** - 29 comprehensive tests for spatial coordinates and interpolation
+- ✅ **Geometry Class Tests** - 37 comprehensive tests using Stanford Bunny mesh
+- ✅ **308 Total Tests** - 100% passing with 89.6% coverage on core components
+- ✅ **Geometry API Coverage** - 80.80% coverage (282/349 lines) for mesh operations
+- ✅ **Volume Class Tests** - 29 tests for spatial coordinates and interpolation
 - ✅ **Bug Fixes** - Fixed volume::sub() bounding box and voxels::operator== byte comparison
 - ✅ **API Documentation** - Documented shallow copy semantics and deep copy alternatives
-- ✅ **271 Total Tests** - 100% passing with 91.6% coverage on core components
 - ✅ **Coverage Analysis** - Detailed per-file metrics with lcov/genhtml/gcov
-- ✅ **Comprehensive Documentation** - Updated testing and coverage reports
 
 ## License
 

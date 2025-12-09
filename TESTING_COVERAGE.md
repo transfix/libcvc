@@ -25,14 +25,14 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 271 (Updated December 2024)
+### Total Tests: 308 (Updated December 2024)
 
 - **App Tests**: 114 (core application state management)
 - **State Tests**: 128 (includes concurrent operations and futures)
 - **Volume Tests**: 29 (spatial coordinate system and interpolation)
-- **Voxels Tests**: Integrated into volume tests
-- **Success Rate**: 100% (271/271 passing)
-- **Execution Time**: ~16 seconds
+- **Geometry Tests**: 37 (mesh operations, normals, I/O using Stanford Bunny)
+- **Success Rate**: 100% (308/308 passing)
+- **Execution Time**: ~20 seconds
 
 ## Coverage Metrics
 
@@ -42,22 +42,23 @@ The following table shows coverage for the actively developed and tested core co
 
 | Component | Executable Lines | Lines Covered | Coverage | Target | Status |
 |-----------|------------------|---------------|----------|--------|--------|
+| `state.cpp` | 267 | 248 | **92.88%** | 80% | ✅ Exceeds Target |
 | `voxels.cpp` | 334 | 307 | **91.92%** | 80% | ✅ Exceeds Target |
 | `volume.cpp` | 136 | 124 | **91.18%** | 80% | ✅ Exceeds Target |
-| `state.cpp` | 267 | 248 | **92.88%** | 80% | ✅ Exceeds Target |
 | `app.cpp` | 491 | 441 | **89.82%** | 80% | ✅ Exceeds Target |
-| **Core Total** | **1,601** | **1,467** | **91.6%** | 80% | ✅ **Exceeds Target** |
+| `geometry.cpp` | 349 | 282 | **80.80%** | 80% | ✅ Meets Target |
+| **Core Total** | **1,941** | **1,740** | **89.6%** | 80% | ✅ **Exceeds Target** |
 
-**Function Coverage**: 94.4% (304 of 322 functions)
+**Function Coverage**: 94.7% (355 of 375 functions)
 
 ### Full Project Coverage
 
 Coverage including all legacy code and untested modules:
 
-- **Lines**: 6.4% (2,257 of 35,274 lines)
-- **Functions**: 14.4% (423 of 2,929 functions)
+- **Lines**: 7.6% (2,674 of 35,274 lines)
+- **Functions**: 16.7% (488 of 2,929 functions)
 
-**Note**: The lower overall project coverage reflects ~33,000 lines of legacy code in modules like LBIE meshing, FastContouring, SDF computation, libiimod, and various I/O handlers that are not actively maintained or tested
+**Note**: The lower overall project coverage reflects ~32,600 lines of legacy code in modules like LBIE meshing, FastContouring, SDF computation, libiimod, and various I/O handlers that are not actively maintained or tested
 
 **Recent Improvements:**
 - `state.h` coverage increased from 78.6% to 83.3% with futures API tests
@@ -385,6 +386,79 @@ The volume class extends voxels with a spatial coordinate system, enabling objec
 - combineWith() without dimension parameter uses current voxel_dimensions()
 - Interpolation uses 8-neighbor trilinear weighting
 - Float storage precision requires EXPECT_NEAR instead of EXPECT_DOUBLE_EQ
+
+### Geometry Component Tests (37 tests)
+
+The geometry class handles triangle mesh data with support for points, normals, colors, lines, triangles, and quads. Tests use the Stanford Bunny (34,835 vertices, 69,473 triangles).
+
+**Coverage Achievement**: 80.80% (geometry.cpp)
+
+#### 1. Construction and Properties (6 tests)
+- Default construction (empty geometry)
+- Copy construction (shared pointers)
+- Assignment operator
+- Copy method
+- Stanford Bunny loading (34,835 vertices, 69,473 triangles)
+- Pre-computed normals validation
+
+#### 2. Extents and Bounding Boxes (3 tests)
+- Min/max point calculation across all vertices
+- Bounding box generation from extents
+- Empty geometry bounds (inverted min/max)
+
+#### 3. Triangle Topology (3 tests)
+- Index validity (all indices < num_points)
+- Non-degenerate triangle detection (no duplicate vertices)
+- Triangle area computation using cross product
+
+#### 4. Merge Operations (3 tests)
+- Merging with empty geometry (preserves original)
+- Combining two geometries (doubles counts)
+- Index remapping verification (0,1,2 → 3,4,5 for second mesh)
+
+#### 5. Triangle Surface Extraction (3 tests)
+- Without boundary info (preserves all tris)
+- With boundary filtering (removes interior tris)
+- Quad-to-triangle conversion (1 quad → 2 tris)
+
+#### 6. Normal Calculations (3 tests)
+- Surface normal generation from triangle faces
+- Normal length validation (averaging produces non-unit vectors)
+- Recalculation after clearing normals
+
+#### 7. Wire Interior Generation (2 tests)
+- Without boundary (preserves tris, no lines added)
+- With boundary (generates interior edge lines for visualization)
+
+#### 8. Normal Operations (2 tests)
+- Normal vector inversion (multiply by -1)
+- Length preservation during inversion
+
+#### 9. File I/O (3 tests)
+- Bunny file reading (.bunny format via bunny_io)
+- File constructor (filename-based initialization)
+- Write/read roundtrip (RAW format)
+
+#### 10. Advanced Features (4 tests)
+- Clear operation (resets to empty geometry)
+- Multiple chained operations (calculate → invert → invert)
+- Copy-on-write semantics (shared_ptr prevents unintended sharing)
+- Const accessor validation
+
+#### 11. Lines and Quads (4 tests)
+- Line segment addition and merging
+- Quad addition and merging
+- Index reindexing for lines (0,1 → 2,3)
+- Index reindexing for quads (0,1,2,3 → 4,5,6,7)
+
+**Key Implementation Details Tested**:
+- Geometry uses boost::shared_ptr for all arrays (copy-on-write)
+- pre_write() triggers unique copy when modifying shared data
+- Extents calculated on-demand and cached (mutable _extents_set flag)
+- merge() appends geometry and adjusts indices by original point count
+- tri_surface() converts quads to triangles, filters by boundary
+- calculate_surf_normals() averages face normals at vertices (may not be unit length)
+- Stanford Bunny provides real-world mesh complexity for testing
 
 ## Testing Strategy
 
