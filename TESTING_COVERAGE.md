@@ -1,16 +1,35 @@
 # Testing and Code Coverage Documentation
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Test Suite Summary](#test-suite-summary)
+- [Coverage Metrics](#coverage-metrics)
+- [Test Categories](#test-categories)
+  - [App Component Tests (53 tests)](#app-component-tests-53-tests)
+  - [State Component Tests (92 tests)](#state-component-tests-92-tests)
+- [Testing Strategy](#testing-strategy)
+- [Code Coverage Process](#code-coverage-process)
+- [What's Covered](#whats-covered)
+- [Areas Requiring More Coverage](#areas-requiring-more-coverage)
+- [Coverage Gaps Analysis](#coverage-gaps-analysis)
+- [Improving Coverage](#improving-coverage)
+- [Continuous Integration](#continuous-integration)
+- [Best Practices](#best-practices)
+- [Future Improvements](#future-improvements)
+- [Conclusion](#conclusion)
+
 ## Overview
 
 This document describes the comprehensive testing strategy and code coverage implementation for the trans-cvc project, with a focus on the critical `app` and `state` components that form the foundation of the library.
 
 ## Test Suite Summary
 
-### Total Tests: 122
+### Total Tests: 145 (Updated December 2025)
 
 - **App Tests**: 53
-- **State Tests**: 69
-- **Success Rate**: 100% (122/122 passing)
+- **State Tests**: 92 (includes 12 concurrent + 11 futures tests)
+- **Success Rate**: 100% (145/145 passing)
 
 ## Coverage Metrics
 
@@ -19,11 +38,17 @@ This document describes the comprehensive testing strategy and code coverage imp
 | Component | Line Coverage | Function Coverage | Target | Status |
 |-----------|---------------|-------------------|--------|--------|
 | `inc/cvc/app.h` | 78.4% | 0.0% (inline) | 80% | ✅ Near Target |
-| `inc/cvc/state.h` | 78.6% | 0.0% (inline) | 80% | ✅ Near Target |
+| `inc/cvc/state.h` | 83.3% | 0.0% (inline) | 80% | ✅ Exceeds Target |
+| `inc/cvc/state_object.h` | 33.3% | 0.0% (inline) | 80% | 🔄 In Progress |
 | `src/cvc/app.cpp` | 12.1% | 0.0% | 80% | 🔄 In Progress |
 | `src/cvc/state.cpp` | 13.7% | 0.0% | 80% | 🔄 In Progress |
 
 **Overall Project**: 2.8% (990/35,082 lines)
+
+**Recent Improvements:**
+- `state.h` coverage increased from 78.6% to 83.3% with futures API tests
+- Added 23 new tests (12 concurrent + 11 futures)
+- All critical synchronization paths now tested
 
 *Note: The low .cpp coverage percentages reflect that many functions require complex dependencies (threads, file I/O, network) that are tested but harder to measure with basic line coverage.*
 
@@ -81,7 +106,7 @@ This document describes the comprehensive testing strategy and code coverage imp
 - Sleep function
 - List/vector round-trips
 
-### State Component Tests (69 tests)
+### State Component Tests (92 tests)
 
 #### 1. Core State Management (10 tests)
 - Singleton access
@@ -155,6 +180,33 @@ This document describes the comprehensive testing strategy and code coverage imp
 - Template isData checks
 - Exception handling
 
+#### 10. Multithreaded Tests (12 tests)
+- Concurrent value reads (10 threads, 1000 reads)
+- Concurrent value writes (10 threads)
+- High contention writes (20 threads)
+- Concurrent data operations (8 threads)
+- Signal handling under load
+- Hierarchy creation (8 threads)
+- Concurrent traversal
+- Reset operations concurrency
+- Property tree serialization during modifications
+- Deadlock detection (signal reentrancy)
+- State object multithreading (CRTP pattern)
+- Stress test (2,162 operations, 1 second)
+
+#### 11. Futures API Tests (11 tests)
+- Value with callback
+- Wait for value (blocking)
+- Wait with timeout
+- Value future get (blocking)
+- Value future wait_for (timeout)
+- Value future get_for (timeout)
+- Data with callback
+- Wait for data (blocking)
+- Data with timeout
+- Multiple futures on same state (5 threads)
+- Producer-consumer pattern
+
 ## Testing Strategy
 
 ### 1. Unit Testing
@@ -169,13 +221,27 @@ Tests verify that components work together (e.g., property lists → data lookup
 - Deep nesting (5+ levels)
 - Duplicate values
 - Invalid regex patterns
-- Thread safety (basic)
+- Thread safety (comprehensive)
 
 ### 4. Signal Testing
 Verify that observers are notified of state changes.
 
 ### 5. RAII Pattern Testing
 Test scoped resources (locks, thread feedback).
+
+### 6. Concurrency Testing
+- Multiple threads reading/writing simultaneously
+- High contention scenarios (20+ threads)
+- Signal propagation under load
+- Deadlock detection
+- Reentrancy validation
+
+### 7. Async Pattern Testing
+- Producer-consumer coordination
+- Blocking waits for values
+- Timeout handling
+- Callback registration
+- Multiple waiters on same state
 
 ## Code Coverage Process
 

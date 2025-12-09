@@ -1,5 +1,38 @@
 # Unit Testing Guide for trans-cvc
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Building Tests](#building-tests)
+  - [CMake Option](#cmake-option)
+  - [Building with Tests](#building-with-tests)
+  - [Google Test Integration](#google-test-integration)
+- [Running Tests](#running-tests)
+  - [Using CTest](#using-ctest)
+  - [Using the Custom 'check' Target](#using-the-custom-check-target)
+  - [Running Test Executables Directly](#running-test-executables-directly)
+- [Test Organization](#test-organization)
+  - [Test Files](#test-files)
+  - [Test Coverage](#test-coverage)
+- [Test Design Principles](#test-design-principles)
+- [Adding New Tests](#adding-new-tests)
+- [Common Testing Patterns](#common-testing-patterns)
+- [Code Coverage](#code-coverage)
+  - [Overview](#overview-1)
+  - [Prerequisites](#prerequisites-1)
+  - [Quick Start - Automated Script](#quick-start---automated-script)
+  - [Manual Coverage Generation](#manual-coverage-generation)
+  - [Understanding Coverage Reports](#understanding-coverage-reports)
+  - [Coverage Workflow](#coverage-workflow)
+  - [Coverage Goals](#coverage-goals)
+  - [Filtering Coverage](#filtering-coverage)
+- [Advanced Testing Features](#advanced-testing-features)
+  - [Multithreaded Tests](#multithreaded-tests)
+  - [Futures API Tests](#futures-api-tests)
+  - [Stress Testing](#stress-testing)
+- [Continuous Integration](#continuous-integration)
+- [Troubleshooting](#troubleshooting)
+
 ## Overview
 
 The trans-cvc library uses Google Test (gtest) for unit testing. Tests are organized to validate the core functionality of the `cvc::app` and `cvc::state` classes, which form the foundation of the library's application state management system.
@@ -525,23 +558,94 @@ If you see undefined references to Boost or other dependencies:
 
 2. Check that test CMakeLists.txt links against `cvc` library
 
+## Advanced Testing Features
+
+### Multithreaded Tests
+
+The test suite includes **12 comprehensive multithreaded tests** to validate concurrent access patterns:
+
+1. **ConcurrentValueReads** - 10 threads, 1,000 reads each
+2. **ConcurrentValueWrites** - 10 threads writing to different nodes
+3. **ConcurrentWritesToSameNode** - 20 threads, high contention
+4. **ConcurrentDataOperations** - 8 reader/writer threads
+5. **ConcurrentSignalHandling** - Signal propagation under load
+6. **ConcurrentHierarchyCreation** - Parallel tree building (8 threads)
+7. **ConcurrentTraversal** - Tree traversal during modifications
+8. **ConcurrentResetOperations** - Reset mixed with read/write
+9. **ConcurrentPropertyTreeOperations** - Serialization under modifications
+10. **DeadlockDetectionValueAndSignal** - Reentrancy testing
+11. **StateObjectMultithreaded** - CRTP pattern with 8 threads
+12. **StressTestCombinedOperations** - 2,162 operations in 1 second
+
+**Run multithreaded tests:**
+```bash
+./bin/state_test --gtest_filter="*Concurrent*:*Deadlock*:*Stress*"
+```
+
+### Futures API Tests
+
+The test suite includes **11 futures API tests** for async programming:
+
+1. **ValueWithCallback** - Callback registration and firing
+2. **WaitForValue** - Blocking wait for producer
+3. **WaitForValueWithTimeout** - Timeout exception handling
+4. **ValueFutureGet** - state_future blocking retrieval
+5. **ValueFutureWaitFor** - Timeout support in futures
+6. **ValueFutureGetFor** - Get with timeout
+7. **DataWithCallback** - Data-specific callbacks
+8. **WaitForData** - Blocking data wait
+9. **WaitForDataWithTimeout** - Data timeout handling
+10. **MultipleFuturesOnSameState** - 5 threads on same node
+11. **FutureProducerConsumerPattern** - Full async workflow
+
+**Run futures tests:**
+```bash
+./bin/state_test --gtest_filter="*Future*:*Wait*:*Callback*"
+```
+
+See [FUTURES_API.md](FUTURES_API.md) for API documentation.
+
+### Stress Testing
+
+The **StressTestCombinedOperations** test runs for 1 second with:
+- 8 concurrent writer threads
+- 4 concurrent reader threads
+- Random hierarchical operations
+- Signal monitoring
+- Result: 2,162 operations without deadlock
+
+### Thread Safety Validation
+
+All multithreaded tests use:
+- `boost::thread` for concurrency
+- `boost::mutex` and `boost::condition_variable` for synchronization
+- `std::atomic` for counters
+- Proper cleanup and thread joining
+- Deadlock detection timeouts
+
 ## Performance Considerations
 
 - Tests use the real singleton instances of `app` and `state`
 - Each test should clean up to avoid state leakage
 - Tests run sequentially by default (CTest can parallelize test executables)
-- Avoid expensive operations in tests; use mocks if needed
+- Multithreaded tests may take 100-500ms each
+- Stress test runs for 1 second
+- Total test execution time: ~1-2 seconds for all 145 tests
 
 ## Future Enhancements
 
 Potential additions to the test suite:
 
-1. **Concurrency Tests**: Multi-threaded access to `app` and `state`
-2. **Performance Tests**: Benchmark critical operations
-3. **Integration Tests**: Test interaction between components
-4. **Fuzzing**: Random input testing for robustness
-5. **Memory Tests**: Valgrind/AddressSanitizer integration
-6. **Mock Objects**: Test in isolation from file I/O, etc.
+1. ✅ **Concurrency Tests**: Implemented (12 tests)
+2. ✅ **Futures API Tests**: Implemented (11 tests)
+3. **Performance Tests**: Benchmark critical operations
+4. **Integration Tests**: Test interaction between components
+5. **Fuzzing**: Random input testing for robustness
+6. **Memory Tests**: Valgrind/AddressSanitizer integration
+7. **Mock Objects**: Test in isolation from file I/O, etc.
+8. **Volume I/O Tests**: Test all file formats
+9. **Geometry Tests**: Test mesh operations
+10. **Algorithm Tests**: Filter, enhancement, smoothing
 
 ## References
 

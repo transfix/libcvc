@@ -36,11 +36,104 @@
 #include <boost/foreach.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/function.hpp>
+#include <boost/thread/condition_variable.hpp>
+#include <boost/chrono.hpp>
 
 #include <vector>
 
 namespace CVC_NAMESPACE
 {
+  // Forward declaration for state_future
+  class state;
+  
+  // ----------------
+  // cvc::state_future
+  // ----------------
+  // Purpose:
+  //   A future-like object that blocks until a state value is set.
+  //   Provides async access to state values with timeout support.
+  // ---- Change History ----
+  // 12/08/2025 -- Added for async state value retrieval.
+  template<typename T>
+  class state_future
+  {
+  public:
+    state_future(state* s);
+    
+    ~state_future() {
+      if (_connection.connected()) {
+        _connection.disconnect();
+      }
+    }
+    
+    // Move constructor and assignment
+    state_future(state_future&& other) 
+      : _state(other._state)
+      , _ready(other._ready)
+      , _has_value(other._has_value)
+      , _connection(std::move(other._connection))
+    {
+      other._state = nullptr;
+    }
+    
+    state_future& operator=(state_future&& other) {
+      if (this != &other) {
+        if (_connection.connected()) {
+          _connection.disconnect();
+        }
+        _state = other._state;
+        _ready = other._ready;
+        _has_value = other._has_value;
+        _connection = std::move(other._connection);
+        other._state = nullptr;
+      }
+      return *this;
+    }
+    
+    // Delete copy constructor and assignment
+    state_future(const state_future&) = delete;
+    state_future& operator=(const state_future&) = delete;
+    
+    // Block until value is available, then return it
+    T get() {
+      boost::unique_lock<boost::mutex> lock(_mutex);
+      while (!_ready) {
+        _condition.wait(lock);
+      }
+      return getValue();
+    }
+    
+    // Block with timeout (returns false on timeout)
+    bool wait_for(const boost::chrono::milliseconds& timeout) {
+      boost::unique_lock<boost::mutex> lock(_mutex);
+      return _condition.wait_for(lock, timeout, [this]() { return _ready; });
+    }
+    
+    // Get value with timeout (throws on timeout)
+    T get_for(const boost::chrono::milliseconds& timeout) {
+      if (!wait_for(timeout)) {
+        throw std::runtime_error("state_future timeout waiting for value");
+      }
+      return getValue();
+    }
+    
+    // Check if value is ready without blocking
+    bool is_ready() const {
+      boost::mutex::scoped_lock lock(_mutex);
+      return _ready;
+    }
+    
+  private:
+    state* _state;
+    bool _ready;
+    bool _has_value;
+    mutable boost::mutex _mutex;
+    boost::condition_variable _condition;
+    boost::signals2::connection _connection;
+    
+    T getValue();  // Implemented below after state is defined
+  };
+  
   // ----------
   // cvc::state
   // ----------
@@ -59,6 +152,7 @@ namespace CVC_NAMESPACE
   // 03/31/2012 -- Joe R. -- Added dataTypeName().
   // 01/12/2014 -- Joe R. -- Added init_funcs and json()
   // 01/13/2014 -- Joe R. -- Removing notifyXmlRpc() once and for all.
+  // 12/08/2025 -- Added futures API for async value retrieval.
   class state
   {
   public:  
@@ -106,7 +200,24 @@ namespace CVC_NAMESPACE
     std::string valueTypeName();
     std::vector<std::string> values(bool unique = false); //shortcut for comma separated values in value()
     state& value(const std::string& v, bool setValueType = true);
-    template <class T> T value() { return boost::lexical_cast<T>(value()); }
+    
+    // Get value with optional callback that fires when value changes
+    template <class T> 
+    T value(const boost::function<void(T)>& callback = boost::function<void(T)>()) { 
+      if (callback) {
+        // Connect callback to valueChanged signal
+        valueChanged.connect([this, callback]() {
+          try {
+            T val = boost::lexical_cast<T>(value());
+            callback(val);
+          } catch (...) {
+            // Silently ignore conversion errors in callback
+          }
+        });
+      }
+      return boost::lexical_cast<T>(value()); 
+    }
+    
     template <class T> state& value(const T& v) {
       {
         boost::mutex::scoped_lock lock(_mutex);
@@ -114,6 +225,33 @@ namespace CVC_NAMESPACE
       }
       return value(boost::lexical_cast<std::string>(v),false);
     }
+    
+    // Get a future that blocks until value is set
+    template <class T>
+    state_future<T> value_future() {
+      return state_future<T>(this);
+    }
+    
+    // Wait for value to be initialized, then return it
+    template <class T>
+    T wait_for_value(const boost::chrono::milliseconds& timeout = boost::chrono::milliseconds(0)) {
+      if (timeout.count() == 0) {
+        // Wait indefinitely
+        boost::unique_lock<boost::mutex> lock(_mutex);
+        while (!_initialized) {
+          _valueCondition.wait(lock);
+        }
+        return boost::lexical_cast<T>(_value);
+      } else {
+        // Wait with timeout
+        boost::unique_lock<boost::mutex> lock(_mutex);
+        if (!_valueCondition.wait_for(lock, timeout, [this]() { return _initialized; })) {
+          throw std::runtime_error("Timeout waiting for state value to be initialized");
+        }
+        return boost::lexical_cast<T>(_value);
+      }
+    }
+    
     signal valueChanged;
 
     boost::any data();
@@ -123,6 +261,44 @@ namespace CVC_NAMESPACE
     T data()
     {
       return boost::any_cast<T>(data());
+    }
+    
+    // Get data with optional callback that fires when data changes
+    template<class T>
+    T data(const boost::function<void(T)>& callback)
+    {
+      if (callback) {
+        // Connect callback to dataChanged signal
+        dataChanged.connect([this, callback]() {
+          try {
+            T val = boost::any_cast<T>(data());
+            callback(val);
+          } catch (...) {
+            // Silently ignore cast errors in callback
+          }
+        });
+      }
+      return boost::any_cast<T>(data());
+    }
+    
+    // Wait for data to be set, then return it
+    template<class T>
+    T wait_for_data(const boost::chrono::milliseconds& timeout = boost::chrono::milliseconds(0)) {
+      if (timeout.count() == 0) {
+        // Wait indefinitely
+        boost::unique_lock<boost::mutex> lock(_mutex);
+        while (_data.empty()) {
+          _dataCondition.wait(lock);
+        }
+        return boost::any_cast<T>(_data);
+      } else {
+        // Wait with timeout
+        boost::unique_lock<boost::mutex> lock(_mutex);
+        if (!_dataCondition.wait_for(lock, timeout, [this]() { return !_data.empty(); })) {
+          throw std::runtime_error("Timeout waiting for state data to be set");
+        }
+        return boost::any_cast<T>(_data);
+      }
     }
 
     template<class T>
@@ -225,12 +401,35 @@ namespace CVC_NAMESPACE
 
     bool                             _initialized;
     
+    // Condition variables for futures/blocking operations
+    boost::condition_variable        _valueCondition;
+    boost::condition_variable        _dataCondition;
+    
     static state_ptr                 instancePtr();
     static state_ptr                 _instance;
     static boost::mutex              _instanceMutex;
   private:
     state(const state&);
   };
+  
+  // Template implementations for state_future
+  template<typename T>
+  state_future<T>::state_future(state* s) 
+    : _state(s), _ready(false), _has_value(false) 
+  {
+    // Connect to valueChanged signal
+    _connection = _state->valueChanged.connect([this]() {
+      boost::mutex::scoped_lock lock(_mutex);
+      _ready = true;
+      _has_value = true;
+      _condition.notify_all();
+    });
+  }
+  
+  template<typename T>
+  T state_future<T>::getValue() {
+    return _state->template value<T>();
+  }
 }
 
 //Shorthand to access the cvc::state object from anywhere

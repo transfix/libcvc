@@ -1697,4 +1697,275 @@ TEST(StateTest, StressTestCombinedOperations) {
   cvcstate("test.stress").reset();
 }
 
+// ===========================
+// Futures API Tests
+// ===========================
+
+TEST(StateTest, ValueWithCallback) {
+  // Test value retrieval with callback
+  std::atomic<int> callback_count(0);
+  std::atomic<int> last_value(0);
+  
+  // Set up callback
+  auto callback = [&callback_count, &last_value](int val) {
+    callback_count++;
+    last_value.store(val);
+  };
+  
+  // Connect and get initial value
+  cvcstate("test.future.callback").value(42);
+  int initial = cvcstate("test.future.callback").value<int>(callback);
+  EXPECT_EQ(initial, 42);
+  
+  // Change value several times
+  for (int i = 0; i < 5; ++i) {
+    cvcstate("test.future.callback").value(100 + i);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  
+  // Callback should have fired
+  EXPECT_GT(callback_count.load(), 0);
+  EXPECT_EQ(last_value.load(), 104);
+  
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, WaitForValue) {
+  // Test blocking wait for value
+  
+  // Thread that sets value after delay
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+    cvcstate("test.future.wait").value(12345);
+  });
+  
+  // Wait for value to be set
+  int val = cvcstate("test.future.wait").wait_for_value<int>();
+  
+  EXPECT_EQ(val, 12345);
+  EXPECT_TRUE(cvcstate("test.future.wait").initialized());
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, WaitForValueWithTimeout) {
+  // Test wait with timeout - should timeout
+  try {
+    cvcstate("test.future.timeout").wait_for_value<int>(boost::chrono::milliseconds(50));
+    FAIL() << "Should have thrown timeout exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_TRUE(std::string(e.what()).find("Timeout") != std::string::npos);
+  }
+  
+  // Test wait with timeout - should succeed
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    cvcstate("test.future.timeout2").value(999);
+  });
+  
+  int val = cvcstate("test.future.timeout2").wait_for_value<int>(boost::chrono::milliseconds(200));
+  EXPECT_EQ(val, 999);
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, ValueFutureGet) {
+  // Test state_future blocking get
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+    cvcstate("test.future.get").value("future_value");
+  });
+  
+  auto future = cvcstate("test.future.get").value_future<std::string>();
+  
+  EXPECT_FALSE(future.is_ready());
+  
+  std::string val = future.get();
+  
+  EXPECT_TRUE(future.is_ready());
+  EXPECT_EQ(val, "future_value");
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, ValueFutureWaitFor) {
+  // Test state_future with timeout
+  auto future = cvcstate("test.future.waitfor").value_future<int>();
+  
+  // Should timeout
+  EXPECT_FALSE(future.wait_for(boost::chrono::milliseconds(50)));
+  EXPECT_FALSE(future.is_ready());
+  
+  // Set value
+  cvcstate("test.future.waitfor").value(777);
+  
+  // Should succeed immediately
+  EXPECT_TRUE(future.wait_for(boost::chrono::milliseconds(10)));
+  EXPECT_TRUE(future.is_ready());
+  EXPECT_EQ(future.get(), 777);
+  
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, ValueFutureGetFor) {
+  // Test state_future get with timeout
+  auto future = cvcstate("test.future.getfor").value_future<double>();
+  
+  // Should timeout
+  try {
+    future.get_for(boost::chrono::milliseconds(50));
+    FAIL() << "Should have thrown timeout exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_TRUE(std::string(e.what()).find("timeout") != std::string::npos);
+  }
+  
+  // Start writer thread
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    cvcstate("test.future.getfor").value(3.14159);
+  });
+  
+  // Should succeed with longer timeout
+  double val = future.get_for(boost::chrono::milliseconds(200));
+  EXPECT_DOUBLE_EQ(val, 3.14159);
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, DataWithCallback) {
+  // Test data retrieval with callback
+  std::atomic<int> callback_count(0);
+  std::string last_data;
+  boost::mutex data_mutex;
+  
+  auto callback = [&callback_count, &last_data, &data_mutex](std::string val) {
+    callback_count++;
+    boost::mutex::scoped_lock lock(data_mutex);
+    last_data = val;
+  };
+  
+  // Set initial data and connect callback
+  cvcstate("test.future.datacb").data(std::string("initial"));
+  std::string initial = cvcstate("test.future.datacb").data<std::string>(callback);
+  EXPECT_EQ(initial, "initial");
+  
+  // Change data several times
+  for (int i = 0; i < 5; ++i) {
+    cvcstate("test.future.datacb").data(std::string("data_") + boost::lexical_cast<std::string>(i));
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  
+  EXPECT_GT(callback_count.load(), 0);
+  
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, WaitForData) {
+  // Test blocking wait for data
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+    cvcstate("test.future.waitdata").data(42);
+  });
+  
+  int val = cvcstate("test.future.waitdata").wait_for_data<int>();
+  
+  EXPECT_EQ(val, 42);
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, WaitForDataWithTimeout) {
+  // Test data wait with timeout - should timeout
+  try {
+    cvcstate("test.future.datatimeout").wait_for_data<int>(boost::chrono::milliseconds(50));
+    FAIL() << "Should have thrown timeout exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_TRUE(std::string(e.what()).find("Timeout") != std::string::npos);
+  }
+  
+  // Test wait with timeout - should succeed
+  boost::thread writer([]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    cvcstate("test.future.datatimeout2").data(std::string("success"));
+  });
+  
+  std::string val = cvcstate("test.future.datatimeout2").wait_for_data<std::string>(boost::chrono::milliseconds(200));
+  EXPECT_EQ(val, "success");
+  
+  writer.join();
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, MultipleFuturesOnSameState) {
+  // Test multiple futures waiting on the same state
+  const int num_futures = 5;
+  std::vector<boost::thread> threads;
+  std::atomic<int> success_count(0);
+  
+  for (int i = 0; i < num_futures; ++i) {
+    threads.emplace_back([&success_count]() {
+      try {
+        auto future = cvcstate("test.future.multiple").value_future<int>();
+        int val = future.get_for(boost::chrono::milliseconds(500));
+        if (val == 888) {
+          success_count++;
+        }
+      } catch (...) {
+        FAIL() << "Future failed";
+      }
+    });
+  }
+  
+  // Give threads time to set up futures
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Set value - all futures should be notified
+  cvcstate("test.future.multiple").value(888);
+  
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  EXPECT_EQ(success_count.load(), num_futures);
+  
+  cvcstate("test.future").reset();
+}
+
+TEST(StateTest, FutureProducerConsumerPattern) {
+  // Test classic producer-consumer with futures
+  const int num_items = 10;
+  std::atomic<int> consumed(0);
+  
+  // Consumer thread waits for each item
+  boost::thread consumer([&consumed, num_items]() {
+    for (int i = 0; i < num_items; ++i) {
+      std::string key = "test.future.queue.item" + boost::lexical_cast<std::string>(i);
+      int val = cvcstate(key).wait_for_value<int>(boost::chrono::milliseconds(1000));
+      EXPECT_EQ(val, i * 10);
+      consumed++;
+    }
+  });
+  
+  // Producer thread generates items
+  boost::thread producer([num_items]() {
+    for (int i = 0; i < num_items; ++i) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      std::string key = "test.future.queue.item" + boost::lexical_cast<std::string>(i);
+      cvcstate(key).value(i * 10);
+    }
+  });
+  
+  consumer.join();
+  producer.join();
+  
+  EXPECT_EQ(consumed.load(), num_items);
+  
+  cvcstate("test.future").reset();
+}
+
 // Main function is provided by gtest_main library

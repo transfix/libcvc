@@ -1,5 +1,22 @@
 # CUDA Modernization Summary
 
+## Table of Contents
+
+- [What Changed](#what-changed)
+- [Key Changes](#key-changes)
+- [Before and After](#before-and-after)
+- [Usage Example](#usage-example)
+  - [Adding CUDA Source Files](#adding-cuda-source-files)
+- [Documentation](#documentation)
+- [Build Examples](#build-examples)
+- [Testing CUDA Setup](#testing-cuda-setup)
+- [Migration Notes](#migration-notes)
+- [Requirements](#requirements)
+- [Compiler Support](#compiler-support)
+- [Performance Notes](#performance-notes)
+- [Future Enhancements](#future-enhancements)
+- [Summary](#summary)
+
 ## What Changed
 
 The trans-cvc project's CUDA support has been completely modernized from the legacy FindCUDA module (pre-CMake 3.17) to CMake's native CUDA language support.

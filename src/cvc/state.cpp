@@ -313,11 +313,14 @@ namespace CVC_NAMESPACE
       _initialized = true;
 
       if(setValueType)
-        _valueTypeName = cvcapp.dataTypeName<std::string>();
+        _valueTypeName = std::string("std::string");
+      
+      // Notify any threads waiting for value
+      _valueCondition.notify_all();
     }
 
     valueChanged();
-    if(parent()) parent()->childChanged(name());
+    if(parent()) parent()->childChanged(fullName());
     return *this;
   }
 
@@ -521,9 +524,12 @@ namespace CVC_NAMESPACE
       _data = d;
       _lastMod = boost::posix_time::microsec_clock::universal_time();
       _initialized = true;
+      
+      // Notify any threads waiting for data
+      _dataCondition.notify_all();
     }
     dataChanged();
-    if(parent()) parent()->childChanged(name());
+    if(parent()) parent()->childChanged(fullName());
     return *this;
   }
 
