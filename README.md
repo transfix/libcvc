@@ -239,6 +239,16 @@ mesh.save("output.off");
   - Test file structure
   - Success metrics and verification
 
+### Image Processing Algorithms
+
+- **[IMAGE_PROCESSING_ALGORITHMS.md](docs/IMAGE_PROCESSING_ALGORITHMS.md)** - Comprehensive API reference
+  - **Anisotropic Diffusion**: Edge-preserving noise reduction (Perona-Malik model)
+  - **Bilateral Filter**: Non-linear smoothing with edge preservation
+  - **Contrast Enhancement**: Adaptive histogram equalization with resistor propagation
+  - **GDTV Filter**: Gradient-dependent total variation regularization
+  - Complete algorithm details, parameters, usage examples, and best practices
+  - Based on 242-test validation suite
+
 ### Advanced Features
 
 - **[FUTURES_API.md](FUTURES_API.md)** - Async state programming
