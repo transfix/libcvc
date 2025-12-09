@@ -112,7 +112,7 @@ namespace CVC_NAMESPACE
     // Get value with timeout (throws on timeout)
     T get_for(const boost::chrono::milliseconds& timeout) {
       if (!wait_for(timeout)) {
-        throw std::runtime_error("state_future timeout waiting for value");
+        throw timeout_error("state_future timeout waiting for value");
       }
       return getValue();
     }
@@ -246,7 +246,7 @@ namespace CVC_NAMESPACE
         // Wait with timeout
         boost::unique_lock<boost::mutex> lock(_mutex);
         if (!_valueCondition.wait_for(lock, timeout, [this]() { return _initialized; })) {
-          throw std::runtime_error("Timeout waiting for state value to be initialized");
+          throw timeout_error("Timeout waiting for state value to be initialized");
         }
         return boost::lexical_cast<T>(_value);
       }
@@ -295,7 +295,7 @@ namespace CVC_NAMESPACE
         // Wait with timeout
         boost::unique_lock<boost::mutex> lock(_mutex);
         if (!_dataCondition.wait_for(lock, timeout, [this]() { return !_data.empty(); })) {
-          throw std::runtime_error("Timeout waiting for state data to be set");
+          throw timeout_error("Timeout waiting for state data to be set");
         }
         return boost::any_cast<T>(_data);
       }

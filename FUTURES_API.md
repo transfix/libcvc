@@ -239,9 +239,22 @@ stage3.join();
 
 ### Exception Safety
 
-- Timeout operations throw `std::runtime_error` with descriptive messages
+- Timeout operations throw `cvc::timeout_error` with descriptive messages
+- `timeout_error` inherits from `cvc::exception` (which inherits from `boost::exception`)
 - Type conversion errors in callbacks are silently caught
 - Move semantics for `state_future` prevent accidental copies
+
+**Example exception handling:**
+```cpp
+try {
+  int value = cvcstate("key").wait_for_value<int>(
+    boost::chrono::milliseconds(1000)
+  );
+} catch (const cvc::timeout_error& e) {
+  std::cerr << "Timeout: " << e.what() << std::endl;
+  // Handle timeout scenario
+}
+```
 
 ### Performance Considerations
 

@@ -1754,7 +1754,7 @@ TEST(StateTest, WaitForValueWithTimeout) {
   try {
     cvcstate("test.future.timeout").wait_for_value<int>(boost::chrono::milliseconds(50));
     FAIL() << "Should have thrown timeout exception";
-  } catch (const std::runtime_error& e) {
+  } catch (const cvc::timeout_error& e) {
     EXPECT_TRUE(std::string(e.what()).find("Timeout") != std::string::npos);
   }
   
@@ -1818,7 +1818,7 @@ TEST(StateTest, ValueFutureGetFor) {
   try {
     future.get_for(boost::chrono::milliseconds(50));
     FAIL() << "Should have thrown timeout exception";
-  } catch (const std::runtime_error& e) {
+  } catch (const cvc::timeout_error& e) {
     EXPECT_TRUE(std::string(e.what()).find("timeout") != std::string::npos);
   }
   
@@ -1884,7 +1884,7 @@ TEST(StateTest, WaitForDataWithTimeout) {
   try {
     cvcstate("test.future.datatimeout").wait_for_data<int>(boost::chrono::milliseconds(50));
     FAIL() << "Should have thrown timeout exception";
-  } catch (const std::runtime_error& e) {
+  } catch (const cvc::timeout_error& e) {
     EXPECT_TRUE(std::string(e.what()).find("Timeout") != std::string::npos);
   }
   
