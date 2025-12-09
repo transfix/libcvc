@@ -962,10 +962,6 @@ TEST(VoxelsTest, BilateralFilterUniform) {
   v(0, 0, 0, 50.1);  // Slight variation to avoid min==max
   v(9, 9, 9, 49.9);
   
-  // Calculate min/max
-  v.min();
-  v.max();
-  
   v.bilateralFilter();
   
   // Nearly uniform regions should stay very close to original
@@ -987,10 +983,6 @@ TEST(VoxelsTest, BilateralFilterEdgePreservation) {
       v(i, j, 0, 80.0);
     }
   }
-  
-  // Ensure min/max are calculated
-  v.min();
-  v.max();
   
   // Apply bilateral filter (edge-preserving)
   v.bilateralFilter(50.0, 1.5, 1);
@@ -1029,9 +1021,6 @@ TEST(VoxelsTest, BilateralFilterNoiseReduction) {
     }
   }
   
-  // Ensure min/max are calculated
-  v.min();
-  v.max();
   
   v.bilateralFilter(20.0, 1.5, 1);
   
@@ -1057,9 +1046,6 @@ TEST(VoxelsTest, BilateralFilterIsolatedSpike) {
   double initial_spike = v(4, 4, 4);
   double initial_neighbor = v(4, 4, 5);
   
-  // Ensure min/max are calculated
-  v.min();
-  v.max();
   
   v.bilateralFilter(50.0, 1.5, 1);
   
@@ -1091,9 +1077,6 @@ TEST(VoxelsTest, BilateralFilterSpatialSigmaEffect) {
     }
   }
   
-  // Ensure min/max are calculated
-  v1.min(); v1.max();
-  v2.min(); v2.max();
   
   // Apply with different spatial sigmas
   v1.bilateralFilter(50.0, 1.0, 1);  // Small spatial sigma
@@ -1146,9 +1129,6 @@ TEST(VoxelsTest, BilateralFilterRadiometricSigmaEffect) {
     }
   }
   
-  // Ensure min/max are calculated
-  v1.min(); v1.max();
-  v2.min(); v2.max();
   
   // Apply with different radiometric sigmas
   v1.bilateralFilter(20.0, 1.5, 1);   // Small radiometric sigma (strong edge preservation)
@@ -1182,9 +1162,6 @@ TEST(VoxelsTest, BilateralFilterFilterRadiusEffect) {
   v1(5, 7, 0, 80.0);   // 2 pixels away
   v2 = v1;
   
-  // Ensure min/max are calculated
-  v1.min(); v1.max();
-  v2.min(); v2.max();
   
   // Apply with different filter radii
   v1.bilateralFilter(50.0, 1.5, 1);  // Radius 1 (3x3x3 neighborhood)
@@ -1221,9 +1198,6 @@ TEST(VoxelsTest, BilateralFilter3DSmoothing) {
   double center_before = v(3, 3, 3);
   double background_before = v(0, 0, 0);
   
-  // Ensure min/max are calculated
-  v.min();
-  v.max();
   
   v.bilateralFilter(50.0, 1.5, 1);
   

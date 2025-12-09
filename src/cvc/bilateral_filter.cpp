@@ -42,10 +42,16 @@ namespace CVC_NAMESPACE
 
     uint64 numSteps = ZDim();
 
+    // Cache original min/max before filtering, as we modify values in-place
+    // and need consistent normalization throughout
+    double origMin = min();
+    double origMax = max();
+    double valueRange = origMax - origMin;
+
     //compute the radiometric table
     for(c=0; c<256; c++)
       {
-	factor = c * ((max() - min()) / 255.0);
+	factor = c * (valueRange / 255.0);
 	radiometricTable[c] = exp((double)(factor*factor)/(-radiometricSigma*radiometricSigma*2.0));
       }
 
@@ -70,12 +76,12 @@ namespace CVC_NAMESPACE
 		  for(y=0; y<filterDiameter; y++)
 		    {
 		      bool2 = bool1 && (j+y>=int(filterRadius) && j+y<int(YDim())+int(filterRadius));
-		      for(x=0; x<filterDiameter; x++)
+		  for(x=0; x<filterDiameter; x++)
 			{
 			  if(i+x>=int(filterRadius) && i+x<int(XDim())+int(filterRadius) && bool2)
 			    {
 			      normalizedDiff = fabs(fsample - (*this)(i+x-filterRadius,j+y-filterRadius,k+z-filterRadius));
-			      normalizedDiff /= (max()-min());
+			      normalizedDiff /= valueRange;
 			      normalizedDiff *= 255.0;
 			      weight = radiometricTable[int(normalizedDiff)]*
 				spatialMask[z*filterDiameter*filterDiameter+y*filterDiameter+x];
