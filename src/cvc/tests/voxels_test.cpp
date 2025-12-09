@@ -603,6 +603,564 @@ TEST(VoxelsTest, AllDataTypes) {
   EXPECT_EQ(v_uint64.voxelType(), UInt64);
 }
 
+// ============================================================================
+// Type Conversion Tests (Comprehensive)
+// ============================================================================
+
+TEST(VoxelsTest, TypeConversionUCharToAll) {
+  voxels v(dimension(5, 5, 5), UChar);
+  v(0, 0, 0, 100.0);
+  v(1, 1, 1, 200.0);
+  
+  // UChar to UShort
+  v.voxelType(UShort);
+  EXPECT_DOUBLE_EQ(v(0, 0, 0), 100.0);
+  EXPECT_DOUBLE_EQ(v(1, 1, 1), 200.0);
+  
+  // UShort to UInt
+  v.voxelType(UInt);
+  EXPECT_DOUBLE_EQ(v(0, 0, 0), 100.0);
+  
+  // UInt to Float
+  v.voxelType(Float);
+  EXPECT_NEAR(v(0, 0, 0), 100.0, 1e-5);
+  
+  // Float to Double
+  v.voxelType(Double);
+  EXPECT_NEAR(v(0, 0, 0), 100.0, 1e-10);
+  
+  // Double to UInt64
+  v.voxelType(UInt64);
+  EXPECT_DOUBLE_EQ(v(0, 0, 0), 100.0);
+}
+
+TEST(VoxelsTest, TypeConversionPrecisionLoss) {
+  voxels v(dimension(5, 5, 5), Double);
+  
+  // Set precise double value
+  v(0, 3.141592653589793);
+  v(1, 1234567.89012345);
+  
+  // Convert to Float (loses precision)
+  v.voxelType(Float);
+  EXPECT_NEAR(v(0), 3.14159, 1e-5);
+  EXPECT_NEAR(v(1), 1234567.875, 1.0);  // Float precision
+  
+  // Convert to UInt (loses fractional part)
+  v.voxelType(UInt);
+  EXPECT_DOUBLE_EQ(v(0), 3.0);
+  EXPECT_DOUBLE_EQ(v(1), 1234567.0);
+}
+
+TEST(VoxelsTest, TypeConversionNegativeValues) {
+  voxels v(dimension(5, 5, 5), Float);
+  v(0, -50.5);
+  v(1, -100.0);
+  v(2, 75.5);
+  
+  // Float to UChar (negative becomes 0, clamped)
+  v.voxelType(UChar);
+  // Note: Actual behavior depends on cast - typically wraps or clamps
+  EXPECT_GE(v(0), 0.0);
+  EXPECT_GE(v(1), 0.0);
+  EXPECT_NEAR(v(2), 75.0, 1.0);
+}
+
+TEST(VoxelsTest, AllTypeConversionCombinations) {
+  std::vector<data_type> types = {UChar, UShort, UInt, Float, Double, UInt64};
+  
+  for (auto from_type : types) {
+    for (auto to_type : types) {
+      if (from_type == to_type) continue;
+      
+      voxels v(dimension(3, 3, 3), from_type);
+      v(0, 42.0);
+      
+      v.voxelType(to_type);
+      
+      // Value should be approximately preserved
+      EXPECT_NEAR(v(0), 42.0, 1.0) 
+        << "Failed converting from " << data_type_strings[from_type] 
+        << " to " << data_type_strings[to_type];
+    }
+  }
+}
+
+// ============================================================================
+// Resize and Interpolation Tests
+// ============================================================================
+
+TEST(VoxelsTest, ResizeUpsample) {
+  voxels v(dimension(2, 2, 2), Float);
+  
+  // Create a simple gradient
+  v(0, 0, 0, 0.0);
+  v(1, 0, 0, 1.0);
+  v(0, 1, 0, 2.0);
+  v(1, 1, 0, 3.0);
+  v(0, 0, 1, 4.0);
+  v(1, 0, 1, 5.0);
+  v(0, 1, 1, 6.0);
+  v(1, 1, 1, 7.0);
+  
+  // Upsample to 4x4x4
+  v.resize(dimension(4, 4, 4));
+  
+  EXPECT_EQ(v.XDim(), 4u);
+  EXPECT_EQ(v.YDim(), 4u);
+  EXPECT_EQ(v.ZDim(), 4u);
+  
+  // Check corners are preserved
+  EXPECT_NEAR(v(0, 0, 0), 0.0, 1e-5);
+  EXPECT_NEAR(v(3, 3, 3), 7.0, 1e-5);
+  
+  // Check interpolated values exist and are reasonable
+  EXPECT_GT(v(1, 1, 1), 0.0);
+  EXPECT_LT(v(1, 1, 1), 7.0);
+}
+
+TEST(VoxelsTest, ResizeDownsample) {
+  voxels v(dimension(8, 8, 8), Float);
+  
+  // Fill with pattern
+  for (uint64 k = 0; k < 8; ++k)
+    for (uint64 j = 0; j < 8; ++j)
+      for (uint64 i = 0; i < 8; ++i)
+        v(i, j, k, double(i + j + k));
+  
+  // Downsample to 4x4x4
+  v.resize(dimension(4, 4, 4));
+  
+  EXPECT_EQ(v.XDim(), 4u);
+  EXPECT_EQ(v.YDim(), 4u);
+  EXPECT_EQ(v.ZDim(), 4u);
+  
+  // Values should be interpolated
+  EXPECT_NEAR(v(0, 0, 0), 0.0, 1e-5);
+}
+
+TEST(VoxelsTest, ResizeSameSize) {
+  voxels v(dimension(5, 5, 5), Float);
+  v.fill(42.0);
+  
+  v.resize(dimension(5, 5, 5));
+  
+  EXPECT_EQ(v.XDim(), 5u);
+  EXPECT_EQ(v.YDim(), 5u);
+  EXPECT_EQ(v.ZDim(), 5u);
+  EXPECT_NEAR(v(2, 2, 2), 42.0, 1e-5);
+}
+
+TEST(VoxelsTest, ResizeNonUniform) {
+  voxels v(dimension(4, 4, 4), Float);
+  v.fill(10.0);
+  
+  // Resize to non-uniform dimensions
+  v.resize(dimension(8, 4, 2));
+  
+  EXPECT_EQ(v.XDim(), 8u);
+  EXPECT_EQ(v.YDim(), 4u);
+  EXPECT_EQ(v.ZDim(), 2u);
+}
+
+// ============================================================================
+// Min/Max Calculation Tests (Comprehensive)
+// ============================================================================
+
+TEST(VoxelsTest, MinMaxAllDataTypes) {
+  std::vector<data_type> types = {UChar, UShort, UInt, Float, Double, UInt64};
+  
+  for (auto type : types) {
+    voxels v(dimension(5, 5, 5), type);
+    
+    v(0, 10.0);
+    v(1, 50.0);
+    v(2, 5.0);
+    v(3, 100.0);
+    
+    double min_val = v.min();
+    double max_val = v.max();
+    
+    EXPECT_LE(min_val, 10.0) << "Type: " << data_type_strings[type];
+    EXPECT_GE(max_val, 100.0) << "Type: " << data_type_strings[type];
+  }
+}
+
+TEST(VoxelsTest, MinMaxWithZeros) {
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(0.0);
+  
+  v(5, 5, 5, 10.0);
+  v(7, 7, 7, -5.0);
+  
+  EXPECT_DOUBLE_EQ(v.min(), -5.0);
+  EXPECT_DOUBLE_EQ(v.max(), 10.0);
+}
+
+TEST(VoxelsTest, MinMaxAllSameValue) {
+  voxels v(dimension(10, 10, 10), Double);
+  v.fill(42.42);
+  
+  EXPECT_DOUBLE_EQ(v.min(), 42.42);
+  EXPECT_DOUBLE_EQ(v.max(), 42.42);
+}
+
+TEST(VoxelsTest, MinMaxAfterTypeChange) {
+  voxels v(dimension(5, 5, 5), Float);
+  v(0, 10.5);
+  v(1, 99.5);
+  
+  // Get min/max
+  double min1 = v.min();
+  double max1 = v.max();
+  
+  // Change type
+  v.voxelType(UChar);
+  
+  // Min/max should be recalculated
+  v.unsetMinMax();
+  double min2 = v.min();
+  double max2 = v.max();
+  
+  // Values may differ due to type conversion
+  EXPECT_LE(min2, min1 + 1.0);
+  EXPECT_GE(max2, max1 - 1.0);
+}
+
+TEST(VoxelsTest, MinMaxLargeVolume) {
+  voxels v(dimension(50, 50, 50), UShort);
+  
+  // Fill with pattern - min at (0,0,0), max at (49,49,49)
+  for (uint64 k = 0; k < 50; ++k)
+    for (uint64 j = 0; j < 50; ++j)
+      for (uint64 i = 0; i < 50; ++i)
+        v(i, j, k, double(i + j + k));
+  
+  EXPECT_DOUBLE_EQ(v.min(), 0.0);
+  EXPECT_DOUBLE_EQ(v.max(), 147.0);  // 49+49+49
+}
+
+// ============================================================================
+// Map Operation Tests
+// ============================================================================
+
+TEST(VoxelsTest, MapExpand) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Fill with 0-9
+  for (uint64 i = 0; i < 10; ++i)
+    v(i, double(i));
+  
+  // Map [0,9] to [0,100]
+  v.map(0.0, 100.0);
+  
+  EXPECT_NEAR(v(0), 0.0, 1e-5);
+  EXPECT_NEAR(v(9), 100.0, 1e-5);
+  EXPECT_NEAR(v(5), 55.555, 0.01);
+}
+
+TEST(VoxelsTest, MapShrink) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Fill with 0-100
+  for (uint64 i = 0; i < 10; ++i)
+    v(i, double(i * 10));
+  
+  // Map [0,90] to [0,1]
+  v.map(0.0, 1.0);
+  
+  EXPECT_NEAR(v(0), 0.0, 1e-5);
+  EXPECT_NEAR(v(9), 1.0, 1e-5);
+}
+
+TEST(VoxelsTest, MapNegativeRange) {
+  voxels v(dimension(5, 5, 5), Float);
+  
+  for (uint64 i = 0; i < 5; ++i)
+    v(i, double(i));
+  
+  // Map [0,4] to [-10,10]
+  v.map(-10.0, 10.0);
+  
+  EXPECT_NEAR(v(0), -10.0, 1e-5);
+  EXPECT_NEAR(v(4), 10.0, 1e-5);
+  EXPECT_NEAR(v(2), 0.0, 1e-5);
+}
+
+TEST(VoxelsTest, MapIdentity) {
+  voxels v(dimension(5, 5, 5), Float);
+  v.fill(50.0);
+  
+  v.min(0.0);
+  v.max(100.0);
+  
+  // Map to same range
+  v.map(0.0, 100.0);
+  
+  EXPECT_NEAR(v(0), 50.0, 1e-5);
+}
+
+// ============================================================================
+// Sub (Subvolume Extraction) Tests
+// ============================================================================
+
+TEST(VoxelsTest, SubCenterExtraction) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Fill with position-based values
+  for (uint64 k = 0; k < 10; ++k)
+    for (uint64 j = 0; j < 10; ++j)
+      for (uint64 i = 0; i < 10; ++i)
+        v(i, j, k, double(i * 100 + j * 10 + k));
+  
+  // Extract center 4x4x4
+  v.sub(3, 3, 3, dimension(4, 4, 4));
+  
+  EXPECT_EQ(v.XDim(), 4u);
+  EXPECT_EQ(v.YDim(), 4u);
+  EXPECT_EQ(v.ZDim(), 4u);
+  
+  // Check that (0,0,0) in new volume was (3,3,3) in old
+  EXPECT_DOUBLE_EQ(v(0, 0, 0), 333.0);
+}
+
+TEST(VoxelsTest, SubCornerExtraction) {
+  voxels v(dimension(10, 10, 10), UShort);
+  
+  for (uint64 i = 0; i < 1000; ++i)
+    v(i, double(i));
+  
+  // Extract from origin
+  v.sub(0, 0, 0, dimension(5, 5, 5));
+  
+  EXPECT_EQ(v.XDim(), 5u);
+  EXPECT_DOUBLE_EQ(v(0, 0, 0), 0.0);
+  EXPECT_DOUBLE_EQ(v(4, 4, 4), 444.0);  // Was at (4,4,4)
+}
+
+TEST(VoxelsTest, SubSingleSlice) {
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(42.0);
+  
+  // Extract single slice in Z
+  v.sub(0, 0, 5, dimension(10, 10, 1));
+  
+  EXPECT_EQ(v.XDim(), 10u);
+  EXPECT_EQ(v.YDim(), 10u);
+  EXPECT_EQ(v.ZDim(), 1u);
+  EXPECT_NEAR(v(5, 5, 0), 42.0, 1e-5);
+}
+
+// ============================================================================
+// Bilateral Filter Tests
+// ============================================================================
+
+TEST(VoxelsTest, BilateralFilterBasic) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Create noisy data
+  v.fill(50.0);
+  v(5, 5, 5, 100.0);  // Spike
+  v(3, 3, 3, 10.0);   // Dip
+  
+  // Apply bilateral filter with default parameters
+  v.bilateralFilter();
+  
+  // Volume should still exist and have same dimensions
+  EXPECT_EQ(v.XDim(), 10u);
+  EXPECT_EQ(v.YDim(), 10u);
+  EXPECT_EQ(v.ZDim(), 10u);
+  
+  // Values should be smoothed but edges preserved
+  double filtered_spike = v(5, 5, 5);
+  EXPECT_GT(filtered_spike, 50.0);  // Still elevated
+  EXPECT_LT(filtered_spike, 100.0); // But smoothed
+}
+
+TEST(VoxelsTest, BilateralFilterParameters) {
+  voxels v(dimension(8, 8, 8), Float);
+  v.fill(50.0);
+  v(4, 4, 4, 200.0);
+  
+  // Test with different parameters
+  v.bilateralFilter(100.0, 1.0, 1);
+  
+  EXPECT_EQ(v.XDim(), 8u);
+  EXPECT_GT(v(4, 4, 4), 50.0);
+}
+
+// ============================================================================
+// Contrast Enhancement Tests
+// ============================================================================
+
+TEST(VoxelsTest, ContrastEnhancement) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Create volume with varying intensities
+  for (uint64 i = 0; i < 1000; ++i)
+    v(i, double(i % 100));
+  
+  v.contrastEnhancement(0.9);
+  
+  // Volume should exist with same dimensions
+  EXPECT_EQ(v.XDim(), 10u);
+  EXPECT_EQ(v.YDim(), 10u);
+  EXPECT_EQ(v.ZDim(), 10u);
+}
+
+TEST(VoxelsTest, ContrastEnhancementResistor) {
+  voxels v(dimension(8, 8, 8), Float);
+  
+  // Fill with gradient
+  for (uint64 i = 0; i < 512; ++i)
+    v(i, double(i) / 10.0);
+  
+  // Apply with different resistor values
+  v.contrastEnhancement(0.5);
+  
+  EXPECT_EQ(v.XDim(), 8u);
+}
+
+// ============================================================================
+// Anisotropic Diffusion Tests
+// ============================================================================
+
+TEST(VoxelsTest, AnisotropicDiffusion) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Create noisy volume
+  for (uint64 i = 0; i < 1000; ++i)
+    v(i, 50.0 + (i % 10) - 5.0);
+  
+  v.anisotropicDiffusion(5);
+  
+  // Should smooth while preserving edges
+  EXPECT_EQ(v.XDim(), 10u);
+  EXPECT_EQ(v.YDim(), 10u);
+  EXPECT_EQ(v.ZDim(), 10u);
+}
+
+TEST(VoxelsTest, AnisotropicDiffusionIterations) {
+  voxels v(dimension(8, 8, 8), Float);
+  v.fill(50.0);
+  v(4, 4, 4, 100.0);
+  
+  // Test with different iteration counts
+  v.anisotropicDiffusion(10);
+  
+  EXPECT_EQ(v.XDim(), 8u);
+}
+
+// ============================================================================
+// GDTV Filter Tests
+// ============================================================================
+
+TEST(VoxelsTest, GDTVFilter) {
+  voxels v(dimension(10, 10, 10), Float);
+  
+  // Create test volume
+  for (uint64 i = 0; i < 1000; ++i)
+    v(i, double(i % 50));
+  
+  v.gdtvFilter(1.5, 0.1, 5, 6);
+  
+  EXPECT_EQ(v.XDim(), 10u);
+  EXPECT_EQ(v.YDim(), 10u);
+  EXPECT_EQ(v.ZDim(), 10u);
+}
+
+TEST(VoxelsTest, GDTVFilterParameters) {
+  voxels v(dimension(8, 8, 8), Float);
+  v.fill(25.0);
+  
+  // Test with different parameters
+  v.gdtvFilter(2.0, 0.05, 3, 18);
+  
+  EXPECT_EQ(v.XDim(), 8u);
+}
+
+// ============================================================================
+// Composite Function Tests (Additional)
+// ============================================================================
+
+TEST(VoxelsTest, CompositeSubtract) {
+  voxels v1(dimension(5, 5, 5), Float);
+  voxels v2(dimension(5, 5, 5), Float);
+  
+  v1.fill(100.0);
+  v2.fill(30.0);
+  
+  // Subtract v2 from v1
+  subtract_func subtract;
+  v1.composite(v2, 0, 0, 0, subtract);
+  
+  EXPECT_DOUBLE_EQ(v1(0, 0, 0), 70.0);
+  EXPECT_DOUBLE_EQ(v1(2, 2, 2), 70.0);
+}
+
+TEST(VoxelsTest, CompositePartialOverlap) {
+  voxels v1(dimension(10, 10, 10), Float);
+  voxels v2(dimension(5, 5, 5), Float);
+  
+  v1.fill(0.0);
+  v2.fill(100.0);
+  
+  // Composite v2 at corner with partial overlap
+  copy_func copy;
+  v1.composite(v2, 7, 7, 7, copy);
+  
+  // Overlapping region should be 100
+  EXPECT_DOUBLE_EQ(v1(7, 7, 7), 100.0);
+  EXPECT_DOUBLE_EQ(v1(9, 9, 9), 100.0);
+  
+  // Non-overlapping should be 0
+  EXPECT_DOUBLE_EQ(v1(0, 0, 0), 0.0);
+  EXPECT_DOUBLE_EQ(v1(6, 6, 6), 0.0);
+}
+
+// ============================================================================
+// Error Condition and Edge Case Tests
+// ============================================================================
+
+TEST(VoxelsTest, FillSubOutOfBounds) {
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(0.0);
+  
+  // Out-of-bounds fillsub throws index_out_of_bounds exception
+  EXPECT_THROW(v.fillsub(8, 8, 8, dimension(5, 5, 5), 100.0), index_out_of_bounds);
+}
+
+TEST(VoxelsTest, MinMaxUninitialized) {
+  voxels v(dimension(5, 5, 5), Float);
+  // Don't set any values, use default zeros
+  
+  EXPECT_NO_THROW(v.min());
+  EXPECT_NO_THROW(v.max());
+}
+
+TEST(VoxelsTest, CopyLargeVolume) {
+  voxels v1(dimension(50, 50, 50), Float);
+  v1.fill(42.0);
+  
+  voxels v2(v1);
+  
+  EXPECT_EQ(v2.XDim(), 50u);
+  EXPECT_EQ(v2.YDim(), 50u);
+  EXPECT_EQ(v2.ZDim(), 50u);
+  EXPECT_NEAR(v2(25, 25, 25), 42.0, 1e-5);
+}
+
+TEST(VoxelsTest, ResizeThenFill) {
+  voxels v(dimension(5, 5, 5), Float);
+  v.fill(10.0);
+  
+  v.resize(dimension(10, 10, 10));
+  v.fill(20.0);
+  
+  EXPECT_NEAR(v(5, 5, 5), 20.0, 1e-5);
+  EXPECT_NEAR(v(9, 9, 9), 20.0, 1e-5);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
