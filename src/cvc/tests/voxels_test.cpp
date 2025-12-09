@@ -1699,28 +1699,285 @@ TEST(VoxelsTest, AnisotropicDiffusion3DEdgePreservation) {
 // GDTV Filter Tests
 // ============================================================================
 
-TEST(VoxelsTest, GDTVFilter) {
+TEST(VoxelsTest, GDTVFilterUniform) {
+  // Test 1: Uniform volume should remain nearly unchanged
   voxels v(dimension(10, 10, 10), Float);
+  v.fill(50.0);
   
-  // Create test volume
-  for (uint64 i = 0; i < 1000; ++i)
-    v(i, double(i % 50));
+  v.gdtvFilter(1.5, 0.5, 3, 0);  // 6-neighbor mode
   
-  v.gdtvFilter(1.5, 0.1, 5, 6);
-  
-  EXPECT_EQ(v.XDim(), 10u);
-  EXPECT_EQ(v.YDim(), 10u);
-  EXPECT_EQ(v.ZDim(), 10u);
+  // Uniform volume should be stable
+  EXPECT_NEAR(v(5, 5, 5), 50.0, 0.1);
+  EXPECT_NEAR(v(0, 0, 0), 50.0, 0.1);
+  EXPECT_NEAR(v(9, 9, 9), 50.0, 0.1);
 }
 
-TEST(VoxelsTest, GDTVFilterParameters) {
-  voxels v(dimension(8, 8, 8), Float);
-  v.fill(25.0);
+TEST(VoxelsTest, GDTVFilterNoiseReduction) {
+  // Test 2: Noise reduction with quantitative validation
+  voxels v(dimension(10, 10, 1), Float);
   
-  // Test with different parameters
-  v.gdtvFilter(2.0, 0.05, 3, 18);
+  // Create noisy data around mean of 50
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 10; ++i) {
+      double noise = (i * j) % 7 - 3.0;  // Noise: -3 to +3
+      v(i, j, 0, 50.0 + noise);
+    }
+  }
   
+  // Calculate variance before
+  double sum_before = 0.0, sum_sq_before = 0.0;
+  for (uint64 i = 0; i < 100; ++i) {
+    double val = v(i);
+    sum_before += val;
+    sum_sq_before += val * val;
+  }
+  double mean_before = sum_before / 100.0;
+  double var_before = (sum_sq_before / 100.0) - (mean_before * mean_before);
+  
+  v.gdtvFilter(1.5, 0.3, 5, 0);
+  
+  // Calculate variance after
+  double sum_after = 0.0, sum_sq_after = 0.0;
+  for (uint64 i = 0; i < 100; ++i) {
+    double val = v(i);
+    sum_after += val;
+    sum_sq_after += val * val;
+  }
+  double mean_after = sum_after / 100.0;
+  double var_after = (sum_sq_after / 100.0) - (mean_after * mean_after);
+  
+  // Variance should be reduced
+  EXPECT_LT(var_after, var_before);
+  // Mean should be approximately preserved
+  EXPECT_NEAR(mean_after, mean_before, 2.0);
+}
+
+TEST(VoxelsTest, GDTVFilterEdgePreservation) {
+  // Test 3: Edge-preserving property
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create sharp edge: left half = 20, right half = 80
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 5; ++i) {
+      v(i, j, 0, 20.0);
+    }
+    for (uint64 i = 5; i < 10; ++i) {
+      v(i, j, 0, 80.0);
+    }
+  }
+  
+  v.gdtvFilter(1.5, 0.3, 3, 0);
+  
+  // Check that edge is preserved (regions should remain distinct)
+  double left_avg = 0.0, right_avg = 0.0;
+  int count = 0;
+  
+  for (uint64 j = 2; j < 8; ++j) {  // Avoid boundary effects
+    left_avg += v(1, j, 0) + v(2, j, 0);
+    right_avg += v(7, j, 0) + v(8, j, 0);
+    count += 2;
+  }
+  
+  left_avg /= count;
+  right_avg /= count;
+  
+  // Edge should be preserved with significant contrast
+  EXPECT_LT(left_avg, 40.0) << "Left region should stay low";
+  EXPECT_GT(right_avg, 60.0) << "Right region should stay high";
+  EXPECT_GT(right_avg - left_avg, 30.0) << "Edge contrast should be preserved";
+}
+
+TEST(VoxelsTest, GDTVFilterGradientSmoothing) {
+  // Test 4: Smooth gradient should be preserved
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create smooth gradient
+  for (uint64 j = 0; j < 10; ++j) {
+    for (uint64 i = 0; i < 10; ++i) {
+      v(i, j, 0, 20.0 + double(i) * 5.0);  // Linear gradient
+    }
+  }
+  
+  v.gdtvFilter(1.5, 0.3, 3, 0);
+  
+  // Gradient direction should be preserved
+  EXPECT_LT(v(0, 5, 0), v(5, 5, 0));
+  EXPECT_LT(v(5, 5, 0), v(9, 5, 0));
+  
+  // Check monotonicity in a few rows
+  for (uint64 j = 2; j < 8; j += 2) {
+    for (uint64 i = 0; i < 8; ++i) {
+      EXPECT_LE(v(i, j, 0), v(i + 1, j, 0) + 1.0) 
+        << "Gradient should be approximately preserved at row " << j;
+    }
+  }
+}
+
+TEST(VoxelsTest, GDTVFilterParameterQ) {
+  // Test 5: Different q parameter values
+  voxels v1(dimension(8, 8, 1), Float);
+  voxels v2(v1);
+  
+  // Create noisy data
+  for (uint64 j = 0; j < 8; ++j) {
+    for (uint64 i = 0; i < 8; ++i) {
+      double val = 30.0 + double(i + j) * 3.0 + (i * j) % 5;
+      v1(i, j, 0, val);
+      v2(i, j, 0, val);
+    }
+  }
+  
+  // Apply with different q values
+  v1.gdtvFilter(1.2, 0.3, 3, 0);  // Small q (less nonlinear)
+  v2.gdtvFilter(1.8, 0.3, 3, 0);  // Large q (more nonlinear)
+  
+  // Both should smooth, but differently
+  // At least one value should differ significantly
+  bool found_difference = false;
+  for (uint64 i = 0; i < 64; ++i) {
+    if (std::abs(v1(i) - v2(i)) > 1.0) {
+      found_difference = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_difference) << "Different q values should produce different results";
+}
+
+TEST(VoxelsTest, GDTVFilterParameterLambda) {
+  // Test 6: Lambda parameter controls data fidelity
+  voxels v1(dimension(8, 8, 1), Float);
+  voxels v2(v1);
+  
+  // Create noisy gradient
+  for (uint64 j = 0; j < 8; ++j) {
+    for (uint64 i = 0; i < 8; ++i) {
+      double noise = (i * j) % 3 - 1.0;
+      double val = 25.0 + double(i) * 4.0 + noise;
+      v1(i, j, 0, val);
+      v2(i, j, 0, val);
+    }
+  }
+  
+  double orig_val = v1(4, 4, 0);
+  
+  // Apply with different lambda values
+  v1.gdtvFilter(1.5, 0.1, 3, 0);  // Low lambda (more smoothing)
+  v2.gdtvFilter(1.5, 0.9, 3, 0);  // High lambda (more data fidelity)
+  
+  // High lambda should stay closer to original
+  double dist1 = std::abs(v1(4, 4, 0) - orig_val);
+  double dist2 = std::abs(v2(4, 4, 0) - orig_val);
+  
+  EXPECT_LT(dist2, dist1 + 0.5) << "Higher lambda should preserve data better";
+}
+
+TEST(VoxelsTest, GDTVFilterIterations) {
+  // Test 7: GDTV filter with varying iteration counts
+  voxels v(dimension(8, 8, 1), Float);
+  
+  // Create noisy gradient data
+  for (uint64 j = 0; j < 8; ++j) {
+    for (uint64 i = 0; i < 8; ++i) {
+      double noise = ((i * 13 + j * 7) % 7) - 3.0;
+      v(i, j, 0, 30.0 + double(i) * 4.0 + noise);
+    }
+  }
+  
+  // Test with minimal iterations
+  v.gdtvFilter(1.5, 0.3, 1, 0);
   EXPECT_EQ(v.XDim(), 8u);
+  EXPECT_EQ(v.YDim(), 8u);
+  
+  // Test with more iterations (should complete without errors)
+  v.gdtvFilter(1.5, 0.3, 10, 0);
+  EXPECT_EQ(v.XDim(), 8u);
+  EXPECT_EQ(v.YDim(), 8u);
+  
+  // Verify values are in reasonable range
+  EXPECT_GT(v(4, 4, 0), 20.0);
+  EXPECT_LT(v(4, 4, 0), 80.0);
+}
+
+TEST(VoxelsTest, GDTVFilter6vs26Neighbor) {
+  // Test 8: 6-neighbor vs 26-neighbor connectivity
+  voxels v1(dimension(8, 8, 8), Float);
+  voxels v2(v1);
+  
+  // Create 3D gradient with noise
+  for (uint64 k = 0; k < 8; ++k) {
+    for (uint64 j = 0; j < 8; ++j) {
+      for (uint64 i = 0; i < 8; ++i) {
+        double noise = (i + j + k) % 3 - 1.0;
+        double val = 30.0 + double(i + j + k) * 2.0 + noise;
+        v1(i, j, k, val);
+        v2(i, j, k, val);
+      }
+    }
+  }
+  
+  // Apply with different neighbor connectivity
+  v1.gdtvFilter(1.5, 0.3, 3, 0);   // 6-neighbor
+  v2.gdtvFilter(1.5, 0.3, 3, 26);  // 26-neighbor
+  
+  // Results should differ
+  bool found_difference = false;
+  for (uint64 i = 0; i < 512; ++i) {
+    if (std::abs(v1(i) - v2(i)) > 0.5) {
+      found_difference = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_difference) << "6 and 26 neighbor modes should differ";
+}
+
+TEST(VoxelsTest, GDTVFilter3DGradient) {
+  // Test 9: 3D volumetric filtering
+  voxels v(dimension(6, 6, 6), Float);
+  
+  // Create 3D gradient
+  for (uint64 k = 0; k < 6; ++k) {
+    for (uint64 j = 0; j < 6; ++j) {
+      for (uint64 i = 0; i < 6; ++i) {
+        double dist = sqrt(double(i*i + j*j + k*k));
+        v(i, j, k, 25.0 + dist * 3.0);
+      }
+    }
+  }
+  
+  v.gdtvFilter(1.5, 0.3, 3, 0);
+  
+  // Gradient structure should be approximately preserved
+  EXPECT_LT(v(0, 0, 0), v(3, 3, 3));
+  EXPECT_LT(v(3, 3, 3), v(5, 5, 5));
+  
+  // Center should be smoothed
+  EXPECT_GT(v(3, 3, 3), 30.0);
+  EXPECT_LT(v(3, 3, 3), 60.0);
+}
+
+TEST(VoxelsTest, GDTVFilterIsolatedSpike) {
+  // Test 10: GDTV with gradient-dependent weighting
+  voxels v(dimension(10, 10, 1), Float);
+  
+  // Create smooth region with an elevated area (not extreme spike)
+  v.fill(40.0);
+  v(4, 4, 0, 65.0);
+  v(5, 4, 0, 65.0);
+  v(4, 5, 0, 65.0);
+  v(5, 5, 0, 65.0);
+  
+  double orig_center = v(4, 4, 0);
+  double orig_far = v(0, 0, 0);
+  
+  v.gdtvFilter(1.5, 0.3, 3, 0);
+  
+  // Elevated region should be smoothed but preserved
+  EXPECT_LT(v(4, 4, 0), orig_center + 5.0) << "Should be smoothed";
+  EXPECT_GT(v(4, 4, 0), orig_far + 10.0) << "Should remain elevated";
+  
+  // Far region should be stable
+  EXPECT_NEAR(v(0, 0, 0), orig_far, 1.0);
+  EXPECT_NEAR(v(9, 9, 0), orig_far, 1.0);
 }
 
 // ============================================================================
