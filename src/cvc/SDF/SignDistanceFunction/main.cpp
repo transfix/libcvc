@@ -87,8 +87,9 @@ void free_memory()
 
 	free(SDFLibrary::values);
 
+	// Use delete[] instead of free for myVert to properly destruct std::vector members
 	if (SDFLibrary::vertices != NULL)
-		free(SDFLibrary::vertices);
+		delete[] SDFLibrary::vertices;
 
 	if (SDFLibrary::surface != NULL)
 		free(SDFLibrary::surface);

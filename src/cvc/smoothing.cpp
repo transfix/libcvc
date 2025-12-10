@@ -252,31 +252,48 @@ namespace
         map<int, unsigned char>::iterator NeighborVertices_it;
         int NumFixedVertices_i = 0, NumNeighborTriangles_i;
         
-        cvcapp.log(3,"Finding fixed vertices ...\n");
-        for(i=0; i<NumVertices_i; i++) {
-          NumNeighborTriangles_i = 0;
-          NeighborVertices_m.clear();
-
-          for(TriangleIndexVec::const_iterator j = SharedTriangleIndex_gi[i].begin();
-              j != SharedTriangleIndex_gi[i].end();
-              j++)
-            {
-              itri = *j;
-              v0 = FaceIndex_gi[itri*3 + 0];    
-              v1 = FaceIndex_gi[itri*3 + 1];
-              v2 = FaceIndex_gi[itri*3 + 2];    
-              NeighborVertices_m[v0] = 1;
-              NeighborVertices_m[v1] = 1;
-              NeighborVertices_m[v2] = 1;
-              NumNeighborTriangles_i++;
+        // Check if boundary markers are explicitly set in the geometry
+        bool has_explicit_boundary = !geo.const_boundary().empty() && 
+                                      geo.const_boundary().size() == NumVertices_i;
+        
+        if(has_explicit_boundary)
+          {
+            // Use explicit boundary markers from geometry
+            cvcapp.log(3,"Using explicit boundary markers...\n");
+            for(i=0; i<NumVertices_i; i++) {
+              FixedVertices_guc[i] = geo.const_boundary()[i];
+              if(FixedVertices_guc[i]) NumFixedVertices_i++;
             }
-
-          if ((int)NeighborVertices_m.size()-1==NumNeighborTriangles_i) FixedVertices_guc[i] = 0;
-          else {
-            FixedVertices_guc[i] = 1;   // Fixed vertex
-            NumFixedVertices_i++;
           }
-        }
+        else
+          {
+            // Auto-detect boundary vertices topologically
+            cvcapp.log(3,"Finding fixed vertices ...\n");
+            for(i=0; i<NumVertices_i; i++) {
+              NumNeighborTriangles_i = 0;
+              NeighborVertices_m.clear();
+
+              for(TriangleIndexVec::const_iterator j = SharedTriangleIndex_gi[i].begin();
+                  j != SharedTriangleIndex_gi[i].end();
+                  j++)
+                {
+                  itri = *j;
+                  v0 = FaceIndex_gi[itri*3 + 0];    
+                  v1 = FaceIndex_gi[itri*3 + 1];
+                  v2 = FaceIndex_gi[itri*3 + 2];    
+                  NeighborVertices_m[v0] = 1;
+                  NeighborVertices_m[v1] = 1;
+                  NeighborVertices_m[v2] = 1;
+                  NumNeighborTriangles_i++;
+                }
+
+              if ((int)NeighborVertices_m.size()-1==NumNeighborTriangles_i) FixedVertices_guc[i] = 0;
+              else {
+                FixedVertices_guc[i] = 1;   // Fixed vertex
+                NumFixedVertices_i++;
+              }
+            }
+          }
 	cvcapp.threadProgress(float(NumFixedVertices_i)/float(NumVertices_i));
       }
     else

@@ -697,7 +697,7 @@ TEST_F(GeometryTest, SmoothingMovesVertices) {
   EXPECT_TRUE(vertices_moved);
 }
 
-TEST_F(GeometryTest, DISABLED_SmoothingWithBoundaryFixed) {
+TEST_F(GeometryTest, SmoothingWithBoundaryFixed) {
   geometry geom(bunny);
   
   // Set up boundary markers (mark first 10 vertices as boundary)
@@ -788,7 +788,7 @@ TEST_F(GeometryTest, ProjectToTargetSurface) {
 // Algorithm Tests - SDF and Isosurface Extraction
 // ============================================================================
 
-TEST(AlgorithmTest, DISABLED_SDFBasic) {
+TEST(AlgorithmTest, SDFBasic) {
   // Create a simple cube geometry
   geometry cube;
   
@@ -910,7 +910,7 @@ TEST(AlgorithmTest, IsoWithDifferentIsovalues) {
   EXPECT_GT(iso3.num_points(), 0);
 }
 
-TEST(AlgorithmTest, DISABLED_SDFThenIsoRoundtrip) {
+TEST(AlgorithmTest, SDFThenIsoRoundtrip) {
   // Create simple geometry
   geometry original;
   
@@ -951,6 +951,91 @@ TEST(AlgorithmTest, DISABLED_SDFThenIsoRoundtrip) {
   EXPECT_LE(recon_max[0], 1.5);
   EXPECT_GE(recon_min[1], -1.5);
   EXPECT_LE(recon_max[1], 1.5);
+}
+
+TEST(AlgorithmTest, BunnySDF_IsoRoundtrip) {
+  // Load the Stanford Bunny geometry
+  geometry bunny_original = read_geometry("test.bunny");
+  
+  // Verify we have a valid bunny
+  ASSERT_GT(bunny_original.num_points(), 0);
+  ASSERT_GT(bunny_original.num_tris(), 0);
+  std::cout << "Original bunny: " << bunny_original.num_points() << " vertices, " 
+            << bunny_original.num_tris() << " triangles" << std::endl;
+  
+  // Get original bounding box
+  point_t original_min = bunny_original.min_point();
+  point_t original_max = bunny_original.max_point();
+  std::cout << "Original bounds: [" << original_min[0] << ", " << original_min[1] << ", " << original_min[2] << "] to ["
+            << original_max[0] << ", " << original_max[1] << ", " << original_max[2] << "]" << std::endl;
+  
+  // Compute extents and expand slightly for the volume
+  double padding = 0.1;
+  bounding_box bbox(original_min[0] - padding, original_min[1] - padding, original_min[2] - padding,
+                    original_max[0] + padding, original_max[1] + padding, original_max[2] + padding);
+  
+  // Create SDF volume - use moderate resolution to avoid memory issues
+  // 64^3 should be sufficient to capture bunny features
+  dimension dim(64, 64, 64);
+  
+  std::cout << "Computing SDF at 64^3 resolution..." << std::endl;
+  volume sdf_vol = sdf(bunny_original, dim, bbox);
+  
+  // Verify SDF was created
+  EXPECT_EQ(sdf_vol.XDim(), 64);
+  EXPECT_EQ(sdf_vol.YDim(), 64);
+  EXPECT_EQ(sdf_vol.ZDim(), 64);
+  
+  // Verify SDF has both positive and negative values
+  bool has_negative = false, has_positive = false;
+  for (uint64 i = 0; i < sdf_vol.XDim() * sdf_vol.YDim() * sdf_vol.ZDim(); i++) {
+    double val = sdf_vol(i);
+    if (val < 0) has_negative = true;
+    if (val > 0) has_positive = true;
+  }
+  EXPECT_TRUE(has_negative) << "SDF should have negative values inside bunny";
+  EXPECT_TRUE(has_positive) << "SDF should have positive values outside bunny";
+  
+  // Extract isosurface at zero level set to reconstruct the bunny
+  std::cout << "Extracting isosurface at zero..." << std::endl;
+  geometry bunny_reconstructed = iso(sdf_vol, 0.0);
+  
+  // Verify reconstructed geometry is valid
+  EXPECT_GT(bunny_reconstructed.num_points(), 0) << "Reconstructed bunny should have vertices";
+  EXPECT_GT(bunny_reconstructed.num_tris(), 0) << "Reconstructed bunny should have triangles";
+  std::cout << "Reconstructed bunny: " << bunny_reconstructed.num_points() << " vertices, " 
+            << bunny_reconstructed.num_tris() << " triangles" << std::endl;
+  
+  // Verify reconstructed bunny is within reasonable bounds of original
+  point_t recon_min = bunny_reconstructed.min_point();
+  point_t recon_max = bunny_reconstructed.max_point();
+  std::cout << "Reconstructed bounds: [" << recon_min[0] << ", " << recon_min[1] << ", " << recon_min[2] << "] to ["
+            << recon_max[0] << ", " << recon_max[1] << ", " << recon_max[2] << "]" << std::endl;
+  
+  // Reconstructed geometry should be within expanded original bounds
+  double tolerance = 0.2; // Allow some expansion due to discretization
+  EXPECT_GE(recon_min[0], original_min[0] - tolerance);
+  EXPECT_LE(recon_max[0], original_max[0] + tolerance);
+  EXPECT_GE(recon_min[1], original_min[1] - tolerance);
+  EXPECT_LE(recon_max[1], original_max[1] + tolerance);
+  EXPECT_GE(recon_min[2], original_min[2] - tolerance);
+  EXPECT_LE(recon_max[2], original_max[2] + tolerance);
+  
+  // Verify the reconstructed bunny has roughly similar dimensions to original
+  double original_extent_x = original_max[0] - original_min[0];
+  double original_extent_y = original_max[1] - original_min[1];
+  double original_extent_z = original_max[2] - original_min[2];
+  
+  double recon_extent_x = recon_max[0] - recon_min[0];
+  double recon_extent_y = recon_max[1] - recon_min[1];
+  double recon_extent_z = recon_max[2] - recon_min[2];
+  
+  // Extents should be within 50% of original (generous tolerance for low resolution)
+  EXPECT_NEAR(recon_extent_x, original_extent_x, original_extent_x * 0.5);
+  EXPECT_NEAR(recon_extent_y, original_extent_y, original_extent_y * 0.5);
+  EXPECT_NEAR(recon_extent_z, original_extent_z, original_extent_z * 0.5);
+  
+  std::cout << "Bunny SDF->ISO roundtrip test completed successfully!" << std::endl;
 }
 
 // Run all tests
