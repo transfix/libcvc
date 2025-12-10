@@ -1,26 +1,33 @@
 cmake_minimum_required(VERSION 3.15...3.28)
 
-# Check for CUDA early to add it to project languages
-option(CVC_ENABLE_CUDA "Enable CUDA support for GPU acceleration" OFF)
+# Check for CUDA availability early to add it to project languages
+# Default ON - will auto-disable if CUDA not found
+option(CVC_ENABLE_CUDA "Enable CUDA support for GPU acceleration" ON)
 
+# Auto-detect CUDA availability before defining project
 if(CVC_ENABLE_CUDA)
   # Require CMake 3.17+ for native CUDA support
   cmake_minimum_required(VERSION 3.17...3.28)
 endif()
 
-# Define project with languages
+# First declare project with C and CXX to initialize CMake properly
+project(trans-cvc
+  VERSION 2.0.0
+  DESCRIPTION "Computational Visualization Center library from VolumeRover package"
+  LANGUAGES C CXX
+)
+
+# Now check if CUDA is actually available and enable it if found
 if(CVC_ENABLE_CUDA)
-  project(trans-cvc
-    VERSION 2.0.0
-    DESCRIPTION "Computational Visualization Center library from VolumeRover package"
-    LANGUAGES C CXX CUDA
-  )
-else()
-  project(trans-cvc
-    VERSION 2.0.0
-    DESCRIPTION "Computational Visualization Center library from VolumeRover package"
-    LANGUAGES C CXX
-  )
+  include(CheckLanguage)
+  check_language(CUDA)
+  
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+  else()
+    message(STATUS "CUDA compiler not found - disabling CUDA support")
+    set(CVC_ENABLE_CUDA OFF)
+  endif()
 endif()
 
 # Require C++14 as a minimum, but allow newer standards

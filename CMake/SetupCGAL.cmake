@@ -5,7 +5,7 @@
 
 function(SetupCGAL TargetName)
   if(NOT DISABLE_CGAL)
-    find_package(CGAL QUIET)
+    find_package(CGAL CONFIG QUIET)
     
     if(CGAL_FOUND)
       message(STATUS "CGAL version: ${CGAL_VERSION}")

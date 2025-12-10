@@ -1,0 +1,229 @@
+/*
+  Copyright 2007-2025 The University of Texas at Austin
+
+        Authors: Joe Rivera <transfix@ices.utexas.edu>
+        Advisor: Chandrajit Bajaj <bajaj@cs.utexas.edu>
+
+  This file is part of VolMagick.
+
+  VolMagick is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  VolMagick is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+#include <cvc/cuda_utils.h>
+#include <cvc/types.h>
+
+namespace CVC_NAMESPACE
+{
+
+// Device function for trilinear interpolation (GPU version of getTriVal)
+__device__ inline double getTriVal_device(double val[8], double x, double y, double z,
+                                          double resX, double resY, double resZ)
+{
+  double x_ratio, y_ratio, z_ratio;
+  double temp1, temp2, temp3, temp4, temp5, temp6;
+  
+  x_ratio = x / resX;
+  y_ratio = y / resY;
+  z_ratio = z / resZ;
+  
+  if (x_ratio == 1.0) x_ratio = 0.0;
+  if (y_ratio == 1.0) y_ratio = 0.0;
+  if (z_ratio == 1.0) z_ratio = 0.0;
+  
+  temp1 = val[0] + (val[1] - val[0]) * x_ratio;
+  temp2 = val[4] + (val[5] - val[4]) * x_ratio;
+  temp3 = val[2] + (val[3] - val[2]) * x_ratio;
+  temp4 = val[6] + (val[7] - val[6]) * x_ratio;
+  temp5 = temp1 + (temp3 - temp1) * y_ratio;
+  temp6 = temp2 + (temp4 - temp2) * y_ratio;
+  
+  return temp5 + (temp6 - temp5) * z_ratio;
+}
+
+// Template kernel for different voxel types
+template<typename T>
+__global__ void resize_trilinear_kernel(
+    const T* __restrict__ src_data,
+    T* __restrict__ dst_data,
+    uint64 src_x, uint64 src_y, uint64 src_z,
+    uint64 dst_x, uint64 dst_y, uint64 dst_z,
+    double inSpaceX, double inSpaceY, double inSpaceZ)
+{
+  // 3D grid indexing
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= dst_x || j >= dst_y || k >= dst_z) return;
+  
+  // Calculate position in source volume
+  double x = double(i) * inSpaceX;
+  double y = double(j) * inSpaceY;
+  double z = double(k) * inSpaceZ;
+  
+  uint64 resXIndex = uint64(x);
+  uint64 resYIndex = uint64(y);
+  uint64 resZIndex = uint64(z);
+  
+  double xPosition = x - double(resXIndex);
+  double yPosition = y - double(resYIndex);
+  double zPosition = z - double(resZIndex);
+  
+  // Find indices for eight corner voxels
+  uint64 ValIndex[8];
+  ValIndex[0] = resZIndex * src_x * src_y + resYIndex * src_x + resXIndex;
+  ValIndex[1] = ValIndex[0] + 1;
+  ValIndex[2] = resZIndex * src_x * src_y + (resYIndex + 1) * src_x + resXIndex;
+  ValIndex[3] = ValIndex[2] + 1;
+  ValIndex[4] = (resZIndex + 1) * src_x * src_y + resYIndex * src_x + resXIndex;
+  ValIndex[5] = ValIndex[4] + 1;
+  ValIndex[6] = (resZIndex + 1) * src_x * src_y + (resYIndex + 1) * src_x + resXIndex;
+  ValIndex[7] = ValIndex[6] + 1;
+  
+  // Handle boundary conditions
+  if (resXIndex >= src_x - 1) {
+    ValIndex[1] = ValIndex[0];
+    ValIndex[3] = ValIndex[2];
+    ValIndex[5] = ValIndex[4];
+    ValIndex[7] = ValIndex[6];
+  }
+  if (resYIndex >= src_y - 1) {
+    ValIndex[2] = ValIndex[0];
+    ValIndex[3] = ValIndex[1];
+    ValIndex[6] = ValIndex[4];
+    ValIndex[7] = ValIndex[5];
+  }
+  if (resZIndex >= src_z - 1) {
+    ValIndex[4] = ValIndex[0];
+    ValIndex[5] = ValIndex[1];
+    ValIndex[6] = ValIndex[2];
+    ValIndex[7] = ValIndex[3];
+  }
+  
+  // Read eight corner values
+  double val[8];
+  for (int idx = 0; idx < 8; idx++) {
+    val[idx] = double(src_data[ValIndex[idx]]);
+  }
+  
+  // Perform trilinear interpolation
+  double result = getTriVal_device(val, xPosition, yPosition, zPosition, 1.0, 1.0, 1.0);
+  
+  // Write result
+  uint64 dst_idx = k * dst_x * dst_y + j * dst_x + i;
+  dst_data[dst_idx] = T(result);
+}
+
+// Explicit template instantiations for all voxel types
+template __global__ void resize_trilinear_kernel<unsigned char>(
+    const unsigned char*, unsigned char*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+template __global__ void resize_trilinear_kernel<unsigned short>(
+    const unsigned short*, unsigned short*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+template __global__ void resize_trilinear_kernel<unsigned int>(
+    const unsigned int*, unsigned int*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+template __global__ void resize_trilinear_kernel<float>(
+    const float*, float*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+template __global__ void resize_trilinear_kernel<double>(
+    const double*, double*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+template __global__ void resize_trilinear_kernel<uint64>(
+    const uint64*, uint64*, uint64, uint64, uint64,
+    uint64, uint64, uint64, double, double, double);
+
+
+// Host function to launch kernel with appropriate type
+extern "C" void cuda_resize_trilinear(
+    void* src_data,
+    void* dst_data,
+    uint64 src_x, uint64 src_y, uint64 src_z,
+    uint64 dst_x, uint64 dst_y, uint64 dst_z,
+    double inSpaceX, double inSpaceY, double inSpaceZ,
+    data_type voxel_type)
+{
+  // Configure kernel launch parameters
+  dim3 blockSize(8, 8, 8);  // 512 threads per block
+  dim3 gridSize(
+      (dst_x + blockSize.x - 1) / blockSize.x,
+      (dst_y + blockSize.y - 1) / blockSize.y,
+      (dst_z + blockSize.z - 1) / blockSize.z
+  );
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      resize_trilinear_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(src_data),
+          static_cast<unsigned char*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+      
+    case UShort:
+      resize_trilinear_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(src_data),
+          static_cast<unsigned short*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+      
+    case UInt:
+      resize_trilinear_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(src_data),
+          static_cast<unsigned int*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+      
+    case Float:
+      resize_trilinear_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(src_data),
+          static_cast<float*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+      
+    case Double:
+      resize_trilinear_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(src_data),
+          static_cast<double*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+      
+    case UInt64:
+      resize_trilinear_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(src_data),
+          static_cast<uint64*>(dst_data),
+          src_x, src_y, src_z, dst_x, dst_y, dst_z,
+          inSpaceX, inSpaceY, inSpaceZ);
+      break;
+  }
+  
+  // Check for kernel launch errors
+  CUDA_CHECK(cudaGetLastError());
+  
+  // Synchronize to ensure completion
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+} // namespace CVC_NAMESPACE

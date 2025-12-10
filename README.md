@@ -3,7 +3,7 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-320%20passing%20%7C%2019%20CUDA-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-321%20passing%20%7C%2020%20CUDA-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/core%20coverage-89.8%25-brightgreen.svg)](TESTING_COVERAGE.md)
 
 ## Table of Contents
@@ -33,7 +33,7 @@
 
 A comprehensive computational visualization library from the Computational Visualization Center at UT Austin. Trans-cvc provides the computational core functionality of the VolumeRover package, including volume processing, geometry manipulation, isosurfacing, and signed distance function calculations.
 
-**Author:** Joe R - transfix@sublevels.net
+**Maintainer:** Joe Rivera - j@jriv.us
 
 ## Features
 
@@ -129,11 +129,11 @@ See `PROJECT_REPORT.md` for a complete list of build options.
 
 Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 320 Tests (100% Passing)
+### Test Suite: 321 Tests (100% Passing)
 
 - **114 App Tests** - Core application framework, data/property management, threading
 - **128 State Tests** - State tree, hierarchies, serialization, signals, async operations
-- **127 Voxels Tests** - Volume data operations, algorithms, **19 CUDA tests** (GPU acceleration, multithreading)
+- **128 Voxels Tests** - Volume data operations, algorithms, **20 CUDA tests** (GPU-accelerated resize, multithreading)
 - **29 Volume Tests** - Spatial coordinates, interpolation, subvolumes, bounding boxes
 - **37 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
 

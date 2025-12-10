@@ -3126,6 +3126,103 @@ TEST(VoxelsCUDATest, MultithreadedCUDAOperations) {
 #endif
 }
 
+// Test GPU-accelerated trilinear resize
+TEST(VoxelsCUDATest, ResizeWithCUDA) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping test";
+    return;
+  }
+
+  // Test with different sizes and data types
+  {
+    // Create a small test volume with known pattern
+    const uint64 src_dim = 16;
+    voxels v_cpu(dimension(src_dim, src_dim, src_dim), Float);
+    
+    // Initialize with a simple pattern: value = i + j + k
+    for (uint64 k = 0; k < src_dim; k++) {
+      for (uint64 j = 0; j < src_dim; j++) {
+        for (uint64 i = 0; i < src_dim; i++) {
+          v_cpu(i, j, k, static_cast<float>(i + j + k));
+        }
+      }
+    }
+    
+    // Resize on CPU
+    const uint64 dst_dim = 24;
+    voxels v_cpu_resized(v_cpu);
+    v_cpu_resized.resize(dimension(dst_dim, dst_dim, dst_dim));
+    
+    // Now do the same with CUDA
+    voxels v_gpu(v_cpu);
+    v_gpu.enableCUDA(0);
+    EXPECT_TRUE(v_gpu.using_cuda());
+    
+    v_gpu.resize(dimension(dst_dim, dst_dim, dst_dim));
+    
+    // Compare results - they should be very close
+    float max_diff = 0.0f;
+    for (uint64 k = 0; k < dst_dim; k++) {
+      for (uint64 j = 0; j < dst_dim; j++) {
+        for (uint64 i = 0; i < dst_dim; i++) {
+          float cpu_val = v_cpu_resized(i, j, k);
+          float gpu_val = v_gpu(i, j, k);
+          float diff = std::abs(cpu_val - gpu_val);
+          max_diff = std::max(max_diff, diff);
+        }
+      }
+    }
+    
+    EXPECT_LT(max_diff, 1e-4) << "GPU and CPU resize results should match";
+    
+    // Verify some specific interpolated values
+    EXPECT_NEAR(v_gpu(0, 0, 0), 0.0f, 1e-4);
+    EXPECT_NEAR(v_gpu(dst_dim-1, dst_dim-1, dst_dim-1), 
+                static_cast<float>(3*(src_dim-1)), 0.1f);
+  }
+  
+  // Test upsampling (small to large)
+  {
+    voxels v_small(dimension(8, 8, 8), UChar);
+    for (uint64 i = 0; i < 8*8*8; i++) {
+      v_small.data_ptr()[i] = static_cast<unsigned char>(i % 256);
+    }
+    
+    v_small.enableCUDA(0);
+    v_small.resize(dimension(32, 32, 32));
+    
+    EXPECT_EQ(v_small.XDim(), 32u);
+    EXPECT_EQ(v_small.YDim(), 32u);
+    EXPECT_EQ(v_small.ZDim(), 32u);
+    EXPECT_TRUE(v_small.using_cuda());
+  }
+  
+  // Test downsampling (large to small)
+  {
+    voxels v_large(dimension(64, 64, 64), Double);
+    double* ddata = reinterpret_cast<double*>(v_large.data_ptr());
+    for (uint64 i = 0; i < 64*64*64; i++) {
+      ddata[i] = static_cast<double>(i) / 100.0;
+    }
+    
+    v_large.enableCUDA(0);
+    v_large.resize(dimension(16, 16, 16));
+    
+    EXPECT_EQ(v_large.XDim(), 16u);
+    EXPECT_EQ(v_large.YDim(), 16u);
+    EXPECT_EQ(v_large.ZDim(), 16u);
+    EXPECT_TRUE(v_large.using_cuda());
+    
+    // Values should be in a reasonable range
+    EXPECT_GE(v_large(0, 0, 0), 0.0);
+    EXPECT_LT(v_large(15, 15, 15), 650000.0); // max index 262143 / 100
+  }
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
+}
+
 #endif // CVC_USING_CUDA
 
 int main(int argc, char **argv) {

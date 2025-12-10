@@ -176,7 +176,7 @@ endif()
 
 # CGAL support
 if(NOT DISABLE_CGAL)
-  find_package(CGAL)
+  find_package(CGAL CONFIG)
   if(CGAL_FOUND)
     include(${CGAL_USE_FILE})
     add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
@@ -490,10 +490,8 @@ endif(CVC_ENABLE_SDF)
 
 # Add CUDA source files if enabled
 if(CVC_ENABLE_CUDA)
-  # Example: Add .cu files here when they exist
-  # file(GLOB CUDA_SOURCE_FILES *.cu)
-  # list(APPEND SOURCE_FILES ${CUDA_SOURCE_FILES})
-  message(STATUS "CUDA enabled for libcvc - add .cu files as needed")
+  list(APPEND SOURCE_FILES voxels_kernels.cu)
+  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
 endif()
 
 # Create the main library

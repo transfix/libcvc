@@ -557,6 +557,35 @@ namespace CVC_NAMESPACE
     inSpaceY = (double)(voxel_dimensions()[1]-1)/(newdim[1]-1);
     inSpaceZ = (double)(voxel_dimensions()[2]-1)/(newdim[2]-1);
 
+#ifdef CVC_USING_CUDA
+    // Use CUDA kernel if CUDA is enabled and unified memory is available
+    if (_using_cuda && _cuda_unified_ptr) {
+      try {
+        // Allocate CUDA unified memory for destination
+        newvox.enableCUDA(_cuda_device_id);
+        
+        // Launch CUDA kernel for trilinear interpolation
+        cuda_resize_trilinear(
+            _cuda_unified_ptr.get(),      // source data
+            newvox._cuda_unified_ptr.get(), // destination data
+            voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
+            newdim[0], newdim[1], newdim[2],
+            inSpaceX, inSpaceY, inSpaceZ,
+            voxelType());
+        
+        // Copy the result
+        copy(newvox);
+        cvcapp.threadProgress(1.0f);
+        
+        return *this;
+      } catch (const cuda_error& e) {
+        // Fall back to CPU implementation if CUDA fails
+        // (exception message: e.what())
+      }
+    }
+#endif
+
+    // CPU implementation (fallback or when CUDA not available)
     for(k = 0; k < newvox.ZDim(); k++)
       {
 	z = double(k)*inSpaceZ;

@@ -48,6 +48,17 @@ namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE
 {
+#ifdef CVC_USING_CUDA
+  // CUDA kernel launcher for trilinear resize (defined in voxels_kernels.cu)
+  extern "C" void cuda_resize_trilinear(
+      void* src_data,
+      void* dst_data,
+      uint64 src_x, uint64 src_y, uint64 src_z,
+      uint64 dst_x, uint64 dst_y, uint64 dst_z,
+      double inSpaceX, double inSpaceY, double inSpaceZ,
+      data_type voxel_type);
+#endif
+
   class composite_function;
 
   /**
