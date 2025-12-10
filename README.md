@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-317%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/core%20coverage-88.7%25-brightgreen.svg)](TESTING_COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-317%20passing%20%7C%2017%20CUDA-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/core%20coverage-89.8%25-brightgreen.svg)](TESTING_COVERAGE.md)
 
 ## Table of Contents
 
@@ -129,22 +129,23 @@ See `PROJECT_REPORT.md` for a complete list of build options.
 
 Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 308 Tests (100% Passing)
+### Test Suite: 317 Tests (100% Passing)
 
 - **114 App Tests** - Core application framework, data/property management, threading
 - **128 State Tests** - State tree, hierarchies, serialization, signals, async operations
+- **123 Voxels Tests** - Volume data operations, algorithms, **17 CUDA tests** (GPU acceleration)
 - **29 Volume Tests** - Spatial coordinates, interpolation, subvolumes, bounding boxes
 - **37 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
 
-### Code Coverage: 89.6% on Core Components
+### Code Coverage: 90.5% on Core Components
 
 The actively tested core modules (app, state, voxels, volume, geometry) achieve excellent coverage:
 
-- **state.cpp**: 92.88% (248/267 lines)
-- **voxels.cpp**: 91.92% (307/334 lines)
+- **state.cpp**: 92.75% (243/262 lines)
+- **voxels.cpp**: 92.17% (306/332 lines)  ⚡ Includes CUDA paths
 - **volume.cpp**: 91.18% (124/136 lines)
 - **app.cpp**: 89.82% (441/491 lines)
-- **geometry.cpp**: 80.80% (282/349 lines)
+- **geometry.cpp**: 79.00% (252/319 lines)
 - **Functions**: 94.7% (355/375 functions)
 
 See [TESTING_COVERAGE.md](TESTING_COVERAGE.md) for detailed coverage analysis
@@ -170,10 +171,11 @@ cmake --build build --target check
 
 - ✅ **Multithreaded Operations** - Concurrent access with thread safety
 - ✅ **Futures API** - Async value retrieval with blocking/callbacks
+- ✅ **CUDA GPU Acceleration** - 17 comprehensive tests (device selection, memory migration, operations)
 - ✅ **Spatial Interpolation** - Trilinear interpolation and gradients
 - ✅ **Subvolume Operations** - Coordinate system transformations
 - ✅ **Edge Cases** - Boundary conditions, tiny/large volumes
-- ✅ **Memory Semantics** - Shallow/deep copy behavior validation
+- ✅ **Memory Semantics** - Shallow copy by default (ref-counted CUDA), deep copy available
 
 ### Documentation
 

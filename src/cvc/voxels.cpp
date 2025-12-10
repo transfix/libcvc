@@ -33,36 +33,13 @@ namespace CVC_NAMESPACE
   voxels::voxels(const dimension& d, data_type vt) 
     : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
-      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
+      _using_cuda(false), _cuda_device_id(-1)
   {
     try
       {
-	switch(_voxelType) {
-	  case UChar:
-	    _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_uchar->data(), XDim()*YDim()*ZDim(), static_cast<unsigned char>(0));
-	    break;
-	  case UShort:
-	    _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_ushort->data(), XDim()*YDim()*ZDim(), static_cast<unsigned short>(0));
-	    break;
-	  case UInt:
-	    _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_uint->data(), XDim()*YDim()*ZDim(), static_cast<unsigned int>(0));
-	    break;
-	  case Float:
-	    _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_float->data(), XDim()*YDim()*ZDim(), static_cast<float>(0));
-	    break;
-	  case Double:
-	    _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_double->data(), XDim()*YDim()*ZDim(), static_cast<double>(0));
-	    break;
-	  case UInt64:
-	    _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::fill_n(_voxels_uint64->data(), XDim()*YDim()*ZDim(), static_cast<uint64>(0));
-	    break;
-	}
+	uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	_voxels.reset(new unsigned char[size]);
+	std::memset(_voxels.get(), 0, size);
       }
     catch(std::bad_alloc& e)
       {
@@ -73,36 +50,13 @@ namespace CVC_NAMESPACE
   voxels::voxels(const void *v, const dimension& d, data_type vt)
     : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
-      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
+      _using_cuda(false), _cuda_device_id(-1)
   {
     try
       {
-	switch(_voxelType) {
-	  case UChar:
-	    _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_uchar->data(), v, XDim()*YDim()*ZDim()*sizeof(unsigned char));
-	    break;
-	  case UShort:
-	    _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_ushort->data(), v, XDim()*YDim()*ZDim()*sizeof(unsigned short));
-	    break;
-	  case UInt:
-	    _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_uint->data(), v, XDim()*YDim()*ZDim()*sizeof(unsigned int));
-	    break;
-	  case Float:
-	    _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_float->data(), v, XDim()*YDim()*ZDim()*sizeof(float));
-	    break;
-	  case Double:
-	    _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_double->data(), v, XDim()*YDim()*ZDim()*sizeof(double));
-	    break;
-	  case UInt64:
-	    _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-	    std::memcpy(_voxels_uint64->data(), v, XDim()*YDim()*ZDim()*sizeof(uint64));
-	    break;
-	}
+	uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	_voxels.reset(new unsigned char[size]);
+	std::memcpy(_voxels.get(), v, size);
       }
     catch(std::bad_alloc& e)
       {
@@ -114,17 +68,13 @@ namespace CVC_NAMESPACE
     : _dimension(v.voxel_dimensions()), 
       _voxelType(v.voxelType()), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
-      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
+      _using_cuda(v._using_cuda), _cuda_device_id(v._cuda_device_id),
+      _voxels(v._voxels),
+      _cuda_unified_ptr(v._cuda_unified_ptr)
   {
-    // Shallow copy: share the typed array
-    switch(_voxelType) {
-      case UChar: _voxels_uchar = v._voxels_uchar; break;
-      case UShort: _voxels_ushort = v._voxels_ushort; break;
-      case UInt: _voxels_uint = v._voxels_uint; break;
-      case Float: _voxels_float = v._voxels_float; break;
-      case Double: _voxels_double = v._voxels_double; break;
-      case UInt64: _voxels_uint64 = v._voxels_uint64; break;
-    }
+    // Shallow copy: share both CPU and CUDA memory via reference counting
+    // boost::shared_array for CPU memory, std::shared_ptr for CUDA unified memory
+    
     if(v.minIsSet() && v.maxIsSet())
       {
 	min(v.min());
@@ -133,11 +83,9 @@ namespace CVC_NAMESPACE
   }
 
   voxels::~voxels() {
-#ifdef CVC_USING_CUDA
-    if (_using_cuda) {
-      free_cuda_memory();
-    }
-#endif
+    // No explicit cleanup needed:
+    // - boost::shared_array automatically frees CPU memory when refcount hits 0
+    // - std::shared_ptr with CudaManagedDeleter automatically frees CUDA memory when refcount hits 0
   }
 
   // ------------------------
@@ -156,31 +104,24 @@ namespace CVC_NAMESPACE
 
     if(voxel_dimensions() == d) return;
 
-    voxels bak(*this); //backup voxels into bak
+    // Shallow copy constructor creates backup sharing memory
+    voxels bak(*this);
+
+#ifdef CVC_USING_CUDA
+    // Reset CUDA memory reference (shared_ptr will auto-cleanup if last reference)
+    if (_using_cuda) {
+      _using_cuda = false;
+      _cuda_device_id = -1;
+      _cuda_unified_ptr.reset();
+    }
+#endif
 
     //allocate for the new dimension
     try
       {
-        switch(_voxelType) {
-          case UChar:
-            _voxels_uchar.reset(new uchar_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-          case UShort:
-            _voxels_ushort.reset(new ushort_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-          case UInt:
-            _voxels_uint.reset(new uint_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-          case Float:
-            _voxels_float.reset(new float_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-          case Double:
-            _voxels_double.reset(new double_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-          case UInt64:
-            _voxels_uint64.reset(new uint64_array_type(boost::extents[d.xdim][d.ydim][d.zdim]));
-            break;
-        }
+        size_t data_size = d.size() * voxelSize();
+        _voxels.reset(new unsigned char[data_size]);
+        std::memset(_voxels.get(), 0, data_size);
       }
     catch(std::bad_alloc& e)
       {
@@ -203,47 +144,18 @@ namespace CVC_NAMESPACE
     if(voxelType() == vt) return;
 
     voxels bak(*this); // backup voxels into bak
-    data_type old_type = _voxelType;
     _voxelType = vt;
 
     //allocate for the new voxel type
     try
       {
-        switch(vt) {
-          case UChar:
-            _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-          case UShort:
-            _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-          case UInt:
-            _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-          case Float:
-            _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-          case Double:
-            _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-          case UInt64:
-            _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-            break;
-        }
+	uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	_voxels.reset(new unsigned char[size]);
       }
     catch(std::bad_alloc& e)
       {
 	throw memory_allocation_error("Could not allocate memory for voxels!");
       }
-
-    // Clear old array pointer
-    switch(old_type) {
-      case UChar: _voxels_uchar.reset(); break;
-      case UShort: _voxels_ushort.reset(); break;
-      case UInt: _voxels_uint.reset(); break;
-      case Float: _voxels_float.reset(); break;
-      case Double: _voxels_double.reset(); break;
-      case UInt64: _voxels_uint64.reset(); break;
-    }
 
     //copy the voxels back with type conversion
     uint64 len = XDim()*YDim()*ZDim();
@@ -267,7 +179,7 @@ namespace CVC_NAMESPACE
 	{
 	  unsigned char uchar_min = static_cast<unsigned char>(_min);
 	  unsigned char uchar_max = static_cast<unsigned char>(_max);
-	  unsigned char* data = _voxels_uchar->data();
+	  unsigned char* data = reinterpret_cast<unsigned char*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      unsigned char v = data[i];
@@ -286,7 +198,7 @@ namespace CVC_NAMESPACE
 	{
 	  unsigned short ushort_min = static_cast<unsigned short>(_min);
 	  unsigned short ushort_max = static_cast<unsigned short>(_max);
-	  unsigned short* data = _voxels_ushort->data();
+	  unsigned short* data = reinterpret_cast<unsigned short*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      unsigned short v = data[i];
@@ -305,7 +217,7 @@ namespace CVC_NAMESPACE
 	{
 	  unsigned int uint_min = static_cast<unsigned int>(_min);
 	  unsigned int uint_max = static_cast<unsigned int>(_max);
-	  unsigned int* data = _voxels_uint->data();
+	  unsigned int* data = reinterpret_cast<unsigned int*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      unsigned int v = data[i];
@@ -324,7 +236,7 @@ namespace CVC_NAMESPACE
 	{
 	  float float_min = static_cast<float>(_min);
 	  float float_max = static_cast<float>(_max);
-	  float* data = _voxels_float->data();
+	  float* data = reinterpret_cast<float*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      float v = data[i];
@@ -343,7 +255,7 @@ namespace CVC_NAMESPACE
 	{
 	  double double_min = _min;
 	  double double_max = _max;
-	  double* data = _voxels_double->data();
+	  double* data = reinterpret_cast<double*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      double v = data[i];
@@ -362,7 +274,7 @@ namespace CVC_NAMESPACE
 	{
 	  uint64 uint64_min = static_cast<uint64>(_min);
 	  uint64 uint64_max = static_cast<uint64>(_max);
-	  uint64* data = _voxels_uint64->data();
+	  uint64* data = reinterpret_cast<uint64*>(_voxels.get());
 	  for(size_t i=0; i<len; i++)
 	    {
 	      uint64 v = data[i];
@@ -464,38 +376,16 @@ namespace CVC_NAMESPACE
         // Deep copy: allocate new memory and copy data
         try
           {
-            switch(_voxelType) {
-              case UChar:
-                _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_uchar->data(), vox._voxels_uchar->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(unsigned char));
-                break;
-              case UShort:
-                _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_ushort->data(), vox._voxels_ushort->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(unsigned short));
-                break;
-              case UInt:
-                _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_uint->data(), vox._voxels_uint->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(unsigned int));
-                break;
-              case Float:
-                _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_float->data(), vox._voxels_float->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(float));
-                break;
-              case Double:
-                _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_double->data(), vox._voxels_double->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(double));
-                break;
-              case UInt64:
-                _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-                std::memcpy(_voxels_uint64->data(), vox._voxels_uint64->data(), 
-                           XDim()*YDim()*ZDim()*sizeof(uint64));
-                break;
-            }
+            size_t data_size = XDim()*YDim()*ZDim()*voxelSize();
+            _voxels.reset(new unsigned char[data_size]);
+            std::memcpy(_voxels.get(), vox._voxels.get(), data_size);
+            
+#ifdef CVC_USING_CUDA
+            // Deep copy doesn't preserve CUDA state - new independent copy
+            _using_cuda = false;
+            _cuda_device_id = -1;
+            _cuda_unified_ptr.reset(); // Release reference to CUDA memory
+#endif
           }
         catch(std::bad_alloc& e)
           {
@@ -504,15 +394,15 @@ namespace CVC_NAMESPACE
       }
     else
       {
-        // Shallow copy: share the underlying data
-        switch(_voxelType) {
-          case UChar: _voxels_uchar = vox._voxels_uchar; break;
-          case UShort: _voxels_ushort = vox._voxels_ushort; break;
-          case UInt: _voxels_uint = vox._voxels_uint; break;
-          case Float: _voxels_float = vox._voxels_float; break;
-          case Double: _voxels_double = vox._voxels_double; break;
-          case UInt64: _voxels_uint64 = vox._voxels_uint64; break;
-        }
+        // Shallow copy: share the underlying data via reference counting
+        _voxels = vox._voxels;
+        
+#ifdef CVC_USING_CUDA
+        // Shallow copy preserves CUDA state and shares CUDA memory
+        _using_cuda = vox._using_cuda;
+        _cuda_device_id = vox._cuda_device_id;
+        _cuda_unified_ptr = vox._cuda_unified_ptr; // shared_ptr handles reference counting
+#endif
       }
     
     if(vox.minIsSet() && vox.maxIsSet())
@@ -540,7 +430,8 @@ namespace CVC_NAMESPACE
        off_z+subvoldim[2]-1 >= voxel_dimensions()[2])
       throw index_out_of_bounds("Subvolume offset and/or dimension is out of bounds");
 
-    voxels tmp(*this); // back up this object into tmp
+    // Deep copy constructor creates independent backup
+    voxels tmp(*this);
 
     voxel_dimensions(subvoldim); // change this object's dimension to the subvolume dimension
 
@@ -911,55 +802,45 @@ namespace CVC_NAMESPACE
 
   void voxels::allocate_cuda_memory(data_type vt) {
 #ifdef CVC_USING_CUDA
-    // Free any existing CUDA memory first
-    free_cuda_memory();
+    // Reset any existing CUDA memory reference (shared_ptr will auto-cleanup if last reference)
+    _cuda_unified_ptr.reset();
     
     uint64 size = XDim() * YDim() * ZDim();
     uint64 byte_size = size * voxelSize();
     
     // Allocate CUDA unified memory
-    CUDA_CHECK(cudaMallocManaged(&_cuda_unified_ptr, byte_size));
+    void* raw_ptr = nullptr;
+    CUDA_CHECK(cudaMallocManaged(&raw_ptr, byte_size));
+    
+    // Wrap in shared_ptr with custom deleter for automatic cleanup
+    _cuda_unified_ptr = std::shared_ptr<void>(raw_ptr, CudaManagedDeleter());
     
     // Initialize to zero
-    CUDA_CHECK(cudaMemset(_cuda_unified_ptr, 0, byte_size));
+    CUDA_CHECK(cudaMemset(_cuda_unified_ptr.get(), 0, byte_size));
 #endif
   }
 
   void voxels::free_cuda_memory() {
 #ifdef CVC_USING_CUDA
-    if (_cuda_unified_ptr) {
-      cudaFree(_cuda_unified_ptr);
-      _cuda_unified_ptr = nullptr;
-    }
+    // Reset shared_ptr (will call CudaManagedDeleter if this is the last reference)
+    _cuda_unified_ptr.reset();
 #endif
   }
 
   void voxels::migrate_to_cuda(int device_id) {
 #ifdef CVC_USING_CUDA
-    // Save old data from regular multi_array
-    byte* old_data = get_data_ptr();
-    uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
-    std::vector<byte> temp_buffer(data_size);
-    std::memcpy(temp_buffer.data(), old_data, data_size);
-
     // Set device
     int old_device = cuda_device_manager::get_current_device();
     cuda_device_manager::set_current_device(device_id);
 
-    // Allocate CUDA unified memory
+    // Allocate CUDA unified memory and copy data
+    uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
     allocate_cuda_memory(_voxelType);
-
-    // Copy data to CUDA unified memory
-    std::memcpy(_cuda_unified_ptr, temp_buffer.data(), data_size);
+    std::memcpy(_cuda_unified_ptr.get(), _voxels.get(), data_size);
     
     // Synchronize to ensure data is uploaded
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // NOTE: We keep the regular multi_array in memory alongside CUDA memory
-    // This allows operator() to continue working with [i][j][k] indexing
-    // CUDA kernels will use the _cuda_unified_ptr directly
-    // For now, both copies exist - in the future we can optimize to use only CUDA memory
-    
     // Restore device
     cuda_device_manager::set_current_device(old_device);
 #endif
@@ -979,41 +860,12 @@ namespace CVC_NAMESPACE
       cuda_device_manager::set_current_device(old_device);
     }
     
-    // Save CUDA data to temporary buffer
+    // Copy CUDA data back to system memory
     uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
-    std::vector<byte> temp_buffer(data_size);
-    std::memcpy(temp_buffer.data(), _cuda_unified_ptr, data_size);
+    std::memcpy(_voxels.get(), _cuda_unified_ptr.get(), data_size);
 
-    // Free CUDA memory
+    // Free CUDA memory (reset shared_ptr)
     free_cuda_memory();
-
-    // Allocate regular system memory
-    switch(_voxelType) {
-      case UChar:
-        _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_uchar->data(), temp_buffer.data(), data_size);
-        break;
-      case UShort:
-        _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_ushort->data(), temp_buffer.data(), data_size);
-        break;
-      case UInt:
-        _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_uint->data(), temp_buffer.data(), data_size);
-        break;
-      case Float:
-        _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_float->data(), temp_buffer.data(), data_size);
-        break;
-      case Double:
-        _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_double->data(), temp_buffer.data(), data_size);
-        break;
-      case UInt64:
-        _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
-        std::memcpy(_voxels_uint64->data(), temp_buffer.data(), data_size);
-        break;
-    }
 #endif
   }
 }

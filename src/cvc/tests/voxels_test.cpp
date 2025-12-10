@@ -2441,10 +2441,7 @@ TEST(VoxelsCUDATest, SwitchGPUDevices) {
     GTEST_SKIP() << "CUDA not available, skipping GPU tests";
   }
   
-  if (voxels::cuda_device_count() < 2) {
-    GTEST_SKIP() << "Multiple GPUs not available, skipping multi-GPU test";
-  }
-  
+  int gpu_count = voxels::cuda_device_count();
   voxels v(dimension(12, 12, 12), Float);
   v.fill(99.0f);
   
@@ -2453,15 +2450,22 @@ TEST(VoxelsCUDATest, SwitchGPUDevices) {
   EXPECT_EQ(v.cuda_device(), 0);
   EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
   
-  // Switch to GPU 1
-  v.switchGPU(1);
-  EXPECT_EQ(v.cuda_device(), 1);
-  EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
-  
-  // Switch back to GPU 0
-  v.switchGPU(0);
-  EXPECT_EQ(v.cuda_device(), 0);
-  EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+  if (gpu_count >= 2) {
+    // Test actual GPU switching with multiple GPUs
+    v.switchGPU(1);
+    EXPECT_EQ(v.cuda_device(), 1);
+    EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+    
+    // Switch back to GPU 0
+    v.switchGPU(0);
+    EXPECT_EQ(v.cuda_device(), 0);
+    EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+  } else {
+    // With single GPU, just verify we can "switch" to the same GPU
+    v.switchGPU(0);
+    EXPECT_EQ(v.cuda_device(), 0);
+    EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+  }
 }
 
 TEST(VoxelsCUDATest, ModifyDataOnGPU) {
@@ -2480,16 +2484,16 @@ TEST(VoxelsCUDATest, ModifyDataOnGPU) {
   v(0, 0, 0, 789.012f);
   v(9, 9, 9, 345.678f);
   
-  // Verify modifications
-  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-5);
-  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-5);
-  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-5);
+  // Verify modifications (use relaxed tolerance for float precision)
+  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-3);
+  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-3);
+  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-3);
   
   // Disable CUDA and verify data persisted
   v.disableCUDA();
-  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-5);
-  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-5);
-  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-5);
+  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-3);
+  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-3);
+  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-3);
 }
 
 TEST(VoxelsCUDATest, FillOperationCPUvsGPU) {

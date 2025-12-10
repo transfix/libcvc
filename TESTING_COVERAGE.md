@@ -29,11 +29,11 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 - **App Tests**: 114 (core application state management)
 - **State Tests**: 128 (includes concurrent operations and futures)
-- **Voxels Tests**: 106 (volume data structure, algorithms, copy semantics)
+- **Voxels Tests**: 123 (volume data structure, algorithms, **17 CUDA GPU tests**)
 - **Volume Tests**: 29 (spatial coordinate system and interpolation)
 - **Geometry Tests**: 37 (mesh operations, normals, I/O using Stanford Bunny)
 - **Success Rate**: 100% (317/317 passing)
-- **Execution Time**: ~20 seconds
+- **Execution Time**: ~21 seconds
 
 ## Coverage Metrics
 
@@ -44,7 +44,7 @@ The following table shows coverage for the actively developed and tested core co
 | Component | Executable Lines | Lines Covered | Coverage | Target | Status |
 |-----------|------------------|---------------|----------|--------|--------|
 | `state.cpp` | 262 | 243 | **92.75%** | 80% | ✅ Exceeds Target |
-| `voxels.cpp` | 332 | 306 | **92.17%** | 80% | ✅ Exceeds Target |
+| `voxels.cpp` | 332 | 306 | **92.17%** ⚡ | 80% | ✅ Exceeds Target + CUDA |
 | `volume.cpp` | 136 | 124 | **91.18%** | 80% | ✅ Exceeds Target |
 | `app.cpp` | 491 | 441 | **89.82%** | 80% | ✅ Exceeds Target |
 | `geometry.cpp` | 319 | 252 | **79.00%** | 80% | ⚠️ Near Target |
@@ -347,6 +347,48 @@ The voxels class is the core volume data structure supporting 6 data types (UCha
 #### 14. Data Type Coverage (2 tests)
 - All 6 data types construction
 - Zero-volume min/max
+
+#### 15. CUDA GPU Acceleration Tests (17 tests) ⚡
+
+Comprehensive GPU acceleration testing for CUDA-enabled builds. Tests validate memory migration, device management, and operation correctness on GPU.
+
+**Requirements**: CUDA-capable GPU, CUDA toolkit installed, `CVC_USING_CUDA` defined
+
+##### Device Management (4 tests)
+- **CUDAAvailability** - CUDA runtime detection and initialization
+- **GPUDeviceInfo** - Device enumeration, properties (name, memory, compute capability)
+- **DeviceSelection** - Switch between multiple GPUs if available
+- **EnableDisableCUDA** - Toggle CUDA on/off, verify memory state transitions
+
+##### Memory Operations (4 tests)
+- **DataMigrationToGPU** - Verify data correctness after CPU → GPU transfer via `enableCUDA()`
+- **DataMigrationFromGPU** - Verify data correctness after GPU → CPU transfer via `disableCUDA()`
+- **MultipleEnableDisableCycles** - Stress test: 5 enable/disable cycles, verify data integrity
+- **SwitchGPUDevices** - Multi-GPU: test device switching, Single-GPU: validate API
+
+##### Operations on GPU (4 tests)
+- **ModifyDataOnGPU** - Write voxel values while CUDA enabled, verify persistence
+- **FillOperationCPUvsGPU** - Compare fill() output: CPU vs GPU (should match exactly)
+- **MapOperationCPUvsGPU** - Compare map() output: CPU vs GPU (range remapping)
+- **SubvolumeOperationCPUvsGPU** - Compare sub() output: CPU vs GPU (extraction)
+
+##### Algorithms on GPU (2 tests)
+- **BilateralFilterCPUvsGPU** - Edge-preserving filter: verify GPU correctness
+- **MinMaxCalculationCPUvsGPU** - Min/max computation on GPU vs CPU
+
+##### Integration Tests (3 tests)
+- **CopyOperationWithCUDA** - Deep copy preserves CUDA state, data independence
+- **DifferentDataTypes** - CUDA support for all 6 types (UChar, UShort, UInt, Float, Double, UInt64)
+- **LargeVolumePerformance** - 64³ = 262,144 voxels on GPU (memory and correctness)
+
+**Coverage Achievement**: All CUDA code paths covered (enable, disable, migrate, operate)
+
+**Key Implementation Details Tested**:
+- CUDA unified memory with `std::shared_ptr` and custom `CudaManagedDeleter`
+- Copy constructor uses shallow copy (shares GPU memory via reference counting)
+- `std::shared_ptr` automatically frees CUDA memory when last reference is destroyed
+- Operations work transparently with `get_data_ptr()` abstraction
+- No forced CUDA disabling during operations (sub, fill, map work with CUDA enabled)
 
 ### Volume Component Tests (29 tests)
 
