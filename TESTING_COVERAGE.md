@@ -25,13 +25,14 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 308 (Updated December 2024)
+### Total Tests: 317 (Updated December 2024)
 
 - **App Tests**: 114 (core application state management)
 - **State Tests**: 128 (includes concurrent operations and futures)
+- **Voxels Tests**: 106 (volume data structure, algorithms, copy semantics)
 - **Volume Tests**: 29 (spatial coordinate system and interpolation)
 - **Geometry Tests**: 37 (mesh operations, normals, I/O using Stanford Bunny)
-- **Success Rate**: 100% (308/308 passing)
+- **Success Rate**: 100% (317/317 passing)
 - **Execution Time**: ~20 seconds
 
 ## Coverage Metrics
@@ -42,14 +43,14 @@ The following table shows coverage for the actively developed and tested core co
 
 | Component | Executable Lines | Lines Covered | Coverage | Target | Status |
 |-----------|------------------|---------------|----------|--------|--------|
-| `state.cpp` | 267 | 248 | **92.88%** | 80% | ✅ Exceeds Target |
-| `voxels.cpp` | 334 | 307 | **91.92%** | 80% | ✅ Exceeds Target |
+| `state.cpp` | 262 | 243 | **92.75%** | 80% | ✅ Exceeds Target |
+| `voxels.cpp` | 332 | 306 | **92.17%** | 80% | ✅ Exceeds Target |
 | `volume.cpp` | 136 | 124 | **91.18%** | 80% | ✅ Exceeds Target |
 | `app.cpp` | 491 | 441 | **89.82%** | 80% | ✅ Exceeds Target |
-| `geometry.cpp` | 349 | 282 | **80.80%** | 80% | ✅ Meets Target |
-| **Core Total** | **1,941** | **1,740** | **89.6%** | 80% | ✅ **Exceeds Target** |
+| `geometry.cpp` | 319 | 252 | **79.00%** | 80% | ⚠️ Near Target |
+| **Core Total** | **1,540** | **1,366** | **88.7%** | 80% | ✅ **Exceeds Target** |
 
-**Function Coverage**: 94.7% (355 of 375 functions)
+**Function Coverage**: 92.3% (132 of 143 functions)
 
 ### Full Project Coverage
 
@@ -226,11 +227,11 @@ Coverage including all legacy code and untested modules:
 - Multiple futures on same state (5 threads)
 - Producer-consumer pattern
 
-### Voxels Component Tests (97 tests)
+### Voxels Component Tests (106 tests)
 
 The voxels class is the core volume data structure supporting 6 data types (UChar, UShort, UInt, Float, Double, UInt64) with comprehensive image processing algorithms.
 
-**Coverage Achievement**: 94.0% (voxels.h), 92.2% (voxels.cpp)
+**Coverage Achievement**: 92.17% (voxels.cpp), 94.44% functions (17/18)
 
 #### 1. Construction and Properties (5 tests)
 - Default construction (empty volume)
@@ -280,6 +281,20 @@ The voxels class is the core volume data structure supporting 6 data types (UCha
 - Negative offset compositing
 - Raw data access
 - Shared array access
+
+#### 6a. Copy Semantics (12 tests)
+- Copy construction (shallow by default)
+- Copy-on-write behavior (automatic data duplication on write)
+- Shallow copy (default) - shares underlying data via boost::shared_array
+- Shallow copy (explicit) - copy(v, false) for clarity
+- Deep copy - copy(v, true) creates independent data allocation
+- Deep copy independence - modifications don't affect original
+- Deep copy with all data types (UChar, UShort, UInt, Float, Double, UInt64)
+- Deep copy min/max metadata preservation
+- Deep copy self-assignment safety
+- Deep copy large volumes (50³ = 125,000 voxels)
+- Assignment operator shallow copy behavior
+- Large volume copy stress test
 
 #### 7. Type Conversions (4 tests)
 - UChar to all types (UShort, UInt, Float, Double, UInt64)
@@ -459,6 +474,66 @@ The geometry class handles triangle mesh data with support for points, normals, 
 - tri_surface() converts quads to triangles, filters by boundary
 - calculate_surf_normals() averages face normals at vertices (may not be unit length)
 - Stanford Bunny provides real-world mesh complexity for testing
+
+### Voxels Copy Semantics Implementation
+
+The voxels class implements both **shallow copy** (default) and **deep copy** (on demand) semantics for efficient memory management.
+
+#### Shallow Copy (Default Behavior)
+
+By default, all copy operations share the underlying voxel data via `boost::shared_array`:
+
+```cpp
+// Copy constructor (shallow)
+voxels v2(v1);  // Shares data with v1
+
+// Assignment operator (shallow)
+v2 = v1;        // Shares data with v1
+
+// Explicit shallow copy
+v2.copy(v1);           // Default: shallow
+v2.copy(v1, false);    // Explicit: shallow
+```
+
+**Copy-on-Write Protection**: When a write operation is performed on shared data, `preWrite()` automatically creates a unique copy:
+
+```cpp
+voxels v2(v1);      // v2 shares data with v1
+v2(0, 0, 0, 99.0);  // preWrite() triggers automatic data duplication
+// Now v1 and v2 have independent data
+```
+
+This pattern enables efficient passing of large volumes without unnecessary copying.
+
+#### Deep Copy (Explicit)
+
+For scenarios requiring independent data from the start, use deep copy:
+
+```cpp
+voxels v2;
+v2.copy(v1, true);  // Creates independent memory allocation
+v2(0, 0, 0, 99.0);  // No copy-on-write needed, already independent
+```
+
+**Deep Copy Implementation**:
+1. Allocates new `boost::shared_array` with `new unsigned char[size]`
+2. Uses `memcpy()` to duplicate all voxel data
+3. Copies metadata (min/max, histogram, dimension, type)
+4. Throws `memory_allocation_error` if allocation fails
+
+**When to Use Deep Copy**:
+- Parallel processing: Multiple threads need independent volumes
+- Benchmarking: Avoid copy-on-write overhead in timing measurements
+- Known modifications: Data will diverge immediately after copy
+- Memory tracking: Need explicit control over allocation timing
+
+**When to Use Shallow Copy** (default):
+- Function parameters: Efficient pass-by-value semantics
+- Temporary views: Reading data without modification
+- Deferred allocation: Copy-on-write delays memory until needed
+- Reference counting: Automatic cleanup when last reference goes out of scope
+
+**Test Coverage**: 12 dedicated tests verify both copy modes across all data types, large volumes (50³), metadata preservation, self-assignment safety, and independence guarantees.
 
 ## Testing Strategy
 

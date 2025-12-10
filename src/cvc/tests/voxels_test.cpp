@@ -441,7 +441,7 @@ TEST(VoxelsTest, Histogram) {
 }
 
 // ============================================================================
-// Copy-on-Write Tests
+// Copy-on-Write and Deep Copy Tests
 // ============================================================================
 
 TEST(VoxelsTest, CopyOnWrite) {
@@ -459,6 +459,217 @@ TEST(VoxelsTest, CopyOnWrite) {
   // v1 should be unchanged
   EXPECT_DOUBLE_EQ(v1(0, 0, 0), 42.0);
   EXPECT_DOUBLE_EQ(v2(0, 0, 0), 100.0);
+}
+
+TEST(VoxelsTest, ShallowCopyDefault) {
+  voxels v1(dimension(5, 5, 5), Float);
+  v1.fill(10.0);
+  v1(2, 2, 2, 50.0);
+  
+  voxels v2;
+  v2.copy(v1); // Default is shallow copy
+  
+  // v2 shares data with v1
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 50.0);
+  
+  // Modify v1 after shallow copy - should NOT affect v2 due to copy-on-write
+  v1(2, 2, 2, 99.0);
+  
+  // v2 should still have old value (copy-on-write triggered)
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 50.0);
+  EXPECT_DOUBLE_EQ(v1(2, 2, 2), 99.0);
+}
+
+TEST(VoxelsTest, ShallowCopyExplicit) {
+  voxels v1(dimension(5, 5, 5), Double);
+  v1.fill(20.0);
+  v1(1, 1, 1, 100.0);
+  
+  voxels v2;
+  v2.copy(v1, false); // Explicit shallow copy
+  
+  // v2 shares data with v1 initially
+  EXPECT_DOUBLE_EQ(v2(1, 1, 1), 100.0);
+  
+  // Modify v2 - triggers copy-on-write, v1 unaffected
+  v2(1, 1, 1, 200.0);
+  
+  EXPECT_DOUBLE_EQ(v1(1, 1, 1), 100.0);
+  EXPECT_DOUBLE_EQ(v2(1, 1, 1), 200.0);
+}
+
+TEST(VoxelsTest, DeepCopy) {
+  voxels v1(dimension(5, 5, 5), Float);
+  v1.fill(10.0);
+  v1(0, 0, 0, 5.0);
+  v1(4, 4, 4, 15.0);
+  
+  voxels v2;
+  v2.copy(v1, true); // Deep copy - independent data
+  
+  // Check dimensions and type are copied
+  EXPECT_EQ(v2.XDim(), v1.XDim());
+  EXPECT_EQ(v2.YDim(), v1.YDim());
+  EXPECT_EQ(v2.ZDim(), v1.ZDim());
+  EXPECT_EQ(v2.voxelType(), v1.voxelType());
+  
+  // Check values are copied
+  EXPECT_DOUBLE_EQ(v2(0, 0, 0), 5.0);
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 10.0);
+  EXPECT_DOUBLE_EQ(v2(4, 4, 4), 15.0);
+  
+  // Modify v1 - should NOT affect v2
+  v1(0, 0, 0, 500.0);
+  v1(2, 2, 2, 1000.0);
+  v1(4, 4, 4, 1500.0);
+  
+  // v2 should be unchanged
+  EXPECT_DOUBLE_EQ(v2(0, 0, 0), 5.0);
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 10.0);
+  EXPECT_DOUBLE_EQ(v2(4, 4, 4), 15.0);
+  
+  // v1 should have new values
+  EXPECT_DOUBLE_EQ(v1(0, 0, 0), 500.0);
+  EXPECT_DOUBLE_EQ(v1(2, 2, 2), 1000.0);
+  EXPECT_DOUBLE_EQ(v1(4, 4, 4), 1500.0);
+}
+
+TEST(VoxelsTest, DeepCopyIndependence) {
+  voxels v1(dimension(10, 10, 10), UShort);
+  
+  // Fill with pattern
+  for(uint64 i = 0; i < 1000; ++i)
+    v1(i, double(i));
+  
+  voxels v2;
+  v2.copy(v1, true); // Deep copy
+  
+  // Modify all values in v1
+  v1.fill(9999.0);
+  
+  // v2 should retain original values
+  for(uint64 i = 0; i < 1000; ++i)
+    EXPECT_DOUBLE_EQ(v2(i), double(i));
+  
+  // v1 should have new values
+  EXPECT_DOUBLE_EQ(v1(0), 9999.0);
+  EXPECT_DOUBLE_EQ(v1(500), 9999.0);
+  EXPECT_DOUBLE_EQ(v1(999), 9999.0);
+}
+
+TEST(VoxelsTest, DeepCopyDifferentTypes) {
+  std::vector<data_type> types = {UChar, UShort, UInt, Float, Double, UInt64};
+  
+  for(auto type : types) {
+    voxels v1(dimension(5, 5, 5), type);
+    v1.fill(42.0);
+    v1(0, 0, 0, 10.0);
+    v1(4, 4, 4, 100.0);
+    
+    voxels v2;
+    v2.copy(v1, true); // Deep copy
+    
+    EXPECT_EQ(v2.voxelType(), type);
+    EXPECT_DOUBLE_EQ(v2(0, 0, 0), 10.0);
+    EXPECT_DOUBLE_EQ(v2(4, 4, 4), 100.0);
+    
+    // Modify v1
+    v1(0, 0, 0, 999.0);
+    
+    // v2 should be unchanged
+    EXPECT_DOUBLE_EQ(v2(0, 0, 0), 10.0);
+  }
+}
+
+TEST(VoxelsTest, DeepCopyMinMax) {
+  voxels v1(dimension(10, 10, 10), Float);
+  v1.fill(50.0);
+  v1(0, 0, 0, 1.0);
+  v1(9, 9, 9, 100.0);
+  
+  // Force min/max calculation
+  double min1 = v1.min();
+  double max1 = v1.max();
+  
+  EXPECT_DOUBLE_EQ(min1, 1.0);
+  EXPECT_DOUBLE_EQ(max1, 100.0);
+  
+  voxels v2;
+  v2.copy(v1, true); // Deep copy
+  
+  // Min/max should be copied
+  EXPECT_TRUE(v2.minIsSet());
+  EXPECT_TRUE(v2.maxIsSet());
+  EXPECT_DOUBLE_EQ(v2.min(), 1.0);
+  EXPECT_DOUBLE_EQ(v2.max(), 100.0);
+  
+  // Modify v1's data
+  v1(0, 0, 0, -50.0);
+  v1(9, 9, 9, 200.0);
+  
+  // v2's min/max should be unchanged (they're cached)
+  EXPECT_DOUBLE_EQ(v2.min(), 1.0);
+  EXPECT_DOUBLE_EQ(v2.max(), 100.0);
+}
+
+TEST(VoxelsTest, DeepCopySelfAssignment) {
+  voxels v1(dimension(5, 5, 5), Float);
+  v1.fill(42.0);
+  v1(2, 2, 2, 100.0);
+  
+  // Self-assignment should be safe
+  v1.copy(v1, true);
+  
+  EXPECT_DOUBLE_EQ(v1(2, 2, 2), 100.0);
+  EXPECT_DOUBLE_EQ(v1(0, 0, 0), 42.0);
+}
+
+TEST(VoxelsTest, DeepCopyLargeVolume) {
+  voxels v1(dimension(50, 50, 50), Double);
+  
+  // Fill with unique pattern
+  uint64 count = 0;
+  for(uint64 k = 0; k < 50; ++k)
+    for(uint64 j = 0; j < 50; ++j)
+      for(uint64 i = 0; i < 50; ++i)
+        v1(i, j, k, double(count++));
+  
+  voxels v2;
+  v2.copy(v1, true); // Deep copy
+  
+  // Verify all values copied correctly
+  count = 0;
+  for(uint64 k = 0; k < 50; ++k)
+    for(uint64 j = 0; j < 50; ++j)
+      for(uint64 i = 0; i < 50; ++i)
+        EXPECT_DOUBLE_EQ(v2(i, j, k), double(count++));
+  
+  // Modify v1
+  v1.fill(0.0);
+  
+  // v2 should still have original values
+  EXPECT_DOUBLE_EQ(v2(0, 0, 0), 0.0);
+  EXPECT_DOUBLE_EQ(v2(25, 25, 25), 63775.0); // 25 + 25*50 + 25*50*50 = 25 + 1250 + 62500
+  EXPECT_DOUBLE_EQ(v2(49, 49, 49), 124999.0); // 49 + 49*50 + 49*50*50 = 49 + 2450 + 122500
+}
+
+TEST(VoxelsTest, AssignmentOperatorUsesShallowCopy) {
+  voxels v1(dimension(5, 5, 5), Float);
+  v1.fill(10.0);
+  v1(2, 2, 2, 50.0);
+  
+  voxels v2;
+  v2 = v1; // Assignment operator uses copy() with default shallow behavior
+  
+  // Should share data initially
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 50.0);
+  
+  // Modify v1 - triggers copy-on-write
+  v1(2, 2, 2, 99.0);
+  
+  // v2 should have old value
+  EXPECT_DOUBLE_EQ(v2(2, 2, 2), 50.0);
+  EXPECT_DOUBLE_EQ(v1(2, 2, 2), 99.0);
 }
 
 // ============================================================================

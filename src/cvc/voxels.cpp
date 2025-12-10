@@ -361,14 +361,34 @@ namespace CVC_NAMESPACE
     return val;
   }
   
-  voxels& voxels::copy(const voxels& vox)
+  voxels& voxels::copy(const voxels& vox, bool deepCopy)
   {
     if(this == &vox)
       return *this;
 
     _voxelType = vox._voxelType;
     _dimension = vox._dimension;
-    _voxels = vox._voxels;
+    
+    if(deepCopy)
+      {
+        // Deep copy: allocate new memory and copy data
+        try
+          {
+            uint64 size = vox.XDim() * vox.YDim() * vox.ZDim() * vox.voxelSize();
+            _voxels.reset(new unsigned char[size]);
+            memcpy(_voxels.get(), vox._voxels.get(), size);
+          }
+        catch(std::bad_alloc& e)
+          {
+            throw memory_allocation_error("Could not allocate memory for deep copy of voxels!");
+          }
+      }
+    else
+      {
+        // Shallow copy: share the underlying data
+        _voxels = vox._voxels;
+      }
+    
     if(vox.minIsSet() && vox.maxIsSet())
       {
 	min(vox.min());

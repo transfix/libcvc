@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/core%20coverage-89.6%25-brightgreen.svg)](TESTING_COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-317%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/core%20coverage-88.7%25-brightgreen.svg)](TESTING_COVERAGE.md)
 
 ## Table of Contents
 
@@ -214,6 +214,20 @@ vol.contrast_enhancement(min_val, max_val);
 
 // Save processed volume
 vol.write("output.rawiv");
+
+// Copy semantics - efficient data sharing
+cvc::voxels v1(cvc::dimension(100, 100, 100), cvc::Float);
+v1.fill(42.0);
+
+// Shallow copy (default) - shares data via boost::shared_array
+cvc::voxels v2;
+v2.copy(v1);              // Fast, no memory duplication
+// or: cvc::voxels v2(v1); // Copy constructor also shallow
+
+// Deep copy - creates independent data allocation
+cvc::voxels v3;
+v3.copy(v1, true);        // Full memory duplication
+v3(0, 0, 0, 99.0);        // Modify v3 without affecting v1
 ```
 
 ### Geometry Processing

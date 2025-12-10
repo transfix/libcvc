@@ -40,31 +40,30 @@ namespace CVC_NAMESPACE
 
   /**
    * @class voxels
-   * @brief Multi-dimensional voxel data container with shallow copy semantics
+   * @brief Multi-dimensional voxel data container with configurable copy semantics
    * 
    * IMPORTANT - MEMORY SEMANTICS:
    * =============================
-   * Voxels uses SHALLOW COPY semantics via boost::shared_array.
+   * Voxels uses SHALLOW COPY semantics by default via boost::shared_array.
    * 
-   * - Copy constructor: voxels v2(v1);   // Shares underlying data
-   * - Assignment operator: v2 = v1;       // Shares underlying data  
-   * - copy() method: v2.copy(v1);        // Shares underlying data
+   * SHALLOW COPY (default - shares data):
+   * - Copy constructor: voxels v2(v1);         // Shares underlying data
+   * - Assignment operator: v2 = v1;            // Shares underlying data  
+   * - copy() method: v2.copy(v1);              // Shares underlying data (default)
+   * - copy() method: v2.copy(v1, false);       // Shares underlying data (explicit)
    * 
-   * All copy operations share the same underlying voxel data array.
+   * With shallow copy, all copies share the same underlying voxel data array.
    * Modifications through any copy will affect all other copies!
    * 
-   * To create a DEEP COPY with independent data:
+   * DEEP COPY (independent data):
+   * - copy() method: v2.copy(v1, true);        // Creates independent copy
+   * - sub() method: v2.sub(0, 0, 0, v1.voxel_dimensions());  // Creates independent copy
    * 
-   *   voxels v2(v1.voxel_dimensions(), v1.voxelType());
-   *   for(uint64 i = 0; i < v1.voxel_dimensions().size(); ++i)
-   *     v2(i, v1(i));
+   * With deep copy, each copy has its own independent voxel data array.
+   * Modifications to one copy will NOT affect other copies.
    * 
-   * Or use sub() which creates a new array:
-   * 
-   *   voxels v2(v1);
-   *   v2.sub(0, 0, 0, v1.voxel_dimensions());  // Deep copy via sub
-   * 
-   * This design enables efficient passing without copying large arrays.
+   * This design enables efficient passing without copying large arrays by default,
+   * while still providing explicit deep copy when needed.
    */
   class voxels
   {
@@ -203,7 +202,7 @@ namespace CVC_NAMESPACE
     /*
       operations!
     */
-    virtual voxels& copy(const voxels& vox); //turns this object into a copy of vox
+    virtual voxels& copy(const voxels& vox, bool deepCopy = false); //turns this object into a copy of vox (shallow by default, deep if requested)
     //subvolume extraction: removes voxels outside of the subvolume specified
     virtual voxels& sub(uint64 off_x, uint64 off_y, uint64 off_z,
 			const dimension& subvoldim);
