@@ -35,6 +35,17 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstddef>
+
+namespace CVC_NAMESPACE
+{
+  // Use std::byte for raw memory representation (C++17) or fallback
+  #if __cplusplus >= 201703L
+    using byte = std::byte;
+  #else
+    using byte = unsigned char;
+  #endif
+}
 
 namespace CVC_NAMESPACE
 {
@@ -77,83 +88,95 @@ namespace CVC_NAMESPACE
 
     dimension& voxel_dimensions() { return _dimension; }
     const dimension& voxel_dimensions() const { return _dimension; }
-    virtual void voxel_dimensions(const dimension& d, 
-				  boost::shared_ptr<boost::multi_array<unsigned char, 1>> voxels = boost::shared_ptr<boost::multi_array<unsigned char, 1>>());
+    virtual void voxel_dimensions(const dimension& d);
     uint64 XDim() const { return voxel_dimensions().xdim; }
     uint64 YDim() const { return voxel_dimensions().ydim; }
     uint64 ZDim() const { return voxel_dimensions().zdim; }
 
     /*
-      Voxel I/O
+      Voxel I/O - 3D indexing with typed arrays
     */
-    double operator()(uint64 i) const /* reading a voxel value */
+    double operator()(uint64 i, uint64 j, uint64 k) const /* reading a voxel value */
     {
-      if(i >= XDim()*YDim()*ZDim()) 
+      if(i >= XDim() || j >= YDim() || k >= ZDim()) 
 	throw index_out_of_bounds("");
       
-      unsigned char* data = _voxels->data();
       switch(voxelType())
 	{
 	case UChar:
-	  return double(*((unsigned char *)(data+i*voxelSize())));
+	  return double((*_voxels_uchar)[i][j][k]);
 	case UShort:
-	  return double(*((unsigned short *)(data+i*voxelSize())));
+	  return double((*_voxels_ushort)[i][j][k]);
 	case UInt:
-	  return double(*((unsigned int *)(data+i*voxelSize())));
+	  return double((*_voxels_uint)[i][j][k]);
 	case Float:
-	  return double(*((float *)(data+i*voxelSize())));
+	  return double((*_voxels_float)[i][j][k]);
 	case Double:
-	  return double(*((double *)(data+i*voxelSize())));
+	  return double((*_voxels_double)[i][j][k]);
 	case UInt64:
-	  return double(*((uint64 *)(data+i*voxelSize())));
+	  return double((*_voxels_uint64)[i][j][k]);
 	}
       return 0;
     }
-    double operator()(uint64 i, uint64 j, uint64 k) const /* reading a voxel value */
-    {
-      return (*this)(i+j*XDim()+k*XDim()*YDim());
-    }
     
-    void operator()(uint64 i, double val) /* writing a voxel value */
+    // Linear indexing for backward compatibility
+    double operator()(uint64 i) const
     {
       if(i >= XDim()*YDim()*ZDim()) 
+	throw index_out_of_bounds("");
+      uint64 x = i % XDim();
+      uint64 y = (i / XDim()) % YDim();
+      uint64 z = i / (XDim() * YDim());
+      return (*this)(x, y, z);
+    }
+    
+    void operator()(uint64 i, uint64 j, uint64 k, double val) /* writing a voxel value */
+    {
+      if(i >= XDim() || j >= YDim() || k >= ZDim()) 
 	throw index_out_of_bounds("");
 
       preWrite();
 
-      unsigned char* data = _voxels->data();
       switch(voxelType())
 	{
 	case UChar:
-	  *((unsigned char *)(data+i*voxelSize())) = (unsigned char)(val);
+	  (*_voxels_uchar)[i][j][k] = static_cast<unsigned char>(val);
 	  break;
 	case UShort:
-	  *((unsigned short *)(data+i*voxelSize())) = (unsigned short)(val);
+	  (*_voxels_ushort)[i][j][k] = static_cast<unsigned short>(val);
 	  break;
 	case UInt:
-	  *((unsigned int *)(data+i*voxelSize())) = (unsigned int)(val);
+	  (*_voxels_uint)[i][j][k] = static_cast<unsigned int>(val);
 	  break;
 	case Float:
-	  *((float *)(data+i*voxelSize())) = float(val);
+	  (*_voxels_float)[i][j][k] = static_cast<float>(val);
 	  break;
 	case Double:
-	  *((double *)(data+i*voxelSize())) = double(val);
+	  (*_voxels_double)[i][j][k] = static_cast<double>(val);
 	  break;
 	case UInt64:
-	  *((uint64 *)(data+i*voxelSize())) = uint64(val);
+	  (*_voxels_uint64)[i][j][k] = static_cast<uint64>(val);
+	  break;
 	}
 
       //NOTE: we cant modify min/max here because it would mess up a map() operation, and perhaps other things
       //if(_minIsSet && val < min()) min(val);
       //if(_maxIsSet && val > max()) max(val);
     }
-    void operator()(uint64 i, uint64 j, uint64 k, double val) /* writing a voxel value */
+    
+    // Linear indexing for backward compatibility
+    void operator()(uint64 i, double val)
     {
-      (*this)(i+j*XDim()+k*XDim()*YDim(),val);
+      if(i >= XDim()*YDim()*ZDim()) 
+	throw index_out_of_bounds("");
+      uint64 x = i % XDim();
+      uint64 y = (i / XDim()) % YDim();
+      uint64 z = i / (XDim() * YDim());
+      (*this)(x, y, z, val);
     }
     
-    unsigned char * operator*() { preWrite(); return _voxels->data(); }
-    const unsigned char * operator*() const { return _voxels->data(); }
+    unsigned char * operator*() { preWrite(); return get_data_ptr(); }
+    const unsigned char * operator*() const { return reinterpret_cast<const unsigned char*>(get_data_ptr()); }
 
     data_type voxelType() const { return _voxelType; }
     void voxelType(data_type);
@@ -179,17 +202,23 @@ namespace CVC_NAMESPACE
 
     bool operator==(const voxels& vox) const 
       { 
-        // Check if same shared_ptr pointer (shared data)
-        if(_voxels == vox._voxels) return true;
-        
         // Check if different dimensions or types
         if(voxel_dimensions() != vox.voxel_dimensions()) return false;
         if(voxelType() != vox.voxelType()) return false;
         
-        // Compare actual data bytes (size * voxelSize, not just size!)
-        return strncmp(reinterpret_cast<const char*>(_voxels->data()),
-                       reinterpret_cast<const char*>(vox._voxels->data()),
-                       voxel_dimensions().size() * voxelSize()) == 0;
+        // Check if same shared_ptr pointer (shared data)
+        switch(_voxelType) {
+          case UChar: if(_voxels_uchar == vox._voxels_uchar) return true; break;
+          case UShort: if(_voxels_ushort == vox._voxels_ushort) return true; break;
+          case UInt: if(_voxels_uint == vox._voxels_uint) return true; break;
+          case Float: if(_voxels_float == vox._voxels_float) return true; break;
+          case Double: if(_voxels_double == vox._voxels_double) return true; break;
+          case UInt64: if(_voxels_uint64 == vox._voxels_uint64) return true; break;
+        }
+        
+        // Compare actual data bytes
+        return std::memcmp(get_data_ptr(), vox.get_data_ptr(),
+                           voxel_dimensions().size() * voxelSize()) == 0;
       }
 
     bool operator!=(const voxels& vox) const
@@ -239,25 +268,59 @@ namespace CVC_NAMESPACE
      */
     virtual voxels& gdtvFilter(double parameterq, double lambda, unsigned int iteration, unsigned int neigbour);
 
-    //special access to the multi_array - careful with this!
-    // 01/11/2014 - Joe R. - creation
-    // 12/09/2024 - Updated to use boost::multi_array
-    const boost::shared_ptr<boost::multi_array<unsigned char, 1>>& data() const { return _voxels; }
-    boost::shared_ptr<boost::multi_array<unsigned char, 1>>& data() { return _voxels; }
-    
     // Direct data pointer access for legacy compatibility
-    unsigned char* data_ptr() { return _voxels->data(); }
-    const unsigned char* data_ptr() const { return _voxels->data(); }
+    unsigned char* data_ptr() { return reinterpret_cast<unsigned char*>(get_data_ptr()); }
+    const unsigned char* data_ptr() const { return reinterpret_cast<const unsigned char*>(get_data_ptr()); }
     
     // Legacy compatibility: convert to shared_array for old VolMagick code
     // Note: This creates a new shared_array that shares ownership with the multi_array  
     boost::shared_array<unsigned char> data_as_shared_array() const {
       // Create shared_array with custom deleter that keeps multi_array alive
-      auto multi_copy = _voxels; // Capture shared_ptr to keep it alive
-      return boost::shared_array<unsigned char>(
-        _voxels->data(),
-        [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
-      );
+      switch(_voxelType) {
+        case UChar: {
+          auto multi_copy = _voxels_uchar;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_uchar->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+        case UShort: {
+          auto multi_copy = _voxels_ushort;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_ushort->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+        case UInt: {
+          auto multi_copy = _voxels_uint;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_uint->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+        case Float: {
+          auto multi_copy = _voxels_float;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_float->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+        case Double: {
+          auto multi_copy = _voxels_double;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_double->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+        case UInt64: {
+          auto multi_copy = _voxels_uint64;
+          return boost::shared_array<unsigned char>(
+            reinterpret_cast<unsigned char*>(_voxels_uint64->data()),
+            [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+          );
+        }
+      }
+      return boost::shared_array<unsigned char>();
     }
 
   protected:
@@ -266,14 +329,48 @@ namespace CVC_NAMESPACE
     {
       _histogramDirty = true; //invalidate the histogram
 
-      if(_voxels.unique()) return; //nothing to copy if our voxels are already unique
+      if(is_unique()) return; //nothing to copy if our voxels are already unique
 
       try
 	{
-	  boost::shared_ptr<boost::multi_array<unsigned char, 1>> tmp(_voxels);
-	  uint64 size = XDim()*YDim()*ZDim()*voxelSize();
-	  _voxels.reset(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
-	  memcpy(_voxels->data(), tmp->data(), size);
+	  switch(_voxelType) {
+	    case UChar: {
+	      auto tmp = _voxels_uchar;
+	      _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_uchar->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(unsigned char));
+	      break;
+	    }
+	    case UShort: {
+	      auto tmp = _voxels_ushort;
+	      _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_ushort->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(unsigned short));
+	      break;
+	    }
+	    case UInt: {
+	      auto tmp = _voxels_uint;
+	      _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_uint->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(unsigned int));
+	      break;
+	    }
+	    case Float: {
+	      auto tmp = _voxels_float;
+	      _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_float->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(float));
+	      break;
+	    }
+	    case Double: {
+	      auto tmp = _voxels_double;
+	      _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_double->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(double));
+	      break;
+	    }
+	    case UInt64: {
+	      auto tmp = _voxels_uint64;
+	      _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+	      std::memcpy(_voxels_uint64->data(), tmp->data(), XDim()*YDim()*ZDim()*sizeof(uint64));
+	      break;
+	    }
+	  }
 	}
       catch(std::bad_alloc& e)
 	{
@@ -282,10 +379,22 @@ namespace CVC_NAMESPACE
     }
     void calcHistogram(uint64 size) const;
 
-    boost::shared_ptr<boost::multi_array<unsigned char, 1>> _voxels;
+    // Typed 3D multi_arrays - one for each supported data type
+    typedef boost::multi_array<unsigned char, 3> uchar_array_type;
+    typedef boost::multi_array<unsigned short, 3> ushort_array_type;
+    typedef boost::multi_array<unsigned int, 3> uint_array_type;
+    typedef boost::multi_array<float, 3> float_array_type;
+    typedef boost::multi_array<double, 3> double_array_type;
+    typedef boost::multi_array<uint64, 3> uint64_array_type;
+
+    boost::shared_ptr<uchar_array_type> _voxels_uchar;
+    boost::shared_ptr<ushort_array_type> _voxels_ushort;
+    boost::shared_ptr<uint_array_type> _voxels_uint;
+    boost::shared_ptr<float_array_type> _voxels_float;
+    boost::shared_ptr<double_array_type> _voxels_double;
+    boost::shared_ptr<uint64_array_type> _voxels_uint64;
 
     dimension _dimension;
-
     data_type _voxelType;
 
     mutable bool _minIsSet;
@@ -297,6 +406,44 @@ namespace CVC_NAMESPACE
     mutable boost::shared_ptr<uint64[]> _histogram;
     mutable uint64 _histogramSize;
     mutable bool _histogramDirty;
+
+    // Helper method to get the active array as a raw pointer
+    byte* get_data_ptr() {
+      switch(_voxelType) {
+        case UChar: return _voxels_uchar ? reinterpret_cast<byte*>(_voxels_uchar->data()) : nullptr;
+        case UShort: return _voxels_ushort ? reinterpret_cast<byte*>(_voxels_ushort->data()) : nullptr;
+        case UInt: return _voxels_uint ? reinterpret_cast<byte*>(_voxels_uint->data()) : nullptr;
+        case Float: return _voxels_float ? reinterpret_cast<byte*>(_voxels_float->data()) : nullptr;
+        case Double: return _voxels_double ? reinterpret_cast<byte*>(_voxels_double->data()) : nullptr;
+        case UInt64: return _voxels_uint64 ? reinterpret_cast<byte*>(_voxels_uint64->data()) : nullptr;
+        default: return nullptr;
+      }
+    }
+
+    const byte* get_data_ptr() const {
+      switch(_voxelType) {
+        case UChar: return _voxels_uchar ? reinterpret_cast<const byte*>(_voxels_uchar->data()) : nullptr;
+        case UShort: return _voxels_ushort ? reinterpret_cast<const byte*>(_voxels_ushort->data()) : nullptr;
+        case UInt: return _voxels_uint ? reinterpret_cast<const byte*>(_voxels_uint->data()) : nullptr;
+        case Float: return _voxels_float ? reinterpret_cast<const byte*>(_voxels_float->data()) : nullptr;
+        case Double: return _voxels_double ? reinterpret_cast<const byte*>(_voxels_double->data()) : nullptr;
+        case UInt64: return _voxels_uint64 ? reinterpret_cast<const byte*>(_voxels_uint64->data()) : nullptr;
+        default: return nullptr;
+      }
+    }
+
+    // Check if the current type array is unique (for copy-on-write)
+    bool is_unique() const {
+      switch(_voxelType) {
+        case UChar: return _voxels_uchar.unique();
+        case UShort: return _voxels_ushort.unique();
+        case UInt: return _voxels_uint.unique();
+        case Float: return _voxels_float.unique();
+        case Double: return _voxels_double.unique();
+        case UInt64: return _voxels_uint64.unique();
+        default: return true;
+      }
+    }
   };
 }
 
