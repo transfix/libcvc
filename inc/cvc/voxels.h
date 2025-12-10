@@ -27,6 +27,7 @@
 #include <cvc/types.h>
 #include <cvc/dimension.h>
 #include <cvc/exception.h>
+#include <cvc/cuda_utils.h>
 
 #include <boost/multi_array.hpp>
 #include <boost/shared_ptr.hpp>
@@ -268,6 +269,30 @@ namespace CVC_NAMESPACE
      */
     virtual voxels& gdtvFilter(double parameterq, double lambda, unsigned int iteration, unsigned int neigbour);
 
+    /*
+     * CUDA Unified Memory Support
+     * Enable/disable CUDA unified memory for GPU-accelerated operations.
+     * Data is automatically migrated between CPU and GPU memory as needed.
+     */
+    
+    // Check if CUDA is available and supported
+    static bool cuda_available();
+    static int cuda_device_count();
+    static std::vector<gpu_device_info> get_gpu_info();
+    
+    // Get/set GPU device for this thread
+    static int get_current_gpu();
+    static void set_current_gpu(int device_id);
+    
+    // Enable/disable CUDA unified memory for this voxels object
+    virtual void enableCUDA(int device_id = -1);
+    virtual void disableCUDA();
+    bool using_cuda() const { return _using_cuda; }
+    int cuda_device() const { return _cuda_device_id; }
+    
+    // Switch to a different GPU (performs peer-to-peer copy if needed)
+    virtual void switchGPU(int new_device_id);
+
     // Direct data pointer access for legacy compatibility
     unsigned char* data_ptr() { return reinterpret_cast<unsigned char*>(get_data_ptr()); }
     const unsigned char* data_ptr() const { return reinterpret_cast<const unsigned char*>(get_data_ptr()); }
@@ -407,8 +432,28 @@ namespace CVC_NAMESPACE
     mutable uint64 _histogramSize;
     mutable bool _histogramDirty;
 
+    // CUDA unified memory state
+    bool _using_cuda;
+    int _cuda_device_id;
+    
+    // CUDA unified memory pointers (one per type, only one active at a time)
+    void* _cuda_unified_ptr;
+    
+    // Helper methods for CUDA memory management
+    void allocate_cuda_memory(data_type vt);
+    void migrate_to_cuda(int device_id);
+    void migrate_from_cuda();
+    void free_cuda_memory();
+
     // Helper method to get the active array as a raw pointer
     byte* get_data_ptr() {
+#ifdef CVC_USING_CUDA
+      // Return CUDA unified memory pointer if enabled
+      if (_using_cuda && _cuda_unified_ptr) {
+        return reinterpret_cast<byte*>(_cuda_unified_ptr);
+      }
+#endif
+      // Otherwise return regular multi_array data
       switch(_voxelType) {
         case UChar: return _voxels_uchar ? reinterpret_cast<byte*>(_voxels_uchar->data()) : nullptr;
         case UShort: return _voxels_ushort ? reinterpret_cast<byte*>(_voxels_ushort->data()) : nullptr;
@@ -421,6 +466,13 @@ namespace CVC_NAMESPACE
     }
 
     const byte* get_data_ptr() const {
+#ifdef CVC_USING_CUDA
+      // Return CUDA unified memory pointer if enabled
+      if (_using_cuda && _cuda_unified_ptr) {
+        return reinterpret_cast<const byte*>(_cuda_unified_ptr);
+      }
+#endif
+      // Otherwise return regular multi_array data
       switch(_voxelType) {
         case UChar: return _voxels_uchar ? reinterpret_cast<const byte*>(_voxels_uchar->data()) : nullptr;
         case UShort: return _voxels_ushort ? reinterpret_cast<const byte*>(_voxels_ushort->data()) : nullptr;

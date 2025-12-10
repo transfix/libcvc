@@ -32,7 +32,8 @@ namespace CVC_NAMESPACE
 {
   voxels::voxels(const dimension& d, data_type vt) 
     : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
-      _histogram(nullptr), _histogramSize(0), _histogramDirty(true)
+      _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
+      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
   {
     try
       {
@@ -71,7 +72,8 @@ namespace CVC_NAMESPACE
 
   voxels::voxels(const void *v, const dimension& d, data_type vt)
     : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
-      _histogram(nullptr), _histogramSize(0), _histogramDirty(true)
+      _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
+      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
   {
     try
       {
@@ -111,7 +113,8 @@ namespace CVC_NAMESPACE
   voxels::voxels(const voxels& v)
     : _dimension(v.voxel_dimensions()), 
       _voxelType(v.voxelType()), _minIsSet(false), _maxIsSet(false),
-      _histogram(nullptr), _histogramSize(0), _histogramDirty(true)
+      _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
+      _using_cuda(false), _cuda_device_id(-1), _cuda_unified_ptr(nullptr)
   {
     // Shallow copy: share the typed array
     switch(_voxelType) {
@@ -129,7 +132,13 @@ namespace CVC_NAMESPACE
       }
   }
 
-  voxels::~voxels() { }
+  voxels::~voxels() {
+#ifdef CVC_USING_CUDA
+    if (_using_cuda) {
+      free_cuda_memory();
+    }
+#endif
+  }
 
   // ------------------------
   // voxels::voxel_dimensions
@@ -728,6 +737,290 @@ namespace CVC_NAMESPACE
 
     cvcapp.threadProgress(1.0f);
     return *this;
+  }
+
+  // ============================================================================
+  // CUDA Unified Memory Support
+  // ============================================================================
+
+  bool voxels::cuda_available() {
+    return cuda_device_manager::cuda_available();
+  }
+
+  int voxels::cuda_device_count() {
+    return cuda_device_manager::device_count();
+  }
+
+  std::vector<gpu_device_info> voxels::get_gpu_info() {
+    return cuda_device_manager::get_device_info();
+  }
+
+  int voxels::get_current_gpu() {
+    return cuda_device_manager::get_current_device();
+  }
+
+  void voxels::set_current_gpu(int device_id) {
+    cuda_device_manager::set_current_device(device_id);
+  }
+
+  void voxels::enableCUDA(int device_id) {
+#ifdef CVC_USING_CUDA
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+
+    if (_using_cuda) {
+      // Already using CUDA - maybe switch devices?
+      if (device_id >= 0 && device_id != _cuda_device_id) {
+        switchGPU(device_id);
+      }
+      return;
+    }
+
+    if (!cuda_available()) {
+      throw cuda_not_available("CUDA not available on this system");
+    }
+
+    // Use current device if not specified
+    if (device_id < 0) {
+      device_id = cuda_device_manager::get_current_device();
+      if (device_id < 0) device_id = 0; // Default to device 0
+    }
+
+    // Validate device
+    if (device_id >= cuda_device_count()) {
+      throw cuda_error("Invalid CUDA device ID");
+    }
+
+    if (!cuda_device_manager::supports_unified_memory(device_id)) {
+      throw cuda_error("Device does not support unified memory");
+    }
+
+    // Migrate data to CUDA unified memory
+    migrate_to_cuda(device_id);
+
+    _using_cuda = true;
+    _cuda_device_id = device_id;
+
+    cvcapp.log(CVC_NAMESPACE::app::info, "CUDA unified memory enabled on device " + 
+               std::to_string(device_id));
+#else
+    throw cuda_not_available("CVC was not compiled with CUDA support");
+#endif
+  }
+
+  void voxels::disableCUDA() {
+#ifdef CVC_USING_CUDA
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+
+    if (!_using_cuda) {
+      return; // Already disabled
+    }
+
+    // Migrate data back to system RAM
+    migrate_from_cuda();
+
+    _using_cuda = false;
+    _cuda_device_id = -1;
+
+    cvcapp.log(CVC_NAMESPACE::app::info, "CUDA unified memory disabled");
+#endif
+  }
+
+  void voxels::switchGPU(int new_device_id) {
+#ifdef CVC_USING_CUDA
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+
+    if (!_using_cuda) {
+      // Not currently using CUDA, just enable on the new device
+      enableCUDA(new_device_id);
+      return;
+    }
+
+    if (new_device_id == _cuda_device_id) {
+      return; // Already on this device
+    }
+
+    if (!cuda_available() || new_device_id >= cuda_device_count()) {
+      throw cuda_error("Invalid CUDA device ID");
+    }
+
+    if (!cuda_device_manager::supports_unified_memory(new_device_id)) {
+      throw cuda_error("Target device does not support unified memory");
+    }
+
+    int old_device = _cuda_device_id;
+    
+    // Check if peer access is possible
+    bool can_peer_access = cuda_device_manager::can_access_peer(new_device_id, old_device);
+    
+    if (can_peer_access) {
+      // Enable peer access for direct GPU-to-GPU copy
+      try {
+        cuda_device_manager::enable_peer_access(new_device_id, old_device);
+      } catch (...) {
+        // Peer access failed, fall back to host copy
+        can_peer_access = false;
+      }
+    }
+
+    // Save old data pointer
+    byte* old_data = get_data_ptr();
+    uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
+
+    // Allocate new memory on target device
+    int current_device = cuda_device_manager::get_current_device();
+    cuda_device_manager::set_current_device(new_device_id);
+    
+    try {
+      allocate_cuda_memory(_voxelType);
+    } catch (...) {
+      cuda_device_manager::set_current_device(current_device);
+      throw;
+    }
+
+    byte* new_data = get_data_ptr();
+
+    if (can_peer_access) {
+      // Direct peer-to-peer copy
+      CUDA_CHECK(cudaMemcpyPeer(new_data, new_device_id, old_data, old_device, data_size));
+      cvcapp.log(CVC_NAMESPACE::app::info, "Performed peer-to-peer GPU copy from device " +
+                 std::to_string(old_device) + " to device " + std::to_string(new_device_id));
+    } else {
+      // Copy through host memory
+      std::vector<byte> temp_buffer(data_size);
+      
+      // Set to old device and copy to host
+      cuda_device_manager::set_current_device(old_device);
+      CUDA_CHECK(cudaMemcpy(temp_buffer.data(), old_data, data_size, cudaMemcpyDeviceToHost));
+      
+      // Set to new device and copy from host
+      cuda_device_manager::set_current_device(new_device_id);
+      CUDA_CHECK(cudaMemcpy(new_data, temp_buffer.data(), data_size, cudaMemcpyHostToDevice));
+      
+      cvcapp.log(CVC_NAMESPACE::app::info, "Performed host-mediated GPU copy from device " +
+                 std::to_string(old_device) + " to device " + std::to_string(new_device_id));
+    }
+
+    // Restore original device
+    cuda_device_manager::set_current_device(current_device);
+
+    _cuda_device_id = new_device_id;
+#else
+    throw cuda_not_available("CVC was not compiled with CUDA support");
+#endif
+  }
+
+  void voxels::allocate_cuda_memory(data_type vt) {
+#ifdef CVC_USING_CUDA
+    // Free any existing CUDA memory first
+    free_cuda_memory();
+    
+    uint64 size = XDim() * YDim() * ZDim();
+    uint64 byte_size = size * voxelSize();
+    
+    // Allocate CUDA unified memory
+    CUDA_CHECK(cudaMallocManaged(&_cuda_unified_ptr, byte_size));
+    
+    // Initialize to zero
+    CUDA_CHECK(cudaMemset(_cuda_unified_ptr, 0, byte_size));
+#endif
+  }
+
+  void voxels::free_cuda_memory() {
+#ifdef CVC_USING_CUDA
+    if (_cuda_unified_ptr) {
+      cudaFree(_cuda_unified_ptr);
+      _cuda_unified_ptr = nullptr;
+    }
+#endif
+  }
+
+  void voxels::migrate_to_cuda(int device_id) {
+#ifdef CVC_USING_CUDA
+    // Save old data from regular multi_array
+    byte* old_data = get_data_ptr();
+    uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
+    std::vector<byte> temp_buffer(data_size);
+    std::memcpy(temp_buffer.data(), old_data, data_size);
+
+    // Set device
+    int old_device = cuda_device_manager::get_current_device();
+    cuda_device_manager::set_current_device(device_id);
+
+    // Allocate CUDA unified memory
+    allocate_cuda_memory(_voxelType);
+
+    // Copy data to CUDA unified memory
+    std::memcpy(_cuda_unified_ptr, temp_buffer.data(), data_size);
+    
+    // Synchronize to ensure data is uploaded
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Clear the regular multi_array to save memory
+    // We'll keep CUDA as the source of truth now
+    switch(_voxelType) {
+      case UChar: _voxels_uchar.reset(); break;
+      case UShort: _voxels_ushort.reset(); break;
+      case UInt: _voxels_uint.reset(); break;
+      case Float: _voxels_float.reset(); break;
+      case Double: _voxels_double.reset(); break;
+      case UInt64: _voxels_uint64.reset(); break;
+    }
+
+    // Restore device
+    cuda_device_manager::set_current_device(old_device);
+#endif
+  }
+
+  void voxels::migrate_from_cuda() {
+#ifdef CVC_USING_CUDA
+    if (!_cuda_unified_ptr) {
+      return; // Nothing to migrate
+    }
+    
+    // Ensure data is synchronized to host
+    if (_cuda_device_id >= 0) {
+      int old_device = cuda_device_manager::get_current_device();
+      cuda_device_manager::set_current_device(_cuda_device_id);
+      CUDA_CHECK(cudaDeviceSynchronize());
+      cuda_device_manager::set_current_device(old_device);
+    }
+    
+    // Save CUDA data to temporary buffer
+    uint64 data_size = XDim() * YDim() * ZDim() * voxelSize();
+    std::vector<byte> temp_buffer(data_size);
+    std::memcpy(temp_buffer.data(), _cuda_unified_ptr, data_size);
+
+    // Free CUDA memory
+    free_cuda_memory();
+
+    // Allocate regular system memory
+    switch(_voxelType) {
+      case UChar:
+        _voxels_uchar.reset(new uchar_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_uchar->data(), temp_buffer.data(), data_size);
+        break;
+      case UShort:
+        _voxels_ushort.reset(new ushort_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_ushort->data(), temp_buffer.data(), data_size);
+        break;
+      case UInt:
+        _voxels_uint.reset(new uint_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_uint->data(), temp_buffer.data(), data_size);
+        break;
+      case Float:
+        _voxels_float.reset(new float_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_float->data(), temp_buffer.data(), data_size);
+        break;
+      case Double:
+        _voxels_double.reset(new double_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_double->data(), temp_buffer.data(), data_size);
+        break;
+      case UInt64:
+        _voxels_uint64.reset(new uint64_array_type(boost::extents[XDim()][YDim()][ZDim()]));
+        std::memcpy(_voxels_uint64->data(), temp_buffer.data(), data_size);
+        break;
+    }
+#endif
   }
 }
 

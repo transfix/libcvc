@@ -51,6 +51,7 @@ set(SOURCE_FILES
   spider_io.cpp
   state.cpp
   utility.cpp
+  cuda_utils.cpp
   voxels.cpp
   volume.cpp
   volume_file_io.cpp
