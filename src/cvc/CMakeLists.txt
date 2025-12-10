@@ -381,70 +381,70 @@ if(CVC_ENABLE_SDF)
   )
   set(INCLUDE_FILES
       ${INCLUDE_FILES}
-      SDF/UsefulMath/AreaVolumes.h
-      SDF/UsefulMath/Matrix.h
-      SDF/UsefulMath/TrilinearGrid.h
-      SDF/UsefulMath/LinearAlgebra.h
-      SDF/UsefulMath/Vector.h
-      SDF/UsefulMath/Ray.h
-      SDF/UsefulMath/Quaternion.h
-      SDF/UsefulMath/Tuple.h
-      SDF/GeometryFileTypes/RawnFile.h
-      SDF/GeometryFileTypes/RawncFile.h
-      SDF/GeometryFileTypes/MayaOBJFile.h
-      SDF/GeometryFileTypes/RawcFile.h
-      SDF/GeometryFileTypes/RawFile.h
-      SDF/GeometryFileTypes/GeometryFileType.h
-      SDF/GeometryFileTypes/GeometryLoader.h
-      SDF/ByteOrder/ByteSwapping.h
+      # SDF/UsefulMath/AreaVolumes.h
+      # SDF/UsefulMath/Matrix.h
+      # SDF/UsefulMath/TrilinearGrid.h
+      # SDF/UsefulMath/LinearAlgebra.h
+      # SDF/UsefulMath/Vector.h
+      # SDF/UsefulMath/Ray.h
+      # SDF/UsefulMath/Quaternion.h
+      # SDF/UsefulMath/Tuple.h
+      # SDF/GeometryFileTypes/RawnFile.h
+      # SDF/GeometryFileTypes/RawncFile.h
+      # SDF/GeometryFileTypes/MayaOBJFile.h
+      # SDF/GeometryFileTypes/RawcFile.h
+      # SDF/GeometryFileTypes/RawFile.h
+      # SDF/GeometryFileTypes/GeometryFileType.h
+      # SDF/GeometryFileTypes/GeometryLoader.h
+      #SDF/ByteOrder/ByteSwapping.h
       SDF/SignDistanceFunction/common.h
       SDF/SignDistanceFunction/sdfLib.h
       SDF/SignDistanceFunction/head.h
-      SDF/Geometry/IntQueue.h
-      SDF/Geometry/GeometrySceneArray.h
-      SDF/Geometry/Geometry.h
-      SDF/Geometry/SceneArrayNode.h
-      SDF/Geometry/MeshDerivatives.h
-      SDF/Geometry/GeometryScene.h
-      SDF/VolumeFileTypes/RawVFile.h
-      SDF/VolumeFileTypes/RawIVFile.h
-      SDF/VolumeFileTypes/MRCFile.h
-      SDF/VolumeFileTypes/SimpleVolumeData.h
-      SDF/VolumeFileTypes/DXFile.h
-      SDF/VolumeFileTypes/VolumeLoader.h
-      SDF/VolumeFileTypes/VolumeFileType.h
-      SDF/SignDistanceFunction_v2/Geom3DParser.h
-      SDF/SignDistanceFunction_v2/reg3data.h
-      SDF/SignDistanceFunction_v2/mtxlib.h
-      SDF/SignDistanceFunction_v2/bufferedio.h
-      SDF/SignDistanceFunction_v2/geom.h
-      SDF/SignDistanceFunction_v2/cubes.h
-      SDF/SignDistanceFunction_v2/diskio.h
-      SDF/SignDistanceFunction_v2/FaceVertSet3D.h
-      SDF/SignDistanceFunction_v2/dynarray.h
-      SDF/SignDistanceFunction_v2/Reg3Parser.h
-      SDF/SignDistanceFunction_v2/DistanceTransform.h
-      SDF/SignDistanceFunction_v2/bio.h
-      SDF/SignDistanceFunction_v2/RawivParser.h
+      #SDF/Geometry/IntQueue.h
+      #SDF/Geometry/GeometrySceneArray.h
+      #SDF/Geometry/Geometry.h
+      #SDF/Geometry/SceneArrayNode.h
+      #SDF/Geometry/MeshDerivatives.h
+      #SDF/Geometry/GeometryScene.h
+      #SDF/VolumeFileTypes/RawVFile.h
+      #SDF/VolumeFileTypes/RawIVFile.h
+      #SDF/VolumeFileTypes/MRCFile.h
+      #SDF/VolumeFileTypes/SimpleVolumeData.h
+      #SDF/VolumeFileTypes/DXFile.h
+      #SDF/VolumeFileTypes/VolumeLoader.h
+      #SDF/VolumeFileTypes/VolumeFileType.h
+      # SDF/SignDistanceFunction_v2/Geom3DParser.h
+      # SDF/SignDistanceFunction_v2/reg3data.h
+      # SDF/SignDistanceFunction_v2/mtxlib.h
+      # SDF/SignDistanceFunction_v2/bufferedio.h
+      # SDF/SignDistanceFunction_v2/geom.h
+      # SDF/SignDistanceFunction_v2/cubes.h
+      # SDF/SignDistanceFunction_v2/diskio.h
+      # SDF/SignDistanceFunction_v2/FaceVertSet3D.h
+      # SDF/SignDistanceFunction_v2/dynarray.h
+      # SDF/SignDistanceFunction_v2/Reg3Parser.h
+      # SDF/SignDistanceFunction_v2/DistanceTransform.h
+      # SDF/SignDistanceFunction_v2/bio.h
+      # SDF/SignDistanceFunction_v2/RawivParser.h
   )
   set(SOURCE_FILES
       ${SOURCE_FILES}
-      SDF/UsefulMath/TrilinearGrid.cpp
-      SDF/UsefulMath/Ray.cpp
-      SDF/UsefulMath/Quaternion.cpp
-      SDF/UsefulMath/Tuple.cpp
-      SDF/UsefulMath/Vector.cpp
-      SDF/UsefulMath/Matrix.cpp
-      SDF/UsefulMath/AreaVolumes.cpp
-      SDF/UsefulMath/LinearAlgebra.cpp
-      SDF/GeometryFileTypes/GeometryFileType.cpp
-      SDF/GeometryFileTypes/RawnFile.cpp
-      SDF/GeometryFileTypes/MayaOBJFile.cpp
-      SDF/GeometryFileTypes/RawcFile.cpp
-      SDF/GeometryFileTypes/GeometryLoader.cpp
-      SDF/GeometryFileTypes/RawFile.cpp
-      SDF/GeometryFileTypes/RawncFile.cpp
-      SDF/ByteOrder/ByteSwapping.cpp
+      # SDF/UsefulMath/TrilinearGrid.cpp
+      # SDF/UsefulMath/Ray.cpp
+      # SDF/UsefulMath/Quaternion.cpp
+      # SDF/UsefulMath/Tuple.cpp
+      # SDF/UsefulMath/Vector.cpp
+      # SDF/UsefulMath/Matrix.cpp
+      # SDF/UsefulMath/AreaVolumes.cpp
+      # SDF/UsefulMath/LinearAlgebra.cpp
+      # SDF/GeometryFileTypes/GeometryFileType.cpp
+      # SDF/GeometryFileTypes/RawnFile.cpp
+      # SDF/GeometryFileTypes/MayaOBJFile.cpp
+      # SDF/GeometryFileTypes/RawcFile.cpp
+      # SDF/GeometryFileTypes/GeometryLoader.cpp
+      # SDF/GeometryFileTypes/RawFile.cpp
+      # SDF/GeometryFileTypes/RawncFile.cpp
+      # SDF/ByteOrder/ByteSwapping.cpp
       SDF/SignDistanceFunction/init.cpp
       SDF/SignDistanceFunction/compute.cpp
       SDF/SignDistanceFunction/propagate.cpp
@@ -453,29 +453,29 @@ if(CVC_ENABLE_SDF)
       SDF/SignDistanceFunction/main.cpp
       SDF/SignDistanceFunction/common.cpp
       SDF/SignDistanceFunction/octree.cpp
-      SDF/Geometry/GeometryScene.cpp
-      SDF/Geometry/GeometrySceneArray.cpp
-      SDF/Geometry/Geometry.cpp
-      SDF/Geometry/SceneArrayNode.cpp
-      SDF/Geometry/IntQueue.cpp
-      SDF/Geometry/MeshDerivatives.cpp
-      SDF/VolumeFileTypes/VolumeLoader.cpp
-      SDF/VolumeFileTypes/DXFile.cpp
-      SDF/VolumeFileTypes/RawIVFile.cpp
-      SDF/VolumeFileTypes/RawVFile.cpp
-      SDF/VolumeFileTypes/VolumeFileType.cpp
-      SDF/VolumeFileTypes/MRCFile.cpp
-      SDF/VolumeFileTypes/SimpleVolumeData.cpp
+      #SDF/Geometry/GeometryScene.cpp
+      #SDF/Geometry/GeometrySceneArray.cpp
+      #SDF/Geometry/Geometry.cpp
+      #SDF/Geometry/SceneArrayNode.cpp
+      #SDF/Geometry/IntQueue.cpp
+      #SDF/Geometry/MeshDerivatives.cpp
+      #SDF/VolumeFileTypes/VolumeLoader.cpp
+      #SDF/VolumeFileTypes/DXFile.cpp
+      #SDF/VolumeFileTypes/RawIVFile.cpp
+      #SDF/VolumeFileTypes/RawVFile.cpp
+      #SDF/VolumeFileTypes/VolumeFileType.cpp
+      #SDF/VolumeFileTypes/MRCFile.cpp
+      #SDF/VolumeFileTypes/SimpleVolumeData.cpp
       #SDF/Server.cpp
       #SDF/SDF/main.cpp
-      SDF/SignDistanceFunction_v2/Reg3Parser.cpp
-      SDF/SignDistanceFunction_v2/RawivParser.cpp
-      SDF/SignDistanceFunction_v2/Geom3DParser.cpp
-      SDF/SignDistanceFunction_v2/geom.cpp
-      SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
-      SDF/SignDistanceFunction_v2/DistanceTransform.cpp
-      SDF/SignDistanceFunction_v2/mtxlib.cpp
-      SDF/SignDistanceFunction_v2/bufferedio.cpp
+      # SDF/SignDistanceFunction_v2/Reg3Parser.cpp
+      # SDF/SignDistanceFunction_v2/RawivParser.cpp
+      # SDF/SignDistanceFunction_v2/Geom3DParser.cpp
+      # SDF/SignDistanceFunction_v2/geom.cpp
+      # SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
+      # SDF/SignDistanceFunction_v2/DistanceTransform.cpp
+      # SDF/SignDistanceFunction_v2/mtxlib.cpp
+      # SDF/SignDistanceFunction_v2/bufferedio.cpp
   )
 endif(CVC_ENABLE_SDF)
 

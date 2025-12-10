@@ -57,6 +57,8 @@ namespace
     float mins[3] = { bbox[0], bbox[1], bbox[2] };
     float maxs[3] = { bbox[3], bbox[4], bbox[5] };
 
+    // TODO: make sdflibrary into an object, and allow switching to sdf v2
+
     //sdf lib only supports cubic sizes
     uint64 size = *max_element(dim.dim_.begin(), dim.dim_.end());
 
