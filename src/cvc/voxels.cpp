@@ -363,6 +363,26 @@ namespace CVC_NAMESPACE
     return val;
   }
   
+  // ------------------------
+  // voxels::copy (zero-parameter)
+  // ------------------------
+  // Purpose:
+  //   Creates a deep copy of itself. Allocates new memory and copies all data,
+  //   creating an independent voxels object. This is a convenience method to
+  //   avoid creating a temporary voxels object just to deep copy from.
+  // ---- Change History ----
+  // 12/10/2025 -- Joe R. -- Creation.
+  voxels& voxels::copy()
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Create a temporary shallow copy to copy from
+    voxels temp(*this);
+    
+    // Now deep copy from the temporary
+    return copy(temp, true);
+  }
+
   voxels& voxels::copy(const voxels& vox, bool deepCopy)
   {
     if(this == &vox)

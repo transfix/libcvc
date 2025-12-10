@@ -25,14 +25,14 @@ This document describes the comprehensive testing strategy and code coverage imp
 
 ## Test Suite Summary
 
-### Total Tests: 317 (Updated December 2024)
+### Total Tests: 320 (Updated December 2025)
 
 - **App Tests**: 114 (core application state management)
 - **State Tests**: 128 (includes concurrent operations and futures)
-- **Voxels Tests**: 123 (volume data structure, algorithms, **17 CUDA GPU tests**)
+- **Voxels Tests**: 127 (volume data structure, algorithms, **19 CUDA GPU tests** including multithreading)
 - **Volume Tests**: 29 (spatial coordinate system and interpolation)
 - **Geometry Tests**: 37 (mesh operations, normals, I/O using Stanford Bunny)
-- **Success Rate**: 100% (317/317 passing)
+- **Success Rate**: 100% (320/320 passing)
 - **Execution Time**: ~21 seconds
 
 ## Coverage Metrics

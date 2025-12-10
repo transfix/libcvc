@@ -239,6 +239,7 @@ namespace CVC_NAMESPACE
       operations!
     */
     virtual voxels& copy(const voxels& vox, bool deepCopy = false); //turns this object into a copy of vox (shallow by default, deep if requested)
+    virtual voxels& copy(); //creates a deep copy of itself (allocates new memory and copies all data)
     //subvolume extraction: removes voxels outside of the subvolume specified
     virtual voxels& sub(uint64 off_x, uint64 off_y, uint64 off_z,
 			const dimension& subvoldim);

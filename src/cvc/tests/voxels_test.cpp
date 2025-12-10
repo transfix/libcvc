@@ -25,6 +25,10 @@
 #include <cvc/composite_function.h>
 #include <cvc/exception.h>
 #include <cvc/types.h>
+#include <thread>
+#include <vector>
+#include <atomic>
+#include <mutex>
 
 using namespace cvc;
 
@@ -651,6 +655,76 @@ TEST(VoxelsTest, DeepCopyLargeVolume) {
   EXPECT_DOUBLE_EQ(v2(0, 0, 0), 0.0);
   EXPECT_DOUBLE_EQ(v2(25, 25, 25), 63775.0); // 25 + 25*50 + 25*50*50 = 25 + 1250 + 62500
   EXPECT_DOUBLE_EQ(v2(49, 49, 49), 124999.0); // 49 + 49*50 + 49*50*50 = 49 + 2450 + 122500
+}
+
+TEST(VoxelsTest, DeepCopySelf) {
+  // Test the zero-parameter copy() method which deep copies itself
+  voxels v1(dimension(10, 10, 10), Float);
+  v1.fill(42.0);
+  v1(5, 5, 5, 100.0);
+  
+  // Create a shallow copy that shares v1's data
+  voxels v2;
+  v2.copy(v1, false); // Shallow copy
+  
+  // Verify they share data
+  EXPECT_FLOAT_EQ(v1(5, 5, 5), 100.0);
+  EXPECT_FLOAT_EQ(v2(5, 5, 5), 100.0);
+  
+  // Modify through v1 (triggers copy-on-write for v1)
+  v1(5, 5, 5, 200.0);
+  
+  // After write, v1 has its own copy, v2 still has original
+  EXPECT_FLOAT_EQ(v1(5, 5, 5), 200.0);
+  EXPECT_FLOAT_EQ(v2(5, 5, 5), 100.0);
+  
+  // Now deep copy v1 itself
+  v1.copy();
+  
+  // After copy(), v1 should still have same values
+  EXPECT_FLOAT_EQ(v1(5, 5, 5), 200.0);
+  EXPECT_FLOAT_EQ(v1(0, 0, 0), 42.0);
+  
+  // Create another shallow copy of v1
+  voxels v3;
+  v3.copy(v1, false);
+  
+  // Modify v3 - should not affect v1 since v1 just did a deep copy
+  v3.fill(999.0);
+  
+  // v1 should be unaffected
+  EXPECT_FLOAT_EQ(v1(5, 5, 5), 200.0);
+  EXPECT_FLOAT_EQ(v3(5, 5, 5), 999.0);
+  
+  // Test with v2: it should be independent after its own copy()
+  v2.copy();
+  voxels v4;
+  v4.copy(v2, false);
+  v4.fill(777.0);
+  
+  // v2 should be unaffected
+  EXPECT_FLOAT_EQ(v2(5, 5, 5), 100.0);
+  EXPECT_FLOAT_EQ(v4(5, 5, 5), 777.0);
+}
+
+TEST(VoxelsTest, DeepCopySelfWithDifferentTypes) {
+  // Test zero-parameter copy() with various data types
+  std::vector<data_type> types = {UChar, UShort, UInt, Float, Double, UInt64};
+  
+  for (auto type : types) {
+    voxels v(dimension(8, 8, 8), type);
+    v.fill(42.0);
+    v(4, 4, 4, 100.0);
+    
+    // Deep copy itself
+    v.copy();
+    
+    // Verify data is preserved
+    EXPECT_NEAR(v(4, 4, 4), 100.0, 1e-5);
+    EXPECT_NEAR(v(0, 0, 0), 42.0, 1e-5);
+    EXPECT_EQ(v.voxelType(), type);
+    EXPECT_EQ(v.XDim(), 8u);
+  }
 }
 
 TEST(VoxelsTest, AssignmentOperatorUsesShallowCopy) {
@@ -2711,6 +2785,44 @@ TEST(VoxelsCUDATest, CopyOperationWithCUDA) {
   EXPECT_NEAR(v3(5, 5, 5), 123.0, 1e-5);
 }
 
+TEST(VoxelsCUDATest, DeepCopySelfWithCUDA) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(42.0);
+  v(5, 5, 5, 100.0);
+  
+  // Enable CUDA
+  v.enableCUDA(0);
+  EXPECT_TRUE(v.using_cuda());
+  EXPECT_NEAR(v(5, 5, 5), 100.0, 1e-5);
+  
+  // Create a shallow copy to share CUDA memory
+  voxels v_shared;
+  v_shared.copy(v, false);
+  EXPECT_TRUE(v_shared.using_cuda());
+  
+  // Now deep copy v to make it independent (using zero-parameter copy())
+  v.copy();
+  
+  // After deep copy, v should NOT be using CUDA (deep copy migrates to CPU)
+  EXPECT_FALSE(v.using_cuda());
+  EXPECT_NEAR(v(5, 5, 5), 100.0, 1e-5);
+  
+  // v_shared should still be using CUDA
+  EXPECT_TRUE(v_shared.using_cuda());
+  EXPECT_NEAR(v_shared(5, 5, 5), 100.0, 1e-5);
+  
+  // Modify v (CPU-only now)
+  v.fill(999.0);
+  
+  // v_shared should be unaffected (was using CUDA memory)
+  EXPECT_NEAR(v_shared(5, 5, 5), 100.0, 1e-5);
+  EXPECT_NEAR(v(5, 5, 5), 999.0, 1e-5);
+}
+
 TEST(VoxelsCUDATest, DifferentDataTypes) {
   if (!voxels::cuda_available()) {
     GTEST_SKIP() << "CUDA not available, skipping GPU tests";
@@ -2767,6 +2879,251 @@ TEST(VoxelsCUDATest, LargeVolumePerformance) {
   v.disableCUDA();
   EXPECT_FALSE(v.using_cuda());
   EXPECT_NEAR(v(50, 50, 50), 150.0, 1e-5);
+}
+
+// Test multithreading behavior with CUDA
+TEST(VoxelsCUDATest, MultithreadedCUDAOperations) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping test";
+    return;
+  }
+
+  const uint64 dim = 32;
+  
+  // Test 1: Create voxels in main thread, pass to worker thread for CUDA operations
+  {
+    voxels v(dimension(dim, dim, dim), Float);
+    
+    // Initialize data in main thread
+    for (uint64 k = 0; k < dim; k++) {
+      for (uint64 j = 0; j < dim; j++) {
+        for (uint64 i = 0; i < dim; i++) {
+          v(i, j, k, static_cast<float>(i + j + k));
+        }
+      }
+    }
+    
+    // Pass to worker thread for CUDA operations
+    std::thread worker([&v, dim]() {
+      // Enable CUDA in this thread
+      v.enableCUDA(0);
+      EXPECT_TRUE(v.using_cuda());
+      
+      // Verify data is accessible
+      EXPECT_NEAR(v(10, 10, 10), 30.0f, 1e-5);
+      
+      // Modify data on GPU
+      for (uint64 k = 0; k < dim; k++) {
+        for (uint64 j = 0; j < dim; j++) {
+          for (uint64 i = 0; i < dim; i++) {
+            float val = v(i, j, k);
+            v(i, j, k, val * 2.0f);
+          }
+        }
+      }
+      
+      // Synchronize
+      cudaDeviceSynchronize();
+    });
+    
+    worker.join();
+    
+    // Verify changes in main thread
+    EXPECT_NEAR(v(10, 10, 10), 60.0f, 1e-5);
+    EXPECT_NEAR(v(0, 0, 0), 0.0f, 1e-5);
+    EXPECT_NEAR(v(20, 20, 20), 120.0f, 1e-5);
+  }
+  
+  // Test 2: Shallow copy with CUDA - demonstrates copy-on-write behavior
+  {
+    voxels v1(dimension(dim, dim, dim), Float);
+    
+    // Initialize and enable CUDA
+    float* fdata = reinterpret_cast<float*>(v1.data_ptr());
+    for (uint64 i = 0; i < dim * dim * dim; i++) {
+      fdata[i] = static_cast<float>(i);
+    }
+    v1.enableCUDA(0);
+    EXPECT_TRUE(v1.using_cuda());
+    
+    // Verify initial value
+    float initial_val = v1(5, 5, 5);
+    EXPECT_NEAR(initial_val, 5.0f + 5.0f * dim + 5.0f * dim * dim, 1e-5);
+    
+    // Create shallow copy - shares CUDA memory initially
+    voxels v2(v1);
+    EXPECT_TRUE(v2.using_cuda());
+    
+    // Verify both have the same value initially
+    EXPECT_EQ(v1(5, 5, 5), v2(5, 5, 5));
+    
+    // Modify through v2 in a worker thread
+    // IMPORTANT: This triggers copy-on-write!
+    // preWrite() creates a new CPU-only copy for v2 and disables its CUDA
+    std::thread worker([&v2]() {
+      v2(5, 5, 5, 999.0f);  // This write triggers copy-on-write
+      // After preWrite(), v2 now has its own CPU memory with CUDA disabled
+    });
+    
+    worker.join();
+    
+    // After copy-on-write, v1 still has original CUDA memory, v2 has new CPU memory
+    EXPECT_TRUE(v1.using_cuda()) << "v1 should still have CUDA enabled";
+    EXPECT_FALSE(v2.using_cuda()) << "v2 should have CUDA disabled after copy-on-write";
+    
+    // v2 has the modified value in its CPU copy
+    EXPECT_NEAR(v2(5, 5, 5), 999.0f, 1e-5);
+    
+    // v1 has the original value in its CUDA memory
+    EXPECT_NEAR(v1(5, 5, 5), initial_val, 1e-5);
+  }
+  
+  // Test 3: Shallow copy read-only access - shares CUDA memory safely
+  {
+    voxels v1(dimension(dim, dim, dim), Float);
+    
+    // Initialize and enable CUDA
+    float* fdata = reinterpret_cast<float*>(v1.data_ptr());
+    for (uint64 i = 0; i < dim * dim * dim; i++) {
+      fdata[i] = static_cast<float>(i);
+    }
+    v1.enableCUDA(0);
+    
+    // Create shallow copy - shares CUDA memory
+    voxels v2(v1);
+    EXPECT_TRUE(v1.using_cuda());
+    EXPECT_TRUE(v2.using_cuda());
+    
+    // Read from v2 in worker thread (no writes, no copy-on-write)
+    std::atomic<bool> read_success(false);
+    std::thread worker([&v2, &read_success, dim]() {
+      // Read-only access doesn't trigger copy-on-write
+      float val = v2(10, 10, 10);
+      float expected = 10.0f + 10.0f * dim + 10.0f * dim * dim;
+      if (std::abs(val - expected) < 1e-5) {
+        read_success = true;
+      }
+    });
+    
+    worker.join();
+    
+    EXPECT_TRUE(read_success.load()) << "Worker thread should read correct value from shared CUDA memory";
+    EXPECT_TRUE(v1.using_cuda());
+    EXPECT_TRUE(v2.using_cuda());
+    // Both still share CUDA memory since no writes occurred
+  }
+  
+  // Test 4: Deep copy with independent CUDA memory across threads
+  {
+    voxels v1(dimension(dim, dim, dim), Float);
+    
+    // Initialize and enable CUDA
+    float* fdata = reinterpret_cast<float*>(v1.data_ptr());
+    for (uint64 i = 0; i < dim * dim * dim; i++) {
+      fdata[i] = static_cast<float>(i);
+    }
+    v1.enableCUDA(0);
+    
+    // Create deep copy - independent memory
+    voxels v2;
+    v2.copy(v1, true);  // Deep copy
+    
+    // v2 has CPU-only copy (deep copy doesn't enable CUDA on destination)
+    EXPECT_TRUE(v1.using_cuda());
+    EXPECT_FALSE(v2.using_cuda());
+    
+    // Initially equal but independent
+    float original_value = v1(5, 5, 5);
+    EXPECT_EQ(v2(5, 5, 5), original_value);
+    
+    // Modify v2 in worker thread
+    std::thread worker([&v2]() {
+      v2(5, 5, 5, 777.0f);
+    });
+    
+    worker.join();
+    
+    // v1 should be unchanged (deep copy has independent memory)
+    EXPECT_NEAR(v1(5, 5, 5), original_value, 1e-5);
+    EXPECT_NEAR(v2(5, 5, 5), 777.0f, 1e-5);
+  }
+  
+  // Test 5: Multiple threads working on independent voxels objects
+  {
+    std::vector<std::thread> threads;
+    std::atomic<int> success_count(0);
+    const int num_threads = 4;
+    
+    for (int t = 0; t < num_threads; t++) {
+      threads.emplace_back([t, &success_count, dim]() {
+        try {
+          voxels v(dimension(dim, dim, dim), Float);
+          
+          // Each thread initializes with different values
+          float offset = static_cast<float>(t * 1000);
+          float* fdata = reinterpret_cast<float*>(v.data_ptr());
+          for (uint64 i = 0; i < dim * dim * dim; i++) {
+            fdata[i] = offset + static_cast<float>(i);
+          }
+          
+          // Enable CUDA (all threads use device 0 for simplicity)
+          v.enableCUDA(0);
+          
+          // Verify data
+          float expected = offset + (10 + 10 * dim + 10 * dim * dim);
+          if (std::abs(v(10, 10, 10) - expected) < 1e-5) {
+            success_count++;
+          }
+          
+          cudaDeviceSynchronize();
+        } catch (...) {
+          // Thread failed
+        }
+      });
+    }
+    
+    for (auto& thread : threads) {
+      thread.join();
+    }
+    
+    EXPECT_EQ(success_count.load(), num_threads);
+  }
+  
+  // Test 6: Direct memory modification across threads (bypass copy-on-write)
+  {
+    voxels v(dimension(dim, dim, dim), UChar);
+    
+    // Initialize
+    unsigned char* udata = v.data_ptr();
+    for (uint64 i = 0; i < dim * dim * dim; i++) {
+      udata[i] = static_cast<unsigned char>(i % 256);
+    }
+    
+    // Enable CUDA in main thread
+    v.enableCUDA(0);
+    unsigned char original = v(15, 15, 15);
+    
+    // Modify directly via data_ptr() in worker thread (bypasses copy-on-write)
+    std::thread worker([&v, dim]() {
+      // Direct memory access bypasses operator() and copy-on-write
+      unsigned char* data = v.data_ptr();
+      uint64 idx = 15 + 15 * dim + 15 * dim * dim;
+      unsigned char old_val = data[idx];
+      data[idx] = static_cast<unsigned char>(old_val + 10);
+      cudaDeviceSynchronize();
+    });
+    
+    worker.join();
+    cudaDeviceSynchronize();
+    
+    // Changes should be visible since we modified CUDA memory directly
+    EXPECT_EQ(v(15, 15, 15), static_cast<unsigned char>(original + 10));
+    EXPECT_TRUE(v.using_cuda()) << "CUDA should still be enabled";
+  }
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
 }
 
 #endif // CVC_USING_CUDA
