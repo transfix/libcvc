@@ -28,6 +28,8 @@
 #include <cvc/dimension.h>
 #include <cvc/exception.h>
 
+#include <boost/multi_array.hpp>
+#include <boost/shared_ptr.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/tuple/tuple.hpp>
 
@@ -44,7 +46,7 @@ namespace CVC_NAMESPACE
    * 
    * IMPORTANT - MEMORY SEMANTICS:
    * =============================
-   * Voxels uses SHALLOW COPY semantics by default via boost::shared_array.
+   * Voxels uses SHALLOW COPY semantics by default via boost::shared_ptr to boost::multi_array.
    * 
    * SHALLOW COPY (default - shares data):
    * - Copy constructor: voxels v2(v1);         // Shares underlying data
@@ -76,7 +78,7 @@ namespace CVC_NAMESPACE
     dimension& voxel_dimensions() { return _dimension; }
     const dimension& voxel_dimensions() const { return _dimension; }
     virtual void voxel_dimensions(const dimension& d, 
-				  boost::shared_array<unsigned char> voxels = boost::shared_array<unsigned char>());
+				  boost::shared_ptr<boost::multi_array<unsigned char, 1>> voxels = boost::shared_ptr<boost::multi_array<unsigned char, 1>>());
     uint64 XDim() const { return voxel_dimensions().xdim; }
     uint64 YDim() const { return voxel_dimensions().ydim; }
     uint64 ZDim() const { return voxel_dimensions().zdim; }
@@ -89,20 +91,21 @@ namespace CVC_NAMESPACE
       if(i >= XDim()*YDim()*ZDim()) 
 	throw index_out_of_bounds("");
       
+      unsigned char* data = _voxels->data();
       switch(voxelType())
 	{
 	case UChar:
-	  return double(*((unsigned char *)(_voxels.get()+i*voxelSize())));
+	  return double(*((unsigned char *)(data+i*voxelSize())));
 	case UShort:
-	  return double(*((unsigned short *)(_voxels.get()+i*voxelSize())));
+	  return double(*((unsigned short *)(data+i*voxelSize())));
 	case UInt:
-	  return double(*((unsigned int *)(_voxels.get()+i*voxelSize())));
+	  return double(*((unsigned int *)(data+i*voxelSize())));
 	case Float:
-	  return double(*((float *)(_voxels.get()+i*voxelSize())));
+	  return double(*((float *)(data+i*voxelSize())));
 	case Double:
-	  return double(*((double *)(_voxels.get()+i*voxelSize())));
+	  return double(*((double *)(data+i*voxelSize())));
 	case UInt64:
-	  return double(*((uint64 *)(_voxels.get()+i*voxelSize())));
+	  return double(*((uint64 *)(data+i*voxelSize())));
 	}
       return 0;
     }
@@ -118,25 +121,26 @@ namespace CVC_NAMESPACE
 
       preWrite();
 
+      unsigned char* data = _voxels->data();
       switch(voxelType())
 	{
 	case UChar:
-	  *((unsigned char *)(_voxels.get()+i*voxelSize())) = (unsigned char)(val);
+	  *((unsigned char *)(data+i*voxelSize())) = (unsigned char)(val);
 	  break;
 	case UShort:
-	  *((unsigned short *)(_voxels.get()+i*voxelSize())) = (unsigned short)(val);
+	  *((unsigned short *)(data+i*voxelSize())) = (unsigned short)(val);
 	  break;
 	case UInt:
-	  *((unsigned int *)(_voxels.get()+i*voxelSize())) = (unsigned int)(val);
+	  *((unsigned int *)(data+i*voxelSize())) = (unsigned int)(val);
 	  break;
 	case Float:
-	  *((float *)(_voxels.get()+i*voxelSize())) = float(val);
+	  *((float *)(data+i*voxelSize())) = float(val);
 	  break;
 	case Double:
-	  *((double *)(_voxels.get()+i*voxelSize())) = double(val);
+	  *((double *)(data+i*voxelSize())) = double(val);
 	  break;
 	case UInt64:
-	  *((uint64 *)(_voxels.get()+i*voxelSize())) = uint64(val);
+	  *((uint64 *)(data+i*voxelSize())) = uint64(val);
 	}
 
       //NOTE: we cant modify min/max here because it would mess up a map() operation, and perhaps other things
@@ -148,8 +152,8 @@ namespace CVC_NAMESPACE
       (*this)(i+j*XDim()+k*XDim()*YDim(),val);
     }
     
-    unsigned char * operator*() { preWrite(); return _voxels.get(); }
-    const unsigned char * operator*() const { return _voxels.get(); }
+    unsigned char * operator*() { preWrite(); return _voxels->data(); }
+    const unsigned char * operator*() const { return _voxels->data(); }
 
     data_type voxelType() const { return _voxelType; }
     void voxelType(data_type);
@@ -175,7 +179,7 @@ namespace CVC_NAMESPACE
 
     bool operator==(const voxels& vox) const 
       { 
-        // Check if same shared_array pointer (shared data)
+        // Check if same shared_ptr pointer (shared data)
         if(_voxels == vox._voxels) return true;
         
         // Check if different dimensions or types
@@ -183,8 +187,8 @@ namespace CVC_NAMESPACE
         if(voxelType() != vox.voxelType()) return false;
         
         // Compare actual data bytes (size * voxelSize, not just size!)
-        return strncmp(reinterpret_cast<const char*>(_voxels.get()),
-                       reinterpret_cast<const char*>(vox._voxels.get()),
+        return strncmp(reinterpret_cast<const char*>(_voxels->data()),
+                       reinterpret_cast<const char*>(vox._voxels->data()),
                        voxel_dimensions().size() * voxelSize()) == 0;
       }
 
@@ -196,7 +200,7 @@ namespace CVC_NAMESPACE
     boost::tuple<const uint64 *,uint64> 
       histogram(uint64 size = 256) const 
     { 
-      calcHistogram(size); return boost::make_tuple(_histogram.get(),_histogramSize);
+      calcHistogram(size); return boost::make_tuple(_histogram.get(), _histogramSize);
     }
 
     /*
@@ -235,10 +239,26 @@ namespace CVC_NAMESPACE
      */
     virtual voxels& gdtvFilter(double parameterq, double lambda, unsigned int iteration, unsigned int neigbour);
 
-    //special access to the shared array - careful with this!
+    //special access to the multi_array - careful with this!
     // 01/11/2014 - Joe R. - creation
-    const boost::shared_array<unsigned char>& data() const { return _voxels; }
-    boost::shared_array<unsigned char>& data() { return _voxels; }
+    // 12/09/2024 - Updated to use boost::multi_array
+    const boost::shared_ptr<boost::multi_array<unsigned char, 1>>& data() const { return _voxels; }
+    boost::shared_ptr<boost::multi_array<unsigned char, 1>>& data() { return _voxels; }
+    
+    // Direct data pointer access for legacy compatibility
+    unsigned char* data_ptr() { return _voxels->data(); }
+    const unsigned char* data_ptr() const { return _voxels->data(); }
+    
+    // Legacy compatibility: convert to shared_array for old VolMagick code
+    // Note: This creates a new shared_array that shares ownership with the multi_array  
+    boost::shared_array<unsigned char> data_as_shared_array() const {
+      // Create shared_array with custom deleter that keeps multi_array alive
+      auto multi_copy = _voxels; // Capture shared_ptr to keep it alive
+      return boost::shared_array<unsigned char>(
+        _voxels->data(),
+        [multi_copy](unsigned char*) mutable { multi_copy.reset(); }
+      );
+    }
 
   protected:
     void calcMinMax() const;
@@ -250,9 +270,10 @@ namespace CVC_NAMESPACE
 
       try
 	{
-	  boost::shared_array<unsigned char> tmp(_voxels);
-	  _voxels.reset(new unsigned char[XDim()*YDim()*ZDim()*voxelSize()]);
-	  memcpy(_voxels.get(),tmp.get(),XDim()*YDim()*ZDim()*voxelSize());
+	  boost::shared_ptr<boost::multi_array<unsigned char, 1>> tmp(_voxels);
+	  uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	  _voxels.reset(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
+	  memcpy(_voxels->data(), tmp->data(), size);
 	}
       catch(std::bad_alloc& e)
 	{
@@ -261,7 +282,7 @@ namespace CVC_NAMESPACE
     }
     void calcHistogram(uint64 size) const;
 
-    boost::shared_array<unsigned char> _voxels;
+    boost::shared_ptr<boost::multi_array<unsigned char, 1>> _voxels;
 
     dimension _dimension;
 
@@ -273,7 +294,7 @@ namespace CVC_NAMESPACE
     mutable double _max;
 
     //computed on demand even for const reference so declare as mutable
-    mutable boost::shared_array<uint64> _histogram;
+    mutable boost::shared_ptr<uint64[]> _histogram;
     mutable uint64 _histogramSize;
     mutable bool _histogramDirty;
   };

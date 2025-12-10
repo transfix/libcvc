@@ -215,7 +215,7 @@ namespace
     //copy new volume to old volume type for mesher
     VolMagick::Volume old_school_vol(VolMagick::Dimension(vol.voxel_dimensions()),VolMagick::VoxelType(vol.voxelType()),
 				     VolMagick::BoundingBox(vol.boundingBox()));
-    old_school_vol.data() = vol.data();
+    old_school_vol.data() = vol.data_as_shared_array();
 
     //do the meshing
     LBIE::geoframe g_frame = LBIE::do_mesh(old_school_vol,

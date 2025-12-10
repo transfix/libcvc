@@ -36,8 +36,9 @@ namespace CVC_NAMESPACE
   {
     try
       {
-	_voxels.reset(new unsigned char[XDim()*YDim()*ZDim()*voxelSize()]);
-	memset(_voxels.get(),0,XDim()*YDim()*ZDim()*voxelSize());
+	uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	_voxels.reset(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
+	memset(_voxels->data(), 0, size);
       }
     catch(std::bad_alloc& e)
       {
@@ -51,8 +52,9 @@ namespace CVC_NAMESPACE
   {
     try
       {
-	_voxels.reset(new unsigned char[XDim()*YDim()*ZDim()*voxelSize()]);
-	memcpy(_voxels.get(),v,XDim()*YDim()*ZDim()*data_type_sizes[_voxelType]);
+	uint64 size = XDim()*YDim()*ZDim()*voxelSize();
+	_voxels.reset(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
+	memcpy(_voxels->data(), v, XDim()*YDim()*ZDim()*data_type_sizes[_voxelType]);
       }
     catch(std::bad_alloc& e)
       {
@@ -83,7 +85,7 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 08/26/2011 -- Joe R. -- Added voxels argument
-  void voxels::voxel_dimensions(const dimension& d, boost::shared_array<unsigned char> vox)
+  void voxels::voxel_dimensions(const dimension& d, boost::shared_ptr<boost::multi_array<unsigned char, 1>> vox)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
@@ -106,7 +108,8 @@ namespace CVC_NAMESPACE
         try
           {
             //in case this throws...
-            boost::shared_array<unsigned char> tmp(new unsigned char[d.xdim*d.ydim*d.zdim*voxelSize()]);
+            uint64 size = d.xdim*d.ydim*d.zdim*voxelSize();
+            boost::shared_ptr<boost::multi_array<unsigned char, 1>> tmp(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
             _voxels = tmp;
           }
         catch(std::bad_alloc& e)
@@ -115,7 +118,7 @@ namespace CVC_NAMESPACE
           }
     
         _dimension = d;
-        memset(_voxels.get(),0,XDim()*YDim()*ZDim()*voxelSize());
+        memset(_voxels->data(), 0, XDim()*YDim()*ZDim()*voxelSize());
         
         //copy the voxels back
         for(uint64 k = 0; k < ZDim() && k < bak.ZDim(); k++)
@@ -137,7 +140,8 @@ namespace CVC_NAMESPACE
     try
       {
 	//in case this throws...
-	boost::shared_array<unsigned char> tmp(new unsigned char[XDim()*YDim()*ZDim()*data_type_sizes[vt]]);
+	uint64 size = XDim()*YDim()*ZDim()*data_type_sizes[vt];
+	boost::shared_ptr<boost::multi_array<unsigned char, 1>> tmp(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
 	_voxels = tmp;
       }
     catch(std::bad_alloc& e)
@@ -146,7 +150,7 @@ namespace CVC_NAMESPACE
       }
 
     _voxelType = vt;
-    memset(_voxels.get(),0,XDim()*YDim()*ZDim()*voxelSize());
+    memset(_voxels->data(), 0, XDim()*YDim()*ZDim()*voxelSize());
 
     //copy the voxels back
     uint64 len = XDim()*YDim()*ZDim();
@@ -172,9 +176,10 @@ namespace CVC_NAMESPACE
 	  register unsigned char v;
 	  register unsigned char uchar_min = (unsigned char)(_min);
 	  register unsigned char uchar_max = (unsigned char)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((unsigned char *)(_voxels.get()+i*sizeof(unsigned char)));
+	      v = *((unsigned char *)(data+i*sizeof(unsigned char)));
 	      if(v < uchar_min) uchar_min = v;
 	      if(v > uchar_max) uchar_max = v;
 	      if((i % slice_len) == 0)
@@ -192,9 +197,10 @@ namespace CVC_NAMESPACE
 	  register unsigned short v;
 	  register unsigned short ushort_min = (unsigned short)(_min);
 	  register unsigned short ushort_max = (unsigned short)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((unsigned short *)(_voxels.get()+i*sizeof(unsigned short)));
+	      v = *((unsigned short *)(data+i*sizeof(unsigned short)));
 	      if(v < ushort_min) ushort_min = v;
 	      if(v > ushort_max) ushort_max = v;
 	      if((i % slice_len) == 0)
@@ -212,9 +218,10 @@ namespace CVC_NAMESPACE
 	  register unsigned int v;
 	  register unsigned int uint_min = (unsigned int)(_min);
 	  register unsigned int uint_max = (unsigned int)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((unsigned int *)(_voxels.get()+i*sizeof(unsigned int)));
+	      v = *((unsigned int *)(data+i*sizeof(unsigned int)));
 	      if(v < uint_min) uint_min = v;
 	      if(v > uint_max) uint_max = v;
 	      if((i % slice_len) == 0)
@@ -232,9 +239,10 @@ namespace CVC_NAMESPACE
 	  register float v;
 	  register float float_min = (float)(_min);
 	  register float float_max = (float)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((float *)(_voxels.get()+i*sizeof(float)));
+	      v = *((float *)(data+i*sizeof(float)));
 	      if(v < float_min) float_min = v;
 	      if(v > float_max) float_max = v;
 	      if((i % slice_len) == 0)
@@ -252,9 +260,10 @@ namespace CVC_NAMESPACE
 	  register double v;
 	  register double double_min = (double)(_min);
 	  register double double_max = (double)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((double *)(_voxels.get()+i*sizeof(double)));
+	      v = *((double *)(data+i*sizeof(double)));
 	      if(v < double_min) double_min = v;
 	      if(v > double_max) double_max = v;
 	      if((i % slice_len) == 0)
@@ -272,9 +281,10 @@ namespace CVC_NAMESPACE
 	  register uint64 v;
 	  register uint64 uint64_min = (uint64)(_min);
 	  register uint64 uint64_max = (uint64)(_max);
+	  unsigned char* data = _voxels->data();
 	  for(i=0; i<len; i++)
 	    {
-	      v = *((uint64 *)(_voxels.get()+i*sizeof(uint64)));
+	      v = *((uint64 *)(data+i*sizeof(uint64)));
 	      if(v < uint64_min) uint64_min = v;
 	      if(v > uint64_max) uint64_max = v;
 	      if((i % slice_len) == 0)
@@ -375,8 +385,8 @@ namespace CVC_NAMESPACE
         try
           {
             uint64 size = vox.XDim() * vox.YDim() * vox.ZDim() * vox.voxelSize();
-            _voxels.reset(new unsigned char[size]);
-            memcpy(_voxels.get(), vox._voxels.get(), size);
+            _voxels.reset(new boost::multi_array<unsigned char, 1>(boost::extents[size]));
+            memcpy(_voxels->data(), vox._voxels->data(), size);
           }
         catch(std::bad_alloc& e)
           {

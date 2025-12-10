@@ -748,11 +748,11 @@ TEST(VoxelsTest, SharedArrayAccess) {
   voxels v(dimension(5, 5, 5), Float);
   v(0, 0, 0, 3.14f);
   
-  const boost::shared_array<unsigned char>& data = v.data();
+  const auto& data = v.data();
   EXPECT_TRUE(data);
   
   // Access as float pointer
-  const float* fdata = reinterpret_cast<const float*>(data.get());
+  const float* fdata = reinterpret_cast<const float*>(data->data());
   EXPECT_FLOAT_EQ(fdata[0], 3.14f);
 }
 
