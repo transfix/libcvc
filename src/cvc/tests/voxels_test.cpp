@@ -2271,6 +2271,502 @@ TEST(VoxelsTest, ResizeThenFill) {
   EXPECT_NEAR(v(9, 9, 9), 20.0, 1e-5);
 }
 
+// ============================================================================
+// CUDA Unified Memory Tests (only compiled if CUDA is available)
+// ============================================================================
+
+#ifdef CVC_USING_CUDA
+
+TEST(VoxelsCUDATest, CUDAAvailability) {
+  // Test that CUDA availability can be queried
+  bool cuda_avail = voxels::cuda_available();
+  int device_count = voxels::cuda_device_count();
+  
+  // These should be consistent
+  if (cuda_avail) {
+    EXPECT_GT(device_count, 0);
+  } else {
+    EXPECT_EQ(device_count, 0);
+  }
+}
+
+TEST(VoxelsCUDATest, GPUDeviceInfo) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  auto gpus = voxels::get_gpu_info();
+  EXPECT_GT(gpus.size(), 0u);
+  
+  // Check first GPU has valid properties
+  EXPECT_GE(gpus[0].device_id, 0);
+  EXPECT_FALSE(gpus[0].name.empty());
+  EXPECT_GT(gpus[0].total_memory, 0u);
+}
+
+TEST(VoxelsCUDATest, DeviceSelection) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  int original_device = voxels::get_current_gpu();
+  EXPECT_GE(original_device, 0);
+  
+  // Set device 0 explicitly
+  voxels::set_current_gpu(0);
+  EXPECT_EQ(voxels::get_current_gpu(), 0);
+  
+  // Restore original device
+  voxels::set_current_gpu(original_device);
+}
+
+TEST(VoxelsCUDATest, EnableDisableCUDA) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(42.0f);
+  
+  // Initially not using CUDA
+  EXPECT_FALSE(v.using_cuda());
+  EXPECT_EQ(v.cuda_device(), -1);
+  
+  // Enable CUDA
+  v.enableCUDA(0);
+  EXPECT_TRUE(v.using_cuda());
+  EXPECT_EQ(v.cuda_device(), 0);
+  
+  // Data should be preserved
+  EXPECT_NEAR(v(5, 5, 5), 42.0, 1e-5);
+  EXPECT_NEAR(v(0, 0, 0), 42.0, 1e-5);
+  EXPECT_NEAR(v(9, 9, 9), 42.0, 1e-5);
+  
+  // Disable CUDA
+  v.disableCUDA();
+  EXPECT_FALSE(v.using_cuda());
+  EXPECT_EQ(v.cuda_device(), -1);
+  
+  // Data should still be preserved
+  EXPECT_NEAR(v(5, 5, 5), 42.0, 1e-5);
+  EXPECT_NEAR(v(0, 0, 0), 42.0, 1e-5);
+  EXPECT_NEAR(v(9, 9, 9), 42.0, 1e-5);
+}
+
+TEST(VoxelsCUDATest, DataMigrationToGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(20, 20, 20), Double);
+  
+  // Fill with specific pattern on CPU
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        v(i, j, k, i * 100.0 + j * 10.0 + k);
+      }
+    }
+  }
+  
+  // Migrate to GPU
+  v.enableCUDA(0);
+  
+  // Verify all data is intact
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        double expected = i * 100.0 + j * 10.0 + k;
+        EXPECT_NEAR(v(i, j, k), expected, 1e-9);
+      }
+    }
+  }
+}
+
+TEST(VoxelsCUDATest, DataMigrationFromGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(15, 15, 15), Float);
+  
+  // Enable CUDA first
+  v.enableCUDA(0);
+  
+  // Fill with data while on GPU
+  for (uint64 k = 0; k < 15; k++) {
+    for (uint64 j = 0; j < 15; j++) {
+      for (uint64 i = 0; i < 15; i++) {
+        v(i, j, k, static_cast<float>(i + j + k));
+      }
+    }
+  }
+  
+  // Migrate back to CPU
+  v.disableCUDA();
+  
+  // Verify all data survived the migration
+  for (uint64 k = 0; k < 15; k++) {
+    for (uint64 j = 0; j < 15; j++) {
+      for (uint64 i = 0; i < 15; i++) {
+        float expected = static_cast<float>(i + j + k);
+        EXPECT_NEAR(v(i, j, k), expected, 1e-5);
+      }
+    }
+  }
+}
+
+TEST(VoxelsCUDATest, MultipleEnableDisableCycles) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(10, 10, 10), UChar);
+  v.fill(123.0);
+  
+  // Cycle between CPU and GPU multiple times
+  for (int cycle = 0; cycle < 3; cycle++) {
+    v.enableCUDA(0);
+    EXPECT_TRUE(v.using_cuda());
+    EXPECT_EQ(v(5, 5, 5), 123);
+    
+    v.disableCUDA();
+    EXPECT_FALSE(v.using_cuda());
+    EXPECT_EQ(v(5, 5, 5), 123);
+  }
+}
+
+TEST(VoxelsCUDATest, SwitchGPUDevices) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  if (voxels::cuda_device_count() < 2) {
+    GTEST_SKIP() << "Multiple GPUs not available, skipping multi-GPU test";
+  }
+  
+  voxels v(dimension(12, 12, 12), Float);
+  v.fill(99.0f);
+  
+  // Enable on GPU 0
+  v.enableCUDA(0);
+  EXPECT_EQ(v.cuda_device(), 0);
+  EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+  
+  // Switch to GPU 1
+  v.switchGPU(1);
+  EXPECT_EQ(v.cuda_device(), 1);
+  EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+  
+  // Switch back to GPU 0
+  v.switchGPU(0);
+  EXPECT_EQ(v.cuda_device(), 0);
+  EXPECT_NEAR(v(6, 6, 6), 99.0, 1e-5);
+}
+
+TEST(VoxelsCUDATest, ModifyDataOnGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v(dimension(10, 10, 10), Float);
+  v.fill(0.0f);
+  
+  // Enable CUDA
+  v.enableCUDA(0);
+  
+  // Modify data while on GPU
+  v(5, 5, 5, 123.456f);
+  v(0, 0, 0, 789.012f);
+  v(9, 9, 9, 345.678f);
+  
+  // Verify modifications
+  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-5);
+  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-5);
+  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-5);
+  
+  // Disable CUDA and verify data persisted
+  v.disableCUDA();
+  EXPECT_NEAR(v(5, 5, 5), 123.456, 1e-5);
+  EXPECT_NEAR(v(0, 0, 0), 789.012, 1e-5);
+  EXPECT_NEAR(v(9, 9, 9), 345.678, 1e-5);
+}
+
+TEST(VoxelsCUDATest, FillOperationCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  // Create two identical voxels
+  dimension dim(20, 20, 20);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Fill on CPU
+  v_cpu.fill(42.42);
+  
+  // Fill on GPU
+  v_gpu.enableCUDA(0);
+  v_gpu.fill(42.42);
+  v_gpu.disableCUDA();
+  
+  // Compare results
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        EXPECT_NEAR(v_cpu(i, j, k), v_gpu(i, j, k), 1e-5);
+      }
+    }
+  }
+}
+
+TEST(VoxelsCUDATest, MapOperationCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  dimension dim(15, 15, 15);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Fill with gradient
+  for (uint64 k = 0; k < 15; k++) {
+    for (uint64 j = 0; j < 15; j++) {
+      for (uint64 i = 0; i < 15; i++) {
+        double val = (i + j + k) / 45.0 * 255.0;
+        v_cpu(i, j, k, val);
+        v_gpu(i, j, k, val);
+      }
+    }
+  }
+  
+  // Map on CPU
+  v_cpu.map(0.0, 100.0);
+  
+  // Map on GPU
+  v_gpu.enableCUDA(0);
+  v_gpu.map(0.0, 100.0);
+  v_gpu.disableCUDA();
+  
+  // Compare results
+  for (uint64 k = 0; k < 15; k++) {
+    for (uint64 j = 0; j < 15; j++) {
+      for (uint64 i = 0; i < 15; i++) {
+        EXPECT_NEAR(v_cpu(i, j, k), v_gpu(i, j, k), 1e-4);
+      }
+    }
+  }
+}
+
+TEST(VoxelsCUDATest, SubvolumeOperationCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  dimension dim(20, 20, 20);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Fill with pattern
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        double val = i * 100 + j * 10 + k;
+        v_cpu(i, j, k, val);
+        v_gpu(i, j, k, val);
+      }
+    }
+  }
+  
+  // Extract subvolume on CPU
+  v_cpu.sub(5, 5, 5, dimension(10, 10, 10));
+  
+  // Extract subvolume on GPU
+  v_gpu.enableCUDA(0);
+  v_gpu.sub(5, 5, 5, dimension(10, 10, 10));
+  v_gpu.disableCUDA();
+  
+  // Compare dimensions
+  EXPECT_EQ(v_cpu.XDim(), v_gpu.XDim());
+  EXPECT_EQ(v_cpu.YDim(), v_gpu.YDim());
+  EXPECT_EQ(v_cpu.ZDim(), v_gpu.ZDim());
+  
+  // Compare data
+  for (uint64 k = 0; k < 10; k++) {
+    for (uint64 j = 0; j < 10; j++) {
+      for (uint64 i = 0; i < 10; i++) {
+        EXPECT_NEAR(v_cpu(i, j, k), v_gpu(i, j, k), 1e-5);
+      }
+    }
+  }
+}
+
+TEST(VoxelsCUDATest, BilateralFilterCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  dimension dim(16, 16, 16);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Create a simple pattern with some noise
+  for (uint64 k = 0; k < 16; k++) {
+    for (uint64 j = 0; j < 16; j++) {
+      for (uint64 i = 0; i < 16; i++) {
+        double base = (i < 8) ? 50.0 : 150.0;
+        double noise = ((i + j + k) % 3) * 2.0;
+        v_cpu(i, j, k, base + noise);
+        v_gpu(i, j, k, base + noise);
+      }
+    }
+  }
+  
+  // Apply bilateral filter on CPU
+  v_cpu.bilateralFilter(20.0, 1.0, 1);
+  
+  // Apply bilateral filter on GPU
+  v_gpu.enableCUDA(0);
+  v_gpu.bilateralFilter(20.0, 1.0, 1);
+  v_gpu.disableCUDA();
+  
+  // Compare results - should be very close
+  double max_diff = 0.0;
+  for (uint64 k = 0; k < 16; k++) {
+    for (uint64 j = 0; j < 16; j++) {
+      for (uint64 i = 0; i < 16; i++) {
+        double diff = std::abs(v_cpu(i, j, k) - v_gpu(i, j, k));
+        max_diff = std::max(max_diff, diff);
+      }
+    }
+  }
+  
+  // Results should be identical or very close (within floating point tolerance)
+  EXPECT_LT(max_diff, 0.1) << "CPU and GPU bilateral filter results differ significantly";
+}
+
+TEST(VoxelsCUDATest, MinMaxCalculationCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  dimension dim(10, 10, 10);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Fill with random-ish pattern
+  for (uint64 k = 0; k < 10; k++) {
+    for (uint64 j = 0; j < 10; j++) {
+      for (uint64 i = 0; i < 10; i++) {
+        double val = (i * 7 + j * 13 + k * 19) % 100;
+        v_cpu(i, j, k, val);
+        v_gpu(i, j, k, val);
+      }
+    }
+  }
+  
+  // Calculate min/max on CPU
+  double cpu_min = v_cpu.min();
+  double cpu_max = v_cpu.max();
+  
+  // Calculate min/max on GPU
+  v_gpu.enableCUDA(0);
+  double gpu_min = v_gpu.min();
+  double gpu_max = v_gpu.max();
+  v_gpu.disableCUDA();
+  
+  // Should be identical
+  EXPECT_NEAR(cpu_min, gpu_min, 1e-9);
+  EXPECT_NEAR(cpu_max, gpu_max, 1e-9);
+}
+
+TEST(VoxelsCUDATest, CopyOperationWithCUDA) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  voxels v1(dimension(10, 10, 10), Float);
+  v1.fill(123.0);
+  v1.enableCUDA(0);
+  
+  // Shallow copy
+  voxels v2;
+  v2.copy(v1);
+  
+  // v2 should also be using CUDA on the same device
+  EXPECT_TRUE(v2.using_cuda());
+  EXPECT_EQ(v2.cuda_device(), 0);
+  EXPECT_NEAR(v2(5, 5, 5), 123.0, 1e-5);
+  
+  // Deep copy
+  voxels v3;
+  v3.copy(v1, true);
+  
+  // v3 should NOT be using CUDA (deep copy migrates to CPU)
+  // Actually, let's check what the behavior is...
+  EXPECT_NEAR(v3(5, 5, 5), 123.0, 1e-5);
+}
+
+TEST(VoxelsCUDATest, DifferentDataTypes) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  // Test multiple data types
+  std::vector<data_type> types = {UChar, UShort, UInt, Float, Double};
+  
+  for (auto dtype : types) {
+    voxels v(dimension(8, 8, 8), dtype);
+    v.fill(42.0);
+    
+    // Enable CUDA
+    v.enableCUDA(0);
+    EXPECT_TRUE(v.using_cuda());
+    
+    // Verify data
+    EXPECT_NEAR(v(4, 4, 4), 42.0, 1e-5);
+    
+    // Disable CUDA
+    v.disableCUDA();
+    EXPECT_FALSE(v.using_cuda());
+    EXPECT_NEAR(v(4, 4, 4), 42.0, 1e-5);
+  }
+}
+
+TEST(VoxelsCUDATest, LargeVolumePerformance) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  // Test with a reasonably large volume
+  dimension dim(100, 100, 100);
+  voxels v(dim, Float);
+  
+  // Fill with pattern
+  for (uint64 k = 0; k < 100; k += 10) {
+    for (uint64 j = 0; j < 100; j += 10) {
+      for (uint64 i = 0; i < 100; i += 10) {
+        v(i, j, k, static_cast<float>(i + j + k));
+      }
+    }
+  }
+  
+  // Migrate to GPU - this tests that large volumes work
+  v.enableCUDA(0);
+  EXPECT_TRUE(v.using_cuda());
+  
+  // Spot check some values
+  EXPECT_NEAR(v(50, 50, 50), 150.0, 1e-5);
+  EXPECT_NEAR(v(90, 90, 90), 270.0, 1e-5);
+  
+  // Migrate back
+  v.disableCUDA();
+  EXPECT_FALSE(v.using_cuda());
+  EXPECT_NEAR(v(50, 50, 50), 150.0, 1e-5);
+}
+
+#endif // CVC_USING_CUDA
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

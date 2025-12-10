@@ -800,7 +800,7 @@ namespace CVC_NAMESPACE
     _using_cuda = true;
     _cuda_device_id = device_id;
 
-    cvcapp.log(CVC_NAMESPACE::app::info, "CUDA unified memory enabled on device " + 
+    cvcapp.log(3, "CUDA unified memory enabled on device " + 
                std::to_string(device_id));
 #else
     throw cuda_not_available("CVC was not compiled with CUDA support");
@@ -821,7 +821,7 @@ namespace CVC_NAMESPACE
     _using_cuda = false;
     _cuda_device_id = -1;
 
-    cvcapp.log(CVC_NAMESPACE::app::info, "CUDA unified memory disabled");
+    cvcapp.log(3, "CUDA unified memory disabled");
 #endif
   }
 
@@ -882,7 +882,7 @@ namespace CVC_NAMESPACE
     if (can_peer_access) {
       // Direct peer-to-peer copy
       CUDA_CHECK(cudaMemcpyPeer(new_data, new_device_id, old_data, old_device, data_size));
-      cvcapp.log(CVC_NAMESPACE::app::info, "Performed peer-to-peer GPU copy from device " +
+      cvcapp.log(3, "Performed peer-to-peer GPU copy from device " +
                  std::to_string(old_device) + " to device " + std::to_string(new_device_id));
     } else {
       // Copy through host memory
@@ -896,7 +896,7 @@ namespace CVC_NAMESPACE
       cuda_device_manager::set_current_device(new_device_id);
       CUDA_CHECK(cudaMemcpy(new_data, temp_buffer.data(), data_size, cudaMemcpyHostToDevice));
       
-      cvcapp.log(CVC_NAMESPACE::app::info, "Performed host-mediated GPU copy from device " +
+      cvcapp.log(3, "Performed host-mediated GPU copy from device " +
                  std::to_string(old_device) + " to device " + std::to_string(new_device_id));
     }
 
@@ -955,17 +955,11 @@ namespace CVC_NAMESPACE
     // Synchronize to ensure data is uploaded
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Clear the regular multi_array to save memory
-    // We'll keep CUDA as the source of truth now
-    switch(_voxelType) {
-      case UChar: _voxels_uchar.reset(); break;
-      case UShort: _voxels_ushort.reset(); break;
-      case UInt: _voxels_uint.reset(); break;
-      case Float: _voxels_float.reset(); break;
-      case Double: _voxels_double.reset(); break;
-      case UInt64: _voxels_uint64.reset(); break;
-    }
-
+    // NOTE: We keep the regular multi_array in memory alongside CUDA memory
+    // This allows operator() to continue working with [i][j][k] indexing
+    // CUDA kernels will use the _cuda_unified_ptr directly
+    // For now, both copies exist - in the future we can optimize to use only CUDA memory
+    
     // Restore device
     cuda_device_manager::set_current_device(old_device);
 #endif
