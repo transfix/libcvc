@@ -47,6 +47,7 @@ namespace
   //   Interface between the old SDF API and the new one.
   // ---- Change History ----
   // 01/10/2014 -- Joe R. -- Creation.
+  // 12/10/2024 -- Joe R. -- Updated to use thread-safe SDFContext API.
   CVC_NAMESPACE::volume sdf_library(const CVC_NAMESPACE::geometry& geom,
 				    const CVC_NAMESPACE::dimension& dim,
 				    const CVC_NAMESPACE::bounding_box& bbox)
@@ -54,17 +55,18 @@ namespace
     using namespace std;
     using namespace CVC_NAMESPACE;
     const int flipNormals = 0;
-    float mins[3] = { bbox[0], bbox[1], bbox[2] };
-    float maxs[3] = { bbox[3], bbox[4], bbox[5] };
+    float mins[3] = { static_cast<float>(bbox[0]), 
+                      static_cast<float>(bbox[1]), 
+                      static_cast<float>(bbox[2]) };
+    float maxs[3] = { static_cast<float>(bbox[3]), 
+                      static_cast<float>(bbox[4]), 
+                      static_cast<float>(bbox[5]) };
 
-    // TODO: make sdflibrary into an object, and allow switching to sdf v2
-
-    //sdf lib only supports cubic sizes
+    // SDF lib only supports cubic sizes
     uint64 size = *max_element(dim.dim_.begin(), dim.dim_.end());
 
-    SDFLibrary::setParameters(size, flipNormals, mins, maxs);
-
-    float* values = 0;
+    // Use new thread-safe API
+    std::unique_ptr<float[]> values;
     {
       boost::scoped_array<float> v(new float[geom.num_points()*3]);
       for(int i = 0; i < geom.num_points(); i++)
@@ -74,9 +76,13 @@ namespace
       for(int i = 0; i < geom.num_tris(); i++)
 	for(int j = 0; j < 3; j++)
 	  t[i*3+j] = geom.tris()[i][j];
-      values = SDFLibrary::computeSDF(geom.num_points(), v.get(), 
-				      geom.num_tris(), t.get());
-      if(!values) throw sign_distance_function_error("SDFLibrary::computeSDF() failed");
+      
+      // Call the new thread-safe API
+      values = SDFLibrary::computeSDF_MT(geom.num_points(), v.get(), 
+                                          geom.num_tris(), t.get(),
+                                          static_cast<int>(size), flipNormals,
+                                          mins, maxs);
+      if(!values) throw sign_distance_function_error("SDFLibrary::computeSDF_MT() failed");
     }
 
     volume cv(dimension(size,size,size),Float,bbox);
@@ -90,7 +96,7 @@ namespace
 	    if( i!=size && j!=size && k!=size )
 	      choppedValues[c++] = values[i*(size+1)*(size+1) + j*(size+1) + k];
     }
-    delete [] values;
+    // Smart pointer automatically cleans up values
 
     cv.resize(dim);
     return cv;

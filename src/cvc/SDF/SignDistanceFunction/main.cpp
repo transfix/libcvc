@@ -55,131 +55,139 @@
 
 using namespace SDFLibrary;
 
-void free_memory()
-{
-	int i, j, k;
-	SDFLibrary::listnode* temp;
-	SDFLibrary::listnode* currNode;
+// Thread-local context for backward compatibility with global API
+static thread_local SDFContext* g_context = nullptr;
 
-	printf("starting memory de-allocation\n");
+// Legacy function - no longer needed with SDFContext and unique_ptr
+// void free_memory()
+// {
+// 	int i, j, k;
+// 	SDFLibrary::listnode* temp;
+// 	SDFLibrary::listnode* currNode;
 
-	//1. Octree
-	for (i = 0; i < SDFLibrary::size; i++)
-	{
-		for (j = 0; j < SDFLibrary::size; j++)
-		{
-			for (k = 0; k < SDFLibrary::size; k++)
-			{
-				currNode = SDFLibrary::sdf[i][j][k].tindex;
+// 	printf("starting memory de-allocation\n");
 
-				while(currNode != NULL)
-				{
-					temp = currNode;
-					currNode = currNode->next;
-					free(temp);
-				}
-			}
-			free(SDFLibrary::sdf[i][j]);
-		}
-		free(SDFLibrary::sdf[i]);
-	}	
-	free(SDFLibrary::sdf);
+// 	//1. Octree
+// 	for (i = 0; i < SDFLibrary::size; i++)
+// 	{
+// 		for (j = 0; j < SDFLibrary::size; j++)
+// 		{
+// 			for (k = 0; k < SDFLibrary::size; k++)
+// 			{
+// 				currNode = SDFLibrary::sdf[i][j][k].tindex;
 
-	free(SDFLibrary::values);
+// 				while(currNode != NULL)
+// 				{
+// 					temp = currNode;
+// 					currNode = currNode->next;
+// 					free(temp);
+// 				}
+// 			}
+// 			free(SDFLibrary::sdf[i][j]);
+// 		}
+// 		free(SDFLibrary::sdf[i]);
+// 	}	
+// 	free(SDFLibrary::sdf);
 
-	// Use delete[] instead of free for myVert to properly destruct std::vector members
-	if (SDFLibrary::vertices != NULL)
-		delete[] SDFLibrary::vertices;
+// 	free(SDFLibrary::values);
 
-	if (SDFLibrary::surface != NULL)
-		free(SDFLibrary::surface);
+// 	// Use delete[] instead of free for myVert to properly destruct std::vector members
+// 	if (SDFLibrary::vertices != NULL)
+// 		delete[] SDFLibrary::vertices;
 
-	if (SDFLibrary::normals != NULL)
-		free(SDFLibrary::normals);
+// 	if (SDFLibrary::surface != NULL)
+// 		free(SDFLibrary::surface);
 
-	if (SDFLibrary::distances != NULL)
-		free(SDFLibrary::distances);
+// 	if (SDFLibrary::normals != NULL)
+// 		free(SDFLibrary::normals);
 
-	if (SDFLibrary::queues != NULL)
-		free(SDFLibrary::queues);
+// 	if (SDFLibrary::distances != NULL)
+// 		free(SDFLibrary::distances);
 
-	if (SDFLibrary::bverts != NULL)
-		free(SDFLibrary::bverts);
+// 	if (SDFLibrary::queues != NULL)
+// 		free(SDFLibrary::queues);
 
-	printf("Memory de-allocated successfully! \n");
-}
+// 	if (SDFLibrary::bverts != NULL)
+// 		free(SDFLibrary::bverts);
 
-void SDFLibrary::setParameters(int Size, int isNormalFlip, float* mins, float* maxs)
-{
-	//First the default values.
-	SDFLibrary::init_all_vars();
-	
-	//Then, assign the actual input values.
-	SDFLibrary::size = Size;
-	SDFLibrary::flipNormals = isNormalFlip;
+// 	printf("Memory de-allocated successfully! \n");
+// }
 
-	SDFLibrary::minext[0] = mins[0];	SDFLibrary::minext[1] = mins[1];	SDFLibrary::minext[2] = mins[2];
-	SDFLibrary::maxext[0] = maxs[0];	SDFLibrary::maxext[1] = maxs[1];	SDFLibrary::maxext[2] = maxs[2];
-	SDFLibrary::span[0] = (maxs[0]-mins[0])/(SDFLibrary::size);
-	SDFLibrary::span[1] = (maxs[1]-mins[1])/(SDFLibrary::size);
-	SDFLibrary::span[2] = (maxs[2]-mins[2])/(SDFLibrary::size);
+// Legacy function - no longer needed with SDFContext
+// void SDFLibrary::setParameters(int Size, int isNormalFlip, float* mins, float* maxs)
+// {
+// 	//First the default values.
+// 	SDFLibrary::init_all_vars();
+// 	
+// 	//Then, assign the actual input values.
+// 	SDFLibrary::size = Size;
+// 	SDFLibrary::flipNormals = isNormalFlip;
 
-	if ((Size!=16) && (Size!=32) &&(Size!=64) && (Size!=128) && (Size!=256) &&(Size!=512) &&(Size!=1024))
-	{
-		printf("size is incorrect\n");
-		exit(1);
-	}
-}
+// 	SDFLibrary::minext[0] = mins[0];	SDFLibrary::minext[1] = mins[1];	SDFLibrary::minext[2] = mins[2];
+// 	SDFLibrary::maxext[0] = maxs[0];	SDFLibrary::maxext[1] = maxs[1];	SDFLibrary::maxext[2] = maxs[2];
+// 	SDFLibrary::span[0] = (maxs[0]-mins[0])/(SDFLibrary::size);
+// 	SDFLibrary::span[1] = (maxs[1]-mins[1])/(SDFLibrary::size);
+// 	SDFLibrary::span[2] = (maxs[2]-mins[2])/(SDFLibrary::size);
 
+// 	if ((Size!=16) && (Size!=32) &&(Size!=64) && (Size!=128) && (Size!=256) &&(Size!=512) &&(Size!=1024))
+// 	{
+// 		printf("size is incorrect\n");
+// 		exit(1);
+// 	}
+// }
+
+// Legacy computeSDF removed - use computeSDF_MT instead
+/*
 float* SDFLibrary::computeSDF(int nverts, float* verts, int ntris, int* tris)
 {
-	int i, numb;
-	float* sdfValues =NULL;
-	float isoval;
+	... removed ...
+}
+*/
 
-	//Set up the volume grid
-	if( !initSDF() ) return 0;
-
-	//Read in the Geometry
-	readGeom(nverts, verts, ntris, tris);
-
-	//Setup the Octree
-	adjustData();
-
-	//Compute the SDF
-    compute();
-
-	//Return the SDF
-	numb = (SDFLibrary::size+1)*(SDFLibrary::size+1)*(SDFLibrary::size+1);
-	sdfValues = (float*)(malloc(sizeof(float)*(numb)));
-	isoval = 100.0f;
-
-	for (i=0; i<numb; i++)
-		sdfValues[i] = SDFLibrary::values[i].value * SDFLibrary::values[i].signe;
-
-	free_memory();
-
-	return (sdfValues);
-}	
-
+// Legacy getVolumeInfo removed - information is now in SDFContext
+/*
 RAWIV_header* SDFLibrary::getVolumeInfo()
 {
-	int i;
+	... removed ...
+}
+*/
 
-	RAWIV_header* ret = (RAWIV_header*)(malloc(sizeof(RAWIV_header)*1));
+// ============================================================================
+// NEW THREAD-SAFE API IMPLEMENTATION
+// ============================================================================
 
-	for (i=0; i<3; i++)
-	{
-		ret->minext[i] = SDFLibrary::minext[i];
-		ret->maxext[i] = SDFLibrary::maxext[i];
-		ret->span[i] = SDFLibrary::span[i];
-		ret->origin[i] = 0.0f;
-		ret->dim[i] = SDFLibrary::size+1;
+std::unique_ptr<SDFContext> SDFLibrary::createContext()
+{
+	return std::make_unique<SDFContext>();
+}
+
+std::unique_ptr<float[]> SDFLibrary::computeSDF_MT(
+	int nverts, const float* verts,
+	int ntris, const int* tris,
+	int grid_size, int isNormalFlip,
+	const float* mins, const float* maxs)
+{
+	// Create a new context for this computation
+	auto ctx = createContext();
+	
+	// Configure parameters
+	ctx->setParameters(grid_size, isNormalFlip, mins, maxs);
+	
+	// Initialize
+	if (!ctx->initSDF()) {
+		fprintf(stderr, "SDFLibrary::computeSDF_MT: initSDF() failed\n");
+		return nullptr;
 	}
-
-	ret->ngridpts = (SDFLibrary::size+1)*(SDFLibrary::size+1)*(SDFLibrary::size+1);
-	ret->ncells = (SDFLibrary::size)*(SDFLibrary::size)*(SDFLibrary::size);
-	ret->size = SDFLibrary::size;
-
-	return ret;
+	
+	// Read geometry
+	ctx->readGeom(nverts, verts, ntris, tris);
+	
+	// Adjust data and build octree
+	ctx->adjustData();
+	
+	// Compute SDF
+	ctx->compute();
+	
+	// Extract and return results
+	return ctx->releaseValues();
 }

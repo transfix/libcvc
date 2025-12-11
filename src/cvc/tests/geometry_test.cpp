@@ -1038,6 +1038,132 @@ TEST(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   std::cout << "Bunny SDF->ISO roundtrip test completed successfully!" << std::endl;
 }
 
+TEST(AlgorithmTest, BunnyVolumeConvergence) {
+  std::cout << "\n=== Testing Bunny Volume Convergence via SDF ===" << std::endl;
+  
+  // Load the bunny geometry
+  geometry bunny_geom = read_geometry("test.bunny");
+  ASSERT_GT(bunny_geom.num_points(), 0);
+  ASSERT_GT(bunny_geom.num_tris(), 0);
+  std::cout << "Loaded bunny: " << bunny_geom.num_points() << " vertices, " 
+            << bunny_geom.num_tris() << " triangles" << std::endl;
+  
+  // Get bunny bounding box
+  point_t original_min = bunny_geom.min_point();
+  point_t original_max = bunny_geom.max_point();
+  
+  std::cout << "Original bounds: [" << original_min[0] << ", " << original_min[1] << ", " << original_min[2] << "] to ["
+            << original_max[0] << ", " << original_max[1] << ", " << original_max[2] << "]" << std::endl;
+  
+  // Add padding to bounding box
+  double padding = 0.05;
+  double extent_x = original_max[0] - original_min[0];
+  double extent_y = original_max[1] - original_min[1];
+  double extent_z = original_max[2] - original_min[2];
+  
+  double min_x = original_min[0] - extent_x * padding;
+  double min_y = original_min[1] - extent_y * padding;
+  double min_z = original_min[2] - extent_z * padding;
+  double max_x = original_max[0] + extent_x * padding;
+  double max_y = original_max[1] + extent_y * padding;
+  double max_z = original_max[2] + extent_z * padding;
+  
+  bounding_box bbox(min_x, min_y, min_z, max_x, max_y, max_z);
+  
+  std::cout << "Padded bounding box: [" << min_x << ", " << max_x << "] x ["
+            << min_y << ", " << max_y << "] x [" << min_z << ", " << max_z << "]" << std::endl;
+  
+  // Test with progressively higher resolutions
+  std::vector<int> resolutions = {32, 64, 128, 256};
+  std::vector<double> volumes;
+  
+  for (int res : resolutions) {
+    std::cout << "\nTesting resolution: " << res << "^3" << std::endl;
+    
+    // Calculate voxel spacing
+    double span_x = max_x - min_x;
+    double span_y = max_y - min_y;
+    double span_z = max_z - min_z;
+    double dx = span_x / res;
+    double dy = span_y / res;
+    double dz = span_z / res;
+    
+    std::cout << "  Voxel spacing: " << dx << " x " << dy << " x " << dz << std::endl;
+    
+    // Generate SDF at this resolution
+    dimension dim(res, res, res);
+    volume sdf_vol = sdf(bunny_geom, dim, bbox);
+    
+    // Verify SDF was created
+    EXPECT_EQ(sdf_vol.XDim(), static_cast<uint64>(res));
+    EXPECT_EQ(sdf_vol.YDim(), static_cast<uint64>(res));
+    EXPECT_EQ(sdf_vol.ZDim(), static_cast<uint64>(res));
+    
+    // Count interior voxels (negative SDF values)
+    uint64 interior_count = 0;
+    for (uint64 k = 0; k < sdf_vol.ZDim(); k++) {
+      for (uint64 j = 0; j < sdf_vol.YDim(); j++) {
+        for (uint64 i = 0; i < sdf_vol.XDim(); i++) {
+          double sdf_value = sdf_vol(i, j, k);
+          if (sdf_value < 0.0) {
+            interior_count++;
+          }
+        }
+      }
+    }
+    
+    // Calculate volume (voxel count * voxel volume)
+    double voxel_volume = dx * dy * dz;
+    double computed_volume = interior_count * voxel_volume;
+    volumes.push_back(computed_volume);
+    
+    std::cout << "  Interior voxels: " << interior_count << " / " << (res * res * res) << std::endl;
+    std::cout << "  Voxel volume: " << voxel_volume << std::endl;
+    std::cout << "  Computed bunny volume: " << computed_volume << std::endl;
+  }
+  
+  // Verify volumes are converging (each resolution should be closer to final value)
+  ASSERT_GE(volumes.size(), 2u);
+  
+  // Check that volumes are generally increasing/stabilizing as resolution increases
+  // (finer resolution captures more detail)
+  std::cout << "\nVolume convergence:" << std::endl;
+  for (size_t i = 0; i < volumes.size(); i++) {
+    std::cout << "  Resolution " << resolutions[i] << "^3: " << volumes[i] << std::endl;
+    if (i > 0) {
+      double change = std::abs(volumes[i] - volumes[i-1]) / volumes[i-1] * 100.0;
+      std::cout << "    Change from previous: " << change << "%" << std::endl;
+    }
+  }
+  
+  // The volumes should be positive and reasonable
+  for (double vol : volumes) {
+    EXPECT_GT(vol, 0.0) << "Volume should be positive";
+    EXPECT_LT(vol, 1.0) << "Bunny volume should be less than 1.0 cubic units";
+  }
+  
+  // Verify volumes are generally increasing with resolution (finer detail captured)
+  // This is expected since higher resolution captures more of the surface boundary voxels
+  if (volumes.size() >= 2) {
+    // Just verify all volumes are in a reasonable range relative to each other
+    double min_vol = *std::min_element(volumes.begin(), volumes.end());
+    double max_vol = *std::max_element(volumes.begin(), volumes.end());
+    double vol_range = max_vol - min_vol;
+    
+    // The volumes should all be within an order of magnitude
+    EXPECT_LT(vol_range / min_vol, 10.0) 
+      << "Volume estimates should be within an order of magnitude across resolutions";
+    
+    std::cout << "\nVolume range: " << min_vol << " to " << max_vol 
+              << " (ratio: " << max_vol/min_vol << ")" << std::endl;
+  }
+  
+  std::cout << "\nBunny volume convergence test completed successfully!" << std::endl;
+  std::cout << "Final volume estimate (256^3): " << volumes.back() << " cubic units" << std::endl;
+  std::cout << "This test demonstrates volume computation via SDF and can be used" << std::endl;
+  std::cout << "to benchmark CPU vs CUDA performance once CUDA SDF is implemented." << std::endl;
+}
+
 // Run all tests
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

@@ -51,103 +51,54 @@
 
 using namespace SDFLibrary;
 
-extern double point_2_plane(int tri, double i, double j, double k, myPoint* inter);
-extern void compute_SDF(int vi, int vj, int vk, int ci, int cj, int ck);
+namespace SDFLibrary {
 
-double dist_grid_3Dpts(int one, int two)
+// Forward declarations
+extern double point_2_plane(SDFContext* ctx, int tri, double i, double j, double k, myPoint* inter);
+extern void compute_SDF(SDFContext* ctx, int vi, int vj, int vk, int ci, int cj, int ck);
+
+double dist_grid_3Dpts(SDFContext* ctx, int one, int two)
 {
 	int vi, vj, vk;
 	myPoint temp;
 
-	_vert2index(one, vi, vj, vk);
-	return (point_2_plane(values[two].closestV, xCoord(vi), yCoord(vj), zCoord(vk), &temp));
+	ctx->vert2index(one, vi, vj, vk);
+	return (point_2_plane(ctx, ctx->voxel_values[two].closestV, ctx->xCoord(vi), ctx->yCoord(vj), ctx->zCoord(vk), &temp));
 }
 
-void update_distance_2_vertex(int ind, int vi, int vj, int vk)
+void update_distance_2_vertex(SDFContext* ctx, int ind, int vi, int vj, int vk)
 {
 	double val;
 	int upd;
 
-	upd = index2vert(vi, vj, vk);
+	upd = ctx->index2vert(vi, vj, vk);
 	
-	if ( (vi>=0) && (vi<=size) )
+	if ( (vi>=0) && (vi<=ctx->size) )
 	{
-		if ( (vj>=0) && (vj<=size) )
+		if ( (vj>=0) && (vj<=ctx->size) )
 		{
-			if ( (vk>=0) && (vk<=size) )
+			if ( (vk>=0) && (vk<=ctx->size) )
 			{
-				if (values[upd].processed == 1)	return;
+				if (ctx->voxel_values[upd].processed == 1)	return;
 		
-				val = dist_grid_3Dpts(upd, ind);
+				val = dist_grid_3Dpts(ctx, upd, ind);
 
-				if (val < values[upd].value )
+				if (val < ctx->voxel_values[upd].value )
 				{
-					values[upd].value = (float)val;
-					values[upd].closestV = values[ind].closestV;
+					ctx->voxel_values[upd].value = (float)val;
+					ctx->voxel_values[upd].closestV = ctx->voxel_values[ind].closestV;
 				}
-				insert_bound_vert(upd);
+				ctx->insert_bound_vert(upd);
 			}	
 		}	
 	}
 }
 
+// Legacy apply_distance_transform and insert_bound_vert moved to SDFContext class
+// (Now member functions that take SDFContext* this pointer)
 
-//Current implementation only does the COMPLETE 3X3 Distance Matrix
-void SDFLibrary::apply_distance_transform(int vi, int vj, int vk)
-{
-	int ind;  //Current vertex
-
-	ind = index2vert(vi, vj, vk);
-
-	//Front Y slice
-	update_distance_2_vertex(ind, vi-1, vj-1, vk-1);
-	update_distance_2_vertex(ind, vi,   vj-1, vk-1);
-	update_distance_2_vertex(ind, vi+1, vj-1, vk-1);
-	
-	update_distance_2_vertex(ind, vi-1, vj-1, vk);
-	update_distance_2_vertex(ind, vi,   vj-1, vk);
-	update_distance_2_vertex(ind, vi+1, vj-1, vk);
-
-	update_distance_2_vertex(ind, vi-1, vj-1, vk+1);
-	update_distance_2_vertex(ind, vi,   vj-1, vk+1);
-	update_distance_2_vertex(ind, vi+1, vj-1, vk+1);
-
-	//Middle Y slice
-	update_distance_2_vertex(ind, vi-1, vj,	 vk-1);
-	update_distance_2_vertex(ind, vi,   vj,	 vk-1);
-	update_distance_2_vertex(ind, vi+1, vj,	 vk-1);
-	
-	update_distance_2_vertex(ind, vi-1, vj,	 vk);
-  //update_distance_2_vertex(ind, vi,   vj,	 vk); //Current vertex
-	update_distance_2_vertex(ind, vi+1, vj,	 vk);
-
-	update_distance_2_vertex(ind, vi-1, vj,	 vk+1);
-	update_distance_2_vertex(ind, vi,   vj,	 vk+1);
-	update_distance_2_vertex(ind, vi+1, vj,	 vk+1);
-
-	//Back Y slice
-	update_distance_2_vertex(ind, vi-1, vj+1, vk-1);
-	update_distance_2_vertex(ind, vi,   vj+1, vk-1);
-	update_distance_2_vertex(ind, vi+1, vj+1, vk-1);
-	
-	update_distance_2_vertex(ind, vi-1, vj+1, vk);
-	update_distance_2_vertex(ind, vi,   vj+1, vk);
-	update_distance_2_vertex(ind, vi+1, vj+1, vk);
-
-	update_distance_2_vertex(ind, vi-1, vj+1, vk+1);
-	update_distance_2_vertex(ind, vi,   vj+1, vk+1);
-	update_distance_2_vertex(ind, vi+1, vj+1, vk+1);
-}
-
-void SDFLibrary::insert_bound_vert(int vert)
-{
-	if(bverts[vert] == 0) //ie not found
-	{
-		bverts[vert] =1;
-		queues[all_verts_touched++] = vert;
-	}
-}
-
+// Unused legacy functions - commented out (used globals)
+/*
 void propagate_from_here(int vert)
 {
 	int i, j, k, ci, cj, ck, level, ind, test;
@@ -201,3 +152,4 @@ int confirm_SDF(int flag)
 
 	return 0;
 }
+*/} // namespace SDFLibrary

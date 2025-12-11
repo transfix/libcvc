@@ -57,19 +57,21 @@
 
 using namespace SDFLibrary;
 
+namespace SDFLibrary {
+
 long int INF = 9999999;
 #define PI 3.14159
 
 double n_dotv( double x, double y, double z, ray r , double temp123);
 myPoint inbox ( ray r, myPoint p, double dist, double* t);
-int ray_polygon_intersection (ray r, int tri);
+int ray_polygon_intersection (SDFContext* ctx, ray r, int tri);
 myPoint normalize(double x, double y, double z) ;
 int max_3( double x, double y, double z );
 int inside_cube(ray r, double xmin, double xmax, double ymin, double ymax, int flag);
-int point_in_polygon(myPoint result, int tri); 
-void update_boundary_vertices(int cx, int cy, int cz);
+int point_in_polygon(SDFContext* ctx, myPoint result, int tri); 
+// void update_boundary_vertices(int cx, int cy, int cz); // OLD - removed
 
-int within( int tri, double xmin, double xmax, double ymin, double ymax, double zmin, double zmax )
+int within(SDFContext* ctx, int tri, double xmin, double xmax, double ymin, double ymax, double zmin, double zmax )
 {
 	int v1, v2, v3;
 	double t;
@@ -77,20 +79,20 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	myPoint p,one,two,three;
 	ray r;
 	
-	v1 = surface[tri].v1;	v2 = surface[tri].v2;	v3 = surface[tri].v3;
+	v1 = ctx->surface[tri].v1;	v2 = ctx->surface[tri].v2;	v3 = ctx->surface[tri].v3;
 
 	// find if completely on some side !
-	x0 = vertices[v1].x;
-	y0 = vertices[v1].y;
-	z0 = vertices[v1].z;
+	x0 = ctx->vertices[v1].x;
+	y0 = ctx->vertices[v1].y;
+	z0 = ctx->vertices[v1].z;
 
-	x1 = vertices[v2].x;
-	y1 = vertices[v2].y;
-	z1 = vertices[v2].z;
+	x1 = ctx->vertices[v2].x;
+	y1 = ctx->vertices[v2].y;
+	z1 = ctx->vertices[v2].z;
 
-	x2 = vertices[v3].x;
-	y2 = vertices[v3].y;
-	z2 = vertices[v3].z;
+	x2 = ctx->vertices[v3].x;
+	y2 = ctx->vertices[v3].y;
+	z2 = ctx->vertices[v3].z;
 
 	// If all 3 vertices on same side, then return 0
 	if( (x0<xmin) && (x1<xmin) && (x2<xmin) ) return 0;
@@ -403,19 +405,19 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	r.dx = (double)0;
 	r.dy = (double)0;
 	r.dz = (double)(zmax-zmin);
- 	if (ray_polygon_intersection(r, tri)) return 1;
+ 	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)1 b>.
 	r.dx = (double)(xmax-xmin);
 	r.dy = (double)0;
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)1 c>.
 	r.dx = (double)0;
 	r.dy = (double)(ymax-ymin);
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 
 	//2)2 a>.
@@ -425,19 +427,19 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	r.dx = (double)0;
 	r.dy = (double)0;
 	r.dz = (double)(-(zmax-zmin));
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)2 b>.
 	r.dx = (double)(-(xmax-xmin));
 	r.dy = (double)0;
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)2 c>.
 	r.dx = (double)0;
 	r.dy = (double)(-(ymax-ymin));
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 
 	//2)3 a>.
@@ -447,13 +449,13 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	r.dx = (double)0;
 	r.dy = (double)(-(ymax-ymin));
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)3 c>.
 	r.dx = (double)(-(xmax-xmin));
 	r.dy = (double)0;
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 
 	//2)4 a>.
@@ -463,14 +465,14 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	r.dx = (double)0;
 	r.dy = (double)0;
 	r.dz = (double)(-(zmax-zmin));
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)4 b>.
 	r.dx = (double)(-(xmax-xmin));
 	r.dy = (double)0;
 	r.dz = (double)0;
 	p.isNull = 0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	
 	//2)5 a>.
@@ -480,97 +482,54 @@ int within( int tri, double xmin, double xmax, double ymin, double ymax, double 
 	r.dx = (double)0;
 	r.dy = (double)0;
 	r.dz = (double)(-(zmax-zmin));
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	//2)5 b>.
 	r.dx = (double)0;
 	r.dy = (double)(-(ymax-ymin));
 	r.dz = (double)0;
-	if (ray_polygon_intersection(r, tri)) return 1;
+	if (ray_polygon_intersection(ctx, r, tri)) return 1;
 
 	return 0;
 }
 
+// OLD global-based update_bounding_box - replaced by update_bounding_box_ctx
+/*
 void update_bounding_box(long int current_triangle, double xmin, double xmax, double ymin, double ymax, double zmin, double zmax, int cur_level)
 {
-	int intersects = 0;
-	int i, j, k;
-
-	listnode* l;
-	listnode* temp;
-
-	intersects = 0;
-
-	if( within(current_triangle, xmin, xmax, ymin, ymax, zmin, zmax ) ) intersects = 1;
-
-	if( intersects )
-	{
-		if( cur_level < octree_depth )
-		{
-			update_bounding_box( current_triangle, xmin,					( xmax + xmin ) /2.0, 	( ymax + ymin ) /2.0, ymax,				zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
-			update_bounding_box( current_triangle, ( xmax + xmin ) /2.0, 	xmax,					( ymax + ymin ) /2.0, ymax,				zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
-			update_bounding_box( current_triangle, ( xmax + xmin ) /2.0, 	xmax,					( ymax + ymin ) /2.0, ymax,				( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
-			update_bounding_box( current_triangle, xmin,					( xmax + xmin ) /2.0, 	( ymax + ymin ) /2.0, ymax,				( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
-			update_bounding_box( current_triangle, xmin,					( xmax + xmin ) /2.0, 	ymin,				( ymax + ymin ) /2.0, zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
-			update_bounding_box( current_triangle, ( xmax + xmin ) /2.0, 	xmax,					ymin,				( ymax + ymin ) /2.0, zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
-			update_bounding_box( current_triangle, ( xmax + xmin ) /2.0, 	xmax,					ymin,				( ymax + ymin ) /2.0, ( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
-			update_bounding_box( current_triangle, xmin,					( xmax + xmin ) /2.0, 	ymin,				( ymax + ymin ) /2.0, ( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
-		}
-		else
-		{
-			object2octree(xmin, ymin, zmin, xmax, ymax, zmax, i, j, k);
-			
-			l = (listnode*) malloc( sizeof( listnode ) );
-			l->index = current_triangle;
-			l->next = NULL;
-
-			if( sdf[i][j][k].tindex == NULL )
-			{
-				sdf[i][j][k].useful = 1;
-				sdf[i][j][k].tindex = l;
-				sdf[i][j][k].no = 1;
-				sdf[i][j][k].type =4;
-			}
-			else
-			{
-				temp = sdf[i][j][k].tindex;
-				l->next = temp;
-				sdf[i][j][k].tindex = l;
-				sdf[i][j][k].no++;
-			}
-
-			update_boundary_vertices(i, j, k);
-		}
-	}
+	... removed - uses global sdf ...
 }
+*/
 
 void write_octree()
 {
-	int i, j, k, sgn;
+	// Legacy function - no longer needed with SDFContext
+	// int i, j, k, sgn;
 
-	FILE* fp = fopen("octree.txt","w");
+	// FILE* fp = fopen("octree.txt","w");
 
-	for(i=0; i<size; i++)
-	{
-		fprintf(fp, "%d\n", i);
-		for(j=0; j<size; j++)
-		{
-			for(k=0; k<size; k++)
-			{
-				sgn = sdf[i][j][k].useful;
-				if (sgn== 0)
-					fprintf(fp, "0");
-				else if (sgn ==1)
-					fprintf(fp, "1");
-				else 
-					fprintf(fp, "%d", sdf[i][j][k].useful);
-			}
-			fprintf(fp, "\n");	
-		}
-	}
-	fflush(fp);
-	fclose(fp);
-	printf("octree.txt written \n");
+	// for(i=0; i<size; i++)
+	// {
+	// 	fprintf(fp, "%d\n", i);
+	// 	for(j=0; j<size; j++)
+	// 	{
+	// 		for(k=0; k<size; k++)
+	// 		{
+	// 			sgn = sdf[i][j][k].useful;
+	// 			if (sgn== 0)
+	// 				fprintf(fp, "0");
+	// 			else if (sgn ==1)
+	// 				fprintf(fp, "1");
+	// 			else 
+	// 				fprintf(fp, "%d", sdf[i][j][k].useful);
+	// 		}
+	// 		fprintf(fp, "\n");	
+	// 	}
+	// }
+	// fflush(fp);
+	// fclose(fp);
+	// printf("octree.txt written \n");
+	printf("write_octree() is deprecated - use SDFContext instead\n");
 }
 
 int inside_cube(ray r, double ymin, double ymax, double zmin, double zmax, int flag)
@@ -728,15 +687,15 @@ myPoint inbox (ray r, myPoint p, double dist, double* t)
 	return result;
 }
 
-int chqOrientedCorrectly(myPoint* start, myPoint* finish, int tri, ray r)
+int chqOrientedCorrectly(SDFContext* ctx, myPoint* start, myPoint* finish, int tri, ray r)
 {
 	double dist[2];
 
-	dist[0] = ( ((( start->x)* normals[tri].x +	(start->y)* normals[tri].y +
-		(start->z)* normals[tri].z)) + distances[tri]);
+	dist[0] = ( ((( start->x)* ctx->normals[tri].x +	(start->y)* ctx->normals[tri].y +
+		(start->z)* ctx->normals[tri].z)) + ctx->distances[tri]);
 
-	dist[1] = ( ((( finish->x)* normals[tri].x +	(finish->y)* normals[tri].y +
-		(finish->z)* normals[tri].z)) + distances[tri]);
+	dist[1] = ( ((( finish->x)* ctx->normals[tri].x +	(finish->y)* ctx->normals[tri].y +
+		(finish->z)* ctx->normals[tri].z)) + ctx->distances[tri]);
 
 	if ( (isZero(dist[0])) || (isZero(dist[1])) )	return 1;
 	if (dist[0]*dist[1] <0)	return 1;	
@@ -762,30 +721,30 @@ int sign3DTest(myPoint d, myPoint a, myPoint b, myPoint c)
 	return 1;
 }
 
-int ray_polygon_intersection (ray r, int tri)
+int ray_polygon_intersection (SDFContext* ctx, ray r, int tri)
 {
 	myPoint start, finish, triA, triB, triC;
 	int flag, i, j, k;
 
 	start.x = r.ox;							start.y = r.oy;							start.z = r.oz;
-	triA.x = vertices[surface[tri].v1].x;	triA.y = vertices[surface[tri].v1].y;	triA.z = vertices[surface[tri].v1].z;
-	triB.x = vertices[surface[tri].v2].x;	triB.y = vertices[surface[tri].v2].y;	triB.z = vertices[surface[tri].v2].z;
-	triC.x = vertices[surface[tri].v3].x;	triC.y = vertices[surface[tri].v3].y;	triC.z = vertices[surface[tri].v3].z;
+	triA.x = ctx->vertices[ctx->surface[tri].v1].x;	triA.y = ctx->vertices[ctx->surface[tri].v1].y;	triA.z = ctx->vertices[ctx->surface[tri].v1].z;
+	triB.x = ctx->vertices[ctx->surface[tri].v2].x;	triB.y = ctx->vertices[ctx->surface[tri].v2].y;	triB.z = ctx->vertices[ctx->surface[tri].v2].z;
+	triC.x = ctx->vertices[ctx->surface[tri].v3].x;	triC.y = ctx->vertices[ctx->surface[tri].v3].y;	triC.z = ctx->vertices[ctx->surface[tri].v3].z;
 	
 	//Start from the Origin and shoot to the bounding box.
-	if (r.dx >0)							finish.x = (double)(size+1);
+	if (r.dx >0)							finish.x = (double)(ctx->size+1);
 	else if (r.dx ==0)						finish.x = (double)(start.x);
 	else									finish.x = (double)(0.0);
 
-	if (r.dy >0)							finish.y = (double)(size+1);
+	if (r.dy >0)							finish.y = (double)(ctx->size+1);
 	else if (r.dy ==0)						finish.y = (double)(start.y);
 	else									finish.y = (double)(0.0);
 
-	if (r.dz >0)							finish.z = (double)(size+1);
+	if (r.dz >0)							finish.z = (double)(ctx->size+1);
 	else if (r.dz ==0)						finish.z = (double)(start.z);
 	else									finish.z = (double)(0.0);
 
-	if (chqOrientedCorrectly(&start, &finish, tri, r) ==0)
+	if (chqOrientedCorrectly(ctx, &start, &finish, tri, r) ==0)
 	{
 		//Both the points are on the same side of the trianngle. 
 		//So, the ray will NEVER intersect the triangle ?
@@ -889,7 +848,7 @@ int max_3( double x, double y, double z )
 ////////////////////////////////////.
 
 //take a point on the plane and c if it lies in the triangle or not.
-int point_in_polygon(myPoint result, int tri)
+int point_in_polygon(SDFContext* ctx, myPoint result, int tri)
 {
 	double alpha, beta;
 	double u0, u1, u2, v0, v1, v2;
@@ -898,47 +857,47 @@ int point_in_polygon(myPoint result, int tri)
 	int i, j;
 
 	//added this
-	if ( !isZero((result.x*normals[tri].x) + (result.y*normals[tri].y) + 
-			(result.z*normals[tri].z) + (distances[tri])) )
+	if ( !isZero((result.x*ctx->normals[tri].x) + (result.y*ctx->normals[tri].y) + 
+			(result.z*ctx->normals[tri].z) + (ctx->distances[tri])) )
 		return 0;
 
 	//now do the point in Triangle test...
-	index = max_3( normals[tri].x, normals[tri].y, normals[tri].z );
+	index = max_3( ctx->normals[tri].x, ctx->normals[tri].y, ctx->normals[tri].z );
 	if( index == 0 )
 	{
 		p1 = result.y; p2 = result.z;
 		i = 1; j = 2;
-		u0 = p1 - vertices[ surface[tri].v1 ].y;
-		u1 = vertices[ surface[tri].v2 ].y - vertices[ surface[tri].v1 ].y;
-		u2 = vertices[ surface[tri].v3 ].y - vertices[ surface[tri].v1 ].y;
+		u0 = p1 - ctx->vertices[ ctx->surface[tri].v1 ].y;
+		u1 = ctx->vertices[ ctx->surface[tri].v2 ].y - ctx->vertices[ ctx->surface[tri].v1 ].y;
+		u2 = ctx->vertices[ ctx->surface[tri].v3 ].y - ctx->vertices[ ctx->surface[tri].v1 ].y;
 
-		v0 = p2 - vertices[ surface[tri].v1 ].z;
-		v1 = vertices[ surface[tri].v2 ].z - vertices[ surface[tri].v1 ].z;
-		v2 = vertices[ surface[tri].v3 ].z - vertices[ surface[tri].v1 ].z;
+		v0 = p2 - ctx->vertices[ ctx->surface[tri].v1 ].z;
+		v1 = ctx->vertices[ ctx->surface[tri].v2 ].z - ctx->vertices[ ctx->surface[tri].v1 ].z;
+		v2 = ctx->vertices[ ctx->surface[tri].v3 ].z - ctx->vertices[ ctx->surface[tri].v1 ].z;
 	}
 	else if ( index == 1 )
 	{
 		p1 = result.z; p2 = result.x;
 		i = 2; j = 0;
-		u0 = p1 - vertices[ surface[tri].v1 ].z;
-		u1 = vertices[ surface[tri].v2 ].z - vertices[ surface[tri].v1 ].z;
-		u2 = vertices[ surface[tri].v3 ].z - vertices[ surface[tri].v1 ].z;
+		u0 = p1 - ctx->vertices[ ctx->surface[tri].v1 ].z;
+		u1 = ctx->vertices[ ctx->surface[tri].v2 ].z - ctx->vertices[ ctx->surface[tri].v1 ].z;
+		u2 = ctx->vertices[ ctx->surface[tri].v3 ].z - ctx->vertices[ ctx->surface[tri].v1 ].z;
 
-		v0 = p2 - vertices[ surface[tri].v1 ].x;
-		v1 = vertices[ surface[tri].v2 ].x - vertices[ surface[tri].v1 ].x;
-		v2 = vertices[ surface[tri].v3 ].x - vertices[ surface[tri].v1 ].x;
+		v0 = p2 - ctx->vertices[ ctx->surface[tri].v1 ].x;
+		v1 = ctx->vertices[ ctx->surface[tri].v2 ].x - ctx->vertices[ ctx->surface[tri].v1 ].x;
+		v2 = ctx->vertices[ ctx->surface[tri].v3 ].x - ctx->vertices[ ctx->surface[tri].v1 ].x;
 	}
 	else
 	{
 		p1 = result.x; p2 = result.y;
 		i = 0; j = 1;
-		u0 = p1 - vertices[ surface[tri].v1 ].x;
-		u1 = vertices[ surface[tri].v2 ].x - vertices[ surface[tri].v1 ].x;
-		u2 = vertices[ surface[tri].v3 ].x - vertices[ surface[tri].v1 ].x;
+		u0 = p1 - ctx->vertices[ ctx->surface[tri].v1 ].x;
+		u1 = ctx->vertices[ ctx->surface[tri].v2 ].x - ctx->vertices[ ctx->surface[tri].v1 ].x;
+		u2 = ctx->vertices[ ctx->surface[tri].v3 ].x - ctx->vertices[ ctx->surface[tri].v1 ].x;
 
-		v0 = p2 - vertices[ surface[tri].v1 ].y;
-		v1 = vertices[ surface[tri].v2 ].y - vertices[ surface[tri].v1 ].y;
-		v2 = vertices[ surface[tri].v3 ].y - vertices[ surface[tri].v1 ].y;
+		v0 = p2 - ctx->vertices[ ctx->surface[tri].v1 ].y;
+		v1 = ctx->vertices[ ctx->surface[tri].v2 ].y - ctx->vertices[ ctx->surface[tri].v1 ].y;
+		v2 = ctx->vertices[ ctx->surface[tri].v3 ].y - ctx->vertices[ ctx->surface[tri].v1 ].y;
 	}
 
 	alpha = ( u0*v2 - v0*u2 ) / ( u1*v2 - v1*u2 );
@@ -955,15 +914,68 @@ int point_in_polygon(myPoint result, int tri)
 
 
 //Add all the vertices of the cell into the boundary_vertices array.
-void update_boundary_vertices(int cx, int cy, int cz)
+void update_boundary_vertices(SDFContext* ctx, int cx, int cy, int cz)
 {
-	insert_bound_vert(index2vert(cx+0, cy+0, cz+0));
-	insert_bound_vert(index2vert(cx+1, cy+0, cz+0));
-	insert_bound_vert(index2vert(cx+1, cy+1, cz+0));
-	insert_bound_vert(index2vert(cx+0, cy+1, cz+0));
+	ctx->insert_bound_vert(ctx->index2vert(cx+0, cy+0, cz+0));
+	ctx->insert_bound_vert(ctx->index2vert(cx+1, cy+0, cz+0));
+	ctx->insert_bound_vert(ctx->index2vert(cx+1, cy+1, cz+0));
+	ctx->insert_bound_vert(ctx->index2vert(cx+0, cy+1, cz+0));
 
-	insert_bound_vert(index2vert(cx+0, cy+0, cz+1));
-	insert_bound_vert(index2vert(cx+1, cy+0, cz+1));
-	insert_bound_vert(index2vert(cx+1, cy+1, cz+1));
-	insert_bound_vert(index2vert(cx+0, cy+1, cz+1));
+	ctx->insert_bound_vert(ctx->index2vert(cx+0, cy+0, cz+1));
+	ctx->insert_bound_vert(ctx->index2vert(cx+1, cy+0, cz+1));
+	ctx->insert_bound_vert(ctx->index2vert(cx+1, cy+1, cz+1));
+	ctx->insert_bound_vert(ctx->index2vert(cx+0, cy+1, cz+1));
 }
+
+// Context-based wrapper for update_bounding_box
+void update_bounding_box_ctx(SDFContext* ctx, long int current_triangle,
+                             double xmin, double xmax, double ymin, double ymax,
+                             double zmin, double zmax, int cur_level)
+{
+	int intersects = 0;
+	int i, j, k;
+
+	intersects = 0;
+
+	if( within(ctx, current_triangle, xmin, xmax, ymin, ymax, zmin, zmax ) ) intersects = 1;
+
+	if( intersects )
+	{
+		if( cur_level < ctx->octree_depth )
+		{
+			update_bounding_box_ctx(ctx, current_triangle, xmin,					( xmax + xmin ) /2.0, 	( ymax + ymin ) /2.0, ymax,				zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, ( xmax + xmin ) /2.0, 	xmax,					( ymax + ymin ) /2.0, ymax,				zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, ( xmax + xmin ) /2.0, 	xmax,					( ymax + ymin ) /2.0, ymax,				( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, xmin,					( xmax + xmin ) /2.0, 	( ymax + ymin ) /2.0, ymax,				( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, xmin,					( xmax + xmin ) /2.0, 	ymin,				( ymax + ymin ) /2.0, zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, ( xmax + xmin ) /2.0, 	xmax,					ymin,				( ymax + ymin ) /2.0, zmin,				( zmax+ zmin ) /2.0,  cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, ( xmax + xmin ) /2.0, 	xmax,					ymin,				( ymax + ymin ) /2.0, ( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
+			update_bounding_box_ctx(ctx, current_triangle, xmin,					( xmax + xmin ) /2.0, 	ymin,				( ymax + ymin ) /2.0, ( zmax + zmin ) /2.0,  zmax,				cur_level+1 );
+		}
+		else
+		{
+			ctx->object2octree(xmin, ymin, zmin, xmax, ymax, zmax, i, j, k);
+			
+			auto l = std::make_unique<listnode>(current_triangle);
+
+			if( ctx->sdf[i][j][k].tindex == nullptr )
+			{
+				ctx->sdf[i][j][k].useful = 1;
+				ctx->sdf[i][j][k].tindex = std::move(l);
+				ctx->sdf[i][j][k].no = 1;
+				ctx->sdf[i][j][k].type = 4;
+			}
+			else
+			{
+				// Prepend to the list
+				l->next = std::move(ctx->sdf[i][j][k].tindex);
+				ctx->sdf[i][j][k].tindex = std::move(l);
+				ctx->sdf[i][j][k].no++;
+			}
+
+			update_boundary_vertices(ctx, i, j, k);
+		}
+	}
+}
+
+} // namespace SDFLibrary

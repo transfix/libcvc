@@ -400,6 +400,7 @@ if(CVC_ENABLE_SDF)
       SDF/SignDistanceFunction/common.h
       SDF/SignDistanceFunction/sdfLib.h
       SDF/SignDistanceFunction/head.h
+      SDF/SignDistanceFunction/SDFContext.h
       #SDF/Geometry/IntQueue.h
       #SDF/Geometry/GeometrySceneArray.h
       #SDF/Geometry/Geometry.h
@@ -445,7 +446,7 @@ if(CVC_ENABLE_SDF)
       # SDF/GeometryFileTypes/RawFile.cpp
       # SDF/GeometryFileTypes/RawncFile.cpp
       # SDF/ByteOrder/ByteSwapping.cpp
-      SDF/SignDistanceFunction/init.cpp
+      # SDF/SignDistanceFunction/init.cpp  # OLD - uses global sdf, all functions moved to SDFContext
       SDF/SignDistanceFunction/compute.cpp
       SDF/SignDistanceFunction/propagate.cpp
       SDF/SignDistanceFunction/head.cpp
@@ -453,6 +454,7 @@ if(CVC_ENABLE_SDF)
       SDF/SignDistanceFunction/main.cpp
       SDF/SignDistanceFunction/common.cpp
       SDF/SignDistanceFunction/octree.cpp
+      SDF/SignDistanceFunction/SDFContext.cpp
       #SDF/Geometry/GeometryScene.cpp
       #SDF/Geometry/GeometrySceneArray.cpp
       #SDF/Geometry/Geometry.cpp
