@@ -55,14 +55,14 @@ A Signed Distance Function (SDF) assigns a real number to every point in 3D spac
 #include <cvc/geometry.h>
 
 // Load a triangle mesh
-CVC::geometry geom = CVC::read_geometry("bunny.off");
+cvc::geometry geom = cvc::read_geometry("bunny.off");
 
 // Define output grid resolution and bounding box
-CVC::dimension dim(128, 128, 128);  // 128³ voxel grid
-CVC::bounding_box bbox = geom.bounding_box();
+cvc::dimension dim(128, 128, 128);  // 128³ voxel grid
+cvc::bounding_box bbox = geom.bounding_box();
 
 // Compute SDF
-CVC::volume sdf_vol = CVC::sdf(geom, dim, bbox);
+cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);
 
 // Access values
 for (uint64 k = 0; k < sdf_vol.ZDim(); k++) {
@@ -124,11 +124,11 @@ for (int i = 0; i < totalVerts; i++) {
 #include <vector>
 
 // Process multiple geometries in parallel
-std::vector<CVC::volume> results(n_geometries);
+std::vector<cvc::volume> results(n_geometries);
 
 #pragma omp parallel for
 for (int i = 0; i < n_geometries; i++) {
-    results[i] = CVC::sdf(geometries[i], dims[i], bboxes[i]);
+    results[i] = cvc::sdf(geometries[i], dims[i], bboxes[i]);
 }
 
 // Each thread gets its own independent SDFContext internally
@@ -228,12 +228,12 @@ t2.join();
 
 ### High-Level API (Recommended)
 
-**Function**: `CVC::sdf()`
+**Function**: `cvc::sdf()`
 
 ```cpp
-CVC::volume sdf(const CVC::geometry& geom,
-                const CVC::dimension& dim,
-                const CVC::bounding_box& bbox);
+cvc::volume sdf(const cvc::geometry& geom,
+                const cvc::dimension& dim,
+                const cvc::bounding_box& bbox);
 ```
 
 **Parameters**:
@@ -241,16 +241,16 @@ CVC::volume sdf(const CVC::geometry& geom,
 - `dim`: Output grid dimensions (nx, ny, nz)
 - `bbox`: Bounding box for the grid
 
-**Returns**: `CVC::volume` containing signed distance values
+**Returns**: `cvc::volume` containing signed distance values
 
 **Example**:
 ```cpp
-CVC::geometry bunny = CVC::read_geometry("bunny.off");
-CVC::dimension dim(256, 256, 256);
-CVC::bounding_box bbox = bunny.bounding_box();
+cvc::geometry bunny = cvc::read_geometry("bunny.off");
+cvc::dimension dim(256, 256, 256);
+cvc::bounding_box bbox = bunny.bounding_box();
 bbox.expand(0.05);  // Add 5% padding
 
-CVC::volume sdf_vol = CVC::sdf(bunny, dim, bbox);
+cvc::volume sdf_vol = cvc::sdf(bunny, dim, bbox);
 ```
 
 ### Low-Level API (Advanced)
@@ -283,7 +283,7 @@ uint64 ny = sdf_vol.YDim();
 uint64 nz = sdf_vol.ZDim();
 
 // Bounding box
-CVC::bounding_box bb = sdf_vol.bounding_box();
+cvc::bounding_box bb = sdf_vol.bounding_box();
 
 // Voxel spacing
 double dx = (bb.maxx - bb.minx) / (nx - 1);
@@ -413,7 +413,7 @@ for (int i = imin; i <= imax; i++) {
 
 2. **Use tight bounding boxes**:
    ```cpp
-   CVC::bounding_box bbox = geom.bounding_box();
+   cvc::bounding_box bbox = geom.bounding_box();
    bbox.expand(0.01);  // Add minimal 1% padding
    ```
 
@@ -421,7 +421,7 @@ for (int i = imin; i <= imax; i++) {
    ```cpp
    #pragma omp parallel for
    for (int i = 0; i < n_geometries; i++) {
-       results[i] = CVC::sdf(geometries[i], dims[i], bboxes[i]);
+       results[i] = cvc::sdf(geometries[i], dims[i], bboxes[i]);
    }
    ```
 
@@ -699,11 +699,11 @@ signeddistancefunction(nverts, verts, ntris, tris, gridData);
 #include <cvc/algorithm.h>
 #include <cvc/geometry.h>
 
-CVC::geometry geom = CVC::read_geometry("mesh.off");
-CVC::dimension dim(128, 128, 128);
-CVC::bounding_box bbox = geom.bounding_box();
+cvc::geometry geom = cvc::read_geometry("mesh.off");
+cvc::dimension dim(128, 128, 128);
+cvc::bounding_box bbox = geom.bounding_box();
 
-CVC::volume sdf_vol = CVC::sdf(geom, dim, bbox);
+cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);
 ```
 
 ##### Low-Level API (More Control)
@@ -744,7 +744,7 @@ delete[] values;
 
 **After**:
 ```cpp
-CVC::volume sdf_vol = CVC::sdf(geom, dim, bbox);
+cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);
 // ... use sdf_vol ...
 // Automatic cleanup
 ```
@@ -764,7 +764,7 @@ for (int i = 0; i < n; i++) {
 **After**:
 ```cpp
 for (int i = 0; i < n; i++) {
-    CVC::volume vol = CVC::sdf(geoms[i], dims[i], bboxes[i]);
+    cvc::volume vol = cvc::sdf(geoms[i], dims[i], bboxes[i]);
     process(vol);
 }
 ```
@@ -784,7 +784,7 @@ for (int i = 0; i < n; i++) {
 ```cpp
 #pragma omp parallel for
 for (int i = 0; i < n; i++) {
-    CVC::volume vol = CVC::sdf(geoms[i], dims[i], bboxes[i]);
+    cvc::volume vol = cvc::sdf(geoms[i], dims[i], bboxes[i]);
     results[i] = vol;
 }
 ```
