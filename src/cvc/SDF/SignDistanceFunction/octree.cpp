@@ -956,21 +956,24 @@ void update_bounding_box_ctx(SDFContext* ctx, long int current_triangle,
 		{
 			ctx->object2octree(xmin, ymin, zmin, xmax, ymax, zmax, i, j, k);
 			
+			// Cache reference to cell to avoid multiple multi_array subscript operations
+			cell& c = ctx->sdf[i][j][k];
+			
 			auto l = std::make_unique<listnode>(current_triangle);
 
-			if( ctx->sdf[i][j][k].tindex == nullptr )
+			if( c.tindex == nullptr )
 			{
-				ctx->sdf[i][j][k].useful = 1;
-				ctx->sdf[i][j][k].tindex = std::move(l);
-				ctx->sdf[i][j][k].no = 1;
-				ctx->sdf[i][j][k].type = 4;
+				c.useful = 1;
+				c.tindex = std::move(l);
+				c.no = 1;
+				c.type = 4;
 			}
 			else
 			{
 				// Prepend to the list
-				l->next = std::move(ctx->sdf[i][j][k].tindex);
-				ctx->sdf[i][j][k].tindex = std::move(l);
-				ctx->sdf[i][j][k].no++;
+				l->next = std::move(c.tindex);
+				c.tindex = std::move(l);
+				c.no++;
 			}
 
 			update_boundary_vertices(ctx, i, j, k);

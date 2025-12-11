@@ -139,9 +139,10 @@ int x_assign(SDFContext* ctx, int vi, int vj, int vk)
 
 	for (i=v; i<ctx->size; i++)
 	{
-		if (ctx->sdf[i][j][k].type==4)
+		const cell& c = ctx->sdf[i][j][k];
+		if (c.type==4)
 		{
-			currNode = ctx->sdf[i][j][k].tindex.get();
+			currNode = c.tindex.get();
 
 			while(currNode != NULL)
 			{
@@ -185,9 +186,10 @@ int y_assign(SDFContext* ctx, int vi, int vj, int vk)
 
 	for (j=v; j<ctx->size; j++)
 	{
-		if (ctx->sdf[i][j][k].type==4)
+		const cell& c = ctx->sdf[i][j][k];
+		if (c.type==4)
 		{
-			currNode = ctx->sdf[i][j][k].tindex.get();
+			currNode = c.tindex.get();
 
 			while(currNode != NULL)
 			{
@@ -231,9 +233,10 @@ int z_assign(SDFContext* ctx, int vi, int vj, int vk)
 
 	for (k=v; k<ctx->size; k++)
 	{
-		if (ctx->sdf[i][j][k].type==4)
+		const cell& c = ctx->sdf[i][j][k];
+		if (c.type==4)
 		{
-			currNode = ctx->sdf[i][j][k].tindex.get();
+			currNode = c.tindex.get();
 
 			while(currNode != NULL)
 			{
