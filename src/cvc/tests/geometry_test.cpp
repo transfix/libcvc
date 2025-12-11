@@ -1073,8 +1073,8 @@ TEST(AlgorithmTest, BunnyVolumeConvergence) {
   std::cout << "Padded bounding box: [" << min_x << ", " << max_x << "] x ["
             << min_y << ", " << max_y << "] x [" << min_z << ", " << max_z << "]" << std::endl;
   
-  // Test with progressively higher resolutions (stop at 128 to avoid long test times)
-  std::vector<int> resolutions = {32, 64, 128};
+  // Test with progressively higher resolutions
+  std::vector<int> resolutions = {32, 64, 128, 256};
   std::vector<double> volumes;
   
   for (int res : resolutions) {
