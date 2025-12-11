@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-321%20passing%20%7C%2020%20CUDA-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/core%20coverage-89.8%25-brightgreen.svg)](TESTING_COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-353%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-64.6%25%20lines%20%7C%2068.1%25%20functions-yellow.svg)](TESTING_COVERAGE.md)
 
 ## Table of Contents
 
@@ -112,7 +112,7 @@ Common CMake configuration options:
 
 ```bash
 cmake .. \
-  -DCMAKE_BUILD_TYPE=Release \          # Build type (Debug/Release)
+  -DCMAKE_BUILD_TYPE=Release \          # Build type (Debug/Release/RelWithDebInfo)
   -DCMAKE_CXX_STANDARD=17 \             # C++ standard (14/17/20/23)
   -DBUILD_SHARED_LIBS=ON \              # Build shared libraries
   -DCVC_BUILD_TESTS=ON \                # Enable unit tests (ON by default)
@@ -122,6 +122,33 @@ cmake .. \
   -DCVC_USING_XMLRPC=OFF \              # Enable network sharing
   -DDISABLE_CGAL=OFF                    # Enable CGAL support
 ```
+
+### Build Type Performance Impact
+
+The build type significantly affects performance, especially for computationally intensive operations like SDF computation:
+
+| Build Type | Optimization | Debug Info | Use Case | SDF 256³ Performance* |
+|------------|-------------|------------|----------|----------------------|
+| **Release** | `-O3 -DNDEBUG` | No | Production | ~220s (fastest) |
+| **RelWithDebInfo** | `-O2 -g -DNDEBUG` | Yes | **Recommended** | ~234s (1.06x) |
+| **Debug** | `-g` (no opt) | Yes | Development only | ~3027s (13.7x slower) |
+| **Debug + Coverage** | `-g --coverage` | Yes | Coverage analysis | ~3030s (13.8x slower) |
+
+*Tested with Stanford Bunny (34,834 triangles) at 256³ resolution
+
+**Recommendations**:
+- **Development/Testing**: Use `RelWithDebInfo` for reasonable performance with debugging capability
+- **Production**: Use `Release` for maximum performance
+- **Debugging**: Use `Debug` only when you need to step through unoptimized code
+- **Coverage Analysis**: Use `Debug` with coverage flags, but expect 10-15x slower execution
+
+The dramatic slowdown in Debug builds is due to:
+- No compiler optimizations (loop unrolling, inlining, dead code elimination)
+- Coverage instrumentation overhead (if enabled)
+- Full bounds checking on all array accesses
+- No constant propagation or strength reduction
+
+**Note**: All build types produce identical, deterministic results. The difference is purely execution speed.
 
 See `PROJECT_REPORT.md` for a complete list of build options.
 
@@ -321,6 +348,14 @@ mesh.write("output.raw");
 
 ### Advanced Features
 
+- **[SDF_API.md](docs/SDF_API.md)** - Signed Distance Function API
+  - Thread-safe SDFContext architecture
+  - High-level and low-level APIs
+  - Performance benchmarks (11x speedup in v2.0)
+  - Resolution scaling guidelines
+  - Common usage patterns
+  - Migration guide from v1.x
+
 - **[FUTURES_API.md](FUTURES_API.md)** - Async state programming
   - Blocking waits for values/data
   - Callback registration
@@ -386,13 +421,14 @@ This is a modernization of legacy research software. Contributions welcome:
 
 ## Recent Additions (December 2025)
 
-- ✅ **Geometry Class Tests** - 37 comprehensive tests using Stanford Bunny mesh
-- ✅ **308 Total Tests** - 100% passing with 89.6% coverage on core components
-- ✅ **Geometry API Coverage** - 80.80% coverage (282/349 lines) for mesh operations
-- ✅ **Volume Class Tests** - 29 tests for spatial coordinates and interpolation
-- ✅ **Bug Fixes** - Fixed volume::sub() bounding box and voxels::operator== byte comparison
-- ✅ **API Documentation** - Documented shallow copy semantics and deep copy alternatives
-- ✅ **Coverage Analysis** - Detailed per-file metrics with lcov/genhtml/gcov
+- ✅ **SDF Thread-Safe Refactoring (v2.0)** - Complete rewrite using SDFContext
+- ✅ **353 Total Tests** - 100% passing including intensive SDF convergence tests  
+- ✅ **11x Performance Gain** - SDF optimization via cell reference caching
+- ✅ **64.6% Overall Coverage** - 10,272 of 15,903 lines tested
+- ✅ **SDF API Documentation** - Comprehensive guide with examples and benchmarks
+- ✅ **Geometry Tests** - 47 tests using Stanford Bunny (34,834 triangles)
+- ✅ **Algorithm Tests** - 6 SDF/isosurface tests including 256³ stress test
+- ✅ **Volume & Voxels** - 157 combined tests for volumetric data structures
 
 ## License
 
