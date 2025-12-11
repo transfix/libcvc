@@ -95,7 +95,7 @@ namespace CVC_NAMESPACE
   //   Changes the dimensions of this voxels dataset.
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
-  // 12/09/2024 -- Joe R. -- Updated for typed 3D arrays
+  // 12/09/2025 -- Joe R. -- Updated for typed 3D arrays
   void voxels::voxel_dimensions(const dimension& d)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);

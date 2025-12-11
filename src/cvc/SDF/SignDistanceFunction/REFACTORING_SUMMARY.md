@@ -359,13 +359,13 @@ The refactored code is production-ready and provides a solid foundation for GPU 
 ## References
 
 - Original SDF implementation: Lalit Karlapalem (2004-2005)
-- Refactoring effort: Joe Rivera (2024-2025)
+- Refactoring effort: Joe Rivera (2025)
 - Full documentation: `SDF_REFACTORING.md`
 - C++ Core Guidelines: https://isocpp.github.io/CppCoreGuidelines/
 
 ---
 
-**Generated**: 2024-12-19  
+**Generated**: 2025-12-19  
 **Build**: gcc 13.3.0, CMake 3.28.3, C++14  
 **Coverage**: 65.4% lines, 68.3% functions  
 **Tests**: 352/353 passing (99.7%)

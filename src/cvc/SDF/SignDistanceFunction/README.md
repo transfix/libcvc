@@ -139,7 +139,7 @@ for (int i = 0; i < num_meshes; i++) {
 for (auto& t : threads) t.join();
 ```
 
-## Recent Improvements (2024)
+## Recent Improvements (2025)
 
 The SDF library was recently refactored for thread safety and modern C++:
 
@@ -179,7 +179,8 @@ Current code coverage:
 ## References
 
 - Original implementation: Lalit Karlapalem (2004-2005)
-- Thread-safe refactoring: Joe Rivera (2024-2025)
+- Maintenance: Joe Rivera (2005-2014)
+- Thread-safe refactoring: Joe Rivera (2025)
 - Based on: Bajaj et al., "Interactive Visual Exploration of Large Flexible Multi-component Molecular Complexes", IEEE Visualization 2004
 
 ## License

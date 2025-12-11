@@ -47,7 +47,7 @@ namespace
   //   Interface between the old SDF API and the new one.
   // ---- Change History ----
   // 01/10/2014 -- Joe R. -- Creation.
-  // 12/10/2024 -- Joe R. -- Updated to use thread-safe SDFContext API.
+  // 12/10/2025 -- Joe R. -- Updated to use thread-safe SDFContext API.
   CVC_NAMESPACE::volume sdf_library(const CVC_NAMESPACE::geometry& geom,
 				    const CVC_NAMESPACE::dimension& dim,
 				    const CVC_NAMESPACE::bounding_box& bbox)

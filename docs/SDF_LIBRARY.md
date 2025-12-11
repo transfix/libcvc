@@ -437,7 +437,7 @@ for (int i = imin; i <= imax; i++) {
 
 ## Development History
 
-### Version 2.0 (December 2024) - Thread-Safe Refactoring
+### Version 2.0 (December 2025) - Thread-Safe Refactoring
 
 **Motivation**: The original implementation used global variables, making parallel computation impossible and causing memory leaks.
 
@@ -819,8 +819,8 @@ for (int i = 0; i < n; i++) {
 ## Contributors
 
 - **Original Implementation**: Lalit Karlapalem (2004-2005)
-- **Thread-Safe Refactoring**: Joe Rivera (December 2024)
-- **Performance Optimization**: Joe Rivera (December 2024)
+- **Thread-Safe Refactoring**: Joe Rivera (December 2025)
+- **Performance Optimization**: Joe Rivera (December 2025)
 - **Maintainer**: Joe Rivera - j@jriv.us
 
 ---
@@ -835,11 +835,11 @@ See [LICENSE](../../LICENSE) file in repository root.
 
 | Version | Date         | Changes                                              |
 |---------|--------------|------------------------------------------------------|
-| 2.0     | Dec 2024     | Thread-safe refactoring, 11x performance improvement |
+| 2.0     | Dec 2025     | Thread-safe refactoring, 11x performance improvement |
 | 1.x     | 2004-2005    | Original global-state implementation                 |
 
 ---
 
-**Last Updated**: December 11, 2024  
+**Last Updated**: December 11, 2025  
 **Status**: Production Ready ✅  
 **Next Milestone**: CUDA Implementation (Q2 2025)

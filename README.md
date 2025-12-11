@@ -463,7 +463,7 @@ trans-cvc/
 
 ## Recent Additions
 
-### December 2024: SDF v2.0 - Thread-Safe Refactoring
+### December 2025: SDF v2.0 - Thread-Safe Refactoring
 
 **Major Achievement**: Complete rewrite of SDF library achieving thread safety and massive performance gains
 

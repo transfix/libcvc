@@ -14,7 +14,7 @@
 /*   Copyright (C) The University of Texas at Austin                         */
 /*                                                                           */
 /*     Author:     Lalit Karlapalem <ckl@ices.utexas.edu>         2004-2005  */
-/*     Refactored: Joe Rivera                                      2024-2025 */
+/*     Refactored: Joe Rivera                                     2025       */
 /*                                                                           */
 /*     Principal Investigator: Chandrajit Bajaj <bajaj@ices.utexas.edu>      */
 /*                                                                           */

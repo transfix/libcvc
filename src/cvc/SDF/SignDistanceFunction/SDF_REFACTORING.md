@@ -453,7 +453,7 @@ Target metrics:
 ## Contributors
 
 - Original implementation: Lalit Karlapalem (2004-2005)
-- Refactoring: Joe Rivera (2024-2025)
+- Refactoring: Joe Rivera (2025)
 
 ## License
 
