@@ -1,5 +1,22 @@
 # SDF Library Refactoring Documentation
 
+> **⚠️ DEPRECATED**: This technical documentation has been consolidated.
+> 
+> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
+> 
+> The comprehensive SDF library guide consolidates all technical documentation:
+> - Complete refactoring details (v1.x → v2.0)
+> - SDFContext architecture and implementation
+> - Memory management with smart pointers
+> - Performance optimization (11x speedup)
+> - Thread safety verification
+> - CUDA implementation strategy and roadmap
+> - Migration guide with code examples
+>
+> This standalone technical document is no longer maintained.
+
+---
+
 ## Overview
 
 The Sign Distance Function (SDF) library has been refactored to be thread-safe and use modern C++ memory management practices. This document describes the refactoring effort, current state, and future plans.

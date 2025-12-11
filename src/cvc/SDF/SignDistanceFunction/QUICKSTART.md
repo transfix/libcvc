@@ -1,5 +1,22 @@
 # SDF Library Quick Start Guide
 
+> **⚠️ DEPRECATED**: This document has been superseded by the comprehensive SDF library documentation.
+> 
+> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
+> 
+> The new documentation consolidates all SDF information including:
+> - Quick start guide (updated for v2.0 thread-safe API)
+> - Complete API reference
+> - Performance benchmarks and optimization tips
+> - Development history and migration guide
+> - Test coverage (353/353 passing)
+> - CUDA acceleration roadmap
+>
+> **Note**: The old global-based API described in this file no longer exists in v2.0.
+> All code must use the new thread-safe `SDFContext` architecture.
+
+---
+
 ## For New Users
 
 ### Basic Usage (Thread-Safe API)

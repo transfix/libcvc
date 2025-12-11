@@ -1,5 +1,22 @@
 # Signed Distance Function (SDF) API Documentation
 
+> **⚠️ DEPRECATED**: This API documentation has been superseded by comprehensive documentation.
+> 
+> **Please see**: [SDF_LIBRARY.md](SDF_LIBRARY.md) (same directory)
+> 
+> The new consolidated SDF library guide includes:
+> - Everything from this API document
+> - Complete development history (v1.x → v2.0)
+> - Performance optimization details (11x speedup)
+> - Build type performance impact
+> - Test coverage (353/353 passing, 100%)
+> - CUDA GPU acceleration roadmap
+> - Migration guide from deprecated v1.x API
+>
+> **SDF_LIBRARY.md** is now the single authoritative source for all SDF documentation.
+
+---
+
 ## Overview
 
 The SDF module in trans-cvc computes signed distance fields from triangle mesh geometries. A signed distance field represents the distance from any point in 3D space to the nearest point on a surface, with negative values inside the surface and positive values outside.

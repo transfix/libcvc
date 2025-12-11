@@ -1,5 +1,21 @@
 # SDF Library Refactoring - Thread-Safe and Memory-Safe Design
 
+> **⚠️ DEPRECATED**: This refactoring document has been consolidated.
+> 
+> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
+> 
+> The comprehensive SDF documentation includes:
+> - Complete refactoring history and technical details
+> - Migration guide from v1.x to v2.0
+> - Performance improvements (11x speedup)
+> - Thread-safe architecture explanation
+> - Test results and coverage
+> - Future CUDA implementation plans
+>
+> This standalone refactoring document is no longer maintained.
+
+---
+
 ## Overview
 
 The SDF library has been refactored to eliminate global state and use modern C++ memory management. This makes the library:

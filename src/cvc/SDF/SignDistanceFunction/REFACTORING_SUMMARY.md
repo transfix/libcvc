@@ -1,5 +1,21 @@
 # SDF Library Thread-Safe Refactoring Summary
 
+> **⚠️ DEPRECATED**: This summary has been consolidated into comprehensive documentation.
+> 
+> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
+> 
+> The new consolidated guide includes all information from this summary:
+> - Executive summary of v2.0 refactoring
+> - Test results (353/353 passing, 100%)
+> - Performance improvements (11x speedup via cell caching)
+> - Technical achievements and code changes
+> - Migration guide and examples
+> - CUDA acceleration roadmap
+>
+> This standalone summary is no longer maintained.
+
+---
+
 ## Executive Summary
 
 Successfully refactored the Sign Distance Function (SDF) library from a global-state architecture to a thread-safe, modern C++ design. The refactoring achieved:

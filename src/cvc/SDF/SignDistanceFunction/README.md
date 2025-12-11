@@ -1,5 +1,23 @@
 # Sign Distance Function (SDF) Library
 
+> **⚠️ DEPRECATED**: This README has been superseded by comprehensive documentation.
+> 
+> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
+> 
+> The new consolidated documentation includes everything from this file plus:
+> - Version 2.0 thread-safe architecture details
+> - Complete API reference and usage examples
+> - Performance benchmarks (11x speedup in v2.0)
+> - Build type performance impact analysis
+> - Development history (v1.x → v2.0 migration)
+> - Test coverage (100% passing)
+> - CUDA GPU acceleration roadmap
+>
+> **Important**: The legacy API mentioned below no longer exists. All code must use
+> the new thread-safe `SDFContext` architecture introduced in v2.0.
+
+---
+
 Fast computation of signed distance fields from triangulated surface meshes.
 
 ## Overview
