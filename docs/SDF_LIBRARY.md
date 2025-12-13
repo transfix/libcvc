@@ -11,15 +11,52 @@
 ## Table of Contents
 
 - [Overview](#overview)
+  - [What is a Signed Distance Function?](#what-is-a-signed-distance-function)
+  - [Use Cases](#use-cases)
 - [Quick Start](#quick-start)
+  - [Basic Usage](#basic-usage)
+  - [Low-Level API](#low-level-api)
+  - [Multi-Threaded Usage](#multi-threaded-usage)
 - [Thread-Safe Architecture](#thread-safe-architecture)
+  - [Version 2.0 Refactoring](#version-20-refactoring)
+  - [Key Improvements](#key-improvements)
+  - [Architecture](#architecture)
+  - [Thread Safety Example](#thread-safety-example)
 - [API Reference](#api-reference)
+  - [High-Level API (Recommended)](#high-level-api-recommended)
+  - [Low-Level API (Advanced)](#low-level-api-advanced)
+  - [Volume Data Structure](#volume-data-structure)
+  - [Distance Value Convention](#distance-value-convention)
 - [Performance Guide](#performance-guide)
+  - [Computational Complexity](#computational-complexity)
+  - [Version 2.0 Performance](#version-20-performance-relwithdebinfo-build)
+  - [Build Type Performance Impact](#build-type-performance-impact)
+  - [Optimization History](#optimization-history-version-20-improvements)
+  - [Optimization Tips](#optimization-tips)
 - [Development History](#development-history)
+  - [Version 2.0 (December 2025)](#version-20-december-2025---thread-safe-refactoring)
+  - [Algorithm Details](#algorithm-details)
 - [Test Coverage](#test-coverage)
+  - [Test Suite Statistics](#test-suite-statistics)
+  - [SDF-Specific Tests](#sdf-specific-tests)
+  - [Performance Benchmarks](#performance-benchmarks-from-bunnyvolumeconvergence)
+  - [Coverage by Module](#coverage-by-module)
 - [Future Plans: CUDA Acceleration](#future-plans-cuda-acceleration)
-- [Migration Guide](#migration-guide)
+  - [Why CUDA?](#why-cuda)
+  - [Current Architecture Advantages](#current-architecture-advantages)
+  - [CUDA Implementation Strategy](#cuda-implementation-strategy)
+  - [Performance Targets](#performance-targets)
+  - [Implementation Roadmap](#implementation-roadmap)
+  - [Alternative: OpenCL](#alternative-opencl)
+- [Common Usage Patterns](#common-usage-patterns)
+  - [Extract Isosurface](#extract-isosurface)
+  - [Volume Computation](#volume-computation)
+  - [Distance Queries](#distance-queries)
+  - [Parallel Processing](#parallel-processing)
 - [References](#references)
+  - [Academic Papers](#academic-papers)
+  - [Related Documentation](#related-documentation)
+  - [External Resources](#external-resources)
 
 ---
 
@@ -445,9 +482,8 @@ for (int i = imin; i <= imax; i++) {
 1. ✅ Encapsulate state in `SDFContext` class
 2. ✅ Replace raw pointers with `std::unique_ptr`
 3. ✅ Enable thread-safe parallel computation
-4. ✅ Maintain backward compatibility (deprecated)
-5. ✅ Optimize performance (11x speedup achieved)
-6. ✅ Prepare architecture for CUDA acceleration
+4. ✅ Optimize performance (11x speedup achieved)
+5. ✅ Prepare architecture for CUDA acceleration
 
 **Key Changes**:
 
@@ -467,25 +503,13 @@ for (int i = imin; i <= imax; i++) {
 - `SDFContext.cpp` (476 lines) - Implementation
 - `head.h` - Modernized structs with constructors
 - `common.h` - Updated includes
-- `sdfLib.h` - Deprecated old API markers
-- `main.cpp` - Thread-safe implementation
-- `algorithm.cpp` - Uses new API
+- `algorithm.cpp` - High-level API implementation
 - `octree.cpp` - Performance optimizations
 - `compute.cpp` - Performance optimizations
 
-### Version 1.x (2004-2005) - Original Implementation
+### Algorithm Details
 
-**Author**: Lalit Karlapalem
-
-**Architecture**: Global variables for all state
-
-**Issues**:
-- Not thread-safe
-- Manual memory management with `malloc`/`free`
-- Memory leaks after multiple runs
-- Global state prevented parallel computation
-
-**Algorithm**: Still used in v2.0:
+**Core Algorithm**:
 1. Build octree spatial acceleration structure
 2. Identify boundary voxels (surface crossings)
 3. Compute exact distances for boundary voxels
@@ -493,6 +517,8 @@ for (int i = imin; i <= imax; i++) {
 5. Assign signs (inside/outside) via ray casting
 
 **Complexity**: O(n log n) instead of naive O(n³)
+
+**Original Author**: Lalit Karlapalem (2004-2005)
 
 ---
 
@@ -671,122 +697,82 @@ Trade-off: Slightly more complex code but broader hardware support.
 
 ---
 
-## Migration Guide
+## Common Usage Patterns
 
-### From Version 1.x (Global API) to Version 2.0 (Thread-Safe)
-
-**Note**: The old global-based API has been completely removed in v2.0. All code must use the new thread-safe API.
-
-#### Old Code (v1.x - No Longer Supported)
-
-```cpp
-// DEPRECATED - Does not compile in v2.0
-#include "sdfLib.h"
-
-SDFLibrary::size = 128;
-SDFLibrary::flipNormals = 0;
-SDFLibrary::minx = mins[0];
-// ... set other globals ...
-
-signeddistancefunction(nverts, verts, ntris, tris, gridData);
-```
-
-#### New Code (v2.0 - Required)
-
-##### High-Level API (Easiest Migration)
+### Extract Isosurface
 
 ```cpp
 #include <cvc/algorithm.h>
-#include <cvc/geometry.h>
 
-cvc::geometry geom = cvc::read_geometry("mesh.off");
-cvc::dimension dim(128, 128, 128);
-cvc::bounding_box bbox = geom.bounding_box();
-
+// Get SDF
 cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);
+
+// Extract isosurface at distance = 0.1 (slight offset from surface)
+cvc::geometry offset_surface = cvc::isosurface(sdf_vol, 0.1);
+
+// Extract actual surface (distance = 0)
+cvc::geometry reconstructed = cvc::isosurface(sdf_vol, 0.0);
 ```
 
-##### Low-Level API (More Control)
+### Volume Computation
 
 ```cpp
-#include "SDF/SignDistanceFunction/SDFContext.h"
+// Count interior voxels
+uint64 interior_count = 0;
+for (uint64 k = 0; k < sdf_vol.ZDim(); k++) {
+    for (uint64 j = 0; j < sdf_vol.YDim(); j++) {
+        for (uint64 i = 0; i < sdf_vol.XDim(); i++) {
+            if (sdf_vol(i, j, k) < 0.0) {
+                interior_count++;
+            }
+        }
+    }
+}
 
-SDFContext ctx;
-ctx.setParameters(128, 0, mins, maxs);
-ctx.initSDF();
-ctx.readGeom(nverts, verts, ntris, tris);
-ctx.adjustData();
-ctx.compute();
-
-// Access results
-const voxel* results = ctx.getVoxelValues();
+// Calculate volume
+cvc::bounding_box bb = sdf_vol.bounding_box();
+double voxel_volume = 
+    (bb.maxx - bb.minx) / (sdf_vol.XDim() - 1) *
+    (bb.maxy - bb.miny) / (sdf_vol.YDim() - 1) *
+    (bb.maxz - bb.minz) / (sdf_vol.ZDim() - 1);
+    
+double total_volume = interior_count * voxel_volume;
 ```
 
-### Benefits of Migration
+### Distance Queries
 
-1. **Thread Safety**: Compute multiple SDFs in parallel
-2. **No Memory Leaks**: Automatic RAII cleanup
-3. **Better Performance**: 11x faster due to optimizations
-4. **Future-Proof**: Ready for CUDA acceleration
-5. **Cleaner Code**: No global state pollution
-
-### Common Migration Patterns
-
-#### Pattern 1: Single SDF Computation
-
-**Before**:
 ```cpp
-float* values = SDFLibrary::computeSDF(nverts, verts, ntris, tris,
-                                        size, flip, mins, maxs);
-// ... use values ...
-delete[] values;
-```
+// Find distance from specific point to surface
+double queryPoint[3] = {0.5, 0.3, 0.8};
 
-**After**:
-```cpp
-cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);
-// ... use sdf_vol ...
-// Automatic cleanup
-```
+// Map world coordinates to grid coordinates
+cvc::bounding_box bb = sdf_vol.bounding_box();
+double grid_x = (queryPoint[0] - bb.minx) / (bb.maxx - bb.minx) * (sdf_vol.XDim() - 1);
+double grid_y = (queryPoint[1] - bb.miny) / (bb.maxy - bb.miny) * (sdf_vol.YDim() - 1);
+double grid_z = (queryPoint[2] - bb.minz) / (bb.maxz - bb.minz) * (sdf_vol.ZDim() - 1);
 
-#### Pattern 2: Multiple Sequential Computations
+// Get interpolated distance
+double distance = sdf_vol(grid_x, grid_y, grid_z);
 
-**Before**:
-```cpp
-for (int i = 0; i < n; i++) {
-    SDFLibrary::setParameters(...);
-    float* v = SDFLibrary::computeSDF(...);
-    process(v);
-    delete[] v;
+if (distance < 0) {
+    std::cout << "Point is inside, " << std::abs(distance) << " units from surface\n";
+} else {
+    std::cout << "Point is outside, " << distance << " units from surface\n";
 }
 ```
 
-**After**:
-```cpp
-for (int i = 0; i < n; i++) {
-    cvc::volume vol = cvc::sdf(geoms[i], dims[i], bboxes[i]);
-    process(vol);
-}
-```
+### Parallel Processing
 
-#### Pattern 3: Parallel Computation
-
-**Before** (Not possible - would cause race conditions):
 ```cpp
-// IMPOSSIBLE with global API
+// Process multiple geometries in parallel
+std::vector<cvc::volume> results(n_geometries);
+
 #pragma omp parallel for
-for (int i = 0; i < n; i++) {
-    // Race condition on globals!
+for (int i = 0; i < n_geometries; i++) {
+    results[i] = cvc::sdf(geometries[i], dims[i], bboxes[i]);
 }
-```
 
-**After** (Thread-safe):
-```cpp
-#pragma omp parallel for
-for (int i = 0; i < n; i++) {
-    cvc::volume vol = cvc::sdf(geoms[i], dims[i], bboxes[i]);
-    results[i] = vol;
-}
+// Each thread gets its own independent SDFContext - fully thread-safe!
 ```
 
 ---
@@ -836,7 +822,6 @@ See [LICENSE](../../LICENSE) file in repository root.
 | Version | Date         | Changes                                              |
 |---------|--------------|------------------------------------------------------|
 | 2.0     | Dec 2025     | Thread-safe refactoring, 11x performance improvement |
-| 1.x     | 2004-2005    | Original global-state implementation                 |
 
 ---
 
