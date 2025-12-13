@@ -1043,6 +1043,33 @@ namespace CVC_NAMESPACE
             return boost::make_tuple(byte_values,dim);
           }
           break;
+        case Int:
+          {
+            boost::shared_array<int> values;
+            boost::tie(values,dim) =
+              readDataSet<int>(hdf5_filename, hdf5_objname,
+                                 subbox, maxdim);
+            size_t len = dim.size()*data_type_sizes[dataType];
+            boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
+            memcpy(byte_values.get(),values.get(),len);
+            return boost::make_tuple(byte_values,dim);
+          }
+          break;
+        case Int64:
+          {
+            boost::shared_array<int64> values;
+            boost::tie(values,dim) =
+              readDataSet<int64>(hdf5_filename, hdf5_objname,
+                                 subbox, maxdim);
+            size_t len = dim.size()*data_type_sizes[dataType];
+            boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
+            memcpy(byte_values.get(),values.get(),len);
+            return boost::make_tuple(byte_values,dim);
+          }
+          break;
+        default:
+        case Undefined:
+          throw std::runtime_error("Undefined or unsupported data type");
         }
     }
     

@@ -73,7 +73,7 @@ set(CVC_LINK_LIBS "")
 
 # Build options
 option(CVC_USING_XMLRPC "Enable cvc::state network sharing support" OFF)
-option(CVC_USING_HDF5 "Enable HDF5 support for *.cvc file format" OFF)
+option(CVC_USING_HDF5 "Enable HDF5 support for *.cvc file format" ON)
 option(CVC_USING_IMOD_MRC "Use IMOD's MRC loading routines" ON)
 option(CVC_LOG4CPLUS_DEFAULT "Use log4cplus output by default" OFF)
 option(LOG4CPLUS_DISABLE_TRACE "Disable logging trace" OFF)

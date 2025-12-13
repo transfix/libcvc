@@ -92,6 +92,7 @@ namespace
       _threadKey = t._threadKey;
       _hdf5_filename = t._hdf5_filename;
       _hdf5_volumeDataSet = t._hdf5_volumeDataSet;
+      return *this;
     }
 
     //lazy way to count the number of steps
@@ -795,7 +796,8 @@ namespace CVC_NAMESPACE
         readDataSet(actualFileName, volume_name,
                     subvolbox, vol.voxelType());
     
-      vol.voxel_dimensions(dim,data);      
+      vol.voxel_dimensions(dim);
+      std::memcpy(*vol, data.get(), dim.size() * vol.voxelSize());      
     }
 
     // -------------------------
