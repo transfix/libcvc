@@ -436,6 +436,18 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Avoiding infinite loops and stack overflow
   - Complete examples and best practices
 
+- **[docs/VOLUME_API.md](docs/VOLUME_API.md)** - Complete volume/voxels API reference (VolMagick)
+  - Multi-dimensional voxel container (`voxels`)
+  - Spatial volume with coordinate system (`volume`)
+  - Memory semantics: shallow vs deep copy
+  - Data types: UChar, UShort, UInt, Float, Double, UInt64
+  - Image processing filters: bilateral, anisotropic diffusion, GDTV, contrast enhancement
+  - Trilinear interpolation and resampling
+  - File I/O: RAWIV, MRC, HDF5, VTK formats
+  - CUDA GPU acceleration with unified memory
+  - Subvolume extraction and compositing
+  - Complete examples and best practices
+
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA development guide
   - Modern CMake CUDA integration
   - CUDA architecture configuration
