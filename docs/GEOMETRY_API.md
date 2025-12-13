@@ -189,7 +189,7 @@ geometry mesh1 = read_geometry("bunny.off");
 geometry mesh2(mesh1);        // Copy constructor - shares data
 geometry mesh3 = mesh1;       // Assignment - shares data
 geometry mesh4;
-mesh4.copy(mesh1);            // copy() method - shares data
+mesh4.copy(mesh1);            // copy() method - shares data (default)
 
 // All four geometries share the same underlying arrays
 // (points, triangles, normals, etc.)
@@ -198,6 +198,41 @@ mesh4.copy(mesh1);            // copy() method - shares data
 mesh2.points().push_back({{0, 0, 0}});  // Triggers COW
 // Now mesh2 has independent data, others still shared
 ```
+
+**Deep Copy:**
+
+For true independent copies that don't use COW, use the `copy()` method with `deepCopy = true`:
+
+```cpp
+geometry mesh1 = read_geometry("bunny.off");
+
+// Deep copy - immediately independent data
+geometry mesh2;
+mesh2.copy(mesh1, true);  // deepCopy = true
+
+// Modifications to mesh2 do NOT affect mesh1
+mesh2.points()[0][0] = 999.0;  // No COW needed, already independent
+// mesh1.points()[0][0] is unchanged
+
+// Shallow copy (default) for comparison
+geometry mesh3;
+mesh3.copy(mesh1);  // or mesh3.copy(mesh1, false);
+// mesh3 shares data with mesh1 until modified
+```
+
+**When to Use Deep Copy:**
+
+- When you need guaranteed independence from source geometry
+- When building geometry that will be heavily modified
+- When you want to avoid COW overhead for many modifications
+- When working with multithreaded code (avoid shared_ptr reference counting)
+
+**When to Use Shallow Copy (Default):**
+
+- When creating temporary copies for read-only operations
+- When you want to save memory by sharing unchanged data
+- When modifications are infrequent
+- For passing geometry around without duplication overhead
 
 **When COW Triggers:**
 
@@ -221,20 +256,18 @@ const auto& pts2 = mesh.points();       // Implicit const (const context)
 
 **Independent Copies:**
 
-To create a true independent copy, modify the copy immediately:
+Deep copies are now easily created using the `copy()` method:
 
 ```cpp
 geometry mesh1 = read_geometry("bunny.off");
 
-// Method 1: Force COW by touching data
-geometry mesh2(mesh1);
-mesh2.points();  // Triggers COW, now independent
+// Method 1: Deep copy (recommended)
+geometry mesh2;
+mesh2.copy(mesh1, true);  // Immediately independent
 
-// Method 2: Use copy() and modify
-geometry mesh3;
-mesh3.copy(mesh1);
-mesh3.clear();                    // Forces new allocation
-mesh3.copy(mesh1);                // Now truly independent
+// Method 2: Shallow copy with forced COW
+geometry mesh3(mesh1);
+mesh3.points();  // Triggers COW, now independent
 
 // Method 3: Manual deep copy
 geometry mesh4;
@@ -316,6 +349,55 @@ geometry bunny = read_geometry("bunny.off");
 geometry copy(bunny);  // Shares data with bunny
 
 EXPECT_EQ(copy.num_points(), bunny.num_points());
+```
+
+### Copy Method
+
+```cpp
+void copy(const geometry& geom, bool deepCopy = false);
+```
+
+Copies data from another geometry. By default, performs a shallow copy with COW semantics. Set `deepCopy = true` for an immediate independent copy.
+
+**Shallow Copy (default):**
+
+```cpp
+geometry mesh1 = read_geometry("bunny.off");
+geometry mesh2;
+mesh2.copy(mesh1);  // Shallow copy - shares data
+
+// Modification triggers COW
+mesh2.points()[0][0] = 1.0;  // Now mesh2 has independent data
+```
+
+**Deep Copy:**
+
+```cpp
+geometry mesh1 = read_geometry("bunny.off");
+geometry mesh3;
+mesh3.copy(mesh1, true);  // Deep copy - immediately independent
+
+// No COW needed - already has independent data
+mesh3.points()[0][0] = 1.0;  // mesh1 is unchanged
+```
+
+**Use Cases:**
+
+- `deepCopy = false` (default): Memory-efficient sharing for read-mostly operations
+- `deepCopy = true`: Guaranteed independence for heavy modification or multithreading
+
+### Assignment Operator
+
+```cpp
+geometry& operator=(const geometry& geom);
+```
+
+Performs a shallow copy (equivalent to `copy(geom, false)`).
+
+```cpp
+geometry mesh1 = read_geometry("bunny.off");
+geometry mesh2;
+mesh2 = mesh1;  // Shallow copy - shares data
 ```
 
 ### File Constructor

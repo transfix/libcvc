@@ -69,15 +69,31 @@ namespace CVC_NAMESPACE
 
   geometry::~geometry() {}
 
-  void geometry::copy(const geometry &geom)
+  void geometry::copy(const geometry &geom, bool deepCopy)
   {
-    _points = geom._points;
-    _boundary = geom._boundary;
-    _normals = geom._normals;
-    _colors = geom._colors;
-    _lines = geom._lines;
-    _tris = geom._tris;
-    _quads = geom._quads;
+    if (deepCopy)
+    {
+      // Deep copy: allocate new shared_ptr instances with copied data
+      _points = points_ptr_t(new points_t(*geom._points));
+      _boundary = boundary_ptr_t(new boundary_t(*geom._boundary));
+      _normals = normals_ptr_t(new normals_t(*geom._normals));
+      _colors = colors_ptr_t(new colors_t(*geom._colors));
+      _lines = lines_ptr_t(new lines_t(*geom._lines));
+      _tris = tris_ptr_t(new tris_t(*geom._tris));
+      _quads = quads_ptr_t(new quads_t(*geom._quads));
+    }
+    else
+    {
+      // Shallow copy: copy-on-write via shared_ptr
+      _points = geom._points;
+      _boundary = geom._boundary;
+      _normals = geom._normals;
+      _colors = geom._colors;
+      _lines = geom._lines;
+      _tris = geom._tris;
+      _quads = geom._quads;
+    }
+    
     _extents_set = geom._extents_set;
     _min = geom._min;
     _max = geom._max;

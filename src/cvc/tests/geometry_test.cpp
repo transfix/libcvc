@@ -526,6 +526,97 @@ TEST_F(GeometryTest, CopyOnWrite) {
   EXPECT_NE(geom1.points()[0][0], 999.0);
 }
 
+TEST_F(GeometryTest, ShallowCopyDefault) {
+  geometry geom1;
+  geom1.points().push_back({{1.0, 2.0, 3.0}});
+  geom1.points().push_back({{4.0, 5.0, 6.0}});
+  geom1.tris().push_back({{0, 1, 0}});
+  
+  // Shallow copy (default)
+  geometry geom2;
+  geom2.copy(geom1);  // deepCopy = false (default)
+  
+  // Initially both should have same data
+  EXPECT_EQ(geom2.num_points(), 2);
+  EXPECT_EQ(geom2.num_tris(), 1);
+  EXPECT_DOUBLE_EQ(geom2.points()[0][0], 1.0);
+  
+  // Modify geom2 - triggers copy-on-write
+  geom2.points()[0][0] = 999.0;
+  
+  // After COW, geom1 should be unchanged
+  EXPECT_DOUBLE_EQ(geom1.points()[0][0], 1.0);
+  EXPECT_DOUBLE_EQ(geom2.points()[0][0], 999.0);
+}
+
+TEST_F(GeometryTest, DeepCopy) {
+  geometry geom1;
+  geom1.points().push_back({{1.0, 2.0, 3.0}});
+  geom1.points().push_back({{4.0, 5.0, 6.0}});
+  geom1.points().push_back({{7.0, 8.0, 9.0}});
+  geom1.tris().push_back({{0, 1, 2}});
+  geom1.normals().resize(3);
+  geom1.normals()[0] = {{0.0, 0.0, 1.0}};
+  geom1.colors().resize(3);
+  geom1.colors()[0] = {{1.0, 0.0, 0.0}};
+  geom1.boundary().resize(3, true);
+  
+  // Deep copy
+  geometry geom2;
+  geom2.copy(geom1, true);  // deepCopy = true
+  
+  // Should have copied data
+  EXPECT_EQ(geom2.num_points(), 3);
+  EXPECT_EQ(geom2.num_tris(), 1);
+  EXPECT_EQ(geom2.normals().size(), 3);
+  EXPECT_EQ(geom2.colors().size(), 3);
+  EXPECT_EQ(geom2.boundary().size(), 3);
+  
+  // Modify geom2 - should NOT affect geom1 (true deep copy)
+  geom2.points()[0][0] = 999.0;
+  geom2.tris()[0][0] = 99;
+  geom2.normals()[0][0] = 5.5;
+  geom2.colors()[0][0] = 0.5;
+  geom2.boundary()[0] = false;
+  
+  // geom1 should be completely unchanged
+  EXPECT_DOUBLE_EQ(geom1.points()[0][0], 1.0);
+  EXPECT_EQ(geom1.tris()[0][0], 0);
+  EXPECT_DOUBLE_EQ(geom1.normals()[0][0], 0.0);
+  EXPECT_DOUBLE_EQ(geom1.colors()[0][0], 1.0);
+  EXPECT_TRUE(geom1.boundary()[0]);
+  
+  // geom2 should have new values
+  EXPECT_DOUBLE_EQ(geom2.points()[0][0], 999.0);
+  EXPECT_EQ(geom2.tris()[0][0], 99);
+  EXPECT_DOUBLE_EQ(geom2.normals()[0][0], 5.5);
+  EXPECT_DOUBLE_EQ(geom2.colors()[0][0], 0.5);
+  EXPECT_FALSE(geom2.boundary()[0]);
+}
+
+TEST_F(GeometryTest, DeepCopyIndependence) {
+  // Test that deep copy creates truly independent geometry
+  geometry original(bunny);
+  
+  geometry shallow;
+  shallow.copy(original, false);  // Shallow copy
+  
+  geometry deep;
+  deep.copy(original, true);  // Deep copy
+  
+  // Modify shallow - triggers COW
+  shallow.points()[100][0] += 1.0;
+  
+  // Modify deep - already independent
+  deep.points()[200][0] += 2.0;
+  
+  // Original should be unchanged by deep copy modifications
+  EXPECT_DOUBLE_EQ(original.points()[200][0], bunny.points()[200][0]);
+  
+  // Deep copy should have different value
+  EXPECT_DOUBLE_EQ(deep.points()[200][0], bunny.points()[200][0] + 2.0);
+}
+
 TEST_F(GeometryTest, AccessorsConst) {
   const geometry& const_bunny = bunny;
   

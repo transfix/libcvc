@@ -95,7 +95,7 @@ namespace CVC_NAMESPACE
     geometry(const std::string & filename);
     ~geometry();
 
-    void copy(const geometry& geom);
+    void copy(const geometry& geom, bool deepCopy = false);
     geometry& operator=(const geometry& geom);
 
     points_t&    points() { pre_write(POINTS); return *_points; }
