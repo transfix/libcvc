@@ -67,6 +67,7 @@ namespace CVC_NAMESPACE
   CVC_DEF_EXCEPTION(volume_cache_directory_file_error);
   CVC_DEF_EXCEPTION(command_line_error);
   CVC_DEF_EXCEPTION(timeout_error);
+  CVC_DEF_EXCEPTION(type_conversion_error);
 };
 
 #endif

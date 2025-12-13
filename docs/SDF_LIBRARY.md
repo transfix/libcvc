@@ -791,8 +791,8 @@ for (int i = 0; i < n_geometries; i++) {
 - [Algorithm API](../ALGORITHM_API.md) - High-level algorithm interface
 - [Volume API](../VOLUME_API.md) - Volume data structure
 - [Geometry API](../GEOMETRY_API.md) - Mesh representation
-- [Testing Coverage](../TESTING_COVERAGE.md) - Test suite and coverage reports
-- [Main README](../../README.md) - Project overview
+- [Testing Coverage](TESTING_COVERAGE.md) - Test suite and coverage reports
+- [Main README](../README.md) - Project overview
 
 ### External Resources
 

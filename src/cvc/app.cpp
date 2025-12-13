@@ -134,24 +134,60 @@ namespace CVC_NAMESPACE
   // 09/09/2011 -- Joe R. -- Creation.
   // 02/24/2012 -- Joe R. -- Moved to class App so we can support checking whether the main
   //                         thread has quit.
+  // 12/12/2025 -- Joe R. -- Two-phase shutdown: interrupt all, then join with timeout.
   void app::wait_for_threads()
   {
     using namespace CVC_NAMESPACE;
 
-    //Wait for all the threads to finish
+    //Get all the threads
     thread_map map = cvcapp.threads();
+    
+    // Phase 1: Interrupt all threads to signal them to exit
+    // Many algorithms have interruption checkpoints that allow clean exit
+    BOOST_FOREACH(thread_map::value_type val, map)
+      {
+        try
+          {
+            if (val.second)
+              val.second->interrupt();
+          }
+        catch(...) {}
+      }
+    
+    // Phase 2: Attempt to join all threads with a timeout
+    std::vector<std::string> failed_threads;
     BOOST_FOREACH(thread_map::value_type val, map)
       {
         try
           {
             using namespace boost;
-            cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
-                             % BOOST_CURRENT_FUNCTION
-                             % val.first));
-            val.second->join();
+            if (val.second && val.second->joinable()) {
+              cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
+                               % BOOST_CURRENT_FUNCTION
+                               % val.first));
+              // Try to join with a 5 second timeout per thread
+              if (!val.second->try_join_for(boost::chrono::seconds(5))) {
+                // Thread didn't join in time, track it
+                failed_threads.push_back(val.first);
+              }
+            }
           }
         catch(boost::thread_interrupted&) {}
+        catch(...) {}
       }
+    
+    // Phase 3: Report any threads that failed to join
+    if (!failed_threads.empty()) {
+      using namespace boost;
+      std::string msg = str(format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
+                            % BOOST_CURRENT_FUNCTION
+                            % failed_threads.size());
+      BOOST_FOREACH(const std::string& thread_name, failed_threads) {
+        msg += str(format("  - %s\n") % thread_name);
+      }
+      cvcapp.log(0, msg); // Error level
+      std::cerr << msg; // Also print to stderr to ensure visibility
+    }
   }
 
   app& app::instance()

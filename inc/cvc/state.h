@@ -260,7 +260,13 @@ namespace CVC_NAMESPACE
     template<class T>
     T data()
     {
-      return boost::any_cast<T>(data());
+      try {
+        return boost::any_cast<T>(data());
+      } catch (const boost::bad_any_cast& e) {
+        throw type_conversion_error(
+          boost::str(boost::format("Failed to cast data to requested type: %1%") % e.what())
+        );
+      }
     }
     
     // Get data with optional callback that fires when data changes
@@ -308,7 +314,7 @@ namespace CVC_NAMESPACE
         {
           T val = data<T>();
         }
-      catch(std::exception& e)
+      catch(...)
         {
           return false;
         }

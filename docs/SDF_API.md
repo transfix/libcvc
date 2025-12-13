@@ -447,7 +447,7 @@ ctx.compute();
 - [Algorithm API](ALGORITHM_API.md) - High-level algorithm interface
 - [Volume API](VOLUME_API.md) - Volume data structure
 - [Geometry API](GEOMETRY_API.md) - Mesh representation
-- [Testing Coverage](../TESTING_COVERAGE.md) - Test suite and coverage reports
+- [Testing Coverage](TESTING_COVERAGE.md) - Test suite and coverage reports
 
 ## References
 

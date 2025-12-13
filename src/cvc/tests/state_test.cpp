@@ -1562,7 +1562,11 @@ TEST(StateTest, DeadlockDetectionValueAndSignal) {
   cvcstate("test.deadlock").reset();
 }
 
-// Test state_object pattern with threading
+// ===========================
+// State Object Pattern Tests
+// ===========================
+
+// Basic test state_object
 class TestStateObject : public state_object<TestStateObject> {
 public:
   std::atomic<int> handleCount;
@@ -1610,7 +1614,7 @@ TEST(StateTest, StateObjectMultithreaded) {
     t.join();
   }
   
-  // Give time for async handlers to complete
+  // Give handlers time to complete (they run async)
   boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
   
   // Should have triggered many state change handlers
@@ -1618,6 +1622,416 @@ TEST(StateTest, StateObjectMultithreaded) {
   
   // Should not have had errors
   EXPECT_EQ(obj.errorCount.load(), 0);
+}
+
+// Configuration state_object example (from STATE_API.md)
+class ConfigurationObject : public state_object<ConfigurationObject> {
+public:
+  std::atomic<int> resizeCount;
+  std::atomic<int> fullscreenCount;
+  std::atomic<int> totalHandlerCalls;
+  int lastWidth;
+  int lastHeight;
+  bool lastFullscreen;
+  
+  ConfigurationObject() : resizeCount(0), fullscreenCount(0), totalHandlerCalls(0),
+                          lastWidth(0), lastHeight(0), lastFullscreen(false) {
+    // Initialize default values
+    getState("width").value(1920);
+    getState("height").value(1080);
+    getState("fullscreen").value(false);
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    totalHandlerCalls++;
+    // childState includes the full path, so check if it ends with the expected names
+    if (childState.find("width") != std::string::npos || childState.find("height") != std::string::npos) {
+      lastWidth = getState("width").value<int>();
+      lastHeight = getState("height").value<int>();
+      resizeCount++;
+    } else if (childState.find("fullscreen") != std::string::npos) {
+      lastFullscreen = getState("fullscreen").value<bool>();
+      fullscreenCount++;
+    }
+  }
+};
+
+TEST(StateTest, StateObjectConfiguration) {
+  ConfigurationObject config;
+  
+  // Verify default initialization
+  EXPECT_EQ(config.getState("width").value<int>(), 1920);
+  EXPECT_EQ(config.getState("height").value<int>(), 1080);
+  EXPECT_FALSE(config.getState("fullscreen").value<bool>());
+  
+  // Modify state - should trigger handlers
+  config.getState("width").value(2560);
+  config.getState("height").value(1440);
+  
+  // Give handlers time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  EXPECT_GT(config.resizeCount.load(), 0);
+  EXPECT_EQ(config.lastWidth, 2560);
+  EXPECT_EQ(config.lastHeight, 1440);
+  
+  // Change fullscreen
+  config.getState("fullscreen").value(true);
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  EXPECT_GT(config.fullscreenCount.load(), 0);
+  EXPECT_TRUE(config.lastFullscreen);
+}
+
+// DataProcessor state_object example (from STATE_API.md)
+class DataProcessorObject : public state_object<DataProcessorObject> {
+public:
+  std::atomic<int> statusChangeCount;
+  std::atomic<int> errorAlertCount;
+  std::string lastStatus;
+  boost::mutex statusMutex;
+  
+  DataProcessorObject() : statusChangeCount(0), errorAlertCount(0) {
+    getState("status").value("idle");
+    getState("progress").value(0.0);
+    getState("error_count").value(0);
+  }
+  
+  void processData(const std::vector<double>& data) {
+    getState("status").value("processing");
+    
+    for (size_t i = 0; i < data.size(); ++i) {
+      // Simulate processing
+      if (data[i] < 0) {
+        // Simulate error
+        int count = getState("error_count").value<int>();
+        getState("error_count").value(count + 1);
+      }
+      
+      // Update progress
+      getState("progress").value(static_cast<double>(i + 1) / data.size());
+    }
+    
+    getState("status").value("complete");
+    getState("progress").value(1.0);
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    // childState includes the full path
+    if (childState.find("status") != std::string::npos) {
+      boost::mutex::scoped_lock lock(statusMutex);
+      lastStatus = getState("status").value();
+      statusChangeCount++;
+    } else if (childState.find("error_count") != std::string::npos) {
+      int errors = getState("error_count").value<int>();
+      if (errors > 3) {
+        errorAlertCount++;
+      }
+    }
+  }
+};
+
+TEST(StateTest, StateObjectDataProcessor) {
+  DataProcessorObject processor;
+  
+  // Verify initial state
+  EXPECT_EQ(processor.getState("status").value(), "idle");
+  EXPECT_DOUBLE_EQ(processor.getState("progress").value<double>(), 0.0);
+  
+  // Process some data with errors
+  std::vector<double> data = {1.0, 2.0, -1.0, 3.0, -2.0, 4.0, -3.0, 5.0, -4.0, -5.0};
+  processor.processData(data);
+  
+  // Give handlers time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  // Verify final state
+  EXPECT_EQ(processor.getState("status").value(), "complete");
+  EXPECT_DOUBLE_EQ(processor.getState("progress").value<double>(), 1.0);
+  EXPECT_EQ(processor.getState("error_count").value<int>(), 5);
+  
+  // Verify handlers were called
+  EXPECT_GT(processor.statusChangeCount.load(), 0);
+  EXPECT_GT(processor.errorAlertCount.load(), 0);  // Should alert since errors > 3
+  
+  {
+    boost::mutex::scoped_lock lock(processor.statusMutex);
+    EXPECT_EQ(processor.lastStatus, "complete");
+  }
+}
+
+// Renderer state_object example (from STATE_API.md)
+class RendererObject : public state_object<RendererObject> {
+public:
+  std::atomic<int> cameraUpdateCount;
+  std::atomic<int> renderModeChangeCount;
+  std::atomic<int> redrawRequestCount;
+  std::string lastRenderMode;
+  boost::mutex modeMutex;
+  
+  RendererObject() : cameraUpdateCount(0), renderModeChangeCount(0), redrawRequestCount(0) {
+    getState("camera.position").value("0,0,10");
+    getState("camera.target").value("0,0,0");
+    getState("render_mode").value("solid");
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    // childState includes the full path
+    if (childState.find("camera.") != std::string::npos) {
+      cameraUpdateCount++;
+      redrawRequestCount++;
+    } else if (childState.find("render_mode") != std::string::npos) {
+      boost::mutex::scoped_lock lock(modeMutex);
+      lastRenderMode = getState("render_mode").value();
+      renderModeChangeCount++;
+      redrawRequestCount++;
+    }
+  }
+};
+
+TEST(StateTest, StateObjectRenderer) {
+  RendererObject renderer;
+  
+  // Verify initial state
+  EXPECT_EQ(renderer.getState("camera.position").value(), "0,0,10");
+  EXPECT_EQ(renderer.getState("camera.target").value(), "0,0,0");
+  EXPECT_EQ(renderer.getState("render_mode").value(), "solid");
+  
+  // Update camera from multiple threads
+  boost::thread t1([&renderer]() {
+    renderer.getState("camera.position").value("5,5,5");
+  });
+  
+  boost::thread t2([&renderer]() {
+    renderer.getState("camera.target").value("1,1,1");
+  });
+  
+  boost::thread t3([&renderer]() {
+    renderer.getState("render_mode").value("wireframe");
+  });
+  
+  t1.join();
+  t2.join();
+  t3.join();
+  
+  // Give handlers time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  // Verify all updates triggered handlers
+  EXPECT_GT(renderer.cameraUpdateCount.load(), 0);
+  EXPECT_GT(renderer.renderModeChangeCount.load(), 0);
+  EXPECT_GT(renderer.redrawRequestCount.load(), 0);
+  
+  {
+    boost::mutex::scoped_lock lock(renderer.modeMutex);
+    EXPECT_EQ(renderer.lastRenderMode, "wireframe");
+  }
+}
+
+// AppSettings state_object example (from STATE_API.md)
+class AppSettingsObject : public state_object<AppSettingsObject> {
+public:
+  std::atomic<int> themeChangeCount;
+  std::string lastTheme;
+  boost::mutex themeMutex;
+  
+  AppSettingsObject() : themeChangeCount(0) {
+    loadDefaults();
+  }
+  
+  void loadDefaults() {
+    getState("window.width").value(1920);
+    getState("window.height").value(1080);
+    getState("theme").value("dark");
+    getState("language").value("en");
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    // childState includes the full path
+    if (childState.find("theme") != std::string::npos) {
+      boost::mutex::scoped_lock lock(themeMutex);
+      lastTheme = getState("theme").value();
+      themeChangeCount++;
+    }
+  }
+};
+
+TEST(StateTest, StateObjectAppSettings) {
+  AppSettingsObject settings;
+  
+  // Verify defaults
+  EXPECT_EQ(settings.getState("window.width").value<int>(), 1920);
+  EXPECT_EQ(settings.getState("window.height").value<int>(), 1080);
+  EXPECT_EQ(settings.getState("theme").value(), "dark");
+  EXPECT_EQ(settings.getState("language").value(), "en");
+  
+  // Change theme
+  settings.getState("theme").value("light");
+  
+  // Give handler time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  EXPECT_GT(settings.themeChangeCount.load(), 0);
+  
+  {
+    boost::mutex::scoped_lock lock(settings.themeMutex);
+    EXPECT_EQ(settings.lastTheme, "light");
+  }
+}
+
+// Test external state access pattern
+TEST(StateTest, StateObjectExternalAccess) {
+  ConfigurationObject config;
+  
+  // Get the state path
+  std::string widthPath = config.stateName("width");
+  
+  // Access via global state
+  cvcstate(widthPath).value(3840);
+  
+  // Give handler time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  // Verify change was detected
+  EXPECT_EQ(config.lastWidth, 3840);
+  EXPECT_GT(config.resizeCount.load(), 0);
+}
+
+// Test state_object with nested state paths
+class NestedStateObject : public state_object<NestedStateObject> {
+public:
+  std::atomic<int> deepPathChangeCount;
+  
+  NestedStateObject() : deepPathChangeCount(0) {
+    getState("level1.level2.level3.value").value("deep");
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    // childState includes the full path
+    if (childState.find("level1.level2.level3") != std::string::npos) {
+      deepPathChangeCount++;
+    }
+  }
+};
+
+TEST(StateTest, StateObjectNestedPaths) {
+  NestedStateObject obj;
+  
+  // Verify deep path initialization
+  EXPECT_EQ(obj.getState("level1.level2.level3.value").value(), "deep");
+  
+  // Modify deep path
+  obj.getState("level1.level2.level3.value").value("modified");
+  
+  // Give handler time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  EXPECT_GT(obj.deepPathChangeCount.load(), 0);
+}
+
+// Test state_object state name generation
+TEST(StateTest, StateObjectStateName) {
+  ConfigurationObject config;
+  
+  // stateName() should include instance information
+  std::string name = config.stateName();
+  EXPECT_FALSE(name.empty());
+  // Note: Type name may be "This" due to template parameter in dataTypeName
+  
+  // stateName with child should append child path
+  std::string childName = config.stateName("width");
+  EXPECT_FALSE(childName.empty());
+  EXPECT_NE(childName.find("width"), std::string::npos);
+}
+
+// Test multiple instances of same state_object type
+TEST(StateTest, StateObjectMultipleInstances) {
+  ConfigurationObject config1;
+  ConfigurationObject config2;
+  
+  // Each instance should have unique state path
+  std::string name1 = config1.stateName();
+  std::string name2 = config2.stateName();
+  EXPECT_NE(name1, name2);
+  
+  // Modify config1 - should not affect config2
+  config1.getState("width").value(2560);
+  config2.getState("width").value(1024);
+  
+  // Give handlers time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  EXPECT_EQ(config1.lastWidth, 2560);
+  EXPECT_EQ(config2.lastWidth, 1024);
+}
+
+// Test state_object with data objects
+class DataStateObject : public state_object<DataStateObject> {
+public:
+  std::atomic<int> dataChangeCount;
+  int lastDataValue;
+  boost::mutex dataMutex;
+  
+  DataStateObject() : dataChangeCount(0), lastDataValue(0) {
+    getState("data_value").data(42);
+  }
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    // childState includes the full path
+    if (childState.find("data_value") != std::string::npos) {
+      if (getState("data_value").isData<int>()) {
+        boost::mutex::scoped_lock lock(dataMutex);
+        lastDataValue = getState("data_value").data<int>();
+        dataChangeCount++;
+      }
+    }
+  }
+};
+
+TEST(StateTest, StateObjectWithData) {
+  DataStateObject obj;
+  
+  // Verify initial data
+  EXPECT_TRUE(obj.getState("data_value").isData<int>());
+  EXPECT_EQ(obj.getState("data_value").data<int>(), 42);
+  
+  // Change data
+  obj.getState("data_value").data(999);
+  
+  // Give handler time to process (handlers run in separate threads)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  
+  EXPECT_GT(obj.dataChangeCount.load(), 0);
+  
+  {
+    boost::mutex::scoped_lock lock(obj.dataMutex);
+    EXPECT_EQ(obj.lastDataValue, 999);
+  }
+}
+
+// Test state_object async handler execution
+TEST(StateTest, StateObjectAsyncHandlers) {
+  ConfigurationObject config;
+  
+  int initialCount = config.resizeCount.load();
+  
+  // Make rapid changes
+  for (int i = 0; i < 10; ++i) {
+    config.getState("width").value(1920 + i * 100);
+  }
+  
+  // Handlers run asynchronously, so changes may still be processing
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(1000));
+  
+  // Should have processed all changes
+  int finalCount = config.resizeCount.load();
+  EXPECT_GT(finalCount, initialCount);
 }
 
 TEST(StateTest, StressTestCombinedOperations) {

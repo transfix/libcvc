@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-353%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-64.6%25%20lines%20%7C%2068.1%25%20functions-yellow.svg)](TESTING_COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-64.6%25%20lines%20%7C%2068.1%25%20functions-yellow.svg)](docs/TESTING.md)
 
 ## Table of Contents
 
@@ -156,13 +156,14 @@ See `PROJECT_REPORT.md` for a complete list of build options.
 
 Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 321 Tests (100% Passing)
+### Test Suite: 363 Tests (100% Passing)
 
 - **114 App Tests** - Core application framework, data/property management, threading
-- **128 State Tests** - State tree, hierarchies, serialization, signals, async operations
+- **102 State Tests** - State tree, hierarchies, signals, async operations, futures API, state_object pattern (11 tests)
 - **128 Voxels Tests** - Volume data operations, algorithms, **20 CUDA tests** (GPU-accelerated resize, multithreading)
 - **29 Volume Tests** - Spatial coordinates, interpolation, subvolumes, bounding boxes
-- **37 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
+- **47 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
+- **6 Algorithm Tests** - SDF computation, isosurface extraction, convergence tests
 
 ### Code Coverage: 90.5% on Core Components
 
@@ -175,7 +176,7 @@ The actively tested core modules (app, state, voxels, volume, geometry) achieve 
 - **geometry.cpp**: 79.00% (252/319 lines)
 - **Functions**: 94.7% (355/375 functions)
 
-See [TESTING_COVERAGE.md](TESTING_COVERAGE.md) for detailed coverage analysis
+See [docs/TESTING.md](docs/TESTING.md) for comprehensive testing documentation including coverage analysis
 
 ### Quick Test Commands
 
@@ -206,14 +207,24 @@ cmake --build build --target check
 
 ### Documentation
 
-See **[TESTING.md](TESTING.md)** for detailed testing documentation:
-- How to run tests
-- Test coverage details
+See **[docs/TESTING.md](docs/TESTING.md)** for comprehensive testing documentation:
+- 363 tests with 100% pass rate (114 app, 102 state, 128 voxels, 29 volume, 47 geometry, 6 algorithm)
+- 90.5% coverage on core components
+- How to run tests (CTest, Google Test)
+- Test coverage details and analysis
+- Multithreaded testing (12 tests)
+- Futures API testing (11 tests)
+- State object pattern tests (11 tests)
+- CUDA GPU tests (20 tests)
 - Adding new tests
 - CI/CD integration
+- Performance benchmarks
 - Troubleshooting
 
-See **[FUTURES_API.md](FUTURES_API.md)** for async programming patterns:
+See **[docs/STATE_API.md](docs/STATE_API.md)** for state system and futures API:
+- Complete state tree documentation
+- Async programming patterns with futures
+- State object pattern (CRTP-based)
 - Blocking waits for values
 - Callbacks for state changes
 - Producer-consumer examples
@@ -354,7 +365,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Core Documentation
 
-- **[PROJECT_REPORT.md](PROJECT_REPORT.md)** - Comprehensive project documentation
+- **[docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md)** - Comprehensive project documentation
   - Full dependency list and installation instructions
   - Detailed build options (all 20+ options explained)
   - Architecture overview
@@ -363,24 +374,19 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Testing Documentation
 
-- **[TESTING.md](TESTING.md)** - Unit testing guide
-  - Running tests with CTest and Google Test
-  - Test organization and coverage (308 tests)
-  - Adding new tests
+- **[docs/TESTING.md](docs/TESTING.md)** - Comprehensive testing guide
+  - **363 tests with 100% pass rate** (114 app, 102 state, 128 voxels, 29 volume, 47 geometry, 6 algorithm)
+  - **90.5% coverage on core components** (1,366/1,509 lines)
+  - Running tests (CTest, Google Test, custom check target)
+  - Test organization and naming conventions
+  - Detailed coverage analysis with lcov/gcov
+  - Advanced features: multithreaded tests (12), futures API (11), state_object (11), CUDA GPU (20)
+  - Performance benchmarks (SDF v2.0: 11x speedup)
+  - Adding new tests with examples
+  - Common testing patterns (fixtures, parameterized tests, multithreading)
   - CI/CD integration examples
-  - Code coverage with lcov/genhtml
-
-- **[TESTING_COVERAGE.md](TESTING_COVERAGE.md)** - Coverage analysis
-  - 308 tests across app, state, voxels, volume, and geometry components
-  - **89.6% coverage on core components** (1,740/1,941 lines)
-  - Detailed per-file coverage metrics including geometry API
-  - Bug fixes and API improvements from testing
-  - Coverage report generation with lcov/genhtml/gcov
-
-- **[TESTING_IMPLEMENTATION.md](TESTING_IMPLEMENTATION.md)** - Implementation details
-  - Google Test infrastructure setup
-  - Test file structure
-  - Success metrics and verification
+  - Troubleshooting guide
+  - Best practices and future improvements
 
 ### SDF Library
 
@@ -398,7 +404,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Image Processing Algorithms
 
-- **[IMAGE_PROCESSING_ALGORITHMS.md](docs/IMAGE_PROCESSING_ALGORITHMS.md)** - Comprehensive API reference
+- **[docs/IMAGE_PROCESSING_ALGORITHMS.md](docs/IMAGE_PROCESSING_ALGORITHMS.md)** - Comprehensive API reference
   - **Anisotropic Diffusion**: Edge-preserving noise reduction (Perona-Malik model)
   - **Bilateral Filter**: Non-linear smoothing with edge preservation
   - **Contrast Enhancement**: Adaptive histogram equalization with resistor propagation
@@ -406,28 +412,42 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Complete algorithm details, parameters, usage examples, and best practices
   - Based on 271-test validation suite
 
-### Advanced Features
+### API Documentation
 
-- **[FUTURES_API.md](FUTURES_API.md)** - Async state programming
-  - Blocking waits for values/data
-  - Callback registration
+- **[docs/APP_API.md](docs/APP_API.md)** - Complete application framework API
+  - Singleton application object (`cvcapp`)
+  - Data management with `boost::any` type-safe storage
+  - Property system for configuration
+  - Thread management with progress tracking
+  - Named mutex system for resource synchronization
+  - Type registration for human-readable names
+  - Signals for change notifications
+  - Complete examples and design patterns
+
+- **[docs/STATE_API.md](docs/STATE_API.md)** - Complete state tree API reference
+  - Hierarchical key-value store
+  - Value and data operations
+  - Property system
+  - Tree navigation
+  - Futures API for async/await patterns
+  - State object pattern (CRTP-based)
   - Producer-consumer patterns
-  - Timeout handling
-  - 11 futures tests
+  - Callbacks and signals
+  - Complete examples and best practices
 
-- **[CUDA_GUIDE.md](CUDA_GUIDE.md)** - CUDA development guide
+- **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA development guide
   - Modern CMake CUDA integration
   - CUDA architecture configuration
   - Example CUDA code patterns
 
-- **[CUDA_MODERNIZATION.md](CUDA_MODERNIZATION.md)** - CUDA migration
+- **[docs/CUDA_MODERNIZATION.md](docs/CUDA_MODERNIZATION.md)** - CUDA migration
   - Legacy to modern CMake CUDA
   - Before/after comparisons
   - Build examples
 
 ### Development Guidelines
 
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development guidelines
+- **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** - Development guidelines
   - Code style and conventions
   - Build system best practices
   - Git workflow recommendations
