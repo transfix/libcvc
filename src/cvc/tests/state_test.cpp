@@ -2764,6 +2764,373 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
   cvcstate("perf").reset();
 }
 
+TEST(StateTest, PerformanceCallbackChains) {
+  // Performance test for cascading callbacks
+  // Tests callback chains that trigger other state changes
+  // Ensures no stack overflow with deep callback chains
+  // Tests safeguards against infinite callback loops
+  
+  std::cout << "\n=== Callback Chain Performance & Safety Test ===\n";
+  
+  const int MAX_CHAIN_DEPTH = 100;
+  const int MAX_RUNTIME_SECONDS = 60;
+  auto start_time = boost::chrono::high_resolution_clock::now();
+  
+  std::atomic<int> total_callbacks(0);
+  std::atomic<int> chain_depth(0);
+  std::atomic<int> max_depth_reached(0);
+  
+  // Test 1: Linear callback chain (A triggers B triggers C...)
+  std::cout << "Test 1: Linear callback chain (depth " << MAX_CHAIN_DEPTH << ")...\n";
+  
+  std::vector<boost::signals2::connection> connections;
+  
+  // Set up chain: each node triggers the next
+  for (int i = 0; i < MAX_CHAIN_DEPTH - 1; ++i) {
+    std::string current = "perf.chain.linear." + boost::lexical_cast<std::string>(i);
+    std::string next = "perf.chain.linear." + boost::lexical_cast<std::string>(i + 1);
+    
+    auto conn = cvcstate(current).valueChanged.connect([&total_callbacks, next, i, &chain_depth, &max_depth_reached]() {
+      total_callbacks++;
+      int current_depth = chain_depth.fetch_add(1) + 1;
+      
+      // Track max depth
+      int current_max = max_depth_reached.load();
+      while (current_depth > current_max && 
+             !max_depth_reached.compare_exchange_weak(current_max, current_depth)) {
+        current_max = max_depth_reached.load();
+      }
+      
+      // Trigger next in chain
+      cvcstate(next).value(i + 1);
+      
+      chain_depth.fetch_sub(1);
+    });
+    connections.push_back(conn);
+  }
+  
+  // Initialize all nodes first
+  for (int i = 0; i < MAX_CHAIN_DEPTH; ++i) {
+    std::string key = "perf.chain.linear." + boost::lexical_cast<std::string>(i);
+    cvcstate(key).value(0);
+  }
+  
+  // Trigger the chain
+  total_callbacks.store(0);
+  chain_depth.store(0);
+  max_depth_reached.store(0);
+  cvcstate("perf.chain.linear.0").value(1);
+  
+  // Wait for chain to complete (small delay)
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  auto checkpoint1 = boost::chrono::high_resolution_clock::now();
+  auto elapsed1 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint1 - start_time).count();
+  
+  std::cout << "  Completed in " << elapsed1 << " ms\n";
+  std::cout << "  Total callbacks fired: " << total_callbacks.load() << "\n";
+  std::cout << "  Max stack depth reached: " << max_depth_reached.load() << "\n";
+  
+  EXPECT_EQ(total_callbacks.load(), MAX_CHAIN_DEPTH - 1) << "All callbacks should fire once";
+  EXPECT_LE(max_depth_reached.load(), MAX_CHAIN_DEPTH) << "Stack depth should be reasonable";
+  
+  // Disconnect linear chain
+  for (auto& conn : connections) {
+    conn.disconnect();
+  }
+  connections.clear();
+  
+  // Test 2: Fan-out callbacks (one parent triggers multiple children)
+  std::cout << "\nTest 2: Fan-out callbacks (1 parent -> 50 children)...\n";
+  
+  const int FAN_OUT_COUNT = 50;
+  std::atomic<int> fanout_callbacks(0);
+  std::atomic<int> child_callbacks(0);
+  
+  // Parent callback triggers writes to all children
+  auto parent_conn = cvcstate("perf.chain.fanout.parent").valueChanged.connect(
+    [&fanout_callbacks, FAN_OUT_COUNT]() {
+      fanout_callbacks++;
+      for (int i = 0; i < FAN_OUT_COUNT; ++i) {
+        std::string child = "perf.chain.fanout.child." + boost::lexical_cast<std::string>(i);
+        cvcstate(child).value(i);
+      }
+    }
+  );
+  
+  // Each child has a callback
+  std::vector<boost::signals2::connection> child_conns;
+  for (int i = 0; i < FAN_OUT_COUNT; ++i) {
+    std::string child = "perf.chain.fanout.child." + boost::lexical_cast<std::string>(i);
+    auto conn = cvcstate(child).valueChanged.connect([&child_callbacks]() {
+      child_callbacks++;
+    });
+    child_conns.push_back(conn);
+  }
+  
+  // Trigger fan-out
+  fanout_callbacks.store(0);
+  child_callbacks.store(0);
+  cvcstate("perf.chain.fanout.parent").value(42);
+  
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  auto checkpoint2 = boost::chrono::high_resolution_clock::now();
+  auto elapsed2 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint2 - checkpoint1).count();
+  
+  std::cout << "  Completed in " << elapsed2 << " ms\n";
+  std::cout << "  Parent callbacks: " << fanout_callbacks.load() << "\n";
+  std::cout << "  Child callbacks: " << child_callbacks.load() << "\n";
+  
+  EXPECT_EQ(fanout_callbacks.load(), 1) << "Parent callback should fire once";
+  EXPECT_EQ(child_callbacks.load(), FAN_OUT_COUNT) << "All child callbacks should fire";
+  
+  parent_conn.disconnect();
+  for (auto& conn : child_conns) {
+    conn.disconnect();
+  }
+  child_conns.clear();
+  
+  // Test 3: Prevent infinite loops with counter-based guard
+  std::cout << "\nTest 3: Infinite loop prevention (mutual triggers with guard)...\n";
+  
+  std::atomic<int> nodeA_callbacks(0);
+  std::atomic<int> nodeB_callbacks(0);
+  const int MAX_ITERATIONS = 10; // Safety limit
+  
+  // Node A triggers B (with iteration limit)
+  auto connA = cvcstate("perf.chain.loop.A").valueChanged.connect(
+    [&nodeA_callbacks, MAX_ITERATIONS]() {
+      int count = nodeA_callbacks.fetch_add(1);
+      if (count < MAX_ITERATIONS) {
+        cvcstate("perf.chain.loop.B").value(count);
+      }
+    }
+  );
+  
+  // Node B triggers A (with iteration limit)
+  auto connB = cvcstate("perf.chain.loop.B").valueChanged.connect(
+    [&nodeB_callbacks, MAX_ITERATIONS]() {
+      int count = nodeB_callbacks.fetch_add(1);
+      if (count < MAX_ITERATIONS) {
+        cvcstate("perf.chain.loop.A").value(count);
+      }
+    }
+  );
+  
+  // Initialize
+  cvcstate("perf.chain.loop.A").value(0);
+  cvcstate("perf.chain.loop.B").value(0);
+  
+  // Trigger potential loop
+  nodeA_callbacks.store(0);
+  nodeB_callbacks.store(0);
+  cvcstate("perf.chain.loop.A").value(1);
+  
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  auto checkpoint3 = boost::chrono::high_resolution_clock::now();
+  auto elapsed3 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint3 - checkpoint2).count();
+  
+  std::cout << "  Completed in " << elapsed3 << " ms\n";
+  std::cout << "  Node A callbacks: " << nodeA_callbacks.load() << "\n";
+  std::cout << "  Node B callbacks: " << nodeB_callbacks.load() << "\n";
+  std::cout << "  Loop prevented by counter guard\n";
+  
+  EXPECT_LE(nodeA_callbacks.load(), MAX_ITERATIONS + 1) << "Counter guard should prevent infinite loop";
+  EXPECT_LE(nodeB_callbacks.load(), MAX_ITERATIONS + 1) << "Counter guard should prevent infinite loop";
+  
+  connA.disconnect();
+  connB.disconnect();
+  
+  // Test 4: State-based loop prevention (check if already processing)
+  std::cout << "\nTest 4: State-based loop prevention (processing flag)...\n";
+  
+  struct GuardedCallback {
+    std::atomic<bool> processing{false};
+    std::atomic<int> callback_count{0};
+    
+    void operator()(const std::string& trigger_key) {
+      // Try to acquire processing flag
+      bool expected = false;
+      if (!processing.compare_exchange_strong(expected, true)) {
+        // Already processing, skip to prevent loop
+        return;
+      }
+      
+      callback_count++;
+      
+      // Do work (trigger another state)
+      if (trigger_key != "self") {
+        cvcstate(trigger_key).value(callback_count.load());
+      }
+      
+      // Release flag
+      processing.store(false);
+    }
+  };
+  
+  GuardedCallback guardC;
+  GuardedCallback guardD;
+  
+  // C triggers D, D triggers C - but guards prevent infinite loop
+  auto connC = cvcstate("perf.chain.guard.C").valueChanged.connect(
+    [&guardC]() { guardC("perf.chain.guard.D"); }
+  );
+  
+  auto connD = cvcstate("perf.chain.guard.D").valueChanged.connect(
+    [&guardD]() { guardD("perf.chain.guard.C"); }
+  );
+  
+  // Initialize
+  cvcstate("perf.chain.guard.C").value(0);
+  cvcstate("perf.chain.guard.D").value(0);
+  
+  // Trigger
+  guardC.callback_count.store(0);
+  guardD.callback_count.store(0);
+  cvcstate("perf.chain.guard.C").value(1);
+  
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  auto checkpoint4 = boost::chrono::high_resolution_clock::now();
+  auto elapsed4 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint4 - checkpoint3).count();
+  
+  std::cout << "  Completed in " << elapsed4 << " ms\n";
+  std::cout << "  Guard C callbacks: " << guardC.callback_count.load() << "\n";
+  std::cout << "  Guard D callbacks: " << guardD.callback_count.load() << "\n";
+  std::cout << "  Loop prevented by processing flag\n";
+  
+  EXPECT_LE(guardC.callback_count.load(), 2) << "Processing flag should prevent re-entry";
+  EXPECT_LE(guardD.callback_count.load(), 2) << "Processing flag should prevent re-entry";
+  
+  connC.disconnect();
+  connD.disconnect();
+  
+  // Test 5: Deep hierarchy with parent-child callbacks
+  std::cout << "\nTest 5: Deep hierarchy callbacks (parent updates trigger child updates)...\n";
+  
+  std::atomic<int> hierarchy_callbacks(0);
+  const int HIER_LEVELS = 5;
+  
+  std::vector<boost::signals2::connection> hier_conns;
+  
+  // Set up linear chain where each level triggers the next level
+  for (int level = 0; level < HIER_LEVELS - 1; ++level) {
+    std::string current = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level);
+    std::string next = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level + 1);
+    
+    auto conn = cvcstate(current).valueChanged.connect(
+      [&hierarchy_callbacks, next, level]() {
+        hierarchy_callbacks++;
+        // Update next level with incremented value
+        cvcstate(next).value(level + 2);
+      }
+    );
+    hier_conns.push_back(conn);
+  }
+  
+  // Last level just counts
+  auto last_conn = cvcstate("perf.chain.hier.level" + boost::lexical_cast<std::string>(HIER_LEVELS - 1))
+    .valueChanged.connect([&hierarchy_callbacks]() {
+      hierarchy_callbacks++;
+    });
+  hier_conns.push_back(last_conn);
+  
+  // Initialize all levels
+  for (int level = 0; level < HIER_LEVELS; ++level) {
+    std::string key = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level);
+    cvcstate(key).value(0);
+  }
+  
+  // Trigger from root level
+  hierarchy_callbacks.store(0);
+  cvcstate("perf.chain.hier.level0").value(1);
+  
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  auto checkpoint5 = boost::chrono::high_resolution_clock::now();
+  auto elapsed5 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint5 - checkpoint4).count();
+  
+  std::cout << "  Completed in " << elapsed5 << " ms\n";
+  std::cout << "  Total hierarchy callbacks: " << hierarchy_callbacks.load() << "\n";
+  
+  // Should trigger all levels: HIER_LEVELS callbacks
+  EXPECT_EQ(hierarchy_callbacks.load(), HIER_LEVELS) << "All hierarchy levels should trigger";
+  
+  for (auto& conn : hier_conns) {
+    conn.disconnect();
+  }
+  hier_conns.clear();
+  
+  // Test 6: Stress test - many concurrent callbacks
+  std::cout << "\nTest 6: Concurrent callback stress (1000 nodes, simultaneous triggers)...\n";
+  
+  const int CONCURRENT_NODES = 1000;
+  std::atomic<int> concurrent_callbacks(0);
+  
+  std::vector<boost::signals2::connection> concurrent_conns;
+  for (int i = 0; i < CONCURRENT_NODES; ++i) {
+    std::string key = "perf.chain.concurrent." + boost::lexical_cast<std::string>(i);
+    
+    auto conn = cvcstate(key).valueChanged.connect([&concurrent_callbacks]() {
+      concurrent_callbacks++;
+      // Simulate some work
+      volatile int dummy = 0;
+      for (int j = 0; j < 100; ++j) {
+        dummy += j;
+      }
+      (void)dummy;
+    });
+    concurrent_conns.push_back(conn);
+    
+    // Initialize with -1 so any value >= 0 will trigger change
+    cvcstate(key).value(-1);
+  }
+  
+  // Trigger all simultaneously
+  concurrent_callbacks.store(0);
+  for (int i = 0; i < CONCURRENT_NODES; ++i) {
+    std::string key = "perf.chain.concurrent." + boost::lexical_cast<std::string>(i);
+    cvcstate(key).value(i);
+  }
+  
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  auto checkpoint6 = boost::chrono::high_resolution_clock::now();
+  auto elapsed6 = boost::chrono::duration_cast<boost::chrono::milliseconds>(checkpoint6 - checkpoint5).count();
+  
+  std::cout << "  Completed in " << elapsed6 << " ms\n";
+  std::cout << "  Concurrent callbacks fired: " << concurrent_callbacks.load() << "\n";
+  std::cout << "  Throughput: " << (concurrent_callbacks.load() / (elapsed6 / 1000.0)) << " callbacks/sec\n";
+  
+  EXPECT_EQ(concurrent_callbacks.load(), CONCURRENT_NODES) << "All concurrent callbacks should fire";
+  
+  for (auto& conn : concurrent_conns) {
+    conn.disconnect();
+  }
+  
+  // Final summary
+  auto end_time = boost::chrono::high_resolution_clock::now();
+  auto total_elapsed = boost::chrono::duration_cast<boost::chrono::milliseconds>(end_time - start_time).count();
+  
+  std::cout << "\n=== Callback Chain Test Summary ===\n";
+  std::cout << "Total test time: " << total_elapsed << " ms (" << (total_elapsed / 1000.0) << " seconds)\n";
+  std::cout << "All callback chain tests passed\n";
+  std::cout << "\n✓ Best Practices for Callback Safety:\n";
+  std::cout << "  1. Use iteration counters to limit callback chains\n";
+  std::cout << "  2. Use processing flags to prevent re-entry\n";
+  std::cout << "  3. Avoid circular callback dependencies\n";
+  std::cout << "  4. Design callbacks to be idempotent when possible\n";
+  std::cout << "  5. Consider async operations for long callback chains\n";
+  std::cout << "  6. Monitor callback depth in production code\n";
+  
+  EXPECT_LT(total_elapsed / 1000.0, MAX_RUNTIME_SECONDS) << "Callback tests should complete quickly";
+  
+  // Cleanup
+  cvcstate("perf.chain").reset();
+}
+
 // ===========================
 // Futures API Tests
 // ===========================

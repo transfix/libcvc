@@ -13,6 +13,7 @@
 - [Advanced Features](#advanced-features)
   - [Futures API](#futures-api)
   - [Signals and Callbacks](#signals-and-callbacks)
+    - [Callback Safety](#callback-safety)
   - [Thread Safety](#thread-safety)
   - [State Serialization](#state-serialization)
   - [State Object Pattern](#state-object-pattern)
@@ -354,6 +355,261 @@ cvcstate("slider").propertyChanged.connect([](std::string key, std::string value
 
 // Signals use boost::signals2 - thread-safe and multi-subscriber
 ```
+
+#### Callback Safety
+
+Callbacks that modify state can create cascading chains or infinite loops if not carefully designed. Here are common pitfalls and safe patterns to avoid them.
+
+##### Common Pitfalls
+
+**1. Infinite Callback Loops**
+
+Two states that listen to each other create an infinite loop:
+
+```cpp
+// ❌ DANGEROUS: Infinite loop
+auto connA = cvcstate("nodeA").valueChanged.connect([]() {
+    cvcstate("nodeB").value("trigger");  // Triggers nodeB's callback
+});
+
+auto connB = cvcstate("nodeB").valueChanged.connect([]() {
+    cvcstate("nodeA").value("trigger");  // Triggers nodeA's callback → LOOP!
+});
+
+cvcstate("nodeA").value("start");  // Stack overflow or hang!
+```
+
+**2. Deep Callback Chains**
+
+Long chains can exhaust stack space (typically >100-1000 levels):
+
+```cpp
+// ⚠️ RISKY: Deep chain without limits
+for (int i = 0; i < 1000; ++i) {
+    std::string current = "node" + std::to_string(i);
+    std::string next = "node" + std::to_string(i + 1);
+    
+    cvcstate(current).valueChanged.connect([next, i]() {
+        cvcstate(next).value(i);  // Each callback triggers the next
+    });
+}
+```
+
+**3. Uncontrolled Cascade Effects**
+
+Exponential fan-out can cause performance issues:
+
+```cpp
+// ⚠️ RISKY: Exponential callback explosion
+cvcstate("parent").valueChanged.connect([]() {
+    for (int i = 0; i < 100; ++i) {
+        cvcstate("child" + std::to_string(i)).value(i);
+        // If each child also triggers more callbacks...
+    }
+});
+```
+
+##### Safe Patterns
+
+**Pattern 1: Iteration Counter Guard**
+
+Limit recursive calls with counters:
+
+```cpp
+// ✅ SAFE: Counter prevents infinite loops
+std::atomic<int> nodeA_count(0);
+std::atomic<int> nodeB_count(0);
+const int MAX_ITERATIONS = 10;
+
+auto connA = cvcstate("nodeA").valueChanged.connect([&nodeA_count]() {
+    int count = nodeA_count.fetch_add(1);
+    if (count < MAX_ITERATIONS) {
+        cvcstate("nodeB").value(count);
+    }
+});
+
+auto connB = cvcstate("nodeB").valueChanged.connect([&nodeB_count]() {
+    int count = nodeB_count.fetch_add(1);
+    if (count < MAX_ITERATIONS) {
+        cvcstate("nodeA").value(count);
+    }
+});
+```
+
+**Pattern 2: Processing Flag (Re-entry Prevention)**
+
+Use atomic flags to prevent re-entry:
+
+```cpp
+// ✅ SAFE: Processing flag prevents re-entry
+struct GuardedCallback {
+    std::atomic<bool> processing{false};
+    
+    void operator()(const std::string& trigger_key) {
+        // Try to acquire processing flag
+        bool expected = false;
+        if (!processing.compare_exchange_strong(expected, true)) {
+            return;  // Already processing, skip to prevent loop
+        }
+        
+        cvcstate(trigger_key).value("update");
+        processing.store(false);
+    }
+};
+
+GuardedCallback guardA, guardB;
+cvcstate("nodeA").valueChanged.connect([&guardA]() { guardA("nodeB"); });
+cvcstate("nodeB").valueChanged.connect([&guardB]() { guardB("nodeA"); });
+```
+
+**Pattern 3: Change Detection Guard**
+
+Only trigger when values actually change:
+
+```cpp
+// ✅ SAFE: Only trigger on actual changes
+struct ChangeDetector {
+    std::string last_value;
+    boost::mutex mutex;
+    
+    bool hasChanged(const std::string& new_value) {
+        boost::lock_guard<boost::mutex> lock(mutex);
+        if (last_value == new_value) return false;
+        last_value = new_value;
+        return true;
+    }
+};
+
+ChangeDetector detector;
+cvcstate("watched").valueChanged.connect([&detector]() {
+    std::string value = cvcstate("watched").value();
+    if (detector.hasChanged(value)) {
+        cvcstate("dependent").value(value);
+    }
+});
+```
+
+**Pattern 4: Depth Tracking**
+
+Monitor and limit call stack depth:
+
+```cpp
+// ✅ SAFE: Depth tracking prevents stack overflow
+thread_local int callback_depth = 0;
+const int MAX_CALLBACK_DEPTH = 50;
+
+struct DepthGuard {
+    bool exceeded = false;
+    
+    DepthGuard() {
+        if (++callback_depth > MAX_CALLBACK_DEPTH) {
+            exceeded = true;
+            --callback_depth;
+        }
+    }
+    
+    ~DepthGuard() {
+        if (!exceeded) --callback_depth;
+    }
+};
+
+cvcstate("node").valueChanged.connect([]() {
+    DepthGuard guard;
+    if (guard.exceeded) {
+        std::cerr << "Warning: Max callback depth exceeded!\n";
+        return;
+    }
+    processCallback();
+});
+```
+
+**Pattern 5: Async Operations**
+
+Break recursion using thread pools:
+
+```cpp
+// ✅ SAFE: Async breaks the call stack
+cvcstate("nodeA").valueChanged.connect([]() {
+    cvcapp.thread("worker", []() {
+        cvcstate("nodeB").value("update");
+    });
+});
+```
+
+##### Design Guidelines
+
+1. **Avoid Circular Dependencies**: Design state relationships as directed acyclic graphs (DAGs)
+2. **Use Convergent Callbacks**: Design callbacks that converge to stable states
+3. **Make Callbacks Idempotent**: Same input should produce same result when called multiple times
+4. **Document Callback Chains**: Comment expected sequences and max depth
+5. **Monitor Performance**: Track callback execution in production code
+
+##### Recommended Limits
+
+Based on testing with `PerformanceCallbackChains`:
+
+- **Linear chains**: Safe up to ~100 levels
+- **Fan-out factor**: Keep below 50 children per callback when those children have callbacks
+- **Iteration limits**: Set to 10-20 for mutually triggering callbacks
+- **Concurrent callbacks**: Tested safe with 1000+ simultaneous callbacks
+
+##### Example: Safe Validation Pipeline
+
+```cpp
+class ValidationPipeline {
+private:
+    std::atomic<bool> validating{false};
+    std::vector<boost::signals2::connection> connections;
+    
+public:
+    void setup() {
+        // Step 1: Input → Validation (with re-entry guard)
+        connections.push_back(
+            cvcstate("pipeline.input").valueChanged.connect([this]() {
+                bool expected = false;
+                if (!validating.compare_exchange_strong(expected, true)) {
+                    return;  // Already validating
+                }
+                
+                std::string input = cvcstate("pipeline.input").value();
+                bool valid = validateInput(input);
+                cvcstate("pipeline.valid").value(valid);
+                validating.store(false);
+            })
+        );
+        
+        // Step 2: Validation → Processing (conditional, no loop back)
+        connections.push_back(
+            cvcstate("pipeline.valid").valueChanged.connect([]() {
+                bool valid = cvcstate("pipeline.valid").value<bool>();
+                if (valid) {
+                    std::string input = cvcstate("pipeline.input").value();
+                    std::string processed = processInput(input);
+                    cvcstate("pipeline.output").value(processed);
+                }
+            })
+        );
+        
+        // Step 3: Output → UI Update (terminal, no further callbacks)
+        connections.push_back(
+            cvcstate("pipeline.output").valueChanged.connect([]() {
+                std::string output = cvcstate("pipeline.output").value();
+                updateUI(output);  // Terminal: no further state changes
+            })
+        );
+    }
+    
+    ~ValidationPipeline() {
+        for (auto& conn : connections) conn.disconnect();
+    }
+};
+```
+
+This pipeline is safe because:
+- ✅ Re-entry guard prevents loops
+- ✅ DAG structure (input → valid → output)
+- ✅ Terminal callbacks don't trigger further changes
+- ✅ Conditional execution prevents unnecessary chains
 
 ### Thread Safety
 

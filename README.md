@@ -432,7 +432,8 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Futures API for async/await patterns
   - State object pattern (CRTP-based)
   - Producer-consumer patterns
-  - Callbacks and signals
+  - Callbacks and signals with safety patterns
+  - Avoiding infinite loops and stack overflow
   - Complete examples and best practices
 
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA development guide
