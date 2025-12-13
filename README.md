@@ -448,6 +448,17 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Subvolume extraction and compositing
   - Complete examples and best practices
 
+- **[docs/GEOMETRY_API.md](docs/GEOMETRY_API.md)** - Complete geometry/mesh API reference
+  - Triangle mesh container (`geometry`)
+  - Copy-on-write memory semantics
+  - Volumetric mesh support (tetrahedral, hexahedral)
+  - Mesh operations: merge, surface extraction, normal computation
+  - Mesh processing: smoothing, quality improvement, projection
+  - File I/O: OFF, RAW, RAWN, RAWC, RAWNC formats
+  - Extensible file I/O system
+  - Boundary vertex marking
+  - Complete examples and best practices
+
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA development guide
   - Modern CMake CUDA integration
   - CUDA architecture configuration
