@@ -219,11 +219,23 @@ namespace CVC_NAMESPACE
     }
     
     template <class T> state& value(const T& v) {
+      std::string str_value = boost::lexical_cast<std::string>(v);
+      
       {
         boost::mutex::scoped_lock lock(_mutex);
+        if(_value == str_value) return *this; //do nothing if equal
+        
         _valueTypeName = cvcapp.dataTypeName<T>();
+        _value = str_value;
+        _lastMod = boost::posix_time::microsec_clock::universal_time();
+        _initialized = true;
+        // Notify any threads waiting for value
+        _valueCondition.notify_all();
       }
-      return value(boost::lexical_cast<std::string>(v),false);
+      
+      valueChanged();
+      if(parent()) parent()->childChanged(fullName());
+      return *this;
     }
     
     // Get a future that blocks until value is set

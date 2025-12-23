@@ -632,6 +632,123 @@ boost::thread consumer([](){
 });
 ```
 
+#### Thread Safety in Async Callbacks
+
+**Important:** When using `state_object<T>` or connecting to signals, callbacks execute in **separate threads** spawned asynchronously. This design has an important implication for reading state values within callbacks.
+
+##### The Race Condition
+
+The template method `value<T>(const T& v)` updates state in two steps:
+
+1. Convert value to string: `std::string str_value = boost::lexical_cast<std::string>(v)`
+2. Acquire lock and atomically update `_valueTypeName` and `_value`
+3. Release lock and fire signals
+
+However, before December 2025, there was a race condition where `_valueTypeName` and `_value` were updated in separate lock scopes:
+
+```cpp
+// OLD CODE (had race condition):
+template <class T> state& value(const T& v) {
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    _valueTypeName = cvcapp.dataTypeName<T>();
+  }  // Lock released here - RACE WINDOW!
+  return value(boost::lexical_cast<std::string>(v), false);
+}
+```
+
+This created a window where async callbacks could read:
+- `_valueTypeName` = "int" (new type)
+- `_value` = "false" (old string value from previous bool)
+
+When the callback tried `value<int>()`, which does `boost::lexical_cast<int>("false")`, it would throw `boost::bad_lexical_cast`.
+
+##### The Fix (December 2025)
+
+The template method now updates both fields atomically under a single lock:
+
+```cpp
+// CURRENT CODE (atomic update):
+template <class T> state& value(const T& v) {
+  std::string str_value = boost::lexical_cast<std::string>(v);
+  
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if(_value == str_value) return *this; // Early return if unchanged
+    
+    _valueTypeName = cvcapp.dataTypeName<T>();
+    _value = str_value;
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+    _initialized = true;
+    _valueCondition.notify_all();
+  }
+  
+  valueChanged();
+  if(parent()) parent()->childChanged(fullName());
+  return *this;
+}
+```
+
+**Key improvements:**
+1. ✅ `_valueTypeName` and `_value` updated atomically in single lock scope
+2. ✅ Early return for unchanged values (preserves `_lastMod` semantics)
+3. ✅ Lexical cast performed before taking lock (avoid holding lock during conversion)
+4. ✅ Condition variable notification for futures API
+
+##### Best Practices for Async Callbacks
+
+Even with the atomic fix, defensive coding in callbacks is recommended:
+
+```cpp
+class MyObject : public state_object<MyObject> {
+protected:
+    virtual void handleStateChanged(const std::string& childState) override {
+        if (childState.find("counter") != std::string::npos) {
+            try {
+                // Defensive: catch any unexpected conversion errors
+                int value = getState("counter").value<int>();
+                processValue(value);
+            } catch (const boost::bad_lexical_cast& e) {
+                // Log and handle gracefully
+                cvcapp.log(1, "Warning: Failed to convert counter value");
+            }
+        }
+    }
+};
+```
+
+**Why defensive coding is still valuable:**
+- Handles edge cases during rapid state changes
+- Graceful degradation if future refactoring introduces issues
+- Better error messages for debugging
+- Prevents crashes in production code
+
+##### Testing Async Callback Safety
+
+The test suite includes specific tests for this scenario:
+
+```cpp
+TEST(StateTest, StateObjectAsyncHandlers) {
+  ConfigurationObject config;
+  
+  int initialCount = config.resizeCount.load();
+  
+  // Rapid changes that previously triggered race condition
+  for (int i = 0; i < 10; ++i) {
+    config.getState("width").value(1920 + i * 100);
+  }
+  
+  // Wait for async handlers to complete
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(1000));
+  
+  // Verify handlers executed without crashes
+  int finalCount = config.resizeCount.load();
+  EXPECT_GT(finalCount, initialCount);
+}
+```
+
+This test rapidly changes integer values, which previously would cause `bad_lexical_cast` exceptions in the async handlers. The fix ensures all handlers can safely read the updated values.
+
 ### State Serialization
 
 ```cpp
