@@ -31,6 +31,64 @@ namespace CVC_NAMESPACE
   // Forward declaration
   template <class This> class state_object;
 
+  // -------------------------
+  // cvc::state_lock_scope
+  // -------------------------
+  // Purpose:
+  //   RAII wrapper for exclusively locking a state_object.
+  //   While this lock is held, other threads attempting to acquire
+  //   a lock on the same state_object will block.
+  //   
+  //   This provides a coordination mechanism for exclusive access to
+  //   state modifications. The lock itself doesn't prevent direct state
+  //   access - it's a synchronization primitive for coordinating between
+  //   threads that respect the locking protocol.
+  //
+  //   Usage:
+  //     {
+  //       state_lock_scope<MyObject> lock(myObject);
+  //       // Exclusive access - other lock holders will block
+  //       myObject.getState("width").value(1920);
+  //       myObject.getState("height").value(1080);
+  //     } // Lock released, blocked threads can now acquire
+  //
+  // ---- Change History ----
+  // 12/23/2025 -- Joe R. -- Creation.
+  template <class This>
+  class state_lock_scope
+  {
+  public:
+    explicit state_lock_scope(state_object<This>& obj)
+      : _obj(obj), _released(false)
+    {
+      _obj.lockState();
+    }
+
+    ~state_lock_scope()
+    {
+      if (!_released) {
+        _obj.unlockState();
+      }
+    }
+
+    // Manually release lock before scope ends
+    void unlock()
+    {
+      if (!_released) {
+        _obj.unlockState();
+        _released = true;
+      }
+    }
+
+    // Non-copyable, non-movable
+    state_lock_scope(const state_lock_scope&) = delete;
+    state_lock_scope& operator=(const state_lock_scope&) = delete;
+
+  private:
+    state_object<This>& _obj;
+    bool _released;
+  };
+
   // -----------------------------
   // cvc::state_change_batch_scope
   // -----------------------------
@@ -103,7 +161,7 @@ namespace CVC_NAMESPACE
   //   Then later, you can do stuff like this:
   //
   //      new_object *p = ...
-  //      p->state("member_variable").value<int>(1234);
+  //      p->getState("member_variable").value<int>(1234);
   //
   //   The advantage of this being that you can easily monitor changes to an object's
   //   state as long as it is using the state graph to store it's data.  You can also
@@ -229,6 +287,18 @@ namespace CVC_NAMESPACE
         }
     }
 
+    // Lock state - blocks other threads from modifying this object or children
+    void lockState()
+    {
+      _stateLockMutex.lock();
+    }
+
+    // Unlock state - allows blocked threads to proceed
+    void unlockState()
+    {
+      _stateLockMutex.unlock();
+    }
+
   protected:
     boost::signals2::connection _stateConnection;
     
@@ -236,6 +306,9 @@ namespace CVC_NAMESPACE
     mutable boost::mutex _batchMutex;
     int _batchDepth;
     std::set<std::string> _pendingChanges;
+
+    // State locking support
+    mutable boost::mutex _stateLockMutex;
 
     //Classes that are state_objects should implement this function for themselves.
     //Note: each call happens in its own thread.

@@ -1245,6 +1245,258 @@ config.getState("width").value(1024);  // Queues "This.0x12345.width"
 config.getState("width").value(1920);  // Replaces (same key in set)
 ```
 
+### State Locking - Exclusive Access Coordination
+
+#### Overview
+
+The `state_lock_scope<T>` template provides RAII-based exclusive access coordination for state objects. When a thread acquires a lock on a state object, other threads attempting to acquire the same lock will block until it's released.
+
+**Important**: This is a **cooperative coordination mechanism**, not enforced access control. Direct state modifications without acquiring the lock are still possible. It's designed for threads that need to coordinate exclusive access to a state object.
+
+#### The Problem
+
+Multiple threads modifying the same state object can lead to:
+- **Interleaved modifications**: Thread A's multi-step update interrupted by Thread B
+- **Race conditions**: Unpredictable ordering of state changes
+- **Inconsistent state**: Partial updates visible to other threads
+
+Example problematic scenario:
+```cpp
+// Thread 1: Multi-step configuration
+config.getState("width").value(1920);
+config.getState("height").value(1080);
+config.getState("aspect_ratio").value(16.0/9.0);
+
+// Thread 2: Concurrent modification
+config.getState("width").value(1024);  // Interleaves!
+
+// Result: Inconsistent state (1024x1080 with 16:9 ratio)
+```
+
+#### The Solution: `state_lock_scope`
+
+Use RAII to coordinate exclusive access:
+
+```cpp
+void Thread1() {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    // Exclusive access - Thread 2 will block
+    config.getState("width").value(1920);
+    config.getState("height").value(1080);
+    config.getState("aspect_ratio").value(16.0/9.0);
+}  // Lock released here
+
+void Thread2() {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    // Blocks until Thread1 releases lock
+    config.getState("width").value(1024);
+    config.getState("height").value(768);
+}
+```
+
+#### API Reference
+
+```cpp
+template<class This>
+class state_lock_scope
+{
+public:
+    // Constructor - acquires lock
+    explicit state_lock_scope(state_object<This>& obj);
+    
+    // Destructor - releases lock automatically
+    ~state_lock_scope();
+    
+    // Manual unlock (can't re-lock)
+    void unlock();
+    
+    // Non-copyable, non-movable
+    state_lock_scope(const state_lock_scope&) = delete;
+    state_lock_scope& operator=(const state_lock_scope&) = delete;
+};
+```
+
+#### Usage Patterns
+
+**Pattern 1: Basic Exclusive Access**
+
+Coordinate multi-step state updates:
+
+```cpp
+void updateConfiguration(ConfigurationObject& config, int w, int h) {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    config.getState("width").value(w);
+    config.getState("height").value(h);
+    config.getState("aspect_ratio").value(static_cast<double>(w) / h);
+    config.getState("last_update").value(getCurrentTime());
+}
+```
+
+**Pattern 2: Critical Sections**
+
+Protect read-modify-write sequences:
+
+```cpp
+void incrementCounter(ConfigurationObject& config) {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    int current = config.getState("counter").value<int>();
+    config.getState("counter").value(current + 1);
+}
+```
+
+**Pattern 3: Early Unlock**
+
+Release lock before expensive operations:
+
+```cpp
+void processWithLock(ConfigurationObject& config) {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    // Critical section
+    std::string data = config.getState("data").value();
+    config.getState("status").value("processing");
+    
+    lock.unlock();  // Release early
+    
+    // Non-critical work (no lock needed)
+    std::string result = expensiveComputation(data);
+    
+    // Need lock again? Create new scope
+    {
+        state_lock_scope<ConfigurationObject> lock2(config);
+        config.getState("result").value(result);
+    }
+}
+```
+
+**Pattern 4: Combining with Batching**
+
+Use both batching and locking for optimal performance:
+
+```cpp
+void bulkUpdate(ConfigurationObject& config, std::vector<int> values) {
+    state_lock_scope<ConfigurationObject> lock(config);
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    
+    // Exclusive access + deduplication
+    for (int val : values) {
+        config.getState("value").value(val);
+        config.getState("timestamp").value(getTime());
+    }
+    
+}  // Batch flushes, then lock releases
+```
+
+#### Lock Hierarchy and Parent Access
+
+**Important**: Locking a child state does **NOT** block access to parent state objects.
+
+```cpp
+ConfigurationObject config;
+StateObject<int>& childState = config.getState("child");
+
+// Thread 1: Locks child
+state_lock_scope<StateObject<int>> lock(childState);
+childState.value(42);
+
+// Thread 2: Can still access parent (NOT blocked)
+config.getState("other_child").value(100);  // ✅ Works fine
+```
+
+This design allows fine-grained locking without blocking unrelated state modifications.
+
+#### Coordination Model
+
+`state_lock_scope` is a **coordination primitive**, not an enforcement mechanism:
+
+✅ **What it does:**
+- Blocks other threads from acquiring the lock
+- Provides mutual exclusion between cooperating threads
+- Guarantees serialized access for threads using locks
+
+❌ **What it doesn't do:**
+- Prevent direct state access without a lock
+- Enforce access control at the API level
+- Block `getState()` or `value()` calls from other threads
+
+**Example:**
+
+```cpp
+// Thread 1: Holds lock
+state_lock_scope<ConfigurationObject> lock(config);
+config.getState("width").value(1920);
+
+// Thread 2: Also uses lock - BLOCKS
+state_lock_scope<ConfigurationObject> lock2(config);  // Waits for Thread 1
+
+// Thread 3: Direct access - NOT BLOCKED
+config.getState("height").value(1080);  // ⚠️ No coordination
+```
+
+**Design rationale**: Enforcing locks in `getState()` caused deadlocks due to signal callbacks and re-entrant patterns. The coordination model provides synchronization for threads that need it while maintaining flexibility.
+
+#### Thread Safety Guarantees
+
+- **Lock acquisition**: Thread-safe via internal mutex
+- **Lock release**: Automatic in destructor (exception-safe)
+- **Multiple locks**: Different state objects can be locked independently
+- **Nested scopes**: Same thread can nest locks (but consider refactoring)
+
+#### Best Practices
+
+1. **Keep critical sections short**: Hold locks only as long as needed
+2. **Avoid blocking operations**: Don't do I/O or sleep while holding lock
+3. **Document locking requirements**: Comment which functions expect locks
+4. **Consistent locking**: If one thread uses lock, all should
+5. **Combine with batching**: Use both for complex multi-state updates
+6. **Consider deadlock**: Don't acquire multiple locks without careful ordering
+
+#### Testing Patterns
+
+**Verify exclusive access:**
+
+```cpp
+TEST(StateTest, ExclusiveAccess) {
+    ConfigurationObject config;
+    std::atomic<bool> holder_finished(false);
+    
+    boost::thread t1([&]() {
+        state_lock_scope<ConfigurationObject> lock(config);
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+        holder_finished.store(true);
+    });
+    
+    boost::thread t2([&]() {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+        state_lock_scope<ConfigurationObject> lock(config);
+        EXPECT_TRUE(holder_finished.load());  // t1 must be done
+    });
+    
+    t1.join();
+    t2.join();
+}
+```
+
+**Use `waitForHandlers()` for deterministic tests:**
+
+```cpp
+TEST(StateTest, LockWithWait) {
+    ConfigurationObject config;
+    
+    {
+        state_lock_scope<ConfigurationObject> lock(config);
+        config.getState("value").value(42);
+    }
+    
+    config.waitForHandlers();  // Wait for signal handlers
+    EXPECT_EQ(config.lastValue, 42);
+}
+```
+
 ## Complete API Reference
 
 ### Construction and Access

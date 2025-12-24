@@ -1826,6 +1826,181 @@ TEST(StateTest, StateObjectBatchingUnderLoad) {
   EXPECT_EQ(config.lastHeight, 1080 + 99);
 }
 
+// Test state locking - exclusive access coordination
+TEST(StateTest, StateObjectLocking) {
+  ConfigurationObject config;
+  std::atomic<int> thread1_value(0);
+  std::atomic<int> thread2_value(0);
+  
+  // Thread 1: Holds lock and makes changes
+  boost::thread t1([&config, &thread1_value]() {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    for (int i = 0; i < 10; ++i) {
+      config.getState("counter").value(i);
+      thread1_value.store(i);
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(2));
+    }
+  });
+  
+  // Thread 2: Also acquires lock - will block until t1 releases
+  boost::thread t2([&config, &thread2_value, &thread1_value]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+    
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    // By the time we acquire the lock, t1 should be done
+    EXPECT_EQ(thread1_value.load(), 9);
+    
+    config.getState("counter").value(100);
+    thread2_value.store(100);
+  });
+  
+  t1.join();
+  t2.join();
+  config.waitForHandlers();
+  
+  EXPECT_EQ(thread1_value.load(), 9);
+  EXPECT_EQ(thread2_value.load(), 100);
+}
+
+// Test that state lock doesn't block parent state
+TEST(StateTest, StateObjectLockDoesNotBlockParent) {
+  ConfigurationObject config;
+  std::atomic<bool> parent_modified(false);
+  
+  // Hold lock on config
+  boost::thread lockHolder([&config]() {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    // Hold lock for a while
+    for (int i = 0; i < 5; ++i) {
+      config.getState("width").value(1000 + i);
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    }
+  });
+  
+  // Try to modify parent state - should NOT block
+  boost::thread parentModifier([&config, &parent_modified]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+    
+    // Get parent state path (everything before the instance address)
+    std::string configStateName = config.stateName();
+    size_t lastDot = configStateName.rfind('.');
+    if (lastDot != std::string::npos) {
+      std::string parentPath = configStateName.substr(0, lastDot);
+      
+      // This modification is to parent state, not config's state
+      // So it should NOT be blocked by config's lock
+      cvcstate(parentPath + ".other_instance").value("parent_data");
+      parent_modified.store(true);
+    }
+  });
+  
+  lockHolder.join();
+  parentModifier.join();
+  config.waitForHandlers();
+  
+  EXPECT_TRUE(parent_modified.load());
+}
+
+// Test multiple concurrent locks on different objects
+TEST(StateTest, StateObjectMultipleLocks) {
+  ConfigurationObject config1;
+  ConfigurationObject config2;
+  std::atomic<int> config1_mods(0);
+  std::atomic<int> config2_mods(0);
+  
+  // Lock config1 and modify
+  boost::thread t1([&config1, &config1_mods]() {
+    state_lock_scope<ConfigurationObject> lock(config1);
+    for (int i = 0; i < 5; ++i) {
+      config1.getState("width").value(1000 + i);
+      config1_mods++;
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+    }
+  });
+  
+  // Lock config2 and modify (should not be blocked by config1's lock)
+  boost::thread t2([&config2, &config2_mods]() {
+    state_lock_scope<ConfigurationObject> lock(config2);
+    for (int i = 0; i < 5; ++i) {
+      config2.getState("width").value(2000 + i);
+      config2_mods++;
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+    }
+  });
+  
+  t1.join();
+  t2.join();
+  config1.waitForHandlers();
+  config2.waitForHandlers();
+  
+  // Both should complete independently
+  EXPECT_EQ(config1_mods.load(), 5);
+  EXPECT_EQ(config2_mods.load(), 5);
+  EXPECT_EQ(config1.lastWidth, 1004);
+  EXPECT_EQ(config2.lastWidth, 2004);
+}
+
+// Test lock with batching
+TEST(StateTest, StateObjectLockWithBatching) {
+  ConfigurationObject config;
+  
+  {
+    state_lock_scope<ConfigurationObject> lock(config);
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    
+    // Make multiple changes under both lock and batch
+    config.getState("width").value(1024);
+    config.getState("width").value(1920);
+    config.getState("height").value(1080);
+    
+    // Batch flushes here, but lock still held
+  }
+  // Lock releases here
+  
+  config.waitForHandlers();
+  
+  EXPECT_EQ(config.lastWidth, 1920);
+  EXPECT_EQ(config.lastHeight, 1080);
+}
+
+// Test early unlock
+TEST(StateTest, StateObjectLockEarlyUnlock) {
+  ConfigurationObject config;
+  std::atomic<bool> other_thread_ran(false);
+  
+  boost::thread t1([&config, &other_thread_ran]() {
+    state_lock_scope<ConfigurationObject> lock(config);
+    
+    config.getState("width").value(1000);
+    
+    // Release lock early
+    lock.unlock();
+    
+    // Do other work without lock
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    
+    // Check if other thread ran (it should have, since we released early)
+    EXPECT_TRUE(other_thread_ran.load());
+  });
+  
+  boost::thread t2([&config, &other_thread_ran]() {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    
+    // Should be able to acquire lock after t1 releases it early
+    config.getState("height").value(2000);
+    other_thread_ran.store(true);
+  });
+  
+  t1.join();
+  t2.join();
+  config.waitForHandlers();
+  
+  EXPECT_TRUE(other_thread_ran.load());
+}
+
 // DataProcessor state_object example (from STATE_API.md)
 class DataProcessorObject : public state_object<DataProcessorObject> {
 public:
