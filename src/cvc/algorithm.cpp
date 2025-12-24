@@ -188,11 +188,10 @@ namespace
     // Calculate scale factors: factor[i] = 2 * half_size / max_ext
     // This ensures: orig[i] = center[i] - factor[i]*max_ext/2 = bbox[i]
     //               orig[i] + factor[i]*max_ext = bbox[i+3]
+    // Note: bbox has already been validated/expanded by sdf() wrapper if needed
     float scale_factors[3];
     for(int i = 0; i < 3; i++) {
       scale_factors[i] = 2.0f * bbox_half_size[i] / max_ext;
-      // Ensure minimum scale factor for numerical stability
-      if(scale_factors[i] < 1.1f) scale_factors[i] = 1.1f;
     }
 
     int dims[3] = { static_cast<int>(dim.xdim), 
@@ -207,7 +206,7 @@ namespace
     // Get the result data directly from DistanceTransform
     const Reg3Data<float>& result = dt.getReg3Data();
     
-    // Create output volume with requested bbox
+    // Create output volume with the bbox (already validated by sdf() wrapper)
     volume cv(dim, Float, bbox);
     float* volData = reinterpret_cast<float*>(*cv);
     
@@ -388,11 +387,18 @@ namespace CVC_NAMESPACE
   // 12/23/2025 -- Joe R. -- Added algorithm selection parameter.
   volume sdf(const geometry& geom,
 	     const dimension& dim,
-	     const bounding_box& bbox,
+	     const bounding_box& bbox_in,
 	     sdf_algorithm algorithm)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     volume vol;
+    
+    // Note: SDF v1 and v2 may use slightly different bounding boxes:
+    // - v1 uses the requested bbox directly
+    // - v2 requires minimum scale factor of 1.1 and may expand bbox
+    // The actual bbox used is stored in the returned volume
+    
+    bounding_box bbox = bbox_in;
     
     switch(algorithm)
     {
@@ -402,8 +408,71 @@ namespace CVC_NAMESPACE
         break;
         
       case SDF_V2:
-        vol = sdf_library_v2(geom, dim, bbox);
-        vol.desc("Signed Distance Function - DistanceTransform v2");
+        {
+          // v2 requires minimum scale factor - expand bbox if needed
+          point_t geom_min = geom.min_point();
+          point_t geom_max = geom.max_point();
+          
+          double geom_ext[3];
+          double max_ext = 0;
+          for(int i = 0; i < 3; i++) {
+            geom_ext[i] = geom_max[i] - geom_min[i];
+            if(geom_ext[i] > max_ext) max_ext = geom_ext[i];
+          }
+          
+          double bbox_center[3], bbox_half_size[3];
+          for(int i = 0; i < 3; i++) {
+            bbox_center[i] = (bbox[i] + bbox[i+3]) / 2.0;
+            bbox_half_size[i] = (bbox[i+3] - bbox[i]) / 2.0;
+          }
+          
+          bool needs_expansion = false;
+          bounding_box expanded_bbox = bbox;
+          for(int i = 0; i < 3; i++) {
+            double scale_factor = 2.0 * bbox_half_size[i] / max_ext;
+            if(scale_factor < 1.1) {
+              needs_expansion = true;
+              double new_half_size = 1.1 * max_ext / 2.0;
+              expanded_bbox[i] = bbox_center[i] - new_half_size;
+              expanded_bbox[i+3] = bbox_center[i] + new_half_size;
+            }
+          }
+          
+          if(needs_expansion) {
+            // Compute SDF on expanded bbox, then resample to match requested bbox
+            vol = sdf_library_v2(geom, dim, expanded_bbox);
+            
+            // Create new volume with requested bbox and resample using trilinear interpolation
+            // This ensures both v1 and v2 use exactly the same bounding box
+            volume resampled(dim, Float, bbox);
+            float* resampled_data = reinterpret_cast<float*>(*resampled);
+            float* vol_data = reinterpret_cast<float*>(*vol);
+            
+            for(uint64 k = 0; k < dim.zdim; k++) {
+              for(uint64 j = 0; j < dim.ydim; j++) {
+                for(uint64 i = 0; i < dim.xdim; i++) {
+                  // Calculate world position in requested bbox
+                  double x = bbox[0] + (bbox[3] - bbox[0]) * i / (dim.xdim - 1.0);
+                  double y = bbox[1] + (bbox[4] - bbox[1]) * j / (dim.ydim - 1.0);
+                  double z = bbox[2] + (bbox[5] - bbox[2]) * k / (dim.zdim - 1.0);
+                  
+                  // Use volume's interpolate method for world coordinate lookup
+                  double value = vol.interpolate(x, y, z);
+                  
+                  uint64 idx = i + j * dim.xdim + k * dim.xdim * dim.ydim;
+                  resampled_data[idx] = static_cast<float>(value);
+                }
+              }
+            }
+            
+            vol = resampled;
+          } else {
+            // No expansion needed, use bbox directly
+            vol = sdf_library_v2(geom, dim, bbox);
+          }
+          
+          vol.desc("Signed Distance Function - DistanceTransform v2");
+        }
         break;
         
       default:
