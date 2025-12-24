@@ -41,29 +41,31 @@ namespace CVC_NAMESPACE
    * 
    * IMPORTANT - MEMORY SEMANTICS:
    * =============================
-   * Volume and voxels use SHALLOW COPY semantics via boost::shared_array.
+   * Volume uses SHALLOW COPY semantics by default via boost::shared_array for CPU memory
+   * and std::shared_ptr for CUDA unified memory (with automatic reference counting).
    * 
-   * - Copy constructor: volume vol2(vol1);        // Shares underlying data
-   * - Assignment operator: vol2 = vol1;           // Shares underlying data
-   * - copy() method: vol2.copy(vol1);             // Shares underlying data
+   * SHALLOW COPY (default - shares data):
+   * - Copy constructor: volume vol2(vol1);         // Shares CPU & GPU memory
+   * - Assignment operator: vol2 = vol1;            // Shares CPU & GPU memory
+   * - copy() method: vol2.copy(vol1);              // Shares CPU & GPU memory (default)
+   * - copy() method: vol2.copy(vol1, false);       // Shares CPU & GPU memory (explicit)
    * 
-   * All three methods create a NEW volume object but share the SAME underlying
-   * voxel data array. Modifications to one volume will affect all copies!
+   * With shallow copy, all copies share the same underlying voxel data arrays.
+   * Modifications through any copy will affect all other copies!
    * 
-   * To create a true DEEP COPY with independent data:
+   * CUDA MEMORY: When CUDA is enabled, both CPU and GPU memory are reference counted.
+   * The custom CudaManagedDeleter ensures CUDA unified memory is automatically freed
+   * when the last reference is destroyed.
    * 
-   *   volume vol2(vol1.voxel_dimensions(), vol1.voxelType(), vol1.boundingBox());
-   *   for(uint64 i = 0; i < vol1.voxel_dimensions().size(); ++i)
-   *     vol2(i, vol1(i));
-   *   vol2.desc(vol1.desc());
+   * DEEP COPY (independent data):
+   * - copy() method: vol2.copy(vol1, true);        // Creates independent copy
+   * - sub() method: vol2.sub(0, 0, 0, vol1.voxel_dimensions());  // Creates independent copy
    * 
-   * Or use sub() to extract a subvolume, which creates a new data array:
+   * With deep copy, each copy has its own independent voxel data array.
+   * Modifications to one copy will NOT affect other copies.
    * 
-   *   volume vol2(vol1);
-   *   vol2.sub(0, 0, 0, vol1.voxel_dimensions());  // Full volume deep copy
-   * 
-   * This shallow copy design enables efficient passing of volumes without
-   * copying large data arrays, but requires awareness when modifying shared data.
+   * This design enables efficient passing without copying large arrays by default,
+   * while still providing explicit deep copy when needed.
    */
   class volume : public voxels
   {
@@ -127,18 +129,6 @@ namespace CVC_NAMESPACE
     /*
       Operations!
     */
-    /**
-     * @brief Shallow copy - shares underlying voxel data with vol
-     * 
-     * WARNING: This is NOT a deep copy! The underlying voxel data array
-     * is shared via boost::shared_array. Both volumes will reference the
-     * same memory, so modifications to one affect the other.
-     * 
-     * Use sub() or manual element-by-element copy for deep copies.
-     * 
-     * @param vol Source volume to copy from
-     * @return Reference to this volume
-     */
     virtual volume& copy(const volume& vol);
     virtual volume& sub(uint64 off_x, uint64 off_y, uint64 off_z,
 			const dimension& subvoldim
