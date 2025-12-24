@@ -470,14 +470,14 @@ if(CVC_ENABLE_SDF)
       #SDF/VolumeFileTypes/SimpleVolumeData.cpp
       #SDF/Server.cpp
       #SDF/SDF/main.cpp
-      # SDF/SignDistanceFunction_v2/Reg3Parser.cpp
-      # SDF/SignDistanceFunction_v2/RawivParser.cpp
-      # SDF/SignDistanceFunction_v2/Geom3DParser.cpp
-      # SDF/SignDistanceFunction_v2/geom.cpp
-      # SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
-      # SDF/SignDistanceFunction_v2/DistanceTransform.cpp
-      # SDF/SignDistanceFunction_v2/mtxlib.cpp
-      # SDF/SignDistanceFunction_v2/bufferedio.cpp
+      SDF/SignDistanceFunction_v2/Reg3Parser.cpp
+      SDF/SignDistanceFunction_v2/RawivParser.cpp
+      SDF/SignDistanceFunction_v2/Geom3DParser.cpp
+      SDF/SignDistanceFunction_v2/geom.cpp
+      SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
+      SDF/SignDistanceFunction_v2/DistanceTransform.cpp
+      SDF/SignDistanceFunction_v2/mtxlib.cpp
+      SDF/SignDistanceFunction_v2/bufferedio.cpp
   )
 endif(CVC_ENABLE_SDF)
 

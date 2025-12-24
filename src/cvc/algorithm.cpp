@@ -25,6 +25,20 @@
 #include <cvc/app.h>
 
 #include <SDF/SignDistanceFunction/sdfLib.h>
+
+// Include SDF v2 headers
+#include <SDF/SignDistanceFunction_v2/DistanceTransform.h>
+#include <SDF/SignDistanceFunction_v2/FaceVertSet3D.h>
+#include <SDF/SignDistanceFunction_v2/reg3data.h>
+
+// Undef conflicting macros from SDF v2 before including mesher headers
+#ifdef MIN
+#undef MIN
+#endif
+#ifdef MAX
+#undef MAX
+#endif
+
 #include <cvc-mesher/Mesher/mesher.h>
 
 #include <boost/any.hpp>
@@ -40,6 +54,17 @@ namespace
   CVC_DEF_EXCEPTION(sign_distance_function_error);
   CVC_DEF_EXCEPTION(cvc_mesher_error);
   
+  // Helper function to round up to nearest power of 2
+  CVC_NAMESPACE::uint64 next_power_of_2(CVC_NAMESPACE::uint64 n) {
+    if (n == 0) return 1;
+    // Check if already power of 2
+    if ((n & (n - 1)) == 0) return n;
+    // Round up to next power of 2
+    CVC_NAMESPACE::uint64 power = 1;
+    while (power < n) power <<= 1;
+    return power;
+  }
+  
   // -----------
   // sdf_library
   // -----------
@@ -48,6 +73,7 @@ namespace
   // ---- Change History ----
   // 01/10/2014 -- Joe R. -- Creation.
   // 12/10/2025 -- Joe R. -- Updated to use thread-safe SDFContext API.
+  // 12/23/2025 -- Joe R. -- Added power-of-2 rounding for arbitrary dimensions.
   CVC_NAMESPACE::volume sdf_library(const CVC_NAMESPACE::geometry& geom,
 				    const CVC_NAMESPACE::dimension& dim,
 				    const CVC_NAMESPACE::bounding_box& bbox)
@@ -62,8 +88,10 @@ namespace
                       static_cast<float>(bbox[4]), 
                       static_cast<float>(bbox[5]) };
 
-    // SDF lib only supports cubic sizes
-    uint64 size = *max_element(dim.dim_.begin(), dim.dim_.end());
+    // SDF lib only supports cubic power-of-2 sizes
+    // Find max dimension and round up to nearest power of 2
+    uint64 max_dim = *max_element(dim.dim_.begin(), dim.dim_.end());
+    uint64 size = next_power_of_2(max_dim);
 
     // Use new thread-safe API
     std::unique_ptr<float[]> values;
@@ -98,7 +126,99 @@ namespace
     }
     // Smart pointer automatically cleans up values
 
-    cv.resize(dim);
+    // Resize to requested dimensions if different from computed size
+    if (dim.xdim != size || dim.ydim != size || dim.zdim != size) {
+      cv.resize(dim);
+    }
+    return cv;
+  }
+
+  // ---------------
+  // sdf_library_v2
+  // ---------------
+  // Purpose: 
+  //   Interface to the SDF v2 API (DistanceTransform).
+  // ---- Change History ----
+  // 12/23/2025 -- Joe R. -- Creation.
+  // 12/24/2025 -- Joe R. -- Fixed to respect provided bounding box.
+  CVC_NAMESPACE::volume sdf_library_v2(const CVC_NAMESPACE::geometry& geom,
+				       const CVC_NAMESPACE::dimension& dim,
+				       const CVC_NAMESPACE::bounding_box& bbox)
+  {
+    using namespace std;
+    using namespace CVC_NAMESPACE;
+
+    // Convert cvc::geometry to FaceVertSet3D
+    // Use vectors to avoid default constructor issues
+    std::vector<Point3f> verts_vec;
+    verts_vec.reserve(geom.num_points());
+    for(int i = 0; i < geom.num_points(); i++)
+      verts_vec.push_back(Point3f(geom.points()[i][0], geom.points()[i][1], geom.points()[i][2]));
+
+    std::vector<TriId3i> tris_vec;
+    tris_vec.reserve(geom.num_tris());
+    for(int i = 0; i < geom.num_tris(); i++)
+      tris_vec.push_back(TriId3i(geom.tris()[i][0], geom.tris()[i][1], geom.tris()[i][2]));
+
+    FaceVertSet3D fvs(geom.num_points(), geom.num_tris(), 
+                      verts_vec.data(), tris_vec.data(), 0);
+
+    // Compute triangle normals (required for sign computation)
+    fvs.computeTriNormals();
+
+    // Calculate scale factors to match the requested bounding box
+    // With the new constructor, we can specify the center directly
+    
+    BoundingBox geom_bbox = fvs.getExtent();
+    float geom_ext[3];
+    float max_ext = 0;
+    
+    for(int i = 0; i < 3; i++) {
+      geom_ext[i] = geom_bbox.upper[i] - geom_bbox.lower[i];
+      if(geom_ext[i] > max_ext) max_ext = geom_ext[i];
+    }
+    
+    // Calculate requested bbox center and half-size
+    float bbox_center[3], bbox_half_size[3];
+    for(int i = 0; i < 3; i++) {
+      bbox_center[i] = (bbox[i] + bbox[i+3]) / 2.0f;
+      bbox_half_size[i] = (bbox[i+3] - bbox[i]) / 2.0f;
+    }
+    
+    // Calculate scale factors: factor[i] = 2 * half_size / max_ext
+    // This ensures: orig[i] = center[i] - factor[i]*max_ext/2 = bbox[i]
+    //               orig[i] + factor[i]*max_ext = bbox[i+3]
+    float scale_factors[3];
+    for(int i = 0; i < 3; i++) {
+      scale_factors[i] = 2.0f * bbox_half_size[i] / max_ext;
+      // Ensure minimum scale factor for numerical stability
+      if(scale_factors[i] < 1.1f) scale_factors[i] = 1.1f;
+    }
+
+    int dims[3] = { static_cast<int>(dim.xdim), 
+                    static_cast<int>(dim.ydim), 
+                    static_cast<int>(dim.zdim) };
+    
+    // Use new constructor with user-specified center to respect arbitrary bbox
+    DistanceTransform dt(fvs, dims, bbox_center, 0.5f, 
+                        scale_factors[0], scale_factors[1], scale_factors[2]);
+    dt.transform();
+
+    // Get the result data directly from DistanceTransform
+    const Reg3Data<float>& result = dt.getReg3Data();
+    
+    // Create output volume with requested bbox
+    volume cv(dim, Float, bbox);
+    float* volData = reinterpret_cast<float*>(*cv);
+    
+    // Copy data from Reg3Data to volume
+    int nverts = result.getNVerts();
+    if (nverts != static_cast<int>(dim.xdim * dim.ydim * dim.zdim)) {
+      throw sign_distance_function_error("SDF v2: dimension mismatch");
+    }
+    
+    std::memcpy(volData, result.getData(), nverts * sizeof(float));
+    
     return cv;
   }
 
@@ -265,13 +385,33 @@ namespace CVC_NAMESPACE
   //   Returns a volume representing the signed distance function of the input geometry.
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
+  // 12/23/2025 -- Joe R. -- Added algorithm selection parameter.
   volume sdf(const geometry& geom,
 	     const dimension& dim,
-	     const bounding_box& bbox)
+	     const bounding_box& bbox,
+	     sdf_algorithm algorithm)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
-    volume vol = sdf_library(geom,dim,bbox);
-    vol.desc("Signed Distance Function - SDFLibrary");
+    volume vol;
+    
+    switch(algorithm)
+    {
+      case SDF_V1:
+        vol = sdf_library(geom, dim, bbox);
+        vol.desc("Signed Distance Function - SDFLibrary v1");
+        break;
+        
+      case SDF_V2:
+        vol = sdf_library_v2(geom, dim, bbox);
+        vol.desc("Signed Distance Function - DistanceTransform v2");
+        break;
+        
+      default:
+        vol = sdf_library(geom, dim, bbox);
+        vol.desc("Signed Distance Function - SDFLibrary v1 (default)");
+        break;
+    }
+    
     return vol;
   }
 

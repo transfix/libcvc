@@ -35,6 +35,13 @@
 
 namespace CVC_NAMESPACE
 {
+  // Enum for selecting SDF algorithm implementation
+  enum sdf_algorithm
+  {
+    SDF_V1,  // Original SDFLibrary implementation (thread-safe, octree-based)
+    SDF_V2   // Alternative DistanceTransform implementation (brute-force)
+  };
+
   // ---
   // sdf
   // ---
@@ -43,6 +50,7 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 - removing sdf_method, always using SDFLibrary now
+  // 12/23/2025 - adding algorithm selection enum to switch between v1 and v2
   volume sdf(const geometry& geom,
 	     /*
 	       Dimension of output sdf vol.
@@ -52,7 +60,11 @@ namespace CVC_NAMESPACE
 	       Bounding box of output vol. If default initialized,
 	       use extents of geometry.
 	     */
-	     const bounding_box& bbox = bounding_box());
+	     const bounding_box& bbox = bounding_box(),
+	     /*
+	       SDF algorithm to use (SDF_V1 or SDF_V2)
+	     */
+	     sdf_algorithm algorithm = SDF_V1);
 
   // ---
   // iso

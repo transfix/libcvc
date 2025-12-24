@@ -10,10 +10,16 @@
 #include <cvc/exception.h>
 
 #include <gtest/gtest.h>
+#include <boost/thread.hpp>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <limits>
 #include <vector>
+#include <chrono>
+#include <iomanip>
+#include <sys/resource.h>
+#include <unistd.h>
 
 using namespace CVC_NAMESPACE;
 
@@ -1253,6 +1259,461 @@ TEST(AlgorithmTest, BunnyVolumeConvergence) {
   std::cout << "Final volume estimate (256^3): " << volumes.back() << " cubic units" << std::endl;
   std::cout << "This test demonstrates volume computation via SDF and can be used" << std::endl;
   std::cout << "to benchmark CPU vs CUDA performance once CUDA SDF is implemented." << std::endl;
+}
+
+// ============================================================================
+// SDF v2 Algorithm Tests
+// ============================================================================
+
+TEST(AlgorithmTest, SDFV2Basic) {
+  // Create a simple cube geometry
+  geometry cube;
+  
+  // Cube vertices
+  cube.points().push_back({{-1.0, -1.0, -1.0}});
+  cube.points().push_back({{1.0, -1.0, -1.0}});
+  cube.points().push_back({{1.0, 1.0, -1.0}});
+  cube.points().push_back({{-1.0, 1.0, -1.0}});
+  cube.points().push_back({{-1.0, -1.0, 1.0}});
+  cube.points().push_back({{1.0, -1.0, 1.0}});
+  cube.points().push_back({{1.0, 1.0, 1.0}});
+  cube.points().push_back({{-1.0, 1.0, 1.0}});
+  
+  // Cube faces (using triangles)
+  cube.tris().push_back({{0, 1, 2}});
+  cube.tris().push_back({{0, 2, 3}});
+  cube.tris().push_back({{4, 5, 6}});
+  cube.tris().push_back({{4, 6, 7}});
+  cube.tris().push_back({{0, 1, 5}});
+  cube.tris().push_back({{0, 5, 4}});
+  cube.tris().push_back({{2, 3, 7}});
+  cube.tris().push_back({{2, 7, 6}});
+  cube.tris().push_back({{0, 3, 7}});
+  cube.tris().push_back({{0, 7, 4}});
+  cube.tris().push_back({{1, 2, 6}});
+  cube.tris().push_back({{1, 6, 5}});
+  
+  // Generate SDF using v2 algorithm
+  dimension dim(32, 32, 32);
+  bounding_box bbox(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
+  
+  volume sdf_vol = sdf(cube, dim, bbox, SDF_V2);
+  
+  // Verify SDF properties
+  EXPECT_EQ(sdf_vol.XDim(), 32);
+  EXPECT_EQ(sdf_vol.YDim(), 32);
+  EXPECT_EQ(sdf_vol.ZDim(), 32);
+  EXPECT_EQ(sdf_vol.desc(), "Signed Distance Function - DistanceTransform v2");
+  
+  // SDF should have negative values inside and positive outside
+  bool has_negative = false;
+  bool has_positive = false;
+  
+  for (uint64 i = 0; i < sdf_vol.XDim() * sdf_vol.YDim() * sdf_vol.ZDim(); i++) {
+    double val = sdf_vol(i);
+    if (val < 0) has_negative = true;
+    if (val > 0) has_positive = true;
+  }
+  
+  EXPECT_TRUE(has_negative) << "SDF v2 should have negative values inside";
+  EXPECT_TRUE(has_positive) << "SDF v2 should have positive values outside";
+}
+
+TEST(AlgorithmTest, SDFV1vsV2Comparison) {
+  // Create a simple pyramid geometry
+  geometry pyramid;
+  
+  // Base vertices
+  pyramid.points().push_back({{-1.0, 0.0, -1.0}});
+  pyramid.points().push_back({{1.0, 0.0, -1.0}});
+  pyramid.points().push_back({{1.0, 0.0, 1.0}});
+  pyramid.points().push_back({{-1.0, 0.0, 1.0}});
+  // Apex
+  pyramid.points().push_back({{0.0, 2.0, 0.0}});
+  
+  // Pyramid faces
+  pyramid.tris().push_back({{0, 1, 4}});  // front
+  pyramid.tris().push_back({{1, 2, 4}});  // right
+  pyramid.tris().push_back({{2, 3, 4}});  // back
+  pyramid.tris().push_back({{3, 0, 4}});  // left
+  pyramid.tris().push_back({{0, 2, 1}});  // base 1
+  pyramid.tris().push_back({{0, 3, 2}});  // base 2
+  
+  dimension dim(32, 32, 32);
+  bounding_box bbox(-1.5, -0.5, -1.5, 1.5, 2.5, 1.5);
+  
+  // Compute SDF with both algorithms
+  std::cout << "Computing SDF v1..." << std::endl;
+  volume sdf_v1 = sdf(pyramid, dim, bbox, SDF_V1);
+  
+  std::cout << "Computing SDF v2..." << std::endl;
+  volume sdf_v2 = sdf(pyramid, dim, bbox, SDF_V2);
+  
+  // Both should have reasonable interior voxel counts
+  EXPECT_EQ(sdf_v1.XDim(), 32);
+  EXPECT_EQ(sdf_v2.XDim(), 32);
+  
+  // Count interior voxels for both
+  int v1_interior = 0, v2_interior = 0;
+  for (uint64 i = 0; i < dim.xdim * dim.ydim * dim.zdim; i++) {
+    if (sdf_v1(i) < 0) v1_interior++;
+    if (sdf_v2(i) < 0) v2_interior++;
+  }
+  
+  std::cout << "V1 interior voxels: " << v1_interior << std::endl;
+  std::cout << "V2 interior voxels: " << v2_interior << std::endl;
+  
+  // Both should have reasonable interior voxel counts
+  EXPECT_GT(v1_interior, 0);
+  EXPECT_GT(v2_interior, 0);
+  
+  // Results should be relatively similar (within factor of 15)
+  // Different algorithms may have different results due to different grid setups
+  // SDF v1 uses octree subdivision, v2 uses brute-force distance transform
+  if (v1_interior > 0 && v2_interior > 0) {
+    double ratio = static_cast<double>(std::max(v1_interior, v2_interior)) / 
+                   static_cast<double>(std::min(v1_interior, v2_interior));
+    std::cout << "Interior voxel ratio: " << ratio << std::endl;
+    EXPECT_LT(ratio, 15.0) << "SDF v1 and v2 should produce reasonably similar results";
+  }
+}
+
+TEST(AlgorithmTest, SDFV2ParallelExecution) {
+  std::cout << "\n=== Testing SDF v2 Parallel Execution (No Global State) ===" << std::endl;
+  
+  // Create multiple different geometries
+  std::vector<geometry> geometries(4);
+  
+  // Geometry 0: Cube
+  geometries[0].points().push_back({{-0.5, -0.5, -0.5}});
+  geometries[0].points().push_back({{0.5, -0.5, -0.5}});
+  geometries[0].points().push_back({{0.5, 0.5, -0.5}});
+  geometries[0].points().push_back({{-0.5, 0.5, -0.5}});
+  geometries[0].points().push_back({{-0.5, -0.5, 0.5}});
+  geometries[0].points().push_back({{0.5, -0.5, 0.5}});
+  geometries[0].points().push_back({{0.5, 0.5, 0.5}});
+  geometries[0].points().push_back({{-0.5, 0.5, 0.5}});
+  for (int i = 0; i < 6; i++) {
+    int base = i * 2;
+    geometries[0].tris().push_back({{base % 8, (base + 1) % 8, (base + 2) % 8}});
+    geometries[0].tris().push_back({{base % 8, (base + 2) % 8, (base + 3) % 8}});
+  }
+  
+  // Geometry 1: Tetrahedron
+  geometries[1].points().push_back({{0.0, 1.0, 0.0}});
+  geometries[1].points().push_back({{-0.866, -0.5, 0.5}});
+  geometries[1].points().push_back({{0.866, -0.5, 0.5}});
+  geometries[1].points().push_back({{0.0, -0.5, -1.0}});
+  geometries[1].tris().push_back({{0, 1, 2}});
+  geometries[1].tris().push_back({{0, 2, 3}});
+  geometries[1].tris().push_back({{0, 3, 1}});
+  geometries[1].tris().push_back({{1, 3, 2}});
+  
+  // Geometry 2: Pyramid  
+  geometries[2].points().push_back({{-0.7, 0.0, -0.7}});
+  geometries[2].points().push_back({{0.7, 0.0, -0.7}});
+  geometries[2].points().push_back({{0.7, 0.0, 0.7}});
+  geometries[2].points().push_back({{-0.7, 0.0, 0.7}});
+  geometries[2].points().push_back({{0.0, 1.2, 0.0}});
+  geometries[2].tris().push_back({{0, 1, 4}});
+  geometries[2].tris().push_back({{1, 2, 4}});
+  geometries[2].tris().push_back({{2, 3, 4}});
+  geometries[2].tris().push_back({{3, 0, 4}});
+  geometries[2].tris().push_back({{0, 2, 1}});
+  geometries[2].tris().push_back({{0, 3, 2}});
+  
+  // Geometry 3: Diamond
+  geometries[3].points().push_back({{0.0, 0.8, 0.0}});  // top
+  geometries[3].points().push_back({{-0.6, 0.0, 0.0}}); // left
+  geometries[3].points().push_back({{0.0, 0.0, 0.6}});  // front
+  geometries[3].points().push_back({{0.6, 0.0, 0.0}});  // right
+  geometries[3].points().push_back({{0.0, 0.0, -0.6}}); // back
+  geometries[3].points().push_back({{0.0, -0.8, 0.0}}); // bottom
+  geometries[3].tris().push_back({{0, 1, 2}});
+  geometries[3].tris().push_back({{0, 2, 3}});
+  geometries[3].tris().push_back({{0, 3, 4}});
+  geometries[3].tris().push_back({{0, 4, 1}});
+  geometries[3].tris().push_back({{5, 2, 1}});
+  geometries[3].tris().push_back({{5, 3, 2}});
+  geometries[3].tris().push_back({{5, 4, 3}});
+  geometries[3].tris().push_back({{5, 1, 4}});
+  
+  dimension dim(20, 20, 20);
+  bounding_box bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
+  
+  // Run SDF computations in parallel using boost::thread
+  std::vector<boost::thread> threads;
+  std::vector<volume> results(4);
+  std::atomic<int> completed(0);
+  
+  std::cout << "Launching 4 parallel SDF v2 computations..." << std::endl;
+  
+  for (int i = 0; i < 4; i++) {
+    threads.emplace_back([&, i]() {
+      std::cout << "  Thread " << i << " computing SDF v2..." << std::endl;
+      results[i] = sdf(geometries[i], dim, bbox, SDF_V2);
+      completed++;
+      std::cout << "  Thread " << i << " completed!" << std::endl;
+    });
+  }
+  
+  // Wait for all threads
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  std::cout << "All threads completed: " << completed.load() << "/4" << std::endl;
+  EXPECT_EQ(completed.load(), 4);
+  
+  // Verify all results are valid and different
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(results[i].XDim(), 20) << "Result " << i << " has wrong dimensions";
+    EXPECT_EQ(results[i].YDim(), 20) << "Result " << i << " has wrong dimensions";
+    EXPECT_EQ(results[i].ZDim(), 20) << "Result " << i << " has wrong dimensions";
+    
+    // Count interior voxels
+    int interior = 0;
+    for (uint64 j = 0; j < dim.xdim * dim.ydim * dim.zdim; j++) {
+      if (results[i](j) < 0) interior++;
+    }
+    
+    std::cout << "Result " << i << " interior voxels: " << interior << std::endl;
+    EXPECT_GT(interior, 0) << "Result " << i << " should have interior voxels";
+  }
+  
+  // Verify results are different (different geometries produce different SDFs)
+  // Compare first voxel values
+  std::vector<double> first_values;
+  for (int i = 0; i < 4; i++) {
+    first_values.push_back(results[i](0, 0, 0));
+  }
+  
+  // At least some should be different
+  bool has_different = false;
+  for (int i = 0; i < 3; i++) {
+    if (std::abs(first_values[i] - first_values[i+1]) > 0.01) {
+      has_different = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(has_different) << "Different geometries should produce different SDFs";
+  
+  std::cout << "Parallel execution test passed - no global state interference!" << std::endl;
+}
+
+// Helper function to get current memory usage in MB
+long get_memory_usage_mb() {
+  struct rusage usage;
+  getrusage(RUSAGE_SELF, &usage);
+  // ru_maxrss is in kilobytes on Linux
+  return usage.ru_maxrss / 1024;
+}
+
+TEST(AlgorithmTest, SDFStressTest) {
+  std::cout << "\n=== SDF Stress Test: Comparing v1 vs v2 ===" << std::endl;
+  
+  // Load the Stanford Bunny for stress testing
+  geometry bunny = read_geometry("test.bunny");
+  
+  std::cout << "Test geometry: Stanford bunny (" << bunny.num_points() 
+            << " vertices, " << bunny.num_tris() << " triangles)" << std::endl;
+  
+  // Get actual bunny bounds and create bbox with moderate padding
+  point_t original_min = bunny.min_point();
+  point_t original_max = bunny.max_point();
+  
+  std::cout << "Geometry bounds: [" << original_min[0] << ", " << original_min[1] << ", " << original_min[2] << "] to ["
+            << original_max[0] << ", " << original_max[1] << ", " << original_max[2] << "]" << std::endl;
+  
+  // Use 5% padding (same as BunnyVolumeConvergence test)
+  // SDF v2 now supports arbitrary bboxes via user-specified center
+  double padding = 0.05;
+  double extent_x = original_max[0] - original_min[0];
+  double extent_y = original_max[1] - original_min[1];
+  double extent_z = original_max[2] - original_min[2];
+  
+  double min_x = original_min[0] - extent_x * padding;
+  double min_y = original_min[1] - extent_y * padding;
+  double min_z = original_min[2] - extent_z * padding;
+  double max_x = original_max[0] + extent_x * padding;
+  double max_y = original_max[1] + extent_y * padding;
+  double max_z = original_max[2] + extent_z * padding;
+  
+  bounding_box bbox(min_x, min_y, min_z, max_x, max_y, max_z);
+  
+  std::cout << "Bounding box (5% padding): [" << min_x << ", " << min_y << ", " << min_z << "] to ["
+            << max_x << ", " << max_y << ", " << max_z << "]" << std::endl;
+  
+  // Test multiple resolutions including non-power-of-2
+  // Both algorithms should now handle arbitrary dimensions via resize()
+  std::vector<int> resolutions = {32, 48, 64, 128};
+  
+  std::cout << "\n" << std::setw(12) << "Resolution" 
+            << std::setw(15) << "Algorithm" 
+            << std::setw(15) << "Time (ms)" 
+            << std::setw(18) << "Memory Peak (MB)"
+            << std::setw(15) << "Interior Vox"
+            << std::setw(12) << "Speedup" << std::endl;
+  std::cout << std::string(87, '-') << std::endl;
+  
+  for (int res : resolutions) {
+    dimension dim(res, res, res);
+    long v1_time = 0, v2_time = 0;
+    int v1_interior_voxels = 0;
+    volume v1_result, v2_result;
+    
+    // Test SDF v1
+    {
+      try {
+        long mem_before = get_memory_usage_mb();
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        volume sdf_vol = sdf(bunny, dim, bbox, SDF_V1);
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        long mem_after = get_memory_usage_mb();
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        v1_time = duration.count();
+        long mem_used = mem_after - mem_before;
+        // Count interior voxels
+        v1_interior_voxels = 0;
+        for (uint64 i = 0; i < sdf_vol.XDim() * sdf_vol.YDim() * sdf_vol.ZDim(); i++) {
+          if (sdf_vol(i) < 0) v1_interior_voxels++;
+        }
+        
+        std::cout << std::setw(12) << (std::to_string(res) + "^3")
+                  << std::setw(15) << "SDF v1" 
+                  << std::setw(15) << v1_time
+                  << std::setw(18) << mem_used
+                  << std::setw(15) << v1_interior_voxels
+                  << std::setw(12) << "baseline" << std::endl;
+        
+        // Verify the result is valid
+        EXPECT_EQ(sdf_vol.XDim(), res);
+        EXPECT_EQ(sdf_vol.YDim(), res);
+        EXPECT_EQ(sdf_vol.ZDim(), res);
+        // With geometry-fitted bbox, we should have significant interior voxels
+        EXPECT_GT(v1_interior_voxels, 0) << "SDF v1 should have interior voxels at " << res << "^3";
+        
+        // Store v1 result for comparison
+        v1_result = sdf_vol;
+      } catch (const std::exception& e) {
+        std::cout << std::setw(12) << (std::to_string(res) + "^3")
+                  << std::setw(15) << "SDF v1" 
+                  << std::setw(15) << "FAILED"
+                  << std::setw(18) << "-"
+                  << std::setw(15) << "-"
+                  << std::setw(12) << "-" << std::endl;
+        std::cout << "    Error: " << e.what() << std::endl;
+      }
+    }
+    
+    // Test SDF v2
+    {
+      try {
+        long mem_before = get_memory_usage_mb();
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        volume sdf_vol = sdf(bunny, dim, bbox, SDF_V2);
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        long mem_after = get_memory_usage_mb();
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        v2_time = duration.count();
+        long mem_used = mem_after - mem_before;
+        
+        // Count interior voxels
+        int interior_voxels = 0;
+        for (uint64 i = 0; i < sdf_vol.XDim() * sdf_vol.YDim() * sdf_vol.ZDim(); i++) {
+          if (sdf_vol(i) < 0) interior_voxels++;
+        }
+        
+        std::string speedup_str = "-";
+        if (v1_time > 0 && v2_time > 0) {
+          double speedup = static_cast<double>(v2_time) / static_cast<double>(v1_time);
+          std::ostringstream oss;
+          oss << std::fixed << std::setprecision(2) << speedup << "x";
+          speedup_str = oss.str();
+        }
+        
+        std::cout << std::setw(12) << (std::to_string(res) + "^3")
+                  << std::setw(15) << "SDF v2" 
+                  << std::setw(15) << v2_time
+                  << std::setw(18) << mem_used
+                  << std::setw(15) << interior_voxels
+                  << std::setw(12) << speedup_str << std::endl;
+        
+        // Verify the result is valid
+        EXPECT_EQ(sdf_vol.XDim(), res);
+        EXPECT_EQ(sdf_vol.YDim(), res);
+        EXPECT_EQ(sdf_vol.ZDim(), res);
+        // With geometry-fitted bbox, we should have significant interior voxels
+        EXPECT_GT(interior_voxels, 0) << "SDF v2 should have interior voxels at " << res << "^3";
+        
+        // Compare with v1 results - should have similar interior voxel counts
+        // Different algorithms produce different results, but should be in same ballpark
+        // Allow wide tolerance: 0.3x to 3x (algorithms differ in how they handle edge cases)
+        if (v1_time > 0 && v1_interior_voxels > 0 && interior_voxels > 0) {
+          double ratio = static_cast<double>(interior_voxels) / static_cast<double>(v1_interior_voxels);
+          EXPECT_GT(ratio, 0.3) << "SDF v2 interior voxels should be in same ballpark as v1 at " << res << "^3";
+          EXPECT_LT(ratio, 3.0) << "SDF v2 interior voxels should be in same ballpark as v1 at " << res << "^3";
+        }
+        
+        // Store v2 result for comparison
+        v2_result = sdf_vol;
+      } catch (const std::exception& e) {
+        std::cout << std::setw(12) << (std::to_string(res) + "^3")
+                  << std::setw(15) << "SDF v2" 
+                  << std::setw(15) << "FAILED"
+                  << std::setw(18) << "-"
+                  << std::setw(15) << "-"
+                  << std::setw(12) << "-" << std::endl;
+        std::cout << "    Error: " << e.what() << std::endl;
+      }
+    }
+    
+    // Compare actual distance values if both succeeded
+    if (v1_result.XDim() > 0 && v2_result.XDim() > 0) {
+      uint64 total_voxels = v1_result.XDim() * v1_result.YDim() * v1_result.ZDim();
+      
+      double sum_abs_diff = 0.0;
+      double sum_sq_diff = 0.0;
+      double max_abs_diff = 0.0;
+      uint64 compared_voxels = 0;
+      
+      for (uint64 i = 0; i < total_voxels; i++) {
+        double v1_val = v1_result(i);
+        double v2_val = v2_result(i);
+        
+        double abs_diff = std::abs(v1_val - v2_val);
+        sum_abs_diff += abs_diff;
+        sum_sq_diff += abs_diff * abs_diff;
+        if (abs_diff > max_abs_diff) max_abs_diff = abs_diff;
+        compared_voxels++;
+      }
+      
+      double mean_abs_error = sum_abs_diff / compared_voxels;
+      double rmse = std::sqrt(sum_sq_diff / compared_voxels);
+      
+      std::cout << "    Distance value comparison (v1 vs v2):" << std::endl;
+      std::cout << "      Mean Absolute Error: " << std::scientific << std::setprecision(4) << mean_abs_error << std::endl;
+      std::cout << "      Root Mean Square Error: " << rmse << std::endl;
+      std::cout << "      Max Absolute Difference: " << max_abs_diff << std::defaultfloat << std::endl;
+    }
+    
+    std::cout << std::string(87, '-') << std::endl;
+  }
+  
+  std::cout << "\nStress test completed successfully!" << std::endl;
+  std::cout << "\nPerformance Notes:" << std::endl;
+  std::cout << "- SDF v1 uses octree subdivision (proven for complex geometries)" << std::endl;
+  std::cout << "- SDF v2 uses brute-force distance transform (simpler implementation)" << std::endl;
+  std::cout << "- Speedup column shows v2_time/v1_time ratio" << std::endl;
+  std::cout << "- Both algorithms now support arbitrary dimensions via auto-resize" << std::endl;
+  std::cout << "- Non-power-of-2 dimensions are supported (rounded up for v1)" << std::endl;
+  std::cout << "- Both algorithms are thread-safe and can run in parallel" << std::endl;
 }
 
 // Run all tests

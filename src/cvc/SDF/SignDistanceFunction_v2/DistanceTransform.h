@@ -48,6 +48,11 @@ public:
 	// sx, sy, sz: scale factor of the bounding volume
 	DistanceTransform(FaceVertSet3D& fvs, int dim[3], float Distance = 20, float sx=2, float sy=2, float sz=2);
 
+	// Constructor with user-specified center (allows arbitrary bounding boxes)
+	// center: center point of the grid [cx, cy, cz]
+	// sx, sy, sz: scale factors to control grid extent
+	DistanceTransform(FaceVertSet3D& fvs, int dim[3], const float center[3], float Distance = 20, float sx=2, float sy=2, float sz=2);
+
 	DistanceTransform(FaceVertSet3D& fvs, const Reg3Data<float>& reg3);
 
 	~DistanceTransform(void);
