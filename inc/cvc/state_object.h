@@ -24,9 +24,66 @@
 
 #include <cvc/app.h>
 #include <cvc/state.h>
+#include <set>
 
 namespace CVC_NAMESPACE
 {
+  // Forward declaration
+  template <class This> class state_object;
+
+  // -----------------------------
+  // cvc::state_change_batch_scope
+  // -----------------------------
+  // Purpose:
+  //   RAII wrapper for batching state changes. While this object is alive,
+  //   state change handlers are queued instead of immediately spawned.
+  //   When destroyed (or flush() is called), all unique pending handlers run.
+  //
+  //   Usage:
+  //     {
+  //       state_change_batch_scope batch(myObject);
+  //       myObject.getState("width").value(1920);   // queued
+  //       myObject.getState("height").value(1080);  // queued
+  //       myObject.getState("width").value(2560);   // replaces first width change
+  //     } // handlers run here (only once per changed state)
+  //
+  // ---- Change History ----
+  // 12/23/2025 -- Joe R. -- Creation.
+  template <class This>
+  class state_change_batch_scope
+  {
+  public:
+    explicit state_change_batch_scope(state_object<This>& obj)
+      : _obj(obj), _flushed(false)
+    {
+      _obj.beginBatch();
+    }
+
+    ~state_change_batch_scope()
+    {
+      if (!_flushed) {
+        _obj.endBatch();
+      }
+    }
+
+    // Manually flush pending changes before scope ends
+    void flush()
+    {
+      if (!_flushed) {
+        _obj.endBatch();
+        _flushed = true;
+      }
+    }
+
+    // Non-copyable
+    state_change_batch_scope(const state_change_batch_scope&) = delete;
+    state_change_batch_scope& operator=(const state_change_batch_scope&) = delete;
+
+  private:
+    state_object<This>& _obj;
+    bool _flushed;
+  };
+
   // -----------------
   // cvc::state_object
   // -----------------
@@ -55,11 +112,13 @@ namespace CVC_NAMESPACE
   //
   // ---- Change History ----
   // 05/27/2012 -- Joe R. -- Creation.
+  // 12/23/2025 -- Joe R. -- Added batching support to avoid thread floods.
   template <class This> //This should be the type of the inheriting class
   class state_object
   {
   public:
     state_object() 
+      : _batchDepth(0)
     { 
       cvcapp.registerDataType(This);
 
@@ -117,8 +176,66 @@ namespace CVC_NAMESPACE
       return cvcstate(stateName(s));
     }
 
+    // Begin batching state changes - handlers are queued instead of spawned
+    void beginBatch()
+    {
+      boost::mutex::scoped_lock lock(_batchMutex);
+      _batchDepth++;
+    }
+
+    // End batching and flush all pending handlers (spawn threads for unique changes)
+    void endBatch()
+    {
+      std::set<std::string> pendingCopy;
+      
+      {
+        boost::mutex::scoped_lock lock(_batchMutex);
+        if (_batchDepth > 0) {
+          _batchDepth--;
+        }
+        
+        // Only flush if we're at depth 0 (supports nested batching)
+        if (_batchDepth == 0 && !_pendingChanges.empty()) {
+          pendingCopy = _pendingChanges;
+          _pendingChanges.clear();
+        }
+      }
+      
+      // Spawn threads outside the lock
+      BOOST_FOREACH(const std::string& childState, pendingCopy)
+        {
+          cvcapp.startThread(stateName(childState) + "_stateChanged",
+                             boost::bind(&state_object<This>::handleStateChanged, 
+                                         boost::ref(*this),
+                                         childState));
+        }
+    }
+
+    // Wait for all handler threads to complete
+    void waitForHandlers()
+    {
+      std::string threadPrefix = stateName();
+      thread_map threads = cvcapp.threads();
+      BOOST_FOREACH(thread_map::value_type& val, threads)
+        {
+          if(val.first.find(threadPrefix) == 0 && 
+             val.first.find("_stateChanged") != std::string::npos)
+            {
+              if(val.second && val.second->joinable())
+                {
+                  val.second->join();
+                }
+            }
+        }
+    }
+
   protected:
     boost::signals2::connection _stateConnection;
+    
+    // Batching support
+    mutable boost::mutex _batchMutex;
+    int _batchDepth;
+    std::set<std::string> _pendingChanges;
 
     //Classes that are state_objects should implement this function for themselves.
     //Note: each call happens in its own thread.
@@ -132,12 +249,22 @@ namespace CVC_NAMESPACE
   private:
     //Responding to state changes.  Every change will launch a new thread and will
     //immediately return, therefore this call is non-blocking.
+    //If batching is enabled, changes are queued instead.
     void stateChanged(const std::string& childState)
     {
-      cvcapp.startThread(stateName(childState) + "_stateChanged",
-                         boost::bind(&state_object<This>::handleStateChanged, 
-                                     boost::ref(*this),
-                                     childState));
+      boost::mutex::scoped_lock lock(_batchMutex);
+      
+      if (_batchDepth > 0) {
+        // Batching enabled - queue this change (set automatically deduplicates)
+        _pendingChanges.insert(childState);
+      } else {
+        // No batching - spawn thread immediately (unlock first to avoid holding lock)
+        lock.unlock();
+        cvcapp.startThread(stateName(childState) + "_stateChanged",
+                           boost::bind(&state_object<This>::handleStateChanged, 
+                                       boost::ref(*this),
+                                       childState));
+      }
     }
   };
 }

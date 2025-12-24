@@ -1614,8 +1614,8 @@ TEST(StateTest, StateObjectMultithreaded) {
     t.join();
   }
   
-  // Give handlers time to complete (they run async)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  // Wait for all handlers to complete
+  obj.waitForHandlers();
   
   // Should have triggered many state change handlers
   EXPECT_GT(obj.handleCount.load(), 0);
@@ -1675,12 +1675,15 @@ TEST(StateTest, StateObjectConfiguration) {
   EXPECT_EQ(config.getState("height").value<int>(), 1080);
   EXPECT_FALSE(config.getState("fullscreen").value<bool>());
   
-  // Modify state - should trigger handlers
-  config.getState("width").value(2560);
-  config.getState("height").value(1440);
+  // Modify state using batching - handlers spawn only once per unique state
+  {
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    config.getState("width").value(2560);
+    config.getState("height").value(1440);
+  }
   
-  // Give handlers time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  config.waitForHandlers();
   
   EXPECT_GT(config.resizeCount.load(), 0);
   EXPECT_EQ(config.lastWidth, 2560);
@@ -1688,10 +1691,139 @@ TEST(StateTest, StateObjectConfiguration) {
   
   // Change fullscreen
   config.getState("fullscreen").value(true);
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  config.waitForHandlers();
   
   EXPECT_GT(config.fullscreenCount.load(), 0);
   EXPECT_TRUE(config.lastFullscreen);
+}
+
+// Test batching state changes to avoid thread floods
+TEST(StateTest, StateObjectBatchedChanges) {
+  ConfigurationObject config;
+  
+  int initialHandlerCalls = config.totalHandlerCalls.load();
+  
+  // Use batching scope - handlers won't spawn until scope ends
+  {
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    
+    // Make multiple rapid changes - these are queued, not spawned immediately
+    config.getState("width").value(1024);
+    config.getState("width").value(1280);  // This replaces the 1024 change
+    config.getState("width").value(1920);  // This replaces the 1280 change
+    config.getState("height").value(768);
+    config.getState("height").value(1080); // This replaces the 768 change
+    
+    // At this point, NO handlers have run yet
+    // When we exit this scope, only 2 handlers will spawn (one for width, one for height)
+  }
+  
+  // Wait for handlers to complete
+  config.waitForHandlers();
+  
+  // Should have final values
+  EXPECT_EQ(config.lastWidth, 1920);
+  EXPECT_EQ(config.lastHeight, 1080);
+  
+  // Should have only called handlers for the UNIQUE state paths that changed
+  // Not 5 times (one for each value() call), but ideally just 1-2 times
+  int finalHandlerCalls = config.totalHandlerCalls.load();
+  int handlerCalls = finalHandlerCalls - initialHandlerCalls;
+  
+  // We changed width and height, so we expect at least 1 handler call
+  // (they might be batched into a single call for the parent state)
+  EXPECT_GT(handlerCalls, 0);
+  
+  // And definitely fewer than 5 (the number of value() calls we made)
+  EXPECT_LT(handlerCalls, 5);
+}
+
+// Test nested batching
+TEST(StateTest, StateObjectNestedBatching) {
+  ConfigurationObject config;
+  
+  int initialCalls = config.totalHandlerCalls.load();
+  
+  {
+    state_change_batch_scope<ConfigurationObject> outerBatch(config);
+    config.getState("width").value(800);
+    
+    {
+      state_change_batch_scope<ConfigurationObject> innerBatch(config);
+      config.getState("width").value(1024);
+      config.getState("height").value(768);
+      // Inner scope ends, but outer batch is still active, so no handlers yet
+    }
+    
+    config.getState("width").value(1920); // Final width value
+    // Outer scope ends - NOW handlers run
+  }
+  
+  config.waitForHandlers();
+  
+  // Should have final values
+  EXPECT_EQ(config.lastWidth, 1920);
+  EXPECT_EQ(config.lastHeight, 768);
+  
+  int handlerCalls = config.totalHandlerCalls.load() - initialCalls;
+  EXPECT_GT(handlerCalls, 0);
+  EXPECT_LT(handlerCalls, 4); // 4 value() calls, but deduplicated
+}
+
+// Test manual flush within batch scope
+TEST(StateTest, StateObjectManualFlush) {
+  ConfigurationObject config;
+  
+  int initialCalls = config.totalHandlerCalls.load();
+  
+  {
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    
+    config.getState("width").value(1024);
+    config.getState("height").value(768);
+    
+    // Manually flush - handlers run now
+    batch.flush();
+    config.waitForHandlers();
+    
+    int callsAfterFlush = config.totalHandlerCalls.load();
+    EXPECT_GT(callsAfterFlush, initialCalls);
+    
+    // Make more changes - these won't spawn handlers since we already flushed
+    config.getState("width").value(1920);
+    
+    // Scope ends, but flush already happened, so no double-flush
+  }
+  
+  config.waitForHandlers();
+  
+  // Width should be 1920 from the change after flush, but that handler never ran
+  // because flush() was already called
+  EXPECT_EQ(config.getState("width").value<int>(), 1920);
+}
+
+// Test batching with rapid concurrent changes
+TEST(StateTest, StateObjectBatchingUnderLoad) {
+  ConfigurationObject config;
+  
+  {
+    state_change_batch_scope<ConfigurationObject> batch(config);
+    
+    // Simulate rapid UI updates where same values change many times
+    for (int i = 0; i < 100; ++i) {
+      config.getState("width").value(1920 + i);
+      config.getState("height").value(1080 + i);
+    }
+    
+    // Without batching, this would spawn 200 threads!
+    // With batching, only 2 threads will spawn (one for width, one for height)
+  }
+  
+  config.waitForHandlers();
+  
+  // Should have final values
+  EXPECT_EQ(config.lastWidth, 1920 + 99);
+  EXPECT_EQ(config.lastHeight, 1080 + 99);
 }
 
 // DataProcessor state_object example (from STATE_API.md)
@@ -1754,8 +1886,8 @@ TEST(StateTest, StateObjectDataProcessor) {
   std::vector<double> data = {1.0, 2.0, -1.0, 3.0, -2.0, 4.0, -3.0, 5.0, -4.0, -5.0};
   processor.processData(data);
   
-  // Give handlers time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for all handlers to complete
+  processor.waitForHandlers();
   
   // Verify final state
   EXPECT_EQ(processor.getState("status").value(), "complete");
@@ -1827,8 +1959,8 @@ TEST(StateTest, StateObjectRenderer) {
   t2.join();
   t3.join();
   
-  // Give handlers time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for all handlers to complete
+  renderer.waitForHandlers();
   
   // Verify all updates triggered handlers
   EXPECT_GT(renderer.cameraUpdateCount.load(), 0);
@@ -1882,8 +2014,8 @@ TEST(StateTest, StateObjectAppSettings) {
   // Change theme
   settings.getState("theme").value("light");
   
-  // Give handler time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  settings.waitForHandlers();
   
   EXPECT_GT(settings.themeChangeCount.load(), 0);
   
@@ -1903,8 +2035,8 @@ TEST(StateTest, StateObjectExternalAccess) {
   // Access via global state
   cvcstate(widthPath).value(3840);
   
-  // Give handler time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  config.waitForHandlers();
   
   // Verify change was detected
   EXPECT_EQ(config.lastWidth, 3840);
@@ -1938,8 +2070,8 @@ TEST(StateTest, StateObjectNestedPaths) {
   // Modify deep path
   obj.getState("level1.level2.level3.value").value("modified");
   
-  // Give handler time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  obj.waitForHandlers();
   
   EXPECT_GT(obj.deepPathChangeCount.load(), 0);
 }
@@ -1973,8 +2105,9 @@ TEST(StateTest, StateObjectMultipleInstances) {
   config1.getState("width").value(2560);
   config2.getState("width").value(1024);
   
-  // Give handlers time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  config1.waitForHandlers();
+  config2.waitForHandlers();
   
   EXPECT_EQ(config1.lastWidth, 2560);
   EXPECT_EQ(config2.lastWidth, 1024);
@@ -2014,8 +2147,8 @@ TEST(StateTest, StateObjectWithData) {
   // Change data
   obj.getState("data_value").data(999);
   
-  // Give handler time to process (handlers run in separate threads)
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(500));
+  // Wait for handlers to complete
+  obj.waitForHandlers();
   
   EXPECT_GT(obj.dataChangeCount.load(), 0);
   
@@ -2036,8 +2169,8 @@ TEST(StateTest, StateObjectAsyncHandlers) {
     config.getState("width").value(1920 + i * 100);
   }
   
-  // Handlers run asynchronously, so changes may still be processing
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(1000));
+  // Wait for all handlers to complete
+  config.waitForHandlers();
   
   // Should have processed all changes
   int finalCount = config.resizeCount.load();
