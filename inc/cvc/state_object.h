@@ -71,7 +71,34 @@ namespace CVC_NAMESPACE
       );
     }
 
-    ~state_object() { _stateConnection.disconnect(); }
+    ~state_object() 
+    { 
+      _stateConnection.disconnect(); 
+      
+      // Wait for handler threads to complete to avoid dangling references
+      // Handler threads are named as stateName(childState) + "_stateChanged"
+      std::string threadPrefix = stateName();
+      thread_map threads = cvcapp.threads();
+      BOOST_FOREACH(thread_map::value_type& val, threads)
+        {
+          // Check if this thread belongs to this state_object instance
+          if(val.first.find(threadPrefix) == 0 && 
+             val.first.find("_stateChanged") != std::string::npos)
+            {
+              // Wait for this handler thread to complete
+              if(val.second && val.second->joinable())
+                {
+                  if(!val.second->timed_join(boost::posix_time::milliseconds(5000)))
+                    {
+                      cvcapp.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish in time, interrupting")
+                                       % val.first));
+                      val.second->interrupt();
+                      val.second->join();
+                    }
+                }
+            }
+        }
+    }
 
     //Use this to easily get the name of this viewer's state object.
     std::string stateName(const std::string& childState = std::string()) const { 

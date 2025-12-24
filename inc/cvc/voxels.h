@@ -57,6 +57,15 @@ namespace CVC_NAMESPACE
       uint64 dst_x, uint64 dst_y, uint64 dst_z,
       double inSpaceX, double inSpaceY, double inSpaceZ,
       data_type voxel_type);
+  
+  // CUDA kernel launcher for anisotropic diffusion slice (defined in voxels_kernels.cu)
+  extern "C" void cuda_anisotropic_diffusion_slice(
+      void* src_data,
+      void* dst_data,
+      uint64 xdim, uint64 ydim, uint64 zdim,
+      uint64 slice_idx,
+      double K_para, double Lambda_para,
+      data_type voxel_type);
 #endif
 
   class composite_function;

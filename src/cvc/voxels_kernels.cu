@@ -226,4 +226,178 @@ extern "C" void cuda_resize_trilinear(
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// Anisotropic diffusion kernel - processes one slice at a time
+template<typename T>
+__global__ void anisotropic_diffusion_slice_kernel(
+    const T* __restrict__ src_data,
+    T* __restrict__ dst_data,
+    uint64 xdim, uint64 ydim,
+    uint64 slice_idx, uint64 zdim,
+    double K_para, double Lambda_para)
+{
+  // 2D grid indexing for a slice
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  
+  if (i >= xdim || j >= ydim) return;
+  
+  uint64 k = slice_idx;
+  
+  // Calculate deltas for all 6 neighbors
+  double delta_n, delta_s, delta_e, delta_w, delta_u, delta_d;
+  
+  // Current voxel value
+  uint64 current_idx = k * xdim * ydim + j * xdim + i;
+  double current_val = double(src_data[current_idx]);
+  
+  // South neighbor (j+1)
+  if (j < ydim - 1) {
+    uint64 idx = k * xdim * ydim + (j + 1) * xdim + i;
+    delta_s = double(src_data[idx]) - current_val;
+  } else {
+    delta_s = 0.0;
+  }
+  
+  // North neighbor (j-1)
+  if (j > 0) {
+    uint64 idx = k * xdim * ydim + (j - 1) * xdim + i;
+    delta_n = double(src_data[idx]) - current_val;
+  } else {
+    delta_n = 0.0;
+  }
+  
+  // East neighbor (i+1)
+  if (i < xdim - 1) {
+    uint64 idx = k * xdim * ydim + j * xdim + (i + 1);
+    delta_e = double(src_data[idx]) - current_val;
+  } else {
+    delta_e = 0.0;
+  }
+  
+  // West neighbor (i-1)
+  if (i > 0) {
+    uint64 idx = k * xdim * ydim + j * xdim + (i - 1);
+    delta_w = double(src_data[idx]) - current_val;
+  } else {
+    delta_w = 0.0;
+  }
+  
+  // Up neighbor (k+1)
+  if (k < zdim - 1) {
+    uint64 idx = (k + 1) * xdim * ydim + j * xdim + i;
+    delta_u = double(src_data[idx]) - current_val;
+  } else {
+    delta_u = 0.0;
+  }
+  
+  // Down neighbor (k-1)
+  if (k > 0) {
+    uint64 idx = (k - 1) * xdim * ydim + j * xdim + i;
+    delta_d = double(src_data[idx]) - current_val;
+  } else {
+    delta_d = 0.0;
+  }
+  
+  // Calculate conductance coefficients
+  double K_squared = K_para * K_para;
+  double cn = 1.0 / (1.0 + (delta_n * delta_n) / K_squared);
+  double cs = 1.0 / (1.0 + (delta_s * delta_s) / K_squared);
+  double ce = 1.0 / (1.0 + (delta_e * delta_e) / K_squared);
+  double cw = 1.0 / (1.0 + (delta_w * delta_w) / K_squared);
+  double cu = 1.0 / (1.0 + (delta_u * delta_u) / K_squared);
+  double cd = 1.0 / (1.0 + (delta_d * delta_d) / K_squared);
+  
+  // Apply anisotropic diffusion update
+  double new_val = current_val + Lambda_para * 
+                   (cn * delta_n + cs * delta_s + ce * delta_e + 
+                    cw * delta_w + cu * delta_u + cd * delta_d);
+  
+  // Write result
+  dst_data[current_idx] = T(new_val);
+}
+
+// Explicit template instantiations for all voxel types
+template __global__ void anisotropic_diffusion_slice_kernel<unsigned char>(
+    const unsigned char*, unsigned char*, uint64, uint64, uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<unsigned short>(
+    const unsigned short*, unsigned short*, uint64, uint64, uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<unsigned int>(
+    const unsigned int*, unsigned int*, uint64, uint64, uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<float>(
+    const float*, float*, uint64, uint64, uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<double>(
+    const double*, double*, uint64, uint64, uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<uint64>(
+    const uint64*, uint64*, uint64, uint64, uint64, uint64, double, double);
+
+// Host function to launch anisotropic diffusion kernel for a single slice
+extern "C" void cuda_anisotropic_diffusion_slice(
+    void* src_data,
+    void* dst_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    uint64 slice_idx,
+    double K_para, double Lambda_para,
+    data_type voxel_type)
+{
+  // Configure kernel launch parameters for 2D slice
+  dim3 blockSize(16, 16);  // 256 threads per block
+  dim3 gridSize(
+      (xdim + blockSize.x - 1) / blockSize.x,
+      (ydim + blockSize.y - 1) / blockSize.y
+  );
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      anisotropic_diffusion_slice_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(src_data),
+          static_cast<unsigned char*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+      
+    case UShort:
+      anisotropic_diffusion_slice_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(src_data),
+          static_cast<unsigned short*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+      
+    case UInt:
+      anisotropic_diffusion_slice_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(src_data),
+          static_cast<unsigned int*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+      
+    case Float:
+      anisotropic_diffusion_slice_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(src_data),
+          static_cast<float*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+      
+    case Double:
+      anisotropic_diffusion_slice_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(src_data),
+          static_cast<double*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+      
+    case UInt64:
+      anisotropic_diffusion_slice_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(src_data),
+          static_cast<uint64*>(dst_data),
+          xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+      break;
+  }
+  
+  // Check for kernel launch errors
+  CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace CVC_NAMESPACE

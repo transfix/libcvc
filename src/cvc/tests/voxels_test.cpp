@@ -3223,6 +3223,89 @@ TEST(VoxelsCUDATest, ResizeWithCUDA) {
 #endif
 }
 
+TEST(VoxelsCUDATest, CUDAAnisotropicDiffusionSliceProcessing) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  // Create a volume with an edge to preserve
+  voxels v(dimension(20, 20, 20), Float);
+  
+  // Create a step edge in the middle
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        if (i < 10) {
+          v(i, j, k, 0.0);
+        } else {
+          v(i, j, k, 100.0);
+        }
+      }
+    }
+  }
+  
+  // Enable CUDA
+  v.enableCUDA(0);
+  EXPECT_TRUE(v.using_cuda());
+  
+  // Store original edge values
+  double edge_low_before = v(9, 10, 10);
+  double edge_high_before = v(10, 10, 10);
+  
+  // Apply anisotropic diffusion (should preserve edges)
+  v.anisotropicDiffusion(5);
+  
+  EXPECT_TRUE(v.using_cuda());
+  
+  // Check that the edge is still relatively sharp
+  double edge_low_after = v(9, 10, 10);
+  double edge_high_after = v(10, 10, 10);
+  
+  // The difference should still be significant (edge preserved)
+  double difference = fabs(edge_high_after - edge_low_after);
+  EXPECT_GT(difference, 50.0); // Should still have clear edge
+  
+  // Values should be smoothed but not completely blurred
+  EXPECT_GT(edge_low_after, edge_low_before - 5.0);
+  EXPECT_LT(edge_high_after, edge_high_before + 5.0);
+  
+  // Test uniform region smoothing
+  voxels v2(dimension(20, 20, 20), Float);
+  v2.fill(50.0);
+  
+  // Add some noise
+  for (uint64 i = 0; i < 10; i++) {
+    uint64 x = i * 2;
+    uint64 y = i * 2;
+    uint64 z = i * 2;
+    if (x < 20 && y < 20 && z < 20) {
+      v2(x, y, z, 50.0 + (i % 2 == 0 ? 10.0 : -10.0));
+    }
+  }
+  
+  v2.enableCUDA(0);
+  v2.anisotropicDiffusion(10);
+  
+  // After diffusion, noise should be reduced
+  double variance = 0.0;
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        double diff = v2(i, j, k) - 50.0;
+        variance += diff * diff;
+      }
+    }
+  }
+  variance /= (20 * 20 * 20);
+  
+  // Variance should be small after smoothing
+  EXPECT_LT(variance, 25.0);
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
+}
+
 #endif // CVC_USING_CUDA
 
 int main(int argc, char **argv) {
