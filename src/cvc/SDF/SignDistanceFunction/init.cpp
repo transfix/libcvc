@@ -275,7 +275,7 @@ bool SDFLibrary::initSDF()
 				sdf[i][j][k].useful = 0;
 				sdf[i][j][k].type = 1;
 				sdf[i][j][k].no = 0;
-				sdf[i][j][k].tindex = NULL;					
+				sdf[i][j][k].tindex.clear();					
 			}
 		}
 	}

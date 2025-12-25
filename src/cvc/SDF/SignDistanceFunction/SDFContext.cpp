@@ -177,7 +177,7 @@ bool SDFContext::initSDF() {
                 sdf[i][j][k].useful = 0;
                 sdf[i][j][k].type = 0;
                 sdf[i][j][k].no = 0;
-                sdf[i][j][k].tindex = nullptr;
+                sdf[i][j][k].tindex.clear();
             }
         }
     }

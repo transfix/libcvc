@@ -95,66 +95,19 @@ namespace SDFLibrary {
 			: v1(v1_), v2(v2_), v3(v3_), type(-1) {}
 	};
 
-	// Linked list node for octree cells
-	struct listnode {
-		int index;          // Index of the triangle
-		std::unique_ptr<listnode> next;
-		
-		listnode() : index(0), next(nullptr) {}
-		explicit listnode(int idx) : index(idx), next(nullptr) {}
-		
-		// Deep copy for listnode chain
-		listnode(const listnode& other) : index(other.index), next(nullptr) {
-			if (other.next) {
-				next = std::make_unique<listnode>(*other.next);
-			}
-		}
-		
-		listnode& operator=(const listnode& other) {
-			if (this != &other) {
-				index = other.index;
-				if (other.next) {
-					next = std::make_unique<listnode>(*other.next);
-				} else {
-					next.reset();
-				}
-			}
-			return *this;
-		}
-	};
-
-	// Octree cell structure
+	// Octree cell structure - stores list of triangle indices
 	struct cell {
 		char useful;        // 0 - no triangles; 1 - has triangles
 		char type;          // 0 - interior node; 1 - leaf node with triangles
 		long int no;
-		std::unique_ptr<listnode> tindex;   // Auto-managed linked list
+		std::vector<int> tindex;   // Triangle indices for this cell
 		
-		cell() : useful(0), type(0), no(0), tindex(nullptr) {}
-		~cell() = default;  // unique_ptr handles cleanup automatically
+		cell() : useful(0), type(0), no(0) {}
+		~cell() = default;
 		
-		// Deep copy for boost::multi_array compatibility
-		cell(const cell& other) : useful(other.useful), type(other.type), no(other.no), tindex(nullptr) {
-			if (other.tindex) {
-				tindex = std::make_unique<listnode>(*other.tindex);
-			}
-		}
-		
-		cell& operator=(const cell& other) {
-			if (this != &other) {
-				useful = other.useful;
-				type = other.type;
-				no = other.no;
-				if (other.tindex) {
-					tindex = std::make_unique<listnode>(*other.tindex);
-				} else {
-					tindex.reset();
-				}
-			}
-			return *this;
-		}
-		
-		// Move operations for efficiency
+		// Default copy/move operations work correctly with vector
+		cell(const cell& other) = default;
+		cell& operator=(const cell& other) = default;
 		cell(cell&& other) noexcept = default;
 		cell& operator=(cell&& other) noexcept = default;
 	};

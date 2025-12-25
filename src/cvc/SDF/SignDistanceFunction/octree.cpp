@@ -959,22 +959,11 @@ void update_bounding_box_ctx(SDFContext* ctx, long int current_triangle,
 			// Cache reference to cell to avoid multiple multi_array subscript operations
 			cell& c = ctx->sdf[i][j][k];
 			
-			auto l = std::make_unique<listnode>(current_triangle);
-
-			if( c.tindex == nullptr )
-			{
-				c.useful = 1;
-				c.tindex = std::move(l);
-				c.no = 1;
-				c.type = 4;
-			}
-			else
-			{
-				// Prepend to the list
-				l->next = std::move(c.tindex);
-				c.tindex = std::move(l);
-				c.no++;
-			}
+			// Add triangle to this cell's list
+			c.tindex.push_back(current_triangle);
+			c.useful = 1;
+			c.no = c.tindex.size();
+			c.type = 4;
 
 			update_boundary_vertices(ctx, i, j, k);
 		}

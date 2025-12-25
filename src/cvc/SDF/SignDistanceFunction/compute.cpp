@@ -127,7 +127,6 @@ int chq_inters(SDFContext* ctx, int pts[100], int inters, double  vi, double vj,
 int x_assign(SDFContext* ctx, int vi, int vj, int vk)
 {
 	int i, j, k, inters, temp, flag, v, ret;
-	listnode* currNode;
 	ray r;
 	int pts[1000];	//the given ray cant intersect the surface more than 1000 times...
 
@@ -142,28 +141,25 @@ int x_assign(SDFContext* ctx, int vi, int vj, int vk)
 		const cell& c = ctx->sdf[i][j][k];
 		if (c.type==4)
 		{
-			currNode = c.tindex.get();
-
-			while(currNode != NULL)
+			for (int tri_idx : c.tindex)
 			{
-				ret = ray_polygon_intersection(ctx, r, currNode->index);
+				ret = ray_polygon_intersection(ctx, r, tri_idx);
 
 				if (ret !=0)
 				{
 					for (flag =0,temp=0; temp<2*inters;)
 					{
-						if (pts[temp] == currNode->index)	flag=1;
+						if (pts[temp] == tri_idx)	flag=1;
 						temp +=2;
 					}
 
-					if (flag ==0)
+					if (flag ==0 && inters < 500)
 					{
-						pts[2*inters+0] = currNode->index;
+						pts[2*inters+0] = tri_idx;
 						pts[2*inters+1] = ret;
 						inters++;
 					}
 				}
-				currNode = currNode->next.get();
 			}
 		}
 	}
@@ -174,7 +170,6 @@ int x_assign(SDFContext* ctx, int vi, int vj, int vk)
 int y_assign(SDFContext* ctx, int vi, int vj, int vk)
 {
 	int i, j, k, inters, temp, flag, v, ret;
-	listnode* currNode;
 	ray r;
 	int pts[1000];	//the given ray cant intersect the surface more than 1000 times...
 
@@ -189,28 +184,25 @@ int y_assign(SDFContext* ctx, int vi, int vj, int vk)
 		const cell& c = ctx->sdf[i][j][k];
 		if (c.type==4)
 		{
-			currNode = c.tindex.get();
-
-			while(currNode != NULL)
+			for (int tri_idx : c.tindex)
 			{
-				ret = ray_polygon_intersection(ctx, r, currNode->index);
+				ret = ray_polygon_intersection(ctx, r, tri_idx);
 
 				if (ret !=0)
 				{
 					for (flag =0,temp=0; temp<2*inters;)
 					{
-						if (pts[temp] == currNode->index)	flag=1;
+						if (pts[temp] == tri_idx)	flag=1;
 						temp +=2;
 					}
 
-					if (flag ==0)
+					if (flag ==0 && inters < 500)
 					{
-						pts[2*inters+0] = currNode->index;
+						pts[2*inters+0] = tri_idx;
 						pts[2*inters+1] = ret;
 						inters++;
 					}
 				}
-				currNode = currNode->next.get();
 			}
 		}
 	}
@@ -221,7 +213,6 @@ int y_assign(SDFContext* ctx, int vi, int vj, int vk)
 int z_assign(SDFContext* ctx, int vi, int vj, int vk)
 {
 	int i, j, k, inters, temp, flag, v, ret;
-	listnode* currNode;
 	ray r;
 	int pts[1000];	//the given ray cant intersect the surface more than 1000 times...
 
@@ -236,28 +227,25 @@ int z_assign(SDFContext* ctx, int vi, int vj, int vk)
 		const cell& c = ctx->sdf[i][j][k];
 		if (c.type==4)
 		{
-			currNode = c.tindex.get();
-
-			while(currNode != NULL)
+			for (int tri_idx : c.tindex)
 			{
-				ret = ray_polygon_intersection(ctx, r, currNode->index);
+				ret = ray_polygon_intersection(ctx, r, tri_idx);
 
 				if (ret !=0)
 				{
 					for (flag =0,temp=0; temp<2*inters;)
 					{
-						if (pts[temp] == currNode->index)	flag=1;
+						if (pts[temp] == tri_idx)	flag=1;
 						temp +=2;
 					}
 
-					if (flag ==0)
+					if (flag ==0 && inters < 500)
 					{
-						pts[2*inters+0] = currNode->index;
+						pts[2*inters+0] = tri_idx;
 						pts[2*inters+1] = ret;
 						inters++;
 					}
 				}
-				currNode = currNode->next.get();
 			}
 		}
 	}
@@ -447,27 +435,23 @@ double point_2_plane(SDFContext* ctx, int tri, double i, double j, double k, myP
 //compute the distance of each Triangle in the cell (ci,cj,ck) from the Vertex vert.
 int each_cell(SDFContext* ctx, int ci, int cj, int ck, int vi, int vj, int vk)
 {
-	int vert, cellnum, currrentTri;
-	listnode* currNode;
+	int vert, cellnum;
 	double val;
 	myPoint temp;
 	int res =0;
 
 	vert = ctx->index2vert(vi, vj, vk);
-	currNode = ctx->sdf[ci][cj][ck].tindex.get();
+	const std::vector<int>& tri_list = ctx->sdf[ci][cj][ck].tindex;
 	cellnum = ctx->index2cell(ci, cj, ck);
 
-	while (currNode != NULL)
+	for (int tri_idx : tri_list)
 	{
-		currrentTri = currNode->index;
-		val = (double)point_2_plane(ctx, currrentTri, ctx->xCoord(vi), ctx->yCoord(vj), ctx->zCoord(vk), &temp);
+		val = (double)point_2_plane(ctx, tri_idx, ctx->xCoord(vi), ctx->yCoord(vj), ctx->zCoord(vk), &temp);
 		if (val < ctx->voxel_values[vert].value )	
 		{
 			ctx->voxel_values[vert].value = (float)val;
-			ctx->voxel_values[vert].closestV = currrentTri;
+			ctx->voxel_values[vert].closestV = tri_idx;
 		}
-
-		currNode = currNode->next.get();
 		res =1;
 	}
 

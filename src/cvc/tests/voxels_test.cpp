@@ -28,6 +28,9 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <chrono>
+#include <iomanip>
+#include <iostream>
 #include <mutex>
 
 using namespace cvc;
@@ -3301,6 +3304,104 @@ TEST(VoxelsCUDATest, CUDAAnisotropicDiffusionSliceProcessing) {
   
   // Variance should be small after smoothing
   EXPECT_LT(variance, 25.0);
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
+}
+
+// CPU vs GPU resize performance benchmark
+TEST(VoxelsCUDATest, ResizePerformanceComparison) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping test";
+    return;
+  }
+
+  std::cout << "\n=== CPU vs GPU Resize Performance Comparison ===" << std::endl;
+  std::cout << std::string(90, '=') << std::endl;
+  std::cout << std::setw(15) << "Resolution"
+            << std::setw(15) << "CPU Time (ms)"
+            << std::setw(15) << "GPU Time (ms)"
+            << std::setw(15) << "Speedup"
+            << std::setw(15) << "Max Diff"
+            << std::setw(15) << "Status" << std::endl;
+  std::cout << std::string(90, '-') << std::endl;
+
+  // Test different resolutions
+  std::vector<std::pair<uint64, uint64>> resize_configs = {
+    {16, 32},   // 2x upsample
+    {32, 64},   // 2x upsample
+    {64, 128},  // 2x upsample
+    {32, 48},   // 1.5x upsample
+    {64, 32},   // 2x downsample
+    {128, 64}   // 2x downsample
+  };
+
+  for (const auto& config : resize_configs) {
+    uint64 src_dim = config.first;
+    uint64 dst_dim = config.second;
+    
+    // Create source volume with known pattern
+    voxels v_src(dimension(src_dim, src_dim, src_dim), Float);
+    for (uint64 k = 0; k < src_dim; k++) {
+      for (uint64 j = 0; j < src_dim; j++) {
+        for (uint64 i = 0; i < src_dim; i++) {
+          float val = static_cast<float>(i + j + k) / (3.0f * src_dim);
+          v_src(i, j, k, val);
+        }
+      }
+    }
+
+    // CPU resize
+    voxels v_cpu(v_src);
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    v_cpu.resize(dimension(dst_dim, dst_dim, dst_dim));
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
+    double cpu_time_ms = cpu_duration.count() / 1000.0;
+
+    // GPU resize
+    voxels v_gpu(v_src);
+    v_gpu.enableCUDA(0);
+    EXPECT_TRUE(v_gpu.using_cuda());
+    
+    auto gpu_start = std::chrono::high_resolution_clock::now();
+    v_gpu.resize(dimension(dst_dim, dst_dim, dst_dim));
+    auto gpu_end = std::chrono::high_resolution_clock::now();
+    auto gpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
+    double gpu_time_ms = gpu_duration.count() / 1000.0;
+
+    // Compare results
+    float max_diff = 0.0f;
+    for (uint64 k = 0; k < dst_dim; k++) {
+      for (uint64 j = 0; j < dst_dim; j++) {
+        for (uint64 i = 0; i < dst_dim; i++) {
+          float cpu_val = v_cpu(i, j, k);
+          float gpu_val = v_gpu(i, j, k);
+          float diff = std::abs(cpu_val - gpu_val);
+          max_diff = std::max(max_diff, diff);
+        }
+      }
+    }
+
+    double speedup = cpu_time_ms / gpu_time_ms;
+    std::string status = (max_diff < 1e-4) ? "✓ PASS" : "✗ DIFF";
+    
+    std::string res_str = std::to_string(src_dim) + "→" + std::to_string(dst_dim);
+    std::cout << std::setw(15) << res_str
+              << std::setw(15) << std::fixed << std::setprecision(3) << cpu_time_ms
+              << std::setw(15) << std::fixed << std::setprecision(3) << gpu_time_ms
+              << std::setw(15) << std::fixed << std::setprecision(2) << speedup << "x"
+              << std::setw(15) << std::scientific << std::setprecision(2) << max_diff
+              << std::setw(15) << status << std::endl;
+
+    // Verify results match
+    EXPECT_LT(max_diff, 1e-4) << "CPU and GPU resize results should match for " << res_str;
+  }
+
+  std::cout << std::string(90, '=') << std::endl;
+  std::cout << "Note: GPU resize includes CUDA memory transfer overhead" << std::endl;
+  std::cout << "      Speedup improves for larger volumes" << std::endl;
 #else
   GTEST_SKIP() << "CUDA support not compiled in";
 #endif
