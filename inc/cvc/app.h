@@ -54,6 +54,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <queue>
 #include <algorithm>
 #include <typeinfo>
 
@@ -345,6 +346,7 @@ namespace CVC_NAMESPACE
 
     //T is a class with operator()
     // 10/09/2011 -- transfix -- added new argument 'wait'
+    // 12/25/2025 -- transfix -- added thread pool support with priority
     template<class T>
     void startThread(const std::string& key, const T& t, bool wait = true)
     {
@@ -364,6 +366,39 @@ namespace CVC_NAMESPACE
         CVC_NAMESPACE::thread_ptr(new boost::thread(t))
       );
     }
+
+    // Start a thread with priority using the thread pool
+    // Higher priority threads are scheduled before lower priority ones
+    // The pool limits concurrent threads to maxPoolSize (default: hardware concurrency)
+    template<class T>
+    void startThreadPooled(const std::string& key, const T& t, 
+                          thread_priority priority = PRIORITY_NORMAL, 
+                          bool wait = true)
+    {
+      boost::this_thread::interruption_point();
+      
+      // If waiting and thread exists, cancel it
+      if(wait && hasThread(key))
+      {
+        thread_ptr tptr = threads(key);
+        tptr->interrupt();
+        tptr->join();
+      }
+
+      std::string actual_key = wait ? key : uniqueThreadKey(key);
+      
+      // Submit to thread pool
+      submitToThreadPool(actual_key, t, priority);
+    }
+
+    // Set the maximum number of concurrent threads in the pool
+    // Default is hardware_concurrency() or 4 if unknown
+    void setThreadPoolSize(unsigned int size);
+    unsigned int getThreadPoolSize() const;
+    
+    // Get thread pool statistics
+    unsigned int getActiveThreadCount() const;
+    unsigned int getPendingThreadCount() const;
 
     //Used to easily manage saving/restoring thread info as we
     //traverse a threads stack.
@@ -484,6 +519,40 @@ namespace CVC_NAMESPACE
     void propertyTreeTraverse(const boost::property_tree::ptree& pt,
                               const std::string& parentkey = std::string());
 
+    // Thread pool implementation
+    struct ThreadPoolTask
+    {
+      std::string key;
+      boost::function<void()> task;
+      thread_priority priority;
+      
+      // For priority queue ordering (higher priority first)
+      bool operator<(const ThreadPoolTask& other) const
+      {
+        return priority < other.priority; // Note: less-than for priority_queue's max-heap
+      }
+    };
+    
+    template<class T>
+    void submitToThreadPool(const std::string& key, const T& task, thread_priority priority)
+    {
+      boost::this_thread::interruption_point();
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      
+      ThreadPoolTask poolTask;
+      poolTask.key = key;
+      poolTask.task = task;
+      poolTask.priority = priority;
+      
+      _pendingTasks.push(poolTask);
+      
+      // Try to start a worker if we're under the limit
+      tryStartWorker();
+    }
+    
+    void tryStartWorker();
+    void threadPoolWorker();
+
     data_map               _data;
     data_type_name_map     _dataTypeNames;
     data_type_enum_map     _dataTypeEnum; //mapping of C++ types to the data_type enums
@@ -509,6 +578,13 @@ namespace CVC_NAMESPACE
 
     mutex_map              _mutexMap;
     boost::mutex           _mutexMapMutex;
+
+    // Thread pool state
+    std::priority_queue<ThreadPoolTask> _pendingTasks;
+    unsigned int           _maxPoolSize;
+    unsigned int           _activeWorkers;
+    boost::mutex           _threadPoolMutex;
+    boost::condition_variable _threadPoolCondition;
 
     static app_ptr         instancePtr();
     static app_ptr         _instance;

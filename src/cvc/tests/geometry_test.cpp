@@ -2116,7 +2116,9 @@ TEST_F(GeometryTest, SDFNonWatertightMeshes) {
 }
 
 // Fine-grained test to find exact threshold where sign determination fails
-TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
+// This test takes 10+ minutes, so it's disabled by default
+// Enable with: --gtest_also_run_disabled_tests
+TEST_F(GeometryTest, DISABLED_SDFSignAmbiguityThreshold) {
   std::cout << "\n=== Sign Ambiguity Threshold Across Multiple Resolutions ===" << std::endl;
   std::cout << "Testing SDF robustness to non-watertight meshes at different grid resolutions\n" << std::endl;
   

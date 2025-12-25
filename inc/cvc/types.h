@@ -130,6 +130,15 @@ namespace CVC_NAMESPACE
   typedef boost::shared_ptr<boost::mutex>                    mutex_ptr;
   typedef boost::tuple<mutex_ptr,std::string>                mutex_map_element;
   typedef std::map<std::string, mutex_map_element>           mutex_map;
+
+  // Thread pool priority levels
+  enum thread_priority
+  {
+    PRIORITY_LOW = 0,
+    PRIORITY_NORMAL = 1,
+    PRIORITY_HIGH = 2,
+    PRIORITY_CRITICAL = 3
+  };
 }
 
 #endif
