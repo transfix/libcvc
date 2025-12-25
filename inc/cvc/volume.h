@@ -153,6 +153,12 @@ namespace CVC_NAMESPACE
     //be inside the bounding box, or an exception is thrown.
     double interpolate(double obj_x, double obj_y, double obj_z) const;
 
+    // Bring base class resize methods into scope to avoid hiding them
+    using voxels::resize;
+    
+    //resizes the volume to a new bounding box using trilinear interpolation (GPU-accelerated when CUDA is available)
+    volume& resize(const bounding_box& new_bbox);
+
     //makes this volume into a new volume that contains both this volume and the volume specified, bounding box and all
     //If dimension is specified, this volume will be resized to that dimension
     volume& combineWith(const volume& vol, const dimension& dim);

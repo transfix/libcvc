@@ -226,6 +226,161 @@ extern "C" void cuda_resize_trilinear(
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// Template kernel for bounding box aware resize
+template<typename T>
+__global__ void resize_bbox_trilinear_kernel(
+    const T* __restrict__ src_data,
+    T* __restrict__ dst_data,
+    uint64 dim_x, uint64 dim_y, uint64 dim_z,
+    double offset_x, double offset_y, double offset_z,
+    double scale_x, double scale_y, double scale_z)
+{
+  // 3D grid indexing
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= dim_x || j >= dim_y || k >= dim_z) return;
+  
+  // Calculate position in source volume using bbox transformation
+  double x = offset_x + double(i) * scale_x;
+  double y = offset_y + double(j) * scale_y;
+  double z = offset_z + double(k) * scale_z;
+  
+  uint64 resXIndex = uint64(x);
+  uint64 resYIndex = uint64(y);
+  uint64 resZIndex = uint64(z);
+  
+  double xPosition = x - double(resXIndex);
+  double yPosition = y - double(resYIndex);
+  double zPosition = z - double(resZIndex);
+  
+  // Find indices for eight corner voxels
+  uint64 ValIndex[8];
+  ValIndex[0] = resZIndex * dim_x * dim_y + resYIndex * dim_x + resXIndex;
+  ValIndex[1] = ValIndex[0] + 1;
+  ValIndex[2] = resZIndex * dim_x * dim_y + (resYIndex + 1) * dim_x + resXIndex;
+  ValIndex[3] = ValIndex[2] + 1;
+  ValIndex[4] = (resZIndex + 1) * dim_x * dim_y + resYIndex * dim_x + resXIndex;
+  ValIndex[5] = ValIndex[4] + 1;
+  ValIndex[6] = (resZIndex + 1) * dim_x * dim_y + (resYIndex + 1) * dim_x + resXIndex;
+  ValIndex[7] = ValIndex[6] + 1;
+  
+  // Handle boundary conditions
+  if (resXIndex >= dim_x - 1) {
+    ValIndex[1] = ValIndex[0];
+    ValIndex[3] = ValIndex[2];
+    ValIndex[5] = ValIndex[4];
+    ValIndex[7] = ValIndex[6];
+  }
+  if (resYIndex >= dim_y - 1) {
+    ValIndex[2] = ValIndex[0];
+    ValIndex[3] = ValIndex[1];
+    ValIndex[6] = ValIndex[4];
+    ValIndex[7] = ValIndex[5];
+  }
+  if (resZIndex >= dim_z - 1) {
+    ValIndex[4] = ValIndex[0];
+    ValIndex[5] = ValIndex[1];
+    ValIndex[6] = ValIndex[2];
+    ValIndex[7] = ValIndex[3];
+  }
+  
+  // Read eight corner values
+  double val[8];
+  for (int idx = 0; idx < 8; idx++) {
+    val[idx] = double(src_data[ValIndex[idx]]);
+  }
+  
+  // Perform trilinear interpolation
+  double result = getTriVal_device(val, xPosition, yPosition, zPosition, 1.0, 1.0, 1.0);
+  
+  // Write result
+  uint64 dst_idx = k * dim_x * dim_y + j * dim_x + i;
+  dst_data[dst_idx] = T(result);
+}
+
+// Host function to launch bbox-aware resize kernel
+extern "C" void cuda_resize_bbox_trilinear(
+    void* src_data,
+    void* dst_data,
+    uint64 dim_x, uint64 dim_y, uint64 dim_z,
+    double offset_x, double offset_y, double offset_z,
+    double scale_x, double scale_y, double scale_z,
+    data_type voxel_type)
+{
+  // Configure kernel launch parameters
+  dim3 blockSize(8, 8, 8);  // 512 threads per block
+  dim3 gridSize(
+      (dim_x + blockSize.x - 1) / blockSize.x,
+      (dim_y + blockSize.y - 1) / blockSize.y,
+      (dim_z + blockSize.z - 1) / blockSize.z
+  );
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      resize_bbox_trilinear_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(src_data),
+          static_cast<unsigned char*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+      
+    case UShort:
+      resize_bbox_trilinear_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(src_data),
+          static_cast<unsigned short*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+      
+    case UInt:
+      resize_bbox_trilinear_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(src_data),
+          static_cast<unsigned int*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+      
+    case Float:
+      resize_bbox_trilinear_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(src_data),
+          static_cast<float*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+      
+    case Double:
+      resize_bbox_trilinear_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(src_data),
+          static_cast<double*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+      
+    case UInt64:
+      resize_bbox_trilinear_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(src_data),
+          static_cast<uint64*>(dst_data),
+          dim_x, dim_y, dim_z,
+          offset_x, offset_y, offset_z,
+          scale_x, scale_y, scale_z);
+      break;
+  }
+  
+  // Check for kernel launch errors
+  CUDA_CHECK(cudaGetLastError());
+  
+  // Synchronize to ensure completion
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 // Anisotropic diffusion kernel - processes one slice at a time
 template<typename T>
 __global__ void anisotropic_diffusion_slice_kernel(

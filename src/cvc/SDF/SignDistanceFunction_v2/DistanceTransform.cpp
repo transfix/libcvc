@@ -22,6 +22,7 @@
 #include "mtxlib.h"
 
 #include <set>
+#include <iostream>
 
 const float DistanceTransform::MAX_FLOAT = (float)1.0e12;
 
@@ -57,24 +58,25 @@ void DistanceTransform::init() {
 		}
 		for(k = minId[2]; k <= maxId[2]; k++) {
 			for(j = minId[1]; j <= maxId[1]; j++) {
-				for (i = minId[0]; i <= maxId[0]; i++) {
-					int nc = p_Data->index2cell(i, j, k);
-					assert(nc < p_Data->getNCells() && nc >= 0);
-					Vector3f norm;
-					p_Surf->getTriNormal(nt, norm);
-					if(intersectCell(v0, norm, i, j, k)) {
-						Point3f lower, upper;
-						lower[0] = orig[0] + i*span[0];
-						lower[1] = orig[1] + j*span[1];
-						lower[2] = orig[2] + k*span[2];
-						upper[0] = lower[0] + span[0];
-						upper[1] = lower[1] + span[1];
-						upper[2] = lower[2] + span[2];
-						if (TriangleCubeIntersection(nt, lower, upper)) {
-							p_Cells[nc].triList.insert(nt);
-						}			
-					}
+			for (i = minId[0]; i <= maxId[0]; i++) {
+				int nc = p_Data->index2cell(i, j, k);
+				if (nc < 0) continue;  // Skip out-of-bounds cells
+				assert(nc < p_Data->getNCells());
+				Vector3f norm;
+				p_Surf->getTriNormal(nt, norm);
+				if(intersectCell(v0, norm, i, j, k)) {
+					Point3f lower, upper;
+					lower[0] = orig[0] + i*span[0];
+					lower[1] = orig[1] + j*span[1];
+					lower[2] = orig[2] + k*span[2];
+					upper[0] = lower[0] + span[0];
+					upper[1] = lower[1] + span[1];
+					upper[2] = lower[2] + span[2];
+					if (TriangleCubeIntersection(nt, lower, upper)) {
+						p_Cells[nc].triList.insert(nt);
+					}			
 				}
+			}
 			}
 		}	
 	}

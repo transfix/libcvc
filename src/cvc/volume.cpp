@@ -218,6 +218,22 @@ namespace CVC_NAMESPACE
     return getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes);
   }
 
+  volume& volume::resize(const bounding_box& new_bbox)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+
+    // If bounding boxes are the same, no work needed
+    if(_boundingBox == new_bbox) return *this;
+
+    // Call the voxels resize method with old and new bounding boxes
+    voxels::resize(_boundingBox, new_bbox);
+
+    // Update our bounding box
+    _boundingBox = new_bbox;
+
+    return *this;
+  }
+
   volume& volume::combineWith(const volume& vol, const dimension& dim)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);

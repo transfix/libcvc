@@ -1378,6 +1378,11 @@ TEST(AlgorithmTest, SDFV1vsV2Comparison) {
   }
 }
 
+// Test SDF computation with v2 in parallel on multiple geometries
+// FIXED: Previously crashed due to bug in DistanceTransform::init() where it didn't check
+// if index2cell() returned -1 for out-of-bounds cell indices. Geometries with vertices
+// extending outside the grid bounding box would cause negative array indexing.
+// Fix: Added bounds check (if nc < 0) continue; before accessing p_Cells[nc]
 TEST(AlgorithmTest, SDFV2ParallelExecution) {
   std::cout << "\n=== Testing SDF v2 Parallel Execution (No Global State) ===" << std::endl;
   

@@ -656,6 +656,164 @@ namespace CVC_NAMESPACE
     return *this;
   }
 
+  voxels& voxels::resize(const bounding_box& old_bbox, const bounding_box& new_bbox)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+
+    if(voxel_dimensions().isNull()) throw null_dimension("Null voxels dimension.");
+
+    // If bounding boxes are the same, no work needed
+    if(old_bbox == new_bbox) return *this;
+
+    // Create temporary voxel array with same dimensions to hold resampled data
+    voxels newvox(voxel_dimensions(), voxelType());
+
+    // Calculate the mapping from new bbox coordinates to old bbox coordinates
+    // For each voxel in the grid, we need to find its position in the new bbox,
+    // then map that to the old bbox coordinate system
+    double old_span_x = old_bbox.maxx - old_bbox.minx;
+    double old_span_y = old_bbox.maxy - old_bbox.miny;
+    double old_span_z = old_bbox.maxz - old_bbox.minz;
+    
+    double new_span_x = new_bbox.maxx - new_bbox.minx;
+    double new_span_y = new_bbox.maxy - new_bbox.miny;
+    double new_span_z = new_bbox.maxz - new_bbox.minz;
+
+    // Calculate inSpace ratios: how much to step in old bbox coordinates per voxel
+    // We're mapping from new_bbox space to old_bbox space
+    // Each voxel i in [0, xdim-1] maps to position new_bbox.minx + i * new_span_x / (xdim-1)
+    // This position then maps to old_bbox space as: (pos - old_bbox.minx) / old_span_x * (xdim-1)
+    // Combining: inSpaceX = (new_span_x / old_span_x)
+    double scale_x = new_span_x / old_span_x;
+    double scale_y = new_span_y / old_span_y;
+    double scale_z = new_span_z / old_span_z;
+    
+    // Offset in voxel coordinates when mapping from new bbox to old bbox
+    double offset_x = (new_bbox.minx - old_bbox.minx) / old_span_x * (voxel_dimensions()[0] - 1);
+    double offset_y = (new_bbox.miny - old_bbox.miny) / old_span_y * (voxel_dimensions()[1] - 1);
+    double offset_z = (new_bbox.minz - old_bbox.minz) / old_span_z * (voxel_dimensions()[2] - 1);
+
+#ifdef CVC_USING_CUDA
+    // Use CUDA kernel if CUDA is enabled and unified memory is available
+    if (_using_cuda && _cuda_unified_ptr) {
+      try {
+        // Allocate CUDA unified memory for destination
+        newvox.enableCUDA(_cuda_device_id);
+        
+        // For CUDA, we need to pass the transformation parameters
+        // The CUDA kernel will compute: old_coord = offset + new_coord * scale
+        cuda_resize_bbox_trilinear(
+            _cuda_unified_ptr.get(),      // source data
+            newvox._cuda_unified_ptr.get(), // destination data
+            voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
+            offset_x, offset_y, offset_z,
+            scale_x, scale_y, scale_z,
+            voxelType());
+        
+        // Copy the result
+        copy(newvox);
+        cvcapp.threadProgress(1.0f);
+        
+        return *this;
+      } catch (const cuda_error& e) {
+        // Fall back to CPU implementation if CUDA fails
+        // (exception message: e.what())
+      }
+    }
+#endif
+
+    // CPU implementation (fallback or when CUDA not available)
+    uint64 i, j, k;
+    double val[8];
+    uint64 resXIndex = 0, resYIndex = 0, resZIndex = 0;
+    uint64 ValIndex[8];
+    double xPosition = 0, yPosition = 0, zPosition = 0;
+    double xRes = 0, yRes = 0, zRes = 0;
+
+    for(k = 0; k < ZDim(); k++)
+      {
+        // Calculate position in old bbox coordinate system
+        double z = offset_z + double(k) * scale_z;
+        // Clamp to valid range
+        if (z < 0) z = 0;
+        if (z >= voxel_dimensions()[2]-1) z = voxel_dimensions()[2]-1-0.001;
+        resZIndex = uint64(z);
+        zPosition = z - uint64(z);
+        zRes = 1;
+        
+        for(j = 0; j < YDim(); j++)
+          {
+            double y = offset_y + double(j) * scale_y;
+            // Clamp to valid range
+            if (y < 0) y = 0;
+            if (y >= voxel_dimensions()[1]-1) y = voxel_dimensions()[1]-1-0.001;
+            resYIndex = uint64(y);
+            yPosition = y - uint64(y);
+            yRes = 1;
+
+            for(i = 0; i < XDim(); i++)
+              {
+                double x = offset_x + double(i) * scale_x;
+                // Clamp to valid range
+                if (x < 0) x = 0;
+                if (x >= voxel_dimensions()[0]-1) x = voxel_dimensions()[0]-1-0.001;
+                resXIndex = uint64(x);
+                xPosition = x - uint64(x);
+                xRes = 1;
+
+                // find index to get eight voxel values
+                ValIndex[0] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
+                ValIndex[1] = ValIndex[0] + 1;
+                ValIndex[2] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
+                ValIndex[3] = ValIndex[2] + 1;
+                ValIndex[4] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
+                ValIndex[5] = ValIndex[4] + 1;
+                ValIndex[6] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
+                ValIndex[7] = ValIndex[6] + 1;
+
+                // Handle boundary conditions
+                if(resXIndex>=voxel_dimensions()[0]-1)
+                  {
+                    xRes = 0;
+                    ValIndex[1] = ValIndex[0];
+                    ValIndex[3] = ValIndex[2];
+                    ValIndex[5] = ValIndex[4];
+                    ValIndex[7] = ValIndex[6];
+                  }
+                if(resYIndex>=voxel_dimensions()[1]-1)
+                  {
+                    yRes = 0;
+                    ValIndex[2] = ValIndex[0];
+                    ValIndex[3] = ValIndex[1];
+                    ValIndex[6] = ValIndex[4];
+                    ValIndex[7] = ValIndex[5];
+                  }
+                if(resZIndex>=voxel_dimensions()[2]-1)
+                  {
+                    zRes = 0;
+                    ValIndex[4] = ValIndex[0];
+                    ValIndex[5] = ValIndex[1];
+                    ValIndex[6] = ValIndex[2];
+                    ValIndex[7] = ValIndex[3];
+                  }
+
+                for(int Index = 0; Index < 8; Index++) 
+                  val[Index] = (*this)(ValIndex[Index]);
+                  
+                newvox(i,j,k,
+                       getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
+              }
+          }
+
+        cvcapp.threadProgress(float(k)/float(ZDim()));
+      }
+
+    copy(newvox); //make this into a copy of the interpolated voxels
+    cvcapp.threadProgress(1.0f);
+
+    return *this;
+  }
+
   voxels& voxels::composite(const voxels& compVox, int64 off_x, int64 off_y, int64 off_z, const composite_function& func)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);

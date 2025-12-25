@@ -26,6 +26,7 @@
 #include <cvc/namespace.h>
 #include <cvc/types.h>
 #include <cvc/dimension.h>
+#include <cvc/bounding_box.h>
 #include <cvc/exception.h>
 #include <cvc/cuda_utils.h>
 
@@ -56,6 +57,15 @@ namespace CVC_NAMESPACE
       uint64 src_x, uint64 src_y, uint64 src_z,
       uint64 dst_x, uint64 dst_y, uint64 dst_z,
       double inSpaceX, double inSpaceY, double inSpaceZ,
+      data_type voxel_type);
+  
+  // CUDA kernel launcher for bounding box aware trilinear resize (defined in voxels_kernels.cu)
+  extern "C" void cuda_resize_bbox_trilinear(
+      void* src_data,
+      void* dst_data,
+      uint64 dim_x, uint64 dim_y, uint64 dim_z,
+      double offset_x, double offset_y, double offset_z,
+      double scale_x, double scale_y, double scale_z,
       data_type voxel_type);
   
   // CUDA kernel launcher for anisotropic diffusion slice (defined in voxels_kernels.cu)
@@ -268,6 +278,7 @@ namespace CVC_NAMESPACE
 		    const dimension& subvoldim, double val); //set all voxels in specified subvolume to val
     voxels& map(double min_, double max_); //maps voxels from min to max
     voxels& resize(const dimension& newdim); //resizes this object to the specified dimension using trilinear interpolation
+    voxels& resize(const bounding_box& old_bbox, const bounding_box& new_bbox); //resizes voxels from one bounding box to another using trilinear interpolation
     voxels& bilateralFilter(double radiometricSigma = 200.0, double spatialSigma = 1.5, unsigned int filterRadius = 2);
     //voxels& rotate(double deg_x, double deg_y, double deg_z); //rotates the object about the x,y,z axis
     /*

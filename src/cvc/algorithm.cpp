@@ -442,30 +442,9 @@ namespace CVC_NAMESPACE
             // Compute SDF on expanded bbox, then resample to match requested bbox
             vol = sdf_library_v2(geom, dim, expanded_bbox);
             
-            // Create new volume with requested bbox and resample using trilinear interpolation
+            // Use GPU-accelerated resize to resample from expanded bbox to requested bbox
             // This ensures both v1 and v2 use exactly the same bounding box
-            volume resampled(dim, Float, bbox);
-            float* resampled_data = reinterpret_cast<float*>(*resampled);
-            float* vol_data = reinterpret_cast<float*>(*vol);
-            
-            for(uint64 k = 0; k < dim.zdim; k++) {
-              for(uint64 j = 0; j < dim.ydim; j++) {
-                for(uint64 i = 0; i < dim.xdim; i++) {
-                  // Calculate world position in requested bbox
-                  double x = bbox[0] + (bbox[3] - bbox[0]) * i / (dim.xdim - 1.0);
-                  double y = bbox[1] + (bbox[4] - bbox[1]) * j / (dim.ydim - 1.0);
-                  double z = bbox[2] + (bbox[5] - bbox[2]) * k / (dim.zdim - 1.0);
-                  
-                  // Use volume's interpolate method for world coordinate lookup
-                  double value = vol.interpolate(x, y, z);
-                  
-                  uint64 idx = i + j * dim.xdim + k * dim.xdim * dim.ydim;
-                  resampled_data[idx] = static_cast<float>(value);
-                }
-              }
-            }
-            
-            vol = resampled;
+            vol.resize(bbox);
           } else {
             // No expansion needed, use bbox directly
             vol = sdf_library_v2(geom, dim, bbox);
