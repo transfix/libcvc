@@ -205,7 +205,7 @@ if(CVC_ENABLE_MESHER)
     cvc-mesher
     cvc-mesher/contour
     cvc-mesher/FastContouring
-    cvc-mesher/VolMagick
+    #cvc-mesher/VolMagick
     cvc-mesher/LBIE
     cvc-mesher/Mesher
   )
@@ -272,12 +272,12 @@ if(CVC_ENABLE_MESHER)
       cvc-mesher/FastContouring/Ray.h
       cvc-mesher/FastContouring/Quaternion.h
       cvc-mesher/FastContouring/Tuple.h
-      cvc-mesher/VolMagick/Exceptions.h
-      cvc-mesher/VolMagick/Dimension.h
-      cvc-mesher/VolMagick/BoundingBox.h
-      cvc-mesher/VolMagick/endians.h
-      cvc-mesher/VolMagick/VolMagick.h
-      cvc-mesher/VolMagick/VolumeCache.h
+      # cvc-mesher/VolMagick/Exceptions.h
+      # cvc-mesher/VolMagick/Dimension.h
+      # cvc-mesher/VolMagick/BoundingBox.h
+      # cvc-mesher/VolMagick/endians.h
+      # cvc-mesher/VolMagick/VolMagick.h
+      # cvc-mesher/VolMagick/VolumeCache.h
       cvc-mesher/LBIE/cubes.h
       cvc-mesher/LBIE/pcio.h
       cvc-mesher/LBIE/LBIE_Mesher.h

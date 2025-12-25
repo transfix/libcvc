@@ -161,36 +161,6 @@ void Octree::setVolume(const VolMagick::Volume& volData)
   vol_max=minmax[0].max;
 }
 
-void Octree::prop_init(const char* rawiv_fname)
-{
-  //	strcpy(prop_fname,rawiv_fname);
-  prop_fname = rawiv_fname;
-	
-	/*prop_fp = fopen(rawiv_fname,"rb");
-
-	if (prop_fp==NULL) {
-		printf("wrong name : %s\n",rawiv_fname);
-		return;
-	}*/
-  prop_flag = 1;
-}
-
-void Octree::Octree_loadVolume(const char* dx_fname)
-{
-  VolMagick::Volume volumeData;
-  VolMagick::readVolumeFile(volumeData,dx_fname);
-  volumeData.voxelType(VolMagick::Float); //I think this library wants a float*
-  loadData(volumeData);
-  
-  int i;
-  for (i=0;i<=oct_depth;i++) {
-    level_res[i]=(1<<i);
-  }
-  construct_octree((char*)dx_fname);
-  vol_min=minmax[0].min;
-  vol_max=minmax[0].max;
-}
-
 //void Octree::loadData(SimpleVolumeData *volumeData, float* vol)
 void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
 {

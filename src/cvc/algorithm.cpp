@@ -473,13 +473,13 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args and preparing for cvc-mesher.
-  // 12/25/2025 -- Joe R. -- Changed extraction_method to use enum instead of string.
-  geometry iso(const volume& vol, double isovalue, extraction_method method)
+  // 12/25/2025 -- Joe R. -- Changed extraction_method to use enum and added improve_iterations.
+  geometry iso(const volume& vol, double isovalue, extraction_method method, int improve_iterations)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
     args["isovalue"] = float(isovalue);
-    args["improve_iterations"] = int(0);
+    args["improve_iterations"] = improve_iterations;
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
 
     return cvc_mesher(vol,args);

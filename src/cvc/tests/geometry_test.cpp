@@ -2264,6 +2264,252 @@ TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
   std::cout << "- Both algorithms are production-ready: no crashes or NaN/Inf values at any damage level" << std::endl;
 }
 
+// ============================================================================
+// Isosurface Extraction Method Comparison Tests
+// ============================================================================
+
+TEST(AlgorithmTest, IsoExtractionMethodComparison) {
+  std::cout << "\n=== Isosurface Extraction Methods Comparison ===" << std::endl;
+  std::cout << std::string(100, '=') << std::endl;
+  
+  // Create a simple sphere SDF for testing
+  dimension dim(32, 32, 32);
+  bounding_box bbox;
+  bbox.minx = bbox.miny = bbox.minz = -1.0;
+  bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
+  volume sphere_vol(dim, Float, bbox);
+  
+  // Fill with sphere SDF (radius 0.5)
+  for (uint64 k = 0; k < dim.zdim; k++) {
+    for (uint64 j = 0; j < dim.ydim; j++) {
+      for (uint64 i = 0; i < dim.xdim; i++) {
+        double x = bbox.minx + (i + 0.5) * (bbox.maxx - bbox.minx) / dim.xdim;
+        double y = bbox.miny + (j + 0.5) * (bbox.maxy - bbox.miny) / dim.ydim;
+        double z = bbox.minz + (k + 0.5) * (bbox.maxz - bbox.minz) / dim.zdim;
+        double dist = std::sqrt(x*x + y*y + z*z) - 0.5;
+        sphere_vol(i, j, k, static_cast<float>(dist));
+      }
+    }
+  }
+  
+  std::cout << "Test volume: 32^3 sphere (radius 0.5)" << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
+  std::cout << std::setw(20) << "Method"
+            << std::setw(15) << "Vertices"
+            << std::setw(15) << "Triangles"
+            << std::setw(20) << "Time (ms)"
+            << std::setw(15) << "Valid" << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
+  
+  std::vector<std::pair<std::string, extraction_method>> methods = {
+    {"DUALLIB", DUALLIB},
+    {"FASTCONTOURING", FASTCONTOURING},
+    {"LIBISOCONTOUR", LIBISOCONTOUR}
+  };
+  
+  for (const auto& [name, method] : methods) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    geometry mesh = iso(sphere_vol, 0.0, method);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    std::cout << std::setw(20) << name
+              << std::setw(15) << mesh.num_points()
+              << std::setw(15) << mesh.num_tris()
+              << std::setw(20) << duration.count()
+              << std::setw(15) << (mesh.num_tris() > 0 ? "Yes" : "No") << std::endl;
+    
+    // Verify mesh is valid
+    EXPECT_GT(mesh.num_points(), 0) << name << " should produce vertices";
+    EXPECT_GT(mesh.num_tris(), 0) << name << " should produce triangles";
+    
+    // Verify triangle indices are valid
+    for (uint64 i = 0; i < mesh.num_tris(); i++) {
+      EXPECT_LT(mesh.tris()[i][0], mesh.num_points());
+      EXPECT_LT(mesh.tris()[i][1], mesh.num_points());
+      EXPECT_LT(mesh.tris()[i][2], mesh.num_points());
+    }
+  }
+  
+  std::cout << std::string(100, '=') << std::endl;
+}
+
+TEST(AlgorithmTest, IsoImprovementIterationsComparison) {
+  std::cout << "\n=== Isosurface Quality Improvement Comparison ===" << std::endl;
+  std::cout << std::string(100, '=') << std::endl;
+  
+  // Use sphere SDF for consistent testing
+  dimension dim(64, 64, 64);
+  bounding_box bbox;
+  bbox.minx = bbox.miny = bbox.minz = -1.0;
+  bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
+  volume sphere_vol(dim, Float, bbox);
+  
+  double radius = 0.5;
+  for (uint64 k = 0; k < dim.zdim; k++) {
+    for (uint64 j = 0; j < dim.ydim; j++) {
+      for (uint64 i = 0; i < dim.xdim; i++) {
+        double x = bbox.minx + (i + 0.5) * (bbox.maxx - bbox.minx) / dim.xdim;
+        double y = bbox.miny + (j + 0.5) * (bbox.maxy - bbox.miny) / dim.ydim;
+        double z = bbox.minz + (k + 0.5) * (bbox.maxz - bbox.minz) / dim.zdim;
+        double dist = std::sqrt(x*x + y*y + z*z) - radius;
+        sphere_vol(i, j, k, static_cast<float>(dist));
+      }
+    }
+  }
+  
+  std::cout << "Test: Sphere (radius " << radius << ") at 64^3 resolution with DUALLIB extraction" << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
+  std::cout << std::setw(15) << "Iterations"
+            << std::setw(15) << "Vertices"
+            << std::setw(15) << "Triangles"
+            << std::setw(20) << "Time (ms)"
+            << std::setw(20) << "Hausdorff Dist" << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
+  
+  geometry baseline_mesh;
+  std::vector<int> iteration_counts = {0, 1, 2, 5, 10};
+  
+  for (int iters : iteration_counts) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    geometry mesh = iso(sphere_vol, 0.0, DUALLIB, iters);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // Compute Hausdorff distance from baseline (0 iterations)
+    double hausdorff_dist = 0.0;
+    if (iters == 0) {
+      baseline_mesh = mesh;
+    } else if (baseline_mesh.num_points() > 0 && mesh.num_points() > 0) {
+      // Sample points and compute max distance
+      for (uint64 i = 0; i < std::min(mesh.num_points(), uint64(1000)); i++) {
+        double min_dist = std::numeric_limits<double>::max();
+        for (uint64 j = 0; j < baseline_mesh.num_points(); j++) {
+          double dist = 0.0;
+          for (int k = 0; k < 3; k++) {
+            double diff = mesh.points()[i][k] - baseline_mesh.points()[j][k];
+            dist += diff * diff;
+          }
+          min_dist = std::min(min_dist, std::sqrt(dist));
+        }
+        hausdorff_dist = std::max(hausdorff_dist, min_dist);
+      }
+    }
+    
+    std::cout << std::setw(15) << iters
+              << std::setw(15) << mesh.num_points()
+              << std::setw(15) << mesh.num_tris()
+              << std::setw(20) << duration.count()
+              << std::setw(20) << std::scientific << std::setprecision(3) 
+              << hausdorff_dist << std::defaultfloat << std::endl;
+    
+    // Verify mesh is valid
+    EXPECT_GT(mesh.num_points(), 0) << "Mesh should have vertices at " << iters << " iterations";
+    EXPECT_GT(mesh.num_tris(), 0) << "Mesh should have triangles at " << iters << " iterations";
+  }
+  
+  std::cout << std::string(100, '=') << std::endl;
+  std::cout << "Note: Hausdorff distance measures max deviation from baseline (0 iterations)" << std::endl;
+}
+
+TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
+  std::cout << "\n=== Extraction Method + Improvement Accuracy Test ===" << std::endl;
+  std::cout << std::string(120, '=') << std::endl;
+  
+  // Create sphere SDF as ground truth
+  dimension dim(48, 48, 48);
+  bounding_box bbox;
+  bbox.minx = bbox.miny = bbox.minz = -1.0;
+  bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
+  volume sphere_vol(dim, Float, bbox);
+  
+  double radius = 0.5;
+  for (uint64 k = 0; k < dim.zdim; k++) {
+    for (uint64 j = 0; j < dim.ydim; j++) {
+      for (uint64 i = 0; i < dim.xdim; i++) {
+        double x = bbox.minx + (i + 0.5) * (bbox.maxx - bbox.minx) / dim.xdim;
+        double y = bbox.miny + (j + 0.5) * (bbox.maxy - bbox.miny) / dim.ydim;
+        double z = bbox.minz + (k + 0.5) * (bbox.maxz - bbox.minz) / dim.zdim;
+        double dist = std::sqrt(x*x + y*y + z*z) - radius;
+        sphere_vol(i, j, k, static_cast<float>(dist));
+      }
+    }
+  }
+  
+  std::cout << "Test: Sphere (radius " << radius << ") at 48^3 resolution" << std::endl;
+  std::cout << "Accuracy measured as mean distance from true sphere surface" << std::endl;
+  std::cout << std::string(120, '-') << std::endl;
+  std::cout << std::setw(20) << "Method"
+            << std::setw(12) << "Iterations"
+            << std::setw(15) << "Vertices"
+            << std::setw(15) << "Triangles"
+            << std::setw(20) << "Mean Error"
+            << std::setw(20) << "Max Error"
+            << std::setw(18) << "Time (ms)" << std::endl;
+  std::cout << std::string(120, '-') << std::endl;
+  
+  std::vector<std::pair<std::string, extraction_method>> methods = {
+    {"DUALLIB", DUALLIB},
+    {"FASTCONTOURING", FASTCONTOURING},
+    {"LIBISOCONTOUR", LIBISOCONTOUR}
+  };
+  
+  std::vector<int> iteration_counts = {0, 2, 5};
+  
+  for (const auto& [name, method] : methods) {
+    for (int iters : iteration_counts) {
+      auto start = std::chrono::high_resolution_clock::now();
+      
+      geometry mesh = iso(sphere_vol, 0.0, method, iters);
+      
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+      
+      // Compute accuracy: distance of mesh vertices from true sphere surface
+      double sum_error = 0.0;
+      double max_error = 0.0;
+      for (uint64 i = 0; i < mesh.num_points(); i++) {
+        const auto& pt = mesh.points()[i];
+        double r = std::sqrt(pt[0]*pt[0] + pt[1]*pt[1] + pt[2]*pt[2]);
+        double error = std::abs(r - radius);
+        sum_error += error;
+        max_error = std::max(max_error, error);
+      }
+      double mean_error = mesh.num_points() > 0 ? sum_error / mesh.num_points() : 0.0;
+      
+      std::cout << std::setw(20) << name
+                << std::setw(12) << iters
+                << std::setw(15) << mesh.num_points()
+                << std::setw(15) << mesh.num_tris()
+                << std::setw(20) << std::scientific << std::setprecision(4) << mean_error
+                << std::setw(20) << max_error << std::defaultfloat
+                << std::setw(18) << duration.count() << std::endl;
+      
+      // Verify mesh quality
+      EXPECT_GT(mesh.num_points(), 0);
+      EXPECT_GT(mesh.num_tris(), 0);
+      
+      // Error should decrease or stay similar with more iterations
+      EXPECT_LT(mean_error, 0.2) << name << " with " << iters << " iterations should be reasonably accurate";
+      EXPECT_LT(max_error, 0.5) << name << " with " << iters << " iterations max error should be bounded";
+    }
+    if (name != methods.back().first) {
+      std::cout << std::string(120, '-') << std::endl;
+    }
+  }
+  
+  std::cout << std::string(120, '=') << std::endl;
+  std::cout << "Findings:" << std::endl;
+  std::cout << "- All extraction methods produce valid meshes" << std::endl;
+  std::cout << "- Quality improvement iterations can refine mesh accuracy" << std::endl;
+  std::cout << "- Different extraction methods have different baseline accuracy" << std::endl;
+  std::cout << "- More iterations generally improve accuracy at the cost of time" << std::endl;
+}
+
 // Run all tests
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

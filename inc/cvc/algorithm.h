@@ -86,10 +86,11 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args.
-  // 12/25/2025 -- Joe R. -- Adding extraction_method parameter (enum instead of string).
+  // 12/25/2025 -- Joe R. -- Adding extraction_method and improve_iterations parameters.
   geometry iso(const volume& vol, 
                double isovalue,
-               extraction_method method = DUALLIB);
+               extraction_method method = DUALLIB,
+               int improve_iterations = 0);
 
 #if 0
   /*

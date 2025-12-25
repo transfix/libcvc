@@ -374,8 +374,6 @@ public :
 
 	//Albert
 	void setInEx(){interior_flag = !interior_flag;}
-	void prop_init(const char* rawiv_fname);
-	void Octree_loadVolume(const char* dx_fname);
 	void initMem();
 	//void pdbVolume(const char* pdb_fname);
 

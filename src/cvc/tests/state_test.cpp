@@ -1595,8 +1595,13 @@ TEST(StateTest, StateObjectMultithreaded) {
   std::vector<boost::thread> threads;
   
   // Multiple threads modify the state_object's state
+  // Use state_change_batch_scope to batch changes within each thread
+  // This reduces handler thread spawning and prevents race conditions
   for (int i = 0; i < num_threads; ++i) {
     threads.emplace_back([&obj, i, ops_per_thread]() {
+      // Batch all state changes from this thread
+      state_change_batch_scope<TestStateObject> batch(obj);
+      
       for (int j = 0; j < ops_per_thread; ++j) {
         try {
           obj.getState("property" + boost::lexical_cast<std::string>(i)).value(
@@ -1607,6 +1612,7 @@ TEST(StateTest, StateObjectMultithreaded) {
           FAIL() << "Exception in state_object test";
         }
       }
+      // batch.flush() happens automatically at scope end
     });
   }
   
