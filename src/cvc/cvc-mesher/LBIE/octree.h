@@ -7,7 +7,7 @@
 #include"contour3d.h"
 #include"e_face.h"
 #include"LBIE_geoframe.h"
-#include<VolMagick.h>
+#include<VolMagickCompat.h>
 #include<boost/shared_array.hpp>
 #include<boost/array.hpp>
 

@@ -202,6 +202,7 @@ if(CVC_ENABLE_MESHER)
     NDEBUG
   )
   list(APPEND CVC_INCLUDE_DIRS
+    cvc-mesher
     cvc-mesher/contour
     cvc-mesher/FastContouring
     cvc-mesher/VolMagick

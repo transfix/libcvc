@@ -33,6 +33,9 @@
 #include <boost/tuple/tuple.hpp>
 #include <boost/cstdint.hpp>
 
+// Forward declaration to avoid circular dependency
+namespace LBIE { class Mesher; }
+
 namespace CVC_NAMESPACE
 {
   // Enum for selecting SDF algorithm implementation
@@ -40,6 +43,15 @@ namespace CVC_NAMESPACE
   {
     SDF_V1,  // Original SDFLibrary implementation (thread-safe, octree-based)
     SDF_V2   // Alternative DistanceTransform implementation (brute-force)
+  };
+
+  // Enum for selecting isosurface extraction method
+  // These values match LBIE::Mesher::ExtractionMethod
+  enum extraction_method
+  {
+    DUALLIB = 0,        // Dual contouring library (default)
+    FASTCONTOURING = 1, // Fast contouring implementation
+    LIBISOCONTOUR = 2   // ISO contouring library
   };
 
   // ---
@@ -74,7 +86,10 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args.
-  geometry iso(const volume& vol, double isovalue);
+  // 12/25/2025 -- Joe R. -- Adding extraction_method parameter (enum instead of string).
+  geometry iso(const volume& vol, 
+               double isovalue,
+               extraction_method method = DUALLIB);
 
 #if 0
   /*

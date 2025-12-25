@@ -1,5 +1,4 @@
-#include <VolMagick.h>
-#include <Exceptions.h>
+#include <VolMagickCompat.h>
 #include <mesher.h>
 
 #include <iostream>
@@ -24,7 +23,7 @@ namespace LBIE
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
 		   const std::string& meshtype, const std::string& improve_method, const std::string& normaltype, 
-		   const std::string& extract_method, int improve_iterations, bool dual_contouring,
+		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose)
   {
     using namespace std;
@@ -59,12 +58,8 @@ namespace LBIE
     else throw cvc_mesher_exception("invalid mesh type '" + meshtype + "'");
     mesher.meshType(mt);
 
-    Mesher::ExtractionMethod em;
-    if(extract_method == "duallib") em = Mesher::DUALLIB;
-    else if(extract_method == "fastcontouring") em = Mesher::FASTCONTOURING;
-    else if(extract_method == "libisocontour") em = Mesher::LIBISOCONTOUR;
-    else throw cvc_mesher_exception("invalid mesh extraction method '" + extract_method + "'");
-    mesher.extractionMethod(em);
+    // extract_method is now already an enum, use it directly
+    mesher.extractionMethod(extract_method);
       
     Mesher::ImproveMethod im;
     if(improve_method == "no_improve") im = Mesher::NO_IMPROVE;

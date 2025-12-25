@@ -326,6 +326,7 @@ namespace
       normaltype = "bspline_convolution", extract_method = "duallib";
     bool dual_contouring = false;
     int improve_iterations = 1;
+    LBIE::Mesher::ExtractionMethod extraction_method_enum = LBIE::Mesher::DUALLIB;
 
     get_arg(isovalue, argv, string("isovalue"));
     get_arg(isovalue_in, argv, string("isovalue_in"));
@@ -336,19 +337,20 @@ namespace
     get_arg(improve_method, argv, string("improve_method"));
     get_arg(normaltype, argv, string("normaltype"));
     get_arg(extract_method, argv, string("extract_method"));
+    get_arg(extraction_method_enum, argv, string("extraction_method_enum"));
     get_arg(dual_contouring, argv, string("dual_contouring"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
-    //copy new volume to old volume type for mesher
-    VolMagick::Volume old_school_vol(VolMagick::Dimension(vol.voxel_dimensions()),VolMagick::VoxelType(vol.voxelType()),
-				     VolMagick::BoundingBox(vol.boundingBox()));
-    old_school_vol.data() = vol.data_as_shared_array();
+    // If extract_method string is set, convert it to enum (for backward compatibility)
+    if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
+    else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
+    else if(extract_method == "duallib") extraction_method_enum = LBIE::Mesher::DUALLIB;
 
-    //do the meshing
-    LBIE::geoframe g_frame = LBIE::do_mesh(old_school_vol,
+    //do the meshing - mesher now uses CVC volumes directly via compat layer
+    LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					   isovalue, isovalue_in, err, err_in,
 					   meshtype, improve_method, normaltype,
-					   extract_method, improve_iterations, dual_contouring);
+					   extraction_method_enum, improve_iterations, dual_contouring);
     
     //convert the geoframe back to cvc::geometry and return it
     return convert(g_frame);
@@ -471,16 +473,14 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args and preparing for cvc-mesher.
-  geometry iso(const volume& vol, double isovalue)
+  // 12/25/2025 -- Joe R. -- Changed extraction_method to use enum instead of string.
+  geometry iso(const volume& vol, double isovalue, extraction_method method)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
     args["isovalue"] = float(isovalue);
     args["improve_iterations"] = int(0);
-
-    //need to test fastcontouring and contour lib
-    //args["extract_method"] = std::string("fastcontouring");
-    //args["extract_method"] = std::string("libisocontour");
+    args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
 
     return cvc_mesher(vol,args);
   }

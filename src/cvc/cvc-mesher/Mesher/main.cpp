@@ -1,8 +1,7 @@
 #include <iostream>
 #include <string>
 #include <cstdlib>
-#include <VolMagick.h>
-#include <Exceptions.h>
+#include <VolMagickCompat.h>
 #include <mesher.h>
 #include <boost/program_options.hpp>
 #include <stdexcept>
