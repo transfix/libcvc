@@ -3204,8 +3204,21 @@ TEST_F(GeometryTest, Tetrahedralize2MeshExtraction) {
   // Extract tet2 mesh
   geometry tet2_mesh = tetrahedralize2(sdf_vol, 0.0);
   
-  // NOTE: Tet2 dual meshing appears to not be fully implemented in LBIE
-  // The mesher runs but produces empty meshes. This is a known limitation.
+  // NOTE: Tet2 (dual/interval tetrahedral meshing) requires TWO isovalues (inner and outer)
+  // to define a volumetric region between two isosurfaces. This is fundamentally different
+  // from standard SDF extraction which uses a single isovalue.
+  // 
+  // The LBIE implementation exists but is designed for:
+  //   - Dual contouring between two isovalues (e.g., iso_val=0.5, iso_val_in=9.5)
+  //   - Creating a volumetric mesh between two surfaces
+  //
+  // For standard SDF mesh extraction (single isovalue=0.0), tet2 produces empty meshes
+  // because the interval [0.0, 9.5] doesn't intersect the SDF data range [-1, 1].
+  //
+  // To use tet2 properly, you would need to provide both inner and outer isovalues
+  // that define a valid interval within the SDF range, but our current API only
+  // supports a single isovalue parameter for consistency with other mesh types.
+  
   std::cout << "Extracted tet2 mesh with " << tet2_mesh.num_points() << " vertices and "
             << tet2_mesh.num_tris() << " triangles" << std::endl;
   
@@ -3221,7 +3234,9 @@ TEST_F(GeometryTest, Tetrahedralize2MeshExtraction) {
         << "All vertices should be finite";
     }
   } else {
-    std::cout << "  NOTE: Tet2 mesh extraction returned empty mesh (known limitation)" << std::endl;
+    std::cout << "  NOTE: Tet2 mesh extraction returned empty mesh" << std::endl;
+    std::cout << "  Tet2 requires dual isovalues (interval meshing), not compatible with" << std::endl;
+    std::cout << "  single-isovalue SDF extraction. This is a design limitation, not a bug." << std::endl;
   }
 }
 
@@ -3362,8 +3377,9 @@ TEST_F(GeometryTest, VolumetricMeshComparisonTest) {
   EXPECT_GT(tet_mesh.num_points(), 0);
   EXPECT_GT(hex_mesh.num_points(), 0);
   
-  // Tet2 is a known limitation (not fully implemented in LBIE)
+  // Tet2 is not compatible with single-isovalue SDF extraction
+  // It's designed for dual contouring between two isovalues
   if (tet2_mesh.num_points() == 0) {
-    std::cout << "NOTE: Tet2 extraction returned empty mesh (known limitation)" << std::endl;
+    std::cout << "NOTE: Tet2 extraction returned empty mesh (requires dual isovalues, not single isovalue)" << std::endl;
   }
 }

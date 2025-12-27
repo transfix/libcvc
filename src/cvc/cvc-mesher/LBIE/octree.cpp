@@ -9,6 +9,7 @@
 #include<assert.h>
 #include<time.h>
 #include<algorithm>
+#include<vector>
 
 #include"normalspline.h"
 
@@ -4410,21 +4411,42 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	float mv0[3], mv1[3], mv2[3], mv3[3];
 	double edge_ratio, new_edge_ratio, s;
 	double e[6], e_min, e_max, aspect, aspect_min, aspect_max;
-	FILE *input, /**output,*/ *fn2;
 
-	input = fopen("input.raw", "w");
-	fprintf(input, "%d %d\n", geofrm.numverts, geofrm.numtris/4);
-	for (i = 0; i < geofrm.numverts; i++)
-		fprintf(input,"%f %f %f %f %f %f %d\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2], 
-			geofrm.normals[i][0], geofrm.normals[i][1], geofrm.normals[i][2], geofrm.bound_sign[i]);
-	for (i = 0; i < geofrm.numtris/4; i++)
-		fprintf(input,"%d %d %d %d\n", geofrm.triangles[4*i][0], geofrm.triangles[4*i][1],
-			geofrm.triangles[4*i][2], geofrm.triangles[4*i+1][2]);
-	fclose(input);
+	// In-memory mesh data structures (replacing file I/O)
+	struct MeshData {
+		int numVerts;
+		int numTets;
+		std::vector<float> verts;       // [numVerts*3]
+		std::vector<float> normals;     // [numVerts*3]
+		std::vector<int> boundSigns;    // [numVerts]
+		std::vector<int> tetrahedra;    // [numTets*4]
+	};
 	
-	//output = fopen("qimprove_temp", "w");
-
-	//fprintf(output, "edge contraction\n");
+	MeshData currentMesh, nextMesh;
+	
+	// Initialize current mesh from geoframe
+	currentMesh.numVerts = geofrm.numverts;
+	currentMesh.numTets = geofrm.numtris / 4;
+	currentMesh.verts.resize(currentMesh.numVerts * 3);
+	currentMesh.normals.resize(currentMesh.numVerts * 3);
+	currentMesh.boundSigns.resize(currentMesh.numVerts);
+	currentMesh.tetrahedra.resize(currentMesh.numTets * 4);
+	
+	for (i = 0; i < currentMesh.numVerts; i++) {
+		currentMesh.verts[i*3 + 0] = geofrm.verts[i][0];
+		currentMesh.verts[i*3 + 1] = geofrm.verts[i][1];
+		currentMesh.verts[i*3 + 2] = geofrm.verts[i][2];
+		currentMesh.normals[i*3 + 0] = geofrm.normals[i][0];
+		currentMesh.normals[i*3 + 1] = geofrm.normals[i][1];
+		currentMesh.normals[i*3 + 2] = geofrm.normals[i][2];
+		currentMesh.boundSigns[i] = geofrm.bound_sign[i];
+	}
+	for (i = 0; i < currentMesh.numTets; i++) {
+		currentMesh.tetrahedra[i*4 + 0] = geofrm.triangles[4*i][0];
+		currentMesh.tetrahedra[i*4 + 1] = geofrm.triangles[4*i][1];
+		currentMesh.tetrahedra[i*4 + 2] = geofrm.triangles[4*i][2];
+		currentMesh.tetrahedra[i*4 + 3] = geofrm.triangles[4*i+1][2];
+	}
 
 	maxIndex = 20;
 
@@ -4435,11 +4457,9 @@ void Octree::edge_contraction(geoframe& geofrm) {
 
 	for (index = 0; index < maxIndex; index++) {
 
-	  //fprintf(output, "Loop %d\n", index);
-
-	input = fopen("input.raw", "r");
-
-	fscanf(input, "%d %d\n", &nv, &ntet);
+	nv = currentMesh.numVerts;
+	ntet = currentMesh.numTets;
+	
 	bound_sign = new int[nv];
 	rep = new int*[10];
 	for(i = 0; i < 10; i++) rep[i] = new int[2];
@@ -4459,27 +4479,23 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		my_list[i] = -1;
 	}
 
+	// Load mesh from in-memory structure
 	for (i = 0; i < nv; i++) {
-		//fscanf(input,"%f %f %f\n", &vx , &vy , &vz);
-		fscanf(input,"%f %f %f %f %f %f %d\n", &vx, &vy, &vz, &nx, &ny, &nz, &b_sign);
-		vtx[i][0] = vx;
-		vtx[i][1] = vy;
-		vtx[i][2] = vz;
-
-		normal[i][0] = nx;
-		normal[i][1] = ny;
-		normal[i][2] = nz;
-
-		bound_sign[i] = b_sign;
+		vtx[i][0] = currentMesh.verts[i*3 + 0];
+		vtx[i][1] = currentMesh.verts[i*3 + 1];
+		vtx[i][2] = currentMesh.verts[i*3 + 2];
+		normal[i][0] = currentMesh.normals[i*3 + 0];
+		normal[i][1] = currentMesh.normals[i*3 + 1];
+		normal[i][2] = currentMesh.normals[i*3 + 2];
+		bound_sign[i] = currentMesh.boundSigns[i];
 	}
 
 	aspect_min = 10.0;
 	aspect_max = 0.0;
 
-	//	fprintf(output, "tet read begin\n");
-	//	fprintf(output, "%d %d\n", nv, ntet);
-
-	fn2 = fopen("new_mesh2.raw", "w");
+	// Prepare next mesh data structure
+	nextMesh.tetrahedra.clear();
+	nextMesh.tetrahedra.reserve(ntet * 4);
 
 	sum0 = 0;	sum1 = 0;	sum2 = 0;	sum3 = 0;	sum4 = 0;	sum5 = 0;
 	sum6 = 0;	sum7 = 0;	sum8 = 0;	sum9 = 0;	sum10 = 0;	sum11 = 0;
@@ -4491,8 +4507,10 @@ void Octree::edge_contraction(geoframe& geofrm) {
 
 	for(i = 0; i < ntet; i++) {
 
-	  //		if(i%10000 == 0) fprintf(output, "%d ", i);
-		fscanf(input, "%d %d %d %d\n", &v0, &v1, &v2, &v3);
+		v0 = currentMesh.tetrahedra[i*4 + 0];
+		v1 = currentMesh.tetrahedra[i*4 + 1];
+		v2 = currentMesh.tetrahedra[i*4 + 2];
+		v3 = currentMesh.tetrahedra[i*4 + 3];
 
 		if(v0 == a_vert || v1 == a_vert || v2 == a_vert || v3 == a_vert) {
 			if(v0 != a_vert) {
@@ -4601,7 +4619,10 @@ void Octree::edge_contraction(geoframe& geofrm) {
 				if(vv0 > vv1) {rep[nrep][0] = vv1;   rep[nrep][1] = vv0;}}
 			//else if(i == 50563) {rep[nrep][0] = v2;   rep[nrep][1] = v3;}
 			else {	//if(bound_sign[vv0] == 0 && bound_sign[vv1] == 0) 
-				fprintf(fn2, "%d %d %d %d\n", v0, v1, v2, v3);
+				nextMesh.tetrahedra.push_back(v0);
+				nextMesh.tetrahedra.push_back(v1);
+				nextMesh.tetrahedra.push_back(v2);
+				nextMesh.tetrahedra.push_back(v3);
 				new_ntet++;
 			}
 			//else {
@@ -4619,26 +4640,27 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		}
 		else {
 			if(aspect > 0.0) {
-				fprintf(fn2, "%d %d %d %d\n", v0, v1, v2, v3);
+				nextMesh.tetrahedra.push_back(v0);
+				nextMesh.tetrahedra.push_back(v1);
+				nextMesh.tetrahedra.push_back(v2);
+				nextMesh.tetrahedra.push_back(v3);
 				new_ntet++;
 			}
 		}
 	}
-	fclose(fn2);
-	fclose(input);
 
-	//	fprintf(output, "\ntet read end\n");
+	// Build next mesh vertices (write phase)
+	nextMesh.numVerts = nv - nrep;
+	if(bool_r == 1) nextMesh.numVerts--;
+	nextMesh.numTets = new_ntet;
+	
+	nextMesh.verts.clear();
+	nextMesh.normals.clear();
+	nextMesh.boundSigns.clear();
+	nextMesh.verts.reserve(nextMesh.numVerts * 3);
+	nextMesh.normals.reserve(nextMesh.numVerts * 3);
+	nextMesh.boundSigns.reserve(nextMesh.numVerts);
 
-	//	fprintf(output, "%f %f\n", aspect_min, aspect_max);
-	//	fprintf(output, "a_vert, nlist = %d %d\n", a_vert, nlist);
-
-	input = fopen("input.raw", "w");
-	fn2 = fopen("new_mesh2.raw", "r");
-
-	new_nv = nv - nrep;
-	if(bool_r == 1) new_nv--;
-
-	fprintf(input, "%d %d\n", new_nv, new_ntet);
 	for(i = 0; i < nv; i++) {
 		my_bool = 0;
 		for(j = 0; j < nrep; j++) {
@@ -4647,7 +4669,6 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		if(bool_r == 1 && i == r_vert) my_bool++;
 
 		if(i == a_vert) {
-		  //			fprintf(output, "average %d %f %f %f %d\n", i, vtx[i][0], vtx[i][1], vtx[i][2], bound_sign[i]);
 			sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
 			for(j = 0; j < nlist; j++) {
 				sum_0 += vtx[my_list[j]][0];
@@ -4657,7 +4678,6 @@ void Octree::edge_contraction(geoframe& geofrm) {
 			vtx[i][0] = sum_0/nlist;
 			vtx[i][1] = sum_1/nlist;
 			vtx[i][2] = sum_2/nlist;
-			//			fprintf(output, "average %d %f %f %f %d\n", i, vtx[i][0], vtx[i][1], vtx[i][2], bound_sign[i]);
 
 			sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
 			for(j = 0; j < nlist; j++) {
@@ -4665,15 +4685,16 @@ void Octree::edge_contraction(geoframe& geofrm) {
 				sum_1 += normal[my_list[j]][1];
 				sum_2 += normal[my_list[j]][2];
 			}
-			//normal[i][0] = sum_0/nlist;
-			//normal[i][1] = sum_1/nlist;
-			//normal[i][2] = sum_2/nlist;
 		}
 
 		if(my_bool == 0) {
-			fprintf(input, "%f %f %f %f %f %f %d\n", vtx[i][0], vtx[i][1], vtx[i][2], 
-				normal[i][0], normal[i][1], normal[i][2], bound_sign[i]);
-			//fprintf(input, "%f %f %f\n", vtx[i][0], vtx[i][1], vtx[i][2]);
+			nextMesh.verts.push_back(vtx[i][0]);
+			nextMesh.verts.push_back(vtx[i][1]);
+			nextMesh.verts.push_back(vtx[i][2]);
+			nextMesh.normals.push_back(normal[i][0]);
+			nextMesh.normals.push_back(normal[i][1]);
+			nextMesh.normals.push_back(normal[i][2]);
+			nextMesh.boundSigns.push_back(bound_sign[i]);
 		}
 	}
 
@@ -4681,9 +4702,18 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	aspect_max = 0.0;
 
 	int new_ntet0 = new_ntet;
+	
+	// Process tetrahedra from nextMesh (read phase)
+	std::vector<int> finalTets;
+	finalTets.reserve(new_ntet * 4);
+	
 	for(i = 0; i < new_ntet; i++) {
 		if(i%10000 == 0) printf("%d ", i);
-		fscanf(fn2, "%d %d %d %d\n", &v0, &v1, &v2, &v3);
+		
+		v0 = nextMesh.tetrahedra[i*4 + 0];
+		v1 = nextMesh.tetrahedra[i*4 + 1];
+		v2 = nextMesh.tetrahedra[i*4 + 2];
+		v3 = nextMesh.tetrahedra[i*4 + 3];
 		
 		for(j = 0; j < nrep; j++) {
 			if(v0 == rep[j][1]) v0 = rep[j][0];
@@ -4737,19 +4767,28 @@ void Octree::edge_contraction(geoframe& geofrm) {
 				mv2[j] = vtx[vv2][j];	mv3[j] = vtx[vv3][j];
 			}
 			s = geofrm.testTetrahedron1(mv0, mv1, mv2, mv3);
-			if(6.0f*s*1.0e8 < 0.0f)
-				fprintf(input, "%d %d %d %d\n", vv0, vv2, vv1, vv3);
-			else
-				fprintf(input, "%d %d %d %d\n", vv0, vv1, vv2, vv3);
+			if(6.0f*s*1.0e8 < 0.0f) {
+				finalTets.push_back(vv0);
+				finalTets.push_back(vv2);
+				finalTets.push_back(vv1);
+				finalTets.push_back(vv3);
+			}
+			else {
+				finalTets.push_back(vv0);
+				finalTets.push_back(vv1);
+				finalTets.push_back(vv2);
+				finalTets.push_back(vv3);
+			}
 		}
 	}
 
-	//	fprintf(output, "\n%f %f\n", aspect_min, aspect_max);
-	//	fprintf(output, "\n%d %d %d\n", new_nv, new_ntet, new_ntet0);
-
-
-	fclose(fn2);
-	fclose(input);
+	// Store finalTets back into currentMesh for next iteration
+	currentMesh.numVerts = nextMesh.numVerts;
+	currentMesh.numTets = finalTets.size() / 4;
+	currentMesh.verts = nextMesh.verts;
+	currentMesh.normals = nextMesh.normals;
+	currentMesh.boundSigns = nextMesh.boundSigns;
+	currentMesh.tetrahedra = finalTets;
 
 	for(i = 0; i < 10; i++)	delete [] rep[i];
 	delete [] rep;
@@ -4759,35 +4798,35 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	for(i = 0; i < nv; i++)	delete [] normal[i];
 	delete [] normal;
 
-	//	fprintf(output, "nrep = %d\n", nrep);
 	if(nrep == 0) break;
 	else new_edge_ratio = aspect_max - 1.0e-6;
 	if(new_edge_ratio < edge_ratio) break;
 
 	}	// end loop index
 
-//	fprintf(output, "sum = %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7,
-//		sum8, sum9, sum10, sum11, sum12, sum13, sum14, sum15, 
-//		sum0+sum1+sum2+sum3+sum4+sum5+sum6+sum7+sum8+sum9+sum10+sum11+sum12+sum13+sum14+sum15);
-
-	input = fopen("input.raw", "r");
-	fscanf(input, "%d %d\n", &nv, &ntet);
+	// Copy final mesh data back to geoframe
+	nv = currentMesh.numVerts;
+	ntet = currentMesh.numTets;
+	
 	geofrm.numverts = nv;
-	geofrm.numtris = ntet*4;
+	geofrm.numtris = ntet * 4;
+	
 	for (i = 0; i < nv; i++) {
-		fscanf(input,"%f %f %f %f %f %f %d\n", &vx, &vy, &vz, &nx, &ny, &nz, &b_sign);
-		geofrm.verts[i][0] = vx;
-		geofrm.verts[i][1] = vy;
-		geofrm.verts[i][2] = vz;
-
-		geofrm.normals[i][0] = nx;
-		geofrm.normals[i][1] = ny;
-		geofrm.normals[i][2] = nz;
-
-		geofrm.bound_sign[i] = b_sign;
+		geofrm.verts[i][0] = currentMesh.verts[i*3 + 0];
+		geofrm.verts[i][1] = currentMesh.verts[i*3 + 1];
+		geofrm.verts[i][2] = currentMesh.verts[i*3 + 2];
+		geofrm.normals[i][0] = currentMesh.normals[i*3 + 0];
+		geofrm.normals[i][1] = currentMesh.normals[i*3 + 1];
+		geofrm.normals[i][2] = currentMesh.normals[i*3 + 2];
+		geofrm.bound_sign[i] = currentMesh.boundSigns[i];
 	}
+	
 	for (i = 0; i < ntet; i++) {
-		fscanf(input,"%d %d %d %d\n", &v0, &v1, &v2, &v3);
+		v0 = currentMesh.tetrahedra[i*4 + 0];
+		v1 = currentMesh.tetrahedra[i*4 + 1];
+		v2 = currentMesh.tetrahedra[i*4 + 2];
+		v3 = currentMesh.tetrahedra[i*4 + 3];
+		
 		for(j = 0; j < 3; j++) {
 			mv0[j] = geofrm.verts[v0][j];	mv1[j] = geofrm.verts[v1][j];
 			mv2[j] = geofrm.verts[v2][j];	mv3[j] = geofrm.verts[v3][j];
@@ -4801,9 +4840,6 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		geofrm.triangles[4*i+2][0] = v0;	geofrm.triangles[4*i+2][1] = v2;	geofrm.triangles[4*i+2][2] = v3; 
 		geofrm.triangles[4*i+3][0] = v0;	geofrm.triangles[4*i+3][1] = v3;	geofrm.triangles[4*i+3][2] = v1; 
 	}
-	fclose(input);
-
-//	fclose(output);
 
 }
 
