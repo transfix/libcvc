@@ -23,7 +23,7 @@ namespace LBIE
   // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   const std::string& meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
+		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose)
   {
@@ -37,7 +37,7 @@ namespace LBIE
 	cout << "inner_isovalue: " << isovalue_in << endl;
 	cout << "error: " << err << endl;
 	cout << "inner_error: " << err_in << endl;
-	cout << "mesh_type: " << meshtype << endl;
+	cout << "mesh_type: " << static_cast<int>(meshtype) << endl;
 	cout << "improvement_method: " << static_cast<int>(improve_method) << endl;
 	cout << "iterations: " << improve_iterations << endl;
 	cout << "normal_type: " << normaltype << endl;
@@ -49,14 +49,17 @@ namespace LBIE
     mesher.err(err);
     mesher.err_in(err_in);
       
+    // meshtype is already an enum, convert to Mesher::MeshType
     Mesher::MeshType mt;
-    if(meshtype == "single") mt = Mesher::SINGLE;
-    else if(meshtype == "tetra") mt = Mesher::TETRA;
-    else if(meshtype == "quad") mt = Mesher::QUAD;
-    else if(meshtype == "hexa") mt = Mesher::HEXA;
-    else if(meshtype == "double") mt = Mesher::DOUBLE;
-    else if(meshtype == "tetra2") mt = Mesher::TETRA2;
-    else throw cvc_mesher_exception("invalid mesh type '" + meshtype + "'");
+    switch(meshtype) {
+      case geoframe::SINGLE: mt = Mesher::SINGLE; break;
+      case geoframe::TETRA:  mt = Mesher::TETRA; break;
+      case geoframe::QUAD:   mt = Mesher::QUAD; break;
+      case geoframe::HEXA:   mt = Mesher::HEXA; break;
+      case geoframe::DOUBLE: mt = Mesher::DOUBLE; break;
+      case geoframe::TETRA2: mt = Mesher::TETRA2; break;
+      default: throw cvc_mesher_exception("invalid mesh type");
+    }
     mesher.meshType(mt);
 
     // extract_method and improve_method are now enums, use them directly

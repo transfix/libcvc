@@ -95,9 +95,17 @@ int main(int argc, char **argv)
 	else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
 	else improvement_method_enum = LBIE::Mesher::GEO_FLOW;
 	
+	LBIE::geoframe::GEOTYPE meshtype_enum;
+	if(meshtype == "tetra") meshtype_enum = LBIE::geoframe::TETRA;
+	else if(meshtype == "quad") meshtype_enum = LBIE::geoframe::QUAD;
+	else if(meshtype == "hexa") meshtype_enum = LBIE::geoframe::HEXA;
+	else if(meshtype == "double") meshtype_enum = LBIE::geoframe::DOUBLE;
+	else if(meshtype == "tetra2") meshtype_enum = LBIE::geoframe::TETRA2;
+	else meshtype_enum = LBIE::geoframe::SINGLE;
+	
 	LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					       isovalue, isovalue_in, err, err_in,
-					       meshtype, improvement_method_enum, normaltype,
+					       meshtype_enum, improvement_method_enum, normaltype,
 					       extraction_method_enum, improve_iterations, dual_contouring, true);
 	g_frame.write_raw(output_file.c_str());
 	cout << "Wrote mesh: " << output_file << endl;

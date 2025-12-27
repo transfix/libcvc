@@ -2733,7 +2733,6 @@ void Octree::mesh_extract(geoframe& geofrm, float err_tol)
 
 	switch (flag_type) {
 	case 0:							// isosurface
-		printf("triangle\n");
 		polygonize(geofrm);
 		if(func)	func_val(geofrm);
 		break;

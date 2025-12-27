@@ -77,6 +77,46 @@ namespace CVC_NAMESPACE
                extraction_method method = DUALLIB,
                int improve_iterations = 0);
 
+  // ------------
+  // tetrahedralize
+  // ------------
+  // Purpose:
+  //   Extract a tetrahedral volumetric mesh from a volume (e.g., from SDF).
+  // ---- Change History ----
+  // 12/26/2025 -- Joe R. -- Creation.
+  // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
+  geometry tetrahedralize(const volume& vol,
+                          double isovalue,
+                          extraction_method method = DUALLIB,
+                          improvement_method improve_method = NO_IMPROVE,
+                          int improve_iterations = 0);
+
+  // --------------
+  // hexahedralize
+  // --------------
+  // Purpose:
+  //   Extract a hexahedral volumetric mesh from a volume (e.g., from SDF).
+  // ---- Change History ----
+  // 12/27/2025 -- Joe R. -- Creation.
+  geometry hexahedralize(const volume& vol,
+                         double isovalue,
+                         extraction_method method = DUALLIB,
+                         improvement_method improve_method = NO_IMPROVE,
+                         int improve_iterations = 0);
+
+  // ---------------
+  // tetrahedralize2
+  // ---------------
+  // Purpose:
+  //   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
+  // ---- Change History ----
+  // 12/27/2025 -- Joe R. -- Creation.
+  geometry tetrahedralize2(const volume& vol,
+                           double isovalue,
+                           extraction_method method = DUALLIB,
+                           improvement_method improve_method = NO_IMPROVE,
+                           int improve_iterations = 0);
+
 #if 0
   /*
    * volren - Volume raycaster interface

@@ -304,6 +304,10 @@ namespace
     copy(geo.quads().begin(),
 	 geo.quads().end(),
 	 ret_geom.quads.begin());
+    // Set the integer counts for legacy code compatibility
+    ret_geom.numverts = geo.num_points();
+    ret_geom.numtris = geo.num_tris();
+    ret_geom.numquads = geo.num_quads();
     return ret_geom;
   }
 
@@ -328,6 +332,7 @@ namespace
     int improve_iterations = 1;
     LBIE::Mesher::ExtractionMethod extraction_method_enum = LBIE::Mesher::DUALLIB;
     LBIE::Mesher::ImproveMethod improvement_method_enum = LBIE::Mesher::GEO_FLOW;
+    LBIE::geoframe::GEOTYPE meshtype_enum = LBIE::geoframe::SINGLE;
 
     get_arg(isovalue, argv, string("isovalue"));
     get_arg(isovalue_in, argv, string("isovalue_in"));
@@ -340,25 +345,45 @@ namespace
     get_arg(extract_method, argv, string("extract_method"));
     get_arg(extraction_method_enum, argv, string("extraction_method_enum"));
     get_arg(improvement_method_enum, argv, string("improvement_method_enum"));
+    get_arg(meshtype_enum, argv, string("meshtype_enum"));
     get_arg(dual_contouring, argv, string("dual_contouring"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
     // Convert string to enum for backward compatibility
-    if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
-    else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
-    else if(extract_method == "duallib") extraction_method_enum = LBIE::Mesher::DUALLIB;
+    // Only do this if the string parameter was actually provided (i.e., not using defaults)
+    if(argv.count("extract_method")) {
+      if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
+      else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
+      else if(extract_method == "duallib") extraction_method_enum = LBIE::Mesher::DUALLIB;
+    }
 
-    if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
-    else if(improve_method == "geo_flow") improvement_method_enum = LBIE::Mesher::GEO_FLOW;
-    else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
-    else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
-    else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
-    else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
+    if(argv.count("improve_method")) {
+      if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
+      else if(improve_method == "geo_flow") improvement_method_enum = LBIE::Mesher::GEO_FLOW;
+      else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
+      else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
+      else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
+      else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
+    }
+
+    if(argv.count("meshtype")) {
+      if(meshtype == "single") meshtype_enum = LBIE::geoframe::SINGLE;
+      else if(meshtype == "tetra") meshtype_enum = LBIE::geoframe::TETRA;
+      else if(meshtype == "quad") meshtype_enum = LBIE::geoframe::QUAD;
+      else if(meshtype == "hexa") meshtype_enum = LBIE::geoframe::HEXA;
+      else if(meshtype == "double") meshtype_enum = LBIE::geoframe::DOUBLE;
+      else if(meshtype == "tetra2") meshtype_enum = LBIE::geoframe::TETRA2;
+    }
+
+    // Force dual contouring for DOUBLE and TETRA2 mesh types
+    if(meshtype_enum == LBIE::geoframe::DOUBLE || meshtype_enum == LBIE::geoframe::TETRA2) {
+      dual_contouring = true;
+    }
 
     //do the meshing - mesher now uses CVC volumes directly via compat layer
     LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					   isovalue, isovalue_in, err, err_in,
-					   meshtype, improvement_method_enum, normaltype,
+					   meshtype_enum, improvement_method_enum, normaltype,
 					   extraction_method_enum, improve_iterations, dual_contouring);
     
     //convert the geoframe back to cvc::geometry and return it
@@ -490,6 +515,76 @@ namespace CVC_NAMESPACE
     args["isovalue"] = float(isovalue);
     args["improve_iterations"] = improve_iterations;
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+
+    return cvc_mesher(vol,args);
+  }
+
+  // ------------
+  // tetrahedralize
+  // ------------
+  // Purpose:
+  //   Extract a tetrahedral volumetric mesh from a volume (e.g., from SDF).
+  // ---- Change History ----
+  // 12/26/2025 -- Joe R. -- Creation.
+  // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
+  geometry tetrahedralize(const volume& vol, double isovalue,
+                          extraction_method method,
+                          improvement_method improve_method,
+                          int improve_iterations)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    Arguments args;
+    args["isovalue"] = float(isovalue);
+    args["improve_iterations"] = improve_iterations;
+    args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+    args["meshtype_enum"] = LBIE::geoframe::TETRA;
+
+    return cvc_mesher(vol,args);
+  }
+
+  // --------------
+  // hexahedralize
+  // --------------
+  // Purpose:
+  //   Extract a hexahedral volumetric mesh from a volume (e.g., from SDF).
+  // ---- Change History ----
+  // 12/27/2025 -- Joe R. -- Creation.
+  geometry hexahedralize(const volume& vol, double isovalue,
+                         extraction_method method,
+                         improvement_method improve_method,
+                         int improve_iterations)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    Arguments args;
+    args["isovalue"] = float(isovalue);
+    args["improve_iterations"] = improve_iterations;
+    args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+    args["meshtype_enum"] = LBIE::geoframe::HEXA;
+
+    return cvc_mesher(vol,args);
+  }
+
+  // ---------------
+  // tetrahedralize2
+  // ---------------
+  // Purpose:
+  //   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
+  // ---- Change History ----
+  // 12/27/2025 -- Joe R. -- Creation.
+  geometry tetrahedralize2(const volume& vol, double isovalue,
+                           extraction_method method,
+                           improvement_method improve_method,
+                           int improve_iterations)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    Arguments args;
+    args["isovalue"] = float(isovalue);
+    args["improve_iterations"] = improve_iterations;
+    args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+    args["meshtype_enum"] = LBIE::geoframe::TETRA2;
 
     return cvc_mesher(vol,args);
   }

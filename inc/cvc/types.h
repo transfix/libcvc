@@ -167,6 +167,18 @@ namespace CVC_NAMESPACE
     MINIMAL_VOL = 4,    // Minimal volume
     OPTIMIZATION = 5    // Optimization-based improvement
   };
+
+  // Enum for selecting mesh type for volume meshing
+  // These values match LBIE::Mesher::MeshType
+  enum mesh_type
+  {
+    SURFACE_MESH = 0,   // Surface triangle mesh (default)
+    TETRAHEDRAL = 1,    // Tetrahedral volume mesh
+    QUAD_MESH = 2,      // Quadrilateral surface mesh
+    HEXAHEDRAL = 3,     // Hexahedral volume mesh
+    DUAL_SURFACE = 4,   // Dual surface mesh
+    TETRAHEDRAL2 = 5    // Alternative tetrahedral mesh
+  };
 }
 
 #endif

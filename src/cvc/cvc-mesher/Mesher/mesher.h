@@ -18,9 +18,10 @@ namespace LBIE
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/25/2025 -- Joe R. -- Changed extract_method from string to enum.
   // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
+  // 12/26/2025 -- Joe R. -- Changed meshtype from string to enum.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   const std::string& meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
+		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose = false);
 
