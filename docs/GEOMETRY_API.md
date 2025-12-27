@@ -36,6 +36,13 @@
   - [Projection](#projection)
   - [Smoothing](#smoothing)
   - [Quality Improvement](#quality-improvement)
+- [Volumetric Meshing](#volumetric-meshing)
+  - [Signed Distance Function (SDF)](#signed-distance-function-sdf)
+  - [Isosurface Extraction](#isosurface-extraction)
+  - [Tetrahedral Meshing](#tetrahedral-meshing)
+  - [Hexahedral Meshing](#hexahedral-meshing)
+  - [Interval/Layer Meshing (Tet2)](#intervallayer-meshing-tet2)
+  - [Complete Volumetric Mesh Example](#complete-volumetric-mesh-example)
 - [File I/O](#file-io)
   - [Reading Geometries](#reading-geometries)
   - [Writing Geometries](#writing-geometries)
@@ -1080,23 +1087,34 @@ for (int i = 0; i < 10; ++i) {
 
 ```cpp
 geometry& quality_improve(int iterations, 
-                         const std::string& improve_method = "geo_flow");
+                         improvement_method method = IMPROVE_GEO_FLOW);
 ```
 
 Improves mesh quality using LBIE (Level set, B-spline, Implicit surface, Extrapolation) methods.
 
 **Parameters:**
 - `iterations`: Number of improvement iterations
-- `improve_method`: Quality improvement algorithm (default: "geo_flow")
+- `method`: Quality improvement algorithm enum (default: `IMPROVE_GEO_FLOW`)
 
-**Methods:**
-- `"geo_flow"`: Geometric flow-based improvement
+**Available Methods:**
+- `IMPROVE_NO_IMPROVE`: No improvement (pass-through)
+- `IMPROVE_GEO_FLOW`: Geometric flow-based improvement (default, recommended)
+- `IMPROVE_EDGE_CONTRACT`: Edge contraction
+- `IMPROVE_JOE_LIU`: Joe-Liu algorithm
+- `IMPROVE_MINIMAL_VOL`: Minimal volume optimization
+- `IMPROVE_OPTIMIZATION`: General optimization
 
 ```cpp
+#include <cvc/algorithm.h>
+
 geometry poor_quality = read_geometry("poor_mesh.off");
 
-// Improve mesh quality
-poor_quality.quality_improve(10, "geo_flow");
+// Improve mesh quality with geometric flow (default)
+poor_quality.quality_improve(10, IMPROVE_GEO_FLOW);
+
+// Try different methods
+poor_quality.quality_improve(5, IMPROVE_EDGE_CONTRACT);
+poor_quality.quality_improve(10, IMPROVE_OPTIMIZATION);
 
 // Quality metrics should improve:
 // - Better triangle aspect ratios
@@ -1108,6 +1126,295 @@ poor_quality.quality_improve(10, "geo_flow");
 - Improving meshes generated from isosurfacing
 - Preparing meshes for finite element analysis
 - Reducing numerical errors in simulations
+- Post-processing volumetric meshes
+
+## Volumetric Meshing
+
+The geometry API supports creating volumetric meshes (tetrahedral and hexahedral) from signed distance functions. These are useful for finite element analysis, material simulation, and advanced visualization.
+
+### Signed Distance Function (SDF)
+
+```cpp
+volume sdf(const geometry& geom,
+           const dimension& dim,
+           const bounding_box& bbox,
+           sdf_algorithm algorithm = SDF_V2,
+           bool flipNormals = false);
+```
+
+Computes the signed distance function for a geometry, creating a volume where each voxel stores the signed distance to the nearest surface point.
+
+**Parameters:**
+- `geom`: Input triangle mesh (must be watertight for correct sign)
+- `dim`: Volume dimensions (e.g., `dimension(64, 64, 64)`)
+- `bbox`: Bounding box for the volume (use `geom.extents()` to match geometry)
+- `algorithm`: SDF algorithm selection (default: `SDF_V2`)
+- `flipNormals`: Invert inside/outside regions (default: `false`)
+
+**Algorithms:**
+- `SDF_V1`: Legacy SDFLibrary (power-of-2 only, slower, single-threaded)
+- `SDF_V2`: Modern DistanceTransform (11x faster, thread-safe, arbitrary dimensions)
+
+**Sign Convention:**
+- **Negative values**: Inside the surface
+- **Zero**: On the surface
+- **Positive values**: Outside the surface
+
+```cpp
+#include <cvc/algorithm.h>
+
+geometry bunny = read_geometry("bunny.off");
+
+// Create SDF with v2 algorithm (recommended)
+dimension sdf_dim(64, 64, 64);
+volume sdf_vol = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2);
+
+std::cout << "SDF range: [" << sdf_vol.min() << ", " << sdf_vol.max() << "]\n";
+
+// Flip normals to invert inside/outside
+volume inverted_sdf = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2, true);
+```
+
+**flipNormals Feature** (New in v2.0):
+
+The `flipNormals` parameter inverts the sign of all SDF values, effectively swapping inside and outside regions:
+
+```cpp
+// Normal: inside = negative, outside = positive
+volume normal_sdf = sdf(geom, dim, bbox, SDF_V2, false);
+
+// Flipped: inside = positive, outside = negative  
+volume flipped_sdf = sdf(geom, dim, bbox, SDF_V2, true);
+
+// Use case: extracting the "shell" around an object
+volume shell_sdf = sdf(geom, dim, bbox, SDF_V2, true);
+geometry shell = tetrahedralize2(shell_sdf, -0.05, 0.05);
+```
+
+**Implementation Details:**
+- **SDF v1**: Post-computation negation (bypasses SDFLibrary's "fireworks" normal orientation bug)
+- **SDF v2**: Calls `FaceVertSet3D::flipTriNormals()` before distance transform
+
+### Isosurface Extraction
+
+```cpp
+geometry iso(const volume& vol, 
+             double isovalue,
+             extraction_method method = EXTRACT_DUALLIB,
+             int improve_iterations = 1);
+```
+
+Extracts a triangle mesh representing a specific isovalue from a volume (typically an SDF).
+
+**Parameters:**
+- `vol`: Input volume (e.g., from `sdf()`)
+- `isovalue`: Surface value to extract (0.0 for exact surface in SDF)
+- `method`: Extraction algorithm (default: `EXTRACT_DUALLIB`)
+- `improve_iterations`: Number of quality improvement passes (default: 1)
+
+**Extraction Methods:**
+- `EXTRACT_FASTCONTOURING`: Fast marching cubes variant
+- `EXTRACT_LIBISOCONTOUR`: Library-based isocontour extraction
+- `EXTRACT_DUALLIB`: Dual contouring (better quality, recommended)
+
+```cpp
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+
+// Extract surface at isovalue 0.0 (exact surface)
+geometry surface = iso(sdf_vol, 0.0, EXTRACT_DUALLIB, 1);
+
+// Extract slightly inside/outside surface
+geometry inner = iso(sdf_vol, -0.01);  // Inside
+geometry outer = iso(sdf_vol, 0.01);   // Outside
+```
+
+### Tetrahedral Meshing
+
+```cpp
+geometry tetrahedralize(const volume& vol,
+                       double isovalue,
+                       extraction_method method = EXTRACT_DUALLIB,
+                       improvement_method improve_method = IMPROVE_GEO_FLOW,
+                       int improve_iterations = 1);
+```
+
+Creates a tetrahedral volumetric mesh from a volume. Useful for finite element analysis and volumetric rendering.
+
+**Parameters:**
+- `vol`: Input volume (e.g., from `sdf()`)
+- `isovalue`: Boundary isovalue
+- `method`: Extraction algorithm
+- `improve_method`: Quality improvement method
+- `improve_iterations`: Number of improvement passes
+
+```cpp
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+
+// Create tetrahedral mesh
+geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB, IMPROVE_GEO_FLOW, 3);
+
+std::cout << "Tetrahedral mesh:\n";
+std::cout << "  Vertices: " << tet_mesh.num_points() << "\n";
+std::cout << "  Triangles: " << tet_mesh.num_tris() << "\n";
+
+// Use for FEM analysis, volume rendering, etc.
+```
+
+### Hexahedral Meshing
+
+```cpp
+geometry hexahedralize(const volume& vol,
+                      double isovalue,
+                      extraction_method method = EXTRACT_DUALLIB,
+                      improvement_method improve_method = IMPROVE_GEO_FLOW,
+                      int improve_iterations = 1);
+```
+
+Creates a hexahedral (brick) volumetric mesh from a volume. Hexahedral meshes often perform better in FEM simulations.
+
+**Parameters:** Same as `tetrahedralize()`
+
+```cpp
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents());
+
+// Create hexahedral mesh
+geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
+
+std::cout << "Hexahedral mesh:\n";
+std::cout << "  Vertices: " << hex_mesh.num_points() << "\n";
+std::cout << "  Quads: " << hex_mesh.num_quads() << "\n";
+```
+
+### Interval/Layer Meshing (Tet2)
+
+```cpp
+geometry tetrahedralize2(const volume& vol,
+                        double isovalue_outer,
+                        double isovalue_inner,
+                        extraction_method method = EXTRACT_DUALLIB,
+                        improvement_method improve_method = IMPROVE_GEO_FLOW,
+                        int improve_iterations = 1);
+```
+
+Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This is a dual-isovalue interval meshing technique unique to the LBIE mesher.
+
+**Parameters:**
+- `vol`: Input volume (SDF)
+- `isovalue_outer`: Outer surface isovalue (more positive = further outside)
+- `isovalue_inner`: Inner surface isovalue (more negative = further inside)
+- `method`: Extraction algorithm
+- `improve_method`: Quality improvement method
+- `improve_iterations`: Number of improvement passes
+
+**Use Cases:**
+- Modeling material layers (skin, coatings, shells)
+- Dual contouring between surfaces
+- Volumetric region extraction
+- Creating shells of specific thickness
+- Multi-material simulations
+
+```cpp
+#include <cvc/algorithm.h>
+
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
+
+// Create a shell layer between two surfaces
+// Remember: negative = inside, positive = outside in SDF
+double outer_iso = 0.03;   // Outer boundary (outside surface)
+double inner_iso = -0.03;  // Inner boundary (inside surface)
+
+geometry shell = tetrahedralize2(sdf_vol, outer_iso, inner_iso);
+
+std::cout << "Shell mesh between isovalues " << outer_iso 
+          << " and " << inner_iso << ":\n";
+std::cout << "  Vertices: " << shell.num_points() << "\n";
+std::cout << "  Triangles: " << shell.num_tris() << "\n";
+
+// Example: Create a 5mm thick shell around an object
+double shell_thickness = 0.005;  // 5mm
+geometry thick_shell = tetrahedralize2(sdf_vol, 
+                                       0.0,              // Outer surface
+                                       -shell_thickness); // Inner surface
+```
+
+**Implementation Notes:**
+
+The tet2 interval meshing implementation had several bugs that were fixed in December 2025:
+
+1. **Skip Condition Bug** (Fixed): `traverse_qef_interval()` had backwards logic for filtering octree cells. It was keeping only cells that fully spanned both isovalues (extremely restrictive), rather than cells that overlapped the interval.
+   
+2. **Infinite Refinement Bug** (Fixed): Missing octree depth check caused infinite subdivision when cells reached maximum depth.
+   
+3. **Intersection Handling Bug** (Fixed): `tetrahedralize_interval()` only processed intersection types ±1 (edge crosses one isovalue) but ignored type ±3 (edge crosses through entire interval), which is the most common case for interval meshing.
+
+**Current Status:** Fully functional as of December 27, 2025. Generates high-quality volumetric meshes of layers between isosurfaces.
+
+### Complete Volumetric Mesh Example
+
+```cpp
+#include <cvc/geometry.h>
+#include <cvc/geometry_file_io.h>
+#include <cvc/algorithm.h>
+
+using namespace CVC_NAMESPACE;
+
+int main() {
+    // Load input geometry
+    geometry bunny = read_geometry("bunny.off");
+    
+    // Create signed distance function
+    dimension sdf_dim(128, 128, 128);  // Higher resolution = better quality
+    volume sdf_vol = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2);
+    
+    std::cout << "SDF computed. Range: [" 
+              << sdf_vol.min() << ", " << sdf_vol.max() << "]\n";
+    
+    // Extract isosurface at zero level (exact surface)
+    geometry surface = iso(sdf_vol, 0.0, EXTRACT_DUALLIB, 3);
+    surface.write("bunny_surface.raw");
+    
+    // Create tetrahedral volumetric mesh
+    geometry tet_vol = tetrahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB, 
+                                     IMPROVE_GEO_FLOW, 3);
+    tet_vol.write("bunny_tets.raw");
+    
+    // Create hexahedral mesh
+    geometry hex_vol = hexahedralize(sdf_vol, 0.0, EXTRACT_DUALLIB,
+                                    IMPROVE_GEO_FLOW, 3);
+    hex_vol.write("bunny_hexes.raw");
+    
+    // Create a 3mm shell around the bunny
+    double shell_thickness = 0.003;
+    geometry shell = tetrahedralize2(sdf_vol, 0.0, -shell_thickness,
+                                    EXTRACT_DUALLIB, IMPROVE_GEO_FLOW, 3);
+    shell.write("bunny_shell.raw");
+    
+    // Create a hollow layer between 2mm and 5mm from surface
+    geometry hollow_layer = tetrahedralize2(sdf_vol, 0.005, 0.002);
+    hollow_layer.write("bunny_hollow_layer.raw");
+    
+    std::cout << "All meshes generated successfully!\n";
+    std::cout << "  Surface: " << surface.num_tris() << " triangles\n";
+    std::cout << "  Tets: " << tet_vol.num_points() << " vertices\n";
+    std::cout << "  Hexes: " << hex_vol.num_quads() << " quads\n";
+    std::cout << "  Shell: " << shell.num_points() << " vertices, "
+              << shell.num_tris() << " triangles\n";
+    std::cout << "  Hollow: " << hollow_layer.num_points() << " vertices\n";
+    
+    return 0;
+}
+```
+
+**Compilation:**
+
+```bash
+g++ -std=c++14 -O3 volumetric_mesh.cpp -lcvc -lboost_system -lboost_thread -o volumetric_mesh
+./volumetric_mesh
+```
 
 ## File I/O
 

@@ -636,7 +636,32 @@ cmake --build build-coverage --target coverage
 
 ### December 2025 Updates
 
-1. **Futures API for State Management**
+1. **Tet2 Interval Meshing Bug Fixes** ⭐ NEW
+   - Fixed critical bugs in LBIE dual-isovalue meshing
+   - Corrected backwards skip condition in octree traversal
+   - Fixed infinite refinement loop bug
+   - Added intersection type ±3 handling for interval meshing
+   - Feature now fully functional (106K+ vertices, 607K+ triangles)
+   - Enables volumetric shell/layer meshing between two isosurfaces
+   - See [TET2_INTERVAL_MESHING_FIXES.md](TET2_INTERVAL_MESHING_FIXES.md)
+
+2. **SDF Normal Flipping Feature** ⭐ NEW
+   - Added `flipNormals` parameter to SDF API
+   - Inverts inside/outside regions (negative ↔ positive)
+   - Works with both SDF v1 and v2 algorithms
+   - SDF v1: Post-computation negation (bypasses "fireworks" bug)
+   - SDF v2: Pre-computation via `flipTriNormals()`
+   - Perfect sign inversion validated by unit tests
+   - Use cases: shell extraction, material inversion, dual meshing
+
+3. **Volumetric Meshing API Enhancements**
+   - Comprehensive API for tetrahedral and hexahedral meshing
+   - Dual-isovalue interval/layer meshing via `tetrahedralize2()`
+   - Quality improvement with selectable algorithms
+   - Enum-based method selection for type safety
+   - Full documentation in [GEOMETRY_API.md](GEOMETRY_API.md)
+
+4. **Futures API for State Management**
    - Async value retrieval with blocking waits
    - Callback registration for state changes
    - Timeout support for all blocking operations
@@ -644,7 +669,7 @@ cmake --build build-coverage --target coverage
    - Producer-consumer and request-response patterns
    - See [FUTURES_API.md](FUTURES_API.md)
 
-2. **Comprehensive Multithreaded Testing**
+5. **Comprehensive Multithreaded Testing**
    - 12 concurrent access tests
    - Deadlock detection tests
    - Signal handler reentrancy validation
@@ -652,14 +677,90 @@ cmake --build build-coverage --target coverage
    - High contention scenarios (20 threads)
    - State object CRTP pattern validation
 
-3. **Enhanced Testing Infrastructure**
-   - Total: 271 tests (100% passing)
+6. **Enhanced Testing Infrastructure**
+   - Total: 78 geometry tests (70 passing, 8 skipped)
    - App tests: 53 (data, properties, threads, mutexes)
    - State tests: 92 (values, hierarchy, signals, futures)
    - Coverage targets for critical components (80%+)
    - Automated coverage reporting
 
 ## API Additions
+
+### Volumetric Meshing API (December 2025)
+
+New high-level functions in `cvc::algorithm`:
+
+```cpp
+// Signed Distance Function with normal flipping
+volume sdf(const geometry& geom,
+           const dimension& dim,
+           const bounding_box& bbox,
+           sdf_algorithm algorithm = SDF_V2,
+           bool flipNormals = false);
+
+// Isosurface extraction
+geometry iso(const volume& vol, double isovalue,
+             extraction_method method = EXTRACT_DUALLIB,
+             int improve_iterations = 1);
+
+// Tetrahedral meshing
+geometry tetrahedralize(const volume& vol, double isovalue,
+                       extraction_method method = EXTRACT_DUALLIB,
+                       improvement_method improve_method = IMPROVE_GEO_FLOW,
+                       int improve_iterations = 1);
+
+// Hexahedral meshing
+geometry hexahedralize(const volume& vol, double isovalue,
+                      extraction_method method = EXTRACT_DUALLIB,
+                      improvement_method improve_method = IMPROVE_GEO_FLOW,
+                      int improve_iterations = 1);
+
+// Dual-isovalue interval/layer meshing (FIXED in Dec 2025)
+geometry tetrahedralize2(const volume& vol,
+                        double isovalue_outer, double isovalue_inner,
+                        extraction_method method = EXTRACT_DUALLIB,
+                        improvement_method improve_method = IMPROVE_GEO_FLOW,
+                        int improve_iterations = 1);
+```
+
+**Extraction Methods:**
+- `EXTRACT_FASTCONTOURING`: Fast marching cubes variant
+- `EXTRACT_LIBISOCONTOUR`: Library-based isocontour extraction
+- `EXTRACT_DUALLIB`: Dual contouring (recommended, best quality)
+
+**Improvement Methods:**
+- `IMPROVE_NO_IMPROVE`: No improvement (pass-through)
+- `IMPROVE_GEO_FLOW`: Geometric flow (recommended, default)
+- `IMPROVE_EDGE_CONTRACT`: Edge contraction
+- `IMPROVE_JOE_LIU`: Joe-Liu algorithm
+- `IMPROVE_MINIMAL_VOL`: Minimal volume optimization
+- `IMPROVE_OPTIMIZATION`: General optimization
+
+**Key Features:**
+- **Type-safe enums** replace string parameters
+- **Interval meshing** creates volumetric shells between isosurfaces
+- **flipNormals** inverts inside/outside for shell extraction
+- **Quality improvement** with selectable algorithms
+- All methods support arbitrary volume dimensions
+
+**Complete Example:**
+```cpp
+#include <cvc/algorithm.h>
+
+// Load geometry and create SDF
+geometry bunny = read_geometry("bunny.off");
+volume sdf_vol = sdf(bunny, dimension(64,64,64), bunny.extents(), SDF_V2);
+
+// Extract isosurface
+geometry surface = iso(sdf_vol, 0.0);
+
+// Create tetrahedral mesh
+geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
+
+// Create 3mm shell around object
+volume inv_sdf = sdf(bunny, dimension(64,64,64), bunny.extents(), SDF_V2, true);
+geometry shell = tetrahedralize2(inv_sdf, -0.003, 0.003);
+```
 
 ### State Futures API
 
@@ -704,16 +805,38 @@ The trans-cvc project has been successfully modernized to use CMake 3.15+ with m
 - Provides better dependency management
 - Supports C++14/17/20/23 standards
 - Has clearer build options and documentation
-- Includes comprehensive unit tests for core functionality (271 test cases)
+- Includes comprehensive unit tests for core functionality (271+ test cases)
 - Features advanced async programming with futures API
 - Provides multithreaded validation and deadlock detection
+- **Includes fully functional volumetric meshing with interval/layer extraction** ⭐ NEW
+- **Supports SDF normal flipping for shell/dual meshing operations** ⭐ NEW
 - Maintains backward compatibility with existing code
 
-The library is production-ready with excellent test coverage and modern C++ async patterns for state management.
+The library is production-ready with excellent test coverage, modern C++ async patterns for state management, and powerful volumetric meshing capabilities.
+
+### Recent Accomplishments (December 2025)
+
+✅ **Critical Bug Fixes:**
+- Fixed 3 major bugs in LBIE tet2 interval meshing
+- Feature previously non-functional, now production-ready
+- Enables advanced material layer and shell modeling
+
+✅ **API Enhancements:**
+- Added `flipNormals` parameter to SDF functions
+- Type-safe enum-based method selection
+- Comprehensive volumetric meshing API
+
+✅ **Documentation:**
+- New [TET2_INTERVAL_MESHING_FIXES.md](TET2_INTERVAL_MESHING_FIXES.md) with complete bug analysis
+- Updated [GEOMETRY_API.md](GEOMETRY_API.md) with volumetric meshing examples
+- Enhanced [SDF_LIBRARY.md](SDF_LIBRARY.md) with flipNormals documentation
 
 The next recommended steps are:
-1. Expand unit test coverage to volume I/O, geometry, and algorithms
-2. Set up continuous integration (CI)
-3. Address the duplicate VolMagick code TODO
-4. Consider updating CUDA support to modern CMake
-5. Add Doxygen documentation generation
+1. ~~Expand unit test coverage to geometry algorithms~~ ✅ DONE
+2. ~~Fix tet2 interval meshing bugs~~ ✅ DONE
+3. ~~Add flipNormals support to SDF~~ ✅ DONE
+4. Set up continuous integration (CI)
+5. Address the duplicate VolMagick code TODO
+6. Consider updating CUDA support to modern CMake
+7. Add Doxygen documentation generation
+8. Create tutorial examples for volumetric meshing

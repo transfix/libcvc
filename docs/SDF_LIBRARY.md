@@ -309,16 +309,23 @@ t2.join();
 **Function**: `cvc::sdf()`
 
 ```cpp
-// Default: Uses SDF v2 (recommended)
+// Default: Uses SDF v2 (recommended), normal orientation
 cvc::volume sdf(const cvc::geometry& geom,
                 const cvc::dimension& dim,
                 const cvc::bounding_box& bbox);
 
-// Explicit algorithm selection
+// With algorithm selection
 cvc::volume sdf(const cvc::geometry& geom,
                 const cvc::dimension& dim,
                 const cvc::bounding_box& bbox,
-                cvc::SDFAlgorithm algorithm);
+                cvc::sdf_algorithm algorithm);
+
+// With algorithm selection and normal flipping
+cvc::volume sdf(const cvc::geometry& geom,
+                const cvc::dimension& dim,
+                const cvc::bounding_box& bbox,
+                cvc::sdf_algorithm algorithm,
+                bool flipNormals);
 ```
 
 **Parameters**:
@@ -326,12 +333,52 @@ cvc::volume sdf(const cvc::geometry& geom,
 - `dim`: Output grid dimensions (nx, ny, nz) - **any size supported**
 - `bbox`: Bounding box for the grid - **arbitrary bounds supported**
 - `algorithm`: Optional - `SDF_V1` (octree) or `SDF_V2` (distance transform, default)
+- `flipNormals`: Optional - `true` to invert inside/outside (default: `false`)
 
 **Returns**: `cvc::volume` containing signed distance values
 
 **Algorithm Selection**:
 - **SDF_V2** (default): 18-27x faster, lower memory, arbitrary dimensions
 - **SDF_V1**: Legacy octree method, proven for very complex geometries
+
+**flipNormals Parameter** (New in v2.1):
+
+The `flipNormals` parameter inverts the sign of all SDF values, effectively swapping inside and outside regions:
+
+```cpp
+// Normal: inside = negative, outside = positive
+cvc::volume normal_sdf = cvc::sdf(geom, dim, bbox, SDF_V2, false);
+
+// Flipped: inside = positive, outside = negative
+cvc::volume flipped_sdf = cvc::sdf(geom, dim, bbox, SDF_V2, true);
+```
+
+**Use Cases for flipNormals:**
+- **Extracting shells**: Create volumetric meshes around objects
+- **Inverted containment tests**: Test if points are outside rather than inside
+- **Dual meshing**: Extract complementary regions
+- **Material inversion**: Model negative space as positive material
+
+**Implementation Details:**
+- **SDF v1**: Post-computation negation (bypasses SDFLibrary's "fireworks" normal orientation bug)
+- **SDF v2**: Calls `FaceVertSet3D::flipTriNormals()` before distance transform
+- Both methods produce **identical results** (perfect sign inversion)
+
+**Example with flipNormals:**
+```cpp
+cvc::geometry bunny = cvc::read_geometry("bunny.off");
+cvc::dimension dim(64, 64, 64);
+cvc::bounding_box bbox = bunny.extents();
+
+// Create normal SDF
+cvc::volume sdf_vol = cvc::sdf(bunny, dim, bbox, SDF_V2, false);
+
+// Create inverted SDF for shell extraction
+cvc::volume inv_sdf = cvc::sdf(bunny, dim, bbox, SDF_V2, true);
+
+// Extract 5mm shell around bunny using inverted SDF
+cvc::geometry shell = cvc::tetrahedralize2(inv_sdf, -0.05, 0.05);
+```
 
 **Dimension Correctness Guarantee**: Both algorithms return volumes with **exact requested dimensions**. SDF v1 internally computes at next power-of-2, then automatically resizes to exact dimensions using GPU-accelerated trilinear interpolation (17-27x faster than CPU, with perfect numerical accuracy).
 
@@ -342,7 +389,11 @@ cvc::dimension dim(256, 256, 256);
 cvc::bounding_box bbox = bunny.bounding_box();
 bbox.expand(0.05);  // Add 5% padding
 
-cvc::volume sdf_vol = cvc::sdf(bunny, dim, bbox);
+// Compute SDF with v2 algorithm
+cvc::volume sdf_vol = cvc::sdf(bunny, dim, bbox, SDF_V2);
+
+// Compute flipped SDF for complementary operations
+cvc::volume flipped_vol = cvc::sdf(bunny, dim, bbox, SDF_V2, true);
 ```
 
 ### Low-Level API (Advanced)
