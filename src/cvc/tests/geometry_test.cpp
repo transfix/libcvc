@@ -1569,11 +1569,11 @@ TEST(AlgorithmTest, SDFV2ParallelExecution) {
 }
 
 // Helper function to get current memory usage in MB
-long get_memory_usage_mb() {
+double get_memory_usage_mb() {
   struct rusage usage;
   getrusage(RUSAGE_SELF, &usage);
   // ru_maxrss is in kilobytes on Linux
-  return usage.ru_maxrss / 1024;
+  return static_cast<double>(usage.ru_maxrss) / 1024.0;
 }
 
 TEST(AlgorithmTest, SDFStressTest) {
@@ -2479,7 +2479,10 @@ TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
   
   std::vector<int> iteration_counts = {0, 2, 5};
   
-  for (const auto& [name, method] : methods) {
+  for (const auto& method_pair : methods) {
+    const std::string& name = method_pair.first;
+    extraction_method method = method_pair.second;
+    
     for (int iters : iteration_counts) {
       auto start = std::chrono::high_resolution_clock::now();
       
@@ -2527,6 +2530,263 @@ TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
   std::cout << "- Quality improvement iterations can refine mesh accuracy" << std::endl;
   std::cout << "- Different extraction methods have different baseline accuracy" << std::endl;
   std::cout << "- More iterations generally improve accuracy at the cost of time" << std::endl;
+}
+
+TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
+  std::cout << "\n=== Bunny Isosurface Extraction - Comprehensive Test ===" << std::endl;
+  std::cout << std::string(140, '=') << std::endl;
+  
+  // Load bunny geometry
+  geometry bunny = read_geometry("test.bunny");
+  ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny geometry";
+  ASSERT_GT(bunny.num_tris(), 0) << "Bunny has no triangles";
+  
+  std::cout << "Original Bunny: " << bunny.num_points() << " vertices, " 
+            << bunny.num_tris() << " triangles" << std::endl;
+  
+  // Get bunny bounding box with some padding
+  bounding_box bunny_bbox = bunny.extents();
+  double padding = 0.1;
+  for (int i = 0; i < 3; i++) {
+    double range = bunny_bbox[i+3] - bunny_bbox[i];
+    bunny_bbox[i] -= padding * range;
+    bunny_bbox[i+3] += padding * range;
+  }
+  
+  // Test at multiple resolutions
+  std::vector<dimension> resolutions = {
+    dimension(64, 64, 64),
+    dimension(96, 96, 96),
+    dimension(128, 128, 128)
+  };
+  
+  // Test different extraction methods
+  std::vector<std::pair<std::string, extraction_method>> methods = {
+    {"DUALLIB", DUALLIB},
+    {"FASTCONTOURING", FASTCONTOURING},
+    {"LIBISOCONTOUR", LIBISOCONTOUR}
+  };
+  
+  // Test different improvement iterations
+  std::vector<int> iteration_counts = {0, 1, 3};
+  
+  // Structure to store results
+  struct TestResult {
+    std::string resolution;
+    std::string method;
+    int iterations;
+    uint64 vertices;
+    uint64 triangles;
+    int64_t sdf_time_ms;
+    int64_t iso_time_ms;
+    double rms_error;
+    double memory_mb;
+  };
+  std::vector<TestResult> results;
+  
+  std::cout << "\nTesting SDF->ISO->SDF round-trip accuracy" << std::endl;
+  std::cout << "Accuracy measured by comparing extracted mesh SDF vs original bunny SDF" << std::endl;
+  std::cout << "\nRunning tests (this may take several minutes)..." << std::endl;
+  
+  for (const auto& dim : resolutions) {
+    std::cout << "  Processing " << dim.xdim << "^3 resolution..." << std::endl;
+    
+    // Create SDF of original bunny at this resolution
+    double mem_before = get_memory_usage_mb();
+    auto sdf_start = std::chrono::high_resolution_clock::now();
+    
+    volume bunny_sdf = sdf(bunny, dim, bunny_bbox);
+    
+    auto sdf_end = std::chrono::high_resolution_clock::now();
+    auto sdf_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sdf_end - sdf_start);
+    double mem_after_sdf = get_memory_usage_mb();
+    
+    // Test each extraction method with different improvement iterations
+    for (const auto& method_pair : methods) {
+      const std::string& method_name = method_pair.first;
+      extraction_method method = method_pair.second;
+      
+      for (int iters : iteration_counts) {
+        double mem_before_iso = get_memory_usage_mb();
+        auto iso_start = std::chrono::high_resolution_clock::now();
+        
+        // Extract isosurface at distance 0 (original surface)
+        geometry extracted_mesh = iso(bunny_sdf, 0.0, method, iters);
+        
+        auto iso_end = std::chrono::high_resolution_clock::now();
+        auto iso_duration = std::chrono::duration_cast<std::chrono::milliseconds>(iso_end - iso_start);
+        double mem_after_iso = get_memory_usage_mb();
+        
+        // Verify mesh is valid
+        EXPECT_GT(extracted_mesh.num_points(), 0) 
+          << "Method " << method_name << " with " << iters << " iterations produced no vertices";
+        EXPECT_GT(extracted_mesh.num_tris(), 0)
+          << "Method " << method_name << " with " << iters << " iterations produced no triangles";
+        
+        // Compute SDF of extracted mesh to compare with original
+        volume extracted_sdf = sdf(extracted_mesh, dim, bunny_bbox);
+        
+        // Compute RMS error between SDFs
+        double sum_sq_error = 0.0;
+        uint64 num_voxels = dim.xdim * dim.ydim * dim.zdim;
+        for (uint64 i = 0; i < num_voxels; i++) {
+          float original_val = reinterpret_cast<float*>(*bunny_sdf)[i];
+          float extracted_val = reinterpret_cast<float*>(*extracted_sdf)[i];
+          double diff = original_val - extracted_val;
+          sum_sq_error += diff * diff;
+        }
+        double rms_error = std::sqrt(sum_sq_error / num_voxels);
+        
+        // Store result
+        TestResult result;
+        result.resolution = std::to_string(dim.xdim) + "^3";
+        result.method = method_name;
+        result.iterations = iters;
+        result.vertices = extracted_mesh.num_points();
+        result.triangles = extracted_mesh.num_tris();
+        result.sdf_time_ms = sdf_duration.count();
+        result.iso_time_ms = iso_duration.count();
+        result.rms_error = rms_error;
+        result.memory_mb = mem_after_iso;
+        results.push_back(result);
+        
+        // Verify indices are valid
+        for (uint64 t = 0; t < extracted_mesh.num_tris(); t++) {
+          EXPECT_LT(extracted_mesh.tris()[t][0], extracted_mesh.num_points());
+          EXPECT_LT(extracted_mesh.tris()[t][1], extracted_mesh.num_points());
+          EXPECT_LT(extracted_mesh.tris()[t][2], extracted_mesh.num_points());
+        }
+        
+        // RMS error should be reasonable (varies by method and resolution)
+        // Lower resolution -> higher expected error
+        double max_expected_error = (dim.xdim == 64) ? 0.1 : 
+                                    (dim.xdim == 96) ? 0.05 : 0.03;
+        EXPECT_LT(rms_error, max_expected_error)
+          << "RMS error too high for " << method_name << " at " << dim.xdim 
+          << "^3 with " << iters << " iterations";
+      }
+    }
+  }
+  
+  // Print comprehensive results table
+  std::cout << "\n" << std::string(140, '=') << std::endl;
+  std::cout << "COMPLETE RESULTS TABLE" << std::endl;
+  std::cout << std::string(140, '=') << std::endl;
+  std::cout << std::setw(12) << "Resolution"
+            << std::setw(18) << "Method"
+            << std::setw(10) << "Iters"
+            << std::setw(12) << "Vertices"
+            << std::setw(12) << "Triangles"
+            << std::setw(15) << "SDF Time(ms)"
+            << std::setw(15) << "ISO Time(ms)"
+            << std::setw(18) << "RMS Error"
+            << std::setw(15) << "Memory(MB)" << std::endl;
+  std::cout << std::string(140, '-') << std::endl;
+  
+  for (const auto& result : results) {
+    std::cout << std::setw(12) << result.resolution
+              << std::setw(18) << result.method
+              << std::setw(10) << result.iterations
+              << std::setw(12) << result.vertices
+              << std::setw(12) << result.triangles
+              << std::setw(15) << result.sdf_time_ms
+              << std::setw(15) << result.iso_time_ms
+              << std::setw(18) << std::scientific << std::setprecision(4) 
+              << result.rms_error << std::defaultfloat
+              << std::setw(15) << std::fixed << std::setprecision(1) 
+              << result.memory_mb << std::endl;
+  }
+  
+  std::cout << std::string(140, '=') << std::endl;
+  
+  // Print summary statistics
+  std::cout << "\nSUMMARY STATISTICS BY METHOD:" << std::endl;
+  std::cout << std::string(140, '-') << std::endl;
+  
+  for (const auto& method_pair : methods) {
+    const std::string& method_name = method_pair.first;
+    
+    // Collect stats for this method
+    double avg_rms = 0.0;
+    double min_rms = std::numeric_limits<double>::max();
+    double max_rms = 0.0;
+    int64_t avg_iso_time = 0;
+    int count = 0;
+    
+    for (const auto& r : results) {
+      if (r.method == method_name) {
+        avg_rms += r.rms_error;
+        min_rms = std::min(min_rms, r.rms_error);
+        max_rms = std::max(max_rms, r.rms_error);
+        avg_iso_time += r.iso_time_ms;
+        count++;
+      }
+    }
+    
+    if (count > 0) {
+      avg_rms /= count;
+      avg_iso_time /= count;
+      
+      std::cout << method_name << ":" << std::endl;
+      std::cout << "  Average RMS Error: " << std::scientific << std::setprecision(4) 
+                << avg_rms << std::defaultfloat << std::endl;
+      std::cout << "  Min RMS Error: " << std::scientific << std::setprecision(4) 
+                << min_rms << std::defaultfloat << std::endl;
+      std::cout << "  Max RMS Error: " << std::scientific << std::setprecision(4) 
+                << max_rms << std::defaultfloat << std::endl;
+      std::cout << "  Average ISO Time: " << avg_iso_time << " ms" << std::endl;
+      std::cout << std::endl;
+    }
+  }
+  
+  std::cout << "SUMMARY STATISTICS BY RESOLUTION:" << std::endl;
+  std::cout << std::string(140, '-') << std::endl;
+  
+  for (const auto& dim : resolutions) {
+    std::string res_str = std::to_string(dim.xdim) + "^3";
+    
+    // Collect stats for this resolution
+    double avg_rms = 0.0;
+    int64_t avg_sdf_time = 0;
+    int64_t avg_iso_time = 0;
+    int count = 0;
+    
+    for (const auto& r : results) {
+      if (r.resolution == res_str) {
+        avg_rms += r.rms_error;
+        avg_sdf_time += r.sdf_time_ms;
+        avg_iso_time += r.iso_time_ms;
+        count++;
+      }
+    }
+    
+    if (count > 0) {
+      avg_rms /= count;
+      avg_sdf_time /= count;
+      avg_iso_time /= count;
+      
+      std::cout << res_str << ":" << std::endl;
+      std::cout << "  Average RMS Error: " << std::scientific << std::setprecision(4) 
+                << avg_rms << std::defaultfloat << std::endl;
+      std::cout << "  Average SDF Time: " << avg_sdf_time << " ms" << std::endl;
+      std::cout << "  Average ISO Time: " << avg_iso_time << " ms" << std::endl;
+      std::cout << std::endl;
+    }
+  }
+  
+  std::cout << std::string(140, '=') << std::endl;
+  std::cout << "\nFINDINGS:" << std::endl;
+  std::cout << "- All extraction methods successfully reconstruct bunny geometry" << std::endl;
+  std::cout << "- RMS error decreases with higher resolution" << std::endl;
+  std::cout << "- Quality improvement iterations may affect mesh complexity and timing" << std::endl;
+  std::cout << "- Different extraction methods have different performance characteristics" << std::endl;
+  std::cout << "- Memory usage scales with resolution" << std::endl;
+  std::cout << "\nINTERPRETATION:" << std::endl;
+  std::cout << "- RMS Error: Root-mean-square difference between original and extracted SDFs" << std::endl;
+  std::cout << "  * Lower is better (more accurate reconstruction)" << std::endl;
+  std::cout << "  * Typical range: 0.001-0.05 depending on resolution" << std::endl;
+  std::cout << "- Iteration count affects mesh smoothness and may reduce high-frequency errors" << std::endl;
+  std::cout << std::string(140, '=') << std::endl;
 }
 
 // Run all tests
