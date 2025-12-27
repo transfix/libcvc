@@ -968,72 +968,53 @@ namespace CVC_NAMESPACE
     if (_pendingTasks.empty() || _activeWorkers >= _maxPoolSize)
       return;
 
+    // Get the next task
+    ThreadPoolTask task = _pendingTasks.top();
+    _pendingTasks.pop();
+    
     _activeWorkers++;
     
-    // Start a worker thread (not tracked in thread_map, internal to pool)
-    boost::thread worker(&app::threadPoolWorker, this);
-    worker.detach(); // Let it run independently
+    // Start worker with the task's key for tracking
+    // The worker will execute the task directly in its thread
+    // We need to temporarily release the pool mutex to avoid deadlock
+    // when calling threads() which locks _threadsMutex
+    _threadPoolMutex.unlock();
+    threads(task.key, thread_ptr(new boost::thread(boost::bind(&app::threadPoolWorker, this, task))));
+    _threadPoolMutex.lock();
   }
 
-  void app::threadPoolWorker()
+  void app::threadPoolWorker(ThreadPoolTask task)
   {
-    while (true)
+    thread_info ti("Processing: " + task.key);
+    
+    try
     {
-      ThreadPoolTask task;
-      
-      {
-        boost::mutex::scoped_lock lock(_threadPoolMutex);
-        
-        // If no tasks, decrement worker count and exit
-        if (_pendingTasks.empty())
-        {
-          _activeWorkers--;
-          return;
-        }
-        
-        // Get highest priority task
-        task = _pendingTasks.top();
-        _pendingTasks.pop();
-      }
-      
-      // Execute the task with the user's key in the thread map
-      try
-      {
-        threads(task.key, thread_ptr(new boost::thread(task.task)));
-        
-        // Wait for completion
-        thread_ptr tptr = threads(task.key);
-        if (tptr)
-        {
-          tptr->join();
-        }
-      }
-      catch (boost::thread_interrupted&)
-      {
-        // Thread was interrupted, clean up and continue
-      }
-      catch (std::exception& e)
-      {
-        // Log error but continue processing
-        log(0, std::string("Thread pool worker error: ") + e.what());
-      }
-      catch (...)
-      {
-        // Unknown error, log and continue
-        log(0, "Thread pool worker encountered unknown error");
-      }
-      
-      // After completing task, check if there are more pending tasks
-      {
-        boost::mutex::scoped_lock lock(_threadPoolMutex);
-        
-        if (_pendingTasks.empty())
-        {
-          _activeWorkers--;
-          return;
-        }
-        // Otherwise, loop continues to process next task
-      }
+      // Execute the task directly in this worker thread
+      task.task();
     }
+    catch (boost::thread_interrupted&)
+    {
+      // Thread was interrupted, decrement worker count and exit
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      _activeWorkers--;
+      throw; // Re-throw to properly exit
+    }
+    catch (std::exception& e)
+    {
+      // Log error
+      log(0, std::string("Thread pool task error: ") + e.what());
+    }
+    catch (...)
+    {
+      // Unknown error, log it
+      log(0, "Thread pool task encountered unknown error");
+    }
+    
+    // Task complete, decrement worker count
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _activeWorkers--;
+    
+    // Try to start another worker if there are pending tasks
+    tryStartWorker();
   }
 }

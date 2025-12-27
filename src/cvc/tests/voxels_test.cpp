@@ -25,6 +25,7 @@
 #include <cvc/composite_function.h>
 #include <cvc/exception.h>
 #include <cvc/types.h>
+#include <cvc/app.h>
 #include <thread>
 #include <vector>
 #include <atomic>
@@ -32,6 +33,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <boost/thread.hpp>
 
 using namespace cvc;
 
@@ -3054,12 +3056,19 @@ TEST(VoxelsCUDATest, MultithreadedCUDAOperations) {
   
   // Test 5: Multiple threads working on independent voxels objects
   {
-    std::vector<std::thread> threads;
     std::atomic<int> success_count(0);
     const int num_threads = 4;
+    std::vector<std::string> task_keys;
+    
+    // Set pool size
+    unsigned int original_pool_size = cvcapp.getThreadPoolSize();
+    cvcapp.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
     
     for (int t = 0; t < num_threads; t++) {
-      threads.emplace_back([t, &success_count, dim]() {
+      std::string key = "cuda_voxels_" + std::to_string(t);
+      task_keys.push_back(key);
+      
+      cvcapp.startThreadPooled(key, [t, &success_count, dim]() {
         try {
           voxels v(dimension(dim, dim, dim), Float);
           
@@ -3083,12 +3092,19 @@ TEST(VoxelsCUDATest, MultithreadedCUDAOperations) {
         } catch (...) {
           // Thread failed
         }
-      });
+      }, PRIORITY_NORMAL, true);
     }
     
-    for (auto& thread : threads) {
-      thread.join();
+    // Wait for all tasks to complete
+    for (const auto& key : task_keys) {
+      if (cvcapp.hasThread(key)) {
+        thread_ptr tptr = cvcapp.threads(key);
+        if (tptr) tptr->join();
+      }
     }
+    
+    // Restore original pool size
+    cvcapp.setThreadPoolSize(original_pool_size);
     
     EXPECT_EQ(success_count.load(), num_threads);
   }

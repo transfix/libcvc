@@ -551,7 +551,7 @@ namespace CVC_NAMESPACE
     }
     
     void tryStartWorker();
-    void threadPoolWorker();
+    void threadPoolWorker(ThreadPoolTask task);
 
     data_map               _data;
     data_type_name_map     _dataTypeNames;

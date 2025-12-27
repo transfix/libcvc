@@ -849,4 +849,405 @@ TEST(AppTest, ScopedLockUsage) {
   EXPECT_TRUE(true); // Just verify no crash
 }
 
+// ===========================
+// Thread Pool Tests
+// ===========================
+
+TEST(AppTest, ThreadPoolBasicExecution) {
+  std::atomic<bool> task_executed(false);
+  
+  cvcapp.startThreadPooled("pool_basic_test", [&task_executed]() {
+    task_executed = true;
+  }, PRIORITY_NORMAL, true);
+  
+  // Wait for task to complete
+  if (cvcapp.hasThread("pool_basic_test")) {
+    thread_ptr tptr = cvcapp.threads("pool_basic_test");
+    if (tptr) tptr->join();
+  }
+  
+  EXPECT_TRUE(task_executed.load());
+}
+
+TEST(AppTest, ThreadPoolMultipleTasks) {
+  std::atomic<int> counter(0);
+  std::vector<std::string> keys;
+  const int num_tasks = 5;
+  
+  for (int i = 0; i < num_tasks; i++) {
+    std::string key = "pool_multi_" + std::to_string(i);
+    keys.push_back(key);
+    cvcapp.startThreadPooled(key, [&counter]() {
+      counter++;
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    }, PRIORITY_NORMAL, true);
+  }
+  
+  // Wait for all tasks
+  for (const auto& key : keys) {
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr) tptr->join();
+    }
+  }
+  
+  EXPECT_EQ(counter.load(), num_tasks);
+}
+
+TEST(AppTest, ThreadPoolPriority) {
+  std::atomic<int> execution_order(0);
+  std::vector<int> order;
+  boost::mutex order_mutex;
+  
+  // Set small pool size to force queuing
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  cvcapp.setThreadPoolSize(1);
+  
+  // Start a blocking task to fill the pool
+  std::atomic<bool> blocker_done(false);
+  std::atomic<bool> blocker_running(true);
+  cvcapp.startThreadPooled("pool_priority_blocker", [&]() {
+    while (blocker_running.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      boost::this_thread::interruption_point();
+    }
+    blocker_done = true;
+  }, PRIORITY_NORMAL, false); // use unique key
+  
+  // Give blocker time to start
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Now submit tasks with unique keys that will queue (blocker is running)
+  // Submit in reverse priority order - high, normal, critical
+  cvcapp.startThreadPooled("pool_priority_high", [&]() {
+    boost::mutex::scoped_lock lock(order_mutex);
+    order.push_back(1);
+    execution_order++;
+  }, PRIORITY_HIGH, false); // unique key
+  
+  cvcapp.startThreadPooled("pool_priority_normal", [&]() {
+    boost::mutex::scoped_lock lock(order_mutex);
+    order.push_back(0);
+    execution_order++;
+  }, PRIORITY_NORMAL, false); // unique key
+  
+  cvcapp.startThreadPooled("pool_priority_critical", [&]() {
+    boost::mutex::scoped_lock lock(order_mutex);
+    order.push_back(2);
+    execution_order++;
+  }, PRIORITY_CRITICAL, false); // unique key
+  
+  // Give tasks time to queue
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  
+  // Stop blocker to let queued tasks execute
+  blocker_running = false;
+  
+  // Wait for all tasks to complete
+  for (int i = 0; i < 50; i++) {
+    if (execution_order.load() >= 3) break;
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  
+  EXPECT_TRUE(blocker_done.load());
+  EXPECT_EQ(execution_order.load(), 3);
+  EXPECT_EQ(order.size(), 3);
+  
+  // With priority queue, critical should execute first, then high, then normal
+  // Order should be: [2, 1, 0] (critical=2, high=1, normal=0)
+  if (order.size() == 3) {
+    EXPECT_EQ(order[0], 2); // critical first
+    EXPECT_EQ(order[1], 1); // high second
+    EXPECT_EQ(order[2], 0); // normal last
+  }
+  
+  cvcapp.setThreadPoolSize(original_size);
+}
+
+TEST(AppTest, ThreadPoolSizeConfiguration) {
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  
+  // Test setting pool size
+  cvcapp.setThreadPoolSize(2);
+  EXPECT_EQ(cvcapp.getThreadPoolSize(), 2u);
+  
+  cvcapp.setThreadPoolSize(4);
+  EXPECT_EQ(cvcapp.getThreadPoolSize(), 4u);
+  
+  // Restore original
+  cvcapp.setThreadPoolSize(original_size);
+  EXPECT_EQ(cvcapp.getThreadPoolSize(), original_size);
+}
+
+TEST(AppTest, ThreadPoolActiveCount) {
+  std::atomic<bool> keep_running(true);
+  std::vector<std::string> keys;
+  
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  cvcapp.setThreadPoolSize(2);
+  
+  // Start 2 long-running tasks
+  for (int i = 0; i < 2; i++) {
+    std::string key = "pool_active_" + std::to_string(i);
+    keys.push_back(key);
+    cvcapp.startThreadPooled(key, [&keep_running]() {
+      while (keep_running.load()) {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      }
+    }, PRIORITY_NORMAL, true);
+  }
+  
+  // Give threads time to start
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Should have 2 active workers
+  unsigned int active = cvcapp.getActiveThreadCount();
+  EXPECT_GE(active, 1u); // At least one should be running
+  EXPECT_LE(active, 2u); // Should not exceed pool size
+  
+  // Stop tasks
+  keep_running = false;
+  
+  for (const auto& key : keys) {
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr) tptr->join();
+    }
+  }
+  
+  cvcapp.setThreadPoolSize(original_size);
+}
+
+TEST(AppTest, ThreadPoolInterruption) {
+  std::atomic<bool> task_started(false);
+  std::atomic<bool> task_interrupted(false);
+  
+  cvcapp.startThreadPooled("pool_interrupt_test", [&]() {
+    task_started = true;
+    try {
+      // Long-running task with interruption points
+      for (int i = 0; i < 100; i++) {
+        boost::this_thread::interruption_point();
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      }
+    } catch (boost::thread_interrupted&) {
+      task_interrupted = true;
+      throw;
+    }
+  }, PRIORITY_NORMAL, true);
+  
+  // Give task time to start
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  EXPECT_TRUE(task_started.load());
+  
+  // Interrupt the thread
+  if (cvcapp.hasThread("pool_interrupt_test")) {
+    thread_ptr tptr = cvcapp.threads("pool_interrupt_test");
+    if (tptr) {
+      tptr->interrupt();
+      try {
+        tptr->join();
+      } catch (...) {
+        // Thread may have thrown during join
+      }
+    }
+  }
+  
+  // Give time for interruption to process
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  EXPECT_TRUE(task_interrupted.load());
+}
+
+TEST(AppTest, ThreadPoolReplaceRunningTask) {
+  std::atomic<int> task_count(0);
+  std::atomic<bool> first_task_running(true);
+  
+  // Start first task with wait=true (uses key "replace_test")
+  cvcapp.startThreadPooled("pool_replace_test", [&]() {
+    task_count++;
+    while (first_task_running.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      boost::this_thread::interruption_point();
+    }
+  }, PRIORITY_NORMAL, true);
+  
+  // Give it time to start
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  EXPECT_EQ(task_count.load(), 1);
+  
+  // Start second task with same key and wait=true
+  // This should interrupt the first task and start a new one
+  cvcapp.startThreadPooled("pool_replace_test", [&]() {
+    task_count++;
+  }, PRIORITY_NORMAL, true);
+  
+  // Wait for new task
+  if (cvcapp.hasThread("pool_replace_test")) {
+    thread_ptr tptr = cvcapp.threads("pool_replace_test");
+    if (tptr) tptr->join();
+  }
+  
+  // Should have executed both tasks (first interrupted, second completed)
+  EXPECT_EQ(task_count.load(), 2);
+  first_task_running = false;
+}
+
+TEST(AppTest, ThreadPoolExceptionHandling) {
+  std::atomic<bool> task_ran(false);
+  std::atomic<bool> cleanup_ran(false);
+  
+  // Check initial state
+  unsigned int initial_active = cvcapp.getActiveThreadCount();
+  bool had_exception_thread_before = cvcapp.hasThread("pool_exception_test");
+  
+  cvcapp.startThreadPooled("pool_exception_test", [&]() {
+    task_ran = true;
+    throw std::runtime_error("Test exception");
+  }, PRIORITY_NORMAL, true);
+  
+  // Give task time to execute and fail
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  EXPECT_TRUE(task_ran.load());
+  
+  // Verify thread pool state after exception
+  // The thread should have exited and active worker count should return to normal
+  unsigned int active_after_exception = cvcapp.getActiveThreadCount();
+  EXPECT_EQ(active_after_exception, initial_active) << "Active worker count should return to initial state";
+  
+  // Pool should continue to work after exception
+  cvcapp.startThreadPooled("pool_after_exception", [&]() {
+    cleanup_ran = true;
+  }, PRIORITY_NORMAL, true);
+  
+  if (cvcapp.hasThread("pool_after_exception")) {
+    thread_ptr tptr = cvcapp.threads("pool_after_exception");
+    if (tptr) tptr->join();
+  }
+  
+  EXPECT_TRUE(cleanup_ran.load());
+}
+
+TEST(AppTest, ThreadPoolStateConsistency) {
+  // Test that thread map stays clean after multiple operations
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  cvcapp.setThreadPoolSize(2);
+  
+  std::atomic<int> completed(0);
+  std::vector<std::string> keys;
+  
+  // Run several tasks including some that throw
+  for (int i = 0; i < 5; i++) {
+    std::string key = "pool_state_" + std::to_string(i);
+    keys.push_back(key);
+    
+    cvcapp.startThreadPooled(key, [&, i]() {
+      if (i == 2) {
+        // Task 2 throws an exception
+        throw std::runtime_error("Intentional exception");
+      }
+      completed++;
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    }, PRIORITY_NORMAL, true);
+  }
+  
+  // Wait for all tasks to complete
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  
+  // Should have completed 4 tasks (task 2 threw exception)
+  EXPECT_EQ(completed.load(), 4);
+  
+  // Active worker count should be back to 0 or minimal
+  unsigned int active = cvcapp.getActiveThreadCount();
+  EXPECT_EQ(active, 0u) << "No workers should be active after all tasks complete";
+  
+  cvcapp.setThreadPoolSize(original_size);
+}
+
+TEST(AppTest, ThreadPoolConcurrencyLimit) {
+  std::atomic<int> concurrent_count(0);
+  std::atomic<int> max_concurrent(0);
+  std::vector<std::string> keys;
+  boost::mutex counter_mutex;
+  
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  const int pool_size = 2;
+  cvcapp.setThreadPoolSize(pool_size);
+  
+  // Submit more tasks than pool size
+  for (int i = 0; i < 5; i++) {
+    std::string key = "pool_concurrency_" + std::to_string(i);
+    keys.push_back(key);
+    
+    cvcapp.startThreadPooled(key, [&]() {
+      // Track concurrent execution
+      int current;
+      {
+        boost::mutex::scoped_lock lock(counter_mutex);
+        concurrent_count++;
+        current = concurrent_count.load();
+        if (current > max_concurrent.load()) {
+          max_concurrent = current;
+        }
+      }
+      
+      // Simulate work
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+      
+      {
+        boost::mutex::scoped_lock lock(counter_mutex);
+        concurrent_count--;
+      }
+    }, PRIORITY_NORMAL, true);
+  }
+  
+  // Wait for all tasks
+  for (const auto& key : keys) {
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr) tptr->join();
+    }
+  }
+  
+  // Max concurrent should not exceed pool size
+  EXPECT_LE(max_concurrent.load(), pool_size);
+  EXPECT_GE(max_concurrent.load(), 1); // At least one should have run
+  
+  cvcapp.setThreadPoolSize(original_size);
+}
+
+TEST(AppTest, ThreadPoolTaskChaining) {
+  std::atomic<int> execution_order(0);
+  std::vector<int> order;
+  boost::mutex order_mutex;
+  
+  unsigned int original_size = cvcapp.getThreadPoolSize();
+  cvcapp.setThreadPoolSize(1); // Force serial execution
+  
+  // Submit multiple tasks that will chain
+  for (int i = 0; i < 3; i++) {
+    std::string key = "pool_chain_" + std::to_string(i);
+    cvcapp.startThreadPooled(key, [&, i]() {
+      boost::mutex::scoped_lock lock(order_mutex);
+      order.push_back(i);
+      execution_order++;
+    }, PRIORITY_NORMAL, true);
+  }
+  
+  // Wait for all
+  for (int i = 0; i < 3; i++) {
+    std::string key = "pool_chain_" + std::to_string(i);
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr) tptr->join();
+    }
+  }
+  
+  EXPECT_EQ(execution_order.load(), 3);
+  EXPECT_EQ(order.size(), 3);
+  
+  cvcapp.setThreadPoolSize(original_size);
+}
+
 // Main function is provided by gtest_main library

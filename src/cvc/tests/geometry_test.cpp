@@ -8,6 +8,7 @@
 #include <cvc/algorithm.h>
 #include <cvc/volmagick.h>
 #include <cvc/exception.h>
+#include <cvc/app.h>
 
 #include <gtest/gtest.h>
 #include <boost/thread.hpp>
@@ -1491,26 +1492,42 @@ TEST(AlgorithmTest, SDFV2ParallelExecution) {
   dimension dim(20, 20, 20);
   bounding_box bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
   
-  // Run SDF computations in parallel using boost::thread
-  std::vector<boost::thread> threads;
+  // Run SDF computations in parallel using thread pool
   std::vector<volume> results(4);
   std::atomic<int> completed(0);
+  std::vector<std::string> task_keys;
   
-  std::cout << "Launching 4 parallel SDF v2 computations..." << std::endl;
+  std::cout << "Launching 4 parallel SDF v2 computations via thread pool..." << std::endl;
   
+  // Set pool size to allow all 4 to run concurrently if we have cores
+  unsigned int original_pool_size = cvcapp.getThreadPoolSize();
+  cvcapp.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
+  
+  // Submit all tasks with unique keys (wait=false means don't wait for existing thread)
   for (int i = 0; i < 4; i++) {
-    threads.emplace_back([&, i]() {
+    std::string key = "sdf_parallel_" + std::to_string(i);
+    task_keys.push_back(key);
+    
+    // Capture by value to avoid dangling references
+    geometry geom = geometries[i];
+    cvcapp.startThreadPooled(key, [&results, &completed, geom, i, dim, bbox]() {
       std::cout << "  Thread " << i << " computing SDF v2..." << std::endl;
-      results[i] = sdf(geometries[i], dim, bbox, SDF_V2);
+      results[i] = sdf(geom, dim, bbox, SDF_V2);
       completed++;
       std::cout << "  Thread " << i << " completed!" << std::endl;
-    });
+    }, PRIORITY_NORMAL, true); // wait=true: stop any existing thread with this key first
   }
   
-  // Wait for all threads
-  for (auto& t : threads) {
-    t.join();
+  // Wait for all threads to complete
+  for (const auto& key : task_keys) {
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr) tptr->join();
+    }
   }
+  
+  // Restore original pool size
+  cvcapp.setThreadPoolSize(original_pool_size);
   
   std::cout << "All threads completed: " << completed.load() << "/4" << std::endl;
   EXPECT_EQ(completed.load(), 4);
