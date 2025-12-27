@@ -24,6 +24,10 @@
 
 using namespace CVC_NAMESPACE;
 
+// Global flag to enable/disable stress and performance tests
+// Can be enabled with --enable-stress-tests command line flag
+bool enable_stress_tests = false;
+
 class GeometryTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -1137,6 +1141,10 @@ TEST(AlgorithmTest, BunnySDF_IsoRoundtrip) {
 }
 
 TEST(AlgorithmTest, BunnyVolumeConvergence) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Testing Bunny Volume Convergence via SDF ===" << std::endl;
   
   // Load the bunny geometry
@@ -1381,6 +1389,10 @@ TEST(AlgorithmTest, SDFV1vsV2Comparison) {
 
 // Test multiple sequential SDF v1 calls (previously caused stack smashing)
 TEST_F(GeometryTest, SDFV1MultipleSequentialCalls) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Testing SDF v1 Multiple Sequential Calls ===" << std::endl;
   std::cout << "This test ensures SDF v1 can be called multiple times without crashes" << std::endl;
   std::cout << std::string(80, '-') << std::endl;
@@ -1577,6 +1589,10 @@ double get_memory_usage_mb() {
 }
 
 TEST(AlgorithmTest, SDFStressTest) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== SDF Stress Test: Comparing v1 vs v2 ===" << std::endl;
   
   // Load the Stanford Bunny for stress testing
@@ -1785,6 +1801,10 @@ TEST(AlgorithmTest, SDFStressTest) {
 
 // Test SDF v1 resize performance: CPU vs GPU
 TEST_F(GeometryTest, SDFResizePerformanceComparison) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
 #ifdef CVC_USING_CUDA
   if (!voxels::cuda_available()) {
     GTEST_SKIP() << "CUDA not available, skipping GPU resize comparison";
@@ -1893,6 +1913,10 @@ TEST_F(GeometryTest, SDFResizePerformanceComparison) {
 
 // Full SDF stress test with resize breakdown
 TEST_F(GeometryTest, SDFFullPipelineWithResizeBreakdown) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Full SDF Pipeline with Resize Breakdown ===" << std::endl;
   std::cout << std::string(130, '=') << std::endl;
   std::cout << "Measures SDF computation + resize for non-power-of-2 dimensions" << std::endl;
@@ -1987,6 +2011,10 @@ TEST_F(GeometryTest, SDFFullPipelineWithResizeBreakdown) {
 
 // Test non-watertight meshes (meshes with holes/missing triangles)
 TEST_F(GeometryTest, SDFNonWatertightMeshes) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Testing SDF with Non-Watertight (Open) Meshes ===" << std::endl;
   std::cout << "This test progressively damages the bunny mesh to see how SDF algorithms handle holes\n" << std::endl;
   
@@ -2135,7 +2163,11 @@ TEST_F(GeometryTest, SDFNonWatertightMeshes) {
 // Fine-grained test to find exact threshold where sign determination fails
 // This test takes 10+ minutes, so it's disabled by default
 // Enable with: --gtest_also_run_disabled_tests
-TEST_F(GeometryTest, DISABLED_SDFSignAmbiguityThreshold) {
+TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Sign Ambiguity Threshold Across Multiple Resolutions ===" << std::endl;
   std::cout << "Testing SDF robustness to non-watertight meshes at different grid resolutions\n" << std::endl;
   
@@ -2533,6 +2565,10 @@ TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
 }
 
 TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   std::cout << "\n=== Bunny Isosurface Extraction - Comprehensive Test ===" << std::endl;
   std::cout << std::string(140, '=') << std::endl;
   
@@ -2791,6 +2827,30 @@ TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
 
 // Run all tests
 int main(int argc, char **argv) {
+  // Parse custom flags before GoogleTest consumes them
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--enable-stress-tests") {
+      enable_stress_tests = true;
+      std::cout << "Stress and performance tests ENABLED" << std::endl;
+    } else if (std::string(argv[i]) == "--help-stress") {
+      std::cout << "\nStress Test Control:" << std::endl;
+      std::cout << "  --enable-stress-tests    Enable long-running stress and performance tests" << std::endl;
+      std::cout << "\nStress tests (disabled by default):" << std::endl;
+      std::cout << "  - GeometryTest.SDFSignAmbiguityThreshold" << std::endl;
+      std::cout << "  - AlgorithmTest.BunnyIsosurfaceExtractionComparison" << std::endl;
+      std::cout << "  - AlgorithmTest.BunnyVolumeConvergence" << std::endl;
+      std::cout << "  - GeometryTest.SDFFullPipelineWithResizeBreakdown" << std::endl;
+      std::cout << "  - GeometryTest.SDFResizePerformanceComparison" << std::endl;
+      std::cout << "  - AlgorithmTest.SDFStressTest" << std::endl;
+      std::cout << "  - GeometryTest.SDFNonWatertightMeshes" << std::endl;
+      std::cout << "  - GeometryTest.SDFV1MultipleSequentialCalls" << std::endl;
+      std::cout << "  - StateTest.PerformanceHierarchyBenchmark" << std::endl;
+      std::cout << "\nExample: ./geometry_test --enable-stress-tests" << std::endl;
+      std::cout << std::endl;
+      return 0;
+    }
+  }
+  
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

@@ -193,6 +193,16 @@ cmake --build build --target check
 # Run specific test suites
 ./build/bin/app_test    # Test cvc::app functionality
 ./build/bin/state_test  # Test cvc::state functionality (includes futures & threading)
+
+# Stress/Performance Tests
+# By default, long-running stress tests are disabled for faster development
+# To run them, use the --enable-stress-tests flag:
+./build/bin/geometry_test --enable-stress-tests
+./build/bin/state_test --enable-stress-tests
+
+# See all stress tests with --help-stress:
+./build/bin/geometry_test --help-stress
+./build/bin/state_test --help-stress
 ```
 
 ### Advanced Features Tested

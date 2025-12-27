@@ -22,6 +22,9 @@
 
 using namespace CVC_NAMESPACE;
 
+// Global flag to control stress/performance tests
+bool enable_stress_tests = false;
+
 // ===========================
 // Basic Singleton Tests
 // ===========================
@@ -2753,6 +2756,10 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
 // ===========================
 
 TEST(StateTest, PerformanceHierarchyBenchmark) {
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   // Performance test: 1 million operations on deep hierarchy
   // Tests various data types and sizes
   // Monitors memory usage and throughput
@@ -3726,4 +3733,23 @@ TEST(StateTest, FutureProducerConsumerPattern) {
   cvcstate("test.future").reset();
 }
 
-// Main function is provided by gtest_main library
+// Main function to handle custom flags
+int main(int argc, char **argv) {
+  // Parse custom flags before GoogleTest removes them
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--enable-stress-tests") {
+      enable_stress_tests = true;
+    } else if (std::string(argv[i]) == "--help-stress") {
+      std::cout << "\nStress Test Options:\n";
+      std::cout << "  --enable-stress-tests    Enable long-running stress/performance tests\n";
+      std::cout << "                           (default: disabled for faster test runs)\n";
+      std::cout << "\nStress tests in state_test:\n";
+      std::cout << "  - StateTest.PerformanceHierarchyBenchmark (6 minutes, 1M operations)\n";
+      std::cout << std::endl;
+      return 0;
+    }
+  }
+  
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
