@@ -74,13 +74,17 @@ namespace
   // 01/10/2014 -- Joe R. -- Creation.
   // 12/10/2025 -- Joe R. -- Updated to use thread-safe SDFContext API.
   // 12/23/2025 -- Joe R. -- Added power-of-2 rounding for arbitrary dimensions.
+  // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
   CVC_NAMESPACE::volume sdf_library(const CVC_NAMESPACE::geometry& geom,
 				    const CVC_NAMESPACE::dimension& dim,
-				    const CVC_NAMESPACE::bounding_box& bbox)
+				    const CVC_NAMESPACE::bounding_box& bbox,
+				    bool flipNormals)
   {
     using namespace std;
     using namespace CVC_NAMESPACE;
-    const int flipNormals = 0;
+    // NOTE: Don't pass flipNormals to SDFLibrary - its "fireworks" normal orientation
+    // will override it. Instead, we negate the SDF values after computation.
+    const int flipNormalsInt = 0;
     float mins[3] = { static_cast<float>(bbox[0]), 
                       static_cast<float>(bbox[1]), 
                       static_cast<float>(bbox[2]) };
@@ -108,7 +112,7 @@ namespace
       // Call the new thread-safe API
       values = SDFLibrary::computeSDF_MT(geom.num_points(), v.get(), 
                                           geom.num_tris(), t.get(),
-                                          static_cast<int>(size), flipNormals,
+                                          static_cast<int>(size), flipNormalsInt,
                                           mins, maxs);
       if(!values) throw sign_distance_function_error("SDFLibrary::computeSDF_MT() failed");
     }
@@ -126,6 +130,14 @@ namespace
     }
     // Smart pointer automatically cleans up values
 
+    // Negate all SDF values if flipNormals is true (inverts inside/outside)
+    if (flipNormals) {
+      uint64 total_values = size * size * size;
+      for (uint64 i = 0; i < total_values; i++) {
+        choppedValues[i] = -choppedValues[i];
+      }
+    }
+
     // Resize to requested dimensions if different from computed size
     if (dim.xdim != size || dim.ydim != size || dim.zdim != size) {
       cv.resize(dim);
@@ -141,9 +153,11 @@ namespace
   // ---- Change History ----
   // 12/23/2025 -- Joe R. -- Creation.
   // 12/24/2025 -- Joe R. -- Fixed to respect provided bounding box.
+  // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
   CVC_NAMESPACE::volume sdf_library_v2(const CVC_NAMESPACE::geometry& geom,
 				       const CVC_NAMESPACE::dimension& dim,
-				       const CVC_NAMESPACE::bounding_box& bbox)
+				       const CVC_NAMESPACE::bounding_box& bbox,
+				       bool flipNormals)
   {
     using namespace std;
     using namespace CVC_NAMESPACE;
@@ -165,6 +179,11 @@ namespace
 
     // Compute triangle normals (required for sign computation)
     fvs.computeTriNormals();
+
+    // Flip normals if requested (inverts inside/outside)
+    if (flipNormals) {
+      fvs.flipTriNormals();
+    }
 
     // Calculate scale factors to match the requested bounding box
     // With the new constructor, we can specify the center directly
@@ -421,10 +440,12 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/29/2013 -- Joe R. -- Creation.
   // 12/23/2025 -- Joe R. -- Added algorithm selection parameter.
+  // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
   volume sdf(const geometry& geom,
 	     const dimension& dim,
 	     const bounding_box& bbox_in,
-	     sdf_algorithm algorithm)
+	     sdf_algorithm algorithm,
+	     bool flipNormals)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     volume vol;
@@ -439,7 +460,7 @@ namespace CVC_NAMESPACE
     switch(algorithm)
     {
       case SDF_V1:
-        vol = sdf_library(geom, dim, bbox);
+        vol = sdf_library(geom, dim, bbox, flipNormals);
         vol.desc("Signed Distance Function - SDFLibrary v1");
         break;
         
@@ -476,14 +497,14 @@ namespace CVC_NAMESPACE
           
           if(needs_expansion) {
             // Compute SDF on expanded bbox, then resample to match requested bbox
-            vol = sdf_library_v2(geom, dim, expanded_bbox);
+            vol = sdf_library_v2(geom, dim, expanded_bbox, flipNormals);
             
             // Use GPU-accelerated resize to resample from expanded bbox to requested bbox
             // This ensures both v1 and v2 use exactly the same bounding box
             vol.resize(bbox);
           } else {
             // No expansion needed, use bbox directly
-            vol = sdf_library_v2(geom, dim, bbox);
+            vol = sdf_library_v2(geom, dim, bbox, flipNormals);
           }
           
           vol.desc("Signed Distance Function - DistanceTransform v2");
@@ -491,7 +512,7 @@ namespace CVC_NAMESPACE
         break;
         
       default:
-        vol = sdf_library(geom, dim, bbox);
+        vol = sdf_library(geom, dim, bbox, flipNormals);
         vol.desc("Signed Distance Function - SDFLibrary v1 (default)");
         break;
     }
@@ -581,6 +602,23 @@ namespace CVC_NAMESPACE
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
     args["isovalue"] = float(isovalue);
+    args["improve_iterations"] = improve_iterations;
+    args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+    args["meshtype_enum"] = LBIE::geoframe::TETRA2;
+
+    return cvc_mesher(vol,args);
+  }
+
+  geometry tetrahedralize2(const volume& vol, double isovalue_outer, double isovalue_inner,
+                           extraction_method method,
+                           improvement_method improve_method,
+                           int improve_iterations)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    Arguments args;
+    args["isovalue"] = float(isovalue_outer);
+    args["isovalue_in"] = float(isovalue_inner);  // Set the inner isovalue for interval meshing
     args["improve_iterations"] = improve_iterations;
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);

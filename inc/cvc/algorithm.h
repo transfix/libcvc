@@ -48,6 +48,7 @@ namespace CVC_NAMESPACE
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 - removing sdf_method, always using SDFLibrary now
   // 12/23/2025 - adding algorithm selection enum to switch between v1 and v2
+  // 12/27/2025 - adding flipNormals parameter to invert inside/outside
   volume sdf(const geometry& geom,
 	     /*
 	       Dimension of output sdf vol.
@@ -61,7 +62,11 @@ namespace CVC_NAMESPACE
 	     /*
 	       SDF algorithm to use (SDF_V1 or SDF_V2)
 	     */
-	     sdf_algorithm algorithm = SDF_V1);
+	     sdf_algorithm algorithm = SDF_V1,
+	     /*
+	       Flip normals to invert inside/outside (true = flip, false = no flip)
+	     */
+	     bool flipNormals = false);
 
   // ---
   // iso
@@ -113,6 +118,21 @@ namespace CVC_NAMESPACE
   // 12/27/2025 -- Joe R. -- Creation.
   geometry tetrahedralize2(const volume& vol,
                            double isovalue,
+                           extraction_method method = DUALLIB,
+                           improvement_method improve_method = NO_IMPROVE,
+                           int improve_iterations = 0);
+
+  // tetrahedralize2 (interval/layer meshing)
+  // ----------------------------------------
+  // Purpose:
+  //   Extract a volumetric tetrahedral mesh of the layer/interval between
+  //   two isosurfaces. This creates a 3D mesh of the region between
+  //   isovalue_outer and isovalue_inner.
+  // ---- Change History ----
+  // 12/27/2025 -- Joe R. -- Creation.
+  geometry tetrahedralize2(const volume& vol,
+                           double isovalue_outer,
+                           double isovalue_inner,
                            extraction_method method = DUALLIB,
                            improvement_method improve_method = NO_IMPROVE,
                            int improve_iterations = 0);
