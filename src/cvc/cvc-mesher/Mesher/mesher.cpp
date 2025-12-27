@@ -20,9 +20,10 @@ namespace LBIE
   //   Main entry point into LBIE meshing.
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
+  // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   const std::string& meshtype, const std::string& improve_method, const std::string& normaltype, 
+		   const std::string& meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose)
   {
@@ -37,7 +38,7 @@ namespace LBIE
 	cout << "error: " << err << endl;
 	cout << "inner_error: " << err_in << endl;
 	cout << "mesh_type: " << meshtype << endl;
-	cout << "improvement_method: " << improve_method << endl;
+	cout << "improvement_method: " << static_cast<int>(improve_method) << endl;
 	cout << "iterations: " << improve_iterations << endl;
 	cout << "normal_type: " << normaltype << endl;
 	cout << "dual: " << (dual_contouring ? "true" : "false") << endl;
@@ -58,18 +59,9 @@ namespace LBIE
     else throw cvc_mesher_exception("invalid mesh type '" + meshtype + "'");
     mesher.meshType(mt);
 
-    // extract_method is now already an enum, use it directly
+    // extract_method and improve_method are now enums, use them directly
     mesher.extractionMethod(extract_method);
-      
-    Mesher::ImproveMethod im;
-    if(improve_method == "no_improve") im = Mesher::NO_IMPROVE;
-    else if(improve_method == "geo_flow") im = Mesher::GEO_FLOW;
-    else if(improve_method == "edge_contract") im = Mesher::EDGE_CONTRACT;
-    else if(improve_method == "joe_liu") im = Mesher::JOE_LIU;
-    else if(improve_method == "minimal_vol") im = Mesher::MINIMAL_VOL;
-    else if(improve_method == "optimization") im = Mesher::OPTIMIZATION;
-    else throw cvc_mesher_exception("invalid quality improvement method '" + improve_method + "'");
-    mesher.improveMethod(im);
+    mesher.improveMethod(improve_method);
   
     Mesher::NormalType nt;
     if(normaltype == "bspline_convolution") nt = Mesher::BSPLINE_CONVOLUTION;
@@ -90,7 +82,8 @@ namespace LBIE
   //   Main entry point into LBIE mesh quality improvement
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
-  geoframe quality_improve(const geoframe& g_frame, const std::string& improve_method, int improve_iterations,
+  // 12/26/2025 -- Joe R. -- Removed string-based version, use enum only.
+  geoframe quality_improve(const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
 			   bool verbose)
   {
     using namespace std;
@@ -98,21 +91,13 @@ namespace LBIE
     
     if(verbose)
       {
-	cout << "improvement_method: " << improve_method << endl;
+	cout << "improvement_method: " << static_cast<int>(improve_method) << endl;
 	cout << "iterations: " << improve_iterations << endl;
       }
 
-    LBIE::Mesher::ImproveMethod im;
-    if(improve_method == "no_improve") im = LBIE::Mesher::NO_IMPROVE;
-    else if(improve_method == "geo_flow") im = LBIE::Mesher::GEO_FLOW;
-    else if(improve_method == "edge_contract") im = LBIE::Mesher::EDGE_CONTRACT;
-    else if(improve_method == "joe_liu") im = LBIE::Mesher::JOE_LIU;
-    else if(improve_method == "minimal_vol") im = LBIE::Mesher::MINIMAL_VOL;
-    else if(improve_method == "optimization") im = LBIE::Mesher::OPTIMIZATION;
-    else cvc_mesher_exception("Error: invalid quality improvement method '" + improve_method + "'");
-    mesher.improveMethod(im);
+    mesher.improveMethod(improve_method);
     mesher.mesh(g_frame);
     mesher.qualityImprove(improve_iterations);
-    return mesher.mesh(); //get the mesh
+    return mesher.mesh();
   }
 }

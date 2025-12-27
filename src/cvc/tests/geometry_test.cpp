@@ -832,7 +832,7 @@ TEST_F(GeometryTest, QualityImprovePreservesTopology) {
   uint64_t original_tris = geom.num_tris();
   
   // Apply quality improvement
-  geom.quality_improve(1, "geo_flow");
+  geom.quality_improve(1, GEO_FLOW);
   
   // Topology should be preserved
   EXPECT_EQ(geom.num_points(), original_points);
@@ -843,12 +843,110 @@ TEST_F(GeometryTest, QualityImproveMultipleIterations) {
   geometry geom(bunny);
   
   // Apply multiple iterations
-  geom.quality_improve(3, "geo_flow");
+  geom.quality_improve(3, GEO_FLOW);
   
   // Should still have valid geometry
   EXPECT_EQ(geom.num_points(), bunny.num_points());
   EXPECT_EQ(geom.num_tris(), bunny.num_tris());
   EXPECT_FALSE(geom.empty());
+}
+
+TEST_F(GeometryTest, QualityImproveAllMethods) {
+  std::cout << "\n=== Testing All Quality Improvement Methods ===" << std::endl;
+  std::cout << "Testing " << bunny.num_points() << " vertices, " 
+            << bunny.num_tris() << " triangles (triangle mesh)" << std::endl;
+  
+  // Test each improvement method
+  // Note: JOE_LIU and MINIMAL_VOL are designed for tetrahedral meshes only
+  // EDGE_CONTRACT and OPTIMIZATION also have specific tetrahedral mesh requirements
+  struct MethodTest {
+    improvement_method method;
+    const char* name;
+    int iterations;
+    bool skip_triangular; // Skip for triangle meshes
+  };
+  
+  MethodTest methods[] = {
+    {NO_IMPROVE, "NO_IMPROVE", 1, false},
+    {GEO_FLOW, "GEO_FLOW", 1, false},
+    {GEO_FLOW, "GEO_FLOW (3 iterations)", 3, false},
+    {GEO_FLOW, "GEO_FLOW (5 iterations)", 5, false},
+    {GEO_FLOW, "GEO_FLOW (10 iterations)", 10, false},
+    {EDGE_CONTRACT, "EDGE_CONTRACT", 1, true},      // Tetrahedral only
+    {JOE_LIU, "JOE_LIU", 1, true},                  // Tetrahedral only
+    {MINIMAL_VOL, "MINIMAL_VOL", 1, true},          // Tetrahedral only
+    {OPTIMIZATION, "OPTIMIZATION", 1, true}         // Tetrahedral only
+  };
+  
+  std::cout << std::string(110, '-') << std::endl;
+  std::cout << std::setw(35) << std::left << "Method"
+            << std::setw(12) << "Iterations"
+            << std::setw(12) << "Vertices"
+            << std::setw(12) << "Triangles"
+            << std::setw(15) << "Time (ms)"
+            << std::setw(15) << "Status" << std::endl;
+  std::cout << std::string(110, '-') << std::endl;
+  
+  for (const auto& test : methods) {
+    // Skip tetrahedral-only methods for triangle meshes
+    if (test.skip_triangular) {
+      std::cout << std::setw(35) << std::left << test.name
+                << std::setw(12) << test.iterations
+                << std::setw(12) << "-"
+                << std::setw(12) << "-"
+                << std::setw(15) << "-"
+                << std::setw(15) << "SKIP (tet only)" << std::endl;
+      continue;
+    }
+    
+    geometry geom(bunny);
+    uint64_t original_points = geom.num_points();
+    uint64_t original_tris = geom.num_tris();
+    
+    auto start = boost::chrono::high_resolution_clock::now();
+    
+    try {
+      geom.quality_improve(test.iterations, test.method);
+      
+      auto end = boost::chrono::high_resolution_clock::now();
+      auto duration = boost::chrono::duration_cast<boost::chrono::milliseconds>(end - start);
+      
+      // Verify topology is preserved
+      EXPECT_EQ(geom.num_points(), original_points) 
+        << "Topology changed for " << test.name;
+      EXPECT_EQ(geom.num_tris(), original_tris) 
+        << "Topology changed for " << test.name;
+      EXPECT_FALSE(geom.empty()) << "Geometry became empty for " << test.name;
+      
+      // Verify all points are valid (no NaN or inf)
+      for (const auto& pt : geom.points()) {
+        EXPECT_TRUE(std::isfinite(pt[0])) << "Invalid point in " << test.name;
+        EXPECT_TRUE(std::isfinite(pt[1])) << "Invalid point in " << test.name;
+        EXPECT_TRUE(std::isfinite(pt[2])) << "Invalid point in " << test.name;
+      }
+      
+      std::cout << std::setw(35) << std::left << test.name
+                << std::setw(12) << test.iterations
+                << std::setw(12) << geom.num_points()
+                << std::setw(12) << geom.num_tris()
+                << std::setw(15) << duration.count()
+                << std::setw(15) << "PASS" << std::endl;
+                
+    } catch (const std::exception& e) {
+      std::cout << std::setw(35) << std::left << test.name
+                << std::setw(12) << test.iterations
+                << std::setw(12) << "-"
+                << std::setw(12) << "-"
+                << std::setw(15) << "-"
+                << std::setw(15) << "FAIL" << std::endl;
+      std::cout << "  Error: " << e.what() << std::endl;
+      FAIL() << "Method " << test.name << " threw exception: " << e.what();
+    }
+  }
+  
+  std::cout << std::string(110, '-') << std::endl;
+  std::cout << "\nNote: Tetrahedral-only methods skipped for triangle mesh." << std::endl;
+  std::cout << "To test these methods, use a tetrahedral mesh from volume meshing." << std::endl;
 }
 
 #ifdef CVC_GEOMETRY_ENABLE_PROJECT

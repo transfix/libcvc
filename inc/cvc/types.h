@@ -139,6 +139,34 @@ namespace CVC_NAMESPACE
     PRIORITY_HIGH = 2,
     PRIORITY_CRITICAL = 3
   };
+
+  // Enum for selecting SDF algorithm implementation
+  enum sdf_algorithm
+  {
+    SDF_V1,  // Original SDFLibrary implementation (thread-safe, octree-based)
+    SDF_V2   // Alternative DistanceTransform implementation (brute-force)
+  };
+
+  // Enum for selecting isosurface extraction method
+  // These values match LBIE::Mesher::ExtractionMethod
+  enum extraction_method
+  {
+    DUALLIB = 0,        // Dual contouring library (default)
+    FASTCONTOURING = 1, // Fast contouring implementation
+    LIBISOCONTOUR = 2   // ISO contouring library
+  };
+
+  // Enum for selecting mesh quality improvement method
+  // These values match LBIE::Mesher::ImproveMethod
+  enum improvement_method
+  {
+    NO_IMPROVE = 0,     // No improvement (default for fast extraction)
+    GEO_FLOW = 1,       // Geometric flow smoothing
+    EDGE_CONTRACT = 2,  // Edge contraction
+    JOE_LIU = 3,        // Joe-Liu method
+    MINIMAL_VOL = 4,    // Minimal volume
+    OPTIMIZATION = 5    // Optimization-based improvement
+  };
 }
 
 #endif

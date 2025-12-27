@@ -24,6 +24,7 @@
 #define __CVC_ALGORITHM_H__
 
 #include <cvc/namespace.h>
+#include <cvc/types.h>
 #include <cvc/geometry.h>
 #include <cvc/volmagick.h>
 
@@ -38,22 +39,6 @@ namespace LBIE { class Mesher; }
 
 namespace CVC_NAMESPACE
 {
-  // Enum for selecting SDF algorithm implementation
-  enum sdf_algorithm
-  {
-    SDF_V1,  // Original SDFLibrary implementation (thread-safe, octree-based)
-    SDF_V2   // Alternative DistanceTransform implementation (brute-force)
-  };
-
-  // Enum for selecting isosurface extraction method
-  // These values match LBIE::Mesher::ExtractionMethod
-  enum extraction_method
-  {
-    DUALLIB = 0,        // Dual contouring library (default)
-    FASTCONTOURING = 1, // Fast contouring implementation
-    LIBISOCONTOUR = 2   // ISO contouring library
-  };
-
   // ---
   // sdf
   // ---

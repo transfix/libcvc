@@ -24,6 +24,7 @@
 #define __CVCGEOM_H__
 
 #include <cvc/namespace.h>
+#include <cvc/types.h>
 #include <cvc/bounding_box.h>
 
 #include <boost/cstdint.hpp>
@@ -164,7 +165,7 @@ namespace CVC_NAMESPACE
     geometry& smoothing(float delta = 0.1f, bool fix_boundary = false);
 
     //LBIE mesh quality improvement
-    geometry& quality_improve(int iterations, const std::string& improve_method = "geo_flow");
+    geometry& quality_improve(int iterations = 1, improvement_method method = GEO_FLOW);
 
     //read file directly into data structure
     geometry& read(const std::string& filename);

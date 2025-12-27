@@ -327,6 +327,7 @@ namespace
     bool dual_contouring = false;
     int improve_iterations = 1;
     LBIE::Mesher::ExtractionMethod extraction_method_enum = LBIE::Mesher::DUALLIB;
+    LBIE::Mesher::ImproveMethod improvement_method_enum = LBIE::Mesher::GEO_FLOW;
 
     get_arg(isovalue, argv, string("isovalue"));
     get_arg(isovalue_in, argv, string("isovalue_in"));
@@ -338,18 +339,26 @@ namespace
     get_arg(normaltype, argv, string("normaltype"));
     get_arg(extract_method, argv, string("extract_method"));
     get_arg(extraction_method_enum, argv, string("extraction_method_enum"));
+    get_arg(improvement_method_enum, argv, string("improvement_method_enum"));
     get_arg(dual_contouring, argv, string("dual_contouring"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
-    // If extract_method string is set, convert it to enum (for backward compatibility)
+    // Convert string to enum for backward compatibility
     if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
     else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
     else if(extract_method == "duallib") extraction_method_enum = LBIE::Mesher::DUALLIB;
 
+    if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
+    else if(improve_method == "geo_flow") improvement_method_enum = LBIE::Mesher::GEO_FLOW;
+    else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
+    else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
+    else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
+    else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
+
     //do the meshing - mesher now uses CVC volumes directly via compat layer
     LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					   isovalue, isovalue_in, err, err_in,
-					   meshtype, improve_method, normaltype,
+					   meshtype, improvement_method_enum, normaltype,
 					   extraction_method_enum, improve_iterations, dual_contouring);
     
     //convert the geoframe back to cvc::geometry and return it
@@ -367,13 +376,13 @@ namespace
   {
     using namespace std;
     using namespace CVC_NAMESPACE;
-    std::string improve_method = "geo_flow";
     int improve_iterations = 1;
+    LBIE::Mesher::ImproveMethod improvement_method_enum = LBIE::Mesher::GEO_FLOW;
 
-    get_arg(improve_method, argv, string("improve_method"));
+    get_arg(improvement_method_enum, argv, string("improvement_method_enum"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
-    return convert(LBIE::quality_improve(convert(geom), improve_method, improve_iterations));
+    return convert(LBIE::quality_improve(convert(geom), improvement_method_enum, improve_iterations));
   }
 }
 
@@ -492,12 +501,13 @@ namespace CVC_NAMESPACE
   //   Filters geometry via various improvement methods.  Defaults to using geometric flow.
   // ---- Change History ----
   // 01/10/2014 -- Joe R. -- Creation.
-  geometry& geometry::quality_improve(int iterations, const std::string& improve_method)
+  // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
+  geometry& geometry::quality_improve(int iterations, improvement_method method)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
-    args["improve_method"] = improve_method;
     args["improve_iterations"] = iterations;
+    args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(method);
     *this = cvc_mesher(*this, args);
     return *this;
   }

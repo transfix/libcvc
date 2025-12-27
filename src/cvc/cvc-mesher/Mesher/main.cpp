@@ -80,10 +80,25 @@ int main(int argc, char **argv)
       {
 	VolMagick::Volume vol;
 	VolMagick::readVolumeFile(vol,input_file);
+	
+	// Convert string arguments to enums
+	LBIE::Mesher::ExtractionMethod extraction_method_enum;
+	if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
+	else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
+	else extraction_method_enum = LBIE::Mesher::DUALLIB;
+	
+	LBIE::Mesher::ImproveMethod improvement_method_enum;
+	if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
+	else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
+	else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
+	else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
+	else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
+	else improvement_method_enum = LBIE::Mesher::GEO_FLOW;
+	
 	LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					       isovalue, isovalue_in, err, err_in,
-					       meshtype, improve_method, normaltype, extract_method,
-					       improve_iterations, dual_contouring, true);
+					       meshtype, improvement_method_enum, normaltype,
+					       extraction_method_enum, improve_iterations, dual_contouring, true);
 	g_frame.write_raw(output_file.c_str());
 	cout << "Wrote mesh: " << output_file << endl;
       }
@@ -91,7 +106,17 @@ int main(int argc, char **argv)
       {
 	LBIE::geoframe g_frame;
 	g_frame.read_raw(input_file.c_str());
-	g_frame = LBIE::quality_improve(g_frame, improve_method, improve_iterations, true);
+	
+	// Convert string argument to enum
+	LBIE::Mesher::ImproveMethod improvement_method_enum;
+	if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
+	else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
+	else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
+	else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
+	else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
+	else improvement_method_enum = LBIE::Mesher::GEO_FLOW;
+	
+	g_frame = LBIE::quality_improve(g_frame, improvement_method_enum, improve_iterations, true);
 	g_frame.write_raw(output_file.c_str()); //write it out using geoframe's I/O
       }
   }
