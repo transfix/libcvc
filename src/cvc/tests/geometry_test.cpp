@@ -3373,24 +3373,20 @@ TEST_F(GeometryTest, Tetrahedralize2IntervalMeshing) {
   std::cout << "  Vertices: " << interval_mesh.num_points() << std::endl;
   std::cout << "  Triangles: " << interval_mesh.num_tris() << std::endl;
   
-  // NOTE: The current implementation produces empty meshes even with properly configured
-  // dual isovalues. This could indicate:
-  //   1. The tet2 algorithm may have additional requirements beyond dual isovalues
-  //   2. The octree-based interval meshing may need specific grid/resolution conditions
-  //   3. The implementation may be incomplete or designed for different use cases
-  //
-  // The API infrastructure is in place:
-  //   - geometry tetrahedralize2(volume, outer_iso, inner_iso) ✓
-  //   - LBIE::Mesher.isovalue_in() support ✓  
-  //   - tetrahedralize_interval() implementation exists ✓
-  //
-  // Future work: Investigate the specific octree and grid conditions required for
-  // successful tet2 interval meshing, or consider if this feature needs completion.
+  // Verify the mesh was created successfully
+  EXPECT_GT(interval_mesh.num_points(), 0) << "Tet2 interval mesh should have vertices";
+  EXPECT_GT(interval_mesh.num_tris(), 0) << "Tet2 interval mesh should have triangles";
+  
+  // The tet2 interval mesher creates a volumetric mesh of the layer between two isosurfaces
+  // This is useful for modeling material layers, shells, or extracting volumetric regions
+  // Bug fixes:
+  //   - Fixed skip condition in traverse_qef_interval() (was backwards)
+  //   - Fixed infinite refinement bug (missing oct_depth check)
+  //   - Fixed tetrahedralize_interval() to handle intersection type ±3 (edge crosses entire interval)
   
   std::cout << "\nAPI Usage for Interval Meshing:" << std::endl;
   std::cout << "  geometry mesh = tetrahedralize2(volume, outer_iso, inner_iso);" << std::endl;
-  std::cout << "\nThis would theoretically create a tetrahedral mesh of the shell/layer" << std::endl;
-  std::cout << "between the two isosurfaces, useful for:" << std::endl;
+  std::cout << "\nCreates a tetrahedral mesh of the shell/layer between two isosurfaces:" << std::endl;
   std::cout << "  - Modeling material layers/shells" << std::endl;
   std::cout << "  - Dual contouring between surfaces" << std::endl;
   std::cout << "  - Volumetric region extraction" << std::endl;

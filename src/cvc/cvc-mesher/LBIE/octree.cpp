@@ -2016,8 +2016,10 @@ void Octree::traverse_qef_interval(float err_tol, float err_tol_in)
 			
 			//octcell2xyz(oc_id,x,y,z,level);
 			
-			//if (is_skipcell(oc_id)) {
-			if(minmax[oc_id].min > iso_val || minmax[oc_id].max < iso_val_in) {
+			// Skip cells completely outside interval [iso_val, iso_val_in]
+			// Original was: min > iso_val || max < iso_val_in (incorrect)
+			// Correct: skip if completely below iso_val OR completely above iso_val_in
+			if(minmax[oc_id].max < iso_val || minmax[oc_id].min > iso_val_in) {
 				continue;
 			//} else if (level <= 3 ||(get_err_grad(oc_id) > err_tol && level != oct_depth)) {
 			//} else if (level <= 3 ||(is_skipcell(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
@@ -2029,7 +2031,8 @@ void Octree::traverse_qef_interval(float err_tol, float err_tol_in)
 			*/
 			//} else if (level <= oct_depth-2) {
 			// hemoglobin_fat 129
-			} else if (level <= 5 ||(is_skipcell_interval(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
+			// FIX: Added level < oct_depth check to prevent infinite refinement
+			} else if ((level <= 5 && level < oct_depth) ||(is_skipcell_interval(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
 				//|| (level <=4 && is_skipcell_interval(oc_id) == 0)
 				|| (minmax[oc_id].max > iso_val_in &&  minmax[oc_id].min < iso_val_in && get_err_grad(oc_id) > err_tol_in && level != oct_depth)) {
 
