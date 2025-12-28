@@ -962,11 +962,10 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, 0);
   
   std::cout << "Tetrahedral mesh: " << tet_mesh.num_points() << " vertices, " 
-            << tet_mesh.num_tris() << " triangles (from " << tet_mesh.num_tris()/4 
-            << " tetrahedra)" << std::endl;
+            << tet_mesh.num_tets() << " tetrahedra" << std::endl;
   
-  // Verify it's actually a tetrahedral mesh (triangles should be divisible by 4)
-  ASSERT_EQ(tet_mesh.num_tris() % 4, 0) << "Invalid tetrahedral mesh";
+  // Verify it's actually a tetrahedral mesh
+  ASSERT_GT(tet_mesh.num_tets(), 0) << "Should have tetrahedra";
   
   // Test each improvement method on tetrahedral mesh
   struct MethodTest {
@@ -997,7 +996,7 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   for (const auto& test : methods) {
     geometry geom(tet_mesh);
     uint64_t original_points = geom.num_points();
-    uint64_t original_tris = geom.num_tris();
+    uint64_t original_tets = geom.num_tets();
     
     auto start = boost::chrono::high_resolution_clock::now();
     
@@ -1010,7 +1009,7 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
       // Verify topology is preserved
       EXPECT_EQ(geom.num_points(), original_points) 
         << "Topology changed for " << test.name;
-      EXPECT_EQ(geom.num_tris(), original_tris) 
+      EXPECT_EQ(geom.num_tets(), original_tets) 
         << "Topology changed for " << test.name;
       EXPECT_FALSE(geom.empty()) << "Geometry became empty for " << test.name;
       
@@ -3293,13 +3292,11 @@ TEST_F(GeometryTest, TetrahedralizeMeshExtraction) {
   // Extract tetrahedral mesh
   geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
   
-  // Verify mesh properties
+  // Verify mesh properties - NOW USING ACTUAL TETS!
   EXPECT_GT(tet_mesh.num_points(), 0) << "Tetrahedral mesh should have vertices";
-  EXPECT_GT(tet_mesh.num_tris(), 0) << "Tetrahedral mesh should have faces";
-  EXPECT_EQ(tet_mesh.num_tris() % 4, 0) << "Tetrahedra represented as 4 triangular faces";
+  EXPECT_GT(tet_mesh.num_tets(), 0) << "Tetrahedral mesh should have tets";
   
-  uint64_t num_tets = tet_mesh.num_tris() / 4;
-  std::cout << "Extracted " << num_tets << " tetrahedra with " 
+  std::cout << "Extracted " << tet_mesh.num_tets() << " tetrahedra with " 
             << tet_mesh.num_points() << " vertices" << std::endl;
   
   // Verify all vertices are valid
@@ -3361,10 +3358,9 @@ TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
       
       // Verify mesh properties
       EXPECT_GT(tet_mesh.num_points(), 0) << "Mesh should have vertices for " << test.name;
-      EXPECT_GT(tet_mesh.num_tris(), 0) << "Mesh should have faces for " << test.name;
-      EXPECT_EQ(tet_mesh.num_tris() % 4, 0) << "Invalid tetrahedral mesh for " << test.name;
+      EXPECT_GT(tet_mesh.num_tets(), 0) << "Mesh should have tets for " << test.name;
       
-      uint64_t num_tets = tet_mesh.num_tris() / 4;
+      uint64_t num_tets = tet_mesh.num_tets();
       
       // Verify all vertices are finite
       bool all_finite = true;
@@ -3412,13 +3408,10 @@ TEST_F(GeometryTest, HexahedralizeMeshExtraction) {
   
   // Verify mesh properties
   EXPECT_GT(hex_mesh.num_points(), 0) << "Hexahedral mesh should have vertices";
-  EXPECT_GT(hex_mesh.num_quads(), 0) << "Hexahedral mesh should have quads";
-  EXPECT_EQ(hex_mesh.num_quads() % 6, 0) << "Hexahedra represented as 6 quad faces";
+  EXPECT_GT(hex_mesh.num_hexs(), 0) << "Hexahedral mesh should have hexahedra";
   
-  uint64_t num_hexas = hex_mesh.num_quads() / 6;
-  std::cout << "Extracted " << num_hexas << " hexahedra with " 
-            << hex_mesh.num_points() << " vertices and "
-            << hex_mesh.num_quads() << " quads" << std::endl;
+  std::cout << "Extracted " << hex_mesh.num_hexs() << " hexahedra with " 
+            << hex_mesh.num_points() << " vertices" << std::endl;
   
   // Verify all vertices are valid
   for (const auto& pt : hex_mesh.points()) {
@@ -3495,11 +3488,11 @@ TEST_F(GeometryTest, Tetrahedralize2IntervalMeshing) {
   
   std::cout << "Extracted tet2 interval mesh:" << std::endl;
   std::cout << "  Vertices: " << interval_mesh.num_points() << std::endl;
-  std::cout << "  Triangles: " << interval_mesh.num_tris() << std::endl;
+  std::cout << "  Tetrahedra: " << interval_mesh.num_tets() << std::endl;
   
   // Verify the mesh was created successfully
   EXPECT_GT(interval_mesh.num_points(), 0) << "Tet2 interval mesh should have vertices";
-  EXPECT_GT(interval_mesh.num_tris(), 0) << "Tet2 interval mesh should have triangles";
+  EXPECT_GT(interval_mesh.num_tets(), 0) << "Tet2 interval mesh should have tetrahedra";
   
   // The tet2 interval mesher creates a volumetric mesh of the layer between two isosurfaces
   // This is useful for modeling material layers, shells, or extracting volumetric regions
@@ -3633,13 +3626,13 @@ TEST_F(GeometryTest, VolumetricMeshComparisonTest) {
             << std::setw(15) << tet_mesh.num_points()
             << std::setw(15) << tet_mesh.num_tris()
             << std::setw(15) << tet_mesh.num_quads()
-            << std::setw(20) << (tet_mesh.num_tris() / 4) + " tets" << std::endl;
+            << std::setw(20) << tet_mesh.num_tets() << " tets" << std::endl;
   
   std::cout << std::setw(20) << std::left << "Hexahedral"
             << std::setw(15) << hex_mesh.num_points()
             << std::setw(15) << hex_mesh.num_tris()
             << std::setw(15) << hex_mesh.num_quads()
-            << std::setw(20) << (hex_mesh.num_quads() / 6) + " hexas" << std::endl;
+            << std::setw(20) << hex_mesh.num_hexs() << " hexas" << std::endl;
   
   std::cout << std::setw(20) << std::left << "Tet2 (dual)"
             << std::setw(15) << tet2_mesh.num_points()
@@ -4132,6 +4125,697 @@ TEST_F(GeometryTest, VolumetricMeshQualityImprove) {
   // Note: Mesh representation (surface vs volumetric) maintained through quality_improve
   // Internal conversion handles volumetric meshes transparently
 }
+
+// ----------------
+// Week 3 Option 1: Extract Surface from Volumetric Meshes
+// ----------------
+
+TEST(AlgorithmTest, ExtractSurfaceFromTetMesh)
+{
+  // Create a tetrahedral mesh from a simple volume
+  dimension dim(10, 10, 10);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere SDF
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry tet_mesh = tetrahedralize(vol, 0.0);
+  
+  // Extract surface from tetrahedral mesh
+  geometry surface = extract_surface(tet_mesh);
+  
+  // Surface should have vertices
+  EXPECT_GT(surface.num_points(), 0);
+  
+  // Surface should have triangles (boundary of tets)
+  EXPECT_GT(surface.num_tris(), 0);
+  
+  // Surface should NOT have tets (it's the boundary)
+  EXPECT_EQ(surface.num_tets(), 0);
+  
+  // Vertex data should be preserved
+  EXPECT_EQ(surface.num_points(), tet_mesh.num_points());
+}
+
+TEST(AlgorithmTest, ExtractSurfaceFromHexMesh)
+{
+  // Create a hexahedral mesh from a simple volume
+  dimension dim(10, 10, 10);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere SDF
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry hex_mesh = hexahedralize(vol, 0.0);
+  
+  // Extract surface from hexahedral mesh
+  geometry surface = extract_surface(hex_mesh);
+  
+  // Surface should have vertices
+  EXPECT_GT(surface.num_points(), 0);
+  
+  // Surface should have quads (boundary of hexs)
+  EXPECT_GT(surface.num_quads(), 0);
+  
+  // Surface should NOT have hexs (it's the boundary)
+  EXPECT_EQ(surface.num_hexs(), 0);
+  
+  // Vertex data should be preserved
+  EXPECT_EQ(surface.num_points(), hex_mesh.num_points());
+}
+
+TEST(AlgorithmTest, ExtractSurfaceFromSurfaceMesh)
+{
+  // Create a simple surface mesh (already a surface)
+  dimension dim(10, 10, 10);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere SDF
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry surface_mesh = iso(vol, 0.0);
+  
+  // Extract surface from surface mesh (should just copy)
+  geometry extracted = extract_surface(surface_mesh);
+  
+  // Should have same structure as original
+  EXPECT_EQ(extracted.num_points(), surface_mesh.num_points());
+  EXPECT_EQ(extracted.num_tris(), surface_mesh.num_tris());
+  EXPECT_EQ(extracted.num_quads(), surface_mesh.num_quads());
+  EXPECT_EQ(extracted.num_tets(), 0);
+  EXPECT_EQ(extracted.num_hexs(), 0);
+}
+
+// ----------------
+// Week 3 Option 2: Property Interpolation for Volumetric Meshes
+// ----------------
+
+TEST(AlgorithmTest, TetBarycentricCoordinates)
+{
+  // Create a simple tetrahedron
+  geometry::point_t v0 = {{0.0, 0.0, 0.0}};
+  geometry::point_t v1 = {{1.0, 0.0, 0.0}};
+  geometry::point_t v2 = {{0.0, 1.0, 0.0}};
+  geometry::point_t v3 = {{0.0, 0.0, 1.0}};
+  
+  // Test barycentric coordinates at vertices
+  auto w0 = tet_barycentric(v0, v0, v1, v2, v3);
+  EXPECT_NEAR(w0[0], 1.0, 1e-6);
+  EXPECT_NEAR(w0[1], 0.0, 1e-6);
+  EXPECT_NEAR(w0[2], 0.0, 1e-6);
+  EXPECT_NEAR(w0[3], 0.0, 1e-6);
+  
+  // Test at center (should be ~0.25 each)
+  geometry::point_t center = {{0.25, 0.25, 0.25}};
+  auto wc = tet_barycentric(center, v0, v1, v2, v3);
+  EXPECT_NEAR(wc[0] + wc[1] + wc[2] + wc[3], 1.0, 1e-6);  // Should sum to 1
+  EXPECT_NEAR(wc[0], 0.25, 0.1);  // Approximately equal for this tet
+}
+
+TEST(AlgorithmTest, PropertyInterpolationInTet)
+{
+  // Create a simple tet mesh with one tetrahedron
+  geometry geom;
+  
+  // Vertices
+  geom.points().push_back({{0.0, 0.0, 0.0}});  // v0
+  geom.points().push_back({{1.0, 0.0, 0.0}});  // v1
+  geom.points().push_back({{0.0, 1.0, 0.0}});  // v2
+  geom.points().push_back({{0.0, 0.0, 1.0}});  // v3
+  
+  // Tetrahedron
+  geom.tets().push_back({{0, 1, 2, 3}});
+  
+  // Property values at vertices (linear function: f(x,y,z) = x + y + z)
+  std::vector<double> props = {0.0, 1.0, 1.0, 1.0};
+  
+  // Test interpolation at center
+  geometry::point_t center = {{0.25, 0.25, 0.25}};
+  double value = interpolate_in_tet(center, geom.const_tets()[0], 
+                                    geom.points(), props);
+  
+  // Expected: linear interpolation should give 0.25+0.25+0.25 = 0.75
+  EXPECT_NEAR(value, 0.75, 0.1);
+}
+
+TEST(AlgorithmTest, PropertyInterpolationInHex)
+{
+  // Create a simple hex (unit cube)
+  geometry geom;
+  
+  // Vertices of unit cube
+  geom.points().push_back({{0.0, 0.0, 0.0}});  // 0
+  geom.points().push_back({{1.0, 0.0, 0.0}});  // 1
+  geom.points().push_back({{1.0, 1.0, 0.0}});  // 2
+  geom.points().push_back({{0.0, 1.0, 0.0}});  // 3
+  geom.points().push_back({{0.0, 0.0, 1.0}});  // 4
+  geom.points().push_back({{1.0, 0.0, 1.0}});  // 5
+  geom.points().push_back({{1.0, 1.0, 1.0}});  // 6
+  geom.points().push_back({{0.0, 1.0, 1.0}});  // 7
+  
+  // Hexahedron
+  geom.hexs().push_back({{0, 1, 2, 3, 4, 5, 6, 7}});
+  
+  // Property values at vertices (linear function: f(x,y,z) = x + y + z)
+  std::vector<double> props = {0.0, 1.0, 2.0, 1.0, 1.0, 2.0, 3.0, 2.0};
+  
+  // Test interpolation at center
+  geometry::point_t center = {{0.5, 0.5, 0.5}};
+  double value = interpolate_in_hex(center, geom.const_hexs()[0],
+                                    geom.points(), props);
+  
+  // Expected: average of all 8 values = (0+1+2+1+1+2+3+2)/8 = 1.5
+  EXPECT_NEAR(value, 1.5, 0.2);
+}
+
+TEST(AlgorithmTest, VolumetricMeshWithPropertyInterpolation)
+{
+  // Create a volume with both SDF and property data
+  dimension dim(10, 10, 10);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume sdf_vol(dim, Float, bbox);
+  volume prop_vol(dim, Float, bbox);
+  
+  // Create a sphere SDF and linear property field
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        
+        // SDF
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        sdf_vol(i, j, k, dist);
+        
+        // Property: simple linear field
+        prop_vol(i, j, k, x + y + z);
+      }
+    }
+  }
+  
+  // Create tet mesh with property interpolation
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, 0, prop_vol);
+  
+  // Mesh should have vertices and property values
+  EXPECT_GT(tet_mesh.num_points(), 0);
+  EXPECT_GT(tet_mesh.functions().size(), 0);
+  
+  // Note: Due to LBIE encoding, tets may be encoded as triangles
+  // The mesh will have either tets (decoded) or triangles (encoded surface)
+  bool has_elements = (tet_mesh.num_tets() > 0) || (tet_mesh.num_tris() > 0);
+  EXPECT_TRUE(has_elements);
+  
+  // Test interpolation if we have tets
+  if(tet_mesh.num_tets() > 0 && tet_mesh.functions().size() > 0) {
+    const auto& tet = tet_mesh.const_tets()[0];
+    geometry::point_t center = {{0.0, 0.0, 0.0}};
+    
+    // Compute center of first tet
+    for(int i = 0; i < 4; ++i) {
+      center[0] += tet_mesh.points()[tet[i]][0];
+      center[1] += tet_mesh.points()[tet[i]][1];
+      center[2] += tet_mesh.points()[tet[i]][2];
+    }
+    center[0] /= 4.0;
+    center[1] /= 4.0;
+    center[2] /= 4.0;
+    
+    // functions() is std::vector<double> - one value per vertex
+    double value = interpolate_in_tet(center, tet, tet_mesh.points(), 
+                                      tet_mesh.functions());
+    
+    // Value should be reasonable (between 0 and 3 for our test field)
+    EXPECT_GE(value, 0.0);
+    EXPECT_LE(value, 3.0);
+  }
+}
+
+// ----------------
+// Week 3 Option 3: Volumetric Mesh Quality Metrics
+// ----------------
+
+TEST(AlgorithmTest, TetVolumeMetric)
+{
+  // Create a simple regular tetrahedron
+  geometry::point_t v0 = {{0.0, 0.0, 0.0}};
+  geometry::point_t v1 = {{1.0, 0.0, 0.0}};
+  geometry::point_t v2 = {{0.5, std::sqrt(3.0)/2.0, 0.0}};
+  geometry::point_t v3 = {{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}};
+  
+  double vol = tet_volume(v0, v1, v2, v3);
+  
+  // Regular tet with edge length 1 has volume ~0.118
+  EXPECT_GT(vol, 0.0);
+  EXPECT_NEAR(vol, 0.118, 0.01);
+}
+
+TEST(AlgorithmTest, TetAspectRatioMetric)
+{
+  // Equilateral tetrahedron
+  geometry::point_t v0 = {{0.0, 0.0, 0.0}};
+  geometry::point_t v1 = {{1.0, 0.0, 0.0}};
+  geometry::point_t v2 = {{0.5, std::sqrt(3.0)/2.0, 0.0}};
+  geometry::point_t v3 = {{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}};
+  
+  double ar = tet_aspect_ratio(v0, v1, v2, v3);
+  
+  // Equilateral tet should have aspect ratio close to 1 (normalized)
+  EXPECT_GT(ar, 0.5);
+  EXPECT_LT(ar, 2.0);
+  
+  // Degenerate tet (flat)
+  geometry::point_t v3_bad = {{0.5, std::sqrt(3.0)/6.0, 0.0001}};
+  double ar_bad = tet_aspect_ratio(v0, v1, v2, v3_bad);
+  
+  // Should have much worse aspect ratio
+  EXPECT_GT(ar_bad, ar);
+}
+
+TEST(AlgorithmTest, TetMinDihedralAngle)
+{
+  // Regular tetrahedron
+  geometry::point_t v0 = {{0.0, 0.0, 0.0}};
+  geometry::point_t v1 = {{1.0, 0.0, 0.0}};
+  geometry::point_t v2 = {{0.5, std::sqrt(3.0)/2.0, 0.0}};
+  geometry::point_t v3 = {{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}};
+  
+  double min_angle = tet_min_dihedral_angle(v0, v1, v2, v3);
+  
+  // Regular tet has dihedral angles of ~70.5 degrees
+  EXPECT_GT(min_angle, 60.0);
+  EXPECT_LT(min_angle, 80.0);
+}
+
+TEST(AlgorithmTest, HexVolumeMetric)
+{
+  // Unit cube
+  geometry::point_t vertices[8] = {
+    {{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{1.0, 1.0, 0.0}}, {{0.0, 1.0, 0.0}},
+    {{0.0, 0.0, 1.0}}, {{1.0, 0.0, 1.0}}, {{1.0, 1.0, 1.0}}, {{0.0, 1.0, 1.0}}
+  };
+  
+  double vol = hex_volume(vertices);
+  
+  // Unit cube should have volume 1
+  EXPECT_NEAR(vol, 1.0, 0.01);
+}
+
+TEST(AlgorithmTest, HexJacobianMetric)
+{
+  // Unit cube (should have positive Jacobian)
+  geometry::point_t vertices[8] = {
+    {{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{1.0, 1.0, 0.0}}, {{0.0, 1.0, 0.0}},
+    {{0.0, 0.0, 1.0}}, {{1.0, 0.0, 1.0}}, {{1.0, 1.0, 1.0}}, {{0.0, 1.0, 1.0}}
+  };
+  
+  double jac = hex_jacobian(vertices);
+  
+  // Should be positive for valid hex
+  EXPECT_GT(jac, 0.0);
+  
+  // Scaled Jacobian should be close to 1 for perfect cube
+  double scaled_jac = hex_scaled_jacobian(vertices);
+  EXPECT_GT(scaled_jac, 0.0);
+  EXPECT_LE(scaled_jac, 1.0);
+}
+
+TEST(AlgorithmTest, TetMeshQualityStatistics)
+{
+  // Create a simple tet mesh
+  geometry geom;
+  
+  // Add vertices for two tets
+  geom.points().push_back({{0.0, 0.0, 0.0}});
+  geom.points().push_back({{1.0, 0.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/2.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, -std::sqrt(6.0)/3.0}});
+  
+  // Add two tets
+  geom.tets().push_back({{0, 1, 2, 3}});
+  geom.tets().push_back({{0, 1, 2, 4}});
+  
+  // Compute quality statistics
+  auto stats = compute_tet_quality_stats(geom.const_tets(), geom.points(), TET_VOLUME);
+  
+  EXPECT_GT(stats.mean, 0.0);
+  EXPECT_GE(stats.max, stats.min);
+  EXPECT_GE(stats.std_dev, 0.0);
+  
+  // Aspect ratio stats
+  auto ar_stats = compute_tet_quality_stats(geom.const_tets(), geom.points(), TET_ASPECT_RATIO);
+  EXPECT_GT(ar_stats.mean, 0.0);
+}
+
+// ----------------
+// Week 3 Option 4: Advanced Mesh Utilities
+// ----------------
+
+TEST(AlgorithmTest, FindTetsContainingPoint)
+{
+  // Create a simple tet mesh
+  geometry geom;
+  geom.points().push_back({{0.0, 0.0, 0.0}});
+  geom.points().push_back({{1.0, 0.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/2.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}});
+  geom.tets().push_back({{0, 1, 2, 3}});
+  
+  // Point inside tet (center)
+  geometry::point_t center = {{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/12.0}};
+  auto tets_inside = find_tets_containing_point(center, geom.const_tets(), geom.points());
+  EXPECT_EQ(tets_inside.size(), 1);
+  
+  // Point outside tet
+  geometry::point_t outside = {{10.0, 10.0, 10.0}};
+  auto tets_outside = find_tets_containing_point(outside, geom.const_tets(), geom.points());
+  EXPECT_EQ(tets_outside.size(), 0);
+}
+
+TEST(AlgorithmTest, ComputeMeshBounds)
+{
+  // Create a simple mesh
+  geometry geom;
+  geom.points().push_back({{-1.0, -2.0, -3.0}});
+  geom.points().push_back({{4.0, 5.0, 6.0}});
+  geom.points().push_back({{2.0, 1.0, 0.0}});
+  
+  auto bounds = compute_mesh_bounds(geom);
+  
+  EXPECT_NEAR(bounds[0], -1.0, 1e-10);  // min_x
+  EXPECT_NEAR(bounds[1], -2.0, 1e-10);  // min_y
+  EXPECT_NEAR(bounds[2], -3.0, 1e-10);  // min_z
+  EXPECT_NEAR(bounds[3], 4.0, 1e-10);   // max_x
+  EXPECT_NEAR(bounds[4], 5.0, 1e-10);   // max_y
+  EXPECT_NEAR(bounds[5], 6.0, 1e-10);   // max_z
+}
+
+TEST(AlgorithmTest, FilterTetsByQuality)
+{
+  // Create mesh with good and bad tets
+  geometry geom;
+  
+  // Good tet (equilateral)
+  geom.points().push_back({{0.0, 0.0, 0.0}});
+  geom.points().push_back({{1.0, 0.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/2.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}});
+  geom.tets().push_back({{0, 1, 2, 3}});
+  
+  // Bad tet (nearly flat)
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, 0.001}});
+  geom.tets().push_back({{0, 1, 2, 4}});
+  
+  // Filter by aspect ratio (lower threshold keeps only good tets)
+  auto good_tets = filter_tets_by_quality(geom.const_tets(), geom.points(), 5.0, TET_ASPECT_RATIO);
+  
+  // Should filter out the bad tet
+  EXPECT_EQ(good_tets.size(), 1);
+  EXPECT_EQ(good_tets[0], 0);  // First tet should be the good one
+}
+
+TEST(AlgorithmTest, ExtractQualityElements)
+{
+  // Create mesh with mixed quality
+  geometry geom;
+  
+  // Add vertices for two tets
+  geom.points().push_back({{0.0, 0.0, 0.0}});
+  geom.points().push_back({{1.0, 0.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/2.0, 0.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, std::sqrt(6.0)/3.0}});
+  geom.points().push_back({{0.5, std::sqrt(3.0)/6.0, 0.001}});  // Bad tet vertex
+  
+  geom.tets().push_back({{0, 1, 2, 3}});  // Good tet
+  geom.tets().push_back({{0, 1, 2, 4}});  // Bad tet
+  
+  // Extract only high-quality elements
+  geometry quality_mesh = extract_quality_elements(geom, 5.0, TET_ASPECT_RATIO);
+  
+  // Should have only one tet
+  EXPECT_EQ(quality_mesh.num_tets(), 1);
+  EXPECT_EQ(quality_mesh.num_points(), geom.num_points());  // All vertices preserved
+}
+
+// ----------------
+// Performance Tests for Point Location on Large Meshes
+// ----------------
+
+TEST(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh)
+{
+  // Create high-resolution SDF from bunny mesh
+  geometry bunny = read_geometry("test.bunny");  // Uses bunny_io to load embedded data
+  
+  std::cout << "Creating high-resolution SDF from Stanford Bunny..." << std::endl;
+  std::cout << "  Bunny has " << bunny.num_points() << " vertices, " 
+            << bunny.num_tris() << " triangles" << std::endl;
+  
+  // Create SDF with reasonable resolution for large tet mesh
+  dimension dim(64, 64, 64);  // Reasonable resolution for performance testing
+  volume bunny_vol = sdf(bunny, dim, bunny.extents(), SDF_V2);
+  
+  std::cout << "  SDF volume: " << dim.xdim << "x" << dim.ydim << "x" << dim.zdim << std::endl;
+  
+  // Tetrahedralize to create large mesh
+  std::cout << "Tetrahedralizing..." << std::endl;
+  auto start_tet = std::chrono::high_resolution_clock::now();
+  geometry tet_mesh = tetrahedralize(bunny_vol, 0.0);
+  auto end_tet = std::chrono::high_resolution_clock::now();
+  auto tet_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_tet - start_tet).count();
+  
+  std::cout << "  Tetrahedralization: " << tet_time << " ms" << std::endl;
+  std::cout << "  Tet mesh has " << tet_mesh.num_tets() << " tetrahedra, " 
+            << tet_mesh.num_points() << " vertices" << std::endl;
+  
+  // Test point location performance at various points
+  std::vector<geometry::point_t> query_points;
+  
+  // Sample points inside the bunny's bounding box
+  auto bbox = bunny.extents();
+  for(int i = 0; i < 100; ++i) {
+    double t = i / 99.0;
+    geometry::point_t p = {{
+      bbox.minx + t * (bbox.maxx - bbox.minx),
+      bbox.miny + 0.5 * (bbox.maxy - bbox.miny),
+      bbox.minz + 0.5 * (bbox.maxz - bbox.minz)
+    }};
+    query_points.push_back(p);
+  }
+  
+  // Time point location queries
+  std::cout << "Testing point location with " << query_points.size() << " queries..." << std::endl;
+  auto start_query = std::chrono::high_resolution_clock::now();
+  
+  size_t total_found = 0;
+  for(const auto& p : query_points) {
+    auto containing = find_tets_containing_point(p, tet_mesh.const_tets(), tet_mesh.points());
+    total_found += containing.size();
+  }
+  
+  auto end_query = std::chrono::high_resolution_clock::now();
+  auto query_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_query - start_query).count();
+  
+  std::cout << "  Point location queries: " << query_time << " ms total" << std::endl;
+  std::cout << "  Average per query: " << (query_time / (double)query_points.size()) << " ms" << std::endl;
+  std::cout << "  Total tets found: " << total_found << std::endl;
+  
+  // Performance expectations
+  if(tet_mesh.num_tets() > 1000) {
+    std::cout << "  Using pre-computed bbox acceleration (>1000 tets)" << std::endl;
+  }
+#ifndef DISABLE_CGAL
+  if(tet_mesh.num_tets() > 10000) {
+    std::cout << "  Using CGAL AABB tree acceleration (>10000 tets)" << std::endl;
+  }
+#endif
+  
+  // Just verify it found some tets (actual performance varies by hardware)
+  EXPECT_GT(total_found, 0);
+}
+
+TEST(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh)
+{
+  // Create high-resolution SDF from bunny mesh
+  geometry bunny = read_geometry("test.bunny");
+  
+  std::cout << "Creating hex mesh from Stanford Bunny SDF..." << std::endl;
+  std::cout << "  Bunny has " << bunny.num_points() << " vertices, " 
+            << bunny.num_tris() << " triangles" << std::endl;
+  
+  // Create SDF with medium-high resolution (hex meshes are typically coarser)
+  dimension dim(64, 64, 64);
+  volume bunny_vol = sdf(bunny, dim, bunny.extents(), SDF_V2);
+  
+  std::cout << "  SDF volume: " << dim.xdim << "x" << dim.ydim << "x" << dim.zdim << std::endl;
+  
+  // Create hex mesh from SDF
+  std::cout << "Creating hex mesh..." << std::endl;
+  auto start_hex = std::chrono::high_resolution_clock::now();
+  
+  geometry hex_mesh;
+  // Extract hex mesh from volume grid where SDF < 0 (inside)
+  size_t hex_count = 0;
+  for(size_t k = 0; k < dim.zdim - 1; ++k) {
+    for(size_t j = 0; j < dim.ydim - 1; ++j) {
+      for(size_t i = 0; i < dim.xdim - 1; ++i) {
+        // Check if this voxel is inside the surface (SDF < 0)
+        if(bunny_vol(i, j, k) < 0.0) {  // Inside surface
+          // Add vertices for this hex if not already added
+          std::vector<size_t> hex_verts;
+          
+          for(size_t dk = 0; dk <= 1; ++dk) {
+            for(size_t dj = 0; dj <= 1; ++dj) {
+              for(size_t di = 0; di <= 1; ++di) {
+                size_t vi = i + di;
+                size_t vj = j + dj;
+                size_t vk = k + dk;
+                size_t vert_idx = vi + vj*dim.xdim + vk*dim.xdim*dim.ydim;
+                
+                // Compute world coordinates
+                double x = bunny_vol.boundingBox().minx + vi * bunny_vol.XSpan();
+                double y = bunny_vol.boundingBox().miny + vj * bunny_vol.YSpan();
+                double z = bunny_vol.boundingBox().minz + vk * bunny_vol.ZSpan();
+                
+                // Add vertex (avoiding duplicates by using index as marker)
+                while(hex_mesh.num_points() <= vert_idx) {
+                  hex_mesh.points().push_back({{0, 0, 0}});
+                }
+                hex_mesh.points()[vert_idx] = {{x, y, z}};
+                hex_verts.push_back(vert_idx);
+              }
+            }
+          }
+          
+          // Add hex with correct winding
+          geometry::hex_t hex = {{
+            hex_verts[0], hex_verts[1], hex_verts[3], hex_verts[2],
+            hex_verts[4], hex_verts[5], hex_verts[7], hex_verts[6]
+          }};
+          hex_mesh.hexs().push_back(hex);
+          hex_count++;
+        }
+      }
+    }
+  }
+  
+  auto end_hex = std::chrono::high_resolution_clock::now();
+  auto hex_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_hex - start_hex).count();
+  
+  std::cout << "  Hex mesh creation: " << hex_time << " ms" << std::endl;
+  std::cout << "  Hex mesh has " << hex_mesh.num_hexs() << " hexahedra, " 
+            << hex_mesh.num_points() << " vertices" << std::endl;
+  
+  // Test point location performance
+  std::vector<geometry::point_t> query_points;
+  
+  auto bbox = bunny.extents();
+  for(int i = 0; i < 100; ++i) {
+    double t = i / 99.0;
+    geometry::point_t p = {{
+      bbox.minx + t * (bbox.maxx - bbox.minx),
+      bbox.miny + 0.5 * (bbox.maxy - bbox.miny),
+      bbox.minz + 0.5 * (bbox.maxz - bbox.minz)
+    }};
+    query_points.push_back(p);
+  }
+  
+  std::cout << "Testing hex point location with " << query_points.size() << " queries..." << std::endl;
+  auto start_query = std::chrono::high_resolution_clock::now();
+  
+  size_t total_found = 0;
+  for(const auto& p : query_points) {
+    auto containing = find_hexs_containing_point(p, hex_mesh.const_hexs(), hex_mesh.points());
+    total_found += containing.size();
+  }
+  
+  auto end_query = std::chrono::high_resolution_clock::now();
+  auto query_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_query - start_query).count();
+  
+  std::cout << "  Point location queries: " << query_time << " ms total" << std::endl;
+  std::cout << "  Average per query: " << (query_time / (double)query_points.size()) << " ms" << std::endl;
+  std::cout << "  Total hexs found: " << total_found << std::endl;
+  
+  if(hex_mesh.num_hexs() > 1000) {
+    std::cout << "  Using pre-computed bbox acceleration (>1000 hexs)" << std::endl;
+  }
+#ifndef DISABLE_CGAL
+  if(hex_mesh.num_hexs() > 10000) {
+    std::cout << "  Using CGAL AABB tree acceleration (>10000 hexs)" << std::endl;
+  }
+#endif
+  
+  EXPECT_GT(hex_mesh.num_hexs(), 0);  // Should have created some hexs
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -179,6 +179,21 @@ namespace CVC_NAMESPACE
     DUAL_SURFACE = 4,   // Dual surface mesh
     TETRAHEDRAL2 = 5    // Alternative tetrahedral mesh
   };
+
+  // Enum for selecting quality metric type for volumetric meshes
+  // Used for quality analysis, filtering, and element extraction
+  enum quality_metric
+  {
+    // Tetrahedral mesh metrics
+    TET_VOLUME = 0,         // Volume of tetrahedron
+    TET_ASPECT_RATIO = 1,   // Aspect ratio (lower is better)
+    TET_MIN_ANGLE = 2,      // Minimum dihedral angle (higher is better)
+    
+    // Hexahedral mesh metrics
+    HEX_VOLUME = 3,         // Volume of hexahedron
+    HEX_JACOBIAN = 4,       // Jacobian determinant (positive is valid)
+    HEX_SCALED_JACOBIAN = 5 // Scaled Jacobian quality [-1, 1]
+  };
 }
 
 #endif

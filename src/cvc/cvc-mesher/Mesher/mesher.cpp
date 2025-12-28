@@ -82,7 +82,10 @@ namespace LBIE
       mesher.interpolateProperties(propertyVol.get());
     }
     
-    return mesher.mesh();
+    geoframe result = mesher.mesh();
+    // BUGFIX: Ensure mesh_type is preserved (sometimes gets cleared)
+    result.mesh_type = meshtype;
+    return result;
   }
 
   // ---------------
@@ -108,6 +111,9 @@ namespace LBIE
     mesher.improveMethod(improve_method);
     mesher.mesh(g_frame);
     mesher.qualityImprove(improve_iterations);
-    return mesher.mesh();
+    geoframe result = mesher.mesh();
+    // BUGFIX: Preserve mesh_type through quality improvement
+    result.mesh_type = g_frame.mesh_type;
+    return result;
   }
 }

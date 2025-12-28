@@ -264,6 +264,160 @@ namespace CVC_NAMESPACE
   // Used when converting geometry hexs to geoframe format
   geometry::quads_t encode_quads_from_hexs(const geometry::hexs_t& hexs);
   
+  // ----------------------------
+  // Surface Extraction Utilities
+  // ----------------------------
+  // Purpose:
+  //   Extract surface representation from volumetric meshes.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 1).
+  
+  // Extract surface from a geometry (works for both surface and volumetric meshes)
+  // Returns a new geometry containing only the boundary surface
+  // For surface meshes (tris/quads), returns a copy
+  // For volumetric meshes (tets/hexs), extracts boundary faces
+  geometry extract_surface(const geometry& geom);
+  
+  // ---------------------------------------
+  // Volumetric Property Interpolation (Week 3 Option 2)
+  // ---------------------------------------
+  // Purpose:
+  //   Interpolate property values within volumetric elements using barycentric coordinates.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 2).
+  
+  // Compute barycentric coordinates for a point within a tetrahedron
+  // Returns 4 weights (one per vertex) that sum to 1.0
+  // If point is outside tet, weights may be negative
+  std::array<double, 4> tet_barycentric(const geometry::point_t& p,
+                                        const geometry::point_t& v0,
+                                        const geometry::point_t& v1,
+                                        const geometry::point_t& v2,
+                                        const geometry::point_t& v3);
+  
+  // Compute trilinear coordinates for a point within a hexahedron
+  // Returns 8 weights (one per vertex) for trilinear interpolation
+  // Uses parametric coordinates (r,s,t) in [-1,1]^3
+  std::array<double, 8> hex_trilinear(const geometry::point_t& p,
+                                      const geometry::point_t vertices[8]);
+  
+  // Interpolate property value at a point within a tetrahedron
+  // Uses barycentric interpolation of vertex property values
+  double interpolate_in_tet(const geometry::point_t& p,
+                           const geometry::tet_t& tet,
+                           const geometry::points_t& vertices,
+                           const std::vector<double>& vertex_properties);
+  
+  // Interpolate property value at a point within a hexahedron
+  // Uses trilinear interpolation of vertex property values  
+  double interpolate_in_hex(const geometry::point_t& p,
+                           const geometry::hex_t& hex,
+                           const geometry::points_t& vertices,
+                           const std::vector<double>& vertex_properties);
+  
+  // ---------------------------------------
+  // Volumetric Mesh Quality Metrics (Week 3 Option 3)
+  // ---------------------------------------
+  // Purpose:
+  //   Compute quality metrics for volumetric mesh elements.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
+  
+  // Compute volume of a tetrahedron
+  // Returns signed volume (positive if vertices are ordered correctly)
+  double tet_volume(const geometry::point_t& v0,
+                   const geometry::point_t& v1,
+                   const geometry::point_t& v2,
+                   const geometry::point_t& v3);
+  
+  // Compute aspect ratio of a tetrahedron
+  // Returns ratio of longest edge to shortest altitude
+  // Lower values indicate better quality (equilateral tet has ratio ~2.04)
+  double tet_aspect_ratio(const geometry::point_t& v0,
+                         const geometry::point_t& v1,
+                         const geometry::point_t& v2,
+                         const geometry::point_t& v3);
+  
+  // Compute minimum dihedral angle of a tetrahedron (in degrees)
+  // Quality measure: good tets have angles away from 0° and 180°
+  double tet_min_dihedral_angle(const geometry::point_t& v0,
+                                const geometry::point_t& v1,
+                                const geometry::point_t& v2,
+                                const geometry::point_t& v3);
+  
+  // Compute volume of a hexahedron
+  // Uses decomposition into tetrahedra
+  double hex_volume(const geometry::point_t vertices[8]);
+  
+  // Compute Jacobian determinant at center of hexahedron
+  // Positive values indicate valid element
+  // Values close to zero or negative indicate distorted/inverted elements
+  double hex_jacobian(const geometry::point_t vertices[8]);
+  
+  // Compute scaled Jacobian quality metric for hexahedron
+  // Range: [-1, 1], where 1 = perfect cube, 0 = degenerate
+  double hex_scaled_jacobian(const geometry::point_t vertices[8]);
+  
+  // Compute quality statistics for all tets in a mesh
+  // Returns {min, max, mean, std_dev} for specified metric
+  struct quality_stats {
+    double min;
+    double max;
+    double mean;
+    double std_dev;
+  };
+  
+  quality_stats compute_tet_quality_stats(const geometry::tets_t& tets,
+                                          const geometry::points_t& vertices,
+                                          quality_metric metric = TET_ASPECT_RATIO);
+  
+  quality_stats compute_hex_quality_stats(const geometry::hexs_t& hexs,
+                                          const geometry::points_t& vertices,
+                                          quality_metric metric = HEX_SCALED_JACOBIAN);
+  
+  // ---------------------------------------
+  // Advanced Mesh Utilities (Week 3 Option 4)
+  // ---------------------------------------
+  // Purpose:
+  //   Advanced operations for volumetric mesh analysis and processing.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 4).
+  
+  // Find all tets/hexs containing a given point
+  // Returns indices of elements that contain the point
+  // Useful for point location queries in volumetric meshes
+  std::vector<size_t> find_tets_containing_point(const geometry::point_t& p,
+                                                  const geometry::tets_t& tets,
+                                                  const geometry::points_t& vertices);
+  
+  std::vector<size_t> find_hexs_containing_point(const geometry::point_t& p,
+                                                  const geometry::hexs_t& hexs,
+                                                  const geometry::points_t& vertices);
+  
+  // Compute bounding box of a volumetric mesh
+  // Returns {min_x, min_y, min_z, max_x, max_y, max_z}
+  std::array<double, 6> compute_mesh_bounds(const geometry& geom);
+  
+  // Filter elements by quality threshold
+  // Returns indices of elements that meet quality criteria
+  // For tets: keeps elements with aspect_ratio < threshold
+  // For hexs: keeps elements with scaled_jacobian > threshold
+  std::vector<size_t> filter_tets_by_quality(const geometry::tets_t& tets,
+                                             const geometry::points_t& vertices,
+                                             double threshold = 10.0,
+                                             quality_metric metric = TET_ASPECT_RATIO);
+  
+  std::vector<size_t> filter_hexs_by_quality(const geometry::hexs_t& hexs,
+                                             const geometry::points_t& vertices,
+                                             double threshold = 0.2,
+                                             quality_metric metric = HEX_SCALED_JACOBIAN);
+  
+  // Create a geometry containing only elements that pass quality filter
+  // Useful for removing low-quality elements from a mesh
+  geometry extract_quality_elements(const geometry& geom,
+                                   double threshold,
+                                   quality_metric metric = TET_ASPECT_RATIO);
+  
 }
 
 #endif
