@@ -25,7 +25,8 @@ namespace LBIE
 		   float isovalue, float isovalue_in, float err, float err_in,
 		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
-		   bool verbose)
+		   bool verbose,
+		   boost::optional<const VolMagick::Volume&> propertyVol)
   {
     using namespace std;
 
@@ -75,6 +76,12 @@ namespace LBIE
     mesher.dual(dual_contouring);
     mesher.extractMesh(vol); //sets the internal geoframe to the extracted mesh
     mesher.qualityImprove(improve_iterations);
+    
+    // If property volume provided, interpolate property values to mesh vertices
+    if(propertyVol) {
+      mesher.interpolateProperties(propertyVol.get());
+    }
+    
     return mesher.mesh();
   }
 

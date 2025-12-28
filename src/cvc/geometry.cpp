@@ -48,7 +48,7 @@
 namespace CVC_NAMESPACE
 {
   geometry::geometry()
-    : _extents_set(false)
+    : _geom_type(SURFACE_TRI), _extents_set(false)
   {
     for(uint64_t i = 0; i < 3; i++)
       _min[i] = _max[i] = 0.0;
@@ -59,8 +59,10 @@ namespace CVC_NAMESPACE
   geometry::geometry(const geometry& geom)
     : _points(geom._points), _boundary(geom._boundary),
       _normals(geom._normals), _colors(geom._colors),
+      _curvatures(geom._curvatures), _functions(geom._functions),
       _lines(geom._lines), _tris(geom._tris),
-      _quads(geom._quads), _extents_set(geom._extents_set),
+      _quads(geom._quads), _tets(geom._tets), _hexs(geom._hexs),
+      _geom_type(geom._geom_type), _extents_set(geom._extents_set),
       _min(geom._min), _max(geom._max) 
   {
     //make sure all our pointers are valid
@@ -78,9 +80,13 @@ namespace CVC_NAMESPACE
       _boundary = boundary_ptr_t(new boundary_t(*geom._boundary));
       _normals = normals_ptr_t(new normals_t(*geom._normals));
       _colors = colors_ptr_t(new colors_t(*geom._colors));
+      _curvatures = curvatures_ptr_t(new curvatures_t(*geom._curvatures));
+      _functions = functions_ptr_t(new functions_t(*geom._functions));
       _lines = lines_ptr_t(new lines_t(*geom._lines));
       _tris = tris_ptr_t(new tris_t(*geom._tris));
       _quads = quads_ptr_t(new quads_t(*geom._quads));
+      _tets = tets_ptr_t(new tets_t(*geom._tets));
+      _hexs = hexs_ptr_t(new hexs_t(*geom._hexs));
     }
     else
     {
@@ -89,11 +95,16 @@ namespace CVC_NAMESPACE
       _boundary = geom._boundary;
       _normals = geom._normals;
       _colors = geom._colors;
+      _curvatures = geom._curvatures;
+      _functions = geom._functions;
       _lines = geom._lines;
       _tris = geom._tris;
       _quads = geom._quads;
+      _tets = geom._tets;
+      _hexs = geom._hexs;
     }
     
+    _geom_type = geom._geom_type;
     _extents_set = geom._extents_set;
     _min = geom._min;
     _max = geom._max;
@@ -148,6 +159,16 @@ namespace CVC_NAMESPACE
   uint64_t geometry::num_quads() const
   {
     return _quads ? _quads->size() : 0;
+  }
+
+  uint64_t geometry::num_tets() const
+  {
+    return _tets ? _tets->size() : 0;
+  }
+
+  uint64_t geometry::num_hexs() const
+  {
+    return _hexs ? _hexs->size() : 0;
   }
 
   bool geometry::empty() const
@@ -523,12 +544,20 @@ namespace CVC_NAMESPACE
       _normals.reset(new normals_t);
     if(!_colors)
       _colors.reset(new colors_t);
+    if(!_curvatures)
+      _curvatures.reset(new curvatures_t);
+    if(!_functions)
+      _functions.reset(new functions_t);
     if(!_lines)
       _lines.reset(new lines_t);
     if(!_tris)
       _tris.reset(new tris_t);
     if(!_quads)
       _quads.reset(new quads_t);
+    if(!_tets)
+      _tets.reset(new tets_t);
+    if(!_hexs)
+      _hexs.reset(new hexs_t);
   }
 
   void geometry::calc_extents() const
@@ -582,9 +611,13 @@ namespace CVC_NAMESPACE
       case BOUNDARY: make_unique(_boundary); break;
       case NORMALS: make_unique(_normals); break;
       case COLORS: make_unique(_colors); break;
+      case CURVATURES: make_unique(_curvatures); break;
+      case FUNCTIONS: make_unique(_functions); break;
       case LINES: make_unique(_lines); break;
       case TRIS: make_unique(_tris); break;
       case QUADS: make_unique(_quads); break;
+      case TETS: make_unique(_tets); break;
+      case HEXS: make_unique(_hexs); break;
       }
   }
 

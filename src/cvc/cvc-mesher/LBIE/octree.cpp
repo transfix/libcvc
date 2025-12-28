@@ -157,7 +157,7 @@ void Octree::setVolume(const VolMagick::Volume& volData)
   for (i=0;i<=oct_depth;i++) {
     level_res[i]=(1<<i);
   }
-  construct_octree("errfile.rawiv");
+  construct_octree();
   vol_min=minmax[0].min;
   vol_max=minmax[0].max;
 }
@@ -432,57 +432,32 @@ void Octree::initMem()
 		level_res[i]=(1<<i);
 	}
 //	e_face_initialization();
-	construct_octree((char*)rawiv_fname);
+	construct_octree();
 	vol_min=minmax[0].min;
 	vol_max=minmax[0].max;
 }
 */
 
 // error computation on each cell of octree
-void Octree::construct_octree(char * rawiv_fname)
+void Octree::construct_octree()
 {
-	int oc_idx=0;
-	int level;
-	FILE* err_fp;
-	char err_fname[256];
-	float min , max;
-	
-	strcpy(err_fname,rawiv_fname);
-	strcat(err_fname,".err");
-	
-	err_fp=fopen(err_fname,"rb");
-	
-	err_fp = 0;
-	if (err_fp) {
-		
-		//getFloat((float*)minmax,octcell_num*2,err_fp);
-	  //fread((float*)minmax,sizeof(float),octcell_num*2,err_fp);
-	  fread(&(minmax[0]),sizeof(float),octcell_num*2,err_fp);
-		fclose(err_fp);
-		
-	} else {
+int oc_idx=0;
+int level;
+float min , max;
 
-		while (oc_idx < octcell_num) {
-
-			level=get_level(oc_idx);
-			compute_error(oc_idx,level,min,max);
-			minmax[oc_idx].min=min;
-			minmax[oc_idx].max=max;
-			//oct_array[oc_idx].refine_flag=0;
-			oc_idx++;
-
-		} 
-
-		/*err_fp=fopen(err_fname, "wb");
-		//putFloat((float*)minmax, octcell_num*2, err_fp);
-		fwrite((float*)minmax,sizeof(float),octcell_num*2,err_fp);
-		fclose(err_fp);*/
-	}
-	
+// Always compute min/max values from volume data in memory
+// No file I/O - removed legacy .err file caching
+while (oc_idx < octcell_num) {
+level=get_level(oc_idx);
+compute_error(oc_idx,level,min,max);
+minmax[oc_idx].min=min;
+minmax[oc_idx].max=max;
+oc_idx++;
+}
 }
 
 void Octree::collapse()
-{	
+{
 	CellQueue prev_queue, cur_queue;
 	int i, oc_id, level;
 
@@ -2565,46 +2540,21 @@ void Octree::func_val(geoframe& geofrm) {
 }
 */
 // read *.rawiv file to show color, e.g., the potential distribution
-void Octree::func_val(geoframe& geofrm) {
+void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 
 	if(!prop_flag)
 		return;
 	prop_flag = 0;
 	int i, j, x, y, z, oc_id, vtx[8];
 	float dx, dy, dz, val[8], func_min, func_max;
-	//	float* func_vol;
-	/*FILE *func_fp, *out_func;
-
-	//func_fp = fopen("rawiv/test/potential211257.rawiv","rb");
-	//func_fp = fopen("rawiv/1C2B_full_pot33.rawiv","rb");
-	//func_fp = fopen("C:/Documents and Settings/jessica/Desktop/NMJ_rawiv/1C2B_pot129.rawiv","rb");
-	//func_fp = fopen("C:/Documents and Settings/jessica/Desktop/NMJ_rawiv/2BG9_pot97129.rawiv","rb");
-	func_fp = fopen(prop_fname,"rb");
 	
-	if (func_fp==NULL) {
-		printf("wrong name : %s\n","potential211257.rawiv");
-		return;
-	}
-
-	strcpy(prop_fname,"");
+	// Temporarily store the current volume data
+	std::vector<float> saved_vol = orig_vol;
 	
-	getFloat(minext,3,func_fp);	getFloat(maxext,3,func_fp);
-	getInt(&nverts,1,func_fp);	getInt(&ncells,1,func_fp);
-	getInt(dim,3,func_fp);		getFloat(orig,3,func_fp);		getFloat(span,3,func_fp);
-
-	func_vol = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-	getFloat(func_vol, dim[0]*dim[1]*dim[2], func_fp);
-
-	fclose(func_fp);*/
-
-	//func_vol = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-
-	VolMagick::Volume propData;
-	VolMagick::readVolumeFile(propData,prop_fname);
-
+	// Load property volume into orig_vol for interpolation
 	int old_flag = interior_flag;
 	interior_flag = 1;
-	loadData(propData/*,func_vol*/);
+	loadData(propVol);
 	interior_flag = old_flag;
 	//out_func = fopen("rawiv/out_func", "w");
 
@@ -2641,9 +2591,8 @@ void Octree::func_val(geoframe& geofrm) {
 		//geofrm.funcs[i][0] = (geofrm.funcs[i][0] - func_min) / (func_max - func_min)*2.0f - 1.0f;
 	}
 
-	//fclose(out_func);
-
-	//free(func_vol);
+	// Restore original volume data
+	orig_vol = saved_vol;
 }
 /*
 // read *.rawv file to show the color, e.g., hemoglobin
@@ -2738,32 +2687,38 @@ void Octree::mesh_extract(geoframe& geofrm, float err_tol)
 	switch (flag_type) {
 	case 0:							// isosurface
 		polygonize(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 1:							// tetra mesh
 		tetrahedralize(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 2:							// quad mesh
 		polygonize_quad(geofrm, err_tol);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 3:							//hexa_mesh
 		hexahedralize(geofrm, err_tol);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 4:							// interval
 		polygonize_interval(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 5:							// interval volume
 		tetrahedralize_interval(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 	}
 }

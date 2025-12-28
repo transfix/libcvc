@@ -3,6 +3,7 @@
 
 #include <VolMagickCompat.h>
 #include <LBIE_Mesher.h>
+#include <boost/optional.hpp>
 
 namespace LBIE
 {
@@ -23,7 +24,8 @@ namespace LBIE
 		   float isovalue, float isovalue_in, float err, float err_in,
 		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
-		   bool verbose = false);
+		   bool verbose = false,
+		   boost::optional<const VolMagick::Volume&> propertyVol = boost::none);
 
   // ---------------
   // quality_improve

@@ -135,6 +135,9 @@ namespace LBIE
    //quality improve mesh
    geoframe& qualityImprove(unsigned int iterations = 1);
 
+   //interpolate property values from a volume to mesh vertices
+   void interpolateProperties(const VolMagick::Volume& propertyVol);
+
   protected:
    void set_octree_volume(const VolMagick::Volume& vol);
    void do_duallib_extract();

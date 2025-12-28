@@ -293,6 +293,12 @@ namespace
     copy(geo.quads.begin(),
 	 geo.quads.end(),
 	 ret_geom.quads().begin());
+    // Copy function values if present
+    if(!geo.funcs.empty()) {
+      ret_geom.functions().resize(geo.funcs.size());
+      for(size_t j = 0; j < geo.funcs.size(); j++)
+        ret_geom.functions()[j] = geo.funcs[j][0];
+    }
     return ret_geom;
   }
 
@@ -327,6 +333,12 @@ namespace
     ret_geom.numverts = geo.num_points();
     ret_geom.numtris = geo.num_tris();
     ret_geom.numquads = geo.num_quads();
+    // Copy function values if present
+    if(!geo.const_functions().empty()) {
+      ret_geom.funcs.resize(geo.num_points());
+      for(size_t j = 0; j < geo.num_points(); j++)
+        ret_geom.funcs[j][0] = geo.const_functions()[j];
+    }
     return ret_geom;
   }
 
@@ -403,7 +415,8 @@ namespace
     LBIE::geoframe g_frame = LBIE::do_mesh(vol,
 					   isovalue, isovalue_in, err, err_in,
 					   meshtype_enum, improvement_method_enum, normaltype,
-					   extraction_method_enum, improve_iterations, dual_contouring);
+					   extraction_method_enum, improve_iterations, dual_contouring,
+					   false, boost::none);
     
     //convert the geoframe back to cvc::geometry and return it
     return convert(g_frame);

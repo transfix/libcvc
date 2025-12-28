@@ -3535,3 +3535,309 @@ TEST_F(GeometryTest, VolumetricMeshComparisonTest) {
     std::cout << "NOTE: Tet2 extraction returned empty mesh (requires dual isovalues, not single isovalue)" << std::endl;
   }
 }
+
+// ============================================================================
+// Week 1: Tetrahedral and Hexahedral Support Tests
+// ============================================================================
+
+TEST(GeometryWeek1Test, TetrahedralTypeSupport) {
+  geometry geom;
+  
+  // Create a simple tetrahedron with 4 vertices
+  geometry::point_t p0 = {{0.0, 0.0, 0.0}};
+  geometry::point_t p1 = {{1.0, 0.0, 0.0}};
+  geometry::point_t p2 = {{0.0, 1.0, 0.0}};
+  geometry::point_t p3 = {{0.0, 0.0, 1.0}};
+  
+  geom.points().push_back(p0);
+  geom.points().push_back(p1);
+  geom.points().push_back(p2);
+  geom.points().push_back(p3);
+  
+  // Add a tetrahedral element
+  geometry::tet_t tet = {{0, 1, 2, 3}};
+  geom.tets().push_back(tet);
+  
+  // Set geometry type
+  geom.set_geometry_type(geometry::VOLUME_TET);
+  
+  // Verify
+  EXPECT_EQ(geom.num_points(), 4);
+  EXPECT_EQ(geom.num_tets(), 1);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::VOLUME_TET);
+  EXPECT_FALSE(geom.empty());
+}
+
+TEST(GeometryWeek1Test, HexahedralTypeSupport) {
+  geometry geom;
+  
+  // Create a unit cube with 8 vertices
+  for (int z = 0; z < 2; z++) {
+    for (int y = 0; y < 2; y++) {
+      for (int x = 0; x < 2; x++) {
+        geometry::point_t p = {{static_cast<double>(x), 
+                                static_cast<double>(y), 
+                                static_cast<double>(z)}};
+        geom.points().push_back(p);
+      }
+    }
+  }
+  
+  // Add a hexahedral element (standard vertex ordering)
+  geometry::hex_t hex = {{0, 1, 3, 2, 4, 5, 7, 6}};
+  geom.hexs().push_back(hex);
+  
+  // Set geometry type
+  geom.set_geometry_type(geometry::VOLUME_HEX);
+  
+  // Verify
+  EXPECT_EQ(geom.num_points(), 8);
+  EXPECT_EQ(geom.num_hexs(), 1);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::VOLUME_HEX);
+}
+
+TEST(GeometryWeek1Test, AuxiliaryDataSupport) {
+  geometry geom;
+  
+  // Add some points
+  for (int i = 0; i < 10; i++) {
+    geometry::point_t p = {{static_cast<double>(i), 0.0, 0.0}};
+    geom.points().push_back(p);
+  }
+  
+  // Add curvatures (principal curvatures k1, k2)
+  for (int i = 0; i < 10; i++) {
+    geometry::curvature_t curv = {{static_cast<double>(i) * 0.1, 
+                                   static_cast<double>(i) * 0.2}};
+    geom.curvatures().push_back(curv);
+  }
+  
+  // Add function values
+  for (int i = 0; i < 10; i++) {
+    geometry::function_t func = static_cast<double>(i) * 1.5;
+    geom.functions().push_back(func);
+  }
+  
+  // Verify
+  EXPECT_EQ(geom.curvatures().size(), 10);
+  EXPECT_EQ(geom.functions().size(), 10);
+  EXPECT_DOUBLE_EQ(geom.curvatures()[5][0], 0.5);
+  EXPECT_DOUBLE_EQ(geom.curvatures()[5][1], 1.0);
+  EXPECT_DOUBLE_EQ(geom.functions()[5], 7.5);
+}
+
+TEST(GeometryWeek1Test, GeometryTypeTracking) {
+  geometry geom;
+  
+  // Default should be SURFACE_TRI
+  EXPECT_EQ(geom.get_geometry_type(), geometry::SURFACE_TRI);
+  
+  // Change to SURFACE_QUAD
+  geom.set_geometry_type(geometry::SURFACE_QUAD);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::SURFACE_QUAD);
+  
+  // Change to VOLUME_TET
+  geom.set_geometry_type(geometry::VOLUME_TET);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::VOLUME_TET);
+  
+  // Change to VOLUME_HEX
+  geom.set_geometry_type(geometry::VOLUME_HEX);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::VOLUME_HEX);
+  
+  // Change to MIXED
+  geom.set_geometry_type(geometry::MIXED);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::MIXED);
+}
+
+TEST(GeometryWeek1Test, CopyWithNewTypes) {
+  geometry geom1;
+  
+  // Create tet mesh
+  for (int i = 0; i < 4; i++) {
+    geometry::point_t p = {{static_cast<double>(i), 0.0, 0.0}};
+    geom1.points().push_back(p);
+  }
+  geometry::tet_t tet = {{0, 1, 2, 3}};
+  geom1.tets().push_back(tet);
+  geom1.set_geometry_type(geometry::VOLUME_TET);
+  
+  // Add curvatures
+  geometry::curvature_t curv = {{1.0, 2.0}};
+  geom1.curvatures().push_back(curv);
+  
+  // Test copy constructor
+  geometry geom2(geom1);
+  EXPECT_EQ(geom2.num_points(), 4);
+  EXPECT_EQ(geom2.num_tets(), 1);
+  EXPECT_EQ(geom2.get_geometry_type(), geometry::VOLUME_TET);
+  EXPECT_EQ(geom2.curvatures().size(), 1);
+  
+  // Test assignment operator
+  geometry geom3;
+  geom3 = geom1;
+  EXPECT_EQ(geom3.num_points(), 4);
+  EXPECT_EQ(geom3.num_tets(), 1);
+  EXPECT_EQ(geom3.get_geometry_type(), geometry::VOLUME_TET);
+  
+  // Test deep copy
+  geometry geom4;
+  geom4.copy(geom1, true);
+  EXPECT_EQ(geom4.num_points(), 4);
+  EXPECT_EQ(geom4.num_tets(), 1);
+  
+  // Modify geom4 shouldn't affect geom1 (deep copy)
+  geom4.points().push_back({{5.0, 0.0, 0.0}});
+  EXPECT_EQ(geom4.num_points(), 5);
+  EXPECT_EQ(geom1.num_points(), 4);
+}
+
+TEST(GeometryWeek1Test, MultipleTetrahedra) {
+  geometry geom;
+  
+  // Create 8 vertices for 2 tetrahedra
+  for (int i = 0; i < 8; i++) {
+    geometry::point_t p = {{static_cast<double>(i % 4), 
+                            static_cast<double>(i / 4), 
+                            0.0}};
+    geom.points().push_back(p);
+  }
+  
+  // Add two tets
+  geometry::tet_t tet1 = {{0, 1, 2, 3}};
+  geometry::tet_t tet2 = {{4, 5, 6, 7}};
+  geom.tets().push_back(tet1);
+  geom.tets().push_back(tet2);
+  
+  geom.set_geometry_type(geometry::VOLUME_TET);
+  
+  EXPECT_EQ(geom.num_tets(), 2);
+  EXPECT_EQ(geom.tets()[0][0], 0);
+  EXPECT_EQ(geom.tets()[1][0], 4);
+}
+
+TEST(GeometryWeek1Test, MultipleHexahedra) {
+  geometry geom;
+  
+  // Create 16 vertices for 2 hexahedra (2x1x1 grid)
+  for (int i = 0; i < 16; i++) {
+    geometry::point_t p = {{static_cast<double>(i % 3), 
+                            static_cast<double>((i / 3) % 2), 
+                            static_cast<double>(i / 6)}};
+    geom.points().push_back(p);
+  }
+  
+  // Add two hexes
+  geometry::hex_t hex1 = {{0, 1, 4, 3, 6, 7, 10, 9}};
+  geometry::hex_t hex2 = {{1, 2, 5, 4, 7, 8, 11, 10}};
+  geom.hexs().push_back(hex1);
+  geom.hexs().push_back(hex2);
+  
+  geom.set_geometry_type(geometry::VOLUME_HEX);
+  
+  EXPECT_EQ(geom.num_hexs(), 2);
+}
+
+TEST(GeometryWeek1Test, MixedGeometryType) {
+  geometry geom;
+  
+  // Create a geometry with both tris and quads (mixed surface)
+  for (int i = 0; i < 10; i++) {
+    point_t p = {{static_cast<double>(i), 0.0, 0.0}};
+    geom.points().push_back(p);
+  }
+  
+  // Add some triangles
+  geometry::tri_t tri1 = {{0, 1, 2}};
+  geometry::tri_t tri2 = {{1, 2, 3}};
+  geom.tris().push_back(tri1);
+  geom.tris().push_back(tri2);
+  
+  // Add some quads
+  geometry::quad_t quad1 = {{4, 5, 6, 7}};
+  geom.quads().push_back(quad1);
+  
+  geom.set_geometry_type(geometry::MIXED);
+  
+  EXPECT_EQ(geom.num_tris(), 2);
+  EXPECT_EQ(geom.num_quads(), 1);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::MIXED);
+}
+
+TEST(GeometryWeek1Test, ClearPreservesType) {
+  geometry geom;
+  
+  // Set up a tet mesh
+  for (int i = 0; i < 4; i++) {
+    geometry::point_t p = {{static_cast<double>(i), 0.0, 0.0}};
+    geom.points().push_back(p);
+  }
+  geometry::tet_t tet = {{0, 1, 2, 3}};
+  geom.tets().push_back(tet);
+  geom.set_geometry_type(geometry::VOLUME_TET);
+  
+  // Clear should reset geometry type to default
+  geom.clear();
+  EXPECT_TRUE(geom.empty());
+  EXPECT_EQ(geom.num_points(), 0);
+  EXPECT_EQ(geom.num_tets(), 0);
+  EXPECT_EQ(geom.get_geometry_type(), geometry::SURFACE_TRI);  // Default after clear
+}
+
+// ============================================================================
+// Property Interpolation Tests
+// ============================================================================
+
+TEST_F(GeometryTest, FunctionValuesStorage) {
+  // Test that geometry can store and retrieve function values
+  geometry geom;
+  
+  // Add some vertices
+  for (int i = 0; i < 10; i++) {
+    geometry::point_t p = {{static_cast<double>(i), 0.0, 0.0}};
+    geom.points().push_back(p);
+  }
+  
+  // Add function values
+  geom.functions().resize(10);
+  for (int i = 0; i < 10; i++) {
+    geom.functions()[i] = static_cast<double>(i) * 1.5;
+  }
+  
+  // Verify storage
+  EXPECT_EQ(geom.functions().size(), 10);
+  for (int i = 0; i < 10; i++) {
+    EXPECT_NEAR(geom.functions()[i], static_cast<double>(i) * 1.5, 1e-10);
+  }
+  
+  // Test copy constructor preserves functions
+  geometry copy(geom);
+  EXPECT_EQ(copy.functions().size(), 10);
+  for (int i = 0; i < 10; i++) {
+    EXPECT_NEAR(copy.functions()[i], geom.functions()[i], 1e-10);
+  }
+  
+  // Test assignment operator preserves functions
+  geometry assigned;
+  assigned = geom;
+  EXPECT_EQ(assigned.functions().size(), 10);
+  for (int i = 0; i < 10; i++) {
+    EXPECT_NEAR(assigned.functions()[i], geom.functions()[i], 1e-10);
+  }
+}
+
+TEST_F(GeometryTest, FunctionValuesClear) {
+  // Test that clear() properly clears function values
+  geometry geom;
+  
+  geom.points().push_back({{0.0, 0.0, 0.0}});
+  geom.functions().push_back(42.0);
+  
+  EXPECT_EQ(geom.functions().size(), 1);
+  
+  geom.clear();
+  
+  EXPECT_EQ(geom.functions().size(), 0);
+  EXPECT_TRUE(geom.empty());
+}
+
+
