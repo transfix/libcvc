@@ -3125,6 +3125,130 @@ TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
   std::cout << std::string(140, '=') << std::endl;
 }
 
+// ============================================================================
+// Property Interpolation Integration Test
+// ============================================================================
+
+TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
+  // Integration test: Create an SDF, segment it with property values,
+  // mesh with property interpolation, then verify function values
+  
+  // Create a simple cube geometry
+  geometry cube;
+  cube.points().push_back({{-1.0, -1.0, -1.0}});
+  cube.points().push_back({{ 1.0, -1.0, -1.0}});
+  cube.points().push_back({{ 1.0,  1.0, -1.0}});
+  cube.points().push_back({{-1.0,  1.0, -1.0}});
+  cube.points().push_back({{-1.0, -1.0,  1.0}});
+  cube.points().push_back({{ 1.0, -1.0,  1.0}});
+  cube.points().push_back({{ 1.0,  1.0,  1.0}});
+  cube.points().push_back({{-1.0,  1.0,  1.0}});
+  
+  // Cube faces (12 triangles)
+  cube.tris().push_back({{0, 1, 2}}); cube.tris().push_back({{0, 2, 3}}); // bottom
+  cube.tris().push_back({{4, 6, 5}}); cube.tris().push_back({{4, 7, 6}}); // top
+  cube.tris().push_back({{0, 4, 5}}); cube.tris().push_back({{0, 5, 1}}); // front
+  cube.tris().push_back({{2, 6, 7}}); cube.tris().push_back({{2, 7, 3}}); // back
+  cube.tris().push_back({{0, 3, 7}}); cube.tris().push_back({{0, 7, 4}}); // left
+  cube.tris().push_back({{1, 5, 6}}); cube.tris().push_back({{1, 6, 2}}); // right
+  
+  // Create SDF volume
+  const unsigned int dim = 32;
+  volume sdf_vol = sdf(cube, dimension(dim, dim, dim), 
+                       bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0));
+  
+  // Create property volume with the SAME dimensions as the SDF
+  // The mesher will automatically resize it to match the octree's adjusted dimensions
+  // - Region 1 (x < 0): property value = 100.0
+  // - Region 2 (x >= 0): property value = 200.0
+  volume prop_vol(dimension(dim, dim, dim), 
+                  bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0));
+  
+  for(unsigned int k = 0; k < dim; k++) {
+    for(unsigned int j = 0; j < dim; j++) {
+      for(unsigned int i = 0; i < dim; i++) {
+        double x = -2.0 + (4.0 * i) / (dim - 1);
+        double prop_value = (x < 0.0) ? 100.0 : 200.0;
+        prop_vol(i, j, k, prop_value);
+      }
+    }
+  }
+  
+  // Extract isosurface with property interpolation using public API
+  geometry mesh = iso(sdf_vol, 0.0, DUALLIB, 0, prop_vol);
+  
+  EXPECT_GT(mesh.num_points(), 0) << "Mesh should have vertices";
+  EXPECT_GT(mesh.num_tris(), 0) << "Mesh should have triangles";
+  EXPECT_EQ(mesh.functions().size(), mesh.num_points()) 
+    << "Should have one function value per vertex";
+  
+  // Verify mesh represents a cube-like surface
+  point_t mesh_min = mesh.min_point();
+  point_t mesh_max = mesh.max_point();
+  
+  // Should be roughly within the cube bounds
+  for(int i = 0; i < 3; i++) {
+    EXPECT_GE(mesh_min[i], -1.5) << "Min point component " << i;
+    EXPECT_LE(mesh_max[i], 1.5) << "Max point component " << i;
+  }
+  
+  // Verify interpolated property values
+  int left_count = 0, right_count = 0, middle_count = 0;
+  double left_sum = 0.0, right_sum = 0.0, middle_sum = 0.0;
+  
+  for(size_t i = 0; i < mesh.num_points(); i++) {
+    double x = mesh.points()[i][0];
+    double func_val = mesh.functions()[i];
+    
+    // Categorize vertices by x-coordinate
+    if(x < -0.1) {
+      left_count++;
+      left_sum += func_val;
+    } else if(x > 0.1) {
+      right_count++;
+      right_sum += func_val;
+    } else {
+      middle_count++;
+      middle_sum += func_val;
+    }
+  }
+  
+  // Verify we have vertices in all regions
+  EXPECT_GT(left_count, 0) << "Should have vertices on left side";
+  EXPECT_GT(right_count, 0) << "Should have vertices on right side";
+  // Note: Middle vertices are optional - cube mesh may not have vertices exactly at x=0
+  
+  // Verify average values in each region
+  if(left_count > 0) {
+    double left_avg = left_sum / left_count;
+    EXPECT_NEAR(left_avg, 100.0, 10.0) 
+      << "Left side vertices should have values near 100.0";
+  }
+  
+  if(right_count > 0) {
+    double right_avg = right_sum / right_count;
+    EXPECT_NEAR(right_avg, 200.0, 10.0) 
+      << "Right side vertices should have values near 200.0";
+  }
+  
+  if(middle_count > 0) {
+    double middle_avg = middle_sum / middle_count;
+    EXPECT_GE(middle_avg, 90.0) << "Middle vertices should be >= 90.0";
+    EXPECT_LE(middle_avg, 210.0) << "Middle vertices should be <= 210.0";
+  }
+  
+  std::cout << "Property interpolation integration test:" << std::endl;
+  std::cout << "  Mesh vertices: " << mesh.num_points() << std::endl;
+  std::cout << "  Mesh triangles: " << mesh.num_tris() << std::endl;
+  std::cout << "  Function values: " << mesh.functions().size() << std::endl;
+  std::cout << "  Left vertices (x < -0.1): " << left_count 
+            << " (avg=" << (left_count > 0 ? left_sum/left_count : 0) << ")" << std::endl;
+  std::cout << "  Right vertices (x > 0.1): " << right_count 
+            << " (avg=" << (right_count > 0 ? right_sum/right_count : 0) << ")" << std::endl;
+  std::cout << "  Middle vertices: " << middle_count 
+            << " (avg=" << (middle_count > 0 ? middle_sum/middle_count : 0) << ")" << std::endl;
+}
+
 // Run all tests
 int main(int argc, char **argv) {
   // Parse custom flags before GoogleTest consumes them
@@ -3839,5 +3963,176 @@ TEST_F(GeometryTest, FunctionValuesClear) {
   EXPECT_EQ(geom.functions().size(), 0);
   EXPECT_TRUE(geom.empty());
 }
+
+// ===========================
+// Week 2: Volumetric Mesh Tests
+// ===========================
+
+TEST_F(GeometryTest, VolumetricMeshTetFacesExtraction) {
+  // Test: Extract boundary faces from a simple tet mesh
+  geometry mesh;
+  
+  // Create two tets sharing a face
+  mesh.points().push_back({{0.0, 0.0, 0.0}});  // v0
+  mesh.points().push_back({{1.0, 0.0, 0.0}});  // v1
+  mesh.points().push_back({{0.0, 1.0, 0.0}});  // v2
+  mesh.points().push_back({{0.0, 0.0, 1.0}});  // v3
+  mesh.points().push_back({{0.0, 0.0, -1.0}}); // v4 - second tet shares v0,v1,v2
+  
+  mesh.tets().push_back({{0, 1, 2, 3}});
+  mesh.tets().push_back({{0, 2, 1, 4}});  // Shares face (0,1,2)
+  
+  // Extract boundary faces
+  geometry::tris_t boundary = tet_faces(mesh.tets());
+  
+  // 2 tets = 8 total faces, 1 shared (internal) face -> 6 boundary faces
+  EXPECT_EQ(boundary.size(), 6);
+  
+  // Verify all faces have valid indices
+  for(const auto& tri : boundary) {
+    EXPECT_LT(tri[0], mesh.num_points());
+    EXPECT_LT(tri[1], mesh.num_points());
+    EXPECT_LT(tri[2], mesh.num_points());
+  }
+}
+
+TEST_F(GeometryTest, VolumetricMeshHexFacesExtraction) {
+  // Test: Extract boundary faces from a simple hex mesh
+  geometry mesh;
+  
+  // Create a single unit cube hex
+  mesh.points().push_back({{0.0, 0.0, 0.0}});  // v0 - bottom
+  mesh.points().push_back({{1.0, 0.0, 0.0}});  // v1
+  mesh.points().push_back({{1.0, 1.0, 0.0}});  // v2
+  mesh.points().push_back({{0.0, 1.0, 0.0}});  // v3
+  mesh.points().push_back({{0.0, 0.0, 1.0}});  // v4 - top
+  mesh.points().push_back({{1.0, 0.0, 1.0}});  // v5
+  mesh.points().push_back({{1.0, 1.0, 1.0}});  // v6
+  mesh.points().push_back({{0.0, 1.0, 1.0}});  // v7
+  
+  mesh.hexs().push_back({{0, 1, 2, 3, 4, 5, 6, 7}});
+  
+  // Extract boundary faces
+  geometry::quads_t boundary = hex_faces(mesh.hexs());
+  
+  // 1 hex -> 6 boundary faces (all faces are on boundary)
+  EXPECT_EQ(boundary.size(), 6);
+  
+  // Verify all faces have valid indices
+  for(const auto& quad : boundary) {
+    EXPECT_LT(quad[0], mesh.num_points());
+    EXPECT_LT(quad[1], mesh.num_points());
+    EXPECT_LT(quad[2], mesh.num_points());
+    EXPECT_LT(quad[3], mesh.num_points());
+  }
+}
+
+TEST_F(GeometryTest, TetrahedralizeProducesGeometry) {
+  // Test: tetrahedralize() produces a mesh (currently returns surface representation)
+  dimension dim(16, 16, 16);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere-like distance function
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry tet_mesh = tetrahedralize(vol, 0.0);
+  
+  // Should have geometry (either surface or volumetric)
+  EXPECT_GT(tet_mesh.num_points(), 0);
+  EXPECT_FALSE(tet_mesh.empty());
+  
+  // Note: Currently returns surface mesh (triangles) for backward compatibility
+  // Internal conversion to/from volumetric representation happens transparently
+}
+
+TEST_F(GeometryTest, HexahedralizeProducesGeometry) {
+  // Test: hexahedralize() produces a mesh (currently returns surface representation)
+  dimension dim(16, 16, 16);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere-like distance function
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry hex_mesh = hexahedralize(vol, 0.0);
+  
+  // Should have geometry (either surface or volumetric)
+  EXPECT_GT(hex_mesh.num_points(), 0);
+  EXPECT_FALSE(hex_mesh.empty());
+  
+  // Note: Currently returns surface mesh (quads) for backward compatibility
+  // Internal conversion to/from volumetric representation happens transparently
+}
+
+TEST_F(GeometryTest, VolumetricMeshQualityImprove) {
+  // Test: quality_improve() works on meshes produced by tetrahedralize
+  dimension dim(16, 16, 16);
+  bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+  volume vol(dim, Float, bbox);
+  
+  // Create a sphere-like distance function
+  double center_x = 0.5, center_y = 0.5, center_z = 0.5;
+  double radius = 0.3;
+  
+  for (uint64 k = 0; k < dim[2]; k++) {
+    for (uint64 j = 0; j < dim[1]; j++) {
+      for (uint64 i = 0; i < dim[0]; i++) {
+        double x = bbox[0] + (i + 0.5) * (bbox[3] - bbox[0]) / dim[0];
+        double y = bbox[1] + (j + 0.5) * (bbox[4] - bbox[1]) / dim[1];
+        double z = bbox[2] + (k + 0.5) * (bbox[5] - bbox[2]) / dim[2];
+        double dist = std::sqrt((x-center_x)*(x-center_x) + 
+                               (y-center_y)*(y-center_y) + 
+                               (z-center_z)*(z-center_z)) - radius;
+        vol(i, j, k, dist);
+      }
+    }
+  }
+  
+  geometry tet_mesh = tetrahedralize(vol, 0.0);
+  size_t original_point_count = tet_mesh.num_points();
+  
+  // Apply quality improvement
+  tet_mesh.quality_improve(1, GEO_FLOW);
+  
+  // Should still have a valid mesh
+  EXPECT_GT(tet_mesh.num_points(), 0);
+  EXPECT_FALSE(tet_mesh.empty());
+  
+  // Note: Mesh representation (surface vs volumetric) maintained through quality_improve
+  // Internal conversion handles volumetric meshes transparently
+}
+
+
 
 

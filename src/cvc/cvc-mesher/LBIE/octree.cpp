@@ -2552,24 +2552,67 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 	std::vector<float> saved_vol = orig_vol;
 	
 	// Load property volume into orig_vol for interpolation
-	int old_flag = interior_flag;
-	interior_flag = 1;
-	loadData(propVol);
-	interior_flag = old_flag;
+	// Note: We load property data WITHOUT negation (unlike SDF data)
+	// Property values should be used as-is, not inverted
+	
+	int propDimX = propVol.XDim();
+	int propDimY = propVol.YDim();
+	int propDimZ = propVol.ZDim();
+	
+	// If property volume dimensions don't match octree dimensions, resize it
+	VolMagick::Volume resizedPropVol;
+	const VolMagick::Volume* propVolPtr = &propVol;
+	
+	if(propDimX != dim[0] || propDimY != dim[1] || propDimZ != dim[2]) {
+		std::cerr << "LBIE::Mesher::func_val(): Property volume dimensions (" 
+		          << propDimX << "x" << propDimY << "x" << propDimZ
+		          << ") do not match octree dimensions ("
+		          << dim[0] << "x" << dim[1] << "x" << dim[2] 
+		          << "). Resizing using trilinear interpolation..." << std::endl;
+		
+		// Create a copy and resize it to match octree dimensions
+		resizedPropVol = propVol;
+		resizedPropVol.resize(VolMagick::Dimension(dim[0], dim[1], dim[2]));
+		propVolPtr = &resizedPropVol;
+		
+		std::cerr << "LBIE::Mesher::func_val(): Property volume resized to " 
+		          << dim[0] << "x" << dim[1] << "x" << dim[2] << std::endl;
+	}
+	
+	// Load the (possibly resized) property volume data
+	for(int k = 0; k < dim[2]; k++) {
+		for(int j = 0; j < dim[1]; j++) {
+			for(int i = 0; i < dim[0]; i++) {
+				int idx = k * dim[0] * dim[1] + j * dim[0] + i;
+				orig_vol[idx] = (*propVolPtr)(i, j, k);  // No negation for property data
+			}
+		}
+	}
+	
 	//out_func = fopen("rawiv/out_func", "w");
 
+	// Ensure funcs vector is properly sized
+	geofrm.funcs.resize(geofrm.numverts);
+	
 	func_min = 100.0f;
 	func_max = -100.0f;
 	int sum_15 = 0;	int sum_10 = 0;	int sum_5 = 0;	int sum_1 = 0;
 	//fprintf(out_func, "%d\n", geofrm.numverts);
+	
 	for(i = 0; i < geofrm.numverts; i++) {
-		x = (int) geofrm.verts[i][0];
-		y = (int) geofrm.verts[i][1];
-		z = (int) geofrm.verts[i][2];
+		// Convert from world coordinates to grid coordinates
+		// Vertices in geoframe are in world space, need to map to grid indices
+		float grid_x = (geofrm.verts[i][0] - minext[0]) / span[0];
+		float grid_y = (geofrm.verts[i][1] - minext[1]) / span[1];
+		float grid_z = (geofrm.verts[i][2] - minext[2]) / span[2];
+		
+		x = (int) grid_x;
+		y = (int) grid_y;
+		z = (int) grid_z;
 
-		dx = geofrm.verts[i][0] - x;
-		dy = geofrm.verts[i][1] - y;
-		dz = geofrm.verts[i][2] - z;
+		dx = grid_x - x;
+		dy = grid_y - y;
+		dz = grid_z - z;
 
 		oc_id = xyz2octcell(x, y, z, oct_depth);
 		idx2vtx(oc_id, oct_depth, vtx);

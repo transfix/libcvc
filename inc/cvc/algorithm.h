@@ -33,6 +33,7 @@
 #include <boost/array.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/cstdint.hpp>
+#include <boost/optional.hpp>
 
 // Forward declaration to avoid circular dependency
 namespace LBIE { class Mesher; }
@@ -77,10 +78,12 @@ namespace CVC_NAMESPACE
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args.
   // 12/25/2025 -- Joe R. -- Adding extraction_method and improve_iterations parameters.
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
   geometry iso(const volume& vol, 
                double isovalue,
                extraction_method method = DUALLIB,
-               int improve_iterations = 0);
+               int improve_iterations = 0,
+               boost::optional<const volume&> propertyVol = boost::none);
 
   // ------------
   // tetrahedralize
@@ -90,11 +93,13 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/26/2025 -- Joe R. -- Creation.
   // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
   geometry tetrahedralize(const volume& vol,
                           double isovalue,
                           extraction_method method = DUALLIB,
                           improvement_method improve_method = NO_IMPROVE,
-                          int improve_iterations = 0);
+                          int improve_iterations = 0,
+                          boost::optional<const volume&> propertyVol = boost::none);
 
   // --------------
   // hexahedralize
@@ -103,11 +108,13 @@ namespace CVC_NAMESPACE
   //   Extract a hexahedral volumetric mesh from a volume (e.g., from SDF).
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
   geometry hexahedralize(const volume& vol,
                          double isovalue,
                          extraction_method method = DUALLIB,
                          improvement_method improve_method = NO_IMPROVE,
-                         int improve_iterations = 0);
+                         int improve_iterations = 0,
+                         boost::optional<const volume&> propertyVol = boost::none);
 
   // ---------------
   // tetrahedralize2
@@ -224,7 +231,40 @@ namespace CVC_NAMESPACE
 
   typedef boost::shared_array<unsigned char> Image;
 #endif  
+
+  // -------------------------
+  // Volumetric Mesh Utilities
+  // -------------------------
+  // Purpose:
+  //   Utility functions for converting between surface and volumetric mesh representations.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation.
+  
+  // Extract surface faces from tetrahedral elements
+  // Returns triangles (boundary faces of tetrahedra)
+  geometry::tris_t tet_faces(const geometry::tets_t& tets);
+  
+  // Extract surface faces from hexahedral elements  
+  // Returns quads (boundary faces of hexahedra)
+  geometry::quads_t hex_faces(const geometry::hexs_t& hexs);
+  
+  // Decode tetrahedral elements from triangle encoding
+  // Used when geoframe stores tets as triangles (TETRA mesh type)
+  geometry::tets_t decode_tets_from_triangles(const geometry::tris_t& encoded_tris);
+  
+  // Decode hexahedral elements from quad encoding
+  // Used when geoframe stores hexs as quads (HEXA mesh type)
+  geometry::hexs_t decode_hexs_from_quads(const geometry::quads_t& encoded_quads);
+  
+  // Encode tetrahedral elements as triangles
+  // Used when converting geometry tets to geoframe format
+  geometry::tris_t encode_triangles_from_tets(const geometry::tets_t& tets);
+  
+  // Encode hexahedral elements as quads
+  // Used when converting geometry hexs to geoframe format
+  geometry::quads_t encode_quads_from_hexs(const geometry::hexs_t& hexs);
   
 }
 
 #endif
+

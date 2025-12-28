@@ -285,14 +285,47 @@ namespace
     ret_geom.boundary().resize(geo.bound_sign.size());
     for(size_t j = 0; j < geo.bound_sign.size(); j++)
       ret_geom.boundary()[j] = geo.bound_sign[j];
-    ret_geom.tris().resize(geo.triangles.size());
-    copy(geo.triangles.begin(),
-	 geo.triangles.end(),
-	 ret_geom.tris().begin());
-    ret_geom.quads().resize(geo.quads.size());
-    copy(geo.quads.begin(),
-	 geo.quads.end(),
-	 ret_geom.quads().begin());
+    
+    // Handle volumetric meshes (decode from face representation)
+    if(geo.mesh_type == LBIE::geoframe::TETRA || geo.mesh_type == LBIE::geoframe::TETRA2) {
+      // Tetrahedral mesh: triangles array contains tet faces (4 tris per tet)
+      // Convert from geoframe's unsigned int to geometry's uint64_t
+      CVC_NAMESPACE::geometry::tris_t encoded_tris;
+      encoded_tris.reserve(geo.triangles.size());
+      for(const auto& tri : geo.triangles) {
+        CVC_NAMESPACE::geometry::tri_t converted_tri;
+        converted_tri[0] = tri[0];
+        converted_tri[1] = tri[1];
+        converted_tri[2] = tri[2];
+        encoded_tris.push_back(converted_tri);
+      }
+      ret_geom.tets() = CVC_NAMESPACE::decode_tets_from_triangles(encoded_tris);
+    } else if(geo.mesh_type == LBIE::geoframe::HEXA) {
+      // Hexahedral mesh: quads array contains hex faces (6 quads per hex)
+      // Convert from geoframe's unsigned int to geometry's uint64_t
+      CVC_NAMESPACE::geometry::quads_t encoded_quads;
+      encoded_quads.reserve(geo.quads.size());
+      for(const auto& quad : geo.quads) {
+        CVC_NAMESPACE::geometry::quad_t converted_quad;
+        converted_quad[0] = quad[0];
+        converted_quad[1] = quad[1];
+        converted_quad[2] = quad[2];
+        converted_quad[3] = quad[3];
+        encoded_quads.push_back(converted_quad);
+      }
+      ret_geom.hexs() = CVC_NAMESPACE::decode_hexs_from_quads(encoded_quads);
+    } else {
+      // Surface mesh: copy triangles and quads directly
+      ret_geom.tris().resize(geo.triangles.size());
+      copy(geo.triangles.begin(),
+	   geo.triangles.end(),
+	   ret_geom.tris().begin());
+      ret_geom.quads().resize(geo.quads.size());
+      copy(geo.quads.begin(),
+	   geo.quads.end(),
+	   ret_geom.quads().begin());
+    }
+    
     // Copy function values if present
     if(!geo.funcs.empty()) {
       ret_geom.functions().resize(geo.funcs.size());
@@ -321,18 +354,65 @@ namespace
     ret_geom.bound_sign.resize(geo.boundary().size());
     for(size_t j = 0; j < geo.boundary().size(); j++)
       ret_geom.bound_sign[j] = geo.boundary()[j];
-    ret_geom.triangles.resize(geo.num_tris());
-    copy(geo.tris().begin(),
-	 geo.tris().end(),
-	 ret_geom.triangles.begin());
-    ret_geom.quads.resize(geo.num_quads());
-    copy(geo.quads().begin(),
-	 geo.quads().end(),
-	 ret_geom.quads.begin());
+    
+    // Determine mesh type and encode appropriately
+    bool has_tets = geo.num_tets() > 0;
+    bool has_hexs = geo.num_hexs() > 0;
+    bool has_tris = geo.num_tris() > 0;
+    bool has_quads = geo.num_quads() > 0;
+    
+    if(has_tets && !has_hexs && !has_tris && !has_quads) {
+      // Pure tetrahedral mesh: encode tets as triangles (4 tris per tet)
+      ret_geom.mesh_type = LBIE::geoframe::TETRA;
+      CVC_NAMESPACE::geometry::tris_t encoded = CVC_NAMESPACE::encode_triangles_from_tets(geo.const_tets());
+      // Convert from geometry's uint64_t to geoframe's unsigned int
+      ret_geom.triangles.reserve(encoded.size());
+      for(const auto& tri : encoded) {
+        LBIE::geoframe::uint_3 converted_tri;
+        converted_tri[0] = static_cast<unsigned int>(tri[0]);
+        converted_tri[1] = static_cast<unsigned int>(tri[1]);
+        converted_tri[2] = static_cast<unsigned int>(tri[2]);
+        ret_geom.triangles.push_back(converted_tri);
+      }
+      ret_geom.numtris = ret_geom.triangles.size();
+      ret_geom.numquads = 0;
+    } else if(has_hexs && !has_tets && !has_tris && !has_quads) {
+      // Pure hexahedral mesh: encode hexs as quads (6 quads per hex)
+      ret_geom.mesh_type = LBIE::geoframe::HEXA;
+      CVC_NAMESPACE::geometry::quads_t encoded = CVC_NAMESPACE::encode_quads_from_hexs(geo.const_hexs());
+      // Convert from geometry's uint64_t to geoframe's unsigned int
+      ret_geom.quads.reserve(encoded.size());
+      for(const auto& quad : encoded) {
+        LBIE::geoframe::uint_4 converted_quad;
+        converted_quad[0] = static_cast<unsigned int>(quad[0]);
+        converted_quad[1] = static_cast<unsigned int>(quad[1]);
+        converted_quad[2] = static_cast<unsigned int>(quad[2]);
+        converted_quad[3] = static_cast<unsigned int>(quad[3]);
+        ret_geom.quads.push_back(converted_quad);
+      }
+      ret_geom.numquads = ret_geom.quads.size();
+      ret_geom.numhexas = geo.num_hexs();
+      ret_geom.numtris = 0;
+    } else {
+      // Surface mesh or mixed: copy triangles and quads directly
+      ret_geom.mesh_type = (has_tris && !has_quads) ? LBIE::geoframe::SINGLE :
+                           (!has_tris && has_quads) ? LBIE::geoframe::QUAD :
+                           LBIE::geoframe::SINGLE;  // Default to SINGLE for mixed
+      ret_geom.triangles.resize(geo.num_tris());
+      copy(geo.tris().begin(),
+	   geo.tris().end(),
+	   ret_geom.triangles.begin());
+      ret_geom.quads.resize(geo.num_quads());
+      copy(geo.quads().begin(),
+	   geo.quads().end(),
+	   ret_geom.quads.begin());
+      ret_geom.numtris = geo.num_tris();
+      ret_geom.numquads = geo.num_quads();
+    }
+    
     // Set the integer counts for legacy code compatibility
     ret_geom.numverts = geo.num_points();
-    ret_geom.numtris = geo.num_tris();
-    ret_geom.numquads = geo.num_quads();
+    
     // Copy function values if present
     if(!geo.const_functions().empty()) {
       ret_geom.funcs.resize(geo.num_points());
@@ -380,6 +460,14 @@ namespace
     get_arg(dual_contouring, argv, string("dual_contouring"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
+    // Extract optional property volume
+    boost::optional<const CVC_NAMESPACE::volume&> propertyVol = boost::none;
+    if(argv.count("propertyVol")) {
+      try {
+        propertyVol = boost::any_cast<const CVC_NAMESPACE::volume&>(argv["propertyVol"]);
+      } catch(...) {}
+    }
+
     // Convert string to enum for backward compatibility
     // Only do this if the string parameter was actually provided (i.e., not using defaults)
     if(argv.count("extract_method")) {
@@ -416,7 +504,7 @@ namespace
 					   isovalue, isovalue_in, err, err_in,
 					   meshtype_enum, improvement_method_enum, normaltype,
 					   extraction_method_enum, improve_iterations, dual_contouring,
-					   false, boost::none);
+					   false, propertyVol);
     
     //convert the geoframe back to cvc::geometry and return it
     return convert(g_frame);
@@ -542,13 +630,18 @@ namespace CVC_NAMESPACE
   // 12/29/2013 -- Joe R. -- Creation.
   // 01/08/2014 -- Joe R. -- Removing color args and preparing for cvc-mesher.
   // 12/25/2025 -- Joe R. -- Changed extraction_method to use enum and added improve_iterations.
-  geometry iso(const volume& vol, double isovalue, extraction_method method, int improve_iterations)
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  geometry iso(const volume& vol, double isovalue, extraction_method method, int improve_iterations,
+               boost::optional<const volume&> propertyVol)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
     args["isovalue"] = float(isovalue);
     args["improve_iterations"] = improve_iterations;
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    if(propertyVol) {
+      args["propertyVol"] = propertyVol.get();
+    }
 
     return cvc_mesher(vol,args);
   }
@@ -561,10 +654,12 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/26/2025 -- Joe R. -- Creation.
   // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
   geometry tetrahedralize(const volume& vol, double isovalue,
                           extraction_method method,
                           improvement_method improve_method,
-                          int improve_iterations)
+                          int improve_iterations,
+                          boost::optional<const volume&> propertyVol)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
@@ -573,6 +668,9 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::TETRA;
+    if(propertyVol) {
+      args["propertyVol"] = propertyVol.get();
+    }
 
     return cvc_mesher(vol,args);
   }
@@ -584,10 +682,12 @@ namespace CVC_NAMESPACE
   //   Extract a hexahedral volumetric mesh from a volume (e.g., from SDF).
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
+  // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
   geometry hexahedralize(const volume& vol, double isovalue,
                          extraction_method method,
                          improvement_method improve_method,
-                         int improve_iterations)
+                         int improve_iterations,
+                         boost::optional<const volume&> propertyVol)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
@@ -596,6 +696,9 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::HEXA;
+    if(propertyVol) {
+      args["propertyVol"] = propertyVol.get();
+    }
 
     return cvc_mesher(vol,args);
   }
@@ -657,4 +760,269 @@ namespace CVC_NAMESPACE
     *this = cvc_mesher(*this, args);
     return *this;
   }
+
+  // -------------------------
+  // Volumetric Mesh Utilities
+  // -------------------------
+  // Purpose:
+  //   Utility functions for converting between surface and volumetric mesh representations.
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Creation.
+
+  // Extract surface (boundary) triangular faces from tetrahedral elements
+  geometry::tris_t tet_faces(const geometry::tets_t& tets)
+  {
+    using namespace std;
+    
+    // Each tetrahedron has 4 triangular faces
+    // Face 0: vertices (0, 2, 1) - ordered for outward normal
+    // Face 1: vertices (0, 1, 3)
+    // Face 2: vertices (0, 3, 2)
+    // Face 3: vertices (1, 2, 3)
+    
+    // Use a map to track face counts (boundary faces appear exactly once)
+    map<geometry::tri_t, int> face_count;
+    
+    for(size_t i = 0; i < tets.size(); i++) {
+      const geometry::tet_t& tet = tets[i];
+      
+      // Generate all 4 faces, sorted to create canonical representation
+      geometry::tri_t faces[4];
+      
+      // Create faces with sorted indices for consistent comparison
+      vector<geometry::index_t> f0 = {tet[0], tet[2], tet[1]};
+      vector<geometry::index_t> f1 = {tet[0], tet[1], tet[3]};
+      vector<geometry::index_t> f2 = {tet[0], tet[3], tet[2]};
+      vector<geometry::index_t> f3 = {tet[1], tet[2], tet[3]};
+      
+      sort(f0.begin(), f0.end());
+      sort(f1.begin(), f1.end());
+      sort(f2.begin(), f2.end());
+      sort(f3.begin(), f3.end());
+      
+      faces[0][0] = f0[0]; faces[0][1] = f0[1]; faces[0][2] = f0[2];
+      faces[1][0] = f1[0]; faces[1][1] = f1[1]; faces[1][2] = f1[2];
+      faces[2][0] = f2[0]; faces[2][1] = f2[1]; faces[2][2] = f2[2];
+      faces[3][0] = f3[0]; faces[3][1] = f3[1]; faces[3][2] = f3[2];
+      
+      for(int j = 0; j < 4; j++) {
+        face_count[faces[j]]++;
+      }
+    }
+    
+    // Extract boundary faces (those that appear exactly once)
+    geometry::tris_t boundary_faces;
+    for(const auto& entry : face_count) {
+      if(entry.second == 1) {
+        boundary_faces.push_back(entry.first);
+      }
+    }
+    
+    return boundary_faces;
+  }
+
+  // Extract surface (boundary) quad faces from hexahedral elements
+  geometry::quads_t hex_faces(const geometry::hexs_t& hexs)
+  {
+    using namespace std;
+    
+    // Each hexahedron has 6 quad faces
+    // Standard hex vertex ordering (same as VTK):
+    //   Bottom: 0-1-2-3, Top: 4-5-6-7
+    // Face 0: (0, 3, 2, 1) - bottom
+    // Face 1: (4, 5, 6, 7) - top
+    // Face 2: (0, 1, 5, 4) - front
+    // Face 3: (2, 3, 7, 6) - back
+    // Face 4: (0, 4, 7, 3) - left
+    // Face 5: (1, 2, 6, 5) - right
+    
+    map<geometry::quad_t, int> face_count;
+    
+    for(size_t i = 0; i < hexs.size(); i++) {
+      const geometry::hex_t& hex = hexs[i];
+      
+      // Generate all 6 faces, sorted for canonical representation
+      geometry::quad_t faces[6];
+      
+      vector<geometry::index_t> f0 = {hex[0], hex[3], hex[2], hex[1]};
+      vector<geometry::index_t> f1 = {hex[4], hex[5], hex[6], hex[7]};
+      vector<geometry::index_t> f2 = {hex[0], hex[1], hex[5], hex[4]};
+      vector<geometry::index_t> f3 = {hex[2], hex[3], hex[7], hex[6]};
+      vector<geometry::index_t> f4 = {hex[0], hex[4], hex[7], hex[3]};
+      vector<geometry::index_t> f5 = {hex[1], hex[2], hex[6], hex[5]};
+      
+      sort(f0.begin(), f0.end());
+      sort(f1.begin(), f1.end());
+      sort(f2.begin(), f2.end());
+      sort(f3.begin(), f3.end());
+      sort(f4.begin(), f4.end());
+      sort(f5.begin(), f5.end());
+      
+      faces[0][0] = f0[0]; faces[0][1] = f0[1]; faces[0][2] = f0[2]; faces[0][3] = f0[3];
+      faces[1][0] = f1[0]; faces[1][1] = f1[1]; faces[1][2] = f1[2]; faces[1][3] = f1[3];
+      faces[2][0] = f2[0]; faces[2][1] = f2[1]; faces[2][2] = f2[2]; faces[2][3] = f2[3];
+      faces[3][0] = f3[0]; faces[3][1] = f3[1]; faces[3][2] = f3[2]; faces[3][3] = f3[3];
+      faces[4][0] = f4[0]; faces[4][1] = f4[1]; faces[4][2] = f4[2]; faces[4][3] = f4[3];
+      faces[5][0] = f5[0]; faces[5][1] = f5[1]; faces[5][2] = f5[2]; faces[5][3] = f5[3];
+      
+      for(int j = 0; j < 6; j++) {
+        face_count[faces[j]]++;
+      }
+    }
+    
+    // Extract boundary faces
+    geometry::quads_t boundary_faces;
+    for(const auto& entry : face_count) {
+      if(entry.second == 1) {
+        boundary_faces.push_back(entry.first);
+      }
+    }
+    
+    return boundary_faces;
+  }
+
+  // Decode tetrahedral elements from triangle encoding
+  // LBIE geoframe stores each tet as 4 consecutive triangles (one per face)
+  geometry::tets_t decode_tets_from_triangles(const geometry::tris_t& encoded_tris)
+  {
+    geometry::tets_t tets;
+    
+    // Each tet is represented by 4 consecutive triangles
+    if(encoded_tris.size() % 4 != 0) {
+      std::cerr << "Warning: Triangle count (" << encoded_tris.size() 
+                << ") is not divisible by 4. Cannot decode tets." << std::endl;
+      return tets;
+    }
+    
+    size_t num_tets = encoded_tris.size() / 4;
+    tets.reserve(num_tets);
+    
+    for(size_t i = 0; i < num_tets; i++) {
+      // Extract the 4 triangular faces of this tet
+      const geometry::tri_t& tri0 = encoded_tris[4*i + 0];
+      const geometry::tri_t& tri1 = encoded_tris[4*i + 1];
+      const geometry::tri_t& tri2 = encoded_tris[4*i + 2];
+      const geometry::tri_t& tri3 = encoded_tris[4*i + 3];
+      
+      // Collect all unique vertices from the 4 faces
+      // A tet has 4 vertices, and each appears in 3 of the 4 faces
+      std::set<geometry::index_t> vertices;
+      vertices.insert(tri0[0]); vertices.insert(tri0[1]); vertices.insert(tri0[2]);
+      vertices.insert(tri1[0]); vertices.insert(tri1[1]); vertices.insert(tri1[2]);
+      vertices.insert(tri2[0]); vertices.insert(tri2[1]); vertices.insert(tri2[2]);
+      vertices.insert(tri3[0]); vertices.insert(tri3[1]); vertices.insert(tri3[2]);
+      
+      if(vertices.size() != 4) {
+        std::cerr << "Warning: Tet " << i << " has " << vertices.size() 
+                  << " unique vertices (expected 4). Skipping." << std::endl;
+        continue;
+      }
+      
+      // Convert set to tet (vertex order may not match original, but that's okay)
+      geometry::tet_t tet;
+      auto it = vertices.begin();
+      tet[0] = *it++; tet[1] = *it++; tet[2] = *it++; tet[3] = *it;
+      tets.push_back(tet);
+    }
+    
+    return tets;
+  }
+
+  // Decode hexahedral elements from quad encoding  
+  // LBIE geoframe stores each hex as 6 consecutive quads (one per face)
+  geometry::hexs_t decode_hexs_from_quads(const geometry::quads_t& encoded_quads)
+  {
+    geometry::hexs_t hexs;
+    
+    // Each hex is represented by 6 consecutive quads
+    if(encoded_quads.size() % 6 != 0) {
+      std::cerr << "Warning: Quad count (" << encoded_quads.size() 
+                << ") is not divisible by 6. Cannot decode hexs." << std::endl;
+      return hexs;
+    }
+    
+    size_t num_hexs = encoded_quads.size() / 6;
+    hexs.reserve(num_hexs);
+    
+    for(size_t i = 0; i < num_hexs; i++) {
+      // Based on saveHexa, the hex vertices are reconstructed from the first two quads:
+      // Hex vertices: quads[6*i][0,1,2,3] and quads[6*i+1][1,0,3,2]
+      // This gives us 8 vertices in standard hex ordering
+      const geometry::quad_t& quad0 = encoded_quads[6*i + 0];
+      const geometry::quad_t& quad1 = encoded_quads[6*i + 1];
+      
+      geometry::hex_t hex;
+      hex[0] = quad0[0];  // Bottom face
+      hex[1] = quad0[1];
+      hex[2] = quad0[2];
+      hex[3] = quad0[3];
+      hex[4] = quad1[1];  // Top face (note the reordering from quad1)
+      hex[5] = quad1[0];
+      hex[6] = quad1[3];
+      hex[7] = quad1[2];
+      
+      hexs.push_back(hex);
+    }
+    
+    return hexs;
+  }
+
+  // Encode tetrahedral elements as triangles for geoframe
+  // Each tet becomes 4 triangles (one per face)
+  geometry::tris_t encode_triangles_from_tets(const geometry::tets_t& tets)
+  {
+    geometry::tris_t encoded;
+    encoded.reserve(tets.size() * 4);
+    
+    for(size_t i = 0; i < tets.size(); i++) {
+      const geometry::tet_t& tet = tets[i];
+      
+      // Create 4 triangular faces (matching AddTetra order for sign==1)
+      // These faces should match the pattern used in LBIE
+      geometry::tri_t tri0 = {{tet[0], tet[2], tet[1]}};
+      geometry::tri_t tri1 = {{tet[1], tet[2], tet[3]}};
+      geometry::tri_t tri2 = {{tet[0], tet[3], tet[2]}};
+      geometry::tri_t tri3 = {{tet[0], tet[1], tet[3]}};
+      
+      encoded.push_back(tri0);
+      encoded.push_back(tri1);
+      encoded.push_back(tri2);
+      encoded.push_back(tri3);
+    }
+    
+    return encoded;
+  }
+
+  // Encode hexahedral elements as quads for geoframe
+  // Each hex becomes 6 quads (one per face)
+  geometry::quads_t encode_quads_from_hexs(const geometry::hexs_t& hexs)
+  {
+    geometry::quads_t encoded;
+    encoded.reserve(hexs.size() * 6);
+    
+    for(size_t i = 0; i < hexs.size(); i++) {
+      const geometry::hex_t& hex = hexs[i];
+      
+      // Create 6 quad faces
+      // Standard hex ordering: bottom (0-3), top (4-7)
+      // Match the pattern from saveHexa reconstruction
+      
+      geometry::quad_t quad0 = {{hex[0], hex[1], hex[2], hex[3]}}; // Bottom
+      geometry::quad_t quad1 = {{hex[5], hex[4], hex[7], hex[6]}}; // Top (reordered for saveHexa)
+      geometry::quad_t quad2 = {{hex[0], hex[1], hex[5], hex[4]}}; // Front
+      geometry::quad_t quad3 = {{hex[2], hex[3], hex[7], hex[6]}}; // Back
+      geometry::quad_t quad4 = {{hex[0], hex[4], hex[7], hex[3]}}; // Left
+      geometry::quad_t quad5 = {{hex[1], hex[2], hex[6], hex[5]}}; // Right
+      
+      encoded.push_back(quad0);
+      encoded.push_back(quad1);
+      encoded.push_back(quad2);
+      encoded.push_back(quad3);
+      encoded.push_back(quad4);
+      encoded.push_back(quad5);
+    }
+    
+    return encoded;
+  }
 }
+
