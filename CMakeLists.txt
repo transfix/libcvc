@@ -11,7 +11,7 @@ if(CVC_ENABLE_CUDA)
 endif()
 
 # First declare project with C and CXX to initialize CMake properly
-project(trans-cvc
+project(libcvc
   VERSION 2.0.0
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
@@ -57,10 +57,10 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 # The version number (now using project VERSION)
-set(transcvc_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
-set(transcvc_VERSION_MINOR ${PROJECT_VERSION_MINOR})
-set(transcvc_VERSION ${PROJECT_VERSION})
-message(STATUS "trans-cvc version: ${transcvc_VERSION}")
+set(libcvc_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(libcvc_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(libcvc_VERSION ${PROJECT_VERSION})
+message(STATUS "libcvc version: ${libcvc_VERSION}")
 
 # Configure CUDA if enabled
 if(CVC_ENABLE_CUDA)
@@ -89,7 +89,7 @@ endif()
 
 # Build options
 option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
-option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of trans-cvc subdirectory" ON)
+option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of libcvc subdirectory" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
@@ -133,7 +133,7 @@ endif()
 if(USING_STANDARD_INSTALL_LOCATION)
   set(ADDED_PREFIX ".")
 else()
-  set(ADDED_PREFIX "trans-cvc")
+  set(ADDED_PREFIX "libcvc")
 endif()
 
 # Include GNUInstallDirs for standard installation paths
@@ -186,7 +186,7 @@ if(CVC_ENABLE_COVERAGE)
         COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML report..."
         COMMAND ${GENHTML_PATH} coverage_filtered.info 
           --output-directory coverage_html
-          --title "trans-cvc Code Coverage"
+          --title "libcvc Code Coverage"
           --legend
           --demangle-cpp
           --ignore-errors source
@@ -237,3 +237,4 @@ if(CVC_BUILD_TESTS)
 endif()
 
 add_subdirectory(src)
+

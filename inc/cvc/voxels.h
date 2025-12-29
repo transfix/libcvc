@@ -222,7 +222,7 @@ namespace CVC_NAMESPACE
       switch(voxelType())
 	{
 	case UChar:
-	  data[idx] = static_cast<unsigned char>(val);
+	  reinterpret_cast<unsigned char*>(data)[idx] = static_cast<unsigned char>(val);
 	  break;
 	case UShort:
 	  reinterpret_cast<unsigned short*>(data)[idx] = static_cast<unsigned short>(val);
@@ -257,7 +257,7 @@ namespace CVC_NAMESPACE
       (*this)(x, y, z, val);
     }
     
-    unsigned char * operator*() { preWrite(); return get_data_ptr(); }
+    unsigned char * operator*() { preWrite(); return reinterpret_cast<unsigned char*>(get_data_ptr()); }
     const unsigned char * operator*() const { return reinterpret_cast<const unsigned char*>(get_data_ptr()); }
 
     data_type voxelType() const { return _voxelType; }
@@ -485,7 +485,7 @@ namespace CVC_NAMESPACE
       }
 #endif
       // Otherwise return regular shared_array data
-      return _voxels.get();
+      return reinterpret_cast<byte*>(_voxels.get());
     }
 
     const byte* get_data_ptr() const {
@@ -496,7 +496,7 @@ namespace CVC_NAMESPACE
       }
 #endif
       // Otherwise return regular shared_array data
-      return _voxels.get();
+      return reinterpret_cast<const byte*>(_voxels.get());
     }
 
     // Check if the shared_array is unique (for copy-on-write)
