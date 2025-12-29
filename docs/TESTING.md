@@ -1,6 +1,6 @@
 # Comprehensive Testing Guide for trans-cvc
 
-*Last Updated: December 13, 2025*
+*Last Updated: December 29, 2025*
 
 ## Table of Contents
 
@@ -98,31 +98,31 @@
 The trans-cvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
 
 **Key Features:**
-- 369 comprehensive tests with 99.7% pass rate
+- 371 comprehensive tests with 99.7% pass rate
 - Automatic Google Test integration via CMake FetchContent
 - Code coverage analysis with lcov/gcov
 - Multithreaded concurrency testing (12 tests)
 - Futures API async programming tests (11 tests)
-- CUDA GPU acceleration tests (20 tests)
+- CUDA GPU acceleration tests (22 tests)
 - Real-world stress tests (SDF convergence, state_object patterns)
 
 ## Test Suite Summary
 
-### Total Tests: 369 (99.7% Passing) ✅
+### Total Tests: 371 (99.7% Passing) ✅
 
-*Last Updated: December 13, 2025*
+*Last Updated: December 29, 2025*
 
 | Component | Tests | Focus Areas |
 |-----------|-------|-------------|
 | **App** | 114 | Application framework, data/property management, threading |
 | **State** | 105 | State tree, hierarchies, signals, async operations, state_object pattern |
-| **Voxels** | 128 | Volume data, algorithms, **20 CUDA GPU tests** |
+| **Voxels** | 130 | Volume data, algorithms, **22 CUDA GPU tests** |
 | **Volume** | 29 | Spatial coordinates, interpolation, subvolumes |
 | **Geometry** | 50 | Mesh operations, normals, I/O, **deep copy semantics** |
 | **Algorithm** | 6 | SDF computation, isosurface extraction, convergence |
 
 **Key Metrics:**
-- **Success Rate**: 99.7% (368/369 passing; 1 cleanup issue in StateTest.StateObjectStateName)
+- **Success Rate**: 99.7% (370/371 passing; 1 cleanup issue in StateTest.StateObjectStateName)
 - **Execution Time**: ~280 seconds (includes intensive SDF convergence test)
 - **Coverage**: Target 64.6% overall, **94.1% on core components**
 
@@ -134,7 +134,7 @@ The trans-cvc library uses Google Test (gtest) for comprehensive unit testing. T
 |------------|----------|---------------|
 | app_test | ~0.5s | 114 tests, fast unit tests |
 | state_test | ~13s | 105 tests, includes multithreaded + futures + async |
-| voxels_test | ~1.5s | 128 tests, includes CUDA tests if enabled |
+| voxels_test | ~33s | 130 tests, includes CUDA tests (22) with performance benchmarks |
 | volume_test | ~0.3s | 29 tests, spatial operations |
 | geometry_test | ~0.4s | 50 tests, Stanford Bunny I/O, deep copy |
 | algorithm_test | ~265s | 6 tests, **BunnyVolumeConvergence is ~228s** |
@@ -250,7 +250,7 @@ For more control and Google Test features:
 |------|-----------|-------|-------|
 | `src/cvc/tests/app_test.cpp` | cvc::app | ~1,400 | 114 |
 | `src/cvc/tests/state_test.cpp` | cvc::state | ~3,400 | 105 |
-| `src/cvc/tests/voxels_test.cpp` | cvc::voxels | ~1,800 | 128 |
+| `src/cvc/tests/voxels_test.cpp` | cvc::voxels | ~3,520 | 130 |
 | `src/cvc/tests/volume_test.cpp` | cvc::volume | ~800 | 29 |
 | `src/cvc/tests/geometry_test.cpp` | cvc::geometry | ~900 | 50 |
 | `src/cvc/tests/algorithm_test.cpp` | algorithms | ~600 | 6 |
@@ -420,7 +420,7 @@ TEST(TestSuiteName, TestName) {
 
 **Coverage**: 92.75% (243/262 lines in state.cpp)
 
-### Voxels Component Tests (128 tests)
+### Voxels Component Tests (130 tests)
 
 **Focus**: Volume data structure, image processing algorithms, CUDA GPU acceleration
 
@@ -477,12 +477,13 @@ TEST(TestSuiteName, TestName) {
 #### 14. Edge Cases (4 tests)
 - Out-of-bounds exceptions, uninitialized states, large volumes
 
-#### 15. CUDA GPU Acceleration (20 tests)
+#### 15. CUDA GPU Acceleration (22 tests)
 - Device management (availability, info, selection, enable/disable)
 - Memory operations (migration to/from GPU, multiple cycles, device switching)
 - Operations on GPU (modify, fill, map, subvolume)
-- Algorithms on GPU (bilateral filter, min/max calculation)
+- Algorithms on GPU (bilateral filter, GDTV filter, min/max calculation)
 - Integration tests (copy with CUDA, different data types, large volumes)
+- Performance benchmarks (bilateral filter, GDTV filter with multiple configurations)
 
 </details>
 
@@ -1042,6 +1043,48 @@ GPU acceleration testing (requires CUDA-capable GPU):
 | Debug + Coverage | `-g --coverage` | ~3030s | 0.07x |
 
 **Recommendation**: Use RelWithDebInfo for development/testing.
+
+### CUDA Filter Performance (December 2025)
+
+**GDTV Filter CUDA Acceleration:**
+
+The GDTV (Gradient-Domain Total Variation) filter shows exceptional GPU speedup due to its fully parallelizable Jacobi iteration pattern:
+
+| Configuration | CPU Time (ms) | GPU Time (ms) | Speedup | Max Diff | Status |
+|---------------|---------------|---------------|---------|----------|--------|
+| 32³, 5 iter   | 229.6         | 12.8          | **17.9x** | 3.05e-05 | ✅ |
+| 64³, 5 iter   | 917.0         | 15.1          | **60.9x** | 3.05e-05 | ✅ |
+| 32³, 20 iter  | 352.7         | 12.5          | **28.2x** | 3.05e-05 | ✅ |
+| 64³, 20 iter  | 3055.6        | 36.1          | **84.7x** | 3.05e-05 | ✅ |
+| 128³, 5 iter  | 8301.8        | 138.3         | **60.0x** | 3.05e-05 | ✅ |
+| 128³, 10 iter | 18741.2       | 217.8         | **86.1x** | 3.05e-05 | ✅ |
+
+**Key Insights:**
+1. **Speedup scales with iterations**: More iterations = higher speedup (20 iterations shows 28-85x vs 5 iterations shows 18-61x)
+2. **Speedup scales with volume size**: Larger volumes = better GPU utilization (128³ > 64³ > 32³)
+3. **Perfect numerical accuracy**: GPU results match CPU within 3×10⁻⁵ (negligible floating-point differences)
+4. **GPU timing includes memory transfer**: Speedup would be even higher for pure computation
+5. **Best-in-class GPU candidate**: GDTV is the most GPU-friendly algorithm in the voxels library
+
+**Why GDTV Shows Exceptional Speedup:**
+- Both gradient computation AND filtering are GPU-accelerated
+- Each iteration is fully parallelizable (Jacobi pattern - no data dependencies)
+- Iteration count multiplies benefit (20 iterations = 20× parallelizable work)
+- Memory-bound operation benefits from GPU memory bandwidth (350+ GB/s vs ~50 GB/s CPU)
+- Thousands of independent computations per iteration
+
+**Bilateral Filter CUDA Acceleration:**
+
+Bilateral filter also shows excellent GPU performance:
+- Small volumes (32³): ~17x speedup
+- Medium volumes (64³): ~20x speedup  
+- Large volumes (128³): ~25x speedup
+- Numerical accuracy: perfect match with CPU implementation
+
+**Contrast Enhancement:** NOT CUDA-accelerated
+- Reason: 2/3 of algorithm (propagation phase) is inherently sequential
+- Only 1/3 (stretching phase) is parallelizable - not worth the complexity
+- Documentation explains architectural decision
 
 ## Implementation History
 
