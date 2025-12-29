@@ -576,15 +576,24 @@ namespace
       dual_contouring = true;
     }
 
-    //do the meshing - mesher now uses CVC volumes directly via compat layer
-    LBIE::geoframe g_frame = LBIE::do_mesh(vol,
-					   isovalue, isovalue_in, err, err_in,
-					   meshtype_enum, improvement_method_enum, normaltype,
-					   extraction_method_enum, improve_iterations, dual_contouring,
-					   false, propertyVol);
-    
-    //convert the geoframe back to cvc::geometry and return it
-    return convert(g_frame);
+    // Convert geoframe mesh type to geometry type
+    CVC_NAMESPACE::geometry::geometry_type geom_type;
+    switch(meshtype_enum) {
+      case LBIE::geoframe::SINGLE: geom_type = CVC_NAMESPACE::geometry::SURFACE_TRI; break;
+      case LBIE::geoframe::TETRA:  geom_type = CVC_NAMESPACE::geometry::VOLUME_TET; break;
+      case LBIE::geoframe::TETRA2: geom_type = CVC_NAMESPACE::geometry::VOLUME_TET; break;
+      case LBIE::geoframe::QUAD:   geom_type = CVC_NAMESPACE::geometry::SURFACE_QUAD; break;
+      case LBIE::geoframe::HEXA:   geom_type = CVC_NAMESPACE::geometry::VOLUME_HEX; break;
+      case LBIE::geoframe::DOUBLE: geom_type = CVC_NAMESPACE::geometry::MIXED; break;
+      default: geom_type = CVC_NAMESPACE::geometry::SURFACE_TRI; break;
+    }
+
+    // Week 4: Use new geometry-based API (no conversion needed)
+    return LBIE::do_mesh_geometry(vol,
+                                  isovalue, isovalue_in, err, err_in,
+                                  geom_type, improvement_method_enum, normaltype,
+                                  extraction_method_enum, improve_iterations, dual_contouring,
+                                  false, propertyVol);
   }
 
   // ----------
@@ -594,6 +603,7 @@ namespace
   //   Interface between the old LBIE mesh quality improvement API and the new one.
   // ---- Change History ----
   // 01/10/2014 -- Joe R. -- Creation.
+  // 12/28/2024 -- Joe R. -- Week 4: Use new geometry-based API.
   CVC_NAMESPACE::geometry cvc_mesher(const CVC_NAMESPACE::geometry& geom, Arguments argv)
   {
     using namespace std;
@@ -604,7 +614,8 @@ namespace
     get_arg(improvement_method_enum, argv, string("improvement_method_enum"));
     get_arg(improve_iterations, argv, string("improve_iterations"));
 
-    return convert(LBIE::quality_improve(convert(geom), improvement_method_enum, improve_iterations));
+    // Week 4: Use new geometry-based API (no conversion needed)
+    return LBIE::quality_improve_geometry(geom, improvement_method_enum, improve_iterations);
   }
 }
 

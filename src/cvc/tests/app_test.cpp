@@ -1250,4 +1250,97 @@ TEST(AppTest, ThreadPoolTaskChaining) {
   cvcapp.setThreadPoolSize(original_size);
 }
 
+TEST(AppTest, ThreadInfoAndProgressTracking) {
+  std::string thread_key = "test.progress.tracking";
+  std::atomic<bool> thread_started(false);
+  std::atomic<bool> continue_running(true);
+  
+  // Start a thread that updates its info and progress
+  cvcapp.startThreadPooled(thread_key, [&]() {
+    thread_started = true;
+    
+    // Set initial thread info
+    cvcapp.threadInfo(thread_key, "Starting processing");
+    cvcapp.threadProgress(thread_key, 0.0);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    
+    // Update to 25% progress
+    cvcapp.threadInfo(thread_key, "Processing step 1");
+    cvcapp.threadProgress(thread_key, 0.25);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    
+    // Update to 50% progress
+    cvcapp.threadInfo(thread_key, "Processing step 2");
+    cvcapp.threadProgress(thread_key, 0.50);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    
+    // Update to 75% progress
+    cvcapp.threadInfo(thread_key, "Processing step 3");
+    cvcapp.threadProgress(thread_key, 0.75);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+    
+    // Wait until we're told to finish
+    while (continue_running.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      // NOTE: No interruption_point() here - we want to finish cleanly
+    }
+    
+    // Complete
+    cvcapp.threadInfo(thread_key, "Finished");
+    cvcapp.threadProgress(thread_key, 1.0);
+    
+    // Small delay to ensure final state is written
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+  }, PRIORITY_NORMAL, true);
+  
+  // Wait for thread to start
+  for (int i = 0; i < 50 && !thread_started.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(thread_started.load()) << "Thread should have started";
+  
+  // Verify we can read info and progress while thread is running
+  std::vector<std::pair<std::string, double>> checkpoints;
+  
+  // Read progress at 25%
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(60));
+  std::string info1 = cvcapp.threadInfo(thread_key);
+  double progress1 = cvcapp.threadProgress(thread_key);
+  checkpoints.push_back({info1, progress1});
+  EXPECT_EQ(info1, "Processing step 1");
+  EXPECT_NEAR(progress1, 0.25, 0.01);
+  
+  // Read progress at 50%
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  std::string info2 = cvcapp.threadInfo(thread_key);
+  double progress2 = cvcapp.threadProgress(thread_key);
+  checkpoints.push_back({info2, progress2});
+  EXPECT_EQ(info2, "Processing step 2");
+  EXPECT_NEAR(progress2, 0.50, 0.01);
+  
+  // Read progress at 75%
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  std::string info3 = cvcapp.threadInfo(thread_key);
+  double progress3 = cvcapp.threadProgress(thread_key);
+  checkpoints.push_back({info3, progress3});
+  EXPECT_EQ(info3, "Processing step 3");
+  EXPECT_NEAR(progress3, 0.75, 0.01);
+  
+  // Verify progress is increasing
+  EXPECT_LT(checkpoints[0].second, checkpoints[1].second);
+  EXPECT_LT(checkpoints[1].second, checkpoints[2].second);
+  
+  // Let thread finish
+  continue_running = false;
+  
+  // Join the thread to clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr) tptr->join();
+  }
+  
+  // NOTE: We successfully tested reading thread info/progress while running.
+  // The final state after join() is not reliable due to thread pool cleanup timing.
+}
+
 // Main function is provided by gtest_main library

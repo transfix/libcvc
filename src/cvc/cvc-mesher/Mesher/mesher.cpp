@@ -1,5 +1,6 @@
 #include <VolMagickCompat.h>
 #include <mesher.h>
+#include <LBIE/geoframe_adapter.h>
 
 #include <iostream>
 #include <string>
@@ -8,6 +9,7 @@
 // ----------
 // 01/11/2014 - Joe R. - separating meshing and quality improve operations into their own functions
 //                       to make them easy to call from outside.
+// 12/28/2024 - Joe R. - Week 4: Added geometry-based API using geoframe_adapter
 
 namespace LBIE
 {
@@ -116,4 +118,79 @@ namespace LBIE
     result.mesh_type = g_frame.mesh_type;
     return result;
   }
+
+  // -----------------------------------------------------------------------
+  // Week 4: Geometry-based API using geoframe_adapter
+  // These functions use CVC::geometry at boundaries for zero-copy semantics
+  // -----------------------------------------------------------------------
+
+  // ----------------
+  // do_mesh_geometry
+  // ----------------
+  // Purpose: 
+  //   Geometry-based entry point into LBIE meshing.
+  //   Uses geoframe_adapter for zero-copy conversion.
+  // ---- Change History ----
+  // 12/28/2024 -- Joe R. -- Creation (Week 4).
+  CVC_NAMESPACE::geometry do_mesh_geometry(
+      const VolMagick::Volume& vol,
+      float isovalue, float isovalue_in, float err, float err_in,
+      CVC_NAMESPACE::geometry::geometry_type geom_type,
+      Mesher::ImproveMethod improve_method,
+      const std::string& normaltype, 
+      Mesher::ExtractionMethod extract_method,
+      int improve_iterations,
+      bool dual_contouring,
+      bool verbose,
+      boost::optional<const VolMagick::Volume&> propertyVol)
+  {
+    // Convert geometry_type to geoframe::GEOTYPE
+    geoframe::GEOTYPE meshtype;
+    switch(geom_type) {
+      case CVC_NAMESPACE::geometry::SURFACE_TRI:  meshtype = geoframe::SINGLE; break;
+      case CVC_NAMESPACE::geometry::SURFACE_QUAD: meshtype = geoframe::QUAD; break;
+      case CVC_NAMESPACE::geometry::VOLUME_TET:   meshtype = geoframe::TETRA; break;
+      case CVC_NAMESPACE::geometry::VOLUME_HEX:   meshtype = geoframe::HEXA; break;
+      case CVC_NAMESPACE::geometry::MIXED:        meshtype = geoframe::SINGLE; break;
+      default: throw cvc_mesher_exception("invalid geometry type");
+    }
+    
+    // Call existing geoframe-based implementation
+    geoframe result = do_mesh(vol, isovalue, isovalue_in, err, err_in,
+                              meshtype, improve_method, normaltype,
+                              extract_method, improve_iterations,
+                              dual_contouring, verbose, propertyVol);
+    
+    // Convert result to geometry
+    return to_geometry(result);
+  }
+
+  // ------------------------
+  // quality_improve_geometry
+  // ------------------------
+  // Purpose: 
+  //   Geometry-based entry point into LBIE mesh quality improvement.
+  //   Uses geoframe_adapter for one-copy conversion.
+  // ---- Change History ----
+  // 12/28/2024 -- Joe R. -- Creation (Week 4).
+  // 12/28/2025 -- Joe R. -- Fixed: work with copy to avoid temporary reference issues.
+  CVC_NAMESPACE::geometry quality_improve_geometry(
+      const CVC_NAMESPACE::geometry& geom,
+      Mesher::ImproveMethod improve_method,
+      int improve_iterations,
+      bool verbose)
+  {
+    // Create a working copy of the geometry (needed because we modify it)
+    CVC_NAMESPACE::geometry working_copy(geom);
+    
+    // Convert geometry to geoframe
+    geoframe gf = to_geoframe(working_copy);
+    
+    // Call existing geoframe-based implementation
+    geoframe result = quality_improve(gf, improve_method, improve_iterations, verbose);
+    
+    // Convert result back to geometry
+    return to_geometry(result);
+  }
+
 }

@@ -278,6 +278,7 @@ if(CVC_ENABLE_MESHER)
       cvc-mesher/LBIE/normalspline.h
       cvc-mesher/LBIE/vtkMarchingCubesCases.h
       cvc-mesher/LBIE/LBIE_geoframe.h
+      cvc-mesher/LBIE/geoframe_adapter.h
       cvc-mesher/LBIE/e_face.h
       cvc-mesher/LBIE/endians.h
       cvc-mesher/LBIE/octree.h
@@ -341,6 +342,7 @@ if(CVC_ENABLE_MESHER)
       cvc-mesher/LBIE/e_face.cpp
       cvc-mesher/LBIE/pcio.cpp
       cvc-mesher/LBIE/LBIE_geoframe.cpp
+      cvc-mesher/LBIE/geoframe_adapter.cpp
       cvc-mesher/LBIE/tetra.cpp
       cvc-mesher/LBIE/hexa.cpp
       cvc-mesher/LBIE/LBIE_Mesher.cpp
