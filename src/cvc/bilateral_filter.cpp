@@ -62,12 +62,19 @@ namespace CVC_NAMESPACE
 	for (i=-int(filterRadius); i<=int(filterRadius); i++)
 	  spatialMask[index++] = exp((double)(k*k+j*j+i*i)/(-spatialSigma*spatialSigma*2.0));
     
+    // Use temporary buffer with deep copy to avoid race conditions with OpenMP
+    voxels temp(voxel_dimensions(), voxelType());
+    temp.copy(*this, true);  // Deep copy
+    
     for(k=0; k<int(ZDim()); k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for private(i,j,x,y,z,fsample,sum,denom,normalizedDiff,weight,bool1,bool2) schedule(dynamic)
+#endif
 	for(j=0; j<int(YDim()); j++)
 	  for(i=0; i<int(XDim()); i++)
 	    {
-	      fsample = (*this)(i,j,k);
+	      fsample = temp(i,j,k);
 	      sum = 0; denom = 0;
 	      
 	      for(z=0; z<filterDiameter; z++)
@@ -80,13 +87,13 @@ namespace CVC_NAMESPACE
 			{
 			  if(i+x>=int(filterRadius) && i+x<int(XDim())+int(filterRadius) && bool2)
 			    {
-			      normalizedDiff = fabs(fsample - (*this)(i+x-filterRadius,j+y-filterRadius,k+z-filterRadius));
+			      normalizedDiff = fabs(fsample - temp(i+x-filterRadius,j+y-filterRadius,k+z-filterRadius));
 			      normalizedDiff /= valueRange;
 			      normalizedDiff *= 255.0;
 			      weight = radiometricTable[int(normalizedDiff)]*
 				spatialMask[z*filterDiameter*filterDiameter+y*filterDiameter+x];
 			      denom += weight;
-			      sum += weight * (*this)(i+x-filterRadius,j+y-filterRadius,k+z-filterRadius);
+			      sum += weight * temp(i+x-filterRadius,j+y-filterRadius,k+z-filterRadius);
 			    }
 			}
 		    }

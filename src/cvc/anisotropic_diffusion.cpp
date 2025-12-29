@@ -74,10 +74,15 @@ namespace CVC_NAMESPACE
     double cn, cs, ce, cw, cu, cd;
     double delta_n, delta_s, delta_e, delta_w, delta_u, delta_d;
     uint64 i, j;
-    voxels tempt(*this);
+    // Use deep copy for temporary buffer to avoid race conditions with OpenMP
+    voxels tempt(voxel_dimensions(), voxelType());
+    tempt.copy(*this, true);  // Deep copy
 
     for (m = 0; m < iterations; m++) {
       for (k = 0; k < ZDim(); k++) {
+#ifdef _OPENMP
+        #pragma omp parallel for private(i,j,cn,cs,ce,cw,cu,cd,delta_n,delta_s,delta_e,delta_w,delta_u,delta_d) schedule(dynamic)
+#endif
         for (j = 0; j < YDim(); j++) {
           for (i = 0; i < XDim(); i++) {
             if (j < YDim()-1)
@@ -123,7 +128,8 @@ namespace CVC_NAMESPACE
         stepnum++;
       }
     
-      (*this) = tempt;
+      // Copy result back using deep copy to avoid shallow copy aliasing
+      copy(tempt, true);
     }
 
     cvcapp.threadProgress(1.0f);

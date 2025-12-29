@@ -44,6 +44,9 @@ namespace CVC_NAMESPACE
 
     for(unsigned int i = 0; i < input.XDim(); i++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for private(val) schedule(dynamic)
+#endif
 	for(unsigned int j = 0; j < input.YDim(); j++)
 	  for(unsigned int k = 0; k < input.ZDim(); k++)
 	    {
@@ -80,6 +83,9 @@ namespace CVC_NAMESPACE
     float val[26];
     for(unsigned int i = 0; i < input.XDim(); i++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for private(val) schedule(dynamic)
+#endif
 	for(unsigned int j = 0; j < input.YDim(); j++)
 	  for(unsigned int k = 0; k < input.ZDim(); k++)
 	    {

@@ -539,6 +539,11 @@ if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)
 endif()
 
+if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
+  target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
+endif()
+
 # Link libraries
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 

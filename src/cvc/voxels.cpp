@@ -513,6 +513,121 @@ namespace CVC_NAMESPACE
     return *this;
   }
 
+  // ------------------------
+  // voxels::resizeTrilinearCPU
+  // ------------------------
+  // Purpose:
+  //   Helper function for CPU-based trilinear interpolation resize.
+  //   Performs the core interpolation loop that is shared between
+  //   resize(dimension) and resize(bounding_box).
+  // Parameters:
+  //   newvox - destination voxels object (must be pre-allocated)
+  //   offset_x/y/z - starting offset in source voxel coordinates
+  //   scale_x/y/z - scale factor per destination voxel
+  //   clampCoords - if true, clamp coords and set xRes/yRes/zRes to 0 at boundaries (bbox mode)
+  //                 if false, don't clamp or modify xRes/yRes/zRes (dimension mode)
+  // ---- Change History ----
+  // 12/28/2025 -- Joe R. -- Created to eliminate code duplication
+  void voxels::resizeTrilinearCPU(voxels& newvox,
+                                   double offset_x, double offset_y, double offset_z,
+                                   double scale_x, double scale_y, double scale_z,
+                                   bool clampCoords) const
+  {
+    uint64 i, j, k;
+    double val[8];
+    uint64 resXIndex = 0, resYIndex = 0, resZIndex = 0;
+    uint64 ValIndex[8];
+    double xPosition = 0, yPosition = 0, zPosition = 0;
+    double xRes = 0, yRes = 0, zRes = 0;
+
+    for(k = 0; k < newvox.ZDim(); k++)
+      {
+        // Calculate position in source voxel coordinate system
+        double z = offset_z + double(k) * scale_z;
+        if (clampCoords) {
+          // Clamp to valid range (bbox mode)
+          if (z < 0) z = 0;
+          if (z >= voxel_dimensions()[2]-1) z = voxel_dimensions()[2]-1-0.001;
+        }
+        resZIndex = uint64(z);
+        zPosition = z - uint64(z);
+        zRes = 1;
+        
+#ifdef _OPENMP
+	#pragma omp parallel for private(i,j,resXIndex,resYIndex,xPosition,yPosition,xRes,yRes,val,ValIndex) schedule(dynamic)
+#endif
+        for(j = 0; j < newvox.YDim(); j++)
+          {
+            double y = offset_y + double(j) * scale_y;
+            if (clampCoords) {
+              // Clamp to valid range (bbox mode)
+              if (y < 0) y = 0;
+              if (y >= voxel_dimensions()[1]-1) y = voxel_dimensions()[1]-1-0.001;
+            }
+            resYIndex = uint64(y);
+            yPosition = y - uint64(y);
+            yRes = 1;
+
+            for(i = 0; i < newvox.XDim(); i++)
+              {
+                double x = offset_x + double(i) * scale_x;
+                if (clampCoords) {
+                  // Clamp to valid range (bbox mode)
+                  if (x < 0) x = 0;
+                  if (x >= voxel_dimensions()[0]-1) x = voxel_dimensions()[0]-1-0.001;
+                }
+                resXIndex = uint64(x);
+                xPosition = x - uint64(x);
+                xRes = 1;
+
+                // find index to get eight voxel values
+                ValIndex[0] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
+                ValIndex[1] = ValIndex[0] + 1;
+                ValIndex[2] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
+                ValIndex[3] = ValIndex[2] + 1;
+                ValIndex[4] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
+                ValIndex[5] = ValIndex[4] + 1;
+                ValIndex[6] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
+                ValIndex[7] = ValIndex[6] + 1;
+
+                // Handle boundary conditions
+                if(resXIndex>=voxel_dimensions()[0]-1)
+                  {
+                    if (clampCoords) xRes = 0;  // Only set to 0 in bbox mode
+                    ValIndex[1] = ValIndex[0];
+                    ValIndex[3] = ValIndex[2];
+                    ValIndex[5] = ValIndex[4];
+                    ValIndex[7] = ValIndex[6];
+                  }
+                if(resYIndex>=voxel_dimensions()[1]-1)
+                  {
+                    if (clampCoords) yRes = 0;  // Only set to 0 in bbox mode
+                    ValIndex[2] = ValIndex[0];
+                    ValIndex[3] = ValIndex[1];
+                    ValIndex[6] = ValIndex[4];
+                    ValIndex[7] = ValIndex[5];
+                  }
+                if(resZIndex>=voxel_dimensions()[2]-1)
+                  {
+                    if (clampCoords) zRes = 0;  // Only set to 0 in bbox mode
+                    ValIndex[4] = ValIndex[0];
+                    ValIndex[5] = ValIndex[1];
+                    ValIndex[6] = ValIndex[2];
+                    ValIndex[7] = ValIndex[3];
+                  }
+
+                for(int Index = 0; Index < 8; Index++) 
+                  val[Index] = (*this)(ValIndex[Index]);
+                  
+                newvox(i,j,k,
+                       getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
+              }
+          }
+
+        cvcapp.threadProgress(float(k)/float(newvox.ZDim()));
+      }
+  }
+
   voxels& voxels::resize(const dimension& newdim)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -586,69 +701,10 @@ namespace CVC_NAMESPACE
 #endif
 
     // CPU implementation (fallback or when CUDA not available)
-    for(k = 0; k < newvox.ZDim(); k++)
-      {
-	z = double(k)*inSpaceZ;
-	resZIndex = uint64(z);
-	zPosition = z - uint64(z);
-	zRes = 1;
-	
-	for(j = 0; j < newvox.YDim(); j++)
-	  {
-	    y = double(j)*inSpaceY;
-	    resYIndex = uint64(y);
-	    yPosition = y - uint64(y);
-	    yRes =  1;
-
-	    for(i = 0; i < newvox.XDim(); i++)
-	      {
-		x = double(i)*inSpaceX;
-		resXIndex = uint64(x);
-		xPosition = x - uint64(x);
-		xRes = 1;
-
-		// find index to get eight voxel values
-		ValIndex[0] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
-		ValIndex[1] = ValIndex[0] + 1;
-		ValIndex[2] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
-		ValIndex[3] = ValIndex[2] + 1;
-		ValIndex[4] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
-		ValIndex[5] = ValIndex[4] + 1;
-		ValIndex[6] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
-		ValIndex[7] = ValIndex[6] + 1;
-
-		if(resXIndex>=voxel_dimensions()[0]-1)
-		  {
-		    ValIndex[1] = ValIndex[0];
-		    ValIndex[3] = ValIndex[2];
-		    ValIndex[5] = ValIndex[4];
-		    ValIndex[7] = ValIndex[6];
-		  }
-		if(resYIndex>=voxel_dimensions()[1]-1)
-		  {
-		    ValIndex[2] = ValIndex[0];
-		    ValIndex[3] = ValIndex[1];
-		    ValIndex[6] = ValIndex[4];
-		    ValIndex[7] = ValIndex[5];
-		  }
-		if(resZIndex>=voxel_dimensions()[2]-1) 
-		  {
-		    ValIndex[4] = ValIndex[0];
-		    ValIndex[5] = ValIndex[1];
-		    ValIndex[6] = ValIndex[2];
-		    ValIndex[7] = ValIndex[3];
-		  }
-
-		for(int Index = 0; Index < 8; Index++) 
-		  val[Index] = (*this)(ValIndex[Index]);
-		  
-		newvox(i,j,k,
-		       getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
-	      }
-	  }
-
-        cvcapp.threadProgress(float(k)/float(newvox.ZDim()));
-      }
+    // Use helper function for trilinear interpolation
+    // For dimension-based resize, offset is 0 and scale is inSpace
+    // Don't clamp coordinates (original behavior for dimension-based resize)
+    resizeTrilinearCPU(newvox, 0.0, 0.0, 0.0, inSpaceX, inSpaceY, inSpaceZ, false);
 
     copy(newvox); //make this into a copy of the interpolated voxels
     cvcapp.threadProgress(1.0f);
@@ -723,90 +779,9 @@ namespace CVC_NAMESPACE
 #endif
 
     // CPU implementation (fallback or when CUDA not available)
-    uint64 i, j, k;
-    double val[8];
-    uint64 resXIndex = 0, resYIndex = 0, resZIndex = 0;
-    uint64 ValIndex[8];
-    double xPosition = 0, yPosition = 0, zPosition = 0;
-    double xRes = 0, yRes = 0, zRes = 0;
-
-    for(k = 0; k < ZDim(); k++)
-      {
-        // Calculate position in old bbox coordinate system
-        double z = offset_z + double(k) * scale_z;
-        // Clamp to valid range
-        if (z < 0) z = 0;
-        if (z >= voxel_dimensions()[2]-1) z = voxel_dimensions()[2]-1-0.001;
-        resZIndex = uint64(z);
-        zPosition = z - uint64(z);
-        zRes = 1;
-        
-        for(j = 0; j < YDim(); j++)
-          {
-            double y = offset_y + double(j) * scale_y;
-            // Clamp to valid range
-            if (y < 0) y = 0;
-            if (y >= voxel_dimensions()[1]-1) y = voxel_dimensions()[1]-1-0.001;
-            resYIndex = uint64(y);
-            yPosition = y - uint64(y);
-            yRes = 1;
-
-            for(i = 0; i < XDim(); i++)
-              {
-                double x = offset_x + double(i) * scale_x;
-                // Clamp to valid range
-                if (x < 0) x = 0;
-                if (x >= voxel_dimensions()[0]-1) x = voxel_dimensions()[0]-1-0.001;
-                resXIndex = uint64(x);
-                xPosition = x - uint64(x);
-                xRes = 1;
-
-                // find index to get eight voxel values
-                ValIndex[0] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
-                ValIndex[1] = ValIndex[0] + 1;
-                ValIndex[2] = resZIndex*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
-                ValIndex[3] = ValIndex[2] + 1;
-                ValIndex[4] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + resYIndex*voxel_dimensions()[0] + resXIndex;
-                ValIndex[5] = ValIndex[4] + 1;
-                ValIndex[6] = (resZIndex+1)*voxel_dimensions()[0]*voxel_dimensions()[1] + (resYIndex+1)*voxel_dimensions()[0] + resXIndex;
-                ValIndex[7] = ValIndex[6] + 1;
-
-                // Handle boundary conditions
-                if(resXIndex>=voxel_dimensions()[0]-1)
-                  {
-                    xRes = 0;
-                    ValIndex[1] = ValIndex[0];
-                    ValIndex[3] = ValIndex[2];
-                    ValIndex[5] = ValIndex[4];
-                    ValIndex[7] = ValIndex[6];
-                  }
-                if(resYIndex>=voxel_dimensions()[1]-1)
-                  {
-                    yRes = 0;
-                    ValIndex[2] = ValIndex[0];
-                    ValIndex[3] = ValIndex[1];
-                    ValIndex[6] = ValIndex[4];
-                    ValIndex[7] = ValIndex[5];
-                  }
-                if(resZIndex>=voxel_dimensions()[2]-1)
-                  {
-                    zRes = 0;
-                    ValIndex[4] = ValIndex[0];
-                    ValIndex[5] = ValIndex[1];
-                    ValIndex[6] = ValIndex[2];
-                    ValIndex[7] = ValIndex[3];
-                  }
-
-                for(int Index = 0; Index < 8; Index++) 
-                  val[Index] = (*this)(ValIndex[Index]);
-                  
-                newvox(i,j,k,
-                       getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
-              }
-          }
-
-        cvcapp.threadProgress(float(k)/float(ZDim()));
-      }
+    // Use helper function for trilinear interpolation with offset and scale
+    // Clamp coordinates (bbox mode requires clamping and setting xRes/yRes/zRes to 0)
+    resizeTrilinearCPU(newvox, offset_x, offset_y, offset_z, scale_x, scale_y, scale_z, true);
 
     copy(newvox); //make this into a copy of the interpolated voxels
     cvcapp.threadProgress(1.0f);
@@ -822,6 +797,9 @@ namespace CVC_NAMESPACE
 
     for(k=0; k<compVox.ZDim(); k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for private(i,j) schedule(dynamic)
+#endif
 	for(j=0; j<compVox.YDim(); j++)
 	  for(i=0; i<compVox.XDim(); i++)
 	    if((int64(i)+off_x >= 0) && (int64(i)+off_x < int64(XDim())) &&

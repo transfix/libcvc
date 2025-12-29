@@ -157,7 +157,8 @@ namespace
     return      Dist_f;
   }
 
-  void smooth_geometry(CVC_NAMESPACE::geometry& geo, float delta, bool fix_boundary)
+  void smooth_geometry(CVC_NAMESPACE::geometry& geo, float delta, bool fix_boundary,
+                       bool perturb_1, bool geometric_flow, bool smoothing_enabled, bool perturb_2)
   {
     using namespace std;
     using namespace boost;
@@ -301,7 +302,7 @@ namespace
         for(i=0; i<NumVertices_i; i++) FixedVertices_guc[i] = 0;
       }
 
-#ifdef  PERTURB_1
+    if(perturb_1)
     {
       thread_info ti("PERTURB_1");
       // calculate the normal for each vertex
@@ -358,10 +359,9 @@ namespace
 	}
       }
     }
-#endif
 
 
-#ifdef  GEOMETRIC_FLOW
+    if(geometric_flow)
     {
       // Rounding sharp edges
       thread_info ti("GEOMETRIC_FLOW");
@@ -370,9 +370,15 @@ namespace
       for(index = 0; index < maxIndex; index++) {
 
 	// calculate the normal for each vertex
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for(i = 0; i < NumVertices_i; i++) {
 	  for(k = 0; k < 3; k++) VertexNormal_gf[i*3 + k] = 0.0f;
 	}
+#ifdef _OPENMP
+	#pragma omp parallel for private(itri,v0,v1,v2,k,Pt0,Pt1,Pt2,Normal_f,Length_f) schedule(dynamic)
+#endif
 	for(i = 0; i < NumVertices_i; i++) {
         
 	  for(TriangleIndexVec::const_iterator j = SharedTriangleIndex_gi[i].begin();
@@ -401,6 +407,9 @@ namespace
 	}
 
 
+#ifdef _OPENMP
+	#pragma omp parallel for private(itri,v0,v1,v2,k,Pt0,Pt1,Pt2,area,sum_0,sum_1,WeightedCenter,t) schedule(dynamic)
+#endif
 	for(i = 0; i < NumVertices_i; i++) {
 
 	  if (FixedVertices_guc[i]==1) continue;
@@ -448,10 +457,9 @@ namespace
 
       } // end of index loop
     }
-#endif  
         
 
-#ifdef  SMOOTHING
+    if(smoothing_enabled)
     {
       thread_info ti("SMOOTHING");
 
@@ -459,9 +467,15 @@ namespace
       for(index = 0; index < maxIndex; index++) {
 
 	// calculate the normal for each vertex
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for(i = 0; i < NumVertices_i; i++) {
 	  for(k = 0; k < 3; k++) VertexNormal_gf[i*3 + k] = 0.0f;
 	}
+#ifdef _OPENMP
+	#pragma omp parallel for private(itri,v0,v1,v2,k,Pt0,Pt1,Pt2,Normal_f,Length_f) schedule(dynamic)
+#endif
 	for(i=0; i<NumVertices_i; i++) {
 
 	  for(TriangleIndexVec::const_iterator j = SharedTriangleIndex_gi[i].begin();
@@ -490,6 +504,9 @@ namespace
 	}
 
 
+#ifdef _OPENMP
+	#pragma omp parallel for private(itri,v0,v1,v2,k,Pt0,Pt1,Pt2,AveCenter_f,NumNeighborVertices_i) schedule(dynamic)
+#endif
 	for(i = 0; i < NumVertices_i; i++) {
                 
 	  if (FixedVertices_guc[i]==1) continue;
@@ -528,16 +545,21 @@ namespace
 
       } // end of index loop
     }
-#endif
 
 
-#ifdef  PERTURB_2
+    if(perturb_2)
     {
       thread_info ti("PERTURB_2");
       // calculate the normal for each vertex
+#ifdef _OPENMP
+      #pragma omp parallel for schedule(static)
+#endif
       for(i = 0; i < NumVertices_i; i++) {
         for(k = 0; k < 3; k++) VertexNormal_gf[i*3 + k] = 0.0f;
       }
+#ifdef _OPENMP
+      #pragma omp parallel for private(itri,v0,v1,v2,k,Pt0,Pt1,Pt2,Normal_f,Length_f) schedule(dynamic)
+#endif
       for(i = 0; i < NumVertices_i; i++) {
 
         if (FixedVertices_guc[i]==1) continue;
@@ -567,6 +589,9 @@ namespace
       }
 
       float     EdgeLength_f[3], MaxDist_f, Perturb_f;
+#ifdef _OPENMP
+      #pragma omp parallel for private(k,Pt0,Pt1,Pt2,EdgeLength_f,MaxDist_f,Perturb_f) schedule(dynamic)
+#endif
       for(i = 0; i < NumVertices_i; i++) {
 
         for(k=0; k<3; k++) {
@@ -588,10 +613,12 @@ namespace
         }
       }
     }
-#endif
 
     points_t& pts = geo.points();
     normals_t& norm = geo.normals();
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
     for(i = 0; i < NumVertices_i; i++)
       {
         //use old vertex if smoothing produced garbage
@@ -620,9 +647,11 @@ namespace
 
 namespace CVC_NAMESPACE
 {
-  geometry& geometry::smoothing(float delta, bool fix_boundary)
+  geometry& geometry::smoothing(float delta, bool fix_boundary,
+                                bool perturb_1, bool geometric_flow,
+                                bool smoothing_enabled, bool perturb_2)
   {
-    smooth_geometry(*this, delta, fix_boundary);
+    smooth_geometry(*this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled, perturb_2);
     return *this;
   }
 }

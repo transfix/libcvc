@@ -205,7 +205,9 @@ namespace CVC_NAMESPACE
     geometry& project(const geometry &input);
 
     //sangmin park's smoothing method
-    geometry& smoothing(float delta = 0.1f, bool fix_boundary = false);
+    geometry& smoothing(float delta = 0.1f, bool fix_boundary = false,
+                        bool perturb_1 = false, bool geometric_flow = true,
+                        bool smoothing_enabled = true, bool perturb_2 = false);
 
     //LBIE mesh quality improvement
     geometry& quality_improve(int iterations = 1, improvement_method method = GEO_FLOW);

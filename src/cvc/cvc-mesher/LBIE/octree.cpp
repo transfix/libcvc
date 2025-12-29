@@ -225,6 +225,9 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
   //interior_flag =0;
   if(interior_flag)
     {	
+#ifdef _OPENMP
+      #pragma omp parallel for schedule(static)
+#endif
       for(i = 0; i < dim[0]*dim[1]*dim[2]; i++) {
 	//vol[i] = -tmp[i];//volumeData->getValueAt(0,i); //tmp[i];
 	orig_vol[i] = -volumeData(i);
@@ -239,6 +242,9 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
       float r0, r;
       int index,index0;
       r0 = center - 0.001f;
+#ifdef _OPENMP
+      #pragma omp parallel for private(j,i,index,index0,r) schedule(dynamic)
+#endif
       for(k = 0; k < dim[2]; k++)
 	for(j = 0; j < dim[1]; j++)
 	  for(i = 0; i < dim[0]; i++) {
@@ -413,8 +419,14 @@ void Octree::initMem()
 	grid_idx_arr = (int*)malloc(sizeof(int)*dim[0]*dim[1]*dim[2]);
 	vtx_idx_arr_in = (int*)malloc(sizeof(int)*octcell_num);
 	int k;
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (k=0;k<octcell_num;k++) {
 		vtx_idx_arr[k]=-1;	vtx_idx_arr_in[k]=-1;}
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (k=0;k<dim[0]*dim[1]*dim[2];k++) grid_idx_arr[k]=-1;	
 
 	qef_array	= (double**) malloc (sizeof(double*) * octcell_num);
@@ -4457,6 +4469,9 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	}
 
 	// Load data from geoframe
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (i = 0; i < nv; i++) {
 		vtx[i][0] = geofrm.verts[i][0];
 		vtx[i][1] = geofrm.verts[i][1];
@@ -4686,6 +4701,7 @@ int new_ntet0 = new_ntet;
 final_tets.clear();
 final_tets.reserve(new_ntet * 4);
 
+// Note: Cannot parallelize this loop due to final_tets.push_back() race condition
 for(i = 0; i < new_ntet; i++) {
 	if(i%10000 == 0) printf("%d ", i);
 	
@@ -5462,6 +5478,7 @@ void Octree::optimization(geoframe& geofrm) {
 	float temp0 = 0.0f;
 	float temp1 = 0.0f;
 	int num = 0;
+	// Cannot parallelize: race conditions on min/max vars, minAspIndx, hexaIndx, and array writes
 	for(i = 0; i < geofrm.numquads/6; i++) {
 		v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];
 		v2 = geofrm.quads[6*i][2];		v3 = geofrm.quads[6*i][3];
@@ -5663,11 +5680,15 @@ void Octree::optimization(geoframe& geofrm) {
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
+#ifdef _OPENMP
+		#pragma omp parallel for schedule(static)
+#endif
 		for(i = 0; i < geofrm.numverts ; i++) {conditionArr[i] = 1.0f;	jacobianArr[i] = 1.0f;	oddyArr[i] = 0.0f;}
 		jaco_min = 1.0f;		jaco_max = -1.0f;
 		oddy_min = 1000.0f;		oddy_max = -1000.0f;
 		cond_min = 1000.0f;		cond_max = -1000.0f;
 		temp = 0.0f;	temp0 = 0.0f;	temp1 = 0.0f;	num = 0;
+		// Cannot parallelize: race conditions on min/max vars and array writes
 		for(i = 0; i < geofrm.numquads/6; i++) {
 
 			v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];

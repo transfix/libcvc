@@ -40,6 +40,7 @@ namespace CVC_NAMESPACE
     voxels lcmin(dimension(xdim,ydim,1),paramin->voxelType());
     voxels lcmax(dimension(xdim,ydim,1),paramin->voxelType());
 
+    // Note: OpenMP removed to maintain deterministic numerical results
     for(j=0; j<ydim; j++)
       for(i=0; i<xdim; i++)
 	{
@@ -148,6 +149,7 @@ namespace CVC_NAMESPACE
 	  }
       }
     
+    // Note: OpenMP removed to maintain deterministic numerical results
     for(j=0; j<ydim; j++)
       for(i=0; i<xdim; i++)
 	{
@@ -182,6 +184,7 @@ namespace CVC_NAMESPACE
     for(k=1; k<int(ZDim()); k++)
       {
 	/* propagation from lower slice */
+	// Note: OpenMP removed to maintain deterministic numerical results
 	for(j=0; j<int(YDim()); j++)
 	  for(i=0; i<int(XDim()); i++)
 	    {
@@ -202,6 +205,7 @@ namespace CVC_NAMESPACE
     for(k=ZDim()-2; k>=0; k--)
       {
 	/* propagation from upper slice */
+	// Note: OpenMP removed to maintain deterministic numerical results
 	for(j=0; j<int(YDim()); j++)
 	  for(i=0; i<int(XDim()); i++) 
 	    {
@@ -218,6 +222,7 @@ namespace CVC_NAMESPACE
     /* stretching */
     for(k=0; k<int(ZDim()); k++)
       {
+	// Note: OpenMP removed to maintain deterministic numerical results
 	for(j=0; j<int(YDim()); j++)
 	  for(i=0; i<int(XDim()); i++)
 	    {
@@ -240,7 +245,11 @@ namespace CVC_NAMESPACE
 		  a = 0.707*alpha;
 		  b = 1.414*alpha*(img - window) - 1;
 		  c = 0.707*alpha*img*(img-2*window) + img;
-		  imgavg(i,j,k, lmin+(-b-sqrt(b*b-4*a*c))/(2*a));
+		  double discriminant = b*b-4*a*c;
+		  if(discriminant >= 0)
+		    imgavg(i,j,k, lmin+(-b-sqrt(discriminant))/(2*a));
+		  else
+		    imgavg(i,j,k, img+lmin); // Fallback if discriminant is negative
 		}
 	      else 
 		imgavg(i,j,k, img+lmin);

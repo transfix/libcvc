@@ -339,6 +339,16 @@ namespace CVC_NAMESPACE
 
   protected:
     void calcMinMax() const;
+    
+    // Helper function for trilinear interpolation resize operations
+    // Performs CPU-based trilinear interpolation from (*this) to newvox
+    // using provided offset and scale parameters
+    // clampCoords: whether to clamp coordinates and set xRes/yRes/zRes to 0 at boundaries
+    void resizeTrilinearCPU(voxels& newvox, 
+                            double offset_x, double offset_y, double offset_z,
+                            double scale_x, double scale_y, double scale_z,
+                            bool clampCoords) const;
+    
     void preWrite()
     {
       _histogramDirty = true; //invalidate the histogram

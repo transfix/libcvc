@@ -93,6 +93,7 @@ option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
+option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 
 # Include macros for setting up library dependencies
 include(SetupFFTW)
@@ -105,6 +106,21 @@ endif()
 
 if(CVC_ENABLE_CUDA)
   include(SetupCUDA)
+endif()
+
+# Setup OpenMP if enabled
+if(CVC_ENABLE_OPENMP)
+  find_package(OpenMP)
+  if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP support enabled")
+    message(STATUS "OpenMP version: ${OpenMP_CXX_VERSION}")
+    message(STATUS "OpenMP flags: ${OpenMP_CXX_FLAGS}")
+  else()
+    message(STATUS "OpenMP not found - disabling OpenMP support")
+    set(CVC_ENABLE_OPENMP OFF)
+  endif()
+else()
+  message(STATUS "OpenMP support disabled")
 endif()
 
 # Platform-specific settings
