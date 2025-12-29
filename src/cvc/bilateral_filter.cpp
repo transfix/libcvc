@@ -66,6 +66,11 @@ namespace CVC_NAMESPACE
     voxels temp(voxel_dimensions(), voxelType());
     temp.copy(*this, true);  // Deep copy
     
+    // Call preWrite() once BEFORE parallel region to avoid race on _histogramDirty flag
+    // and ensure unique voxel data (copy-on-write if needed)
+    preWrite();
+    byte* data = get_data_ptr();  // Get pointer once for direct writes
+    
     for(k=0; k<int(ZDim()); k++)
       {
 #ifdef _OPENMP
@@ -99,7 +104,21 @@ namespace CVC_NAMESPACE
 		    }
 		}
 	      
-	      (*this)(i,j,k, sum/denom);
+	      // Direct write bypassing operator() to avoid preWrite() race
+	      uint64 idx = i + j*XDim() + k*XDim()*YDim();
+	      double new_val = sum/denom;
+	      switch(voxelType())
+		{
+		case Float:
+		  reinterpret_cast<float*>(data)[idx] = static_cast<float>(new_val);
+		  break;
+		case Double:
+		  reinterpret_cast<double*>(data)[idx] = static_cast<double>(new_val);
+		  break;
+		default:
+		  reinterpret_cast<unsigned char*>(data)[idx] = static_cast<unsigned char>(new_val);
+		  break;
+		}
 	    }
 
         cvcapp.threadProgress(float(k)/float(numSteps));

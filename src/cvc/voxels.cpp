@@ -305,13 +305,35 @@ namespace CVC_NAMESPACE
     _histogram.reset(new uint64[size]);
     memset(_histogram.get(),0,sizeof(uint64)*size);
 
+    // Compute min/max BEFORE parallel region to avoid race conditions
+    // on _min/_max member variables when called from multiple threads
+    double current_min = min();
+    double current_max = max();
+    double range = current_max - current_min;
+    
+    // Handle degenerate case where all values are the same
+    if(range == 0.0)
+      {
+        // All values are the same, put everything in the middle bin
+        _histogram[size/2] = XDim() * YDim() * ZDim();
+        _histogramDirty = false;
+        cvcapp.threadProgress(1.0f);
+        return;
+      }
+
     for(uint64 k = 0; k<ZDim(); k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(dynamic)
+#endif
 	for(uint64 j = 0; j<YDim(); j++)
 	  for(uint64 i = 0; i<XDim(); i++)
 	    {
 	      uint64 offset = 
-		uint64((((*this)(i,j,k) - min())/(max() - min())) * double(size-1));
+		uint64((((*this)(i,j,k) - current_min) / range) * double(size-1));
+#ifdef _OPENMP
+	      #pragma omp atomic
+#endif
 	      _histogram[offset]++;
 	    }
         cvcapp.threadProgress(float(k)/float(ZDim()));
@@ -331,6 +353,9 @@ namespace CVC_NAMESPACE
     val = (*this)(0,0,0);
     for(k=0; k<dim[2]; k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for reduction(min:val) schedule(static)
+#endif
 	for(j=0; j<dim[1]; j++)
 	  for(i=0; i<dim[0]; i++)
 	    if(val > (*this)(i+off_x,j+off_y,k+off_z))
@@ -352,6 +377,9 @@ namespace CVC_NAMESPACE
     val = (*this)(0,0,0);
     for(k=0; k<dim[2]; k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for reduction(max:val) schedule(static)
+#endif
 	for(j=0; j<dim[1]; j++)
 	  for(i=0; i<dim[0]; i++)
 	    if(val < (*this)(i+off_x,j+off_y,k+off_z))
@@ -458,6 +486,9 @@ namespace CVC_NAMESPACE
     //copy the subvolume voxels
     for(uint64 k=0; k<voxel_dimensions()[2]; k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for(uint64 j=0; j<voxel_dimensions()[1]; j++)
 	  for(uint64 i=0; i<voxel_dimensions()[0]; i++)
 	    (*this)(i,j,k,tmp(i+off_x,j+off_y,k+off_z));
@@ -485,6 +516,9 @@ namespace CVC_NAMESPACE
 
     for(uint64 k=0; k<subvoldim[2]; k++)
       {
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for(uint64 j=0; j<subvoldim[1]; j++)
 	  for(uint64 i=0; i<subvoldim[0]; i++)
 	    (*this)(i+off_x,j+off_y,k+off_z,val);
@@ -499,15 +533,59 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    uint64 len = XDim()*YDim()*ZDim(), count=0;
-    for(uint64 i=0; i<len; i++)
+    // Compute min/max BEFORE parallel region to avoid race conditions
+    // on _min/_max member variables when called from multiple threads
+    double current_min = min();
+    double current_max = max();
+    double range = current_max - current_min;
+    
+    // Handle degenerate case where all values are the same
+    if(range == 0.0)
       {
-	(*this)(i,min_ + (((*this)(i) - min())/(max() - min()))*(max_ - min_));
-	if((i % (XDim()*YDim())) == 0)
-          {
-            cvcapp.threadProgress(float(count)/float(ZDim()));
-            count++;
-          }
+        // Just set all values to the middle of the target range
+        fill((min_ + max_) / 2.0);
+        min(min_); max(max_);
+        return *this;
+      }
+    
+    double scale = (max_ - min_) / range;
+    
+    // Call preWrite() once BEFORE parallel region to:
+    // 1. Set _histogramDirty = true (avoid race on this flag)
+    // 2. Ensure unique voxel data (copy-on-write if needed)
+    // This prevents multiple threads from calling preWrite() simultaneously
+    preWrite();
+
+    uint64 xdim = XDim(), ydim = YDim(), zdim = ZDim();
+    byte* data = get_data_ptr();  // Get pointer once, reuse in parallel region
+    
+    for(uint64 k=0; k<zdim; k++)
+      {
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
+	for(uint64 j=0; j<ydim; j++)
+	  for(uint64 i=0; i<xdim; i++)
+	    {
+	      uint64 idx = k*xdim*ydim + j*xdim + i;
+	      double new_val = min_ + ((*this)(idx) - current_min) * scale;
+	      
+	      // Direct write bypassing operator() to avoid preWrite() calls
+	      switch(voxelType())
+		{
+		case Float:
+		  reinterpret_cast<float*>(data)[idx] = static_cast<float>(new_val);
+		  break;
+		case Double:
+		  reinterpret_cast<double*>(data)[idx] = static_cast<double>(new_val);
+		  break;
+		default:
+		  // For integer types, cast appropriately
+		  reinterpret_cast<unsigned char*>(data)[idx] = static_cast<unsigned char>(new_val);
+		  break;
+		}
+	    }
+        cvcapp.threadProgress(float(k)/float(zdim));
       }
     min(min_); max(max_); // set the new min and max
     return *this;
