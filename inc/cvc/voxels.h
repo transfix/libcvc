@@ -76,6 +76,17 @@ namespace CVC_NAMESPACE
       uint64 slice_idx,
       double K_para, double Lambda_para,
       data_type voxel_type);
+  
+  // CUDA kernel launcher for bilateral filter (defined in voxels_kernels.cu)
+  extern "C" void cuda_bilateral_filter(
+      void* src_data,
+      void* dst_data,
+      uint64 xdim, uint64 ydim, uint64 zdim,
+      double radiometricSigma,
+      double spatialSigma,
+      unsigned int filterRadius,
+      double valueRange,
+      data_type voxel_type);
 #endif
 
   class composite_function;

@@ -555,4 +555,224 @@ extern "C" void cuda_anisotropic_diffusion_slice(
   CUDA_CHECK(cudaGetLastError());
 }
 
+// ============================================================================
+// Bilateral Filter CUDA Kernel
+// ============================================================================
+
+// CUDA kernel for bilateral filtering
+// Uses shared memory for the radiometric table to reduce global memory access
+template<typename T>
+__global__ void bilateral_filter_kernel(
+    const T* __restrict__ src_data,
+    T* __restrict__ dst_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    const double* __restrict__ radiometricTable,
+    const double* __restrict__ spatialMask,
+    int filterRadius,
+    double valueRange)
+{
+  // 3D grid indexing
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= xdim || j >= ydim || k >= zdim) return;
+  
+  int filterDiameter = filterRadius * 2 + 1;
+  
+  // Get current voxel value
+  uint64 current_idx = k * xdim * ydim + j * xdim + i;
+  double fsample = double(src_data[current_idx]);
+  
+  double sum = 0.0;
+  double denom = 0.0;
+  
+  // Iterate over the filter window
+  for (int z = 0; z < filterDiameter; z++) {
+    int kk = int(k) + z - filterRadius;
+    if (kk < 0 || kk >= int(zdim)) continue;
+    
+    for (int y = 0; y < filterDiameter; y++) {
+      int jj = int(j) + y - filterRadius;
+      if (jj < 0 || jj >= int(ydim)) continue;
+      
+      for (int x = 0; x < filterDiameter; x++) {
+        int ii = int(i) + x - filterRadius;
+        if (ii < 0 || ii >= int(xdim)) continue;
+        
+        // Get neighbor value - use explicit casts to avoid overflow
+        uint64 neighbor_idx = uint64(kk) * xdim * ydim + uint64(jj) * xdim + uint64(ii);
+        double neighbor_val = double(src_data[neighbor_idx]);
+        
+        // Calculate normalized difference
+        double normalizedDiff = fabs(fsample - neighbor_val);
+        if (valueRange > 0.0) {
+          normalizedDiff /= valueRange;
+          normalizedDiff *= 255.0;
+        } else {
+          normalizedDiff = 0.0;
+        }
+        
+        // Clamp to table range
+        int table_idx = int(normalizedDiff);
+        if (table_idx > 255) table_idx = 255;
+        if (table_idx < 0) table_idx = 0;
+        
+        // Get spatial mask index
+        int mask_idx = z * filterDiameter * filterDiameter + y * filterDiameter + x;
+        
+        // Calculate weight
+        double weight = radiometricTable[table_idx] * spatialMask[mask_idx];
+        
+        denom += weight;
+        sum += weight * neighbor_val;
+      }
+    }
+  }
+  
+  // Write result
+  if (denom > 0.0) {
+    dst_data[current_idx] = T(sum / denom);
+  } else {
+    dst_data[current_idx] = T(fsample);
+  }
+}
+
+// Explicit template instantiations
+template __global__ void bilateral_filter_kernel<unsigned char>(
+    const unsigned char*, unsigned char*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+template __global__ void bilateral_filter_kernel<unsigned short>(
+    const unsigned short*, unsigned short*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+template __global__ void bilateral_filter_kernel<unsigned int>(
+    const unsigned int*, unsigned int*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+template __global__ void bilateral_filter_kernel<float>(
+    const float*, float*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+template __global__ void bilateral_filter_kernel<double>(
+    const double*, double*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+template __global__ void bilateral_filter_kernel<uint64>(
+    const uint64*, uint64*, uint64, uint64, uint64,
+    const double*, const double*, int, double);
+
+// Host function to launch bilateral filter kernel
+extern "C" void cuda_bilateral_filter(
+    void* src_data,
+    void* dst_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    double radiometricSigma,
+    double spatialSigma,
+    unsigned int filterRadius,
+    double valueRange,
+    data_type voxel_type)
+{
+  int filterDiameter = filterRadius * 2 + 1;
+  
+  // Allocate and compute radiometric table on device
+  double* d_radiometricTable;
+  CUDA_CHECK(cudaMalloc(&d_radiometricTable, 256 * sizeof(double)));
+  
+  double h_radiometricTable[256];
+  for (int c = 0; c < 256; c++) {
+    double factor = c * (valueRange / 255.0);
+    h_radiometricTable[c] = exp((factor * factor) / (-radiometricSigma * radiometricSigma * 2.0));
+  }
+  CUDA_CHECK(cudaMemcpy(d_radiometricTable, h_radiometricTable, 
+                        256 * sizeof(double), cudaMemcpyHostToDevice));
+  
+  // Allocate and compute spatial mask on device
+  int maskSize = filterDiameter * filterDiameter * filterDiameter;
+  double* d_spatialMask;
+  CUDA_CHECK(cudaMalloc(&d_spatialMask, maskSize * sizeof(double)));
+  
+  double* h_spatialMask = new double[maskSize];
+  int index = 0;
+  for (int k = -int(filterRadius); k <= int(filterRadius); k++) {
+    for (int j = -int(filterRadius); j <= int(filterRadius); j++) {
+      for (int i = -int(filterRadius); i <= int(filterRadius); i++) {
+        h_spatialMask[index++] = exp(double(k*k + j*j + i*i) / 
+                                      (-spatialSigma * spatialSigma * 2.0));
+      }
+    }
+  }
+  CUDA_CHECK(cudaMemcpy(d_spatialMask, h_spatialMask, 
+                        maskSize * sizeof(double), cudaMemcpyHostToDevice));
+  delete[] h_spatialMask;
+  
+  // Configure kernel launch parameters
+  dim3 blockSize(8, 8, 8);  // 512 threads per block
+  dim3 gridSize(
+      (xdim + blockSize.x - 1) / blockSize.x,
+      (ydim + blockSize.y - 1) / blockSize.y,
+      (zdim + blockSize.z - 1) / blockSize.z
+  );
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      bilateral_filter_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(src_data),
+          static_cast<unsigned char*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+      
+    case UShort:
+      bilateral_filter_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(src_data),
+          static_cast<unsigned short*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+      
+    case UInt:
+      bilateral_filter_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(src_data),
+          static_cast<unsigned int*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+      
+    case Float:
+      bilateral_filter_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(src_data),
+          static_cast<float*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+      
+    case Double:
+      bilateral_filter_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(src_data),
+          static_cast<double*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+      
+    case UInt64:
+      bilateral_filter_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(src_data),
+          static_cast<uint64*>(dst_data),
+          xdim, ydim, zdim, d_radiometricTable, d_spatialMask,
+          filterRadius, valueRange);
+      break;
+  }
+  
+  // Check for kernel launch errors
+  CUDA_CHECK(cudaGetLastError());
+  
+  // Synchronize and clean up
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaFree(d_radiometricTable));
+  CUDA_CHECK(cudaFree(d_spatialMask));
+}
+
 } // namespace CVC_NAMESPACE

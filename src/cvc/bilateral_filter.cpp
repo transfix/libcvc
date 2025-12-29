@@ -61,7 +61,45 @@ namespace CVC_NAMESPACE
       for (j=-int(filterRadius); j<=int(filterRadius); j++)
 	for (i=-int(filterRadius); i<=int(filterRadius); i++)
 	  spatialMask[index++] = exp((double)(k*k+j*j+i*i)/(-spatialSigma*spatialSigma*2.0));
+
+#ifdef CVC_USING_CUDA
+    // Use CUDA kernel if CUDA is enabled and unified memory is available
+    if (_using_cuda && _cuda_unified_ptr) {
+      try {
+        // Create temporary buffer and copy source data
+        voxels temp(voxel_dimensions(), voxelType());
+        temp.copy(*this, true);  // Deep copy first
+        temp.enableCUDA(_cuda_device_id);  // Then enable CUDA (migrates to GPU)
+        
+        // Allocate CUDA unified memory for destination
+        voxels result(voxel_dimensions(), voxelType());
+        result.enableCUDA(_cuda_device_id);
+        
+        // Launch CUDA kernel for bilateral filtering
+        cuda_bilateral_filter(
+            temp._cuda_unified_ptr.get(),      // source data
+            result._cuda_unified_ptr.get(),    // destination data
+            XDim(), YDim(), ZDim(),
+            radiometricSigma,
+            spatialSigma,
+            filterRadius,
+            valueRange,
+            voxelType());
+        
+        // Copy the result
+        copy(result);
+        delete [] spatialMask;
+        cvcapp.threadProgress(1.0f);
+        
+        return *this;
+      } catch (const cuda_error& e) {
+        // Fall back to CPU implementation if CUDA fails
+        cvcapp.log(2, std::string("CUDA bilateral filter failed: ") + e.what() + ", falling back to CPU");
+      }
+    }
+#endif
     
+    // CPU implementation (fallback or when CUDA not available)
     // Use temporary buffer with deep copy to avoid race conditions with OpenMP
     voxels temp(voxel_dimensions(), voxelType());
     temp.copy(*this, true);  // Deep copy
