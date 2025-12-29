@@ -87,6 +87,37 @@ namespace CVC_NAMESPACE
       unsigned int filterRadius,
       double valueRange,
       data_type voxel_type);
+  
+  // CUDA kernel launcher for contrast enhancement stretching (defined in voxels_kernels.cu)
+  extern "C" void cuda_contrast_enhancement_stretching(
+      void* src_data,
+      void* upmin_data,
+      void* upmax_data,
+      void* downmin_data,
+      void* downmax_data,
+      void* imgavg_data,
+      void* result_data,
+      uint64 xdim, uint64 ydim, uint64 zdim,
+      double lmin_global,
+      double lmax_global,
+      data_type voxel_type);
+  
+  // CUDA kernel launcher for GDTV gradient computation (defined in voxels_kernels.cu)
+  extern "C" void cuda_gdtv_gradient(
+      void* input_data,
+      void* grad_data,
+      uint64 xdim, uint64 ydim, uint64 zdim,
+      data_type voxel_type);
+  
+  // CUDA kernel launcher for GDTV filter iteration (defined in voxels_kernels.cu)
+  extern "C" void cuda_gdtv_filter(
+      void* input_data,
+      void* grad_data,
+      void* funcval_data,
+      void* funcvalue_data,
+      uint64 xdim, uint64 ydim, uint64 zdim,
+      float q, float lbda,
+      data_type voxel_type);
 #endif
 
   class composite_function;
@@ -334,6 +365,12 @@ namespace CVC_NAMESPACE
     virtual void disableCUDA();
     bool using_cuda() const { return _using_cuda; }
     int cuda_device() const { return _cuda_device_id; }
+    
+#ifdef CVC_USING_CUDA
+    // Get CUDA unified memory pointer (returns nullptr if CUDA not enabled)
+    void* cuda_data_ptr() { return _using_cuda ? _cuda_unified_ptr.get() : nullptr; }
+    const void* cuda_data_ptr() const { return _using_cuda ? _cuda_unified_ptr.get() : nullptr; }
+#endif
     
     // Switch to a different GPU (performs peer-to-peer copy if needed)
     virtual void switchGPU(int new_device_id);

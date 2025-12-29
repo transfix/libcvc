@@ -40,6 +40,23 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
+#ifdef CVC_USING_CUDA
+    // Use CUDA for gradient computation if both input and grad have CUDA enabled
+    if (input.using_cuda() && grad.using_cuda()) {
+      try {
+        cuda_gdtv_gradient(
+            const_cast<void*>(input.cuda_data_ptr()),
+            grad.cuda_data_ptr(),
+            input.XDim(), input.YDim(), input.ZDim(),
+            input.voxelType());
+        cvcapp.threadProgress(1.0f);
+        return;
+      } catch (const cuda_error& e) {
+        cvcapp.log(2, std::string("CUDA GDTV gradient failed: ") + e.what() + ", falling back to CPU");
+      }
+    }
+#endif
+
     float val[6];
 
     for(unsigned int i = 0; i < input.XDim(); i++)
@@ -171,7 +188,39 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    voxels funcvalue(grad);    
+    voxels funcvalue(grad.voxel_dimensions(), grad.voxelType());
+    
+#ifdef CVC_USING_CUDA
+    // Enable CUDA on funcvalue if grad has CUDA enabled
+    if (grad.using_cuda()) {
+      funcvalue.enableCUDA(grad.cuda_device());
+    }
+#endif
+
+#ifdef CVC_USING_CUDA
+    // Use CUDA for filtering if all volumes have CUDA enabled
+    if (input.using_cuda() && grad.using_cuda() &&
+        funcval.using_cuda() && funcvalue.using_cuda()) {
+      try {
+        cuda_gdtv_filter(
+            const_cast<void*>(input.cuda_data_ptr()),
+            const_cast<void*>(grad.cuda_data_ptr()),
+            funcval.cuda_data_ptr(),
+            funcvalue.cuda_data_ptr(),
+            grad.XDim(), grad.YDim(), grad.ZDim(),
+            q, lbda,
+            input.voxelType());
+        
+        // Copy result back to funcval
+        funcval.copy(funcvalue);
+        cvcapp.threadProgress(1.0f);
+        return;
+      } catch (const cuda_error& e) {
+        cvcapp.log(2, std::string("CUDA GDTV filter failed: ") + e.what() + ", falling back to CPU");
+      }
+    }
+#endif
+
     int l;
     float epsilon = 0.0001;
     float temp[7];
@@ -495,9 +544,18 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    voxels filter(*this);
-    voxels gradient(*this);
-    gradient.voxelType(Float);
+    voxels filter(voxel_dimensions(), voxelType());  // Create independent copy
+    filter.copy(*this, true);  // Deep copy the data
+    
+    voxels gradient(voxel_dimensions(), Float);
+    
+#ifdef CVC_USING_CUDA
+    // Enable CUDA on filter and gradient if source has CUDA enabled
+    if (using_cuda()) {
+      filter.enableCUDA(cuda_device());
+      gradient.enableCUDA(cuda_device());
+    }
+#endif
     
     if(neigbour == 0){
       Gradient((*this),gradient);

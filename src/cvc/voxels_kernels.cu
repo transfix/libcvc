@@ -775,4 +775,516 @@ extern "C" void cuda_bilateral_filter(
   CUDA_CHECK(cudaFree(d_spatialMask));
 }
 
+// ============================================================================
+// Contrast Enhancement Stretching Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void contrast_enhancement_stretching_kernel(
+    const T* src_data,           // Original image data
+    const T* upmin_data,         // Bottom-up minimum propagation
+    const T* upmax_data,         // Bottom-up maximum propagation  
+    const T* downmin_data,       // Top-down minimum propagation
+    const T* downmax_data,       // Top-down maximum propagation
+    const T* imgavg_data,        // Average image data
+    T* result_data,              // Output stretched data
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    double lmin_global,          // Global minimum for normalization
+    double lmax_global)          // Global maximum for normalization
+{
+  // 3D thread indexing
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= xdim || j >= ydim || k >= zdim) return;
+  
+  uint64 idx = k * xdim * ydim + j * xdim + i;
+  
+  // Read inputs - convert to double for computation
+  double lmin = fmin(double(upmin_data[idx]), double(downmin_data[idx]));
+  double lmax = fmax(double(upmax_data[idx]), double(downmax_data[idx]));
+  double img = double(src_data[idx]);
+  double avg = double(imgavg_data[idx]);
+  
+  // Compute window
+  double window = lmax - lmin;
+  window = sqrt(window * (510.0 - window));
+  
+  double result;
+  
+  if (lmin != lmax) {
+    img = window * (img - lmin) / (lmax - lmin);
+    avg = window * (avg - lmin) / (lmax - lmin);
+  }
+  
+  double alpha = (avg - img) / (181.019 * window);
+  
+  if (alpha != 0.0) {
+    double a = 0.707 * alpha;
+    double b = 1.414 * alpha * (img - window) - 1.0;
+    double c = 0.707 * alpha * img * (img - 2.0 * window) + img;
+    double discriminant = b * b - 4.0 * a * c;
+    
+    if (discriminant >= 0.0) {
+      result = lmin + (-b - sqrt(discriminant)) / (2.0 * a);
+    } else {
+      result = img + lmin;  // Fallback if discriminant is negative
+    }
+  } else {
+    result = img + lmin;
+  }
+  
+  // Write result
+  result_data[idx] = T(result);
+}
+
+// Template instantiations
+template __global__ void contrast_enhancement_stretching_kernel<unsigned char>(
+    const unsigned char*, const unsigned char*, const unsigned char*,
+    const unsigned char*, const unsigned char*, const unsigned char*,
+    unsigned char*, uint64, uint64, uint64, double, double);
+    
+template __global__ void contrast_enhancement_stretching_kernel<unsigned short>(
+    const unsigned short*, const unsigned short*, const unsigned short*,
+    const unsigned short*, const unsigned short*, const unsigned short*,
+    unsigned short*, uint64, uint64, uint64, double, double);
+    
+template __global__ void contrast_enhancement_stretching_kernel<unsigned int>(
+    const unsigned int*, const unsigned int*, const unsigned int*,
+    const unsigned int*, const unsigned int*, const unsigned int*,
+    unsigned int*, uint64, uint64, uint64, double, double);
+    
+template __global__ void contrast_enhancement_stretching_kernel<float>(
+    const float*, const float*, const float*,
+    const float*, const float*, const float*,
+    float*, uint64, uint64, uint64, double, double);
+    
+template __global__ void contrast_enhancement_stretching_kernel<double>(
+    const double*, const double*, const double*,
+    const double*, const double*, const double*,
+    double*, uint64, uint64, uint64, double, double);
+    
+template __global__ void contrast_enhancement_stretching_kernel<uint64>(
+    const uint64*, const uint64*, const uint64*,
+    const uint64*, const uint64*, const uint64*,
+    uint64*, uint64, uint64, uint64, double, double);
+
+// Host function to launch contrast enhancement stretching kernel
+extern "C" void cuda_contrast_enhancement_stretching(
+    void* src_data,
+    void* upmin_data,
+    void* upmax_data,
+    void* downmin_data,
+    void* downmax_data,
+    void* imgavg_data,
+    void* result_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    double lmin_global,
+    double lmax_global,
+    data_type voxel_type)
+{
+  // Configure kernel launch parameters
+  dim3 blockSize(8, 8, 8);  // 512 threads per block
+  dim3 gridSize(
+      (xdim + blockSize.x - 1) / blockSize.x,
+      (ydim + blockSize.y - 1) / blockSize.y,
+      (zdim + blockSize.z - 1) / blockSize.z
+  );
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      contrast_enhancement_stretching_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(src_data),
+          static_cast<const unsigned char*>(upmin_data),
+          static_cast<const unsigned char*>(upmax_data),
+          static_cast<const unsigned char*>(downmin_data),
+          static_cast<const unsigned char*>(downmax_data),
+          static_cast<const unsigned char*>(imgavg_data),
+          static_cast<unsigned char*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+      
+    case UShort:
+      contrast_enhancement_stretching_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(src_data),
+          static_cast<const unsigned short*>(upmin_data),
+          static_cast<const unsigned short*>(upmax_data),
+          static_cast<const unsigned short*>(downmin_data),
+          static_cast<const unsigned short*>(downmax_data),
+          static_cast<const unsigned short*>(imgavg_data),
+          static_cast<unsigned short*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+      
+    case UInt:
+      contrast_enhancement_stretching_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(src_data),
+          static_cast<const unsigned int*>(upmin_data),
+          static_cast<const unsigned int*>(upmax_data),
+          static_cast<const unsigned int*>(downmin_data),
+          static_cast<const unsigned int*>(downmax_data),
+          static_cast<const unsigned int*>(imgavg_data),
+          static_cast<unsigned int*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+      
+    case Float:
+      contrast_enhancement_stretching_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(src_data),
+          static_cast<const float*>(upmin_data),
+          static_cast<const float*>(upmax_data),
+          static_cast<const float*>(downmin_data),
+          static_cast<const float*>(downmax_data),
+          static_cast<const float*>(imgavg_data),
+          static_cast<float*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+      
+    case Double:
+      contrast_enhancement_stretching_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(src_data),
+          static_cast<const double*>(upmin_data),
+          static_cast<const double*>(upmax_data),
+          static_cast<const double*>(downmin_data),
+          static_cast<const double*>(downmax_data),
+          static_cast<const double*>(imgavg_data),
+          static_cast<double*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+      
+    case UInt64:
+      contrast_enhancement_stretching_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(src_data),
+          static_cast<const uint64*>(upmin_data),
+          static_cast<const uint64*>(upmax_data),
+          static_cast<const uint64*>(downmin_data),
+          static_cast<const uint64*>(downmax_data),
+          static_cast<const uint64*>(imgavg_data),
+          static_cast<uint64*>(result_data),
+          xdim, ydim, zdim, lmin_global, lmax_global);
+      break;
+  }
+  
+  // Check for kernel launch errors
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ============================================================================
+// GDTV Filter Kernels
+// ============================================================================
+
+// Device helper function for phi calculation
+__device__ inline float phi_device(float x, float q) {
+  return (2.0f - q) * powf(x, 1.0f - q);
+}
+
+// Gradient computation kernel (6-neighborhood)
+template<typename T>
+__global__ void gdtv_gradient_kernel(
+    const T* input_data,
+    float* grad_data,
+    uint64 xdim, uint64 ydim, uint64 zdim)
+{
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= xdim || j >= ydim || k >= zdim) return;
+  
+  uint64 idx = k * xdim * ydim + j * xdim + i;
+  float center = float(input_data[idx]);
+  
+  // Compute differences with 6 neighbors
+  float val[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  
+  if (i + 1 < xdim) val[0] = float(input_data[idx + 1]) - center;
+  if (i >= 1) val[1] = float(input_data[idx - 1]) - center;
+  if (j + 1 < ydim) val[2] = float(input_data[idx + xdim]) - center;
+  if (j >= 1) val[3] = float(input_data[idx - xdim]) - center;
+  if (k + 1 < zdim) val[4] = float(input_data[idx + xdim * ydim]) - center;
+  if (k >= 1) val[5] = float(input_data[idx - xdim * ydim]) - center;
+  
+  // Compute gradient magnitude
+  float sum = 0.0f;
+  for (int l = 0; l < 6; l++) {
+    sum += val[l] * val[l];
+  }
+  
+  grad_data[idx] = sqrtf(sum);
+}
+
+// GDTV filtering kernel (6-neighborhood)
+template<typename T>
+__global__ void gdtv_filter_kernel(
+    const T* input_data,
+    const float* grad_data,
+    const T* funcval_data,
+    T* funcvalue_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    float q, float lbda)
+{
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  if (i >= xdim || j >= ydim || k >= zdim) return;
+  
+  uint64 idx = k * xdim * ydim + j * xdim + i;
+  const float epsilon = 0.0001f;
+  
+  float temp[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  float grad_center = grad_data[idx];
+  
+  if (grad_center != 0.0f) {
+    float phi_center = phi_device(grad_center, q) / grad_center;
+    
+    // Compute weights for each neighbor
+    if (i < xdim - 1) {
+      uint64 neighbor_idx = idx + 1;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[0] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[0] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+    
+    if (i > 1) {
+      uint64 neighbor_idx = idx - 1;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[1] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[1] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+    
+    if (j < ydim - 1) {
+      uint64 neighbor_idx = idx + xdim;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[2] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[2] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+    
+    if (j > 1) {
+      uint64 neighbor_idx = idx - xdim;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[3] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[3] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+    
+    if (k < zdim - 1) {
+      uint64 neighbor_idx = idx + xdim * ydim;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[4] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[4] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+    
+    if (k > 1) {
+      uint64 neighbor_idx = idx - xdim * ydim;
+      float grad_neighbor = grad_data[neighbor_idx];
+      if (grad_neighbor != 0.0f)
+        temp[5] = phi_center + phi_device(grad_neighbor, q) / grad_neighbor;
+      else
+        temp[5] = phi_center + phi_device(epsilon, q) / epsilon;
+    }
+  }
+  
+  temp[6] = lbda;
+  
+  // Normalize weights
+  float sum = 0.0f;
+  for (int l = 0; l < 7; l++) {
+    sum += temp[l];
+  }
+  
+  if (sum > 0.0f) {
+    for (int l = 0; l < 7; l++) {
+      temp[l] = temp[l] / sum;
+    }
+  }
+  
+  // Compute weighted average
+  double result = 0.0;
+  if (i < xdim - 1) result += double(funcval_data[idx + 1]) * temp[0];
+  if (i > 1) result += double(funcval_data[idx - 1]) * temp[1];
+  if (j < ydim - 1) result += double(funcval_data[idx + xdim]) * temp[2];
+  if (j > 1) result += double(funcval_data[idx - xdim]) * temp[3];
+  if (k < zdim - 1) result += double(funcval_data[idx + xdim * ydim]) * temp[4];
+  if (k > 1) result += double(funcval_data[idx - xdim * ydim]) * temp[5];
+  result += double(input_data[idx]) * temp[6];
+  
+  funcvalue_data[idx] = T(result);
+}
+
+// Template instantiations for gradient kernel
+template __global__ void gdtv_gradient_kernel<unsigned char>(
+    const unsigned char*, float*, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<unsigned short>(
+    const unsigned short*, float*, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<unsigned int>(
+    const unsigned int*, float*, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<float>(
+    const float*, float*, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<double>(
+    const double*, float*, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<uint64>(
+    const uint64*, float*, uint64, uint64, uint64);
+
+// Template instantiations for filter kernel
+template __global__ void gdtv_filter_kernel<unsigned char>(
+    const unsigned char*, const float*, const unsigned char*, unsigned char*,
+    uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<unsigned short>(
+    const unsigned short*, const float*, const unsigned short*, unsigned short*,
+    uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<unsigned int>(
+    const unsigned int*, const float*, const unsigned int*, unsigned int*,
+    uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<float>(
+    const float*, const float*, const float*, float*,
+    uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<double>(
+    const double*, const float*, const double*, double*,
+    uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<uint64>(
+    const uint64*, const float*, const uint64*, uint64*,
+    uint64, uint64, uint64, float, float);
+
+// Host function for GDTV gradient computation
+extern "C" void cuda_gdtv_gradient(
+    void* input_data,
+    void* grad_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    data_type voxel_type)
+{
+  dim3 blockSize(8, 8, 8);
+  dim3 gridSize(
+      (xdim + blockSize.x - 1) / blockSize.x,
+      (ydim + blockSize.y - 1) / blockSize.y,
+      (zdim + blockSize.z - 1) / blockSize.z
+  );
+  
+  switch (voxel_type) {
+    case UChar:
+      gdtv_gradient_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+    case UShort:
+      gdtv_gradient_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+    case UInt:
+      gdtv_gradient_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+    case Float:
+      gdtv_gradient_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+    case Double:
+      gdtv_gradient_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+    case UInt64:
+      gdtv_gradient_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(input_data),
+          static_cast<float*>(grad_data),
+          xdim, ydim, zdim);
+      break;
+  }
+  
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// Host function for GDTV filter iteration
+extern "C" void cuda_gdtv_filter(
+    void* input_data,
+    void* grad_data,
+    void* funcval_data,
+    void* funcvalue_data,
+    uint64 xdim, uint64 ydim, uint64 zdim,
+    float q, float lbda,
+    data_type voxel_type)
+{
+  dim3 blockSize(8, 8, 8);
+  dim3 gridSize(
+      (xdim + blockSize.x - 1) / blockSize.x,
+      (ydim + blockSize.y - 1) / blockSize.y,
+      (zdim + blockSize.z - 1) / blockSize.z
+  );
+  
+  switch (voxel_type) {
+    case UChar:
+      gdtv_filter_kernel<unsigned char><<<gridSize, blockSize>>>(
+          static_cast<const unsigned char*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const unsigned char*>(funcval_data),
+          static_cast<unsigned char*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+    case UShort:
+      gdtv_filter_kernel<unsigned short><<<gridSize, blockSize>>>(
+          static_cast<const unsigned short*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const unsigned short*>(funcval_data),
+          static_cast<unsigned short*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+    case UInt:
+      gdtv_filter_kernel<unsigned int><<<gridSize, blockSize>>>(
+          static_cast<const unsigned int*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const unsigned int*>(funcval_data),
+          static_cast<unsigned int*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+    case Float:
+      gdtv_filter_kernel<float><<<gridSize, blockSize>>>(
+          static_cast<const float*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const float*>(funcval_data),
+          static_cast<float*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+    case Double:
+      gdtv_filter_kernel<double><<<gridSize, blockSize>>>(
+          static_cast<const double*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const double*>(funcval_data),
+          static_cast<double*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+    case UInt64:
+      gdtv_filter_kernel<uint64><<<gridSize, blockSize>>>(
+          static_cast<const uint64*>(input_data),
+          static_cast<const float*>(grad_data),
+          static_cast<const uint64*>(funcval_data),
+          static_cast<uint64*>(funcvalue_data),
+          xdim, ydim, zdim, q, lbda);
+      break;
+  }
+  
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 } // namespace CVC_NAMESPACE

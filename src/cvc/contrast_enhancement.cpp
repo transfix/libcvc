@@ -220,6 +220,15 @@ namespace CVC_NAMESPACE
       }
 
     /* stretching */
+    // Note: CUDA acceleration is not used for contrast enhancement because:
+    // 1. The bottom-up and top-down propagation phases (2/3 of the algorithm) are
+    //    inherently sequential and cannot be parallelized
+    // 2. Only the final stretching phase (1/3) could use CUDA, providing minimal benefit
+    // 3. Data movement overhead between CPU propagation and GPU stretching would
+    //    likely negate any performance gains
+    // A future optimization could implement the entire algorithm on GPU using
+    // parallel scan primitives, but that requires significant algorithmic changes.
+    
     for(k=0; k<int(ZDim()); k++)
       {
 	// Note: OpenMP removed to maintain deterministic numerical results

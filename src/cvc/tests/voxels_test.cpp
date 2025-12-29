@@ -3423,6 +3423,105 @@ TEST(VoxelsCUDATest, ResizePerformanceComparison) {
 #endif
 }
 
+// CPU vs GPU GDTV filter performance benchmark
+TEST(VoxelsCUDATest, GDTVFilterPerformanceComparison) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping test";
+    return;
+  }
+
+  std::cout << "\n=== CPU vs GPU GDTV Filter Performance Comparison ===" << std::endl;
+  std::cout << std::string(110, '=') << std::endl;
+  std::cout << std::setw(15) << "Volume Size"
+            << std::setw(15) << "Iterations"
+            << std::setw(15) << "CPU Time (ms)"
+            << std::setw(15) << "GPU Time (ms)"
+            << std::setw(15) << "Speedup"
+            << std::setw(20) << "Max Diff"
+            << std::setw(15) << "Status" << std::endl;
+  std::cout << std::string(110, '-') << std::endl;
+
+  // Test different volume sizes and iteration counts
+  std::vector<std::tuple<uint64, unsigned int>> test_configs = {
+    {32, 5},   // Small volume, few iterations
+    {64, 5},   // Medium volume, few iterations
+    {32, 20},  // Small volume, many iterations
+    {64, 20},  // Medium volume, many iterations
+    {128, 5},  // Large volume, few iterations
+    {128, 10}  // Large volume, moderate iterations
+  };
+
+  for (const auto& [dim, iterations] : test_configs) {
+    dimension vol_dim(dim, dim, dim);
+    
+    // Create test volumes with noise
+    voxels v_cpu(vol_dim, Float);
+    voxels v_gpu(vol_dim, Float);
+    
+    for (uint64 k = 0; k < dim; k++) {
+      for (uint64 j = 0; j < dim; j++) {
+        for (uint64 i = 0; i < dim; i++) {
+          // Create a pattern with edges and noise
+          float base = (i < dim/2) ? 100.0f : 200.0f;
+          float noise = float((i + j + k) % 7) * 3.0f;
+          v_cpu(i, j, k, base + noise);
+          v_gpu(i, j, k, base + noise);
+        }
+      }
+    }
+
+    // CPU timing
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    v_cpu.gdtvFilter(1.5, 0.5, iterations, 0);  // q=1.5, lambda=0.5, 6-neighbor
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    double cpu_time_ms = std::chrono::duration<double, std::milli>(cpu_end - cpu_start).count();
+
+    // GPU timing (includes CUDA memory transfer)
+    v_gpu.enableCUDA(0);
+    auto gpu_start = std::chrono::high_resolution_clock::now();
+    v_gpu.gdtvFilter(1.5, 0.5, iterations, 0);  // q=1.5, lambda=0.5, 6-neighbor
+    auto gpu_end = std::chrono::high_resolution_clock::now();
+    double gpu_time_ms = std::chrono::duration<double, std::milli>(gpu_end - gpu_start).count();
+    v_gpu.disableCUDA();
+
+    // Compare results
+    double max_diff = 0.0;
+    for (uint64 k = 0; k < dim; k++) {
+      for (uint64 j = 0; j < dim; j++) {
+        for (uint64 i = 0; i < dim; i++) {
+          double diff = std::abs(v_cpu(i, j, k) - v_gpu(i, j, k));
+          max_diff = std::max(max_diff, diff);
+        }
+      }
+    }
+
+    double speedup = cpu_time_ms / gpu_time_ms;
+    std::string status = (max_diff < 0.1) ? "✓ PASS" : "✗ DIFF";
+    
+    std::string size_str = std::to_string(dim) + "³";
+    std::cout << std::setw(15) << size_str
+              << std::setw(15) << iterations
+              << std::setw(15) << std::fixed << std::setprecision(1) << cpu_time_ms
+              << std::setw(15) << std::fixed << std::setprecision(1) << gpu_time_ms
+              << std::setw(15) << std::fixed << std::setprecision(2) << speedup << "x"
+              << std::setw(20) << std::scientific << std::setprecision(2) << max_diff
+              << std::setw(15) << status << std::endl;
+
+    // Verify results match
+    EXPECT_LT(max_diff, 0.1) << "CPU and GPU GDTV filter results should match for " 
+                             << size_str << " with " << iterations << " iterations";
+  }
+
+  std::cout << std::string(110, '=') << std::endl;
+  std::cout << "Note: GPU timing includes CUDA memory transfer overhead" << std::endl;
+  std::cout << "      Speedup increases with iteration count and volume size" << std::endl;
+  std::cout << "      Each iteration is fully parallelized on GPU" << std::endl;
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
+}
+
 #endif // CVC_USING_CUDA
 
 int main(int argc, char **argv) {
