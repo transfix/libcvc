@@ -21,9 +21,10 @@ namespace LBIE
   // 12/25/2025 -- Joe R. -- Changed extract_method from string to enum.
   // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
   // 12/26/2025 -- Joe R. -- Changed meshtype from string to enum.
+  // 12/28/2025 -- Joe R. -- Changed normaltype from string to enum.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
+		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, Mesher::NormalType normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose = false,
 		   boost::optional<const VolMagick::Volume&> propertyVol = boost::none);
@@ -52,12 +53,13 @@ namespace LBIE
   //   PREFERRED API for external callers.
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
+  // 12/28/2025 -- Joe R. -- Changed normaltype from string to enum.
   CVC_NAMESPACE::geometry do_mesh_geometry(
       const VolMagick::Volume& vol,
       float isovalue, float isovalue_in, float err, float err_in,
       CVC_NAMESPACE::geometry::geometry_type geom_type,
       Mesher::ImproveMethod improve_method,
-      const std::string& normaltype, 
+      Mesher::NormalType normaltype, 
       Mesher::ExtractionMethod extract_method,
       int improve_iterations,
       bool dual_contouring,

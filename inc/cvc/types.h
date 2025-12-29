@@ -194,6 +194,15 @@ namespace CVC_NAMESPACE
     HEX_JACOBIAN = 4,       // Jacobian determinant (positive is valid)
     HEX_SCALED_JACOBIAN = 5 // Scaled Jacobian quality [-1, 1]
   };
+
+  // Enum for selecting normal computation method
+  // These values match LBIE::Mesher::NormalType
+  enum normal_type
+  {
+    BSPLINE_CONVOLUTION = 0,    // B-spline convolution (default, most accurate)
+    CENTRAL_DIFFERENCE = 1,     // Central difference (faster, less accurate)
+    BSPLINE_INTERPOLATION = 2   // B-spline interpolation (balanced)
+  };
 }
 
 #endif

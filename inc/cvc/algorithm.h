@@ -79,10 +79,12 @@ namespace CVC_NAMESPACE
   // 01/08/2014 -- Joe R. -- Removing color args.
   // 12/25/2025 -- Joe R. -- Adding extraction_method and improve_iterations parameters.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry iso(const volume& vol, 
                double isovalue,
                extraction_method method = DUALLIB,
                int improve_iterations = 0,
+               normal_type normals = BSPLINE_CONVOLUTION,
                boost::optional<const volume&> propertyVol = boost::none);
 
   // ------------
@@ -94,10 +96,12 @@ namespace CVC_NAMESPACE
   // 12/26/2025 -- Joe R. -- Creation.
   // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry tetrahedralize(const volume& vol,
                           double isovalue,
                           extraction_method method = DUALLIB,
                           improvement_method improve_method = NO_IMPROVE,
+                          normal_type normals = BSPLINE_CONVOLUTION,
                           int improve_iterations = 0,
                           boost::optional<const volume&> propertyVol = boost::none);
 
@@ -109,10 +113,12 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry hexahedralize(const volume& vol,
                          double isovalue,
                          extraction_method method = DUALLIB,
                          improvement_method improve_method = NO_IMPROVE,
+                         normal_type normals = BSPLINE_CONVOLUTION,
                          int improve_iterations = 0,
                          boost::optional<const volume&> propertyVol = boost::none);
 
@@ -123,10 +129,12 @@ namespace CVC_NAMESPACE
   //   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry tetrahedralize2(const volume& vol,
                            double isovalue,
                            extraction_method method = DUALLIB,
                            improvement_method improve_method = NO_IMPROVE,
+                           normal_type normals = BSPLINE_CONVOLUTION,
                            int improve_iterations = 0);
 
   // tetrahedralize2 (interval/layer meshing)
@@ -137,11 +145,13 @@ namespace CVC_NAMESPACE
   //   isovalue_outer and isovalue_inner.
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry tetrahedralize2(const volume& vol,
                            double isovalue_outer,
                            double isovalue_inner,
                            extraction_method method = DUALLIB,
                            improvement_method improve_method = NO_IMPROVE,
+                           normal_type normals = BSPLINE_CONVOLUTION,
                            int improve_iterations = 0);
 
 #if 0

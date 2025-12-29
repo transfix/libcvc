@@ -160,6 +160,14 @@ void Octree::setVolume(const VolMagick::Volume& volData)
   construct_octree();
   vol_min=minmax[0].min;
   vol_max=minmax[0].max;
+  
+  // Initialize BSpline coefficients for BSPLINE_INTERPOLATION normal type
+  // This must be done here (not in mesh_extract) because getVertGrad() may be called
+  // during polygonize() which happens before mesh_extract()
+  if(flag_normal == 2) {  // BSPLINE_INTERPOLATION
+    BSplineCoeff.resize(dim[0]*dim[1]*dim[2]);
+    LBIE::TransImg2Spline(&(orig_vol[0]), &(BSplineCoeff[0]), dim[0], dim[1], dim[2]);
+  }
 }
 
 //void Octree::loadData(SimpleVolumeData *volumeData, float* vol)

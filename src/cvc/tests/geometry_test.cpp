@@ -959,7 +959,7 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   
   // Extract a tetrahedral mesh from the SDF
   std::cout << "Extracting tetrahedral mesh from SDF..." << std::endl;
-  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, 0);
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, BSPLINE_CONVOLUTION, 0);
   
   std::cout << "Tetrahedral mesh: " << tet_mesh.num_points() << " vertices, " 
             << tet_mesh.num_tets() << " tetrahedra" << std::endl;
@@ -3174,7 +3174,7 @@ TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
   }
   
   // Extract isosurface with property interpolation using public API
-  geometry mesh = iso(sdf_vol, 0.0, DUALLIB, 0, prop_vol);
+  geometry mesh = iso(sdf_vol, 0.0, DUALLIB, 0, BSPLINE_CONVOLUTION, prop_vol);
   
   EXPECT_GT(mesh.num_points(), 0) << "Mesh should have vertices";
   EXPECT_GT(mesh.num_tris(), 0) << "Mesh should have triangles";
@@ -3246,6 +3246,135 @@ TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
             << " (avg=" << (right_count > 0 ? right_sum/right_count : 0) << ")" << std::endl;
   std::cout << "  Middle vertices: " << middle_count 
             << " (avg=" << (middle_count > 0 ? middle_sum/middle_count : 0) << ")" << std::endl;
+}
+
+// ============================================================================
+// Normal Type Tests
+// ============================================================================
+
+TEST(AlgorithmTest, NormalTypeIsosurface) {
+  // Test all three normal type methods for isosurface extraction
+  // Verifies all normal types produce valid meshes
+  
+  std::cout << "\n=== Normal Type Isosurface Test ===" << std::endl;
+  
+  // Load bunny mesh
+  geometry bunny = read_geometry("test.bunny");
+  ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny mesh";
+  
+  // Create SDF
+  dimension sdf_dim(32, 32, 32);  // Smaller for faster test
+  volume sdf_vol = sdf(bunny, sdf_dim, bunny.extents(), SDF_V2);
+  
+  // Test each normal type
+  struct NormalTypeTest {
+    normal_type type;
+    std::string name;
+    std::string description;
+  };
+  
+  std::vector<NormalTypeTest> tests = {
+    {BSPLINE_CONVOLUTION, "BSPLINE_CONVOLUTION", "Most accurate (default)"},
+    {CENTRAL_DIFFERENCE, "CENTRAL_DIFFERENCE", "Faster, less accurate"},
+    {BSPLINE_INTERPOLATION, "BSPLINE_INTERPOLATION", "Balanced"}
+  };
+  
+  std::cout << std::setw(25) << "Normal Type" 
+            << std::setw(15) << "Vertices" 
+            << std::setw(15) << "Triangles" 
+            << std::setw(15) << "Time (ms)" << std::endl;
+  std::cout << std::string(70, '-') << std::endl;
+  
+  for(const auto& test : tests) {
+    auto start = boost::chrono::high_resolution_clock::now();
+    
+    // Extract isosurface with specified normal type
+    geometry mesh = iso(sdf_vol, 0.0, DUALLIB, 0, test.type);
+    
+    auto end = boost::chrono::high_resolution_clock::now();
+    auto duration = boost::chrono::duration_cast<boost::chrono::milliseconds>(end - start);
+    
+    // Verify mesh was created
+    EXPECT_GT(mesh.num_points(), 0) << "Mesh should have vertices for " << test.name;
+    EXPECT_GT(mesh.num_tris(), 0) << "Mesh should have triangles for " << test.name;
+    
+    std::cout << std::setw(25) << test.name
+              << std::setw(15) << mesh.num_points()
+              << std::setw(15) << mesh.num_tris()
+              << std::setw(15) << duration.count() << std::endl;
+  }
+  
+  std::cout << "\nAll normal types produced valid isosurface meshes." << std::endl;
+}
+
+TEST(AlgorithmTest, NormalTypeVolumetricMesh) {
+  // Test normal types with volumetric meshing (tetrahedralize)
+  
+  std::cout << "\n=== Normal Type Volumetric Mesh Test ===" << std::endl;
+  
+  // Create a simple sphere geometry
+  geometry sphere;
+  const int n_lat = 8, n_lon = 16;
+  const double radius = 1.0;
+  
+  // Generate sphere vertices
+  for(int lat = 0; lat <= n_lat; ++lat) {
+    double theta = M_PI * lat / n_lat;
+    for(int lon = 0; lon < n_lon; ++lon) {
+      double phi = 2.0 * M_PI * lon / n_lon;
+      double x = radius * std::sin(theta) * std::cos(phi);
+      double y = radius * std::sin(theta) * std::sin(phi);
+      double z = radius * std::cos(theta);
+      sphere.points().push_back({{x, y, z}});
+    }
+  }
+  
+  // Generate triangles
+  for(int lat = 0; lat < n_lat; ++lat) {
+    for(int lon = 0; lon < n_lon; ++lon) {
+      int current = lat * n_lon + lon;
+      int next = lat * n_lon + (lon + 1) % n_lon;
+      int current_next_lat = (lat + 1) * n_lon + lon;
+      int next_next_lat = (lat + 1) * n_lon + (lon + 1) % n_lon;
+      
+      if(lat < n_lat) {
+        sphere.tris().push_back({{(uint64_t)current, (uint64_t)next, (uint64_t)current_next_lat}});
+        sphere.tris().push_back({{(uint64_t)next, (uint64_t)next_next_lat, (uint64_t)current_next_lat}});
+      }
+    }
+  }
+  
+  // Create SDF
+  dimension sdf_dim(32, 32, 32);
+  bounding_box bbox(-1.5, -1.5, -1.5, 1.5, 1.5, 1.5);
+  volume sdf_vol = sdf(sphere, sdf_dim, bbox, SDF_V2);
+  
+  // Test tetrahedral meshing with each normal type
+  std::vector<std::pair<normal_type, std::string>> tests = {
+    {BSPLINE_CONVOLUTION, "BSPLINE_CONVOLUTION"},
+    {CENTRAL_DIFFERENCE, "CENTRAL_DIFFERENCE"},
+    {BSPLINE_INTERPOLATION, "BSPLINE_INTERPOLATION"}
+  };
+  
+  std::cout << std::setw(25) << "Normal Type" 
+            << std::setw(15) << "Vertices" 
+            << std::setw(15) << "Tetrahedra" << std::endl;
+  std::cout << std::string(55, '-') << std::endl;
+  
+  for(size_t i = 0; i < tests.size(); i++) {
+    normal_type type = tests[i].first;
+    std::string name = tests[i].second;
+    
+    geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, type, 0);
+    
+    EXPECT_GT(tet_mesh.num_points(), 0) << "Mesh should have vertices for " << name;
+    
+    std::cout << std::setw(25) << name
+              << std::setw(15) << tet_mesh.num_points()
+              << std::setw(15) << tet_mesh.num_tets() << std::endl;
+  }
+  
+  std::cout << "\nAll normal types produced valid tetrahedral meshes." << std::endl;
 }
 
 // Run all tests
@@ -3351,7 +3480,7 @@ TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
     auto start = boost::chrono::high_resolution_clock::now();
     
     try {
-      geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, test.method, test.iterations);
+      geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, test.method, BSPLINE_CONVOLUTION, test.iterations);
       
       auto end = boost::chrono::high_resolution_clock::now();
       auto duration = boost::chrono::duration_cast<boost::chrono::milliseconds>(end - start);
@@ -3557,7 +3686,7 @@ TEST_F(GeometryTest, VolumetricMeshNumericalAccuracy) {
   volume sdf_vol = sdf(sphere, sdf_dim, bbox, SDF_V2);
   
   // Test tetrahedral mesh
-  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, 0);
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, BSPLINE_CONVOLUTION, 0);
   
   // Check that mesh vertices are within reasonable bounds
   point_t min_pt = tet_mesh.min_point();
@@ -4368,7 +4497,7 @@ TEST(AlgorithmTest, VolumetricMeshWithPropertyInterpolation)
   }
   
   // Create tet mesh with property interpolation
-  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, 0, prop_vol);
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, BSPLINE_CONVOLUTION, 0, prop_vol);
   
   // Mesh should have vertices and property values
   EXPECT_GT(tet_mesh.num_points(), 0);

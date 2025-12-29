@@ -514,8 +514,8 @@ namespace
     
     float isovalue = LBIE::DEFAULT_IVAL, isovalue_in = LBIE::DEFAULT_IVAL_IN, 
       err = LBIE::DEFAULT_ERR, err_in = LBIE::DEFAULT_ERR_IN;
-    std::string operation = "mesh", meshtype = "single", improve_method = "geo_flow", 
-      normaltype = "bspline_convolution", extract_method = "duallib";
+    std::string operation = "mesh", meshtype = "single", improve_method = "geo_flow";
+    normal_type normaltype_enum = BSPLINE_CONVOLUTION;
     bool dual_contouring = false;
     int improve_iterations = 1;
     LBIE::Mesher::ExtractionMethod extraction_method_enum = LBIE::Mesher::DUALLIB;
@@ -529,8 +529,7 @@ namespace
     get_arg(operation, argv, string("operation"));
     get_arg(meshtype, argv, string("meshtype"));
     get_arg(improve_method, argv, string("improve_method"));
-    get_arg(normaltype, argv, string("normaltype"));
-    get_arg(extract_method, argv, string("extract_method"));
+    get_arg(normaltype_enum, argv, string("normaltype_enum"));
     get_arg(extraction_method_enum, argv, string("extraction_method_enum"));
     get_arg(improvement_method_enum, argv, string("improvement_method_enum"));
     get_arg(meshtype_enum, argv, string("meshtype_enum"));
@@ -545,31 +544,7 @@ namespace
       } catch(...) {}
     }
 
-    // Convert string to enum for backward compatibility
-    // Only do this if the string parameter was actually provided (i.e., not using defaults)
-    if(argv.count("extract_method")) {
-      if(extract_method == "fastcontouring") extraction_method_enum = LBIE::Mesher::FASTCONTOURING;
-      else if(extract_method == "libisocontour") extraction_method_enum = LBIE::Mesher::LIBISOCONTOUR;
-      else if(extract_method == "duallib") extraction_method_enum = LBIE::Mesher::DUALLIB;
-    }
 
-    if(argv.count("improve_method")) {
-      if(improve_method == "no_improve") improvement_method_enum = LBIE::Mesher::NO_IMPROVE;
-      else if(improve_method == "geo_flow") improvement_method_enum = LBIE::Mesher::GEO_FLOW;
-      else if(improve_method == "edge_contract") improvement_method_enum = LBIE::Mesher::EDGE_CONTRACT;
-      else if(improve_method == "joe_liu") improvement_method_enum = LBIE::Mesher::JOE_LIU;
-      else if(improve_method == "minimal_vol") improvement_method_enum = LBIE::Mesher::MINIMAL_VOL;
-      else if(improve_method == "optimization") improvement_method_enum = LBIE::Mesher::OPTIMIZATION;
-    }
-
-    if(argv.count("meshtype")) {
-      if(meshtype == "single") meshtype_enum = LBIE::geoframe::SINGLE;
-      else if(meshtype == "tetra") meshtype_enum = LBIE::geoframe::TETRA;
-      else if(meshtype == "quad") meshtype_enum = LBIE::geoframe::QUAD;
-      else if(meshtype == "hexa") meshtype_enum = LBIE::geoframe::HEXA;
-      else if(meshtype == "double") meshtype_enum = LBIE::geoframe::DOUBLE;
-      else if(meshtype == "tetra2") meshtype_enum = LBIE::geoframe::TETRA2;
-    }
 
     // Force dual contouring for DOUBLE and TETRA2 mesh types
     if(meshtype_enum == LBIE::geoframe::DOUBLE || meshtype_enum == LBIE::geoframe::TETRA2) {
@@ -588,10 +563,19 @@ namespace
       default: geom_type = CVC_NAMESPACE::geometry::SURFACE_TRI; break;
     }
 
+    // Convert CVC normal_type to LBIE::Mesher::NormalType
+    LBIE::Mesher::NormalType normaltype_lbie;
+    switch(normaltype_enum) {
+      case BSPLINE_CONVOLUTION: normaltype_lbie = LBIE::Mesher::BSPLINE_CONVOLUTION; break;
+      case CENTRAL_DIFFERENCE: normaltype_lbie = LBIE::Mesher::CENTRAL_DIFFERENCE; break;
+      case BSPLINE_INTERPOLATION: normaltype_lbie = LBIE::Mesher::BSPLINE_INTERPOLATION; break;
+      default: normaltype_lbie = LBIE::Mesher::BSPLINE_CONVOLUTION; break;
+    }
+
     // Week 4: Use new geometry-based API (no conversion needed)
     return LBIE::do_mesh_geometry(vol,
                                   isovalue, isovalue_in, err, err_in,
-                                  geom_type, improvement_method_enum, normaltype,
+                                  geom_type, improvement_method_enum, normaltype_lbie,
                                   extraction_method_enum, improve_iterations, dual_contouring,
                                   false, propertyVol);
   }
@@ -719,14 +703,16 @@ namespace CVC_NAMESPACE
   // 01/08/2014 -- Joe R. -- Removing color args and preparing for cvc-mesher.
   // 12/25/2025 -- Joe R. -- Changed extraction_method to use enum and added improve_iterations.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry iso(const volume& vol, double isovalue, extraction_method method, int improve_iterations,
-               boost::optional<const volume&> propertyVol)
+               normal_type normals, boost::optional<const volume&> propertyVol)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
     Arguments args;
     args["isovalue"] = float(isovalue);
     args["improve_iterations"] = improve_iterations;
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+    args["normaltype_enum"] = normals;
     if(propertyVol) {
       args["propertyVol"] = propertyVol.get();
     }
@@ -743,9 +729,11 @@ namespace CVC_NAMESPACE
   // 12/26/2025 -- Joe R. -- Creation.
   // 12/27/2025 -- Joe R. -- Added improvement_method parameter.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry tetrahedralize(const volume& vol, double isovalue,
                           extraction_method method,
                           improvement_method improve_method,
+                          normal_type normals,
                           int improve_iterations,
                           boost::optional<const volume&> propertyVol)
   {
@@ -756,6 +744,7 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::TETRA;
+    args["normaltype_enum"] = normals;
     if(propertyVol) {
       args["propertyVol"] = propertyVol.get();
     }
@@ -771,9 +760,11 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
   // 12/28/2025 -- Joe R. -- Adding optional property volume for property interpolation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry hexahedralize(const volume& vol, double isovalue,
                          extraction_method method,
                          improvement_method improve_method,
+                         normal_type normals,
                          int improve_iterations,
                          boost::optional<const volume&> propertyVol)
   {
@@ -784,6 +775,7 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::HEXA;
+    args["normaltype_enum"] = normals;
     if(propertyVol) {
       args["propertyVol"] = propertyVol.get();
     }
@@ -798,9 +790,11 @@ namespace CVC_NAMESPACE
   //   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
   // ---- Change History ----
   // 12/27/2025 -- Joe R. -- Creation.
+  // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
   geometry tetrahedralize2(const volume& vol, double isovalue,
                            extraction_method method,
                            improvement_method improve_method,
+                           normal_type normals,
                            int improve_iterations)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -810,6 +804,7 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::TETRA2;
+    args["normaltype_enum"] = normals;
 
     return cvc_mesher(vol,args);
   }
@@ -817,6 +812,7 @@ namespace CVC_NAMESPACE
   geometry tetrahedralize2(const volume& vol, double isovalue_outer, double isovalue_inner,
                            extraction_method method,
                            improvement_method improve_method,
+                           normal_type normals,
                            int improve_iterations)
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -827,6 +823,7 @@ namespace CVC_NAMESPACE
     args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
     args["meshtype_enum"] = LBIE::geoframe::TETRA2;
+    args["normaltype_enum"] = normals;
 
     return cvc_mesher(vol,args);
   }

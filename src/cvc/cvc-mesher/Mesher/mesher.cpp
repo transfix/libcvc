@@ -25,7 +25,7 @@ namespace LBIE
   // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, const std::string& normaltype, 
+		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, Mesher::NormalType normaltype, 
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose,
 		   boost::optional<const VolMagick::Volume&> propertyVol)
@@ -65,16 +65,10 @@ namespace LBIE
     }
     mesher.meshType(mt);
 
-    // extract_method and improve_method are now enums, use them directly
+    // extract_method, improve_method, and normaltype are now enums, use them directly
     mesher.extractionMethod(extract_method);
     mesher.improveMethod(improve_method);
-  
-    Mesher::NormalType nt;
-    if(normaltype == "bspline_convolution") nt = Mesher::BSPLINE_CONVOLUTION;
-    else if(normaltype == "central_difference") nt = Mesher::CENTRAL_DIFFERENCE;
-    else if(normaltype == "bspline_interpolation") nt = Mesher::BSPLINE_INTERPOLATION;
-    else throw cvc_mesher_exception("invalid normal type '" + normaltype + "'");
-    mesher.normalType(nt);
+    mesher.normalType(normaltype);
     mesher.dual(dual_contouring);
     mesher.extractMesh(vol); //sets the internal geoframe to the extracted mesh
     mesher.qualityImprove(improve_iterations);
@@ -137,7 +131,7 @@ namespace LBIE
       float isovalue, float isovalue_in, float err, float err_in,
       CVC_NAMESPACE::geometry::geometry_type geom_type,
       Mesher::ImproveMethod improve_method,
-      const std::string& normaltype, 
+      Mesher::NormalType normaltype, 
       Mesher::ExtractionMethod extract_method,
       int improve_iterations,
       bool dual_contouring,
