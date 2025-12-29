@@ -1,0 +1,16 @@
+BasedOnStyle: LLVM
+BreakBeforeBraces: Attach  # Braces on the same line as function declarations and control statements (e.g., void foo() { ... })
+ColumnLimit: 78            # Max 78 column width (will wrap where practical)
+IndentWidth: 2             # 2-space indentation
+UseTab: Never              # Use spaces only, no tabs
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup     # Merge and regroup include blocks
+IncludeCategories:         # Group and sort includes: local (quoted), third-party (customize regex as needed), system (angle brackets)
+  - Regex: '^".*"'         # Local/project includes (quoted paths)
+    Priority: 1
+  - Regex: '^"(thirdparty1|thirdparty2|path/to/thirdparty)/.*"'  # Third-party: replace with your actual third-party include prefixes/paths (e.g., "boost/", "gtest/")
+    Priority: 2
+  - Regex: '^<.*>'         # System/standard library includes (angle brackets)
+    Priority: 3
+  - Regex: '.*'            # Fallback for any unmatched includes
+    Priority: 4
