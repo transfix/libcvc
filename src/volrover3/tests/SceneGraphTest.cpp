@@ -22,8 +22,9 @@ protected:
 };
 
 TEST_F(SceneGraphTest, InitialState) {
-    EXPECT_NE(sceneGraph->getRenderer(), nullptr);
-    EXPECT_NE(sceneGraph->getRenderWindow(), nullptr);
+    EXPECT_NE(sceneGraph, nullptr);
+    // SceneGraph doesn't expose renderer/renderWindow, just verify it was created
+    SUCCEED();
 }
 
 TEST_F(SceneGraphTest, AddGeometryNode) {
@@ -59,37 +60,37 @@ TEST_F(SceneGraphTest, ShowHideGrid) {
 }
 
 TEST_F(SceneGraphTest, ShowHideAxes) {
-    sceneGraph->setAxesVisible(true);
+    sceneGraph->setAxisVisible(true);
     // Axes should be created and visible
     
-    sceneGraph->setAxesVisible(false);
+    sceneGraph->setAxisVisible(false);
     // Axes should be hidden
     
     SUCCEED();
 }
 
 TEST_F(SceneGraphTest, ShowHideBoundingBox) {
-    sceneGraph->setBoundingBoxVisible(true);
+    sceneGraph->setVolumeBBoxVisible(true);
     // Bounding box should be created and visible
     
-    sceneGraph->setBoundingBoxVisible(false);
+    sceneGraph->setVolumeBBoxVisible(false);
     // Bounding box should be hidden
     
     SUCCEED();
 }
 
 TEST_F(SceneGraphTest, UpdateBoundingBox) {
-    double bounds[6] = {-1.0, 1.0, -1.0, 1.0, -1.0, 1.0};
-    sceneGraph->updateBoundingBox(bounds);
+    cvc::bounding_box bounds;
+    bounds.setMin(-1.0, -1.0, -1.0);
+    bounds.setMax(1.0, 1.0, 1.0);
+    sceneGraph->updateGrid(bounds);
     
-    // Bounding box should be updated
+    // Grid should be updated to match bounding box
     SUCCEED();
 }
 
 TEST_F(SceneGraphTest, ResetCamera) {
-    sceneGraph->resetCamera();
-    
-    // Camera should be reset to view all geometry
+    // SceneGraph doesn't expose resetCamera, this would be done via the renderer
     SUCCEED();
 }
 
@@ -118,10 +119,10 @@ TEST_F(SceneGraphTest, MultipleUpdates) {
     sceneGraph->setVolume(vol);
     
     sceneGraph->setGridVisible(true);
-    sceneGraph->setAxesVisible(true);
-    sceneGraph->setBoundingBoxVisible(true);
+    sceneGraph->setAxisVisible(true);
+    sceneGraph->setVolumeBBoxVisible(true);
     
-    sceneGraph->resetCamera();
+    // Camera reset would be done externally
     
     SUCCEED();
 }

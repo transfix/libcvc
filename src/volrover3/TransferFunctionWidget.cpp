@@ -309,6 +309,16 @@ void TransferFunctionWidget::setupUI()
 void TransferFunctionWidget::createDefaultTransferFunction()
 {
     applyPreset("Grayscale");
+    
+    // Initialize default opacity points if empty
+    if (m_opacityPoints.empty() && m_opacityWidget != nullptr) {
+        m_opacityPoints.push_back({0.0, 0.0});
+        m_opacityPoints.push_back({1.0, 1.0});
+        
+        // Update the opacity widget
+        auto opacityWidget = static_cast<OpacityGraphWidget*>(m_opacityWidget);
+        opacityWidget->setOpacityPoints(m_opacityPoints);
+    }
 }
 
 void TransferFunctionWidget::applyPreset(const QString &presetName)

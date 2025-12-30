@@ -32,13 +32,13 @@ TEST_F(AppStateTest, SingletonInstance) {
 }
 
 TEST_F(AppStateTest, CameraPosition) {
-    std::array<double, 3> pos = {1.0, 2.0, 3.0};
-    state->setCameraPosition(pos);
+    state->setCameraPosition(1.0, 2.0, 3.0);
     
-    auto retrieved = state->cameraPosition();
-    EXPECT_DOUBLE_EQ(retrieved[0], 1.0);
-    EXPECT_DOUBLE_EQ(retrieved[1], 2.0);
-    EXPECT_DOUBLE_EQ(retrieved[2], 3.0);
+    double x, y, z;
+    state->getCameraPosition(x, y, z);
+    EXPECT_DOUBLE_EQ(x, 1.0);
+    EXPECT_DOUBLE_EQ(y, 2.0);
+    EXPECT_DOUBLE_EQ(z, 3.0);
 }
 
 TEST_F(AppStateTest, CameraSensitivity) {

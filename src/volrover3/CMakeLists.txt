@@ -110,9 +110,7 @@ install(TARGETS volrover3
 )
 
 # Tests
-if(BUILD_TESTING)
-  enable_testing()
-  
+if(CVC_BUILD_TESTS)  
   # Create a library with all volrover3 components except main.cpp for testing
   set(VOLROVER3_LIB_SOURCES ${VOLROVER3_SOURCES})
   list(REMOVE_ITEM VOLROVER3_LIB_SOURCES main.cpp)

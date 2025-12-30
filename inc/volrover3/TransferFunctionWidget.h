@@ -34,6 +34,8 @@ public:
     
     std::vector<double> getColorTable() const;
     std::vector<double> getOpacityTable() const;
+    
+    void applyPreset(const QString &presetName);
 
 signals:
     void transferFunctionChanged();
@@ -46,7 +48,6 @@ private slots:
 private:
     void setupUI();
     void createDefaultTransferFunction();
-    void applyPreset(const QString &presetName);
     void updateColorBar();
 
     QComboBox *m_presetCombo;

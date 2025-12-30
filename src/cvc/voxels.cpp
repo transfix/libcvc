@@ -348,20 +348,20 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    double val;
-    uint64 i,j,k;
-    val = (*this)(0,0,0);
-    for(k=0; k<dim[2]; k++)
-      {
+    double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
+    
 #ifdef _OPENMP
-	#pragma omp parallel for reduction(min:val) schedule(static)
+    // Parallel map-reduce: each thread finds min in its chunk, then combine
+    #pragma omp parallel for reduction(min:val) collapse(3) schedule(static)
 #endif
-	for(j=0; j<dim[1]; j++)
-	  for(i=0; i<dim[0]; i++)
-	    if(val > (*this)(i+off_x,j+off_y,k+off_z))
-	      val = (*this)(i+off_x,j+off_y,k+off_z);
-        cvcapp.threadProgress(float(k)/float(dim[2]));
-      }
+    for(uint64 k=0; k<dim[2]; k++)
+      for(uint64 j=0; j<dim[1]; j++)
+	for(uint64 i=0; i<dim[0]; i++)
+	  {
+	    double curr = (*this)(i+off_x,j+off_y,k+off_z);
+	    if(val > curr)
+	      val = curr;
+	  }
     
     cvcapp.threadProgress(1.0f);
     return val;
@@ -372,20 +372,20 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    double val;
-    uint64 i,j,k;
-    val = (*this)(0,0,0);
-    for(k=0; k<dim[2]; k++)
-      {
+    double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
+    
 #ifdef _OPENMP
-	#pragma omp parallel for reduction(max:val) schedule(static)
+    // Parallel map-reduce: each thread finds max in its chunk, then combine
+    #pragma omp parallel for reduction(max:val) collapse(3) schedule(static)
 #endif
-	for(j=0; j<dim[1]; j++)
-	  for(i=0; i<dim[0]; i++)
-	    if(val < (*this)(i+off_x,j+off_y,k+off_z))
-	      val = (*this)(i+off_x,j+off_y,k+off_z);
-        cvcapp.threadProgress(float(k)/float(dim[2]));        
-      }
+    for(uint64 k=0; k<dim[2]; k++)
+      for(uint64 j=0; j<dim[1]; j++)
+	for(uint64 i=0; i<dim[0]; i++)
+	  {
+	    double curr = (*this)(i+off_x,j+off_y,k+off_z);
+	    if(val < curr)
+	      val = curr;
+	  }
     
     cvcapp.threadProgress(1.0f);
     return val;
