@@ -3,6 +3,8 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
+#include <QHBoxLayout>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <boost/lexical_cast.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -38,6 +40,23 @@ StateTreeWidget::StateTreeWidget(QWidget *parent)
     splitter->addWidget(m_tableWidget);
     
     mainLayout->addWidget(splitter);
+    
+    // Create button bar
+    QHBoxLayout* buttonLayout = new QHBoxLayout();
+    
+    m_addButton = new QPushButton(tr("Add State..."), this);
+    m_deleteButton = new QPushButton(tr("Delete State"), this);
+    m_deleteButton->setEnabled(false);
+    
+    buttonLayout->addWidget(m_addButton);
+    buttonLayout->addWidget(m_deleteButton);
+    buttonLayout->addStretch();
+    
+    mainLayout->addLayout(buttonLayout);
+    
+    // Connect button signals
+    connect(m_addButton, &QPushButton::clicked, this, &StateTreeWidget::onAddStateClicked);
+    connect(m_deleteButton, &QPushButton::clicked, this, &StateTreeWidget::onDeleteStateClicked);
     
     // Set splitter sizes
     splitter->setSizes({300, 200});
@@ -107,6 +126,11 @@ void StateTreeWidget::populateTree(QTreeWidgetItem* parentItem, cvc::state* stat
             try {
                 cvc::state& child = (*state)(childName);
                 
+                // Skip uninitialized states
+                if (!child.initialized()) {
+                    continue;
+                }
+                
                 QTreeWidgetItem* childItem = new QTreeWidgetItem(parentItem);
                 childItem->setText(0, QString::fromStdString(childName));
                 childItem->setData(0, Qt::UserRole, QVariant::fromValue(static_cast<void*>(&child)));
@@ -130,12 +154,16 @@ void StateTreeWidget::onTreeItemSelected()
     if (selected.isEmpty()) {
         m_tableWidget->setRowCount(0);
         m_currentState = nullptr;
+        m_deleteButton->setEnabled(false);
         return;
     }
     
     QTreeWidgetItem* item = selected.first();
     void* statePtr = item->data(0, Qt::UserRole).value<void*>();
     m_currentState = static_cast<cvc::state*>(statePtr);
+    
+    // Enable delete button for non-root items
+    m_deleteButton->setEnabled(m_currentState != m_rootState);
     
     populateTable(m_currentState);
 }
@@ -401,4 +429,70 @@ void StateTreeWidget::onTableValueChanged(int row, int column)
     }
     
     m_tableWidget->blockSignals(false);
+}
+
+void StateTreeWidget::onAddStateClicked()
+{
+    bool ok;
+    QString path = QInputDialog::getText(this, tr("Add State"),
+                                        tr("Enter full path for new state:\ne.g., 'volrover3.my_setting' or 'myapp.nested.child.value'"),
+                                        QLineEdit::Normal, "", &ok);
+    
+    if (!ok || path.isEmpty()) return;
+    
+    QString value = QInputDialog::getText(this, tr("Add State"),
+                                         tr("Enter initial value:"),
+                                         QLineEdit::Normal, "", &ok);
+    
+    if (!ok) return;
+    
+    try {
+        // Access the state using the full path from the global state singleton
+        cvc::state& newState = cvc::state::instance()(path.toStdString());
+        newState.value(value.toStdString());
+        
+        // Refresh the tree to show the new state
+        refresh();
+        
+        QString fullPath = QString::fromStdString(newState.fullName());
+        QMessageBox::information(this, tr("Success"),
+                               tr("State '%1' created successfully").arg(fullPath));
+    }
+    catch (const std::exception& e) {
+        QMessageBox::warning(this, tr("Error"),
+                           tr("Failed to create state: %1").arg(e.what()));
+    }
+}
+
+void StateTreeWidget::onDeleteStateClicked()
+{
+    if (!m_currentState || m_currentState == m_rootState) {
+        QMessageBox::warning(this, tr("Error"),
+                           tr("Cannot delete root state"));
+        return;
+    }
+    
+    QString stateName = QString::fromStdString(m_currentState->name());
+    QString fullPath = QString::fromStdString(m_currentState->fullName());
+    
+    auto reply = QMessageBox::question(this, tr("Delete State"),
+                                      tr("Are you sure you want to reset state '%1'?\n\nThis will clear its value, data, and mark it as uninitialized.").arg(fullPath),
+                                      QMessageBox::Yes | QMessageBox::No);
+    
+    if (reply == QMessageBox::Yes) {
+        try {
+            // Reset the state (clears value, data, and sets initialized to false)
+            m_currentState->reset();
+            
+            // Refresh the entire tree since the node should now be hidden
+            refresh();
+            
+            QMessageBox::information(this, tr("Success"),
+                                   tr("State '%1' cleared successfully").arg(fullPath));
+        }
+        catch (const std::exception& e) {
+            QMessageBox::warning(this, tr("Error"),
+                               tr("Failed to clear state: %1").arg(e.what()));
+        }
+    }
 }

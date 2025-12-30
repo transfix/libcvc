@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QTreeWidget>
 #include <QTableWidget>
+#include <QPushButton>
 #include <QVBoxLayout>
 #include <QSplitter>
 #include <cvc/state.h>
@@ -24,6 +25,8 @@ public:
 private slots:
     void onTreeItemSelected();
     void onTableValueChanged(int row, int column);
+    void onAddStateClicked();
+    void onDeleteStateClicked();
 
 private:
     void populateTree(QTreeWidgetItem* parentItem, cvc::state* state, const std::string& path);
@@ -34,6 +37,8 @@ private:
 
     QTreeWidget* m_treeWidget;
     QTableWidget* m_tableWidget;
+    QPushButton* m_addButton;
+    QPushButton* m_deleteButton;
     cvc::state* m_rootState;
     cvc::state* m_currentState;
 };

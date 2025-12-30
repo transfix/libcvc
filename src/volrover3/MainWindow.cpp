@@ -550,8 +550,8 @@ void MainWindow::showStateTree()
         m_stateTreeWidget->setAttribute(Qt::WA_DeleteOnClose);
         m_stateTreeWidget->resize(600, 500);
         
-        // Set root state to AppState's internal state
-        m_stateTreeWidget->setRootState(&AppState::instance().getRootState());
+        // Set root state to the global state singleton
+        m_stateTreeWidget->setRootState(&cvc::state::instance());
         
         // Clean up pointer when window is closed
         connect(m_stateTreeWidget, &QObject::destroyed, [this]() {
