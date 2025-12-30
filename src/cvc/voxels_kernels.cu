@@ -381,6 +381,241 @@ extern "C" void cuda_resize_bbox_trilinear(
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// =============================================================================
+// Min/Max Reduction Kernels
+// =============================================================================
+
+// Kernel to compute partial min/max for a block of voxels
+template<typename T>
+__global__ void minmax_reduction_kernel(
+    const T* __restrict__ data,
+    double* __restrict__ block_mins,
+    double* __restrict__ block_maxs,
+    uint64 off_x, uint64 off_y, uint64 off_z,
+    uint64 dim_x, uint64 dim_y, uint64 dim_z,
+    uint64 vol_x, uint64 vol_y, uint64 vol_z)
+{
+  // Shared memory for block-level reduction
+  extern __shared__ double sdata[];
+  double* s_min = sdata;
+  double* s_max = &sdata[blockDim.x * blockDim.y * blockDim.z];
+  
+  // 3D grid indexing within the subvolume
+  uint64 i = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64 j = blockIdx.y * blockDim.y + threadIdx.y;
+  uint64 k = blockIdx.z * blockDim.z + threadIdx.z;
+  
+  // Thread index within block
+  int tid = threadIdx.z * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+  
+  // Initialize with extreme values
+  double local_min = INFINITY;
+  double local_max = -INFINITY;
+  
+  // Compute local min/max if within bounds
+  if (i < dim_x && j < dim_y && k < dim_z) {
+    uint64 global_idx = (k + off_z) * vol_x * vol_y + (j + off_y) * vol_x + (i + off_x);
+    double val = double(data[global_idx]);
+    local_min = val;
+    local_max = val;
+  }
+  
+  // Store to shared memory
+  s_min[tid] = local_min;
+  s_max[tid] = local_max;
+  __syncthreads();
+  
+  // Block-level reduction in shared memory
+  for (int stride = (blockDim.x * blockDim.y * blockDim.z) / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      s_min[tid] = fmin(s_min[tid], s_min[tid + stride]);
+      s_max[tid] = fmax(s_max[tid], s_max[tid + stride]);
+    }
+    __syncthreads();
+  }
+  
+  // Thread 0 writes block result to global memory
+  if (tid == 0) {
+    int block_id = blockIdx.z * gridDim.x * gridDim.y + blockIdx.y * gridDim.x + blockIdx.x;
+    block_mins[block_id] = s_min[0];
+    block_maxs[block_id] = s_max[0];
+  }
+}
+
+// Host function to compute min over a subvolume
+extern "C" double cuda_compute_min(
+    void* data,
+    uint64 off_x, uint64 off_y, uint64 off_z,
+    uint64 dim_x, uint64 dim_y, uint64 dim_z,
+    uint64 vol_x, uint64 vol_y, uint64 vol_z,
+    data_type voxel_type)
+{
+  // Use 8x8x8 thread blocks
+  dim3 blockSize(8, 8, 8);
+  dim3 gridSize(
+      (dim_x + blockSize.x - 1) / blockSize.x,
+      (dim_y + blockSize.y - 1) / blockSize.y,
+      (dim_z + blockSize.z - 1) / blockSize.z
+  );
+  
+  int num_blocks = gridSize.x * gridSize.y * gridSize.z;
+  size_t shared_mem_size = 2 * blockSize.x * blockSize.y * blockSize.z * sizeof(double);
+  
+  // Allocate device memory for block results
+  double *d_block_mins, *d_block_maxs;
+  CUDA_CHECK(cudaMalloc(&d_block_mins, num_blocks * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_block_maxs, num_blocks * sizeof(double)));
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      minmax_reduction_kernel<unsigned char><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned char*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UShort:
+      minmax_reduction_kernel<unsigned short><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned short*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UInt:
+      minmax_reduction_kernel<unsigned int><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned int*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case Float:
+      minmax_reduction_kernel<float><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const float*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case Double:
+      minmax_reduction_kernel<double><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const double*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UInt64:
+      minmax_reduction_kernel<uint64><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const uint64*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+  }
+  
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  
+  // Copy block results back to host
+  std::vector<double> h_block_mins(num_blocks);
+  CUDA_CHECK(cudaMemcpy(h_block_mins.data(), d_block_mins, 
+                        num_blocks * sizeof(double), cudaMemcpyDeviceToHost));
+  
+  // Free device memory
+  CUDA_CHECK(cudaFree(d_block_mins));
+  CUDA_CHECK(cudaFree(d_block_maxs));
+  
+  // Final reduction on host
+  double result = h_block_mins[0];
+  for (int i = 1; i < num_blocks; i++) {
+    if (h_block_mins[i] < result) {
+      result = h_block_mins[i];
+    }
+  }
+  
+  return result;
+}
+
+// Host function to compute max over a subvolume
+extern "C" double cuda_compute_max(
+    void* data,
+    uint64 off_x, uint64 off_y, uint64 off_z,
+    uint64 dim_x, uint64 dim_y, uint64 dim_z,
+    uint64 vol_x, uint64 vol_y, uint64 vol_z,
+    data_type voxel_type)
+{
+  // Use 8x8x8 thread blocks
+  dim3 blockSize(8, 8, 8);
+  dim3 gridSize(
+      (dim_x + blockSize.x - 1) / blockSize.x,
+      (dim_y + blockSize.y - 1) / blockSize.y,
+      (dim_z + blockSize.z - 1) / blockSize.z
+  );
+  
+  int num_blocks = gridSize.x * gridSize.y * gridSize.z;
+  size_t shared_mem_size = 2 * blockSize.x * blockSize.y * blockSize.z * sizeof(double);
+  
+  // Allocate device memory for block results
+  double *d_block_mins, *d_block_maxs;
+  CUDA_CHECK(cudaMalloc(&d_block_mins, num_blocks * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_block_maxs, num_blocks * sizeof(double)));
+  
+  // Launch kernel based on voxel type
+  switch (voxel_type) {
+    case UChar:
+      minmax_reduction_kernel<unsigned char><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned char*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UShort:
+      minmax_reduction_kernel<unsigned short><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned short*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UInt:
+      minmax_reduction_kernel<unsigned int><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const unsigned int*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case Float:
+      minmax_reduction_kernel<float><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const float*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case Double:
+      minmax_reduction_kernel<double><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const double*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+    case UInt64:
+      minmax_reduction_kernel<uint64><<<gridSize, blockSize, shared_mem_size>>>(
+          static_cast<const uint64*>(data),
+          d_block_mins, d_block_maxs,
+          off_x, off_y, off_z, dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+      break;
+  }
+  
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  
+  // Copy block results back to host
+  std::vector<double> h_block_maxs(num_blocks);
+  CUDA_CHECK(cudaMemcpy(h_block_maxs.data(), d_block_maxs, 
+                        num_blocks * sizeof(double), cudaMemcpyDeviceToHost));
+  
+  // Free device memory
+  CUDA_CHECK(cudaFree(d_block_mins));
+  CUDA_CHECK(cudaFree(d_block_maxs));
+  
+  // Final reduction on host
+  double result = h_block_maxs[0];
+  for (int i = 1; i < num_blocks; i++) {
+    if (h_block_maxs[i] > result) {
+      result = h_block_maxs[i];
+    }
+  }
+  
+  return result;
+}
+
 // Anisotropic diffusion kernel - processes one slice at a time
 template<typename T>
 __global__ void anisotropic_diffusion_slice_kernel(

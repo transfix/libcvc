@@ -2763,6 +2763,179 @@ TEST(VoxelsCUDATest, MinMaxCalculationCPUvsGPU) {
   EXPECT_NEAR(cpu_max, gpu_max, 1e-9);
 }
 
+TEST(VoxelsCUDATest, MinMaxSubvolumeCPUvsGPU) {
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping GPU tests";
+  }
+  
+  dimension dim(20, 20, 20);
+  voxels v_cpu(dim, Float);
+  voxels v_gpu(dim, Float);
+  
+  // Fill with pattern where center region has specific range
+  for (uint64 k = 0; k < 20; k++) {
+    for (uint64 j = 0; j < 20; j++) {
+      for (uint64 i = 0; i < 20; i++) {
+        double val;
+        if (i >= 5 && i < 15 && j >= 5 && j < 15 && k >= 5 && k < 15) {
+          // Center region: values from 10 to ~110
+          val = 10.0 + ((i-5) * 10 + (j-5) + (k-5));
+        } else {
+          // Outer region: large values
+          val = 500.0 + i + j + k;
+        }
+        v_cpu(i, j, k, val);
+        v_gpu(i, j, k, val);
+      }
+    }
+  }
+  
+  // Calculate min/max on subvolume (center region) using CPU
+  double cpu_min = v_cpu.min(5, 5, 5, dimension(10, 10, 10));
+  double cpu_max = v_cpu.max(5, 5, 5, dimension(10, 10, 10));
+  
+  // Calculate min/max on same subvolume using GPU
+  v_gpu.enableCUDA(0);
+  double gpu_min = v_gpu.min(5, 5, 5, dimension(10, 10, 10));
+  double gpu_max = v_gpu.max(5, 5, 5, dimension(10, 10, 10));
+  v_gpu.disableCUDA();
+  
+  // Results should be identical
+  EXPECT_NEAR(cpu_min, gpu_min, 1e-9);
+  EXPECT_NEAR(cpu_max, gpu_max, 1e-9);
+  
+  // Verify the values are from the center region, not the outer region
+  EXPECT_LT(cpu_min, 200.0) << "Min should be from center region";
+  EXPECT_LT(cpu_max, 500.0) << "Max should be from center region";
+  EXPECT_GE(cpu_min, 10.0) << "Min should be at least 10";
+}
+
+TEST(VoxelsCUDATest, MinMaxPerformanceComparison) {
+#ifdef CVC_USING_CUDA
+  if (!voxels::cuda_available()) {
+    GTEST_SKIP() << "CUDA not available, skipping test";
+    return;
+  }
+
+  std::cout << "\n=== CPU vs GPU Min/Max Performance Comparison ===" << std::endl;
+  std::cout << std::string(110, '=') << std::endl;
+  std::cout << std::setw(12) << "Volume Size"
+            << std::setw(12) << "Voxels"
+            << std::setw(15) << "CPU Min (µs)"
+            << std::setw(15) << "GPU Min (µs)"
+            << std::setw(12) << "Speedup"
+            << std::setw(15) << "CPU Max (µs)"
+            << std::setw(15) << "GPU Max (µs)"
+            << std::setw(12) << "Speedup" << std::endl;
+  std::cout << std::string(110, '-') << std::endl;
+
+  // Test different volume sizes
+  std::vector<uint64> dimensions = {32, 64, 96, 128, 160, 192, 224, 256};
+  const int num_iterations = 20; // Run multiple times for better timing
+
+  for (uint64 dim : dimensions) {
+    uint64 num_voxels = dim * dim * dim;
+    
+    // Create volume with varied data to ensure meaningful min/max
+    voxels v_cpu(dimension(dim, dim, dim), Float);
+    for (uint64 k = 0; k < dim; k++) {
+      for (uint64 j = 0; j < dim; j++) {
+        for (uint64 i = 0; i < dim; i++) {
+          // Create pattern with both small and large values
+          float val = static_cast<float>((i * 7 + j * 13 + k * 19) % 1000) / 10.0f;
+          v_cpu(i, j, k, val);
+        }
+      }
+    }
+
+    // Create GPU copy
+    voxels v_gpu(v_cpu);
+    v_gpu.enableCUDA(0);
+    EXPECT_TRUE(v_gpu.using_cuda());
+
+    // Warm up (first call may include overhead)
+    v_cpu.min();
+    v_gpu.min();
+    v_cpu.max();
+    v_gpu.max();
+
+    // Benchmark CPU min (multiple iterations)
+    auto cpu_min_start = std::chrono::high_resolution_clock::now();
+    double cpu_min_val = 0;
+    for (int iter = 0; iter < num_iterations; iter++) {
+      v_cpu.unsetMinMax();  // Force recalculation
+      cpu_min_val = v_cpu.min();
+    }
+    auto cpu_min_end = std::chrono::high_resolution_clock::now();
+    auto cpu_min_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_min_end - cpu_min_start);
+    double cpu_min_us = cpu_min_duration.count() / double(num_iterations);
+
+    // Benchmark GPU min (multiple iterations)
+    auto gpu_min_start = std::chrono::high_resolution_clock::now();
+    double gpu_min_val = 0;
+    for (int iter = 0; iter < num_iterations; iter++) {
+      v_gpu.unsetMinMax();  // Force recalculation
+      gpu_min_val = v_gpu.min();
+    }
+    auto gpu_min_end = std::chrono::high_resolution_clock::now();
+    auto gpu_min_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_min_end - gpu_min_start);
+    double gpu_min_us = gpu_min_duration.count() / double(num_iterations);
+
+    // Benchmark CPU max (multiple iterations)
+    auto cpu_max_start = std::chrono::high_resolution_clock::now();
+    double cpu_max_val = 0;
+    for (int iter = 0; iter < num_iterations; iter++) {
+      v_cpu.unsetMinMax();  // Force recalculation
+      cpu_max_val = v_cpu.max();
+    }
+    auto cpu_max_end = std::chrono::high_resolution_clock::now();
+    auto cpu_max_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_max_end - cpu_max_start);
+    double cpu_max_us = cpu_max_duration.count() / double(num_iterations);
+
+    // Benchmark GPU max (multiple iterations)
+    auto gpu_max_start = std::chrono::high_resolution_clock::now();
+    double gpu_max_val = 0;
+    for (int iter = 0; iter < num_iterations; iter++) {
+      v_gpu.unsetMinMax();  // Force recalculation
+      gpu_max_val = v_gpu.max();
+    }
+    auto gpu_max_end = std::chrono::high_resolution_clock::now();
+    auto gpu_max_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_max_end - gpu_max_start);
+    double gpu_max_us = gpu_max_duration.count() / double(num_iterations);
+
+    // Verify results match
+    EXPECT_NEAR(cpu_min_val, gpu_min_val, 1e-5) << "Min values should match for " << dim << "³";
+    EXPECT_NEAR(cpu_max_val, gpu_max_val, 1e-5) << "Max values should match for " << dim << "³";
+
+    double min_speedup = cpu_min_us / gpu_min_us;
+    double max_speedup = cpu_max_us / gpu_max_us;
+    
+    std::string dim_str = std::to_string(dim) + "³";
+    std::string voxels_str = std::to_string(num_voxels / 1000000) + "M";
+    if (num_voxels < 1000000) {
+      voxels_str = std::to_string(num_voxels / 1000) + "K";
+    }
+    
+    std::cout << std::setw(12) << dim_str
+              << std::setw(12) << voxels_str
+              << std::setw(15) << std::fixed << std::setprecision(2) << cpu_min_us
+              << std::setw(15) << std::fixed << std::setprecision(2) << gpu_min_us
+              << std::setw(12) << std::fixed << std::setprecision(2) << min_speedup << "x"
+              << std::setw(15) << std::fixed << std::setprecision(2) << cpu_max_us
+              << std::setw(15) << std::fixed << std::setprecision(2) << gpu_max_us
+              << std::setw(12) << std::fixed << std::setprecision(2) << max_speedup << "x"
+              << std::endl;
+  }
+
+  std::cout << std::string(110, '=') << std::endl;
+  std::cout << "Note: GPU timings include kernel launch overhead and final host reduction" << std::endl;
+  std::cout << "      CPU implementation uses OpenMP parallel reduction with collapse(3)" << std::endl;
+  std::cout << "      Each measurement averaged over " << num_iterations << " iterations" << std::endl;
+#else
+  GTEST_SKIP() << "CUDA support not compiled in";
+#endif
+}
+
 TEST(VoxelsCUDATest, CopyOperationWithCUDA) {
   if (!voxels::cuda_available()) {
     GTEST_SKIP() << "CUDA not available, skipping GPU tests";

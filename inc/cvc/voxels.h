@@ -68,6 +68,22 @@ namespace CVC_NAMESPACE
       double scale_x, double scale_y, double scale_z,
       data_type voxel_type);
   
+  // CUDA kernel launcher for min computation over a subvolume (defined in voxels_kernels.cu)
+  extern "C" double cuda_compute_min(
+      void* data,
+      uint64 off_x, uint64 off_y, uint64 off_z,
+      uint64 dim_x, uint64 dim_y, uint64 dim_z,
+      uint64 vol_x, uint64 vol_y, uint64 vol_z,
+      data_type voxel_type);
+  
+  // CUDA kernel launcher for max computation over a subvolume (defined in voxels_kernels.cu)
+  extern "C" double cuda_compute_max(
+      void* data,
+      uint64 off_x, uint64 off_y, uint64 off_z,
+      uint64 dim_x, uint64 dim_y, uint64 dim_z,
+      uint64 vol_x, uint64 vol_y, uint64 vol_z,
+      data_type voxel_type);
+  
   // CUDA kernel launcher for anisotropic diffusion slice (defined in voxels_kernels.cu)
   extern "C" void cuda_anisotropic_diffusion_slice(
       void* src_data,

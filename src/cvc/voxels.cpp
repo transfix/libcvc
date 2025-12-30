@@ -348,6 +348,26 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
+#ifdef CVC_USING_CUDA
+    // Use CUDA kernel if CUDA is enabled and unified memory is available
+    if (_using_cuda && _cuda_unified_ptr) {
+      try {
+        double result = cuda_compute_min(
+            _cuda_unified_ptr.get(),
+            off_x, off_y, off_z,
+            dim[0], dim[1], dim[2],
+            voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
+            voxelType());
+        
+        cvcapp.threadProgress(1.0f);
+        return result;
+      } catch (const cuda_error& e) {
+        // Fall back to CPU implementation if CUDA fails
+      }
+    }
+#endif
+
+    // CPU implementation (fallback or when CUDA not available)
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
@@ -372,6 +392,26 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
+#ifdef CVC_USING_CUDA
+    // Use CUDA kernel if CUDA is enabled and unified memory is available
+    if (_using_cuda && _cuda_unified_ptr) {
+      try {
+        double result = cuda_compute_max(
+            _cuda_unified_ptr.get(),
+            off_x, off_y, off_z,
+            dim[0], dim[1], dim[2],
+            voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
+            voxelType());
+        
+        cvcapp.threadProgress(1.0f);
+        return result;
+      } catch (const cuda_error& e) {
+        // Fall back to CPU implementation if CUDA fails
+      }
+    }
+#endif
+
+    // CPU implementation (fallback or when CUDA not available)
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
