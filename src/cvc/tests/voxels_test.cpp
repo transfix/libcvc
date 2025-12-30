@@ -37,6 +37,10 @@
 
 using namespace cvc;
 
+// Global flag to enable/disable stress and performance tests
+// Can be enabled with --enable-stress-tests command line flag
+bool enable_stress_tests = false;
+
 // ============================================================================
 // Construction and Basic Properties Tests
 // ============================================================================
@@ -2812,6 +2816,10 @@ TEST(VoxelsCUDATest, MinMaxSubvolumeCPUvsGPU) {
 
 TEST(VoxelsCUDATest, MinMaxPerformanceComparison) {
 #ifdef CVC_USING_CUDA
+  if (!enable_stress_tests) {
+    GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
+  }
+  
   if (!voxels::cuda_available()) {
     GTEST_SKIP() << "CUDA not available, skipping test";
     return;
@@ -3699,5 +3707,21 @@ TEST(VoxelsCUDATest, GDTVFilterPerformanceComparison) {
 
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
+  
+  // Parse custom command line arguments
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--enable-stress-tests") {
+      enable_stress_tests = true;
+    } else if (std::string(argv[i]) == "--help") {
+      std::cout << "Custom options:\n";
+      std::cout << "  --enable-stress-tests    Enable long-running stress/performance tests\n";
+      return 0;
+    }
+  }
+  
+  if (enable_stress_tests) {
+    std::cout << "Stress tests ENABLED\n";
+  }
+  
   return RUN_ALL_TESTS();
 }
