@@ -2,10 +2,12 @@
 #include <volrover3/VTKRenderWidget.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/SceneGraph.h>
+#include <volrover3/GraphicsNode.h>
 #include <volrover3/AppState.h>
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraSettingsDialog.h>
 #include <volrover3/GridOptionsDialog.h>
+#include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/CameraController.h>
 #include <volrover3/ThreadMonitorWidget.h>
 #include <volrover3/StateTreeWidget.h>
@@ -348,29 +350,89 @@ void MainWindow::openGeometry()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    QString fileName = QFileDialog::getOpenFileName(
+    // First, show parent selection dialog
+    GraphicsParentDialog parentDialog(m_sceneGraph, this);
+    if (parentDialog.exec() != QDialog::Accepted) {
+        return; // User cancelled
+    }
+    
+    std::string parentName = parentDialog.getSelectedParentName();
+    auto parentNode = parentDialog.getSelectedParent();
+    
+    // Now show file selection dialog (allow multiple files)
+    QStringList fileNames = QFileDialog::getOpenFileNames(
         this,
-        tr("Open Geometry File"),
+        tr("Open Geometry File(s)"),
         QString(),
         tr("Geometry Files (*.off *.raw *.rawn *.rawc *.rawnc *.obj);;All Files (*)"));
 
-    if (fileName.isEmpty())
+    if (fileNames.isEmpty())
         return;
 
-    try {
-        // Load geometry using CVC library
-        cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
-        
-        // Update app state (will trigger scene graph update via callback)
-        AppState::instance().setGeometry(geom);
-
-        statusBar()->showMessage(tr("Loaded geometry: %1 vertices, %2 triangles")
-            .arg(geom.num_points())
-            .arg(geom.num_tris()), 3000);
+    int successCount = 0;
+    int totalVertices = 0;
+    int totalTriangles = 0;
+    
+    for (const QString& fileName : fileNames) {
+        try {
+            // Load geometry using CVC library
+            cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
+            
+            // Extract filename without path for naming
+            QFileInfo fileInfo(fileName);
+            std::string baseName = fileInfo.baseName().toStdString();
+            
+            // Create unique name if needed
+            std::string graphicsName = baseName;
+            int counter = 1;
+            while (m_sceneGraph->getGraphics(graphicsName)) {
+                graphicsName = baseName + "_" + std::to_string(counter++);
+            }
+            
+            // Create graphics node
+            auto graphicsNode = std::make_shared<GraphicsNode>(graphicsName);
+            graphicsNode->setGeometry(geom);
+            
+            // Store filename in metadata
+            graphicsNode->setMetadata("filename", fileName.toStdString());
+            graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
+            graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
+            
+            // Add to parent or root
+            if (parentNode) {
+                parentNode->addGraphicsChild(graphicsNode);
+                m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+            } else {
+                m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
+                m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+            }
+            
+            totalVertices += geom.num_points();
+            totalTriangles += geom.num_tris();
+            successCount++;
+            
+        } catch (const std::exception &e) {
+            QMessageBox::warning(this, tr("Error Loading Geometry"),
+                tr("Failed to load %1:\n%2").arg(fileName).arg(e.what()));
+        }
     }
-    catch (const std::exception &e) {
-        QMessageBox::critical(this, tr("Error Loading Geometry"),
-            tr("Failed to load geometry file:\n%1").arg(e.what()));
+    
+    // Sync to state tree
+    m_sceneGraph->syncGraphicsToState();
+    
+    // Update render
+    m_renderWidget->update();
+    
+    // Show status message
+    if (successCount > 0) {
+        QString parentMsg = parentName.empty() ? tr("root") : QString::fromStdString(parentName);
+        statusBar()->showMessage(
+            tr("Loaded %1 geometry file(s) under '%2': %3 vertices, %4 triangles")
+                .arg(successCount)
+                .arg(parentMsg)
+                .arg(totalVertices)
+                .arg(totalTriangles),
+            5000);
     }
 }
 
@@ -556,6 +618,16 @@ void MainWindow::showStateTree()
         // Clean up pointer when window is closed
         connect(m_stateTreeWidget, &QObject::destroyed, [this]() {
             m_stateTreeWidget = nullptr;
+        });
+        
+        // Connect state tree refresh to trigger graphics updates
+        connect(m_stateTreeWidget, &StateTreeWidget::stateChanged, this, [this]() {
+            // Sync graphics from state tree
+            m_sceneGraph->syncGraphicsFromState();
+            // Update all graphics nodes
+            m_sceneGraph->update();
+            // Refresh render
+            m_renderWidget->update();
         });
     }
     

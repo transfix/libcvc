@@ -1,6 +1,7 @@
 #include <volrover3/SceneGraph.h>
 #include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
+#include <volrover3/GraphicsNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/GridNode.h>
 #include <volrover3/AxisNode.h>
@@ -8,6 +9,7 @@
 #include <volrover3/AppState.h>
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
+#include <cvc/state.h>
 #include <cvc/app.h>
 #include <vtkRenderer.h>
 #include <algorithm>
@@ -20,6 +22,7 @@ SceneGraph::SceneGraph()
     , m_axisNode(std::make_shared<AxisNode>())
     , m_geometryBBoxNode(std::make_shared<BBoxNode>())
     , m_volumeBBoxNode(std::make_shared<BBoxNode>())
+    , m_graphicsRoot(std::make_shared<GraphicsNode>("graphics_root"))
 {
     m_rootNodes.push_back(m_geometryNode);
     m_rootNodes.push_back(m_volumeNode);
@@ -27,6 +30,7 @@ SceneGraph::SceneGraph()
     m_rootNodes.push_back(m_axisNode);
     m_rootNodes.push_back(m_geometryBBoxNode);
     m_rootNodes.push_back(m_volumeBBoxNode);
+    m_rootNodes.push_back(m_graphicsRoot); // Add graphics root to scene
     
     // Set colors for bbox nodes from AppState
     double r, g, b;
@@ -191,4 +195,120 @@ void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
                                         const std::vector<double> &opacityTable)
 {
     m_volumeNode->setTransferFunction(colorTable, opacityTable);
+}
+
+// Multi-object graphics management
+std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, const cvc::geometry& geom)
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Check if name already exists
+    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+        cvcapp.log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
+        removeGraphics(name);
+    }
+    
+    // Create new graphics node
+    auto graphicsNode = std::make_shared<GraphicsNode>(name);
+    graphicsNode->setGeometry(geom);
+    
+    // Add to graphics root
+    m_graphicsRoot->addGraphicsChild(graphicsNode);
+    
+    // Add to lookup map
+    m_graphicsNodes[name] = graphicsNode;
+    
+    // Sync to state tree
+    syncGraphicsToState();
+    
+    return graphicsNode;
+}
+
+std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Check if name already exists
+    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+        cvcapp.log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
+        removeGraphics(name);
+    }
+    
+    // Create new empty graphics node (for hierarchy/grouping)
+    auto graphicsNode = std::make_shared<GraphicsNode>(name);
+    
+    // Add to graphics root
+    m_graphicsRoot->addGraphicsChild(graphicsNode);
+    
+    // Add to lookup map
+    m_graphicsNodes[name] = graphicsNode;
+    
+    // Sync to state tree
+    syncGraphicsToState();
+    
+    return graphicsNode;
+}
+
+void SceneGraph::removeGraphics(const std::string& name)
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    auto it = m_graphicsNodes.find(name);
+    if (it == m_graphicsNodes.end()) {
+        cvcapp.log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
+        return;
+    }
+    
+    auto graphicsNode = it->second;
+    
+    // Remove from graphics root
+    m_graphicsRoot->removeGraphicsChild(graphicsNode);
+    
+    // Remove from lookup map
+    m_graphicsNodes.erase(it);
+    
+    // Sync to state tree
+    syncGraphicsToState();
+}
+
+std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string& name)
+{
+    auto it = m_graphicsNodes.find(name);
+    if (it != m_graphicsNodes.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+void SceneGraph::registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node)
+{
+    if (node) {
+        m_graphicsNodes[name] = node;
+    }
+}
+
+void SceneGraph::syncGraphicsToState()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Get or create the graphics state node
+    cvc::state& graphicsState = cvc::state::instance()("volrover3")("graphics");
+    
+    // Sync the graphics root and all children
+    m_graphicsRoot->syncToState(graphicsState);
+}
+
+void SceneGraph::syncGraphicsFromState()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Get the graphics state node
+    cvc::state& graphicsState = cvc::state::instance()("volrover3")("graphics");
+    
+    if (!graphicsState.initialized()) {
+        return; // No graphics state to load
+    }
+    
+    // Sync the graphics root and all children
+    m_graphicsRoot->syncFromState(graphicsState);
 }

@@ -41,6 +41,7 @@ set(VOLROVER3_SOURCES
   SceneGraph.cpp
   SceneNode.cpp
   GeometryNode.cpp
+  GraphicsNode.cpp
   VolumeNode.cpp
   GridNode.cpp
   AxisNode.cpp
@@ -53,6 +54,7 @@ set(VOLROVER3_SOURCES
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
   GridOptionsDialog.cpp
+  GraphicsParentDialog.cpp
 )
 
 # Header files
@@ -62,6 +64,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/SceneGraph.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/SceneNode.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GeometryNode.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsNode.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/VolumeNode.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GridNode.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/AxisNode.h
@@ -74,6 +77,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
 )
 
 # Create executable

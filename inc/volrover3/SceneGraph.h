@@ -3,11 +3,14 @@
 
 #include <memory>
 #include <vector>
+#include <map>
+#include <string>
 #include <cvc/bounding_box.h>
 
 class vtkRenderer;
 class SceneNode;
 class GeometryNode;
+class GraphicsNode;
 class VolumeNode;
 class GridNode;
 class AxisNode;
@@ -16,6 +19,7 @@ class BBoxNode;
 namespace cvc {
     class geometry;
     class volume;
+    class state;
 }
 
 class SceneGraph
@@ -27,9 +31,22 @@ public:
     void setRenderer(vtkRenderer *renderer);
     void update();
 
-    // Scene content management
+    // Legacy scene content management (single objects)
     void setGeometry(const cvc::geometry &geom);
     void setVolume(const cvc::volume &vol);
+    
+    // Multi-object graphics management
+    std::shared_ptr<GraphicsNode> addGraphics(const std::string& name, const cvc::geometry& geom);
+    std::shared_ptr<GraphicsNode> addGraphics(const std::string& name); // Empty graphics node for hierarchy
+    void removeGraphics(const std::string& name);
+    std::shared_ptr<GraphicsNode> getGraphics(const std::string& name);
+    std::shared_ptr<GraphicsNode> getGraphicsRoot() { return m_graphicsRoot; }
+    const std::map<std::string, std::shared_ptr<GraphicsNode>>& getAllGraphics() const { return m_graphicsNodes; }
+    void registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node); // For manual registration
+    
+    // State synchronization
+    void syncGraphicsToState();
+    void syncGraphicsFromState();
     
     // Scene element visibility
     void setGridVisible(bool visible);
@@ -72,14 +89,19 @@ public:
 private:
     vtkRenderer *m_renderer;
     
+    // Legacy single-object nodes
     std::shared_ptr<GeometryNode> m_geometryNode;
     std::shared_ptr<VolumeNode> m_volumeNode;
     std::shared_ptr<GridNode> m_gridNode;
     std::shared_ptr<AxisNode> m_axisNode;
     std::shared_ptr<BBoxNode> m_geometryBBoxNode;
     std::shared_ptr<BBoxNode> m_volumeBBoxNode;
-    
+
     std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
+    
+    // Multi-object graphics system
+    std::shared_ptr<GraphicsNode> m_graphicsRoot; // Root node for all graphics
+    std::map<std::string, std::shared_ptr<GraphicsNode>> m_graphicsNodes; // Flat lookup by name
 };
 
 #endif // SCENEGRAPH_H

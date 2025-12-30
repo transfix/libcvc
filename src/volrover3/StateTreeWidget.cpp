@@ -63,6 +63,10 @@ StateTreeWidget::StateTreeWidget(QWidget *parent)
     splitter->setSizes({300, 200});
 }
 
+StateTreeWidget::~StateTreeWidget()
+{
+}
+
 void StateTreeWidget::setRootState(cvc::state* root)
 {
     m_rootState = root;
@@ -420,7 +424,8 @@ void StateTreeWidget::onTableValueChanged(int row, int column)
     
     try {
         setStateValue(m_currentState, newValue);
-        // Value was set successfully, the callback system will notify listeners
+        // Value was set successfully, emit state changed signal
+        emit stateChanged();
     }
     catch (const std::exception& e) {
         QMessageBox::warning(this, tr("Error"),
@@ -507,6 +512,9 @@ void StateTreeWidget::onDeleteStateClicked()
             
             // Refresh the entire tree since the node should now be hidden
             refresh();
+            
+            // Emit state changed signal
+            emit stateChanged();
             
             QMessageBox::information(this, tr("Success"),
                                    tr("State '%1' cleared successfully").arg(fullPath));

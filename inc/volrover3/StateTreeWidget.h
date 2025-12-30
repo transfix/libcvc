@@ -17,10 +17,13 @@ class StateTreeWidget : public QWidget
 
 public:
     explicit StateTreeWidget(QWidget *parent = nullptr);
-    ~StateTreeWidget() override = default;
+    ~StateTreeWidget() override;
 
     void setRootState(cvc::state* root);
     void refresh();
+
+signals:
+    void stateChanged(); // Emitted when state data is modified
 
 private slots:
     void onTreeItemSelected();
