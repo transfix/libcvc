@@ -8,6 +8,7 @@
 #include <volrover3/GridOptionsDialog.h>
 #include <volrover3/CameraController.h>
 #include <volrover3/ThreadMonitorWidget.h>
+#include <volrover3/StateTreeWidget.h>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -28,6 +29,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_transferFunctionWidget(nullptr)
     , m_sceneGraph(std::make_shared<SceneGraph>())
     , m_threadMonitor(nullptr)
+    , m_stateTreeWidget(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -75,6 +77,17 @@ MainWindow::MainWindow(QWidget *parent)
     AppState::instance().onWorldBoundsChanged([this]() {
         // Update grid to match new world bounds
         m_sceneGraph->updateGrid(AppState::instance().worldBounds());
+        
+        // Update camera orbit center to match new bounds center
+        CameraController* camCtrl = m_renderWidget->getCameraController();
+        if (camCtrl) {
+            cvc::bounding_box bounds = AppState::instance().worldBounds();
+            camCtrl->updateOrbitCenterFromBounds(
+                bounds.minx, bounds.miny, bounds.minz,
+                bounds.maxx, bounds.maxy, bounds.maxz
+            );
+        }
+        
         m_renderWidget->update();
     });
     
@@ -292,6 +305,11 @@ void MainWindow::createMenus()
     threadMonitorAction->setShortcut(tr("Ctrl+T"));
     connect(threadMonitorAction, &QAction::triggered, this, &MainWindow::showThreadMonitor);
     viewMenu->addAction(threadMonitorAction);
+    
+    QAction *stateTreeAction = new QAction(tr("&State Tree..."), this);
+    stateTreeAction->setShortcut(tr("Ctrl+Shift+S"));
+    connect(stateTreeAction, &QAction::triggered, this, &MainWindow::showStateTree);
+    viewMenu->addAction(stateTreeAction);
 
     // Help menu
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -442,6 +460,17 @@ void MainWindow::editCameraSettings()
     settings.keyDown = AppState::instance().cameraKeyDown();
     
     CameraSettingsDialog dialog(settings, this);
+    
+    // Connect reset view signal
+    connect(&dialog, &CameraSettingsDialog::resetViewRequested, [this, camCtrl]() {
+        cvc::bounding_box bounds = AppState::instance().worldBounds();
+        camCtrl->resetView(
+            bounds.minx, bounds.miny, bounds.minz,
+            bounds.maxx, bounds.maxy, bounds.maxz
+        );
+        m_renderWidget->update();
+    });
+    
     if (dialog.exec() == QDialog::Accepted) {
         CameraSettingsDialog::CameraSettings newSettings = dialog.getSettings();
         
@@ -510,6 +539,33 @@ void MainWindow::showThreadMonitor()
     m_threadMonitor->show();
     m_threadMonitor->raise();
     m_threadMonitor->activateWindow();
+}
+
+void MainWindow::showStateTree()
+{
+    // Create state tree widget as a separate window if not already created
+    if (!m_stateTreeWidget) {
+        m_stateTreeWidget = new StateTreeWidget();
+        m_stateTreeWidget->setWindowTitle(tr("State Tree - VolRover3"));
+        m_stateTreeWidget->setAttribute(Qt::WA_DeleteOnClose);
+        m_stateTreeWidget->resize(600, 500);
+        
+        // Set root state to AppState's internal state
+        m_stateTreeWidget->setRootState(&AppState::instance().getRootState());
+        
+        // Clean up pointer when window is closed
+        connect(m_stateTreeWidget, &QObject::destroyed, [this]() {
+            m_stateTreeWidget = nullptr;
+        });
+    }
+    
+    // Refresh to show current state
+    m_stateTreeWidget->refresh();
+    
+    // Show and raise the window
+    m_stateTreeWidget->show();
+    m_stateTreeWidget->raise();
+    m_stateTreeWidget->activateWindow();
 }
 
 void MainWindow::aboutVolRover()

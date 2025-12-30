@@ -35,6 +35,8 @@ public:
     CameraMode getMode() const { return m_mode; }
     
     void setOrbitCenter(double x, double y, double z);
+    void updateOrbitCenterFromBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
+    void resetView(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
     
     void setKeyBindings(int forward, int backward, int left, int right, int up, int down);
     
@@ -62,6 +64,7 @@ private:
     
     // Fly mode state
     double m_position[3];
+    double m_focalPoint[3];  // Track focal point to avoid snapping
     double m_yaw;
     double m_pitch;
     

@@ -138,10 +138,17 @@ void CameraSettingsDialog::setupUI(const CameraSettings& settings)
     
     mainLayout->addWidget(keysGroup);
 
-    // Reset to defaults button
+    // Reset to defaults and reset view buttons
+    QHBoxLayout *resetLayout = new QHBoxLayout();
     QPushButton *resetButton = new QPushButton(tr("Reset to Defaults"));
     connect(resetButton, &QPushButton::clicked, this, &CameraSettingsDialog::onResetDefaults);
-    mainLayout->addWidget(resetButton);
+    resetLayout->addWidget(resetButton);
+    
+    QPushButton *resetViewButton = new QPushButton(tr("Reset View"));
+    resetViewButton->setToolTip(tr("Position camera to view the entire scene"));
+    connect(resetViewButton, &QPushButton::clicked, this, &CameraSettingsDialog::onResetView);
+    resetLayout->addWidget(resetViewButton);
+    mainLayout->addLayout(resetLayout);
 
     // Dialog buttons
     QDialogButtonBox *buttonBox = new QDialogButtonBox(
@@ -196,4 +203,11 @@ void CameraSettingsDialog::onResetDefaults()
     m_keyStrafeRightButton->setKey(defaults.keyStrafeRight);
     m_keyUpButton->setKey(defaults.keyUp);
     m_keyDownButton->setKey(defaults.keyDown);
+}
+
+void CameraSettingsDialog::onResetView()
+{
+    // Signal to parent to reset the camera view
+    // This will be handled by MainWindow
+    emit resetViewRequested();
 }

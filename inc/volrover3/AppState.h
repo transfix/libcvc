@@ -178,6 +178,9 @@ public:
     boost::signals2::connection onCameraChanged(const boost::function<void()>& callback);
     boost::signals2::connection onTransferFunctionChanged(const boost::function<void()>& callback);
     
+    // State tree access for debugging/inspection
+    cvc::state& getRootState();
+    
 private:
     AppState();
     ~AppState() = default;

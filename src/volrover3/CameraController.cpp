@@ -25,7 +25,10 @@ CameraController::CameraController()
 {
     m_position[0] = 0.0;
     m_position[1] = 0.0;
-    m_position[2] = 10.0;
+    m_position[2] = 5.0;
+    m_focalPoint[0] = 0.0;
+    m_focalPoint[1] = 0.0;
+    m_focalPoint[2] = 0.0;
     
     m_orbitCenter[0] = 0.0;
     m_orbitCenter[1] = 0.0;
@@ -260,15 +263,14 @@ void CameraController::updateOrientation()
     forward[1] = sin(pitchRad);
     forward[2] = -cos(pitchRad) * cos(yawRad);
 
-    // Calculate focal point
-    double focalPoint[3];
-    focalPoint[0] = m_position[0] + forward[0];
-    focalPoint[1] = m_position[1] + forward[1];
-    focalPoint[2] = m_position[2] + forward[2];
+    // Update focal point based on new orientation
+    m_focalPoint[0] = m_position[0] + forward[0];
+    m_focalPoint[1] = m_position[1] + forward[1];
+    m_focalPoint[2] = m_position[2] + forward[2];
 
     // Update camera
     m_camera->SetPosition(m_position);
-    m_camera->SetFocalPoint(focalPoint);
+    m_camera->SetFocalPoint(m_focalPoint);
     m_camera->SetViewUp(0, 1, 0);
     
     saveCameraStateToAppState();
@@ -309,6 +311,12 @@ void CameraController::move(double forward, double right, double up)
     m_position[0] += forward * forwardVec[0] + right * rightVec[0];
     m_position[1] += up;  // Vertical movement
     m_position[2] += forward * forwardVec[2] + right * rightVec[2];
+    
+    // Update focal point to maintain current view direction
+    double* focal = m_camera->GetFocalPoint();
+    m_focalPoint[0] = focal[0] + forward * forwardVec[0] + right * rightVec[0];
+    m_focalPoint[1] = focal[1] + up;
+    m_focalPoint[2] = focal[2] + forward * forwardVec[2] + right * rightVec[2];
 
     updateOrientation();
 }
@@ -340,4 +348,63 @@ void CameraController::orbitCamera(int dx, int dy)
     m_camera->SetViewUp(0, 1, 0);
     
     saveCameraStateToAppState();
+}
+
+void CameraController::updateOrbitCenterFromBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ)
+{
+    // Set orbit center to center of bounding box
+    m_orbitCenter[0] = (minX + maxX) * 0.5;
+    m_orbitCenter[1] = (minY + maxY) * 0.5;
+    m_orbitCenter[2] = (minZ + maxZ) * 0.5;
+    
+    // Update camera focal point to maintain orbit
+    if (m_camera && m_mode == ORBIT_MODE) {
+        m_camera->SetFocalPoint(m_orbitCenter);
+    }
+}
+
+void CameraController::resetView(double minX, double minY, double minZ, double maxX, double maxY, double maxZ)
+{
+    if (!m_camera) return;
+    
+    // Calculate bounding box center and size
+    double centerX = (minX + maxX) * 0.5;
+    double centerY = (minY + maxY) * 0.5;
+    double centerZ = (minZ + maxZ) * 0.5;
+    
+    double sizeX = maxX - minX;
+    double sizeY = maxY - minY;
+    double sizeZ = maxZ - minZ;
+    double maxSize = std::max({sizeX, sizeY, sizeZ});
+    
+    // Position camera to view entire scene
+    double distance = maxSize * 2.0; // Distance to see entire bounding box
+    
+    if (m_mode == ORBIT_MODE) {
+        // Update orbit center to bounding box center
+        m_orbitCenter[0] = centerX;
+        m_orbitCenter[1] = centerY;
+        m_orbitCenter[2] = centerZ;
+        m_orbitDistance = distance;
+        m_orbitAzimuth = 45.0;
+        m_orbitElevation = 30.0;
+        
+        // Position camera
+        orbitCamera(0, 0);
+    } else {
+        // Fly mode - position camera back from center
+        m_position[0] = centerX;
+        m_position[1] = centerY + maxSize * 0.5;
+        m_position[2] = centerZ + distance;
+        
+        m_focalPoint[0] = centerX;
+        m_focalPoint[1] = centerY;
+        m_focalPoint[2] = centerZ;
+        
+        // Calculate yaw and pitch to look at center
+        m_yaw = 0.0;
+        m_pitch = -20.0;
+        
+        updateOrientation();
+    }
 }

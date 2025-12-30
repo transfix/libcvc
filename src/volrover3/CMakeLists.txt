@@ -48,6 +48,7 @@ set(VOLROVER3_SOURCES
   CameraController.cpp
   TransferFunctionWidget.cpp
   ThreadMonitorWidget.cpp
+  StateTreeWidget.cpp
   AppState.cpp
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
@@ -68,6 +69,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraController.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/TransferFunctionWidget.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/ThreadMonitorWidget.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/StateTreeWidget.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/AppState.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h

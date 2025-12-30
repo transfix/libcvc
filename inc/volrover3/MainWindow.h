@@ -13,6 +13,7 @@ class VTKRenderWidget;
 class TransferFunctionWidget;
 class SceneGraph;
 class ThreadMonitorWidget;
+class StateTreeWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -33,6 +34,7 @@ private slots:
     void editCameraSettings();
     void showGridOptions();
     void showThreadMonitor();
+    void showStateTree();
     void aboutVolRover();
     void updateThreadStatus();
 
@@ -47,6 +49,7 @@ private:
     TransferFunctionWidget *m_transferFunctionWidget;
     std::shared_ptr<SceneGraph> m_sceneGraph;
     ThreadMonitorWidget *m_threadMonitor;
+    StateTreeWidget *m_stateTreeWidget;
 
     // Status bar widgets for thread monitoring
     QLabel *m_threadNameLabel;

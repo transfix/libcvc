@@ -58,8 +58,12 @@ public:
     
     CameraSettings getSettings() const;
 
+signals:
+    void resetViewRequested();
+
 private slots:
     void onResetDefaults();
+    void onResetView();
 
 private:
     void setupUI(const CameraSettings& settings);

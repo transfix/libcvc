@@ -111,6 +111,11 @@ cvc::state& AppState::getState(const std::string& path)
     return cvc::state::instance()("volrover3")(path);
 }
 
+cvc::state& AppState::getRootState()
+{
+    return cvc::state::instance()("volrover3");
+}
+
 cvc::geometry AppState::geometry()
 {
     try {
