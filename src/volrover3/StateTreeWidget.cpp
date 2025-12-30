@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QRegularExpression>
 #include <boost/lexical_cast.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <set>
@@ -433,12 +434,32 @@ void StateTreeWidget::onTableValueChanged(int row, int column)
 
 void StateTreeWidget::onAddStateClicked()
 {
+    // Pre-fill the path with the selected node's full name (if not root)
+    QString prefill = "";
+    if (m_currentState && m_currentState != m_rootState) {
+        prefill = QString::fromStdString(m_currentState->fullName()) + ".";
+    }
+    
     bool ok;
     QString path = QInputDialog::getText(this, tr("Add State"),
                                         tr("Enter full path for new state:\ne.g., 'volrover3.my_setting' or 'myapp.nested.child.value'"),
-                                        QLineEdit::Normal, "", &ok);
+                                        QLineEdit::Normal, prefill, &ok);
     
     if (!ok || path.isEmpty()) return;
+    
+    // Validate the path
+    // State names can contain alphanumeric characters and underscores, separated by dots
+    QRegularExpression pathRegex("^[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)*$");
+    QRegularExpressionMatch match = pathRegex.match(path);
+    
+    if (!match.hasMatch()) {
+        QMessageBox::warning(this, tr("Invalid Path"),
+                           tr("Invalid state path. Path must contain only alphanumeric characters and underscores,\n"
+                              "with segments separated by dots (.).\n"
+                              "Each segment must start with a letter or underscore.\n\n"
+                              "Examples: 'volrover3.camera_mode' or 'app.config.value_1'"));
+        return;
+    }
     
     QString value = QInputDialog::getText(this, tr("Add State"),
                                          tr("Enter initial value:"),

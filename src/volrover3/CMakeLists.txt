@@ -197,4 +197,12 @@ if(CVC_BUILD_TESTS)
     GTest::gtest
     GTest::gtest_main)
   add_test(NAME GridNodeTest COMMAND volrover3_gridnode_test)
+  
+  # StateTreeWidget tests
+  add_executable(volrover3_statetree_test
+    tests/StateTreeWidgetTest.cpp)
+  target_link_libraries(volrover3_statetree_test
+    volrover3_lib
+    GTest::gtest)
+  add_test(NAME StateTreeWidgetTest COMMAND volrover3_statetree_test)
 endif()
