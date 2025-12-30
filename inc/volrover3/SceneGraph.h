@@ -37,7 +37,32 @@ public:
     void setGeometryBBoxVisible(bool visible);
     void setVolumeBBoxVisible(bool visible);
     
-    // Update grid to match bounding box
+    // Scene element colors
+    void setGridColor(double r, double g, double b);
+    void setGeometryBBoxColor(double r, double g, double b);
+    void setVolumeBBoxColor(double r, double g, double b);
+    
+    // Grid plane visibility
+    void setGridPlaneVisibility(bool yz, bool xz, bool xy);
+    
+    // Grid divisions
+    void setGridDivisions(int x, int y, int z);
+    
+    // Grid tick intervals
+    void setGridTickIntervals(int x, int y, int z);
+    
+    // Per-plane grid colors
+    void setGridPlaneColors(double yzR, double yzG, double yzB,
+                            double xzR, double xzG, double xzB,
+                            double xyR, double xyG, double xyB);
+    
+    // Grid tick label properties
+    void setGridTickLabelProperties(double r, double g, double b, int fontSize);
+    
+    // Volume bbox tick controls
+    void setVolumeBBoxTicks(bool visible, double interval, double r, double g, double b, int fontSize);
+    
+    // Update grid to match bounds
     void updateGrid(const cvc::bounding_box& bounds);
 
     // Transfer function update

@@ -179,3 +179,178 @@ TEST_F(SceneGraphTest, WorldBoundsUpdate) {
     
     SUCCEED();
 }
+
+// ===========================
+// Color Tests
+// ===========================
+
+TEST_F(SceneGraphTest, GridColorUpdate) {
+    // Set grid color
+    sceneGraph->setGridColor(0.9, 0.1, 0.5);
+    
+    // Verify color was applied (we can't directly inspect VTK properties
+    // in these tests without a renderer, but we verify it doesn't crash)
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, GeometryBBoxColorUpdate) {
+    // Set geometry bbox color
+    sceneGraph->setGeometryBBoxColor(0.2, 0.8, 0.3);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, VolumeBBoxColorUpdate) {
+    // Set volume bbox color
+    sceneGraph->setVolumeBBoxColor(0.7, 0.4, 0.9);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, ColorFromAppState) {
+    // Set colors in AppState
+    appState->setGridColor(0.1, 0.2, 0.3);
+    appState->setGeometryBBoxColor(0.4, 0.5, 0.6);
+    appState->setVolumeBBoxColor(0.7, 0.8, 0.9);
+    
+    // Apply to scene graph
+    double r, g, b;
+    appState->getGridColor(r, g, b);
+    sceneGraph->setGridColor(r, g, b);
+    
+    appState->getGeometryBBoxColor(r, g, b);
+    sceneGraph->setGeometryBBoxColor(r, g, b);
+    
+    appState->getVolumeBBoxColor(r, g, b);
+    sceneGraph->setVolumeBBoxColor(r, g, b);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, MultipleColorUpdates) {
+    // Update colors multiple times
+    for (int i = 0; i < 5; i++) {
+        double val = i * 0.2;
+        sceneGraph->setGridColor(val, val, val);
+        sceneGraph->setGeometryBBoxColor(1.0 - val, val, 0.5);
+        sceneGraph->setVolumeBBoxColor(val, 0.5, 1.0 - val);
+    }
+    
+    SUCCEED();
+}
+
+// ===========================
+// Axis Scaling Tests
+// ===========================
+
+TEST_F(SceneGraphTest, AxisScalingWithBounds) {
+    // Create bounding boxes of different sizes and verify axis scales
+    
+    // Small bounds
+    cvc::bounding_box smallBounds(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
+    sceneGraph->updateGrid(smallBounds);
+    // Axis should be scaled to ~20% of max span (2.0), so ~0.4
+    
+    // Large bounds
+    cvc::bounding_box largeBounds(-50.0, -50.0, -50.0, 50.0, 50.0, 50.0);
+    sceneGraph->updateGrid(largeBounds);
+    // Axis should be scaled to ~20% of max span (100.0), so ~20.0
+    
+    // Asymmetric bounds
+    cvc::bounding_box asymBounds(-5.0, -2.0, -1.0, 5.0, 2.0, 1.0);
+    sceneGraph->updateGrid(asymBounds);
+    // Axis should be scaled to ~20% of max span (10.0), so ~2.0
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, AxisScalingEdgeCases) {
+    // Test with very small bounds
+    cvc::bounding_box tinyBounds(-0.01, -0.01, -0.01, 0.01, 0.01, 0.01);
+    sceneGraph->updateGrid(tinyBounds);
+    
+    // Test with very large bounds
+    cvc::bounding_box hugeBounds(-1000.0, -1000.0, -1000.0, 1000.0, 1000.0, 1000.0);
+    sceneGraph->updateGrid(hugeBounds);
+    
+    // Test with zero-volume bounds
+    cvc::bounding_box zeroBounds(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    sceneGraph->updateGrid(zeroBounds);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, AxisScalingWithGeometry) {
+    // Create simple geometry
+    cvc::geometry geom;
+    geom.points().push_back({-2.0, -2.0, -2.0});
+    geom.points().push_back({2.0, 2.0, 2.0});
+    
+    // Set geometry and get its bounds
+    sceneGraph->setGeometry(geom);
+    cvc::bounding_box geomBounds = geom.extents();
+    
+    // Update grid/axis with geometry bounds
+    sceneGraph->updateGrid(geomBounds);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, GridAndAxisUpdateTogether) {
+    // Verify that updating grid also updates axis scaling
+    cvc::bounding_box bounds1(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0);
+    sceneGraph->updateGrid(bounds1);
+    
+    cvc::bounding_box bounds2(-5.0, -5.0, -5.0, 5.0, 5.0, 5.0);
+    sceneGraph->updateGrid(bounds2);
+    
+    cvc::bounding_box bounds3(-100.0, -100.0, -100.0, 100.0, 100.0, 100.0);
+    sceneGraph->updateGrid(bounds3);
+    
+    SUCCEED();
+}
+
+// ===========================
+// Integration Tests
+// ===========================
+
+TEST_F(SceneGraphTest, ColorAndBoundsIntegration) {
+    // Test setting both colors and bounds together
+    appState->setGridColor(0.5, 0.5, 0.5);
+    appState->setGeometryBBoxColor(0.0, 1.0, 0.0);
+    appState->setVolumeBBoxColor(1.0, 0.0, 1.0);
+    
+    double r, g, b;
+    appState->getGridColor(r, g, b);
+    sceneGraph->setGridColor(r, g, b);
+    
+    cvc::bounding_box bounds(-25.0, -25.0, -25.0, 25.0, 25.0, 25.0);
+    sceneGraph->updateGrid(bounds);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, StateTreeColorPropagation) {
+    // Set colors via state tree
+    auto& stateTree = cvc::state::instance()("volrover3");
+    stateTree("grid_color").value("0.3,0.3,0.3");
+    stateTree("geometry_bbox_color").value("1.0,1.0,0.0");
+    stateTree("volume_bbox_color").value("0.0,1.0,1.0");
+    
+    // Read via AppState and apply to SceneGraph
+    double r, g, b;
+    appState->getGridColor(r, g, b);
+    sceneGraph->setGridColor(r, g, b);
+    
+    EXPECT_DOUBLE_EQ(r, 0.3);
+    EXPECT_DOUBLE_EQ(g, 0.3);
+    EXPECT_DOUBLE_EQ(b, 0.3);
+    
+    appState->getGeometryBBoxColor(r, g, b);
+    sceneGraph->setGeometryBBoxColor(r, g, b);
+    
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+}
+

@@ -36,6 +36,68 @@ public:
     bool volumeBBoxVisible();
     void setVolumeBBoxVisible(bool visible);
     
+    // Grid plane visibility (individual planes)
+    bool gridYZPlaneVisible();
+    void setGridYZPlaneVisible(bool visible);
+    
+    bool gridXZPlaneVisible();
+    void setGridXZPlaneVisible(bool visible);
+    
+    bool gridXYPlaneVisible();
+    void setGridXYPlaneVisible(bool visible);
+    
+    // Grid divisions per axis
+    void getGridDivisions(int& x, int& y, int& z);
+    void setGridDivisions(int x, int y, int z);
+    
+    // Grid tick intervals
+    void getGridTickIntervals(int& x, int& y, int& z);
+    void setGridTickIntervals(int x, int y, int z);
+    
+    // Grid ticks visibility
+    bool gridTicksVisible();
+    void setGridTicksVisible(bool visible);
+    
+    // Grid and bbox colors (RGB triplets)
+    void getGridColor(double& r, double& g, double& b);
+    void setGridColor(double r, double g, double b);
+    
+    // Per-plane grid colors
+    void getGridYZPlaneColor(double& r, double& g, double& b);
+    void setGridYZPlaneColor(double r, double g, double b);
+    
+    void getGridXZPlaneColor(double& r, double& g, double& b);
+    void setGridXZPlaneColor(double r, double g, double b);
+    
+    void getGridXYPlaneColor(double& r, double& g, double& b);
+    void setGridXYPlaneColor(double r, double g, double b);
+    
+    // Grid tick label properties
+    void getGridTickLabelColor(double& r, double& g, double& b);
+    void setGridTickLabelColor(double r, double g, double b);
+    
+    int gridTickLabelFontSize();
+    void setGridTickLabelFontSize(int size);
+    
+    void getGeometryBBoxColor(double& r, double& g, double& b);
+    void setGeometryBBoxColor(double r, double g, double b);
+    
+    void getVolumeBBoxColor(double& r, double& g, double& b);
+    void setVolumeBBoxColor(double r, double g, double b);
+    
+    // BBox tick controls
+    bool volumeBBoxTicksVisible();
+    void setVolumeBBoxTicksVisible(bool visible);
+    
+    double volumeBBoxTickInterval();
+    void setVolumeBBoxTickInterval(double interval);
+    
+    void getVolumeBBoxTickLabelColor(double& r, double& g, double& b);
+    void setVolumeBBoxTickLabelColor(double r, double g, double b);
+    
+    int volumeBBoxTickLabelFontSize();
+    void setVolumeBBoxTickLabelFontSize(int size);
+    
     // Camera control mode (0 = orbit, 1 = fly)
     int cameraMode();
     void setCameraMode(int mode);
@@ -102,6 +164,16 @@ public:
     boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridColorChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGeometryBBoxColorChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onVolumeBBoxColorChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onVolumeBBoxTicksChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridPlaneVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridDivisionsChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridTickIntervalsChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridTicksVisibleChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridPlaneColorsChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridTickLabelPropertiesChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraModeChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraChanged(const boost::function<void()>& callback);
     boost::signals2::connection onTransferFunctionChanged(const boost::function<void()>& callback);

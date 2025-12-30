@@ -1,5 +1,6 @@
 #include <volrover3/GeometryNode.h>
 #include <cvc/geometry.h>
+#include <cvc/app.h>
 #include <vtkActor.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPolyData.h>
@@ -34,6 +35,7 @@ vtkProp* GeometryNode::getProp()
 
 void GeometryNode::setGeometry(const CVC_NAMESPACE::geometry &geom)
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     updatePolyData(geom);
 }
 

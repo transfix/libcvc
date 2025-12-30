@@ -1,4 +1,5 @@
 #include <volrover3/TransferFunctionWidget.h>
+#include <cvc/app.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -323,6 +324,8 @@ void TransferFunctionWidget::createDefaultTransferFunction()
 
 void TransferFunctionWidget::applyPreset(const QString &presetName)
 {
+    cvc::thread_info ti("Applying transfer function preset");
+    
     m_colorPoints.clear();
     // Don't clear opacity points - keep them independent!
 

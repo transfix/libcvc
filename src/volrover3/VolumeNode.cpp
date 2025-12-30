@@ -1,5 +1,6 @@
 #include <volrover3/VolumeNode.h>
 #include <cvc/volume.h>
+#include <cvc/app.h>
 #include <vtkVolume.h>
 #include <vtkSmartVolumeMapper.h>
 #include <vtkImageData.h>
@@ -17,6 +18,12 @@ VolumeNode::VolumeNode()
     , m_dataMin(0.0)
     , m_dataMax(1.0)
 {
+    // Initialize with empty 1x1x1 volume to avoid VTK errors before data is loaded
+    m_imageData->SetDimensions(1, 1, 1);
+    m_imageData->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    unsigned char *ptr = static_cast<unsigned char*>(m_imageData->GetScalarPointer());
+    ptr[0] = 0;
+    
     m_mapper->SetInputData(m_imageData);
     m_volume->SetMapper(m_mapper);
 
@@ -53,6 +60,8 @@ vtkProp* VolumeNode::getProp()
 
 void VolumeNode::setVolume(const cvc::volume &vol)
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
     updateImageData(vol);
     m_dataMin = vol.min();
     m_dataMax = vol.max();

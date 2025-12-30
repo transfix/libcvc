@@ -5,7 +5,9 @@
 #include <volrover3/AppState.h>
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraSettingsDialog.h>
+#include <volrover3/GridOptionsDialog.h>
 #include <volrover3/CameraController.h>
+#include <volrover3/ThreadMonitorWidget.h>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -14,14 +16,21 @@
 #include <QStatusBar>
 #include <QDockWidget>
 #include <QVBoxLayout>
+#include <QLabel>
+#include <QProgressBar>
 #include <cvc/geometry_file_io.h>
 #include <cvc/volume_file_io.h>
+#include <cvc/app.h>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_renderWidget(nullptr)
     , m_transferFunctionWidget(nullptr)
     , m_sceneGraph(std::make_shared<SceneGraph>())
+    , m_threadMonitor(nullptr)
+    , m_threadNameLabel(nullptr)
+    , m_threadInfoLabel(nullptr)
+    , m_threadProgressBar(nullptr)
     , m_gridVisible(true)
     , m_axisVisible(true)
 {
@@ -35,6 +44,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     createDockWidgets();
     createMenus();
+    setupStatusBar();
     setupConnections();
 
     // Initialize from AppState
@@ -54,6 +64,10 @@ MainWindow::MainWindow(QWidget *parent)
         cvc::volume vol = AppState::instance().volume();
         m_sceneGraph->setVolume(vol);
         m_transferFunctionWidget->setDataRange(vol.min(), vol.max());
+        
+        // Set grid divisions to match volume resolution
+        AppState::instance().setGridDivisions(vol.XDim(), vol.YDim(), vol.ZDim());
+        
         m_sceneGraph->updateGrid(AppState::instance().worldBounds());
         m_renderWidget->update();
     });
@@ -83,6 +97,86 @@ MainWindow::MainWindow(QWidget *parent)
     
     AppState::instance().onVolumeBBoxVisibilityChanged([this]() {
         m_sceneGraph->setVolumeBBoxVisible(AppState::instance().volumeBBoxVisible());
+        m_renderWidget->update();
+    });
+    
+    // Connect color state changes to update rendering
+    AppState::instance().onGridColorChanged([this]() {
+        double r, g, b;
+        AppState::instance().getGridColor(r, g, b);
+        m_sceneGraph->setGridColor(r, g, b);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onGeometryBBoxColorChanged([this]() {
+        double r, g, b;
+        AppState::instance().getGeometryBBoxColor(r, g, b);
+        m_sceneGraph->setGeometryBBoxColor(r, g, b);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onVolumeBBoxColorChanged([this]() {
+        double r, g, b;
+        AppState::instance().getVolumeBBoxColor(r, g, b);
+        m_sceneGraph->setVolumeBBoxColor(r, g, b);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onVolumeBBoxTicksChanged([this]() {
+        double r, g, b;
+        AppState::instance().getVolumeBBoxTickLabelColor(r, g, b);
+        m_sceneGraph->setVolumeBBoxTicks(
+            AppState::instance().volumeBBoxTicksVisible(),
+            AppState::instance().volumeBBoxTickInterval(),
+            r, g, b,
+            AppState::instance().volumeBBoxTickLabelFontSize()
+        );
+        m_renderWidget->update();
+    });
+    
+    // Connect grid plane visibility and divisions changes
+    AppState::instance().onGridPlaneVisibilityChanged([this]() {
+        bool yz = AppState::instance().gridYZPlaneVisible();
+        bool xz = AppState::instance().gridXZPlaneVisible();
+        bool xy = AppState::instance().gridXYPlaneVisible();
+        m_sceneGraph->setGridPlaneVisibility(yz, xz, xy);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onGridDivisionsChanged([this]() {
+        int x, y, z;
+        AppState::instance().getGridDivisions(x, y, z);
+        m_sceneGraph->setGridDivisions(x, y, z);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onGridTickIntervalsChanged([this]() {
+        int x, y, z;
+        AppState::instance().getGridTickIntervals(x, y, z);
+        m_sceneGraph->setGridTickIntervals(x, y, z);
+        m_renderWidget->update();
+    });
+    
+    // Add callback for grid ticks visibility changes
+    AppState::instance().onGridTicksVisibleChanged([this]() {
+        m_sceneGraph->updateGrid(AppState::instance().worldBounds());
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onGridPlaneColorsChanged([this]() {
+        double yzR, yzG, yzB, xzR, xzG, xzB, xyR, xyG, xyB;
+        AppState::instance().getGridYZPlaneColor(yzR, yzG, yzB);
+        AppState::instance().getGridXZPlaneColor(xzR, xzG, xzB);
+        AppState::instance().getGridXYPlaneColor(xyR, xyG, xyB);
+        m_sceneGraph->setGridPlaneColors(yzR, yzG, yzB, xzR, xzG, xzB, xyR, xyG, xyB);
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onGridTickLabelPropertiesChanged([this]() {
+        double r, g, b;
+        AppState::instance().getGridTickLabelColor(r, g, b);
+        int fontSize = AppState::instance().gridTickLabelFontSize();
+        m_sceneGraph->setGridTickLabelProperties(r, g, b, fontSize);
         m_renderWidget->update();
     });
     
@@ -119,6 +213,11 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    // Disconnect all callbacks
+    for (auto& conn : m_connections) {
+        conn.disconnect();
+    }
+    m_connections.clear();
 }
 
 void MainWindow::createMenus()
@@ -181,6 +280,18 @@ void MainWindow::createMenus()
     editCameraAction->setShortcut(tr("Ctrl+K"));
     connect(editCameraAction, &QAction::triggered, this, &MainWindow::editCameraSettings);
     viewMenu->addAction(editCameraAction);
+    
+    QAction *gridOptionsAction = new QAction(tr("&Grid Options..."), this);
+    gridOptionsAction->setShortcut(tr("Ctrl+G"));
+    connect(gridOptionsAction, &QAction::triggered, this, &MainWindow::showGridOptions);
+    viewMenu->addAction(gridOptionsAction);
+    
+    viewMenu->addSeparator();
+    
+    QAction *threadMonitorAction = new QAction(tr("&Thread Monitor..."), this);
+    threadMonitorAction->setShortcut(tr("Ctrl+T"));
+    connect(threadMonitorAction, &QAction::triggered, this, &MainWindow::showThreadMonitor);
+    viewMenu->addAction(threadMonitorAction);
 
     // Help menu
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -217,6 +328,8 @@ void MainWindow::setupConnections()
 
 void MainWindow::openGeometry()
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
     QString fileName = QFileDialog::getOpenFileName(
         this,
         tr("Open Geometry File"),
@@ -245,6 +358,8 @@ void MainWindow::openGeometry()
 
 void MainWindow::openVolume()
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
     QString fileName = QFileDialog::getOpenFileName(
         this,
         tr("Open Volume File"),
@@ -298,6 +413,8 @@ void MainWindow::toggleVolumeBBox()
 
 void MainWindow::editBoundingBox()
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
     BoundingBoxDialog dialog(AppState::instance().worldBounds(), this);
     if (dialog.exec() == QDialog::Accepted) {
         AppState::instance().setWorldBounds(dialog.getBoundingBox());
@@ -306,6 +423,8 @@ void MainWindow::editBoundingBox()
 
 void MainWindow::editCameraSettings()
 {
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
     CameraController *camCtrl = m_renderWidget->getCameraController();
     if (!camCtrl) return;
     
@@ -355,11 +474,131 @@ void MainWindow::editCameraSettings()
         // Update orbit center to world bounds center when switching to orbit mode
         if (newSettings.mode == 0) {
             cvc::bounding_box bounds = AppState::instance().worldBounds();
-            double cx = (bounds[0] + bounds[3]) / 2.0;
-            double cy = (bounds[1] + bounds[4]) / 2.0;
-            double cz = (bounds[2] + bounds[5]) / 2.0;
+            double cx = (bounds[0] + bounds[3]) * 0.5;
+            double cy = (bounds[1] + bounds[4]) * 0.5;
+            double cz = (bounds[2] + bounds[5]) * 0.5;
             camCtrl->setOrbitCenter(cx, cy, cz);
         }
+        
+        m_renderWidget->update();
+    }
+}
+
+void MainWindow::showGridOptions()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    GridOptionsDialog dialog(this);
+    dialog.exec();
+}
+
+void MainWindow::showThreadMonitor()
+{
+    // Create thread monitor widget as a separate window if not already created
+    if (!m_threadMonitor) {
+        m_threadMonitor = new ThreadMonitorWidget();
+        m_threadMonitor->setWindowTitle(tr("Thread Monitor - VolRover3"));
+        m_threadMonitor->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Clean up pointer when window is closed
+        connect(m_threadMonitor, &QObject::destroyed, [this]() {
+            m_threadMonitor = nullptr;
+        });
+    }
+    
+    // Show and raise the window
+    m_threadMonitor->show();
+    m_threadMonitor->raise();
+    m_threadMonitor->activateWindow();
+}
+
+void MainWindow::aboutVolRover()
+{
+    QMessageBox::about(this, tr("About VolRover3"),
+        tr("<h2>VolRover3</h2>"
+           "<p>Volume Rover Version 3.0</p>"
+           "<p>A prototype visualization application built on libcvc</p>"
+           "<p>Features:</p>"
+           "<ul>"
+           "<li>Volume rendering with transfer functions</li>"
+           "<li>Surface and volumetric mesh visualization</li>"
+           "<li>Isosurface extraction and rendering</li>"
+           "<li>Quake-style camera controls</li>"
+           "</ul>"
+           "<p>Copyright © 2025 CVC</p>"));
+}
+
+void MainWindow::setupStatusBar()
+{
+    // Create status bar widgets for thread monitoring
+    m_threadNameLabel = new QLabel(this);
+    m_threadNameLabel->setMinimumWidth(150);
+    m_threadNameLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+    
+    m_threadInfoLabel = new QLabel(this);
+    m_threadInfoLabel->setMinimumWidth(200);
+    m_threadInfoLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+    
+    m_threadProgressBar = new QProgressBar(this);
+    m_threadProgressBar->setMinimumWidth(150);
+    m_threadProgressBar->setMaximumWidth(200);
+    m_threadProgressBar->setTextVisible(true);
+    m_threadProgressBar->setRange(0, 100);
+    m_threadProgressBar->setValue(0);
+    
+    // Add widgets to status bar
+    statusBar()->addPermanentWidget(m_threadNameLabel);
+    statusBar()->addPermanentWidget(m_threadInfoLabel);
+    statusBar()->addPermanentWidget(m_threadProgressBar);
+    
+    // Initially hidden
+    m_threadNameLabel->hide();
+    m_threadInfoLabel->hide();
+    m_threadProgressBar->hide();
+    
+    // Register callback for thread changes
+    m_connections.push_back(
+        cvc::app::instance().threadsChanged.connect(
+            [this](const std::string&) {
+                updateThreadStatus();
+            }
+        )
+    );
+    
+    // Do initial update
+    updateThreadStatus();
+}
+
+void MainWindow::updateThreadStatus()
+{
+    // Get all threads
+    auto threads = cvc::app::instance().threads();
+    
+    if (threads.empty()) {
+        // No threads active - hide widgets
+        m_threadNameLabel->hide();
+        m_threadInfoLabel->hide();
+        m_threadProgressBar->hide();
+        statusBar()->clearMessage();
+    } else {
+        // Find the most recently updated thread (last in the map)
+        auto lastThread = threads.rbegin();
+        std::string threadKey = lastThread->first;
+        auto threadPtr = lastThread->second;
+        
+        // Get thread info
+        std::string info = cvc::app::instance().threadInfo(threadKey);
+        double progress = cvc::app::instance().threadProgress(threadKey);
+        
+        // Update status bar widgets
+        m_threadNameLabel->setText(QString::fromStdString(threadKey));
+        m_threadInfoLabel->setText(QString::fromStdString(info));
+        m_threadProgressBar->setValue(static_cast<int>(progress * 100.0));
+        
+        // Show widgets
+        m_threadNameLabel->show();
+        m_threadInfoLabel->show();
+        m_threadProgressBar->show();
     }
 }
 
@@ -396,20 +635,4 @@ void MainWindow::initializeCameraFromState()
     double cy = (bounds[1] + bounds[4]) / 2.0;
     double cz = (bounds[2] + bounds[5]) / 2.0;
     camCtrl->setOrbitCenter(cx, cy, cz);
-}
-
-void MainWindow::aboutVolRover()
-{
-    QMessageBox::about(this, tr("About VolRover3"),
-        tr("<h2>VolRover3</h2>"
-           "<p>Volume Rover Version 3.0</p>"
-           "<p>A prototype visualization application built on libcvc</p>"
-           "<p>Features:</p>"
-           "<ul>"
-           "<li>Volume rendering with transfer functions</li>"
-           "<li>Surface and volumetric mesh visualization</li>"
-           "<li>Isosurface extraction and rendering</li>"
-           "<li>Quake-style camera controls</li>"
-           "</ul>"
-           "<p>Copyright © 2025 CVC</p>"));
 }

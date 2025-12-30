@@ -8,12 +8,18 @@
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QDoubleValidator>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QColorDialog>
 
 BoundingBoxDialog::BoundingBoxDialog(const cvc::bounding_box& bounds, QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("World Bounding Box"));
+    m_tickLabelColor[0] = m_tickLabelColor[1] = m_tickLabelColor[2] = 1.0;
     setupUI();
+    loadTickSettings();
     
     // Set initial values
     m_minXEdit->setText(QString::number(bounds[0]));
@@ -75,10 +81,37 @@ void BoundingBoxDialog::setupUI()
     quickSetLayout->addWidget(resetVolBtn);
     mainLayout->addLayout(quickSetLayout);
     
+    // Tick settings group
+    QGroupBox *tickGroup = new QGroupBox(tr("World Coordinate Ticks"));
+    QFormLayout *tickLayout = new QFormLayout(tickGroup);
+    
+    m_showTicksCheckbox = new QCheckBox();
+    tickLayout->addRow(tr("Show Ticks:"), m_showTicksCheckbox);
+    
+    m_tickIntervalSpinBox = new QDoubleSpinBox();
+    m_tickIntervalSpinBox->setRange(0.01, 1000.0);
+    m_tickIntervalSpinBox->setDecimals(2);
+    m_tickIntervalSpinBox->setSingleStep(0.1);
+    tickLayout->addRow(tr("Tick Interval:"), m_tickIntervalSpinBox);
+    
+    m_tickLabelColorButton = new QPushButton();
+    m_tickLabelColorButton->setFixedSize(50, 25);
+    connect(m_tickLabelColorButton, &QPushButton::clicked, this, &BoundingBoxDialog::chooseTickLabelColor);
+    tickLayout->addRow(tr("Label Color:"), m_tickLabelColorButton);
+    
+    m_tickLabelFontSizeSpinBox = new QSpinBox();
+    m_tickLabelFontSizeSpinBox->setRange(6, 72);
+    tickLayout->addRow(tr("Font Size:"), m_tickLabelFontSizeSpinBox);
+    
+    mainLayout->addWidget(tickGroup);
+    
     // Dialog buttons
     QDialogButtonBox *buttonBox = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttonBox, &QDialogButtonBox::accepted, this, [this]() {
+        saveTickSettings();
+        accept();
+    });
     connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
     mainLayout->addWidget(buttonBox);
 }
@@ -121,4 +154,47 @@ void BoundingBoxDialog::onResetToVolume()
         m_maxYEdit->setText(QString::number(bounds[4]));
         m_maxZEdit->setText(QString::number(bounds[5]));
     }
+}
+
+void BoundingBoxDialog::loadTickSettings()
+{
+    m_showTicksCheckbox->setChecked(AppState::instance().volumeBBoxTicksVisible());
+    m_tickIntervalSpinBox->setValue(AppState::instance().volumeBBoxTickInterval());
+    m_tickLabelFontSizeSpinBox->setValue(AppState::instance().volumeBBoxTickLabelFontSize());
+    
+    AppState::instance().getVolumeBBoxTickLabelColor(
+        m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
+    updateColorButton();
+}
+
+void BoundingBoxDialog::saveTickSettings()
+{
+    AppState::instance().setVolumeBBoxTicksVisible(m_showTicksCheckbox->isChecked());
+    AppState::instance().setVolumeBBoxTickInterval(m_tickIntervalSpinBox->value());
+    AppState::instance().setVolumeBBoxTickLabelFontSize(m_tickLabelFontSizeSpinBox->value());
+    AppState::instance().setVolumeBBoxTickLabelColor(
+        m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
+}
+
+void BoundingBoxDialog::chooseTickLabelColor()
+{
+    QColor currentColor = QColor::fromRgbF(m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
+    QColor color = QColorDialog::getColor(currentColor, this, tr("Choose Tick Label Color"));
+    
+    if (color.isValid()) {
+        m_tickLabelColor[0] = color.redF();
+        m_tickLabelColor[1] = color.greenF();
+        m_tickLabelColor[2] = color.blueF();
+        updateColorButton();
+    }
+}
+
+void BoundingBoxDialog::updateColorButton()
+{
+    int r = static_cast<int>(m_tickLabelColor[0] * 255);
+    int g = static_cast<int>(m_tickLabelColor[1] * 255);
+    int b = static_cast<int>(m_tickLabelColor[2] * 255);
+    
+    QString styleSheet = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
+    m_tickLabelColorButton->setStyleSheet(styleSheet);
 }

@@ -535,3 +535,363 @@ TEST_F(AppStateTest, StateTreePersistence) {
     EXPECT_DOUBLE_EQ(stateTree("camera_speed").value<double>(), 5.5);
 }
 
+// ===========================
+// Color State Tests
+// ===========================
+
+TEST_F(AppStateTest, GridColor) {
+    // Set grid color
+    state->setGridColor(0.8, 0.6, 0.4);
+    
+    // Read back
+    double r, g, b;
+    state->getGridColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.8);
+    EXPECT_DOUBLE_EQ(g, 0.6);
+    EXPECT_DOUBLE_EQ(b, 0.4);
+}
+
+TEST_F(AppStateTest, GeometryBBoxColor) {
+    // Set geometry bbox color
+    state->setGeometryBBoxColor(1.0, 0.0, 0.5);
+    
+    // Read back
+    double r, g, b;
+    state->getGeometryBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 0.5);
+}
+
+TEST_F(AppStateTest, VolumeBBoxColor) {
+    // Set volume bbox color
+    state->setVolumeBBoxColor(0.2, 0.9, 0.7);
+    
+    // Read back
+    double r, g, b;
+    state->getVolumeBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.2);
+    EXPECT_DOUBLE_EQ(g, 0.9);
+    EXPECT_DOUBLE_EQ(b, 0.7);
+}
+
+TEST_F(AppStateTest, StateTreeGridColor) {
+    // Set via state tree
+    auto& stateTree = cvc::state::instance()("volrover3");
+    stateTree("grid_color").value("0.1,0.2,0.3");
+    
+    // Read via AppState
+    double r, g, b;
+    state->getGridColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.1);
+    EXPECT_DOUBLE_EQ(g, 0.2);
+    EXPECT_DOUBLE_EQ(b, 0.3);
+}
+
+TEST_F(AppStateTest, StateTreeGeometryBBoxColor) {
+    // Set via AppState
+    state->setGeometryBBoxColor(0.7, 0.8, 0.9);
+    
+    // Verify in state tree
+    auto& stateTree = cvc::state::instance()("volrover3");
+    std::string colorStr = stateTree("geometry_bbox_color").value<std::string>();
+    // Check individual components due to floating point representation
+    EXPECT_TRUE(colorStr.find("0.7") != std::string::npos || 
+                colorStr.find("0.69999") != std::string::npos);
+}
+
+TEST_F(AppStateTest, StateTreeVolumeBBoxColor) {
+    // Set via AppState
+    state->setVolumeBBoxColor(0.25, 0.5, 0.75);
+    
+    // Verify in state tree
+    auto& stateTree = cvc::state::instance()("volrover3");
+    std::string colorStr = stateTree("volume_bbox_color").value<std::string>();
+    EXPECT_EQ(colorStr, "0.25,0.5,0.75");
+}
+
+TEST_F(AppStateTest, ColorDefaultValues) {
+    // Reset to default values first
+    auto& stateTree = cvc::state::instance()("volrover3");
+    stateTree("grid_color").value("0.5,0.5,0.5");
+    stateTree("geometry_bbox_color").value("0.0,1.0,0.0");
+    stateTree("volume_bbox_color").value("1.0,0.0,1.0");
+    
+    // Test default values from fresh state
+    double r, g, b;
+    
+    // Grid should default to gray
+    state->getGridColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.5);
+    EXPECT_DOUBLE_EQ(g, 0.5);
+    EXPECT_DOUBLE_EQ(b, 0.5);
+    
+    // Geometry bbox should default to green
+    state->getGeometryBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+    
+    // Volume bbox should default to magenta
+    state->getVolumeBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+TEST_F(AppStateTest, GridColorChangedCallback) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridColorChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    // Trigger color change
+    state->setGridColor(1.0, 0.5, 0.0);
+    EXPECT_GT(callback_count, 0);
+    
+    int prev_count = callback_count;
+    state->setGridColor(0.0, 0.5, 1.0);
+    EXPECT_GT(callback_count, prev_count);
+    
+    // Cleanup
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GeometryBBoxColorChangedCallback) {
+    int callback_count = 0;
+    
+    auto connection = state->onGeometryBBoxColorChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    // Trigger color change
+    state->setGeometryBBoxColor(0.3, 0.6, 0.9);
+    EXPECT_GT(callback_count, 0);
+    
+    // Cleanup
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, VolumeBBoxColorChangedCallback) {
+    int callback_count = 0;
+    
+    auto connection = state->onVolumeBBoxColorChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    // Trigger color change
+    state->setVolumeBBoxColor(0.9, 0.6, 0.3);
+    EXPECT_GT(callback_count, 0);
+    
+    // Cleanup
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, ColorBoundaryValues) {
+    // Test with boundary values (0.0 and 1.0)
+    state->setGridColor(0.0, 1.0, 0.0);
+    
+    double r, g, b;
+    state->getGridColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+    
+    // Test all zeros
+    state->setVolumeBBoxColor(0.0, 0.0, 0.0);
+    state->getVolumeBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+    
+    // Test all ones
+    state->setGeometryBBoxColor(1.0, 1.0, 1.0);
+    state->getGeometryBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+// ===========================
+// Grid-Specific Tests
+// ===========================
+
+TEST_F(AppStateTest, GridPlaneVisibility) {
+    state->setGridYZPlaneVisible(true);
+    EXPECT_TRUE(state->gridYZPlaneVisible());
+    
+    state->setGridXZPlaneVisible(false);
+    EXPECT_FALSE(state->gridXZPlaneVisible());
+    
+    state->setGridXYPlaneVisible(true);
+    EXPECT_TRUE(state->gridXYPlaneVisible());
+}
+
+TEST_F(AppStateTest, GridDivisions) {
+    state->setGridDivisions(16, 32, 64);
+    
+    int x, y, z;
+    state->getGridDivisions(x, y, z);
+    EXPECT_EQ(x, 16);
+    EXPECT_EQ(y, 32);
+    EXPECT_EQ(z, 64);
+}
+
+TEST_F(AppStateTest, GridTickIntervals) {
+    state->setGridTickIntervals(4, 8, 16);
+    
+    int x, y, z;
+    state->getGridTickIntervals(x, y, z);
+    EXPECT_EQ(x, 4);
+    EXPECT_EQ(y, 8);
+    EXPECT_EQ(z, 16);
+}
+
+TEST_F(AppStateTest, GridTicksVisible) {
+    // Default should be true
+    EXPECT_TRUE(state->gridTicksVisible());
+    
+    state->setGridTicksVisible(false);
+    EXPECT_FALSE(state->gridTicksVisible());
+    
+    state->setGridTicksVisible(true);
+    EXPECT_TRUE(state->gridTicksVisible());
+}
+
+TEST_F(AppStateTest, GridPlaneColors) {
+    state->setGridYZPlaneColor(1.0, 0.0, 0.0);
+    state->setGridXZPlaneColor(0.0, 1.0, 0.0);
+    state->setGridXYPlaneColor(0.0, 0.0, 1.0);
+    
+    double r, g, b;
+    state->getGridYZPlaneColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+    
+    state->getGridXZPlaneColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+    
+    state->getGridXYPlaneColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+TEST_F(AppStateTest, GridTickLabelProperties) {
+    state->setGridTickLabelColor(0.8, 0.6, 0.4);
+    state->setGridTickLabelFontSize(20);
+    
+    double r, g, b;
+    state->getGridTickLabelColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.8);
+    EXPECT_DOUBLE_EQ(g, 0.6);
+    EXPECT_DOUBLE_EQ(b, 0.4);
+    
+    EXPECT_EQ(state->gridTickLabelFontSize(), 20);
+}
+
+TEST_F(AppStateTest, GridPlaneVisibilityCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridPlaneVisibilityChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    // Toggle from current state to trigger callbacks
+    bool currentYZ = state->gridYZPlaneVisible();
+    state->setGridYZPlaneVisible(!currentYZ);
+    EXPECT_GT(callback_count, 0);
+    
+    int prev_count = callback_count;
+    bool currentXZ = state->gridXZPlaneVisible();
+    state->setGridXZPlaneVisible(!currentXZ);
+    EXPECT_GT(callback_count, prev_count);
+    
+    prev_count = callback_count;
+    bool currentXY = state->gridXYPlaneVisible();
+    state->setGridXYPlaneVisible(!currentXY);
+    EXPECT_GT(callback_count, prev_count);
+    
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GridDivisionsCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridDivisionsChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    state->setGridDivisions(10, 20, 30);
+    EXPECT_GT(callback_count, 0);
+    
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GridTickIntervalsCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridTickIntervalsChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    state->setGridTickIntervals(5, 10, 15);
+    EXPECT_GT(callback_count, 0);
+    
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GridTicksVisibleCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridTicksVisibleChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    state->setGridTicksVisible(false);
+    EXPECT_GT(callback_count, 0);
+    
+    int prev_count = callback_count;
+    state->setGridTicksVisible(true);
+    EXPECT_GT(callback_count, prev_count);
+    
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GridPlaneColorsCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridPlaneColorsChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    state->setGridYZPlaneColor(1.0, 0.5, 0.0);
+    EXPECT_GT(callback_count, 0);
+    
+    connection.disconnect();
+}
+
+TEST_F(AppStateTest, GridTickLabelPropertiesCallbacks) {
+    int callback_count = 0;
+    
+    auto connection = state->onGridTickLabelPropertiesChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    state->setGridTickLabelColor(0.5, 0.5, 0.5);
+    EXPECT_GT(callback_count, 0);
+    
+    int prev_count = callback_count;
+    state->setGridTickLabelFontSize(18);
+    EXPECT_GT(callback_count, prev_count);
+    
+    connection.disconnect();
+}
+
+
+
+

@@ -29,6 +29,38 @@ AppState::AppState()
     getState("geometry_bbox_visible").value(false);
     getState("volume_bbox_visible").value(false);
     
+    // Initialize grid plane visibility (all visible by default)
+    getState("grid_yz_plane_visible").value(true);
+    getState("grid_xz_plane_visible").value(true);
+    getState("grid_xy_plane_visible").value(true);
+    
+    // Initialize grid divisions (64 per axis by default)
+    getState("grid_divisions_x").value(64);
+    getState("grid_divisions_y").value(64);
+    getState("grid_divisions_z").value(64);
+    
+    // Initialize grid tick intervals (8 per axis by default)
+    getState("grid_tick_interval_x").value(8);
+    getState("grid_tick_interval_y").value(8);
+    getState("grid_tick_interval_z").value(8);
+    getState("grid_ticks_visible").value(true);
+    
+    // Initialize colors (RGB triplets)
+    getState("grid_color").value("0.5,0.5,0.5");  // Gray
+    getState("grid_yz_plane_color").value("0.5,0.5,0.5");  // Gray
+    getState("grid_xz_plane_color").value("0.5,0.5,0.5");  // Gray
+    getState("grid_xy_plane_color").value("0.5,0.5,0.5");  // Gray
+    getState("grid_tick_label_color").value("1.0,1.0,1.0");  // White
+    getState("grid_tick_label_font_size").value(12);
+    getState("geometry_bbox_color").value("0.0,1.0,0.0");  // Green
+    getState("volume_bbox_color").value("1.0,0.0,1.0");  // Magenta
+    
+    // Initialize volume bbox tick settings
+    getState("volume_bbox_ticks_visible").value(false);
+    getState("volume_bbox_tick_interval").value(1.0);
+    getState("volume_bbox_tick_label_color").value("1.0,1.0,0.0");  // Yellow
+    getState("volume_bbox_tick_label_font_size").value(12);
+    
     // Initialize camera settings
     getState("camera_mode").value(0);  // 0 = orbit, 1 = fly
     getState("camera_speed").value(5.0);
@@ -251,6 +283,260 @@ bool AppState::volumeBBoxVisible()
 void AppState::setVolumeBBoxVisible(bool visible)
 {
     getState("volume_bbox_visible").value(visible);
+}
+
+bool AppState::gridYZPlaneVisible()
+{
+    return getState("grid_yz_plane_visible").value<bool>();
+}
+
+void AppState::setGridYZPlaneVisible(bool visible)
+{
+    getState("grid_yz_plane_visible").value(visible);
+}
+
+bool AppState::gridXZPlaneVisible()
+{
+    return getState("grid_xz_plane_visible").value<bool>();
+}
+
+void AppState::setGridXZPlaneVisible(bool visible)
+{
+    getState("grid_xz_plane_visible").value(visible);
+}
+
+bool AppState::gridXYPlaneVisible()
+{
+    return getState("grid_xy_plane_visible").value<bool>();
+}
+
+void AppState::setGridXYPlaneVisible(bool visible)
+{
+    getState("grid_xy_plane_visible").value(visible);
+}
+
+void AppState::getGridDivisions(int& x, int& y, int& z)
+{
+    x = getState("grid_divisions_x").value<int>();
+    y = getState("grid_divisions_y").value<int>();
+    z = getState("grid_divisions_z").value<int>();
+}
+
+void AppState::setGridDivisions(int x, int y, int z)
+{
+    getState("grid_divisions_x").value(x);
+    getState("grid_divisions_y").value(y);
+    getState("grid_divisions_z").value(z);
+}
+
+void AppState::getGridTickIntervals(int& x, int& y, int& z)
+{
+    x = getState("grid_tick_interval_x").value<int>();
+    y = getState("grid_tick_interval_y").value<int>();
+    z = getState("grid_tick_interval_z").value<int>();
+}
+
+void AppState::setGridTickIntervals(int x, int y, int z)
+{
+    getState("grid_tick_interval_x").value(x);
+    getState("grid_tick_interval_y").value(y);
+    getState("grid_tick_interval_z").value(z);
+}
+
+bool AppState::gridTicksVisible()
+{
+    return getState("grid_ticks_visible").value<bool>();
+}
+
+void AppState::setGridTicksVisible(bool visible)
+{
+    getState("grid_ticks_visible").value(visible);
+}
+
+void AppState::getGridColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("grid_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = g = b = 0.5; // Default gray
+    }
+}
+
+void AppState::setGridColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("grid_color").value(colorStr);
+}
+
+void AppState::getGridYZPlaneColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("grid_yz_plane_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = g = b = 0.5;
+    }
+}
+
+void AppState::setGridYZPlaneColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("grid_yz_plane_color").value(colorStr);
+}
+
+void AppState::getGridXZPlaneColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("grid_xz_plane_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = g = b = 0.5;
+    }
+}
+
+void AppState::setGridXZPlaneColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("grid_xz_plane_color").value(colorStr);
+}
+
+void AppState::getGridXYPlaneColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("grid_xy_plane_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = g = b = 0.5;
+    }
+}
+
+void AppState::setGridXYPlaneColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("grid_xy_plane_color").value(colorStr);
+}
+
+void AppState::getGridTickLabelColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("grid_tick_label_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = g = b = 1.0; // Default white
+    }
+}
+
+void AppState::setGridTickLabelColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("grid_tick_label_color").value(colorStr);
+}
+
+int AppState::gridTickLabelFontSize()
+{
+    return getState("grid_tick_label_font_size").value<int>();
+}
+
+void AppState::setGridTickLabelFontSize(int size)
+{
+    getState("grid_tick_label_font_size").value(size);
+}
+
+void AppState::getGeometryBBoxColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("geometry_bbox_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = 0.0; g = 1.0; b = 0.0; // Default green
+    }
+}
+
+void AppState::setGeometryBBoxColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("geometry_bbox_color").value(colorStr);
+}
+
+void AppState::getVolumeBBoxColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("volume_bbox_color").value<std::string>();
+    std::vector<std::string> parts;
+    boost::split(parts, colorStr, boost::is_any_of(","));
+    if (parts.size() >= 3) {
+        r = boost::lexical_cast<double>(parts[0]);
+        g = boost::lexical_cast<double>(parts[1]);
+        b = boost::lexical_cast<double>(parts[2]);
+    } else {
+        r = 1.0; g = 0.0; b = 1.0; // Default magenta
+    }
+}
+
+void AppState::setVolumeBBoxColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("volume_bbox_color").value(colorStr);
+}
+
+boost::signals2::connection AppState::onGridColorChanged(const boost::function<void()>& callback)
+{
+    return getState("grid_color").valueChanged.connect(callback);
+}
+
+boost::signals2::connection AppState::onGeometryBBoxColorChanged(const boost::function<void()>& callback)
+{
+    return getState("geometry_bbox_color").valueChanged.connect(callback);
+}
+
+boost::signals2::connection AppState::onVolumeBBoxColorChanged(const boost::function<void()>& callback)
+{
+    return getState("volume_bbox_color").valueChanged.connect(callback);
 }
 
 int AppState::cameraMode()
@@ -511,4 +797,116 @@ void AppState::setTransferFunctionOpacityTable(const std::vector<double>& table)
 boost::signals2::connection AppState::onTransferFunctionChanged(const boost::function<void()>& callback)
 {
     return getState("transfer_function_changed").valueChanged.connect(callback);
+}
+
+boost::signals2::connection AppState::onGridPlaneVisibilityChanged(const boost::function<void()>& callback)
+{
+    // Connect to all three plane visibility states
+    auto conn1 = getState("grid_yz_plane_visible").valueChanged.connect(callback);
+    getState("grid_xz_plane_visible").valueChanged.connect(callback);
+    getState("grid_xy_plane_visible").valueChanged.connect(callback);
+    return conn1; // Return first connection (caller can disconnect individually if needed)
+}
+
+boost::signals2::connection AppState::onGridDivisionsChanged(const boost::function<void()>& callback)
+{
+    // Connect to all three division states
+    auto conn1 = getState("grid_divisions_x").valueChanged.connect(callback);
+    getState("grid_divisions_y").valueChanged.connect(callback);
+    getState("grid_divisions_z").valueChanged.connect(callback);
+    return conn1; // Return first connection
+}
+
+boost::signals2::connection AppState::onGridTickIntervalsChanged(const boost::function<void()>& callback)
+{
+    auto conn1 = getState("grid_tick_interval_x").valueChanged.connect(callback);
+    getState("grid_tick_interval_y").valueChanged.connect(callback);
+    getState("grid_tick_interval_z").valueChanged.connect(callback);
+    return conn1;
+}
+
+boost::signals2::connection AppState::onGridTicksVisibleChanged(const boost::function<void()>& callback)
+{
+    return getState("grid_ticks_visible").valueChanged.connect(callback);
+}
+
+boost::signals2::connection AppState::onGridPlaneColorsChanged(const boost::function<void()>& callback)
+{
+    auto conn1 = getState("grid_yz_plane_color").valueChanged.connect(callback);
+    getState("grid_xz_plane_color").valueChanged.connect(callback);
+    getState("grid_xy_plane_color").valueChanged.connect(callback);
+    return conn1;
+}
+
+boost::signals2::connection AppState::onGridTickLabelPropertiesChanged(const boost::function<void()>& callback)
+{
+    auto conn1 = getState("grid_tick_label_color").valueChanged.connect(callback);
+    getState("grid_tick_label_font_size").valueChanged.connect(callback);
+    return conn1;
+}
+
+
+// Volume BBox tick methods
+bool AppState::volumeBBoxTicksVisible()
+{
+    return getState("volume_bbox_ticks_visible").value<bool>();
+}
+
+void AppState::setVolumeBBoxTicksVisible(bool visible)
+{
+    getState("volume_bbox_ticks_visible").value(visible);
+}
+
+double AppState::volumeBBoxTickInterval()
+{
+    return getState("volume_bbox_tick_interval").value<double>();
+}
+
+void AppState::setVolumeBBoxTickInterval(double interval)
+{
+    getState("volume_bbox_tick_interval").value(interval);
+}
+
+void AppState::getVolumeBBoxTickLabelColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("volume_bbox_tick_label_color").value<std::string>();
+    
+    size_t pos1 = colorStr.find(',');
+    size_t pos2 = colorStr.find(',', pos1 + 1);
+    
+    if (pos1 != std::string::npos && pos2 != std::string::npos) {
+        r = boost::lexical_cast<double>(colorStr.substr(0, pos1));
+        g = boost::lexical_cast<double>(colorStr.substr(pos1 + 1, pos2 - pos1 - 1));
+        b = boost::lexical_cast<double>(colorStr.substr(pos2 + 1));
+    } else {
+        r = g = b = 1.0;
+    }
+}
+
+void AppState::setVolumeBBoxTickLabelColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("volume_bbox_tick_label_color").value(colorStr);
+}
+
+int AppState::volumeBBoxTickLabelFontSize()
+{
+    return getState("volume_bbox_tick_label_font_size").value<int>();
+}
+
+void AppState::setVolumeBBoxTickLabelFontSize(int size)
+{
+    getState("volume_bbox_tick_label_font_size").value(size);
+}
+
+boost::signals2::connection AppState::onVolumeBBoxTicksChanged(const boost::function<void()>& callback)
+{
+    auto conn1 = getState("volume_bbox_ticks_visible").valueChanged.connect(callback);
+    getState("volume_bbox_tick_interval").valueChanged.connect(callback);
+    getState("volume_bbox_tick_label_color").valueChanged.connect(callback);
+    getState("volume_bbox_tick_label_font_size").valueChanged.connect(callback);
+    return conn1;
 }

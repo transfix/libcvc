@@ -3,11 +3,16 @@
 
 #include <QMainWindow>
 #include <QDockWidget>
+#include <QLabel>
+#include <QProgressBar>
 #include <memory>
+#include <vector>
+#include <boost/signals2.hpp>
 
 class VTKRenderWidget;
 class TransferFunctionWidget;
 class SceneGraph;
+class ThreadMonitorWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -26,17 +31,29 @@ private slots:
     void toggleVolumeBBox();
     void editBoundingBox();
     void editCameraSettings();
+    void showGridOptions();
+    void showThreadMonitor();
     void aboutVolRover();
+    void updateThreadStatus();
 
 private:
     void createMenus();
     void createDockWidgets();
     void setupConnections();
     void initializeCameraFromState();
+    void setupStatusBar();
 
     VTKRenderWidget *m_renderWidget;
     TransferFunctionWidget *m_transferFunctionWidget;
     std::shared_ptr<SceneGraph> m_sceneGraph;
+    ThreadMonitorWidget *m_threadMonitor;
+
+    // Status bar widgets for thread monitoring
+    QLabel *m_threadNameLabel;
+    QLabel *m_threadInfoLabel;
+    QProgressBar *m_threadProgressBar;
+    
+    std::vector<boost::signals2::connection> m_connections;
 
     bool m_gridVisible;
     bool m_axisVisible;

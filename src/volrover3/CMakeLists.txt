@@ -47,9 +47,11 @@ set(VOLROVER3_SOURCES
   BBoxNode.cpp
   CameraController.cpp
   TransferFunctionWidget.cpp
+  ThreadMonitorWidget.cpp
   AppState.cpp
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
+  GridOptionsDialog.cpp
 )
 
 # Header files
@@ -65,9 +67,11 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BBoxNode.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraController.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/TransferFunctionWidget.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/ThreadMonitorWidget.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/AppState.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
 )
 
 # Create executable
@@ -182,4 +186,13 @@ if(CVC_BUILD_TESTS)
     GTest::gtest
     GTest::gtest_main)
   add_test(NAME CameraControllerTest COMMAND volrover3_camera_test)
+  
+  # GridNode tests
+  add_executable(volrover3_gridnode_test
+    tests/GridNodeTest.cpp)
+  target_link_libraries(volrover3_gridnode_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME GridNodeTest COMMAND volrover3_gridnode_test)
 endif()
