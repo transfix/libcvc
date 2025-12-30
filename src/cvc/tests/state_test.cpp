@@ -277,6 +277,183 @@ TEST(StateTest, HiddenFlag) {
   cvcstate("test").reset();
 }
 
+TEST(StateTest, ReadOnlyFlag) {
+  // Test setting and getting read-only flag
+  cvcstate("test.readonly").readOnly(true);
+  EXPECT_TRUE(cvcstate("test.readonly").readOnly());
+  
+  cvcstate("test.readonly").readOnly(false);
+  EXPECT_FALSE(cvcstate("test.readonly").readOnly());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyBlocksValueModification) {
+  // Set initial value
+  cvcstate("test.readonly_value").value("initial");
+  EXPECT_EQ(cvcstate("test.readonly_value").value(), "initial");
+  
+  // Mark as read-only
+  cvcstate("test.readonly_value").readOnly(true);
+  
+  // Attempt to modify should throw
+  EXPECT_THROW({
+    cvcstate("test.readonly_value").value("modified");
+  }, read_only_error);
+  
+  // Value should remain unchanged
+  EXPECT_EQ(cvcstate("test.readonly_value").value(), "initial");
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyBlocksDataModification) {
+  // Set initial data
+  cvcstate("test.readonly_data").data(42);
+  EXPECT_EQ(cvcstate("test.readonly_data").data<int>(), 42);
+  
+  // Mark as read-only
+  cvcstate("test.readonly_data").readOnly(true);
+  
+  // Attempt to modify should throw
+  EXPECT_THROW({
+    cvcstate("test.readonly_data").data(100);
+  }, read_only_error);
+  
+  // Data should remain unchanged
+  EXPECT_EQ(cvcstate("test.readonly_data").data<int>(), 42);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyAllowsReadOperations) {
+  // Set value and mark read-only
+  cvcstate("test.readonly_read").value("readable");
+  cvcstate("test.readonly_read").readOnly(true);
+  
+  // Reading should still work
+  EXPECT_NO_THROW({
+    std::string val = cvcstate("test.readonly_read").value();
+    EXPECT_EQ(val, "readable");
+  });
+  
+  // Getting read-only status should work
+  EXPECT_TRUE(cvcstate("test.readonly_read").readOnly());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyCanBeUnset) {
+  // Set value and mark read-only
+  cvcstate("test.readonly_unset").value("initial");
+  cvcstate("test.readonly_unset").readOnly(true);
+  
+  // Verify it's read-only
+  EXPECT_TRUE(cvcstate("test.readonly_unset").readOnly());
+  EXPECT_THROW({
+    cvcstate("test.readonly_unset").value("should_fail");
+  }, read_only_error);
+  
+  // Unset read-only
+  cvcstate("test.readonly_unset").readOnly(false);
+  
+  // Now modification should work
+  EXPECT_NO_THROW({
+    cvcstate("test.readonly_unset").value("modified");
+  });
+  EXPECT_EQ(cvcstate("test.readonly_unset").value(), "modified");
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlySignalEmission) {
+  bool signal_received = false;
+  
+  // Connect to readOnlyChanged signal
+  auto connection = cvcstate("test.readonly_signal").readOnlyChanged.connect(
+    [&signal_received]() { signal_received = true; }
+  );
+  
+  // Setting read-only should trigger signal
+  cvcstate("test.readonly_signal").readOnly(true);
+  EXPECT_TRUE(signal_received);
+  
+  // Reset flag and test again
+  signal_received = false;
+  cvcstate("test.readonly_signal").readOnly(false);
+  EXPECT_TRUE(signal_received);
+  
+  // Setting to same value should not trigger signal
+  signal_received = false;
+  cvcstate("test.readonly_signal").readOnly(false);
+  EXPECT_FALSE(signal_received);
+  
+  // Clean up
+  connection.disconnect();
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyInitializesFlag) {
+  EXPECT_FALSE(cvcstate("test.init.readonly").initialized());
+  
+  cvcstate("test.init.readonly").readOnly(true);
+  EXPECT_TRUE(cvcstate("test.init.readonly").initialized());
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyWithTemplateValue) {
+  // Test with int
+  cvcstate("test.readonly_template_int").value<int>(42);
+  cvcstate("test.readonly_template_int").readOnly(true);
+  
+  EXPECT_THROW({
+    cvcstate("test.readonly_template_int").value<int>(100);
+  }, read_only_error);
+  
+  EXPECT_EQ(cvcstate("test.readonly_template_int").value<int>(), 42);
+  
+  // Test with double
+  cvcstate("test.readonly_template_double").value<double>(3.14);
+  cvcstate("test.readonly_template_double").readOnly(true);
+  
+  EXPECT_THROW({
+    cvcstate("test.readonly_template_double").value<double>(2.71);
+  }, read_only_error);
+  
+  EXPECT_DOUBLE_EQ(cvcstate("test.readonly_template_double").value<double>(), 3.14);
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
+TEST(StateTest, ReadOnlyExceptionMessage) {
+  cvcstate("test.readonly_exception").value("test");
+  cvcstate("test.readonly_exception").readOnly(true);
+  
+  try {
+    cvcstate("test.readonly_exception").value("modified");
+    FAIL() << "Expected read_only_error to be thrown";
+  } catch (const read_only_error& e) {
+    // Verify exception contains useful information
+    std::string msg = e.what();
+    EXPECT_TRUE(msg.find("read") != std::string::npos || 
+                msg.find("readonly") != std::string::npos ||
+                msg.find("read-only") != std::string::npos);
+  } catch (...) {
+    FAIL() << "Expected read_only_error, got different exception";
+  }
+  
+  // Clean up
+  cvcstate("test").reset();
+}
+
 TEST(StateTest, InitializedFlag) {
   // Before setting anything, should not be initialized
   EXPECT_FALSE(cvcstate("test.uninitialized").initialized());

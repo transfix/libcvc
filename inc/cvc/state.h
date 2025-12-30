@@ -221,8 +221,19 @@ namespace CVC_NAMESPACE
     template <class T> state& value(const T& v) {
       std::string str_value = boost::lexical_cast<std::string>(v);
       
+      // Check if read-only before acquiring lock
+      std::string full_name = fullName();
+      
       {
         boost::mutex::scoped_lock lock(_mutex);
+        
+        // Check if this state is read-only
+        if(_readOnly) {
+          throw read_only_error(
+            boost::str(boost::format("Cannot modify read-only state: %1%") % full_name)
+          );
+        }
+        
         if(_value == str_value) return *this; //do nothing if equal
         
         _valueTypeName = cvcapp.dataTypeName<T>();
@@ -234,7 +245,7 @@ namespace CVC_NAMESPACE
       }
       
       valueChanged();
-      if(parent()) parent()->childChanged(fullName());
+      if(parent()) parent()->childChanged(full_name);
       return *this;
     }
     
@@ -396,6 +407,10 @@ namespace CVC_NAMESPACE
     state& hidden(bool h);
     signal hiddenChanged;
 
+    bool readOnly();
+    state& readOnly(bool ro);
+    signal readOnlyChanged;
+
     static void on_startup(const nullary_func& init_func);
 
   protected:
@@ -415,6 +430,7 @@ namespace CVC_NAMESPACE
     boost::any                       _data;
     std::string                      _comment;
     bool                             _hidden;
+    bool                             _readOnly;
     child_map                        _children;
 
     bool                             _initialized;

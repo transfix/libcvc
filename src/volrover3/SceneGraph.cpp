@@ -197,6 +197,48 @@ void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
     m_volumeNode->setTransferFunction(colorTable, opacityTable);
 }
 
+cvc::bounding_box SceneGraph::computeGraphicsBounds() const
+{
+    cvc::bounding_box combinedBounds;
+    bool first = true;
+    
+    // Helper function to process graphics nodes recursively
+    std::function<void(const std::shared_ptr<GraphicsNode>&)> processBounds = 
+        [&](const std::shared_ptr<GraphicsNode>& node) {
+            if (!node) return;
+            
+            // Get geometry if available
+            if (node->hasGeometry() && node->getGeometry()) {
+                cvc::bounding_box geomBounds = node->getGeometry()->extents();
+                
+                if (first) {
+                    combinedBounds = geomBounds;
+                    first = false;
+                } else {
+                    // Expand to include this geometry
+                    combinedBounds[0] = std::min(combinedBounds[0], geomBounds[0]);
+                    combinedBounds[1] = std::min(combinedBounds[1], geomBounds[1]);
+                    combinedBounds[2] = std::min(combinedBounds[2], geomBounds[2]);
+                    combinedBounds[3] = std::max(combinedBounds[3], geomBounds[3]);
+                    combinedBounds[4] = std::max(combinedBounds[4], geomBounds[4]);
+                    combinedBounds[5] = std::max(combinedBounds[5], geomBounds[5]);
+                }
+            }
+            
+            // Process children recursively
+            for (const auto& child : node->getGraphicsChildren()) {
+                processBounds(child);
+            }
+        };
+    
+    // Start from root graphics node
+    if (m_graphicsRoot) {
+        processBounds(m_graphicsRoot);
+    }
+    
+    return combinedBounds;
+}
+
 // Multi-object graphics management
 std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, const cvc::geometry& geom)
 {

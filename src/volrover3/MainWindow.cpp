@@ -393,7 +393,8 @@ void MainWindow::openGeometry()
             auto graphicsNode = std::make_shared<GraphicsNode>(graphicsName);
             graphicsNode->setGeometry(geom);
             
-            // Store filename in metadata
+            // Store metadata
+            graphicsNode->setMetadata("type", std::string("geometry"));
             graphicsNode->setMetadata("filename", fileName.toStdString());
             graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
             graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
@@ -419,6 +420,13 @@ void MainWindow::openGeometry()
     
     // Sync to state tree
     m_sceneGraph->syncGraphicsToState();
+    
+    // Update world bounding box to include all graphics
+    cvc::bounding_box graphicsBounds = m_sceneGraph->computeGraphicsBounds();
+    if (graphicsBounds[0] <= graphicsBounds[3]) { // Valid bounds
+        AppState::instance().setWorldBounds(graphicsBounds);
+        m_sceneGraph->updateGrid(graphicsBounds);
+    }
     
     // Update render
     m_renderWidget->update();

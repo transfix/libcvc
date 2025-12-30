@@ -209,4 +209,13 @@ if(CVC_BUILD_TESTS)
     volrover3_lib
     GTest::gtest)
   add_test(NAME StateTreeWidgetTest COMMAND volrover3_statetree_test)
+  
+  # GraphicsNode tests
+  add_executable(volrover3_graphicsnode_test
+    tests/GraphicsNodeTest.cpp)
+  target_link_libraries(volrover3_graphicsnode_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME GraphicsNodeTest COMMAND volrover3_graphicsnode_test)
 endif()

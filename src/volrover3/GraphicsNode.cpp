@@ -51,6 +51,10 @@ vtkProp* GraphicsNode::getProp()
 void GraphicsNode::setGeometry(const cvc::geometry& geom)
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Store the geometry object
+    m_geometry = std::make_shared<cvc::geometry>(geom);
+    
     updatePolyData(geom);
     m_hasGeometry = true;
 }
@@ -244,14 +248,20 @@ void GraphicsNode::update()
     SceneNode::update();
     updateTransform();
     
-    // Sync visibility from metadata
+    // Read visible flag from metadata and apply to both SceneNode and actor
     if (hasMetadata("visible")) {
         try {
             bool visible = std::any_cast<bool>(getMetadata("visible"));
             SceneNode::setVisible(visible);
+            if (m_actor) {
+                m_actor->SetVisibility(visible ? 1 : 0);
+            }
         } catch (...) {
             // If cast fails, default to visible
             SceneNode::setVisible(true);
+            if (m_actor) {
+                m_actor->SetVisibility(1);
+            }
         }
     }
 }
@@ -333,14 +343,9 @@ void GraphicsNode::syncToState(cvc::state& parentState)
 {
     cvc::state& myState = parentState(m_name);
     
-    // Store visibility from metadata
-    if (hasMetadata("visible")) {
-        try {
-            bool visible = std::any_cast<bool>(getMetadata("visible"));
-            myState("visible").value(visible ? "true" : "false");
-        } catch (...) {
-            myState("visible").value("true");
-        }
+    // Store geometry in state data field if available
+    if (m_geometry) {
+        myState.data(*m_geometry);
     }
     
     // Store transform matrix (row-major)
@@ -357,15 +362,22 @@ void GraphicsNode::syncToState(cvc::state& parentState)
     for (const auto& [key, value] : m_metadata) {
         // Store metadata in a sub-state
         try {
+            cvc::state& metaState = myState("metadata")(key);
+            
             if (value.type() == typeid(std::string)) {
-                myState("metadata")(key).value(std::any_cast<std::string>(value));
+                metaState.value(std::any_cast<std::string>(value));
             } else if (value.type() == typeid(double)) {
-                myState("metadata")(key).value(std::any_cast<double>(value));
+                metaState.value(std::any_cast<double>(value));
             } else if (value.type() == typeid(int)) {
-                myState("metadata")(key).value(std::any_cast<int>(value));
+                metaState.value(std::any_cast<int>(value));
             } else if (value.type() == typeid(bool)) {
                 bool boolVal = std::any_cast<bool>(value);
-                myState("metadata")(key).value(boolVal ? "true" : "false");
+                metaState.value(boolVal ? "true" : "false");
+            }
+            
+            // Mark certain metadata as read-only
+            if (key == "filename" || key == "num_vertices" || key == "num_triangles" || key == "type") {
+                metaState.readOnly(true);
             }
             // Add more types as needed
         } catch (...) {
@@ -384,11 +396,6 @@ void GraphicsNode::syncFromState(const cvc::state& parentState)
     cvc::state& myState = const_cast<cvc::state&>(parentState)(m_name);
     
     if (!myState.initialized()) return;
-    
-    // Load visibility
-    if (myState("visible").initialized()) {
-        setVisible(myState("visible").value() == "true");
-    }
     
     // Load transform matrix
     if (myState("transform").initialized()) {
@@ -410,7 +417,12 @@ void GraphicsNode::syncFromState(const cvc::state& parentState)
     cvc::state& metadataState = myState("metadata");
     if (metadataState.initialized()) {
         auto metadataChildren = metadataState.children();
-        for (const auto& key : metadataChildren) {
+        for (const auto& childPath : metadataChildren) {
+            // Extract just the key name (last component after last dot)
+            size_t lastDot = childPath.find_last_of('.');
+            std::string key = (lastDot != std::string::npos) ? 
+                childPath.substr(lastDot + 1) : childPath;
+            
             cvc::state& metaState = metadataState(key);
             if (metaState.initialized()) {
                 // Try to determine type and store
@@ -418,7 +430,13 @@ void GraphicsNode::syncFromState(const cvc::state& parentState)
                 
                 // Special handling for bool values
                 if (valueStr == "true" || valueStr == "false") {
-                    setMetadata(key, valueStr == "true");
+                    bool boolVal = (valueStr == "true");
+                    setMetadata(key, boolVal);
+                    
+                    // Apply visible flag from metadata
+                    if (key == "visible") {
+                        SceneNode::setVisible(boolVal);
+                    }
                 } else {
                     setMetadata(key, valueStr); // Store as string by default
                 }

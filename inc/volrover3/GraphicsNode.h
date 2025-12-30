@@ -46,6 +46,7 @@ public:
     // Geometry management
     void setGeometry(const cvc::geometry& geom);
     bool hasGeometry() const { return m_hasGeometry; }
+    const cvc::geometry* getGeometry() const { return m_geometry.get(); }
     
     // Transform management
     void setTransform(vtkMatrix4x4* matrix);
@@ -92,6 +93,7 @@ protected:
 private:
     std::string m_name;
     bool m_hasGeometry;
+    std::shared_ptr<cvc::geometry> m_geometry; // Store the actual geometry
     
     // VTK rendering components
     vtkSmartPointer<vtkActor> m_actor;

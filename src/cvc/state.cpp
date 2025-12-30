@@ -64,6 +64,7 @@ namespace CVC_NAMESPACE
     _parent(p),
     _lastMod(boost::posix_time::min_date_time),
     _hidden(false),
+    _readOnly(false),
     _initialized(false)
   {
     //This slot propagates child changes up to parents
@@ -257,6 +258,45 @@ namespace CVC_NAMESPACE
     return *this;
   }
 
+  // ---------------
+  // state::readOnly
+  // ---------------
+  // Purpose: 
+  //   Returns the read-only flag for this state object.
+  // ---- Change History ----
+  // 12/30/2025 -- Joe R. -- Creation.  
+  bool state::readOnly()
+  {
+    boost::this_thread::interruption_point();
+    boost::mutex::scoped_lock lock(_mutex);
+    return _readOnly;
+  }
+
+  // ---------------
+  // state::readOnly
+  // ---------------
+  // Purpose: 
+  //   Sets a read-only flag for this state object. When set, attempts to
+  //   modify value or data will throw a read_only_error exception.
+  // ---- Change History ----
+  // 12/30/2025 -- Joe R. -- Creation.  
+  state& state::readOnly(bool ro)
+  {
+    boost::this_thread::interruption_point();
+    if(readOnly() == ro) return *this; //do nothing if equal
+
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      _readOnly = ro;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      _initialized = true;      
+    }
+
+    readOnlyChanged();
+    if(parent()) parent()->childChanged(name());
+    return *this;
+  }
+
   // -------------
   // state::values
   // -------------
@@ -304,6 +344,20 @@ namespace CVC_NAMESPACE
   state& state::value(const std::string& v, bool setValueType)
   {
     boost::this_thread::interruption_point();
+    
+    // Get fullName before locking
+    std::string full_name = fullName();
+    
+    // Check if this state is read-only
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      if(_readOnly) {
+        throw read_only_error(
+          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name)
+        );
+      }
+    }
+    
     if(value() == v) return *this; //do nothing if equal
 
     {
@@ -320,7 +374,7 @@ namespace CVC_NAMESPACE
     }
 
     valueChanged();
-    if(parent()) parent()->childChanged(fullName());
+    if(parent()) parent()->childChanged(full_name);
     return *this;
   }
 
@@ -519,6 +573,20 @@ namespace CVC_NAMESPACE
   state& state::data(const boost::any& d)
   {
     boost::this_thread::interruption_point();
+    
+    // Get fullName before locking
+    std::string full_name = fullName();
+    
+    // Check if this state is read-only
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      if(_readOnly) {
+        throw read_only_error(
+          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name)
+        );
+      }
+    }
+    
     {
       boost::mutex::scoped_lock lock(_mutex);
       _data = d;
@@ -529,7 +597,7 @@ namespace CVC_NAMESPACE
       _dataCondition.notify_all();
     }
     dataChanged();
-    if(parent()) parent()->childChanged(fullName());
+    if(parent()) parent()->childChanged(full_name);
     return *this;
   }
 

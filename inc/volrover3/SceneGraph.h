@@ -81,6 +81,9 @@ public:
     
     // Update grid to match bounds
     void updateGrid(const cvc::bounding_box& bounds);
+    
+    // Compute combined bounding box of all graphics
+    cvc::bounding_box computeGraphicsBounds() const;
 
     // Transfer function update
     void updateTransferFunction(const std::vector<double> &colorTable,
