@@ -5,6 +5,7 @@
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 #include <cvc/bounding_box.h>
+#include <boost/signals2/connection.hpp>
 #include <memory>
 
 // Application state manager using cvc::state for reactive updates
@@ -93,16 +94,17 @@ public:
     std::shared_ptr<cvc::volume> volumePtr();
     
     // Register callbacks for state changes
-    void onGeometryChanged(const boost::function<void()>& callback);
-    void onVolumeChanged(const boost::function<void()>& callback);
-    void onWorldBoundsChanged(const boost::function<void()>& callback);
-    void onGridVisibilityChanged(const boost::function<void()>& callback);
-    void onAxisVisibilityChanged(const boost::function<void()>& callback);
-    void onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback);
-    void onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback);
-    void onCameraModeChanged(const boost::function<void()>& callback);
-    void onCameraChanged(const boost::function<void()>& callback);
-    void onTransferFunctionChanged(const boost::function<void()>& callback);
+    // Returns a connection object that can be used to disconnect the callback
+    boost::signals2::connection onGeometryChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onVolumeChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGridVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onCameraModeChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onCameraChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onTransferFunctionChanged(const boost::function<void()>& callback);
     
 private:
     AppState();

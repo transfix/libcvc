@@ -2,6 +2,8 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <volrover3/CameraController.h>
+#include <volrover3/AppState.h>
+#include <cvc/state.h>
 #include <vtkRenderer.h>
 #include <vtkCamera.h>
 #include <vtkRenderWindow.h>
@@ -23,6 +25,9 @@ protected:
         
         controller = new CameraController();
         controller->setCamera(camera);
+        
+        // Get AppState singleton
+        appState = &AppState::instance();
     }
     
     void TearDown() override {
@@ -33,6 +38,7 @@ protected:
     vtkSmartPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkCamera> camera;
     CameraController* controller;
+    AppState* appState;
 };
 
 QApplication* CameraControllerTest::app = nullptr;
@@ -228,4 +234,100 @@ TEST_F(CameraControllerTest, UpdateWithNoMovement) {
     EXPECT_DOUBLE_EQ(initialPos[0], newPos[0]);
     EXPECT_DOUBLE_EQ(initialPos[1], newPos[1]);
     EXPECT_DOUBLE_EQ(initialPos[2], newPos[2]);
+}
+
+// ===========================
+// State Tree Integration Tests
+// ===========================
+
+TEST_F(CameraControllerTest, StateTreeCameraPosition) {
+    // Set camera position via controller
+    double testPos[3] = {10.0, 20.0, 30.0};
+    double testDir[3] = {0.0, 0.0, -1.0};
+    double testUp[3] = {0.0, 1.0, 0.0};
+    double testFov = 60.0;
+    
+    controller->setCameraState(testPos, testDir, testUp, testFov);
+    
+    // Verify state tree contains the values
+    auto& stateTree = cvc::state::instance()("volrover3");
+    EXPECT_NEAR(stateTree("camera_position_x").value<double>(), 10.0, 0.01);
+    EXPECT_NEAR(stateTree("camera_position_y").value<double>(), 20.0, 0.01);
+    EXPECT_NEAR(stateTree("camera_position_z").value<double>(), 30.0, 0.01);
+    EXPECT_NEAR(stateTree("camera_fov").value<double>(), 60.0, 0.01);
+}
+
+TEST_F(CameraControllerTest, StateTreeCameraUpdate) {
+    // Move camera through controller
+    controller->setMode(FLY_MODE);
+    controller->setMovementSpeed(1.0);
+    controller->setKeyBindings(Qt::Key_W, Qt::Key_S, Qt::Key_A, Qt::Key_D, Qt::Key_E, Qt::Key_Q);
+    
+    // Get initial position from state tree
+    auto& stateTree = cvc::state::instance()("volrover3");
+    double initialX = stateTree("camera_position_x").value<double>();
+    double initialY = stateTree("camera_position_y").value<double>();
+    double initialZ = stateTree("camera_position_z").value<double>();
+    
+    // Move forward
+    controller->handleKeyPress(Qt::Key_W);
+    controller->update();
+    controller->handleKeyRelease(Qt::Key_W);
+    
+    // State tree should be updated
+    double newX = stateTree("camera_position_x").value<double>();
+    double newY = stateTree("camera_position_y").value<double>();
+    double newZ = stateTree("camera_position_z").value<double>();
+    
+    bool moved = (initialX != newX) || (initialY != newY) || (initialZ != newZ);
+    EXPECT_TRUE(moved);
+}
+
+TEST_F(CameraControllerTest, CameraChangeCallback) {
+    int callback_count = 0;
+    
+    // Register callback for camera changes
+    auto connection = appState->onCameraChanged([&callback_count]() {
+        callback_count++;
+    });
+    
+    // Clear camera_changed flag
+    auto& stateTree = cvc::state::instance()("volrover3");
+    stateTree("camera_changed").value(false);
+    
+    // Change camera via controller
+    double testPos[3] = {5.0, 5.0, 5.0};
+    double testDir[3] = {0.0, 0.0, -1.0};
+    double testUp[3] = {0.0, 1.0, 0.0};
+    double testFov = 45.0;
+    
+    controller->setCameraState(testPos, testDir, testUp, testFov);
+    
+    // Callback should have been triggered
+    EXPECT_GT(callback_count, 0);
+    
+    connection.disconnect();
+}
+
+TEST_F(CameraControllerTest, CameraStateSymmetry) {
+    // Set via controller
+    double setPos[3] = {7.0, 8.0, 9.0};
+    double setDir[3] = {1.0, 0.0, 0.0};
+    double setUp[3] = {0.0, 0.0, 1.0};
+    double setFov = 70.0;
+    
+    controller->setCameraState(setPos, setDir, setUp, setFov);
+    
+    // Get via AppState
+    double getPos[3], getDir[3], getUp[3];
+    appState->getCameraPosition(getPos[0], getPos[1], getPos[2]);
+    appState->getCameraViewDirection(getDir[0], getDir[1], getDir[2]);
+    appState->getCameraUpVector(getUp[0], getUp[1], getUp[2]);
+    double getFov = appState->cameraFieldOfView();
+    
+    // Values should match
+    EXPECT_NEAR(setPos[0], getPos[0], 0.01);
+    EXPECT_NEAR(setPos[1], getPos[1], 0.01);
+    EXPECT_NEAR(setPos[2], getPos[2], 0.01);
+    EXPECT_NEAR(setFov, getFov, 0.01);
 }

@@ -102,6 +102,30 @@ cmake .. -DCVC_BUILD_VOLROVER3=OFF
 6. Camera controller handles user input
 7. Transfer function widget controls volume appearance
 
+### State Management
+
+VolRover3 uses a reactive state management system built on `cvc::state`:
+
+- **AppState**: Singleton managing application-wide state
+  - Camera position, view direction, FOV
+  - Geometry and volume data
+  - World bounds and visibility flags
+  - Transfer function parameters
+  
+- **State Tree**: All state stored in hierarchical tree at `volrover3.*`
+  - Direct access: `cvc::state::instance()("volrover3")("camera_position_x")`
+  - Bidirectional synchronization with AppState methods
+  
+- **Change Notifications**: Register callbacks for reactive updates
+  - All callback methods return `boost::signals2::connection`
+  - Disconnect when no longer needed for proper lifecycle management
+  - See `docs/APPSTATE_CALLBACKS.md` for detailed API documentation
+
+## API Documentation
+
+- [AppState Callback System](../../docs/APPSTATE_CALLBACKS.md) - Reactive state change notifications
+- [Testing Guide](../../docs/TESTING.md) - Unit and integration test documentation
+
 ## Future Enhancements
 
 - [ ] Isosurface extraction and rendering

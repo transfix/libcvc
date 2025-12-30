@@ -133,6 +133,9 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
     
     // Set field of view
     m_camera->SetViewAngle(fov);
+    
+    // Save to AppState for state tree synchronization
+    saveCameraStateToAppState();
 }
 
 void CameraController::applyCameraToVTK()

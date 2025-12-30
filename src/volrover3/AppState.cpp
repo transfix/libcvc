@@ -208,29 +208,29 @@ void AppState::setAxisVisible(bool visible)
     getState("axis_visible").value(visible);
 }
 
-void AppState::onGeometryChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onGeometryChanged(const boost::function<void()>& callback)
 {
-    getState("geometry_changed").valueChanged.connect(callback);
+    return getState("geometry_changed").valueChanged.connect(callback);
 }
 
-void AppState::onVolumeChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onVolumeChanged(const boost::function<void()>& callback)
 {
-    getState("volume_changed").valueChanged.connect(callback);
+    return getState("volume_changed").valueChanged.connect(callback);
 }
 
-void AppState::onWorldBoundsChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onWorldBoundsChanged(const boost::function<void()>& callback)
 {
-    getState("world_bounds").valueChanged.connect(callback);
+    return getState("world_bounds").valueChanged.connect(callback);
 }
 
-void AppState::onGridVisibilityChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onGridVisibilityChanged(const boost::function<void()>& callback)
 {
-    getState("grid_visible").valueChanged.connect(callback);
+    return getState("grid_visible").valueChanged.connect(callback);
 }
 
-void AppState::onAxisVisibilityChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onAxisVisibilityChanged(const boost::function<void()>& callback)
 {
-    getState("axis_visible").valueChanged.connect(callback);
+    return getState("axis_visible").valueChanged.connect(callback);
 }
 
 bool AppState::geometryBBoxVisible()
@@ -281,19 +281,19 @@ std::shared_ptr<cvc::volume> AppState::volumePtr()
     }
 }
 
-void AppState::onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback)
 {
-    getState("geometry_bbox_visible").valueChanged.connect(callback);
+    return getState("geometry_bbox_visible").valueChanged.connect(callback);
 }
 
-void AppState::onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback)
 {
-    getState("volume_bbox_visible").valueChanged.connect(callback);
+    return getState("volume_bbox_visible").valueChanged.connect(callback);
 }
 
-void AppState::onCameraModeChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onCameraModeChanged(const boost::function<void()>& callback)
 {
-    getState("camera_mode").valueChanged.connect(callback);
+    return getState("camera_mode").valueChanged.connect(callback);
 }
 
 // Camera settings
@@ -443,9 +443,9 @@ void AppState::setCameraFieldOfView(double fov)
     getState("camera_changed").value(true);
 }
 
-void AppState::onCameraChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onCameraChanged(const boost::function<void()>& callback)
 {
-    getState("camera_changed").valueChanged.connect(callback);
+    return getState("camera_changed").valueChanged.connect(callback);
 }
 
 std::vector<double> AppState::transferFunctionColorTable()
@@ -508,7 +508,7 @@ void AppState::setTransferFunctionOpacityTable(const std::vector<double>& table)
     getState("transfer_function_changed").value(!current);
 }
 
-void AppState::onTransferFunctionChanged(const boost::function<void()>& callback)
+boost::signals2::connection AppState::onTransferFunctionChanged(const boost::function<void()>& callback)
 {
-    getState("transfer_function_changed").valueChanged.connect(callback);
+    return getState("transfer_function_changed").valueChanged.connect(callback);
 }

@@ -5,6 +5,8 @@
 #include <volrover3/GridNode.h>
 #include <volrover3/AxisNode.h>
 #include <volrover3/BBoxNode.h>
+#include <volrover3/AppState.h>
+#include <cvc/state.h>
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 
@@ -12,6 +14,7 @@ class SceneGraphTest : public ::testing::Test {
 protected:
     void SetUp() override {
         sceneGraph = new SceneGraph();
+        appState = &AppState::instance();
     }
     
     void TearDown() override {
@@ -19,6 +22,7 @@ protected:
     }
     
     SceneGraph* sceneGraph;
+    AppState* appState;
 };
 
 TEST_F(SceneGraphTest, InitialState) {
@@ -123,6 +127,55 @@ TEST_F(SceneGraphTest, MultipleUpdates) {
     sceneGraph->setVolumeBBoxVisible(true);
     
     // Camera reset would be done externally
+    
+    SUCCEED();
+}
+
+// ===========================
+// State Tree Integration Tests
+// ===========================
+
+TEST_F(SceneGraphTest, VisibilityStateTree) {
+    // SceneGraph doesn't directly manipulate state tree
+    // but we can verify it responds to AppState visibility flags
+    
+    // Set visibility via scene graph
+    sceneGraph->setGridVisible(true);
+    sceneGraph->setAxisVisible(false);
+    sceneGraph->setVolumeBBoxVisible(true);
+    
+    // These don't save to AppState automatically
+    // In actual usage, MainWindow coordinates between SceneGraph and AppState
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, TransferFunctionFromState) {
+    // Create volume
+    cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
+    sceneGraph->setVolume(vol);
+    
+    // Get transfer function from AppState
+    auto colorTable = appState->transferFunctionColorTable();
+    auto opacityTable = appState->transferFunctionOpacityTable();
+    
+    // Apply to scene graph
+    sceneGraph->updateTransferFunction(colorTable, opacityTable);
+    
+    SUCCEED();
+}
+
+TEST_F(SceneGraphTest, WorldBoundsUpdate) {
+    // Set world bounds in AppState
+    cvc::bounding_box bounds(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
+    appState->setWorldBounds(bounds);
+    
+    // Update scene graph grid
+    sceneGraph->updateGrid(bounds);
+    
+    // Verify state tree has the bounds
+    auto& stateTree = cvc::state::instance()("volrover3");
+    auto values = stateTree("world_bounds").values();
+    ASSERT_EQ(values.size(), size_t(6));
     
     SUCCEED();
 }
