@@ -28,6 +28,9 @@
 #include <cvc/dimension.h>
 #include <cvc/state.h>
 #include <cvc/utility.h>
+#include <cvc/geometry.h>
+#include <cvc/volume.h>
+#include <cvc/voxels.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
 #include <log4cplus/logger.h>
@@ -100,6 +103,18 @@ namespace CVC_NAMESPACE
         _instance->registerDataType(boost::shared_array<float>);
         _instance->registerDataType(boost::shared_array<double>);
         _instance->registerDataType(state);
+        
+        // Register core CVC data types with full C++ qualified names
+        _instance->registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
+        _instance->registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
+        _instance->registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
+        _instance->registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
+        _instance->registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
+        
+        // Register shared pointers to these types as well
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
 
         //Register a call to wait for all child threads to finish before exiting
         //the main thread.

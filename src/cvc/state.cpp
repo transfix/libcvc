@@ -754,6 +754,85 @@ namespace CVC_NAMESPACE
     boost::this_thread::interruption_point();
     if(parent()) parent()->childChanged(name() + SEPARATOR + childname);
   }
+
+  // ------------------
+  // isValidStateName
+  // ------------------
+  // Purpose: 
+  //   Validates that a state name conforms to C identifier rules:
+  //   - Must start with letter or underscore
+  //   - Can contain letters, digits, and underscores
+  //   - No special characters, spaces, or dashes
+  // ---- Change History ----
+  // 12/30/2025 -- Added for state name validation.
+  bool state::isValidStateName(const std::string& name)
+  {
+    if (name.empty()) {
+      return false;
+    }
+
+    // First character must be letter or underscore
+    char first = name[0];
+    if (!std::isalpha(first) && first != '_') {
+      return false;
+    }
+
+    // Remaining characters must be alphanumeric or underscore
+    for (size_t i = 1; i < name.length(); ++i) {
+      char c = name[i];
+      if (!std::isalnum(c) && c != '_') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // ------------------
+  // sanitizeStateName
+  // ------------------
+  // Purpose: 
+  //   Converts an arbitrary string into a valid C identifier:
+  //   - Replaces invalid characters with underscores
+  //   - Ensures first character is valid (prepends underscore if needed)
+  //   - Handles empty strings
+  // ---- Change History ----
+  // 12/30/2025 -- Added for state name sanitization.
+  std::string state::sanitizeStateName(const std::string& name)
+  {
+    if (name.empty()) {
+      return "unnamed";
+    }
+
+    std::string result;
+    result.reserve(name.length());
+
+    // Handle first character
+    char first = name[0];
+    if (std::isalpha(first) || first == '_') {
+      result += first;
+    } else if (std::isdigit(first)) {
+      // If starts with digit, prepend underscore
+      result += '_';
+      result += first;
+    } else {
+      // Replace invalid first character with underscore
+      result += '_';
+    }
+
+    // Handle remaining characters
+    for (size_t i = 1; i < name.length(); ++i) {
+      char c = name[i];
+      if (std::isalnum(c) || c == '_') {
+        result += c;
+      } else {
+        // Replace invalid characters (including dashes, spaces, etc.) with underscore
+        result += '_';
+      }
+    }
+
+    return result;
+  }
 }
 
 namespace

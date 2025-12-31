@@ -12,6 +12,11 @@
 
 #include <cvc/state.h>
 #include <cvc/state_object.h>
+#include <cvc/geometry.h>
+#include <cvc/volume.h>
+#include <cvc/voxels.h>
+#include <cvc/bounding_box.h>
+#include <cvc/dimension.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -3908,6 +3913,236 @@ TEST(StateTest, FutureProducerConsumerPattern) {
   EXPECT_EQ(consumed.load(), num_items);
   
   cvcstate("test.future").reset();
+}
+
+// ===========================
+// State Name Validation Tests
+// ===========================
+
+TEST(StateTest, ValidStateNames) {
+  // Valid names - should pass validation
+  EXPECT_TRUE(cvc::state::isValidStateName("validName"));
+  EXPECT_TRUE(cvc::state::isValidStateName("_private"));
+  EXPECT_TRUE(cvc::state::isValidStateName("name123"));
+  EXPECT_TRUE(cvc::state::isValidStateName("_underscore_name"));
+  EXPECT_TRUE(cvc::state::isValidStateName("CamelCase"));
+  EXPECT_TRUE(cvc::state::isValidStateName("snake_case_name"));
+  EXPECT_TRUE(cvc::state::isValidStateName("name_with_digits_123"));
+  EXPECT_TRUE(cvc::state::isValidStateName("_123"));
+}
+
+TEST(StateTest, InvalidStateNames) {
+  // Invalid names - should fail validation
+  EXPECT_FALSE(cvc::state::isValidStateName(""));  // Empty
+  EXPECT_FALSE(cvc::state::isValidStateName("123start"));  // Starts with digit
+  EXPECT_FALSE(cvc::state::isValidStateName("name-with-dash"));  // Contains dash
+  EXPECT_FALSE(cvc::state::isValidStateName("name with space"));  // Contains space
+  EXPECT_FALSE(cvc::state::isValidStateName("name.with.dot"));  // Contains dot
+  EXPECT_FALSE(cvc::state::isValidStateName("name$pecial"));  // Contains special char
+  EXPECT_FALSE(cvc::state::isValidStateName("name@symbol"));  // Contains @
+  EXPECT_FALSE(cvc::state::isValidStateName("name#hash"));  // Contains #
+}
+
+TEST(StateTest, SanitizeEmptyName) {
+  std::string result = cvc::state::sanitizeStateName("");
+  EXPECT_EQ(result, "unnamed");
+}
+
+TEST(StateTest, SanitizeValidName) {
+  // Already valid names should pass through unchanged
+  EXPECT_EQ(cvc::state::sanitizeStateName("validName"), "validName");
+  EXPECT_EQ(cvc::state::sanitizeStateName("_private"), "_private");
+  EXPECT_EQ(cvc::state::sanitizeStateName("name123"), "name123");
+}
+
+TEST(StateTest, SanitizeNameWithDashes) {
+  // Dashes should be converted to underscores
+  EXPECT_EQ(cvc::state::sanitizeStateName("name-with-dashes"), "name_with_dashes");
+  EXPECT_EQ(cvc::state::sanitizeStateName("multi-part-name"), "multi_part_name");
+  EXPECT_EQ(cvc::state::sanitizeStateName("-starts-with-dash"), "_starts_with_dash");
+}
+
+TEST(StateTest, SanitizeNameWithSpaces) {
+  // Spaces should be converted to underscores
+  EXPECT_EQ(cvc::state::sanitizeStateName("name with spaces"), "name_with_spaces");
+  EXPECT_EQ(cvc::state::sanitizeStateName("multiple   spaces"), "multiple___spaces");
+}
+
+TEST(StateTest, SanitizeNameStartingWithDigit) {
+  // Names starting with digits should get underscore prefix
+  EXPECT_EQ(cvc::state::sanitizeStateName("123name"), "_123name");
+  EXPECT_EQ(cvc::state::sanitizeStateName("4test"), "_4test");
+}
+
+TEST(StateTest, SanitizeNameWithSpecialChars) {
+  // Special characters should be converted to underscores
+  EXPECT_EQ(cvc::state::sanitizeStateName("name@symbol"), "name_symbol");
+  EXPECT_EQ(cvc::state::sanitizeStateName("file$name"), "file_name");
+  EXPECT_EQ(cvc::state::sanitizeStateName("test#value"), "test_value");
+  EXPECT_EQ(cvc::state::sanitizeStateName("name.with.dots"), "name_with_dots");
+}
+
+TEST(StateTest, SanitizeComplexFilename) {
+  // Real-world filename examples
+  EXPECT_EQ(cvc::state::sanitizeStateName("my-mesh-file"), "my_mesh_file");
+  EXPECT_EQ(cvc::state::sanitizeStateName("bunny.obj"), "bunny_obj");
+  EXPECT_EQ(cvc::state::sanitizeStateName("test file (1)"), "test_file__1_");
+  EXPECT_EQ(cvc::state::sanitizeStateName("2024-12-30_data"), "_2024_12_30_data");
+}
+
+TEST(StateTest, SanitizePreservesUnderscores) {
+  // Underscores should be preserved
+  EXPECT_EQ(cvc::state::sanitizeStateName("name_with_underscores"), "name_with_underscores");
+  EXPECT_EQ(cvc::state::sanitizeStateName("__double__underscore__"), "__double__underscore__");
+}
+
+TEST(StateTest, SanitizeResultIsValid) {
+  // All sanitized names should pass validation
+  std::vector<std::string> testNames = {
+    "123start",
+    "name-with-dash",
+    "name with space",
+    "special@char#name",
+    "file.name.ext",
+    ""
+  };
+  
+  for (const auto& name : testNames) {
+    std::string sanitized = cvc::state::sanitizeStateName(name);
+    EXPECT_TRUE(cvc::state::isValidStateName(sanitized)) 
+      << "Sanitized name '" << sanitized << "' from '" << name << "' should be valid";
+  }
+}
+
+// ===========================
+// Data Type Registration Tests
+// ===========================
+
+TEST(StateTest, RegisteredDataTypeNames) {
+  // Test that core CVC types are registered with human-readable names
+  
+  // Create instances of each type
+  cvc::geometry geom;
+  cvc::voxels vox(cvc::dimension(10, 10, 10), cvc::UChar);
+  cvc::volume vol(cvc::dimension(10, 10, 10), cvc::UChar);
+  cvc::bounding_box bbox(0, 0, 0, 1, 1, 1);
+  cvc::dimension dim(10, 10, 10);
+  
+  // Store them in cvcapp data map
+  cvcapp.data("test.geometry", geom);
+  cvcapp.data("test.voxels", vox);
+  cvcapp.data("test.volume", vol);
+  cvcapp.data("test.bbox", bbox);
+  cvcapp.data("test.dimension", dim);
+  
+  // Verify the type names are human-readable, not mangled C++ names
+  std::string geom_type = cvcapp.dataTypeName(std::string("test.geometry"));
+  std::string vox_type = cvcapp.dataTypeName(std::string("test.voxels"));
+  std::string vol_type = cvcapp.dataTypeName(std::string("test.volume"));
+  std::string bbox_type = cvcapp.dataTypeName(std::string("test.bbox"));
+  std::string dim_type = cvcapp.dataTypeName(std::string("test.dimension"));
+  
+  EXPECT_EQ(geom_type, "cvc::geometry") << "Geometry type should be registered";
+  EXPECT_EQ(vox_type, "cvc::voxels") << "Voxels type should be registered";
+  EXPECT_EQ(vol_type, "cvc::volume") << "Volume type should be registered";
+  EXPECT_EQ(bbox_type, "cvc::bounding_box") << "BoundingBox type should be registered";
+  EXPECT_EQ(dim_type, "cvc::dimension") << "Dimension type should be registered";
+  
+  // Clean up
+  cvcapp.data("test.geometry", boost::any());
+  cvcapp.data("test.voxels", boost::any());
+  cvcapp.data("test.volume", boost::any());
+  cvcapp.data("test.bbox", boost::any());
+  cvcapp.data("test.dimension", boost::any());
+}
+
+TEST(StateTest, RegisteredSharedPtrDataTypeNames) {
+  // Test that shared_ptr variants are also registered
+  
+  boost::shared_ptr<cvc::geometry> geom_ptr(new cvc::geometry());
+  boost::shared_ptr<cvc::voxels> vox_ptr(new cvc::voxels(cvc::dimension(10, 10, 10), cvc::UChar));
+  boost::shared_ptr<cvc::volume> vol_ptr(new cvc::volume(cvc::dimension(10, 10, 10), cvc::UChar));
+  
+  cvcapp.data("test.geometry_ptr", geom_ptr);
+  cvcapp.data("test.voxels_ptr", vox_ptr);
+  cvcapp.data("test.volume_ptr", vol_ptr);
+  
+  std::string geom_ptr_type = cvcapp.dataTypeName(std::string("test.geometry_ptr"));
+  std::string vox_ptr_type = cvcapp.dataTypeName(std::string("test.voxels_ptr"));
+  std::string vol_ptr_type = cvcapp.dataTypeName(std::string("test.volume_ptr"));
+  
+  EXPECT_EQ(geom_ptr_type, "boost::shared_ptr<cvc::geometry>") << "Geometry shared_ptr type should be registered";
+  EXPECT_EQ(vox_ptr_type, "boost::shared_ptr<cvc::voxels>") << "Voxels shared_ptr type should be registered";
+  EXPECT_EQ(vol_ptr_type, "boost::shared_ptr<cvc::volume>") << "Volume shared_ptr type should be registered";
+  
+  // Clean up
+  cvcapp.data("test.geometry_ptr", boost::any());
+  cvcapp.data("test.voxels_ptr", boost::any());
+  cvcapp.data("test.volume_ptr", boost::any());
+}
+
+TEST(StateTest, DataTypeNameTemplate) {
+  // Test the template version of dataTypeName<T>()
+  
+  std::string geom_type = cvcapp.dataTypeName<cvc::geometry>();
+  std::string vox_type = cvcapp.dataTypeName<cvc::voxels>();
+  std::string vol_type = cvcapp.dataTypeName<cvc::volume>();
+  std::string bbox_type = cvcapp.dataTypeName<cvc::bounding_box>();
+  std::string dim_type = cvcapp.dataTypeName<cvc::dimension>();
+  
+  EXPECT_EQ(geom_type, "cvc::geometry");
+  EXPECT_EQ(vox_type, "cvc::voxels");
+  EXPECT_EQ(vol_type, "cvc::volume");
+  EXPECT_EQ(bbox_type, "cvc::bounding_box");
+  EXPECT_EQ(dim_type, "cvc::dimension");
+  
+  // Test shared_ptr versions
+  std::string geom_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::geometry>>();
+  std::string vox_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::voxels>>();
+  std::string vol_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::volume>>();
+  
+  EXPECT_EQ(geom_ptr_type, "boost::shared_ptr<cvc::geometry>");
+  EXPECT_EQ(vox_ptr_type, "boost::shared_ptr<cvc::voxels>");
+  EXPECT_EQ(vol_ptr_type, "boost::shared_ptr<cvc::volume>");
+}
+
+TEST(StateTest, DataTypeNameFromAny) {
+  // Test the dataTypeName(boost::any) overload
+  
+  boost::any geom_any = cvc::geometry();
+  boost::any vox_any = cvc::voxels(cvc::dimension(10, 10, 10), cvc::UChar);
+  boost::any vol_any = cvc::volume(cvc::dimension(10, 10, 10), cvc::UChar);
+  
+  std::string geom_type = cvcapp.dataTypeName(geom_any);
+  std::string vox_type = cvcapp.dataTypeName(vox_any);
+  std::string vol_type = cvcapp.dataTypeName(vol_any);
+  
+  EXPECT_EQ(geom_type, "cvc::geometry");
+  EXPECT_EQ(vox_type, "cvc::voxels");
+  EXPECT_EQ(vol_type, "cvc::volume");
+}
+
+TEST(StateTest, UnregisteredTypeReturnsMangled) {
+  // Test that unregistered types return the mangled C++ name
+  
+  struct UnregisteredType {
+    int value;
+  };
+  
+  UnregisteredType custom;
+  cvcapp.data("test.unregistered", custom);
+  
+  std::string type_name = cvcapp.dataTypeName(std::string("test.unregistered"));
+  
+  // The type name should be a mangled C++ name, not a nice name
+  // It will contain something like "UnregisteredType" but might be mangled
+  EXPECT_NE(type_name, "") << "Unregistered types should still return a type name";
+  EXPECT_TRUE(type_name.find("UnregisteredType") != std::string::npos ||
+              type_name.find("N") != std::string::npos) 
+      << "Unregistered type should return raw/mangled name: " << type_name;
+  
+  // Clean up
+  cvcapp.data("test.unregistered", boost::any());
 }
 
 // Main function to handle custom flags

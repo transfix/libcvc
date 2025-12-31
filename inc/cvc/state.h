@@ -411,6 +411,10 @@ namespace CVC_NAMESPACE
     state& readOnly(bool ro);
     signal readOnlyChanged;
 
+    // State name validation and sanitization
+    static bool isValidStateName(const std::string& name);
+    static std::string sanitizeStateName(const std::string& name);
+
     static void on_startup(const nullary_func& init_func);
 
   protected:

@@ -220,8 +220,57 @@ void StateTreeWidget::populateTable(cvc::state* state)
     
     std::string valueStr = getStateValue(state);
     QTableWidgetItem* valueItem = new QTableWidgetItem(QString::fromStdString(valueStr));
+    
+    // Check if state is read-only and mark accordingly
+    if (state->readOnly()) {
+        // Make non-editable and add visual indicator
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        valueItem->setForeground(QBrush(QColor(100, 100, 100)));
+        valueItem->setToolTip(tr("This value is read-only (computed/generated)"));
+        // Add lock emoji/icon to indicate read-only
+        QString displayValue = QString::fromStdString(valueStr) + " 🔒";
+        valueItem->setText(displayValue);
+    }
+    
     m_tableWidget->setItem(row, 1, valueItem);
     row++;
+    
+    // Add "Read-Only" status row
+    m_tableWidget->insertRow(row);
+    QTableWidgetItem* readOnlyLabel = new QTableWidgetItem(tr("read-only"));
+    readOnlyLabel->setFlags(readOnlyLabel->flags() & ~Qt::ItemIsEditable);
+    m_tableWidget->setItem(row, 0, readOnlyLabel);
+    
+    QString readOnlyStatus = state->readOnly() ? tr("Yes 🔒") : tr("No");
+    QTableWidgetItem* readOnlyItem = new QTableWidgetItem(readOnlyStatus);
+    readOnlyItem->setFlags(readOnlyItem->flags() & ~Qt::ItemIsEditable);
+    if (state->readOnly()) {
+        readOnlyItem->setForeground(QBrush(QColor(200, 100, 50)));
+        readOnlyItem->setToolTip(tr("This state is read-only and cannot be modified"));
+    } else {
+        readOnlyItem->setForeground(QBrush(QColor(100, 150, 100)));
+    }
+    m_tableWidget->setItem(row, 1, readOnlyItem);
+    row++;
+    
+    // Add "Comment" row if comment is set
+    try {
+        std::string commentStr = state->comment();
+        if (!commentStr.empty()) {
+            m_tableWidget->insertRow(row);
+            QTableWidgetItem* commentLabel = new QTableWidgetItem(tr("comment"));
+            commentLabel->setFlags(commentLabel->flags() & ~Qt::ItemIsEditable);
+            m_tableWidget->setItem(row, 0, commentLabel);
+            
+            QTableWidgetItem* commentItem = new QTableWidgetItem(QString::fromStdString(commentStr));
+            commentItem->setFlags(commentItem->flags() & ~Qt::ItemIsEditable);
+            commentItem->setForeground(QBrush(QColor(80, 120, 180))); // Blue color for comments
+            commentItem->setFont(QFont("", -1, QFont::Normal, true)); // Italic
+            commentItem->setToolTip(QString::fromStdString(commentStr)); // Show full comment on hover
+            m_tableWidget->setItem(row, 1, commentItem);
+            row++;
+        }
+    } catch (...) {}
     
     // Add "Value Type" row if value type is set
     try {
@@ -411,8 +460,21 @@ void StateTreeWidget::onTableValueChanged(int row, int column)
 {
     if (!m_currentState || column != 1) return;
     
-    // Only the value row (row 0) is editable
-    if (row != 0) return;
+    // Only the value row (row 2) is editable (after name, full path)
+    QTableWidgetItem* labelItem = m_tableWidget->item(row, 0);
+    if (!labelItem || labelItem->text() != tr("value")) return;
+    
+    // Check if state is read-only before attempting to change
+    if (m_currentState->readOnly()) {
+        m_tableWidget->blockSignals(true);
+        QMessageBox::information(this, tr("Read-Only State"),
+                                tr("This state is read-only and cannot be modified.\n"
+                                   "It contains computed or generated values."));
+        // Revert to original value
+        populateTable(m_currentState);
+        m_tableWidget->blockSignals(false);
+        return;
+    }
     
     QTableWidgetItem* item = m_tableWidget->item(row, column);
     if (!item) return;
@@ -452,18 +514,43 @@ void StateTreeWidget::onAddStateClicked()
     
     if (!ok || path.isEmpty()) return;
     
-    // Validate the path
-    // State names can contain alphanumeric characters and underscores, separated by dots
-    QRegularExpression pathRegex("^[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)*$");
-    QRegularExpressionMatch match = pathRegex.match(path);
+    // Validate the path using state's validation function
+    // Split path into components and validate each
+    QStringList components = path.split('.');
+    bool needsSanitization = false;
+    QStringList sanitizedComponents;
     
-    if (!match.hasMatch()) {
-        QMessageBox::warning(this, tr("Invalid Path"),
-                           tr("Invalid state path. Path must contain only alphanumeric characters and underscores,\n"
-                              "with segments separated by dots (.).\n"
-                              "Each segment must start with a letter or underscore.\n\n"
-                              "Examples: 'volrover3.camera_mode' or 'app.config.value_1'"));
-        return;
+    for (const QString& component : components) {
+        std::string comp = component.toStdString();
+        if (!cvc::state::isValidStateName(comp)) {
+            needsSanitization = true;
+            std::string sanitized = cvc::state::sanitizeStateName(comp);
+            sanitizedComponents.append(QString::fromStdString(sanitized));
+        } else {
+            sanitizedComponents.append(component);
+        }
+    }
+    
+    // If path needs sanitization, offer to use sanitized version
+    if (needsSanitization) {
+        QString sanitizedPath = sanitizedComponents.join('.');
+        QMessageBox::StandardButton reply = QMessageBox::question(this, tr("Invalid State Name"),
+            tr("The path contains invalid characters.\n\n"
+               "Original: %1\n"
+               "Suggested: %2\n\n"
+               "State names must follow C identifier rules:\n"
+               "- Start with letter or underscore\n"
+               "- Contain only letters, digits, and underscores\n"
+               "- No spaces, dashes, or special characters\n\n"
+               "Use sanitized version?")
+            .arg(path).arg(sanitizedPath),
+            QMessageBox::Yes | QMessageBox::No);
+        
+        if (reply == QMessageBox::Yes) {
+            path = sanitizedPath;
+        } else {
+            return;
+        }
     }
     
     QString value = QInputDialog::getText(this, tr("Add State"),

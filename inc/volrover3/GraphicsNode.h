@@ -4,6 +4,7 @@
 #include <volrover3/SceneNode.h>
 #include <vtkSmartPointer.h>
 #include <vtkMatrix4x4.h>
+#include <boost/signals2.hpp>
 #include <string>
 #include <map>
 #include <any>
@@ -89,6 +90,8 @@ protected:
     vtkProp* getProp() override;
     void updateTransform();
     void updatePolyData(const cvc::geometry& geom);
+    void updateMetadata(const cvc::geometry& geom);
+    void onDataChanged();
 
 private:
     std::string m_name;
@@ -107,6 +110,10 @@ private:
     
     // Metadata storage
     std::map<std::string, std::any> m_metadata;
+    
+    // State tracking for data changes
+    cvc::state* m_stateNode;
+    boost::signals2::connection m_dataConnection;
 };
 
 #endif // GRAPHICSNODE_H

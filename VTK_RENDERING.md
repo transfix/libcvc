@@ -1,99 +1,89 @@
-# VTK Rendering Options for Geometry and Volume Data
+# Information Report: Development Options for Adapting Legacy Computational Graphics Software to Modern VTK and Graphics Hardware
 
-This document summarizes the key options in VTK for rendering various types of data, including volume data, arbitrary geometry, volumetric meshes, and isosurfaces. It is based on VTK's capabilities as of late 2025, drawing from official documentation and examples. VTK provides a flexible pipeline for visualization, typically involving data sources, filters, mappers, actors, and renderers. For integration into your computational geometry package, focus on connecting your data (e.g., via vtkImageData, vtkPolyData, or vtkUnstructuredGrid) to the appropriate mappers and actors.
+## Executive Summary
+This report synthesizes discussions on integrating legacy rendering components from our computational geometry package into the Visualization Toolkit (VTK), leveraging modern graphics hardware such as GPUs via OpenGL and CUDA. The primary goals are to enhance performance for volume rendering, isosurface extraction, arbitrary geometry, and volumetric meshes while preserving custom legacy renderers. Key options include using VTK's extensible mapper-actor pipeline for standard and custom rendering, with support for multi-volume scenes and depth-aware compositing. Implementation directions emphasize subclassing VTK classes for custom integrations, performance benchmarking, and handling overlaps in multi-volume scenarios. This will inform our planning document for a hardened implementation path, prioritizing GPU acceleration and compatibility with existing data structures.
 
-## Volume Data (3D Texture with Volume Rendering)
+## Background and Objectives
+Our legacy software includes specialized renderers: an OpenGL ARB fragment program-based volume renderer (high-speed, legacy shaders) and a raycasting volume/isosurface renderer ("volren") being ported to CUDA for acceleration. The package handles volume data, arbitrary polygonal geometry (triangles/quads with colors/textures), tetrahedral/hexahedral meshes, and isosurfaces. Adaptation to VTK aims to:
+- Utilize VTK's robust visualization pipeline for scene management, interaction, and data filtering.
+- Integrate custom renderers as extensions for performance comparisons and hybrid use.
+- Support multiple volumes in scenes with proper depth blending to avoid artifacts.
+- Leverage modern hardware (e.g., NVIDIA GPUs for CUDA) while maintaining fallback options.
 
-VTK excels at volume rendering for scalar fields, often using ray casting or texture-based methods on structured data like vtkImageData. These techniques composite samples along rays to visualize internal structures.
+VTK (version 9.x+ as of late 2025) provides excellent extensibility through subclassing and modular builds, making it suitable for our needs. Challenges include migrating legacy ARB shaders to GLSL, ensuring CUDA-OpenGL interoperability, and optimizing for overlapping volumes.
 
-- **vtkSmartVolumeMapper**: Adaptive mapper that chooses the best method (e.g., GPU ray casting with 3D textures) based on hardware for efficient scalar volume rendering.
-- **vtkGPUVolumeRayCastMapper**: GPU-accelerated ray casting using 3D textures, supporting shading, gradients, and real-time interaction.
-- **vtkFixedPointVolumeRayCastMapper**: CPU-based ray casting with fixed-point precision, useful for software rendering or detailed control.
-- **vtkVolumeTextureMapper3D** (legacy): Direct 3D texture slicing and compositing for hardware-accelerated rendering.
-- Supporting classes:
-  - **vtkVolume**: Actor for the volume in the scene.
-  - **vtkVolumeProperty**: Controls color/opacity transfer functions, shading, and gradient opacity.
-  - **vtkVolumeTexture**: Manages 3D texture data.
+## VTK Rendering Options for Key Data Types
+VTK offers a variety of mappers and actors tailored to our data types, typically connected via a pipeline: data source → filter → mapper → actor → renderer. These can be GPU-accelerated for real-time performance.
 
-These mappers support techniques like ray integration for compositing. For unstructured data, some may require conversion or use unstructured variants.
+### Volume Data (3D Texture with Volume Rendering)
+For scalar fields in structured grids (e.g., vtkImageData), VTK uses ray casting or texture slicing:
+- **vtkSmartVolumeMapper**: Adaptive, hardware-optimal (often GPU ray casting with 3D textures).
+- **vtkGPUVolumeRayCastMapper**: GPU-based for high-speed rendering with shading.
+- **vtkFixedPointVolumeRayCastMapper**: CPU fallback for precision.
+- **vtkVolumeTextureMapper3D** (legacy): Direct 3D texture compositing.
+- Supporting: **vtkVolume** (actor), **vtkVolumeProperty** (transfer functions), **vtkVolumeTexture** (data management).
 
-## Arbitrary Geometry (Triangles, Quads) with Colored Vertices or Texture Mapping (2D or 3D)
+### Arbitrary Geometry (Triangles, Quads with Colored Vertices or Texture Mapping)
+For polygonal data (vtkPolyData):
+- **vtkPolyDataMapper**: Core for tris/quads, supports vertex coloring and 2D/3D textures.
+- **vtkCompositePolyDataMapper**: For multi-block datasets.
+- **vtkDataSetMapper**: General-purpose with scalar/texture support.
+- **vtkTexture**: For 2D/3D mapping; multi-texturing for layers.
+- Supporting: **vtkActor**, **vtkProperty**.
 
-For surface-based polygonal data (e.g., in vtkPolyData), VTK renders triangles and quads with options for vertex coloring, scalar mapping, or textures.
+### Tetrahedral Volumetric Meshes (vtkUnstructuredGrid with VTK_TETRA)
+- **vtkUnstructuredGridVolumeRayCastMapper**: Ray casting for volumes.
+- **vtkProjectedTetrahedraMapper**: GPU-accelerated projection.
+- **vtkUnstructuredGridVolumeZSweepMapper**: Z-sweep rendering.
+- Surface: **vtkUnstructuredGridMapper**, **vtkCellGridMapper**.
+- Generation: **vtkDelaunay3D** filter.
 
-- **vtkPolyDataMapper**: Core mapper for polygons, supporting interpolated vertex colors (via scalars) and texture coordinates.
-- **vtkCompositePolyDataMapper**: Handles multi-block polygonal data for complex assemblies.
-- **vtkDataSetMapper**: Versatile for various datasets, including polygons with coloring and textures.
-- Texture options:
-  - **vtkTexture**: Applies 2D/3D textures to surfaces; 3D textures enable volumetric effects like procedural mapping.
-  - Coloring in mappers (e.g., via vtkMapper): Interpolates colors or uses 1D textures for cell-based coloring.
-- Supporting classes:
-  - **vtkActor**: Positions the geometry with properties like color and opacity.
-  - **vtkProperty**: Manages surface attributes and texture binding.
+### Hexahedral Volumetric Meshes (vtkUnstructuredGrid with VTK_HEXAHEDRON)
+- **vtkUnstructuredGridVolumeRayCastMapper**: For hex volumes.
+- **vtkUnstructuredGridVolumeZSweepMapper**: Z-sweep.
+- **vtkSmartVolumeMapper**: Fallback for structured hexes.
+- Surface: **vtkUnstructuredGridMapper**, **vtkCellGridMapper**/**vtkCompositeCellGridMapper**.
+- Extensions: vtkHDF for polyhedral cells.
 
-Multi-texturing is supported for layered effects.
+### Isosurface Rendering
+- **Extraction-Based**: Generate vtkPolyData for surface rendering.
+  - **vtkMarchingCubes**: For structured data.
+  - **vtkContourFilter**: General, multi-value contours.
+  - Optimized: **vtkFlyingEdges**, **vtkContourGrid**, **vtkContour3DLinearGrid**, **vtkmContour**.
+  - **vtkExtractSurface**: For signed distance fields.
+- **Direct Volume-Based**: Use transfer functions in **vtkSmartVolumeMapper**/**vtkGPUVolumeRayCastMapper** with ISOSURFACE_BLEND mode.
 
-## Tetrahedral Volumetric Meshes
+Integration Tips: Use filters like vtkImageImport for custom data; GPU for speed, CPU for fallback.
 
-Tetrahedral meshes (vtkUnstructuredGrid with VTK_TETRA cells) can be rendered as surfaces or volumes.
+## Custom Renderer Integration and Performance Comparison
+To adapt legacy renderers:
 
-- **vtkUnstructuredGridVolumeRayCastMapper**: Ray casting for volume rendering on tets.
-- **vtkProjectedTetrahedraMapper**: GPU-accelerated projection and compositing for large tet meshes.
-- **vtkUnstructuredGridVolumeZSweepMapper**: Z-sweep algorithm for view-aligned rendering.
-- **vtkUnstructuredGridMapper**: Surface or wireframe rendering of boundaries.
-- **vtkCellGridMapper**: For cell-based rendering, including hybrids.
-- Supporting classes: **vtkVolume** and **vtkVolumeProperty** for attributes.
+### OpenGL ARB Fragment Program-Based Volume Renderer
+- **Approach**: Subclass **vtkAbstractVolumeMapper** or **vtkGPUVolumeRayCastMapper**; implement **Render()** with ARB logic (convert to GLSL for modern compatibility).
+- **Shader Customization**: Use **AddShaderReplacement** or **SetFragmentShaderCode** for partial/full overrides.
+- **Extension Build**: Create a VTK module via CMake; load dynamically.
+- **Performance Comparison**: Use **vtkTimerLog** for frame times; test with profilers (Nsight). Expect gains in simple cases but validate against stock.
 
-Filters like vtkDelaunay3D can generate tets from points.
+### CUDA-Ported Volren Raycaster (Volume and Isosurfaces)
+- **Likelihood**: High (80-90%) via CUDA-OpenGL interop.
+- **Approach**: Subclass **vtkAbstractVolumeMapper**; in **Render()**, register GL textures with CUDA, launch kernels to write color/depth, unmap, and composite quad with depth blending (use **gl_FragDepth**).
+- **Alternative**: Subclass **vtkRenderPass** for post-processing compositing.
+- **Depth Handling**: Preserve scene depth (**SetPreserveDepthBuffer(1)**); test/write via textures.
+- **Build**: Compile VTK with CUDA; link custom module.
 
-## Hexahedral Volumetric Meshes
+## Multi-Volume Scene Support
+- **Non-Overlapping**: Multiple **vtkVolume** actors with individual mappers; auto-sort via **vtkFrustumCoverageCuller**.
+- **Overlapping**: Use **vtkMultiVolume** with shared **vtkGPUVolumeRayCastMapper** for unified raycasting; supports properties per volume.
+- **Custom Integration**: Extend mappers for multi-input; expect strong support with testing for artifacts.
+- **Depth Buffer Management**: Volumes render post-opaque geometry; multi-volume computes unified depth. Use **vtkDualDepthPeelingPass** for translucents.
+- **Level of Support**: Robust (up to several volumes); performance scales with GPU resources.
 
-Hexahedral meshes (vtkUnstructuredGrid with VTK_HEXAHEDRON cells) use similar unstructured tools; structured hexes can leverage volume mappers.
+## Recommendations for Implementation Direction
+1. **Prioritize GPU Pathways**: Start with stock VTK GPU mappers; integrate customs via subclasses for hybrid testing.
+2. **Modular Build**: Develop custom mappers as VTK modules for easy swapping and benchmarking.
+3. **Migration Steps**: Convert ARB to GLSL; ensure CUDA interop syncs with VTK state.
+4. **Testing Focus**: Benchmark with **vtkTimerLog**; validate multi-volume overlaps and depth blending on varied datasets.
+5. **Resources**: VTK docs/examples; upgrade to latest for multi-volume enhancements.
+6. **Risks and Mitigations**: Overhead in interop—profile early; fallback to CPU for non-NVIDIA hardware.
 
-- **vtkUnstructuredGridVolumeRayCastMapper**: Sampling and integration for hex volumes.
-- **vtkUnstructuredGridVolumeZSweepMapper**: Z-sweep for hex-dominant data.
-- **vtkSmartVolumeMapper**: Fallback for unstructured hexes.
-- **vtkUnstructuredGridMapper**: Surface rendering.
-- **vtkCellGridMapper** or **vtkCompositeCellGridMapper**: For composite or advanced hex elements.
-- Supporting classes: **vtkVolume** and **vtkVolumeProperty**.
-
-Polyhedral extensions are available via vtkHDF.
-
-## Rendering Isosurfaces
-
-Isosurfaces extract level sets from scalar fields, rendered as polygonal surfaces or directly via volume techniques. Extraction creates vtkPolyData for surface rendering, while direct methods use transfer functions for efficiency.
-
-### Extraction-Based Methods
-These filters generate geometry from volume data, which is then mapped and acted upon.
-
-- **vtkMarchingCubes**: Classic algorithm for structured data (vtkImageData), extracting one or more isosurfaces from scalar volumes.
-- **vtkContourFilter**: General-purpose for any dataset, supporting multiple contour values; outputs isosurfaces, isolines, or isopoints based on dimensionality.
-- **vtkFlyingEdges**: High-performance alternative to marching cubes for large structured datasets.
-- **vtkContourGrid**: Optimized for unstructured grids, generating isosurfaces from 3D cells.
-- **vtkContour3DLinearGrid**: Fast contouring for linear cells, with options for point merging, attribute interpolation, and normals.
-- **vtkmContour**: Accelerated version using VTK-m for parallel processing.
-- **vtkExtractSurface**: For signed distance fields, extracts zero-crossing isosurfaces with options like hole filling.
-
-**Rendering Pipeline**: Connect the filter output to **vtkPolyDataMapper** (for scalar coloring or textures) and **vtkActor**. Use **SetValue()** or **GenerateValues()** to specify iso-values.
-
-Example (from implicit function sampling):
-- Use vtkSampleFunction to sample a scalar field.
-- Apply vtkContourFilter to extract the isosurface.
-- Map with vtkPolyDataMapper and add to vtkRenderer.
-
-### Direct Volume Rendering for Isosurfaces
-Render isosurfaces without mesh extraction using volume mappers, ideal for multiple surfaces or GPU efficiency.
-
-- **vtkSmartVolumeMapper** or **vtkGPUVolumeRayCastMapper**: Set blend mode to ISOSURFACE_BLEND in vtkVolumeProperty; provide iso-values via vtkContourValues.
-- Enable shading for better visuals; colors/opacity from transfer functions.
-
-This composites only at contour intersections during ray casting, avoiding mesh generation.
-
-## Integration Tips
-- **Data Conversion**: Use filters like vtkImageImport for custom volume data or vtkUnstructuredGrid for meshes.
-- **Performance**: GPU mappers for interactivity; CPU for precision.
-- **Customization**: Apply shaders or properties for advanced effects.
-- **Examples**: Check VTK Examples site for code snippets (e.g., RayCastIsosurface).
-- **Resources**: VTK documentation (vtk.org/doc) and Kitware blogs for updates.
-
-This setup should integrate well with your package—let me know if you need code samples!
+This framework positions us to modernize our software efficiently, blending legacy strengths with VTK's ecosystem. Next steps: Prototype a custom mapper and multi-volume scene.

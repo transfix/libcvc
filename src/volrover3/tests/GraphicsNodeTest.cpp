@@ -487,6 +487,569 @@ TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
     EXPECT_DOUBLE_EQ(worldTransform->GetElement(2, 3), 0.0);
 }
 
+// Test that metadata is computed from geometry
+TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Check that basic stats are computed
+    EXPECT_TRUE(node.hasMetadata("num_vertices"));
+    EXPECT_TRUE(node.hasMetadata("num_triangles"));
+    EXPECT_TRUE(node.hasMetadata("type"));
+    
+    // Verify values
+    int numVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    int numTris = std::any_cast<int>(node.getMetadata("num_triangles"));
+    
+    EXPECT_EQ(numVerts, 3);
+    EXPECT_EQ(numTris, 1);
+    
+    std::string type = std::any_cast<std::string>(node.getMetadata("type"));
+    EXPECT_EQ(type, "triangle_mesh");
+}
+
+// Test that bounding box metadata is computed
+TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Check bounding box metadata exists
+    EXPECT_TRUE(node.hasMetadata("bbox_min_x"));
+    EXPECT_TRUE(node.hasMetadata("bbox_min_y"));
+    EXPECT_TRUE(node.hasMetadata("bbox_min_z"));
+    EXPECT_TRUE(node.hasMetadata("bbox_max_x"));
+    EXPECT_TRUE(node.hasMetadata("bbox_max_y"));
+    EXPECT_TRUE(node.hasMetadata("bbox_max_z"));
+    
+    // Verify bounding box values
+    double minX = std::any_cast<double>(node.getMetadata("bbox_min_x"));
+    double minY = std::any_cast<double>(node.getMetadata("bbox_min_y"));
+    double maxX = std::any_cast<double>(node.getMetadata("bbox_max_x"));
+    double maxY = std::any_cast<double>(node.getMetadata("bbox_max_y"));
+    
+    EXPECT_DOUBLE_EQ(minX, 0.0);
+    EXPECT_DOUBLE_EQ(minY, 0.0);
+    EXPECT_DOUBLE_EQ(maxX, 1.0);
+    EXPECT_DOUBLE_EQ(maxY, 1.0);
+}
+
+// Test that extent metadata is computed
+TEST_F(GraphicsNodeTest, ExtentMetadata) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Check extent metadata exists
+    EXPECT_TRUE(node.hasMetadata("extent_x"));
+    EXPECT_TRUE(node.hasMetadata("extent_y"));
+    EXPECT_TRUE(node.hasMetadata("extent_z"));
+    
+    // Verify extent values
+    double extentX = std::any_cast<double>(node.getMetadata("extent_x"));
+    double extentY = std::any_cast<double>(node.getMetadata("extent_y"));
+    double extentZ = std::any_cast<double>(node.getMetadata("extent_z"));
+    
+    EXPECT_DOUBLE_EQ(extentX, 1.0);
+    EXPECT_DOUBLE_EQ(extentY, 1.0);
+    EXPECT_DOUBLE_EQ(extentZ, 0.0);
+}
+
+// Test that center metadata is computed
+TEST_F(GraphicsNodeTest, CenterMetadata) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Check center metadata exists
+    EXPECT_TRUE(node.hasMetadata("center_x"));
+    EXPECT_TRUE(node.hasMetadata("center_y"));
+    EXPECT_TRUE(node.hasMetadata("center_z"));
+    
+    // Verify center values
+    double centerX = std::any_cast<double>(node.getMetadata("center_x"));
+    double centerY = std::any_cast<double>(node.getMetadata("center_y"));
+    double centerZ = std::any_cast<double>(node.getMetadata("center_z"));
+    
+    EXPECT_DOUBLE_EQ(centerX, 0.5);
+    EXPECT_DOUBLE_EQ(centerY, 0.5);
+    EXPECT_DOUBLE_EQ(centerZ, 0.0);
+}
+
+// Test that data changes trigger geometry updates
+TEST_F(GraphicsNodeTest, DataChangeTriggerUpdate) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("graphics_test");
+    node.syncToState(testState);
+    
+    // Verify initial metadata
+    int initialVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    EXPECT_EQ(initialVerts, 3);
+    
+    // Sync from state (this connects the data change signal)
+    node.syncFromState(testState);
+    
+    // Modify the geometry in the state
+    cvc::geometry newGeom;
+    newGeom.points().push_back({0.0, 0.0, 0.0});
+    newGeom.points().push_back({1.0, 0.0, 0.0});
+    newGeom.points().push_back({1.0, 1.0, 0.0});
+    newGeom.points().push_back({0.0, 1.0, 0.0});
+    newGeom.tris().push_back({0, 1, 2});
+    newGeom.tris().push_back({0, 2, 3});
+    
+    // Update state data (should trigger onDataChanged callback)
+    testState("test_node").data(newGeom);
+    
+    // Verify metadata was updated
+    int updatedVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    int updatedTris = std::any_cast<int>(node.getMetadata("num_triangles"));
+    
+    EXPECT_EQ(updatedVerts, 4);
+    EXPECT_EQ(updatedTris, 2);
+    
+    // Verify geometry was updated
+    const cvc::geometry* geom = node.getGeometry();
+    ASSERT_NE(geom, nullptr);
+    EXPECT_EQ(geom->num_points(), 4);
+    EXPECT_EQ(geom->num_tris(), 2);
+}
+
+// Test that metadata syncs to state tree
+TEST_F(GraphicsNodeTest, MetadataSyncToState) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("metadata_sync_test");
+    node.syncToState(testState);
+    
+    // Verify metadata is in state tree
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    EXPECT_TRUE(metadataState("num_vertices").initialized());
+    EXPECT_TRUE(metadataState("num_triangles").initialized());
+    EXPECT_TRUE(metadataState("type").initialized());
+    
+    // Verify values match
+    int numVerts = metadataState("num_vertices").value<int>();
+    int numTris = metadataState("num_triangles").value<int>();
+    
+    EXPECT_EQ(numVerts, 3);
+    EXPECT_EQ(numTris, 1);
+}
+
+// Test that computed metadata is read-only
+TEST_F(GraphicsNodeTest, ComputedMetadataReadOnly) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("readonly_test");
+    node.syncToState(testState);
+    
+    // Verify computed metadata is read-only
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    EXPECT_TRUE(metadataState("num_vertices").readOnly());
+    EXPECT_TRUE(metadataState("num_triangles").readOnly());
+    EXPECT_TRUE(metadataState("type").readOnly());
+    EXPECT_TRUE(metadataState("bbox_min_x").readOnly());
+    EXPECT_TRUE(metadataState("extent_x").readOnly());
+    EXPECT_TRUE(metadataState("center_x").readOnly());
+}
+
+// Test geometry type detection
+TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
+    // Test triangle mesh
+    {
+        GraphicsNode node("tri_mesh");
+        cvc::geometry triGeom;
+        triGeom.points().push_back({0.0, 0.0, 0.0});
+        triGeom.points().push_back({1.0, 0.0, 0.0});
+        triGeom.points().push_back({0.0, 1.0, 0.0});
+        triGeom.tris().push_back({0, 1, 2});
+        
+        node.setGeometry(triGeom);
+        std::string type = std::any_cast<std::string>(node.getMetadata("type"));
+        EXPECT_EQ(type, "triangle_mesh");
+    }
+    
+    // Test quad mesh
+    {
+        GraphicsNode node("quad_mesh");
+        cvc::geometry quadGeom;
+        quadGeom.points().push_back({0.0, 0.0, 0.0});
+        quadGeom.points().push_back({1.0, 0.0, 0.0});
+        quadGeom.points().push_back({1.0, 1.0, 0.0});
+        quadGeom.points().push_back({0.0, 1.0, 0.0});
+        quadGeom.quads().push_back({0, 1, 2, 3});
+        
+        node.setGeometry(quadGeom);
+        std::string type = std::any_cast<std::string>(node.getMetadata("type"));
+        EXPECT_EQ(type, "quad_mesh");
+    }
+    
+    // Test mixed mesh
+    {
+        GraphicsNode node("mixed_mesh");
+        cvc::geometry mixedGeom;
+        mixedGeom.points().push_back({0.0, 0.0, 0.0});
+        mixedGeom.points().push_back({1.0, 0.0, 0.0});
+        mixedGeom.points().push_back({1.0, 1.0, 0.0});
+        mixedGeom.points().push_back({0.0, 1.0, 0.0});
+        mixedGeom.tris().push_back({0, 1, 2});
+        mixedGeom.quads().push_back({0, 1, 2, 3});
+        
+        node.setGeometry(mixedGeom);
+        std::string type = std::any_cast<std::string>(node.getMetadata("type"));
+        EXPECT_EQ(type, "mixed_mesh");
+    }
+}
+
+// Test metadata updates when geometry changes
+TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
+    GraphicsNode node("test_node");
+    
+    // Set initial geometry
+    node.setGeometry(testGeom);
+    int initialVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    EXPECT_EQ(initialVerts, 3);
+    
+    // Change geometry
+    cvc::geometry newGeom;
+    for (int i = 0; i < 10; ++i) {
+        newGeom.points().push_back({static_cast<double>(i), 0.0, 0.0});
+    }
+    newGeom.tris().push_back({0, 1, 2});
+    newGeom.tris().push_back({3, 4, 5});
+    
+    node.setGeometry(newGeom);
+    
+    // Verify metadata was updated
+    int newVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    int newTris = std::any_cast<int>(node.getMetadata("num_triangles"));
+    
+    EXPECT_EQ(newVerts, 10);
+    EXPECT_EQ(newTris, 2);
+}
+
+// Test that all bounding box metadata is read-only in state
+TEST_F(GraphicsNodeTest, AllBBoxMetadataReadOnly) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("bbox_readonly_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    // Verify all bbox metadata is read-only
+    EXPECT_TRUE(metadataState("bbox_min_x").readOnly());
+    EXPECT_TRUE(metadataState("bbox_min_y").readOnly());
+    EXPECT_TRUE(metadataState("bbox_min_z").readOnly());
+    EXPECT_TRUE(metadataState("bbox_max_x").readOnly());
+    EXPECT_TRUE(metadataState("bbox_max_y").readOnly());
+    EXPECT_TRUE(metadataState("bbox_max_z").readOnly());
+}
+
+// Test that all extent metadata is read-only in state
+TEST_F(GraphicsNodeTest, AllExtentMetadataReadOnly) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("extent_readonly_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    // Verify all extent metadata is read-only
+    EXPECT_TRUE(metadataState("extent_x").readOnly());
+    EXPECT_TRUE(metadataState("extent_y").readOnly());
+    EXPECT_TRUE(metadataState("extent_z").readOnly());
+}
+
+// Test that all center metadata is read-only in state
+TEST_F(GraphicsNodeTest, AllCenterMetadataReadOnly) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("center_readonly_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    // Verify all center metadata is read-only
+    EXPECT_TRUE(metadataState("center_x").readOnly());
+    EXPECT_TRUE(metadataState("center_y").readOnly());
+    EXPECT_TRUE(metadataState("center_z").readOnly());
+}
+
+// Test that num_quads metadata is computed and read-only
+TEST_F(GraphicsNodeTest, NumQuadsMetadataReadOnly) {
+    GraphicsNode node("quad_node");
+    
+    // Create geometry with quads
+    cvc::geometry quadGeom;
+    quadGeom.points().push_back({0.0, 0.0, 0.0});
+    quadGeom.points().push_back({1.0, 0.0, 0.0});
+    quadGeom.points().push_back({1.0, 1.0, 0.0});
+    quadGeom.points().push_back({0.0, 1.0, 0.0});
+    quadGeom.quads().push_back({0, 1, 2, 3});
+    
+    node.setGeometry(quadGeom);
+    
+    // Verify metadata exists
+    EXPECT_TRUE(node.hasMetadata("num_quads"));
+    int numQuads = std::any_cast<int>(node.getMetadata("num_quads"));
+    EXPECT_EQ(numQuads, 1);
+    
+    // Sync to state and verify read-only
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("quads_readonly_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("quad_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    EXPECT_TRUE(metadataState("num_quads").readOnly());
+}
+
+// Test that attempting to modify read-only metadata throws exception
+TEST_F(GraphicsNodeTest, ModifyingReadOnlyMetadataThrows) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("readonly_modify_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    // Attempting to modify read-only metadata should throw
+    EXPECT_THROW({
+        metadataState("num_vertices").value(999);
+    }, cvc::read_only_error);
+    
+    EXPECT_THROW({
+        metadataState("bbox_min_x").value(123.456);
+    }, cvc::read_only_error);
+    
+    EXPECT_THROW({
+        metadataState("type").value("modified");
+    }, cvc::read_only_error);
+}
+
+// Test metadata recalculation after data change updates all read-only fields
+TEST_F(GraphicsNodeTest, DataChangeUpdatesAllReadOnlyMetadata) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("recalc_test");
+    node.syncToState(testState);
+    node.syncFromState(testState);
+    
+    // Get initial metadata values - use try/catch for safe casting
+    int initialVerts = 0;
+    double initialExtentX = 0.0;
+    try {
+        initialVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    } catch (...) {
+        // Metadata might not be set yet
+    }
+    try {
+        initialExtentX = std::any_cast<double>(node.getMetadata("extent_x"));
+    } catch (...) {
+        // Metadata might not be set yet
+    }
+    
+    // Create new geometry with different properties
+    cvc::geometry newGeom;
+    newGeom.points().push_back({0.0, 0.0, 0.0});
+    newGeom.points().push_back({5.0, 0.0, 0.0});
+    newGeom.points().push_back({5.0, 5.0, 0.0});
+    newGeom.points().push_back({0.0, 5.0, 0.0});
+    newGeom.tris().push_back({0, 1, 2});
+    newGeom.tris().push_back({0, 2, 3});
+    
+    // Update state data (triggers onDataChanged)
+    testState("test_node").data(newGeom);
+    
+    // Verify all metadata was updated - metadata should now exist
+    EXPECT_TRUE(node.hasMetadata("num_vertices"));
+    EXPECT_TRUE(node.hasMetadata("num_triangles"));
+    EXPECT_TRUE(node.hasMetadata("extent_x"));
+    EXPECT_TRUE(node.hasMetadata("extent_y"));
+    EXPECT_TRUE(node.hasMetadata("center_x"));
+    EXPECT_TRUE(node.hasMetadata("center_y"));
+    
+    int newVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    int newTris = std::any_cast<int>(node.getMetadata("num_triangles"));
+    double newExtentX = std::any_cast<double>(node.getMetadata("extent_x"));
+    double newExtentY = std::any_cast<double>(node.getMetadata("extent_y"));
+    double newCenterX = std::any_cast<double>(node.getMetadata("center_x"));
+    double newCenterY = std::any_cast<double>(node.getMetadata("center_y"));
+    
+    EXPECT_EQ(newVerts, 4);
+    EXPECT_EQ(newTris, 2);
+    EXPECT_DOUBLE_EQ(newExtentX, 5.0);
+    EXPECT_DOUBLE_EQ(newExtentY, 5.0);
+    EXPECT_DOUBLE_EQ(newCenterX, 2.5);
+    EXPECT_DOUBLE_EQ(newCenterY, 2.5);
+    
+    // Verify values changed from initial (if initial had values)
+    if (initialVerts > 0) {
+        EXPECT_NE(initialVerts, newVerts);
+    }
+    if (initialExtentX > 0.0) {
+        EXPECT_NE(initialExtentX, newExtentX);
+    }
+}
+
+// Test that empty geometry produces zero metadata
+TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
+    GraphicsNode node("empty_node");
+    
+    cvc::geometry emptyGeom;
+    node.setGeometry(emptyGeom);
+    
+    // Verify metadata for empty geometry
+    EXPECT_TRUE(node.hasMetadata("num_vertices"));
+    EXPECT_TRUE(node.hasMetadata("num_triangles"));
+    
+    int numVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    int numTris = std::any_cast<int>(node.getMetadata("num_triangles"));
+    
+    EXPECT_EQ(numVerts, 0);
+    EXPECT_EQ(numTris, 0);
+}
+
+// Test geometry with normals and colors preserves metadata
+TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
+    GraphicsNode node("colored_node");
+    
+    cvc::geometry coloredGeom;
+    coloredGeom.points().push_back({0.0, 0.0, 0.0});
+    coloredGeom.points().push_back({1.0, 0.0, 0.0});
+    coloredGeom.points().push_back({0.0, 1.0, 0.0});
+    coloredGeom.tris().push_back({0, 1, 2});
+    
+    // Add normals
+    coloredGeom.normals().push_back({0.0, 0.0, 1.0});
+    coloredGeom.normals().push_back({0.0, 0.0, 1.0});
+    coloredGeom.normals().push_back({0.0, 0.0, 1.0});
+    
+    // Add colors
+    coloredGeom.colors().push_back({1.0, 0.0, 0.0});
+    coloredGeom.colors().push_back({0.0, 1.0, 0.0});
+    coloredGeom.colors().push_back({0.0, 0.0, 1.0});
+    
+    node.setGeometry(coloredGeom);
+    
+    // Metadata should still be computed correctly
+    EXPECT_TRUE(node.hasMetadata("num_vertices"));
+    int numVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
+    EXPECT_EQ(numVerts, 3);
+}
+
+// Test that state objects have comments
+TEST_F(GraphicsNodeTest, StateCommentsSet) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("comments_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    
+    // Verify main node has comment
+    std::string nodeComment = nodeState.comment();
+    EXPECT_FALSE(nodeComment.empty());
+    EXPECT_NE(nodeComment.find("Graphics object"), std::string::npos);
+    
+    // Verify transform has comment
+    std::string transformComment = nodeState("transform").comment();
+    EXPECT_FALSE(transformComment.empty());
+    EXPECT_NE(transformComment.find("transformation matrix"), std::string::npos);
+    
+    // Verify metadata container has comment
+    std::string metadataComment = nodeState("metadata").comment();
+    EXPECT_FALSE(metadataComment.empty());
+    EXPECT_NE(metadataComment.find("geometry statistics"), std::string::npos);
+    
+    // Verify specific metadata fields have comments
+    cvc::state& metadataState = nodeState("metadata");
+    
+    std::string numVertsComment = metadataState("num_vertices").comment();
+    EXPECT_FALSE(numVertsComment.empty());
+    EXPECT_NE(numVertsComment.find("vertices"), std::string::npos);
+    
+    std::string bboxComment = metadataState("bbox_min_x").comment();
+    EXPECT_FALSE(bboxComment.empty());
+    EXPECT_NE(bboxComment.find("bounding box"), std::string::npos);
+    
+    std::string extentComment = metadataState("extent_x").comment();
+    EXPECT_FALSE(extentComment.empty());
+    EXPECT_NE(extentComment.find("Width"), std::string::npos);
+    
+    std::string centerComment = metadataState("center_x").comment();
+    EXPECT_FALSE(centerComment.empty());
+    EXPECT_NE(centerComment.find("center"), std::string::npos);
+    
+    std::string typeComment = metadataState("type").comment();
+    EXPECT_FALSE(typeComment.empty());
+    EXPECT_NE(typeComment.find("Geometry type"), std::string::npos);
+}
+
+// Test that comments persist after data changes
+TEST_F(GraphicsNodeTest, CommentsPersistAfterDataChange) {
+    GraphicsNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("comments_persist_test");
+    node.syncToState(testState);
+    node.syncFromState(testState);
+    
+    // Get initial comment
+    std::string initialComment = testState("test_node")("metadata")("num_vertices").comment();
+    EXPECT_FALSE(initialComment.empty());
+    
+    // Create new geometry and trigger data change
+    cvc::geometry newGeom;
+    newGeom.points().push_back({0.0, 0.0, 0.0});
+    newGeom.points().push_back({1.0, 0.0, 0.0});
+    newGeom.tris().push_back({0, 1, 2});
+    
+    testState("test_node").data(newGeom);
+    
+    // Verify comment still exists after data change
+    std::string updatedComment = testState("test_node")("metadata")("num_vertices").comment();
+    EXPECT_FALSE(updatedComment.empty());
+    EXPECT_EQ(initialComment, updatedComment);
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

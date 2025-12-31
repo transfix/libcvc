@@ -382,11 +382,14 @@ void MainWindow::openGeometry()
             QFileInfo fileInfo(fileName);
             std::string baseName = fileInfo.baseName().toStdString();
             
+            // Sanitize the base name to conform to C identifier rules
+            std::string sanitizedName = cvc::state::sanitizeStateName(baseName);
+            
             // Create unique name if needed
-            std::string graphicsName = baseName;
+            std::string graphicsName = sanitizedName;
             int counter = 1;
             while (m_sceneGraph->getGraphics(graphicsName)) {
-                graphicsName = baseName + "_" + std::to_string(counter++);
+                graphicsName = sanitizedName + "_" + std::to_string(counter++);
             }
             
             // Create graphics node
