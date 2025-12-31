@@ -114,31 +114,6 @@ TEST_F(AppStateTest, TransferFunctionOpacityTable) {
     }
 }
 
-TEST_F(AppStateTest, GeometryStorage) {
-    // Create a simple geometry
-    cvc::geometry geom;
-    geom.points().push_back({0.0, 0.0, 0.0});
-    geom.points().push_back({1.0, 0.0, 0.0});
-    geom.points().push_back({0.0, 1.0, 0.0});
-    
-    state->setGeometry(geom);
-    
-    auto retrieved = state->geometry();
-    EXPECT_EQ(retrieved.points().size(), size_t(3));
-}
-
-TEST_F(AppStateTest, VolumeStorage) {
-    // Create a simple volume
-    cvc::volume vol(cvc::dimension(2, 2, 2), cvc::UChar);
-    
-    state->setVolume(vol);
-    
-    auto retrieved = state->volume();
-    EXPECT_EQ(retrieved.XDim(), size_t(2));
-    EXPECT_EQ(retrieved.YDim(), size_t(2));
-    EXPECT_EQ(retrieved.ZDim(), size_t(2));
-}
-
 // ===========================
 // State Tree Tests
 // ===========================
@@ -388,45 +363,6 @@ TEST_F(AppStateTest, AxisVisibilityChangedCallback) {
     connection.disconnect();
 }
 
-TEST_F(AppStateTest, GeometryChangedCallback) {
-    int callback_count = 0;
-    
-    auto connection = state->onGeometryChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Clear geometry_changed flag first
-    auto& stateTree = state->getRootState();
-    stateTree("geometry_changed").value(false);
-    
-    cvc::geometry geom;
-    geom.points().push_back({0.0, 0.0, 0.0});
-    state->setGeometry(geom);
-    
-    EXPECT_GT(callback_count, 0);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, VolumeChangedCallback) {
-    int callback_count = 0;
-    
-    auto connection = state->onVolumeChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Clear volume_changed flag first
-    auto& stateTree = state->getRootState();
-    stateTree("volume_changed").value(false);
-    
-    cvc::volume vol(cvc::dimension(2, 2, 2), cvc::UChar);
-    state->setVolume(vol);
-    
-    EXPECT_GT(callback_count, 0);
-    
-    connection.disconnect();
-}
-
 TEST_F(AppStateTest, MultipleCallbacksForSameState) {
     int callback1_count = 0;
     int callback2_count = 0;
@@ -565,30 +501,6 @@ TEST_F(AppStateTest, GridColor) {
     EXPECT_DOUBLE_EQ(b, 0.4);
 }
 
-TEST_F(AppStateTest, GeometryBBoxColor) {
-    // Set geometry bbox color
-    state->setGeometryBBoxColor(1.0, 0.0, 0.5);
-    
-    // Read back
-    double r, g, b;
-    state->getGeometryBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 0.0);
-    EXPECT_DOUBLE_EQ(b, 0.5);
-}
-
-TEST_F(AppStateTest, VolumeBBoxColor) {
-    // Set volume bbox color
-    state->setVolumeBBoxColor(0.2, 0.9, 0.7);
-    
-    // Read back
-    double r, g, b;
-    state->getVolumeBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.2);
-    EXPECT_DOUBLE_EQ(g, 0.9);
-    EXPECT_DOUBLE_EQ(b, 0.7);
-}
-
 TEST_F(AppStateTest, StateTreeGridColor) {
     // Set via state tree
     auto& stateTree = state->getRootState();
@@ -602,34 +514,10 @@ TEST_F(AppStateTest, StateTreeGridColor) {
     EXPECT_DOUBLE_EQ(b, 0.3);
 }
 
-TEST_F(AppStateTest, StateTreeGeometryBBoxColor) {
-    // Set via AppState
-    state->setGeometryBBoxColor(0.7, 0.8, 0.9);
-    
-    // Verify in state tree
-    auto& stateTree = state->getRootState();
-    std::string colorStr = stateTree("geometry_bbox_color").value<std::string>();
-    // Check individual components due to floating point representation
-    EXPECT_TRUE(colorStr.find("0.7") != std::string::npos || 
-                colorStr.find("0.69999") != std::string::npos);
-}
-
-TEST_F(AppStateTest, StateTreeVolumeBBoxColor) {
-    // Set via AppState
-    state->setVolumeBBoxColor(0.25, 0.5, 0.75);
-    
-    // Verify in state tree
-    auto& stateTree = state->getRootState();
-    std::string colorStr = stateTree("volume_bbox_color").value<std::string>();
-    EXPECT_EQ(colorStr, "0.25,0.5,0.75");
-}
-
 TEST_F(AppStateTest, ColorDefaultValues) {
     // Reset to default values first
     auto& stateTree = state->getRootState();
     stateTree("grid_color").value("0.5,0.5,0.5");
-    stateTree("geometry_bbox_color").value("0.0,1.0,0.0");
-    stateTree("volume_bbox_color").value("1.0,0.0,1.0");
     
     // Test default values from fresh state
     double r, g, b;
@@ -639,18 +527,6 @@ TEST_F(AppStateTest, ColorDefaultValues) {
     EXPECT_DOUBLE_EQ(r, 0.5);
     EXPECT_DOUBLE_EQ(g, 0.5);
     EXPECT_DOUBLE_EQ(b, 0.5);
-    
-    // Geometry bbox should default to green
-    state->getGeometryBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-    
-    // Volume bbox should default to magenta
-    state->getVolumeBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 0.0);
-    EXPECT_DOUBLE_EQ(b, 1.0);
 }
 
 TEST_F(AppStateTest, GridColorChangedCallback) {
@@ -672,36 +548,6 @@ TEST_F(AppStateTest, GridColorChangedCallback) {
     connection.disconnect();
 }
 
-TEST_F(AppStateTest, GeometryBBoxColorChangedCallback) {
-    int callback_count = 0;
-    
-    auto connection = state->onGeometryBBoxColorChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Trigger color change
-    state->setGeometryBBoxColor(0.3, 0.6, 0.9);
-    EXPECT_GT(callback_count, 0);
-    
-    // Cleanup
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, VolumeBBoxColorChangedCallback) {
-    int callback_count = 0;
-    
-    auto connection = state->onVolumeBBoxColorChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Trigger color change
-    state->setVolumeBBoxColor(0.9, 0.6, 0.3);
-    EXPECT_GT(callback_count, 0);
-    
-    // Cleanup
-    connection.disconnect();
-}
-
 TEST_F(AppStateTest, ColorBoundaryValues) {
     // Test with boundary values (0.0 and 1.0)
     state->setGridColor(0.0, 1.0, 0.0);
@@ -711,20 +557,6 @@ TEST_F(AppStateTest, ColorBoundaryValues) {
     EXPECT_DOUBLE_EQ(r, 0.0);
     EXPECT_DOUBLE_EQ(g, 1.0);
     EXPECT_DOUBLE_EQ(b, 0.0);
-    
-    // Test all zeros
-    state->setVolumeBBoxColor(0.0, 0.0, 0.0);
-    state->getVolumeBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 0.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-    
-    // Test all ones
-    state->setGeometryBBoxColor(1.0, 1.0, 1.0);
-    state->getGeometryBBoxColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 1.0);
 }
 
 // ===========================

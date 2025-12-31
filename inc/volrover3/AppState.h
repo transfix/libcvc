@@ -22,12 +22,6 @@ public:
     std::string getStatePrefix() const { return m_statePrefix; }
     
     // State accessors with change notification
-    cvc::geometry geometry();
-    void setGeometry(const cvc::geometry& geom);
-    
-    cvc::volume volume();
-    void setVolume(const cvc::volume& vol);
-    
     cvc::bounding_box worldBounds();
     void setWorldBounds(const cvc::bounding_box& bounds);
     
@@ -43,12 +37,6 @@ public:
     
     bool axisVisible();
     void setAxisVisible(bool visible);
-    
-    bool geometryBBoxVisible();
-    void setGeometryBBoxVisible(bool visible);
-    
-    bool volumeBBoxVisible();
-    void setVolumeBBoxVisible(bool visible);
     
     // Grid plane visibility (individual planes)
     bool gridYZPlaneVisible();
@@ -92,25 +80,6 @@ public:
     
     int gridTickLabelFontSize();
     void setGridTickLabelFontSize(int size);
-    
-    void getGeometryBBoxColor(double& r, double& g, double& b);
-    void setGeometryBBoxColor(double r, double g, double b);
-    
-    void getVolumeBBoxColor(double& r, double& g, double& b);
-    void setVolumeBBoxColor(double r, double g, double b);
-    
-    // Volume BBox tick controls
-    bool volumeBBoxTicksVisible();
-    void setVolumeBBoxTicksVisible(bool visible);
-    
-    double volumeBBoxTickInterval();
-    void setVolumeBBoxTickInterval(double interval);
-    
-    void getVolumeBBoxTickLabelColor(double& r, double& g, double& b);
-    void setVolumeBBoxTickLabelColor(double r, double g, double b);
-    
-    int volumeBBoxTickLabelFontSize();
-    void setVolumeBBoxTickLabelFontSize(int size);
     
     // World BBox coordinate controls (no interval - shows at vertices only)
     bool worldBBoxCoordinatesVisible();
@@ -175,24 +144,13 @@ public:
     std::vector<double> transferFunctionOpacityTable();
     void setTransferFunctionOpacityTable(const std::vector<double>& table);
     
-    // Get shared pointers to data (for direct access)
-    std::shared_ptr<cvc::geometry> geometryPtr();
-    std::shared_ptr<cvc::volume> volumePtr();
-    
     // Register callbacks for state changes
     // Returns a connection object that can be used to disconnect the callback
-    boost::signals2::connection onGeometryChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onVolumeChanged(const boost::function<void()>& callback);
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
     boost::signals2::connection onWorldBBoxVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onVolumeBBoxVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridColorChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGeometryBBoxColorChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onVolumeBBoxColorChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onVolumeBBoxTicksChanged(const boost::function<void()>& callback);
     boost::signals2::connection onWorldBBoxCoordinatesChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridPlaneVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridDivisionsChanged(const boost::function<void()>& callback);

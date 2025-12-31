@@ -123,3 +123,10 @@ void VTKRenderWidget::resetCamera()
         renderWindow()->Render();
     }
 }
+
+void VTKRenderWidget::render()
+{
+    if (renderWindow()) {
+        renderWindow()->Render();
+    }
+}

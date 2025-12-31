@@ -44,11 +44,11 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     
     AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
     m_worldBBoxNode->setColor(1.0, 1.0, 1.0); // White for world bbox
-    m_worldBBoxNode->setTickLabelColor(r, g, b);
-    m_worldBBoxNode->setTickLabelFontSize(AppState::instance().worldBBoxCoordinateFontSize());
-    m_worldBBoxNode->setTickInterval(0.0); // No interval - only show at vertices
-    m_worldBBoxNode->setTicksVisible(AppState::instance().worldBBoxCoordinatesVisible());
-    m_worldBBoxNode->setVisible(false); // Hidden by default
+    m_worldBBoxNode->setCoordinateLabelColor(r, g, b);
+    m_worldBBoxNode->setCoordinateLabelFontSize(AppState::instance().worldBBoxCoordinateFontSize());
+    m_worldBBoxNode->setCoordinatesVisible(AppState::instance().worldBBoxCoordinatesVisible());
+    // Set bbox visibility from AppState before renderer is attached
+    m_worldBBoxNode->setVisible(AppState::instance().worldBBoxVisible());
 }
 
 SceneGraph::~SceneGraph()
@@ -179,10 +179,9 @@ void SceneGraph::updateWorldBBox(const cvc::bounding_box& bounds)
 
 void SceneGraph::setWorldBBoxCoordinates(bool visible, double r, double g, double b, int fontSize)
 {
-    m_worldBBoxNode->setTicksVisible(visible);
-    m_worldBBoxNode->setTickInterval(0.0); // No interval - only vertices
-    m_worldBBoxNode->setTickLabelColor(r, g, b);
-    m_worldBBoxNode->setTickLabelFontSize(fontSize);
+    m_worldBBoxNode->setCoordinatesVisible(visible);
+    m_worldBBoxNode->setCoordinateLabelColor(r, g, b);
+    m_worldBBoxNode->setCoordinateLabelFontSize(fontSize);
 }
 
 void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,

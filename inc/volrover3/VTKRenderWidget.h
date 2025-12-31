@@ -30,6 +30,7 @@ public:
 
     void setSceneGraph(std::shared_ptr<SceneGraph> sceneGraph);
     void resetCamera();
+    void render();  // Force an immediate render
     
     CameraController* getCameraController() { return m_cameraController.get(); }
 

@@ -73,16 +73,6 @@ TEST_F(SceneGraphTest, ShowHideAxes) {
     SUCCEED();
 }
 
-TEST_F(SceneGraphTest, ShowHideBoundingBox) {
-    sceneGraph->setVolumeBBoxVisible(true);
-    // Bounding box should be created and visible
-    
-    sceneGraph->setVolumeBBoxVisible(false);
-    // Bounding box should be hidden
-    
-    SUCCEED();
-}
-
 TEST_F(SceneGraphTest, UpdateBoundingBox) {
     cvc::bounding_box bounds;
     bounds.setMin(-1.0, -1.0, -1.0);
@@ -124,7 +114,6 @@ TEST_F(SceneGraphTest, MultipleUpdates) {
     
     sceneGraph->setGridVisible(true);
     sceneGraph->setAxisVisible(true);
-    sceneGraph->setVolumeBBoxVisible(true);
     
     // Camera reset would be done externally
     
@@ -142,7 +131,6 @@ TEST_F(SceneGraphTest, VisibilityStateTree) {
     // Set visibility via scene graph
     sceneGraph->setGridVisible(true);
     sceneGraph->setAxisVisible(false);
-    sceneGraph->setVolumeBBoxVisible(true);
     
     // These don't save to AppState automatically
     // In actual usage, MainWindow coordinates between SceneGraph and AppState
@@ -190,52 +178,6 @@ TEST_F(SceneGraphTest, GridColorUpdate) {
     
     // Verify color was applied (we can't directly inspect VTK properties
     // in these tests without a renderer, but we verify it doesn't crash)
-    SUCCEED();
-}
-
-TEST_F(SceneGraphTest, GeometryBBoxColorUpdate) {
-    // Set geometry bbox color
-    sceneGraph->setGeometryBBoxColor(0.2, 0.8, 0.3);
-    
-    SUCCEED();
-}
-
-TEST_F(SceneGraphTest, VolumeBBoxColorUpdate) {
-    // Set volume bbox color
-    sceneGraph->setVolumeBBoxColor(0.7, 0.4, 0.9);
-    
-    SUCCEED();
-}
-
-TEST_F(SceneGraphTest, ColorFromAppState) {
-    // Set colors in AppState
-    appState->setGridColor(0.1, 0.2, 0.3);
-    appState->setGeometryBBoxColor(0.4, 0.5, 0.6);
-    appState->setVolumeBBoxColor(0.7, 0.8, 0.9);
-    
-    // Apply to scene graph
-    double r, g, b;
-    appState->getGridColor(r, g, b);
-    sceneGraph->setGridColor(r, g, b);
-    
-    appState->getGeometryBBoxColor(r, g, b);
-    sceneGraph->setGeometryBBoxColor(r, g, b);
-    
-    appState->getVolumeBBoxColor(r, g, b);
-    sceneGraph->setVolumeBBoxColor(r, g, b);
-    
-    SUCCEED();
-}
-
-TEST_F(SceneGraphTest, MultipleColorUpdates) {
-    // Update colors multiple times
-    for (int i = 0; i < 5; i++) {
-        double val = i * 0.2;
-        sceneGraph->setGridColor(val, val, val);
-        sceneGraph->setGeometryBBoxColor(1.0 - val, val, 0.5);
-        sceneGraph->setVolumeBBoxColor(val, 0.5, 1.0 - val);
-    }
-    
     SUCCEED();
 }
 
@@ -317,8 +259,6 @@ TEST_F(SceneGraphTest, GridAndAxisUpdateTogether) {
 TEST_F(SceneGraphTest, ColorAndBoundsIntegration) {
     // Test setting both colors and bounds together
     appState->setGridColor(0.5, 0.5, 0.5);
-    appState->setGeometryBBoxColor(0.0, 1.0, 0.0);
-    appState->setVolumeBBoxColor(1.0, 0.0, 1.0);
     
     double r, g, b;
     appState->getGridColor(r, g, b);
@@ -328,29 +268,5 @@ TEST_F(SceneGraphTest, ColorAndBoundsIntegration) {
     sceneGraph->updateGrid(bounds);
     
     SUCCEED();
-}
-
-TEST_F(SceneGraphTest, StateTreeColorPropagation) {
-    // Set colors via state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
-    stateTree("grid_color").value("0.3,0.3,0.3");
-    stateTree("geometry_bbox_color").value("1.0,1.0,0.0");
-    stateTree("volume_bbox_color").value("0.0,1.0,1.0");
-    
-    // Read via AppState and apply to SceneGraph
-    double r, g, b;
-    appState->getGridColor(r, g, b);
-    sceneGraph->setGridColor(r, g, b);
-    
-    EXPECT_DOUBLE_EQ(r, 0.3);
-    EXPECT_DOUBLE_EQ(g, 0.3);
-    EXPECT_DOUBLE_EQ(b, 0.3);
-    
-    appState->getGeometryBBoxColor(r, g, b);
-    sceneGraph->setGeometryBBoxColor(r, g, b);
-    
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
 }
 

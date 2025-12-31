@@ -23,6 +23,7 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
+#include <QCloseEvent>
 #include <cvc/geometry_file_io.h>
 #include <cvc/volume_file_io.h>
 #include <cvc/app.h>
@@ -68,24 +69,20 @@ MainWindow::MainWindow(QWidget *parent)
     m_sceneGraph->updateGrid(AppState::instance().worldBounds());
     m_sceneGraph->updateWorldBBox(AppState::instance().worldBounds());
     
+    // Initialize world bbox visibility and coordinates from AppState
+    m_sceneGraph->setWorldBBoxVisible(AppState::instance().worldBBoxVisible());
+    double r, g, b;
+    AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
+    m_sceneGraph->setWorldBBoxCoordinates(
+        AppState::instance().worldBBoxCoordinatesVisible(),
+        r, g, b,
+        AppState::instance().worldBBoxCoordinateFontSize()
+    );
+    
+    // Initial sync of graphics from state tree (in case state was loaded before)
+    m_sceneGraph->syncGraphicsFromState();
+    
     // Connect to state changes
-    AppState::instance().onGeometryChanged([this]() {
-        m_sceneGraph->setGeometry(AppState::instance().geometry());
-        m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-        m_renderWidget->update();
-    });
-    
-    AppState::instance().onVolumeChanged([this]() {
-        cvc::volume vol = AppState::instance().volume();
-        m_sceneGraph->setVolume(vol);
-        m_transferFunctionWidget->setDataRange(vol.min(), vol.max());
-        
-        // Don't change grid divisions when loading volumes
-        // Let user control grid manually
-        m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-        m_renderWidget->update();
-    });
-    
     AppState::instance().onWorldBoundsChanged([this]() {
         cvc::bounding_box bounds = AppState::instance().worldBounds();
         
@@ -105,19 +102,19 @@ MainWindow::MainWindow(QWidget *parent)
             );
         }
         
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onGridVisibilityChanged([this]() {
         m_gridVisible = AppState::instance().gridVisible();
         m_sceneGraph->setGridVisible(m_gridVisible);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onAxisVisibilityChanged([this]() {
         m_axisVisible = AppState::instance().axisVisible();
         m_sceneGraph->setAxisVisible(m_axisVisible);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     // Connect color state changes to update rendering
@@ -125,7 +122,7 @@ MainWindow::MainWindow(QWidget *parent)
         double r, g, b;
         AppState::instance().getGridColor(r, g, b);
         m_sceneGraph->setGridColor(r, g, b);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onWorldBBoxCoordinatesChanged([this]() {
@@ -136,12 +133,12 @@ MainWindow::MainWindow(QWidget *parent)
             r, g, b,
             AppState::instance().worldBBoxCoordinateFontSize()
         );
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onWorldBBoxVisibilityChanged([this]() {
         m_sceneGraph->setWorldBBoxVisible(AppState::instance().worldBBoxVisible());
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     // Connect grid plane visibility and divisions changes
@@ -150,27 +147,27 @@ MainWindow::MainWindow(QWidget *parent)
         bool xz = AppState::instance().gridXZPlaneVisible();
         bool xy = AppState::instance().gridXYPlaneVisible();
         m_sceneGraph->setGridPlaneVisibility(yz, xz, xy);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onGridDivisionsChanged([this]() {
         int x, y, z;
         AppState::instance().getGridDivisions(x, y, z);
         m_sceneGraph->setGridDivisions(x, y, z);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onGridTickIntervalsChanged([this]() {
         int x, y, z;
         AppState::instance().getGridTickIntervals(x, y, z);
         m_sceneGraph->setGridTickIntervals(x, y, z);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     // Add callback for grid ticks visibility changes
     AppState::instance().onGridTicksVisibleChanged([this]() {
         m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onGridPlaneColorsChanged([this]() {
@@ -179,7 +176,7 @@ MainWindow::MainWindow(QWidget *parent)
         AppState::instance().getGridXZPlaneColor(xzR, xzG, xzB);
         AppState::instance().getGridXYPlaneColor(xyR, xyG, xyB);
         m_sceneGraph->setGridPlaneColors(yzR, yzG, yzB, xzR, xzG, xzB, xyR, xyG, xyB);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     AppState::instance().onGridTickLabelPropertiesChanged([this]() {
@@ -187,7 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
         AppState::instance().getGridTickLabelColor(r, g, b);
         int fontSize = AppState::instance().gridTickLabelFontSize();
         m_sceneGraph->setGridTickLabelProperties(r, g, b, fontSize);
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     // Connect camera state changes to update rendering
@@ -200,7 +197,7 @@ MainWindow::MainWindow(QWidget *parent)
             AppState::instance().getCameraUpVector(up[0], up[1], up[2]);
             fov = AppState::instance().cameraFieldOfView();
             camCtrl->setCameraState(pos, dir, up, fov);
-            m_renderWidget->update();
+            m_renderWidget->render();
         }
     });
     
@@ -209,7 +206,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_sceneGraph->updateTransferFunction(
             AppState::instance().transferFunctionColorTable(),
             AppState::instance().transferFunctionOpacityTable());
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     // Initialize camera settings from AppState
@@ -228,6 +225,20 @@ MainWindow::~MainWindow()
         conn.disconnect();
     }
     m_connections.clear();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // Close all child windows when main window is closing
+    if (m_threadMonitor) {
+        m_threadMonitor->close();
+    }
+    if (m_stateTreeWidget) {
+        m_stateTreeWidget->close();
+    }
+    
+    // Accept the close event
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::createMenus()
@@ -415,7 +426,7 @@ void MainWindow::openGeometry()
     }
     
     // Update render
-    m_renderWidget->update();
+    m_renderWidget->render();
     
     // Show status message
     if (successCount > 0) {
@@ -524,7 +535,7 @@ void MainWindow::openVolume()
     }
     
     // Update render
-    m_renderWidget->update();
+    m_renderWidget->render();
     
     // Show status message
     if (successCount > 0) {
@@ -595,7 +606,7 @@ void MainWindow::editCameraSettings()
             bounds.minx, bounds.miny, bounds.minz,
             bounds.maxx, bounds.maxy, bounds.maxz
         );
-        m_renderWidget->update();
+        m_renderWidget->render();
     });
     
     if (dialog.exec() == QDialog::Accepted) {
@@ -636,7 +647,7 @@ void MainWindow::editCameraSettings()
             camCtrl->setOrbitCenter(cx, cy, cz);
         }
         
-        m_renderWidget->update();
+        m_renderWidget->render();
     }
 }
 
@@ -691,8 +702,8 @@ void MainWindow::showStateTree()
             m_sceneGraph->syncGraphicsFromState();
             // Update all graphics nodes
             m_sceneGraph->update();
-            // Refresh render
-            m_renderWidget->update();
+            // Force immediate render
+            m_renderWidget->render();
         });
     }
     

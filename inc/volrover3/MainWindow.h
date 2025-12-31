@@ -36,6 +36,9 @@ private slots:
     void aboutVolRover();
     void updateThreadStatus();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private:
     void createMenus();
     void createDockWidgets();

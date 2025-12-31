@@ -22,6 +22,7 @@ CameraController::CameraController()
     , m_keyStrafeRight(Qt::Key_D)
     , m_keyUp(Qt::Key_Space)
     , m_keyDown(Qt::Key_Control)
+    , m_updatingFromAppState(false)
 {
     m_position[0] = 0.0;
     m_position[1] = 0.0;
@@ -115,6 +116,9 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
 {
     if (!m_camera) return;
     
+    // Guard against feedback loops - if we're updating from AppState, don't save back
+    m_updatingFromAppState = true;
+    
     // Update internal position state
     m_position[0] = pos[0];
     m_position[1] = pos[1];
@@ -137,8 +141,7 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
     // Set field of view
     m_camera->SetViewAngle(fov);
     
-    // Save to AppState for state tree synchronization
-    saveCameraStateToAppState();
+    m_updatingFromAppState = false;
 }
 
 void CameraController::applyCameraToVTK()
@@ -279,6 +282,9 @@ void CameraController::updateOrientation()
 void CameraController::saveCameraStateToAppState()
 {
     if (!m_camera) return;
+    
+    // Don't save if we're currently updating from AppState (prevents feedback loop)
+    if (m_updatingFromAppState) return;
     
     double pos[3], dir[3], up[3], fov;
     getCameraState(pos, dir, up, fov);

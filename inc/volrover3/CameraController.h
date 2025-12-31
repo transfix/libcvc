@@ -85,6 +85,9 @@ private:
     int m_keyStrafeRight;
     int m_keyUp;
     int m_keyDown;
+    
+    // Guard flag to prevent feedback loops
+    bool m_updatingFromAppState;
 };
 
 #endif // CAMERACONTROLLER_H
