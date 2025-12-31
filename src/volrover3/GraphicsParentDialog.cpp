@@ -1,5 +1,6 @@
 #include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/GraphicsNode.h>
+#include <volrover3/VolumeNode.h>
 #include <volrover3/SceneGraph.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -69,6 +70,14 @@ void GraphicsParentDialog::populateParentList()
         }
     }
     
+    // Add all volume graphics nodes hierarchically
+    auto volumeGraphicsRoot = m_sceneGraph->getVolumeGraphicsRoot();
+    if (volumeGraphicsRoot) {
+        for (const auto& child : volumeGraphicsRoot->getGraphicsChildren()) {
+            addVolumeNodeToList(child, 0);
+        }
+    }
+    
     // Select root by default
     m_parentComboBox->setCurrentIndex(0);
 }
@@ -77,16 +86,36 @@ void GraphicsParentDialog::addNodeToList(std::shared_ptr<GraphicsNode> node, int
 {
     if (!node) return;
     
-    // Create indented display name
+    // Create indented display name with icon
     QString indent(depth * 2, ' ');
-    QString displayName = indent + QString::fromStdString(node->getName());
+    QString displayName = indent + "📦 Geometry: " + QString::fromStdString(node->getName());
     
-    // Add to combo box with node name as data
-    m_parentComboBox->addItem(displayName, QVariant(QString::fromStdString(node->getName())));
+    // Add to combo box with node name as data (prefixed with "geom:")
+    m_parentComboBox->addItem(displayName, QVariant(QString::fromStdString("geom:" + node->getName())));
     
     // Recursively add children
     for (const auto& child : node->getGraphicsChildren()) {
         addNodeToList(child, depth + 1);
+    }
+}
+
+void GraphicsParentDialog::addVolumeNodeToList(std::shared_ptr<GraphicsNode> node, int depth)
+{
+    if (!node) return;
+    
+    // Check if this is actually a VolumeNode
+    if (auto volNode = std::dynamic_pointer_cast<VolumeNode>(node)) {
+        // Create indented display name with icon
+        QString indent(depth * 2, ' ');
+        QString displayName = indent + "🔲 Volume: " + QString::fromStdString(volNode->getName());
+        
+        // Add to combo box with node name as data (prefixed with "vol:")
+        m_parentComboBox->addItem(displayName, QVariant(QString::fromStdString("vol:" + volNode->getName())));
+    }
+    
+    // Recursively add children
+    for (const auto& child : node->getGraphicsChildren()) {
+        addVolumeNodeToList(child, depth + 1);
     }
 }
 
@@ -102,5 +131,34 @@ std::shared_ptr<GraphicsNode> GraphicsParentDialog::getSelectedParent() const
     if (parentName.empty()) {
         return nullptr; // Root
     }
-    return m_sceneGraph->getGraphics(parentName);
+    
+    // Check if it's a geometry node (prefixed with "geom:")
+    if (parentName.substr(0, 5) == "geom:") {
+        return m_sceneGraph->getGraphics(parentName.substr(5));
+    }
+    
+    // Otherwise it's a volume node, return nullptr (volumes can't parent geometry)
+    return nullptr;
+}
+
+std::shared_ptr<VolumeNode> GraphicsParentDialog::getSelectedVolumeParent() const
+{
+    std::string parentName = getSelectedParentName();
+    if (parentName.empty()) {
+        return nullptr; // Root
+    }
+    
+    // Check if it's a volume node (prefixed with "vol:")
+    if (parentName.substr(0, 4) == "vol:") {
+        return m_sceneGraph->getVolumeGraphics(parentName.substr(4));
+    }
+    
+    // Check if it's a geometry node (prefixed with "geom:")
+    if (parentName.substr(0, 5) == "geom:") {
+        // Return the geometry node as a potential parent for volumes
+        // (This allows volumes to be children of geometry nodes)
+        return nullptr; // For now, only support volume parents for volumes
+    }
+    
+    return nullptr;
 }

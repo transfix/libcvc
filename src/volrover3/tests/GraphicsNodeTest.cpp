@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <volrover3/GraphicsNode.h>
+#include <volrover3/GeometryNode.h>
 #include <volrover3/SceneGraph.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
@@ -9,6 +9,8 @@
 class GraphicsNodeTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Each test uses its own state subtree, so no need to reset
+        
         // Create a simple test geometry (triangle)
         testGeom.points().push_back({0.0, 0.0, 0.0});
         testGeom.points().push_back({1.0, 0.0, 0.0});
@@ -23,16 +25,16 @@ protected:
     cvc::geometry testGeom;
 };
 
-// Test basic GraphicsNode creation
+// Test basic GeometryNode creation (GraphicsNode is abstract)
 TEST_F(GraphicsNodeTest, Creation) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     EXPECT_EQ(node.getName(), "test_node");
     EXPECT_FALSE(node.hasGeometry());
 }
 
 // Test setting geometry
 TEST_F(GraphicsNodeTest, SetGeometry) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     EXPECT_TRUE(node.hasGeometry());
@@ -43,7 +45,7 @@ TEST_F(GraphicsNodeTest, SetGeometry) {
 
 // Test geometry storage in node
 TEST_F(GraphicsNodeTest, GeometryRetrieval) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     const cvc::geometry* geom = node.getGeometry();
@@ -58,7 +60,7 @@ TEST_F(GraphicsNodeTest, GeometryRetrieval) {
 
 // Test default transform is identity
 TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     vtkMatrix4x4* transform = node.getTransform();
     
     ASSERT_NE(transform, nullptr);
@@ -77,7 +79,7 @@ TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
 
 // Test setting position
 TEST_F(GraphicsNodeTest, SetPosition) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setPosition(1.0, 2.0, 3.0);
     
     vtkMatrix4x4* transform = node.getTransform();
@@ -88,7 +90,7 @@ TEST_F(GraphicsNodeTest, SetPosition) {
 
 // Test setting scale
 TEST_F(GraphicsNodeTest, SetScale) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setScale(2.0, 3.0, 4.0);
     
     vtkMatrix4x4* transform = node.getTransform();
@@ -99,7 +101,7 @@ TEST_F(GraphicsNodeTest, SetScale) {
 
 // Test reset transform
 TEST_F(GraphicsNodeTest, ResetTransform) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setPosition(1.0, 2.0, 3.0);
     node.resetTransform();
     
@@ -119,7 +121,7 @@ TEST_F(GraphicsNodeTest, ResetTransform) {
 
 // Test metadata storage and retrieval
 TEST_F(GraphicsNodeTest, MetadataStorage) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     
     node.setMetadata("test_string", std::string("hello"));
     node.setMetadata("test_int", 42);
@@ -141,7 +143,7 @@ TEST_F(GraphicsNodeTest, MetadataStorage) {
 
 // Test default visible metadata
 TEST_F(GraphicsNodeTest, DefaultVisibleMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     
     EXPECT_TRUE(node.hasMetadata("visible"));
     EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), true);
@@ -149,7 +151,7 @@ TEST_F(GraphicsNodeTest, DefaultVisibleMetadata) {
 
 // Test setVisible updates metadata
 TEST_F(GraphicsNodeTest, SetVisibleUpdatesMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     
     node.setVisible(false);
     EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), false);
@@ -160,7 +162,7 @@ TEST_F(GraphicsNodeTest, SetVisibleUpdatesMetadata) {
 
 // Test type metadata for geometry
 TEST_F(GraphicsNodeTest, TypeMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setMetadata("type", std::string("geometry"));
     
     EXPECT_TRUE(node.hasMetadata("type"));
@@ -169,9 +171,9 @@ TEST_F(GraphicsNodeTest, TypeMetadata) {
 
 // Test hierarchical structure - adding children
 TEST_F(GraphicsNodeTest, AddChild) {
-    auto parent = std::make_shared<GraphicsNode>("parent");
-    auto child1 = std::make_shared<GraphicsNode>("child1");
-    auto child2 = std::make_shared<GraphicsNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("parent");
+    auto child1 = std::make_shared<GeometryNode>("child1");
+    auto child2 = std::make_shared<GeometryNode>("child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -181,9 +183,9 @@ TEST_F(GraphicsNodeTest, AddChild) {
 
 // Test finding child by name
 TEST_F(GraphicsNodeTest, FindChildByName) {
-    auto parent = std::make_shared<GraphicsNode>("parent");
-    auto child1 = std::make_shared<GraphicsNode>("child1");
-    auto child2 = std::make_shared<GraphicsNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("parent");
+    auto child1 = std::make_shared<GeometryNode>("child1");
+    auto child2 = std::make_shared<GeometryNode>("child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -198,9 +200,9 @@ TEST_F(GraphicsNodeTest, FindChildByName) {
 
 // Test removing children
 TEST_F(GraphicsNodeTest, RemoveChild) {
-    auto parent = std::make_shared<GraphicsNode>("parent");
-    auto child1 = std::make_shared<GraphicsNode>("child1");
-    auto child2 = std::make_shared<GraphicsNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("parent");
+    auto child1 = std::make_shared<GeometryNode>("child1");
+    auto child2 = std::make_shared<GeometryNode>("child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -214,7 +216,7 @@ TEST_F(GraphicsNodeTest, RemoveChild) {
 
 // Test state synchronization - syncToState
 TEST_F(GraphicsNodeTest, SyncToState) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     node.setPosition(1.0, 2.0, 3.0);
     node.setMetadata("filename", std::string("test.obj"));
@@ -249,7 +251,7 @@ TEST_F(GraphicsNodeTest, SyncFromState) {
     testState("test_node")("metadata")("type").value("geometry");
     
     // Create node and sync from state
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.syncFromState(testState);
     
     // Verify metadata was loaded
@@ -266,7 +268,7 @@ TEST_F(GraphicsNodeTest, SyncFromState) {
 
 // Test read-only metadata flag is set
 TEST_F(GraphicsNodeTest, ReadOnlyMetadataFlag) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setMetadata("filename", std::string("test.obj"));
     node.setMetadata("num_vertices", 100);
     node.setMetadata("num_triangles", 50);
@@ -289,7 +291,7 @@ TEST_F(GraphicsNodeTest, ReadOnlyMetadataFlag) {
 
 // Test that modifying read-only state throws exception
 TEST_F(GraphicsNodeTest, ReadOnlyStateThrowsException) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setMetadata("filename", std::string("test.obj"));
     
     cvc::state& testState = cvc::state::instance()("graphics_test_readonly");
@@ -312,7 +314,7 @@ TEST_F(GraphicsNodeTest, ReadOnlyStateThrowsException) {
 
 // Test geometry stored in state data field
 TEST_F(GraphicsNodeTest, GeometryInStateData) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     cvc::state& testState = cvc::state::instance()("graphics_test4");
@@ -336,8 +338,8 @@ TEST_F(GraphicsNodeTest, GeometryInStateData) {
 
 // Test hierarchical state sync with children
 TEST_F(GraphicsNodeTest, HierarchicalStateSyncToState) {
-    auto parent = std::make_shared<GraphicsNode>("parent");
-    auto child = std::make_shared<GraphicsNode>("child");
+    auto parent = std::make_shared<GeometryNode>("parent");
+    auto child = std::make_shared<GeometryNode>("child");
     
     parent->addGraphicsChild(child);
     parent->setMetadata("type", std::string("geometry"));
@@ -357,13 +359,17 @@ TEST_F(GraphicsNodeTest, HierarchicalStateSyncToState) {
 
 // Test SceneGraph graphics management
 TEST_F(GraphicsNodeTest, SceneGraphAddGraphics) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     auto node = sceneGraph.addGraphics("test_graphics", testGeom);
     
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->getName(), "test_graphics");
-    EXPECT_TRUE(node->hasGeometry());
+    
+    // Cast to GeometryNode to check geometry
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    EXPECT_TRUE(geomNode->hasGeometry());
     
     // Verify we can retrieve it
     auto retrieved = sceneGraph.getGraphics("test_graphics");
@@ -372,18 +378,22 @@ TEST_F(GraphicsNodeTest, SceneGraphAddGraphics) {
 
 // Test SceneGraph empty graphics node
 TEST_F(GraphicsNodeTest, SceneGraphAddEmptyGraphics) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     auto node = sceneGraph.addGraphics("empty_node");
     
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->getName(), "empty_node");
-    EXPECT_FALSE(node->hasGeometry());
+    
+    // Cast to GeometryNode to check geometry
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    EXPECT_FALSE(geomNode->hasGeometry());
 }
 
 // Test SceneGraph remove graphics
 TEST_F(GraphicsNodeTest, SceneGraphRemoveGraphics) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     sceneGraph.addGraphics("test_graphics", testGeom);
     sceneGraph.removeGraphics("test_graphics");
@@ -394,7 +404,7 @@ TEST_F(GraphicsNodeTest, SceneGraphRemoveGraphics) {
 
 // Test SceneGraph graphics root
 TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     auto root = sceneGraph.getGraphicsRoot();
     ASSERT_NE(root, nullptr);
@@ -403,9 +413,9 @@ TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
 
 // Test SceneGraph register graphics
 TEST_F(GraphicsNodeTest, SceneGraphRegisterGraphics) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
-    auto customNode = std::make_shared<GraphicsNode>("custom");
+    auto customNode = std::make_shared<GeometryNode>("custom");
     sceneGraph.registerGraphics("custom", customNode);
     
     auto retrieved = sceneGraph.getGraphics("custom");
@@ -414,7 +424,7 @@ TEST_F(GraphicsNodeTest, SceneGraphRegisterGraphics) {
 
 // Test SceneGraph sync to state
 TEST_F(GraphicsNodeTest, SceneGraphSyncGraphicsToState) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     sceneGraph.addGraphics("node1", testGeom);
     sceneGraph.addGraphics("node2", testGeom);
@@ -422,16 +432,23 @@ TEST_F(GraphicsNodeTest, SceneGraphSyncGraphicsToState) {
     sceneGraph.syncGraphicsToState();
     
     // Verify state tree was updated
-    cvc::state& volroverState = cvc::state::instance()("volrover3");
-    EXPECT_TRUE(volroverState("graphics").initialized());
+    // SceneGraph syncs to graphics_test.graphics, check that children were created
+    cvc::state& graphicsState = cvc::state::instance()("graphics_test")("graphics");
+    EXPECT_TRUE(graphicsState.initialized());
     
-    // Clean up
-    volroverState.reset();
+    // Check that children container exists and has nodes
+    if (graphicsState("children").initialized()) {
+        std::vector<std::string> children = graphicsState("children").children();
+        EXPECT_FALSE(children.empty());
+    }
+    
+    // Clean up - reset graphics state for next test
+    graphicsState.reset();
 }
 
 // Test SceneGraph compute bounds
 TEST_F(GraphicsNodeTest, SceneGraphComputeBounds) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     // Create geometry with known bounds
     cvc::geometry geom1;
@@ -458,7 +475,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBounds) {
 
 // Test SceneGraph compute bounds with no graphics
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
-    SceneGraph sceneGraph;
+    SceneGraph sceneGraph("graphics_test");
     
     cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
     
@@ -468,8 +485,8 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
 
 // Test world transform calculation for nested nodes
 TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
-    auto parent = std::make_shared<GraphicsNode>("parent");
-    auto child = std::make_shared<GraphicsNode>("child");
+    auto parent = std::make_shared<GeometryNode>("parent");
+    auto child = std::make_shared<GeometryNode>("child");
     
     // Set parent position
     parent->setPosition(10.0, 0.0, 0.0);
@@ -489,7 +506,7 @@ TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
 
 // Test that metadata is computed from geometry
 TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Check that basic stats are computed
@@ -510,7 +527,7 @@ TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
 
 // Test that bounding box metadata is computed
 TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Check bounding box metadata exists
@@ -535,7 +552,7 @@ TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
 
 // Test that extent metadata is computed
 TEST_F(GraphicsNodeTest, ExtentMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Check extent metadata exists
@@ -555,7 +572,7 @@ TEST_F(GraphicsNodeTest, ExtentMetadata) {
 
 // Test that center metadata is computed
 TEST_F(GraphicsNodeTest, CenterMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Check center metadata exists
@@ -575,7 +592,7 @@ TEST_F(GraphicsNodeTest, CenterMetadata) {
 
 // Test that data changes trigger geometry updates
 TEST_F(GraphicsNodeTest, DataChangeTriggerUpdate) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -618,7 +635,7 @@ TEST_F(GraphicsNodeTest, DataChangeTriggerUpdate) {
 
 // Test that metadata syncs to state tree
 TEST_F(GraphicsNodeTest, MetadataSyncToState) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -644,7 +661,7 @@ TEST_F(GraphicsNodeTest, MetadataSyncToState) {
 
 // Test that computed metadata is read-only
 TEST_F(GraphicsNodeTest, ComputedMetadataReadOnly) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -668,7 +685,7 @@ TEST_F(GraphicsNodeTest, ComputedMetadataReadOnly) {
 TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     // Test triangle mesh
     {
-        GraphicsNode node("tri_mesh");
+        GeometryNode node("tri_mesh");
         cvc::geometry triGeom;
         triGeom.points().push_back({0.0, 0.0, 0.0});
         triGeom.points().push_back({1.0, 0.0, 0.0});
@@ -682,7 +699,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     
     // Test quad mesh
     {
-        GraphicsNode node("quad_mesh");
+        GeometryNode node("quad_mesh");
         cvc::geometry quadGeom;
         quadGeom.points().push_back({0.0, 0.0, 0.0});
         quadGeom.points().push_back({1.0, 0.0, 0.0});
@@ -697,7 +714,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     
     // Test mixed mesh
     {
-        GraphicsNode node("mixed_mesh");
+        GeometryNode node("mixed_mesh");
         cvc::geometry mixedGeom;
         mixedGeom.points().push_back({0.0, 0.0, 0.0});
         mixedGeom.points().push_back({1.0, 0.0, 0.0});
@@ -714,7 +731,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
 
 // Test metadata updates when geometry changes
 TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     
     // Set initial geometry
     node.setGeometry(testGeom);
@@ -741,7 +758,7 @@ TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
 
 // Test that all bounding box metadata is read-only in state
 TEST_F(GraphicsNodeTest, AllBBoxMetadataReadOnly) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -763,7 +780,7 @@ TEST_F(GraphicsNodeTest, AllBBoxMetadataReadOnly) {
 
 // Test that all extent metadata is read-only in state
 TEST_F(GraphicsNodeTest, AllExtentMetadataReadOnly) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -782,7 +799,7 @@ TEST_F(GraphicsNodeTest, AllExtentMetadataReadOnly) {
 
 // Test that all center metadata is read-only in state
 TEST_F(GraphicsNodeTest, AllCenterMetadataReadOnly) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -801,7 +818,7 @@ TEST_F(GraphicsNodeTest, AllCenterMetadataReadOnly) {
 
 // Test that num_quads metadata is computed and read-only
 TEST_F(GraphicsNodeTest, NumQuadsMetadataReadOnly) {
-    GraphicsNode node("quad_node");
+    GeometryNode node("quad_node");
     
     // Create geometry with quads
     cvc::geometry quadGeom;
@@ -831,7 +848,7 @@ TEST_F(GraphicsNodeTest, NumQuadsMetadataReadOnly) {
 
 // Test that attempting to modify read-only metadata throws exception
 TEST_F(GraphicsNodeTest, ModifyingReadOnlyMetadataThrows) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -858,7 +875,7 @@ TEST_F(GraphicsNodeTest, ModifyingReadOnlyMetadataThrows) {
 
 // Test metadata recalculation after data change updates all read-only fields
 TEST_F(GraphicsNodeTest, DataChangeUpdatesAllReadOnlyMetadata) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -926,7 +943,7 @@ TEST_F(GraphicsNodeTest, DataChangeUpdatesAllReadOnlyMetadata) {
 
 // Test that empty geometry produces zero metadata
 TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
-    GraphicsNode node("empty_node");
+    GeometryNode node("empty_node");
     
     cvc::geometry emptyGeom;
     node.setGeometry(emptyGeom);
@@ -944,7 +961,7 @@ TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
 
 // Test geometry with normals and colors preserves metadata
 TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
-    GraphicsNode node("colored_node");
+    GeometryNode node("colored_node");
     
     cvc::geometry coloredGeom;
     coloredGeom.points().push_back({0.0, 0.0, 0.0});
@@ -972,7 +989,7 @@ TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
 
 // Test that state objects have comments
 TEST_F(GraphicsNodeTest, StateCommentsSet) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state
@@ -1023,7 +1040,7 @@ TEST_F(GraphicsNodeTest, StateCommentsSet) {
 
 // Test that comments persist after data changes
 TEST_F(GraphicsNodeTest, CommentsPersistAfterDataChange) {
-    GraphicsNode node("test_node");
+    GeometryNode node("test_node");
     node.setGeometry(testGeom);
     
     // Sync to state

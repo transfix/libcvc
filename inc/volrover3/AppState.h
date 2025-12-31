@@ -12,7 +12,14 @@
 class AppState
 {
 public:
+    // Get default singleton instance (uses "volrover3" prefix)
     static AppState& instance();
+    
+    // Create instance with custom state prefix (for multiple viewers or testing)
+    explicit AppState(const std::string& statePrefix = "volrover3");
+    
+    // Get the state prefix for this instance
+    std::string getStatePrefix() const { return m_statePrefix; }
     
     // State accessors with change notification
     cvc::geometry geometry();
@@ -23,6 +30,13 @@ public:
     
     cvc::bounding_box worldBounds();
     void setWorldBounds(const cvc::bounding_box& bounds);
+    
+    // Compute bounding box that contains all graphics objects with their transforms applied
+    cvc::bounding_box computeGraphicsBounds();
+    
+    // World bounding box visibility
+    bool worldBBoxVisible();
+    void setWorldBBoxVisible(bool visible);
     
     bool gridVisible();
     void setGridVisible(bool visible);
@@ -85,7 +99,7 @@ public:
     void getVolumeBBoxColor(double& r, double& g, double& b);
     void setVolumeBBoxColor(double r, double g, double b);
     
-    // BBox tick controls
+    // Volume BBox tick controls
     bool volumeBBoxTicksVisible();
     void setVolumeBBoxTicksVisible(bool visible);
     
@@ -97,6 +111,16 @@ public:
     
     int volumeBBoxTickLabelFontSize();
     void setVolumeBBoxTickLabelFontSize(int size);
+    
+    // World BBox coordinate controls (no interval - shows at vertices only)
+    bool worldBBoxCoordinatesVisible();
+    void setWorldBBoxCoordinatesVisible(bool visible);
+    
+    void getWorldBBoxCoordinateColor(double& r, double& g, double& b);
+    void setWorldBBoxCoordinateColor(double r, double g, double b);
+    
+    int worldBBoxCoordinateFontSize();
+    void setWorldBBoxCoordinateFontSize(int size);
     
     // Camera control mode (0 = orbit, 1 = fly)
     int cameraMode();
@@ -160,6 +184,7 @@ public:
     boost::signals2::connection onGeometryChanged(const boost::function<void()>& callback);
     boost::signals2::connection onVolumeChanged(const boost::function<void()>& callback);
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onWorldBBoxVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGeometryBBoxVisibilityChanged(const boost::function<void()>& callback);
@@ -168,6 +193,7 @@ public:
     boost::signals2::connection onGeometryBBoxColorChanged(const boost::function<void()>& callback);
     boost::signals2::connection onVolumeBBoxColorChanged(const boost::function<void()>& callback);
     boost::signals2::connection onVolumeBBoxTicksChanged(const boost::function<void()>& callback);
+    boost::signals2::connection onWorldBBoxCoordinatesChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridPlaneVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridDivisionsChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridTickIntervalsChanged(const boost::function<void()>& callback);
@@ -181,13 +207,17 @@ public:
     // State tree access for debugging/inspection
     cvc::state& getRootState();
     
-private:
-    AppState();
+public:
     ~AppState() = default;
+    
+private:
     AppState(const AppState&) = delete;
     AppState& operator=(const AppState&) = delete;
     
     cvc::state& getState(const std::string& path);
+    void initializeDefaults();
+    
+    std::string m_statePrefix;
 };
 
 #endif // APPSTATE_H

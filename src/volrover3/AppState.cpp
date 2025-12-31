@@ -3,14 +3,23 @@
 #include <cvc/volume_file_io.h>
 #include <boost/lexical_cast.hpp>
 #include <QtCore/Qt>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
 
 AppState& AppState::instance()
 {
-    static AppState instance;
+    static AppState instance; // Uses default parameter "volrover3"
     return instance;
 }
 
-AppState::AppState()
+AppState::AppState(const std::string& statePrefix)
+    : m_statePrefix(statePrefix)
+{
+    initializeDefaults();
+}
+
+void AppState::initializeDefaults()
 {
     // Initialize default world bounds
     cvc::bounding_box defaultBounds(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
@@ -29,21 +38,24 @@ AppState::AppState()
     getState("geometry_bbox_visible").value(false);
     getState("volume_bbox_visible").value(false);
     
+    // Initialize default world bounds (-0.5 to 0.5 on each axis)
+    getState("world_bounds").value("-0.5,-0.5,-0.5,0.5,0.5,0.5");
+    
     // Initialize grid plane visibility (all visible by default)
     getState("grid_yz_plane_visible").value(true);
     getState("grid_xz_plane_visible").value(true);
     getState("grid_xy_plane_visible").value(true);
     
-    // Initialize grid divisions (64 per axis by default)
-    getState("grid_divisions_x").value(64);
-    getState("grid_divisions_y").value(64);
-    getState("grid_divisions_z").value(64);
+    // Initialize grid divisions (32 per axis by default)
+    getState("grid_divisions_x").value(32);
+    getState("grid_divisions_y").value(32);
+    getState("grid_divisions_z").value(32);
     
     // Initialize grid tick intervals (8 per axis by default)
     getState("grid_tick_interval_x").value(8);
     getState("grid_tick_interval_y").value(8);
     getState("grid_tick_interval_z").value(8);
-    getState("grid_ticks_visible").value(true);
+    getState("grid_ticks_visible").value(false);
     
     // Initialize colors (RGB triplets)
     getState("grid_color").value("0.5,0.5,0.5");  // Gray
@@ -60,6 +72,14 @@ AppState::AppState()
     getState("volume_bbox_tick_interval").value(1.0);
     getState("volume_bbox_tick_label_color").value("1.0,1.0,0.0");  // Yellow
     getState("volume_bbox_tick_label_font_size").value(12);
+    
+    // Initialize world bounding box coordinate settings (no interval - shows at vertices)
+    getState("world_bbox_coordinates_visible").value(true);  // Visible by default
+    getState("world_bbox_coordinate_color").value("1.0,1.0,1.0");  // White
+    getState("world_bbox_coordinate_font_size").value(12);
+    
+    // Initialize world bounding box visibility (off by default)
+    getState("world_bbox_visible").value(false);
     
     // Initialize camera settings
     getState("camera_mode").value(0);  // 0 = orbit, 1 = fly
@@ -108,12 +128,12 @@ AppState::AppState()
 
 cvc::state& AppState::getState(const std::string& path)
 {
-    return cvc::state::instance()("volrover3")(path);
+    return cvc::state::instance()(m_statePrefix)(path);
 }
 
 cvc::state& AppState::getRootState()
 {
-    return cvc::state::instance()("volrover3");
+    return cvc::state::instance()(m_statePrefix);
 }
 
 cvc::geometry AppState::geometry()
@@ -225,6 +245,155 @@ void AppState::setWorldBounds(const cvc::bounding_box& bounds)
     getState("world_bounds").value(boundsStr);
 }
 
+cvc::bounding_box AppState::computeGraphicsBounds()
+{
+    // Iterate through all graphics objects in the state tree,
+    // apply their transforms, and compute the union of all transformed bounding boxes.
+    
+    cvc::state& graphicsState = getState("graphics");
+    
+    // Initialize with invalid bounds
+    cvc::bounding_box result;
+    bool foundAny = false;
+    
+    // Graphics children are stored under a "children" container
+    // Check if children container exists
+    if (!graphicsState("children").initialized()) {
+        return result; // No children, return empty bounds
+    }
+    
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Get list of all child graphics objects
+    std::vector<std::string> allDescendants = childrenState.children();
+    
+    // Filter to only direct children (not nested descendants)
+    std::vector<std::string> childNames;
+    std::string childrenPath = childrenState.fullName();
+    int expectedDepth = std::count(childrenPath.begin(), childrenPath.end(), '.') + 1;
+    
+    for (const auto& descendant : allDescendants) {
+        int depth = std::count(descendant.begin(), descendant.end(), '.');
+        if (depth == expectedDepth) {
+            // Extract just the child name (last component after final '.')
+            size_t lastDot = descendant.find_last_of('.');
+            std::string childName = (lastDot != std::string::npos) ? descendant.substr(lastDot + 1) : descendant;
+            childNames.push_back(childName);
+        }
+    }
+    
+    for (const auto& childName : childNames) {
+        cvc::state& childState = childrenState(childName);
+        
+        // Check if this child has a bounding box in metadata
+        try {
+            std::string bboxStr = childState("metadata")("bounding_box").value();
+            if (bboxStr.empty()) continue;
+            
+            cvc::bounding_box childBBox(bboxStr);
+            
+            // Get transform if it exists and apply it to the bounding box
+            try {
+                std::string transformStr = childState("transform").value();
+                if (!transformStr.empty()) {
+                    // Parse the 4x4 transform matrix (row-major order, comma-separated)
+                    std::vector<double> matrixValues;
+                    std::stringstream ss(transformStr);
+                    std::string token;
+                    while (std::getline(ss, token, ',')) {
+                        matrixValues.push_back(std::stod(token));
+                    }
+                    
+                    if (matrixValues.size() == 16) {
+                        // Get the 8 vertices of the bounding box
+                        double vertices[8][3] = {
+                            {childBBox.minx, childBBox.miny, childBBox.minz},
+                            {childBBox.maxx, childBBox.miny, childBBox.minz},
+                            {childBBox.minx, childBBox.maxy, childBBox.minz},
+                            {childBBox.maxx, childBBox.maxy, childBBox.minz},
+                            {childBBox.minx, childBBox.miny, childBBox.maxz},
+                            {childBBox.maxx, childBBox.miny, childBBox.maxz},
+                            {childBBox.minx, childBBox.maxy, childBBox.maxz},
+                            {childBBox.maxx, childBBox.maxy, childBBox.maxz}
+                        };
+                        
+                        // Transform all 8 vertices
+                        double transformedVertices[8][3];
+                        for (int i = 0; i < 8; ++i) {
+                            double x = vertices[i][0];
+                            double y = vertices[i][1];
+                            double z = vertices[i][2];
+                            
+                            // Apply 4x4 matrix transform: [x' y' z' w'] = [x y z 1] * M
+                            transformedVertices[i][0] = matrixValues[0]*x + matrixValues[1]*y + matrixValues[2]*z + matrixValues[3];
+                            transformedVertices[i][1] = matrixValues[4]*x + matrixValues[5]*y + matrixValues[6]*z + matrixValues[7];
+                            transformedVertices[i][2] = matrixValues[8]*x + matrixValues[9]*y + matrixValues[10]*z + matrixValues[11];
+                            // w component: matrixValues[12]*x + matrixValues[13]*y + matrixValues[14]*z + matrixValues[15]
+                            // For affine transforms, w should be 1, so we don't need to divide
+                        }
+                        
+                        // Compute axis-aligned bounding box of transformed vertices
+                        double minX = transformedVertices[0][0];
+                        double maxX = transformedVertices[0][0];
+                        double minY = transformedVertices[0][1];
+                        double maxY = transformedVertices[0][1];
+                        double minZ = transformedVertices[0][2];
+                        double maxZ = transformedVertices[0][2];
+                        
+                        for (int i = 1; i < 8; ++i) {
+                            minX = std::min(minX, transformedVertices[i][0]);
+                            maxX = std::max(maxX, transformedVertices[i][0]);
+                            minY = std::min(minY, transformedVertices[i][1]);
+                            maxY = std::max(maxY, transformedVertices[i][1]);
+                            minZ = std::min(minZ, transformedVertices[i][2]);
+                            maxZ = std::max(maxZ, transformedVertices[i][2]);
+                        }
+                        
+                        // Update childBBox with transformed bounds
+                        childBBox.setMin(minX, minY, minZ);
+                        childBBox.setMax(maxX, maxY, maxZ);
+                    }
+                }
+            } catch (...) {
+                // No transform or parsing failed, use untransformed bbox
+            }
+            
+            // Union with result
+            if (!foundAny) {
+                result = childBBox;
+                foundAny = true;
+            } else {
+                // Compute union: min of mins, max of maxes
+                result.setMin(
+                    std::min(result.minx, childBBox.minx),
+                    std::min(result.miny, childBBox.miny),
+                    std::min(result.minz, childBBox.minz)
+                );
+                result.setMax(
+                    std::max(result.maxx, childBBox.maxx),
+                    std::max(result.maxy, childBBox.maxy),
+                    std::max(result.maxz, childBBox.maxz)
+                );
+            }
+        } catch (...) {
+            // Child doesn't have a bounding box, skip it
+            continue;
+        }
+    }
+    
+    return result;
+}
+
+bool AppState::worldBBoxVisible()
+{
+    return getState("world_bbox_visible").value<bool>();
+}
+
+void AppState::setWorldBBoxVisible(bool visible)
+{
+    getState("world_bbox_visible").value(visible);
+}
+
 bool AppState::gridVisible()
 {
     return getState("grid_visible").value<bool>();
@@ -258,6 +427,11 @@ boost::signals2::connection AppState::onVolumeChanged(const boost::function<void
 boost::signals2::connection AppState::onWorldBoundsChanged(const boost::function<void()>& callback)
 {
     return getState("world_bounds").valueChanged.connect(callback);
+}
+
+boost::signals2::connection AppState::onWorldBBoxVisibilityChanged(const boost::function<void()>& callback)
+{
+    return getState("world_bbox_visible").valueChanged.connect(callback);
 }
 
 boost::signals2::connection AppState::onGridVisibilityChanged(const boost::function<void()>& callback)
@@ -350,7 +524,12 @@ void AppState::setGridTickIntervals(int x, int y, int z)
 
 bool AppState::gridTicksVisible()
 {
-    return getState("grid_ticks_visible").value<bool>();
+    cvc::state& tickState = getState("grid_ticks_visible");
+    if (!tickState.initialized()) {
+        // Default to true if not yet set
+        tickState.value(true);
+    }
+    return tickState.value<bool>();
 }
 
 void AppState::setGridTicksVisible(bool visible)
@@ -907,11 +1086,65 @@ void AppState::setVolumeBBoxTickLabelFontSize(int size)
     getState("volume_bbox_tick_label_font_size").value(size);
 }
 
+// World BBox coordinate methods (no interval - displays at vertices only)
+bool AppState::worldBBoxCoordinatesVisible()
+{
+    return getState("world_bbox_coordinates_visible").value<bool>();
+}
+
+void AppState::setWorldBBoxCoordinatesVisible(bool visible)
+{
+    getState("world_bbox_coordinates_visible").value(visible);
+}
+
+void AppState::getWorldBBoxCoordinateColor(double& r, double& g, double& b)
+{
+    std::string colorStr = getState("world_bbox_coordinate_color").value<std::string>();
+    
+    size_t pos1 = colorStr.find(',');
+    size_t pos2 = colorStr.find(',', pos1 + 1);
+    
+    if (pos1 != std::string::npos && pos2 != std::string::npos) {
+        r = boost::lexical_cast<double>(colorStr.substr(0, pos1));
+        g = boost::lexical_cast<double>(colorStr.substr(pos1 + 1, pos2 - pos1 - 1));
+        b = boost::lexical_cast<double>(colorStr.substr(pos2 + 1));
+    } else {
+        r = g = b = 1.0;
+    }
+}
+
+void AppState::setWorldBBoxCoordinateColor(double r, double g, double b)
+{
+    std::string colorStr = 
+        boost::lexical_cast<std::string>(r) + "," +
+        boost::lexical_cast<std::string>(g) + "," +
+        boost::lexical_cast<std::string>(b);
+    getState("world_bbox_coordinate_color").value(colorStr);
+}
+
+int AppState::worldBBoxCoordinateFontSize()
+{
+    return getState("world_bbox_coordinate_font_size").value<int>();
+}
+
+void AppState::setWorldBBoxCoordinateFontSize(int size)
+{
+    getState("world_bbox_coordinate_font_size").value(size);
+}
+
 boost::signals2::connection AppState::onVolumeBBoxTicksChanged(const boost::function<void()>& callback)
 {
     auto conn1 = getState("volume_bbox_ticks_visible").valueChanged.connect(callback);
     getState("volume_bbox_tick_interval").valueChanged.connect(callback);
     getState("volume_bbox_tick_label_color").valueChanged.connect(callback);
     getState("volume_bbox_tick_label_font_size").valueChanged.connect(callback);
+    return conn1;
+}
+
+boost::signals2::connection AppState::onWorldBBoxCoordinatesChanged(const boost::function<void()>& callback)
+{
+    auto conn1 = getState("world_bbox_coordinates_visible").valueChanged.connect(callback);
+    getState("world_bbox_coordinate_color").valueChanged.connect(callback);
+    getState("world_bbox_coordinate_font_size").valueChanged.connect(callback);
     return conn1;
 }

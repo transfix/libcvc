@@ -19,8 +19,7 @@ public:
     cvc::bounding_box getBoundingBox() const;
     
 private slots:
-    void onResetToGeometry();
-    void onResetToVolume();
+    void onResetToGraphics();
     void chooseTickLabelColor();
     void updateColorButton();
     
@@ -36,9 +35,9 @@ private:
     QLineEdit *m_maxYEdit;
     QLineEdit *m_maxZEdit;
     
-    // Tick controls
+    // Coordinate controls (vertex-only, no interval)
     QCheckBox *m_showTicksCheckbox;
-    QDoubleSpinBox *m_tickIntervalSpinBox;
+    QCheckBox *m_worldBBoxVisibleCheckbox;
     QPushButton *m_tickLabelColorButton;
     QSpinBox *m_tickLabelFontSizeSpinBox;
     double m_tickLabelColor[3];

@@ -17,19 +17,33 @@ protected:
     }
     
     void SetUp() override {
-        // AppState is a singleton, get instance
-        state = &AppState::instance();
+        // Create AppState with custom prefix for test isolation
+        // Each test class gets its own state subtree
+        state = std::make_unique<AppState>("appstate_test");
+    }
+    
+    void TearDown() override {
+        // Clean up test-specific state tree to prevent pollution between tests
+        if (state) {
+            state->getRootState().reset();
+        }
+        // Clean up test-specific state instance
+        state.reset();
     }
     
     static QApplication* app;
-    AppState* state;
+    std::unique_ptr<AppState> state;
 };
 
 QApplication* AppStateTest::app = nullptr;
 
 TEST_F(AppStateTest, SingletonInstance) {
-    AppState* state2 = &AppState::instance();
-    EXPECT_EQ(state, state2);
+    // Verify that the singleton instance is different from our test instance
+    // (they use different state prefixes)
+    AppState& singleton = AppState::instance();
+    EXPECT_NE(state->getStatePrefix(), singleton.getStatePrefix());
+    EXPECT_EQ(singleton.getStatePrefix(), "volrover3");
+    EXPECT_EQ(state->getStatePrefix(), "appstate_test");
 }
 
 TEST_F(AppStateTest, CameraPosition) {
@@ -134,7 +148,7 @@ TEST_F(AppStateTest, StateTreeCameraPosition) {
     state->setCameraPosition(10.0, 20.0, 30.0);
     
     // Verify values are stored in state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_position_x").value<double>(), 10.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_position_y").value<double>(), 20.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_position_z").value<double>(), 30.0);
@@ -150,7 +164,7 @@ TEST_F(AppStateTest, StateTreeCameraPosition) {
 TEST_F(AppStateTest, StateTreeCameraViewDirection) {
     state->setCameraViewDirection(1.0, 0.0, 0.0);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_x").value<double>(), 1.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_y").value<double>(), 0.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_z").value<double>(), 0.0);
@@ -165,7 +179,7 @@ TEST_F(AppStateTest, StateTreeCameraViewDirection) {
 TEST_F(AppStateTest, StateTreeCameraUpVector) {
     state->setCameraUpVector(0.0, 1.0, 0.0);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_up_x").value<double>(), 0.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_up_y").value<double>(), 1.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_up_z").value<double>(), 0.0);
@@ -180,7 +194,7 @@ TEST_F(AppStateTest, StateTreeCameraUpVector) {
 TEST_F(AppStateTest, StateTreeCameraFOV) {
     state->setCameraFieldOfView(60.0);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_fov").value<double>(), 60.0);
     EXPECT_DOUBLE_EQ(state->cameraFieldOfView(), 60.0);
 }
@@ -188,7 +202,7 @@ TEST_F(AppStateTest, StateTreeCameraFOV) {
 TEST_F(AppStateTest, StateTreeCameraSpeed) {
     state->setCameraSpeed(3.5);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_speed").value<double>(), 3.5);
     EXPECT_DOUBLE_EQ(state->cameraSpeed(), 3.5);
 }
@@ -196,7 +210,7 @@ TEST_F(AppStateTest, StateTreeCameraSpeed) {
 TEST_F(AppStateTest, StateTreeCameraSensitivity) {
     state->setCameraSensitivity(0.75);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_sensitivity").value<double>(), 0.75);
     EXPECT_DOUBLE_EQ(state->cameraSensitivity(), 0.75);
 }
@@ -205,7 +219,7 @@ TEST_F(AppStateTest, StateTreeWorldBounds) {
     cvc::bounding_box bounds(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
     state->setWorldBounds(bounds);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     std::vector<std::string> values = stateTree("world_bounds").values();
     ASSERT_EQ(values.size(), size_t(6));
     
@@ -221,7 +235,7 @@ TEST_F(AppStateTest, StateTreeWorldBounds) {
 TEST_F(AppStateTest, StateTreeGridVisible) {
     state->setGridVisible(true);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_TRUE(stateTree("grid_visible").value<bool>());
     EXPECT_TRUE(state->gridVisible());
     
@@ -233,7 +247,7 @@ TEST_F(AppStateTest, StateTreeGridVisible) {
 TEST_F(AppStateTest, StateTreeAxisVisible) {
     state->setAxisVisible(true);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_TRUE(stateTree("axis_visible").value<bool>());
     EXPECT_TRUE(state->axisVisible());
     
@@ -250,7 +264,7 @@ TEST_F(AppStateTest, StateTreeKeyBindings) {
     state->setCameraKeyUp(Qt::Key_E);
     state->setCameraKeyDown(Qt::Key_Q);
     
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_EQ(stateTree("camera_key_forward").value<int>(), Qt::Key_W);
     EXPECT_EQ(stateTree("camera_key_backward").value<int>(), Qt::Key_S);
     EXPECT_EQ(stateTree("camera_key_left").value<int>(), Qt::Key_A);
@@ -261,7 +275,7 @@ TEST_F(AppStateTest, StateTreeKeyBindings) {
 
 TEST_F(AppStateTest, StateTreeDirectUpdate) {
     // Set values directly in state tree (simulating external update)
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("camera_position_x").value(100.0);
     stateTree("camera_position_y").value(200.0);
     stateTree("camera_position_z").value(300.0);
@@ -286,7 +300,7 @@ TEST_F(AppStateTest, CameraChangedCallback) {
     });
     
     // Clear camera_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("camera_changed").value(false);
     
     // Trigger camera changes
@@ -382,7 +396,7 @@ TEST_F(AppStateTest, GeometryChangedCallback) {
     });
     
     // Clear geometry_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("geometry_changed").value(false);
     
     cvc::geometry geom;
@@ -402,7 +416,7 @@ TEST_F(AppStateTest, VolumeChangedCallback) {
     });
     
     // Clear volume_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("volume_changed").value(false);
     
     cvc::volume vol(cvc::dimension(2, 2, 2), cvc::UChar);
@@ -423,7 +437,7 @@ TEST_F(AppStateTest, MultipleCallbacksForSameState) {
     auto conn3 = state->onCameraChanged([&callback3_count]() { callback3_count++; });
     
     // Clear camera_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("camera_changed").value(false);
     
     state->setCameraPosition(5.0, 5.0, 5.0);
@@ -447,7 +461,7 @@ TEST_F(AppStateTest, CallbackReceivesCorrectValue) {
     });
     
     // Clear camera_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("camera_changed").value(false);
     
     state->setCameraPosition(7.0, 8.0, 9.0);
@@ -469,7 +483,7 @@ TEST_F(AppStateTest, StateTreeTriggerCallback) {
     });
     
     // Clear camera_changed flag first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     int before_count = callback_count;
     stateTree("camera_changed").value(false);
     
@@ -505,7 +519,7 @@ TEST_F(AppStateTest, CallbackDisconnection) {
 // ===========================
 
 TEST_F(AppStateTest, StateTreeInitialized) {
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     
     // Verify default state values are initialized
     EXPECT_TRUE(stateTree("camera_position_x").initialized());
@@ -523,7 +537,7 @@ TEST_F(AppStateTest, StateTreePersistence) {
     state->setGridVisible(true);
     
     // Verify values persist in state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     EXPECT_DOUBLE_EQ(stateTree("camera_position_x").value<double>(), 11.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_position_y").value<double>(), 22.0);
     EXPECT_DOUBLE_EQ(stateTree("camera_position_z").value<double>(), 33.0);
@@ -577,7 +591,7 @@ TEST_F(AppStateTest, VolumeBBoxColor) {
 
 TEST_F(AppStateTest, StateTreeGridColor) {
     // Set via state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("grid_color").value("0.1,0.2,0.3");
     
     // Read via AppState
@@ -593,7 +607,7 @@ TEST_F(AppStateTest, StateTreeGeometryBBoxColor) {
     state->setGeometryBBoxColor(0.7, 0.8, 0.9);
     
     // Verify in state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     std::string colorStr = stateTree("geometry_bbox_color").value<std::string>();
     // Check individual components due to floating point representation
     EXPECT_TRUE(colorStr.find("0.7") != std::string::npos || 
@@ -605,14 +619,14 @@ TEST_F(AppStateTest, StateTreeVolumeBBoxColor) {
     state->setVolumeBBoxColor(0.25, 0.5, 0.75);
     
     // Verify in state tree
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     std::string colorStr = stateTree("volume_bbox_color").value<std::string>();
     EXPECT_EQ(colorStr, "0.25,0.5,0.75");
 }
 
 TEST_F(AppStateTest, ColorDefaultValues) {
     // Reset to default values first
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = state->getRootState();
     stateTree("grid_color").value("0.5,0.5,0.5");
     stateTree("geometry_bbox_color").value("0.0,1.0,0.0");
     stateTree("volume_bbox_color").value("1.0,0.0,1.0");
@@ -749,6 +763,9 @@ TEST_F(AppStateTest, GridTickIntervals) {
 }
 
 TEST_F(AppStateTest, GridTicksVisible) {
+    // Reset to test default value
+    state->getRootState()("grid_ticks_visible").reset();
+    
     // Default should be true
     EXPECT_TRUE(state->gridTicksVisible());
     
@@ -848,6 +865,9 @@ TEST_F(AppStateTest, GridTickIntervalsCallbacks) {
 TEST_F(AppStateTest, GridTicksVisibleCallbacks) {
     int callback_count = 0;
     
+    // Set initial value to true so we can detect change to false
+    state->setGridTicksVisible(true);
+    
     auto connection = state->onGridTicksVisibleChanged([&callback_count]() {
         callback_count++;
     });
@@ -878,6 +898,7 @@ TEST_F(AppStateTest, GridPlaneColorsCallbacks) {
 TEST_F(AppStateTest, GridTickLabelPropertiesCallbacks) {
     int callback_count = 0;
     
+    
     auto connection = state->onGridTickLabelPropertiesChanged([&callback_count]() {
         callback_count++;
     });
@@ -891,6 +912,212 @@ TEST_F(AppStateTest, GridTickLabelPropertiesCallbacks) {
     
     connection.disconnect();
 }
+
+// Test computeGraphicsBounds with no graphics
+TEST_F(AppStateTest, ComputeGraphicsBounds_Empty) {
+    // Get graphics state through root
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    
+    // Clear children by creating a fresh graphics state
+    // (The state system will handle this)
+    
+    // Should return an invalid/empty bounding box
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // No assertion since we just verify it doesn't crash
+}
+
+// Test computeGraphicsBounds with single untransformed object
+TEST_F(AppStateTest, ComputeGraphicsBounds_SingleObject) {
+    // Get graphics state through root
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add a single graphics object with a known bounding box in metadata
+    cvc::state& obj1 = childrenState("test_object1");
+    obj1("metadata")("bounding_box").value("-1,-2,-3,1,2,3");
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    EXPECT_DOUBLE_EQ(result.minx, -1.0);
+    EXPECT_DOUBLE_EQ(result.miny, -2.0);
+    EXPECT_DOUBLE_EQ(result.minz, -3.0);
+    EXPECT_DOUBLE_EQ(result.maxx, 1.0);
+    EXPECT_DOUBLE_EQ(result.maxy, 2.0);
+    EXPECT_DOUBLE_EQ(result.maxz, 3.0);
+}
+
+// Test computeGraphicsBounds with multiple untransformed objects
+TEST_F(AppStateTest, ComputeGraphicsBounds_MultipleObjects) {
+    // Get graphics state through root
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add multiple graphics objects
+    cvc::state& obj1 = childrenState("test_multi_object1");
+    obj1("metadata")("bounding_box").value("0,0,0,1,1,1");
+    
+    cvc::state& obj2 = childrenState("test_multi_object2");
+    obj2("metadata")("bounding_box").value("-2,-2,-2,-1,-1,-1");
+    
+    cvc::state& obj3 = childrenState("test_multi_object3");
+    obj3("metadata")("bounding_box").value("2,2,2,3,3,3");
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // Should be union of all three: [-2,-2,-2] to [3,3,3]
+    EXPECT_DOUBLE_EQ(result.minx, -2.0);
+    EXPECT_DOUBLE_EQ(result.miny, -2.0);
+    EXPECT_DOUBLE_EQ(result.minz, -2.0);
+    EXPECT_DOUBLE_EQ(result.maxx, 3.0);
+    EXPECT_DOUBLE_EQ(result.maxy, 3.0);
+    EXPECT_DOUBLE_EQ(result.maxz, 3.0);
+}
+
+// Test computeGraphicsBounds with translation transform
+TEST_F(AppStateTest, ComputeGraphicsBounds_Translation) {
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add object with unit cube bbox centered at origin: [-0.5, -0.5, -0.5] to [0.5, 0.5, 0.5]
+    cvc::state& obj1 = childrenState("test_trans_obj1");
+    obj1("metadata")("bounding_box").value("-0.5,-0.5,-0.5,0.5,0.5,0.5");
+    
+    // Translation matrix: translate by (10, 20, 30)
+    // Identity matrix with translation in last column
+    std::string transform = "1,0,0,10,"  // row 0
+                            "0,1,0,20,"  // row 1
+                            "0,0,1,30,"  // row 2
+                            "0,0,0,1";   // row 3
+    obj1("transform").value(transform);
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // Cube should be translated to [9.5, 19.5, 29.5] to [10.5, 20.5, 30.5]
+    EXPECT_NEAR(result.minx, 9.5, 1e-6);
+    EXPECT_NEAR(result.miny, 19.5, 1e-6);
+    EXPECT_NEAR(result.minz, 29.5, 1e-6);
+    EXPECT_NEAR(result.maxx, 10.5, 1e-6);
+    EXPECT_NEAR(result.maxy, 20.5, 1e-6);
+    EXPECT_NEAR(result.maxz, 30.5, 1e-6);
+}
+
+// Test computeGraphicsBounds with scale transform
+TEST_F(AppStateTest, ComputeGraphicsBounds_Scale) {
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add object with unit cube bbox: [0, 0, 0] to [1, 1, 1]
+    cvc::state& obj1 = childrenState("test_scale_obj");
+    obj1("metadata")("bounding_box").value("0,0,0,1,1,1");
+    
+    // Scale matrix: scale by (2, 3, 4)
+    std::string transform = "2,0,0,0,"  // row 0
+                            "0,3,0,0,"  // row 1
+                            "0,0,4,0,"  // row 2
+                            "0,0,0,1";  // row 3
+    obj1("transform").value(transform);
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // Cube should be scaled to [0, 0, 0] to [2, 3, 4]
+    EXPECT_NEAR(result.minx, 0.0, 1e-6);
+    EXPECT_NEAR(result.miny, 0.0, 1e-6);
+    EXPECT_NEAR(result.minz, 0.0, 1e-6);
+    EXPECT_NEAR(result.maxx, 2.0, 1e-6);
+    EXPECT_NEAR(result.maxy, 3.0, 1e-6);
+    EXPECT_NEAR(result.maxz, 4.0, 1e-6);
+}
+
+// Test computeGraphicsBounds with rotation transform (45 degrees around Z)
+TEST_F(AppStateTest, ComputeGraphicsBounds_Rotation) {
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add object with bbox: [-1, -1, 0] to [1, 1, 0] (square in XY plane)
+    cvc::state& obj1 = childrenState("test_rotation_obj");
+    obj1("metadata")("bounding_box").value("-1,-1,0,1,1,0");
+    
+    // 45 degree rotation around Z axis
+    // cos(45) = sin(45) = sqrt(2)/2 ≈ 0.707107
+    double c = 0.707107;
+    double s = 0.707107;
+    std::stringstream ss;
+    ss << c << "," << -s << ",0,0,"  // row 0
+       << s << "," << c << ",0,0,"   // row 1
+       << "0,0,1,0,"                  // row 2
+       << "0,0,0,1";                  // row 3
+    obj1("transform").value(ss.str());
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // After 45 degree rotation, diagonal of square becomes axis-aligned
+    // Expected bbox: approximately [-sqrt(2), -sqrt(2), 0] to [sqrt(2), sqrt(2), 0]
+    double expected = 1.414214; // sqrt(2)
+    EXPECT_NEAR(result.minx, -expected, 1e-4);
+    EXPECT_NEAR(result.miny, -expected, 1e-4);
+    EXPECT_NEAR(result.minz, 0.0, 1e-6);
+    EXPECT_NEAR(result.maxx, expected, 1e-4);
+    EXPECT_NEAR(result.maxy, expected, 1e-4);
+    EXPECT_NEAR(result.maxz, 0.0, 1e-6);
+}
+
+// Test computeGraphicsBounds with combined transform (scale + translate)
+TEST_F(AppStateTest, ComputeGraphicsBounds_Combined) {
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Add object with unit cube: [0, 0, 0] to [1, 1, 1]
+    cvc::state& obj1 = childrenState("test_combined_obj");
+    obj1("metadata")("bounding_box").value("0,0,0,1,1,1");
+    
+    // Combined transform: scale by 2 and translate by (5, 10, 15)
+    std::string transform = "2,0,0,5,"   // row 0
+                            "0,2,0,10,"  // row 1
+                            "0,0,2,15,"  // row 2
+                            "0,0,0,1";   // row 3
+    obj1("transform").value(transform);
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // Cube should be scaled to [0,0,0]->[2,2,2] then translated to [5,10,15]->[7,12,17]
+    EXPECT_NEAR(result.minx, 5.0, 1e-6);
+    EXPECT_NEAR(result.miny, 10.0, 1e-6);
+    EXPECT_NEAR(result.minz, 15.0, 1e-6);
+    EXPECT_NEAR(result.maxx, 7.0, 1e-6);
+    EXPECT_NEAR(result.maxy, 12.0, 1e-6);
+    EXPECT_NEAR(result.maxz, 17.0, 1e-6);
+}
+
+// Test computeGraphicsBounds with multiple transformed objects
+TEST_F(AppStateTest, ComputeGraphicsBounds_MultipleTransformed) {
+    cvc::state& rootState = state->getRootState();
+    cvc::state& graphicsState = rootState("graphics");
+    cvc::state& childrenState = graphicsState("children");
+    
+    // Object 1: unit cube at origin, translated to (0,0,0)->(1,1,1)
+    cvc::state& obj1 = childrenState("test_trans_obj1");
+    obj1("metadata")("bounding_box").value("0,0,0,1,1,1");
+    obj1("transform").value("1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1");
+    
+    // Object 2: unit cube at origin, translated to (10,10,10)->(11,11,11)
+    cvc::state& obj2 = childrenState("test_scale_obj2");
+    obj2("metadata")("bounding_box").value("0,0,0,1,1,1");
+    obj2("transform").value("1,0,0,10,0,1,0,10,0,0,1,10,0,0,0,1");
+    
+    cvc::bounding_box result = state->computeGraphicsBounds();
+    // Union should be [0,0,0] to [11,11,11]
+    EXPECT_NEAR(result.minx, 0.0, 1e-6);
+    EXPECT_NEAR(result.miny, 0.0, 1e-6);
+    EXPECT_NEAR(result.minz, 0.0, 1e-6);
+    EXPECT_NEAR(result.maxx, 11.0, 1e-6);
+    EXPECT_NEAR(result.maxy, 11.0, 1e-6);
+    EXPECT_NEAR(result.maxz, 11.0, 1e-6);
+}
+
+
+
+
 
 
 

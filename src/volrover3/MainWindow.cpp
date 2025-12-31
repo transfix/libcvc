@@ -2,7 +2,9 @@
 #include <volrover3/VTKRenderWidget.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/SceneGraph.h>
+#include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>
+#include <volrover3/VolumeNode.h>
 #include <volrover3/AppState.h>
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraSettingsDialog.h>
@@ -57,6 +59,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_sceneGraph->setGridVisible(m_gridVisible);
     m_sceneGraph->setAxisVisible(m_axisVisible);
     
+    // Initialize grid divisions from AppState (override GridNode's default 64x64x64)
+    int x, y, z;
+    AppState::instance().getGridDivisions(x, y, z);
+    m_sceneGraph->setGridDivisions(x, y, z);
+    
+    // Initialize grid and world bbox with default world bounds
+    m_sceneGraph->updateGrid(AppState::instance().worldBounds());
+    m_sceneGraph->updateWorldBBox(AppState::instance().worldBounds());
+    
     // Connect to state changes
     AppState::instance().onGeometryChanged([this]() {
         m_sceneGraph->setGeometry(AppState::instance().geometry());
@@ -69,16 +80,20 @@ MainWindow::MainWindow(QWidget *parent)
         m_sceneGraph->setVolume(vol);
         m_transferFunctionWidget->setDataRange(vol.min(), vol.max());
         
-        // Set grid divisions to match volume resolution
-        AppState::instance().setGridDivisions(vol.XDim(), vol.YDim(), vol.ZDim());
-        
+        // Don't change grid divisions when loading volumes
+        // Let user control grid manually
         m_sceneGraph->updateGrid(AppState::instance().worldBounds());
         m_renderWidget->update();
     });
     
     AppState::instance().onWorldBoundsChanged([this]() {
-        // Update grid to match new world bounds
-        m_sceneGraph->updateGrid(AppState::instance().worldBounds());
+        cvc::bounding_box bounds = AppState::instance().worldBounds();
+        
+        // Always update grid to match new world bounds
+        m_sceneGraph->updateGrid(bounds);
+        
+        // Update world bounding box to match new bounds
+        m_sceneGraph->updateWorldBBox(bounds);
         
         // Update camera orbit center to match new bounds center
         CameraController* camCtrl = m_renderWidget->getCameraController();
@@ -105,16 +120,6 @@ MainWindow::MainWindow(QWidget *parent)
         m_renderWidget->update();
     });
     
-    AppState::instance().onGeometryBBoxVisibilityChanged([this]() {
-        m_sceneGraph->setGeometryBBoxVisible(AppState::instance().geometryBBoxVisible());
-        m_renderWidget->update();
-    });
-    
-    AppState::instance().onVolumeBBoxVisibilityChanged([this]() {
-        m_sceneGraph->setVolumeBBoxVisible(AppState::instance().volumeBBoxVisible());
-        m_renderWidget->update();
-    });
-    
     // Connect color state changes to update rendering
     AppState::instance().onGridColorChanged([this]() {
         double r, g, b;
@@ -123,29 +128,19 @@ MainWindow::MainWindow(QWidget *parent)
         m_renderWidget->update();
     });
     
-    AppState::instance().onGeometryBBoxColorChanged([this]() {
+    AppState::instance().onWorldBBoxCoordinatesChanged([this]() {
         double r, g, b;
-        AppState::instance().getGeometryBBoxColor(r, g, b);
-        m_sceneGraph->setGeometryBBoxColor(r, g, b);
-        m_renderWidget->update();
-    });
-    
-    AppState::instance().onVolumeBBoxColorChanged([this]() {
-        double r, g, b;
-        AppState::instance().getVolumeBBoxColor(r, g, b);
-        m_sceneGraph->setVolumeBBoxColor(r, g, b);
-        m_renderWidget->update();
-    });
-    
-    AppState::instance().onVolumeBBoxTicksChanged([this]() {
-        double r, g, b;
-        AppState::instance().getVolumeBBoxTickLabelColor(r, g, b);
-        m_sceneGraph->setVolumeBBoxTicks(
-            AppState::instance().volumeBBoxTicksVisible(),
-            AppState::instance().volumeBBoxTickInterval(),
+        AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
+        m_sceneGraph->setWorldBBoxCoordinates(
+            AppState::instance().worldBBoxCoordinatesVisible(),
             r, g, b,
-            AppState::instance().volumeBBoxTickLabelFontSize()
+            AppState::instance().worldBBoxCoordinateFontSize()
         );
+        m_renderWidget->update();
+    });
+    
+    AppState::instance().onWorldBBoxVisibilityChanged([this]() {
+        m_sceneGraph->setWorldBBoxVisible(AppState::instance().worldBBoxVisible());
         m_renderWidget->update();
     });
     
@@ -272,18 +267,6 @@ void MainWindow::createMenus()
     connect(toggleAxisAction, &QAction::triggered, this, &MainWindow::toggleAxis);
     viewMenu->addAction(toggleAxisAction);
     
-    QAction *toggleGeomBBoxAction = new QAction(tr("Show Geometry Bounding Bo&x"), this);
-    toggleGeomBBoxAction->setCheckable(true);
-    toggleGeomBBoxAction->setChecked(false);
-    connect(toggleGeomBBoxAction, &QAction::triggered, this, &MainWindow::toggleGeometryBBox);
-    viewMenu->addAction(toggleGeomBBoxAction);
-    
-    QAction *toggleVolBBoxAction = new QAction(tr("Show &Volume Bounding Box"), this);
-    toggleVolBBoxAction->setCheckable(true);
-    toggleVolBBoxAction->setChecked(false);
-    connect(toggleVolBBoxAction, &QAction::triggered, this, &MainWindow::toggleVolumeBBox);
-    viewMenu->addAction(toggleVolBBoxAction);
-    
     viewMenu->addSeparator();
     
     QAction *editBoundsAction = new QAction(tr("Edit World &Bounding Box..."), this);
@@ -392,8 +375,8 @@ void MainWindow::openGeometry()
                 graphicsName = sanitizedName + "_" + std::to_string(counter++);
             }
             
-            // Create graphics node
-            auto graphicsNode = std::make_shared<GraphicsNode>(graphicsName);
+            // Create graphics node (use GeometryNode)
+            auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
             graphicsNode->setGeometry(geom);
             
             // Store metadata
@@ -428,7 +411,7 @@ void MainWindow::openGeometry()
     cvc::bounding_box graphicsBounds = m_sceneGraph->computeGraphicsBounds();
     if (graphicsBounds[0] <= graphicsBounds[3]) { // Valid bounds
         AppState::instance().setWorldBounds(graphicsBounds);
-        m_sceneGraph->updateGrid(graphicsBounds);
+        // Grid will update automatically via onWorldBoundsChanged callback
     }
     
     // Update render
@@ -451,30 +434,113 @@ void MainWindow::openVolume()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    QString fileName = QFileDialog::getOpenFileName(
+    // Allow multiple file selection
+    QStringList fileNames = QFileDialog::getOpenFileNames(
         this,
-        tr("Open Volume File"),
+        tr("Open Volume File(s)"),
         QString(),
         tr("Volume Files (*.rawiv *.mrc *.ccp4);;All Files (*)"));
 
-    if (fileName.isEmpty())
+    if (fileNames.isEmpty())
         return;
 
-    try {
-        // Load volume using CVC library
-        cvc::volume vol(fileName.toStdString());
-        
-        // Update app state (will trigger scene graph update via callback)
-        AppState::instance().setVolume(vol);
-
-        statusBar()->showMessage(tr("Loaded volume: %1x%2x%3")
-            .arg(vol.XDim())
-            .arg(vol.YDim())
-            .arg(vol.ZDim()), 3000);
+    // Show parent selection dialog
+    GraphicsParentDialog dialog(m_sceneGraph, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
     }
-    catch (const std::exception &e) {
-        QMessageBox::critical(this, tr("Error Loading Volume"),
-            tr("Failed to load volume file:\n%1").arg(e.what()));
+
+    // Get parent node - can be volume type
+    std::shared_ptr<VolumeNode> parentVolNode = dialog.getSelectedVolumeParent();
+
+    int successCount = 0;
+    cvc::uint64 totalVoxels = 0;
+
+    for (const QString& fileName : fileNames) {
+        try {
+            // Load volume using CVC library
+            cvc::volume vol(fileName.toStdString());
+            
+            // Extract filename without path for naming
+            QFileInfo fileInfo(fileName);
+            std::string baseName = fileInfo.baseName().toStdString();
+            
+            // Sanitize the base name to conform to C identifier rules
+            std::string sanitizedName = cvc::state::sanitizeStateName(baseName);
+            
+            // Create unique name if needed
+            std::string volumeName = sanitizedName;
+            int counter = 1;
+            while (m_sceneGraph->getVolumeGraphics(volumeName)) {
+                volumeName = sanitizedName + "_" + std::to_string(counter++);
+            }
+            
+            // Create volume graphics node
+            auto volumeNode = std::make_shared<VolumeNode>(volumeName);
+            volumeNode->setVolume(vol);
+            
+            // Store metadata
+            volumeNode->setMetadata("type", std::string("volume"));
+            volumeNode->setMetadata("filename", fileName.toStdString());
+            
+            // Add to parent or root
+            if (parentVolNode) {
+                parentVolNode->addGraphicsChild(volumeNode);
+                m_sceneGraph->registerVolumeGraphics(volumeName, volumeNode);
+            } else {
+                m_sceneGraph->getVolumeGraphicsRoot()->addGraphicsChild(volumeNode);
+                m_sceneGraph->registerVolumeGraphics(volumeName, volumeNode);
+            }
+            
+            totalVoxels += vol.XDim() * vol.YDim() * vol.ZDim();
+            successCount++;
+            
+        } catch (const std::exception &e) {
+            QMessageBox::warning(this, tr("Error Loading Volume"),
+                tr("Failed to load %1:\n%2").arg(fileName).arg(e.what()));
+        }
+    }
+    
+    // Sync to state tree
+    m_sceneGraph->syncVolumesToState();
+    
+    // Update world bounding box to include all volumes
+    cvc::bounding_box volumeBounds = m_sceneGraph->computeVolumeBounds();
+    if (volumeBounds[0] <= volumeBounds[3]) { // Valid bounds
+        cvc::bounding_box currentBounds = AppState::instance().worldBounds();
+        
+        // Combine with existing bounds
+        cvc::bounding_box combinedBounds(
+            std::min(currentBounds.minx, volumeBounds.minx),
+            std::min(currentBounds.miny, volumeBounds.miny),
+            std::min(currentBounds.minz, volumeBounds.minz),
+            std::max(currentBounds.maxx, volumeBounds.maxx),
+            std::max(currentBounds.maxy, volumeBounds.maxy),
+            std::max(currentBounds.maxz, volumeBounds.maxz)
+        );
+        
+        AppState::instance().setWorldBounds(combinedBounds);
+        // Grid will update automatically via onWorldBoundsChanged callback
+    }
+    
+    // Update render
+    m_renderWidget->update();
+    
+    // Show status message
+    if (successCount > 0) {
+        QString parentMsg = parentVolNode ? QString::fromStdString(parentVolNode->getName()) : tr("root");
+        statusBar()->showMessage(
+            tr("Loaded %1 volume file(s) under '%2': %3 total voxels")
+                .arg(successCount)
+                .arg(parentMsg)
+                .arg(totalVoxels),
+            5000);
+    }
+    
+    // If we loaded multiple volumes or have multiple volumes total, ensure multi-volume rendering
+    int totalVolumes = m_sceneGraph->getVolumeGraphicsCount();
+    if (totalVolumes > 1) {
+        m_sceneGraph->enableMultiVolumeRendering(true);
     }
 }
 
@@ -488,18 +554,6 @@ void MainWindow::toggleAxis()
 {
     m_axisVisible = !m_axisVisible;
     AppState::instance().setAxisVisible(m_axisVisible);
-}
-
-void MainWindow::toggleGeometryBBox()
-{
-    bool visible = !AppState::instance().geometryBBoxVisible();
-    AppState::instance().setGeometryBBoxVisible(visible);
-}
-
-void MainWindow::toggleVolumeBBox()
-{
-    bool visible = !AppState::instance().volumeBBoxVisible();
-    AppState::instance().setVolumeBBoxVisible(visible);
 }
 
 void MainWindow::editBoundingBox()

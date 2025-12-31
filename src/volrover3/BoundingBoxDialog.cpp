@@ -69,35 +69,36 @@ void BoundingBoxDialog::setupUI()
     
     mainLayout->addWidget(boundsGroup);
     
-    // Quick set buttons
+    // Quick set button
     QHBoxLayout *quickSetLayout = new QHBoxLayout();
-    QPushButton *resetGeomBtn = new QPushButton(tr("Fit to Geometry"));
-    QPushButton *resetVolBtn = new QPushButton(tr("Fit to Volume"));
+    QPushButton *resetGraphicsBtn = new QPushButton(tr("Fit to Graphics"));
     
-    connect(resetGeomBtn, &QPushButton::clicked, this, &BoundingBoxDialog::onResetToGeometry);
-    connect(resetVolBtn, &QPushButton::clicked, this, &BoundingBoxDialog::onResetToVolume);
+    connect(resetGraphicsBtn, &QPushButton::clicked, this, &BoundingBoxDialog::onResetToGraphics);
     
-    quickSetLayout->addWidget(resetGeomBtn);
-    quickSetLayout->addWidget(resetVolBtn);
+    quickSetLayout->addWidget(resetGraphicsBtn);
+    quickSetLayout->addStretch();
     mainLayout->addLayout(quickSetLayout);
     
-    // Tick settings group
-    QGroupBox *tickGroup = new QGroupBox(tr("World Coordinate Ticks"));
+    // World bbox visibility group
+    QGroupBox *visibilityGroup = new QGroupBox(tr("Visibility"));
+    QFormLayout *visibilityLayout = new QFormLayout(visibilityGroup);
+    
+    m_worldBBoxVisibleCheckbox = new QCheckBox();
+    visibilityLayout->addRow(tr("Show World Bounding Box:"), m_worldBBoxVisibleCheckbox);
+    
+    mainLayout->addWidget(visibilityGroup);
+    
+    // Coordinate settings group
+    QGroupBox *tickGroup = new QGroupBox(tr("World Bounding Box Coordinates"));
     QFormLayout *tickLayout = new QFormLayout(tickGroup);
     
     m_showTicksCheckbox = new QCheckBox();
-    tickLayout->addRow(tr("Show Ticks:"), m_showTicksCheckbox);
-    
-    m_tickIntervalSpinBox = new QDoubleSpinBox();
-    m_tickIntervalSpinBox->setRange(0.01, 1000.0);
-    m_tickIntervalSpinBox->setDecimals(2);
-    m_tickIntervalSpinBox->setSingleStep(0.1);
-    tickLayout->addRow(tr("Tick Interval:"), m_tickIntervalSpinBox);
+    tickLayout->addRow(tr("Show Coordinates:"), m_showTicksCheckbox);
     
     m_tickLabelColorButton = new QPushButton();
     m_tickLabelColorButton->setFixedSize(50, 25);
     connect(m_tickLabelColorButton, &QPushButton::clicked, this, &BoundingBoxDialog::chooseTickLabelColor);
-    tickLayout->addRow(tr("Label Color:"), m_tickLabelColorButton);
+    tickLayout->addRow(tr("Coordinate Color:"), m_tickLabelColorButton);
     
     m_tickLabelFontSizeSpinBox = new QSpinBox();
     m_tickLabelFontSizeSpinBox->setRange(6, 72);
@@ -128,25 +129,13 @@ cvc::bounding_box BoundingBoxDialog::getBoundingBox() const
     );
 }
 
-void BoundingBoxDialog::onResetToGeometry()
+void BoundingBoxDialog::onResetToGraphics()
 {
-    cvc::geometry geom = AppState::instance().geometry();
-    if (geom.num_points() > 0) {
-        cvc::bounding_box bounds = geom.extents();
-        m_minXEdit->setText(QString::number(bounds[0]));
-        m_minYEdit->setText(QString::number(bounds[1]));
-        m_minZEdit->setText(QString::number(bounds[2]));
-        m_maxXEdit->setText(QString::number(bounds[3]));
-        m_maxYEdit->setText(QString::number(bounds[4]));
-        m_maxZEdit->setText(QString::number(bounds[5]));
-    }
-}
-
-void BoundingBoxDialog::onResetToVolume()
-{
-    cvc::volume vol = AppState::instance().volume();
-    if (vol.XDim() > 0) {
-        cvc::bounding_box bounds = vol.boundingBox();
+    // Get transformed bounds of all graphics objects
+    cvc::bounding_box bounds = AppState::instance().computeGraphicsBounds();
+    
+    // Check if bounds are valid (max > min for all dimensions)
+    if (bounds[3] > bounds[0] && bounds[4] > bounds[1] && bounds[5] > bounds[2]) {
         m_minXEdit->setText(QString::number(bounds[0]));
         m_minYEdit->setText(QString::number(bounds[1]));
         m_minZEdit->setText(QString::number(bounds[2]));
@@ -158,28 +147,28 @@ void BoundingBoxDialog::onResetToVolume()
 
 void BoundingBoxDialog::loadTickSettings()
 {
-    m_showTicksCheckbox->setChecked(AppState::instance().volumeBBoxTicksVisible());
-    m_tickIntervalSpinBox->setValue(AppState::instance().volumeBBoxTickInterval());
-    m_tickLabelFontSizeSpinBox->setValue(AppState::instance().volumeBBoxTickLabelFontSize());
+    m_worldBBoxVisibleCheckbox->setChecked(AppState::instance().worldBBoxVisible());
+    m_showTicksCheckbox->setChecked(AppState::instance().worldBBoxCoordinatesVisible());
+    m_tickLabelFontSizeSpinBox->setValue(AppState::instance().worldBBoxCoordinateFontSize());
     
-    AppState::instance().getVolumeBBoxTickLabelColor(
+    AppState::instance().getWorldBBoxCoordinateColor(
         m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
     updateColorButton();
 }
 
 void BoundingBoxDialog::saveTickSettings()
 {
-    AppState::instance().setVolumeBBoxTicksVisible(m_showTicksCheckbox->isChecked());
-    AppState::instance().setVolumeBBoxTickInterval(m_tickIntervalSpinBox->value());
-    AppState::instance().setVolumeBBoxTickLabelFontSize(m_tickLabelFontSizeSpinBox->value());
-    AppState::instance().setVolumeBBoxTickLabelColor(
+    AppState::instance().setWorldBBoxVisible(m_worldBBoxVisibleCheckbox->isChecked());
+    AppState::instance().setWorldBBoxCoordinatesVisible(m_showTicksCheckbox->isChecked());
+    AppState::instance().setWorldBBoxCoordinateFontSize(m_tickLabelFontSizeSpinBox->value());
+    AppState::instance().setWorldBBoxCoordinateColor(
         m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
 }
 
 void BoundingBoxDialog::chooseTickLabelColor()
 {
     QColor currentColor = QColor::fromRgbF(m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
-    QColor color = QColorDialog::getColor(currentColor, this, tr("Choose Tick Label Color"));
+    QColor color = QColorDialog::getColor(currentColor, this, tr("Choose Coordinate Label Color"));
     
     if (color.isValid()) {
         m_tickLabelColor[0] = color.redF();

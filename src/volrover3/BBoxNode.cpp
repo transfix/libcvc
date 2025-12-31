@@ -47,6 +47,7 @@ vtkProp* BBoxNode::getProp()
 void BBoxNode::addToRenderer(vtkRenderer* renderer)
 {
     if (renderer && isVisible()) {
+        m_renderer = renderer;  // Store renderer reference
         renderer->AddActor(m_actor);
         if (m_ticksVisible) {
             for (auto& actor : m_tickLabelActors) {
@@ -62,6 +63,9 @@ void BBoxNode::removeFromRenderer(vtkRenderer* renderer)
         renderer->RemoveActor(m_actor);
         for (auto& actor : m_tickLabelActors) {
             renderer->RemoveActor2D(actor);
+        }
+        if (renderer == m_renderer) {
+            m_renderer = nullptr;
         }
     }
 }
@@ -135,10 +139,8 @@ void BBoxNode::setTicksVisible(bool visible)
 
 void BBoxNode::setTickInterval(double interval)
 {
-    if (interval > 0.0) {
-        m_tickInterval = interval;
-        createTickLabels();
-    }
+    m_tickInterval = interval;
+    createTickLabels();
 }
 
 void BBoxNode::setTickLabelColor(double r, double g, double b)
@@ -176,10 +178,20 @@ void BBoxNode::setTickLabelFontSize(int size)
 
 void BBoxNode::createTickLabels()
 {
+    // Remove old labels from renderer first
+    if (m_renderer) {
+        for (auto& actor : m_tickLabelActors) {
+            // Only remove if actor was actually added to a renderer
+            if (actor->GetReferenceCount() > 1) {
+                m_renderer->RemoveActor2D(actor);
+            }
+        }
+    }
+    
     // Clear existing labels
     m_tickLabelActors.clear();
     
-    if (!m_ticksVisible || m_tickInterval <= 0.0) return;
+    if (!m_ticksVisible) return;
     
     double minX = m_bbox[0];
     double minY = m_bbox[1];
@@ -212,6 +224,25 @@ void BBoxNode::createTickLabels()
         m_tickLabelActors.push_back(textActor);
     };
     
+    // If interval is 0 or negative, only show coordinates at the 8 vertices
+    if (m_tickInterval <= 0.0) {
+        std::ostringstream oss;
+        // 8 vertices of the bounding box
+        std::vector<std::tuple<double, double, double>> vertices = {
+            {minX, minY, minZ}, {maxX, minY, minZ},
+            {minX, maxY, minZ}, {maxX, maxY, minZ},
+            {minX, minY, maxZ}, {maxX, minY, maxZ},
+            {minX, maxY, maxZ}, {maxX, maxY, maxZ}
+        };
+        for (const auto& [x, y, z] : vertices) {
+            oss.str("");
+            oss << "(" << std::fixed << std::setprecision(2) << x << ", " << y << ", " << z << ")";
+            createLabel(x, y, z, oss.str());
+        }
+        return;
+    }
+    
+    // Otherwise use interval-based ticks along edges
     // X-axis labels along bottom-front edge (minY, minZ)
     for (double x = minX; x <= maxX; x += m_tickInterval) {
         if (x > maxX + 1e-6) break; // Avoid floating point overshoot
@@ -234,6 +265,13 @@ void BBoxNode::createTickLabels()
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(2) << z;
         createLabel(minX, minY, z, oss.str());
+    }
+    
+    // Add new labels to renderer if we have one and ticks are visible
+    if (m_renderer && m_ticksVisible && isVisible()) {
+        for (auto& actor : m_tickLabelActors) {
+            m_renderer->AddActor2D(actor);
+        }
     }
 }
 

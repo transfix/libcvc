@@ -1,38 +1,19 @@
 #include <volrover3/GraphicsNode.h>
-#include <cvc/geometry.h>
+#include <volrover3/BBoxNode.h>
 #include <cvc/state.h>
-#include <cvc/app.h>
-#include <vtkActor.h>
-#include <vtkPolyDataMapper.h>
-#include <vtkPolyData.h>
-#include <vtkPoints.h>
-#include <vtkCellArray.h>
-#include <vtkProperty.h>
-#include <vtkFloatArray.h>
-#include <vtkPointData.h>
 #include <vtkTransform.h>
 #include <vtkMatrix4x4.h>
+#include <cmath>
 #include <algorithm>
 
 GraphicsNode::GraphicsNode(const std::string& name)
     : SceneNode()
     , m_name(name)
-    , m_hasGeometry(false)
-    , m_actor(vtkSmartPointer<vtkActor>::New())
-    , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
-    , m_polyData(vtkSmartPointer<vtkPolyData>::New())
     , m_transform(vtkSmartPointer<vtkMatrix4x4>::New())
     , m_parent(nullptr)
-    , m_stateNode(nullptr)
+    , m_showBBox(false)
+    , m_bboxNode(std::make_shared<BBoxNode>())
 {
-    m_mapper->SetInputData(m_polyData);
-    m_actor->SetMapper(m_mapper);
-    
-    // Set default material properties
-    m_actor->GetProperty()->SetColor(0.8, 0.8, 0.9);
-    m_actor->GetProperty()->SetSpecular(0.3);
-    m_actor->GetProperty()->SetSpecularPower(20);
-    
     // Initialize transform to identity
     m_transform->Identity();
     
@@ -42,86 +23,6 @@ GraphicsNode::GraphicsNode(const std::string& name)
 
 GraphicsNode::~GraphicsNode()
 {
-    // Disconnect from state signals
-    m_dataConnection.disconnect();
-}
-
-vtkProp* GraphicsNode::getProp()
-{
-    return m_actor;
-}
-
-void GraphicsNode::setGeometry(const cvc::geometry& geom)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Store the geometry object
-    m_geometry = std::make_shared<cvc::geometry>(geom);
-    
-    updatePolyData(geom);
-    updateMetadata(geom);
-    m_hasGeometry = true;
-}
-
-void GraphicsNode::updatePolyData(const cvc::geometry& geom)
-{
-    // Create VTK points from geometry
-    vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
-    points->SetNumberOfPoints(geom.num_points());
-
-    for (size_t i = 0; i < geom.num_points(); ++i) {
-        const auto& pt = geom.points()[i];
-        points->SetPoint(i, pt[0], pt[1], pt[2]);
-    }
-
-    // Create VTK cells (triangles)
-    vtkSmartPointer<vtkCellArray> triangles = vtkSmartPointer<vtkCellArray>::New();
-    
-    for (size_t i = 0; i < geom.num_tris(); ++i) {
-        const auto& tri = geom.tris()[i];
-        triangles->InsertNextCell(3);
-        triangles->InsertCellPoint(tri[0]);
-        triangles->InsertCellPoint(tri[1]);
-        triangles->InsertCellPoint(tri[2]);
-    }
-
-    // Update polydata
-    m_polyData->SetPoints(points);
-    m_polyData->SetPolys(triangles);
-
-    // Add normals if available
-    if (geom.normals().size() == geom.num_points()) {
-        vtkSmartPointer<vtkFloatArray> normals = vtkSmartPointer<vtkFloatArray>::New();
-        normals->SetNumberOfComponents(3);
-        normals->SetNumberOfTuples(geom.num_points());
-        normals->SetName("Normals");
-
-        for (size_t i = 0; i < geom.num_points(); ++i) {
-            const auto& n = geom.normals()[i];
-            normals->SetTuple3(i, n[0], n[1], n[2]);
-        }
-
-        m_polyData->GetPointData()->SetNormals(normals);
-    } else {
-        m_polyData->GetPointData()->SetNormals(nullptr);
-    }
-
-    // Add colors if available
-    if (geom.colors().size() == geom.num_points()) {
-        vtkSmartPointer<vtkFloatArray> colors = vtkSmartPointer<vtkFloatArray>::New();
-        colors->SetNumberOfComponents(3);
-        colors->SetNumberOfTuples(geom.num_points());
-        colors->SetName("Colors");
-
-        for (size_t i = 0; i < geom.num_points(); ++i) {
-            const auto& c = geom.colors()[i];
-            colors->SetTuple3(i, c[0], c[1], c[2]);
-        }
-
-        m_polyData->GetPointData()->SetScalars(colors);
-    }
-
-    m_polyData->Modified();
 }
 
 void GraphicsNode::setTransform(vtkMatrix4x4* matrix)
@@ -175,7 +76,7 @@ void GraphicsNode::setRotation(double x, double y, double z)
 
 void GraphicsNode::setScale(double x, double y, double z)
 {
-    // Get current rotation and translation
+    // Get current translation
     double tx = m_transform->GetElement(0, 3);
     double ty = m_transform->GetElement(1, 3);
     double tz = m_transform->GetElement(2, 3);
@@ -188,7 +89,7 @@ void GraphicsNode::setScale(double x, double y, double z)
             double val = m_transform->GetElement(i, j);
             len += val * val;
         }
-        len = sqrt(len);
+        len = std::sqrt(len);
         if (len > 0.0) {
             for (int j = 0; j < 3; ++j) {
                 rotation->SetElement(i, j, m_transform->GetElement(i, j) / len);
@@ -237,35 +138,74 @@ vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const
 
 void GraphicsNode::updateTransform()
 {
-    // Get world transform and apply to actor
-    vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
-    m_actor->SetUserMatrix(worldTransform);
-    
     // Update all children
     for (auto& child : m_graphicsChildren) {
         child->updateTransform();
     }
+    
+    // Update bbox if visible
+    if (m_showBBox) {
+        updateBoundingBoxNode();
+    }
+}
+
+void GraphicsNode::updateBoundingBoxNode()
+{
+    if (!m_bboxNode) return;
+    
+    // Get untransformed bounding box from subclass
+    cvc::bounding_box bbox = getBoundingBox();
+    
+    // Apply world transform to bounding box
+    vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
+    
+    // Transform all 8 corners of the bounding box
+    double corners[8][3] = {
+        {bbox.minx, bbox.miny, bbox.minz},
+        {bbox.maxx, bbox.miny, bbox.minz},
+        {bbox.minx, bbox.maxy, bbox.minz},
+        {bbox.maxx, bbox.maxy, bbox.minz},
+        {bbox.minx, bbox.miny, bbox.maxz},
+        {bbox.maxx, bbox.miny, bbox.maxz},
+        {bbox.minx, bbox.maxy, bbox.maxz},
+        {bbox.maxx, bbox.maxy, bbox.maxz}
+    };
+    
+    double minx = std::numeric_limits<double>::max();
+    double miny = std::numeric_limits<double>::max();
+    double minz = std::numeric_limits<double>::max();
+    double maxx = std::numeric_limits<double>::lowest();
+    double maxy = std::numeric_limits<double>::lowest();
+    double maxz = std::numeric_limits<double>::lowest();
+    
+    for (int i = 0; i < 8; ++i) {
+        double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
+        double out[4];
+        worldTransform->MultiplyPoint(in, out);
+        
+        minx = std::min(minx, out[0]);
+        miny = std::min(miny, out[1]);
+        minz = std::min(minz, out[2]);
+        maxx = std::max(maxx, out[0]);
+        maxy = std::max(maxy, out[1]);
+        maxz = std::max(maxz, out[2]);
+    }
+    
+    m_bboxNode->setBoundingBox(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
 }
 
 void GraphicsNode::update()
 {
     SceneNode::update();
-    updateTransform();
     
-    // Read visible flag from metadata and apply to both SceneNode and actor
+    // Read visible flag from metadata and apply
     if (hasMetadata("visible")) {
         try {
             bool visible = std::any_cast<bool>(getMetadata("visible"));
             SceneNode::setVisible(visible);
-            if (m_actor) {
-                m_actor->SetVisibility(visible ? 1 : 0);
-            }
         } catch (...) {
             // If cast fails, default to visible
             SceneNode::setVisible(true);
-            if (m_actor) {
-                m_actor->SetVisibility(1);
-            }
         }
     }
 }
@@ -343,369 +283,42 @@ void GraphicsNode::setVisible(bool visible)
     setMetadata("visible", visible);
 }
 
-void GraphicsNode::syncToState(cvc::state& parentState)
+void GraphicsNode::setShowBBox(bool show)
 {
-    cvc::state& myState = parentState(m_name);
-    myState.comment("Graphics object representing 3D geometry with transformation and metadata");
+    if (m_showBBox == show)
+        return;
     
-    // Store geometry in state data field if available
-    if (m_geometry) {
-        myState.data(*m_geometry);
-        // Update metadata from geometry
-        updateMetadata(*m_geometry);
-    }
+    m_showBBox = show;
     
-    // Store transform matrix (row-major)
-    std::string matrixStr;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!matrixStr.empty()) matrixStr += ",";
-            matrixStr += std::to_string(m_transform->GetElement(i, j));
-        }
-    }
-    myState("transform").value(matrixStr);
-    myState("transform").comment("4x4 transformation matrix (position, rotation, scale) in row-major format");
-    
-    // Add comment to metadata container
-    myState("metadata").comment("Computed geometry statistics and properties");
-    
-    // Store metadata
-    for (const auto& [key, value] : m_metadata) {
-        // Store metadata in a sub-state
-        try {
-            cvc::state& metaState = myState("metadata")(key);
-            
-            if (value.type() == typeid(std::string)) {
-                metaState.value(std::any_cast<std::string>(value));
-            } else if (value.type() == typeid(double)) {
-                metaState.value(std::any_cast<double>(value));
-            } else if (value.type() == typeid(int)) {
-                metaState.value(std::any_cast<int>(value));
-            } else if (value.type() == typeid(bool)) {
-                bool boolVal = std::any_cast<bool>(value);
-                metaState.value(boolVal ? "true" : "false");
-            }
-            
-            // Add descriptive comments for metadata fields
-            if (key == "num_vertices") {
-                metaState.comment("Total number of vertices in the geometry");
-            } else if (key == "num_triangles") {
-                metaState.comment("Total number of triangular faces");
-            } else if (key == "num_quads") {
-                metaState.comment("Total number of quadrilateral faces");
-            } else if (key == "type") {
-                metaState.comment("Geometry type (triangle_mesh, quad_mesh, mixed_mesh, or empty)");
-            } else if (key == "bbox_min_x") {
-                metaState.comment("Minimum X coordinate of bounding box");
-            } else if (key == "bbox_min_y") {
-                metaState.comment("Minimum Y coordinate of bounding box");
-            } else if (key == "bbox_min_z") {
-                metaState.comment("Minimum Z coordinate of bounding box");
-            } else if (key == "bbox_max_x") {
-                metaState.comment("Maximum X coordinate of bounding box");
-            } else if (key == "bbox_max_y") {
-                metaState.comment("Maximum Y coordinate of bounding box");
-            } else if (key == "bbox_max_z") {
-                metaState.comment("Maximum Z coordinate of bounding box");
-            } else if (key == "extent_x") {
-                metaState.comment("Width of geometry along X axis");
-            } else if (key == "extent_y") {
-                metaState.comment("Height of geometry along Y axis");
-            } else if (key == "extent_z") {
-                metaState.comment("Depth of geometry along Z axis");
-            } else if (key == "center_x") {
-                metaState.comment("X coordinate of geometric center");
-            } else if (key == "center_y") {
-                metaState.comment("Y coordinate of geometric center");
-            } else if (key == "center_z") {
-                metaState.comment("Z coordinate of geometric center");
-            } else if (key == "visible") {
-                metaState.comment("Visibility flag for rendering (true=visible, false=hidden)");
-            } else if (key == "filename") {
-                metaState.comment("Source filename if loaded from file");
-            }
-            
-            // Mark computed metadata as read-only
-            if (key == "filename" || key == "num_vertices" || key == "num_triangles" || 
-                key == "num_quads" || key == "type" || key.find("bbox_") == 0 || 
-                key.find("extent_") == 0 || key.find("center_") == 0) {
-                metaState.readOnly(true);
-            }
-            // Add more types as needed
-        } catch (...) {
-            // Skip metadata that can't be serialized
-        }
-    }
-    
-    // Add comment to children container
-    if (!m_graphicsChildren.empty()) {
-        myState("children").comment("Child graphics objects in the scene hierarchy");
-    }
-    
-    // Recursively sync children
-    for (auto& child : m_graphicsChildren) {
-        child->syncToState(myState("children"));
-    }
-}
-
-void GraphicsNode::syncFromState(const cvc::state& parentState)
-{
-    cvc::state& myState = const_cast<cvc::state&>(parentState)(m_name);
-    
-    if (!myState.initialized()) return;
-    
-    // Store state node pointer and connect to data changes
-    m_stateNode = &myState;
-    m_dataConnection.disconnect(); // Disconnect any previous connection
-    m_dataConnection = myState.dataChanged.connect([this]() {
-        onDataChanged();
-    });
-    
-    // Load geometry from state data if available
-    if (myState.isData<cvc::geometry>()) {
-        try {
-            const cvc::geometry& geom = boost::any_cast<const cvc::geometry&>(myState.data());
-            setGeometry(geom);
-        } catch (...) {
-            // Failed to load geometry from state
-        }
-    }
-    
-    // Load transform matrix
-    if (myState("transform").initialized()) {
-        std::string matrixStr = myState("transform").value();
-        // Parse comma-separated values
-        double matrix[16];
-        size_t pos = 0;
-        for (int i = 0; i < 16; ++i) {
-            size_t nextPos = matrixStr.find(',', pos);
-            std::string val = (nextPos == std::string::npos) ? 
-                matrixStr.substr(pos) : matrixStr.substr(pos, nextPos - pos);
-            matrix[i] = std::stod(val);
-            pos = nextPos + 1;
-        }
-        setTransform(matrix);
-    }
-    
-    // Load metadata
-    cvc::state& metadataState = myState("metadata");
-    if (metadataState.initialized()) {
-        auto metadataChildren = metadataState.children();
-        for (const auto& childPath : metadataChildren) {
-            // Extract just the key name (last component after last dot)
-            size_t lastDot = childPath.find_last_of('.');
-            std::string key = (lastDot != std::string::npos) ? 
-                childPath.substr(lastDot + 1) : childPath;
-            
-            cvc::state& metaState = metadataState(key);
-            if (metaState.initialized()) {
-                // Try to determine type and store
-                std::string valueStr = metaState.value();
-                
-                // Special handling for bool values
-                if (valueStr == "true" || valueStr == "false") {
-                    bool boolVal = (valueStr == "true");
-                    setMetadata(key, boolVal);
-                    
-                    // Apply visible flag from metadata
-                    if (key == "visible") {
-                        SceneNode::setVisible(boolVal);
-                    }
-                } else {
-                    setMetadata(key, valueStr); // Store as string by default
-                }
-            }
+    if (m_bboxNode && m_renderer) {
+        if (show) {
+            updateBoundingBoxNode();
+            m_bboxNode->addToRenderer(m_renderer);
+        } else {
+            m_bboxNode->removeFromRenderer(m_renderer);
         }
     }
 }
 
-void GraphicsNode::updateMetadata(const cvc::geometry& geom)
+void GraphicsNode::addToRenderer(vtkRenderer* renderer)
 {
-    // Update all geometry statistics as metadata
-    setMetadata("num_vertices", static_cast<int>(geom.num_points()));
-    setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
-    setMetadata("num_quads", static_cast<int>(geom.num_quads()));
+    // Call base implementation to add the main prop
+    SceneNode::addToRenderer(renderer);
     
-    // Only compute bounding box if geometry has points
-    if (geom.num_points() > 0) {
-        try {
-            // Get bounding box extents
-            auto bbox = geom.extents();
-            
-            setMetadata("bbox_min_x", bbox.minx);
-            setMetadata("bbox_min_y", bbox.miny);
-            setMetadata("bbox_min_z", bbox.minz);
-            setMetadata("bbox_max_x", bbox.maxx);
-            setMetadata("bbox_max_y", bbox.maxy);
-            setMetadata("bbox_max_z", bbox.maxz);
-            
-            // Compute extents (dimensions)
-            double extentX = bbox.maxx - bbox.minx;
-            double extentY = bbox.maxy - bbox.miny;
-            double extentZ = bbox.maxz - bbox.minz;
-            
-            setMetadata("extent_x", extentX);
-            setMetadata("extent_y", extentY);
-            setMetadata("extent_z", extentZ);
-            
-            // Compute center point
-            setMetadata("center_x", (bbox.minx + bbox.maxx) / 2.0);
-            setMetadata("center_y", (bbox.miny + bbox.maxy) / 2.0);
-            setMetadata("center_z", (bbox.minz + bbox.maxz) / 2.0);
-        } catch (...) {
-            // Failed to compute bounding box for empty or invalid geometry
-            setMetadata("bbox_min_x", 0.0);
-            setMetadata("bbox_min_y", 0.0);
-            setMetadata("bbox_min_z", 0.0);
-            setMetadata("bbox_max_x", 0.0);
-            setMetadata("bbox_max_y", 0.0);
-            setMetadata("bbox_max_z", 0.0);
-            setMetadata("extent_x", 0.0);
-            setMetadata("extent_y", 0.0);
-            setMetadata("extent_z", 0.0);
-            setMetadata("center_x", 0.0);
-            setMetadata("center_y", 0.0);
-            setMetadata("center_z", 0.0);
-        }
-    } else {
-        // Empty geometry - set all bbox/extent/center values to zero
-        setMetadata("bbox_min_x", 0.0);
-        setMetadata("bbox_min_y", 0.0);
-        setMetadata("bbox_min_z", 0.0);
-        setMetadata("bbox_max_x", 0.0);
-        setMetadata("bbox_max_y", 0.0);
-        setMetadata("bbox_max_z", 0.0);
-        setMetadata("extent_x", 0.0);
-        setMetadata("extent_y", 0.0);
-        setMetadata("extent_z", 0.0);
-        setMetadata("center_x", 0.0);
-        setMetadata("center_y", 0.0);
-        setMetadata("center_z", 0.0);
+    // Add bbox if it should be visible
+    if (m_showBBox && m_bboxNode) {
+        updateBoundingBoxNode();
+        m_bboxNode->addToRenderer(renderer);
     }
-    
-    // Add geometry type
-    std::string geomType = "mesh";
-    if (geom.num_tris() > 0 && geom.num_quads() == 0) {
-        geomType = "triangle_mesh";
-    } else if (geom.num_quads() > 0 && geom.num_tris() == 0) {
-        geomType = "quad_mesh";
-    } else if (geom.num_tris() > 0 && geom.num_quads() > 0) {
-        geomType = "mixed_mesh";
-    } else if (geom.num_points() == 0) {
-        geomType = "empty";
-    }
-    setMetadata("type", geomType);
 }
 
-void GraphicsNode::onDataChanged()
+void GraphicsNode::removeFromRenderer(vtkRenderer* renderer)
 {
-    // Called when state data changes - reload geometry from state
-    if (!m_stateNode) return;
-    
-    if (m_stateNode->isData<cvc::geometry>()) {
-        try {
-            const cvc::geometry& geom = boost::any_cast<const cvc::geometry&>(m_stateNode->data());
-            
-            // Store the geometry
-            m_geometry = std::make_shared<cvc::geometry>(geom);
-            
-            // Update VTK rendering
-            updatePolyData(geom);
-            
-            // Recalculate all metadata
-            updateMetadata(geom);
-            
-            // Sync updated metadata back to state tree
-            if (m_stateNode) {
-                cvc::state* parent = m_stateNode;
-                // Get parent by removing our name from the path
-                std::string fullPath = m_stateNode->fullName();
-                size_t lastDot = fullPath.find_last_of('.');
-                if (lastDot != std::string::npos) {
-                    std::string parentPath = fullPath.substr(0, lastDot);
-                    try {
-                        parent = &cvc::state::instance()(parentPath);
-                    } catch (...) {
-                        // Use current state as fallback
-                        parent = m_stateNode;
-                    }
-                }
-                
-                // Sync metadata to state tree
-                for (const auto& [key, value] : m_metadata) {
-                    try {
-                        cvc::state& metaState = (*m_stateNode)("metadata")(key);
-                        
-                        if (value.type() == typeid(std::string)) {
-                            metaState.value(std::any_cast<std::string>(value));
-                        } else if (value.type() == typeid(double)) {
-                            metaState.value(std::any_cast<double>(value));
-                        } else if (value.type() == typeid(int)) {
-                            metaState.value(std::any_cast<int>(value));
-                        } else if (value.type() == typeid(bool)) {
-                            bool boolVal = std::any_cast<bool>(value);
-                            metaState.value(boolVal ? "true" : "false");
-                        }
-                        
-                        // Add descriptive comments for metadata fields
-                        if (key == "num_vertices") {
-                            metaState.comment("Total number of vertices in the geometry");
-                        } else if (key == "num_triangles") {
-                            metaState.comment("Total number of triangular faces");
-                        } else if (key == "num_quads") {
-                            metaState.comment("Total number of quadrilateral faces");
-                        } else if (key == "type") {
-                            metaState.comment("Geometry type (triangle_mesh, quad_mesh, mixed_mesh, or empty)");
-                        } else if (key == "bbox_min_x") {
-                            metaState.comment("Minimum X coordinate of bounding box");
-                        } else if (key == "bbox_min_y") {
-                            metaState.comment("Minimum Y coordinate of bounding box");
-                        } else if (key == "bbox_min_z") {
-                            metaState.comment("Minimum Z coordinate of bounding box");
-                        } else if (key == "bbox_max_x") {
-                            metaState.comment("Maximum X coordinate of bounding box");
-                        } else if (key == "bbox_max_y") {
-                            metaState.comment("Maximum Y coordinate of bounding box");
-                        } else if (key == "bbox_max_z") {
-                            metaState.comment("Maximum Z coordinate of bounding box");
-                        } else if (key == "extent_x") {
-                            metaState.comment("Width of geometry along X axis");
-                        } else if (key == "extent_y") {
-                            metaState.comment("Height of geometry along Y axis");
-                        } else if (key == "extent_z") {
-                            metaState.comment("Depth of geometry along Z axis");
-                        } else if (key == "center_x") {
-                            metaState.comment("X coordinate of geometric center");
-                        } else if (key == "center_y") {
-                            metaState.comment("Y coordinate of geometric center");
-                        } else if (key == "center_z") {
-                            metaState.comment("Z coordinate of geometric center");
-                        } else if (key == "visible") {
-                            metaState.comment("Visibility flag for rendering (true=visible, false=hidden)");
-                        } else if (key == "filename") {
-                            metaState.comment("Source filename if loaded from file");
-                        }
-                        
-                        // Mark computed metadata as read-only
-                        if (key == "num_vertices" || key == "num_triangles" || key == "num_quads" ||
-                            key == "type" || key.find("bbox_") == 0 || key.find("extent_") == 0 ||
-                            key.find("center_") == 0) {
-                            metaState.readOnly(true);
-                        }
-                    } catch (...) {
-                        // Skip metadata that can't be serialized
-                    }
-                }
-            }
-            
-            m_hasGeometry = true;
-            
-            // Trigger a redraw by marking as modified
-            if (m_actor) {
-                m_actor->Modified();
-            }
-        } catch (...) {
-            // Failed to load geometry from state
-        }
+    // Remove bbox
+    if (m_bboxNode) {
+        m_bboxNode->removeFromRenderer(renderer);
     }
+    
+    // Call base implementation to remove the main prop
+    SceneNode::removeFromRenderer(renderer);
 }

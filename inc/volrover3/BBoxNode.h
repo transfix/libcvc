@@ -52,6 +52,7 @@ private:
     double m_tickInterval;
     double m_tickLabelColor[3];
     int m_tickLabelFontSize;
+    vtkRenderer* m_renderer;  // Store renderer to re-add labels when recreated
 };
 
 #endif // BBOXNODE_H

@@ -28,8 +28,6 @@ private slots:
     void openVolume();
     void toggleGrid();
     void toggleAxis();
-    void toggleGeometryBBox();
-    void toggleVolumeBBox();
     void editBoundingBox();
     void editCameraSettings();
     void showGridOptions();

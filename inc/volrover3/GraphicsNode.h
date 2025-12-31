@@ -2,6 +2,7 @@
 #define GRAPHICSNODE_H
 
 #include <volrover3/SceneNode.h>
+#include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
 #include <vtkMatrix4x4.h>
 #include <boost/signals2.hpp>
@@ -9,45 +10,43 @@
 #include <map>
 #include <any>
 
-class vtkActor;
-class vtkPolyDataMapper;
-class vtkPolyData;
 class vtkTransform;
+class BBoxNode;
 
 namespace cvc {
-    class geometry;
     class state;
 }
 
 /**
- * @brief GraphicsNode represents a single graphics object in the scene with transformation
+ * @brief Abstract base class for all graphics objects in the scene
  * 
- * Each GraphicsNode can contain:
- * - A geometry object to render
- * - A 4x4 transformation matrix (position, rotation, scale)
- * - Child graphics nodes with their own transformations (relative to parent)
- * - Metadata stored as key-value pairs
- * - A unique name/ID
+ * GraphicsNode provides common functionality for all renderable graphics objects:
+ * - Transformation (position, rotation, scale)
+ * - Hierarchical structure (parent/child relationships)
+ * - Metadata storage
+ * - Bounding box display
+ * - Visibility control
+ * - State tree synchronization
  * 
- * The hierarchical transformation system means:
- * - Child nodes are transformed relative to their parent
- * - Transforming a parent automatically transforms all children
- * - Each node maintains its own local transform matrix
+ * Subclasses must implement:
+ * - getBoundingBox() - return the untransformed bounding box
+ * - getProp() - return the VTK prop for rendering
+ * - syncToState() / syncFromState() - state tree integration
  */
 class GraphicsNode : public SceneNode
 {
 public:
     GraphicsNode(const std::string& name = "");
-    ~GraphicsNode() override;
+    virtual ~GraphicsNode();
 
     // Identity and naming
     void setName(const std::string& name) { m_name = name; }
     std::string getName() const { return m_name; }
     
-    // Geometry management
-    void setGeometry(const cvc::geometry& geom);
-    bool hasGeometry() const { return m_hasGeometry; }
-    const cvc::geometry* getGeometry() const { return m_geometry.get(); }
+    // Pure virtual methods that subclasses must implement
+    virtual cvc::bounding_box getBoundingBox() const = 0;  // Return untransformed bounding box
+    virtual void syncToState(cvc::state& parentState) = 0;
+    virtual void syncFromState(cvc::state& parentState) = 0;
     
     // Transform management
     void setTransform(vtkMatrix4x4* matrix);
@@ -76,44 +75,32 @@ public:
     bool hasMetadata(const std::string& key) const;
     const std::map<std::string, std::any>& getAllMetadata() const { return m_metadata; }
     
+    // Bounding box visibility
+    void setShowBBox(bool show);
+    bool getShowBBox() const { return m_showBBox; }
+    
     // Override visibility to sync with metadata
     void setVisible(bool visible);
     
-    // State tree integration
-    void syncToState(cvc::state& parentState);
-    void syncFromState(const cvc::state& parentState);
-    
     // Override update to handle transform changes
     void update() override;
+    
+    // Override addToRenderer/removeFromRenderer to handle bbox
+    void addToRenderer(vtkRenderer* renderer) override;
+    void removeFromRenderer(vtkRenderer* renderer) override;
 
 protected:
-    vtkProp* getProp() override;
     void updateTransform();
-    void updatePolyData(const cvc::geometry& geom);
-    void updateMetadata(const cvc::geometry& geom);
-    void onDataChanged();
+    void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
 
-private:
+    // Protected members for subclass access
     std::string m_name;
-    bool m_hasGeometry;
-    std::shared_ptr<cvc::geometry> m_geometry; // Store the actual geometry
-    
-    // VTK rendering components
-    vtkSmartPointer<vtkActor> m_actor;
-    vtkSmartPointer<vtkPolyDataMapper> m_mapper;
-    vtkSmartPointer<vtkPolyData> m_polyData;
     vtkSmartPointer<vtkMatrix4x4> m_transform;
-    
-    // Hierarchical graphics children (separate from SceneNode children)
     std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
     GraphicsNode* m_parent; // Weak pointer to parent for world transform calculation
-    
-    // Metadata storage
     std::map<std::string, std::any> m_metadata;
-    
-    // State tracking for data changes
-    cvc::state* m_stateNode;
-    boost::signals2::connection m_dataConnection;
+    bool m_showBBox;
+    std::shared_ptr<BBoxNode> m_bboxNode;
 };
 
 #endif // GRAPHICSNODE_H

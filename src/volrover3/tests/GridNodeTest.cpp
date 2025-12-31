@@ -350,6 +350,9 @@ TEST_F(GridNodeTest, MultipleAddRemove) {
 // ===========================
 
 TEST_F(GridNodeTest, TickVisibilityDefault) {
+    // Reset state to uninitialized to test default behavior
+    appState->getRootState()("grid_ticks_visible").reset();
+    
     // Ticks should be visible by default
     EXPECT_TRUE(appState->gridTicksVisible());
 }
