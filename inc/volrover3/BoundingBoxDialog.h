@@ -4,30 +4,42 @@
 #include <QDialog>
 #include <QLineEdit>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QPushButton>
 #include <cvc/bounding_box.h>
+#include <memory>
+#include <vector>
+
+class GraphicsNode;
+class SceneGraph;
 
 class BoundingBoxDialog : public QDialog
 {
     Q_OBJECT
 
 public:
-    explicit BoundingBoxDialog(const cvc::bounding_box& bounds, QWidget *parent = nullptr);
-    
-    cvc::bounding_box getBoundingBox() const;
+    explicit BoundingBoxDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent = nullptr);
     
 private slots:
+    void onGraphicsSelectionChanged(int index);
     void onResetToGraphics();
-    void chooseTickLabelColor();
-    void updateColorButton();
+    void onBBoxVisibilityChanged(bool visible);
+    void onBBoxColorChanged();
+    void onApplyChanges();
     
 private:
     void setupUI();
-    void loadTickSettings();
-    void saveTickSettings();
+    void populateGraphicsComboBox();
+    void loadGraphicsSettings();
+    void updateColorButton();
     
+    std::shared_ptr<SceneGraph> m_sceneGraph;
+    std::vector<std::shared_ptr<GraphicsNode>> m_graphicsList;
+    std::shared_ptr<GraphicsNode> m_currentGraphics;
+    
+    QComboBox *m_graphicsComboBox;
     QLineEdit *m_minXEdit;
     QLineEdit *m_minYEdit;
     QLineEdit *m_minZEdit;
@@ -35,12 +47,9 @@ private:
     QLineEdit *m_maxYEdit;
     QLineEdit *m_maxZEdit;
     
-    // Coordinate controls (vertex-only, no interval)
-    QCheckBox *m_showTicksCheckbox;
-    QCheckBox *m_worldBBoxVisibleCheckbox;
-    QPushButton *m_tickLabelColorButton;
-    QSpinBox *m_tickLabelFontSizeSpinBox;
-    double m_tickLabelColor[3];
+    QCheckBox *m_bboxVisibleCheckbox;
+    QPushButton *m_bboxColorButton;
+    double m_bboxColor[3];
 };
 
 #endif // BOUNDINGBOXDIALOG_H

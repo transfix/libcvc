@@ -18,8 +18,9 @@ BBoxNode::BBoxNode()
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
-    , m_coordinatesVisible(false)
+    , m_coordinatesVisible(true)
     , m_coordinateLabelFontSize(12)
+    , m_renderer(nullptr)
 {
     m_actor->SetMapper(m_mapper);
     
@@ -235,19 +236,17 @@ void BBoxNode::createCoordinateLabels()
         m_coordinateLabelActors.push_back(textActor);
     };
     
-    // Show coordinates at the 8 vertices of the bounding box
+    // Show coordinates at the 2 opposing corners (min and max) of the bounding box
     std::ostringstream oss;
-    std::vector<std::tuple<double, double, double>> vertices = {
-        {minX, minY, minZ}, {maxX, minY, minZ},
-        {minX, maxY, minZ}, {maxX, maxY, minZ},
-        {minX, minY, maxZ}, {maxX, minY, maxZ},
-        {minX, maxY, maxZ}, {maxX, maxY, maxZ}
-    };
-    for (const auto& [x, y, z] : vertices) {
-        oss.str("");
-        oss << "(" << std::fixed << std::setprecision(2) << x << ", " << y << ", " << z << ")";
-        createLabel(x, y, z, oss.str());
-    }
+    
+    // Minimum corner
+    oss << "Min: (" << std::fixed << std::setprecision(2) << minX << ", " << minY << ", " << minZ << ")";
+    createLabel(minX, minY, minZ, oss.str());
+    
+    // Maximum corner
+    oss.str("");
+    oss << "Max: (" << std::fixed << std::setprecision(2) << maxX << ", " << maxY << ", " << maxZ << ")";
+    createLabel(maxX, maxY, maxZ, oss.str());
     
     // Add new labels to renderer if we have one and coordinates are visible
     if (m_renderer && m_coordinatesVisible && isVisible()) {

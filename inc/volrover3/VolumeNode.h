@@ -47,6 +47,31 @@ public:
                             const std::vector<double> &opacityTable);
     void setDefaultTransferFunction();
     
+    // Volume rendering property getters and setters
+    void setShading(bool enabled);
+    bool getShading() const { return m_shading; }
+    
+    void setAmbient(double value);
+    double getAmbient() const { return m_ambient; }
+    
+    void setDiffuse(double value);
+    double getDiffuse() const { return m_diffuse; }
+    
+    void setSpecular(double value);
+    double getSpecular() const { return m_specular; }
+    
+    void setSpecularPower(double value);
+    double getSpecularPower() const { return m_specularPower; }
+    
+    void setScalarOpacityUnitDistance(double value);
+    double getScalarOpacityUnitDistance() const { return m_scalarOpacityUnitDistance; }
+    
+    void setSampleDistance(double value);
+    double getSampleDistance() const { return m_sampleDistance; }
+    
+    void setAutoAdjustSampleDistances(bool enabled);
+    bool getAutoAdjustSampleDistances() const { return m_autoAdjustSampleDistances; }
+    
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
     void syncToState(cvc::state& parentState) override;

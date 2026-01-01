@@ -2,6 +2,7 @@
 #include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/GridNode.h>
@@ -25,12 +26,21 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     , m_axisNode(std::make_shared<AxisNode>())
     , m_worldBBoxNode(std::make_shared<BBoxNode>())
     , m_graphicsRoot(std::make_shared<GeometryNode>("graphics"))
+    , m_nullGraphic(nullptr)
     , m_multiVolumeRenderingEnabled(false)
 {
     m_rootNodes.push_back(m_gridNode);
     m_rootNodes.push_back(m_axisNode);
     m_rootNodes.push_back(m_worldBBoxNode);
     m_rootNodes.push_back(m_graphicsRoot); // Add graphics root to scene
+    
+    // Enable bounding box for root graphics node by default
+    m_graphicsRoot->setShowBBox(true);
+    
+    // Create null graphic as placeholder (scene starts empty)
+    m_nullGraphic = std::make_shared<NullGraphicNode>("null");
+    m_nullGraphic->setShowBBox(true);  // Show bbox by default so user can see something
+    m_graphicsRoot->addGraphicsChild(m_nullGraphic);
     
     // Set colors for nodes from AppState
     double r, g, b;
@@ -239,6 +249,9 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, c
     // Add to lookup map
     m_graphicsNodes[name] = graphicsNode;
     
+    // Remove null graphic since we now have real graphics
+    removeNullGraphicIfPresent();
+    
     // Sync to state tree
     syncGraphicsToState();
     
@@ -264,6 +277,9 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
     // Add to lookup map
     m_graphicsNodes[name] = graphicsNode;
     
+    // Remove null graphic since we now have real graphics
+    removeNullGraphicIfPresent();
+    
     // Sync to state tree
     syncGraphicsToState();
     
@@ -287,6 +303,9 @@ void SceneGraph::removeGraphics(const std::string& name)
     
     // Remove from lookup map
     m_graphicsNodes.erase(it);
+    
+    // If scene is now empty, add null graphic back
+    ensureNullGraphicIfEmpty();
     
     // Sync to state tree
     syncGraphicsToState();
@@ -363,6 +382,9 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
     
     // Add to lookup map
     m_graphicsNodes[name] = volumeNode;
+    
+    // Remove null graphic since we now have real graphics
+    removeNullGraphicIfPresent();
     
     // Sync to state tree
     syncGraphicsToState();
@@ -542,5 +564,36 @@ void SceneGraph::updateVolumeRendering()
         enableMultiVolumeRendering(true);
     } else if (volumeCount <= 1 && m_multiVolumeRenderingEnabled) {
         enableMultiVolumeRendering(false);
+    }
+}
+
+void SceneGraph::ensureNullGraphicIfEmpty()
+{
+    // Check if there are any real graphics (excluding null graphic itself)
+    if (m_graphicsNodes.empty() && !m_nullGraphic) {
+        // Create and add null graphic
+        m_nullGraphic = std::make_shared<NullGraphicNode>("null");
+        m_nullGraphic->setShowBBox(true);  // Show bbox by default
+        m_graphicsRoot->addGraphicsChild(m_nullGraphic);
+    } else if (m_graphicsNodes.empty() && m_nullGraphic) {
+        // Null graphic exists but might not be in scene, add it back
+        // Check if it's already a child
+        auto children = m_graphicsRoot->getGraphicsChildren();
+        bool isChild = std::find(children.begin(), children.end(), m_nullGraphic) != children.end();
+        if (!isChild) {
+            m_graphicsRoot->addGraphicsChild(m_nullGraphic);
+        }
+    }
+}
+
+void SceneGraph::removeNullGraphicIfPresent()
+{
+    if (m_nullGraphic && !m_graphicsNodes.empty()) {
+        // Check if null graphic is currently a child of graphics root
+        auto children = m_graphicsRoot->getGraphicsChildren();
+        bool isChild = std::find(children.begin(), children.end(), m_nullGraphic) != children.end();
+        if (isChild) {
+            m_graphicsRoot->removeGraphicsChild(m_nullGraphic);
+        }
     }
 }

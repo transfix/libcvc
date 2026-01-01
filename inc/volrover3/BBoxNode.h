@@ -22,18 +22,20 @@ public:
     void removeFromRenderer(vtkRenderer* renderer) override;
     
     void setBoundingBox(const cvc::bounding_box& bbox);
+    cvc::bounding_box getBoundingBox() const { return m_bbox; }
+    
     void setColor(double r, double g, double b);
     void setLineWidth(double width);
     
     // Coordinate label controls
     void setCoordinatesVisible(bool visible);
-    bool coordinatesVisible() const { return m_coordinatesVisible; }
+    bool getCoordinatesVisible() const { return m_coordinatesVisible; }
     
     void setCoordinateLabelColor(double r, double g, double b);
     void getCoordinateLabelColor(double& r, double& g, double& b) const;
     
     void setCoordinateLabelFontSize(int size);
-    int coordinateLabelFontSize() const { return m_coordinateLabelFontSize; }
+    int getCoordinateLabelFontSize() const { return m_coordinateLabelFontSize; }
 
 private:
     void createBBox();

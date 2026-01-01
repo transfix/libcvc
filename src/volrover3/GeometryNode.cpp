@@ -141,17 +141,8 @@ void GeometryNode::syncToState(cvc::state& parentState)
         myState.data(*m_geometry);
     }
     
-    // Store transform as comma-separated string (row-major 4x4 matrix)
-    std::string transformStr;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!transformStr.empty()) transformStr += ",";
-            transformStr += std::to_string(m_transform->GetElement(i, j));
-        }
-    }
-    cvc::state& transformState = myState("transform");
-    transformState.value(transformStr);
-    transformState.comment("4x4 transformation matrix in row-major order");
+    // Save common graphics attributes (transform, bbox, label, children, combined bbox if has children)
+    saveCommonStateAttributes(myState);
     
     // Store metadata with appropriate readOnly flags and comments
     cvc::state& metadataState = myState("metadata");
@@ -191,24 +182,24 @@ void GeometryNode::syncToState(cvc::state& parentState)
             else if (key == "center_x") metaEntry.comment("X coordinate of bounding box center");
             else if (key == "center_y") metaEntry.comment("Y coordinate of bounding box center");
             else if (key == "center_z") metaEntry.comment("Z coordinate of bounding box center");
+            else if (key == "combined_bbox_min_x") metaEntry.comment("Minimum X coordinate of combined bounding box (this + children)");
+            else if (key == "combined_bbox_min_y") metaEntry.comment("Minimum Y coordinate of combined bounding box (this + children)");
+            else if (key == "combined_bbox_min_z") metaEntry.comment("Minimum Z coordinate of combined bounding box (this + children)");
+            else if (key == "combined_bbox_max_x") metaEntry.comment("Maximum X coordinate of combined bounding box (this + children)");
+            else if (key == "combined_bbox_max_y") metaEntry.comment("Maximum Y coordinate of combined bounding box (this + children)");
+            else if (key == "combined_bbox_max_z") metaEntry.comment("Maximum Z coordinate of combined bounding box (this + children)");
+            else if (key == "combined_extent_x") metaEntry.comment("Width (X dimension) of combined bounding box");
+            else if (key == "combined_extent_y") metaEntry.comment("Height (Y dimension) of combined bounding box");
+            else if (key == "combined_extent_z") metaEntry.comment("Depth (Z dimension) of combined bounding box");
+            else if (key == "combined_center_x") metaEntry.comment("X coordinate of combined bounding box center");
+            else if (key == "combined_center_y") metaEntry.comment("Y coordinate of combined bounding box center");
+            else if (key == "combined_center_z") metaEntry.comment("Z coordinate of combined bounding box center");
             else if (key == "type") metaEntry.comment("Geometry type (triangle_mesh, quad_mesh, etc.)");
             else if (key == "bounding_box") metaEntry.comment("Complete bounding box as comma-separated values");
             else if (key == "filename") metaEntry.comment("Source filename for the geometry");
             
         } catch (...) {
             // Skip metadata that can't be serialized
-        }
-    }
-    
-    // Store bbox flag
-    myState("show_bbox").value(m_showBBox ? "true" : "false");
-    
-    // Recursively sync children under a "children" container
-    if (!m_graphicsChildren.empty()) {
-        cvc::state& childrenState = myState("children");
-        childrenState.comment("Child graphics objects");
-        for (const auto& child : m_graphicsChildren) {
-            child->syncToState(childrenState);
         }
     }
 }
@@ -222,7 +213,11 @@ bool GeometryNode::isComputedMetadata(const std::string& key)
         "bbox_max_x", "bbox_max_y", "bbox_max_z",
         "extent_x", "extent_y", "extent_z",
         "center_x", "center_y", "center_z",
-        "bounding_box", "type", "filename"
+        "bounding_box", "type", "filename",
+        "combined_bbox_min_x", "combined_bbox_min_y", "combined_bbox_min_z",
+        "combined_bbox_max_x", "combined_bbox_max_y", "combined_bbox_max_z",
+        "combined_extent_x", "combined_extent_y", "combined_extent_z",
+        "combined_center_x", "combined_center_y", "combined_center_z"
     };
     
     return computedKeys.find(key) != computedKeys.end();
@@ -304,6 +299,32 @@ void GeometryNode::syncFromState(cvc::state& parentState)
         try {
             std::string showBBoxStr = myState("show_bbox").value();
             setShowBBox(showBBoxStr == "true");
+        } catch (...) {}
+        
+        // Load label settings
+        try {
+            std::string showLabelStr = myState("show_label").value();
+            setShowLabel(showLabelStr == "true");
+        } catch (...) {}
+        
+        try {
+            std::string labelText = myState("label_text").value();
+            setLabelText(labelText);
+        } catch (...) {}
+        
+        try {
+            int labelSize = std::stoi(myState("label_size").value());
+            setLabelSize(labelSize);
+        } catch (...) {}
+        
+        try {
+            std::string colorStr = myState("label_color").value();
+            std::istringstream iss(colorStr);
+            double r, g, b;
+            char comma;
+            if (iss >> r >> comma >> g >> comma >> b) {
+                setLabelColor(r, g, b);
+            }
         } catch (...) {}
     } catch (...) {
         // State doesn't exist or can't be loaded

@@ -13,6 +13,7 @@ class vtkMultiVolume;
 class SceneNode;
 class GeometryNode;
 class GraphicsNode;
+class NullGraphicNode;
 class VolumeNode;
 class VolumeNode;
 class GridNode;
@@ -117,6 +118,7 @@ private:
     // Multi-object graphics system (includes both geometry and volume graphics)
     std::shared_ptr<GraphicsNode> m_graphicsRoot; // Root node for all graphics
     std::map<std::string, std::shared_ptr<GraphicsNode>> m_graphicsNodes; // Flat lookup by name
+    std::shared_ptr<NullGraphicNode> m_nullGraphic; // Placeholder when scene is empty
     
     // Multi-volume rendering state
     bool m_multiVolumeRenderingEnabled;
@@ -126,6 +128,10 @@ private:
     void setupMultiVolumeRendering();
     void teardownMultiVolumeRendering();
     void updateVolumeRendering();
+    
+    // Null graphic management
+    void ensureNullGraphicIfEmpty();
+    void removeNullGraphicIfPresent();
 };
 
 #endif // SCENEGRAPH_H

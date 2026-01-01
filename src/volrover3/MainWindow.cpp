@@ -578,10 +578,8 @@ void MainWindow::editBoundingBox()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    BoundingBoxDialog dialog(AppState::instance().worldBounds(), this);
-    if (dialog.exec() == QDialog::Accepted) {
-        AppState::instance().setWorldBounds(dialog.getBoundingBox());
-    }
+    BoundingBoxDialog dialog(m_sceneGraph, this);
+    dialog.exec();
 }
 
 void MainWindow::editCameraSettings()

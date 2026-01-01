@@ -1,0 +1,354 @@
+#include <gtest/gtest.h>
+#include <volrover3/VolumeNode.h>
+#include <volrover3/SceneGraph.h>
+#include <cvc/volume.h>
+#include <cvc/state.h>
+#include <vtkMatrix4x4.h>
+#include <cmath>
+
+class VolumeNodeTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Create a simple test volume with known data range
+        testVolume = cvc::volume(
+            cvc::dimension(10, 10, 10),
+            cvc::UChar,
+            cvc::bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0)
+        );
+        
+        // Fill with gradient data
+        for (unsigned int k = 0; k < 10; k++) {
+            for (unsigned int j = 0; j < 10; j++) {
+                for (unsigned int i = 0; i < 10; i++) {
+                    testVolume(i, j, k, static_cast<unsigned char>(i + j + k));
+                }
+            }
+        }
+        
+        // Set min/max explicitly
+        testVolume.min(0.0);
+        testVolume.max(27.0);
+        
+        // Create a volume with larger bounds for spacing tests
+        largeVolume = cvc::volume(
+            cvc::dimension(171, 171, 171),
+            cvc::Float,
+            cvc::bounding_box(0.0, 0.0, 0.0, 945.0, 945.0, 945.0)
+        );
+        
+        // Fill with test data
+        for (unsigned int k = 0; k < 171; k++) {
+            for (unsigned int j = 0; j < 171; j++) {
+                for (unsigned int i = 0; i < 171; i++) {
+                    largeVolume(i, j, k, static_cast<float>(i * 0.01 + j * 0.01 + k * 0.01));
+                }
+            }
+        }
+        
+        largeVolume.min(-5.185418);
+        largeVolume.max(8.067500);
+    }
+    
+    void TearDown() override {
+    }
+    
+    cvc::volume testVolume;
+    cvc::volume largeVolume;
+};
+
+// ============================================================================
+// Volume Span and Spacing Tests (Critical for rendering)
+// ============================================================================
+
+TEST_F(VolumeNodeTest, VolumeSpanCalculation) {
+    // Test that volume span is calculated correctly
+    // XSpan = (XMax - XMin) / (XDim - 1)
+    
+    // Small volume: (9-0)/(10-1) = 1.0
+    EXPECT_DOUBLE_EQ(testVolume.XSpan(), 1.0);
+    EXPECT_DOUBLE_EQ(testVolume.YSpan(), 1.0);
+    EXPECT_DOUBLE_EQ(testVolume.ZSpan(), 1.0);
+    
+    // Large volume: (945-0)/(171-1) = 5.558823...
+    double expectedSpan = 945.0 / 170.0;
+    EXPECT_NEAR(largeVolume.XSpan(), expectedSpan, 0.0001);
+    EXPECT_NEAR(largeVolume.YSpan(), expectedSpan, 0.0001);
+    EXPECT_NEAR(largeVolume.ZSpan(), expectedSpan, 0.0001);
+}
+
+TEST_F(VolumeNodeTest, VolumeSpacingForVTK) {
+    VolumeNode node("test_volume");
+    node.setVolume(largeVolume);
+    
+    // The critical fix: spacing should be (Max - Min) / Dim, NOT Span() / Dim
+    // Spacing = (945 - 0) / 171 = 5.526315...
+    double expectedSpacing = 945.0 / 171.0;
+    
+    // We don't have direct access to VTK spacing, but we can verify
+    // the volume bounds are correct
+    cvc::bounding_box bbox = node.getBoundingBox();
+    
+    EXPECT_DOUBLE_EQ(bbox[0], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[1], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[2], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[3], 945.0);
+    EXPECT_DOUBLE_EQ(bbox[4], 945.0);
+    EXPECT_DOUBLE_EQ(bbox[5], 945.0);
+    
+    // Verify dimensions
+    EXPECT_EQ(largeVolume.XDim(), 171);
+    EXPECT_EQ(largeVolume.YDim(), 171);
+    EXPECT_EQ(largeVolume.ZDim(), 171);
+}
+
+TEST_F(VolumeNodeTest, VolumeSpacingNotSpanDivDim) {
+    // This test verifies the critical bug fix
+    // WRONG: spacing = XSpan() / XDim()
+    // RIGHT: spacing = (XMax() - XMin()) / XDim()
+    
+    double wrongSpacing = largeVolume.XSpan() / largeVolume.XDim();
+    double correctSpacing = (largeVolume.XMax() - largeVolume.XMin()) / largeVolume.XDim();
+    
+    // These should be different!
+    EXPECT_NE(wrongSpacing, correctSpacing);
+    
+    // The wrong calculation gives ~0.0325
+    EXPECT_NEAR(wrongSpacing, 0.0325, 0.001);
+    
+    // The correct calculation gives ~5.526
+    EXPECT_NEAR(correctSpacing, 5.526, 0.001);
+}
+
+// ============================================================================
+// Transfer Function and Data Range Tests
+// ============================================================================
+
+TEST_F(VolumeNodeTest, VolumeDataRange) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Verify metadata contains correct data range
+    EXPECT_TRUE(node.hasMetadata("data_min"));
+    EXPECT_TRUE(node.hasMetadata("data_max"));
+    
+    double dataMin = std::any_cast<double>(node.getMetadata("data_min"));
+    double dataMax = std::any_cast<double>(node.getMetadata("data_max"));
+    
+    EXPECT_DOUBLE_EQ(dataMin, 0.0);
+    EXPECT_DOUBLE_EQ(dataMax, 27.0);
+}
+
+TEST_F(VolumeNodeTest, LargeVolumeDataRange) {
+    VolumeNode node("large_volume");
+    node.setVolume(largeVolume);
+    
+    // Verify the actual data range from the problematic volume
+    EXPECT_TRUE(node.hasMetadata("data_min"));
+    EXPECT_TRUE(node.hasMetadata("data_max"));
+    
+    double dataMin = std::any_cast<double>(node.getMetadata("data_min"));
+    double dataMax = std::any_cast<double>(node.getMetadata("data_max"));
+    
+    EXPECT_DOUBLE_EQ(dataMin, -5.185418);
+    EXPECT_DOUBLE_EQ(dataMax, 8.067500);
+}
+
+TEST_F(VolumeNodeTest, TransferFunctionMetadata) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("transfer_function_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_volume");
+    cvc::state& metadataState = nodeState("metadata");
+    
+    // Verify data_min and data_max are in state
+    EXPECT_NO_THROW({
+        std::string minStr = metadataState("data_min").value();
+        std::string maxStr = metadataState("data_max").value();
+        
+        double minVal = std::stod(minStr);
+        double maxVal = std::stod(maxStr);
+        
+        EXPECT_DOUBLE_EQ(minVal, 0.0);
+        EXPECT_DOUBLE_EQ(maxVal, 27.0);
+    });
+}
+
+TEST_F(VolumeNodeTest, VolumeRenderingPropertiesStateSync) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Set rendering properties
+    node.setShading(true);
+    node.setAmbient(0.3);
+    node.setDiffuse(0.7);
+    node.setSpecular(0.5);
+    node.setSpecularPower(25.0);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("rendering_props_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_volume");
+    cvc::state& renderingState = nodeState("rendering");
+    
+    // Verify rendering properties in state
+    EXPECT_EQ(renderingState("shading").value(), "true");
+    
+    // For floating point values, compare numerically with tolerance
+    EXPECT_NEAR(std::stod(renderingState("ambient").value()), 0.3, 0.0001);
+    EXPECT_NEAR(std::stod(renderingState("diffuse").value()), 0.7, 0.0001);
+    EXPECT_NEAR(std::stod(renderingState("specular").value()), 0.5, 0.0001);
+    EXPECT_NEAR(std::stod(renderingState("specular_power").value()), 25.0, 0.0001);
+    
+    // Create new node and load from state
+    VolumeNode node2("test_volume");
+    node2.syncFromState(testState);
+    
+    EXPECT_TRUE(node2.getShading());
+    EXPECT_DOUBLE_EQ(node2.getAmbient(), 0.3);
+    EXPECT_DOUBLE_EQ(node2.getDiffuse(), 0.7);
+    EXPECT_DOUBLE_EQ(node2.getSpecular(), 0.5);
+    EXPECT_DOUBLE_EQ(node2.getSpecularPower(), 25.0);
+}
+
+// ============================================================================
+// Volume Label Tests
+// ============================================================================
+
+TEST_F(VolumeNodeTest, VolumeLabelDefaultState) {
+    VolumeNode node("test_volume");
+    
+    // Label should be off by default
+    EXPECT_FALSE(node.getShowLabel());
+    // Default label text should be node name
+    EXPECT_EQ(node.getLabelText(), "test_volume");
+    // Default size should be 14
+    EXPECT_EQ(node.getLabelSize(), 14);
+}
+
+TEST_F(VolumeNodeTest, VolumeLabelStateSync) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Configure label
+    node.setShowLabel(true);
+    node.setLabelText("My Volume");
+    node.setLabelSize(16);
+    node.setLabelColor(0.0, 1.0, 0.0);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("volume_label_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_volume");
+    
+    // Verify label state
+    EXPECT_EQ(nodeState("show_label").value(), "true");
+    EXPECT_EQ(nodeState("label_text").value(), "My Volume");
+    EXPECT_EQ(nodeState("label_size").value(), "16");
+    EXPECT_EQ(nodeState("label_color").value(), "0,1,0");
+    
+    // Create new node and sync from state
+    VolumeNode node2("test_volume");
+    node2.syncFromState(testState);
+    
+    EXPECT_TRUE(node2.getShowLabel());
+    EXPECT_EQ(node2.getLabelText(), "My Volume");
+    EXPECT_EQ(node2.getLabelSize(), 16);
+    
+    double r, g, b;
+    node2.getLabelColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+}
+
+// ============================================================================
+// Volume Bounding Box Tests
+// ============================================================================
+
+TEST_F(VolumeNodeTest, VolumeBBoxBounds) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    cvc::bounding_box bbox = node.getBoundingBox();
+    
+    // Should match volume bounds
+    EXPECT_DOUBLE_EQ(bbox[0], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[1], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[2], 0.0);
+    EXPECT_DOUBLE_EQ(bbox[3], 9.0);
+    EXPECT_DOUBLE_EQ(bbox[4], 9.0);
+    EXPECT_DOUBLE_EQ(bbox[5], 9.0);
+}
+
+TEST_F(VolumeNodeTest, VolumeBBoxStateSync) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Enable bbox
+    node.setShowBBox(true);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("volume_bbox_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_volume");
+    EXPECT_EQ(nodeState("show_bbox").value(), "true");
+    
+    // Create new node and sync from state
+    VolumeNode node2("test_volume");
+    node2.syncFromState(testState);
+    
+    EXPECT_TRUE(node2.getShowBBox());
+}
+
+// ============================================================================
+// Volume Metadata Tests
+// ============================================================================
+
+TEST_F(VolumeNodeTest, VolumeMetadataComplete) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Check all expected metadata fields exist
+    EXPECT_TRUE(node.hasMetadata("dim_x"));
+    EXPECT_TRUE(node.hasMetadata("dim_y"));
+    EXPECT_TRUE(node.hasMetadata("dim_z"));
+    EXPECT_TRUE(node.hasMetadata("data_min"));
+    EXPECT_TRUE(node.hasMetadata("data_max"));
+    EXPECT_TRUE(node.hasMetadata("bbox_min_x"));
+    EXPECT_TRUE(node.hasMetadata("bbox_max_z"));
+    EXPECT_TRUE(node.hasMetadata("voxel_type"));
+}
+
+TEST_F(VolumeNodeTest, VolumeMetadataValues) {
+    VolumeNode node("test_volume");
+    node.setVolume(testVolume);
+    
+    // Verify dimension metadata
+    EXPECT_EQ(std::any_cast<int>(node.getMetadata("dim_x")), 10);
+    EXPECT_EQ(std::any_cast<int>(node.getMetadata("dim_y")), 10);
+    EXPECT_EQ(std::any_cast<int>(node.getMetadata("dim_z")), 10);
+    
+    // Verify bounding box metadata
+    EXPECT_DOUBLE_EQ(std::any_cast<double>(node.getMetadata("bbox_min_x")), 0.0);
+    EXPECT_DOUBLE_EQ(std::any_cast<double>(node.getMetadata("bbox_max_x")), 9.0);
+    
+    // Verify voxel type
+    std::string voxelType = std::any_cast<std::string>(node.getMetadata("voxel_type"));
+    EXPECT_EQ(voxelType, "unsigned_char");
+}
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

@@ -11,6 +11,7 @@
 #include <any>
 
 class vtkTransform;
+class vtkActor2D;
 class BBoxNode;
 
 namespace cvc {
@@ -44,9 +45,12 @@ public:
     std::string getName() const { return m_name; }
     
     // Pure virtual methods that subclasses must implement
-    virtual cvc::bounding_box getBoundingBox() const = 0;  // Return untransformed bounding box
+    virtual cvc::bounding_box getBoundingBox() const = 0;  // Return untransformed bounding box of THIS node only
     virtual void syncToState(cvc::state& parentState) = 0;
     virtual void syncFromState(cvc::state& parentState) = 0;
+    
+    // Get combined bounding box (this node + all children)
+    cvc::bounding_box getCombinedBoundingBox() const;
     
     // Transform management
     void setTransform(vtkMatrix4x4* matrix);
@@ -79,6 +83,20 @@ public:
     void setShowBBox(bool show);
     bool getShowBBox() const { return m_showBBox; }
     
+    // Bounding box color
+    void setBBoxColor(double r, double g, double b);
+    void getBBoxColor(double& r, double& g, double& b) const;
+    
+    // Label control
+    void setShowLabel(bool show);
+    bool getShowLabel() const { return m_showLabel; }
+    void setLabelText(const std::string& text);
+    std::string getLabelText() const { return m_labelText; }
+    void setLabelSize(int size);
+    int getLabelSize() const { return m_labelSize; }
+    void setLabelColor(double r, double g, double b);
+    void getLabelColor(double& r, double& g, double& b) const;
+    
     // Override visibility to sync with metadata
     void setVisible(bool visible);
     
@@ -92,6 +110,10 @@ public:
 protected:
     void updateTransform();
     void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
+    void updateLabel();  // Update label position and properties
+    
+    // Helper to save common state attributes (transform, bbox, label, children)
+    void saveCommonStateAttributes(cvc::state& myState);
 
     // Protected members for subclass access
     std::string m_name;
@@ -101,6 +123,13 @@ protected:
     std::map<std::string, std::any> m_metadata;
     bool m_showBBox;
     std::shared_ptr<BBoxNode> m_bboxNode;
+    
+    // Label members
+    bool m_showLabel;
+    std::string m_labelText;
+    int m_labelSize;
+    double m_labelColor[3];
+    vtkSmartPointer<vtkActor2D> m_labelActor;
 };
 
 #endif // GRAPHICSNODE_H

@@ -43,6 +43,7 @@ set(VOLROVER3_SOURCES
   GeometryNode.cpp
   GraphicsNode.cpp
   VolumeNode.cpp
+  NullGraphicNode.cpp
   GridNode.cpp
   AxisNode.cpp
   BBoxNode.cpp
@@ -218,4 +219,40 @@ if(CVC_BUILD_TESTS)
     GTest::gtest
     GTest::gtest_main)
   add_test(NAME GraphicsNodeTest COMMAND volrover3_graphicsnode_test)
+  
+  # VolumeNode tests
+  add_executable(volrover3_volumenode_test
+    tests/VolumeNodeTest.cpp)
+  target_link_libraries(volrover3_volumenode_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME VolumeNodeTest COMMAND volrover3_volumenode_test)
+  
+  # BBoxNode tests
+  add_executable(volrover3_bboxnode_test
+    tests/BBoxNodeTest.cpp)
+  target_link_libraries(volrover3_bboxnode_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME BBoxNodeTest COMMAND volrover3_bboxnode_test)
+  
+  # NullGraphicNode tests
+  add_executable(volrover3_nullgraphicnode_test
+    tests/NullGraphicNodeTest.cpp)
+  target_link_libraries(volrover3_nullgraphicnode_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME NullGraphicNodeTest COMMAND volrover3_nullgraphicnode_test)
+  
+  # BoundingBox Semantics tests
+  add_executable(volrover3_bbox_semantics_test
+    tests/BoundingBoxSemanticsTest.cpp)
+  target_link_libraries(volrover3_bbox_semantics_test
+    volrover3_lib
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME BoundingBoxSemanticsTest COMMAND volrover3_bbox_semantics_test)
 endif()

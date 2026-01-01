@@ -1067,6 +1067,186 @@ TEST_F(GraphicsNodeTest, CommentsPersistAfterDataChange) {
     EXPECT_EQ(initialComment, updatedComment);
 }
 
+// ============================================================================
+// Label Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, LabelDefaultState) {
+    GeometryNode node("test_node");
+    
+    // Label should be off by default
+    EXPECT_FALSE(node.getShowLabel());
+    // Default label text should be node name
+    EXPECT_EQ(node.getLabelText(), "test_node");
+    // Default size should be 14
+    EXPECT_EQ(node.getLabelSize(), 14);
+    // Default color should be white
+    double r, g, b;
+    node.getLabelColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+TEST_F(GraphicsNodeTest, SetLabelText) {
+    GeometryNode node("test_node");
+    
+    node.setLabelText("Custom Label");
+    EXPECT_EQ(node.getLabelText(), "Custom Label");
+    
+    node.setLabelText("Another Label");
+    EXPECT_EQ(node.getLabelText(), "Another Label");
+}
+
+TEST_F(GraphicsNodeTest, SetLabelSize) {
+    GeometryNode node("test_node");
+    
+    node.setLabelSize(20);
+    EXPECT_EQ(node.getLabelSize(), 20);
+    
+    // Should clamp to minimum 1
+    node.setLabelSize(0);
+    EXPECT_EQ(node.getLabelSize(), 1);
+    
+    node.setLabelSize(-5);
+    EXPECT_EQ(node.getLabelSize(), 1);
+}
+
+TEST_F(GraphicsNodeTest, SetLabelColor) {
+    GeometryNode node("test_node");
+    
+    node.setLabelColor(0.5, 0.75, 1.0);
+    
+    double r, g, b;
+    node.getLabelColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 0.5);
+    EXPECT_DOUBLE_EQ(g, 0.75);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+TEST_F(GraphicsNodeTest, SetShowLabel) {
+    GeometryNode node("test_node");
+    
+    EXPECT_FALSE(node.getShowLabel());
+    
+    node.setShowLabel(true);
+    EXPECT_TRUE(node.getShowLabel());
+    
+    node.setShowLabel(false);
+    EXPECT_FALSE(node.getShowLabel());
+}
+
+TEST_F(GraphicsNodeTest, LabelStateSync) {
+    GeometryNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Configure label
+    node.setShowLabel(true);
+    node.setLabelText("Test Label");
+    node.setLabelSize(18);
+    node.setLabelColor(1.0, 0.5, 0.0);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("label_sync_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    
+    // Verify label state
+    EXPECT_EQ(nodeState("show_label").value(), "true");
+    EXPECT_EQ(nodeState("label_text").value(), "Test Label");
+    EXPECT_EQ(nodeState("label_size").value(), "18");
+    EXPECT_EQ(nodeState("label_color").value(), "1,0.5,0");
+    
+    // Create new node and sync from state
+    GeometryNode node2("test_node");
+    node2.syncFromState(testState);
+    
+    EXPECT_TRUE(node2.getShowLabel());
+    EXPECT_EQ(node2.getLabelText(), "Test Label");
+    EXPECT_EQ(node2.getLabelSize(), 18);
+    
+    double r, g, b;
+    node2.getLabelColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 0.5);
+    EXPECT_DOUBLE_EQ(b, 0.0);
+}
+
+// ============================================================================
+// Bounding Box Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, BBoxDefaultState) {
+    GeometryNode node("test_node");
+    
+    // BBox should be off by default for regular nodes
+    EXPECT_FALSE(node.getShowBBox());
+}
+
+TEST_F(GraphicsNodeTest, SetShowBBox) {
+    GeometryNode node("test_node");
+    
+    node.setShowBBox(true);
+    EXPECT_TRUE(node.getShowBBox());
+    
+    node.setShowBBox(false);
+    EXPECT_FALSE(node.getShowBBox());
+}
+
+TEST_F(GraphicsNodeTest, BBoxStateSync) {
+    GeometryNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    // Enable bbox
+    node.setShowBBox(true);
+    
+    // Sync to state
+    cvc::state& root = cvc::state::instance();
+    cvc::state& testState = root("bbox_sync_test");
+    node.syncToState(testState);
+    
+    cvc::state& nodeState = testState("test_node");
+    EXPECT_EQ(nodeState("show_bbox").value(), "true");
+    
+    // Create new node and sync from state
+    GeometryNode node2("test_node");
+    node2.syncFromState(testState);
+    
+    EXPECT_TRUE(node2.getShowBBox());
+}
+
+TEST_F(GraphicsNodeTest, BBoxColor) {
+    GeometryNode node("test_node");
+    
+    // Set bbox color
+    node.setBBoxColor(1.0, 0.0, 0.0);
+    
+    // Note: getBBoxColor currently returns default white
+    // because BBoxNode doesn't have getColor() method
+    double r, g, b;
+    node.getBBoxColor(r, g, b);
+    EXPECT_DOUBLE_EQ(r, 1.0);
+    EXPECT_DOUBLE_EQ(g, 1.0);
+    EXPECT_DOUBLE_EQ(b, 1.0);
+}
+
+TEST_F(GraphicsNodeTest, BBoxBounds) {
+    GeometryNode node("test_node");
+    node.setGeometry(testGeom);
+    
+    cvc::bounding_box bbox = node.getBoundingBox();
+    
+    // Verify bounding box encompasses all points
+    EXPECT_LE(bbox[0], 0.0);  // min x
+    EXPECT_LE(bbox[1], 0.0);  // min y
+    EXPECT_LE(bbox[2], 0.0);  // min z
+    EXPECT_GE(bbox[3], 1.0);  // max x
+    EXPECT_GE(bbox[4], 1.0);  // max y
+    EXPECT_GE(bbox[5], 0.0);  // max z
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -317,6 +317,70 @@ void VolumeNode::setDefaultTransferFunction()
     m_opacityFunc->AddPoint(m_dataMax, 1.0);
 }
 
+void VolumeNode::setShading(bool enabled)
+{
+    m_shading = enabled;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetShade(enabled);
+    }
+}
+
+void VolumeNode::setAmbient(double value)
+{
+    m_ambient = value;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetAmbient(value);
+    }
+}
+
+void VolumeNode::setDiffuse(double value)
+{
+    m_diffuse = value;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetDiffuse(value);
+    }
+}
+
+void VolumeNode::setSpecular(double value)
+{
+    m_specular = value;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetSpecular(value);
+    }
+}
+
+void VolumeNode::setSpecularPower(double value)
+{
+    m_specularPower = value;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetSpecularPower(value);
+    }
+}
+
+void VolumeNode::setScalarOpacityUnitDistance(double value)
+{
+    m_scalarOpacityUnitDistance = value;
+    if (m_volumeProperty) {
+        m_volumeProperty->SetScalarOpacityUnitDistance(value);
+    }
+}
+
+void VolumeNode::setSampleDistance(double value)
+{
+    m_sampleDistance = value;
+    if (m_mapper) {
+        m_mapper->SetSampleDistance(value);
+    }
+}
+
+void VolumeNode::setAutoAdjustSampleDistances(bool enabled)
+{
+    m_autoAdjustSampleDistances = enabled;
+    if (m_mapper) {
+        m_mapper->SetAutoAdjustSampleDistances(enabled);
+    }
+}
+
 void VolumeNode::updateTransferFunctions()
 {
     static int callCount = 0;
@@ -421,6 +485,14 @@ void VolumeNode::syncToState(cvc::state& parentState)
     // Store bbox flag
     myState("show_bbox").value(m_showBBox ? "true" : "false");
     
+    // Store label settings
+    myState("show_label").value(m_showLabel ? "true" : "false");
+    myState("label_text").value(m_labelText);
+    myState("label_size").value(std::to_string(m_labelSize));
+    std::ostringstream labelColorStr;
+    labelColorStr << m_labelColor[0] << "," << m_labelColor[1] << "," << m_labelColor[2];
+    myState("label_color").value(labelColorStr.str());
+    
     // Store volume rendering properties
     cvc::state& renderingState = myState("rendering");
     renderingState.comment("Volume rendering properties");
@@ -449,14 +521,8 @@ void VolumeNode::syncToState(cvc::state& parentState)
     renderingState("auto_adjust_sample_distances").value(m_autoAdjustSampleDistances ? "true" : "false");
     renderingState("auto_adjust_sample_distances").comment("Auto-adjust sample distances");
     
-    // Recursively sync children under a "children" container
-    if (!m_graphicsChildren.empty()) {
-        cvc::state& childrenState = myState("children");
-        childrenState.comment("Child graphics objects");
-        for (const auto& child : m_graphicsChildren) {
-            child->syncToState(childrenState);
-        }
-    }
+    // Save common graphics attributes (transform, bbox, label, children, combined bbox if has children)
+    saveCommonStateAttributes(myState);
 }
 
 bool VolumeNode::isComputedMetadata(const std::string& key)
@@ -468,7 +534,11 @@ bool VolumeNode::isComputedMetadata(const std::string& key)
         "bbox_max_x", "bbox_max_y", "bbox_max_z",
         "spacing_x", "spacing_y", "spacing_z",
         "data_range_min", "data_range_max",
-        "voxel_type", "bounding_box", "filename"
+        "voxel_type", "bounding_box", "filename",
+        "combined_bbox_min_x", "combined_bbox_min_y", "combined_bbox_min_z",
+        "combined_bbox_max_x", "combined_bbox_max_y", "combined_bbox_max_z",
+        "combined_extent_x", "combined_extent_y", "combined_extent_z",
+        "combined_center_x", "combined_center_y", "combined_center_z"
     };
     
     return computedKeys.find(key) != computedKeys.end();
@@ -550,6 +620,32 @@ void VolumeNode::syncFromState(cvc::state& parentState)
         try {
             std::string showBBoxStr = myState("show_bbox").value();
             setShowBBox(showBBoxStr == "true");
+        } catch (...) {}
+        
+        // Load label settings
+        try {
+            std::string showLabelStr = myState("show_label").value();
+            setShowLabel(showLabelStr == "true");
+        } catch (...) {}
+        
+        try {
+            std::string labelText = myState("label_text").value();
+            setLabelText(labelText);
+        } catch (...) {}
+        
+        try {
+            int labelSize = std::stoi(myState("label_size").value());
+            setLabelSize(labelSize);
+        } catch (...) {}
+        
+        try {
+            std::string colorStr = myState("label_color").value();
+            std::istringstream iss(colorStr);
+            double r, g, b;
+            char comma;
+            if (iss >> r >> comma >> g >> comma >> b) {
+                setLabelColor(r, g, b);
+            }
         } catch (...) {}
         
         // Load volume rendering properties

@@ -1,4 +1,6 @@
 #include <volrover3/BoundingBoxDialog.h>
+#include <volrover3/SceneGraph.h>
+#include <volrover3/GraphicsNode.h>
 #include <volrover3/AppState.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -13,36 +15,40 @@
 #include <QSpinBox>
 #include <QColorDialog>
 
-BoundingBoxDialog::BoundingBoxDialog(const cvc::bounding_box& bounds, QWidget *parent)
+BoundingBoxDialog::BoundingBoxDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
     : QDialog(parent)
+    , m_sceneGraph(sceneGraph)
+    , m_currentGraphics(nullptr)
 {
-    setWindowTitle(tr("World Bounding Box"));
-    m_tickLabelColor[0] = m_tickLabelColor[1] = m_tickLabelColor[2] = 1.0;
+    setWindowTitle(tr("Bounding Box Settings"));
+    m_bboxColor[0] = m_bboxColor[1] = m_bboxColor[2] = 1.0;
     setupUI();
-    loadTickSettings();
+    populateGraphicsComboBox();
     
-    // Set initial values
-    m_minXEdit->setText(QString::number(bounds[0]));
-    m_minYEdit->setText(QString::number(bounds[1]));
-    m_minZEdit->setText(QString::number(bounds[2]));
-    m_maxXEdit->setText(QString::number(bounds[3]));
-    m_maxYEdit->setText(QString::number(bounds[4]));
-    m_maxZEdit->setText(QString::number(bounds[5]));
+    // Select first graphics if available
+    if (m_graphicsComboBox->count() > 0) {
+        m_graphicsComboBox->setCurrentIndex(0);
+        onGraphicsSelectionChanged(0);
+    }
 }
 
 void BoundingBoxDialog::setupUI()
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     
-    // Info label
-    QLabel *infoLabel = new QLabel(
-        tr("The world bounding box defines the coordinate system and grid extents. "
-           "It automatically expands to contain all loaded geometry and volumes."));
-    infoLabel->setWordWrap(true);
-    mainLayout->addWidget(infoLabel);
+    // Graphics selector
+    QGroupBox *selectorGroup = new QGroupBox(tr("Graphic"));
+    QFormLayout *selectorLayout = new QFormLayout(selectorGroup);
     
-    // Bounds group
-    QGroupBox *boundsGroup = new QGroupBox(tr("Bounds"));
+    m_graphicsComboBox = new QComboBox();
+    connect(m_graphicsComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &BoundingBoxDialog::onGraphicsSelectionChanged);
+    selectorLayout->addRow(tr("Select Graphic:"), m_graphicsComboBox);
+    
+    mainLayout->addWidget(selectorGroup);
+    
+    // Bounds group (read-only display of computed bounds)
+    QGroupBox *boundsGroup = new QGroupBox(tr("Computed Bounds"));
     QFormLayout *formLayout = new QFormLayout(boundsGroup);
     
     m_minXEdit = new QLineEdit();
@@ -52,13 +58,13 @@ void BoundingBoxDialog::setupUI()
     m_maxYEdit = new QLineEdit();
     m_maxZEdit = new QLineEdit();
     
-    QDoubleValidator *validator = new QDoubleValidator(this);
-    m_minXEdit->setValidator(validator);
-    m_minYEdit->setValidator(validator);
-    m_minZEdit->setValidator(validator);
-    m_maxXEdit->setValidator(validator);
-    m_maxYEdit->setValidator(validator);
-    m_maxZEdit->setValidator(validator);
+    // Make read-only - bounds are computed from geometry/volume data
+    m_minXEdit->setReadOnly(true);
+    m_minYEdit->setReadOnly(true);
+    m_minZEdit->setReadOnly(true);
+    m_maxXEdit->setReadOnly(true);
+    m_maxYEdit->setReadOnly(true);
+    m_maxZEdit->setReadOnly(true);
     
     formLayout->addRow(tr("Min X:"), m_minXEdit);
     formLayout->addRow(tr("Min Y:"), m_minYEdit);
@@ -69,121 +75,139 @@ void BoundingBoxDialog::setupUI()
     
     mainLayout->addWidget(boundsGroup);
     
-    // Quick set button
-    QHBoxLayout *quickSetLayout = new QHBoxLayout();
-    QPushButton *resetGraphicsBtn = new QPushButton(tr("Fit to Graphics"));
+    // Bounding box rendering group
+    QGroupBox *renderGroup = new QGroupBox(tr("Bounding Box Rendering"));
+    QFormLayout *renderLayout = new QFormLayout(renderGroup);
     
-    connect(resetGraphicsBtn, &QPushButton::clicked, this, &BoundingBoxDialog::onResetToGraphics);
+    m_bboxVisibleCheckbox = new QCheckBox();
+    connect(m_bboxVisibleCheckbox, &QCheckBox::toggled,
+            this, &BoundingBoxDialog::onBBoxVisibilityChanged);
+    renderLayout->addRow(tr("Show Bounding Box:"), m_bboxVisibleCheckbox);
     
-    quickSetLayout->addWidget(resetGraphicsBtn);
-    quickSetLayout->addStretch();
-    mainLayout->addLayout(quickSetLayout);
+    QHBoxLayout *colorLayout = new QHBoxLayout();
+    m_bboxColorButton = new QPushButton();
+    m_bboxColorButton->setFixedSize(50, 25);
+    connect(m_bboxColorButton, &QPushButton::clicked,
+            this, &BoundingBoxDialog::onBBoxColorChanged);
+    colorLayout->addWidget(m_bboxColorButton);
+    colorLayout->addStretch();
+    renderLayout->addRow(tr("Color:"), colorLayout);
     
-    // World bbox visibility group
-    QGroupBox *visibilityGroup = new QGroupBox(tr("Visibility"));
-    QFormLayout *visibilityLayout = new QFormLayout(visibilityGroup);
-    
-    m_worldBBoxVisibleCheckbox = new QCheckBox();
-    visibilityLayout->addRow(tr("Show World Bounding Box:"), m_worldBBoxVisibleCheckbox);
-    
-    mainLayout->addWidget(visibilityGroup);
-    
-    // Coordinate settings group
-    QGroupBox *tickGroup = new QGroupBox(tr("World Bounding Box Coordinates"));
-    QFormLayout *tickLayout = new QFormLayout(tickGroup);
-    
-    m_showTicksCheckbox = new QCheckBox();
-    tickLayout->addRow(tr("Show Coordinates:"), m_showTicksCheckbox);
-    
-    m_tickLabelColorButton = new QPushButton();
-    m_tickLabelColorButton->setFixedSize(50, 25);
-    connect(m_tickLabelColorButton, &QPushButton::clicked, this, &BoundingBoxDialog::chooseTickLabelColor);
-    tickLayout->addRow(tr("Coordinate Color:"), m_tickLabelColorButton);
-    
-    m_tickLabelFontSizeSpinBox = new QSpinBox();
-    m_tickLabelFontSizeSpinBox->setRange(6, 72);
-    tickLayout->addRow(tr("Font Size:"), m_tickLabelFontSizeSpinBox);
-    
-    mainLayout->addWidget(tickGroup);
+    mainLayout->addWidget(renderGroup);
     
     // Dialog buttons
-    QDialogButtonBox *buttonBox = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttonBox, &QDialogButtonBox::accepted, this, [this]() {
-        saveTickSettings();
-        accept();
-    });
+    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
     mainLayout->addWidget(buttonBox);
+    
+    updateColorButton();
 }
 
-cvc::bounding_box BoundingBoxDialog::getBoundingBox() const
+void BoundingBoxDialog::populateGraphicsComboBox()
 {
-    return cvc::bounding_box(
-        m_minXEdit->text().toDouble(),
-        m_minYEdit->text().toDouble(),
-        m_minZEdit->text().toDouble(),
-        m_maxXEdit->text().toDouble(),
-        m_maxYEdit->text().toDouble(),
-        m_maxZEdit->text().toDouble()
-    );
+    m_graphicsComboBox->clear();
+    m_graphicsList.clear();
+    
+    if (!m_sceneGraph) return;
+    
+    // Add root graphic first
+    auto root = m_sceneGraph->getGraphicsRoot();
+    if (root) {
+        m_graphicsComboBox->addItem(tr("(Root - All Graphics)"));
+        m_graphicsList.push_back(root);
+    }
+    
+    // Add all other graphics
+    const auto& allGraphics = m_sceneGraph->getAllGraphics();
+    for (const auto& pair : allGraphics) {
+        m_graphicsComboBox->addItem(QString::fromStdString(pair.first));
+        m_graphicsList.push_back(pair.second);
+    }
+}
+
+void BoundingBoxDialog::onGraphicsSelectionChanged(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_graphicsList.size())) {
+        m_currentGraphics = nullptr;
+        return;
+    }
+    
+    m_currentGraphics = m_graphicsList[index];
+    loadGraphicsSettings();
+}
+
+void BoundingBoxDialog::loadGraphicsSettings()
+{
+    if (!m_currentGraphics) {
+        return;
+    }
+    
+    // Load bounding box
+    cvc::bounding_box bounds = m_currentGraphics->getBoundingBox();
+    m_minXEdit->setText(QString::number(bounds[0]));
+    m_minYEdit->setText(QString::number(bounds[1]));
+    m_minZEdit->setText(QString::number(bounds[2]));
+    m_maxXEdit->setText(QString::number(bounds[3]));
+    m_maxYEdit->setText(QString::number(bounds[4]));
+    m_maxZEdit->setText(QString::number(bounds[5]));
+    
+    // Load bbox visibility
+    m_bboxVisibleCheckbox->setChecked(m_currentGraphics->getShowBBox());
+    
+    // Load bbox color
+    m_currentGraphics->getBBoxColor(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+    updateColorButton();
 }
 
 void BoundingBoxDialog::onResetToGraphics()
 {
-    // Get transformed bounds of all graphics objects
-    cvc::bounding_box bounds = AppState::instance().computeGraphicsBounds();
-    
-    // Check if bounds are valid (max > min for all dimensions)
-    if (bounds[3] > bounds[0] && bounds[4] > bounds[1] && bounds[5] > bounds[2]) {
-        m_minXEdit->setText(QString::number(bounds[0]));
-        m_minYEdit->setText(QString::number(bounds[1]));
-        m_minZEdit->setText(QString::number(bounds[2]));
-        m_maxXEdit->setText(QString::number(bounds[3]));
-        m_maxYEdit->setText(QString::number(bounds[4]));
-        m_maxZEdit->setText(QString::number(bounds[5]));
+    // For now, bounds are computed automatically, so this is a no-op
+    // Could potentially re-compute or reload
+    if (m_currentGraphics) {
+        loadGraphicsSettings();
     }
 }
 
-void BoundingBoxDialog::loadTickSettings()
+void BoundingBoxDialog::onBBoxVisibilityChanged(bool visible)
 {
-    m_worldBBoxVisibleCheckbox->setChecked(AppState::instance().worldBBoxVisible());
-    m_showTicksCheckbox->setChecked(AppState::instance().worldBBoxCoordinatesVisible());
-    m_tickLabelFontSizeSpinBox->setValue(AppState::instance().worldBBoxCoordinateFontSize());
+    if (m_currentGraphics) {
+        m_currentGraphics->setShowBBox(visible);
+        onApplyChanges();
+    }
+}
+
+void BoundingBoxDialog::onBBoxColorChanged()
+{
+    if (!m_currentGraphics) return;
     
-    AppState::instance().getWorldBBoxCoordinateColor(
-        m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
-    updateColorButton();
-}
-
-void BoundingBoxDialog::saveTickSettings()
-{
-    AppState::instance().setWorldBBoxVisible(m_worldBBoxVisibleCheckbox->isChecked());
-    AppState::instance().setWorldBBoxCoordinatesVisible(m_showTicksCheckbox->isChecked());
-    AppState::instance().setWorldBBoxCoordinateFontSize(m_tickLabelFontSizeSpinBox->value());
-    AppState::instance().setWorldBBoxCoordinateColor(
-        m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
-}
-
-void BoundingBoxDialog::chooseTickLabelColor()
-{
-    QColor currentColor = QColor::fromRgbF(m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
-    QColor color = QColorDialog::getColor(currentColor, this, tr("Choose Coordinate Label Color"));
+    QColor currentColor = QColor::fromRgbF(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+    QColor color = QColorDialog::getColor(currentColor, this, tr("Choose Bounding Box Color"));
     
     if (color.isValid()) {
-        m_tickLabelColor[0] = color.redF();
-        m_tickLabelColor[1] = color.greenF();
-        m_tickLabelColor[2] = color.blueF();
+        m_bboxColor[0] = color.redF();
+        m_bboxColor[1] = color.greenF();
+        m_bboxColor[2] = color.blueF();
         updateColorButton();
+        
+        m_currentGraphics->setBBoxColor(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+        onApplyChanges();
+    }
+}
+
+void BoundingBoxDialog::onApplyChanges()
+{
+    // Trigger a render update
+    if (m_sceneGraph) {
+        m_sceneGraph->update();
     }
 }
 
 void BoundingBoxDialog::updateColorButton()
 {
-    int r = static_cast<int>(m_tickLabelColor[0] * 255);
-    int g = static_cast<int>(m_tickLabelColor[1] * 255);
-    int b = static_cast<int>(m_tickLabelColor[2] * 255);
+    int r = static_cast<int>(m_bboxColor[0] * 255);
+    int g = static_cast<int>(m_bboxColor[1] * 255);
+    int b = static_cast<int>(m_bboxColor[2] * 255);
     
-    QString styleSheet = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
-    m_tickLabelColorButton->setStyleSheet(styleSheet);
+    QString style = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
+    m_bboxColorButton->setStyleSheet(style);
 }

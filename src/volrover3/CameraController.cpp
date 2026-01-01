@@ -116,9 +116,6 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
 {
     if (!m_camera) return;
     
-    // Guard against feedback loops - if we're updating from AppState, don't save back
-    m_updatingFromAppState = true;
-    
     // Update internal position state
     m_position[0] = pos[0];
     m_position[1] = pos[1];
@@ -141,7 +138,8 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
     // Set field of view
     m_camera->SetViewAngle(fov);
     
-    m_updatingFromAppState = false;
+    // Save the camera state to AppState (which will update the state tree)
+    saveCameraStateToAppState();
 }
 
 void CameraController::applyCameraToVTK()
