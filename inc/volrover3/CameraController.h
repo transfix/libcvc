@@ -44,6 +44,9 @@ public:
     void getCameraState(double pos[3], double dir[3], double up[3], double& fov);
     void setCameraState(const double pos[3], const double dir[3], const double up[3], double fov);
     void applyCameraToVTK();
+    
+    // Control whether setCameraState should update AppState (to prevent feedback loops)
+    void setUpdatingFromAppState(bool updating) { m_updatingFromAppState = updating; }
 
 private:
     void updateOrientation();

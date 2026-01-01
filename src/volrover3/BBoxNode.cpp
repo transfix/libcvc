@@ -82,6 +82,14 @@ void BBoxNode::setColor(double r, double g, double b)
     m_actor->GetProperty()->SetColor(r, g, b);
 }
 
+void BBoxNode::getColor(double& r, double& g, double& b) const
+{
+    double* color = m_actor->GetProperty()->GetColor();
+    r = color[0];
+    g = color[1];
+    b = color[2];
+}
+
 void BBoxNode::setLineWidth(double width)
 {
     m_actor->GetProperty()->SetLineWidth(width);

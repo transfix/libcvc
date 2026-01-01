@@ -24,36 +24,24 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     , m_statePrefix(statePrefix)
     , m_gridNode(std::make_shared<GridNode>())
     , m_axisNode(std::make_shared<AxisNode>())
-    , m_worldBBoxNode(std::make_shared<BBoxNode>())
-    , m_graphicsRoot(std::make_shared<GeometryNode>("graphics"))
+    , m_graphicsRoot(nullptr)
     , m_nullGraphic(nullptr)
     , m_multiVolumeRenderingEnabled(false)
 {
     m_rootNodes.push_back(m_gridNode);
     m_rootNodes.push_back(m_axisNode);
-    m_rootNodes.push_back(m_worldBBoxNode);
-    m_rootNodes.push_back(m_graphicsRoot); // Add graphics root to scene
     
-    // Enable bounding box for root graphics node by default
-    m_graphicsRoot->setShowBBox(true);
-    
-    // Create null graphic as placeholder (scene starts empty)
-    m_nullGraphic = std::make_shared<NullGraphicNode>("null");
-    m_nullGraphic->setShowBBox(true);  // Show bbox by default so user can see something
-    m_graphicsRoot->addGraphicsChild(m_nullGraphic);
+    // Create null graphic as THE root graphics node (all graphics go under this)
+    m_nullGraphic = std::make_shared<NullGraphicNode>("root");
+    m_nullGraphic->setShowBBox(true);  // Show bbox by default
+    m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);  // Default unit cube when empty
+    m_graphicsRoot = m_nullGraphic;  // NullGraphic IS the graphics root
+    m_rootNodes.push_back(m_graphicsRoot);
     
     // Set colors for nodes from AppState
     double r, g, b;
     AppState::instance().getGridColor(r, g, b);
     m_gridNode->setColor(r, g, b);
-    
-    AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
-    m_worldBBoxNode->setColor(1.0, 1.0, 1.0); // White for world bbox
-    m_worldBBoxNode->setCoordinateLabelColor(r, g, b);
-    m_worldBBoxNode->setCoordinateLabelFontSize(AppState::instance().worldBBoxCoordinateFontSize());
-    m_worldBBoxNode->setCoordinatesVisible(AppState::instance().worldBBoxCoordinatesVisible());
-    // Set bbox visibility from AppState before renderer is attached
-    m_worldBBoxNode->setVisible(AppState::instance().worldBBoxVisible());
 }
 
 SceneGraph::~SceneGraph()
@@ -153,28 +141,6 @@ void SceneGraph::setGridTickLabelProperties(double r, double g, double b, int fo
     m_gridNode->setTickLabelFontSize(fontSize);
 }
 
-void SceneGraph::setWorldBBoxVisible(bool visible)
-{
-    m_worldBBoxNode->setVisible(visible);
-}
-
-void SceneGraph::setWorldBBoxColor(double r, double g, double b)
-{
-    m_worldBBoxNode->setColor(r, g, b);
-}
-
-void SceneGraph::updateWorldBBox(const cvc::bounding_box& bounds)
-{
-    m_worldBBoxNode->setBoundingBox(bounds);
-}
-
-void SceneGraph::setWorldBBoxCoordinates(bool visible, double r, double g, double b, int fontSize)
-{
-    m_worldBBoxNode->setCoordinatesVisible(visible);
-    m_worldBBoxNode->setCoordinateLabelColor(r, g, b);
-    m_worldBBoxNode->setCoordinateLabelFontSize(fontSize);
-}
-
 void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
                                         const std::vector<double> &opacityTable)
 {
@@ -190,39 +156,70 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const
     cvc::bounding_box combinedBounds;
     bool first = true;
     
-    // Helper function to process graphics nodes recursively
-    std::function<void(const std::shared_ptr<GraphicsNode>&)> processBounds = 
-        [&](const std::shared_ptr<GraphicsNode>& node) {
-            if (!node) return;
-            
-            // Get geometry if available (try casting to GeometryNode)
-            auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
-            if (geomNode && geomNode->hasGeometry() && geomNode->getGeometry()) {
-                cvc::bounding_box geomBounds = geomNode->getGeometry()->extents();
-                
-                if (first) {
-                    combinedBounds = geomBounds;
-                    first = false;
-                } else {
-                    // Expand to include this geometry
-                    combinedBounds[0] = std::min(combinedBounds[0], geomBounds[0]);
-                    combinedBounds[1] = std::min(combinedBounds[1], geomBounds[1]);
-                    combinedBounds[2] = std::min(combinedBounds[2], geomBounds[2]);
-                    combinedBounds[3] = std::max(combinedBounds[3], geomBounds[3]);
-                    combinedBounds[4] = std::max(combinedBounds[4], geomBounds[4]);
-                    combinedBounds[5] = std::max(combinedBounds[5], geomBounds[5]);
-                }
-            }
-            
-            // Process children recursively
-            for (const auto& child : node->getGraphicsChildren()) {
-                processBounds(child);
-            }
-        };
-    
-    // Start from root graphics node
+    // Process each direct child of the graphics root
+    // Each child's getCombinedBoundingBox() already includes its descendants recursively
     if (m_graphicsRoot) {
-        processBounds(m_graphicsRoot);
+        for (const auto& child : m_graphicsRoot->getGraphicsChildren()) {
+            if (!child) continue;
+            
+            // Get combined bbox of this child (includes all its descendants in local space)
+            cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+            
+            // Skip invalid bounding boxes
+            if (childBBox[0] > childBBox[3] || 
+                childBBox[1] > childBBox[4] || 
+                childBBox[2] > childBBox[5]) {
+                continue;
+            }
+            
+            // Apply world transform to the bounding box by transforming all 8 corners
+            vtkSmartPointer<vtkMatrix4x4> worldTransform = child->getWorldTransform();
+            
+            double corners[8][3] = {
+                {childBBox[0], childBBox[1], childBBox[2]},  // min, min, min
+                {childBBox[3], childBBox[1], childBBox[2]},  // max, min, min
+                {childBBox[0], childBBox[4], childBBox[2]},  // min, max, min
+                {childBBox[3], childBBox[4], childBBox[2]},  // max, max, min
+                {childBBox[0], childBBox[1], childBBox[5]},  // min, min, max
+                {childBBox[3], childBBox[1], childBBox[5]},  // max, min, max
+                {childBBox[0], childBBox[4], childBBox[5]},  // min, max, max
+                {childBBox[3], childBBox[4], childBBox[5]}   // max, max, max
+            };
+            
+            // Transform all corners and find new axis-aligned bounds
+            double minx = std::numeric_limits<double>::max();
+            double miny = std::numeric_limits<double>::max();
+            double minz = std::numeric_limits<double>::max();
+            double maxx = std::numeric_limits<double>::lowest();
+            double maxy = std::numeric_limits<double>::lowest();
+            double maxz = std::numeric_limits<double>::lowest();
+            
+            for (int i = 0; i < 8; ++i) {
+                double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
+                double out[4];
+                worldTransform->MultiplyPoint(in, out);
+                
+                minx = std::min(minx, out[0]);
+                miny = std::min(miny, out[1]);
+                minz = std::min(minz, out[2]);
+                maxx = std::max(maxx, out[0]);
+                maxy = std::max(maxy, out[1]);
+                maxz = std::max(maxz, out[2]);
+            }
+            
+            // Merge with combined bounds
+            if (first) {
+                combinedBounds = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+                first = false;
+            } else {
+                combinedBounds[0] = std::min(combinedBounds[0], minx);
+                combinedBounds[1] = std::min(combinedBounds[1], miny);
+                combinedBounds[2] = std::min(combinedBounds[2], minz);
+                combinedBounds[3] = std::max(combinedBounds[3], maxx);
+                combinedBounds[4] = std::max(combinedBounds[4], maxy);
+                combinedBounds[5] = std::max(combinedBounds[5], maxz);
+            }
+        }
     }
     
     return combinedBounds;
@@ -335,11 +332,9 @@ void SceneGraph::syncGraphicsToState()
     cvc::state& graphicsState = cvc::state::instance()(m_statePrefix)("graphics");
     graphicsState.comment("Unified graphics tree (geometry and volumes)");
     
-    // Sync children directly to graphics state (not the root node itself)
-    // This avoids creating graphics/graphics_root/... redundancy
-    for (const auto& child : m_graphicsRoot->getGraphicsChildren()) {
-        child->syncToState(graphicsState);
-    }
+    // Sync the graphics root (null graphic) to state
+    // This ensures all graphics appear as children of the null graphic in the state tree
+    m_graphicsRoot->syncToState(graphicsState);
 }
 
 void SceneGraph::syncGraphicsFromState()
@@ -569,31 +564,12 @@ void SceneGraph::updateVolumeRendering()
 
 void SceneGraph::ensureNullGraphicIfEmpty()
 {
-    // Check if there are any real graphics (excluding null graphic itself)
-    if (m_graphicsNodes.empty() && !m_nullGraphic) {
-        // Create and add null graphic
-        m_nullGraphic = std::make_shared<NullGraphicNode>("null");
-        m_nullGraphic->setShowBBox(true);  // Show bbox by default
-        m_graphicsRoot->addGraphicsChild(m_nullGraphic);
-    } else if (m_graphicsNodes.empty() && m_nullGraphic) {
-        // Null graphic exists but might not be in scene, add it back
-        // Check if it's already a child
-        auto children = m_graphicsRoot->getGraphicsChildren();
-        bool isChild = std::find(children.begin(), children.end(), m_nullGraphic) != children.end();
-        if (!isChild) {
-            m_graphicsRoot->addGraphicsChild(m_nullGraphic);
-        }
-    }
+    // With new architecture: NullGraphicNode IS the graphics root, always present
+    // No need to add/remove it
 }
 
 void SceneGraph::removeNullGraphicIfPresent()
 {
-    if (m_nullGraphic && !m_graphicsNodes.empty()) {
-        // Check if null graphic is currently a child of graphics root
-        auto children = m_graphicsRoot->getGraphicsChildren();
-        bool isChild = std::find(children.begin(), children.end(), m_nullGraphic) != children.end();
-        if (isChild) {
-            m_graphicsRoot->removeGraphicsChild(m_nullGraphic);
-        }
-    }
+    // With new architecture: NullGraphicNode IS the graphics root, always present
+    // No need to add/remove it
 }

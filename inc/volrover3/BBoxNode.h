@@ -25,6 +25,7 @@ public:
     cvc::bounding_box getBoundingBox() const { return m_bbox; }
     
     void setColor(double r, double g, double b);
+    void getColor(double& r, double& g, double& b) const;
     void setLineWidth(double width);
     
     // Coordinate label controls

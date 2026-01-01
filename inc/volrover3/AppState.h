@@ -25,13 +25,6 @@ public:
     cvc::bounding_box worldBounds();
     void setWorldBounds(const cvc::bounding_box& bounds);
     
-    // Compute bounding box that contains all graphics objects with their transforms applied
-    cvc::bounding_box computeGraphicsBounds();
-    
-    // World bounding box visibility
-    bool worldBBoxVisible();
-    void setWorldBBoxVisible(bool visible);
-    
     bool gridVisible();
     void setGridVisible(bool visible);
     
@@ -80,16 +73,6 @@ public:
     
     int gridTickLabelFontSize();
     void setGridTickLabelFontSize(int size);
-    
-    // World BBox coordinate controls (no interval - shows at vertices only)
-    bool worldBBoxCoordinatesVisible();
-    void setWorldBBoxCoordinatesVisible(bool visible);
-    
-    void getWorldBBoxCoordinateColor(double& r, double& g, double& b);
-    void setWorldBBoxCoordinateColor(double r, double g, double b);
-    
-    int worldBBoxCoordinateFontSize();
-    void setWorldBBoxCoordinateFontSize(int size);
     
     // Camera control mode (0 = orbit, 1 = fly)
     int cameraMode();
@@ -147,11 +130,9 @@ public:
     // Register callbacks for state changes
     // Returns a connection object that can be used to disconnect the callback
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onWorldBBoxVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridColorChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onWorldBBoxCoordinatesChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridPlaneVisibilityChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridDivisionsChanged(const boost::function<void()>& callback);
     boost::signals2::connection onGridTickIntervalsChanged(const boost::function<void()>& callback);

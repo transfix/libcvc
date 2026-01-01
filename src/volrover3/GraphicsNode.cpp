@@ -253,6 +253,11 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
     
     // Update child's transform to reflect new parent
     child->updateTransform();
+    
+    // Update this node's bounding box to include the new child
+    if (m_showBBox) {
+        updateBoundingBoxNode();
+    }
 }
 
 void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child)
@@ -269,6 +274,11 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child)
     
     // Also remove as SceneNode child
     removeChild(child);
+    
+    // Update this node's bounding box after removing child
+    if (m_showBBox) {
+        updateBoundingBoxNode();
+    }
 }
 
 std::shared_ptr<GraphicsNode> GraphicsNode::findChildByName(const std::string& name)
@@ -291,19 +301,62 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const
     // Start with this node's own bounding box
     cvc::bounding_box combined = getBoundingBox();
     
-    // Expand to include all children
+    // Expand to include all children (transformed to this node's local space)
     for (const auto& child : m_graphicsChildren) {
         if (!child) continue;
         
+        // Get child's combined bbox (includes child's descendants in child's local space)
         cvc::bounding_box childBBox = child->getCombinedBoundingBox();
         
-        // Expand combined box to include child
-        combined[0] = std::min(combined[0], childBBox[0]);
-        combined[1] = std::min(combined[1], childBBox[1]);
-        combined[2] = std::min(combined[2], childBBox[2]);
-        combined[3] = std::max(combined[3], childBBox[3]);
-        combined[4] = std::max(combined[4], childBBox[4]);
-        combined[5] = std::max(combined[5], childBBox[5]);
+        // Skip invalid bounding boxes
+        if (childBBox[0] > childBBox[3] || 
+            childBBox[1] > childBBox[4] || 
+            childBBox[2] > childBBox[5]) {
+            continue;
+        }
+        
+        // Transform child's bbox by child's local transform to get it in this node's space
+        vtkMatrix4x4* childTransform = child->getTransform();
+        
+        // Transform all 8 corners of child's bbox
+        double corners[8][3] = {
+            {childBBox[0], childBBox[1], childBBox[2]},  // min, min, min
+            {childBBox[3], childBBox[1], childBBox[2]},  // max, min, min
+            {childBBox[0], childBBox[4], childBBox[2]},  // min, max, min
+            {childBBox[3], childBBox[4], childBBox[2]},  // max, max, min
+            {childBBox[0], childBBox[1], childBBox[5]},  // min, min, max
+            {childBBox[3], childBBox[1], childBBox[5]},  // max, min, max
+            {childBBox[0], childBBox[4], childBBox[5]},  // min, max, max
+            {childBBox[3], childBBox[4], childBBox[5]}   // max, max, max
+        };
+        
+        double minx = std::numeric_limits<double>::max();
+        double miny = std::numeric_limits<double>::max();
+        double minz = std::numeric_limits<double>::max();
+        double maxx = std::numeric_limits<double>::lowest();
+        double maxy = std::numeric_limits<double>::lowest();
+        double maxz = std::numeric_limits<double>::lowest();
+        
+        for (int i = 0; i < 8; ++i) {
+            double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
+            double out[4];
+            childTransform->MultiplyPoint(in, out);
+            
+            minx = std::min(minx, out[0]);
+            miny = std::min(miny, out[1]);
+            minz = std::min(minz, out[2]);
+            maxx = std::max(maxx, out[0]);
+            maxy = std::max(maxy, out[1]);
+            maxz = std::max(maxz, out[2]);
+        }
+        
+        // Expand combined box to include transformed child
+        combined[0] = std::min(combined[0], minx);
+        combined[1] = std::min(combined[1], miny);
+        combined[2] = std::min(combined[2], minz);
+        combined[3] = std::max(combined[3], maxx);
+        combined[4] = std::max(combined[4], maxy);
+        combined[5] = std::max(combined[5], maxz);
     }
     
     return combined;
@@ -424,9 +477,7 @@ void GraphicsNode::setBBoxColor(double r, double g, double b)
 void GraphicsNode::getBBoxColor(double& r, double& g, double& b) const
 {
     if (m_bboxNode) {
-        // BBoxNode doesn't have a getColor method, so we'll return default white
-        // This could be enhanced by storing color in BBoxNode
-        r = g = b = 1.0;
+        m_bboxNode->getColor(r, g, b);
     } else {
         r = g = b = 1.0;
     }
@@ -512,7 +563,7 @@ void GraphicsNode::addToRenderer(vtkRenderer* renderer)
     // Add label if it should be visible
     if (m_showLabel && m_labelActor) {
         updateLabel();
-        m_renderer->AddActor2D(m_labelActor);
+        renderer->AddActor2D(m_labelActor);
     }
 }
 

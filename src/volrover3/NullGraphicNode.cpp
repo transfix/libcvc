@@ -2,6 +2,8 @@
 #include <cvc/state.h>
 #include <vtkActor.h>
 #include <sstream>
+#include <limits>
+#include <algorithm>
 
 NullGraphicNode::NullGraphicNode(const std::string& name)
     : GraphicsNode(name)
@@ -39,6 +41,9 @@ void NullGraphicNode::setBounds(double minX, double minY, double minZ,
 
 cvc::bounding_box NullGraphicNode::getBoundingBox() const
 {
+    // Return this node's own bounds
+    // Note: If we have children, getCombinedBoundingBox() (inherited from GraphicsNode)
+    // will handle merging children's transformed bboxes with our bounds
     return m_bounds;
 }
 
@@ -79,6 +84,16 @@ void NullGraphicNode::syncToState(cvc::state& parentState)
     std::ostringstream labelColorStr;
     labelColorStr << m_labelColor[0] << "," << m_labelColor[1] << "," << m_labelColor[2];
     myState("label_color").value(labelColorStr.str());
+    
+    // Sync children if we have any
+    const auto& children = getGraphicsChildren();
+    if (!children.empty()) {
+        cvc::state& childrenState = myState("children");
+        childrenState.comment("Child graphics objects");
+        for (const auto& child : children) {
+            child->syncToState(childrenState);
+        }
+    }
 }
 
 void NullGraphicNode::syncFromState(cvc::state& parentState)

@@ -65,19 +65,8 @@ MainWindow::MainWindow(QWidget *parent)
     AppState::instance().getGridDivisions(x, y, z);
     m_sceneGraph->setGridDivisions(x, y, z);
     
-    // Initialize grid and world bbox with default world bounds
+    // Initialize grid with default world bounds
     m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-    m_sceneGraph->updateWorldBBox(AppState::instance().worldBounds());
-    
-    // Initialize world bbox visibility and coordinates from AppState
-    m_sceneGraph->setWorldBBoxVisible(AppState::instance().worldBBoxVisible());
-    double r, g, b;
-    AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
-    m_sceneGraph->setWorldBBoxCoordinates(
-        AppState::instance().worldBBoxCoordinatesVisible(),
-        r, g, b,
-        AppState::instance().worldBBoxCoordinateFontSize()
-    );
     
     // Initial sync of graphics from state tree (in case state was loaded before)
     m_sceneGraph->syncGraphicsFromState();
@@ -88,9 +77,6 @@ MainWindow::MainWindow(QWidget *parent)
         
         // Always update grid to match new world bounds
         m_sceneGraph->updateGrid(bounds);
-        
-        // Update world bounding box to match new bounds
-        m_sceneGraph->updateWorldBBox(bounds);
         
         // Update camera orbit center to match new bounds center
         CameraController* camCtrl = m_renderWidget->getCameraController();
@@ -122,22 +108,6 @@ MainWindow::MainWindow(QWidget *parent)
         double r, g, b;
         AppState::instance().getGridColor(r, g, b);
         m_sceneGraph->setGridColor(r, g, b);
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onWorldBBoxCoordinatesChanged([this]() {
-        double r, g, b;
-        AppState::instance().getWorldBBoxCoordinateColor(r, g, b);
-        m_sceneGraph->setWorldBBoxCoordinates(
-            AppState::instance().worldBBoxCoordinatesVisible(),
-            r, g, b,
-            AppState::instance().worldBBoxCoordinateFontSize()
-        );
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onWorldBBoxVisibilityChanged([this]() {
-        m_sceneGraph->setWorldBBoxVisible(AppState::instance().worldBBoxVisible());
         m_renderWidget->render();
     });
     
@@ -196,7 +166,12 @@ MainWindow::MainWindow(QWidget *parent)
             AppState::instance().getCameraViewDirection(dir[0], dir[1], dir[2]);
             AppState::instance().getCameraUpVector(up[0], up[1], up[2]);
             fov = AppState::instance().cameraFieldOfView();
+            
+            // Set flag to prevent feedback loop: we're updating FROM AppState, so don't save back
+            camCtrl->setUpdatingFromAppState(true);
             camCtrl->setCameraState(pos, dir, up, fov);
+            camCtrl->setUpdatingFromAppState(false);
+            
             m_renderWidget->render();
         }
     });
@@ -280,7 +255,7 @@ void MainWindow::createMenus()
     
     viewMenu->addSeparator();
     
-    QAction *editBoundsAction = new QAction(tr("Edit World &Bounding Box..."), this);
+    QAction *editBoundsAction = new QAction(tr("Edit &Bounding Box..."), this);
     editBoundsAction->setShortcut(tr("Ctrl+B"));
     connect(editBoundsAction, &QAction::triggered, this, &MainWindow::editBoundingBox);
     viewMenu->addAction(editBoundsAction);

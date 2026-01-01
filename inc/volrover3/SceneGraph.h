@@ -63,17 +63,9 @@ public:
     // Scene element visibility
     void setGridVisible(bool visible);
     void setAxisVisible(bool visible);
-    void setWorldBBoxVisible(bool visible);
     
     // Scene element colors
     void setGridColor(double r, double g, double b);
-    void setWorldBBoxColor(double r, double g, double b);
-    
-    // Update world bounding box
-    void updateWorldBBox(const cvc::bounding_box& bounds);
-    
-    // World bbox coordinate controls (no interval - shows at vertices only)
-    void setWorldBBoxCoordinates(bool visible, double r, double g, double b, int fontSize);
     
     // Grid plane visibility
     void setGridPlaneVisibility(bool yz, bool xz, bool xy);
@@ -111,7 +103,6 @@ private:
     
     std::shared_ptr<GridNode> m_gridNode;
     std::shared_ptr<AxisNode> m_axisNode;
-    std::shared_ptr<BBoxNode> m_worldBBoxNode;
 
     std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
     

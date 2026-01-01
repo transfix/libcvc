@@ -97,29 +97,32 @@ TEST_F(NullGraphicNodeTest, StateSynchronization) {
     EXPECT_TRUE(nullNode2->getShowBBox());
 }
 
-// Test SceneGraph creates null graphic on construction
+// Test SceneGraph creates null graphic as graphics root
 TEST_F(NullGraphicNodeTest, SceneGraphInitialNullGraphic) {
     SceneGraph sceneGraph(m_statePrefix);
     
-    auto children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
-    ASSERT_EQ(children.size(), 1);
-    
-    // Should be a NullGraphicNode
-    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(children[0]);
+    // Graphics root IS the null graphic node
+    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(sceneGraph.getGraphicsRoot());
     ASSERT_NE(nullNode, nullptr);
-    EXPECT_EQ(nullNode->getName(), "null");
+    EXPECT_EQ(nullNode->getName(), "root");
     
     // Should have bbox visible by default
     EXPECT_TRUE(nullNode->getShowBBox());
+    
+    // Should have no children initially
+    auto children = nullNode->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 0);
 }
 
-// Test null graphic removed when geometry added
+// Test geometry added as child of null graphic root
 TEST_F(NullGraphicNodeTest, NullGraphicRemovedOnGeometryAdd) {
     SceneGraph sceneGraph(m_statePrefix);
     
-    // Initially has null graphic
-    auto children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
-    ASSERT_EQ(children.size(), 1);
+    // Graphics root is the null graphic, starts empty
+    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(sceneGraph.getGraphicsRoot());
+    ASSERT_NE(nullNode, nullptr);
+    auto children = nullNode->getGraphicsChildren();
+    ASSERT_EQ(children.size(), 0);
     
     // Add geometry
     cvc::geometry geom;
@@ -130,21 +133,17 @@ TEST_F(NullGraphicNodeTest, NullGraphicRemovedOnGeometryAdd) {
     
     sceneGraph.addGraphics("test_geom", geom);
     
-    // Null graphic should be removed
-    children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
+    // Null graphic is still the root, but now has one child
+    children = nullNode->getGraphicsChildren();
     ASSERT_EQ(children.size(), 1);
     
-    // Should NOT be a NullGraphicNode
-    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(children[0]);
-    EXPECT_EQ(nullNode, nullptr);
-    
-    // Should be the geometry we added
+    // Should be the geometry we added (not the null graphic)
     auto geomNode = std::dynamic_pointer_cast<GeometryNode>(children[0]);
     ASSERT_NE(geomNode, nullptr);
     EXPECT_EQ(geomNode->getName(), "test_geom");
 }
 
-// Test null graphic restored when all graphics removed
+// Test null graphic root remains when graphics removed
 TEST_F(NullGraphicNodeTest, NullGraphicRestoredOnRemove) {
     SceneGraph sceneGraph(m_statePrefix);
     
@@ -156,32 +155,32 @@ TEST_F(NullGraphicNodeTest, NullGraphicRestoredOnRemove) {
     geom.points()[2][0] = 0; geom.points()[2][1] = 1; geom.points()[2][2] = 0;
     sceneGraph.addGraphics("test_geom", geom);
     
-    // Null graphic should be removed
-    auto children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
+    // Graphics root (null graphic) has one child
+    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(sceneGraph.getGraphicsRoot());
+    ASSERT_NE(nullNode, nullptr);
+    auto children = nullNode->getGraphicsChildren();
     ASSERT_EQ(children.size(), 1);
     
     // Remove the geometry
     sceneGraph.removeGraphics("test_geom");
     
-    // Null graphic should be restored
-    children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
-    ASSERT_EQ(children.size(), 1);
-    
-    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(children[0]);
-    ASSERT_NE(nullNode, nullptr);
-    EXPECT_EQ(nullNode->getName(), "null");
+    // Graphics root (null graphic) is back to empty
+    children = nullNode->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 0);
 }
 
 // Test null graphic not counted as real graphic
 TEST_F(NullGraphicNodeTest, NullGraphicNotInGraphicsMap) {
     SceneGraph sceneGraph(m_statePrefix);
     
-    // Initially scene has null graphic as child, but it's not in m_graphicsNodes
-    auto children = sceneGraph.getGraphicsRoot()->getGraphicsChildren();
-    ASSERT_EQ(children.size(), 1);
+    // Graphics root IS the null graphic, starts with no children
+    auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(sceneGraph.getGraphicsRoot());
+    ASSERT_NE(nullNode, nullptr);
+    auto children = nullNode->getGraphicsChildren();
+    ASSERT_EQ(children.size(), 0);
     
-    // Verify null graphic is not accessible via getGraphics
-    auto nullFromMap = sceneGraph.getGraphics("null");
+    // Verify null graphic is not accessible via getGraphics (it's the root, not a child)
+    auto nullFromMap = sceneGraph.getGraphics("root");
     EXPECT_EQ(nullFromMap, nullptr);
     
     // Add real graphic

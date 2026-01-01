@@ -408,7 +408,8 @@ TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
     
     auto root = sceneGraph.getGraphicsRoot();
     ASSERT_NE(root, nullptr);
-    EXPECT_EQ(root->getName(), "graphics");
+    // Graphics root is now the NullGraphicNode named "root"
+    EXPECT_EQ(root->getName(), "root");
 }
 
 // Test SceneGraph register graphics
@@ -1245,6 +1246,202 @@ TEST_F(GraphicsNodeTest, BBoxBounds) {
     EXPECT_GE(bbox[3], 1.0);  // max x
     EXPECT_GE(bbox[4], 1.0);  // max y
     EXPECT_GE(bbox[5], 0.0);  // max z
+}
+
+// Test SceneGraph computeGraphicsBounds with translation transform
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithTranslation) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create geometry with unit cube: [0,0,0] to [1,1,1]
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 0.0, 0.0});
+    geom.points().push_back({0.0, 1.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 0.0});
+    geom.points().push_back({0.0, 0.0, 1.0});
+    geom.points().push_back({1.0, 0.0, 1.0});
+    geom.points().push_back({0.0, 1.0, 1.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto node = sceneGraph.addGraphics("translated_cube", geom);
+    
+    // Apply translation: move by (10, 20, 30)
+    node->setPosition(10.0, 20.0, 30.0);
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // Bounds should be [10,20,30] to [11,21,31]
+    EXPECT_NEAR(bounds[0], 10.0, 1e-6);
+    EXPECT_NEAR(bounds[1], 20.0, 1e-6);
+    EXPECT_NEAR(bounds[2], 30.0, 1e-6);
+    EXPECT_NEAR(bounds[3], 11.0, 1e-6);
+    EXPECT_NEAR(bounds[4], 21.0, 1e-6);
+    EXPECT_NEAR(bounds[5], 31.0, 1e-6);
+}
+
+// Test SceneGraph computeGraphicsBounds with scale transform
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithScale) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create geometry with unit cube: [0,0,0] to [1,1,1]
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 0.0, 0.0});
+    geom.points().push_back({0.0, 1.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 0.0});
+    geom.points().push_back({0.0, 0.0, 1.0});
+    geom.points().push_back({1.0, 0.0, 1.0});
+    geom.points().push_back({0.0, 1.0, 1.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto node = sceneGraph.addGraphics("scaled_cube", geom);
+    
+    // Apply scale: 2x in X, 3x in Y, 4x in Z
+    node->setScale(2.0, 3.0, 4.0);
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // Bounds should be [0,0,0] to [2,3,4]
+    EXPECT_NEAR(bounds[0], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[1], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[2], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[3], 2.0, 1e-6);
+    EXPECT_NEAR(bounds[4], 3.0, 1e-6);
+    EXPECT_NEAR(bounds[5], 4.0, 1e-6);
+}
+
+// Test SceneGraph computeGraphicsBounds with rotation transform
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithRotation) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create geometry with square in XY plane: [-1,-1,0] to [1,1,0]
+    cvc::geometry geom;
+    geom.points().push_back({-1.0, -1.0, 0.0});
+    geom.points().push_back({ 1.0, -1.0, 0.0});
+    geom.points().push_back({-1.0,  1.0, 0.0});
+    geom.points().push_back({ 1.0,  1.0, 0.0});
+    
+    auto node = sceneGraph.addGraphics("rotated_square", geom);
+    
+    // Rotate 45 degrees around Z axis
+    node->setRotation(0.0, 0.0, 45.0);
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // After 45 degree rotation, the diagonal becomes axis-aligned
+    // Expected bbox: approximately [-sqrt(2), -sqrt(2), 0] to [sqrt(2), sqrt(2), 0]
+    double expected = std::sqrt(2.0);
+    EXPECT_NEAR(bounds[0], -expected, 1e-4);
+    EXPECT_NEAR(bounds[1], -expected, 1e-4);
+    EXPECT_NEAR(bounds[2], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[3], expected, 1e-4);
+    EXPECT_NEAR(bounds[4], expected, 1e-4);
+    EXPECT_NEAR(bounds[5], 0.0, 1e-6);
+}
+
+// Test SceneGraph computeGraphicsBounds with combined transforms
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithCombinedTransforms) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create geometry with unit cube centered at origin: [-0.5,-0.5,-0.5] to [0.5,0.5,0.5]
+    cvc::geometry geom;
+    geom.points().push_back({-0.5, -0.5, -0.5});
+    geom.points().push_back({ 0.5, -0.5, -0.5});
+    geom.points().push_back({-0.5,  0.5, -0.5});
+    geom.points().push_back({ 0.5,  0.5, -0.5});
+    geom.points().push_back({-0.5, -0.5,  0.5});
+    geom.points().push_back({ 0.5, -0.5,  0.5});
+    geom.points().push_back({-0.5,  0.5,  0.5});
+    geom.points().push_back({ 0.5,  0.5,  0.5});
+    
+    auto node = sceneGraph.addGraphics("combined_cube", geom);
+    
+    // Apply scale then translate
+    node->setScale(2.0, 2.0, 2.0);  // Scale to [-1,-1,-1] to [1,1,1]
+    node->setPosition(5.0, 10.0, 15.0);  // Then translate
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // After scale: [-1,-1,-1] to [1,1,1]
+    // After translate: [4,9,14] to [6,11,16]
+    EXPECT_NEAR(bounds[0], 4.0, 1e-6);
+    EXPECT_NEAR(bounds[1], 9.0, 1e-6);
+    EXPECT_NEAR(bounds[2], 14.0, 1e-6);
+    EXPECT_NEAR(bounds[3], 6.0, 1e-6);
+    EXPECT_NEAR(bounds[4], 11.0, 1e-6);
+    EXPECT_NEAR(bounds[5], 16.0, 1e-6);
+}
+
+// Test SceneGraph computeGraphicsBounds with multiple transformed objects
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsMultipleTransformed) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create first geometry at [0,0,0] to [1,1,1]
+    cvc::geometry geom1;
+    geom1.points().push_back({0.0, 0.0, 0.0});
+    geom1.points().push_back({1.0, 1.0, 1.0});
+    
+    // Create second geometry at [0,0,0] to [1,1,1]
+    cvc::geometry geom2;
+    geom2.points().push_back({0.0, 0.0, 0.0});
+    geom2.points().push_back({1.0, 1.0, 1.0});
+    
+    auto node1 = sceneGraph.addGraphics("obj1", geom1);
+    auto node2 = sceneGraph.addGraphics("obj2", geom2);
+    
+    // Translate first to [10,10,10] to [11,11,11]
+    node1->setPosition(10.0, 10.0, 10.0);
+    
+    // Translate second to [-5,-5,-5] to [-4,-4,-4]
+    node2->setPosition(-5.0, -5.0, -5.0);
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // Combined bounds should be [-5,-5,-5] to [11,11,11]
+    EXPECT_NEAR(bounds[0], -5.0, 1e-6);
+    EXPECT_NEAR(bounds[1], -5.0, 1e-6);
+    EXPECT_NEAR(bounds[2], -5.0, 1e-6);
+    EXPECT_NEAR(bounds[3], 11.0, 1e-6);
+    EXPECT_NEAR(bounds[4], 11.0, 1e-6);
+    EXPECT_NEAR(bounds[5], 11.0, 1e-6);
+}
+
+// Test SceneGraph computeGraphicsBounds with hierarchical transforms
+TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
+    SceneGraph sceneGraph("graphics_test");
+    
+    // Create parent geometry at [0,0,0] to [1,1,1]
+    cvc::geometry geom1;
+    geom1.points().push_back({0.0, 0.0, 0.0});
+    geom1.points().push_back({1.0, 1.0, 1.0});
+    
+    // Create child geometry at [0,0,0] to [1,1,1]
+    cvc::geometry geom2;
+    geom2.points().push_back({0.0, 0.0, 0.0});
+    geom2.points().push_back({1.0, 1.0, 1.0});
+    
+    auto parent = sceneGraph.addGraphics("parent", geom1);
+    auto child = std::make_shared<GeometryNode>("child");
+    child->setGeometry(geom2);
+    
+    // Parent at [10,0,0]
+    parent->setPosition(10.0, 0.0, 0.0);
+    
+    // Child at [5,0,0] relative to parent
+    parent->addGraphicsChild(child);
+    child->setPosition(5.0, 0.0, 0.0);
+    
+    cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
+    
+    // Parent bounds: [10,0,0] to [11,1,1]
+    // Child world position: [15,0,0] to [16,1,1]
+    // Combined: [10,0,0] to [16,1,1]
+    EXPECT_NEAR(bounds[0], 10.0, 1e-6);
+    EXPECT_NEAR(bounds[1], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[2], 0.0, 1e-6);
+    EXPECT_NEAR(bounds[3], 16.0, 1e-6);
+    EXPECT_NEAR(bounds[4], 1.0, 1e-6);
+    EXPECT_NEAR(bounds[5], 1.0, 1e-6);
 }
 
 int main(int argc, char **argv) {

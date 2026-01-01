@@ -139,7 +139,10 @@ void CameraController::setCameraState(const double pos[3], const double dir[3], 
     m_camera->SetViewAngle(fov);
     
     // Save the camera state to AppState (which will update the state tree)
-    saveCameraStateToAppState();
+    // But don't save if we're currently being called FROM AppState (prevents feedback loop)
+    if (!m_updatingFromAppState) {
+        saveCameraStateToAppState();
+    }
 }
 
 void CameraController::applyCameraToVTK()
