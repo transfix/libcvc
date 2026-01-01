@@ -21,17 +21,12 @@
 SceneGraph::SceneGraph(const std::string& statePrefix)
     : m_renderer(nullptr)
     , m_statePrefix(statePrefix)
-    , m_geometryNode(std::make_shared<GeometryNode>())
-    , m_volumeNode(std::make_shared<VolumeNode>())
     , m_gridNode(std::make_shared<GridNode>())
     , m_axisNode(std::make_shared<AxisNode>())
     , m_worldBBoxNode(std::make_shared<BBoxNode>())
-    , m_graphicsRoot(std::make_shared<GeometryNode>("graphics_root"))
-    , m_volumeGraphicsRoot(std::make_shared<VolumeNode>("volume_graphics_root"))
+    , m_graphicsRoot(std::make_shared<GeometryNode>("graphics"))
     , m_multiVolumeRenderingEnabled(false)
 {
-    m_rootNodes.push_back(m_geometryNode);
-    m_rootNodes.push_back(m_volumeNode);
     m_rootNodes.push_back(m_gridNode);
     m_rootNodes.push_back(m_axisNode);
     m_rootNodes.push_back(m_worldBBoxNode);
@@ -82,20 +77,6 @@ void SceneGraph::update()
     for (auto &node : m_rootNodes) {
         node->update();
     }
-}
-
-void SceneGraph::setGeometry(const cvc::geometry &geom)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    m_geometryNode->setGeometry(geom);
-}
-
-void SceneGraph::setVolume(const cvc::volume &vol)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    m_volumeNode->setVolume(vol);
 }
 
 void SceneGraph::setGridVisible(bool visible)
@@ -187,7 +168,11 @@ void SceneGraph::setWorldBBoxCoordinates(bool visible, double r, double g, doubl
 void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
                                         const std::vector<double> &opacityTable)
 {
-    m_volumeNode->setTransferFunction(colorTable, opacityTable);
+    // Apply transfer function to all volume nodes
+    auto volumes = getAllVolumeGraphics();
+    for (auto& volNode : volumes) {
+        volNode->setTransferFunction(colorTable, opacityTable);
+    }
 }
 
 cvc::bounding_box SceneGraph::computeGraphicsBounds() const
@@ -329,9 +314,13 @@ void SceneGraph::syncGraphicsToState()
     
     // Get or create the graphics state node
     cvc::state& graphicsState = cvc::state::instance()(m_statePrefix)("graphics");
+    graphicsState.comment("Unified graphics tree (geometry and volumes)");
     
-    // Sync the graphics root and all children
-    m_graphicsRoot->syncToState(graphicsState);
+    // Sync children directly to graphics state (not the root node itself)
+    // This avoids creating graphics/graphics_root/... redundancy
+    for (const auto& child : m_graphicsRoot->getGraphicsChildren()) {
+        child->syncToState(graphicsState);
+    }
 }
 
 void SceneGraph::syncGraphicsFromState()
@@ -345,145 +334,76 @@ void SceneGraph::syncGraphicsFromState()
         return; // No graphics state to load
     }
     
-    // Sync the graphics root and all children
-    m_graphicsRoot->syncFromState(graphicsState);
+    // Load children directly from graphics state
+    // Note: For now, we don't automatically reconstruct the tree from state.
+    // Graphics are added via addGraphics() which handles both geometry and volumes,
+    // managing both memory and state. This method would need a type registry to
+    // automatically instantiate the correct node types.
+    
+    // TODO: Implement full state-to-memory reconstruction when needed
 }
 
 // Volume graphics management
-std::shared_ptr<VolumeNode> SceneGraph::addVolumeGraphics(const std::string& name, const cvc::volume& vol)
+std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, const cvc::volume& vol)
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
     // Check if name already exists
-    if (m_volumeGraphicsNodes.find(name) != m_volumeGraphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::addVolumeGraphics: Volume graphics object '" + name + "' already exists, replacing");
-        removeVolumeGraphics(name);
+    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+        cvcapp.log(0, "SceneGraph::addGraphics: Volume '" + name + "' already exists, replacing");
+        removeGraphics(name);
     }
     
-    // Create new volume graphics node
-    auto volumeGraphicsNode = std::make_shared<VolumeNode>(name);
-    volumeGraphicsNode->setVolume(vol);
+    // Create new volume node
+    auto volumeNode = std::make_shared<VolumeNode>(name);
+    volumeNode->setVolume(vol);
     
-    // Add to volume graphics root
-    m_volumeGraphicsRoot->addGraphicsChild(volumeGraphicsNode);
+    // Add to graphics root
+    m_graphicsRoot->addGraphicsChild(volumeNode);
     
     // Add to lookup map
-    m_volumeGraphicsNodes[name] = volumeGraphicsNode;
+    m_graphicsNodes[name] = volumeNode;
     
     // Sync to state tree
-    syncVolumesToState();
+    syncGraphicsToState();
     
     // Update multi-volume rendering if needed
     updateVolumeRendering();
     
-    return volumeGraphicsNode;
+    return volumeNode;
 }
 
-std::shared_ptr<VolumeNode> SceneGraph::addVolumeGraphics(const std::string& name)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Check if name already exists
-    if (m_volumeGraphicsNodes.find(name) != m_volumeGraphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::addVolumeGraphics: Volume graphics object '" + name + "' already exists, replacing");
-        removeVolumeGraphics(name);
-    }
-    
-    // Create new empty volume graphics node (for hierarchy/grouping)
-    auto volumeGraphicsNode = std::make_shared<VolumeNode>(name);
-    
-    // Add to volume graphics root
-    m_volumeGraphicsRoot->addGraphicsChild(volumeGraphicsNode);
-    
-    // Add to lookup map
-    m_volumeGraphicsNodes[name] = volumeGraphicsNode;
-    
-    // Sync to state tree
-    syncVolumesToState();
-    
-    return volumeGraphicsNode;
-}
 
-void SceneGraph::removeVolumeGraphics(const std::string& name)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    auto it = m_volumeGraphicsNodes.find(name);
-    if (it == m_volumeGraphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::removeVolumeGraphics: Volume graphics object '" + name + "' not found");
-        return;
-    }
-    
-    auto volumeGraphicsNode = it->second;
-    
-    // Remove from volume graphics root
-    m_volumeGraphicsRoot->removeGraphicsChild(volumeGraphicsNode);
-    
-    // Remove from lookup map
-    m_volumeGraphicsNodes.erase(it);
-    
-    // Sync to state tree
-    syncVolumesToState();
-    
-    // Update multi-volume rendering
-    updateVolumeRendering();
-}
-
-std::shared_ptr<VolumeNode> SceneGraph::getVolumeGraphics(const std::string& name)
-{
-    auto it = m_volumeGraphicsNodes.find(name);
-    if (it != m_volumeGraphicsNodes.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
 
 std::vector<std::shared_ptr<VolumeNode>> SceneGraph::getAllVolumeGraphics()
 {
     std::vector<std::shared_ptr<VolumeNode>> volumes;
-    for (const auto& pair : m_volumeGraphicsNodes) {
-        volumes.push_back(pair.second);
+    // Filter volume nodes from the unified graphics tree
+    for (const auto& pair : m_graphicsNodes) {
+        auto volumeNode = std::dynamic_pointer_cast<VolumeNode>(pair.second);
+        if (volumeNode) {
+            volumes.push_back(volumeNode);
+        }
     }
     return volumes;
 }
 
-void SceneGraph::registerVolumeGraphics(const std::string& name, std::shared_ptr<VolumeNode> node)
-{
-    if (node) {
-        m_volumeGraphicsNodes[name] = node;
-    }
-}
+
 
 size_t SceneGraph::getVolumeGraphicsCount() const
 {
-    return m_volumeGraphicsNodes.size();
-}
-
-void SceneGraph::syncVolumesToState()
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Get or create the volume graphics state node
-    cvc::state& volumeGraphicsState = cvc::state::instance()(m_statePrefix)("volume_graphics");
-    
-    // Sync the volume graphics root and all children
-    m_volumeGraphicsRoot->syncToState(volumeGraphicsState);
-}
-
-void SceneGraph::syncVolumesFromState()
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Get the volume graphics state node
-    cvc::state& volumeGraphicsState = cvc::state::instance()(m_statePrefix)("volume_graphics");
-    
-    if (!volumeGraphicsState.initialized()) {
-        return; // No volume graphics state to load
+    // Count volume nodes in the unified graphics tree
+    size_t count = 0;
+    for (const auto& pair : m_graphicsNodes) {
+        if (std::dynamic_pointer_cast<VolumeNode>(pair.second)) {
+            ++count;
+        }
     }
-    
-    // Sync the volume graphics root and all children
-    m_volumeGraphicsRoot->syncFromState(volumeGraphicsState);
+    return count;
 }
+
+// Volume sync methods removed - volumes are now part of the unified graphics tree
+// and sync automatically via syncGraphicsToState() / syncGraphicsFromState()
 
 cvc::bounding_box SceneGraph::computeVolumeBounds() const
 {
@@ -522,9 +442,9 @@ cvc::bounding_box SceneGraph::computeVolumeBounds() const
             }
         };
     
-    // Start from root volume graphics node
-    if (m_volumeGraphicsRoot) {
-        processBounds(m_volumeGraphicsRoot);
+    // Start from unified graphics root (includes volumes)
+    if (m_graphicsRoot) {
+        processBounds(m_graphicsRoot);
     }
     
     return combinedBounds;

@@ -37,12 +37,9 @@ public:
     void setRenderer(vtkRenderer *renderer);
     void update();
 
-    // Legacy scene content management (single objects)
-    void setGeometry(const cvc::geometry &geom);
-    void setVolume(const cvc::volume &vol);
-    
-    // Multi-object graphics management
+    // Multi-object graphics management (unified for both geometry and volumes)
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name, const cvc::geometry& geom);
+    std::shared_ptr<VolumeNode> addGraphics(const std::string& name, const cvc::volume& vol);
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name); // Empty graphics node for hierarchy
     void removeGraphics(const std::string& name);
     std::shared_ptr<GraphicsNode> getGraphics(const std::string& name);
@@ -50,25 +47,17 @@ public:
     const std::map<std::string, std::shared_ptr<GraphicsNode>>& getAllGraphics() const { return m_graphicsNodes; }
     void registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node); // For manual registration
     
-    // Multi-object volume graphics management
-    std::shared_ptr<VolumeNode> addVolumeGraphics(const std::string& name, const cvc::volume& vol);
-    std::shared_ptr<VolumeNode> addVolumeGraphics(const std::string& name); // Empty volume node for hierarchy
-    void removeVolumeGraphics(const std::string& name);
-    std::shared_ptr<VolumeNode> getVolumeGraphics(const std::string& name);
-    std::shared_ptr<VolumeNode> getVolumeGraphicsRoot() { return m_volumeGraphicsRoot; }
+    // Volume-specific query helpers (volumes are part of the unified graphics tree)
     std::vector<std::shared_ptr<VolumeNode>> getAllVolumeGraphics();
     size_t getVolumeGraphicsCount() const;
-    void registerVolumeGraphics(const std::string& name, std::shared_ptr<VolumeNode> node); // For manual registration
     
     // Multi-volume rendering control
     void enableMultiVolumeRendering(bool enable);
     bool isMultiVolumeRenderingEnabled() const;
     
-    // State synchronization
+    // State synchronization (handles both geometry and volume graphics)
     void syncGraphicsToState();
     void syncGraphicsFromState();
-    void syncVolumesToState();
-    void syncVolumesFromState();
     
     // Scene element visibility
     void setGridVisible(bool visible);
@@ -119,22 +108,15 @@ private:
     vtkRenderer *m_renderer;
     std::string m_statePrefix;
     
-    // Legacy single-object nodes
-    std::shared_ptr<GeometryNode> m_geometryNode;
-    std::shared_ptr<VolumeNode> m_volumeNode;
     std::shared_ptr<GridNode> m_gridNode;
     std::shared_ptr<AxisNode> m_axisNode;
     std::shared_ptr<BBoxNode> m_worldBBoxNode;
 
     std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
     
-    // Multi-object graphics system
+    // Multi-object graphics system (includes both geometry and volume graphics)
     std::shared_ptr<GraphicsNode> m_graphicsRoot; // Root node for all graphics
     std::map<std::string, std::shared_ptr<GraphicsNode>> m_graphicsNodes; // Flat lookup by name
-    
-    // Multi-object volume graphics system
-    std::shared_ptr<VolumeNode> m_volumeGraphicsRoot; // Root node for all volumes
-    std::map<std::string, std::shared_ptr<VolumeNode>> m_volumeGraphicsNodes; // Flat lookup by name
     
     // Multi-volume rendering state
     bool m_multiVolumeRenderingEnabled;

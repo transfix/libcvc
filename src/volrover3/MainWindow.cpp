@@ -322,6 +322,7 @@ void MainWindow::createDockWidgets()
     tfDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     
     m_transferFunctionWidget = new TransferFunctionWidget(tfDock);
+    m_transferFunctionWidget->setSceneGraph(m_sceneGraph.get());
     tfDock->setWidget(m_transferFunctionWidget);
     
     addDockWidget(Qt::RightDockWidgetArea, tfDock);
@@ -445,7 +446,16 @@ void MainWindow::openVolume()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    // Allow multiple file selection
+    // Show parent selection dialog FIRST (consistent with geometry loading)
+    GraphicsParentDialog parentDialog(m_sceneGraph, this);
+    if (parentDialog.exec() != QDialog::Accepted) {
+        return; // User cancelled
+    }
+    
+    std::string parentName = parentDialog.getSelectedParentName();
+    auto parentNode = parentDialog.getSelectedParent();
+
+    // Now show file selection dialog (allow multiple files)
     QStringList fileNames = QFileDialog::getOpenFileNames(
         this,
         tr("Open Volume File(s)"),
@@ -454,15 +464,6 @@ void MainWindow::openVolume()
 
     if (fileNames.isEmpty())
         return;
-
-    // Show parent selection dialog
-    GraphicsParentDialog dialog(m_sceneGraph, this);
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
-    }
-
-    // Get parent node - can be volume type
-    std::shared_ptr<VolumeNode> parentVolNode = dialog.getSelectedVolumeParent();
 
     int successCount = 0;
     cvc::uint64 totalVoxels = 0;
@@ -482,25 +483,22 @@ void MainWindow::openVolume()
             // Create unique name if needed
             std::string volumeName = sanitizedName;
             int counter = 1;
-            while (m_sceneGraph->getVolumeGraphics(volumeName)) {
+            while (m_sceneGraph->getGraphics(volumeName)) {
                 volumeName = sanitizedName + "_" + std::to_string(counter++);
             }
             
-            // Create volume graphics node
-            auto volumeNode = std::make_shared<VolumeNode>(volumeName);
-            volumeNode->setVolume(vol);
+            // Add volume to graphics tree (volumes are graphics too!)
+            auto volumeNode = m_sceneGraph->addGraphics(volumeName, vol);
             
             // Store metadata
             volumeNode->setMetadata("type", std::string("volume"));
             volumeNode->setMetadata("filename", fileName.toStdString());
             
-            // Add to parent or root
-            if (parentVolNode) {
-                parentVolNode->addGraphicsChild(volumeNode);
-                m_sceneGraph->registerVolumeGraphics(volumeName, volumeNode);
-            } else {
-                m_sceneGraph->getVolumeGraphicsRoot()->addGraphicsChild(volumeNode);
-                m_sceneGraph->registerVolumeGraphics(volumeName, volumeNode);
+            // Set parent if requested
+            if (parentNode) {
+                // Remove from root first (addGraphics adds to root by default)
+                m_sceneGraph->getGraphicsRoot()->removeGraphicsChild(volumeNode);
+                parentNode->addGraphicsChild(volumeNode);
             }
             
             totalVoxels += vol.XDim() * vol.YDim() * vol.ZDim();
@@ -513,7 +511,8 @@ void MainWindow::openVolume()
     }
     
     // Sync to state tree
-    m_sceneGraph->syncVolumesToState();
+    // Sync graphics to state tree (includes both geometry and volumes)
+    m_sceneGraph->syncGraphicsToState();
     
     // Update world bounding box to include all volumes
     cvc::bounding_box volumeBounds = m_sceneGraph->computeVolumeBounds();
@@ -532,14 +531,22 @@ void MainWindow::openVolume()
         
         AppState::instance().setWorldBounds(combinedBounds);
         // Grid will update automatically via onWorldBoundsChanged callback
+        
+        // Don't reset camera - user wants to control it manually
+        // m_cameraController->resetView(
+        //     combinedBounds.minx, combinedBounds.miny, combinedBounds.minz,
+        //     combinedBounds.maxx, combinedBounds.maxy, combinedBounds.maxz);
     }
     
     // Update render
     m_renderWidget->render();
     
+    // Refresh transfer function widget volume list
+    m_transferFunctionWidget->refreshVolumeList();
+    
     // Show status message
     if (successCount > 0) {
-        QString parentMsg = parentVolNode ? QString::fromStdString(parentVolNode->getName()) : tr("root");
+        QString parentMsg = parentNode ? QString::fromStdString(parentNode->getName()) : tr("root");
         statusBar()->showMessage(
             tr("Loaded %1 volume file(s) under '%2': %3 total voxels")
                 .arg(successCount)

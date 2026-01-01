@@ -23,8 +23,8 @@ GraphicsParentDialog::GraphicsParentDialog(std::shared_ptr<SceneGraph> sceneGrap
     
     // Add description label
     QLabel *descLabel = new QLabel(
-        tr("Select the parent node for the new geometry.\n"
-           "The new geometry will be placed under the selected node."),
+        tr("Select the parent node for the new graphics object.\n"
+           "The new object will be placed under the selected node."),
         this);
     descLabel->setWordWrap(true);
     mainLayout->addWidget(descLabel);
@@ -62,19 +62,11 @@ void GraphicsParentDialog::populateParentList()
     // Add root option (empty parent)
     m_parentComboBox->addItem(tr("(Root - No Parent)"), QVariant(QString("")));
     
-    // Add all graphics nodes hierarchically
+    // Add all graphics nodes hierarchically (includes both geometry and volumes)
     auto graphicsRoot = m_sceneGraph->getGraphicsRoot();
     if (graphicsRoot) {
         for (const auto& child : graphicsRoot->getGraphicsChildren()) {
             addNodeToList(child, 0);
-        }
-    }
-    
-    // Add all volume graphics nodes hierarchically
-    auto volumeGraphicsRoot = m_sceneGraph->getVolumeGraphicsRoot();
-    if (volumeGraphicsRoot) {
-        for (const auto& child : volumeGraphicsRoot->getGraphicsChildren()) {
-            addVolumeNodeToList(child, 0);
         }
     }
     
@@ -86,12 +78,18 @@ void GraphicsParentDialog::addNodeToList(std::shared_ptr<GraphicsNode> node, int
 {
     if (!node) return;
     
+    // Determine if this is a volume or geometry node
+    bool isVolume = (std::dynamic_pointer_cast<VolumeNode>(node) != nullptr);
+    
     // Create indented display name with icon
     QString indent(depth * 2, ' ');
-    QString displayName = indent + "📦 Geometry: " + QString::fromStdString(node->getName());
+    QString icon = isVolume ? "🔲" : "📦";
+    QString type = isVolume ? "Volume" : "Geometry";
+    QString displayName = indent + icon + " " + type + ": " + QString::fromStdString(node->getName());
     
-    // Add to combo box with node name as data (prefixed with "geom:")
-    m_parentComboBox->addItem(displayName, QVariant(QString::fromStdString("geom:" + node->getName())));
+    // Add to combo box with node name as data (prefixed with type)
+    QString prefix = isVolume ? "vol:" : "geom:";
+    m_parentComboBox->addItem(displayName, QVariant(prefix + QString::fromStdString(node->getName())));
     
     // Recursively add children
     for (const auto& child : node->getGraphicsChildren()) {
@@ -99,25 +97,7 @@ void GraphicsParentDialog::addNodeToList(std::shared_ptr<GraphicsNode> node, int
     }
 }
 
-void GraphicsParentDialog::addVolumeNodeToList(std::shared_ptr<GraphicsNode> node, int depth)
-{
-    if (!node) return;
-    
-    // Check if this is actually a VolumeNode
-    if (auto volNode = std::dynamic_pointer_cast<VolumeNode>(node)) {
-        // Create indented display name with icon
-        QString indent(depth * 2, ' ');
-        QString displayName = indent + "🔲 Volume: " + QString::fromStdString(volNode->getName());
-        
-        // Add to combo box with node name as data (prefixed with "vol:")
-        m_parentComboBox->addItem(displayName, QVariant(QString::fromStdString("vol:" + volNode->getName())));
-    }
-    
-    // Recursively add children
-    for (const auto& child : node->getGraphicsChildren()) {
-        addVolumeNodeToList(child, depth + 1);
-    }
-}
+
 
 std::string GraphicsParentDialog::getSelectedParentName() const
 {
@@ -137,7 +117,12 @@ std::shared_ptr<GraphicsNode> GraphicsParentDialog::getSelectedParent() const
         return m_sceneGraph->getGraphics(parentName.substr(5));
     }
     
-    // Otherwise it's a volume node, return nullptr (volumes can't parent geometry)
+    // Check if it's a volume node (prefixed with "vol:")
+    if (parentName.substr(0, 4) == "vol:") {
+        // Return the volume node as a GraphicsNode (volumes can parent both geometry and volumes)
+        return std::dynamic_pointer_cast<VolumeNode>(m_sceneGraph->getGraphics(parentName.substr(4)));
+    }
+    
     return nullptr;
 }
 
@@ -150,14 +135,14 @@ std::shared_ptr<VolumeNode> GraphicsParentDialog::getSelectedVolumeParent() cons
     
     // Check if it's a volume node (prefixed with "vol:")
     if (parentName.substr(0, 4) == "vol:") {
-        return m_sceneGraph->getVolumeGraphics(parentName.substr(4));
+        return std::dynamic_pointer_cast<VolumeNode>(m_sceneGraph->getGraphics(parentName.substr(4)));
     }
     
-    // Check if it's a geometry node (prefixed with "geom:")
+    // Check if it's a geometry node (prefixed with "geom:") - volumes can be children of geometry
     if (parentName.substr(0, 5) == "geom:") {
-        // Return the geometry node as a potential parent for volumes
-        // (This allows volumes to be children of geometry nodes)
-        return nullptr; // For now, only support volume parents for volumes
+        auto geomNode = m_sceneGraph->getGraphics(parentName.substr(5));
+        // Try to cast to VolumeNode (in case geometry node is actually a volume)
+        return std::dynamic_pointer_cast<VolumeNode>(geomNode);
     }
     
     return nullptr;

@@ -52,6 +52,9 @@ public:
     void syncToState(cvc::state& parentState) override;
     void syncFromState(cvc::state& parentState) override;
     
+    // Override to add logging
+    void addToRenderer(vtkRenderer* renderer) override;
+    
     // Check if a metadata key is computed (read-only)
     static bool isComputedMetadata(const std::string& key);
 
@@ -76,8 +79,26 @@ private:
     double m_dataMin;
     double m_dataMax;
     
+    // Volume rendering properties
+    bool m_shading;
+    double m_ambient;
+    double m_diffuse;
+    double m_specular;
+    double m_specularPower;
+    double m_scalarOpacityUnitDistance;
+    double m_sampleDistance;
+    bool m_autoAdjustSampleDistances;
+    
     cvc::state* m_stateNode;
     boost::signals2::connection m_dataConnection;
+    boost::signals2::connection m_shadingConnection;
+    boost::signals2::connection m_ambientConnection;
+    boost::signals2::connection m_diffuseConnection;
+    boost::signals2::connection m_specularConnection;
+    boost::signals2::connection m_specularPowerConnection;
+    boost::signals2::connection m_scalarOpacityUnitDistanceConnection;
+    boost::signals2::connection m_sampleDistanceConnection;
+    boost::signals2::connection m_autoAdjustSampleDistancesConnection;
 };
 
 #endif // VOLUMENODE_H

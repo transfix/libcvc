@@ -1,4 +1,6 @@
 #include <volrover3/TransferFunctionWidget.h>
+#include <volrover3/SceneGraph.h>
+#include <volrover3/VolumeNode.h>
 #include <cvc/app.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -258,6 +260,8 @@ TransferFunctionWidget::TransferFunctionWidget(QWidget *parent)
     , m_presetCombo(nullptr)
     , m_colorBarWidget(nullptr)
     , m_opacityWidget(nullptr)
+    , m_volumeCombo(nullptr)
+    , m_sceneGraph(nullptr)
     , m_dataMin(0.0)
     , m_dataMax(1.0)
 {
@@ -272,6 +276,15 @@ TransferFunctionWidget::~TransferFunctionWidget()
 void TransferFunctionWidget::setupUI()
 {
     QVBoxLayout *layout = new QVBoxLayout(this);
+
+    // Volume selector
+    QHBoxLayout *volumeLayout = new QHBoxLayout();
+    volumeLayout->addWidget(new QLabel("Volume:"));
+    m_volumeCombo = new QComboBox();
+    connect(m_volumeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &TransferFunctionWidget::onVolumeSelected);
+    volumeLayout->addWidget(m_volumeCombo);
+    layout->addLayout(volumeLayout);
 
     // Preset selector
     QHBoxLayout *presetLayout = new QHBoxLayout();
@@ -320,6 +333,111 @@ void TransferFunctionWidget::createDefaultTransferFunction()
         auto opacityWidget = static_cast<OpacityGraphWidget*>(m_opacityWidget);
         opacityWidget->setOpacityPoints(m_opacityPoints);
     }
+}
+
+void TransferFunctionWidget::setSceneGraph(SceneGraph* sceneGraph)
+{
+    m_sceneGraph = sceneGraph;
+    refreshVolumeList();
+}
+
+void TransferFunctionWidget::refreshVolumeList()
+{
+    if (!m_sceneGraph || !m_volumeCombo) {
+        return;
+    }
+
+    // Store current selection
+    QString currentText = m_volumeCombo->currentText();
+
+    // Clear and repopulate
+    m_volumeCombo->clear();
+    m_volumes.clear();
+
+    auto volumeGraphics = m_sceneGraph->getAllVolumeGraphics();
+    for (const auto& volNode : volumeGraphics) {
+        if (volNode) {
+            QString name = QString::fromStdString(volNode->getName());
+            m_volumeCombo->addItem(name);
+            m_volumes.push_back(volNode);
+        }
+    }
+
+    // Restore selection if possible
+    int index = m_volumeCombo->findText(currentText);
+    if (index >= 0) {
+        m_volumeCombo->setCurrentIndex(index);
+    } else if (m_volumeCombo->count() > 0) {
+        m_volumeCombo->setCurrentIndex(0);
+        if (!m_volumes.empty()) {
+            loadTransferFunctionFromVolume(m_volumes[0]);
+        }
+    }
+}
+
+std::shared_ptr<VolumeNode> TransferFunctionWidget::getSelectedVolume() const
+{
+    int index = m_volumeCombo ? m_volumeCombo->currentIndex() : -1;
+    if (index >= 0 && index < static_cast<int>(m_volumes.size())) {
+        return m_volumes[index];
+    }
+    return nullptr;
+}
+
+void TransferFunctionWidget::onVolumeSelected(int index)
+{
+    if (index >= 0 && index < static_cast<int>(m_volumes.size())) {
+        auto volume = m_volumes[index];
+        emit selectedVolumeChanged(volume);
+        loadTransferFunctionFromVolume(volume);
+    }
+}
+
+void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<VolumeNode> volume)
+{
+    if (!volume || !volume->hasVolume()) {
+        cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume: No volume or volume not loaded");
+        return;
+    }
+
+    // Update data range from volume's metadata
+    // The metadata contains computed min/max values
+    auto minVal = volume->getMetadata("data_min");
+    auto maxVal = volume->getMetadata("data_max");
+    
+    cvcapp.log(0, "\nTransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + "]: Getting metadata");
+    
+    if (minVal.has_value() && maxVal.has_value()) {
+        try {
+            // Try double first, then string
+            if (minVal.type() == typeid(double)) {
+                m_dataMin = std::any_cast<double>(minVal);
+                m_dataMax = std::any_cast<double>(maxVal);
+            } else {
+                std::string minStr = std::any_cast<std::string>(minVal);
+                std::string maxStr = std::any_cast<std::string>(maxVal);
+                m_dataMin = std::stod(minStr);
+                m_dataMax = std::stod(maxStr);
+            }
+            cvcapp.log(0, "  Set data range to: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]\n");
+        } catch (const std::exception& e) {
+            // If conversion fails, use defaults
+            cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
+                       "]: Failed to convert metadata (" + std::string(e.what()) + "), using defaults [0.0, 1.0]");
+            m_dataMin = 0.0;
+            m_dataMax = 1.0;
+        }
+    } else {
+        cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
+                   "]: No metadata found, using defaults [0.0, 1.0]");
+        m_dataMin = 0.0;
+        m_dataMax = 1.0;
+    }
+    
+    // Note: We don't load the actual transfer function from the volume
+    // because VolumeNode doesn't expose the TF getters. Instead, we keep
+    // the current TF in the widget and just update the data range.
+    // The user can then adjust the TF as needed for this volume.
 }
 
 void TransferFunctionWidget::applyPreset(const QString &presetName)

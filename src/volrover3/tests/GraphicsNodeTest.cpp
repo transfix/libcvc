@@ -408,7 +408,7 @@ TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
     
     auto root = sceneGraph.getGraphicsRoot();
     ASSERT_NE(root, nullptr);
-    EXPECT_EQ(root->getName(), "graphics_root");
+    EXPECT_EQ(root->getName(), "graphics");
 }
 
 // Test SceneGraph register graphics

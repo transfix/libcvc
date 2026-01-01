@@ -37,20 +37,19 @@ TEST_F(SceneGraphTest, AddGeometryNode) {
     geom.points().push_back({1.0, 0.0, 0.0});
     geom.points().push_back({0.0, 1.0, 0.0});
     
-    sceneGraph->setGeometry(geom);
+    auto node = sceneGraph->addGraphics("test_geom", geom);
     
-    // Verify the geometry was set (node should be created internally)
-    // We can't directly test the private geometry node, but we can verify no crash
-    SUCCEED();
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(sceneGraph->getGraphics("test_geom"), node);
 }
 
 TEST_F(SceneGraphTest, AddVolumeNode) {
     cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
     
-    sceneGraph->setVolume(vol);
+    auto node = sceneGraph->addGraphics("test_vol", vol);
     
-    // Verify the volume was set (node should be created internally)
-    SUCCEED();
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(sceneGraph->getGraphics("test_vol"), node);
 }
 
 TEST_F(SceneGraphTest, ShowHideGrid) {
@@ -91,7 +90,7 @@ TEST_F(SceneGraphTest, ResetCamera) {
 TEST_F(SceneGraphTest, TransferFunctionUpdate) {
     // Create a volume first
     cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
-    sceneGraph->setVolume(vol);
+    auto volNode = sceneGraph->addGraphics("test_vol", vol);
     
     // Update transfer function
     std::vector<double> colorTable = {0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0};
@@ -107,10 +106,10 @@ TEST_F(SceneGraphTest, MultipleUpdates) {
     // Test multiple updates don't cause issues
     cvc::geometry geom;
     geom.points().push_back({0.0, 0.0, 0.0});
-    sceneGraph->setGeometry(geom);
+    sceneGraph->addGraphics("test_geom", geom);
     
     cvc::volume vol(cvc::dimension(2, 2, 2), cvc::UChar);
-    sceneGraph->setVolume(vol);
+    sceneGraph->addGraphics("test_vol", vol);
     
     sceneGraph->setGridVisible(true);
     sceneGraph->setAxisVisible(true);
@@ -140,7 +139,7 @@ TEST_F(SceneGraphTest, VisibilityStateTree) {
 TEST_F(SceneGraphTest, TransferFunctionFromState) {
     // Create volume
     cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
-    sceneGraph->setVolume(vol);
+    sceneGraph->addGraphics("test_vol", vol);
     
     // Get transfer function from AppState
     auto colorTable = appState->transferFunctionColorTable();
@@ -229,7 +228,7 @@ TEST_F(SceneGraphTest, AxisScalingWithGeometry) {
     geom.points().push_back({2.0, 2.0, 2.0});
     
     // Set geometry and get its bounds
-    sceneGraph->setGeometry(geom);
+    sceneGraph->addGraphics("test_geom", geom);
     cvc::bounding_box geomBounds = geom.extents();
     
     // Update grid/axis with geometry bounds
