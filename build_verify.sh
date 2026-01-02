@@ -4,7 +4,7 @@
 set -e  # Exit on error
 
 echo "=========================================="
-echo "Trans-CVC Build Verification Script"
+echo "libcvc Build Verification Script"
 echo "=========================================="
 echo ""
 
@@ -145,5 +145,5 @@ echo "To install, run:"
 echo "  cd $BUILD_DIR && sudo cmake --install ."
 echo ""
 echo "To run the executable:"
-echo "  ./$BUILD_DIR/bin/trans-cvc"
+echo "  ./$BUILD_DIR/bin/libcvc"
 echo ""

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Code coverage generation script for trans-cvc
+# Code coverage generation script for libcvc
 # Automatically configures, builds, runs tests, and generates coverage reports
 #
 

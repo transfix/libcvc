@@ -1,6 +1,6 @@
 # Volume and Voxels API Reference (VolMagick)
 
-*Complete reference for the trans-cvc/VolMagick volume data library*
+*Complete reference for the libcvc/VolMagick volume data library*
 
 ## Table of Contents
 
