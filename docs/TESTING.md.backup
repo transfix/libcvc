@@ -1,4 +1,4 @@
-# Comprehensive Testing Guide for trans-cvc
+# Comprehensive Testing Guide for libcvc
 
 *Last Updated: December 12, 2025*
 
@@ -25,7 +25,7 @@
 
 ## Overview
 
-The trans-cvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
+The libcvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
 
 ## Test Suite Summary
 
@@ -52,7 +52,7 @@ The trans-cvc library uses Google Test (gtest) for comprehensive unit testing. T
 Tests are controlled by the `CVC_BUILD_TESTS` CMake option, which is **ON by default**. To disable tests:
 
 ```bash
-cmake -DCVC_BUILD_TESTS=OFF /path/to/trans-cvc
+cmake -DCVC_BUILD_TESTS=OFF /path/to/libcvc
 ```
 
 ### Building with Tests
@@ -379,7 +379,7 @@ INSTANTIATE_TEST_SUITE_P(
 
 ### Overview
 
-Trans-cvc includes integrated code coverage support using gcov/lcov. Coverage analysis shows which lines of code are executed by your tests, helping identify untested areas.
+libcvc includes integrated code coverage support using gcov/lcov. Coverage analysis shows which lines of code are executed by your tests, helping identify untested areas.
 
 ### Prerequisites
 

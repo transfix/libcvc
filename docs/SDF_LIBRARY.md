@@ -76,7 +76,7 @@ A Signed Distance Function (SDF) assigns a real number to every point in 3D spac
 
 ### Dual Algorithm Architecture
 
-As of version 2.1, trans-cvc provides **two independent SDF implementations**:
+As of version 2.1, libcvc provides **two independent SDF implementations**:
 
 **SDF v1 (Octree-based)**:
 - Uses adaptive octree subdivision

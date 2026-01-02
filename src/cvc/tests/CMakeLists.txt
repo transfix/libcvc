@@ -1,4 +1,4 @@
-# Unit tests for trans-cvc library
+# Unit tests for libcvc library
 cmake_minimum_required(VERSION 3.15)
 
 # Test executables

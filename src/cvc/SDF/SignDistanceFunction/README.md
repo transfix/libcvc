@@ -96,7 +96,7 @@ float* SDFLibrary::computeSDF(
 ## Building
 
 ```bash
-cd trans-cvc
+cd libcvc
 mkdir build && cd build
 cmake ..
 make

@@ -118,7 +118,7 @@ Benefits:
 
 Build successful:
 ```bash
-cd /home/joe/src/trans-cvc/build
+cd /home/joe/src/libcvc/build
 make volrover3 -j$(nproc)
 # [100%] Built target volrover3
 ```

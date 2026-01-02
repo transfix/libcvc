@@ -30,7 +30,7 @@ namespace
   void help(const std::vector<std::string>& args)
   {
     using namespace std;
-    cout << "Usage: trans-cvc <command> <command args>" << endl << endl;
+    cout << "Usage: libcvc <command> <command args>" << endl << endl;
     for(command_map::iterator i = commands.begin();
         i != commands.end();
         ++i)

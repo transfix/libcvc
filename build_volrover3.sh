@@ -35,7 +35,7 @@ fi
 echo ""
 
 # Build
-echo "Building trans-cvc with VolRover3..."
+echo "Building libcvc with VolRover3..."
 echo ""
 
 cd "$(dirname "$0")"

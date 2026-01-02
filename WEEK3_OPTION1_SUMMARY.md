@@ -211,7 +211,7 @@ With Option 1 complete, consider:
 ## Build Verification
 
 ```bash
-cd /home/joe/src/trans-cvc/build
+cd /home/joe/src/libcvc/build
 make -j$(nproc)
 ./bin/geometry_test
 # Result: 98 tests, 90 passed, 8 skipped (stress tests disabled)

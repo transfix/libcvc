@@ -4,7 +4,7 @@
 - **Geometry**: Stanford Bunny (34,835 vertices, 69,473 triangles)
 - **Bounding Box**: Bunny bounds with 0.1 padding
 - **Resolutions Tested**: 64³, 128³
-- **Platform**: Linux (trans-cvc build system)
+- **Platform**: Linux (libcvc build system)
 
 ## Performance Comparison: SDF v1 vs SDF v2
 

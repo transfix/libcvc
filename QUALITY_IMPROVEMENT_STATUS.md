@@ -16,7 +16,7 @@
 - All public APIs now use enums instead of strings
 - Removed backward compatibility code
 - Updated all call sites to use new enum API
-- Command-line tool (`trans-cvc`) maintains string interface for user convenience
+- Command-line tool (`libcvc`) maintains string interface for user convenience
 
 ### 3. Comprehensive Testing ✅
 - `QualityImproveAllMethods`: Tests all 6 improvement methods on triangle mesh

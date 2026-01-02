@@ -1,6 +1,6 @@
 # Application Framework API (cvc::app)
 
-*Complete reference for the trans-cvc application singleton*
+*Complete reference for the libcvc application singleton*
 
 ## Table of Contents
 

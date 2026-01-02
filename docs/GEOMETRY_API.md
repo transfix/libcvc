@@ -1,6 +1,6 @@
 # Geometry API Reference
 
-*Complete reference for the trans-cvc triangle mesh and geometry library*
+*Complete reference for the libcvc triangle mesh and geometry library*
 
 ## Table of Contents
 
@@ -64,7 +64,7 @@
 
 ## Overview
 
-The `cvc::geometry` class provides a versatile container for 3D triangle meshes, volumetric meshes (tetrahedra, hexahedra), and general geometric data. It serves as the standard geometry representation throughout trans-cvc for isosurfacing, mesh processing, rendering, and scientific visualization.
+The `cvc::geometry` class provides a versatile container for 3D triangle meshes, volumetric meshes (tetrahedra, hexahedra), and general geometric data. It serves as the standard geometry representation throughout libcvc for isosurfacing, mesh processing, rendering, and scientific visualization.
 
 **Key Features:**
 - **Triangle meshes**: Surface meshes with optional normals and colors

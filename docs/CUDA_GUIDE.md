@@ -446,7 +446,7 @@ Key differences:
 
 ## Summary
 
-Modern CUDA support in trans-cvc:
+Modern CUDA support in libcvc:
 - ✅ Uses CMake 3.17+ native CUDA language
 - ✅ Automatic nvcc integration
 - ✅ Target-specific architecture compilation

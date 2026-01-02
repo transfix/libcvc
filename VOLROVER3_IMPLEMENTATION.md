@@ -5,7 +5,7 @@
 
 ## Overview
 
-VolRover3 is a new prototype application built as part of the trans-cvc project. It provides an interactive 3D visualization environment for volumetric data, surface meshes, and volumetric meshes using Qt6, VTK, and OpenGL.
+VolRover3 is a new prototype application built as part of the libcvc project. It provides an interactive 3D visualization environment for volumetric data, surface meshes, and volumetric meshes using Qt6, VTK, and OpenGL.
 
 ## Architecture
 
@@ -288,7 +288,7 @@ Uses `VTK_MODULE_INIT` for required modules:
 - Qt6 (Core, Widgets, OpenGL, OpenGLWidgets)
 - VTK 9.0+
 - OpenGL 3.3+
-- libcvc (built from trans-cvc)
+- libcvc (built from libcvc)
 
 ### Optional
 - None (all features included if dependencies met)

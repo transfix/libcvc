@@ -32,7 +32,7 @@
 
 ## Overview
 
-The `cvc::state` class provides a thread-safe, hierarchical key-value store with signal/slot notifications and futures-based async operations. It serves as the backbone for application state management in trans-cvc, supporting:
+The `cvc::state` class provides a thread-safe, hierarchical key-value store with signal/slot notifications and futures-based async operations. It serves as the backbone for application state management in libcvc, supporting:
 
 - **Hierarchical organization**: Dot-notation paths create tree structures
 - **Type-safe storage**: Template methods with automatic conversion
@@ -124,7 +124,7 @@ state child = parent.child("title");
 // Set value (converted to string internally)
 cvcstate("count").value(42);
 cvcstate("ratio").value(3.14159);
-cvcstate("name").value(std::string("trans-cvc"));
+cvcstate("name").value(std::string("libcvc"));
 
 // Get value with type conversion
 int count = cvcstate("count").value<int>();

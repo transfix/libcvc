@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build verification script for trans-cvc
+# Build verification script for libcvc
 
 set -e  # Exit on error
 
@@ -124,8 +124,8 @@ fi
 echo ""
 echo "Verifying build outputs..."
 
-if [ -f "bin/trans-cvc" ]; then
-    echo -e "${GREEN}✓ Executable: bin/trans-cvc${NC}"
+if [ -f "bin/libcvc" ]; then
+    echo -e "${GREEN}✓ Executable: bin/libcvc${NC}"
 else
     echo -e "${RED}✗ Executable not found${NC}"
 fi
