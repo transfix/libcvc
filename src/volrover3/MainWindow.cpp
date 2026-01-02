@@ -221,15 +221,10 @@ void MainWindow::createMenus()
     // File menu
     QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
     
-    QAction *openGeomAction = new QAction(tr("Open &Geometry..."), this);
-    openGeomAction->setShortcut(QKeySequence::Open);
-    connect(openGeomAction, &QAction::triggered, this, &MainWindow::openGeometry);
-    fileMenu->addAction(openGeomAction);
-
-    QAction *openVolAction = new QAction(tr("Open &Volume..."), this);
-    openVolAction->setShortcut(tr("Ctrl+V"));
-    connect(openVolAction, &QAction::triggered, this, &MainWindow::openVolume);
-    fileMenu->addAction(openVolAction);
+    QAction *openFileAction = new QAction(tr("&Open File..."), this);
+    openFileAction->setShortcut(QKeySequence::Open);
+    connect(openFileAction, &QAction::triggered, this, &MainWindow::openFile);
+    fileMenu->addAction(openFileAction);
 
     fileMenu->addSeparator();
 
@@ -316,7 +311,7 @@ void MainWindow::setupConnections()
             });
 }
 
-void MainWindow::openGeometry()
+void MainWindow::openFile()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
@@ -329,64 +324,164 @@ void MainWindow::openGeometry()
     std::string parentName = parentDialog.getSelectedParentName();
     auto parentNode = parentDialog.getSelectedParent();
     
-    // Now show file selection dialog (allow multiple files)
+    // Get supported extensions from I/O classes
+    std::vector<std::string> geomExts = cvc::geometry_file_io::get_extensions();
+    std::vector<std::string> volExts = cvc::volume_file_io::getExtensions();
+    
+    // Build filter strings (extensions may or may not have leading dots)
+    QString geomFilter;
+    for (const auto& ext : geomExts) {
+        if (!geomFilter.isEmpty()) geomFilter += " ";
+        QString extStr = QString::fromStdString(ext);
+        // Handle extensions with or without leading dot
+        if (extStr.startsWith('.')) {
+            geomFilter += "*" + extStr;
+        } else {
+            geomFilter += "*." + extStr;
+        }
+    }
+    
+    QString volFilter;
+    for (const auto& ext : volExts) {
+        if (!volFilter.isEmpty()) volFilter += " ";
+        QString extStr = QString::fromStdString(ext);
+        // Handle extensions with or without leading dot
+        if (extStr.startsWith('.')) {
+            volFilter += "*" + extStr;
+        } else {
+            volFilter += "*." + extStr;
+        }
+    }
+    
+    QString allFilter = geomFilter;
+    if (!geomFilter.isEmpty() && !volFilter.isEmpty()) {
+        allFilter += " ";
+    }
+    allFilter += volFilter;
+    
+    QString filters = tr("All Graphics Files (%1);;"
+                        "Geometry Files (%2);;"
+                        "Volume Files (%3);;"
+                        "All Files (*)")
+        .arg(allFilter)
+        .arg(geomFilter)
+        .arg(volFilter);
+    
+    // Show file selection dialog with both geometry and volume extensions
     QStringList fileNames = QFileDialog::getOpenFileNames(
         this,
-        tr("Open Geometry File(s)"),
+        tr("Open Graphics File(s)"),
         QString(),
-        tr("Geometry Files (*.off *.raw *.rawn *.rawc *.rawnc *.obj);;All Files (*)"));
+        filters);
 
     if (fileNames.isEmpty())
         return;
 
-    int successCount = 0;
-    int totalVertices = 0;
-    int totalTriangles = 0;
+    int geomCount = 0, volCount = 0;
+    int totalVertices = 0, totalTriangles = 0;
+    cvc::uint64 totalVoxels = 0;
     
     for (const QString& fileName : fileNames) {
+        QFileInfo fileInfo(fileName);
+        
         try {
-            // Load geometry using CVC library
-            cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
-            
             // Extract filename without path for naming
-            QFileInfo fileInfo(fileName);
             std::string baseName = fileInfo.baseName().toStdString();
-            
-            // Sanitize the base name to conform to C identifier rules
             std::string sanitizedName = cvc::state::sanitizeStateName(baseName);
             
-            // Create unique name if needed
+            // Create unique name
             std::string graphicsName = sanitizedName;
             int counter = 1;
             while (m_sceneGraph->getGraphics(graphicsName)) {
                 graphicsName = sanitizedName + "_" + std::to_string(counter++);
             }
             
-            // Create graphics node (use GeometryNode)
-            auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
-            graphicsNode->setGeometry(geom);
+            // Try loading as volume first, then geometry if that fails
+            bool loadedAsVolume = false;
+            bool loadedAsGeometry = false;
+            std::string lastError;
             
-            // Store metadata
-            graphicsNode->setMetadata("type", std::string("geometry"));
-            graphicsNode->setMetadata("filename", fileName.toStdString());
-            graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
-            graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
-            
-            // Add to parent or root
-            if (parentNode) {
-                parentNode->addGraphicsChild(graphicsNode);
-                m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
-            } else {
-                m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
-                m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+            try {
+                // Try loading as volume
+                cvc::volume vol(fileName.toStdString());
+                auto volumeNode = m_sceneGraph->addGraphics(graphicsName, vol);
+                volumeNode->setMetadata("type", std::string("volume"));
+                volumeNode->setMetadata("filename", fileName.toStdString());
+                
+                // Set parent if requested
+                if (parentNode) {
+                    m_sceneGraph->getGraphicsRoot()->removeGraphicsChild(volumeNode);
+                    parentNode->addGraphicsChild(volumeNode);
+                }
+                
+                totalVoxels += vol.XDim() * vol.YDim() * vol.ZDim();
+                volCount++;
+                loadedAsVolume = true;
+            } catch (const cvc::unsupported_volume_file_type& e) {
+                // Not a volume file, try geometry
+                lastError = e.what();
+                try {
+                    cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
+                    auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
+                    graphicsNode->setGeometry(geom);
+                    graphicsNode->setMetadata("type", std::string("geometry"));
+                    graphicsNode->setMetadata("filename", fileName.toStdString());
+                    graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
+                    graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
+                    
+                    // Add to parent or root
+                    if (parentNode) {
+                        parentNode->addGraphicsChild(graphicsNode);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    } else {
+                        m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    }
+                    
+                    totalVertices += geom.num_points();
+                    totalTriangles += geom.num_tris();
+                    geomCount++;
+                    loadedAsGeometry = true;
+                } catch (const cvc::unsupported_geometry_file_type&) {
+                    // Neither volume nor geometry - throw a clear error
+                    throw std::runtime_error("File format not supported by any loader (not a recognized volume or geometry file)");
+                } catch (const std::exception& e) {
+                    // Other geometry loading error
+                    throw std::runtime_error(std::string("Failed to load as geometry: ") + e.what());
+                }
+            } catch (const std::exception& e) {
+                // Other volume loading error - still try geometry
+                lastError = e.what();
+                try {
+                    cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
+                    auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
+                    graphicsNode->setGeometry(geom);
+                    graphicsNode->setMetadata("type", std::string("geometry"));
+                    graphicsNode->setMetadata("filename", fileName.toStdString());
+                    graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
+                    graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
+                    
+                    // Add to parent or root
+                    if (parentNode) {
+                        parentNode->addGraphicsChild(graphicsNode);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    } else {
+                        m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    }
+                    
+                    totalVertices += geom.num_points();
+                    totalTriangles += geom.num_tris();
+                    geomCount++;
+                    loadedAsGeometry = true;
+                } catch (const std::exception&) {
+                    // Failed both ways - report the original volume error
+                    throw std::runtime_error(lastError);
+                }
             }
             
-            totalVertices += geom.num_points();
-            totalTriangles += geom.num_tris();
-            successCount++;
-            
         } catch (const std::exception &e) {
-            QMessageBox::warning(this, tr("Error Loading Geometry"),
+            QMessageBox::warning(this, tr("Error Loading File"),
                 tr("Failed to load %1:\n%2").arg(fileName).arg(e.what()));
         }
     }
@@ -404,136 +499,27 @@ void MainWindow::openGeometry()
     // Update render
     m_renderWidget->render();
     
+    // Refresh transfer function widget if volumes were loaded
+    if (volCount > 0) {
+        m_transferFunctionWidget->refreshVolumeList();
+    }
+    
     // Show status message
-    if (successCount > 0) {
+    if (geomCount > 0 || volCount > 0) {
         QString parentMsg = parentName.empty() ? tr("root") : QString::fromStdString(parentName);
-        statusBar()->showMessage(
-            tr("Loaded %1 geometry file(s) under '%2': %3 vertices, %4 triangles")
-                .arg(successCount)
-                .arg(parentMsg)
-                .arg(totalVertices)
-                .arg(totalTriangles),
-            5000);
-    }
-}
-
-void MainWindow::openVolume()
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Show parent selection dialog FIRST (consistent with geometry loading)
-    GraphicsParentDialog parentDialog(m_sceneGraph, this);
-    if (parentDialog.exec() != QDialog::Accepted) {
-        return; // User cancelled
-    }
-    
-    std::string parentName = parentDialog.getSelectedParentName();
-    auto parentNode = parentDialog.getSelectedParent();
-
-    // Now show file selection dialog (allow multiple files)
-    QStringList fileNames = QFileDialog::getOpenFileNames(
-        this,
-        tr("Open Volume File(s)"),
-        QString(),
-        tr("Volume Files (*.rawiv *.mrc *.ccp4);;All Files (*)"));
-
-    if (fileNames.isEmpty())
-        return;
-
-    int successCount = 0;
-    cvc::uint64 totalVoxels = 0;
-
-    for (const QString& fileName : fileNames) {
-        try {
-            // Load volume using CVC library
-            cvc::volume vol(fileName.toStdString());
-            
-            // Extract filename without path for naming
-            QFileInfo fileInfo(fileName);
-            std::string baseName = fileInfo.baseName().toStdString();
-            
-            // Sanitize the base name to conform to C identifier rules
-            std::string sanitizedName = cvc::state::sanitizeStateName(baseName);
-            
-            // Create unique name if needed
-            std::string volumeName = sanitizedName;
-            int counter = 1;
-            while (m_sceneGraph->getGraphics(volumeName)) {
-                volumeName = sanitizedName + "_" + std::to_string(counter++);
-            }
-            
-            // Add volume to graphics tree (volumes are graphics too!)
-            auto volumeNode = m_sceneGraph->addGraphics(volumeName, vol);
-            
-            // Store metadata
-            volumeNode->setMetadata("type", std::string("volume"));
-            volumeNode->setMetadata("filename", fileName.toStdString());
-            
-            // Set parent if requested
-            if (parentNode) {
-                // Remove from root first (addGraphics adds to root by default)
-                m_sceneGraph->getGraphicsRoot()->removeGraphicsChild(volumeNode);
-                parentNode->addGraphicsChild(volumeNode);
-            }
-            
-            totalVoxels += vol.XDim() * vol.YDim() * vol.ZDim();
-            successCount++;
-            
-        } catch (const std::exception &e) {
-            QMessageBox::warning(this, tr("Error Loading Volume"),
-                tr("Failed to load %1:\n%2").arg(fileName).arg(e.what()));
+        QString msg;
+        if (geomCount > 0 && volCount > 0) {
+            msg = tr("Loaded %1 geometry file(s) (%2 vertices, %3 triangles) and %4 volume file(s) (%5 voxels) under '%6'")
+                .arg(geomCount).arg(totalVertices).arg(totalTriangles)
+                .arg(volCount).arg(totalVoxels).arg(parentMsg);
+        } else if (geomCount > 0) {
+            msg = tr("Loaded %1 geometry file(s) under '%2': %3 vertices, %4 triangles")
+                .arg(geomCount).arg(parentMsg).arg(totalVertices).arg(totalTriangles);
+        } else {
+            msg = tr("Loaded %1 volume file(s) under '%2': %3 voxels")
+                .arg(volCount).arg(parentMsg).arg(totalVoxels);
         }
-    }
-    
-    // Sync to state tree
-    // Sync graphics to state tree (includes both geometry and volumes)
-    m_sceneGraph->syncGraphicsToState();
-    
-    // Update world bounding box to include all volumes
-    cvc::bounding_box volumeBounds = m_sceneGraph->computeVolumeBounds();
-    if (volumeBounds[0] <= volumeBounds[3]) { // Valid bounds
-        cvc::bounding_box currentBounds = AppState::instance().worldBounds();
-        
-        // Combine with existing bounds
-        cvc::bounding_box combinedBounds(
-            std::min(currentBounds.minx, volumeBounds.minx),
-            std::min(currentBounds.miny, volumeBounds.miny),
-            std::min(currentBounds.minz, volumeBounds.minz),
-            std::max(currentBounds.maxx, volumeBounds.maxx),
-            std::max(currentBounds.maxy, volumeBounds.maxy),
-            std::max(currentBounds.maxz, volumeBounds.maxz)
-        );
-        
-        AppState::instance().setWorldBounds(combinedBounds);
-        // Grid will update automatically via onWorldBoundsChanged callback
-        
-        // Don't reset camera - user wants to control it manually
-        // m_cameraController->resetView(
-        //     combinedBounds.minx, combinedBounds.miny, combinedBounds.minz,
-        //     combinedBounds.maxx, combinedBounds.maxy, combinedBounds.maxz);
-    }
-    
-    // Update render
-    m_renderWidget->render();
-    
-    // Refresh transfer function widget volume list
-    m_transferFunctionWidget->refreshVolumeList();
-    
-    // Show status message
-    if (successCount > 0) {
-        QString parentMsg = parentNode ? QString::fromStdString(parentNode->getName()) : tr("root");
-        statusBar()->showMessage(
-            tr("Loaded %1 volume file(s) under '%2': %3 total voxels")
-                .arg(successCount)
-                .arg(parentMsg)
-                .arg(totalVoxels),
-            5000);
-    }
-    
-    // If we loaded multiple volumes or have multiple volumes total, ensure multi-volume rendering
-    int totalVolumes = m_sceneGraph->getVolumeGraphicsCount();
-    if (totalVolumes > 1) {
-        m_sceneGraph->enableMultiVolumeRendering(true);
+        statusBar()->showMessage(msg, 5000);
     }
 }
 

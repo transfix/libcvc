@@ -24,8 +24,7 @@ public:
     ~MainWindow();
 
 private slots:
-    void openGeometry();
-    void openVolume();
+    void openFile();
     void toggleGrid();
     void toggleAxis();
     void editBoundingBox();
