@@ -1,30 +1,35 @@
 #
-# This macro is for setting up a sub-project to use FFTW (float or double version)
+# Modern macro for setting up FFTW (float or double version)
 #
 
-macro(SetupFFTW)
-  mark_as_advanced(USE_FFTWD)
+function(SetupFFTW)
   option(USE_FFTWD "Use double precision FFTW if found" ON)
-  mark_as_advanced(USE_FFTWF)
   option(USE_FFTWF "Use single precision FFTW if found" ON)
+  
+  mark_as_advanced(USE_FFTWD USE_FFTWF)
 
   find_package(FFTW)
 
-  # Set the FFTW_LIB variable to the version we found.
-  # Prefer the double precision version if both found.
+  # Set the FFTW_LIB variable to the version we found
+  # Prefer the double precision version if both found
+  set(FFTW_FOUND FALSE PARENT_SCOPE)
 
-  set(FFTW_FOUND NOTFOUND)
+  if(USE_FFTWF AND FFTWF_FOUND)
+    set(FFTW_LIB ${FFTWF_LIB} PARENT_SCOPE)
+    set(FFTW_FOUND TRUE PARENT_SCOPE)
+    message(STATUS "FFTW: Using single precision (float)")
+  endif()
 
-  if(FFTWF_FOUND)
-    set(FFTW_LIB ${FFTWF_LIB})
-    set(FFTW_FOUND TRUE)
-  endif(FFTWF_FOUND)
+  if(USE_FFTWD AND FFTWD_FOUND)
+    set(FFTW_LIB ${FFTWD_LIB} PARENT_SCOPE)
+    set(FFTW_FOUND TRUE PARENT_SCOPE)
+    message(STATUS "FFTW: Using double precision")
+  endif()
 
-  if(FFTWD_FOUND)
-    set(FFTW_LIB ${FFTWD_LIB})
-    set(FFTW_FOUND TRUE)
-  endif(FFTWD_FOUND)
+  if(FFTW_FOUND)
+    message(STATUS "FFTW library: ${FFTW_LIB}")
+  else()
+    message(STATUS "FFTW not found - FFTW features disabled")
+  endif()
 
-  MESSAGE(FFTW_LIB: ${FFTW_LIB})
-
-endmacro(SetupFFTW)
+endfunction(SetupFFTW)

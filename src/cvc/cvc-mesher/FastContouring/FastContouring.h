@@ -2,7 +2,7 @@
 #define __LBIE__FASTCONTOURING_H__
 
 #include <vector>
-#include <VolMagick.h>
+#include <VolMagickCompat.h>
 
 #include "Matrix.h"
 #include "MarchingCubesBuffers.h"

@@ -1,9 +1,11 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.15)
 
+# Platform-specific definitions
 if(WIN32)
-  add_definitions(-D__WINDOWS__)
-endif(WIN32)
+  add_compile_definitions(__WINDOWS__)
+endif()
 
+# Header files
 set(INCLUDE_FILES
   ../../inc/cvc/composite_function.h
   ../../inc/cvc/types.h
@@ -28,6 +30,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
 )
+
+# Source files
 set(SOURCE_FILES
   algorithm.cpp
   anisotropic_diffusion.cpp
@@ -47,6 +51,7 @@ set(SOURCE_FILES
   spider_io.cpp
   state.cpp
   utility.cpp
+  cuda_utils.cpp
   voxels.cpp
   volume.cpp
   volume_file_io.cpp
@@ -54,173 +59,156 @@ set(SOURCE_FILES
   vtk_io.cpp
 )
 
-include_directories(
-  ../../inc
-  ${CMAKE_BINARY_DIR}/inc
-  .
-)
-
-set(CVC_NAMESPACE cvc)
+# Configuration
+set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
-add_definitions(-DCVC_NAMESPACE=${CVC_NAMESPACE})
 
-# The libcvc version number.
-set(CVC_VERSION_MAJOR 1)
+# The libcvc version number
+set(CVC_VERSION_MAJOR 2)
 set(CVC_VERSION_MINOR 0)
-
-# The full version string
 set(CVC_VERSION ${CVC_VERSION_MAJOR}.${CVC_VERSION_MINOR})
 message(STATUS "libcvc version: ${CVC_VERSION}")
 
-add_definitions(-DCVC_VERSION_STRING=\"${CVC_VERSION}\")
-
 set(CVC_LINK_LIBS "")
 
-option(CVC_USING_XMLRPC "If this is enabled, cvc::state will support state sharing with other processes on the network" OFF)
-mark_as_advanced(CVC_USING_XMLRPC)
-if(CVC_USING_XMLRPC)
-  set(CVC_LINK_LIBS ${CVC_LINK_LIBS} xmlrpc)
-  set(SOURCE_FILES
-      ${SOURCE_FILES}
-      xmlrpc_client.cpp
-      xmlrpc_server.cpp)
-  add_definitions(-DUSING_XMLRPC)
-endif(CVC_USING_XMLRPC)
+# Build options
+option(CVC_USING_XMLRPC "Enable cvc::state network sharing support" OFF)
+option(CVC_USING_HDF5 "Enable HDF5 support for *.cvc file format" ON)
+option(CVC_USING_IMOD_MRC "Use IMOD's MRC loading routines" ON)
+option(CVC_LOG4CPLUS_DEFAULT "Use log4cplus output by default" OFF)
+option(LOG4CPLUS_DISABLE_TRACE "Disable logging trace" OFF)
+option(CVC_APP_XML_PROPERTY_TREE "Use XML for property map (otherwise Boost INFO format)" OFF)
+option(CVC_GEOMETRY_ENABLE_BUNNY "Enable built-in bunny geometry test tri mesh" ON)
+option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rather than 0" OFF)
+option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
+option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 
-option(CVC_USING_HDF5 "HDF5 Support. Needed for *.cvc format but requires linking to libhdf5." OFF)
-mark_as_advanced(CVC_USING_HDF5)
+# XMLRPC support
+if(CVC_USING_XMLRPC)
+  list(APPEND CVC_LINK_LIBS xmlrpc)
+  list(APPEND SOURCE_FILES
+    xmlrpc_client.cpp
+    xmlrpc_server.cpp
+  )
+  add_compile_definitions(USING_XMLRPC)
+endif()
+
+# HDF5 support
 if(CVC_USING_HDF5)
   find_package(HDF5 COMPONENTS C CXX)
   if(HDF5_FOUND)
-    message("HDF5 found! Enabling *.cvc file support")
-
-    add_definitions(-DCVC_USING_HDF5 ${HDF5_DEFINITIONS})
-    set(INCLUDE_FILES
-       ${INCLUDE_FILES}
-       ../../inc/cvc/hdf5_utils.h
+    message(STATUS "HDF5 found - Enabling *.cvc file support")
+    
+    add_compile_definitions(CVC_USING_HDF5 ${HDF5_DEFINITIONS})
+    list(APPEND INCLUDE_FILES ../../inc/cvc/hdf5_utils.h)
+    list(APPEND SOURCE_FILES
+      hdf5_io.cpp
+      hdf5_utils.cpp
     )
-    set(SOURCE_FILES
-       ${SOURCE_FILES}
-       hdf5_io.cpp
-       hdf5_utils.cpp
-    )
-
-    include_directories(${HDF5_INCLUDE_DIR})
-
-    set(CVC_LINK_LIBS ${CVC_LINK_LIBS} ${HDF5_LIBRARIES})
-  else(HDF5_FOUND)
-    message("HDF5 not found! *.cvc file support disabled")
+    list(APPEND CVC_INCLUDE_DIRS ${HDF5_INCLUDE_DIRS})
+    list(APPEND CVC_LINK_LIBS ${HDF5_LIBRARIES})
+  else()
+    message(WARNING "HDF5 not found - *.cvc file support disabled")
     set(CVC_HDF5_DISABLED TRUE)
-  endif(HDF5_FOUND)
-else(CVC_USING_HDF5)
+  endif()
+else()
   set(CVC_HDF5_DISABLED TRUE)
-endif(CVC_USING_HDF5)
+endif()
 
-option(CVC_USING_IMOD_MRC "Add support for using imod's MRC loading routines." ON)
-mark_as_advanced(CVC_USING_IMOD_MRC)
+# IMOD MRC support
 if(CVC_USING_IMOD_MRC)
-  add_definitions(-DNOTIFFLIBS -DCVC_USING_IMOD_MRC)
-  include_directories(libiimod)
-  set(INCLUDE_FILES
-      ${INCLUDE_FILES}
-      libiimod/ilist.h
-      libiimod/imodconfig.h
-      libiimod/notiff.h
-      libiimod/iimage.h
-      libiimod/mrcfiles.h
-      libiimod/hvemtypes.h
-      libiimod/sliceproc.h
-      libiimod/mrcc.h
-      libiimod/b3dutil.h
-      libiimod/mrcslice.h
-      libiimod/cfsemshare.h
-      libiimod/notiffio.h
+  add_compile_definitions(NOTIFFLIBS CVC_USING_IMOD_MRC)
+  list(APPEND CVC_INCLUDE_DIRS libiimod)
+  list(APPEND INCLUDE_FILES
+    libiimod/ilist.h
+    libiimod/imodconfig.h
+    libiimod/notiff.h
+    libiimod/iimage.h
+    libiimod/mrcfiles.h
+    libiimod/hvemtypes.h
+    libiimod/sliceproc.h
+    libiimod/mrcc.h
+    libiimod/b3dutil.h
+    libiimod/mrcslice.h
+    libiimod/cfsemshare.h
+    libiimod/notiffio.h
   )
-  set(SOURCE_FILES
-     ${SOURCE_FILES}
-     libiimod/b3dutil.c
-     libiimod/diffusion.c
-     libiimod/iilikemrc.c
-     libiimod/iimage.c
-     libiimod/iimrc.c
-     libiimod/iitif.c
-     libiimod/ilist.c
-     libiimod/mrcfiles.c
-     libiimod/mrcsec.c
-     libiimod/mrcslice.c
-     libiimod/plist.c
-     #libiimod/sliceproc.c
-     libiimod/tiffstub.c
-     libiimod/islice.c
-     libiimod/parallelwrite.c
+  list(APPEND SOURCE_FILES
+    libiimod/b3dutil.c
+    libiimod/diffusion.c
+    libiimod/iilikemrc.c
+    libiimod/iimage.c
+    libiimod/iimrc.c
+    libiimod/iitif.c
+    libiimod/ilist.c
+    libiimod/mrcfiles.c
+    libiimod/mrcsec.c
+    libiimod/mrcslice.c
+    libiimod/plist.c
+    libiimod/tiffstub.c
+    libiimod/islice.c
+    libiimod/parallelwrite.c
   )
-endif(CVC_USING_IMOD_MRC)
+endif()
 
-option(CVC_LOG4CPLUS_DEFAULT "Use log4cplus output by default" OFF)
-mark_as_advanced(CVC_LOG4CPLUS_DEFAULT)
+# Log4cplus support
 if(CVC_LOG4CPLUS_DEFAULT)
   find_package(Log4cplus)
   if(LOG4CPLUS_FOUND)
-    add_definitions(-DUSING_LOG4CPLUS_DEFAULT)
-    include_directories(${LOG4CPLUS_INCLUDE_DIR})
-    set(CVC_LINK_LIBS ${CVC_LINK_LIBS} ${LOG4CPLUS_LIBRARIES})
-  else(LOG4CPLUS_FOUND)
-    message("Log4cplus not found! Log4cplus based logging disabled")
-  endif(LOG4CPLUS_FOUND)
-endif(CVC_LOG4CPLUS_DEFAULT)
+    add_compile_definitions(USING_LOG4CPLUS_DEFAULT)
+    list(APPEND CVC_INCLUDE_DIRS ${LOG4CPLUS_INCLUDE_DIR})
+    list(APPEND CVC_LINK_LIBS ${LOG4CPLUS_LIBRARIES})
+  else()
+    message(WARNING "Log4cplus not found - Log4cplus based logging disabled")
+  endif()
+endif()
 
-option(LOG4CPLUS_DISABLE_TRACE "Disable logging trace" OFF)
-mark_as_advanced(LOG4CPLUS_DISABLE_TRACE)
-
-option(CVC_APP_XML_PROPERTY_TREE "Read/Write XML for property map info.  If not set, uses boost INFO property tree format." OFF)
+# Property tree format
 if(CVC_APP_XML_PROPERTY_TREE)
-  add_definitions(-DCVC_APP_XML_PROPERTY_TREE)
-endif(CVC_APP_XML_PROPERTY_TREE)
-mark_as_advanced(CVC_APP_XML_PROPERTY_TREE)
+  add_compile_definitions(CVC_APP_XML_PROPERTY_TREE)
+endif()
 
-option(CVC_GEOMETRY_ENABLE_BUNNY "Enable built-in bunny geometry test tri mesh" ON)
-mark_as_advanced(CVC_GEOMETRY_ENABLE_BUNNY)
+# Bunny geometry
 if(CVC_GEOMETRY_ENABLE_BUNNY)
-  #add_definitions(-DCVC_GEOMETRY_ENABLE_BUNNY)
-  set(SOURCE_FILES
-      ${SOURCE_FILES}
-      bunny_io.cpp)
-endif(CVC_GEOMETRY_ENABLE_BUNNY)
+  add_compile_definitions(CVC_GEOMETRY_ENABLE_BUNNY)
+  list(APPEND SOURCE_FILES bunny_io.cpp)
+endif()
 
-option(CVC_GEOMETRY_CORRECT_INDEX_START "adjust indices if they start from 1 rather than 0." OFF)
-mark_as_advanced(CVC_GEOMETRY_CORRECT_INDEX_START)
-if(CVC_GEOMETRY_ENABLE_BUNNY)
-  add_definitions(-DCVC_GEOMETRY_ENABLE_BUNNY)
-endif(CVC_GEOMETRY_ENABLE_BUNNY)
-
+# CGAL support
 if(NOT DISABLE_CGAL)
-  find_package(CGAL)
+  find_package(CGAL CONFIG)
   if(CGAL_FOUND)
     include(${CGAL_USE_FILE})
-    # need the following flags in case CGAL has some special compiler needs for this compiler
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CGAL_CXX_FLAGS_INIT}")
-    set(CVC_LINK_LIBS ${CVC_LINK_LIBS} ${CGAL_LIBRARIES})
-    add_definitions(-DCVC_GEOMETRY_ENABLE_PROJECT)
-    set(INCLUDE_FILES 
-        ${INCLUDE_FILES} 
-	../../inc/cvc/project_verts.h)
-    set(CVC_LINK_LIBS ${CVC_LINK_LIBS} ${GMP_LIBRARIES} ${GMPXX_LIBRARIES})
-  endif(CGAL_FOUND)
-endif(NOT DISABLE_CGAL)
+    add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
+    list(APPEND INCLUDE_FILES ../../inc/cvc/project_verts.h)
+    # CGAL may have special compiler requirements
+    string(APPEND CMAKE_CXX_FLAGS " ${CGAL_CXX_FLAGS_INIT}")
+    list(APPEND CVC_LINK_LIBS ${CGAL_LIBRARIES} ${GMP_LIBRARIES} ${GMPXX_LIBRARIES})
+  endif()
+endif()
 
+# IDE source organization
 source_group("Source Files" FILES ${SOURCE_FILES})
 source_group("Header Files" FILES ${INCLUDE_FILES})
 
-option(CVC_ENABLE_MESHER "enable isosurfacing/meshing capability" ON)
-mark_as_advanced(CVC_ENABLE_MESHER)
+# Mesher support
 if(CVC_ENABLE_MESHER)
-  #TODO: need to do something about the duplicate volmagick code - transfix - 1/9/2014
-  add_definitions(-DCVC_ENABLE_MESHER -D_BOOL -DSP2 -DUSEDICT -DNDEBUG)
-  include_directories(cvc-mesher/contour
-                      cvc-mesher/FastContouring
-                      cvc-mesher/VolMagick
-                      cvc-mesher/LBIE
-		      cvc-mesher/Mesher)
+  # TODO: Address duplicate volmagick code (noted 1/9/2014)
+  add_compile_definitions(
+    CVC_ENABLE_MESHER
+    _BOOL
+    SP2
+    USEDICT
+    NDEBUG
+  )
+  list(APPEND CVC_INCLUDE_DIRS
+    cvc-mesher
+    cvc-mesher/contour
+    cvc-mesher/FastContouring
+    #cvc-mesher/VolMagick
+    cvc-mesher/LBIE
+    cvc-mesher/Mesher
+  )
   set(INCLUDE_FILES
       ${INCLUDE_FILES}
       cvc-mesher/contour/edgehash.h
@@ -284,18 +272,13 @@ if(CVC_ENABLE_MESHER)
       cvc-mesher/FastContouring/Ray.h
       cvc-mesher/FastContouring/Quaternion.h
       cvc-mesher/FastContouring/Tuple.h
-      cvc-mesher/VolMagick/Exceptions.h
-      cvc-mesher/VolMagick/Dimension.h
-      cvc-mesher/VolMagick/BoundingBox.h
-      cvc-mesher/VolMagick/endians.h
-      cvc-mesher/VolMagick/VolMagick.h
-      cvc-mesher/VolMagick/VolumeCache.h
       cvc-mesher/LBIE/cubes.h
       cvc-mesher/LBIE/pcio.h
       cvc-mesher/LBIE/LBIE_Mesher.h
       cvc-mesher/LBIE/normalspline.h
       cvc-mesher/LBIE/vtkMarchingCubesCases.h
       cvc-mesher/LBIE/LBIE_geoframe.h
+      cvc-mesher/LBIE/geoframe_adapter.h
       cvc-mesher/LBIE/e_face.h
       cvc-mesher/LBIE/endians.h
       cvc-mesher/LBIE/octree.h
@@ -355,21 +338,11 @@ if(CVC_ENABLE_MESHER)
       cvc-mesher/FastContouring/ContourGeometry.cpp
       cvc-mesher/FastContouring/Matrix.cpp
       cvc-mesher/FastContouring/MarchingCubesBuffers.cpp
-      cvc-mesher/VolMagick/RawV.cpp
-      cvc-mesher/VolMagick/MRC.cpp
-      cvc-mesher/VolMagick/VolumeCache.cpp
-      cvc-mesher/VolMagick/ContrastEnhancement.cpp
-      cvc-mesher/VolMagick/AnisotropicDiffusion.cpp
-      cvc-mesher/VolMagick/BilateralFilter.cpp
-      cvc-mesher/VolMagick/INR.cpp
-      cvc-mesher/VolMagick/RawIV.cpp
-      cvc-mesher/VolMagick/VolMagick.cpp
-      cvc-mesher/VolMagick/Spider.cpp
-      #cvc-mesher/VolMagick/main.cpp
       cvc-mesher/LBIE/normalspline.cpp
       cvc-mesher/LBIE/e_face.cpp
       cvc-mesher/LBIE/pcio.cpp
       cvc-mesher/LBIE/LBIE_geoframe.cpp
+      cvc-mesher/LBIE/geoframe_adapter.cpp
       cvc-mesher/LBIE/tetra.cpp
       cvc-mesher/LBIE/hexa.cpp
       cvc-mesher/LBIE/LBIE_Mesher.cpp
@@ -380,84 +353,86 @@ if(CVC_ENABLE_MESHER)
   )
 endif(CVC_ENABLE_MESHER)
 
-option(CVC_ENABLE_SDF "enable signed distance function calculation capability" ON)
-mark_as_advanced(CVC_ENABLE_SDF)
+# Signed distance function support
 if(CVC_ENABLE_SDF)
-  include_directories(SDF/UsefulMath
-                      SDF/GeometryFileTypes
-                      SDF/ByteOrder
-                      SDF/SignDistanceFunction
-                      SDF/Geometry
-                      SDF/VolumeFileTypes
-                      SDF/SDF
-                      SDF/SignDistanceFunction_v2)
+  list(APPEND CVC_INCLUDE_DIRS
+    SDF/UsefulMath
+    SDF/GeometryFileTypes
+    SDF/ByteOrder
+    SDF/SignDistanceFunction
+    SDF/Geometry
+    SDF/VolumeFileTypes
+    SDF/SDF
+    SDF/SignDistanceFunction_v2
+  )
   set(INCLUDE_FILES
       ${INCLUDE_FILES}
-      SDF/UsefulMath/AreaVolumes.h
-      SDF/UsefulMath/Matrix.h
-      SDF/UsefulMath/TrilinearGrid.h
-      SDF/UsefulMath/LinearAlgebra.h
-      SDF/UsefulMath/Vector.h
-      SDF/UsefulMath/Ray.h
-      SDF/UsefulMath/Quaternion.h
-      SDF/UsefulMath/Tuple.h
-      SDF/GeometryFileTypes/RawnFile.h
-      SDF/GeometryFileTypes/RawncFile.h
-      SDF/GeometryFileTypes/MayaOBJFile.h
-      SDF/GeometryFileTypes/RawcFile.h
-      SDF/GeometryFileTypes/RawFile.h
-      SDF/GeometryFileTypes/GeometryFileType.h
-      SDF/GeometryFileTypes/GeometryLoader.h
-      SDF/ByteOrder/ByteSwapping.h
+      # SDF/UsefulMath/AreaVolumes.h
+      # SDF/UsefulMath/Matrix.h
+      # SDF/UsefulMath/TrilinearGrid.h
+      # SDF/UsefulMath/LinearAlgebra.h
+      # SDF/UsefulMath/Vector.h
+      # SDF/UsefulMath/Ray.h
+      # SDF/UsefulMath/Quaternion.h
+      # SDF/UsefulMath/Tuple.h
+      # SDF/GeometryFileTypes/RawnFile.h
+      # SDF/GeometryFileTypes/RawncFile.h
+      # SDF/GeometryFileTypes/MayaOBJFile.h
+      # SDF/GeometryFileTypes/RawcFile.h
+      # SDF/GeometryFileTypes/RawFile.h
+      # SDF/GeometryFileTypes/GeometryFileType.h
+      # SDF/GeometryFileTypes/GeometryLoader.h
+      #SDF/ByteOrder/ByteSwapping.h
       SDF/SignDistanceFunction/common.h
       SDF/SignDistanceFunction/sdfLib.h
       SDF/SignDistanceFunction/head.h
-      SDF/Geometry/IntQueue.h
-      SDF/Geometry/GeometrySceneArray.h
-      SDF/Geometry/Geometry.h
-      SDF/Geometry/SceneArrayNode.h
-      SDF/Geometry/MeshDerivatives.h
-      SDF/Geometry/GeometryScene.h
-      SDF/VolumeFileTypes/RawVFile.h
-      SDF/VolumeFileTypes/RawIVFile.h
-      SDF/VolumeFileTypes/MRCFile.h
-      SDF/VolumeFileTypes/SimpleVolumeData.h
-      SDF/VolumeFileTypes/DXFile.h
-      SDF/VolumeFileTypes/VolumeLoader.h
-      SDF/VolumeFileTypes/VolumeFileType.h
-      SDF/SignDistanceFunction_v2/Geom3DParser.h
-      SDF/SignDistanceFunction_v2/reg3data.h
-      SDF/SignDistanceFunction_v2/mtxlib.h
-      SDF/SignDistanceFunction_v2/bufferedio.h
-      SDF/SignDistanceFunction_v2/geom.h
-      SDF/SignDistanceFunction_v2/cubes.h
-      SDF/SignDistanceFunction_v2/diskio.h
-      SDF/SignDistanceFunction_v2/FaceVertSet3D.h
-      SDF/SignDistanceFunction_v2/dynarray.h
-      SDF/SignDistanceFunction_v2/Reg3Parser.h
-      SDF/SignDistanceFunction_v2/DistanceTransform.h
-      SDF/SignDistanceFunction_v2/bio.h
-      SDF/SignDistanceFunction_v2/RawivParser.h
+      SDF/SignDistanceFunction/SDFContext.h
+      #SDF/Geometry/IntQueue.h
+      #SDF/Geometry/GeometrySceneArray.h
+      #SDF/Geometry/Geometry.h
+      #SDF/Geometry/SceneArrayNode.h
+      #SDF/Geometry/MeshDerivatives.h
+      #SDF/Geometry/GeometryScene.h
+      #SDF/VolumeFileTypes/RawVFile.h
+      #SDF/VolumeFileTypes/RawIVFile.h
+      #SDF/VolumeFileTypes/MRCFile.h
+      #SDF/VolumeFileTypes/SimpleVolumeData.h
+      #SDF/VolumeFileTypes/DXFile.h
+      #SDF/VolumeFileTypes/VolumeLoader.h
+      #SDF/VolumeFileTypes/VolumeFileType.h
+      # SDF/SignDistanceFunction_v2/Geom3DParser.h
+      # SDF/SignDistanceFunction_v2/reg3data.h
+      # SDF/SignDistanceFunction_v2/mtxlib.h
+      # SDF/SignDistanceFunction_v2/bufferedio.h
+      # SDF/SignDistanceFunction_v2/geom.h
+      # SDF/SignDistanceFunction_v2/cubes.h
+      # SDF/SignDistanceFunction_v2/diskio.h
+      # SDF/SignDistanceFunction_v2/FaceVertSet3D.h
+      # SDF/SignDistanceFunction_v2/dynarray.h
+      # SDF/SignDistanceFunction_v2/Reg3Parser.h
+      # SDF/SignDistanceFunction_v2/DistanceTransform.h
+      # SDF/SignDistanceFunction_v2/bio.h
+      # SDF/SignDistanceFunction_v2/RawivParser.h
   )
   set(SOURCE_FILES
       ${SOURCE_FILES}
-      SDF/UsefulMath/TrilinearGrid.cpp
-      SDF/UsefulMath/Ray.cpp
-      SDF/UsefulMath/Quaternion.cpp
-      SDF/UsefulMath/Tuple.cpp
-      SDF/UsefulMath/Vector.cpp
-      SDF/UsefulMath/Matrix.cpp
-      SDF/UsefulMath/AreaVolumes.cpp
-      SDF/UsefulMath/LinearAlgebra.cpp
-      SDF/GeometryFileTypes/GeometryFileType.cpp
-      SDF/GeometryFileTypes/RawnFile.cpp
-      SDF/GeometryFileTypes/MayaOBJFile.cpp
-      SDF/GeometryFileTypes/RawcFile.cpp
-      SDF/GeometryFileTypes/GeometryLoader.cpp
-      SDF/GeometryFileTypes/RawFile.cpp
-      SDF/GeometryFileTypes/RawncFile.cpp
-      SDF/ByteOrder/ByteSwapping.cpp
-      SDF/SignDistanceFunction/init.cpp
+      # SDF/UsefulMath/TrilinearGrid.cpp
+      # SDF/UsefulMath/Ray.cpp
+      # SDF/UsefulMath/Quaternion.cpp
+      # SDF/UsefulMath/Tuple.cpp
+      # SDF/UsefulMath/Vector.cpp
+      # SDF/UsefulMath/Matrix.cpp
+      # SDF/UsefulMath/AreaVolumes.cpp
+      # SDF/UsefulMath/LinearAlgebra.cpp
+      # SDF/GeometryFileTypes/GeometryFileType.cpp
+      # SDF/GeometryFileTypes/RawnFile.cpp
+      # SDF/GeometryFileTypes/MayaOBJFile.cpp
+      # SDF/GeometryFileTypes/RawcFile.cpp
+      # SDF/GeometryFileTypes/GeometryLoader.cpp
+      # SDF/GeometryFileTypes/RawFile.cpp
+      # SDF/GeometryFileTypes/RawncFile.cpp
+      # SDF/ByteOrder/ByteSwapping.cpp
+      # SDF/SignDistanceFunction/init.cpp  # OLD - uses global sdf, all functions moved to SDFContext
       SDF/SignDistanceFunction/compute.cpp
       SDF/SignDistanceFunction/propagate.cpp
       SDF/SignDistanceFunction/head.cpp
@@ -465,19 +440,20 @@ if(CVC_ENABLE_SDF)
       SDF/SignDistanceFunction/main.cpp
       SDF/SignDistanceFunction/common.cpp
       SDF/SignDistanceFunction/octree.cpp
-      SDF/Geometry/GeometryScene.cpp
-      SDF/Geometry/GeometrySceneArray.cpp
-      SDF/Geometry/Geometry.cpp
-      SDF/Geometry/SceneArrayNode.cpp
-      SDF/Geometry/IntQueue.cpp
-      SDF/Geometry/MeshDerivatives.cpp
-      SDF/VolumeFileTypes/VolumeLoader.cpp
-      SDF/VolumeFileTypes/DXFile.cpp
-      SDF/VolumeFileTypes/RawIVFile.cpp
-      SDF/VolumeFileTypes/RawVFile.cpp
-      SDF/VolumeFileTypes/VolumeFileType.cpp
-      SDF/VolumeFileTypes/MRCFile.cpp
-      SDF/VolumeFileTypes/SimpleVolumeData.cpp
+      SDF/SignDistanceFunction/SDFContext.cpp
+      #SDF/Geometry/GeometryScene.cpp
+      #SDF/Geometry/GeometrySceneArray.cpp
+      #SDF/Geometry/Geometry.cpp
+      #SDF/Geometry/SceneArrayNode.cpp
+      #SDF/Geometry/IntQueue.cpp
+      #SDF/Geometry/MeshDerivatives.cpp
+      #SDF/VolumeFileTypes/VolumeLoader.cpp
+      #SDF/VolumeFileTypes/DXFile.cpp
+      #SDF/VolumeFileTypes/RawIVFile.cpp
+      #SDF/VolumeFileTypes/RawVFile.cpp
+      #SDF/VolumeFileTypes/VolumeFileType.cpp
+      #SDF/VolumeFileTypes/MRCFile.cpp
+      #SDF/VolumeFileTypes/SimpleVolumeData.cpp
       #SDF/Server.cpp
       #SDF/SDF/main.cpp
       SDF/SignDistanceFunction_v2/Reg3Parser.cpp
@@ -491,28 +467,107 @@ if(CVC_ENABLE_SDF)
   )
 endif(CVC_ENABLE_SDF)
 
-#if poco is found, use it for the http server.
-#find_package(POCO)
-#if(POCO_FOUND)
-#  include_directories(${POCO_INCLUDE_DIRS})
-#  set(CVC_LINK_LIBS ${CVC_LINK_LIBS} ${POCO_LIBRARIES})
-#  add_definitions(-DCVC_USING_POCO)
-#  message("Poco libs: " ${POCO_LIBRARIES})
-#endif(POCO_FOUND)
+# Optional: Poco HTTP server support (currently disabled)
+# find_package(Poco)
+# if(Poco_FOUND)
+#   add_compile_definitions(CVC_USING_POCO)
+#   list(APPEND CVC_INCLUDE_DIRS ${POCO_INCLUDE_DIRS})
+#   list(APPEND CVC_LINK_LIBS ${POCO_LIBRARIES})
+#   message(STATUS "Poco libs: ${POCO_LIBRARIES}")
+# endif()
 
+# Add CUDA source files if enabled
+if(CVC_ENABLE_CUDA)
+  list(APPEND SOURCE_FILES voxels_kernels.cu)
+  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
+endif()
+
+# Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
+add_library(cvc::cvc ALIAS cvc)
 
+# Set library version
+set_target_properties(cvc PROPERTIES
+  VERSION ${CVC_VERSION}
+  SOVERSION ${CVC_VERSION_MAJOR}
+  OUTPUT_NAME cvc
+)
+
+# CUDA-specific configuration
+if(CVC_ENABLE_CUDA)
+  # Set CUDA properties for the target
+  set_target_properties(cvc PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  )
+  
+  # Add CUDA compile definitions
+  target_compile_definitions(cvc PUBLIC CVC_USING_CUDA)
+  
+  # CUDA-specific compile options can be added here
+  # target_compile_options(cvc PRIVATE
+  #   $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+  # )
+endif()
+
+# Modern include directory handling
+target_include_directories(cvc
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/inc>
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/inc>
+    $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CVC_INCLUDE_DIRS}
+)
+
+# Compile definitions
+target_compile_definitions(cvc
+  PRIVATE
+    CVC_NAMESPACE=${CVC_NAMESPACE}
+    CVC_VERSION_STRING="${CVC_VERSION}"
+)
+
+# Setup dependencies
 SetupBoost(cvc)
 
-target_link_libraries(cvc ${CVC_LINK_LIBS})
+if(NOT DISABLE_CGAL)
+  SetupCGAL(cvc)
+endif()
 
+if(CVC_ENABLE_CUDA)
+  SetupCUDA(cvc)
+endif()
+
+if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
+  target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
+endif()
+
+# Link libraries
+target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
+
+# Create executable
 add_executable(trans-cvc trans-cvc.cpp)
-target_link_libraries(trans-cvc cvc)
+target_link_libraries(trans-cvc PRIVATE cvc::cvc)
 
-configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake ${CMAKE_BINARY_DIR}/inc/cvc/config.h )
+# Generate config.h
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake
+  ${CMAKE_BINARY_DIR}/inc/cvc/config.h
+)
 
+# Windows-specific batch file
 if(WIN32)
-  file(TO_NATIVE_PATH ${Boost_LIBRARY_DIRS} BOOST_LOCATION)
-  file(TO_NATIVE_PATH ${CMAKE_BINARY_DIR} BINARIES_LOCATION)
-  configure_file( trans-cvc.bat.cmake ${CMAKE_BINARY_DIR}/trans-cvc.bat )
-endif(WIN32)
+  file(TO_NATIVE_PATH "${Boost_LIBRARY_DIRS}" BOOST_LOCATION)
+  file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" BINARIES_LOCATION)
+  configure_file(
+    trans-cvc.bat.cmake
+    ${CMAKE_BINARY_DIR}/trans-cvc.bat
+  )
+endif()
+
+# Add unit tests if enabled
+if(CVC_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()

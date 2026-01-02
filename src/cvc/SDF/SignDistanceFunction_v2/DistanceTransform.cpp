@@ -22,6 +22,7 @@
 #include "mtxlib.h"
 
 #include <set>
+#include <iostream>
 
 const float DistanceTransform::MAX_FLOAT = (float)1.0e12;
 
@@ -57,24 +58,25 @@ void DistanceTransform::init() {
 		}
 		for(k = minId[2]; k <= maxId[2]; k++) {
 			for(j = minId[1]; j <= maxId[1]; j++) {
-				for (i = minId[0]; i <= maxId[0]; i++) {
-					int nc = p_Data->index2cell(i, j, k);
-					assert(nc < p_Data->getNCells() && nc >= 0);
-					Vector3f norm;
-					p_Surf->getTriNormal(nt, norm);
-					if(intersectCell(v0, norm, i, j, k)) {
-						Point3f lower, upper;
-						lower[0] = orig[0] + i*span[0];
-						lower[1] = orig[1] + j*span[1];
-						lower[2] = orig[2] + k*span[2];
-						upper[0] = lower[0] + span[0];
-						upper[1] = lower[1] + span[1];
-						upper[2] = lower[2] + span[2];
-						if (TriangleCubeIntersection(nt, lower, upper)) {
-							p_Cells[nc].triList.insert(nt);
-						}			
-					}
+			for (i = minId[0]; i <= maxId[0]; i++) {
+				int nc = p_Data->index2cell(i, j, k);
+				if (nc < 0) continue;  // Skip out-of-bounds cells
+				assert(nc < p_Data->getNCells());
+				Vector3f norm;
+				p_Surf->getTriNormal(nt, norm);
+				if(intersectCell(v0, norm, i, j, k)) {
+					Point3f lower, upper;
+					lower[0] = orig[0] + i*span[0];
+					lower[1] = orig[1] + j*span[1];
+					lower[2] = orig[2] + k*span[2];
+					upper[0] = lower[0] + span[0];
+					upper[1] = lower[1] + span[1];
+					upper[2] = lower[2] + span[2];
+					if (TriangleCubeIntersection(nt, lower, upper)) {
+						p_Cells[nc].triList.insert(nt);
+					}			
 				}
+			}
 			}
 		}	
 	}
@@ -117,12 +119,13 @@ DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], float dist,
 //		orig[i] = center[i] - factor[i]*ext[i] / 2;
 //		span[i] = factor[i]*ext[i] / (dim[i] - 1);
 	}	
-	const float DISTANCE = dist*1.1;
-	for(i = 0; i < 3; i++) {
-		if (max_ext *(factor[i]-1) < 2.2 * DISTANCE) {
-			factor[i] = 1 + (2.2*DISTANCE) / max_ext;
-		}
-	}
+	// NOTE: Automatic scale factor adjustment disabled to respect user-provided factors
+	// const float DISTANCE = dist*1.1;
+	// for(i = 0; i < 3; i++) {
+	// 	if (max_ext *(factor[i]-1) < 2.2 * DISTANCE) {
+	// 		factor[i] = 1 + (2.2*DISTANCE) / max_ext;
+	// 	}
+	// }
 	printf("scaling factors: %f %f %f\n", factor[0], factor[1], factor[2]);
 
 	for(i = 0; i < 3; i++) {
@@ -148,6 +151,57 @@ DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], float dist,
 	printf("lower: %f %f %f\n", bbox.lower[0], bbox.lower[1], bbox.lower[2]);
 	printf("upper: %f %f %f\n", bbox.upper[0], bbox.upper[1], bbox.upper[2]);
 	printf("center: %f %f %f\n", center[0], center[1], center[2]);
+	printf("orig: %f %f %f\n", orig[0], orig[1], orig[2]);
+	printf("span: %f %f %f\n", span[0], span[1], span[2]);
+#endif
+	init();
+}
+
+// Constructor with user-specified center (allows arbitrary bounding boxes)
+DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], const float user_center[3], 
+                                     float dist, float sx, float sy, float sz)
+{
+	float factor[3];
+	factor[0] = sx; factor[1] = sy; factor[2] = sz;
+	p_Data = new Reg3Data<float> (dim, NULL);
+	p_Surf = &fvs;
+	
+	// Use user-specified center instead of geometry center
+	float center[3];
+	center[0] = user_center[0];
+	center[1] = user_center[1];
+	center[2] = user_center[2];
+	
+	// Still need geometry bbox for max_ext calculation
+	BoundingBox bbox = p_Surf->getExtent();
+	float ext[3], orig[3], span[3];
+	int i, j, k;
+	float max_fac = 0, max_ext = 0;
+	for(i = 0; i < 3; i++) {
+		ext[i] = bbox.upper[i] - bbox.lower[i];
+		if(ext[i] > max_ext) max_ext = ext[i];
+	}
+	
+	// NOTE: Automatic scale factor adjustment disabled to respect user-provided factors
+	// const float DISTANCE = dist*1.1;
+	// for(i = 0; i < 3; i++) {
+	// 	if (max_ext *(factor[i]-1) < 2.2 * DISTANCE) {
+	// 		factor[i] = 1 + (2.2*DISTANCE) / max_ext;
+	// 	}
+	// }
+	printf("scaling factors: %f %f %f\n", factor[0], factor[1], factor[2]);
+
+	for(i = 0; i < 3; i++) {
+		orig[i] = center[i] - factor[i]*max_ext / 2;
+		span[i] = factor[i]*max_ext / (dim[i] - 1);
+	}
+
+	p_Data->setOrig(orig);
+	p_Data->setSpan(span);
+#ifdef _DEBUG
+	printf("lower: %f %f %f\n", bbox.lower[0], bbox.lower[1], bbox.lower[2]);
+	printf("upper: %f %f %f\n", bbox.upper[0], bbox.upper[1], bbox.upper[2]);
+	printf("user center: %f %f %f\n", center[0], center[1], center[2]);
 	printf("orig: %f %f %f\n", orig[0], orig[1], orig[2]);
 	printf("span: %f %f %f\n", span[0], span[1], span[2]);
 #endif

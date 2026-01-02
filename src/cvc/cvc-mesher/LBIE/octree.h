@@ -7,7 +7,7 @@
 #include"contour3d.h"
 #include"e_face.h"
 #include"LBIE_geoframe.h"
-#include<VolMagick.h>
+#include<VolMagickCompat.h>
 #include<boost/shared_array.hpp>
 #include<boost/array.hpp>
 
@@ -204,7 +204,7 @@ private :
 	void e_face_initialization();
 
 	float compute_error(int oc_idx,int level,float& min, float& max);
-	void construct_octree(char*);
+	void construct_octree();
 
 	int child(int oc_id, int level, int i);
 
@@ -330,6 +330,7 @@ public :
 	//void Octree_init(const char* rawiv_fname);
 	void set_isovalue(float val) {iso_val = val;}
 	void set_isovalue_in(float val) {iso_val_in = val;}
+	void set_prop_flag(bool flag) {prop_flag = flag ? 1 : 0;}
 	void setMeshType(int n) {flag_type = n;}
 	void setNormalType(int n) {flag_normal = n;}
 
@@ -357,7 +358,6 @@ public :
 	void tetra_to_4_hexa(geoframe& geofrm);
 	void tetrahedralize_interval(geoframe& geofrm);
 	void quality_improve(geoframe& geofrm,int improvemethod);
-	void func_val(geoframe& geofrm);
 	void find_oc_id(int x, int y, int z, int level, int j, int intersect_id, int* oc_id);
 	void find_oc_id_hexa(int x, int y, int z, int level, int j, int* oc_id);
 	void find_edge_id_hexa(int x, int y, int z, int cell_size, int j, int* edge_id);
@@ -374,8 +374,6 @@ public :
 
 	//Albert
 	void setInEx(){interior_flag = !interior_flag;}
-	void prop_init(const char* rawiv_fname);
-	void Octree_loadVolume(const char* dx_fname);
 	void initMem();
 	//void pdbVolume(const char* pdb_fname);
 
@@ -389,7 +387,9 @@ public :
  public:
 	bool isInterior() {return interior_flag;}
 	void flipInterior() { interior_flag = ! interior_flag;}
-
+	
+	//interpolate property values from volume to mesh vertices
+	void func_val(geoframe& geofrm, const VolMagick::Volume& propVol);
 
 	//quality improve
 	void smoothing_joeliu_volume(geoframe& geofrm, int sign);

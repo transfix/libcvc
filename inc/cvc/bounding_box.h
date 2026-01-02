@@ -328,7 +328,7 @@ namespace CVC_NAMESPACE
                         % maxx % maxy % maxz);
     }
 
-    void str(const std::string& s) throw(invalid_bounding_box_string)
+    void str(const std::string& s)
     {
       using namespace std;
       using namespace boost;
@@ -351,7 +351,7 @@ namespace CVC_NAMESPACE
     }
 
   private:
-    void checkBounds() const throw(invalid_bounding_box)
+    void checkBounds() const
     {
       using namespace boost;
       std::string buf;

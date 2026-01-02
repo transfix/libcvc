@@ -153,7 +153,7 @@ namespace CVC_NAMESPACE
                         % xdim % ydim % zdim);
     }
 
-    void str(const std::string& s) throw(invalid_dimension_string)
+    void str(const std::string& s)
     {
       using namespace std;
       using namespace boost;

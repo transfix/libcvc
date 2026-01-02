@@ -32,6 +32,41 @@ namespace CVC_NAMESPACE
 {
   CVC_DEF_EXCEPTION(sub_volume_out_of_bounds);
 
+  /**
+   * @class volume
+   * @brief Volume data with spatial coordinate system (extends voxels)
+   * 
+   * The volume class extends voxels by adding a bounding box in object space,
+   * enabling spatial operations like interpolation at arbitrary coordinates.
+   * 
+   * IMPORTANT - MEMORY SEMANTICS:
+   * =============================
+   * Volume uses SHALLOW COPY semantics by default via boost::shared_array for CPU memory
+   * and std::shared_ptr for CUDA unified memory (with automatic reference counting).
+   * 
+   * SHALLOW COPY (default - shares data):
+   * - Copy constructor: volume vol2(vol1);         // Shares CPU & GPU memory
+   * - Assignment operator: vol2 = vol1;            // Shares CPU & GPU memory
+   * - copy() method: vol2.copy(vol1);              // Shares CPU & GPU memory (default)
+   * - copy() method: vol2.copy(vol1, false);       // Shares CPU & GPU memory (explicit)
+   * 
+   * With shallow copy, all copies share the same underlying voxel data arrays.
+   * Modifications through any copy will affect all other copies!
+   * 
+   * CUDA MEMORY: When CUDA is enabled, both CPU and GPU memory are reference counted.
+   * The custom CudaManagedDeleter ensures CUDA unified memory is automatically freed
+   * when the last reference is destroyed.
+   * 
+   * DEEP COPY (independent data):
+   * - copy() method: vol2.copy(vol1, true);        // Creates independent copy
+   * - sub() method: vol2.sub(0, 0, 0, vol1.voxel_dimensions());  // Creates independent copy
+   * 
+   * With deep copy, each copy has its own independent voxel data array.
+   * Modifications to one copy will NOT affect other copies.
+   * 
+   * This design enables efficient passing without copying large arrays by default,
+   * while still providing explicit deep copy when needed.
+   */
   class volume : public voxels
   {
   public:
@@ -94,7 +129,7 @@ namespace CVC_NAMESPACE
     /*
       Operations!
     */
-    virtual volume& copy(const volume& vol); // makes this a copy of vol
+    virtual volume& copy(const volume& vol);
     virtual volume& sub(uint64 off_x, uint64 off_y, uint64 off_z,
 			const dimension& subvoldim
 #ifdef _MSC_VER
@@ -117,6 +152,12 @@ namespace CVC_NAMESPACE
     //returns a linearly interpolated voxel value for the object coordinates supplied.  The coordinates must
     //be inside the bounding box, or an exception is thrown.
     double interpolate(double obj_x, double obj_y, double obj_z) const;
+
+    // Bring base class resize methods into scope to avoid hiding them
+    using voxels::resize;
+    
+    //resizes the volume to a new bounding box using trilinear interpolation (GPU-accelerated when CUDA is available)
+    volume& resize(const bounding_box& new_bbox);
 
     //makes this volume into a new volume that contains both this volume and the volume specified, bounding box and all
     //If dimension is specified, this volume will be resized to that dimension

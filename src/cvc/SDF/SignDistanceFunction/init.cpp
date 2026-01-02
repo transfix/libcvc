@@ -275,7 +275,7 @@ bool SDFLibrary::initSDF()
 				sdf[i][j][k].useful = 0;
 				sdf[i][j][k].type = 1;
 				sdf[i][j][k].no = 0;
-				sdf[i][j][k].tindex = NULL;					
+				sdf[i][j][k].tindex.clear();					
 			}
 		}
 	}
@@ -317,7 +317,8 @@ void SDFLibrary::readGeom(int nverts, float* verts, int ntris, int* tris)
 
 	printf("vert= %d and tri = %d \n", total_points,total_triangles);
 
-	vertices = (myVert*) malloc (sizeof (myVert) * total_points);
+	// Use new[] instead of malloc for myVert to properly construct std::vector members
+	vertices = new myVert[total_points];
 	surface = (triangle*) malloc (sizeof (triangle) * total_triangles);
 	normals = (myPoint*) malloc (sizeof (myPoint) * total_triangles);
 	distances = (double*) malloc (sizeof (double) * total_triangles);

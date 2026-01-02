@@ -28,6 +28,9 @@
 #include <cvc/dimension.h>
 #include <cvc/state.h>
 #include <cvc/utility.h>
+#include <cvc/geometry.h>
+#include <cvc/volume.h>
+#include <cvc/voxels.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
 #include <log4cplus/logger.h>
@@ -49,6 +52,7 @@
 #include <iostream>
 #include <fstream>
 #include <set>
+#include <queue>
 #include <algorithm>
 #include <iterator>
 #include <cstdlib>
@@ -99,6 +103,18 @@ namespace CVC_NAMESPACE
         _instance->registerDataType(boost::shared_array<float>);
         _instance->registerDataType(boost::shared_array<double>);
         _instance->registerDataType(state);
+        
+        // Register core CVC data types with full C++ qualified names
+        _instance->registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
+        _instance->registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
+        _instance->registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
+        _instance->registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
+        _instance->registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
+        
+        // Register shared pointers to these types as well
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
+        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
 
         //Register a call to wait for all child threads to finish before exiting
         //the main thread.
@@ -134,24 +150,60 @@ namespace CVC_NAMESPACE
   // 09/09/2011 -- Joe R. -- Creation.
   // 02/24/2012 -- Joe R. -- Moved to class App so we can support checking whether the main
   //                         thread has quit.
+  // 12/12/2025 -- Joe R. -- Two-phase shutdown: interrupt all, then join with timeout.
   void app::wait_for_threads()
   {
     using namespace CVC_NAMESPACE;
 
-    //Wait for all the threads to finish
+    //Get all the threads
     thread_map map = cvcapp.threads();
+    
+    // Phase 1: Interrupt all threads to signal them to exit
+    // Many algorithms have interruption checkpoints that allow clean exit
+    BOOST_FOREACH(thread_map::value_type val, map)
+      {
+        try
+          {
+            if (val.second)
+              val.second->interrupt();
+          }
+        catch(...) {}
+      }
+    
+    // Phase 2: Attempt to join all threads with a timeout
+    std::vector<std::string> failed_threads;
     BOOST_FOREACH(thread_map::value_type val, map)
       {
         try
           {
             using namespace boost;
-            cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
-                             % BOOST_CURRENT_FUNCTION
-                             % val.first));
-            val.second->join();
+            if (val.second && val.second->joinable()) {
+              cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
+                               % BOOST_CURRENT_FUNCTION
+                               % val.first));
+              // Try to join with a 5 second timeout per thread
+              if (!val.second->try_join_for(boost::chrono::seconds(5))) {
+                // Thread didn't join in time, track it
+                failed_threads.push_back(val.first);
+              }
+            }
           }
         catch(boost::thread_interrupted&) {}
+        catch(...) {}
       }
+    
+    // Phase 3: Report any threads that failed to join
+    if (!failed_threads.empty()) {
+      using namespace boost;
+      std::string msg = str(format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
+                            % BOOST_CURRENT_FUNCTION
+                            % failed_threads.size());
+      BOOST_FOREACH(const std::string& thread_name, failed_threads) {
+        msg += str(format("  - %s\n") % thread_name);
+      }
+      cvcapp.log(0, msg); // Error level
+      std::cerr << msg; // Also print to stderr to ensure visibility
+    }
   }
 
   app& app::instance()
@@ -161,6 +213,9 @@ namespace CVC_NAMESPACE
   }
 
   app::app() 
+    : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? 
+                   boost::thread::hardware_concurrency() : 4),
+      _activeWorkers(0)
   {
   }
 
@@ -882,5 +937,99 @@ namespace CVC_NAMESPACE
     boost::this_thread::interruption_point();
     boost::mutex::scoped_lock lock(_mutexMapMutex);
     return _mutexMap[name].get<1>();
+  }
+
+  // -------------------------
+  // Thread Pool Implementation
+  // -------------------------
+  // 12/25/2025 -- Joe R. -- Creation.
+  
+  void app::setThreadPoolSize(unsigned int size)
+  {
+    boost::this_thread::interruption_point();
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _maxPoolSize = (size > 0) ? size : 1;
+    
+    // Try to start workers if we have pending tasks
+    while (!_pendingTasks.empty() && _activeWorkers < _maxPoolSize)
+    {
+      tryStartWorker();
+    }
+  }
+
+  unsigned int app::getThreadPoolSize() const
+  {
+    boost::mutex::scoped_lock lock(const_cast<boost::mutex&>(_threadPoolMutex));
+    return _maxPoolSize;
+  }
+
+  unsigned int app::getActiveThreadCount() const
+  {
+    boost::mutex::scoped_lock lock(const_cast<boost::mutex&>(_threadPoolMutex));
+    return _activeWorkers;
+  }
+
+  unsigned int app::getPendingThreadCount() const
+  {
+    boost::mutex::scoped_lock lock(const_cast<boost::mutex&>(_threadPoolMutex));
+    return _pendingTasks.size();
+  }
+
+  void app::tryStartWorker()
+  {
+    // Assumes _threadPoolMutex is already locked by caller
+    boost::this_thread::interruption_point();
+    
+    if (_pendingTasks.empty() || _activeWorkers >= _maxPoolSize)
+      return;
+
+    // Get the next task
+    ThreadPoolTask task = _pendingTasks.top();
+    _pendingTasks.pop();
+    
+    _activeWorkers++;
+    
+    // Start worker with the task's key for tracking
+    // The worker will execute the task directly in its thread
+    // We need to temporarily release the pool mutex to avoid deadlock
+    // when calling threads() which locks _threadsMutex
+    _threadPoolMutex.unlock();
+    threads(task.key, thread_ptr(new boost::thread(boost::bind(&app::threadPoolWorker, this, task))));
+    _threadPoolMutex.lock();
+  }
+
+  void app::threadPoolWorker(ThreadPoolTask task)
+  {
+    thread_info ti("Processing: " + task.key);
+    
+    try
+    {
+      // Execute the task directly in this worker thread
+      task.task();
+    }
+    catch (boost::thread_interrupted&)
+    {
+      // Thread was interrupted, decrement worker count and exit
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      _activeWorkers--;
+      throw; // Re-throw to properly exit
+    }
+    catch (std::exception& e)
+    {
+      // Log error
+      log(0, std::string("Thread pool task error: ") + e.what());
+    }
+    catch (...)
+    {
+      // Unknown error, log it
+      log(0, "Thread pool task encountered unknown error");
+    }
+    
+    // Task complete, decrement worker count
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _activeWorkers--;
+    
+    // Try to start another worker if there are pending tasks
+    tryStartWorker();
   }
 }

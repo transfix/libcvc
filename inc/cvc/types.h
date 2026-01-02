@@ -130,6 +130,79 @@ namespace CVC_NAMESPACE
   typedef boost::shared_ptr<boost::mutex>                    mutex_ptr;
   typedef boost::tuple<mutex_ptr,std::string>                mutex_map_element;
   typedef std::map<std::string, mutex_map_element>           mutex_map;
+
+  // Thread pool priority levels
+  enum thread_priority
+  {
+    PRIORITY_LOW = 0,
+    PRIORITY_NORMAL = 1,
+    PRIORITY_HIGH = 2,
+    PRIORITY_CRITICAL = 3
+  };
+
+  // Enum for selecting SDF algorithm implementation
+  enum sdf_algorithm
+  {
+    SDF_V1,  // Original SDFLibrary implementation (thread-safe, octree-based)
+    SDF_V2   // Alternative DistanceTransform implementation (brute-force)
+  };
+
+  // Enum for selecting isosurface extraction method
+  // These values match LBIE::Mesher::ExtractionMethod
+  enum extraction_method
+  {
+    DUALLIB = 0,        // Dual contouring library (default)
+    FASTCONTOURING = 1, // Fast contouring implementation
+    LIBISOCONTOUR = 2   // ISO contouring library
+  };
+
+  // Enum for selecting mesh quality improvement method
+  // These values match LBIE::Mesher::ImproveMethod
+  enum improvement_method
+  {
+    NO_IMPROVE = 0,     // No improvement (default for fast extraction)
+    GEO_FLOW = 1,       // Geometric flow smoothing
+    EDGE_CONTRACT = 2,  // Edge contraction
+    JOE_LIU = 3,        // Joe-Liu method
+    MINIMAL_VOL = 4,    // Minimal volume
+    OPTIMIZATION = 5    // Optimization-based improvement
+  };
+
+  // Enum for selecting mesh type for volume meshing
+  // These values match LBIE::Mesher::MeshType
+  enum mesh_type
+  {
+    SURFACE_MESH = 0,   // Surface triangle mesh (default)
+    TETRAHEDRAL = 1,    // Tetrahedral volume mesh
+    QUAD_MESH = 2,      // Quadrilateral surface mesh
+    HEXAHEDRAL = 3,     // Hexahedral volume mesh
+    DUAL_SURFACE = 4,   // Dual surface mesh
+    TETRAHEDRAL2 = 5    // Alternative tetrahedral mesh
+  };
+
+  // Enum for selecting quality metric type for volumetric meshes
+  // Used for quality analysis, filtering, and element extraction
+  enum quality_metric
+  {
+    // Tetrahedral mesh metrics
+    TET_VOLUME = 0,         // Volume of tetrahedron
+    TET_ASPECT_RATIO = 1,   // Aspect ratio (lower is better)
+    TET_MIN_ANGLE = 2,      // Minimum dihedral angle (higher is better)
+    
+    // Hexahedral mesh metrics
+    HEX_VOLUME = 3,         // Volume of hexahedron
+    HEX_JACOBIAN = 4,       // Jacobian determinant (positive is valid)
+    HEX_SCALED_JACOBIAN = 5 // Scaled Jacobian quality [-1, 1]
+  };
+
+  // Enum for selecting normal computation method
+  // These values match LBIE::Mesher::NormalType
+  enum normal_type
+  {
+    BSPLINE_CONVOLUTION = 0,    // B-spline convolution (default, most accurate)
+    CENTRAL_DIFFERENCE = 1,     // Central difference (faster, less accurate)
+    BSPLINE_INTERPOLATION = 2   // B-spline interpolation (balanced)
+  };
 }
 
 #endif

@@ -64,12 +64,13 @@ namespace CVC_NAMESPACE
     _parent(p),
     _lastMod(boost::posix_time::min_date_time),
     _hidden(false),
+    _readOnly(false),
     _initialized(false)
   {
     //This slot propagates child changes up to parents
     childChanged.connect(
       map_change_signal::slot_type(
-        &state::notifyParent, this, _1
+        &state::notifyParent, this, boost::placeholders::_1
       )
     );
   }
@@ -257,6 +258,45 @@ namespace CVC_NAMESPACE
     return *this;
   }
 
+  // ---------------
+  // state::readOnly
+  // ---------------
+  // Purpose: 
+  //   Returns the read-only flag for this state object.
+  // ---- Change History ----
+  // 12/30/2025 -- Joe R. -- Creation.  
+  bool state::readOnly()
+  {
+    boost::this_thread::interruption_point();
+    boost::mutex::scoped_lock lock(_mutex);
+    return _readOnly;
+  }
+
+  // ---------------
+  // state::readOnly
+  // ---------------
+  // Purpose: 
+  //   Sets a read-only flag for this state object. When set, attempts to
+  //   modify value or data will throw a read_only_error exception.
+  // ---- Change History ----
+  // 12/30/2025 -- Joe R. -- Creation.  
+  state& state::readOnly(bool ro)
+  {
+    boost::this_thread::interruption_point();
+    if(readOnly() == ro) return *this; //do nothing if equal
+
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      _readOnly = ro;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      _initialized = true;      
+    }
+
+    readOnlyChanged();
+    if(parent()) parent()->childChanged(name());
+    return *this;
+  }
+
   // -------------
   // state::values
   // -------------
@@ -304,6 +344,20 @@ namespace CVC_NAMESPACE
   state& state::value(const std::string& v, bool setValueType)
   {
     boost::this_thread::interruption_point();
+    
+    // Get fullName before locking
+    std::string full_name = fullName();
+    
+    // Check if this state is read-only
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      if(_readOnly) {
+        throw read_only_error(
+          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name)
+        );
+      }
+    }
+    
     if(value() == v) return *this; //do nothing if equal
 
     {
@@ -313,11 +367,14 @@ namespace CVC_NAMESPACE
       _initialized = true;
 
       if(setValueType)
-        _valueTypeName = cvcapp.dataTypeName<std::string>();
+        _valueTypeName = std::string("std::string");
+      
+      // Notify any threads waiting for value
+      _valueCondition.notify_all();
     }
 
     valueChanged();
-    if(parent()) parent()->childChanged(name());
+    if(parent()) parent()->childChanged(full_name);
     return *this;
   }
 
@@ -516,14 +573,31 @@ namespace CVC_NAMESPACE
   state& state::data(const boost::any& d)
   {
     boost::this_thread::interruption_point();
+    
+    // Get fullName before locking
+    std::string full_name = fullName();
+    
+    // Check if this state is read-only
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      if(_readOnly) {
+        throw read_only_error(
+          boost::str(boost::format("Cannot modify read-only state: %1%") % full_name)
+        );
+      }
+    }
+    
     {
       boost::mutex::scoped_lock lock(_mutex);
       _data = d;
       _lastMod = boost::posix_time::microsec_clock::universal_time();
       _initialized = true;
+      
+      // Notify any threads waiting for data
+      _dataCondition.notify_all();
     }
     dataChanged();
-    if(parent()) parent()->childChanged(name());
+    if(parent()) parent()->childChanged(full_name);
     return *this;
   }
 
@@ -679,6 +753,85 @@ namespace CVC_NAMESPACE
   {
     boost::this_thread::interruption_point();
     if(parent()) parent()->childChanged(name() + SEPARATOR + childname);
+  }
+
+  // ------------------
+  // isValidStateName
+  // ------------------
+  // Purpose: 
+  //   Validates that a state name conforms to C identifier rules:
+  //   - Must start with letter or underscore
+  //   - Can contain letters, digits, and underscores
+  //   - No special characters, spaces, or dashes
+  // ---- Change History ----
+  // 12/30/2025 -- Added for state name validation.
+  bool state::isValidStateName(const std::string& name)
+  {
+    if (name.empty()) {
+      return false;
+    }
+
+    // First character must be letter or underscore
+    char first = name[0];
+    if (!std::isalpha(first) && first != '_') {
+      return false;
+    }
+
+    // Remaining characters must be alphanumeric or underscore
+    for (size_t i = 1; i < name.length(); ++i) {
+      char c = name[i];
+      if (!std::isalnum(c) && c != '_') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // ------------------
+  // sanitizeStateName
+  // ------------------
+  // Purpose: 
+  //   Converts an arbitrary string into a valid C identifier:
+  //   - Replaces invalid characters with underscores
+  //   - Ensures first character is valid (prepends underscore if needed)
+  //   - Handles empty strings
+  // ---- Change History ----
+  // 12/30/2025 -- Added for state name sanitization.
+  std::string state::sanitizeStateName(const std::string& name)
+  {
+    if (name.empty()) {
+      return "unnamed";
+    }
+
+    std::string result;
+    result.reserve(name.length());
+
+    // Handle first character
+    char first = name[0];
+    if (std::isalpha(first) || first == '_') {
+      result += first;
+    } else if (std::isdigit(first)) {
+      // If starts with digit, prepend underscore
+      result += '_';
+      result += first;
+    } else {
+      // Replace invalid first character with underscore
+      result += '_';
+    }
+
+    // Handle remaining characters
+    for (size_t i = 1; i < name.length(); ++i) {
+      char c = name[i];
+      if (std::isalnum(c) || c == '_') {
+        result += c;
+      } else {
+        // Replace invalid characters (including dashes, spaces, etc.) with underscore
+        result += '_';
+      }
+    }
+
+    return result;
   }
 }
 

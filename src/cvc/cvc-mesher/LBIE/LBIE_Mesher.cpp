@@ -280,4 +280,20 @@ namespace LBIE
       }
     return _geoframe;
   }
+
+  void Mesher::interpolateProperties(const VolMagick::Volume& propertyVol)
+  {
+    using namespace std;
+    
+    cerr << "LBIE::Mesher::interpolateProperties(): "
+         << "Interpolating property values to mesh vertices..." << endl;
+    
+    // Enable property interpolation and call func_val
+    _octree.set_prop_flag(true);
+    _octree.func_val(_geoframe, propertyVol);
+    
+    cerr << "LBIE::Mesher::interpolateProperties(): "
+         << "Property interpolation complete. "
+         << _geoframe.funcs.size() << " values assigned." << endl;
+  }
 }

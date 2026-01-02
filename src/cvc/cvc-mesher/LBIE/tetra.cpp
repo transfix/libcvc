@@ -137,7 +137,6 @@ void Octree::tetrahedralize_interval(geoframe& geofrm) {
 	for (k = 0; k < dim[0]*dim[1]*dim[2]; k++) grid_idx_arr[k] = -1;
 
 	for (i = 0; i < leaf_num; i++ ) {
-
 		valid_leaf = cut_array[i] ;
 		level = get_level(valid_leaf) ;
 		cell_size = (dim[0]-1)/(1<<level);
@@ -152,7 +151,9 @@ void Octree::tetrahedralize_interval(geoframe& geofrm) {
 			if(is_skipcell(valid_leaf) == 0) in_out = 0;
 			else in_out = 1;
 			// intersection edge
-			if (intersect_id == 1 || intersect_id == -1) {
+			// Type ±1: edge crosses one of the isovalues
+			// Type ±3: edge crosses through entire interval (most common for interval meshing)
+			if (intersect_id == 1 || intersect_id == -1 || intersect_id == 3 || intersect_id == -3) {
 				if (is_min_edge(valid_leaf, j, vtx, vtx_num, intersect_id, geofrm)) {
 					eflag_on(x , y , z , level , j);
 

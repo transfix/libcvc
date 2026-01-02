@@ -48,31 +48,75 @@
 #ifndef CCV_SDF_SDFLIB_H
 #define CCV_SDF_SDFLIB_H
 
+#include <memory>
+#include "SDFContext.h"
+
 namespace SDFLibrary {
 
-//First, set the parameters of the SDF grid.
-void setParameters(int size, int isNormalFlip, float* mins, float* maxs);
-
+// RAWIV header structure for volume information
 typedef struct RAWIV_header
 {
-	float minext[3];	//Co-ords of the first voxel
-	float maxext[3];	//Co-ords of the last voxel
-	float origin[3];	//Co-ords of the first voxel a.k.a. Origin
-	float span[3];		//Span between grid points
-	int dim[3];			//number of grid points
+	float minext[3];	// Co-ords of the first voxel
+	float maxext[3];	// Co-ords of the last voxel
+	float origin[3];	// Co-ords of the first voxel a.k.a. Origin
+	float span[3];		// Span between grid points
+	int dim[3];			// Number of grid points
 
-	int ngridpts;		//Total grid points
-	int ncells;			//Total cells
-	int size;			//Octree size
+	int ngridpts;		// Total grid points
+	int ncells;			// Total cells
+	int size;			// Octree size
 
-}RAWIV_header;
+} RAWIV_header;
 
+// ============================================================================
+// NEW THREAD-SAFE API (Recommended for new code)
+// ============================================================================
 
-//Then, call the function with the input triangulated data. The SDF values are returned
+/**
+ * Compute SDF using a dedicated context (thread-safe)
+ * 
+ * This is the recommended way to compute SDF as it allows multiple
+ * computations to run in parallel without interfering with each other.
+ * 
+ * @param nverts Number of vertices in the mesh
+ * @param verts  Vertex array (3*nverts floats: x1,y1,z1, x2,y2,z2, ...)
+ * @param ntris  Number of triangles
+ * @param tris   Triangle index array (3*ntris ints: v1,v2,v3, ...)
+ * @param size   Grid size (must be power of 2: 16, 32, 64, 128, 256, 512, 1024)
+ * @param isNormalFlip Whether to flip normals
+ * @param mins   Bounding box minimum (3 floats: minx, miny, minz)
+ * @param maxs   Bounding box maximum (3 floats: maxx, maxy, maxz)
+ * @return       Unique pointer to SDF values array, or nullptr on failure
+ */
+std::unique_ptr<float[]> computeSDF_MT(int nverts, const float* verts, 
+                                        int ntris, const int* tris,
+                                        int size, int isNormalFlip,
+                                        const float* mins, const float* maxs);
+
+/**
+ * Create a new SDF computation context
+ * 
+ * Use this for manual control over the SDF computation pipeline.
+ * The context can be reused for multiple computations.
+ * 
+ * @return A unique pointer to a new SDFContext
+ */
+std::unique_ptr<SDFContext> createContext();
+
+// ============================================================================
+// LEGACY API (Deprecated - not thread-safe, uses global state)
+// ============================================================================
+
+// Set parameters of the SDF grid (not thread-safe)
+void setParameters(int size, int isNormalFlip, float* mins, float* maxs);
+
+// Compute SDF using global state (not thread-safe)
+// Returns raw pointer that caller must delete[]
 float* computeSDF(int nverts, float* verts, int ntris, int* tris);
 
+// Get volume information (not thread-safe)
 RAWIV_header* getVolumeInfo();
 
-};
+}; // namespace SDFLibrary
 
 #endif

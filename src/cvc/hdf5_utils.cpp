@@ -213,16 +213,11 @@ namespace CVC_NAMESPACE
             }
         }
 
-      const CommonFG *handle = &file;
-      if(cvc_group) handle = cvc_group.get();
-
-      cvc_dataset.reset(
-        new DataSet(
-          handle->openDataSet(
-            dataSetName
-          )
-        )
-      );
+      // Use appropriate object to open dataset (Group or File)
+      if(cvc_group)
+        cvc_dataset.reset(new DataSet(cvc_group->openDataSet(dataSetName)));
+      else
+        cvc_dataset.reset(new DataSet(file.openDataSet(dataSetName)));
       
       return cvc_dataset;
     }
@@ -265,7 +260,7 @@ namespace CVC_NAMESPACE
       //if we found a group, unlink from the group.  Else it must be at the root,
       //so unlink from the file itself.
       if(cvc_group) cvc_group->unlink(unlinkName);
-      else file.unlink(unlinkName);
+      else const_cast<H5::H5File&>(file).unlink(unlinkName);
     }
 
     // ---------------------
@@ -572,13 +567,12 @@ namespace CVC_NAMESPACE
 
             //if we found a group, add to the group.  Else it must be at the root,
             //so add via the file itself.
-            H5::CommonFG *cfg;
-            if(cvc_group) cfg = cvc_group.get();
-            else cfg = file.get();
-      
             try
               {
-                cfg->unlink(dataSetName);
+                if(cvc_group)
+                  cvc_group->unlink(dataSetName);
+                else
+                  file->unlink(dataSetName);
               }
             catch(H5::Exception& e)
               {}
@@ -609,16 +603,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
                 
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_UCHAR,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_UCHAR, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_UCHAR, dataspace, plist)));
                 }
                 break;
               case UShort:
@@ -636,16 +624,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
                 
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_USHORT,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_USHORT, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_USHORT, dataspace, plist)));
                 }
                 break;
               case UInt:
@@ -663,16 +645,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
                 
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_UINT,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );                  
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_UINT, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_UINT, dataspace, plist)));                  
                 }
                 break;
               case Float:
@@ -690,16 +666,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
             
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_FLOAT,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );                  
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_FLOAT, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_FLOAT, dataspace, plist)));                  
                 }
                 break;
               case Double:
@@ -717,16 +687,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
                 
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_DOUBLE,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );                  
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_DOUBLE, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_DOUBLE, dataspace, plist)));                  
                 }
                 break;
               case UInt64:
@@ -744,16 +708,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
             
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::NATIVE_UINT64,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );                  
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::NATIVE_UINT64, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::NATIVE_UINT64, dataspace, plist)));                  
                 }
                 break;
               case Char:
@@ -771,16 +729,10 @@ namespace CVC_NAMESPACE
                       plist.setChunk(RANK, chunk_dim);
                     }
             
-                  dataset.reset(
-                    new DataSet(
-                      cfg->createDataSet(
-                        dataSetName,
-                        PredType::C_S1,
-                        dataspace,
-                        plist
-                      )
-                    )
-                  );                  
+                  if(cvc_group)
+                    dataset.reset(new DataSet(cvc_group->createDataSet(dataSetName, PredType::C_S1, dataspace, plist)));
+                  else
+                    dataset.reset(new DataSet(file->createDataSet(dataSetName, PredType::C_S1, dataspace, plist)));                  
                 }
                 break;
               default:

@@ -90,6 +90,16 @@ public:
 		return(m_dim[0] - 1)*(m_dim[1] - 1)*(m_dim[2] - 1);
 	}
 
+	// Get direct access to data array (const)
+	const T* getData() const {
+		return p_data;
+	}
+
+	// Get direct access to data array (non-const)
+	T* getData() {
+		return p_data;
+	}
+
 	void getOrig(float orig[3]) const {
 		for (int i = 0; i < 3; i++)	orig[i] = m_orig[i];
 	}

@@ -49,75 +49,90 @@
 #define CCV_SDF_HEAD_H
 
 #include <vector>
+#include <memory>
 
 namespace SDFLibrary {
 
 	#define MAX_TRIS_PER_VERT 100
 	
-	typedef struct _Pt_
-	{
+	// Point structure for 3D coordinates
+	struct myPoint {
 		double x;
 		double y;
 		double z;
 		char isNull;
 		
-	}  myPoint;
+		myPoint() : x(0.0), y(0.0), z(0.0), isNull(0) {}
+		myPoint(double x_, double y_, double z_) 
+			: x(x_), y(y_), z(z_), isNull(0) {}
+	};
 
-	typedef struct _Vt_
-	{
+	// Vertex structure with associated triangles
+	struct myVert {
 		double x;
 		double y;
 		double z;
 		char isNull;
 
-	  //int tris[MAX_TRIS_PER_VERT]; //not more than MAX_TRIS_PER_VERT triangles can share a vertex.
-	        std::vector<int> tris;
-		int trisUsed; //elements used in the above array.
+		std::vector<int> tris;  // Triangles sharing this vertex
+		int trisUsed;           // Number of elements used
 
-	}  myVert;
+		myVert() : x(0.0), y(0.0), z(0.0), isNull(0), trisUsed(0) {}
+		myVert(double x_, double y_, double z_) 
+			: x(x_), y(y_), z(z_), isNull(0), trisUsed(0) {}
+	};
 
 
-	typedef struct _tri_
-	{
+	// Triangle structure
+	struct triangle {
 		int v1;
 		int v2;
 		int v3;
+		int type; // default = -1; done = 1; wrong = 3;
+		
+		triangle() : v1(0), v2(0), v3(0), type(-1) {}
+		triangle(int v1_, int v2_, int v3_) 
+			: v1(v1_), v2(v2_), v3(v3_), type(-1) {}
+	};
 
-		int type; // default = -1; done =1.	wrong =3;
-	} triangle;
-
-	typedef struct listnodedef
-	{
-		int index;	//index of the triangle
-		struct listnodedef* next;
-	} listnode;
-
-	typedef struct nodedef 
-	{
-		char useful;	//  0 - no triangles in it	; 1 - there are triangles in it
-		char type;		//	0 - interior node		; 1 - leaf node, containing triangles
+	// Octree cell structure - stores list of triangle indices
+	struct cell {
+		char useful;        // 0 - no triangles; 1 - has triangles
+		char type;          // 0 - interior node; 1 - leaf node with triangles
 		long int no;
-		listnode* tindex;		
-	} cell;
+		std::vector<int> tindex;   // Triangle indices for this cell
+		
+		cell() : useful(0), type(0), no(0) {}
+		~cell() = default;
+		
+		// Default copy/move operations work correctly with vector
+		cell(const cell& other) = default;
+		cell& operator=(const cell& other) = default;
+		cell(cell&& other) noexcept = default;
+		cell& operator=(cell&& other) noexcept = default;
+	};
 
-	typedef struct 
-	{
+	// Ray structure for ray tracing
+	struct ray {
 		double ox;
 		double oy;
 		double oz;
-
 		double dx; 
 		double dy;
 		double dz;
-	} ray; 
+		
+		ray() : ox(0.0), oy(0.0), oz(0.0), dx(0.0), dy(0.0), dz(0.0) {}
+	};
 
-	typedef struct _voxel_
-	{
+	// Voxel structure for distance field
+	struct voxel {
 		float value;
-		signed char signe;  //-1 = inside,		1 = outside	
-		bool processed;		// 1 = propagated distance FROM here. 0 = not
-		int closestV;		//the closest triangle on the surface
-	}voxel;
+		signed char signe;  // -1 = inside, 1 = outside
+		bool processed;     // true = propagated distance FROM here
+		int closestV;       // Closest triangle on the surface
+		
+		voxel() : value(0.0f), signe(1), processed(false), closestV(-1) {}
+	};
 
 	
 }; //namespace SDFLibrary

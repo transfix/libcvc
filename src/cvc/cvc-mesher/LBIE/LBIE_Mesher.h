@@ -2,7 +2,7 @@
 #define __LIBLBIE_H__
 
 #include <iostream>
-#include <VolMagick.h>
+#include <VolMagickCompat.h>
 
 #include "octree.h"
 #include "LBIE_geoframe.h"
@@ -134,6 +134,9 @@ namespace LBIE
 
    //quality improve mesh
    geoframe& qualityImprove(unsigned int iterations = 1);
+
+   //interpolate property values from a volume to mesh vertices
+   void interpolateProperties(const VolMagick::Volume& propertyVol);
 
   protected:
    void set_octree_volume(const VolMagick::Volume& vol);

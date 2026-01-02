@@ -9,6 +9,7 @@
 #include<assert.h>
 #include<time.h>
 #include<algorithm>
+#include<vector>
 
 #include"normalspline.h"
 
@@ -156,39 +157,17 @@ void Octree::setVolume(const VolMagick::Volume& volData)
   for (i=0;i<=oct_depth;i++) {
     level_res[i]=(1<<i);
   }
-  construct_octree("errfile.rawiv");
+  construct_octree();
   vol_min=minmax[0].min;
   vol_max=minmax[0].max;
-}
-
-void Octree::prop_init(const char* rawiv_fname)
-{
-  //	strcpy(prop_fname,rawiv_fname);
-  prop_fname = rawiv_fname;
-	
-	/*prop_fp = fopen(rawiv_fname,"rb");
-
-	if (prop_fp==NULL) {
-		printf("wrong name : %s\n",rawiv_fname);
-		return;
-	}*/
-  prop_flag = 1;
-}
-
-void Octree::Octree_loadVolume(const char* dx_fname)
-{
-  VolMagick::Volume volumeData;
-  VolMagick::readVolumeFile(volumeData,dx_fname);
-  volumeData.voxelType(VolMagick::Float); //I think this library wants a float*
-  loadData(volumeData);
   
-  int i;
-  for (i=0;i<=oct_depth;i++) {
-    level_res[i]=(1<<i);
+  // Initialize BSpline coefficients for BSPLINE_INTERPOLATION normal type
+  // This must be done here (not in mesh_extract) because getVertGrad() may be called
+  // during polygonize() which happens before mesh_extract()
+  if(flag_normal == 2) {  // BSPLINE_INTERPOLATION
+    BSplineCoeff.resize(dim[0]*dim[1]*dim[2]);
+    LBIE::TransImg2Spline(&(orig_vol[0]), &(BSplineCoeff[0]), dim[0], dim[1], dim[2]);
   }
-  construct_octree((char*)dx_fname);
-  vol_min=minmax[0].min;
-  vol_max=minmax[0].max;
 }
 
 //void Octree::loadData(SimpleVolumeData *volumeData, float* vol)
@@ -246,6 +225,9 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
   //interior_flag =0;
   if(interior_flag)
     {	
+#ifdef _OPENMP
+      #pragma omp parallel for schedule(static)
+#endif
       for(i = 0; i < dim[0]*dim[1]*dim[2]; i++) {
 	//vol[i] = -tmp[i];//volumeData->getValueAt(0,i); //tmp[i];
 	orig_vol[i] = -volumeData(i);
@@ -260,6 +242,9 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
       float r0, r;
       int index,index0;
       r0 = center - 0.001f;
+#ifdef _OPENMP
+      #pragma omp parallel for private(j,i,index,index0,r) schedule(dynamic)
+#endif
       for(k = 0; k < dim[2]; k++)
 	for(j = 0; j < dim[1]; j++)
 	  for(i = 0; i < dim[0]; i++) {
@@ -434,8 +419,14 @@ void Octree::initMem()
 	grid_idx_arr = (int*)malloc(sizeof(int)*dim[0]*dim[1]*dim[2]);
 	vtx_idx_arr_in = (int*)malloc(sizeof(int)*octcell_num);
 	int k;
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (k=0;k<octcell_num;k++) {
 		vtx_idx_arr[k]=-1;	vtx_idx_arr_in[k]=-1;}
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (k=0;k<dim[0]*dim[1]*dim[2];k++) grid_idx_arr[k]=-1;	
 
 	qef_array	= (double**) malloc (sizeof(double*) * octcell_num);
@@ -461,57 +452,32 @@ void Octree::initMem()
 		level_res[i]=(1<<i);
 	}
 //	e_face_initialization();
-	construct_octree((char*)rawiv_fname);
+	construct_octree();
 	vol_min=minmax[0].min;
 	vol_max=minmax[0].max;
 }
 */
 
 // error computation on each cell of octree
-void Octree::construct_octree(char * rawiv_fname)
+void Octree::construct_octree()
 {
-	int oc_idx=0;
-	int level;
-	FILE* err_fp;
-	char err_fname[256];
-	float min , max;
-	
-	strcpy(err_fname,rawiv_fname);
-	strcat(err_fname,".err");
-	
-	err_fp=fopen(err_fname,"rb");
-	
-	err_fp = 0;
-	if (err_fp) {
-		
-		//getFloat((float*)minmax,octcell_num*2,err_fp);
-	  //fread((float*)minmax,sizeof(float),octcell_num*2,err_fp);
-	  fread(&(minmax[0]),sizeof(float),octcell_num*2,err_fp);
-		fclose(err_fp);
-		
-	} else {
+int oc_idx=0;
+int level;
+float min , max;
 
-		while (oc_idx < octcell_num) {
-
-			level=get_level(oc_idx);
-			compute_error(oc_idx,level,min,max);
-			minmax[oc_idx].min=min;
-			minmax[oc_idx].max=max;
-			//oct_array[oc_idx].refine_flag=0;
-			oc_idx++;
-
-		} 
-
-		/*err_fp=fopen(err_fname, "wb");
-		//putFloat((float*)minmax, octcell_num*2, err_fp);
-		fwrite((float*)minmax,sizeof(float),octcell_num*2,err_fp);
-		fclose(err_fp);*/
-	}
-	
+// Always compute min/max values from volume data in memory
+// No file I/O - removed legacy .err file caching
+while (oc_idx < octcell_num) {
+level=get_level(oc_idx);
+compute_error(oc_idx,level,min,max);
+minmax[oc_idx].min=min;
+minmax[oc_idx].max=max;
+oc_idx++;
+}
 }
 
 void Octree::collapse()
-{	
+{
 	CellQueue prev_queue, cur_queue;
 	int i, oc_id, level;
 
@@ -2045,8 +2011,10 @@ void Octree::traverse_qef_interval(float err_tol, float err_tol_in)
 			
 			//octcell2xyz(oc_id,x,y,z,level);
 			
-			//if (is_skipcell(oc_id)) {
-			if(minmax[oc_id].min > iso_val || minmax[oc_id].max < iso_val_in) {
+			// Skip cells completely outside interval [iso_val, iso_val_in]
+			// Original was: min > iso_val || max < iso_val_in (incorrect)
+			// Correct: skip if completely below iso_val OR completely above iso_val_in
+			if(minmax[oc_id].max < iso_val || minmax[oc_id].min > iso_val_in) {
 				continue;
 			//} else if (level <= 3 ||(get_err_grad(oc_id) > err_tol && level != oct_depth)) {
 			//} else if (level <= 3 ||(is_skipcell(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
@@ -2058,7 +2026,8 @@ void Octree::traverse_qef_interval(float err_tol, float err_tol_in)
 			*/
 			//} else if (level <= oct_depth-2) {
 			// hemoglobin_fat 129
-			} else if (level <= 5 ||(is_skipcell_interval(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
+			// FIX: Added level < oct_depth check to prevent infinite refinement
+			} else if ((level <= 5 && level < oct_depth) ||(is_skipcell_interval(oc_id) == 0  && get_err_grad(oc_id) > err_tol && level != oct_depth)
 				//|| (level <=4 && is_skipcell_interval(oc_id) == 0)
 				|| (minmax[oc_id].max > iso_val_in &&  minmax[oc_id].min < iso_val_in && get_err_grad(oc_id) > err_tol_in && level != oct_depth)) {
 
@@ -2591,61 +2560,79 @@ void Octree::func_val(geoframe& geofrm) {
 }
 */
 // read *.rawiv file to show color, e.g., the potential distribution
-void Octree::func_val(geoframe& geofrm) {
+void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 
 	if(!prop_flag)
 		return;
 	prop_flag = 0;
 	int i, j, x, y, z, oc_id, vtx[8];
 	float dx, dy, dz, val[8], func_min, func_max;
-	//	float* func_vol;
-	/*FILE *func_fp, *out_func;
-
-	//func_fp = fopen("rawiv/test/potential211257.rawiv","rb");
-	//func_fp = fopen("rawiv/1C2B_full_pot33.rawiv","rb");
-	//func_fp = fopen("C:/Documents and Settings/jessica/Desktop/NMJ_rawiv/1C2B_pot129.rawiv","rb");
-	//func_fp = fopen("C:/Documents and Settings/jessica/Desktop/NMJ_rawiv/2BG9_pot97129.rawiv","rb");
-	func_fp = fopen(prop_fname,"rb");
 	
-	if (func_fp==NULL) {
-		printf("wrong name : %s\n","potential211257.rawiv");
-		return;
+	// Temporarily store the current volume data
+	std::vector<float> saved_vol = orig_vol;
+	
+	// Load property volume into orig_vol for interpolation
+	// Note: We load property data WITHOUT negation (unlike SDF data)
+	// Property values should be used as-is, not inverted
+	
+	int propDimX = propVol.XDim();
+	int propDimY = propVol.YDim();
+	int propDimZ = propVol.ZDim();
+	
+	// If property volume dimensions don't match octree dimensions, resize it
+	VolMagick::Volume resizedPropVol;
+	const VolMagick::Volume* propVolPtr = &propVol;
+	
+	if(propDimX != dim[0] || propDimY != dim[1] || propDimZ != dim[2]) {
+		std::cerr << "LBIE::Mesher::func_val(): Property volume dimensions (" 
+		          << propDimX << "x" << propDimY << "x" << propDimZ
+		          << ") do not match octree dimensions ("
+		          << dim[0] << "x" << dim[1] << "x" << dim[2] 
+		          << "). Resizing using trilinear interpolation..." << std::endl;
+		
+		// Create a copy and resize it to match octree dimensions
+		resizedPropVol = propVol;
+		resizedPropVol.resize(VolMagick::Dimension(dim[0], dim[1], dim[2]));
+		propVolPtr = &resizedPropVol;
+		
+		std::cerr << "LBIE::Mesher::func_val(): Property volume resized to " 
+		          << dim[0] << "x" << dim[1] << "x" << dim[2] << std::endl;
 	}
-
-	strcpy(prop_fname,"");
 	
-	getFloat(minext,3,func_fp);	getFloat(maxext,3,func_fp);
-	getInt(&nverts,1,func_fp);	getInt(&ncells,1,func_fp);
-	getInt(dim,3,func_fp);		getFloat(orig,3,func_fp);		getFloat(span,3,func_fp);
-
-	func_vol = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-	getFloat(func_vol, dim[0]*dim[1]*dim[2], func_fp);
-
-	fclose(func_fp);*/
-
-	//func_vol = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-
-	VolMagick::Volume propData;
-	VolMagick::readVolumeFile(propData,prop_fname);
-
-	int old_flag = interior_flag;
-	interior_flag = 1;
-	loadData(propData/*,func_vol*/);
-	interior_flag = old_flag;
+	// Load the (possibly resized) property volume data
+	for(int k = 0; k < dim[2]; k++) {
+		for(int j = 0; j < dim[1]; j++) {
+			for(int i = 0; i < dim[0]; i++) {
+				int idx = k * dim[0] * dim[1] + j * dim[0] + i;
+				orig_vol[idx] = (*propVolPtr)(i, j, k);  // No negation for property data
+			}
+		}
+	}
+	
 	//out_func = fopen("rawiv/out_func", "w");
 
+	// Ensure funcs vector is properly sized
+	geofrm.funcs.resize(geofrm.numverts);
+	
 	func_min = 100.0f;
 	func_max = -100.0f;
 	int sum_15 = 0;	int sum_10 = 0;	int sum_5 = 0;	int sum_1 = 0;
 	//fprintf(out_func, "%d\n", geofrm.numverts);
+	
 	for(i = 0; i < geofrm.numverts; i++) {
-		x = (int) geofrm.verts[i][0];
-		y = (int) geofrm.verts[i][1];
-		z = (int) geofrm.verts[i][2];
+		// Convert from world coordinates to grid coordinates
+		// Vertices in geoframe are in world space, need to map to grid indices
+		float grid_x = (geofrm.verts[i][0] - minext[0]) / span[0];
+		float grid_y = (geofrm.verts[i][1] - minext[1]) / span[1];
+		float grid_z = (geofrm.verts[i][2] - minext[2]) / span[2];
+		
+		x = (int) grid_x;
+		y = (int) grid_y;
+		z = (int) grid_z;
 
-		dx = geofrm.verts[i][0] - x;
-		dy = geofrm.verts[i][1] - y;
-		dz = geofrm.verts[i][2] - z;
+		dx = grid_x - x;
+		dy = grid_y - y;
+		dz = grid_z - z;
 
 		oc_id = xyz2octcell(x, y, z, oct_depth);
 		idx2vtx(oc_id, oct_depth, vtx);
@@ -2667,9 +2654,8 @@ void Octree::func_val(geoframe& geofrm) {
 		//geofrm.funcs[i][0] = (geofrm.funcs[i][0] - func_min) / (func_max - func_min)*2.0f - 1.0f;
 	}
 
-	//fclose(out_func);
-
-	//free(func_vol);
+	// Restore original volume data
+	orig_vol = saved_vol;
 }
 /*
 // read *.rawv file to show the color, e.g., hemoglobin
@@ -2763,34 +2749,39 @@ void Octree::mesh_extract(geoframe& geofrm, float err_tol)
 
 	switch (flag_type) {
 	case 0:							// isosurface
-		printf("triangle\n");
 		polygonize(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 1:							// tetra mesh
 		tetrahedralize(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 2:							// quad mesh
 		polygonize_quad(geofrm, err_tol);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 3:							//hexa_mesh
 		hexahedralize(geofrm, err_tol);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 4:							// interval
 		polygonize_interval(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 
 	case 5:							// interval volume
 		tetrahedralize_interval(geofrm);
-		if(func)	func_val(geofrm);
+		// DISABLED: func_val requires external prop_fname which is never initialized
+		// if(func)	func_val(geofrm);
 		break;
 	}
 }
@@ -4441,21 +4432,10 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	float mv0[3], mv1[3], mv2[3], mv3[3];
 	double edge_ratio, new_edge_ratio, s;
 	double e[6], e_min, e_max, aspect, aspect_min, aspect_max;
-	FILE *input, /**output,*/ *fn2;
 
-	input = fopen("input.raw", "w");
-	fprintf(input, "%d %d\n", geofrm.numverts, geofrm.numtris/4);
-	for (i = 0; i < geofrm.numverts; i++)
-		fprintf(input,"%f %f %f %f %f %f %d\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2], 
-			geofrm.normals[i][0], geofrm.normals[i][1], geofrm.normals[i][2], geofrm.bound_sign[i]);
-	for (i = 0; i < geofrm.numtris/4; i++)
-		fprintf(input,"%d %d %d %d\n", geofrm.triangles[4*i][0], geofrm.triangles[4*i][1],
-			geofrm.triangles[4*i][2], geofrm.triangles[4*i+1][2]);
-	fclose(input);
-	
-	//output = fopen("qimprove_temp", "w");
-
-	//fprintf(output, "edge contraction\n");
+	// Temporary vectors for building refined mesh within each iteration
+	std::vector<int> temp_tetrahedra;  // Tetrahedra for next iteration
+	std::vector<int> final_tets;        // Final adjusted tetrahedra
 
 	maxIndex = 20;
 
@@ -4466,11 +4446,9 @@ void Octree::edge_contraction(geoframe& geofrm) {
 
 	for (index = 0; index < maxIndex; index++) {
 
-	  //fprintf(output, "Loop %d\n", index);
-
-	input = fopen("input.raw", "r");
-
-	fscanf(input, "%d %d\n", &nv, &ntet);
+	nv = geofrm.numverts;
+	ntet = geofrm.numtris / 4;
+	
 	bound_sign = new int[nv];
 	rep = new int*[10];
 	for(i = 0; i < 10; i++) rep[i] = new int[2];
@@ -4490,27 +4468,26 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		my_list[i] = -1;
 	}
 
+	// Load data from geoframe
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(static)
+#endif
 	for (i = 0; i < nv; i++) {
-		//fscanf(input,"%f %f %f\n", &vx , &vy , &vz);
-		fscanf(input,"%f %f %f %f %f %f %d\n", &vx, &vy, &vz, &nx, &ny, &nz, &b_sign);
-		vtx[i][0] = vx;
-		vtx[i][1] = vy;
-		vtx[i][2] = vz;
-
-		normal[i][0] = nx;
-		normal[i][1] = ny;
-		normal[i][2] = nz;
-
-		bound_sign[i] = b_sign;
+		vtx[i][0] = geofrm.verts[i][0];
+		vtx[i][1] = geofrm.verts[i][1];
+		vtx[i][2] = geofrm.verts[i][2];
+		normal[i][0] = geofrm.normals[i][0];
+		normal[i][1] = geofrm.normals[i][1];
+		normal[i][2] = geofrm.normals[i][2];
+		bound_sign[i] = geofrm.bound_sign[i];
 	}
 
 	aspect_min = 10.0;
 	aspect_max = 0.0;
 
-	//	fprintf(output, "tet read begin\n");
-	//	fprintf(output, "%d %d\n", nv, ntet);
-
-	fn2 = fopen("new_mesh2.raw", "w");
+	// Clear temporary storage for this iteration
+	temp_tetrahedra.clear();
+	temp_tetrahedra.reserve(ntet * 4);
 
 	sum0 = 0;	sum1 = 0;	sum2 = 0;	sum3 = 0;	sum4 = 0;	sum5 = 0;
 	sum6 = 0;	sum7 = 0;	sum8 = 0;	sum9 = 0;	sum10 = 0;	sum11 = 0;
@@ -4522,8 +4499,10 @@ void Octree::edge_contraction(geoframe& geofrm) {
 
 	for(i = 0; i < ntet; i++) {
 
-	  //		if(i%10000 == 0) fprintf(output, "%d ", i);
-		fscanf(input, "%d %d %d %d\n", &v0, &v1, &v2, &v3);
+		v0 = geofrm.triangles[4*i][0];
+		v1 = geofrm.triangles[4*i][1];
+		v2 = geofrm.triangles[4*i][2];
+		v3 = geofrm.triangles[4*i+1][2];
 
 		if(v0 == a_vert || v1 == a_vert || v2 == a_vert || v3 == a_vert) {
 			if(v0 != a_vert) {
@@ -4632,7 +4611,10 @@ void Octree::edge_contraction(geoframe& geofrm) {
 				if(vv0 > vv1) {rep[nrep][0] = vv1;   rep[nrep][1] = vv0;}}
 			//else if(i == 50563) {rep[nrep][0] = v2;   rep[nrep][1] = v3;}
 			else {	//if(bound_sign[vv0] == 0 && bound_sign[vv1] == 0) 
-				fprintf(fn2, "%d %d %d %d\n", v0, v1, v2, v3);
+				temp_tetrahedra.push_back(v0);
+				temp_tetrahedra.push_back(v1);
+				temp_tetrahedra.push_back(v2);
+				temp_tetrahedra.push_back(v3);
 				new_ntet++;
 			}
 			//else {
@@ -4650,78 +4632,90 @@ void Octree::edge_contraction(geoframe& geofrm) {
 		}
 		else {
 			if(aspect > 0.0) {
-				fprintf(fn2, "%d %d %d %d\n", v0, v1, v2, v3);
+				temp_tetrahedra.push_back(v0);
+				temp_tetrahedra.push_back(v1);
+				temp_tetrahedra.push_back(v2);
+				temp_tetrahedra.push_back(v3);
 				new_ntet++;
 			}
 		}
 	}
-	fclose(fn2);
-	fclose(input);
 
-	//	fprintf(output, "\ntet read end\n");
+// Build compacted vertex list (removing collapsed vertices)
+new_nv = nv - nrep;
+if(bool_r == 1) new_nv--;
 
-	//	fprintf(output, "%f %f\n", aspect_min, aspect_max);
-	//	fprintf(output, "a_vert, nlist = %d %d\n", a_vert, nlist);
+// Track vertex mapping for compaction
+std::vector<int> old_to_new(nv, -1);
+std::vector<float> compact_verts;
+std::vector<float> compact_normals;
+std::vector<int> compact_boundsigns;
+compact_verts.reserve(new_nv * 3);
+compact_normals.reserve(new_nv * 3);
+compact_boundsigns.reserve(new_nv);
 
-	input = fopen("input.raw", "w");
-	fn2 = fopen("new_mesh2.raw", "r");
+int new_idx = 0;
 
-	new_nv = nv - nrep;
-	if(bool_r == 1) new_nv--;
+for(i = 0; i < nv; i++) {
+	my_bool = 0;
+	for(j = 0; j < nrep; j++) {
+		if(i == rep[j][1]) {my_bool++; break;}
+	}
+	if(bool_r == 1 && i == r_vert) my_bool++;
 
-	fprintf(input, "%d %d\n", new_nv, new_ntet);
-	for(i = 0; i < nv; i++) {
-		my_bool = 0;
-		for(j = 0; j < nrep; j++) {
-			if(i == rep[j][1]) {my_bool++; break;}
+	if(i == a_vert) {
+		sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
+		for(j = 0; j < nlist; j++) {
+			sum_0 += vtx[my_list[j]][0];
+			sum_1 += vtx[my_list[j]][1];
+			sum_2 += vtx[my_list[j]][2];
 		}
-		if(bool_r == 1 && i == r_vert) my_bool++;
+		vtx[i][0] = sum_0/nlist;
+		vtx[i][1] = sum_1/nlist;
+		vtx[i][2] = sum_2/nlist;
 
-		if(i == a_vert) {
-		  //			fprintf(output, "average %d %f %f %f %d\n", i, vtx[i][0], vtx[i][1], vtx[i][2], bound_sign[i]);
-			sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
-			for(j = 0; j < nlist; j++) {
-				sum_0 += vtx[my_list[j]][0];
-				sum_1 += vtx[my_list[j]][1];
-				sum_2 += vtx[my_list[j]][2];
-			}
-			vtx[i][0] = sum_0/nlist;
-			vtx[i][1] = sum_1/nlist;
-			vtx[i][2] = sum_2/nlist;
-			//			fprintf(output, "average %d %f %f %f %d\n", i, vtx[i][0], vtx[i][1], vtx[i][2], bound_sign[i]);
-
-			sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
-			for(j = 0; j < nlist; j++) {
-				sum_0 += normal[my_list[j]][0];
-				sum_1 += normal[my_list[j]][1];
-				sum_2 += normal[my_list[j]][2];
-			}
-			//normal[i][0] = sum_0/nlist;
-			//normal[i][1] = sum_1/nlist;
-			//normal[i][2] = sum_2/nlist;
-		}
-
-		if(my_bool == 0) {
-			fprintf(input, "%f %f %f %f %f %f %d\n", vtx[i][0], vtx[i][1], vtx[i][2], 
-				normal[i][0], normal[i][1], normal[i][2], bound_sign[i]);
-			//fprintf(input, "%f %f %f\n", vtx[i][0], vtx[i][1], vtx[i][2]);
+		sum_0 = 0.0;	sum_1 = 0.0;	sum_2 = 0.0;
+		for(j = 0; j < nlist; j++) {
+			sum_0 += normal[my_list[j]][0];
+			sum_1 += normal[my_list[j]][1];
+			sum_2 += normal[my_list[j]][2];
 		}
 	}
 
-	aspect_min = 10.0;
-	aspect_max = 0.0;
+	if(my_bool == 0) {
+		old_to_new[i] = new_idx++;
+		compact_verts.push_back(vtx[i][0]);
+		compact_verts.push_back(vtx[i][1]);
+		compact_verts.push_back(vtx[i][2]);
+		compact_normals.push_back(normal[i][0]);
+		compact_normals.push_back(normal[i][1]);
+		compact_normals.push_back(normal[i][2]);
+		compact_boundsigns.push_back(bound_sign[i]);
+	}
+}aspect_min = 10.0;
+aspect_max = 0.0;
 
-	int new_ntet0 = new_ntet;
-	for(i = 0; i < new_ntet; i++) {
-		if(i%10000 == 0) printf("%d ", i);
-		fscanf(fn2, "%d %d %d %d\n", &v0, &v1, &v2, &v3);
-		
-		for(j = 0; j < nrep; j++) {
-			if(v0 == rep[j][1]) v0 = rep[j][0];
-			if(v1 == rep[j][1]) v1 = rep[j][0];
-			if(v2 == rep[j][1]) v2 = rep[j][0];
-			if(v3 == rep[j][1]) v3 = rep[j][0];
-		}
+int new_ntet0 = new_ntet;
+
+// Process tetrahedra with vertex remapping
+final_tets.clear();
+final_tets.reserve(new_ntet * 4);
+
+// Note: Cannot parallelize this loop due to final_tets.push_back() race condition
+for(i = 0; i < new_ntet; i++) {
+	if(i%10000 == 0) printf("%d ", i);
+	
+	v0 = temp_tetrahedra[i*4 + 0];
+	v1 = temp_tetrahedra[i*4 + 1];
+	v2 = temp_tetrahedra[i*4 + 2];
+	v3 = temp_tetrahedra[i*4 + 3];
+	
+	for(j = 0; j < nrep; j++) {
+		if(v0 == rep[j][1]) v0 = rep[j][0];
+		if(v1 == rep[j][1]) v1 = rep[j][0];
+		if(v2 == rep[j][1]) v2 = rep[j][0];
+		if(v3 == rep[j][1]) v3 = rep[j][0];
+	}
 		  
 		for(j = 0; j < 6; j++) e[j] = 0.0;
 
@@ -4750,95 +4744,81 @@ void Octree::edge_contraction(geoframe& geofrm) {
 			
 			vv0 = v0;	vv1 = v1;	vv2 = v2;	vv3 = v3;
 			for(j = 0; j < nrep; j++) {
-				if(v0 > rep[j][1]) vv0--;
-				if(v1 > rep[j][1]) vv1--;
-				if(v2 > rep[j][1]) vv2--;
-				if(v3 > rep[j][1]) vv3--;
-			}
-
-			if(bool_r == 1) {
-				if(v0 > r_vert) vv0--;
-				if(v1 > r_vert) vv1--;
-				if(v2 > r_vert) vv2--;
-				if(v3 > r_vert) vv3--;
-			}
-
-			for(j = 0; j < 3; j++) {
-				mv0[j] = vtx[vv0][j];	mv1[j] = vtx[vv1][j];
-				mv2[j] = vtx[vv2][j];	mv3[j] = vtx[vv3][j];
-			}
-			s = geofrm.testTetrahedron1(mv0, mv1, mv2, mv3);
-			if(6.0f*s*1.0e8 < 0.0f)
-				fprintf(input, "%d %d %d %d\n", vv0, vv2, vv1, vv3);
-			else
-				fprintf(input, "%d %d %d %d\n", vv0, vv1, vv2, vv3);
+			if(v0 > rep[j][1]) vv0--;
+			if(v1 > rep[j][1]) vv1--;
+			if(v2 > rep[j][1]) vv2--;
+			if(v3 > rep[j][1]) vv3--;
 		}
-	}
 
-	//	fprintf(output, "\n%f %f\n", aspect_min, aspect_max);
-	//	fprintf(output, "\n%d %d %d\n", new_nv, new_ntet, new_ntet0);
+		if(bool_r == 1) {
+			if(v0 > r_vert) vv0--;
+			if(v1 > r_vert) vv1--;
+			if(v2 > r_vert) vv2--;
+			if(v3 > r_vert) vv3--;
+		}
 
-
-	fclose(fn2);
-	fclose(input);
-
-	for(i = 0; i < 10; i++)	delete [] rep[i];
-	delete [] rep;
-	delete [] bound_sign;
-	for(i = 0; i < nv; i++)	delete [] vtx[i];
-	delete [] vtx;
-	for(i = 0; i < nv; i++)	delete [] normal[i];
-	delete [] normal;
-
-	//	fprintf(output, "nrep = %d\n", nrep);
-	if(nrep == 0) break;
-	else new_edge_ratio = aspect_max - 1.0e-6;
-	if(new_edge_ratio < edge_ratio) break;
-
-	}	// end loop index
-
-//	fprintf(output, "sum = %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7,
-//		sum8, sum9, sum10, sum11, sum12, sum13, sum14, sum15, 
-//		sum0+sum1+sum2+sum3+sum4+sum5+sum6+sum7+sum8+sum9+sum10+sum11+sum12+sum13+sum14+sum15);
-
-	input = fopen("input.raw", "r");
-	fscanf(input, "%d %d\n", &nv, &ntet);
-	geofrm.numverts = nv;
-	geofrm.numtris = ntet*4;
-	for (i = 0; i < nv; i++) {
-		fscanf(input,"%f %f %f %f %f %f %d\n", &vx, &vy, &vz, &nx, &ny, &nz, &b_sign);
-		geofrm.verts[i][0] = vx;
-		geofrm.verts[i][1] = vy;
-		geofrm.verts[i][2] = vz;
-
-		geofrm.normals[i][0] = nx;
-		geofrm.normals[i][1] = ny;
-		geofrm.normals[i][2] = nz;
-
-		geofrm.bound_sign[i] = b_sign;
-	}
-	for (i = 0; i < ntet; i++) {
-		fscanf(input,"%d %d %d %d\n", &v0, &v1, &v2, &v3);
 		for(j = 0; j < 3; j++) {
-			mv0[j] = geofrm.verts[v0][j];	mv1[j] = geofrm.verts[v1][j];
-			mv2[j] = geofrm.verts[v2][j];	mv3[j] = geofrm.verts[v3][j];
+			mv0[j] = vtx[vv0][j];	mv1[j] = vtx[vv1][j];
+			mv2[j] = vtx[vv2][j];	mv3[j] = vtx[vv3][j];
 		}
 		s = geofrm.testTetrahedron1(mv0, mv1, mv2, mv3);
 		if(6.0f*s*1.0e8 < 0.0f) {
-			index = v1;	v1 = v2; v2 = index; 
+			final_tets.push_back(vv0);
+			final_tets.push_back(vv2);
+			final_tets.push_back(vv1);
+			final_tets.push_back(vv3);
 		}
-		geofrm.triangles[4*i][0] = v0;		geofrm.triangles[4*i][1] = v1;		geofrm.triangles[4*i][2] = v2; 
-		geofrm.triangles[4*i+1][0] = v2;	geofrm.triangles[4*i+1][1] = v1;	geofrm.triangles[4*i+1][2] = v3; 
-		geofrm.triangles[4*i+2][0] = v0;	geofrm.triangles[4*i+2][1] = v2;	geofrm.triangles[4*i+2][2] = v3; 
-		geofrm.triangles[4*i+3][0] = v0;	geofrm.triangles[4*i+3][1] = v3;	geofrm.triangles[4*i+3][2] = v1; 
+		else {
+			final_tets.push_back(vv0);
+			final_tets.push_back(vv1);
+			final_tets.push_back(vv2);
+			final_tets.push_back(vv3);
+		}
 	}
-	fclose(input);
-
-//	fclose(output);
-
 }
 
-// sign == 0 -- improve the Joe-Liu parameter
+// Update geoframe for next iteration with compacted data
+geofrm.numverts = new_nv;
+geofrm.numtris = temp_tetrahedra.size();
+
+for (i = 0; i < new_nv; i++) {
+	geofrm.verts[i][0] = compact_verts[i*3 + 0];
+	geofrm.verts[i][1] = compact_verts[i*3 + 1];
+	geofrm.verts[i][2] = compact_verts[i*3 + 2];
+	geofrm.normals[i][0] = compact_normals[i*3 + 0];
+	geofrm.normals[i][1] = compact_normals[i*3 + 1];
+	geofrm.normals[i][2] = compact_normals[i*3 + 2];
+	geofrm.bound_sign[i] = compact_boundsigns[i];
+}
+
+ntet = final_tets.size() / 4;
+for (i = 0; i < ntet; i++) {
+	v0 = final_tets[i*4 + 0];
+	v1 = final_tets[i*4 + 1];
+	v2 = final_tets[i*4 + 2];
+	v3 = final_tets[i*4 + 3];
+	
+	geofrm.triangles[4*i][0] = v0;		geofrm.triangles[4*i][1] = v1;		geofrm.triangles[4*i][2] = v2;
+	geofrm.triangles[4*i+1][0] = v2;	geofrm.triangles[4*i+1][1] = v1;	geofrm.triangles[4*i+1][2] = v3;
+	geofrm.triangles[4*i+2][0] = v0;	geofrm.triangles[4*i+2][1] = v2;	geofrm.triangles[4*i+2][2] = v3;
+	geofrm.triangles[4*i+3][0] = v0;	geofrm.triangles[4*i+3][1] = v3;	geofrm.triangles[4*i+3][2] = v1;
+}
+
+for(i = 0; i < 10; i++)	delete [] rep[i];
+delete [] rep;
+delete [] bound_sign;
+for(i = 0; i < nv; i++)	delete [] vtx[i];
+delete [] vtx;
+for(i = 0; i < nv; i++)	delete [] normal[i];
+delete [] normal;
+
+if(nrep == 0) break;
+else new_edge_ratio = aspect_max - 1.0e-6;
+if(new_edge_ratio < edge_ratio) break;
+
+}	// end loop index
+
+}// sign == 0 -- improve the Joe-Liu parameter
 // sign == 1 -- improve the minimal volume
 void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 
@@ -5498,6 +5478,7 @@ void Octree::optimization(geoframe& geofrm) {
 	float temp0 = 0.0f;
 	float temp1 = 0.0f;
 	int num = 0;
+	// Cannot parallelize: race conditions on min/max vars, minAspIndx, hexaIndx, and array writes
 	for(i = 0; i < geofrm.numquads/6; i++) {
 		v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];
 		v2 = geofrm.quads[6*i][2];		v3 = geofrm.quads[6*i][3];
@@ -5699,11 +5680,15 @@ void Octree::optimization(geoframe& geofrm) {
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
+#ifdef _OPENMP
+		#pragma omp parallel for schedule(static)
+#endif
 		for(i = 0; i < geofrm.numverts ; i++) {conditionArr[i] = 1.0f;	jacobianArr[i] = 1.0f;	oddyArr[i] = 0.0f;}
 		jaco_min = 1.0f;		jaco_max = -1.0f;
 		oddy_min = 1000.0f;		oddy_max = -1000.0f;
 		cond_min = 1000.0f;		cond_max = -1000.0f;
 		temp = 0.0f;	temp0 = 0.0f;	temp1 = 0.0f;	num = 0;
+		// Cannot parallelize: race conditions on min/max vars and array writes
 		for(i = 0; i < geofrm.numquads/6; i++) {
 
 			v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];
