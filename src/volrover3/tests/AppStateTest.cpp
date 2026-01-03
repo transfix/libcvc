@@ -4,6 +4,7 @@
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 #include <cvc/state.h>
+#include <cvc/state_object.h>
 
 // Need QApplication for Qt types
 class AppStateTest : public ::testing::Test {

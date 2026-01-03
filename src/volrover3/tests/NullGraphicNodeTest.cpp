@@ -4,6 +4,7 @@
 #include <volrover3/GeometryNode.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
+#include <cvc/state_object.h>
 
 class NullGraphicNodeTest : public ::testing::Test {
 protected:

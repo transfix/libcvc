@@ -231,9 +231,8 @@ void GraphicsNode::handleStateChanged(const std::string& childState)
 {
     cvcapp.log(2, str(boost::format("GraphicsNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
-    // Marshal all state changes to main thread to avoid Qt/VTK threading issues
+    // Marshal to main thread via event queue
     runOnMainThread([this, childState]() {
-        
         // Handle state changes for graphics-specific fields
         if (childState == "show_bbox") {
             int showBBox = getState("show_bbox").value<int>();
@@ -252,16 +251,21 @@ void GraphicsNode::handleStateChanged(const std::string& childState)
             setLabelSize(labelSize);
         }
         else if (childState == "label_color") {
-            std::string colorStr = getState("label_color").value<std::string>();
-            std::istringstream iss(colorStr);
-            double r, g, b;
-            char comma;
-            if (iss >> r >> comma >> g >> comma >> b) {
-                setLabelColor(r, g, b);
+            try {
+                std::string colorStr = getState("label_color").value<std::string>();
+                std::istringstream iss(colorStr);
+                double r, g, b;
+                char comma;
+                if (iss >> r >> comma >> g >> comma >> b) {
+                    setLabelColor(r, g, b);
+                }
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - state initialization may trigger before all components are set
             }
         }
         else {
             // Delegate to parent for common fields like visible
+            // Parent will NOT wrap again - we're already on main thread
             SceneNode::handleStateChanged(childState);
         }
         
@@ -281,6 +285,9 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
     
     // Set parent pointer
     child->m_parent = this;
+    
+    // Propagate SceneGraph reference to child
+    child->setSceneGraph(m_sceneGraph);
     
     // Also add as SceneNode child so it gets rendered
     addChild(child);
@@ -427,9 +434,13 @@ void GraphicsNode::setVisible(bool visible)
 {
     SceneNode::setVisible(visible);
     
-    // Update label visibility
+    // Update label visibility (wrap VTK operation)
     if (m_labelActor) {
-        m_labelActor->SetVisibility(m_showLabel && visible);
+        runOnMainThread([this, visible]() {
+            if (m_labelActor) {
+                m_labelActor->SetVisibility(m_showLabel && visible);
+            }
+        });
     }
 }
 
@@ -441,12 +452,17 @@ void GraphicsNode::setShowBBox(bool show)
     m_showBBox = show;
     
     if (m_bboxNode && m_renderer) {
-        if (show) {
-            updateBoundingBoxNode();
-            m_bboxNode->addToRenderer(m_renderer);
-        } else {
-            m_bboxNode->removeFromRenderer(m_renderer);
-        }
+        // Wrap VTK operations in runOnMainThread
+        runOnMainThread([this, show]() {
+            if (m_bboxNode && m_renderer) {
+                if (show) {
+                    updateBoundingBoxNode();
+                    m_bboxNode->addToRenderer(m_renderer);
+                } else {
+                    m_bboxNode->removeFromRenderer(m_renderer);
+                }
+            }
+        });
     }
 }
 
@@ -539,14 +555,20 @@ void GraphicsNode::addToRenderer(vtkRenderer* renderer)
     
     // Add bbox if it should be visible
     if (m_showBBox && m_bboxNode) {
-        updateBoundingBoxNode();
+        runOnMainThread([this]() {
+            updateBoundingBoxNode();
+        });
         m_bboxNode->addToRenderer(renderer);
     }
     
     // Add label if it should be visible
     if (m_showLabel && m_labelActor) {
-        updateLabel();
-        renderer->AddActor2D(m_labelActor);
+        runOnMainThread([this, renderer]() {
+            updateLabel();
+            if (m_labelActor) {
+                renderer->AddActor2D(m_labelActor);
+            }
+        });
     }
 }
 
@@ -554,7 +576,11 @@ void GraphicsNode::removeFromRenderer(vtkRenderer* renderer)
 {
     // Remove label
     if (m_labelActor) {
-        renderer->RemoveActor2D(m_labelActor);
+        runOnMainThread([this, renderer]() {
+            if (m_labelActor) {
+                renderer->RemoveActor2D(m_labelActor);
+            }
+        });
     }
     
     // Remove bbox

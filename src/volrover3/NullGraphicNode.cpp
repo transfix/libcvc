@@ -58,23 +58,20 @@ void NullGraphicNode::handleStateChanged(const std::string& childState)
 {
     cvcapp.log(2, str(boost::format("NullGraphicNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
-    // Marshal to main thread
-    runOnMainThread([this, childState]() {
-        
-        // Handle bounds state changes
-        if (childState == "bounds") {
-            std::string boundsStr = getState("bounds").value<std::string>();
-            std::istringstream iss(boundsStr);
-            double minX, minY, minZ, maxX, maxY, maxZ;
-            char comma;
-            if (iss >> minX >> comma >> minY >> comma >> minZ >> comma 
-                    >> maxX >> comma >> maxY >> comma >> maxZ) {
-                setBounds(minX, minY, minZ, maxX, maxY, maxZ);
-            }
+    // Handle bounds state changes (no VTK calls, so no runOnMainThread needed)
+    if (childState == "bounds") {
+        std::string boundsStr = getState("bounds").value<std::string>();
+        std::istringstream iss(boundsStr);
+        double minX, minY, minZ, maxX, maxY, maxZ;
+        char comma;
+        if (iss >> minX >> comma >> minY >> comma >> minZ >> comma 
+                >> maxX >> comma >> maxY >> comma >> maxZ) {
+            setBounds(minX, minY, minZ, maxX, maxY, maxZ);
         }
-        else {
-            // Delegate to parent for common graphics fields
-            GraphicsNode::handleStateChanged(childState);
-        }
-    });
+    }
+    else {
+        // Delegate to parent for common graphics fields
+        // Parent will handle its own runOnMainThread wrapping
+        GraphicsNode::handleStateChanged(childState);
+    }
 }

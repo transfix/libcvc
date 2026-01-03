@@ -9,6 +9,7 @@
 
 class vtkProp;
 class vtkRenderer;
+class SceneGraph;
 
 class SceneNode : public CVC_NAMESPACE::state_object<SceneNode>
 {
@@ -25,9 +26,13 @@ public:
 
     void addChild(std::shared_ptr<SceneNode> child);
     void removeChild(std::shared_ptr<SceneNode> child);
+    
+    // SceneGraph association (set when node is added to a scene graph)
+    void setSceneGraph(SceneGraph* sceneGraph);
+    SceneGraph* getSceneGraph() const { return m_sceneGraph; }
 
-    // Set a callback to execute state changes on the main thread
-    // The callback receives a function to execute on the main thread
+    // DEPRECATED: Old callback system - kept for compatibility during transition
+    // Use node's SceneGraph::postEvent() instead
     using MainThreadCallback = std::function<void(std::function<void()>)>;
     static void setMainThreadCallback(MainThreadCallback callback);
 
@@ -45,6 +50,7 @@ protected:
     bool m_visible;
     std::vector<std::shared_ptr<SceneNode>> m_children;
     vtkRenderer *m_renderer;
+    SceneGraph* m_sceneGraph;  // Non-owning pointer to parent SceneGraph
 };
 
 #endif // SCENENODE_H

@@ -8,6 +8,11 @@
 
 class VolumeNodeTest : public ::testing::Test {
 protected:
+    static void SetUpTestSuite() {
+        // Disable threading for state_object to avoid race conditions during destruction
+        cvc::state_object<SceneNode>::setUseThreading(false);
+    }
+    
     void SetUp() override {
         // Create a simple test volume with known data range
         testVolume = cvc::volume(

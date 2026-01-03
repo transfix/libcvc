@@ -2,6 +2,7 @@
 #define VTKRENDERWIDGET_H
 
 #include <QWidget>
+#include <QTimer>
 #include <vtkSmartPointer.h>
 #include <memory>
 
@@ -42,6 +43,9 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
 
+private slots:
+    void processSceneGraphEvents();
+
 private:
     void initializeVTK();
     void updateCamera();
@@ -50,6 +54,7 @@ private:
     vtkSmartPointer<vtkRenderer> m_renderer;
     std::shared_ptr<SceneGraph> m_sceneGraph;
     std::unique_ptr<CameraController> m_cameraController;
+    QTimer m_eventTimer;  // Timer for processing SceneGraph events
     
     QPoint m_lastMousePos;
 };

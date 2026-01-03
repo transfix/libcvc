@@ -35,7 +35,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_renderWidget(nullptr)
     , m_transferFunctionWidget(nullptr)
-    , m_sceneGraph(std::make_shared<SceneGraph>())
+    , m_sceneGraph(nullptr)  // Will be created after callback is set
     , m_threadMonitor(nullptr)
     , m_stateTreeWidget(nullptr)
     , m_threadNameLabel(nullptr)
@@ -47,8 +47,8 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle("VolRover3 - Volume Rover Version 3");
     resize(1280, 720);
     
-    // Set up thread-safe state change callback for SceneNode hierarchy
-    // This allows state changes from worker threads to be marshaled to the Qt main thread
+    // Set up thread-safe state change callback for SceneNode hierarchy FIRST
+    // This MUST be done before creating SceneGraph to avoid VTK calls on background threads
     SceneNode::setMainThreadCallback([this](std::function<void()> func) {
         // Check if we're already on the main thread
         if (QThread::currentThread() == this->thread()) {
@@ -59,6 +59,9 @@ MainWindow::MainWindow(QWidget *parent)
             QMetaObject::invokeMethod(this, [func]() { func(); }, Qt::QueuedConnection);
         }
     });
+    
+    // NOW create the scene graph - state changes will be properly marshaled
+    m_sceneGraph = std::make_shared<SceneGraph>();
 
     // Create central render widget
     m_renderWidget = new VTKRenderWidget(this);

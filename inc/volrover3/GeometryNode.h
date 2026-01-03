@@ -54,6 +54,16 @@ public:
     void setRenderMode(GeometryRenderMode mode);
     GeometryRenderMode getRenderMode() const { return m_renderMode; }
     
+    // Material property setters (sync with state tree)
+    void setColor(double r, double g, double b);
+    void setSpecular(double value);
+    void setSpecularPower(double value);
+    void setAmbient(double value);
+    void setDiffuse(double value);
+    void setOpacity(double value);
+    void setPointSize(double size);
+    void setLineWidth(double width);
+    
     // Helper to convert render mode to/from string
     static std::string renderModeToString(GeometryRenderMode mode);
     static GeometryRenderMode stringToRenderMode(const std::string& str);
@@ -68,6 +78,7 @@ protected:
     vtkProp* getProp() override;
     void handleStateChanged(const std::string& childState) override;
     void updatePolyData(const cvc::geometry &geom);
+    void updateRenderModeVTK();  // Helper to update VTK properties from render mode
     void updateMetadata(const cvc::geometry &geom);
     void onDataChanged();
 

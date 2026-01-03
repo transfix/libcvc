@@ -32,6 +32,11 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     // State path: {statePrefix}.graphics.root
     std::string rootStatePath = statePrefix + ".graphics.root";
     m_nullGraphic = std::make_shared<NullGraphicNode>(rootStatePath, "root");
+    
+    // Set SceneGraph reference IMMEDIATELY after construction
+    // This enables threading for event posting (nodes disable threading in constructor)
+    m_nullGraphic->setSceneGraph(this);
+    
     m_nullGraphic->setShowBBox(true);  // Show bbox by default
     m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);  // Default unit cube when empty
     m_graphicsRoot = m_nullGraphic;  // NullGraphic IS the graphics root
@@ -50,10 +55,44 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
 
 SceneGraph::~SceneGraph()
 {
+    // Process any remaining events before shutdown
+    processEvents();
+    
     if (m_renderer) {
         for (auto &node : m_rootNodes) {
             node->removeFromRenderer(m_renderer);
         }
+    }
+    
+    // Clear SceneGraph reference from all nodes
+    for (auto &node : m_rootNodes) {
+        node->setSceneGraph(nullptr);
+    }
+}
+
+void SceneGraph::postEvent(std::function<void()> callback)
+{
+    std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+    m_eventQueue.push(std::move(callback));
+}
+
+void SceneGraph::processEvents()
+{
+    // Process all pending events on the main thread
+    // Extract all events while holding the lock, then execute without lock
+    std::queue<std::function<void()>> events;
+    {
+        std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+        std::swap(events, m_eventQueue);
+    }
+    
+    // Execute all events on the main thread
+    while (!events.empty()) {
+        auto& callback = events.front();
+        if (callback) {
+            callback();
+        }
+        events.pop();
     }
 }
 

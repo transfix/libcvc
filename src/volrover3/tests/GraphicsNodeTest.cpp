@@ -3,6 +3,7 @@
 #include <volrover3/SceneGraph.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
+#include <cvc/state_object.h>
 #include <vtkMatrix4x4.h>
 #include <cmath>
 

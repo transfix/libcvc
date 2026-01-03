@@ -28,9 +28,36 @@ AxisNode::AxisNode(const std::string& statePath, const std::string& name)
     m_axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetFontSize(20);
     m_axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetColor(0.0, 0.0, 1.0);
     
-    // Initialize state tree
+    // Initialize state tree with all rendering attributes
     if (!statePath.empty()) {
         getState("visible").value(1);  // Visible by default
+        
+        // Axis length (for all axes)
+        getState("axis_length").value(2.0);
+        
+        // Shaft type (0=cylinder, 1=line)
+        getState("shaft_type_line").value(1);
+        
+        // Show axis labels
+        getState("show_labels").value(1);
+        
+        // Label font size
+        getState("label_font_size").value(20);
+        
+        // X axis label color (red by default)
+        getState("x_label_color_r").value(1.0);
+        getState("x_label_color_g").value(0.0);
+        getState("x_label_color_b").value(0.0);
+        
+        // Y axis label color (green by default)
+        getState("y_label_color_r").value(0.0);
+        getState("y_label_color_g").value(1.0);
+        getState("y_label_color_b").value(0.0);
+        
+        // Z axis label color (blue by default)
+        getState("z_label_color_r").value(0.0);
+        getState("z_label_color_g").value(0.0);
+        getState("z_label_color_b").value(1.0);
     }
 }
 
@@ -45,7 +72,7 @@ vtkProp* AxisNode::getProp()
 
 void AxisNode::setAxisLength(double length)
 {
-    m_axesActor->SetTotalLength(length, length, length);
+    getState("axis_length").value(length);
 }
 
 cvc::bounding_box AxisNode::getBoundingBox() const
@@ -56,6 +83,76 @@ cvc::bounding_box AxisNode::getBoundingBox() const
 
 void AxisNode::handleStateChanged(const std::string& childState)
 {
-    // Delegate to parent GraphicsNode for common handling (visible, etc.)
-    GraphicsNode::handleStateChanged(childState);
+    // Synchronize rendering attributes from state tree
+    // All VTK operations MUST be wrapped in runOnMainThread() for thread safety
+    if (childState == "axis_length") {
+        runOnMainThread([this]() {
+            double length = getState("axis_length").value<double>();
+            m_axesActor->SetTotalLength(length, length, length);
+        });
+    }
+    else if (childState == "shaft_type_line") {
+        runOnMainThread([this]() {
+            bool useLine = getState("shaft_type_line").value<bool>();
+            if (useLine) {
+                m_axesActor->SetShaftTypeToLine();
+            } else {
+                m_axesActor->SetShaftTypeToCylinder();
+            }
+        });
+    }
+    else if (childState == "show_labels") {
+        runOnMainThread([this]() {
+            bool showLabels = getState("show_labels").value<bool>();
+            m_axesActor->SetAxisLabels(showLabels ? 1 : 0);
+        });
+    }
+    else if (childState == "label_font_size") {
+        runOnMainThread([this]() {
+            int fontSize = getState("label_font_size").value<int>();
+            m_axesActor->GetXAxisCaptionActor2D()->GetCaptionTextProperty()->SetFontSize(fontSize);
+            m_axesActor->GetYAxisCaptionActor2D()->GetCaptionTextProperty()->SetFontSize(fontSize);
+            m_axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetFontSize(fontSize);
+        });
+    }
+    else if (childState == "x_label_color_r" || childState == "x_label_color_g" || childState == "x_label_color_b") {
+        runOnMainThread([this]() {
+            try {
+                double r = getState("x_label_color_r").value<double>();
+                double g = getState("x_label_color_g").value<double>();
+                double b = getState("x_label_color_b").value<double>();
+                m_axesActor->GetXAxisCaptionActor2D()->GetCaptionTextProperty()->SetColor(r, g, b);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "y_label_color_r" || childState == "y_label_color_g" || childState == "y_label_color_b") {
+        runOnMainThread([this]() {
+            try {
+                double r = getState("y_label_color_r").value<double>();
+                double g = getState("y_label_color_g").value<double>();
+                double b = getState("y_label_color_b").value<double>();
+                m_axesActor->GetYAxisCaptionActor2D()->GetCaptionTextProperty()->SetColor(r, g, b);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "z_label_color_r" || childState == "z_label_color_g" || childState == "z_label_color_b") {
+        runOnMainThread([this]() {
+            try {
+                double r = getState("z_label_color_r").value<double>();
+                double g = getState("z_label_color_g").value<double>();
+                double b = getState("z_label_color_b").value<double>();
+                m_axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetColor(r, g, b);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else {
+        // Delegate to parent for common fields (visible, show_bbox, label, etc.)
+        GraphicsNode::handleStateChanged(childState);
+    }
 }

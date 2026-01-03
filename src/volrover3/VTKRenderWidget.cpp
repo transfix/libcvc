@@ -16,6 +16,10 @@ VTKRenderWidget::VTKRenderWidget(QWidget *parent)
     , m_cameraController(std::make_unique<CameraController>())
 {
     initializeVTK();
+    
+    // Set up timer to process SceneGraph events on main thread
+    connect(&m_eventTimer, &QTimer::timeout, this, &VTKRenderWidget::processSceneGraphEvents);
+    m_eventTimer.start(16);  // ~60fps event processing
 }
 
 VTKRenderWidget::~VTKRenderWidget()
@@ -126,7 +130,14 @@ void VTKRenderWidget::resetCamera()
 
 void VTKRenderWidget::render()
 {
-    if (renderWindow()) {
-        renderWindow()->Render();
+    if (m_renderWindow) {
+        m_renderWindow->Render();
+    }
+}
+
+void VTKRenderWidget::processSceneGraphEvents()
+{
+    if (m_sceneGraph) {
+        m_sceneGraph->processEvents();
     }
 }

@@ -1,11 +1,12 @@
 #include <volrover3/SceneNode.h>
+#include <volrover3/SceneGraph.h>
 #include <cvc/app.h>
 #include <vtkProp.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <algorithm>
 
-// Static member for main thread callback
+// Static member for main thread callback (DEPRECATED - use SceneGraph event queue)
 SceneNode::MainThreadCallback SceneNode::s_mainThreadCallback;
 
 void SceneNode::setMainThreadCallback(MainThreadCallback callback)
@@ -13,21 +14,58 @@ void SceneNode::setMainThreadCallback(MainThreadCallback callback)
     s_mainThreadCallback = callback;
 }
 
+void SceneNode::setSceneGraph(SceneGraph* sceneGraph)
+{
+    m_sceneGraph = sceneGraph;
+    
+    // Enable threading now that we have a SceneGraph for event posting
+    // If sceneGraph is null (cleanup), use static threading setting
+    if (sceneGraph) {
+        setInstanceThreading(state_object<SceneNode>::getUseThreading());
+    } else {
+        clearInstanceThreading();
+    }
+    
+    // Propagate to all children
+    for (auto& child : m_children) {
+        child->setSceneGraph(sceneGraph);
+    }
+}
+
 void SceneNode::runOnMainThread(std::function<void()> func)
 {
+    // If threading is disabled (tests or during construction), execute immediately
+    if (!getInstanceThreading()) {
+        func();
+        return;
+    }
+    
+    // Try node's SceneGraph event queue first (production with threading)
+    if (m_sceneGraph) {
+        m_sceneGraph->postEvent(std::move(func));
+        return;
+    }
+    
+    // Fallback to old callback system (for Qt-based scenarios without SceneGraph)
     if (s_mainThreadCallback) {
         s_mainThreadCallback(func);
-    } else {
-        // No callback set, execute immediately (may not be thread-safe!)
-        func();
+        return;
     }
+    
+    // No queue or callback available - execute immediately as last resort
+    // This should rarely happen in production
+    func();
 }
 
 SceneNode::SceneNode(const std::string& statePath)
     : state_object<SceneNode>(statePath)
     , m_visible(true)
     , m_renderer(nullptr)
+    , m_sceneGraph(nullptr)
 {
+    // Disable threading for this instance during construction
+    // Will be enabled when SceneGraph reference is set
+    setInstanceThreading(false);
     // Initialize visible state
     if (!statePath.empty()) {
         getState("visible").value(1);  // Default to visible
@@ -45,7 +83,13 @@ void SceneNode::addToRenderer(vtkRenderer *renderer)
 {
     m_renderer = renderer;
     if (m_visible && getProp()) {
-        renderer->AddViewProp(getProp());
+        // Wrap VTK operation in runOnMainThread
+        runOnMainThread([this, renderer]() {
+            vtkProp* prop = getProp();
+            if (prop) {
+                renderer->AddViewProp(prop);
+            }
+        });
     }
 
     for (auto &child : m_children) {
@@ -56,7 +100,13 @@ void SceneNode::addToRenderer(vtkRenderer *renderer)
 void SceneNode::removeFromRenderer(vtkRenderer *renderer)
 {
     if (getProp()) {
-        renderer->RemoveViewProp(getProp());
+        // Wrap VTK operation in runOnMainThread
+        runOnMainThread([this, renderer]() {
+            vtkProp* prop = getProp();
+            if (prop) {
+                renderer->RemoveViewProp(prop);
+            }
+        });
     }
 
     for (auto &child : m_children) {
@@ -81,11 +131,17 @@ void SceneNode::setVisible(bool visible)
     m_visible = visible;
 
     if (m_renderer && getProp()) {
-        if (visible) {
-            m_renderer->AddViewProp(getProp());
-        } else {
-            m_renderer->RemoveViewProp(getProp());
-        }
+        // Wrap VTK operations in runOnMainThread for thread safety
+        runOnMainThread([this, visible]() {
+            vtkProp* prop = getProp();
+            if (m_renderer && prop) {
+                if (visible) {
+                    m_renderer->AddViewProp(prop);
+                } else {
+                    m_renderer->RemoveViewProp(prop);
+                }
+            }
+        });
     }
 
     for (auto &child : m_children) {
@@ -116,9 +172,8 @@ void SceneNode::handleStateChanged(const std::string& childState)
 {
     cvcapp.log(2, str(boost::format("SceneNode::handleStateChanged: %s") % childState));
     
-    // Marshal state changes to main thread to avoid Qt/VTK threading issues
+    // Marshal to main thread via event queue
     runOnMainThread([this, childState]() {
-        
         // Handle visible state changes
         if (childState == "visible") {
             int visible = getState("visible").value<int>();

@@ -22,6 +22,9 @@
 
 /* $Id: StateObject.h 5883 2012-07-20 19:52:38Z transfix $ */
 
+#ifndef __CVC_STATE_OBJECT_H__
+#define __CVC_STATE_OBJECT_H__
+
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <set>
@@ -176,7 +179,9 @@ namespace CVC_NAMESPACE
   {
   public:
     state_object(const std::string state_path = std::string()) 
-      : _batchDepth(0), 
+      : _batchDepth(0),
+        _hasInstanceThreading(false),
+        _instanceThreading(false),
         _state_path(state_path.empty() ?
           cvcapp.dataTypeName<This>()+
           CVC_NAMESPACE::state::SEPARATOR+
@@ -263,7 +268,8 @@ namespace CVC_NAMESPACE
       }
       
       // Spawn threads outside the lock
-      if (_useThreading) {
+      bool useThreading = _hasInstanceThreading ? _instanceThreading : _useThreading;
+      if (useThreading) {
         // Threading enabled - spawn threads for each change
         BOOST_FOREACH(const std::string& childState, pendingCopy)
           {
@@ -322,6 +328,26 @@ namespace CVC_NAMESPACE
     {
       return _useThreading;
     }
+    
+    // Per-instance threading control (overrides static if set)
+    void setInstanceThreading(bool useThreading)
+    {
+      _instanceThreading = useThreading;
+      _hasInstanceThreading = true;
+    }
+    
+    bool getInstanceThreading() const
+    {
+      if (_hasInstanceThreading) {
+        return _instanceThreading;
+      }
+      return _useThreading;
+    }
+    
+    void clearInstanceThreading()
+    {
+      _hasInstanceThreading = false;
+    }
 
   protected:
     std::string _state_path;
@@ -335,6 +361,10 @@ namespace CVC_NAMESPACE
 
     // State locking support
     mutable boost::mutex _stateLockMutex;
+    
+    // Per-instance threading control
+    bool _hasInstanceThreading;
+    bool _instanceThreading;
 
     // Threading control - can be disabled for tests
     static bool _useThreading;
@@ -367,17 +397,20 @@ namespace CVC_NAMESPACE
       if (_batchDepth > 0) {
         // Batching enabled - queue this change (set automatically deduplicates)
         _pendingChanges.insert(childState);
-      } else if (_useThreading) {
-        // Threading enabled - spawn thread (unlock first to avoid holding lock)
-        lock.unlock();
-        cvcapp.startThread(stateName(childState) + "_stateChanged",
-                           boost::bind(&state_object<This>::handleStateChanged, 
-                                       boost::ref(*this),
-                                       childState));
       } else {
-        // Threading disabled - call synchronously (unlock first)
-        lock.unlock();
-        handleStateChanged(childState);
+        bool useThreading = _hasInstanceThreading ? _instanceThreading : _useThreading;
+        if (useThreading) {
+          // Threading enabled - spawn thread (unlock first to avoid holding lock)
+          lock.unlock();
+          cvcapp.startThread(stateName(childState) + "_stateChanged",
+                             boost::bind(&state_object<This>::handleStateChanged, 
+                                         boost::ref(*this),
+                                         childState));
+        } else {
+          // Threading disabled - call synchronously (unlock first)
+          lock.unlock();
+          handleStateChanged(childState);
+        }
       }
     }
   };
@@ -386,3 +419,5 @@ namespace CVC_NAMESPACE
   template <class This>
   bool state_object<This>::_useThreading = true;
 }
+
+#endif // __CVC_STATE_OBJECT_H__

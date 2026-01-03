@@ -61,9 +61,43 @@ GridNode::GridNode(const std::string& statePath, const std::string& name)
     m_xyActor->GetProperty()->SetLineWidth(1.0);
     m_xyActor->GetProperty()->SetOpacity(0.5);
 
-    // Initialize state tree
+    // Initialize state tree with all rendering attributes
     if (!statePath.empty()) {
         getState("visible").value(1);  // Visible by default
+        
+        // Plane visibility
+        getState("yz_plane_visible").value(1);
+        getState("xz_plane_visible").value(1);
+        getState("xy_plane_visible").value(1);
+        
+        // Plane colors (RGB 0-1)
+        getState("yz_plane_color_r").value(0.5);
+        getState("yz_plane_color_g").value(0.5);
+        getState("yz_plane_color_b").value(0.5);
+        
+        getState("xz_plane_color_r").value(0.5);
+        getState("xz_plane_color_g").value(0.5);
+        getState("xz_plane_color_b").value(0.5);
+        
+        getState("xy_plane_color_r").value(0.5);
+        getState("xy_plane_color_g").value(0.5);
+        getState("xy_plane_color_b").value(0.5);
+        
+        // Grid divisions
+        getState("divisions_x").value(64);
+        getState("divisions_y").value(64);
+        getState("divisions_z").value(64);
+        
+        // Tick intervals
+        getState("tick_interval_x").value(8);
+        getState("tick_interval_y").value(8);
+        getState("tick_interval_z").value(8);
+        
+        // Tick label properties
+        getState("tick_label_color_r").value(1.0);
+        getState("tick_label_color_g").value(1.0);
+        getState("tick_label_color_b").value(1.0);
+        getState("tick_label_font_size").value(12);
     }
 
     createGridPlanes();
@@ -147,32 +181,166 @@ cvc::bounding_box GridNode::getBoundingBox() const
 
 void GridNode::handleStateChanged(const std::string& childState)
 {
-    // Delegate to parent GraphicsNode for common handling (visible, etc.)
-    GraphicsNode::handleStateChanged(childState);
+    // Synchronize rendering attributes from state tree
+    // All VTK operations MUST be wrapped in runOnMainThread() for thread safety
+    if (childState == "yz_plane_visible") {
+        runOnMainThread([this]() {
+            m_yzPlaneVisible = getState("yz_plane_visible").value<bool>();
+            m_yzActor->SetVisibility(m_yzPlaneVisible);
+            for (auto& actor : m_yzTickLabelActors) {
+                actor->SetVisibility(m_yzPlaneVisible);
+            }
+        });
+    }
+    else if (childState == "xz_plane_visible") {
+        runOnMainThread([this]() {
+            m_xzPlaneVisible = getState("xz_plane_visible").value<bool>();
+            m_xzActor->SetVisibility(m_xzPlaneVisible);
+            for (auto& actor : m_xzTickLabelActors) {
+                actor->SetVisibility(m_xzPlaneVisible);
+            }
+        });
+    }
+    else if (childState == "xy_plane_visible") {
+        runOnMainThread([this]() {
+            m_xyPlaneVisible = getState("xy_plane_visible").value<bool>();
+            m_xyActor->SetVisibility(m_xyPlaneVisible);
+            for (auto& actor : m_xyTickLabelActors) {
+                actor->SetVisibility(m_xyPlaneVisible);
+            }
+        });
+    }
+    else if (childState == "yz_plane_color_r" || childState == "yz_plane_color_g" || childState == "yz_plane_color_b") {
+        runOnMainThread([this]() {
+            // Only update if all color components can be read
+            try {
+                m_yzPlaneColor[0] = getState("yz_plane_color_r").value<double>();
+                m_yzPlaneColor[1] = getState("yz_plane_color_g").value<double>();
+                m_yzPlaneColor[2] = getState("yz_plane_color_b").value<double>();
+                m_yzActor->GetProperty()->SetColor(m_yzPlaneColor);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "xz_plane_color_r" || childState == "xz_plane_color_g" || childState == "xz_plane_color_b") {
+        runOnMainThread([this]() {
+            try {
+                m_xzPlaneColor[0] = getState("xz_plane_color_r").value<double>();
+                m_xzPlaneColor[1] = getState("xz_plane_color_g").value<double>();
+                m_xzPlaneColor[2] = getState("xz_plane_color_b").value<double>();
+                m_xzActor->GetProperty()->SetColor(m_xzPlaneColor);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "xy_plane_color_r" || childState == "xy_plane_color_g" || childState == "xy_plane_color_b") {
+        runOnMainThread([this]() {
+            try {
+                m_xyPlaneColor[0] = getState("xy_plane_color_r").value<double>();
+                m_xyPlaneColor[1] = getState("xy_plane_color_g").value<double>();
+                m_xyPlaneColor[2] = getState("xy_plane_color_b").value<double>();
+                m_xyActor->GetProperty()->SetColor(m_xyPlaneColor);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "divisions_x" || childState == "divisions_y" || childState == "divisions_z") {
+        runOnMainThread([this]() {
+            try {
+                m_divisionsX = std::max(1, getState("divisions_x").value<int>());
+                m_divisionsY = std::max(1, getState("divisions_y").value<int>());
+                m_divisionsZ = std::max(1, getState("divisions_z").value<int>());
+                createGridPlanes();
+                updateTickLabelsInRenderer();
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "tick_interval_x" || childState == "tick_interval_y" || childState == "tick_interval_z") {
+        runOnMainThread([this]() {
+            try {
+                m_tickIntervalX = std::max(1, getState("tick_interval_x").value<int>());
+                m_tickIntervalY = std::max(1, getState("tick_interval_y").value<int>());
+                m_tickIntervalZ = std::max(1, getState("tick_interval_z").value<int>());
+                updateTickLabelsInRenderer();
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "tick_label_color_r" || childState == "tick_label_color_g" || childState == "tick_label_color_b") {
+        runOnMainThread([this]() {
+            try {
+                m_tickLabelColor[0] = getState("tick_label_color_r").value<double>();
+                m_tickLabelColor[1] = getState("tick_label_color_g").value<double>();
+                m_tickLabelColor[2] = getState("tick_label_color_b").value<double>();
+                
+                // Update all existing labels
+                auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
+                    for (auto& actor : actors) {
+                        vtkTextMapper* mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
+                        if (mapper) {
+                            mapper->GetTextProperty()->SetColor(m_tickLabelColor);
+                        }
+                    }
+                };
+                
+                updateLabels(m_yzTickLabelActors);
+                updateLabels(m_xzTickLabelActors);
+                updateLabels(m_xyTickLabelActors);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "tick_label_font_size") {
+        runOnMainThread([this]() {
+            m_tickLabelFontSize = std::max(1, getState("tick_label_font_size").value<int>());
+            
+            // Update all existing labels
+            auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
+                for (auto& actor : actors) {
+                    vtkTextMapper* mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
+                    if (mapper) {
+                        mapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
+                    }
+                }
+            };
+            
+            updateLabels(m_yzTickLabelActors);
+            updateLabels(m_xzTickLabelActors);
+            updateLabels(m_xyTickLabelActors);
+        });
+    }
+    else {
+        // Delegate to parent for common fields (visible, show_bbox, label, etc.)
+        GraphicsNode::handleStateChanged(childState);
+    }
 }
 
 void GridNode::setYZPlaneColor(double r, double g, double b)
 {
-    m_yzPlaneColor[0] = r;
-    m_yzPlaneColor[1] = g;
-    m_yzPlaneColor[2] = b;
-    m_yzActor->GetProperty()->SetColor(r, g, b);
+    getState("yz_plane_color_r").value(r);
+    getState("yz_plane_color_g").value(g);
+    getState("yz_plane_color_b").value(b);
 }
 
 void GridNode::setXZPlaneColor(double r, double g, double b)
 {
-    m_xzPlaneColor[0] = r;
-    m_xzPlaneColor[1] = g;
-    m_xzPlaneColor[2] = b;
-    m_xzActor->GetProperty()->SetColor(r, g, b);
+    getState("xz_plane_color_r").value(r);
+    getState("xz_plane_color_g").value(g);
+    getState("xz_plane_color_b").value(b);
 }
 
 void GridNode::setXYPlaneColor(double r, double g, double b)
 {
-    m_xyPlaneColor[0] = r;
-    m_xyPlaneColor[1] = g;
-    m_xyPlaneColor[2] = b;
-    m_xyActor->GetProperty()->SetColor(r, g, b);
+    getState("xy_plane_color_r").value(r);
+    getState("xy_plane_color_g").value(g);
+    getState("xy_plane_color_b").value(b);
 }
 
 void GridNode::getYZPlaneColor(double& r, double& g, double& b) const
@@ -198,38 +366,24 @@ void GridNode::getXYPlaneColor(double& r, double& g, double& b) const
 
 void GridNode::setYZPlaneVisible(bool visible)
 {
-    m_yzPlaneVisible = visible;
-    m_yzActor->SetVisibility(visible);
-    for (auto& actor : m_yzTickLabelActors) {
-        actor->SetVisibility(visible);
-    }
+    getState("yz_plane_visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setXZPlaneVisible(bool visible)
 {
-    m_xzPlaneVisible = visible;
-    m_xzActor->SetVisibility(visible);
-    for (auto& actor : m_xzTickLabelActors) {
-        actor->SetVisibility(visible);
-    }
+    getState("xz_plane_visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setXYPlaneVisible(bool visible)
 {
-    m_xyPlaneVisible = visible;
-    m_xyActor->SetVisibility(visible);
-    for (auto& actor : m_xyTickLabelActors) {
-        actor->SetVisibility(visible);
-    }
+    getState("xy_plane_visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setGridDivisions(int x, int y, int z)
 {
-    m_divisionsX = std::max(1, x);
-    m_divisionsY = std::max(1, y);
-    m_divisionsZ = std::max(1, z);
-    createGridPlanes();
-    updateTickLabelsInRenderer();
+    getState("divisions_x").value(std::max(1, x));
+    getState("divisions_y").value(std::max(1, y));
+    getState("divisions_z").value(std::max(1, z));
 }
 
 void GridNode::getGridDivisions(int& x, int& y, int& z) const
@@ -241,10 +395,9 @@ void GridNode::getGridDivisions(int& x, int& y, int& z) const
 
 void GridNode::setTickIntervals(int x, int y, int z)
 {
-    m_tickIntervalX = std::max(1, x);
-    m_tickIntervalY = std::max(1, y);
-    m_tickIntervalZ = std::max(1, z);
-    updateTickLabelsInRenderer();
+    getState("tick_interval_x").value(std::max(1, x));
+    getState("tick_interval_y").value(std::max(1, y));
+    getState("tick_interval_z").value(std::max(1, z));
 }
 
 void GridNode::getTickIntervals(int& x, int& y, int& z) const
@@ -256,23 +409,9 @@ void GridNode::getTickIntervals(int& x, int& y, int& z) const
 
 void GridNode::setTickLabelColor(double r, double g, double b)
 {
-    m_tickLabelColor[0] = r;
-    m_tickLabelColor[1] = g;
-    m_tickLabelColor[2] = b;
-    
-    // Update all existing labels
-    auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
-        for (auto& actor : actors) {
-            vtkTextMapper* mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
-            if (mapper) {
-                mapper->GetTextProperty()->SetColor(r, g, b);
-            }
-        }
-    };
-    
-    updateLabels(m_yzTickLabelActors);
-    updateLabels(m_xzTickLabelActors);
-    updateLabels(m_xyTickLabelActors);
+    getState("tick_label_color_r").value(r);
+    getState("tick_label_color_g").value(g);
+    getState("tick_label_color_b").value(b);
 }
 
 void GridNode::getTickLabelColor(double& r, double& g, double& b) const
@@ -284,21 +423,7 @@ void GridNode::getTickLabelColor(double& r, double& g, double& b) const
 
 void GridNode::setTickLabelFontSize(int size)
 {
-    m_tickLabelFontSize = std::max(1, size);
-    
-    // Update all existing labels
-    auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
-        for (auto& actor : actors) {
-            vtkTextMapper* mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
-            if (mapper) {
-                mapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
-            }
-        }
-    };
-    
-    updateLabels(m_yzTickLabelActors);
-    updateLabels(m_xzTickLabelActors);
-    updateLabels(m_xyTickLabelActors);
+    getState("tick_label_font_size").value(std::max(1, size));
 }
 
 int GridNode::getTickLabelFontSize() const

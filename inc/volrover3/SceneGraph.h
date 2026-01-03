@@ -5,6 +5,9 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <queue>
+#include <mutex>
+#include <functional>
 #include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
 
@@ -37,6 +40,14 @@ public:
 
     void setRenderer(vtkRenderer *renderer);
     void update();
+    
+    // Process pending events on the main thread
+    // This MUST be called regularly from the main event loop
+    void processEvents();
+    
+    // Post a callback to be executed on the main thread during processEvents()
+    // This is thread-safe and can be called from any thread
+    void postEvent(std::function<void()> callback);
 
     // Multi-object graphics management (unified for both geometry and volumes)
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name, const cvc::geometry& geom);
@@ -99,6 +110,10 @@ private:
     
     std::shared_ptr<GridNode> m_gridNode;
     std::shared_ptr<AxisNode> m_axisNode;
+    
+    // Event queue for thread-safe main thread execution
+    std::queue<std::function<void()>> m_eventQueue;
+    std::mutex m_eventQueueMutex;
 
     std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
     

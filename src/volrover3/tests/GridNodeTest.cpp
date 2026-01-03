@@ -16,6 +16,8 @@ protected:
             char** argv = nullptr;
             app = new QApplication(argc, argv);
         }
+        // Disable threading for state_object to avoid race conditions during destruction
+        cvc::state_object<SceneNode>::setUseThreading(false);
     }
     
     void SetUp() override {

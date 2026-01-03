@@ -35,9 +35,28 @@ GeometryNode::GeometryNode(const std::string& statePath, const std::string& name
     m_actor->GetProperty()->SetSpecular(0.3);
     m_actor->GetProperty()->SetSpecularPower(20);
     
-    // Initialize render mode state
+    // Initialize state tree with all rendering attributes
     if (!statePath.empty()) {
+        getState("visible").value(1);  // Visible by default
+        
+        // Render mode
         getState("render_mode").value(renderModeToString(m_renderMode));
+        
+        // Material color (RGB 0-1)
+        getState("color_r").value(0.8);
+        getState("color_g").value(0.8);
+        getState("color_b").value(0.9);
+        
+        // Material properties
+        getState("specular").value(0.3);
+        getState("specular_power").value(20.0);
+        getState("ambient").value(0.0);  // VTK default
+        getState("diffuse").value(1.0);  // VTK default
+        getState("opacity").value(1.0);
+        
+        // Point/line rendering properties
+        getState("point_size").value(3.0);
+        getState("line_width").value(1.0);
     }
 }
 
@@ -50,20 +69,78 @@ void GeometryNode::handleStateChanged(const std::string& childState)
 {
     cvcapp.log(2, str(boost::format("GeometryNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
-    // Marshal to main thread
-    runOnMainThread([this, childState]() {
-        
-        // Handle geometry-specific state changes
-        if (childState == "render_mode") {
+    // Handle geometry-specific state changes
+    // All VTK operations MUST be wrapped in runOnMainThread() for thread safety
+    if (childState == "render_mode") {
+        runOnMainThread([this]() {
             std::string renderModeStr = getState("render_mode").value<std::string>();
             GeometryRenderMode newMode = stringToRenderMode(renderModeStr);
-            setRenderMode(newMode);
-        }
-        else {
-            // Delegate to parent for common graphics fields
-            GraphicsNode::handleStateChanged(childState);
-        }
-    });
+            if (m_renderMode != newMode) {
+                m_renderMode = newMode;
+                updateRenderModeVTK();
+            }
+        });
+    }
+    else if (childState == "color_r" || childState == "color_g" || childState == "color_b") {
+        runOnMainThread([this]() {
+            // Only update if all color components can be read
+            try {
+                double r = getState("color_r").value<double>();
+                double g = getState("color_g").value<double>();
+                double b = getState("color_b").value<double>();
+                m_actor->GetProperty()->SetColor(r, g, b);
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - values not fully initialized yet
+            }
+        });
+    }
+    else if (childState == "specular") {
+        runOnMainThread([this]() {
+            double specular = getState("specular").value<double>();
+            m_actor->GetProperty()->SetSpecular(specular);
+        });
+    }
+    else if (childState == "specular_power") {
+        runOnMainThread([this]() {
+            double specularPower = getState("specular_power").value<double>();
+            m_actor->GetProperty()->SetSpecularPower(specularPower);
+        });
+    }
+    else if (childState == "ambient") {
+        runOnMainThread([this]() {
+            double ambient = getState("ambient").value<double>();
+            m_actor->GetProperty()->SetAmbient(ambient);
+        });
+    }
+    else if (childState == "diffuse") {
+        runOnMainThread([this]() {
+            double diffuse = getState("diffuse").value<double>();
+            m_actor->GetProperty()->SetDiffuse(diffuse);
+        });
+    }
+    else if (childState == "opacity") {
+        runOnMainThread([this]() {
+            double opacity = getState("opacity").value<double>();
+            m_actor->GetProperty()->SetOpacity(opacity);
+        });
+    }
+    else if (childState == "point_size") {
+        runOnMainThread([this]() {
+            double pointSize = getState("point_size").value<double>();
+            m_actor->GetProperty()->SetPointSize(pointSize);
+        });
+    }
+    else if (childState == "line_width") {
+        runOnMainThread([this]() {
+            double lineWidth = getState("line_width").value<double>();
+            m_actor->GetProperty()->SetLineWidth(lineWidth);
+        });
+    }
+    else {
+        // Delegate to parent for common graphics fields
+        // Parent will handle its own runOnMainThread wrapping
+        GraphicsNode::handleStateChanged(childState);
+    }
 }
 
 std::string GeometryNode::renderModeToString(GeometryRenderMode mode)
@@ -88,19 +165,27 @@ void GeometryNode::setRenderMode(GeometryRenderMode mode)
     
     m_renderMode = mode;
     
-    // Update state tree (bi-directional sync)
+    // Update state tree
     getState("render_mode").value(renderModeToString(mode));
     
+    // Update VTK rendering on main thread
+    runOnMainThread([this]() {
+        updateRenderModeVTK();
+    });
+}
+
+void GeometryNode::updateRenderModeVTK()
+{
     // Update VTK rendering based on mode
-    switch (mode) {
+    switch (m_renderMode) {
         case GeometryRenderMode::POINTS:
             m_actor->GetProperty()->SetRepresentationToPoints();
-            m_actor->GetProperty()->SetPointSize(3.0);
+            m_actor->GetProperty()->SetPointSize(getState("point_size").value<double>());
             break;
             
         case GeometryRenderMode::LINES:
             m_actor->GetProperty()->SetRepresentationToWireframe();
-            m_actor->GetProperty()->SetLineWidth(1.0);
+            m_actor->GetProperty()->SetLineWidth(getState("line_width").value<double>());
             break;
             
         case GeometryRenderMode::TRIS:
@@ -130,6 +215,48 @@ void GeometryNode::setRenderMode(GeometryRenderMode mode)
     if (m_renderer && m_renderer->GetRenderWindow()) {
         m_renderer->GetRenderWindow()->Render();
     }
+}
+
+void GeometryNode::setColor(double r, double g, double b)
+{
+    getState("color_r").value(r);
+    getState("color_g").value(g);
+    getState("color_b").value(b);
+}
+
+void GeometryNode::setSpecular(double value)
+{
+    getState("specular").value(value);
+}
+
+void GeometryNode::setSpecularPower(double value)
+{
+    getState("specular_power").value(value);
+}
+
+void GeometryNode::setAmbient(double value)
+{
+    getState("ambient").value(value);
+}
+
+void GeometryNode::setDiffuse(double value)
+{
+    getState("diffuse").value(value);
+}
+
+void GeometryNode::setOpacity(double value)
+{
+    getState("opacity").value(value);
+}
+
+void GeometryNode::setPointSize(double size)
+{
+    getState("point_size").value(size);
+}
+
+void GeometryNode::setLineWidth(double width)
+{
+    getState("line_width").value(width);
 }
 
 vtkProp* GeometryNode::getProp()
@@ -175,11 +302,16 @@ void GeometryNode::setGeometry(const cvc::geometry& geom)
             break;
     }
     
-    setRenderMode(autoMode);  // This will now call updatePolyData
-    updateMetadata(geom);
+    // Update render mode and geometry data immediately on main thread
+    // This ensures the geometry is ready when the node is added to the renderer
+    runOnMainThread([this, autoMode]() {
+        m_renderMode = autoMode;
+        getState("render_mode").value(renderModeToString(autoMode));
+        updateRenderModeVTK();  // This calls updatePolyData() internally
+        updateBoundingBoxNode();
+    });
     
-    // Update bbox to match geometry bounds
-    updateBoundingBoxNode();
+    updateMetadata(geom);
 }
 
 void GeometryNode::updatePolyData(const cvc::geometry& geom)
