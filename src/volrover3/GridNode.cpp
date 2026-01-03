@@ -16,8 +16,9 @@
 #include <sstream>
 #include <iomanip>
 
-GridNode::GridNode()
-    : m_yzActor(vtkSmartPointer<vtkActor>::New())
+GridNode::GridNode(const std::string& statePath, const std::string& name)
+    : GraphicsNode(statePath, name)
+    , m_yzActor(vtkSmartPointer<vtkActor>::New())
     , m_xzActor(vtkSmartPointer<vtkActor>::New())
     , m_xyActor(vtkSmartPointer<vtkActor>::New())
     , m_yzMapper(vtkSmartPointer<vtkPolyDataMapper>::New())
@@ -59,6 +60,11 @@ GridNode::GridNode()
     m_xyActor->GetProperty()->SetColor(m_xyPlaneColor);
     m_xyActor->GetProperty()->SetLineWidth(1.0);
     m_xyActor->GetProperty()->SetOpacity(0.5);
+
+    // Initialize state tree
+    if (!statePath.empty()) {
+        getState("visible").value(1);  // Visible by default
+    }
 
     createGridPlanes();
 }
@@ -131,6 +137,18 @@ void GridNode::setColor(double r, double g, double b)
     setYZPlaneColor(r, g, b);
     setXZPlaneColor(r, g, b);
     setXYPlaneColor(r, g, b);
+}
+
+cvc::bounding_box GridNode::getBoundingBox() const
+{
+    // Grid doesn't contribute to scene bounds - it's just a visualization helper
+    return cvc::bounding_box(0, 0, 0, 0, 0, 0);
+}
+
+void GridNode::handleStateChanged(const std::string& childState)
+{
+    // Delegate to parent GraphicsNode for common handling (visible, etc.)
+    GraphicsNode::handleStateChanged(childState);
 }
 
 void GridNode::setYZPlaneColor(double r, double g, double b)

@@ -14,8 +14,9 @@
 #include <iomanip>
 #include <cmath>
 
-BBoxNode::BBoxNode()
-    : m_actor(vtkSmartPointer<vtkActor>::New())
+BBoxNode::BBoxNode(const std::string& statePath)
+    : SceneNode(statePath)
+    , m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
     , m_coordinatesVisible(true)

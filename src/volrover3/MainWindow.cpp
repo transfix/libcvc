@@ -2,6 +2,7 @@
 #include <volrover3/VTKRenderWidget.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/SceneGraph.h>
+#include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/VolumeNode.h>
@@ -24,6 +25,8 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QCloseEvent>
+#include <QMetaObject>
+#include <QThread>
 #include <cvc/geometry_file_io.h>
 #include <cvc/volume_file_io.h>
 #include <cvc/app.h>
@@ -43,6 +46,19 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle("VolRover3 - Volume Rover Version 3");
     resize(1280, 720);
+    
+    // Set up thread-safe state change callback for SceneNode hierarchy
+    // This allows state changes from worker threads to be marshaled to the Qt main thread
+    SceneNode::setMainThreadCallback([this](std::function<void()> func) {
+        // Check if we're already on the main thread
+        if (QThread::currentThread() == this->thread()) {
+            // We're on the main thread, execute immediately
+            func();
+        } else {
+            // We're on a worker thread, marshal to main thread
+            QMetaObject::invokeMethod(this, [func]() { func(); }, Qt::QueuedConnection);
+        }
+    });
 
     // Create central render widget
     m_renderWidget = new VTKRenderWidget(this);
@@ -67,9 +83,6 @@ MainWindow::MainWindow(QWidget *parent)
     
     // Initialize grid with default world bounds
     m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-    
-    // Initial sync of graphics from state tree (in case state was loaded before)
-    m_sceneGraph->syncGraphicsFromState();
     
     // Connect to state changes
     AppState::instance().onWorldBoundsChanged([this]() {
@@ -422,21 +435,27 @@ void MainWindow::openFile()
                 lastError = e.what();
                 try {
                     cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
-                    auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
+                    
+                    // Create geometry node using parent's factory method (or root if no parent)
+                    // This automatically creates the correct state path
+                    std::shared_ptr<GeometryNode> graphicsNode;
+                    if (parentNode) {
+                        graphicsNode = parentNode->addGraphicsChild<GeometryNode>(graphicsName);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    } else {
+                        graphicsNode = m_sceneGraph->getGraphicsRoot()->addGraphicsChild<GeometryNode>(graphicsName);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    }
+                    
+                    // Set geometry and metadata
                     graphicsNode->setGeometry(geom);
                     graphicsNode->setMetadata("type", std::string("geometry"));
                     graphicsNode->setMetadata("filename", fileName.toStdString());
                     graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
                     graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
                     
-                    // Add to parent or root
-                    if (parentNode) {
-                        parentNode->addGraphicsChild(graphicsNode);
-                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
-                    } else {
-                        m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
-                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
-                    }
+                    // Node automatically connected to state tree via state_object constructor
+                    // (no manual sync needed)
                     
                     totalVertices += geom.num_points();
                     totalTriangles += geom.num_tris();
@@ -454,27 +473,33 @@ void MainWindow::openFile()
                 lastError = e.what();
                 try {
                     cvc::geometry geom = cvc::read_geometry(fileName.toStdString());
-                    auto graphicsNode = std::make_shared<GeometryNode>(graphicsName);
+                    
+                    // Create geometry node using parent's factory method (or root if no parent)
+                    // This automatically creates the correct state path
+                    std::shared_ptr<GeometryNode> graphicsNode;
+                    if (parentNode) {
+                        graphicsNode = parentNode->addGraphicsChild<GeometryNode>(graphicsName);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    } else {
+                        graphicsNode = m_sceneGraph->getGraphicsRoot()->addGraphicsChild<GeometryNode>(graphicsName);
+                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+                    }
+                    
+                    // Set geometry and metadata
                     graphicsNode->setGeometry(geom);
                     graphicsNode->setMetadata("type", std::string("geometry"));
                     graphicsNode->setMetadata("filename", fileName.toStdString());
                     graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
                     graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
                     
-                    // Add to parent or root
-                    if (parentNode) {
-                        parentNode->addGraphicsChild(graphicsNode);
-                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
-                    } else {
-                        m_sceneGraph->getGraphicsRoot()->addGraphicsChild(graphicsNode);
-                        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
-                    }
+                    // Node automatically connected to state tree via state_object constructor
+                    // (no manual sync needed)
                     
                     totalVertices += geom.num_points();
                     totalTriangles += geom.num_tris();
                     geomCount++;
                     loadedAsGeometry = true;
-                } catch (const std::exception&) {
+                } catch (const cvc::unsupported_geometry_file_type& e) {
                     // Failed both ways - report the original volume error
                     throw std::runtime_error(lastError);
                 }
@@ -486,8 +511,7 @@ void MainWindow::openFile()
         }
     }
     
-    // Sync to state tree
-    m_sceneGraph->syncGraphicsToState();
+    // Note: No manual sync needed - nodes auto-sync via state_object
     
     // Update world bounding box to include all graphics
     cvc::bounding_box graphicsBounds = m_sceneGraph->computeGraphicsBounds();
@@ -664,8 +688,6 @@ void MainWindow::showStateTree()
         
         // Connect state tree refresh to trigger graphics updates
         connect(m_stateTreeWidget, &StateTreeWidget::stateChanged, this, [this]() {
-            // Sync graphics from state tree
-            m_sceneGraph->syncGraphicsFromState();
             // Update all graphics nodes
             m_sceneGraph->update();
             // Force immediate render

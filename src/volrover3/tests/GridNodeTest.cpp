@@ -19,7 +19,7 @@ protected:
     }
     
     void SetUp() override {
-        gridNode = new GridNode();
+        gridNode = new GridNode("test.grid", "grid");
         renderer = vtkRenderer::New();
         appState = &AppState::instance();
     }

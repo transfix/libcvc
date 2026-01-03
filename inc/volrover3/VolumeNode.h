@@ -36,7 +36,7 @@ namespace cvc {
 class VolumeNode : public GraphicsNode
 {
 public:
-    VolumeNode(const std::string& name = "volume");
+    VolumeNode(const std::string& statePath, const std::string& name = "volume");
     ~VolumeNode() override;
 
     void setVolume(const cvc::volume &vol);
@@ -74,8 +74,6 @@ public:
     
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
-    void syncToState(cvc::state& parentState) override;
-    void syncFromState(cvc::state& parentState) override;
     
     // Override to add logging
     void addToRenderer(vtkRenderer* renderer) override;
@@ -85,6 +83,7 @@ public:
 
 protected:
     vtkProp* getProp() override;
+    void handleStateChanged(const std::string& childState) override;
     void updateImageData(const cvc::volume &vol);
     void updateTransferFunctions();
     void updateMetadata(const cvc::volume &vol);

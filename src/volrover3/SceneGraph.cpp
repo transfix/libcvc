@@ -22,21 +22,25 @@
 SceneGraph::SceneGraph(const std::string& statePrefix)
     : m_renderer(nullptr)
     , m_statePrefix(statePrefix)
-    , m_gridNode(std::make_shared<GridNode>())
-    , m_axisNode(std::make_shared<AxisNode>())
+    , m_gridNode(nullptr)
+    , m_axisNode(nullptr)
     , m_graphicsRoot(nullptr)
     , m_nullGraphic(nullptr)
     , m_multiVolumeRenderingEnabled(false)
 {
-    m_rootNodes.push_back(m_gridNode);
-    m_rootNodes.push_back(m_axisNode);
-    
     // Create null graphic as THE root graphics node (all graphics go under this)
-    m_nullGraphic = std::make_shared<NullGraphicNode>("root");
+    // State path: {statePrefix}.graphics.root
+    std::string rootStatePath = statePrefix + ".graphics.root";
+    m_nullGraphic = std::make_shared<NullGraphicNode>(rootStatePath, "root");
     m_nullGraphic->setShowBBox(true);  // Show bbox by default
     m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);  // Default unit cube when empty
     m_graphicsRoot = m_nullGraphic;  // NullGraphic IS the graphics root
     m_rootNodes.push_back(m_graphicsRoot);
+    
+    // Create grid and axis as graphics children of the root null graphic
+    // They will live in the null graphic's coordinate system and state tree
+    m_gridNode = m_nullGraphic->addGraphicsChild<GridNode>("grid");
+    m_axisNode = m_nullGraphic->addGraphicsChild<AxisNode>("axis");
     
     // Set colors for nodes from AppState
     double r, g, b;
@@ -94,12 +98,39 @@ void SceneGraph::setGridColor(double r, double g, double b)
 
 void SceneGraph::updateGrid(const cvc::bounding_box& bounds)
 {
-    m_gridNode->setBounds(bounds);
+    // Update the null graphic's own bounds
+    m_nullGraphic->setBounds(bounds);
     
-    // Scale axis length to be proportional to bounding box size
-    double spanX = bounds[3] - bounds[0];
-    double spanY = bounds[4] - bounds[1];
-    double spanZ = bounds[5] - bounds[2];
+    // Compute combined bounds of null graphic and all its graphics children
+    // (excluding grid and axis which are just visualization helpers)
+    cvc::bounding_box combinedBounds = bounds;
+    
+    for (const auto& child : m_nullGraphic->getGraphicsChildren()) {
+        // Skip grid and axis - they're visualization helpers, not data
+        // Compare raw pointers since GridNode/AxisNode are SceneNode, not GraphicsNode
+        SceneNode* childPtr = dynamic_cast<SceneNode*>(child.get());
+        if (childPtr == m_gridNode.get() || childPtr == m_axisNode.get()) {
+            continue;
+        }
+        
+        cvc::bounding_box childBounds = child->getBoundingBox();
+        
+        // Expand combined bounds to include this child
+        combinedBounds[0] = std::min(combinedBounds[0], childBounds[0]); // minX
+        combinedBounds[1] = std::min(combinedBounds[1], childBounds[1]); // minY
+        combinedBounds[2] = std::min(combinedBounds[2], childBounds[2]); // minZ
+        combinedBounds[3] = std::max(combinedBounds[3], childBounds[3]); // maxX
+        combinedBounds[4] = std::max(combinedBounds[4], childBounds[4]); // maxY
+        combinedBounds[5] = std::max(combinedBounds[5], childBounds[5]); // maxZ
+    }
+    
+    // Update grid to match combined bounds
+    m_gridNode->setBounds(combinedBounds);
+    
+    // Scale axis length to be proportional to combined bounding box size
+    double spanX = combinedBounds[3] - combinedBounds[0];
+    double spanY = combinedBounds[4] - combinedBounds[1];
+    double spanZ = combinedBounds[5] - combinedBounds[2];
     double maxSpan = std::max({spanX, spanY, spanZ});
     
     // Set axis to be about 20% of the maximum span
@@ -161,6 +192,11 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const
     if (m_graphicsRoot) {
         for (const auto& child : m_graphicsRoot->getGraphicsChildren()) {
             if (!child) continue;
+            
+            // Skip grid and axis nodes - they don't contribute to scene bounds
+            if (child.get() == m_gridNode.get() || child.get() == m_axisNode.get()) {
+                continue;
+            }
             
             // Get combined bbox of this child (includes all its descendants in local space)
             cvc::bounding_box childBBox = child->getCombinedBoundingBox();
@@ -236,21 +272,15 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, c
         removeGraphics(name);
     }
     
-    // Create new geometry node
-    auto graphicsNode = std::make_shared<GeometryNode>(name);
+    // Create new geometry node using template factory (automatically creates proper state path)
+    auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
     graphicsNode->setGeometry(geom);
-    
-    // Add to graphics root
-    m_graphicsRoot->addGraphicsChild(graphicsNode);
     
     // Add to lookup map
     m_graphicsNodes[name] = graphicsNode;
     
     // Remove null graphic since we now have real graphics
     removeNullGraphicIfPresent();
-    
-    // Sync to state tree
-    syncGraphicsToState();
     
     return graphicsNode;
 }
@@ -265,20 +295,14 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
         removeGraphics(name);
     }
     
-    // Create new empty geometry node (for hierarchy/grouping)
-    auto graphicsNode = std::make_shared<GeometryNode>(name);
-    
-    // Add to graphics root
-    m_graphicsRoot->addGraphicsChild(graphicsNode);
+    // Create new empty geometry node using template factory (automatically creates proper state path)
+    auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
     
     // Add to lookup map
     m_graphicsNodes[name] = graphicsNode;
     
     // Remove null graphic since we now have real graphics
     removeNullGraphicIfPresent();
-    
-    // Sync to state tree
-    syncGraphicsToState();
     
     return graphicsNode;
 }
@@ -304,8 +328,7 @@ void SceneGraph::removeGraphics(const std::string& name)
     // If scene is now empty, add null graphic back
     ensureNullGraphicIfEmpty();
     
-    // Sync to state tree
-    syncGraphicsToState();
+    // Note: No manual sync needed - state_object handles state tree automatically
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string& name)
@@ -324,39 +347,6 @@ void SceneGraph::registerGraphics(const std::string& name, std::shared_ptr<Graph
     }
 }
 
-void SceneGraph::syncGraphicsToState()
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Get or create the graphics state node
-    cvc::state& graphicsState = cvc::state::instance()(m_statePrefix)("graphics");
-    graphicsState.comment("Unified graphics tree (geometry and volumes)");
-    
-    // Sync the graphics root (null graphic) to state
-    // This ensures all graphics appear as children of the null graphic in the state tree
-    m_graphicsRoot->syncToState(graphicsState);
-}
-
-void SceneGraph::syncGraphicsFromState()
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Get the graphics state node
-    cvc::state& graphicsState = cvc::state::instance()(m_statePrefix)("graphics");
-    
-    if (!graphicsState.initialized()) {
-        return; // No graphics state to load
-    }
-    
-    // Load children directly from graphics state
-    // Note: For now, we don't automatically reconstruct the tree from state.
-    // Graphics are added via addGraphics() which handles both geometry and volumes,
-    // managing both memory and state. This method would need a type registry to
-    // automatically instantiate the correct node types.
-    
-    // TODO: Implement full state-to-memory reconstruction when needed
-}
-
 // Volume graphics management
 std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, const cvc::volume& vol)
 {
@@ -368,21 +358,15 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
         removeGraphics(name);
     }
     
-    // Create new volume node
-    auto volumeNode = std::make_shared<VolumeNode>(name);
+    // Create new volume node using template factory (automatically creates proper state path)
+    auto volumeNode = m_graphicsRoot->addGraphicsChild<VolumeNode>(name);
     volumeNode->setVolume(vol);
-    
-    // Add to graphics root
-    m_graphicsRoot->addGraphicsChild(volumeNode);
     
     // Add to lookup map
     m_graphicsNodes[name] = volumeNode;
     
     // Remove null graphic since we now have real graphics
     removeNullGraphicIfPresent();
-    
-    // Sync to state tree
-    syncGraphicsToState();
     
     // Update multi-volume rendering if needed
     updateVolumeRendering();
@@ -418,9 +402,6 @@ size_t SceneGraph::getVolumeGraphicsCount() const
     }
     return count;
 }
-
-// Volume sync methods removed - volumes are now part of the unified graphics tree
-// and sync automatically via syncGraphicsToState() / syncGraphicsFromState()
 
 cvc::bounding_box SceneGraph::computeVolumeBounds() const
 {

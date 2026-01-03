@@ -175,10 +175,16 @@ namespace CVC_NAMESPACE
   class state_object
   {
   public:
-    state_object() 
-      : _batchDepth(0)
-    { 
-      cvcapp.registerDataType(This);
+    state_object(const std::string state_path = std::string()) 
+      : _batchDepth(0), 
+        _state_path(state_path.empty() ?
+          cvcapp.dataTypeName<This>()+
+          CVC_NAMESPACE::state::SEPARATOR+
+          boost::lexical_cast<std::string>(this) :
+          state_path)
+    {
+      // Register the data type - avoid the macro by using template syntax
+      cvcapp.template registerDataType<This>(cvcapp.dataTypeName<This>());
 
       //watch this object's state
       _stateConnection = getState().childChanged.connect(
@@ -217,15 +223,12 @@ namespace CVC_NAMESPACE
         }
     }
 
-    //Use this to easily get the name of this viewer's state object.
+    //Use this to easily get the name of either this state object or it's children.
     std::string stateName(const std::string& childState = std::string()) const { 
-      std::string viewer_root = cvcapp.dataTypeName<This>()+
-        CVC_NAMESPACE::state::SEPARATOR+
-        boost::lexical_cast<std::string>(this);
       return 
         !childState.empty() ? 
-        viewer_root + CVC_NAMESPACE::state::SEPARATOR + childState :
-        viewer_root;
+        _state_path + CVC_NAMESPACE::state::SEPARATOR + childState :
+        _state_path;
     }
 
     //Shortcut for accessing the state corresponding to an instance of this
@@ -260,13 +263,22 @@ namespace CVC_NAMESPACE
       }
       
       // Spawn threads outside the lock
-      BOOST_FOREACH(const std::string& childState, pendingCopy)
-        {
-          cvcapp.startThread(stateName(childState) + "_stateChanged",
-                             boost::bind(&state_object<This>::handleStateChanged, 
-                                         boost::ref(*this),
-                                         childState));
-        }
+      if (_useThreading) {
+        // Threading enabled - spawn threads for each change
+        BOOST_FOREACH(const std::string& childState, pendingCopy)
+          {
+            cvcapp.startThread(stateName(childState) + "_stateChanged",
+                               boost::bind(&state_object<This>::handleStateChanged, 
+                                           boost::ref(*this),
+                                           childState));
+          }
+      } else {
+        // Threading disabled - call synchronously
+        BOOST_FOREACH(const std::string& childState, pendingCopy)
+          {
+            handleStateChanged(childState);
+          }
+      }
     }
 
     // Wait for all handler threads to complete
@@ -299,7 +311,21 @@ namespace CVC_NAMESPACE
       _stateLockMutex.unlock();
     }
 
+    // Control whether handleStateChanged runs in threads (default true)
+    // Set to false in tests to avoid threading issues during destruction
+    static void setUseThreading(bool useThreading)
+    {
+      _useThreading = useThreading;
+    }
+
+    static bool getUseThreading()
+    {
+      return _useThreading;
+    }
+
   protected:
+    std::string _state_path;
+
     boost::signals2::connection _stateConnection;
     
     // Batching support
@@ -310,8 +336,19 @@ namespace CVC_NAMESPACE
     // State locking support
     mutable boost::mutex _stateLockMutex;
 
+    // Threading control - can be disabled for tests
+    static bool _useThreading;
+
+    // Disconnect from state tree to prevent NEW callbacks during destruction
+    // Call this in derived class destructors to avoid pure virtual method calls
+    // Note: Cannot safely wait for in-flight callbacks as they may be calling methods on 'this'
+    void disconnectState()
+    {
+      _stateConnection.disconnect();
+    }
+
     //Classes that are state_objects should implement this function for themselves.
-    //Note: each call happens in its own thread.
+    //Note: each call happens in its own thread (unless threading is disabled).
     virtual void handleStateChanged(const std::string& childState)
     {
       cvcapp.log(2,str(boost::format("%s :: state changed: %s\n")
@@ -330,14 +367,22 @@ namespace CVC_NAMESPACE
       if (_batchDepth > 0) {
         // Batching enabled - queue this change (set automatically deduplicates)
         _pendingChanges.insert(childState);
-      } else {
-        // No batching - spawn thread immediately (unlock first to avoid holding lock)
+      } else if (_useThreading) {
+        // Threading enabled - spawn thread (unlock first to avoid holding lock)
         lock.unlock();
         cvcapp.startThread(stateName(childState) + "_stateChanged",
                            boost::bind(&state_object<This>::handleStateChanged, 
                                        boost::ref(*this),
                                        childState));
+      } else {
+        // Threading disabled - call synchronously (unlock first)
+        lock.unlock();
+        handleStateChanged(childState);
       }
     }
   };
+
+  // Initialize static member - threading enabled by default
+  template <class This>
+  bool state_object<This>::_useThreading = true;
 }

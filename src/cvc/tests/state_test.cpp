@@ -995,6 +995,34 @@ TEST(StateTest, ChildChangedSignal) {
   cvcstate("test").reset();
 }
 
+TEST(StateTest, ChildChangedSignalUsesRelativeName) {
+  // Regression test: childChanged signal should send relative name (e.g., "child"),
+  // not full path (e.g., "test.parent.child")
+  std::vector<std::string> received_names;
+  
+  auto connection = cvcstate("test.parent").childChanged.connect(
+    [&received_names](const std::string& childState) { 
+      received_names.push_back(childState); 
+    }
+  );
+  
+  // Modify child state - parent should receive just "child", not "test.parent.child"
+  cvcstate("test.parent.child").value("test_value");
+  
+  // Give signal time to fire
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+  
+  // We should have received at least one signal
+  ASSERT_FALSE(received_names.empty()) << "No childChanged signals received";
+  
+  // The FIRST signal should be "child" (direct notification from child to parent)
+  EXPECT_EQ(received_names[0], "child") 
+    << "Expected relative name 'child', but got: '" << received_names[0] << "'";
+  
+  connection.disconnect();
+  cvcstate("test").reset();
+}
+
 // ===========================
 // Deep Hierarchy Tests
 // ===========================
@@ -4143,6 +4171,368 @@ TEST(StateTest, UnregisteredTypeReturnsMangled) {
   
   // Clean up
   cvcapp.data("test.unregistered", boost::any());
+}
+
+// ===========================
+// Reset with Parameters Tests  
+// ===========================
+
+TEST(StateTest, ResetWithoutChildren) {
+  // Create a state hierarchy
+  cvcstate("test.reset_params.parent").value("parent_value");
+  cvcstate("test.reset_params.parent.child1").value("child1_value");
+  cvcstate("test.reset_params.parent.child2").value("child2_value");
+  
+  EXPECT_TRUE(cvcstate("test.reset_params.parent").initialized());
+  EXPECT_TRUE(cvcstate("test.reset_params.parent.child1").initialized());
+  EXPECT_TRUE(cvcstate("test.reset_params.parent.child2").initialized());
+  
+  // Reset parent without resetting children
+  cvcstate("test.reset_params.parent").reset(false, true);
+  
+  // Parent should be reset
+  EXPECT_FALSE(cvcstate("test.reset_params.parent").initialized());
+  
+  // Children are detached - accessing them via parent path creates new states
+  // The old children exist as shared_ptrs elsewhere but are no longer accessible via parent
+  // This is the expected behavior of reset(false, ...)
+  EXPECT_FALSE(cvcstate("test.reset_params.parent.child1").initialized());
+  EXPECT_FALSE(cvcstate("test.reset_params.parent.child2").initialized());
+  
+  // Clean up
+  cvcstate("test.reset_params").reset();
+}
+
+TEST(StateTest, ResetWithChildren) {
+  // Create a state hierarchy
+  cvcstate("test.reset_children.parent").value("parent_value");
+  cvcstate("test.reset_children.parent.child1").value("child1_value");
+  cvcstate("test.reset_children.parent.child2").value("child2_value");
+  cvcstate("test.reset_children.parent.child2.grandchild").value("grandchild_value");
+  
+  EXPECT_TRUE(cvcstate("test.reset_children.parent").initialized());
+  EXPECT_TRUE(cvcstate("test.reset_children.parent.child1").initialized());
+  EXPECT_TRUE(cvcstate("test.reset_children.parent.child2").initialized());
+  EXPECT_TRUE(cvcstate("test.reset_children.parent.child2.grandchild").initialized());
+  
+  // Reset parent with children (default behavior)
+  cvcstate("test.reset_children.parent").reset(true, true);
+  
+  // Parent and all children should be reset
+  EXPECT_FALSE(cvcstate("test.reset_children.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.reset_children.parent.child1").initialized());
+  EXPECT_FALSE(cvcstate("test.reset_children.parent.child2").initialized());
+  EXPECT_FALSE(cvcstate("test.reset_children.parent.child2.grandchild").initialized());
+  
+  // Clean up
+  cvcstate("test.reset_children").reset();
+}
+
+TEST(StateTest, ResetWithoutCallbacks) {
+  // Track callback invocations
+  std::atomic<int> callbackCount(0);
+  
+  auto conn = cvcstate("test.reset_callbacks.watched").valueChanged.connect([&callbackCount]() {
+    callbackCount++;
+  });
+  
+  cvcstate("test.reset_callbacks.watched").value("initial_value");
+  int initialCount = callbackCount.load();
+  EXPECT_GT(initialCount, 0);
+  
+  // Reset without firing callbacks
+  cvcstate("test.reset_callbacks.watched").reset(true, false);
+  
+  // Callback should not have been triggered by reset
+  EXPECT_EQ(callbackCount.load(), initialCount);
+  EXPECT_FALSE(cvcstate("test.reset_callbacks.watched").initialized());
+  
+  // Clean up
+  cvcstate("test.reset_callbacks").reset();
+}
+
+TEST(StateTest, ResetWithCallbacks) {
+  // Track callback invocations
+  std::atomic<int> callbackCount(0);
+  
+  auto conn = cvcstate("test.reset_with_callbacks.watched").valueChanged.connect([&callbackCount]() {
+    callbackCount++;
+  });
+  
+  cvcstate("test.reset_with_callbacks.watched").value("initial_value");
+  callbackCount.store(0); // Reset counter after initialization
+  
+  // Reset with firing callbacks (default behavior)
+  cvcstate("test.reset_with_callbacks.watched").reset(true, true);
+  
+  // Callback should have been triggered by reset
+  EXPECT_GT(callbackCount.load(), 0);
+  EXPECT_FALSE(cvcstate("test.reset_with_callbacks.watched").initialized());
+  
+  // Clean up
+  cvcstate("test.reset_with_callbacks").reset();
+}
+
+TEST(StateTest, ResetParameterCombinations) {
+  // Test all four combinations of resetChildren and fireCallbacks
+  
+  // Setup 1: reset(false, false) - no children, no callbacks
+  cvcstate("test.combinations.case1.parent").value("value");
+  cvcstate("test.combinations.case1.parent.child").value("child_value");
+  
+  std::atomic<int> count1(0);
+  auto conn1 = cvcstate("test.combinations.case1.parent").valueChanged.connect([&count1]() { count1++; });
+  count1.store(0);
+  
+  cvcstate("test.combinations.case1.parent").reset(false, false);
+  EXPECT_FALSE(cvcstate("test.combinations.case1.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.combinations.case1.parent.child").initialized());  // Detached
+  EXPECT_EQ(count1.load(), 0);
+  
+  // Setup 2: reset(false, true) - no children, yes callbacks
+  cvcstate("test.combinations.case2.parent").value("value");
+  cvcstate("test.combinations.case2.parent.child").value("child_value");
+  
+  std::atomic<int> count2(0);
+  auto conn2 = cvcstate("test.combinations.case2.parent").valueChanged.connect([&count2]() { count2++; });
+  count2.store(0);
+  
+  cvcstate("test.combinations.case2.parent").reset(false, true);
+  EXPECT_FALSE(cvcstate("test.combinations.case2.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.combinations.case2.parent.child").initialized());  // Detached
+  EXPECT_GT(count2.load(), 0);
+  
+  // Setup 3: reset(true, false) - yes children, no callbacks
+  cvcstate("test.combinations.case3.parent").value("value");
+  cvcstate("test.combinations.case3.parent.child").value("child_value");
+  
+  std::atomic<int> count3(0);
+  auto conn3 = cvcstate("test.combinations.case3.parent").valueChanged.connect([&count3]() { count3++; });
+  count3.store(0);
+  
+  cvcstate("test.combinations.case3.parent").reset(true, false);
+  EXPECT_FALSE(cvcstate("test.combinations.case3.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.combinations.case3.parent.child").initialized());
+  EXPECT_EQ(count3.load(), 0);
+  
+  // Setup 4: reset(true, true) - yes children, yes callbacks (default)
+  cvcstate("test.combinations.case4.parent").value("value");
+  cvcstate("test.combinations.case4.parent.child").value("child_value");
+  
+  std::atomic<int> count4(0);
+  auto conn4 = cvcstate("test.combinations.case4.parent").valueChanged.connect([&count4]() { count4++; });
+  count4.store(0);
+  
+  cvcstate("test.combinations.case4.parent").reset(true, true);
+  EXPECT_FALSE(cvcstate("test.combinations.case4.parent").initialized());
+  EXPECT_FALSE(cvcstate("test.combinations.case4.parent.child").initialized());
+  EXPECT_GT(count4.load(), 0);
+  
+  // Clean up
+  cvcstate("test.combinations").reset();
+}
+
+// ===========================
+// state_object Threading Control Tests
+// ===========================
+
+// Test object that tracks synchronous vs threaded execution
+class ThreadingTestObject : public state_object<ThreadingTestObject> {
+public:
+  std::atomic<int> handleCount;
+  std::atomic<int> synchronousCount;
+  std::atomic<int> threadedCount;
+  boost::thread::id constructorThreadId;
+  
+  ThreadingTestObject() 
+    : handleCount(0)
+    , synchronousCount(0) 
+    , threadedCount(0)
+    , constructorThreadId(boost::this_thread::get_id())
+  {}
+  
+protected:
+  virtual void handleStateChanged(const std::string& childState) override {
+    handleCount++;
+    
+    // Check if running on same thread as constructor (synchronous) or different (threaded)
+    if (boost::this_thread::get_id() == constructorThreadId) {
+      synchronousCount++;
+    } else {
+      threadedCount++;
+    }
+    
+    // Simulate some work
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+  }
+};
+
+TEST(StateTest, StateObjectThreadingDisabled) {
+  // Disable threading for this test
+  state_object<ThreadingTestObject>::setUseThreading(false);
+  
+  ThreadingTestObject obj;
+  
+  // Make multiple state changes
+  for (int i = 0; i < 10; ++i) {
+    obj.getState("property" + boost::lexical_cast<std::string>(i)).value("value");
+  }
+  
+  // Wait for any pending handlers (should be none with threading disabled)
+  obj.waitForHandlers();
+  
+  // All callbacks should have run synchronously
+  EXPECT_EQ(obj.handleCount.load(), 10);
+  EXPECT_EQ(obj.synchronousCount.load(), 10);
+  EXPECT_EQ(obj.threadedCount.load(), 0);
+  
+  // Re-enable threading for other tests
+  state_object<ThreadingTestObject>::setUseThreading(true);
+  
+  // Clean up
+  obj.getState().reset();
+}
+
+TEST(StateTest, StateObjectThreadingEnabled) {
+  // Ensure threading is enabled (default)
+  state_object<ThreadingTestObject>::setUseThreading(true);
+  
+  ThreadingTestObject obj;
+  
+  // Make multiple state changes
+  for (int i = 0; i < 10; ++i) {
+    obj.getState("property" + boost::lexical_cast<std::string>(i)).value("value");
+  }
+  
+  // Wait for handlers to complete
+  obj.waitForHandlers();
+  
+  // All callbacks should have been triggered
+  EXPECT_EQ(obj.handleCount.load(), 10);
+  
+  // With threading enabled, callbacks should run on different threads
+  // (though some might coincidentally run on the same thread)
+  EXPECT_GT(obj.threadedCount.load(), 0) << "Expected at least some callbacks on different threads";
+  
+  // Clean up
+  obj.getState().reset();
+}
+
+TEST(StateTest, StateObjectThreadingToggle) {
+  // Test that we can toggle threading on and off
+  
+  // Start with threading disabled
+  state_object<ThreadingTestObject>::setUseThreading(false);
+  EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
+  
+  ThreadingTestObject obj1;
+  obj1.getState("prop1").value("value1");
+  obj1.waitForHandlers();
+  EXPECT_EQ(obj1.synchronousCount.load(), 1);
+  EXPECT_EQ(obj1.threadedCount.load(), 0);
+  
+  // Enable threading
+  state_object<ThreadingTestObject>::setUseThreading(true);
+  EXPECT_TRUE(state_object<ThreadingTestObject>::getUseThreading());
+  
+  ThreadingTestObject obj2;
+  obj2.getState("prop2").value("value2");
+  obj2.waitForHandlers();
+  EXPECT_EQ(obj2.handleCount.load(), 1);
+  // With threading enabled, should be on different thread (usually)
+  
+  // Disable again
+  state_object<ThreadingTestObject>::setUseThreading(false);
+  EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
+  
+  ThreadingTestObject obj3;
+  obj3.getState("prop3").value("value3");
+  obj3.waitForHandlers();
+  EXPECT_EQ(obj3.synchronousCount.load(), 1);
+  EXPECT_EQ(obj3.threadedCount.load(), 0);
+  
+  // Re-enable for other tests
+  state_object<ThreadingTestObject>::setUseThreading(true);
+  
+  // Clean up
+  obj1.getState().reset();
+  obj2.getState().reset();
+  obj3.getState().reset();
+}
+
+TEST(StateTest, StateObjectBatchingWithThreadingDisabled) {
+  // Test that batching works correctly even with threading disabled
+  state_object<ThreadingTestObject>::setUseThreading(false);
+  
+  ThreadingTestObject obj;
+  
+  {
+    state_change_batch_scope<ThreadingTestObject> batch(obj);
+    
+    // Make multiple changes within batch
+    for (int i = 0; i < 5; ++i) {
+      obj.getState("batch_prop" + boost::lexical_cast<std::string>(i)).value("value");
+    }
+    
+    // Handler should not have been called yet
+    EXPECT_EQ(obj.handleCount.load(), 0);
+    
+  } // batch.flush() happens here
+  
+  // Now all handlers should have been called synchronously
+  EXPECT_EQ(obj.handleCount.load(), 5);
+  EXPECT_EQ(obj.synchronousCount.load(), 5);
+  EXPECT_EQ(obj.threadedCount.load(), 0);
+  
+  // Re-enable threading
+  state_object<ThreadingTestObject>::setUseThreading(true);
+  
+  // Clean up
+  obj.getState().reset();
+}
+
+TEST(StateTest, StateObjectThreadingPerTemplateType) {
+  // Test that threading control is independent per template instantiation
+  
+  class TypeA : public state_object<TypeA> {
+  public:
+    std::atomic<bool> called{false};
+  protected:
+    void handleStateChanged(const std::string&) override { called = true; }
+  };
+  
+  class TypeB : public state_object<TypeB> {
+  public:
+    std::atomic<bool> called{false};
+  protected:
+    void handleStateChanged(const std::string&) override { called = true; }
+  };
+  
+  // Disable threading for TypeA only
+  state_object<TypeA>::setUseThreading(false);
+  state_object<TypeB>::setUseThreading(true);
+  
+  EXPECT_FALSE(state_object<TypeA>::getUseThreading());
+  EXPECT_TRUE(state_object<TypeB>::getUseThreading());
+  
+  TypeA objA;
+  TypeB objB;
+  
+  objA.getState("test").value("value");
+  objB.getState("test").value("value");
+  
+  objA.waitForHandlers();
+  objB.waitForHandlers();
+  
+  EXPECT_TRUE(objA.called);
+  EXPECT_TRUE(objB.called);
+  
+  // Reset TypeA back to default
+  state_object<TypeA>::setUseThreading(true);
+  
+  // Clean up
+  objA.getState().reset();
+  objB.getState().reset();
 }
 
 // Main function to handle custom flags

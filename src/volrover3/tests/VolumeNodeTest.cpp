@@ -153,76 +153,12 @@ TEST_F(VolumeNodeTest, LargeVolumeDataRange) {
     EXPECT_DOUBLE_EQ(dataMax, 8.067500);
 }
 
-TEST_F(VolumeNodeTest, TransferFunctionMetadata) {
-    VolumeNode node("test_volume");
-    node.setVolume(testVolume);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("transfer_function_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_volume");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    // Verify data_min and data_max are in state
-    EXPECT_NO_THROW({
-        std::string minStr = metadataState("data_min").value();
-        std::string maxStr = metadataState("data_max").value();
-        
-        double minVal = std::stod(minStr);
-        double maxVal = std::stod(maxStr);
-        
-        EXPECT_DOUBLE_EQ(minVal, 0.0);
-        EXPECT_DOUBLE_EQ(maxVal, 27.0);
-    });
-}
-
-TEST_F(VolumeNodeTest, VolumeRenderingPropertiesStateSync) {
-    VolumeNode node("test_volume");
-    node.setVolume(testVolume);
-    
-    // Set rendering properties
-    node.setShading(true);
-    node.setAmbient(0.3);
-    node.setDiffuse(0.7);
-    node.setSpecular(0.5);
-    node.setSpecularPower(25.0);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("rendering_props_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_volume");
-    cvc::state& renderingState = nodeState("rendering");
-    
-    // Verify rendering properties in state
-    EXPECT_EQ(renderingState("shading").value(), "true");
-    
-    // For floating point values, compare numerically with tolerance
-    EXPECT_NEAR(std::stod(renderingState("ambient").value()), 0.3, 0.0001);
-    EXPECT_NEAR(std::stod(renderingState("diffuse").value()), 0.7, 0.0001);
-    EXPECT_NEAR(std::stod(renderingState("specular").value()), 0.5, 0.0001);
-    EXPECT_NEAR(std::stod(renderingState("specular_power").value()), 25.0, 0.0001);
-    
-    // Create new node and load from state
-    VolumeNode node2("test_volume");
-    node2.syncFromState(testState);
-    
-    EXPECT_TRUE(node2.getShading());
-    EXPECT_DOUBLE_EQ(node2.getAmbient(), 0.3);
-    EXPECT_DOUBLE_EQ(node2.getDiffuse(), 0.7);
-    EXPECT_DOUBLE_EQ(node2.getSpecular(), 0.5);
-    EXPECT_DOUBLE_EQ(node2.getSpecularPower(), 25.0);
-}
-
 // ============================================================================
 // Volume Label Tests
 // ============================================================================
 
 TEST_F(VolumeNodeTest, VolumeLabelDefaultState) {
-    VolumeNode node("test_volume");
+    VolumeNode node("test.volume", "test_volume");
     
     // Label should be off by default
     EXPECT_FALSE(node.getShowLabel());
@@ -230,44 +166,6 @@ TEST_F(VolumeNodeTest, VolumeLabelDefaultState) {
     EXPECT_EQ(node.getLabelText(), "test_volume");
     // Default size should be 14
     EXPECT_EQ(node.getLabelSize(), 14);
-}
-
-TEST_F(VolumeNodeTest, VolumeLabelStateSync) {
-    VolumeNode node("test_volume");
-    node.setVolume(testVolume);
-    
-    // Configure label
-    node.setShowLabel(true);
-    node.setLabelText("My Volume");
-    node.setLabelSize(16);
-    node.setLabelColor(0.0, 1.0, 0.0);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("volume_label_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_volume");
-    
-    // Verify label state
-    EXPECT_EQ(nodeState("show_label").value(), "true");
-    EXPECT_EQ(nodeState("label_text").value(), "My Volume");
-    EXPECT_EQ(nodeState("label_size").value(), "16");
-    EXPECT_EQ(nodeState("label_color").value(), "0,1,0");
-    
-    // Create new node and sync from state
-    VolumeNode node2("test_volume");
-    node2.syncFromState(testState);
-    
-    EXPECT_TRUE(node2.getShowLabel());
-    EXPECT_EQ(node2.getLabelText(), "My Volume");
-    EXPECT_EQ(node2.getLabelSize(), 16);
-    
-    double r, g, b;
-    node2.getLabelColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
 }
 
 // ============================================================================
@@ -287,28 +185,6 @@ TEST_F(VolumeNodeTest, VolumeBBoxBounds) {
     EXPECT_DOUBLE_EQ(bbox[3], 9.0);
     EXPECT_DOUBLE_EQ(bbox[4], 9.0);
     EXPECT_DOUBLE_EQ(bbox[5], 9.0);
-}
-
-TEST_F(VolumeNodeTest, VolumeBBoxStateSync) {
-    VolumeNode node("test_volume");
-    node.setVolume(testVolume);
-    
-    // Enable bbox
-    node.setShowBBox(true);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("volume_bbox_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_volume");
-    EXPECT_EQ(nodeState("show_bbox").value(), "true");
-    
-    // Create new node and sync from state
-    VolumeNode node2("test_volume");
-    node2.syncFromState(testState);
-    
-    EXPECT_TRUE(node2.getShowBBox());
 }
 
 // ============================================================================

@@ -56,10 +56,6 @@ public:
     void enableMultiVolumeRendering(bool enable);
     bool isMultiVolumeRenderingEnabled() const;
     
-    // State synchronization (handles both geometry and volume graphics)
-    void syncGraphicsToState();
-    void syncGraphicsFromState();
-    
     // Scene element visibility
     void setGridVisible(bool visible);
     void setAxisVisible(bool visible);

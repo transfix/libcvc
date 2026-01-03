@@ -19,14 +19,14 @@ protected:
 // ============================================================================
 
 TEST_F(BBoxNodeTest, CoordinateLabelsDefaultVisible) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Coordinate labels should be visible by default
     EXPECT_TRUE(node.getCoordinatesVisible());
 }
 
 TEST_F(BBoxNodeTest, SetCoordinatesVisible) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     node.setCoordinatesVisible(false);
     EXPECT_FALSE(node.getCoordinatesVisible());
@@ -36,7 +36,7 @@ TEST_F(BBoxNodeTest, SetCoordinatesVisible) {
 }
 
 TEST_F(BBoxNodeTest, CoordinateLabelCount) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Set coordinates visible first
     node.setCoordinatesVisible(true);
@@ -53,7 +53,7 @@ TEST_F(BBoxNodeTest, CoordinateLabelCount) {
 }
 
 TEST_F(BBoxNodeTest, CoordinateLabelColor) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Set label color
     node.setCoordinateLabelColor(1.0, 0.5, 0.0);
@@ -68,7 +68,7 @@ TEST_F(BBoxNodeTest, CoordinateLabelColor) {
 }
 
 TEST_F(BBoxNodeTest, CoordinateLabelFontSize) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Default font size should be 12
     EXPECT_EQ(node.getCoordinateLabelFontSize(), 12);
@@ -90,7 +90,7 @@ TEST_F(BBoxNodeTest, CoordinateLabelFontSize) {
 // ============================================================================
 
 TEST_F(BBoxNodeTest, DefaultConstruction) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Default bbox should be (-1, -1, -1) to (1, 1, 1)
     cvc::bounding_box bbox = node.getBoundingBox();
@@ -104,7 +104,7 @@ TEST_F(BBoxNodeTest, DefaultConstruction) {
 }
 
 TEST_F(BBoxNodeTest, SetBoundingBox) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     node.setBoundingBox(testBBox);
     
@@ -119,7 +119,7 @@ TEST_F(BBoxNodeTest, SetBoundingBox) {
 }
 
 TEST_F(BBoxNodeTest, SetColor) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Set yellow color (default is yellow anyway)
     node.setColor(1.0, 1.0, 0.0);
@@ -130,14 +130,14 @@ TEST_F(BBoxNodeTest, SetColor) {
 }
 
 TEST_F(BBoxNodeTest, DefaultVisibility) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // BBox should be visible by default
     EXPECT_TRUE(node.isVisible());
 }
 
 TEST_F(BBoxNodeTest, SetVisibility) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     node.setVisible(false);
     EXPECT_FALSE(node.isVisible());
@@ -147,7 +147,7 @@ TEST_F(BBoxNodeTest, SetVisibility) {
 }
 
 TEST_F(BBoxNodeTest, LargeBoundingBox) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Test with a large bounding box (like the 945x945x945 volume)
     cvc::bounding_box largeBBox(0.0, 0.0, 0.0, 945.0, 945.0, 945.0);
@@ -167,7 +167,7 @@ TEST_F(BBoxNodeTest, LargeBoundingBox) {
 }
 
 TEST_F(BBoxNodeTest, NonUniformBoundingBox) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Test with non-uniform bounds
     cvc::bounding_box nonUniform(-10.0, -5.0, 0.0, 100.0, 50.0, 25.0);
@@ -184,7 +184,7 @@ TEST_F(BBoxNodeTest, NonUniformBoundingBox) {
 }
 
 TEST_F(BBoxNodeTest, UpdateBoundingBox) {
-    BBoxNode node;
+    BBoxNode node("test.bbox");
     
     // Set initial bbox
     node.setBoundingBox(testBBox);

@@ -14,7 +14,7 @@ class vtkRenderer;
 class BBoxNode : public SceneNode
 {
 public:
-    BBoxNode();
+    BBoxNode(const std::string& statePath);
     ~BBoxNode() override;
 
     vtkProp* getProp() override;

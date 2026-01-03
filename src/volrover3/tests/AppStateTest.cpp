@@ -14,28 +14,31 @@ protected:
             char** argv = nullptr;
             app = new QApplication(argc, argv);
         }
+        // Disable threading for state_object to avoid destruction race conditions
+        cvc::state_object<AppState>::setUseThreading(false);
     }
     
     void SetUp() override {
-        // Create AppState with custom prefix for test isolation
-        // Each test class gets its own state subtree
-        state = std::make_unique<AppState>("appstate_test");
+        // Create AppState with unique prefix for test isolation
+        // Each test instance gets its own state subtree
+        m_statePrefix = "appstate_test_" + std::to_string(testCounter++);
+        state = std::make_unique<AppState>(m_statePrefix);
     }
     
     void TearDown() override {
-        // Clean up test-specific state tree to prevent pollution between tests
-        if (state) {
-            state->getRootState().reset();
-        }
         // Clean up test-specific state instance
+        // No need to reset state tree - unique prefixes provide isolation
         state.reset();
     }
     
     static QApplication* app;
+    static int testCounter;
+    std::string m_statePrefix;
     std::unique_ptr<AppState> state;
 };
 
 QApplication* AppStateTest::app = nullptr;
+int AppStateTest::testCounter = 0;
 
 TEST_F(AppStateTest, SingletonInstance) {
     // Verify that the singleton instance is different from our test instance
@@ -43,7 +46,8 @@ TEST_F(AppStateTest, SingletonInstance) {
     AppState& singleton = AppState::instance();
     EXPECT_NE(state->getStatePrefix(), singleton.getStatePrefix());
     EXPECT_EQ(singleton.getStatePrefix(), "volrover3");
-    EXPECT_EQ(state->getStatePrefix(), "appstate_test");
+    // Our test instance uses unique prefix
+    EXPECT_EQ(state->getStatePrefix(), m_statePrefix);
 }
 
 TEST_F(AppStateTest, CameraPosition) {

@@ -15,6 +15,18 @@ namespace cvc {
 }
 
 /**
+ * @brief Geometry rendering modes
+ */
+enum class GeometryRenderMode {
+    POINTS,  // Render as point cloud
+    LINES,   // Render as wireframe
+    TRIS,    // Render triangles as solid surface
+    QUADS,   // Render quads as solid surface
+    TETS,    // Render tetrahedral mesh (placeholder)
+    HEXS     // Render hexahedral mesh (placeholder)
+};
+
+/**
  * @brief GeometryNode renders cvc::geometry objects with full transform support
  * 
  * Extends GraphicsNode to provide:
@@ -31,23 +43,30 @@ namespace cvc {
 class GeometryNode : public GraphicsNode
 {
 public:
-    GeometryNode(const std::string& name = "geometry");
+    GeometryNode(const std::string& statePath, const std::string& name = "geometry");
     ~GeometryNode() override;
 
     void setGeometry(const cvc::geometry &geom);
     bool hasGeometry() const { return m_hasGeometry; }
     const cvc::geometry* getGeometry() const { return m_geometry.get(); }
     
+    // Render mode control
+    void setRenderMode(GeometryRenderMode mode);
+    GeometryRenderMode getRenderMode() const { return m_renderMode; }
+    
+    // Helper to convert render mode to/from string
+    static std::string renderModeToString(GeometryRenderMode mode);
+    static GeometryRenderMode stringToRenderMode(const std::string& str);
+    
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
-    void syncToState(cvc::state& parentState) override;
-    void syncFromState(cvc::state& parentState) override;
 
     // Check if a metadata key is computed (read-only)
     static bool isComputedMetadata(const std::string& key);
 
 protected:
     vtkProp* getProp() override;
+    void handleStateChanged(const std::string& childState) override;
     void updatePolyData(const cvc::geometry &geom);
     void updateMetadata(const cvc::geometry &geom);
     void onDataChanged();
@@ -55,12 +74,12 @@ protected:
 private:
     bool m_hasGeometry;
     std::shared_ptr<cvc::geometry> m_geometry;
+    GeometryRenderMode m_renderMode;
     
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     vtkSmartPointer<vtkPolyData> m_polyData;
     
-    cvc::state* m_stateNode;
     boost::signals2::connection m_dataConnection;
 };
 

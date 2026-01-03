@@ -24,7 +24,7 @@ namespace cvc {
 class NullGraphicNode : public GraphicsNode
 {
 public:
-    NullGraphicNode(const std::string& name = "null");
+    NullGraphicNode(const std::string& statePath, const std::string& name = "null");
     ~NullGraphicNode() override;
 
     // Set custom bounding box extents (user-modifiable)
@@ -34,18 +34,14 @@ public:
     
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
-    void syncToState(cvc::state& parentState) override;
-    void syncFromState(cvc::state& parentState) override;
 
 protected:
     vtkProp* getProp() override;
+    void handleStateChanged(const std::string& childState) override;
 
 private:
     cvc::bounding_box m_bounds;
     vtkSmartPointer<vtkActor> m_dummyActor;  // Empty actor (never rendered)
-    
-    cvc::state* m_stateNode;
-    boost::signals2::connection m_dataConnection;
 };
 
 #endif // NULLGRAPHICNODE_H

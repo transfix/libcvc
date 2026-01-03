@@ -1,16 +1,44 @@
 #include <volrover3/SceneNode.h>
+#include <cvc/app.h>
 #include <vtkProp.h>
 #include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <algorithm>
 
-SceneNode::SceneNode()
-    : m_visible(true)
+// Static member for main thread callback
+SceneNode::MainThreadCallback SceneNode::s_mainThreadCallback;
+
+void SceneNode::setMainThreadCallback(MainThreadCallback callback)
+{
+    s_mainThreadCallback = callback;
+}
+
+void SceneNode::runOnMainThread(std::function<void()> func)
+{
+    if (s_mainThreadCallback) {
+        s_mainThreadCallback(func);
+    } else {
+        // No callback set, execute immediately (may not be thread-safe!)
+        func();
+    }
+}
+
+SceneNode::SceneNode(const std::string& statePath)
+    : state_object<SceneNode>(statePath)
+    , m_visible(true)
     , m_renderer(nullptr)
 {
+    // Initialize visible state
+    if (!statePath.empty()) {
+        getState("visible").value(1);  // Default to visible
+    }
 }
 
 SceneNode::~SceneNode()
 {
+    // Disconnect from state tree before derived class destructor completes
+    // to prevent pure virtual method calls during destruction
+    disconnectState();
 }
 
 void SceneNode::addToRenderer(vtkRenderer *renderer)
@@ -82,4 +110,19 @@ void SceneNode::removeChild(std::shared_ptr<SceneNode> child)
         }
         m_children.erase(it);
     }
+}
+
+void SceneNode::handleStateChanged(const std::string& childState)
+{
+    cvcapp.log(2, str(boost::format("SceneNode::handleStateChanged: %s") % childState));
+    
+    // Marshal state changes to main thread to avoid Qt/VTK threading issues
+    runOnMainThread([this, childState]() {
+        
+        // Handle visible state changes
+        if (childState == "visible") {
+            int visible = getState("visible").value<int>();
+            setVisible(visible != 0);
+        }
+    });
 }

@@ -14,10 +14,6 @@ class vtkTransform;
 class vtkActor2D;
 class BBoxNode;
 
-namespace cvc {
-    class state;
-}
-
 /**
  * @brief Abstract base class for all graphics objects in the scene
  * 
@@ -27,17 +23,17 @@ namespace cvc {
  * - Metadata storage
  * - Bounding box display
  * - Visibility control
- * - State tree synchronization
+ * - State tree synchronization (via state_object inheritance)
  * 
  * Subclasses must implement:
  * - getBoundingBox() - return the untransformed bounding box
  * - getProp() - return the VTK prop for rendering
- * - syncToState() / syncFromState() - state tree integration
+ * - handleStateChanged() - respond to state tree changes
  */
 class GraphicsNode : public SceneNode
 {
 public:
-    GraphicsNode(const std::string& name = "");
+    GraphicsNode(const std::string& statePath, const std::string& name = "");
     virtual ~GraphicsNode();
 
     // Identity and naming
@@ -46,8 +42,6 @@ public:
     
     // Pure virtual methods that subclasses must implement
     virtual cvc::bounding_box getBoundingBox() const = 0;  // Return untransformed bounding box of THIS node only
-    virtual void syncToState(cvc::state& parentState) = 0;
-    virtual void syncFromState(cvc::state& parentState) = 0;
     
     // Get combined bounding box (this node + all children)
     cvc::bounding_box getCombinedBoundingBox() const;
@@ -68,6 +62,28 @@ public:
     vtkSmartPointer<vtkMatrix4x4> getWorldTransform() const;
     
     // Hierarchical structure
+    
+    // Template factory method for creating child graphics nodes
+    // Automatically constructs the proper state path based on parent's state
+    // Usage: auto node = parent->addGraphicsChild<GeometryNode>("myGeom");
+    template<typename T>
+    std::shared_ptr<T> addGraphicsChild(const std::string& name)
+    {
+        static_assert(std::is_base_of<GraphicsNode, T>::value, "T must be derived from GraphicsNode");
+        
+        // Construct state path: {parent_path}.children.{name}
+        std::string childStatePath = getState().fullName() + ".children." + name;
+        
+        // Create the child node with proper state path and name
+        auto child = std::make_shared<T>(childStatePath, name);
+        
+        // Add to children using the non-template version
+        addGraphicsChild(std::static_pointer_cast<GraphicsNode>(child));
+        
+        return child;
+    }
+    
+    // Non-template version for adding existing nodes
     void addGraphicsChild(std::shared_ptr<GraphicsNode> child);
     void removeGraphicsChild(std::shared_ptr<GraphicsNode> child);
     std::shared_ptr<GraphicsNode> findChildByName(const std::string& name);
@@ -111,9 +127,6 @@ protected:
     void updateTransform();
     void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
     void updateLabel();  // Update label position and properties
-    
-    // Helper to save common state attributes (transform, bbox, label, children)
-    void saveCommonStateAttributes(cvc::state& myState);
 
     // Protected members for subclass access
     std::string m_name;
@@ -130,6 +143,9 @@ protected:
     int m_labelSize;
     double m_labelColor[3];
     vtkSmartPointer<vtkActor2D> m_labelActor;
+    
+    // State change handler override
+    virtual void handleStateChanged(const std::string& childState) override;
 };
 
 #endif // GRAPHICSNODE_H

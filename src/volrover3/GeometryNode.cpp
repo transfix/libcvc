@@ -10,17 +10,22 @@
 #include <vtkProperty.h>
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
+#include <vtkCellArray.h>
+#include <vtkLine.h>
+#include <vtkVertex.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <sstream>
 #include <algorithm>
 #include <set>
 
-GeometryNode::GeometryNode(const std::string& name)
-    : GraphicsNode(name)
+GeometryNode::GeometryNode(const std::string& statePath, const std::string& name)
+    : GraphicsNode(statePath, name)
     , m_hasGeometry(false)
+    , m_renderMode(GeometryRenderMode::TRIS)
     , m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_polyData(vtkSmartPointer<vtkPolyData>::New())
-    , m_stateNode(nullptr)
 {
     m_mapper->SetInputData(m_polyData);
     m_actor->SetMapper(m_mapper);
@@ -29,11 +34,102 @@ GeometryNode::GeometryNode(const std::string& name)
     m_actor->GetProperty()->SetColor(0.8, 0.8, 0.9);
     m_actor->GetProperty()->SetSpecular(0.3);
     m_actor->GetProperty()->SetSpecularPower(20);
+    
+    // Initialize render mode state
+    if (!statePath.empty()) {
+        getState("render_mode").value(renderModeToString(m_renderMode));
+    }
 }
 
 GeometryNode::~GeometryNode()
 {
     m_dataConnection.disconnect();
+}
+
+void GeometryNode::handleStateChanged(const std::string& childState)
+{
+    cvcapp.log(2, str(boost::format("GeometryNode::handleStateChanged(%s) for '%s'") % childState % getName()));
+    
+    // Marshal to main thread
+    runOnMainThread([this, childState]() {
+        
+        // Handle geometry-specific state changes
+        if (childState == "render_mode") {
+            std::string renderModeStr = getState("render_mode").value<std::string>();
+            GeometryRenderMode newMode = stringToRenderMode(renderModeStr);
+            setRenderMode(newMode);
+        }
+        else {
+            // Delegate to parent for common graphics fields
+            GraphicsNode::handleStateChanged(childState);
+        }
+    });
+}
+
+std::string GeometryNode::renderModeToString(GeometryRenderMode mode)
+{
+    return std::to_string(static_cast<int>(mode));
+}
+
+GeometryRenderMode GeometryNode::stringToRenderMode(const std::string& str)
+{
+    try {
+        int mode = std::stoi(str);
+        if (mode >= 0 && mode <= 5) {
+            return static_cast<GeometryRenderMode>(mode);
+        }
+    } catch (...) {}
+    return GeometryRenderMode::TRIS; // Default
+}
+
+void GeometryNode::setRenderMode(GeometryRenderMode mode)
+{
+    if (m_renderMode == mode) return;
+    
+    m_renderMode = mode;
+    
+    // Update state tree (bi-directional sync)
+    getState("render_mode").value(renderModeToString(mode));
+    
+    // Update VTK rendering based on mode
+    switch (mode) {
+        case GeometryRenderMode::POINTS:
+            m_actor->GetProperty()->SetRepresentationToPoints();
+            m_actor->GetProperty()->SetPointSize(3.0);
+            break;
+            
+        case GeometryRenderMode::LINES:
+            m_actor->GetProperty()->SetRepresentationToWireframe();
+            m_actor->GetProperty()->SetLineWidth(1.0);
+            break;
+            
+        case GeometryRenderMode::TRIS:
+        case GeometryRenderMode::QUADS:
+            m_actor->GetProperty()->SetRepresentationToSurface();
+            break;
+            
+        case GeometryRenderMode::TETS:
+        case GeometryRenderMode::HEXS:
+            // Placeholder: For now, render as wireframe
+            // TODO: Implement proper volumetric mesh rendering
+            m_actor->GetProperty()->SetRepresentationToWireframe();
+            break;
+    }
+    
+    // Trigger re-render if we have geometry
+    if (m_hasGeometry && m_geometry) {
+        updatePolyData(*m_geometry);
+    }
+    
+    // Mark everything as modified to trigger re-render
+    m_polyData->Modified();
+    m_mapper->Modified();
+    m_actor->Modified();
+    
+    // Request a render update (if we have a renderer with a render window)
+    if (m_renderer && m_renderer->GetRenderWindow()) {
+        m_renderer->GetRenderWindow()->Render();
+    }
 }
 
 vtkProp* GeometryNode::getProp()
@@ -47,10 +143,40 @@ void GeometryNode::setGeometry(const cvc::geometry& geom)
     
     // Store the geometry object
     m_geometry = std::make_shared<cvc::geometry>(geom);
+    m_hasGeometry = true;  // Set this BEFORE setRenderMode so it can update
     
-    updatePolyData(geom);
+    // Auto-detect render mode from geometry type
+    GeometryRenderMode autoMode = GeometryRenderMode::TRIS; // default
+    
+    switch (geom.get_geometry_type()) {
+        case cvc::geometry::SURFACE_TRI:
+            autoMode = GeometryRenderMode::TRIS;
+            break;
+        case cvc::geometry::SURFACE_QUAD:
+            autoMode = GeometryRenderMode::QUADS;
+            break;
+        case cvc::geometry::VOLUME_TET:
+            autoMode = GeometryRenderMode::TETS;
+            break;
+        case cvc::geometry::VOLUME_HEX:
+            autoMode = GeometryRenderMode::HEXS;
+            break;
+        case cvc::geometry::MIXED:
+            // For mixed, prefer tris if available, otherwise quads
+            if (geom.num_tris() > 0) {
+                autoMode = GeometryRenderMode::TRIS;
+            } else if (geom.num_quads() > 0) {
+                autoMode = GeometryRenderMode::QUADS;
+            } else if (geom.num_tets() > 0) {
+                autoMode = GeometryRenderMode::TETS;
+            } else if (geom.num_hexs() > 0) {
+                autoMode = GeometryRenderMode::HEXS;
+            }
+            break;
+    }
+    
+    setRenderMode(autoMode);  // This will now call updatePolyData
     updateMetadata(geom);
-    m_hasGeometry = true;
     
     // Update bbox to match geometry bounds
     updateBoundingBoxNode();
@@ -67,20 +193,158 @@ void GeometryNode::updatePolyData(const cvc::geometry& geom)
         points->SetPoint(i, pt[0], pt[1], pt[2]);
     }
 
-    // Create VTK cells (triangles)
-    vtkSmartPointer<vtkCellArray> triangles = vtkSmartPointer<vtkCellArray>::New();
+    // Clear existing cells
+    m_polyData->SetVerts(nullptr);
+    m_polyData->SetLines(nullptr);
+    m_polyData->SetPolys(nullptr);
     
-    for (size_t i = 0; i < geom.num_tris(); ++i) {
-        const auto& tri = geom.tris()[i];
-        triangles->InsertNextCell(3);
-        triangles->InsertCellPoint(tri[0]);
-        triangles->InsertCellPoint(tri[1]);
-        triangles->InsertCellPoint(tri[2]);
+    // Create cells based on render mode
+    switch (m_renderMode) {
+        case GeometryRenderMode::POINTS: {
+            // Render as point cloud
+            vtkSmartPointer<vtkCellArray> vertices = vtkSmartPointer<vtkCellArray>::New();
+            for (size_t i = 0; i < geom.num_points(); ++i) {
+                vertices->InsertNextCell(1);
+                vertices->InsertCellPoint(i);
+            }
+            m_polyData->SetVerts(vertices);
+            break;
+        }
+        
+        case GeometryRenderMode::LINES: {
+            // Render as wireframe using edge connectivity
+            vtkSmartPointer<vtkCellArray> lines = vtkSmartPointer<vtkCellArray>::New();
+            
+            // Add lines from line array if available
+            for (size_t i = 0; i < geom.num_lines(); ++i) {
+                const auto& line = geom.lines()[i];
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(line[0]);
+                lines->InsertCellPoint(line[1]);
+            }
+            
+            // Add triangle edges
+            for (size_t i = 0; i < geom.num_tris(); ++i) {
+                const auto& tri = geom.tris()[i];
+                // Three edges per triangle
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(tri[0]);
+                lines->InsertCellPoint(tri[1]);
+                
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(tri[1]);
+                lines->InsertCellPoint(tri[2]);
+                
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(tri[2]);
+                lines->InsertCellPoint(tri[0]);
+            }
+            
+            // Add quad edges
+            for (size_t i = 0; i < geom.num_quads(); ++i) {
+                const auto& quad = geom.quads()[i];
+                // Four edges per quad
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(quad[0]);
+                lines->InsertCellPoint(quad[1]);
+                
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(quad[1]);
+                lines->InsertCellPoint(quad[2]);
+                
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(quad[2]);
+                lines->InsertCellPoint(quad[3]);
+                
+                lines->InsertNextCell(2);
+                lines->InsertCellPoint(quad[3]);
+                lines->InsertCellPoint(quad[0]);
+            }
+            
+            m_polyData->SetLines(lines);
+            break;
+        }
+        
+        case GeometryRenderMode::TRIS: {
+            // Render triangles as solid surface
+            vtkSmartPointer<vtkCellArray> triangles = vtkSmartPointer<vtkCellArray>::New();
+            
+            for (size_t i = 0; i < geom.num_tris(); ++i) {
+                const auto& tri = geom.tris()[i];
+                triangles->InsertNextCell(3);
+                triangles->InsertCellPoint(tri[0]);
+                triangles->InsertCellPoint(tri[1]);
+                triangles->InsertCellPoint(tri[2]);
+            }
+            
+            m_polyData->SetPolys(triangles);
+            break;
+        }
+        
+        case GeometryRenderMode::QUADS: {
+            // Render quads as solid surface
+            vtkSmartPointer<vtkCellArray> quads = vtkSmartPointer<vtkCellArray>::New();
+            
+            for (size_t i = 0; i < geom.num_quads(); ++i) {
+                const auto& quad = geom.quads()[i];
+                quads->InsertNextCell(4);
+                quads->InsertCellPoint(quad[0]);
+                quads->InsertCellPoint(quad[1]);
+                quads->InsertCellPoint(quad[2]);
+                quads->InsertCellPoint(quad[3]);
+            }
+            
+            m_polyData->SetPolys(quads);
+            break;
+        }
+        
+        case GeometryRenderMode::TETS: {
+            // TODO: Implement tetrahedral mesh rendering
+            // For now, render as wireframe edges
+            vtkSmartPointer<vtkCellArray> lines = vtkSmartPointer<vtkCellArray>::New();
+            
+            for (size_t i = 0; i < geom.num_tets(); ++i) {
+                const auto& tet = geom.tets()[i];
+                // 6 edges per tet: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+                const int edges[6][2] = {{0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}};
+                for (int e = 0; e < 6; ++e) {
+                    lines->InsertNextCell(2);
+                    lines->InsertCellPoint(tet[edges[e][0]]);
+                    lines->InsertCellPoint(tet[edges[e][1]]);
+                }
+            }
+            
+            m_polyData->SetLines(lines);
+            break;
+        }
+        
+        case GeometryRenderMode::HEXS: {
+            // TODO: Implement hexahedral mesh rendering
+            // For now, render as wireframe edges
+            vtkSmartPointer<vtkCellArray> lines = vtkSmartPointer<vtkCellArray>::New();
+            
+            for (size_t i = 0; i < geom.num_hexs(); ++i) {
+                const auto& hex = geom.hexs()[i];
+                // 12 edges per hex
+                const int edges[12][2] = {
+                    {0,1}, {1,2}, {2,3}, {3,0},  // Bottom face
+                    {4,5}, {5,6}, {6,7}, {7,4},  // Top face
+                    {0,4}, {1,5}, {2,6}, {3,7}   // Vertical edges
+                };
+                for (int e = 0; e < 12; ++e) {
+                    lines->InsertNextCell(2);
+                    lines->InsertCellPoint(hex[edges[e][0]]);
+                    lines->InsertCellPoint(hex[edges[e][1]]);
+                }
+            }
+            
+            m_polyData->SetLines(lines);
+            break;
+        }
     }
 
-    // Update polydata
+    // Update polydata points
     m_polyData->SetPoints(points);
-    m_polyData->SetPolys(triangles);
 
     // Add normals if available
     if (geom.normals().size() == geom.num_points()) {
@@ -131,79 +395,7 @@ cvc::bounding_box GeometryNode::getBoundingBox() const
     return cvc::bounding_box(0, 0, 0, 0, 0, 0);
 }
 
-void GeometryNode::syncToState(cvc::state& parentState)
-{
-    cvc::state& myState = parentState(m_name);
-    myState.comment("Graphics object with geometry data and transform");
-    
-    // Store geometry data
-    if (m_geometry) {
-        myState.data(*m_geometry);
-    }
-    
-    // Save common graphics attributes (transform, bbox, label, children, combined bbox if has children)
-    saveCommonStateAttributes(myState);
-    
-    // Store metadata with appropriate readOnly flags and comments
-    cvc::state& metadataState = myState("metadata");
-    metadataState.comment("Computed geometry statistics and properties");
-    
-    for (const auto& [key, value] : m_metadata) {
-        try {
-            cvc::state& metaEntry = metadataState(key);
-            
-            if (value.type() == typeid(std::string)) {
-                metaEntry.value(std::any_cast<std::string>(value));
-            } else if (value.type() == typeid(double)) {
-                metaEntry.value(std::any_cast<double>(value));
-            } else if (value.type() == typeid(int)) {
-                metaEntry.value(std::any_cast<int>(value));
-            } else if (value.type() == typeid(bool)) {
-                bool boolVal = std::any_cast<bool>(value);
-                metaEntry.value(boolVal ? "true" : "false");
-            }
-            
-            // Set readOnly flag for computed metadata
-            metaEntry.readOnly(isComputedMetadata(key));
-            
-            // Set descriptive comments for known metadata keys
-            if (key == "num_vertices") metaEntry.comment("Number of vertices in the geometry");
-            else if (key == "num_triangles") metaEntry.comment("Number of triangles in the geometry");
-            else if (key == "num_quads") metaEntry.comment("Number of quads in the geometry");
-            else if (key == "bbox_min_x") metaEntry.comment("Minimum X coordinate of bounding box");
-            else if (key == "bbox_min_y") metaEntry.comment("Minimum Y coordinate of bounding box");
-            else if (key == "bbox_min_z") metaEntry.comment("Minimum Z coordinate of bounding box");
-            else if (key == "bbox_max_x") metaEntry.comment("Maximum X coordinate of bounding box");
-            else if (key == "bbox_max_y") metaEntry.comment("Maximum Y coordinate of bounding box");
-            else if (key == "bbox_max_z") metaEntry.comment("Maximum Z coordinate of bounding box");
-            else if (key == "extent_x") metaEntry.comment("Width (X dimension) of bounding box");
-            else if (key == "extent_y") metaEntry.comment("Height (Y dimension) of bounding box");
-            else if (key == "extent_z") metaEntry.comment("Depth (Z dimension) of bounding box");
-            else if (key == "center_x") metaEntry.comment("X coordinate of bounding box center");
-            else if (key == "center_y") metaEntry.comment("Y coordinate of bounding box center");
-            else if (key == "center_z") metaEntry.comment("Z coordinate of bounding box center");
-            else if (key == "combined_bbox_min_x") metaEntry.comment("Minimum X coordinate of combined bounding box (this + children)");
-            else if (key == "combined_bbox_min_y") metaEntry.comment("Minimum Y coordinate of combined bounding box (this + children)");
-            else if (key == "combined_bbox_min_z") metaEntry.comment("Minimum Z coordinate of combined bounding box (this + children)");
-            else if (key == "combined_bbox_max_x") metaEntry.comment("Maximum X coordinate of combined bounding box (this + children)");
-            else if (key == "combined_bbox_max_y") metaEntry.comment("Maximum Y coordinate of combined bounding box (this + children)");
-            else if (key == "combined_bbox_max_z") metaEntry.comment("Maximum Z coordinate of combined bounding box (this + children)");
-            else if (key == "combined_extent_x") metaEntry.comment("Width (X dimension) of combined bounding box");
-            else if (key == "combined_extent_y") metaEntry.comment("Height (Y dimension) of combined bounding box");
-            else if (key == "combined_extent_z") metaEntry.comment("Depth (Z dimension) of combined bounding box");
-            else if (key == "combined_center_x") metaEntry.comment("X coordinate of combined bounding box center");
-            else if (key == "combined_center_y") metaEntry.comment("Y coordinate of combined bounding box center");
-            else if (key == "combined_center_z") metaEntry.comment("Z coordinate of combined bounding box center");
-            else if (key == "type") metaEntry.comment("Geometry type (triangle_mesh, quad_mesh, etc.)");
-            else if (key == "bounding_box") metaEntry.comment("Complete bounding box as comma-separated values");
-            else if (key == "filename") metaEntry.comment("Source filename for the geometry");
-            
-        } catch (...) {
-            // Skip metadata that can't be serialized
-        }
-    }
-}
-
+// Note: syncToState and syncFromState removed - state_object handles state synchronization automatically
 bool GeometryNode::isComputedMetadata(const std::string& key)
 {
     // These metadata keys are computed from geometry data and should be read-only
@@ -221,114 +413,6 @@ bool GeometryNode::isComputedMetadata(const std::string& key)
     };
     
     return computedKeys.find(key) != computedKeys.end();
-}
-
-void GeometryNode::syncFromState(cvc::state& parentState)
-{
-    try {
-        cvc::state& myState = parentState(m_name);
-        
-        m_stateNode = &myState;
-        m_dataConnection.disconnect(); // Disconnect any previous connection
-        m_dataConnection = myState.dataChanged.connect([this]() {
-            onDataChanged();
-        });
-        
-        // Load geometry data
-        if (myState.isData<cvc::geometry>()) {
-            try {
-                const cvc::geometry& geom = boost::any_cast<const cvc::geometry&>(myState.data());
-                setGeometry(geom);
-            } catch (...) {}
-        }
-        
-        // Load transform
-        try {
-            std::string transformStr = myState("transform").value();
-            std::vector<double> values;
-            std::stringstream ss(transformStr);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                values.push_back(std::stod(token));
-            }
-            
-            if (values.size() == 16) {
-                for (int i = 0; i < 4; ++i) {
-                    for (int j = 0; j < 4; ++j) {
-                        m_transform->SetElement(i, j, values[i * 4 + j]);
-                    }
-                }
-                updateTransform();
-            }
-        } catch (...) {}
-        
-        // Load metadata
-        try {
-            cvc::state& metadataState = myState("metadata");
-            std::vector<std::string> metadataKeys = metadataState.children();
-            
-            // Filter to direct children only
-            std::string metadataPath = metadataState.fullName();
-            int expectedDepth = std::count(metadataPath.begin(), metadataPath.end(), '.') + 1;
-            
-            for (const auto& descendant : metadataKeys) {
-                int depth = std::count(descendant.begin(), descendant.end(), '.');
-                if (depth == expectedDepth) {
-                    // Extract just the key name
-                    size_t lastDot = descendant.find_last_of('.');
-                    std::string key = (lastDot != std::string::npos) ? descendant.substr(lastDot + 1) : descendant;
-                    
-                    try {
-                        std::string value = metadataState(key).value();
-                        
-                        // Store all metadata as strings when loading from state
-                        // The state tree stores everything as strings anyway
-                        if (value == "true") {
-                            setMetadata(key, true);
-                        } else if (value == "false") {
-                            setMetadata(key, false);
-                        } else {
-                            setMetadata(key, value);
-                        }
-                    } catch (...) {}
-                }
-            }
-        } catch (...) {}
-        
-        // Load bbox flag
-        try {
-            std::string showBBoxStr = myState("show_bbox").value();
-            setShowBBox(showBBoxStr == "true");
-        } catch (...) {}
-        
-        // Load label settings
-        try {
-            std::string showLabelStr = myState("show_label").value();
-            setShowLabel(showLabelStr == "true");
-        } catch (...) {}
-        
-        try {
-            std::string labelText = myState("label_text").value();
-            setLabelText(labelText);
-        } catch (...) {}
-        
-        try {
-            int labelSize = std::stoi(myState("label_size").value());
-            setLabelSize(labelSize);
-        } catch (...) {}
-        
-        try {
-            std::string colorStr = myState("label_color").value();
-            std::istringstream iss(colorStr);
-            double r, g, b;
-            char comma;
-            if (iss >> r >> comma >> g >> comma >> b) {
-                setLabelColor(r, g, b);
-            }
-        } catch (...) {}
-    } catch (...) {
-        // State doesn't exist or can't be loaded
-    }
 }
 
 void GeometryNode::updateMetadata(const cvc::geometry& geom)
@@ -395,11 +479,10 @@ void GeometryNode::updateMetadata(const cvc::geometry& geom)
 void GeometryNode::onDataChanged()
 {
     // Called when state data changes - reload geometry from state
-    if (!m_stateNode) return;
-    
-    if (m_stateNode->isData<cvc::geometry>()) {
+    // Note: With state_object, we access state via getState() instead of m_stateNode
+    if (getState().isData<cvc::geometry>()) {
         try {
-            const cvc::geometry& geom = boost::any_cast<const cvc::geometry&>(m_stateNode->data());
+            const cvc::geometry& geom = boost::any_cast<const cvc::geometry&>(getState().data());
             setGeometry(geom);
         } catch (...) {
             // Failed to load geometry from state

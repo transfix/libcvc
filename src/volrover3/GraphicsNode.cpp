@@ -1,22 +1,24 @@
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/BBoxNode.h>
 #include <cvc/state.h>
+#include <cvc/app.h>
 #include <vtkTransform.h>
 #include <vtkMatrix4x4.h>
 #include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <vtkActor2D.h>
 #include <vtkTextMapper.h>
 #include <vtkTextProperty.h>
 #include <cmath>
 #include <algorithm>
 
-GraphicsNode::GraphicsNode(const std::string& name)
-    : SceneNode()
+GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name)
+    : SceneNode(statePath)
     , m_name(name)
     , m_transform(vtkSmartPointer<vtkMatrix4x4>::New())
     , m_parent(nullptr)
     , m_showBBox(false)
-    , m_bboxNode(std::make_shared<BBoxNode>())
+    , m_bboxNode(std::make_shared<BBoxNode>(statePath + ".bbox"))
     , m_showLabel(false)
     , m_labelText(name)
     , m_labelSize(14)
@@ -39,8 +41,16 @@ GraphicsNode::GraphicsNode(const std::string& name)
     m_labelActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     m_labelActor->SetVisibility(m_showLabel);
     
-    // Set default visible metadata flag to true
-    setMetadata("visible", true);
+    // Initialize state tree values if we have a valid state path
+    // Don't batch during construction - initial values should be set silently
+    // Handlers will fire when values change AFTER construction completes
+    if (!statePath.empty()) {
+        getState("show_bbox").value(0);
+        getState("show_label").value(0);
+        getState("label_text").value(name);
+        getState("label_size").value(14);
+        getState("label_color").value(std::string("1.0,1.0,1.0"));
+    }
 }
 
 GraphicsNode::~GraphicsNode()
@@ -217,25 +227,49 @@ void GraphicsNode::updateBoundingBoxNode()
     m_bboxNode->setBoundingBox(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
 }
 
-void GraphicsNode::update()
+void GraphicsNode::handleStateChanged(const std::string& childState)
 {
-    SceneNode::update();
+    cvcapp.log(2, str(boost::format("GraphicsNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
-    // Update label position if visible
-    if (m_showLabel && isVisible()) {
-        updateLabel();
-    }
-    
-    // Read visible flag from metadata and apply
-    if (hasMetadata("visible")) {
-        try {
-            bool visible = std::any_cast<bool>(getMetadata("visible"));
-            SceneNode::setVisible(visible);
-        } catch (...) {
-            // If cast fails, default to visible
-            SceneNode::setVisible(true);
+    // Marshal all state changes to main thread to avoid Qt/VTK threading issues
+    runOnMainThread([this, childState]() {
+        
+        // Handle state changes for graphics-specific fields
+        if (childState == "show_bbox") {
+            int showBBox = getState("show_bbox").value<int>();
+            setShowBBox(showBBox != 0);
         }
-    }
+        else if (childState == "show_label") {
+            int showLabel = getState("show_label").value<int>();
+            setShowLabel(showLabel != 0);
+        }
+        else if (childState == "label_text") {
+            std::string labelText = getState("label_text").value<std::string>();
+            setLabelText(labelText);
+        }
+        else if (childState == "label_size") {
+            int labelSize = getState("label_size").value<int>();
+            setLabelSize(labelSize);
+        }
+        else if (childState == "label_color") {
+            std::string colorStr = getState("label_color").value<std::string>();
+            std::istringstream iss(colorStr);
+            double r, g, b;
+            char comma;
+            if (iss >> r >> comma >> g >> comma >> b) {
+                setLabelColor(r, g, b);
+            }
+        }
+        else {
+            // Delegate to parent for common fields like visible
+            SceneNode::handleStateChanged(childState);
+        }
+        
+        // Request render after any state change
+        if (m_renderer && m_renderer->GetRenderWindow()) {
+            m_renderer->GetRenderWindow()->Render();
+        }
+    });
 }
 
 void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
@@ -362,64 +396,6 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const
     return combined;
 }
 
-void GraphicsNode::saveCommonStateAttributes(cvc::state& myState)
-{
-    // Store transform as comma-separated string (row-major 4x4 matrix)
-    std::string transformStr;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!transformStr.empty()) transformStr += ",";
-            transformStr += std::to_string(m_transform->GetElement(i, j));
-        }
-    }
-    cvc::state& transformState = myState("transform");
-    transformState.value(transformStr);
-    transformState.comment("4x4 transformation matrix in row-major order");
-    
-    // Store bbox flag
-    myState("show_bbox").value(m_showBBox ? "true" : "false");
-    
-    // Store label settings
-    myState("show_label").value(m_showLabel ? "true" : "false");
-    myState("label_text").value(m_labelText);
-    myState("label_size").value(std::to_string(m_labelSize));
-    std::ostringstream labelColorStr;
-    labelColorStr << m_labelColor[0] << "," << m_labelColor[1] << "," << m_labelColor[2];
-    myState("label_color").value(labelColorStr.str());
-    
-    // If this node has children, add combined bounding box to metadata
-    if (!m_graphicsChildren.empty()) {
-        cvc::bounding_box combinedBBox = getCombinedBoundingBox();
-        
-        // Store combined bbox min coordinates
-        m_metadata["combined_bbox_min_x"] = combinedBBox[0];
-        m_metadata["combined_bbox_min_y"] = combinedBBox[1];
-        m_metadata["combined_bbox_min_z"] = combinedBBox[2];
-        
-        // Store combined bbox max coordinates
-        m_metadata["combined_bbox_max_x"] = combinedBBox[3];
-        m_metadata["combined_bbox_max_y"] = combinedBBox[4];
-        m_metadata["combined_bbox_max_z"] = combinedBBox[5];
-        
-        // Store combined extents
-        m_metadata["combined_extent_x"] = combinedBBox[3] - combinedBBox[0];
-        m_metadata["combined_extent_y"] = combinedBBox[4] - combinedBBox[1];
-        m_metadata["combined_extent_z"] = combinedBBox[5] - combinedBBox[2];
-        
-        // Store combined center
-        m_metadata["combined_center_x"] = (combinedBBox[0] + combinedBBox[3]) / 2.0;
-        m_metadata["combined_center_y"] = (combinedBBox[1] + combinedBBox[4]) / 2.0;
-        m_metadata["combined_center_z"] = (combinedBBox[2] + combinedBBox[5]) / 2.0;
-        
-        // Recursively sync children under a "children" container
-        cvc::state& childrenState = myState("children");
-        childrenState.comment("Child graphics objects");
-        for (const auto& child : m_graphicsChildren) {
-            child->syncToState(childrenState);
-        }
-    }
-}
-
 void GraphicsNode::setMetadata(const std::string& key, const std::any& value)
 {
     m_metadata[key] = value;
@@ -439,10 +415,17 @@ bool GraphicsNode::hasMetadata(const std::string& key) const
     return m_metadata.find(key) != m_metadata.end();
 }
 
+void GraphicsNode::update()
+{
+    // With state_object, we don't need manual syncing
+    // The state tree automatically synchronizes via handleStateChanged()
+    // Just propagate to children
+    SceneNode::update();
+}
+
 void GraphicsNode::setVisible(bool visible)
 {
     SceneNode::setVisible(visible);
-    setMetadata("visible", visible);
     
     // Update label visibility
     if (m_labelActor) {
