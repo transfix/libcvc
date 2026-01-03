@@ -32,6 +32,12 @@ public:
     void setBounds(double minX, double minY, double minZ,
                    double maxX, double maxY, double maxZ);
     
+    // Control whether this node's own bounds contribute to combined bbox
+    // When false, only children's bounds are included (useful for root nodes)
+    // When true, this node's bounds are included (useful for clipping regions)
+    void setIncludeOwnBounds(bool include) { m_includeOwnBounds = include; }
+    bool getIncludeOwnBounds() const { return m_includeOwnBounds; }
+    
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
 
@@ -42,6 +48,7 @@ protected:
 private:
     cvc::bounding_box m_bounds;
     vtkSmartPointer<vtkActor> m_dummyActor;  // Empty actor (never rendered)
+    bool m_includeOwnBounds;  // Whether to include own bounds in combined bbox
 };
 
 #endif // NULLGRAPHICNODE_H

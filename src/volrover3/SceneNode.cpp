@@ -170,8 +170,6 @@ void SceneNode::removeChild(std::shared_ptr<SceneNode> child)
 
 void SceneNode::handleStateChanged(const std::string& childState)
 {
-    cvcapp.log(2, str(boost::format("SceneNode::handleStateChanged: %s") % childState));
-    
     // Marshal to main thread via event queue
     runOnMainThread([this, childState]() {
         // Handle visible state changes

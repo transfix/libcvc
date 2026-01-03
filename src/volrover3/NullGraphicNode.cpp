@@ -8,8 +8,9 @@
 
 NullGraphicNode::NullGraphicNode(const std::string& statePath, const std::string& name)
     : GraphicsNode(statePath, name)
-    , m_bounds(-100.0, -100.0, -100.0, 100.0, 100.0, 100.0)  // Default 200x200x200 box
+    , m_bounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5)  // Default 1x1x1 box centered at origin
     , m_dummyActor(vtkSmartPointer<vtkActor>::New())
+    , m_includeOwnBounds(false)  // Don't include own bounds by default (typical for root nodes)
 {
     // Dummy actor has no mapper, won't render anything
     // This node exists only to provide bounding box extents
@@ -56,8 +57,6 @@ cvc::bounding_box NullGraphicNode::getBoundingBox() const
 
 void NullGraphicNode::handleStateChanged(const std::string& childState)
 {
-    cvcapp.log(2, str(boost::format("NullGraphicNode::handleStateChanged(%s) for '%s'") % childState % getName()));
-    
     // Handle bounds state changes (no VTK calls, so no runOnMainThread needed)
     if (childState == "bounds") {
         std::string boundsStr = getState("bounds").value<std::string>();

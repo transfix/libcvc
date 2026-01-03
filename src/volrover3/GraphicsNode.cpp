@@ -1,5 +1,6 @@
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/BBoxNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <cvc/state.h>
 #include <cvc/app.h>
 #include <vtkTransform.h>
@@ -229,8 +230,6 @@ void GraphicsNode::updateBoundingBoxNode()
 
 void GraphicsNode::handleStateChanged(const std::string& childState)
 {
-    cvcapp.log(2, str(boost::format("GraphicsNode::handleStateChanged(%s) for '%s'") % childState % getName()));
-    
     // Marshal to main thread via event queue
     runOnMainThread([this, childState]() {
         // Handle state changes for graphics-specific fields
@@ -339,8 +338,31 @@ std::shared_ptr<GraphicsNode> GraphicsNode::findChildByName(const std::string& n
 
 cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const
 {
-    // Start with this node's own bounding box
-    cvc::bounding_box combined = getBoundingBox();
+    // Check if this is a NullGraphicNode and if it should include own bounds
+    const NullGraphicNode* nullNode = dynamic_cast<const NullGraphicNode*>(this);
+    bool includeOwnBounds = true;
+    if (nullNode) {
+        includeOwnBounds = nullNode->getIncludeOwnBounds();
+    }
+    
+    // Accumulate extents without creating invalid bbox
+    double acc_minx = std::numeric_limits<double>::max();
+    double acc_miny = std::numeric_limits<double>::max();
+    double acc_minz = std::numeric_limits<double>::max();
+    double acc_maxx = std::numeric_limits<double>::lowest();
+    double acc_maxy = std::numeric_limits<double>::lowest();
+    double acc_maxz = std::numeric_limits<double>::lowest();
+    
+    // Include own bounds if requested
+    if (includeOwnBounds) {
+        cvc::bounding_box ownBBox = getBoundingBox();
+        acc_minx = ownBBox[0];
+        acc_miny = ownBBox[1];
+        acc_minz = ownBBox[2];
+        acc_maxx = ownBBox[3];
+        acc_maxy = ownBBox[4];
+        acc_maxz = ownBBox[5];
+    }
     
     // Expand to include all children (transformed to this node's local space)
     for (const auto& child : m_graphicsChildren) {
@@ -391,16 +413,22 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const
             maxz = std::max(maxz, out[2]);
         }
         
-        // Expand combined box to include transformed child
-        combined[0] = std::min(combined[0], minx);
-        combined[1] = std::min(combined[1], miny);
-        combined[2] = std::min(combined[2], minz);
-        combined[3] = std::max(combined[3], maxx);
-        combined[4] = std::max(combined[4], maxy);
-        combined[5] = std::max(combined[5], maxz);
+        // Expand accumulated extents to include transformed child
+        acc_minx = std::min(acc_minx, minx);
+        acc_miny = std::min(acc_miny, miny);
+        acc_minz = std::min(acc_minz, minz);
+        acc_maxx = std::max(acc_maxx, maxx);
+        acc_maxy = std::max(acc_maxy, maxy);
+        acc_maxz = std::max(acc_maxz, maxz);
     }
     
-    return combined;
+    // Create final bounding box from accumulated extents
+    // If no valid extents were accumulated, return a default small box
+    if (acc_minx > acc_maxx || acc_miny > acc_maxy || acc_minz > acc_maxz) {
+        return cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);
+    }
+    
+    return cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
 }
 
 void GraphicsNode::setMetadata(const std::string& key, const std::any& value)
