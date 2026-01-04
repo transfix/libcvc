@@ -1,7 +1,6 @@
 #ifndef BBOXNODE_H
 #define BBOXNODE_H
 
-#include <volrover3/SceneNode.h>
 #include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
 #include <vector>
@@ -11,15 +10,16 @@ class vtkPolyDataMapper;
 class vtkActor2D;
 class vtkRenderer;
 
-class BBoxNode : public SceneNode
+// Simple VTK wrapper for bounding box visualization
+// Not a SceneNode - controlled by parent GraphicsNode's show_bbox state
+class BBoxNode
 {
 public:
-    BBoxNode(const std::string& statePath);
-    ~BBoxNode() override;
+    BBoxNode();
+    ~BBoxNode();
 
-    vtkProp* getProp() override;
-    void addToRenderer(vtkRenderer* renderer) override;
-    void removeFromRenderer(vtkRenderer* renderer) override;
+    void addToRenderer(vtkRenderer* renderer);
+    void removeFromRenderer(vtkRenderer* renderer);
     
     void setBoundingBox(const cvc::bounding_box& bbox);
     cvc::bounding_box getBoundingBox() const { return m_bbox; }

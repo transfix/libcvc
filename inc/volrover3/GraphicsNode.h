@@ -5,12 +5,12 @@
 #include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
 #include <vtkMatrix4x4.h>
+#include <vtkTransform.h>
 #include <boost/signals2.hpp>
 #include <string>
 #include <map>
 #include <any>
 
-class vtkTransform;
 class vtkActor2D;
 class BBoxNode;
 
@@ -127,10 +127,14 @@ protected:
     void updateTransform();
     void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
     void updateLabel();  // Update label position and properties
+    
+    // Apply transform to VTK prop - subclasses should override to apply to their specific prop type
+    virtual void applyTransformToVTK();
 
     // Protected members for subclass access
     std::string m_name;
     vtkSmartPointer<vtkMatrix4x4> m_transform;
+    vtkSmartPointer<vtkTransform> m_vtkTransform;  // VTK transform wrapper for m_transform
     std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
     GraphicsNode* m_parent; // Weak pointer to parent for world transform calculation
     std::map<std::string, std::any> m_metadata;

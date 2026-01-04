@@ -20,6 +20,7 @@ public:
 protected:
     vtkProp* getProp() override;
     void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to axes actor
 
 private:
     vtkSmartPointer<vtkAxesActor> m_axesActor;

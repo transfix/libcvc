@@ -327,8 +327,8 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
 
 // Test world transform calculation for nested nodes
 TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
-    auto parent = std::make_shared<GeometryNode>("test", "parent");
-    auto child = std::make_shared<GeometryNode>("test", "child");
+    auto parent = std::make_shared<GeometryNode>("test.parent", "parent");
+    auto child = std::make_shared<GeometryNode>("test.child", "child");
     
     // Set parent position
     parent->setPosition(10.0, 0.0, 0.0);

@@ -39,6 +39,7 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     
     m_nullGraphic->setShowBBox(true);  // Show bbox by default
     m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);  // Default unit cube when empty
+    m_nullGraphic->setIncludeOwnBounds(true);  // Include root bounds in visualization (will change to false when children are added)
     m_graphicsRoot = m_nullGraphic;  // NullGraphic IS the graphics root
     m_rootNodes.push_back(m_graphicsRoot);
     

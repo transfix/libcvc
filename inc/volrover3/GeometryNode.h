@@ -77,6 +77,7 @@ public:
 protected:
     vtkProp* getProp() override;
     void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to actor
     void updatePolyData(const cvc::geometry &geom);
     void updateRenderModeVTK();  // Helper to update VTK properties from render mode
     void updateMetadata(const cvc::geometry &geom);

@@ -63,6 +63,7 @@ public:
 protected:
     vtkProp* getProp() override; // Returns first actor (for compatibility)
     void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to all grid actors
 
 private:
     void createGridPlanes();

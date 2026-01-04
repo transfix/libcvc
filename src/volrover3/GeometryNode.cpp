@@ -65,10 +65,16 @@ GeometryNode::~GeometryNode()
     m_dataConnection.disconnect();
 }
 
+void GeometryNode::applyTransformToVTK()
+{
+    // Apply transform to VTK actor
+    if (m_actor) {
+        m_actor->SetUserTransform(m_vtkTransform.Get());
+    }
+}
+
 void GeometryNode::handleStateChanged(const std::string& childState)
 {
-    cvcapp.log(2, str(boost::format("GeometryNode::handleStateChanged(%s) for '%s'") % childState % getName()));
-    
     // Handle geometry-specific state changes
     // All VTK operations MUST be wrapped in runOnMainThread() for thread safety
     if (childState == "render_mode") {

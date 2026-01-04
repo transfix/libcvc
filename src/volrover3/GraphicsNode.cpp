@@ -17,9 +17,10 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
     : SceneNode(statePath)
     , m_name(name)
     , m_transform(vtkSmartPointer<vtkMatrix4x4>::New())
+    , m_vtkTransform(vtkSmartPointer<vtkTransform>::New())
     , m_parent(nullptr)
     , m_showBBox(false)
-    , m_bboxNode(std::make_shared<BBoxNode>(statePath + ".bbox"))
+    , m_bboxNode(std::make_shared<BBoxNode>())
     , m_showLabel(false)
     , m_labelText(name)
     , m_labelSize(14)
@@ -27,6 +28,7 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
 {
     // Initialize transform to identity
     m_transform->Identity();
+    m_vtkTransform->SetMatrix(m_transform);
     
     // Initialize label color to white
     m_labelColor[0] = m_labelColor[1] = m_labelColor[2] = 1.0;
@@ -51,6 +53,14 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
         getState("label_text").value(name);
         getState("label_size").value(14);
         getState("label_color").value(std::string("1.0,1.0,1.0"));
+        
+        // Transform state attributes
+        getState("position").value(std::string("0.0,0.0,0.0"));
+        getState("rotation").value(std::string("0.0,0.0,0.0"));
+        getState("scale").value(std::string("1.0,1.0,1.0"));
+        
+        // Full matrix (16 values, row-major)
+        getState("matrix").value(std::string("1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"));
     }
 }
 
@@ -62,6 +72,17 @@ void GraphicsNode::setTransform(vtkMatrix4x4* matrix)
 {
     if (matrix) {
         m_transform->DeepCopy(matrix);
+        
+        // Update state tree (matrix in row-major format)
+        std::ostringstream oss;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                if (i > 0 || j > 0) oss << ",";
+                oss << m_transform->GetElement(i, j);
+            }
+        }
+        getState("matrix").value(oss.str());
+        
         updateTransform();
     }
 }
@@ -74,6 +95,15 @@ void GraphicsNode::setTransform(const double matrix[16])
             m_transform->SetElement(i, j, matrix[i * 4 + j]);
         }
     }
+    
+    // Update state tree (matrix in row-major format)
+    std::ostringstream oss;
+    for (int i = 0; i < 16; ++i) {
+        if (i > 0) oss << ",";
+        oss << matrix[i];
+    }
+    getState("matrix").value(oss.str());
+    
     updateTransform();
 }
 
@@ -82,6 +112,12 @@ void GraphicsNode::setPosition(double x, double y, double z)
     m_transform->SetElement(0, 3, x);
     m_transform->SetElement(1, 3, y);
     m_transform->SetElement(2, 3, z);
+    
+    // Update state tree
+    std::ostringstream oss;
+    oss << x << "," << y << "," << z;
+    getState("position").value(oss.str());
+    
     updateTransform();
 }
 
@@ -103,6 +139,11 @@ void GraphicsNode::setRotation(double x, double y, double z)
     m_transform->SetElement(0, 3, tx);
     m_transform->SetElement(1, 3, ty);
     m_transform->SetElement(2, 3, tz);
+    
+    // Update state tree
+    std::ostringstream oss;
+    oss << x << "," << y << "," << z;
+    getState("rotation").value(oss.str());
     
     updateTransform();
 }
@@ -143,12 +184,24 @@ void GraphicsNode::setScale(double x, double y, double z)
     m_transform->SetElement(1, 3, ty);
     m_transform->SetElement(2, 3, tz);
     
+    // Update state tree
+    std::ostringstream oss;
+    oss << x << "," << y << "," << z;
+    getState("scale").value(oss.str());
+    
     updateTransform();
 }
 
 void GraphicsNode::resetTransform()
 {
     m_transform->Identity();
+    
+    // Update state tree to identity
+    getState("position").value(std::string("0.0,0.0,0.0"));
+    getState("rotation").value(std::string("0.0,0.0,0.0"));
+    getState("scale").value(std::string("1.0,1.0,1.0"));
+    getState("matrix").value(std::string("1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"));
+    
     updateTransform();
 }
 
@@ -171,6 +224,13 @@ vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const
 
 void GraphicsNode::updateTransform()
 {
+    // Update VTK transform wrapper
+    m_vtkTransform->SetMatrix(m_transform);
+    m_vtkTransform->Modified();
+    
+    // Apply to VTK prop (subclasses override this)
+    applyTransformToVTK();
+    
     // Update all children
     for (auto& child : m_graphicsChildren) {
         child->updateTransform();
@@ -180,6 +240,12 @@ void GraphicsNode::updateTransform()
     if (m_showBBox) {
         updateBoundingBoxNode();
     }
+}
+
+void GraphicsNode::applyTransformToVTK()
+{
+    // Base class does nothing - subclasses override to apply transform to their specific VTK prop
+    // E.g., GeometryNode calls m_actor->SetUserTransform(m_vtkTransform)
 }
 
 void GraphicsNode::updateBoundingBoxNode()
@@ -261,6 +327,116 @@ void GraphicsNode::handleStateChanged(const std::string& childState)
             } catch (const boost::bad_lexical_cast&) {
                 // Ignore - state initialization may trigger before all components are set
             }
+        }
+        else if (childState == "position") {
+            try {
+                std::string posStr = getState("position").value<std::string>();
+                std::istringstream iss(posStr);
+                double x, y, z;
+                char comma;
+                if (iss >> x >> comma >> y >> comma >> z) {
+                    // Directly update matrix without triggering state update (avoid loop)
+                    m_transform->SetElement(0, 3, x);
+                    m_transform->SetElement(1, 3, y);
+                    m_transform->SetElement(2, 3, z);
+                    updateTransform();
+                }
+            } catch (const boost::bad_lexical_cast&) {}
+        }
+        else if (childState == "rotation") {
+            try {
+                std::string rotStr = getState("rotation").value<std::string>();
+                std::istringstream iss(rotStr);
+                double rx, ry, rz;
+                char comma;
+                if (iss >> rx >> comma >> ry >> comma >> rz) {
+                    // Create transform with rotation
+                    vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
+                    transform->Identity();
+                    transform->RotateZ(rz);
+                    transform->RotateY(ry);
+                    transform->RotateX(rx);
+                    
+                    // Preserve current translation
+                    double tx = m_transform->GetElement(0, 3);
+                    double ty = m_transform->GetElement(1, 3);
+                    double tz = m_transform->GetElement(2, 3);
+                    
+                    m_transform->DeepCopy(transform->GetMatrix());
+                    m_transform->SetElement(0, 3, tx);
+                    m_transform->SetElement(1, 3, ty);
+                    m_transform->SetElement(2, 3, tz);
+                    
+                    updateTransform();
+                }
+            } catch (const boost::bad_lexical_cast&) {}
+        }
+        else if (childState == "scale") {
+            try {
+                std::string scaleStr = getState("scale").value<std::string>();
+                std::istringstream iss(scaleStr);
+                double sx, sy, sz;
+                char comma;
+                if (iss >> sx >> comma >> sy >> comma >> sz) {
+                    // Get current translation
+                    double tx = m_transform->GetElement(0, 3);
+                    double ty = m_transform->GetElement(1, 3);
+                    double tz = m_transform->GetElement(2, 3);
+                    
+                    // Extract rotation part (normalize the 3x3 upper-left)
+                    vtkSmartPointer<vtkMatrix4x4> rotation = vtkSmartPointer<vtkMatrix4x4>::New();
+                    for (int i = 0; i < 3; ++i) {
+                        double len = 0.0;
+                        for (int j = 0; j < 3; ++j) {
+                            double val = m_transform->GetElement(i, j);
+                            len += val * val;
+                        }
+                        len = std::sqrt(len);
+                        if (len > 0.0) {
+                            for (int j = 0; j < 3; ++j) {
+                                rotation->SetElement(i, j, m_transform->GetElement(i, j) / len);
+                            }
+                        }
+                    }
+                    
+                    // Apply new scale to rotation
+                    for (int i = 0; i < 3; ++i) {
+                        double scale = (i == 0) ? sx : (i == 1) ? sy : sz;
+                        for (int j = 0; j < 3; ++j) {
+                            m_transform->SetElement(i, j, rotation->GetElement(i, j) * scale);
+                        }
+                    }
+                    
+                    // Restore translation
+                    m_transform->SetElement(0, 3, tx);
+                    m_transform->SetElement(1, 3, ty);
+                    m_transform->SetElement(2, 3, tz);
+                    
+                    updateTransform();
+                }
+            } catch (const boost::bad_lexical_cast&) {}
+        }
+        else if (childState == "matrix") {
+            try {
+                std::string matrixStr = getState("matrix").value<std::string>();
+                std::istringstream iss(matrixStr);
+                double values[16];
+                char comma;
+                
+                // Read 16 comma-separated values
+                for (int i = 0; i < 16; ++i) {
+                    if (i > 0) iss >> comma;
+                    if (!(iss >> values[i])) break;
+                }
+                
+                // Update matrix (row-major input)
+                for (int i = 0; i < 4; ++i) {
+                    for (int j = 0; j < 4; ++j) {
+                        m_transform->SetElement(i, j, values[i * 4 + j]);
+                    }
+                }
+                updateTransform();
+            } catch (const boost::bad_lexical_cast&) {}
         }
         else {
             // Delegate to parent for common fields like visible
@@ -479,6 +655,9 @@ void GraphicsNode::setShowBBox(bool show)
     
     m_showBBox = show;
     
+    // Update state tree value
+    getState("show_bbox").value(show ? 1 : 0);
+    
     if (m_bboxNode && m_renderer) {
         // Wrap VTK operations in runOnMainThread
         runOnMainThread([this, show]() {
@@ -583,10 +762,10 @@ void GraphicsNode::addToRenderer(vtkRenderer* renderer)
     
     // Add bbox if it should be visible
     if (m_showBBox && m_bboxNode) {
-        runOnMainThread([this]() {
+        runOnMainThread([this, renderer]() {
             updateBoundingBoxNode();
+            m_bboxNode->addToRenderer(renderer);
         });
-        m_bboxNode->addToRenderer(renderer);
     }
     
     // Add label if it should be visible

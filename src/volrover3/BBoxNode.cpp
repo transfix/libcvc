@@ -14,9 +14,8 @@
 #include <iomanip>
 #include <cmath>
 
-BBoxNode::BBoxNode(const std::string& statePath)
-    : SceneNode(statePath)
-    , m_actor(vtkSmartPointer<vtkActor>::New())
+BBoxNode::BBoxNode()
+    : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
     , m_coordinatesVisible(true)
@@ -40,14 +39,9 @@ BBoxNode::~BBoxNode()
 {
 }
 
-vtkProp* BBoxNode::getProp()
-{
-    return m_actor;
-}
-
 void BBoxNode::addToRenderer(vtkRenderer* renderer)
 {
-    if (renderer && isVisible()) {
+    if (renderer) {
         m_renderer = renderer;  // Store renderer reference
         renderer->AddActor(m_actor);
         if (m_coordinatesVisible) {
@@ -150,8 +144,8 @@ void BBoxNode::setCoordinatesVisible(bool visible)
         actor->SetVisibility(visible);
     }
     
-    // If we have a renderer and the bbox itself is visible, add/remove labels
-    if (m_renderer && isVisible()) {
+    // If we have a renderer, add/remove labels
+    if (m_renderer) {
         if (visible) {
             for (auto& actor : m_coordinateLabelActors) {
                 m_renderer->AddActor2D(actor);
@@ -258,7 +252,7 @@ void BBoxNode::createCoordinateLabels()
     createLabel(maxX, maxY, maxZ, oss.str());
     
     // Add new labels to renderer if we have one and coordinates are visible
-    if (m_renderer && m_coordinatesVisible && isVisible()) {
+    if (m_renderer && m_coordinatesVisible) {
         for (auto& actor : m_coordinateLabelActors) {
             m_renderer->AddActor2D(actor);
         }

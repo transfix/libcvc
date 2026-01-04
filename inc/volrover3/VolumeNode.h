@@ -84,6 +84,7 @@ public:
 protected:
     vtkProp* getProp() override;
     void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to volume
     void updateImageData(const cvc::volume &vol);
     void updateTransferFunctions();
     void updateMetadata(const cvc::volume &vol);

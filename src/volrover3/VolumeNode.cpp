@@ -117,6 +117,14 @@ vtkProp* VolumeNode::getProp()
     return m_vtkVolume;
 }
 
+void VolumeNode::applyTransformToVTK()
+{
+    // Apply transform to VTK volume
+    if (m_vtkVolume) {
+        m_vtkVolume->SetUserTransform(m_vtkTransform.Get());
+    }
+}
+
 void VolumeNode::addToRenderer(vtkRenderer* renderer)
 {
     cvcapp.log(0, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");

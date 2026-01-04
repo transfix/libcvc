@@ -107,6 +107,20 @@ GridNode::~GridNode()
 {
 }
 
+void GridNode::applyTransformToVTK()
+{
+    // Apply transform to all grid actors
+    if (m_yzActor) {
+        m_yzActor->SetUserTransform(m_vtkTransform.Get());
+    }
+    if (m_xzActor) {
+        m_xzActor->SetUserTransform(m_vtkTransform.Get());
+    }
+    if (m_xyActor) {
+        m_xyActor->SetUserTransform(m_vtkTransform.Get());
+    }
+}
+
 vtkProp* GridNode::getProp()
 {
     // Return first actor for compatibility with base class

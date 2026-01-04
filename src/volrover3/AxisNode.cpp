@@ -65,6 +65,14 @@ AxisNode::~AxisNode()
 {
 }
 
+void AxisNode::applyTransformToVTK()
+{
+    // Apply transform to VTK axes actor
+    if (m_axesActor) {
+        m_axesActor->SetUserTransform(m_vtkTransform.Get());
+    }
+}
+
 vtkProp* AxisNode::getProp()
 {
     return m_axesActor;
