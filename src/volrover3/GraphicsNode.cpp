@@ -746,13 +746,19 @@ void GraphicsNode::getLabelColor(double& r, double& g, double& b) const
 
 void GraphicsNode::updateLabel()
 {
-    // Position label at center of bounding box
+    // Position label at center of bounding box in LOCAL space
     cvc::bounding_box bbox = getBoundingBox();
     double centerX = (bbox[0] + bbox[3]) / 2.0;
     double centerY = (bbox[1] + bbox[4]) / 2.0;
     double centerZ = (bbox[2] + bbox[5]) / 2.0;
     
-    m_labelActor->GetPositionCoordinate()->SetValue(centerX, centerY, centerZ);
+    // Transform center to world space
+    vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
+    double localCenter[4] = {centerX, centerY, centerZ, 1.0};
+    double worldCenter[4];
+    worldTransform->MultiplyPoint(localCenter, worldCenter);
+    
+    m_labelActor->GetPositionCoordinate()->SetValue(worldCenter[0], worldCenter[1], worldCenter[2]);
 }
 
 void GraphicsNode::addToRenderer(vtkRenderer* renderer)
