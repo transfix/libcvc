@@ -6,13 +6,16 @@
 #include <vtkSmartPointer.h>
 #include <vtkMatrix4x4.h>
 #include <vtkTransform.h>
+#include <vtkPlaneCollection.h>
 #include <boost/signals2.hpp>
 #include <string>
 #include <map>
 #include <any>
+#include <array>
 
 class vtkActor2D;
 class BBoxNode;
+class vtkPlane;
 
 /**
  * @brief Abstract base class for all graphics objects in the scene
@@ -24,6 +27,7 @@ class BBoxNode;
  * - Bounding box display
  * - Visibility control
  * - State tree synchronization (via state_object inheritance)
+ * - Clipping planes based on bounding box
  * 
  * Subclasses must implement:
  * - getBoundingBox() - return the untransformed bounding box
@@ -103,6 +107,11 @@ public:
     void setBBoxColor(double r, double g, double b);
     void getBBoxColor(double& r, double& g, double& b) const;
     
+    // Clipping plane control
+    void setClipChildren(bool clip);
+    bool getClipChildren() const { return m_clipChildren; }
+    vtkPlaneCollection* getClipPlanes() const { return m_clipPlanes; }
+    
     // Label control
     void setShowLabel(bool show);
     bool getShowLabel() const { return m_showLabel; }
@@ -127,9 +136,16 @@ protected:
     void updateTransform();
     void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
     void updateLabel();  // Update label position and properties
+    void updateClipPlanes();  // Update clip planes based on bounding box and transform
     
     // Apply transform to VTK prop - subclasses should override to apply to their specific prop type
     virtual void applyTransformToVTK();
+    
+    // Apply clip planes to children - called when clipChildren changes
+    void applyClipPlanesToChildren();
+    
+    // Apply clip planes to this node's mapper/prop - subclasses override if they support clipping
+    virtual void applyClipPlanes(vtkPlaneCollection* planes);
 
     // Protected members for subclass access
     std::string m_name;
@@ -147,6 +163,11 @@ protected:
     int m_labelSize;
     double m_labelColor[3];
     vtkSmartPointer<vtkActor2D> m_labelActor;
+    
+    // Clipping planes
+    bool m_clipChildren;  // Whether to clip children to this node's bounding box
+    vtkSmartPointer<vtkPlaneCollection> m_clipPlanes;  // Collection of 6 planes
+    std::array<vtkSmartPointer<vtkPlane>, 6> m_clipPlaneArray;  // Individual planes for updates
     
     // State change handler override
     virtual void handleStateChanged(const std::string& childState) override;

@@ -1,10 +1,16 @@
 #include <gtest/gtest.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/SceneGraph.h>
+#include <volrover3/GeometryNode.h>
 #include <cvc/volume.h>
+#include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
 #include <cmath>
+#include <thread>
+#include <chrono>
 
 class VolumeNodeTest : public ::testing::Test {
 protected:
@@ -227,6 +233,94 @@ TEST_F(VolumeNodeTest, VolumeMetadataValues) {
     // Verify voxel type
     std::string voxelType = std::any_cast<std::string>(node.getMetadata("voxel_type"));
     EXPECT_EQ(voxelType, "unsigned_char");
+}
+
+// ============================================================================
+// Clip Plane Tests for VolumeNode
+// ============================================================================
+
+TEST_F(VolumeNodeTest, ClipChildrenDefault) {
+    SceneGraph sceneGraph("volume_clip_test");
+    auto parent = sceneGraph.addGraphics("volume_clip_test.parent", testVolume);
+    
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(VolumeNodeTest, SetClipChildren) {
+    SceneGraph sceneGraph("volume_clip_test");
+    auto parent = sceneGraph.addGraphics("volume_clip_test.setter", testVolume);
+    
+    parent->setClipChildren(true);
+    EXPECT_TRUE(parent->getClipChildren());
+    
+    parent->setClipChildren(false);
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(VolumeNodeTest, ClipPlanesGenerated) {
+    SceneGraph sceneGraph("volume_clip_test");
+    auto parent = sceneGraph.addGraphics("volume_clip_test.planes", testVolume);
+    
+    parent->setClipChildren(true);
+    
+    // Should have 6 clip planes
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(VolumeNodeTest, VolumeClipsGeometryChild) {
+    // Test that a VolumeNode can clip a GeometryNode child
+    SceneGraph sceneGraph("volume_clip_test");
+    
+    auto volumeParent = sceneGraph.addGraphics("volume_clip_test.vol_parent", testVolume);
+    
+    // Create a geometry child
+    cvc::geometry childGeom;
+    childGeom.points().push_back({5.0, 5.0, 5.0});
+    childGeom.points().push_back({15.0, 15.0, 15.0});
+    
+    auto geomChild = std::make_shared<GeometryNode>("volume_clip_test.vol_parent.geom_child", "child");
+    geomChild->setGeometry(childGeom);
+    volumeParent->addGraphicsChild(geomChild);
+    
+    // Enable clipping on volume parent
+    volumeParent->setClipChildren(true);
+    
+    // Give time for threading/event queue to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Verify planes were created
+    vtkPlaneCollection* planes = volumeParent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(VolumeNodeTest, GeometryClipsVolumeChild) {
+    // Test that a GeometryNode can clip a VolumeNode child
+    SceneGraph sceneGraph("volume_clip_test");
+    
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({20.0, 20.0, 20.0});
+    
+    auto geomParent = sceneGraph.addGraphics("volume_clip_test.geom_parent", parentGeom);
+    
+    // Create a volume child
+    auto volumeChild = std::make_shared<VolumeNode>("volume_clip_test.geom_parent.vol_child", "volume");
+    volumeChild->setVolume(testVolume);
+    geomParent->addGraphicsChild(volumeChild);
+    
+    // Enable clipping on geometry parent
+    geomParent->setClipChildren(true);
+    
+    // Give time for threading/event queue to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Verify planes were created
+    vtkPlaneCollection* planes = geomParent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
 }
 
 int main(int argc, char **argv) {

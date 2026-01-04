@@ -10,6 +10,8 @@
 #include <vtkTextMapper.h>
 #include <vtkTextProperty.h>
 #include <vtkCoordinate.h>
+#include <vtkMatrix4x4.h>
+#include <vtkTransform.h>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -88,6 +90,15 @@ void BBoxNode::getColor(double& r, double& g, double& b) const
 void BBoxNode::setLineWidth(double width)
 {
     m_actor->GetProperty()->SetLineWidth(width);
+}
+
+void BBoxNode::setTransform(vtkMatrix4x4* transform)
+{
+    if (transform && m_actor) {
+        vtkSmartPointer<vtkTransform> vtkTrans = vtkSmartPointer<vtkTransform>::New();
+        vtkTrans->SetMatrix(transform);
+        m_actor->SetUserTransform(vtkTrans);
+    }
 }
 
 void BBoxNode::createBBox()

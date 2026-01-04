@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <volrover3/BBoxNode.h>
 #include <cvc/bounding_box.h>
+#include <vtkMatrix4x4.h>
+#include <vtkSmartPointer.h>
 
 class BBoxNodeTest : public ::testing::Test {
 protected:
@@ -182,6 +184,32 @@ TEST_F(BBoxNodeTest, UpdateBoundingBox) {
     cvc::bounding_box bbox2 = node.getBoundingBox();
     EXPECT_DOUBLE_EQ(bbox2[0], 5.0);
     EXPECT_DOUBLE_EQ(bbox2[3], 15.0);
+}
+
+TEST_F(BBoxNodeTest, SetTransform) {
+    BBoxNode node;
+    
+    // Set a simple bounding box
+    cvc::bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    node.setBoundingBox(bbox);
+    
+    // Create a transform (translation)
+    vtkSmartPointer<vtkMatrix4x4> transform = vtkSmartPointer<vtkMatrix4x4>::New();
+    transform->Identity();
+    transform->SetElement(0, 3, 10.0);  // Translate X by 10
+    transform->SetElement(1, 3, 20.0);  // Translate Y by 20
+    transform->SetElement(2, 3, 30.0);  // Translate Z by 30
+    
+    // Apply transform - this should work without error
+    node.setTransform(transform);
+    
+    // The bounding box coordinates should remain in local space
+    cvc::bounding_box localBBox = node.getBoundingBox();
+    EXPECT_DOUBLE_EQ(localBBox[0], 0.0);
+    EXPECT_DOUBLE_EQ(localBBox[3], 1.0);
+    
+    // The transform is applied to the VTK actor, not the bbox coordinates
+    // This test verifies the method doesn't crash and the bbox stays in local space
 }
 
 int main(int argc, char **argv) {

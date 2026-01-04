@@ -10,6 +10,9 @@
 #include <vtkActor2D.h>
 #include <vtkTextMapper.h>
 #include <vtkTextProperty.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
+#include <vtkMapper.h>
 #include <cmath>
 #include <algorithm>
 
@@ -25,6 +28,8 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
     , m_labelText(name)
     , m_labelSize(14)
     , m_labelActor(vtkSmartPointer<vtkActor2D>::New())
+    , m_clipChildren(false)
+    , m_clipPlanes(vtkSmartPointer<vtkPlaneCollection>::New())
 {
     // Initialize transform to identity
     m_transform->Identity();
@@ -44,6 +49,12 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
     m_labelActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     m_labelActor->SetVisibility(m_showLabel);
     
+    // Initialize clip planes (6 planes for bounding box faces)
+    for (int i = 0; i < 6; ++i) {
+        m_clipPlaneArray[i] = vtkSmartPointer<vtkPlane>::New();
+        m_clipPlanes->AddItem(m_clipPlaneArray[i]);
+    }
+    
     // Initialize state tree values if we have a valid state path
     // Don't batch during construction - initial values should be set silently
     // Handlers will fire when values change AFTER construction completes
@@ -61,6 +72,9 @@ GraphicsNode::GraphicsNode(const std::string& statePath, const std::string& name
         
         // Full matrix (16 values, row-major)
         getState("matrix").value(std::string("1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"));
+        
+        // Clip planes
+        getState("clip_children").value(0);
     }
 }
 
@@ -240,6 +254,11 @@ void GraphicsNode::updateTransform()
     if (m_showBBox) {
         updateBoundingBoxNode();
     }
+    
+    // Update clip planes if clipping is enabled
+    if (m_clipChildren) {
+        updateClipPlanes();
+    }
 }
 
 void GraphicsNode::applyTransformToVTK()
@@ -252,46 +271,23 @@ void GraphicsNode::updateBoundingBoxNode()
 {
     if (!m_bboxNode) return;
     
-    // Get COMBINED bounding box (this node + all children) for visualization
+    // Get COMBINED bounding box (this node + all children) in LOCAL space
     // This ensures the bbox shows the full extent including children
     cvc::bounding_box bbox = getCombinedBoundingBox();
     
-    // Apply world transform to bounding box
+    // Get world transform
     vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
     
-    // Transform all 8 corners of the bounding box
-    double corners[8][3] = {
-        {bbox.minx, bbox.miny, bbox.minz},
-        {bbox.maxx, bbox.miny, bbox.minz},
-        {bbox.minx, bbox.maxy, bbox.minz},
-        {bbox.maxx, bbox.maxy, bbox.minz},
-        {bbox.minx, bbox.miny, bbox.maxz},
-        {bbox.maxx, bbox.miny, bbox.maxz},
-        {bbox.minx, bbox.maxy, bbox.maxz},
-        {bbox.maxx, bbox.maxy, bbox.maxz}
-    };
-    
-    double minx = std::numeric_limits<double>::max();
-    double miny = std::numeric_limits<double>::max();
-    double minz = std::numeric_limits<double>::max();
-    double maxx = std::numeric_limits<double>::lowest();
-    double maxy = std::numeric_limits<double>::lowest();
-    double maxz = std::numeric_limits<double>::lowest();
-    
-    for (int i = 0; i < 8; ++i) {
-        double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
-        double out[4];
-        worldTransform->MultiplyPoint(in, out);
-        
-        minx = std::min(minx, out[0]);
-        miny = std::min(miny, out[1]);
-        minz = std::min(minz, out[2]);
-        maxx = std::max(maxx, out[0]);
-        maxy = std::max(maxy, out[1]);
-        maxz = std::max(maxz, out[2]);
-    }
-    
-    m_bboxNode->setBoundingBox(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+    // Update bbox on main thread (VTK operations must be on main thread)
+    runOnMainThread([this, bbox, worldTransform]() {
+        if (m_bboxNode) {
+            // Set the bounding box geometry in local space
+            m_bboxNode->setBoundingBox(bbox);
+            
+            // Apply the world transform to the bbox actor so it renders correctly
+            m_bboxNode->setTransform(worldTransform);
+        }
+    });
 }
 
 void GraphicsNode::handleStateChanged(const std::string& childState)
@@ -437,6 +433,10 @@ void GraphicsNode::handleStateChanged(const std::string& childState)
                 }
                 updateTransform();
             } catch (const boost::bad_lexical_cast&) {}
+        }
+        else if (childState == "clip_children") {
+            int clip = getState("clip_children").value<int>();
+            setClipChildren(clip != 0);
         }
         else {
             // Delegate to parent for common fields like visible
@@ -797,4 +797,115 @@ void GraphicsNode::removeFromRenderer(vtkRenderer* renderer)
     
     // Call base implementation to remove the main prop
     SceneNode::removeFromRenderer(renderer);
+}
+
+void GraphicsNode::setClipChildren(bool clip)
+{
+    if (m_clipChildren == clip) return;
+    
+    m_clipChildren = clip;
+    
+    // Update state tree
+    getState("clip_children").value(clip ? 1 : 0);
+    
+    if (m_clipChildren) {
+        // Enable clipping - update and apply planes
+        updateClipPlanes();
+        applyClipPlanesToChildren();
+    } else {
+        // Disable clipping - remove planes from children
+        for (auto& child : m_graphicsChildren) {
+            child->runOnMainThread([child]() {
+                child->applyClipPlanes(nullptr);
+            });
+        }
+    }
+}
+
+void GraphicsNode::updateClipPlanes()
+{
+    // Get this node's OWN bounding box (not combined)
+    cvc::bounding_box bbox = getBoundingBox();
+    double bounds[6] = {
+        bbox.minx, bbox.maxx,
+        bbox.miny, bbox.maxy,
+        bbox.minz, bbox.maxz
+    };
+    
+    // Get world transform to transform the planes
+    vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
+    
+    // Define 6 plane normals in local space
+    // Order: +X, -X, +Y, -Y, +Z, -Z
+    double normals[6][3] = {
+        { 1.0,  0.0,  0.0},  // +X face (points inward: -X)
+        {-1.0,  0.0,  0.0},  // -X face (points inward: +X)
+        { 0.0,  1.0,  0.0},  // +Y face (points inward: -Y)
+        { 0.0, -1.0,  0.0},  // -Y face (points inward: +Y)
+        { 0.0,  0.0,  1.0},  // +Z face (points inward: -Z)
+        { 0.0,  0.0, -1.0}   // -Z face (points inward: +Z)
+    };
+    
+    // Plane origins in local space (centers of each face)
+    double origins[6][3] = {
+        {bounds[1], (bounds[2] + bounds[3]) / 2.0, (bounds[4] + bounds[5]) / 2.0},  // +X
+        {bounds[0], (bounds[2] + bounds[3]) / 2.0, (bounds[4] + bounds[5]) / 2.0},  // -X
+        {(bounds[0] + bounds[1]) / 2.0, bounds[3], (bounds[4] + bounds[5]) / 2.0},  // +Y
+        {(bounds[0] + bounds[1]) / 2.0, bounds[2], (bounds[4] + bounds[5]) / 2.0},  // -Y
+        {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0, bounds[5]},  // +Z
+        {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0, bounds[4]}   // -Z
+    };
+    
+    // Transform and set each plane
+    for (int i = 0; i < 6; ++i) {
+        // Transform origin to world space
+        double worldOrigin[4] = {origins[i][0], origins[i][1], origins[i][2], 1.0};
+        double transformedOrigin[4];
+        worldTransform->MultiplyPoint(worldOrigin, transformedOrigin);
+        
+        // Transform normal to world space (using transpose of inverse for normals)
+        // For orthogonal transforms (rotation + uniform scale), we can use the matrix directly
+        vtkSmartPointer<vtkMatrix4x4> normalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        normalMatrix->DeepCopy(worldTransform);
+        normalMatrix->Invert();
+        normalMatrix->Transpose();
+        
+        double worldNormal[4] = {normals[i][0], normals[i][1], normals[i][2], 0.0};
+        double transformedNormal[4];
+        normalMatrix->MultiplyPoint(worldNormal, transformedNormal);
+        
+        // Normalize the transformed normal
+        double len = std::sqrt(transformedNormal[0] * transformedNormal[0] +
+                              transformedNormal[1] * transformedNormal[1] +
+                              transformedNormal[2] * transformedNormal[2]);
+        if (len > 0.0) {
+            transformedNormal[0] /= len;
+            transformedNormal[1] /= len;
+            transformedNormal[2] /= len;
+        }
+        
+        // Set plane
+        m_clipPlaneArray[i]->SetOrigin(transformedOrigin[0], transformedOrigin[1], transformedOrigin[2]);
+        m_clipPlaneArray[i]->SetNormal(transformedNormal[0], transformedNormal[1], transformedNormal[2]);
+    }
+    
+    // Apply updated planes to children
+    if (m_clipChildren) {
+        applyClipPlanesToChildren();
+    }
+}
+
+void GraphicsNode::applyClipPlanesToChildren()
+{
+    for (auto& child : m_graphicsChildren) {
+        child->runOnMainThread([this, child]() {
+            child->applyClipPlanes(m_clipPlanes);
+        });
+    }
+}
+
+void GraphicsNode::applyClipPlanes(vtkPlaneCollection* planes)
+{
+    // Base implementation does nothing
+    // Subclasses that support clipping (GeometryNode, VolumeNode, GridNode) override this
 }

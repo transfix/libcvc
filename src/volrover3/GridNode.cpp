@@ -121,6 +121,20 @@ void GridNode::applyTransformToVTK()
     }
 }
 
+void GridNode::applyClipPlanes(vtkPlaneCollection* planes)
+{
+    // Apply clip planes to all three grid mappers
+    if (planes && planes->GetNumberOfItems() > 0) {
+        if (m_yzMapper) m_yzMapper->SetClippingPlanes(planes);
+        if (m_xzMapper) m_xzMapper->SetClippingPlanes(planes);
+        if (m_xyMapper) m_xyMapper->SetClippingPlanes(planes);
+    } else {
+        if (m_yzMapper) m_yzMapper->RemoveAllClippingPlanes();
+        if (m_xzMapper) m_xzMapper->RemoveAllClippingPlanes();
+        if (m_xyMapper) m_xyMapper->RemoveAllClippingPlanes();
+    }
+}
+
 vtkProp* GridNode::getProp()
 {
     // Return first actor for compatibility with base class

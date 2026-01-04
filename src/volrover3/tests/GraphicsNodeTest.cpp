@@ -5,7 +5,11 @@
 #include <cvc/state.h>
 #include <cvc/state_object.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
 #include <cmath>
+#include <thread>
+#include <chrono>
 
 class GraphicsNodeTest : public ::testing::Test {
 protected:
@@ -861,6 +865,180 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
     EXPECT_NEAR(bounds[3], 16.0, 1e-6);
     EXPECT_NEAR(bounds[4], 1.0, 1e-6);
     EXPECT_NEAR(bounds[5], 1.0, 1e-6);
+}
+
+// ============================================================================
+// Bounding Box Transform Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, BBoxShowsLocalSpace) {
+    // Verify that bounding box geometry stays in local space
+    // and transform is applied to the bbox actor
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto node = sceneGraph.addGraphics("bbox_test", geom);
+    
+    // Enable bbox
+    node->setShowBBox(true);
+    
+    // Apply a transform (rotation + translation)
+    node->setPosition(10.0, 0.0, 0.0);
+    node->setRotation(0.0, 0.0, 45.0);  // 45 degree rotation around Z
+    
+    // The node's getBoundingBox should return local space coords
+    cvc::bounding_box localBBox = node->getBoundingBox();
+    EXPECT_NEAR(localBBox[0], 0.0, 1e-6);
+    EXPECT_NEAR(localBBox[3], 1.0, 1e-6);
+    
+    // The bbox visualization will use the transform to render correctly
+    // This is applied in updateBoundingBoxNode() via setTransform()
+}
+
+// ============================================================================
+// Clip Plane Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, ClipChildrenDefault) {
+    // Default clipChildren should be false
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.parent", geom);
+    
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, SetClipChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.setter", geom);
+    
+    parent->setClipChildren(true);
+    EXPECT_TRUE(parent->getClipChildren());
+    
+    parent->setClipChildren(false);
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, ClipChildrenStateSync) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.statesync", geom);
+    
+    // Test setter -> state tree
+    parent->setClipChildren(true);
+    int stateValue = parent->getState("clip_children").template value<int>();
+    EXPECT_EQ(stateValue, 1);
+    
+    parent->setClipChildren(false);
+    stateValue = parent->getState("clip_children").template value<int>();
+    EXPECT_EQ(stateValue, 0);
+    
+    // Test state tree -> getter
+    parent->getState("clip_children").value(1);
+    // Give time for state change to propagate
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, ClipPlanesGenerated) {
+    // Create a parent with a known bounding box
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({2.0, 3.0, 4.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.planes", geom);
+    parent->setClipChildren(true);
+    
+    // Should have 6 clip planes
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(GraphicsNodeTest, ClipPlanesTransform) {
+    // Create a parent with bounding box and transform
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.transform", geom);
+    parent->setPosition(10.0, 20.0, 30.0);
+    parent->setClipChildren(true);
+    
+    // Planes should be transformed with the parent's transform
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+    
+    // Get first plane and check it's been transformed
+    // The exact values depend on implementation, but planes should exist
+    planes->InitTraversal();
+    vtkPlane* plane = planes->GetNextItem();
+    ASSERT_NE(plane, nullptr);
+}
+
+TEST_F(GraphicsNodeTest, ChildrenClipped) {
+    // Create parent and child geometry nodes
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 10.0, 10.0});
+    
+    cvc::geometry childGeom;
+    childGeom.points().push_back({5.0, 5.0, 5.0});
+    childGeom.points().push_back({15.0, 15.0, 15.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.children", parentGeom);
+    auto child = std::make_shared<GeometryNode>("cliptest.children.child", "child");
+    child->setGeometry(childGeom);
+    parent->addGraphicsChild(child);
+    
+    // Enable clipping on parent
+    parent->setClipChildren(true);
+    
+    // Give time for threading/event queue to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Child should have received clip planes
+    // We can't easily test the mapper directly without VTK rendering context,
+    // but we can verify the planes were created
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(GraphicsNodeTest, ClippingDisabled) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 10.0, 10.0});
+    
+    cvc::geometry childGeom;
+    childGeom.points().push_back({5.0, 5.0, 5.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.disabled", parentGeom);
+    auto child = std::make_shared<GeometryNode>("cliptest.disabled.child", "child");
+    child->setGeometry(childGeom);
+    parent->addGraphicsChild(child);
+    
+    // Enable then disable clipping
+    parent->setClipChildren(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    parent->setClipChildren(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Clipping should be disabled
+    EXPECT_FALSE(parent->getClipChildren());
 }
 
 int main(int argc, char **argv) {

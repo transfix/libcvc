@@ -73,6 +73,17 @@ void GeometryNode::applyTransformToVTK()
     }
 }
 
+void GeometryNode::applyClipPlanes(vtkPlaneCollection* planes)
+{
+    if (m_mapper) {
+        if (planes && planes->GetNumberOfItems() > 0) {
+            m_mapper->SetClippingPlanes(planes);
+        } else {
+            m_mapper->RemoveAllClippingPlanes();
+        }
+    }
+}
+
 void GeometryNode::handleStateChanged(const std::string& childState)
 {
     // Handle geometry-specific state changes

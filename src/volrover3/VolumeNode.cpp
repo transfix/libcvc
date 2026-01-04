@@ -125,6 +125,17 @@ void VolumeNode::applyTransformToVTK()
     }
 }
 
+void VolumeNode::applyClipPlanes(vtkPlaneCollection* planes)
+{
+    if (m_mapper) {
+        if (planes && planes->GetNumberOfItems() > 0) {
+            m_mapper->SetClippingPlanes(planes);
+        } else {
+            m_mapper->RemoveAllClippingPlanes();
+        }
+    }
+}
+
 void VolumeNode::addToRenderer(vtkRenderer* renderer)
 {
     cvcapp.log(0, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");
