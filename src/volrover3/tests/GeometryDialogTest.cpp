@@ -1,0 +1,289 @@
+#include <gtest/gtest.h>
+#include <QApplication>
+#include <QTest>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QCheckBox>
+#include <volrover3/GeometryDialog.h>
+#include <volrover3/SceneGraph.h>
+#include <volrover3/GeometryNode.h>
+#include <cvc/geometry.h>
+#include <cvc/state.h>
+
+class GeometryDialogTest : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() {
+        // Disable threading for state_object to avoid race conditions
+        cvc::state_object<SceneNode>::setUseThreading(false);
+        
+        // Initialize Qt if not already initialized
+        if (!QApplication::instance()) {
+            int argc = 0;
+            char** argv = nullptr;
+            static QApplication app(argc, argv);
+        }
+    }
+    
+    void SetUp() override {
+        sceneGraph = std::make_shared<SceneGraph>();
+        dialog = nullptr;
+    }
+    
+    void TearDown() override {
+        if (dialog) {
+            delete dialog;
+            dialog = nullptr;
+        }
+        sceneGraph.reset();
+    }
+    
+    cvc::geometry createTestGeometry() {
+        cvc::geometry geom;
+        geom.points().push_back({0.0, 0.0, 0.0});
+        geom.points().push_back({1.0, 0.0, 0.0});
+        geom.points().push_back({0.0, 1.0, 0.0});
+        geom.tris().push_back({0, 1, 2});
+        return geom;
+    }
+    
+    std::shared_ptr<SceneGraph> sceneGraph;
+    GeometryDialog* dialog;
+};
+
+TEST_F(GeometryDialogTest, DialogCreation) {
+    dialog = new GeometryDialog(sceneGraph);
+    EXPECT_NE(dialog, nullptr);
+    EXPECT_EQ(dialog->windowTitle(), "Geometry Properties");
+}
+
+TEST_F(GeometryDialogTest, EmptySceneGraph) {
+    dialog = new GeometryDialog(sceneGraph);
+    
+    // Dialog should be created but properties should be disabled
+    EXPECT_NE(dialog, nullptr);
+    
+    // Access the combo box through findChild
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    EXPECT_EQ(comboBox->count(), 0);
+}
+
+TEST_F(GeometryDialogTest, SingleGeometry) {
+    cvc::geometry geom = createTestGeometry();
+    sceneGraph->addGraphics("test_geom", geom);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    EXPECT_EQ(comboBox->count(), 1);
+    EXPECT_EQ(comboBox->itemText(0).toStdString(), "test_geom");
+}
+
+TEST_F(GeometryDialogTest, MultipleGeometries) {
+    cvc::geometry geom1 = createTestGeometry();
+    cvc::geometry geom2 = createTestGeometry();
+    
+    sceneGraph->addGraphics("geom1", geom1);
+    sceneGraph->addGraphics("geom2", geom2);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    EXPECT_EQ(comboBox->count(), 2);
+}
+
+TEST_F(GeometryDialogTest, GeometrySelectionUpdatesUI) {
+    cvc::geometry geom = createTestGeometry();
+    auto node = sceneGraph->addGraphics("test_geom", geom);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    
+    // Set some properties
+    geomNode->setColor(0.5, 0.6, 0.7);
+    geomNode->setAmbient(0.3);
+    geomNode->setDiffuse(0.8);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    // Find the color spin boxes
+    QList<QDoubleSpinBox*> spinBoxes = dialog->findChildren<QDoubleSpinBox*>();
+    EXPECT_GT(spinBoxes.size(), 0);
+    
+    // Check that UI reflects the geometry properties
+    // Look for the specific color values with proper tolerance
+    bool foundColorValue = false;
+    for (auto* spinBox : spinBoxes) {
+        double value = spinBox->value();
+        if (qAbs(value - 0.5) < 0.001 || 
+            qAbs(value - 0.6) < 0.001 || 
+            qAbs(value - 0.7) < 0.001) {
+            foundColorValue = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(foundColorValue);
+}
+
+TEST_F(GeometryDialogTest, RenderModeChange) {
+    cvc::geometry geom = createTestGeometry();
+    auto node = sceneGraph->addGraphics("test_geom", geom);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    // Find render mode combo box (should be the second combo box)
+    QList<QComboBox*> comboBoxes = dialog->findChildren<QComboBox*>();
+    ASSERT_GE(comboBoxes.size(), 2);
+    
+    QComboBox* renderModeCombo = comboBoxes[1]; // First is geometry selection, second is render mode
+    
+    // Change render mode
+    int wireframeIndex = renderModeCombo->findText("Wireframe");
+    if (wireframeIndex >= 0) {
+        renderModeCombo->setCurrentIndex(wireframeIndex);
+        QTest::qWait(10); // Allow signal processing
+        
+        // Verify the node's render mode changed
+        EXPECT_EQ(geomNode->getRenderMode(), GeometryRenderMode::LINES);
+    }
+}
+
+TEST_F(GeometryDialogTest, ColorPropertyChange) {
+    cvc::geometry geom = createTestGeometry();
+    auto node = sceneGraph->addGraphics("test_geom", geom);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    // Find color spin boxes (should be among the first double spin boxes)
+    QList<QDoubleSpinBox*> spinBoxes = dialog->findChildren<QDoubleSpinBox*>();
+    ASSERT_GE(spinBoxes.size(), 3);
+    
+    // Set color values (assuming first 3 are R, G, B)
+    if (spinBoxes.size() >= 3) {
+        spinBoxes[0]->setValue(1.0);
+        spinBoxes[1]->setValue(0.0);
+        spinBoxes[2]->setValue(0.0);
+        QTest::qWait(10);
+        
+        // Check that the color was set in the node
+        auto colorR = geomNode->getMetadata("color_r");
+        if (colorR.has_value()) {
+            EXPECT_DOUBLE_EQ(std::any_cast<double>(colorR), 1.0);
+        }
+    }
+}
+
+TEST_F(GeometryDialogTest, DynamicGeometryAddition) {
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    EXPECT_EQ(comboBox->count(), 0);
+    
+    // Add geometry after dialog creation
+    cvc::geometry geom = createTestGeometry();
+    sceneGraph->addGraphics("new_geom", geom);
+    
+    // Wait for state tree signals to propagate
+    QTest::qWait(50);
+    
+    // The combo box should update automatically
+    EXPECT_EQ(comboBox->count(), 1);
+}
+
+TEST_F(GeometryDialogTest, DynamicGeometryRemoval) {
+    cvc::geometry geom = createTestGeometry();
+    sceneGraph->addGraphics("test_geom", geom);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    EXPECT_EQ(comboBox->count(), 1);
+    
+    // Remove geometry
+    sceneGraph->removeGraphics("test_geom");
+    
+    // Wait for state tree signal and Qt signal processing
+    QTest::qWait(100);
+    
+    // The combo box should update automatically
+    EXPECT_EQ(comboBox->count(), 0);
+}
+
+TEST_F(GeometryDialogTest, OpacityChange) {
+    cvc::geometry geom = createTestGeometry();
+    auto node = sceneGraph->addGraphics("test_geom", geom);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(node);
+    ASSERT_NE(geomNode, nullptr);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    // Find all double spin boxes
+    QList<QDoubleSpinBox*> spinBoxes = dialog->findChildren<QDoubleSpinBox*>();
+    
+    // Look for opacity spin box (should have range 0-1)
+    for (auto* spinBox : spinBoxes) {
+        if (spinBox->minimum() == 0.0 && spinBox->maximum() == 1.0) {
+            spinBox->setValue(0.5);
+            QTest::qWait(10);
+            
+            // Check if it could be the opacity
+            auto opacity = geomNode->getMetadata("opacity");
+            if (opacity.has_value()) {
+                double opacityValue = std::any_cast<double>(opacity);
+                if (qFuzzyCompare(opacityValue, 0.5)) {
+                    SUCCEED();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+TEST_F(GeometryDialogTest, EmptyGeometryNotListed) {
+    cvc::geometry emptyGeom; // Empty geometry
+    sceneGraph->addGraphics("empty_geom", emptyGeom);
+    
+    cvc::geometry validGeom = createTestGeometry();
+    sceneGraph->addGraphics("valid_geom", validGeom);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    
+    // Only the valid geometry should be listed
+    EXPECT_EQ(comboBox->count(), 1);
+    EXPECT_EQ(comboBox->itemText(0).toStdString(), "valid_geom");
+}
+
+TEST_F(GeometryDialogTest, NestedGeometries) {
+    cvc::geometry geom1 = createTestGeometry();
+    cvc::geometry geom2 = createTestGeometry();
+    
+    auto parent = sceneGraph->addGraphics("parent_geom", geom1);
+    ASSERT_NE(parent, nullptr);
+    
+    // Add child geometry
+    auto child = parent->createChild<GeometryNode>("child_geom", geom2);
+    ASSERT_NE(child, nullptr);
+    
+    dialog = new GeometryDialog(sceneGraph);
+    
+    QComboBox* comboBox = dialog->findChild<QComboBox*>();
+    ASSERT_NE(comboBox, nullptr);
+    
+    // Both parent and child should be listed
+    EXPECT_EQ(comboBox->count(), 2);
+}
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

@@ -17,6 +17,8 @@ class StateTreeWidget;
 class GridOptionsDialog;
 class SDFDialog;
 class IsosurfaceDialog;
+class GeometryDialog;
+class VolumeDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -37,6 +39,8 @@ private slots:
     void showStateTree();
     void showSDF();
     void showIsosurface();
+    void showGeometry();
+    void showVolume();
     void aboutVolRover();
     void updateThreadStatus();
 
@@ -58,6 +62,8 @@ private:
     GridOptionsDialog *m_gridOptionsDialog;
     SDFDialog *m_sdfDialog;
     IsosurfaceDialog *m_isosurfaceDialog;
+    GeometryDialog *m_geometryDialog;
+    VolumeDialog *m_volumeDialog;
 
     // Status bar widgets for thread monitoring
     QLabel *m_threadNameLabel;

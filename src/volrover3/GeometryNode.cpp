@@ -99,7 +99,8 @@ void GeometryNode::handleStateChanged(const std::string& childState)
     }
     else if (childState == "color_r" || childState == "color_g" || childState == "color_b") {
         runOnMainThread([this]() {
-            // Only update if all color components can be read
+            // Only update if all color components can be read and actor exists
+            if (!m_actor) return;
             try {
                 double r = getState("color_r").value<double>();
                 double g = getState("color_g").value<double>();
@@ -112,42 +113,49 @@ void GeometryNode::handleStateChanged(const std::string& childState)
     }
     else if (childState == "specular") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double specular = getState("specular").value<double>();
             m_actor->GetProperty()->SetSpecular(specular);
         });
     }
     else if (childState == "specular_power") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double specularPower = getState("specular_power").value<double>();
             m_actor->GetProperty()->SetSpecularPower(specularPower);
         });
     }
     else if (childState == "ambient") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double ambient = getState("ambient").value<double>();
             m_actor->GetProperty()->SetAmbient(ambient);
         });
     }
     else if (childState == "diffuse") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double diffuse = getState("diffuse").value<double>();
             m_actor->GetProperty()->SetDiffuse(diffuse);
         });
     }
     else if (childState == "opacity") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double opacity = getState("opacity").value<double>();
             m_actor->GetProperty()->SetOpacity(opacity);
         });
     }
     else if (childState == "point_size") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double pointSize = getState("point_size").value<double>();
             m_actor->GetProperty()->SetPointSize(pointSize);
         });
     }
     else if (childState == "line_width") {
         runOnMainThread([this]() {
+            if (!m_actor) return;
             double lineWidth = getState("line_width").value<double>();
             m_actor->GetProperty()->SetLineWidth(lineWidth);
         });
@@ -192,6 +200,9 @@ void GeometryNode::setRenderMode(GeometryRenderMode mode)
 
 void GeometryNode::updateRenderModeVTK()
 {
+    // Guard: Don't update VTK if actor not initialized
+    if (!m_actor) return;
+    
     // Update VTK rendering based on mode
     switch (m_renderMode) {
         case GeometryRenderMode::POINTS:
@@ -223,9 +234,9 @@ void GeometryNode::updateRenderModeVTK()
     }
     
     // Mark everything as modified to trigger re-render
-    m_polyData->Modified();
-    m_mapper->Modified();
-    m_actor->Modified();
+    if (m_polyData) m_polyData->Modified();
+    if (m_mapper) m_mapper->Modified();
+    if (m_actor) m_actor->Modified();
     
     // Request a render update (if we have a renderer with a render window)
     if (m_renderer && m_renderer->GetRenderWindow()) {

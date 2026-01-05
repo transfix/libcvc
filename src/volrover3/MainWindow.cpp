@@ -13,6 +13,8 @@
 #include <volrover3/GridOptionsDialog.h>
 #include <volrover3/SDFDialog.h>
 #include <volrover3/IsosurfaceDialog.h>
+#include <volrover3/GeometryDialog.h>
+#include <volrover3/VolumeDialog.h>
 #include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/CameraController.h>
 #include <volrover3/ThreadMonitorWidget.h>
@@ -44,6 +46,8 @@ MainWindow::MainWindow(QWidget *parent)
     , m_gridOptionsDialog(nullptr)
     , m_sdfDialog(nullptr)
     , m_isosurfaceDialog(nullptr)
+    , m_geometryDialog(nullptr)
+    , m_volumeDialog(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -226,6 +230,18 @@ void MainWindow::createMenus()
     stateTreeAction->setShortcut(tr("Ctrl+Shift+S"));
     connect(stateTreeAction, &QAction::triggered, this, &MainWindow::showStateTree);
     viewMenu->addAction(stateTreeAction);
+    
+    viewMenu->addSeparator();
+    
+    QAction *geometryAction = new QAction(tr("Geo&metry Properties..."), this);
+    geometryAction->setShortcut(tr("Ctrl+M"));
+    connect(geometryAction, &QAction::triggered, this, &MainWindow::showGeometry);
+    viewMenu->addAction(geometryAction);
+    
+    QAction *volumeAction = new QAction(tr("&Volume Properties..."), this);
+    volumeAction->setShortcut(tr("Ctrl+V"));
+    connect(volumeAction, &QAction::triggered, this, &MainWindow::showVolume);
+    viewMenu->addAction(volumeAction);
 
     // Tools menu
     QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
@@ -712,6 +728,50 @@ void MainWindow::showIsosurface()
     m_isosurfaceDialog->show();
     m_isosurfaceDialog->raise();
     m_isosurfaceDialog->activateWindow();
+}
+
+void MainWindow::showGeometry()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Create Geometry dialog as a separate window if not already created
+    if (!m_geometryDialog) {
+        m_geometryDialog = new GeometryDialog(m_sceneGraph);
+        m_geometryDialog->setWindowTitle(tr("Geometry Properties - VolRover3"));
+        m_geometryDialog->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Clean up pointer when window is closed
+        connect(m_geometryDialog, &QObject::destroyed, [this]() {
+            m_geometryDialog = nullptr;
+        });
+    }
+    
+    // Show and raise the window
+    m_geometryDialog->show();
+    m_geometryDialog->raise();
+    m_geometryDialog->activateWindow();
+}
+
+void MainWindow::showVolume()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Create Volume dialog as a separate window if not already created
+    if (!m_volumeDialog) {
+        m_volumeDialog = new VolumeDialog(m_sceneGraph);
+        m_volumeDialog->setWindowTitle(tr("Volume Properties - VolRover3"));
+        m_volumeDialog->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Clean up pointer when window is closed
+        connect(m_volumeDialog, &QObject::destroyed, [this]() {
+            m_volumeDialog = nullptr;
+        });
+    }
+    
+    // Show and raise the window
+    m_volumeDialog->show();
+    m_volumeDialog->raise();
+    m_volumeDialog->activateWindow();
 }
 
 void MainWindow::aboutVolRover()

@@ -310,6 +310,13 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, c
     // Remove null graphic since we now have real graphics
     removeNullGraphicIfPresent();
     
+    // Notify dialogs that children collection has changed
+    try {
+        m_graphicsRoot->getState("children").touch();
+    } catch (...) {
+        // State might not exist yet
+    }
+    
     return graphicsNode;
 }
 
@@ -332,6 +339,13 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
     // Remove null graphic since we now have real graphics
     removeNullGraphicIfPresent();
     
+    // Notify dialogs that children collection has changed
+    try {
+        m_graphicsRoot->getState("children").touch();
+    } catch (...) {
+        // State might not exist yet
+    }
+    
     return graphicsNode;
 }
 
@@ -352,6 +366,14 @@ void SceneGraph::removeGraphics(const std::string& name)
     
     // Remove from lookup map
     m_graphicsNodes.erase(it);
+    
+    // Explicitly notify state tree that children have changed
+    // This triggers dataChanged signals that dialogs are listening to
+    try {
+        m_graphicsRoot->getState("children").touch();
+    } catch (...) {
+        // State might not exist yet during initialization
+    }
     
     // If scene is now empty, add null graphic back
     ensureNullGraphicIfEmpty();
@@ -398,6 +420,13 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
     
     // Update multi-volume rendering if needed
     updateVolumeRendering();
+    
+    // Notify dialogs that children collection has changed
+    try {
+        m_graphicsRoot->getState("children").touch();
+    } catch (...) {
+        // State might not exist yet
+    }
     
     return volumeNode;
 }
