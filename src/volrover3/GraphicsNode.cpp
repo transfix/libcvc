@@ -5,6 +5,7 @@
 #include <cvc/app.h>
 #include <vtkTransform.h>
 #include <vtkMatrix4x4.h>
+#include <vtkProp3D.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkActor2D.h>
@@ -261,10 +262,30 @@ void GraphicsNode::updateTransform()
     }
 }
 
+void GraphicsNode::applyWorldTransformToProps(const std::vector<vtkProp*>& props)
+{
+    if (props.empty()) return;
+    
+    // Compute world transform once
+    auto worldTransform = getWorldTransform();
+    vtkSmartPointer<vtkTransform> vtkWorldTransform = vtkSmartPointer<vtkTransform>::New();
+    vtkWorldTransform->SetMatrix(worldTransform);
+    
+    // Apply to all props (cast to vtkProp3D which has SetUserTransform)
+    for (vtkProp* prop : props) {
+        if (prop) {
+            vtkProp3D* prop3D = vtkProp3D::SafeDownCast(prop);
+            if (prop3D) {
+                prop3D->SetUserTransform(vtkWorldTransform.Get());
+            }
+        }
+    }
+}
+
 void GraphicsNode::applyTransformToVTK()
 {
     // Base class does nothing - subclasses override to apply transform to their specific VTK prop
-    // E.g., GeometryNode calls m_actor->SetUserTransform(m_vtkTransform)
+    // E.g., GeometryNode calls applyWorldTransformToProps({m_actor})
 }
 
 void GraphicsNode::updateBoundingBoxNode()
@@ -474,6 +495,12 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
     if (m_showBBox) {
         updateBoundingBoxNode();
     }
+}
+
+std::shared_ptr<GraphicsNode> GraphicsNode::createChild(const std::string& name)
+{
+    // Create NullGraphicNode child for placeholder/hierarchy purposes
+    return addGraphicsChild<NullGraphicNode>(name);
 }
 
 void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child)

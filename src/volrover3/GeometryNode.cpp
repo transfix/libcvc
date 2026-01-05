@@ -13,6 +13,7 @@
 #include <vtkCellArray.h>
 #include <vtkLine.h>
 #include <vtkVertex.h>
+#include <vtkTransform.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <sstream>
@@ -67,10 +68,8 @@ GeometryNode::~GeometryNode()
 
 void GeometryNode::applyTransformToVTK()
 {
-    // Apply transform to VTK actor
-    if (m_actor) {
-        m_actor->SetUserTransform(m_vtkTransform.Get());
-    }
+    // Use generic helper to apply world transform
+    applyWorldTransformToProps({m_actor});
 }
 
 void GeometryNode::applyClipPlanes(vtkPlaneCollection* planes)

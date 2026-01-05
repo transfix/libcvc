@@ -12,6 +12,7 @@
 #include <volrover3/CameraSettingsDialog.h>
 #include <volrover3/GridOptionsDialog.h>
 #include <volrover3/SDFDialog.h>
+#include <volrover3/IsosurfaceDialog.h>
 #include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/CameraController.h>
 #include <volrover3/ThreadMonitorWidget.h>
@@ -42,6 +43,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_stateTreeWidget(nullptr)
     , m_gridOptionsDialog(nullptr)
     , m_sdfDialog(nullptr)
+    , m_isosurfaceDialog(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -156,6 +158,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (m_sdfDialog) {
         m_sdfDialog->close();
     }
+    if (m_isosurfaceDialog) {
+        m_isosurfaceDialog->close();
+    }
     
     // Accept the close event
     QMainWindow::closeEvent(event);
@@ -229,6 +234,11 @@ void MainWindow::createMenus()
     sdfAction->setShortcut(tr("Ctrl+D"));
     connect(sdfAction, &QAction::triggered, this, &MainWindow::showSDF);
     toolsMenu->addAction(sdfAction);
+    
+    QAction *isoAction = new QAction(tr("&Isosurface Extraction..."), this);
+    isoAction->setShortcut(tr("Ctrl+I"));
+    connect(isoAction, &QAction::triggered, this, &MainWindow::showIsosurface);
+    toolsMenu->addAction(isoAction);
 
     // Help menu
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -680,6 +690,28 @@ void MainWindow::showSDF()
     m_sdfDialog->show();
     m_sdfDialog->raise();
     m_sdfDialog->activateWindow();
+}
+
+void MainWindow::showIsosurface()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Create Isosurface dialog as a separate window if not already created
+    if (!m_isosurfaceDialog) {
+        m_isosurfaceDialog = new IsosurfaceDialog(m_sceneGraph);
+        m_isosurfaceDialog->setWindowTitle(tr("Isosurface Extraction - VolRover3"));
+        m_isosurfaceDialog->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Clean up pointer when window is closed
+        connect(m_isosurfaceDialog, &QObject::destroyed, [this]() {
+            m_isosurfaceDialog = nullptr;
+        });
+    }
+    
+    // Show and raise the window
+    m_isosurfaceDialog->show();
+    m_isosurfaceDialog->raise();
+    m_isosurfaceDialog->activateWindow();
 }
 
 void MainWindow::aboutVolRover()

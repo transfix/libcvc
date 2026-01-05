@@ -16,6 +16,13 @@
 class vtkActor2D;
 class BBoxNode;
 class vtkPlane;
+class VolumeNode;
+class NullGraphicNode;
+
+namespace cvc {
+    class geometry;
+    class volume;
+}
 
 /**
  * @brief Abstract base class for all graphics objects in the scene
@@ -89,6 +96,27 @@ public:
     
     // Non-template version for adding existing nodes
     void addGraphicsChild(std::shared_ptr<GraphicsNode> child);
+    
+    // Generic template method for creating child graphics nodes with data
+    // Usage: auto geomNode = parent->createChild<GeometryNode>("name", geomData);
+    //        auto volNode = parent->createChild<VolumeNode>("name", volData);
+    template<typename NodeType, typename DataType>
+    std::shared_ptr<NodeType> createChild(const std::string& name, const DataType& data)
+    {
+        static_assert(std::is_base_of<GraphicsNode, NodeType>::value, "NodeType must be derived from GraphicsNode");
+        
+        // Create the child node using the template factory
+        auto child = addGraphicsChild<NodeType>(name);
+        
+        // Set the data using the generic setData method
+        child->setData(data);
+        
+        return child;
+    }
+    
+    // Overload for creating child without data (uses NullGraphicNode)
+    std::shared_ptr<GraphicsNode> createChild(const std::string& name);
+    
     void removeGraphicsChild(std::shared_ptr<GraphicsNode> child);
     std::shared_ptr<GraphicsNode> findChildByName(const std::string& name);
     const std::vector<std::shared_ptr<GraphicsNode>>& getGraphicsChildren() const { return m_graphicsChildren; }
@@ -137,6 +165,9 @@ protected:
     void updateBoundingBoxNode();  // Update bbox node with current bounds + transform
     void updateLabel();  // Update label position and properties
     void updateClipPlanes();  // Update clip planes based on bounding box and transform
+    
+    // Generic helper to apply world transform to a vector of VTK props
+    void applyWorldTransformToProps(const std::vector<vtkProp*>& props);
     
     // Apply transform to VTK prop - subclasses should override to apply to their specific prop type
     virtual void applyTransformToVTK();

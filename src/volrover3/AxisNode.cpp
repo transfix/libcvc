@@ -3,6 +3,7 @@
 #include <vtkCaptionActor2D.h>
 #include <vtkTextProperty.h>
 #include <vtkTextActor.h>
+#include <vtkTransform.h>
 
 AxisNode::AxisNode(const std::string& statePath, const std::string& name)
     : GraphicsNode(statePath, name)
@@ -70,10 +71,8 @@ AxisNode::~AxisNode()
 
 void AxisNode::applyTransformToVTK()
 {
-    // Apply transform to VTK axes actor
-    if (m_axesActor) {
-        m_axesActor->SetUserTransform(m_vtkTransform.Get());
-    }
+    // Use generic helper to apply world transform
+    applyWorldTransformToProps({m_axesActor});
 }
 
 vtkProp* AxisNode::getProp()

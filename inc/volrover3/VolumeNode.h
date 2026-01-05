@@ -39,6 +39,9 @@ public:
     VolumeNode(const std::string& statePath, const std::string& name = "volume");
     ~VolumeNode() override;
 
+    // Generic setData for template compatibility
+    void setData(const cvc::volume& vol) { setVolume(vol); }
+    
     void setVolume(const cvc::volume &vol);
     bool hasVolume() const { return m_hasVolume; }
     const cvc::volume* getVolume() const { return m_volume.get(); }

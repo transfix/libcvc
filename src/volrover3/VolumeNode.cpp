@@ -8,6 +8,7 @@
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkVolumeProperty.h>
+#include <vtkTransform.h>
 #include <vtkRenderer.h>
 #include <sstream>
 #include <iomanip>
@@ -124,10 +125,8 @@ vtkProp* VolumeNode::getProp()
 
 void VolumeNode::applyTransformToVTK()
 {
-    // Apply transform to VTK volume
-    if (m_vtkVolume) {
-        m_vtkVolume->SetUserTransform(m_vtkTransform.Get());
-    }
+    // Use generic helper to apply world transform
+    applyWorldTransformToProps({m_vtkVolume});
 }
 
 void VolumeNode::applyClipPlanes(vtkPlaneCollection* planes)

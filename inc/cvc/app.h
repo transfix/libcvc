@@ -442,7 +442,11 @@ namespace CVC_NAMESPACE
     };
 
     //output
-    void log(unsigned int level, const std::string& buf);
+#ifdef USING_LOG4CPLUS_DEFAULT
+    void log(unsigned int level, const std::string& buf, bool append_newline = false);
+#else
+    void log(unsigned int level, const std::string& buf, bool append_newline = true);
+#endif
 
     template<class T>
     void registerDataType(const std::string& datatypename)

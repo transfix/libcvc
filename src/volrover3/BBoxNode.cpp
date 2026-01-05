@@ -20,10 +20,12 @@ BBoxNode::BBoxNode()
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+    , m_transform(vtkSmartPointer<vtkMatrix4x4>::New())
     , m_coordinatesVisible(true)
     , m_coordinateLabelFontSize(12)
     , m_renderer(nullptr)
 {
+    m_transform->Identity();
     m_actor->SetMapper(m_mapper);
     
     // Set default appearance
@@ -95,9 +97,16 @@ void BBoxNode::setLineWidth(double width)
 void BBoxNode::setTransform(vtkMatrix4x4* transform)
 {
     if (transform && m_actor) {
+        // Store the transform for coordinate label positioning
+        m_transform->DeepCopy(transform);
+        
+        // Apply to bbox actor
         vtkSmartPointer<vtkTransform> vtkTrans = vtkSmartPointer<vtkTransform>::New();
         vtkTrans->SetMatrix(transform);
         m_actor->SetUserTransform(vtkTrans);
+        
+        // Update coordinate labels with new transformed positions
+        createCoordinateLabels();
     }
 }
 
@@ -232,8 +241,13 @@ void BBoxNode::createCoordinateLabels()
     
     if (spanX <= 0.0 || spanY <= 0.0 || spanZ <= 0.0) return;
     
-    // Helper lambda to create a label
+    // Helper lambda to create a label at world-transformed position
     auto createLabel = [&](double x, double y, double z, const std::string& text) {
+        // Transform local position to world position
+        double localPos[4] = {x, y, z, 1.0};
+        double worldPos[4];
+        m_transform->MultiplyPoint(localPos, worldPos);
+        
         vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
         textMapper->SetInput(text.c_str());
         textMapper->GetTextProperty()->SetFontSize(m_coordinateLabelFontSize);
@@ -244,7 +258,7 @@ void BBoxNode::createCoordinateLabels()
         vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
         textActor->SetMapper(textMapper);
         textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
-        textActor->GetPositionCoordinate()->SetValue(x, y, z);
+        textActor->GetPositionCoordinate()->SetValue(worldPos[0], worldPos[1], worldPos[2]);
         textActor->SetVisibility(m_coordinatesVisible);
         
         m_coordinateLabelActors.push_back(textActor);

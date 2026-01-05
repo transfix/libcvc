@@ -1,12 +1,17 @@
 #include <gtest/gtest.h>
 #include <volrover3/GeometryNode.h>
+#include <volrover3/VolumeNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <volrover3/SceneGraph.h>
 #include <cvc/geometry.h>
+#include <cvc/volmagick.h>
 #include <cvc/state.h>
 #include <cvc/state_object.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlane.h>
 #include <vtkPlaneCollection.h>
+#include <vtkVolume.h>
+#include <vtkActor.h>
 #include <cmath>
 #include <thread>
 #include <chrono>
@@ -1039,6 +1044,394 @@ TEST_F(GraphicsNodeTest, ClippingDisabled) {
     
     // Clipping should be disabled
     EXPECT_FALSE(parent->getClipChildren());
+}
+
+// Test createChild with GeometryNode and geometry data
+TEST_F(GraphicsNodeTest, CreateChildGeometry) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create parent geometry
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 0.0, 0.0});
+    parentGeom.points().push_back({0.0, 10.0, 0.0});
+    parentGeom.tris().push_back({0, 1, 2});
+    
+    auto parent = sceneGraph.addGraphics("parent", parentGeom);
+    
+    // Create child geometry using createChild
+    cvc::geometry childGeom;
+    childGeom.points().push_back({1.0, 1.0, 1.0});
+    childGeom.points().push_back({2.0, 1.0, 1.0});
+    childGeom.points().push_back({1.0, 2.0, 1.0});
+    childGeom.tris().push_back({0, 1, 2});
+    
+    auto child = parent->createChild<GeometryNode>("child", childGeom);
+    
+    // Verify child was created correctly
+    ASSERT_NE(child, nullptr);
+    EXPECT_TRUE(child->hasGeometry());
+    EXPECT_EQ(child->getName(), "child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify geometry was set correctly
+    const cvc::geometry* geom = child->getGeometry();
+    ASSERT_NE(geom, nullptr);
+    EXPECT_EQ(geom->points().size(), 3);
+    EXPECT_EQ(geom->tris().size(), 1);
+}
+
+// Test createChild with VolumeNode and volume data
+TEST_F(GraphicsNodeTest, CreateChildVolume) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create parent geometry
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create child volume using createChild
+    cvc::volume vol(
+        cvc::dimension(10, 10, 10),
+        cvc::UChar,
+        cvc::bounding_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)
+    );
+    auto child = parent->createChild<VolumeNode>("volume_child", vol);
+    
+    // Verify child was created correctly
+    ASSERT_NE(child, nullptr);
+    EXPECT_TRUE(child->hasVolume());
+    EXPECT_EQ(child->getName(), "volume_child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify volume was set correctly
+    const cvc::volume* v = child->getVolume();
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(v->XDim(), 10);
+    EXPECT_EQ(v->YDim(), 10);
+    EXPECT_EQ(v->ZDim(), 10);
+}
+
+// Test createChild without data (should create NullGraphicNode)
+TEST_F(GraphicsNodeTest, CreateChildNoData) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create child without data
+    auto child = parent->createChild("null_child");
+    
+    // Verify child was created
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->getName(), "null_child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify it's a NullGraphicNode (default bounds are -0.5 to 0.5)
+    auto bbox = child->getBoundingBox();
+    EXPECT_EQ(bbox.minx, -0.5);
+    EXPECT_EQ(bbox.maxx, 0.5);
+    EXPECT_EQ(bbox.miny, -0.5);
+    EXPECT_EQ(bbox.maxy, 0.5);
+    EXPECT_EQ(bbox.minz, -0.5);
+    EXPECT_EQ(bbox.maxz, 0.5);
+}
+
+// Test multiple createChild calls
+TEST_F(GraphicsNodeTest, CreateMultipleChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create multiple children of different types
+    cvc::geometry geom1;
+    geom1.points().push_back({1.0, 0.0, 0.0});
+    auto child1 = parent->createChild<GeometryNode>("geom1", geom1);
+    
+    cvc::volume vol1(
+        cvc::dimension(5, 5, 5),
+        cvc::UChar,
+        cvc::bounding_box(0.0, 0.0, 0.0, 5.0, 5.0, 5.0)
+    );
+    auto child2 = parent->createChild<VolumeNode>("vol1", vol1);
+    
+    cvc::geometry geom2;
+    geom2.points().push_back({2.0, 0.0, 0.0});
+    auto child3 = parent->createChild<GeometryNode>("geom2", geom2);
+    
+    // Verify all children were created
+    ASSERT_NE(child1, nullptr);
+    ASSERT_NE(child2, nullptr);
+    ASSERT_NE(child3, nullptr);
+    
+    // Verify parent has all children
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 3);
+    
+    // Verify correct types
+    auto geomChild1 = std::dynamic_pointer_cast<GeometryNode>(child1);
+    auto volChild = std::dynamic_pointer_cast<VolumeNode>(child2);
+    auto geomChild2 = std::dynamic_pointer_cast<GeometryNode>(child3);
+    
+    EXPECT_NE(geomChild1, nullptr);
+    EXPECT_NE(volChild, nullptr);
+    EXPECT_NE(geomChild2, nullptr);
+}
+
+// Test createChild state tree path construction
+TEST_F(GraphicsNodeTest, CreateChildStatePath) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    auto child = parent->createChild<GeometryNode>("child", testGeom);
+    
+    // Verify state path is properly constructed
+    std::string parentPath = parent->getState().fullName();
+    std::string childPath = child->getState().fullName();
+    
+    // Child path should be parent.children.child
+    std::string expectedPath = parentPath + ".children.child";
+    EXPECT_EQ(childPath, expectedPath);
+}
+
+// Test nested createChild calls
+TEST_F(GraphicsNodeTest, CreateNestedChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto root = sceneGraph.addGraphics("root", testGeom);
+    auto level1 = root->createChild<GeometryNode>("level1", testGeom);
+    auto level2 = level1->createChild<GeometryNode>("level2", testGeom);
+    auto level3 = level2->createChild<GeometryNode>("level3", testGeom);
+    
+    // Verify hierarchy
+    ASSERT_NE(level1, nullptr);
+    ASSERT_NE(level2, nullptr);
+    ASSERT_NE(level3, nullptr);
+    
+    EXPECT_EQ(root->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level1->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level2->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level3->getGraphicsChildren().size(), 0);
+    
+    // Verify state paths are properly nested
+    std::string rootPath = root->getState().fullName();
+    std::string level1Path = level1->getState().fullName();
+    std::string level2Path = level2->getState().fullName();
+    std::string level3Path = level3->getState().fullName();
+    
+    EXPECT_EQ(level1Path, rootPath + ".children.level1");
+    EXPECT_EQ(level2Path, level1Path + ".children.level2");
+    EXPECT_EQ(level3Path, level2Path + ".children.level3");
+}
+
+// Test that child volumes are found by SceneGraph::getAllVolumeGraphics()
+TEST_F(GraphicsNodeTest, CreateChildVolumeDiscovery) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create a parent geometry
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Initial check - no volumes
+    EXPECT_EQ(sceneGraph.getAllVolumeGraphics().size(), 0);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 0);
+    
+    // Create child volumes
+    cvc::volume vol1(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+    auto childVol1 = parent->createChild<VolumeNode>("vol1", vol1);
+    
+    // Should now find the child volume
+    auto allVolumes = sceneGraph.getAllVolumeGraphics();
+    EXPECT_EQ(allVolumes.size(), 1);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 1);
+    EXPECT_EQ(allVolumes[0], childVol1);
+    
+    // Add another child volume at different level
+    cvc::volume vol2(cvc::dimension(3, 3, 3), cvc::UChar, cvc::bounding_box(0, 0, 0, 2, 2, 2));
+    auto childVol2 = childVol1->createChild<VolumeNode>("vol2", vol2);
+    
+    // Should find both volumes
+    allVolumes = sceneGraph.getAllVolumeGraphics();
+    EXPECT_EQ(allVolumes.size(), 2);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 2);
+    
+    // Verify both volumes are in the list
+    bool foundVol1 = false, foundVol2 = false;
+    for (const auto& vol : allVolumes) {
+        if (vol == childVol1) foundVol1 = true;
+        if (vol == childVol2) foundVol2 = true;
+    }
+    EXPECT_TRUE(foundVol1);
+    EXPECT_TRUE(foundVol2);
+}
+
+// Test that child geometries are found by SceneGraph::getAllGeometryGraphics()
+TEST_F(GraphicsNodeTest, CreateChildGeometryDiscovery) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create a parent volume
+    cvc::volume vol(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+    auto parent = sceneGraph.addGraphics("parent_vol", vol);
+    
+    // Initial check - no geometries
+    EXPECT_EQ(sceneGraph.getAllGeometryGraphics().size(), 0);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 0);
+    
+    // Create child geometries
+    cvc::geometry geom1;
+    geom1.points().push_back({1.0, 0.0, 0.0});
+    geom1.points().push_back({0.0, 1.0, 0.0});
+    geom1.points().push_back({0.0, 0.0, 1.0});
+    geom1.tris().push_back({0, 1, 2});
+    auto childGeom1 = parent->createChild<GeometryNode>("geom1", geom1);
+    
+    // Should now find the child geometry
+    auto allGeometries = sceneGraph.getAllGeometryGraphics();
+    EXPECT_EQ(allGeometries.size(), 1);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 1);
+    EXPECT_EQ(allGeometries[0], childGeom1);
+    
+    // Add another child geometry at different level
+    cvc::geometry geom2;
+    geom2.points().push_back({2.0, 0.0, 0.0});
+    auto childGeom2 = childGeom1->createChild<GeometryNode>("geom2", geom2);
+    
+    // Should find both geometries
+    allGeometries = sceneGraph.getAllGeometryGraphics();
+    EXPECT_EQ(allGeometries.size(), 2);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 2);
+    
+    // Verify both geometries are in the list
+    bool foundGeom1 = false, foundGeom2 = false;
+    for (const auto& geom : allGeometries) {
+        if (geom == childGeom1) foundGeom1 = true;
+        if (geom == childGeom2) foundGeom2 = true;
+    }
+    EXPECT_TRUE(foundGeom1);
+    EXPECT_TRUE(foundGeom2);
+}
+
+// ============================================================================
+// Transform Hierarchy Tests - World Transform Application
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, ChildVolumeInheritsParentTransform) {
+    // Create scene graph with parent geometry and child volume
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent geometry with scale transform
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({1.0, 0.0, 0.0});
+    parentGeom.points().push_back({0.0, 1.0, 0.0});
+    parentGeom.tris().push_back({0, 1, 2});
+    
+    auto parentNode = rootNode->createChild<GeometryNode>("parent", parentGeom);
+    
+    // Apply scale to parent
+    parentNode->setScale(2.0, 2.0, 2.0);
+    
+    // Create child volume (SDF from parent geometry)
+    cvc::volume childVol(cvc::dimension(10, 10, 10), 
+                         cvc::UChar, 
+                         cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    
+    auto childNode = parentNode->createChild<VolumeNode>("sdf", childVol);
+    
+    // Get the world transform of the child
+    auto childWorldTransform = childNode->getWorldTransform();
+    
+    // The world transform should include parent's scale (2x)
+    // Extract scale from the transform matrix
+    double scaleX = std::sqrt(
+        childWorldTransform->GetElement(0, 0) * childWorldTransform->GetElement(0, 0) +
+        childWorldTransform->GetElement(1, 0) * childWorldTransform->GetElement(1, 0) +
+        childWorldTransform->GetElement(2, 0) * childWorldTransform->GetElement(2, 0)
+    );
+    
+    EXPECT_NEAR(scaleX, 2.0, 1e-6);
+}
+
+TEST_F(GraphicsNodeTest, ChildGeometryInheritsParentTransform) {
+    // Create scene graph with parent volume and child geometry
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent volume
+    cvc::volume parentVol(cvc::dimension(10, 10, 10), 
+                          cvc::UChar, 
+                          cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    
+    auto parentNode = rootNode->createChild<VolumeNode>("parent", parentVol);
+    
+    // Apply scale to parent
+    parentNode->setScale(3.0, 3.0, 3.0);
+    
+    // Create child geometry (isosurface from parent volume)
+    cvc::geometry childGeom;
+    childGeom.points().push_back({0.0, 0.0, 0.0});
+    childGeom.points().push_back({1.0, 0.0, 0.0});
+    childGeom.points().push_back({0.0, 1.0, 0.0});
+    childGeom.tris().push_back({0, 1, 2});
+    
+    auto childNode = parentNode->createChild<GeometryNode>("isosurface", childGeom);
+    
+    // Get the world transform of the child
+    auto childWorldTransform = childNode->getWorldTransform();
+    
+    // The world transform should include parent's scale (3x)
+    double scaleX = std::sqrt(
+        childWorldTransform->GetElement(0, 0) * childWorldTransform->GetElement(0, 0) +
+        childWorldTransform->GetElement(1, 0) * childWorldTransform->GetElement(1, 0) +
+        childWorldTransform->GetElement(2, 0) * childWorldTransform->GetElement(2, 0)
+    );
+    
+    EXPECT_NEAR(scaleX, 3.0, 1e-6);
+}
+
+TEST_F(GraphicsNodeTest, DeepTransformHierarchy) {
+    // Test a 3-level hierarchy: root -> parent (scaled) -> child (rotated) -> grandchild (translated)
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent with scale
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    auto parentNode = rootNode->createChild<GeometryNode>("parent", parentGeom);
+    parentNode->setScale(2.0, 2.0, 2.0);
+    
+    // Create child with rotation (90 degrees around Z)
+    cvc::volume childVol(cvc::dimension(5, 5, 5), 
+                         cvc::UChar, 
+                         cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    auto childNode = parentNode->createChild<VolumeNode>("child", childVol);
+    childNode->setRotation(0.0, 0.0, 90.0);
+    
+    // Create grandchild with translation
+    cvc::geometry grandchildGeom;
+    grandchildGeom.points().push_back({1.0, 0.0, 0.0});
+    auto grandchildNode = childNode->createChild<GeometryNode>("grandchild", grandchildGeom);
+    grandchildNode->setPosition(5.0, 0.0, 0.0);
+    
+    // Verify grandchild's world transform includes all transformations
+    auto worldTransform = grandchildNode->getWorldTransform();
+    
+    // The grandchild should be scaled by parent
+    double scaleX = std::sqrt(
+        worldTransform->GetElement(0, 0) * worldTransform->GetElement(0, 0) +
+        worldTransform->GetElement(1, 0) * worldTransform->GetElement(1, 0) +
+        worldTransform->GetElement(2, 0) * worldTransform->GetElement(2, 0)
+    );
+    EXPECT_NEAR(scaleX, 2.0, 0.1);  // Allow some tolerance due to rotation
 }
 
 int main(int argc, char **argv) {

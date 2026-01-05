@@ -46,6 +46,9 @@ public:
     GeometryNode(const std::string& statePath, const std::string& name = "geometry");
     ~GeometryNode() override;
 
+    // Generic setData for template compatibility
+    void setData(const cvc::geometry& geom) { setGeometry(geom); }
+    
     void setGeometry(const cvc::geometry &geom);
     bool hasGeometry() const { return m_hasGeometry; }
     const cvc::geometry* getGeometry() const { return m_geometry.get(); }

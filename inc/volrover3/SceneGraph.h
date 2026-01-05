@@ -10,15 +10,14 @@
 #include <functional>
 #include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
+#include <volrover3/GraphicsNode.h>
+#include <volrover3/VolumeNode.h>
+#include <volrover3/GeometryNode.h>
 
 class vtkRenderer;
 class vtkMultiVolume;
 class SceneNode;
-class GeometryNode;
-class GraphicsNode;
 class NullGraphicNode;
-class VolumeNode;
-class VolumeNode;
 class GridNode;
 class AxisNode;
 class BBoxNode;
@@ -63,9 +62,42 @@ public:
     const std::map<std::string, std::shared_ptr<GraphicsNode>>& getAllGraphics() const { return m_graphicsNodes; }
     void registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node); // For manual registration
     
-    // Volume-specific query helpers (volumes are part of the unified graphics tree)
-    std::vector<std::shared_ptr<VolumeNode>> getAllVolumeGraphics();
-    size_t getVolumeGraphicsCount() const;
+    // Generic templated method to recursively get all graphics nodes of a specific type
+    template<typename T>
+    std::vector<std::shared_ptr<T>> getAllGraphicsOfType() const
+    {
+        std::vector<std::shared_ptr<T>> result;
+        
+        // Helper lambda for recursive traversal
+        std::function<void(std::shared_ptr<GraphicsNode>)> collectNodes;
+        collectNodes = [&](std::shared_ptr<GraphicsNode> node) {
+            if (!node) return;
+            
+            // Check if this node is of type T
+            auto typedNode = std::dynamic_pointer_cast<T>(node);
+            if (typedNode) {
+                result.push_back(typedNode);
+            }
+            
+            // Recursively check all children
+            for (const auto& child : node->getGraphicsChildren()) {
+                collectNodes(child);
+            }
+        };
+        
+        // Start traversal from graphics root
+        if (m_graphicsRoot) {
+            collectNodes(m_graphicsRoot);
+        }
+        
+        return result;
+    }
+    
+    // Convenience wrappers for common types
+    std::vector<std::shared_ptr<VolumeNode>> getAllVolumeGraphics() const { return getAllGraphicsOfType<VolumeNode>(); }
+    size_t getVolumeGraphicsCount() const { return getAllVolumeGraphics().size(); }
+    std::vector<std::shared_ptr<GeometryNode>> getAllGeometryGraphics() const { return getAllGraphicsOfType<GeometryNode>(); }
+    size_t getGeometryGraphicsCount() const { return getAllGeometryGraphics().size(); }
     
     // Multi-volume rendering control
     void enableMultiVolumeRendering(bool enable);

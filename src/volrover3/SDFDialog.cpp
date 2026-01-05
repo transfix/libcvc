@@ -7,6 +7,7 @@
 #include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/volmagick.h>
+#include <cvc/state.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -227,14 +228,14 @@ void SDFDialog::populateGeometryList()
     
     if (!m_sceneGraph) return;
     
-    // Get all graphics nodes
-    const auto& allGraphics = m_sceneGraph->getAllGraphics();
+    // Get all geometry nodes recursively
+    auto allGeometries = m_sceneGraph->getAllGeometryGraphics();
     
-    for (const auto& pair : allGraphics) {
-        auto geomNode = std::dynamic_pointer_cast<GeometryNode>(pair.second);
+    for (const auto& geomNode : allGeometries) {
         if (geomNode && geomNode->getGeometry() && !geomNode->getGeometry()->empty()) {
-            m_geometryNames.push_back(pair.first);
-            m_geometryComboBox->addItem(QString::fromStdString(pair.first));
+            std::string name = geomNode->getName();
+            m_geometryNames.push_back(name);
+            m_geometryComboBox->addItem(QString::fromStdString(name));
         }
     }
     
@@ -253,11 +254,10 @@ void SDFDialog::onGraphicsChildrenChanged()
     // Get current geometry count
     size_t currentCount = m_geometryNames.size();
     
-    // Count geometry nodes in scene graph
+    // Count geometry nodes in scene graph recursively
     size_t sceneGeomCount = 0;
-    const auto& allGraphics = m_sceneGraph->getAllGraphics();
-    for (const auto& pair : allGraphics) {
-        auto geomNode = std::dynamic_pointer_cast<GeometryNode>(pair.second);
+    auto allGeometries = m_sceneGraph->getAllGeometryGraphics();
+    for (const auto& geomNode : allGeometries) {
         if (geomNode && geomNode->getGeometry() && !geomNode->getGeometry()->empty()) {
             sceneGeomCount++;
         }
@@ -413,7 +413,9 @@ void SDFDialog::onComputeClicked()
                     cvc::thread_info ti("Add SDF Volume");
                     
                     try {
-                        std::string sdfName = geomName + "_sdf";
+                        // Sanitize the name to ensure it's a valid C identifier
+                        std::string rawName = geomName + "_sdf";
+                        std::string sdfName = cvc::state::sanitizeStateName(rawName);
                         
                         // Check if SDF volume already exists
                         auto existingNode = m_sceneGraph->getGraphics(sdfName);
@@ -422,13 +424,17 @@ void SDFDialog::onComputeClicked()
                             m_sceneGraph->removeGraphics(sdfName);
                         }
                         
-                        // Add new SDF volume as child of the geometry
-                        auto sdfNode = m_sceneGraph->addGraphics(sdfName, sdfVol);
-                        
-                        // Set parent to the geometry node
+                        // Get the parent geometry node first
                         auto geomNode = m_sceneGraph->getGraphics(geomName);
-                        if (geomNode && sdfNode) {
-                            geomNode->addChild(sdfNode);
+                        if (!geomNode) {
+                            throw std::runtime_error("Geometry node not found");
+                        }
+                        
+                        // Add SDF volume as child of geometry using the template createChild method
+                        auto sdfNode = geomNode->createChild<VolumeNode>(sdfName, sdfVol);
+                        
+                        if (!sdfNode) {
+                            throw std::runtime_error("Failed to create SDF volume node");
                         }
                         
                         // Update UI on Qt thread

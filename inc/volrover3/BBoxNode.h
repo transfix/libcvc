@@ -48,6 +48,7 @@ private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     cvc::bounding_box m_bbox;
+    vtkSmartPointer<vtkMatrix4x4> m_transform;  // Store world transform for coordinate labels
     
     // Coordinate label members
     std::vector<vtkSmartPointer<vtkActor2D>> m_coordinateLabelActors;

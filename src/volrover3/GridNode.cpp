@@ -6,6 +6,7 @@
 #include <vtkPoints.h>
 #include <vtkCellArray.h>
 #include <vtkProperty.h>
+#include <vtkTransform.h>
 #include <vtkRenderer.h>
 #include <vtkActor2D.h>
 #include <vtkTextMapper.h>
@@ -120,16 +121,8 @@ GridNode::~GridNode()
 
 void GridNode::applyTransformToVTK()
 {
-    // Apply transform to all grid actors
-    if (m_yzActor) {
-        m_yzActor->SetUserTransform(m_vtkTransform.Get());
-    }
-    if (m_xzActor) {
-        m_xzActor->SetUserTransform(m_vtkTransform.Get());
-    }
-    if (m_xyActor) {
-        m_xyActor->SetUserTransform(m_vtkTransform.Get());
-    }
+    // Use generic helper to apply world transform to all three grid actors
+    applyWorldTransformToProps({m_yzActor, m_xzActor, m_xyActor});
 }
 
 void GridNode::applyClipPlanes(vtkPlaneCollection* planes)

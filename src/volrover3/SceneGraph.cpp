@@ -404,33 +404,6 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
 
 
 
-std::vector<std::shared_ptr<VolumeNode>> SceneGraph::getAllVolumeGraphics()
-{
-    std::vector<std::shared_ptr<VolumeNode>> volumes;
-    // Filter volume nodes from the unified graphics tree
-    for (const auto& pair : m_graphicsNodes) {
-        auto volumeNode = std::dynamic_pointer_cast<VolumeNode>(pair.second);
-        if (volumeNode) {
-            volumes.push_back(volumeNode);
-        }
-    }
-    return volumes;
-}
-
-
-
-size_t SceneGraph::getVolumeGraphicsCount() const
-{
-    // Count volume nodes in the unified graphics tree
-    size_t count = 0;
-    for (const auto& pair : m_graphicsNodes) {
-        if (std::dynamic_pointer_cast<VolumeNode>(pair.second)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 cvc::bounding_box SceneGraph::computeVolumeBounds() const
 {
     cvc::bounding_box combinedBounds;

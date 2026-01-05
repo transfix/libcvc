@@ -790,11 +790,15 @@ namespace CVC_NAMESPACE
   //stream operators.
   // 09/09/2011 -- Joe R. -- Removing references to cvcapp because it will crash
   //                         if you try to use them in ~App.
-  void app::log(unsigned int verbosity_level, const std::string& buf)
+  void app::log(unsigned int verbosity_level, const std::string& buf, bool append_newline)
   {
 #ifdef USING_LOG4CPLUS_DEFAULT
     static log4cplus::Logger logger = log4cplus::Logger::getInstance("cvc.app.log");
-    std::string msg = buf.substr(0, buf.length()-1); // take off trailing newline
+    std::string msg = buf;
+    // Remove trailing newline if present and append_newline is false
+    if (!append_newline && !msg.empty() && msg[msg.length()-1] == '\n') {
+      msg = msg.substr(0, msg.length()-1);
+    }
     if (verbosity_level == 0) {// || verbosity_level == 1) {
       LOG4CPLUS_ERROR(logger, msg);
     }
@@ -825,6 +829,9 @@ namespace CVC_NAMESPACE
         string log_prefix = properties("system.log_prefix");
         string log_postfix = properties("system.log_postfix");
         string output_string = log_prefix+buf+log_postfix;
+        if (append_newline && (output_string.empty() || output_string[output_string.length()-1] != '\n')) {
+          output_string += "\n";
+        }
 
         vector<string> key_idents;
         split(key_idents,output_locs,is_any_of(","));

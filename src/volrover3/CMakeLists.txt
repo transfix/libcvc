@@ -56,6 +56,7 @@ set(VOLROVER3_SOURCES
   CameraSettingsDialog.cpp
   GridOptionsDialog.cpp
   SDFDialog.cpp
+  IsosurfaceDialog.cpp
   GraphicsParentDialog.cpp
 )
 
@@ -80,6 +81,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/SDFDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/IsosurfaceDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
 )
 
