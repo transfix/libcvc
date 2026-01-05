@@ -63,39 +63,36 @@ void AppState::initializeDefaults()
     getState("grid_tick_label_font_size").value(12);
     
     // Initialize camera settings
-    getState("camera_mode").value(0);  // 0 = orbit, 1 = fly
-    getState("camera_speed").value(5.0);
-    getState("camera_sensitivity").value(1.0);
-    getState("camera_invert_mouse").value(false);
+    getState("camera.mode").value(0);  // 0 = orbit, 1 = fly
+    getState("camera.speed").value(5.0);
+    getState("camera.sensitivity").value(1.0);
+    getState("camera.invert_mouse").value(false);
     
     // Initialize camera key bindings (Qt::Key enum values)
-    getState("camera_key_forward").value(static_cast<int>(Qt::Key_W));
-    getState("camera_key_backward").value(static_cast<int>(Qt::Key_S));
-    getState("camera_key_left").value(static_cast<int>(Qt::Key_A));
-    getState("camera_key_right").value(static_cast<int>(Qt::Key_D));
-    getState("camera_key_up").value(static_cast<int>(Qt::Key_Space));
-    getState("camera_key_down").value(static_cast<int>(Qt::Key_Control));
+    getState("camera.key_forward").value(static_cast<int>(Qt::Key_W));
+    getState("camera.key_backward").value(static_cast<int>(Qt::Key_S));
+    getState("camera.key_left").value(static_cast<int>(Qt::Key_A));
+    getState("camera.key_right").value(static_cast<int>(Qt::Key_D));
+    getState("camera.key_up").value(static_cast<int>(Qt::Key_Space));
+    getState("camera.key_down").value(static_cast<int>(Qt::Key_Control));
     
     // Initialize camera position (looking at origin from distance)
-    getState("camera_position_x").value(0.0);
-    getState("camera_position_y").value(-10.0);
-    getState("camera_position_z").value(5.0);
+    getState("camera.position.x").value(0.0);
+    getState("camera.position.y").value(-10.0);
+    getState("camera.position.z").value(5.0);
     
     // Initialize camera view direction (looking at origin)
-    getState("camera_view_dir_x").value(0.0);
-    getState("camera_view_dir_y").value(1.0);
-    getState("camera_view_dir_z").value(-0.5);
+    getState("camera.view_dir.x").value(0.0);
+    getState("camera.view_dir.y").value(1.0);
+    getState("camera.view_dir.z").value(-0.5);
     
     // Initialize camera up vector (standard Z-up)
-    getState("camera_up_x").value(0.0);
-    getState("camera_up_y").value(0.0);
-    getState("camera_up_z").value(1.0);
+    getState("camera.up.x").value(0.0);
+    getState("camera.up.y").value(0.0);
+    getState("camera.up.z").value(1.0);
     
     // Initialize field of view (degrees)
-    getState("camera_fov").value(60.0);
-    
-    // Initialize camera changed flag (for debounced callbacks)
-    getState("camera_changed").value(false);
+    getState("camera.fov").value(60.0);
     
     // Initialize default grayscale transfer function
     // Color table: scalar, r, g, b (grayscale 0-1)
@@ -391,170 +388,169 @@ boost::signals2::connection AppState::onGridColorChanged(const boost::function<v
 
 int AppState::cameraMode()
 {
-    return getState("camera_mode").value<int>();
+    return getState("camera.mode").value<int>();
 }
 
 void AppState::setCameraMode(int mode)
 {
-    getState("camera_mode").value(mode);
+    getState("camera.mode").value(mode);
 }
 
 boost::signals2::connection AppState::onCameraModeChanged(const boost::function<void()>& callback)
 {
-    return getState("camera_mode").valueChanged.connect(callback);
+    return getState("camera.mode").valueChanged.connect(callback);
 }
 
 // Camera settings
 double AppState::cameraSpeed()
 {
-    return getState("camera_speed").value<double>();
+    return getState("camera.speed").value<double>();
 }
 
 void AppState::setCameraSpeed(double speed)
 {
-    getState("camera_speed").value(speed);
+    getState("camera.speed").value(speed);
 }
 
 double AppState::cameraSensitivity()
 {
-    return getState("camera_sensitivity").value<double>();
+    return getState("camera.sensitivity").value<double>();
 }
 
 void AppState::setCameraSensitivity(double sensitivity)
 {
-    getState("camera_sensitivity").value(sensitivity);
+    getState("camera.sensitivity").value(sensitivity);
 }
 
 bool AppState::cameraInvertMouse()
 {
-    return getState("camera_invert_mouse").value<bool>();
+    return getState("camera.invert_mouse").value<bool>();
 }
 
 void AppState::setCameraInvertMouse(bool invert)
 {
-    getState("camera_invert_mouse").value(invert);
+    getState("camera.invert_mouse").value(invert);
 }
 
 int AppState::cameraKeyForward()
 {
-    return getState("camera_key_forward").value<int>();
+    return getState("camera.key_forward").value<int>();
 }
 
 void AppState::setCameraKeyForward(int key)
 {
-    getState("camera_key_forward").value(key);
+    getState("camera.key_forward").value(key);
 }
 
 int AppState::cameraKeyBackward()
 {
-    return getState("camera_key_backward").value<int>();
+    return getState("camera.key_backward").value<int>();
 }
 
 void AppState::setCameraKeyBackward(int key)
 {
-    getState("camera_key_backward").value(key);
+    getState("camera.key_backward").value(key);
 }
 
 int AppState::cameraKeyLeft()
 {
-    return getState("camera_key_left").value<int>();
+    return getState("camera.key_left").value<int>();
 }
 
 void AppState::setCameraKeyLeft(int key)
 {
-    getState("camera_key_left").value(key);
+    getState("camera.key_left").value(key);
 }
 
 int AppState::cameraKeyRight()
 {
-    return getState("camera_key_right").value<int>();
+    return getState("camera.key_right").value<int>();
 }
 
 void AppState::setCameraKeyRight(int key)
 {
-    getState("camera_key_right").value(key);
+    getState("camera.key_right").value(key);
 }
 
 int AppState::cameraKeyUp()
 {
-    return getState("camera_key_up").value<int>();
+    return getState("camera.key_up").value<int>();
 }
 
 void AppState::setCameraKeyUp(int key)
 {
-    getState("camera_key_up").value(key);
+    getState("camera.key_up").value(key);
 }
 
 int AppState::cameraKeyDown()
 {
-    return getState("camera_key_down").value<int>();
+    return getState("camera.key_down").value<int>();
 }
 
 void AppState::setCameraKeyDown(int key)
 {
-    getState("camera_key_down").value(key);
+    getState("camera.key_down").value(key);
 }
 
 void AppState::getCameraPosition(double& x, double& y, double& z)
 {
-    x = getState("camera_position_x").value<double>();
-    y = getState("camera_position_y").value<double>();
-    z = getState("camera_position_z").value<double>();
+    x = getState("camera.position.x").value<double>();
+    y = getState("camera.position.y").value<double>();
+    z = getState("camera.position.z").value<double>();
 }
 
 void AppState::setCameraPosition(double x, double y, double z)
 {
-    getState("camera_position_x").value(x);
-    getState("camera_position_y").value(y);
-    getState("camera_position_z").value(z);
-    getState("camera_changed").value(true);  // Trigger single callback
+    getState("camera.position.x").value(x);
+    getState("camera.position.y").value(y);
+    getState("camera.position.z").value(z);
 }
 
 void AppState::getCameraViewDirection(double& x, double& y, double& z)
 {
-    x = getState("camera_view_dir_x").value<double>();
-    y = getState("camera_view_dir_y").value<double>();
-    z = getState("camera_view_dir_z").value<double>();
+    x = getState("camera.view_dir.x").value<double>();
+    y = getState("camera.view_dir.y").value<double>();
+    z = getState("camera.view_dir.z").value<double>();
 }
 
 void AppState::setCameraViewDirection(double x, double y, double z)
 {
-    getState("camera_view_dir_x").value(x);
-    getState("camera_view_dir_y").value(y);
-    getState("camera_view_dir_z").value(z);
-    getState("camera_changed").value(true);  // Trigger single callback
+    getState("camera.view_dir.x").value(x);
+    getState("camera.view_dir.y").value(y);
+    getState("camera.view_dir.z").value(z);
 }
 
 void AppState::getCameraUpVector(double& x, double& y, double& z)
 {
-    x = getState("camera_up_x").value<double>();
-    y = getState("camera_up_y").value<double>();
-    z = getState("camera_up_z").value<double>();
+    x = getState("camera.up.x").value<double>();
+    y = getState("camera.up.y").value<double>();
+    z = getState("camera.up.z").value<double>();
 }
 
 void AppState::setCameraUpVector(double x, double y, double z)
 {
-    getState("camera_up_x").value(x);
-    getState("camera_up_y").value(y);
-    getState("camera_up_z").value(z);
-    getState("camera_changed").value(true);  // Trigger single callback
+    getState("camera.up.x").value(x);
+    getState("camera.up.y").value(y);
+    getState("camera.up.z").value(z);
 }
 
 double AppState::cameraFieldOfView()
 {
-    return getState("camera_fov").value<double>();
+    return getState("camera.fov").value<double>();
 }
 
 void AppState::setCameraFieldOfView(double fov)
 {
-    getState("camera_fov").value(fov);
-    getState("camera_changed").value(true);  // Trigger single callback
+    getState("camera.fov").value(fov);
 }
 
 boost::signals2::connection AppState::onCameraChanged(const boost::function<void()>& callback)
 {
-    // Connect to the camera_changed flag for debounced notifications
-    return getState("camera_changed").valueChanged.connect(callback);
+    // Connect to the "camera" parent node's childChanged signal
+    // Any child value change (camera.position.x, camera.fov, etc.) will trigger this
+    return getState("camera").childChanged.connect([callback](const std::string&) {
+        callback();
+    });
 }
 
 std::vector<double> AppState::transferFunctionColorTable()

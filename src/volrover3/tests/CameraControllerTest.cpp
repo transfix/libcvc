@@ -251,10 +251,10 @@ TEST_F(CameraControllerTest, StateTreeCameraPosition) {
     
     // Verify state tree contains the values
     auto& stateTree = cvc::state::instance()("volrover3");
-    EXPECT_NEAR(stateTree("camera_position_x").value<double>(), 10.0, 0.01);
-    EXPECT_NEAR(stateTree("camera_position_y").value<double>(), 20.0, 0.01);
-    EXPECT_NEAR(stateTree("camera_position_z").value<double>(), 30.0, 0.01);
-    EXPECT_NEAR(stateTree("camera_fov").value<double>(), 60.0, 0.01);
+    EXPECT_NEAR(stateTree("camera.position.x").value<double>(), 10.0, 0.01);
+    EXPECT_NEAR(stateTree("camera.position.y").value<double>(), 20.0, 0.01);
+    EXPECT_NEAR(stateTree("camera.position.z").value<double>(), 30.0, 0.01);
+    EXPECT_NEAR(stateTree("camera.fov").value<double>(), 60.0, 0.01);
 }
 
 TEST_F(CameraControllerTest, StateTreeCameraUpdate) {
@@ -265,9 +265,9 @@ TEST_F(CameraControllerTest, StateTreeCameraUpdate) {
     
     // Get initial position from state tree
     auto& stateTree = cvc::state::instance()("volrover3");
-    double initialX = stateTree("camera_position_x").value<double>();
-    double initialY = stateTree("camera_position_y").value<double>();
-    double initialZ = stateTree("camera_position_z").value<double>();
+    double initialX = stateTree("camera.position.x").value<double>();
+    double initialY = stateTree("camera.position.y").value<double>();
+    double initialZ = stateTree("camera.position.z").value<double>();
     
     // Move forward
     controller->handleKeyPress(Qt::Key_W);
@@ -275,9 +275,9 @@ TEST_F(CameraControllerTest, StateTreeCameraUpdate) {
     controller->handleKeyRelease(Qt::Key_W);
     
     // State tree should be updated
-    double newX = stateTree("camera_position_x").value<double>();
-    double newY = stateTree("camera_position_y").value<double>();
-    double newZ = stateTree("camera_position_z").value<double>();
+    double newX = stateTree("camera.position.x").value<double>();
+    double newY = stateTree("camera.position.y").value<double>();
+    double newZ = stateTree("camera.position.z").value<double>();
     
     bool moved = (initialX != newX) || (initialY != newY) || (initialZ != newZ);
     EXPECT_TRUE(moved);
@@ -290,10 +290,6 @@ TEST_F(CameraControllerTest, CameraChangeCallback) {
     auto connection = appState->onCameraChanged([&callback_count]() {
         callback_count++;
     });
-    
-    // Clear camera_changed flag
-    auto& stateTree = cvc::state::instance()("volrover3");
-    stateTree("camera_changed").value(false);
     
     // Change camera via controller
     double testPos[3] = {5.0, 5.0, 5.0};

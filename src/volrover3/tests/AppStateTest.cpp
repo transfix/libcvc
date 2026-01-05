@@ -129,9 +129,9 @@ TEST_F(AppStateTest, StateTreeCameraPosition) {
     
     // Verify values are stored in state tree
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_x").value<double>(), 10.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_y").value<double>(), 20.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_z").value<double>(), 30.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.x").value<double>(), 10.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.y").value<double>(), 20.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.z").value<double>(), 30.0);
     
     // Verify getters match state tree values
     double x, y, z;
@@ -145,9 +145,9 @@ TEST_F(AppStateTest, StateTreeCameraViewDirection) {
     state->setCameraViewDirection(1.0, 0.0, 0.0);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_x").value<double>(), 1.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_y").value<double>(), 0.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_view_dir_z").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.x").value<double>(), 1.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.y").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.z").value<double>(), 0.0);
     
     double x, y, z;
     state->getCameraViewDirection(x, y, z);
@@ -160,9 +160,9 @@ TEST_F(AppStateTest, StateTreeCameraUpVector) {
     state->setCameraUpVector(0.0, 1.0, 0.0);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_up_x").value<double>(), 0.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_up_y").value<double>(), 1.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_up_z").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up.x").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up.y").value<double>(), 1.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up.z").value<double>(), 0.0);
     
     double x, y, z;
     state->getCameraUpVector(x, y, z);
@@ -175,7 +175,7 @@ TEST_F(AppStateTest, StateTreeCameraFOV) {
     state->setCameraFieldOfView(60.0);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_fov").value<double>(), 60.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.fov").value<double>(), 60.0);
     EXPECT_DOUBLE_EQ(state->cameraFieldOfView(), 60.0);
 }
 
@@ -183,7 +183,7 @@ TEST_F(AppStateTest, StateTreeCameraSpeed) {
     state->setCameraSpeed(3.5);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_speed").value<double>(), 3.5);
+    EXPECT_DOUBLE_EQ(stateTree("camera.speed").value<double>(), 3.5);
     EXPECT_DOUBLE_EQ(state->cameraSpeed(), 3.5);
 }
 
@@ -191,7 +191,7 @@ TEST_F(AppStateTest, StateTreeCameraSensitivity) {
     state->setCameraSensitivity(0.75);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_sensitivity").value<double>(), 0.75);
+    EXPECT_DOUBLE_EQ(stateTree("camera.sensitivity").value<double>(), 0.75);
     EXPECT_DOUBLE_EQ(state->cameraSensitivity(), 0.75);
 }
 
@@ -245,20 +245,20 @@ TEST_F(AppStateTest, StateTreeKeyBindings) {
     state->setCameraKeyDown(Qt::Key_Q);
     
     auto& stateTree = state->getRootState();
-    EXPECT_EQ(stateTree("camera_key_forward").value<int>(), Qt::Key_W);
-    EXPECT_EQ(stateTree("camera_key_backward").value<int>(), Qt::Key_S);
-    EXPECT_EQ(stateTree("camera_key_left").value<int>(), Qt::Key_A);
-    EXPECT_EQ(stateTree("camera_key_right").value<int>(), Qt::Key_D);
-    EXPECT_EQ(stateTree("camera_key_up").value<int>(), Qt::Key_E);
-    EXPECT_EQ(stateTree("camera_key_down").value<int>(), Qt::Key_Q);
+    EXPECT_EQ(stateTree("camera.key_forward").value<int>(), Qt::Key_W);
+    EXPECT_EQ(stateTree("camera.key_backward").value<int>(), Qt::Key_S);
+    EXPECT_EQ(stateTree("camera.key_left").value<int>(), Qt::Key_A);
+    EXPECT_EQ(stateTree("camera.key_right").value<int>(), Qt::Key_D);
+    EXPECT_EQ(stateTree("camera.key_up").value<int>(), Qt::Key_E);
+    EXPECT_EQ(stateTree("camera.key_down").value<int>(), Qt::Key_Q);
 }
 
 TEST_F(AppStateTest, StateTreeDirectUpdate) {
     // Set values directly in state tree (simulating external update)
     auto& stateTree = state->getRootState();
-    stateTree("camera_position_x").value(100.0);
-    stateTree("camera_position_y").value(200.0);
-    stateTree("camera_position_z").value(300.0);
+    stateTree("camera.position.x").value(100.0);
+    stateTree("camera.position.y").value(200.0);
+    stateTree("camera.position.z").value(300.0);
     
     // Verify AppState reads from state tree
     double x, y, z;
@@ -279,33 +279,24 @@ TEST_F(AppStateTest, CameraChangedCallback) {
         callback_count++;
     });
     
-    // Clear camera_changed flag first
-    auto& stateTree = state->getRootState();
-    stateTree("camera_changed").value(false);
-    
     // Trigger camera changes
     state->setCameraPosition(1.0, 2.0, 3.0);
     EXPECT_GT(callback_count, 0);
     
-    // Reset for next change
-    stateTree("camera_changed").value(false);
     int prev_count = callback_count;
     state->setCameraViewDirection(0.0, 0.0, 1.0);
     EXPECT_GT(callback_count, prev_count);
     
-    stateTree("camera_changed").value(false);
     prev_count = callback_count;
     state->setCameraUpVector(0.0, 1.0, 0.0);
     EXPECT_GT(callback_count, prev_count);
     
-    stateTree("camera_changed").value(false);
     prev_count = callback_count;
     state->setCameraFieldOfView(45.0);
     EXPECT_GT(callback_count, prev_count);
     
     // Disconnect and verify no more callbacks
     connection.disconnect();
-    stateTree("camera_changed").value(false);
     prev_count = callback_count;
     state->setCameraPosition(99.0, 99.0, 99.0);
     EXPECT_EQ(callback_count, prev_count);  // Should not have incremented
@@ -377,10 +368,6 @@ TEST_F(AppStateTest, MultipleCallbacksForSameState) {
     auto conn2 = state->onCameraChanged([&callback2_count]() { callback2_count++; });
     auto conn3 = state->onCameraChanged([&callback3_count]() { callback3_count++; });
     
-    // Clear camera_changed flag first
-    auto& stateTree = state->getRootState();
-    stateTree("camera_changed").value(false);
-    
     state->setCameraPosition(5.0, 5.0, 5.0);
     
     EXPECT_GT(callback1_count, 0);
@@ -401,10 +388,6 @@ TEST_F(AppStateTest, CallbackReceivesCorrectValue) {
         state->getCameraPosition(captured_x, captured_y, captured_z);
     });
     
-    // Clear camera_changed flag first
-    auto& stateTree = state->getRootState();
-    stateTree("camera_changed").value(false);
-    
     state->setCameraPosition(7.0, 8.0, 9.0);
     
     EXPECT_DOUBLE_EQ(captured_x, 7.0);
@@ -423,13 +406,11 @@ TEST_F(AppStateTest, StateTreeTriggerCallback) {
         callback_count++;
     });
     
-    // Clear camera_changed flag first
     auto& stateTree = state->getRootState();
     int before_count = callback_count;
-    stateTree("camera_changed").value(false);
     
-    // Trigger callback by setting state tree directly
-    stateTree("camera_changed").value(true);
+    // Trigger callback by setting camera position in state tree directly
+    stateTree("camera.position.x").value(123.0);
     
     EXPECT_GT(callback_count, before_count);
     
@@ -463,12 +444,12 @@ TEST_F(AppStateTest, StateTreeInitialized) {
     auto& stateTree = state->getRootState();
     
     // Verify default state values are initialized
-    EXPECT_TRUE(stateTree("camera_position_x").initialized());
-    EXPECT_TRUE(stateTree("camera_position_y").initialized());
-    EXPECT_TRUE(stateTree("camera_position_z").initialized());
-    EXPECT_TRUE(stateTree("camera_speed").initialized());
-    EXPECT_TRUE(stateTree("camera_sensitivity").initialized());
-    EXPECT_TRUE(stateTree("camera_fov").initialized());
+    EXPECT_TRUE(stateTree("camera.position.x").initialized());
+    EXPECT_TRUE(stateTree("camera.position.y").initialized());
+    EXPECT_TRUE(stateTree("camera.position.z").initialized());
+    EXPECT_TRUE(stateTree("camera.speed").initialized());
+    EXPECT_TRUE(stateTree("camera.sensitivity").initialized());
+    EXPECT_TRUE(stateTree("camera.fov").initialized());
 }
 
 TEST_F(AppStateTest, StateTreePersistence) {
@@ -479,15 +460,15 @@ TEST_F(AppStateTest, StateTreePersistence) {
     
     // Verify values persist in state tree
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_x").value<double>(), 11.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_y").value<double>(), 22.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_z").value<double>(), 33.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_speed").value<double>(), 5.5);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.x").value<double>(), 11.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.y").value<double>(), 22.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.z").value<double>(), 33.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.speed").value<double>(), 5.5);
     EXPECT_TRUE(stateTree("grid_visible").value<bool>());
     
     // Values should persist across multiple reads
-    EXPECT_DOUBLE_EQ(stateTree("camera_position_x").value<double>(), 11.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera_speed").value<double>(), 5.5);
+    EXPECT_DOUBLE_EQ(stateTree("camera.position.x").value<double>(), 11.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.speed").value<double>(), 5.5);
 }
 
 // ===========================
