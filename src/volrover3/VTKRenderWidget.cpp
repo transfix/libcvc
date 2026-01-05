@@ -139,5 +139,9 @@ void VTKRenderWidget::processSceneGraphEvents()
 {
     if (m_sceneGraph) {
         m_sceneGraph->processEvents();
+        // Trigger render if any events modified the scene
+        if (m_sceneGraph->checkAndResetRenderNeeded()) {
+            render();
+        }
     }
 }

@@ -14,6 +14,7 @@ class TransferFunctionWidget;
 class SceneGraph;
 class ThreadMonitorWidget;
 class StateTreeWidget;
+class GridOptionsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -50,6 +51,7 @@ private:
     std::shared_ptr<SceneGraph> m_sceneGraph;
     ThreadMonitorWidget *m_threadMonitor;
     StateTreeWidget *m_stateTreeWidget;
+    GridOptionsDialog *m_gridOptionsDialog;
 
     // Status bar widgets for thread monitoring
     QLabel *m_threadNameLabel;

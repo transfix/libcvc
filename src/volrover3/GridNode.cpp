@@ -68,42 +68,47 @@ GridNode::GridNode(const std::string& statePath, const std::string& name)
         
         getState("visible").value(1);  // Visible by default
         
-        // Plane visibility
-        getState("yz_plane_visible").value(1);
-        getState("xz_plane_visible").value(1);
-        getState("xy_plane_visible").value(1);
+        // YZ Plane (organized under yz_plane. hierarchy)
+        getState("yz_plane.visible").value(1);
+        getState("yz_plane.color_r").value(0.5);
+        getState("yz_plane.color_g").value(0.5);
+        getState("yz_plane.color_b").value(0.5);
+        getState("yz_plane.line_width").value(1.0);
+        getState("yz_plane.opacity").value(0.5);
         
-        // Plane colors (RGB 0-1)
-        getState("yz_plane_color_r").value(0.5);
-        getState("yz_plane_color_g").value(0.5);
-        getState("yz_plane_color_b").value(0.5);
+        // XZ Plane (organized under xz_plane. hierarchy)
+        getState("xz_plane.visible").value(1);
+        getState("xz_plane.color_r").value(0.5);
+        getState("xz_plane.color_g").value(0.5);
+        getState("xz_plane.color_b").value(0.5);
+        getState("xz_plane.line_width").value(1.0);
+        getState("xz_plane.opacity").value(0.5);
         
-        getState("xz_plane_color_r").value(0.5);
-        getState("xz_plane_color_g").value(0.5);
-        getState("xz_plane_color_b").value(0.5);
-        
-        getState("xy_plane_color_r").value(0.5);
-        getState("xy_plane_color_g").value(0.5);
-        getState("xy_plane_color_b").value(0.5);
+        // XY Plane (organized under xy_plane. hierarchy)
+        getState("xy_plane.visible").value(1);
+        getState("xy_plane.color_r").value(0.5);
+        getState("xy_plane.color_g").value(0.5);
+        getState("xy_plane.color_b").value(0.5);
+        getState("xy_plane.line_width").value(1.0);
+        getState("xy_plane.opacity").value(0.5);
         
         // Grid divisions
         getState("divisions_x").value(64);
         getState("divisions_y").value(64);
         getState("divisions_z").value(64);
         
-        // Tick intervals
-        getState("tick_interval_x").value(8);
-        getState("tick_interval_y").value(8);
-        getState("tick_interval_z").value(8);
+        // Tick properties (organized under tics. hierarchy)
+        getState("tics.interval_x").value(8);
+        getState("tics.interval_y").value(8);
+        getState("tics.interval_z").value(8);
         
-        // Tick label properties
-        getState("tick_label_color_r").value(1.0);
-        getState("tick_label_color_g").value(1.0);
-        getState("tick_label_color_b").value(1.0);
-        getState("tick_label_font_size").value(12);
+        getState("tics.label_color_r").value(1.0);
+        getState("tics.label_color_g").value(1.0);
+        getState("tics.label_color_b").value(1.0);
+        getState("tics.label_font_size").value(12);
         
         // Tick visibility (hidden by default)
-        getState("ticks_visible").value(0);
+        getState("tics.visible").value(0);
     } // batch ends here, callbacks fire with all values initialized
 
     createGridPlanes();
@@ -217,68 +222,104 @@ void GridNode::handleStateChanged(const std::string& childState)
 {
     // Synchronize rendering attributes from state tree
     // All VTK operations MUST be wrapped in runOnMainThread() for thread safety
-    if (childState == "yz_plane_visible") {
+    if (childState == "yz_plane.visible") {
         runOnMainThread([this]() {
-            m_yzPlaneVisible = getState("yz_plane_visible").value<bool>();
+            m_yzPlaneVisible = getState("yz_plane.visible").value<bool>();
             m_yzActor->SetVisibility(m_yzPlaneVisible);
             for (auto& actor : m_yzTickLabelActors) {
                 actor->SetVisibility(m_yzPlaneVisible);
             }
         });
     }
-    else if (childState == "xz_plane_visible") {
+    else if (childState == "xz_plane.visible") {
         runOnMainThread([this]() {
-            m_xzPlaneVisible = getState("xz_plane_visible").value<bool>();
+            m_xzPlaneVisible = getState("xz_plane.visible").value<bool>();
             m_xzActor->SetVisibility(m_xzPlaneVisible);
             for (auto& actor : m_xzTickLabelActors) {
                 actor->SetVisibility(m_xzPlaneVisible);
             }
         });
     }
-    else if (childState == "xy_plane_visible") {
+    else if (childState == "xy_plane.visible") {
         runOnMainThread([this]() {
-            m_xyPlaneVisible = getState("xy_plane_visible").value<bool>();
+            m_xyPlaneVisible = getState("xy_plane.visible").value<bool>();
             m_xyActor->SetVisibility(m_xyPlaneVisible);
             for (auto& actor : m_xyTickLabelActors) {
                 actor->SetVisibility(m_xyPlaneVisible);
             }
         });
     }
-    else if (childState == "yz_plane_color_r" || childState == "yz_plane_color_g" || childState == "yz_plane_color_b") {
+    else if (childState == "yz_plane.color_r" || childState == "yz_plane.color_g" || childState == "yz_plane.color_b") {
         runOnMainThread([this]() {
             // Only update if all color components can be read
             try {
-                m_yzPlaneColor[0] = getState("yz_plane_color_r").value<double>();
-                m_yzPlaneColor[1] = getState("yz_plane_color_g").value<double>();
-                m_yzPlaneColor[2] = getState("yz_plane_color_b").value<double>();
+                m_yzPlaneColor[0] = getState("yz_plane.color_r").value<double>();
+                m_yzPlaneColor[1] = getState("yz_plane.color_g").value<double>();
+                m_yzPlaneColor[2] = getState("yz_plane.color_b").value<double>();
                 m_yzActor->GetProperty()->SetColor(m_yzPlaneColor);
             } catch (const boost::bad_lexical_cast&) {
                 // Ignore - values not fully initialized yet
             }
         });
     }
-    else if (childState == "xz_plane_color_r" || childState == "xz_plane_color_g" || childState == "xz_plane_color_b") {
+    else if (childState == "yz_plane.line_width") {
+        runOnMainThread([this]() {
+            double lineWidth = getState("yz_plane.line_width").value<double>();
+            m_yzActor->GetProperty()->SetLineWidth(lineWidth);
+        });
+    }
+    else if (childState == "yz_plane.opacity") {
+        runOnMainThread([this]() {
+            double opacity = getState("yz_plane.opacity").value<double>();
+            m_yzActor->GetProperty()->SetOpacity(opacity);
+        });
+    }
+    else if (childState == "xz_plane.color_r" || childState == "xz_plane.color_g" || childState == "xz_plane.color_b") {
         runOnMainThread([this]() {
             try {
-                m_xzPlaneColor[0] = getState("xz_plane_color_r").value<double>();
-                m_xzPlaneColor[1] = getState("xz_plane_color_g").value<double>();
-                m_xzPlaneColor[2] = getState("xz_plane_color_b").value<double>();
+                m_xzPlaneColor[0] = getState("xz_plane.color_r").value<double>();
+                m_xzPlaneColor[1] = getState("xz_plane.color_g").value<double>();
+                m_xzPlaneColor[2] = getState("xz_plane.color_b").value<double>();
                 m_xzActor->GetProperty()->SetColor(m_xzPlaneColor);
             } catch (const boost::bad_lexical_cast&) {
                 // Ignore - values not fully initialized yet
             }
         });
     }
-    else if (childState == "xy_plane_color_r" || childState == "xy_plane_color_g" || childState == "xy_plane_color_b") {
+    else if (childState == "xz_plane.line_width") {
+        runOnMainThread([this]() {
+            double lineWidth = getState("xz_plane.line_width").value<double>();
+            m_xzActor->GetProperty()->SetLineWidth(lineWidth);
+        });
+    }
+    else if (childState == "xz_plane.opacity") {
+        runOnMainThread([this]() {
+            double opacity = getState("xz_plane.opacity").value<double>();
+            m_xzActor->GetProperty()->SetOpacity(opacity);
+        });
+    }
+    else if (childState == "xy_plane.color_r" || childState == "xy_plane.color_g" || childState == "xy_plane.color_b") {
         runOnMainThread([this]() {
             try {
-                m_xyPlaneColor[0] = getState("xy_plane_color_r").value<double>();
-                m_xyPlaneColor[1] = getState("xy_plane_color_g").value<double>();
-                m_xyPlaneColor[2] = getState("xy_plane_color_b").value<double>();
+                m_xyPlaneColor[0] = getState("xy_plane.color_r").value<double>();
+                m_xyPlaneColor[1] = getState("xy_plane.color_g").value<double>();
+                m_xyPlaneColor[2] = getState("xy_plane.color_b").value<double>();
                 m_xyActor->GetProperty()->SetColor(m_xyPlaneColor);
             } catch (const boost::bad_lexical_cast&) {
                 // Ignore - values not fully initialized yet
             }
+        });
+    }
+    else if (childState == "xy_plane.line_width") {
+        runOnMainThread([this]() {
+            double lineWidth = getState("xy_plane.line_width").value<double>();
+            m_xyActor->GetProperty()->SetLineWidth(lineWidth);
+        });
+    }
+    else if (childState == "xy_plane.opacity") {
+        runOnMainThread([this]() {
+            double opacity = getState("xy_plane.opacity").value<double>();
+            m_xyActor->GetProperty()->SetOpacity(opacity);
         });
     }
     else if (childState == "divisions_x" || childState == "divisions_y" || childState == "divisions_z") {
@@ -294,24 +335,24 @@ void GridNode::handleStateChanged(const std::string& childState)
             }
         });
     }
-    else if (childState == "tick_interval_x" || childState == "tick_interval_y" || childState == "tick_interval_z") {
+    else if (childState == "tics.interval_x" || childState == "tics.interval_y" || childState == "tics.interval_z") {
         runOnMainThread([this]() {
             try {
-                m_tickIntervalX = std::max(1, getState("tick_interval_x").value<int>());
-                m_tickIntervalY = std::max(1, getState("tick_interval_y").value<int>());
-                m_tickIntervalZ = std::max(1, getState("tick_interval_z").value<int>());
+                m_tickIntervalX = std::max(1, getState("tics.interval_x").value<int>());
+                m_tickIntervalY = std::max(1, getState("tics.interval_y").value<int>());
+                m_tickIntervalZ = std::max(1, getState("tics.interval_z").value<int>());
                 updateTickLabelsInRenderer();
             } catch (const boost::bad_lexical_cast&) {
                 // Ignore - values not fully initialized yet
             }
         });
     }
-    else if (childState == "tick_label_color_r" || childState == "tick_label_color_g" || childState == "tick_label_color_b") {
+    else if (childState == "tics.label_color_r" || childState == "tics.label_color_g" || childState == "tics.label_color_b") {
         runOnMainThread([this]() {
             try {
-                m_tickLabelColor[0] = getState("tick_label_color_r").value<double>();
-                m_tickLabelColor[1] = getState("tick_label_color_g").value<double>();
-                m_tickLabelColor[2] = getState("tick_label_color_b").value<double>();
+                m_tickLabelColor[0] = getState("tics.label_color_r").value<double>();
+                m_tickLabelColor[1] = getState("tics.label_color_g").value<double>();
+                m_tickLabelColor[2] = getState("tics.label_color_b").value<double>();
                 
                 // Update all existing labels
                 auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
@@ -331,9 +372,9 @@ void GridNode::handleStateChanged(const std::string& childState)
             }
         });
     }
-    else if (childState == "tick_label_font_size") {
+    else if (childState == "tics.label_font_size") {
         runOnMainThread([this]() {
-            m_tickLabelFontSize = std::max(1, getState("tick_label_font_size").value<int>());
+            m_tickLabelFontSize = std::max(1, getState("tics.label_font_size").value<int>());
             
             // Update all existing labels
             auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>>& actors) {
@@ -350,6 +391,12 @@ void GridNode::handleStateChanged(const std::string& childState)
             updateLabels(m_xyTickLabelActors);
         });
     }
+    else if (childState == "tics.visible") {
+        runOnMainThread([this]() {
+            // Update tick label visibility in renderer
+            updateTickLabelsInRenderer();
+        });
+    }
     else {
         // Delegate to parent for common fields (visible, show_bbox, label, etc.)
         GraphicsNode::handleStateChanged(childState);
@@ -358,23 +405,23 @@ void GridNode::handleStateChanged(const std::string& childState)
 
 void GridNode::setYZPlaneColor(double r, double g, double b)
 {
-    getState("yz_plane_color_r").value(r);
-    getState("yz_plane_color_g").value(g);
-    getState("yz_plane_color_b").value(b);
+    getState("yz_plane.color_r").value(r);
+    getState("yz_plane.color_g").value(g);
+    getState("yz_plane.color_b").value(b);
 }
 
 void GridNode::setXZPlaneColor(double r, double g, double b)
 {
-    getState("xz_plane_color_r").value(r);
-    getState("xz_plane_color_g").value(g);
-    getState("xz_plane_color_b").value(b);
+    getState("xz_plane.color_r").value(r);
+    getState("xz_plane.color_g").value(g);
+    getState("xz_plane.color_b").value(b);
 }
 
 void GridNode::setXYPlaneColor(double r, double g, double b)
 {
-    getState("xy_plane_color_r").value(r);
-    getState("xy_plane_color_g").value(g);
-    getState("xy_plane_color_b").value(b);
+    getState("xy_plane.color_r").value(r);
+    getState("xy_plane.color_g").value(g);
+    getState("xy_plane.color_b").value(b);
 }
 
 void GridNode::getYZPlaneColor(double& r, double& g, double& b) const
@@ -400,17 +447,17 @@ void GridNode::getXYPlaneColor(double& r, double& g, double& b) const
 
 void GridNode::setYZPlaneVisible(bool visible)
 {
-    getState("yz_plane_visible").value(visible ? 1 : 0);
+    getState("yz_plane.visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setXZPlaneVisible(bool visible)
 {
-    getState("xz_plane_visible").value(visible ? 1 : 0);
+    getState("xz_plane.visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setXYPlaneVisible(bool visible)
 {
-    getState("xy_plane_visible").value(visible ? 1 : 0);
+    getState("xy_plane.visible").value(visible ? 1 : 0);
 }
 
 void GridNode::setGridDivisions(int x, int y, int z)
@@ -429,9 +476,9 @@ void GridNode::getGridDivisions(int& x, int& y, int& z) const
 
 void GridNode::setTickIntervals(int x, int y, int z)
 {
-    getState("tick_interval_x").value(std::max(1, x));
-    getState("tick_interval_y").value(std::max(1, y));
-    getState("tick_interval_z").value(std::max(1, z));
+    getState("tics.interval_x").value(std::max(1, x));
+    getState("tics.interval_y").value(std::max(1, y));
+    getState("tics.interval_z").value(std::max(1, z));
 }
 
 void GridNode::getTickIntervals(int& x, int& y, int& z) const
@@ -443,9 +490,9 @@ void GridNode::getTickIntervals(int& x, int& y, int& z) const
 
 void GridNode::setTickLabelColor(double r, double g, double b)
 {
-    getState("tick_label_color_r").value(r);
-    getState("tick_label_color_g").value(g);
-    getState("tick_label_color_b").value(b);
+    getState("tics.label_color_r").value(r);
+    getState("tics.label_color_g").value(g);
+    getState("tics.label_color_b").value(b);
 }
 
 void GridNode::getTickLabelColor(double& r, double& g, double& b) const
@@ -457,7 +504,7 @@ void GridNode::getTickLabelColor(double& r, double& g, double& b) const
 
 void GridNode::setTickLabelFontSize(int size)
 {
-    getState("tick_label_font_size").value(std::max(1, size));
+    getState("tics.label_font_size").value(std::max(1, size));
 }
 
 int GridNode::getTickLabelFontSize() const
@@ -855,7 +902,7 @@ void GridNode::updateTickLabelsInRenderer()
     createTickLabels();
     
     // Add new tick labels to renderer if present and ticks are visible
-    bool ticksVisible = getState("ticks_visible").value<bool>();
+    bool ticksVisible = getState("tics.visible").value<bool>();
     if (m_renderer && isVisible() && ticksVisible) {
         if (m_yzPlaneVisible) {
             for (auto& actor : m_yzTickLabelActors) {

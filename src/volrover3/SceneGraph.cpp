@@ -27,6 +27,7 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     , m_graphicsRoot(nullptr)
     , m_nullGraphic(nullptr)
     , m_multiVolumeRenderingEnabled(false)
+    , m_renderNeeded(false)
 {
     // Create null graphic as THE root graphics node (all graphics go under this)
     // State path: {statePrefix}.graphics.root
@@ -72,6 +73,7 @@ void SceneGraph::postEvent(std::function<void()> callback)
 {
     std::lock_guard<std::mutex> lock(m_eventQueueMutex);
     m_eventQueue.push(std::move(callback));
+    m_renderNeeded = true;
 }
 
 void SceneGraph::processEvents()
@@ -92,6 +94,14 @@ void SceneGraph::processEvents()
         }
         events.pop();
     }
+}
+
+bool SceneGraph::checkAndResetRenderNeeded()
+{
+    std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+    bool needed = m_renderNeeded;
+    m_renderNeeded = false;
+    return needed;
 }
 
 void SceneGraph::setRenderer(vtkRenderer *renderer)

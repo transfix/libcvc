@@ -39,6 +39,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_sceneGraph(nullptr)  // Will be created after callback is set
     , m_threadMonitor(nullptr)
     , m_stateTreeWidget(nullptr)
+    , m_gridOptionsDialog(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -159,6 +160,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     }
     if (m_stateTreeWidget) {
         m_stateTreeWidget->close();
+    }
+    if (m_gridOptionsDialog) {
+        m_gridOptionsDialog->close();
     }
     
     // Accept the close event
@@ -581,8 +585,21 @@ void MainWindow::showGridOptions()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    GridOptionsDialog dialog(m_sceneGraph->getGridNode(), this);
-    dialog.exec();
+    if (!m_gridOptionsDialog) {
+        m_gridOptionsDialog = new GridOptionsDialog(m_sceneGraph->getGridNode());
+        m_gridOptionsDialog->setWindowTitle(tr("Grid Options - VolRover3"));
+        m_gridOptionsDialog->setAttribute(Qt::WA_DeleteOnClose);
+        m_gridOptionsDialog->resize(450, 600);
+        
+        // Reset pointer when dialog is closed
+        connect(m_gridOptionsDialog, &QObject::destroyed, [this]() {
+            m_gridOptionsDialog = nullptr;
+        });
+    }
+    
+    m_gridOptionsDialog->show();
+    m_gridOptionsDialog->raise();
+    m_gridOptionsDialog->activateWindow();
 }
 
 void MainWindow::showThreadMonitor()

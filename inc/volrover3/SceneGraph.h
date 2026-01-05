@@ -48,6 +48,9 @@ public:
     // Post a callback to be executed on the main thread during processEvents()
     // This is thread-safe and can be called from any thread
     void postEvent(std::function<void()> callback);
+    
+    // Check if a render is needed and reset the flag
+    bool checkAndResetRenderNeeded();
 
     // Multi-object graphics management (unified for both geometry and volumes)
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name, const cvc::geometry& geom);
@@ -115,6 +118,7 @@ private:
     // Event queue for thread-safe main thread execution
     std::queue<std::function<void()>> m_eventQueue;
     std::mutex m_eventQueueMutex;
+    bool m_renderNeeded;
 
     std::vector<std::shared_ptr<SceneNode>> m_rootNodes;
     
