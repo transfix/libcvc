@@ -55,6 +55,7 @@ set(VOLROVER3_SOURCES
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
   GridOptionsDialog.cpp
+  SDFDialog.cpp
   GraphicsParentDialog.cpp
 )
 
@@ -78,6 +79,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/SDFDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
 )
 

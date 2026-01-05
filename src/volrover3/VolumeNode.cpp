@@ -10,6 +10,7 @@
 #include <vtkVolumeProperty.h>
 #include <vtkRenderer.h>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -87,6 +88,10 @@ VolumeNode::VolumeNode(const std::string& statePath, const std::string& name)
         // Data range (will be updated when volume is loaded)
         getState("data_min").value(m_dataMin);
         getState("data_max").value(m_dataMax);
+        
+        // Transfer function state (stored as serialized arrays)
+        getState("transfer_function.color").value("");
+        getState("transfer_function.opacity").value("");
     }
 
     // Initialize with default transfer function
@@ -324,6 +329,17 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
                std::to_string(colorTable.size() / 4) + " color pts, " +
                std::to_string(opacityTable.size() / 2) + " opacity pts");
     
+    // DEBUG: Log first few color values to see what we're getting
+    if (colorTable.size() >= 8) {
+        cvcapp.log(0, "  First 2 color points:");
+        cvcapp.log(0, "    [0]: scalar=" + std::to_string(colorTable[0]) + 
+                   ", rgb=(" + std::to_string(colorTable[1]) + "," + 
+                   std::to_string(colorTable[2]) + "," + std::to_string(colorTable[3]) + ")");
+        cvcapp.log(0, "    [1]: scalar=" + std::to_string(colorTable[4]) + 
+                   ", rgb=(" + std::to_string(colorTable[5]) + "," + 
+                   std::to_string(colorTable[6]) + "," + std::to_string(colorTable[7]) + ")");
+    }
+    
     // Clear existing functions
     m_colorFunc->RemoveAllPoints();
     m_opacityFunc->RemoveAllPoints();
@@ -350,6 +366,29 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
     }
 
     updateTransferFunctions();
+    
+    // Save to state tree only if values changed
+    // Build strings for comparison
+    std::ostringstream colorStr, opacityStr;
+    for (size_t i = 0; i < colorTable.size(); ++i) {
+        if (i > 0) colorStr << ",";
+        colorStr << std::fixed << std::setprecision(6) << colorTable[i];
+    }
+    for (size_t i = 0; i < opacityTable.size(); ++i) {
+        if (i > 0) opacityStr << ",";
+        opacityStr << std::fixed << std::setprecision(6) << opacityTable[i];
+    }
+    
+    // Only update state if values actually changed
+    std::string currentColorStr = getState("transfer_function.color").value();
+    std::string currentOpacityStr = getState("transfer_function.opacity").value();
+    
+    if (colorStr.str() != currentColorStr) {
+        getState("transfer_function.color").value(colorStr.str());
+    }
+    if (opacityStr.str() != currentOpacityStr) {
+        getState("transfer_function.opacity").value(opacityStr.str());
+    }
 }
 
 void VolumeNode::setDefaultTransferFunction()
@@ -364,6 +403,49 @@ void VolumeNode::setDefaultTransferFunction()
     // Default opacity ramp using actual data range
     m_opacityFunc->AddPoint(m_dataMin, 0.0);
     m_opacityFunc->AddPoint(m_dataMax, 1.0);
+    
+    // Save to state tree
+    std::ostringstream colorStr, opacityStr;
+    colorStr << m_dataMin << ",0,0,0," << m_dataMax << ",1,1,1";
+    opacityStr << m_dataMin << ",0," << m_dataMax << ",1";
+    getState("transfer_function.color").value(colorStr.str());
+    getState("transfer_function.opacity").value(opacityStr.str());
+}
+
+std::vector<double> VolumeNode::getTransferFunctionColorTable() const
+{
+    std::string tableStr = getState("transfer_function.color").value();
+    std::vector<double> table;
+    
+    if (tableStr.empty()) {
+        return table;
+    }
+    
+    std::istringstream iss(tableStr);
+    std::string value;
+    while (std::getline(iss, value, ',')) {
+        table.push_back(std::stod(value));
+    }
+    
+    return table;
+}
+
+std::vector<double> VolumeNode::getTransferFunctionOpacityTable() const
+{
+    std::string tableStr = getState("transfer_function.opacity").value();
+    std::vector<double> table;
+    
+    if (tableStr.empty()) {
+        return table;
+    }
+    
+    std::istringstream iss(tableStr);
+    std::string value;
+    while (std::getline(iss, value, ',')) {
+        table.push_back(std::stod(value));
+    }
+    
+    return table;
 }
 
 void VolumeNode::setShading(bool enabled)

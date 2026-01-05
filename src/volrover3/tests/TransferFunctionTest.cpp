@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <QApplication>
 #include <volrover3/TransferFunctionWidget.h>
+#include <volrover3/VolumeNode.h>
 #include <volrover3/AppState.h>
 #include <cvc/state.h>
 
@@ -185,9 +186,125 @@ TEST_F(TransferFunctionTest, SignalEmission) {
 }
 
 // ===========================
+// Feedback Loop Prevention Tests
+// ===========================
+
+TEST_F(TransferFunctionTest, NoFeedbackLoopOnStateUpdate) {
+    // This test verifies that the counter mechanism prevents feedback loops
+    // by checking that repeated setTransferFunction calls don't cause exponential growth
+    
+    auto volume = std::make_shared<VolumeNode>("test_volume");
+    
+    widget->setDataRange(0.0, 100.0);
+    widget->applyPreset("Rainbow");
+    
+    auto initialColor = widget->getColorTable();
+    size_t initialSize = initialColor.size();
+    
+    // Simulate rapid updates (this would cause feedback loops in the old implementation)
+    for (int i = 0; i < 5; ++i) {
+        auto colorTable = widget->getColorTable();
+        auto opacityTable = widget->getOpacityTable();
+        
+        // This should NOT trigger a reload that increases the table size
+        volume->setTransferFunction(colorTable, opacityTable);
+        
+        // Verify size hasn't grown
+        auto currentSize = widget->getColorTable().size();
+        EXPECT_EQ(currentSize, initialSize) << "Iteration " << i << ": size changed from " 
+                                             << initialSize << " to " << currentSize;
+    }
+}
+
+TEST_F(TransferFunctionTest, StateRoundTripPreservesData) {
+    // Test that data survives round-trip through state tree without corruption
+    
+    auto volume = std::make_shared<VolumeNode>("test_volume");
+    
+    widget->setDataRange(0.0, 255.0);
+    widget->applyPreset("Rainbow");
+    
+    auto originalColor = widget->getColorTable();
+    auto originalOpacity = widget->getOpacityTable();
+    
+    // Save to volume state
+    volume->setTransferFunction(originalColor, originalOpacity);
+    
+    // Retrieve from volume state
+    auto retrievedColor = volume->getTransferFunctionColorTable();
+    auto retrievedOpacity = volume->getTransferFunctionOpacityTable();
+    
+    // Should have same number of values
+    EXPECT_EQ(originalColor.size(), retrievedColor.size());
+    EXPECT_EQ(originalOpacity.size(), retrievedOpacity.size());
+    
+    // Values should be very close (allowing for floating point precision with 6 decimal places)
+    for (size_t i = 0; i < std::min(originalColor.size(), retrievedColor.size()); ++i) {
+        EXPECT_NEAR(originalColor[i], retrievedColor[i], 1e-5) 
+            << "Color mismatch at index " << i;
+    }
+    
+    for (size_t i = 0; i < std::min(originalOpacity.size(), retrievedOpacity.size()); ++i) {
+        EXPECT_NEAR(originalOpacity[i], retrievedOpacity[i], 1e-5)
+            << "Opacity mismatch at index " << i;
+    }
+}
+
+TEST_F(TransferFunctionTest, PerVolumeStateSeparation) {
+    // Test that each volume has independent transfer function state
+    
+    auto volume1 = std::make_shared<VolumeNode>("volume_1");
+    auto volume2 = std::make_shared<VolumeNode>("volume_2");
+    
+    // Set different transfer functions for each volume
+    widget->setDataRange(0.0, 100.0);
+    widget->applyPreset("Rainbow");
+    volume1->setTransferFunction(widget->getColorTable(), widget->getOpacityTable());
+    auto volume1Color = volume1->getTransferFunctionColorTable();
+    
+    widget->applyPreset("Grayscale");
+    volume2->setTransferFunction(widget->getColorTable(), widget->getOpacityTable());
+    auto volume2Color = volume2->getTransferFunctionColorTable();
+    
+    // They should be different sizes (Rainbow has 5 points, Grayscale has 2)
+    EXPECT_NE(volume1Color.size(), volume2Color.size()) 
+        << "Volumes should have independent transfer functions";
+    
+    // Verify each volume retained its own TF
+    EXPECT_EQ(volume1Color.size(), 5 * 4);  // 5 color points * 4 values each
+    EXPECT_EQ(volume2Color.size(), 2 * 4);  // 2 color points * 4 values each
+    
+    // Verify they're actually different
+    EXPECT_NE(volume1Color, volume2Color);
+}
+
+TEST_F(TransferFunctionTest, DefaultTransferFunctionSet) {
+    // Test that VolumeNode gets a default transfer function when created
+    
+    auto volume = std::make_shared<VolumeNode>("test_volume");
+    
+    // Set default TF
+    volume->setDefaultTransferFunction();
+    
+    // Should have a valid transfer function in state
+    auto colorTable = volume->getTransferFunctionColorTable();
+    auto opacityTable = volume->getTransferFunctionOpacityTable();
+    
+    EXPECT_GT(colorTable.size(), 0) << "Default color table should not be empty";
+    EXPECT_GT(opacityTable.size(), 0) << "Default opacity table should not be empty";
+    
+    // Should be properly formatted
+    EXPECT_EQ(colorTable.size() % 4, 0);
+    EXPECT_EQ(opacityTable.size() % 2, 0);
+}
+
+// ===========================
 // State Tree Integration Tests
 // ===========================
 
+// NOTE: Transfer function storage moved to per-volume state in VolumeNode
+// These tests are commented out as they tested the old global AppState TF storage
+/*
 TEST_F(TransferFunctionTest, TransferFunctionStateStorage) {
     // In actual usage, MainWindow saves transfer function to AppState
     // when widget emits transferFunctionChanged signal
@@ -293,3 +410,4 @@ TEST_F(TransferFunctionTest, SignalAndStateIntegration) {
     
     connection.disconnect();
 }
+*/

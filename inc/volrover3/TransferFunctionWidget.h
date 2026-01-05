@@ -5,6 +5,7 @@
 #include <vector>
 #include <QColor>
 #include <memory>
+#include <boost/signals2.hpp>
 
 class QCustomPlot;
 class QCPGraph;
@@ -54,12 +55,16 @@ private slots:
     void onColorMapClicked(double x, double y);
     void onOpacityGraphChanged();
     void onVolumeSelected(int index);
+    void onGraphicsChildrenChanged();
+    void onVolumeTransferFunctionChanged();
 
 private:
     void setupUI();
     void createDefaultTransferFunction();
     void updateColorBar();
     void loadTransferFunctionFromVolume(std::shared_ptr<VolumeNode> volume);
+    void connectToVolumeState(std::shared_ptr<VolumeNode> volume);
+    void disconnectFromVolumeState();
 
     QComboBox *m_presetCombo;
     QComboBox *m_volumeCombo;
@@ -74,6 +79,15 @@ private:
     
     SceneGraph* m_sceneGraph;
     std::vector<std::shared_ptr<VolumeNode>> m_volumes;
+    
+    // State tree connections
+    boost::signals2::scoped_connection m_graphicsChildrenConnection;
+    boost::signals2::scoped_connection m_colorTFConnection;
+    boost::signals2::scoped_connection m_opacityTFConnection;
+    
+    // Track if we're updating from state to prevent feedback loops
+    // Use counter instead of bool to handle nested/queued updates
+    int m_updatingFromState = 0;
 };
 
 #endif // TRANSFERFUNCTIONWIDGET_H

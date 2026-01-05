@@ -67,15 +67,6 @@ void AppState::initializeDefaults()
     
     // Initialize field of view (degrees)
     getState("camera.fov").value(60.0);
-    
-    // Initialize default grayscale transfer function
-    // Color table: scalar, r, g, b (grayscale 0-1)
-    std::string defaultColorTable = "0.0,0.0,0.0,0.0,1.0,1.0,1.0,1.0";
-    getState("transfer_function_color").value(defaultColorTable);
-    
-    // Opacity table: scalar, opacity (linear ramp)
-    std::string defaultOpacityTable = "0.0,0.0,0.5,0.5,1.0,1.0";
-    getState("transfer_function_opacity").value(defaultOpacityTable);
 }
 
 cvc::state& AppState::getState(const std::string& path)
@@ -297,65 +288,3 @@ boost::signals2::connection AppState::onCameraChanged(const boost::function<void
         callback();
     });
 }
-
-std::vector<double> AppState::transferFunctionColorTable()
-{
-    std::string tableStr = getState("transfer_function_color").value();
-    std::vector<std::string> values = getState("transfer_function_color").values();
-    
-    std::vector<double> table;
-    for (const auto& val : values) {
-        try {
-            table.push_back(boost::lexical_cast<double>(val));
-        } catch (...) {
-            // Skip invalid values
-        }
-    }
-    
-    return table;
-}
-
-void AppState::setTransferFunctionColorTable(const std::vector<double>& table)
-{
-    std::string tableStr;
-    for (size_t i = 0; i < table.size(); ++i) {
-        if (i > 0) tableStr += ",";
-        tableStr += boost::lexical_cast<std::string>(table[i]);
-    }
-    getState("transfer_function_color").value(tableStr);
-}
-
-std::vector<double> AppState::transferFunctionOpacityTable()
-{
-    std::string tableStr = getState("transfer_function_opacity").value();
-    std::vector<std::string> values = getState("transfer_function_opacity").values();
-    
-    std::vector<double> table;
-    for (const auto& val : values) {
-        try {
-            table.push_back(boost::lexical_cast<double>(val));
-        } catch (...) {
-            // Skip invalid values
-        }
-    }
-    
-    return table;
-}
-
-void AppState::setTransferFunctionOpacityTable(const std::vector<double>& table)
-{
-    std::string tableStr;
-    for (size_t i = 0; i < table.size(); ++i) {
-        if (i > 0) tableStr += ",";
-        tableStr += boost::lexical_cast<std::string>(table[i]);
-    }
-    getState("transfer_function_opacity").value(tableStr);
-}
-
-boost::signals2::connection AppState::onTransferFunctionChanged(const boost::function<void()>& callback)
-{
-    auto conn = getState("transfer_function_color").valueChanged.connect(callback);
-    getState("transfer_function_opacity").valueChanged.connect(callback);
-    return conn;
-}
-

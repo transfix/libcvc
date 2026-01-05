@@ -98,6 +98,9 @@ TEST_F(AppStateTest, KeyBindings) {
     EXPECT_EQ(state->cameraKeyDown(), Qt::Key_Q);
 }
 
+// NOTE: Transfer function storage moved to per-volume state in VolumeNode
+// These tests are commented out as AppState no longer has global transfer function storage
+/*
 TEST_F(AppStateTest, TransferFunctionColorTable) {
     std::vector<double> colorTable = {0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0};
     state->setTransferFunctionColorTable(colorTable);
@@ -119,6 +122,7 @@ TEST_F(AppStateTest, TransferFunctionOpacityTable) {
         EXPECT_DOUBLE_EQ(retrieved[i], opacityTable[i]);
     }
 }
+*/
 
 // ===========================
 // State Tree Tests

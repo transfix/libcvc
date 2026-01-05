@@ -11,6 +11,7 @@
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraSettingsDialog.h>
 #include <volrover3/GridOptionsDialog.h>
+#include <volrover3/SDFDialog.h>
 #include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/CameraController.h>
 #include <volrover3/ThreadMonitorWidget.h>
@@ -40,6 +41,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_threadMonitor(nullptr)
     , m_stateTreeWidget(nullptr)
     , m_gridOptionsDialog(nullptr)
+    , m_sdfDialog(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -126,21 +128,8 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
     
-    // Connect transfer function state changes to update rendering
-    AppState::instance().onTransferFunctionChanged([this]() {
-        m_sceneGraph->updateTransferFunction(
-            AppState::instance().transferFunctionColorTable(),
-            AppState::instance().transferFunctionOpacityTable());
-        m_renderWidget->render();
-    });
-    
     // Initialize camera settings from AppState
     initializeCameraFromState();
-    
-    // Initialize transfer function from AppState
-    m_sceneGraph->updateTransferFunction(
-        AppState::instance().transferFunctionColorTable(),
-        AppState::instance().transferFunctionOpacityTable());
 }
 
 MainWindow::~MainWindow()
@@ -163,6 +152,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     }
     if (m_gridOptionsDialog) {
         m_gridOptionsDialog->close();
+    }
+    if (m_sdfDialog) {
+        m_sdfDialog->close();
     }
     
     // Accept the close event
@@ -230,6 +222,14 @@ void MainWindow::createMenus()
     connect(stateTreeAction, &QAction::triggered, this, &MainWindow::showStateTree);
     viewMenu->addAction(stateTreeAction);
 
+    // Tools menu
+    QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
+    
+    QAction *sdfAction = new QAction(tr("&Signed Distance Function..."), this);
+    sdfAction->setShortcut(tr("Ctrl+D"));
+    connect(sdfAction, &QAction::triggered, this, &MainWindow::showSDF);
+    toolsMenu->addAction(sdfAction);
+
     // Help menu
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
 
@@ -253,14 +253,17 @@ void MainWindow::createDockWidgets()
 
 void MainWindow::setupConnections()
 {
-    // Connect transfer function changes to AppState
+    // Connect transfer function changes to update only the selected volume
     connect(m_transferFunctionWidget, &TransferFunctionWidget::transferFunctionChanged,
             [this]() {
-                // Save to AppState
-                AppState::instance().setTransferFunctionColorTable(
-                    m_transferFunctionWidget->getColorTable());
-                AppState::instance().setTransferFunctionOpacityTable(
-                    m_transferFunctionWidget->getOpacityTable());
+                // Apply transfer function to the selected volume only
+                auto selectedVolume = m_transferFunctionWidget->getSelectedVolume();
+                if (selectedVolume) {
+                    selectedVolume->setTransferFunction(
+                        m_transferFunctionWidget->getColorTable(),
+                        m_transferFunctionWidget->getOpacityTable());
+                    m_renderWidget->render();
+                }
             });
 }
 
@@ -655,6 +658,28 @@ void MainWindow::showStateTree()
     m_stateTreeWidget->show();
     m_stateTreeWidget->raise();
     m_stateTreeWidget->activateWindow();
+}
+
+void MainWindow::showSDF()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Create SDF dialog as a separate window if not already created
+    if (!m_sdfDialog) {
+        m_sdfDialog = new SDFDialog(m_sceneGraph);
+        m_sdfDialog->setWindowTitle(tr("Signed Distance Function - VolRover3"));
+        m_sdfDialog->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Clean up pointer when window is closed
+        connect(m_sdfDialog, &QObject::destroyed, [this]() {
+            m_sdfDialog = nullptr;
+        });
+    }
+    
+    // Show and raise the window
+    m_sdfDialog->show();
+    m_sdfDialog->raise();
+    m_sdfDialog->activateWindow();
 }
 
 void MainWindow::aboutVolRover()

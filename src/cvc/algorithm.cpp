@@ -174,6 +174,8 @@ namespace
     uint64 max_dim = *max_element(dim.dim_.begin(), dim.dim_.end());
     uint64 size = next_power_of_2(max_dim);
 
+    cvc::app::instance().threadProgress(0.05);  // Starting
+
     // Use new thread-safe API
     std::unique_ptr<float[]> values;
     {
@@ -186,7 +188,11 @@ namespace
 	for(int j = 0; j < 3; j++)
 	  t[i*3+j] = geom.tris()[i][j];
       
+      cvc::app::instance().threadProgress(0.10);  // Geometry prepared
+      
       // Call the new thread-safe API
+      // Note: SDFLibrary::computeSDF_MT is external and doesn't report progress
+      // This computation typically takes 60-80% of total time
       values = SDFLibrary::computeSDF_MT(geom.num_points(), v.get(), 
                                           geom.num_tris(), t.get(),
                                           static_cast<int>(size), flipNormalsInt,
@@ -194,31 +200,52 @@ namespace
       if(!values) throw sign_distance_function_error("SDFLibrary::computeSDF_MT() failed");
     }
 
+    cvc::app::instance().threadProgress(0.85);  // SDF computation complete
+
     volume cv(dimension(size,size,size),Float,bbox);
     float* choppedValues = reinterpret_cast<float*>(*cv);
     {
       int i, j, k;
       int c=0;
+      uint64 total_iterations = (size + 1) * (size + 1) * (size + 1);
+      uint64 iteration = 0;
       for( i=0; i<=size; i++ )
 	for( j=0; j<=size; j++ )
-	  for( k=0; k<=size; k++ )
+	  for( k=0; k<=size; k++ ) {
 	    if( i!=size && j!=size && k!=size )
 	      choppedValues[c++] = values[i*(size+1)*(size+1) + j*(size+1) + k];
+	    
+	    // Update progress every 10% of iterations
+	    if (++iteration % (total_iterations / 10) == 0) {
+	      cvc::app::instance().threadProgress(0.85 + 0.05 * (float(iteration) / float(total_iterations)));
+	    }
+	  }
     }
     // Smart pointer automatically cleans up values
+
+    cvc::app::instance().threadProgress(0.92);  // Data extraction complete
 
     // Negate all SDF values if flipNormals is true (inverts inside/outside)
     if (flipNormals) {
       uint64 total_values = size * size * size;
       for (uint64 i = 0; i < total_values; i++) {
         choppedValues[i] = -choppedValues[i];
+        
+        // Update progress every 10%
+        if (i % (total_values / 10) == 0) {
+          cvc::app::instance().threadProgress(0.92 + 0.04 * (float(i) / float(total_values)));
+        }
       }
     }
+
+    cvc::app::instance().threadProgress(0.96);  // Flip normals complete (if needed)
 
     // Resize to requested dimensions if different from computed size
     if (dim.xdim != size || dim.ydim != size || dim.zdim != size) {
       cv.resize(dim);
     }
+
+    cvc::app::instance().threadProgress(1.0);  // Complete
     return cv;
   }
 

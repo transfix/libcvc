@@ -71,19 +71,11 @@ public:
     double cameraFieldOfView();
     void setCameraFieldOfView(double fov);
     
-    // Transfer function (color and opacity tables)
-    std::vector<double> transferFunctionColorTable();
-    void setTransferFunctionColorTable(const std::vector<double>& table);
-    
-    std::vector<double> transferFunctionOpacityTable();
-    void setTransferFunctionOpacityTable(const std::vector<double>& table);
-    
     // Register callbacks for state changes
     // Returns a connection object that can be used to disconnect the callback
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraModeChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onTransferFunctionChanged(const boost::function<void()>& callback);
     
     // State tree access for debugging/inspection
     cvc::state& getRootState();

@@ -144,6 +144,9 @@ TEST_F(SceneGraphTest, VisibilityStateTree) {
     SUCCEED();
 }
 
+// NOTE: Transfer function storage moved to per-volume state in VolumeNode
+// SceneGraph no longer has global transfer function updates
+/*
 TEST_F(SceneGraphTest, TransferFunctionFromState) {
     // Create volume
     cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
@@ -158,6 +161,7 @@ TEST_F(SceneGraphTest, TransferFunctionFromState) {
     
     SUCCEED();
 }
+*/
 
 TEST_F(SceneGraphTest, WorldBoundsUpdate) {
     // Set world bounds in AppState

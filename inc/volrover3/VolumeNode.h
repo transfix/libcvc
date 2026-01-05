@@ -47,6 +47,9 @@ public:
                             const std::vector<double> &opacityTable);
     void setDefaultTransferFunction();
     
+    std::vector<double> getTransferFunctionColorTable() const;
+    std::vector<double> getTransferFunctionOpacityTable() const;
+    
     // Volume rendering property getters and setters
     void setShading(bool enabled);
     bool getShading() const { return m_shading; }
