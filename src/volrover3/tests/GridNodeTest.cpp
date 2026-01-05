@@ -352,25 +352,22 @@ TEST_F(GridNodeTest, MultipleAddRemove) {
 // ===========================
 
 TEST_F(GridNodeTest, TickVisibilityDefault) {
-    // Reset state to uninitialized to test default behavior
-    appState->getRootState()("grid_ticks_visible").reset();
-    
-    // Ticks should be visible by default
-    EXPECT_TRUE(appState->gridTicksVisible());
+    // GridNode initializes ticks_visible to false by default
+    EXPECT_FALSE(gridNode->getState("ticks_visible").value<bool>());
 }
 
 TEST_F(GridNodeTest, TickVisibilityToggle) {
-    // Test state synchronization
-    appState->setGridTicksVisible(true);
-    EXPECT_TRUE(appState->gridTicksVisible());
+    // Test state synchronization via GridNode state
+    gridNode->getState("ticks_visible").value(true);
+    EXPECT_TRUE(gridNode->getState("ticks_visible").value<bool>());
     
-    appState->setGridTicksVisible(false);
-    EXPECT_FALSE(appState->gridTicksVisible());
+    gridNode->getState("ticks_visible").value(false);
+    EXPECT_FALSE(gridNode->getState("ticks_visible").value<bool>());
 }
 
 TEST_F(GridNodeTest, TickLabelsWithVisibilityOff) {
     // When ticks are not visible, tick labels should not be added to renderer
-    appState->setGridTicksVisible(false);
+    gridNode->getState("ticks_visible").value(false);
     
     cvc::bounding_box bounds;
     bounds.setMin(0.0, 0.0, 0.0);
@@ -386,7 +383,7 @@ TEST_F(GridNodeTest, TickLabelsWithVisibilityOff) {
 
 TEST_F(GridNodeTest, TickLabelsWithVisibilityOn) {
     // When ticks are visible, tick labels should be added to renderer
-    appState->setGridTicksVisible(true);
+    gridNode->getState("ticks_visible").value(true);
     
     cvc::bounding_box bounds;
     bounds.setMin(0.0, 0.0, 0.0);
@@ -423,7 +420,7 @@ TEST_F(GridNodeTest, UpdateAfterDataLoad) {
 }
 
 TEST_F(GridNodeTest, TickLabelPositioningAfterBoundsChange) {
-    appState->setGridTicksVisible(true);
+    gridNode->getState("ticks_visible").value(true);
     
     // Initial setup
     cvc::bounding_box bounds1;

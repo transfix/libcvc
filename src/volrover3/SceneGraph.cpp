@@ -48,10 +48,7 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     m_gridNode = m_nullGraphic->addGraphicsChild<GridNode>("grid");
     m_axisNode = m_nullGraphic->addGraphicsChild<AxisNode>("axis");
     
-    // Set colors for nodes from AppState
-    double r, g, b;
-    AppState::instance().getGridColor(r, g, b);
-    m_gridNode->setColor(r, g, b);
+    // GridNode and AxisNode initialize their own default state and colors
 }
 
 SceneGraph::~SceneGraph()
@@ -141,28 +138,9 @@ void SceneGraph::updateGrid(const cvc::bounding_box& bounds)
     // Update the null graphic's own bounds
     m_nullGraphic->setBounds(bounds);
     
-    // Compute combined bounds of null graphic and all its graphics children
-    // (excluding grid and axis which are just visualization helpers)
-    cvc::bounding_box combinedBounds = bounds;
-    
-    for (const auto& child : m_nullGraphic->getGraphicsChildren()) {
-        // Skip grid and axis - they're visualization helpers, not data
-        // Compare raw pointers since GridNode/AxisNode are SceneNode, not GraphicsNode
-        SceneNode* childPtr = dynamic_cast<SceneNode*>(child.get());
-        if (childPtr == m_gridNode.get() || childPtr == m_axisNode.get()) {
-            continue;
-        }
-        
-        cvc::bounding_box childBounds = child->getBoundingBox();
-        
-        // Expand combined bounds to include this child
-        combinedBounds[0] = std::min(combinedBounds[0], childBounds[0]); // minX
-        combinedBounds[1] = std::min(combinedBounds[1], childBounds[1]); // minY
-        combinedBounds[2] = std::min(combinedBounds[2], childBounds[2]); // minZ
-        combinedBounds[3] = std::max(combinedBounds[3], childBounds[3]); // maxX
-        combinedBounds[4] = std::max(combinedBounds[4], childBounds[4]); // maxY
-        combinedBounds[5] = std::max(combinedBounds[5], childBounds[5]); // maxZ
-    }
+    // Get combined bounds of null graphic (respecting children's local coordinate systems)
+    // This automatically excludes grid and axis as they're just visualization helpers
+    cvc::bounding_box combinedBounds = m_nullGraphic->getCombinedBoundingBox();
     
     // Update grid to match combined bounds
     m_gridNode->setBounds(combinedBounds);

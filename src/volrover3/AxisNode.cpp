@@ -29,7 +29,10 @@ AxisNode::AxisNode(const std::string& statePath, const std::string& name)
     m_axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetColor(0.0, 0.0, 1.0);
     
     // Initialize state tree with all rendering attributes
+    // Use batch scope to prevent callbacks from firing until all values are set
     if (!statePath.empty()) {
+        cvc::state_change_batch_scope<SceneNode> batch(*this);
+        
         getState("visible").value(1);  // Visible by default
         
         // Axis length (for all axes)
@@ -58,7 +61,7 @@ AxisNode::AxisNode(const std::string& statePath, const std::string& name)
         getState("z_label_color_r").value(0.0);
         getState("z_label_color_g").value(0.0);
         getState("z_label_color_b").value(1.0);
-    }
+    } // batch ends here, callbacks fire with all values initialized
 }
 
 AxisNode::~AxisNode()

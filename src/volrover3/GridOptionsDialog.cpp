@@ -1,5 +1,6 @@
 #include <volrover3/GridOptionsDialog.h>
-#include <volrover3/AppState.h>
+#include <volrover3/GridNode.h>
+#include <cvc/state.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -11,8 +12,9 @@
 #include <QColorDialog>
 #include <QShowEvent>
 
-GridOptionsDialog::GridOptionsDialog(QWidget *parent)
+GridOptionsDialog::GridOptionsDialog(std::shared_ptr<GridNode> gridNode, QWidget *parent)
     : QDialog(parent)
+    , m_gridNode(gridNode)
     , m_yzPlaneCheckBox(nullptr)
     , m_xzPlaneCheckBox(nullptr)
     , m_xyPlaneCheckBox(nullptr)
@@ -38,7 +40,7 @@ GridOptionsDialog::GridOptionsDialog(QWidget *parent)
 void GridOptionsDialog::showEvent(QShowEvent *event)
 {
     QDialog::showEvent(event);
-    // Reload state from AppState when dialog is shown to ensure sync
+    // Reload state from GridNode when dialog is shown to ensure sync
     loadFromState();
 }
 
@@ -249,38 +251,54 @@ void GridOptionsDialog::loadFromState()
     m_zTickIntervalSpinBox->blockSignals(true);
     m_tickLabelFontSizeSpinBox->blockSignals(true);
     
-    // Load visibility
-    m_yzPlaneCheckBox->setChecked(AppState::instance().gridYZPlaneVisible());
-    m_xzPlaneCheckBox->setChecked(AppState::instance().gridXZPlaneVisible());
-    m_xyPlaneCheckBox->setChecked(AppState::instance().gridXYPlaneVisible());
+    if (!m_gridNode) return;
     
-    // Load divisions
-    int x, y, z;
-    AppState::instance().getGridDivisions(x, y, z);
+    // Load visibility from GridNode state
+    m_yzPlaneCheckBox->setChecked(m_gridNode->getState("yz_plane_visible").value<bool>());
+    m_xzPlaneCheckBox->setChecked(m_gridNode->getState("xz_plane_visible").value<bool>());
+    m_xyPlaneCheckBox->setChecked(m_gridNode->getState("xy_plane_visible").value<bool>());
+    
+    // Load divisions from GridNode state
+    int x = m_gridNode->getState("divisions_x").value<int>();
+    int y = m_gridNode->getState("divisions_y").value<int>();
+    int z = m_gridNode->getState("divisions_z").value<int>();
     m_xDivisionsSpinBox->setValue(x);
     m_yDivisionsSpinBox->setValue(y);
     m_zDivisionsSpinBox->setValue(z);
     
-    // Load tick intervals
-    m_showTicksCheckBox->setChecked(AppState::instance().gridTicksVisible());
-    AppState::instance().getGridTickIntervals(x, y, z);
+    // Load tick intervals from GridNode state
+    m_showTicksCheckBox->setChecked(m_gridNode->getState("ticks_visible").value<bool>());
+    x = m_gridNode->getState("tick_interval_x").value<int>();
+    y = m_gridNode->getState("tick_interval_y").value<int>();
+    z = m_gridNode->getState("tick_interval_z").value<int>();
     m_xTickIntervalSpinBox->setValue(x);
     m_yTickIntervalSpinBox->setValue(y);
     m_zTickIntervalSpinBox->setValue(z);
     
-    // Load colors
-    AppState::instance().getGridYZPlaneColor(m_yzPlaneColor[0], m_yzPlaneColor[1], m_yzPlaneColor[2]);
-    AppState::instance().getGridXZPlaneColor(m_xzPlaneColor[0], m_xzPlaneColor[1], m_xzPlaneColor[2]);
-    AppState::instance().getGridXYPlaneColor(m_xyPlaneColor[0], m_xyPlaneColor[1], m_xyPlaneColor[2]);
-    AppState::instance().getGridTickLabelColor(m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
+    // Load colors from GridNode state
+    m_yzPlaneColor[0] = m_gridNode->getState("yz_plane_color_r").value<double>();
+    m_yzPlaneColor[1] = m_gridNode->getState("yz_plane_color_g").value<double>();
+    m_yzPlaneColor[2] = m_gridNode->getState("yz_plane_color_b").value<double>();
+    
+    m_xzPlaneColor[0] = m_gridNode->getState("xz_plane_color_r").value<double>();
+    m_xzPlaneColor[1] = m_gridNode->getState("xz_plane_color_g").value<double>();
+    m_xzPlaneColor[2] = m_gridNode->getState("xz_plane_color_b").value<double>();
+    
+    m_xyPlaneColor[0] = m_gridNode->getState("xy_plane_color_r").value<double>();
+    m_xyPlaneColor[1] = m_gridNode->getState("xy_plane_color_g").value<double>();
+    m_xyPlaneColor[2] = m_gridNode->getState("xy_plane_color_b").value<double>();
+    
+    m_tickLabelColor[0] = m_gridNode->getState("tick_label_color_r").value<double>();
+    m_tickLabelColor[1] = m_gridNode->getState("tick_label_color_g").value<double>();
+    m_tickLabelColor[2] = m_gridNode->getState("tick_label_color_b").value<double>();
     
     updateColorButton(m_yzPlaneColorButton, m_yzPlaneColor[0], m_yzPlaneColor[1], m_yzPlaneColor[2]);
     updateColorButton(m_xzPlaneColorButton, m_xzPlaneColor[0], m_xzPlaneColor[1], m_xzPlaneColor[2]);
     updateColorButton(m_xyPlaneColorButton, m_xyPlaneColor[0], m_xyPlaneColor[1], m_xyPlaneColor[2]);
     updateColorButton(m_tickLabelColorButton, m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
     
-    // Load font size
-    m_tickLabelFontSizeSpinBox->setValue(AppState::instance().gridTickLabelFontSize());
+    // Load font size from GridNode state
+    m_tickLabelFontSizeSpinBox->setValue(m_gridNode->getState("tick_label_font_size").value<int>());
     
     // Unblock signals
     m_yzPlaneCheckBox->blockSignals(false);
@@ -298,34 +316,43 @@ void GridOptionsDialog::loadFromState()
 
 void GridOptionsDialog::applyChanges()
 {
-    // Apply visibility changes
-    AppState::instance().setGridYZPlaneVisible(m_yzPlaneCheckBox->isChecked());
-    AppState::instance().setGridXZPlaneVisible(m_xzPlaneCheckBox->isChecked());
-    AppState::instance().setGridXYPlaneVisible(m_xyPlaneCheckBox->isChecked());
+    if (!m_gridNode) return;
     
-    // Apply division changes
-    AppState::instance().setGridDivisions(
-        m_xDivisionsSpinBox->value(),
-        m_yDivisionsSpinBox->value(),
-        m_zDivisionsSpinBox->value()
-    );
+    // Apply visibility changes to GridNode state
+    m_gridNode->getState("yz_plane_visible").value(m_yzPlaneCheckBox->isChecked());
+    m_gridNode->getState("xz_plane_visible").value(m_xzPlaneCheckBox->isChecked());
+    m_gridNode->getState("xy_plane_visible").value(m_xyPlaneCheckBox->isChecked());
     
-    // Apply tick interval changes
-    AppState::instance().setGridTicksVisible(m_showTicksCheckBox->isChecked());
-    AppState::instance().setGridTickIntervals(
-        m_xTickIntervalSpinBox->value(),
-        m_yTickIntervalSpinBox->value(),
-        m_zTickIntervalSpinBox->value()
-    );
+    // Apply division changes to GridNode state
+    m_gridNode->getState("divisions_x").value(m_xDivisionsSpinBox->value());
+    m_gridNode->getState("divisions_y").value(m_yDivisionsSpinBox->value());
+    m_gridNode->getState("divisions_z").value(m_zDivisionsSpinBox->value());
     
-    // Apply color changes
-    AppState::instance().setGridYZPlaneColor(m_yzPlaneColor[0], m_yzPlaneColor[1], m_yzPlaneColor[2]);
-    AppState::instance().setGridXZPlaneColor(m_xzPlaneColor[0], m_xzPlaneColor[1], m_xzPlaneColor[2]);
-    AppState::instance().setGridXYPlaneColor(m_xyPlaneColor[0], m_xyPlaneColor[1], m_xyPlaneColor[2]);
-    AppState::instance().setGridTickLabelColor(m_tickLabelColor[0], m_tickLabelColor[1], m_tickLabelColor[2]);
+    // Apply tick interval changes to GridNode state
+    m_gridNode->getState("ticks_visible").value(m_showTicksCheckBox->isChecked());
+    m_gridNode->getState("tick_interval_x").value(m_xTickIntervalSpinBox->value());
+    m_gridNode->getState("tick_interval_y").value(m_yTickIntervalSpinBox->value());
+    m_gridNode->getState("tick_interval_z").value(m_zTickIntervalSpinBox->value());
     
-    // Apply font size
-    AppState::instance().setGridTickLabelFontSize(m_tickLabelFontSizeSpinBox->value());
+    // Apply color changes to GridNode state
+    m_gridNode->getState("yz_plane_color_r").value(m_yzPlaneColor[0]);
+    m_gridNode->getState("yz_plane_color_g").value(m_yzPlaneColor[1]);
+    m_gridNode->getState("yz_plane_color_b").value(m_yzPlaneColor[2]);
+    
+    m_gridNode->getState("xz_plane_color_r").value(m_xzPlaneColor[0]);
+    m_gridNode->getState("xz_plane_color_g").value(m_xzPlaneColor[1]);
+    m_gridNode->getState("xz_plane_color_b").value(m_xzPlaneColor[2]);
+    
+    m_gridNode->getState("xy_plane_color_r").value(m_xyPlaneColor[0]);
+    m_gridNode->getState("xy_plane_color_g").value(m_xyPlaneColor[1]);
+    m_gridNode->getState("xy_plane_color_b").value(m_xyPlaneColor[2]);
+    
+    m_gridNode->getState("tick_label_color_r").value(m_tickLabelColor[0]);
+    m_gridNode->getState("tick_label_color_g").value(m_tickLabelColor[1]);
+    m_gridNode->getState("tick_label_color_b").value(m_tickLabelColor[2]);
+    
+    // Apply font size to GridNode state
+    m_gridNode->getState("tick_label_font_size").value(m_tickLabelFontSizeSpinBox->value());
 }
 
 void GridOptionsDialog::chooseYZPlaneColor()

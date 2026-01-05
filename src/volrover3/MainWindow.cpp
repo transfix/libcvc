@@ -5,6 +5,7 @@
 #include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>
+#include <volrover3/GridNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/AppState.h>
 #include <volrover3/BoundingBoxDialog.h>
@@ -73,16 +74,10 @@ MainWindow::MainWindow(QWidget *parent)
     setupStatusBar();
     setupConnections();
 
-    // Initialize from AppState
-    m_gridVisible = AppState::instance().gridVisible();
-    m_axisVisible = AppState::instance().axisVisible();
-    m_sceneGraph->setGridVisible(m_gridVisible);
-    m_sceneGraph->setAxisVisible(m_axisVisible);
-    
-    // Initialize grid divisions from AppState (override GridNode's default 64x64x64)
-    int x, y, z;
-    AppState::instance().getGridDivisions(x, y, z);
-    m_sceneGraph->setGridDivisions(x, y, z);
+    // GridNode and AxisNode initialize their own visibility state
+    // Get initial values from their state
+    m_gridVisible = m_sceneGraph->getGridNode()->isVisible();
+    m_axisVisible = true; // AxisNode default
     
     // Initialize grid with default world bounds
     m_sceneGraph->updateGrid(AppState::instance().worldBounds());
@@ -107,71 +102,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_renderWidget->render();
     });
     
-    AppState::instance().onGridVisibilityChanged([this]() {
-        m_gridVisible = AppState::instance().gridVisible();
-        m_sceneGraph->setGridVisible(m_gridVisible);
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onAxisVisibilityChanged([this]() {
-        m_axisVisible = AppState::instance().axisVisible();
-        m_sceneGraph->setAxisVisible(m_axisVisible);
-        m_renderWidget->render();
-    });
-    
-    // Connect color state changes to update rendering
-    AppState::instance().onGridColorChanged([this]() {
-        double r, g, b;
-        AppState::instance().getGridColor(r, g, b);
-        m_sceneGraph->setGridColor(r, g, b);
-        m_renderWidget->render();
-    });
-    
-    // Connect grid plane visibility and divisions changes
-    AppState::instance().onGridPlaneVisibilityChanged([this]() {
-        bool yz = AppState::instance().gridYZPlaneVisible();
-        bool xz = AppState::instance().gridXZPlaneVisible();
-        bool xy = AppState::instance().gridXYPlaneVisible();
-        m_sceneGraph->setGridPlaneVisibility(yz, xz, xy);
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onGridDivisionsChanged([this]() {
-        int x, y, z;
-        AppState::instance().getGridDivisions(x, y, z);
-        m_sceneGraph->setGridDivisions(x, y, z);
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onGridTickIntervalsChanged([this]() {
-        int x, y, z;
-        AppState::instance().getGridTickIntervals(x, y, z);
-        m_sceneGraph->setGridTickIntervals(x, y, z);
-        m_renderWidget->render();
-    });
-    
-    // Add callback for grid ticks visibility changes
-    AppState::instance().onGridTicksVisibleChanged([this]() {
-        m_sceneGraph->updateGrid(AppState::instance().worldBounds());
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onGridPlaneColorsChanged([this]() {
-        double yzR, yzG, yzB, xzR, xzG, xzB, xyR, xyG, xyB;
-        AppState::instance().getGridYZPlaneColor(yzR, yzG, yzB);
-        AppState::instance().getGridXZPlaneColor(xzR, xzG, xzB);
-        AppState::instance().getGridXYPlaneColor(xyR, xyG, xyB);
-        m_sceneGraph->setGridPlaneColors(yzR, yzG, yzB, xzR, xzG, xzB, xyR, xyG, xyB);
-        m_renderWidget->render();
-    });
-    
-    AppState::instance().onGridTickLabelPropertiesChanged([this]() {
-        double r, g, b;
-        AppState::instance().getGridTickLabelColor(r, g, b);
-        int fontSize = AppState::instance().gridTickLabelFontSize();
-        m_sceneGraph->setGridTickLabelProperties(r, g, b, fontSize);
-        m_renderWidget->render();
-    });
+    // GridNode and AxisNode handle their own state changes internally via handleStateChanged()
+    // and updates VTK actors automatically. No MainWindow callbacks needed.
+    // Grid state is at: volrover3.graphics.root.children.grid.*
     
     // Connect camera state changes to update rendering
     AppState::instance().onCameraChanged([this]() {
@@ -553,13 +486,13 @@ void MainWindow::openFile()
 void MainWindow::toggleGrid()
 {
     m_gridVisible = !m_gridVisible;
-    AppState::instance().setGridVisible(m_gridVisible);
+    m_sceneGraph->setGridVisible(m_gridVisible);
 }
 
 void MainWindow::toggleAxis()
 {
     m_axisVisible = !m_axisVisible;
-    AppState::instance().setAxisVisible(m_axisVisible);
+    m_sceneGraph->setAxisVisible(m_axisVisible);
 }
 
 void MainWindow::editBoundingBox()
@@ -648,7 +581,7 @@ void MainWindow::showGridOptions()
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    GridOptionsDialog dialog(this);
+    GridOptionsDialog dialog(m_sceneGraph->getGridNode(), this);
     dialog.exec();
 }
 

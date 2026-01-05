@@ -2,17 +2,19 @@
 #define GRIDOPTIONSDIALOG_H
 
 #include <QDialog>
+#include <memory>
 
 class QCheckBox;
 class QSpinBox;
 class QPushButton;
+class GridNode;
 
 class GridOptionsDialog : public QDialog
 {
     Q_OBJECT
 
 public:
-    explicit GridOptionsDialog(QWidget *parent = nullptr);
+    explicit GridOptionsDialog(std::shared_ptr<GridNode> gridNode, QWidget *parent = nullptr);
     ~GridOptionsDialog() override = default;
 
 protected:
@@ -63,6 +65,9 @@ private:
     double m_xzPlaneColor[3];
     double m_xyPlaneColor[3];
     double m_tickLabelColor[3];
+    
+    // Grid node reference
+    std::shared_ptr<GridNode> m_gridNode;
 };
 
 #endif // GRIDOPTIONSDIALOG_H

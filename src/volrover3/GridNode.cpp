@@ -62,7 +62,10 @@ GridNode::GridNode(const std::string& statePath, const std::string& name)
     m_xyActor->GetProperty()->SetOpacity(0.5);
 
     // Initialize state tree with all rendering attributes
+    // Use batch scope to prevent callbacks from firing until all values are set
     if (!statePath.empty()) {
+        cvc::state_change_batch_scope<SceneNode> batch(*this);
+        
         getState("visible").value(1);  // Visible by default
         
         // Plane visibility
@@ -98,7 +101,10 @@ GridNode::GridNode(const std::string& statePath, const std::string& name)
         getState("tick_label_color_g").value(1.0);
         getState("tick_label_color_b").value(1.0);
         getState("tick_label_font_size").value(12);
-    }
+        
+        // Tick visibility (hidden by default)
+        getState("ticks_visible").value(0);
+    } // batch ends here, callbacks fire with all values initialized
 
     createGridPlanes();
 }
@@ -849,7 +855,7 @@ void GridNode::updateTickLabelsInRenderer()
     createTickLabels();
     
     // Add new tick labels to renderer if present and ticks are visible
-    bool ticksVisible = AppState::instance().gridTicksVisible();
+    bool ticksVisible = getState("ticks_visible").value<bool>();
     if (m_renderer && isVisible() && ticksVisible) {
         if (m_yzPlaneVisible) {
             for (auto& actor : m_yzTickLabelActors) {

@@ -56,6 +56,7 @@ public:
     void removeGraphics(const std::string& name);
     std::shared_ptr<GraphicsNode> getGraphics(const std::string& name);
     std::shared_ptr<GraphicsNode> getGraphicsRoot() { return m_graphicsRoot; }
+    std::shared_ptr<GridNode> getGridNode() { return m_gridNode; }
     const std::map<std::string, std::shared_ptr<GraphicsNode>>& getAllGraphics() const { return m_graphicsNodes; }
     void registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node); // For manual registration
     

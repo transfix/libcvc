@@ -264,12 +264,9 @@ TEST_F(SceneGraphTest, GridAndAxisUpdateTogether) {
 // ===========================
 
 TEST_F(SceneGraphTest, ColorAndBoundsIntegration) {
-    // Test setting both colors and bounds together
-    appState->setGridColor(0.5, 0.5, 0.5);
-    
-    double r, g, b;
-    appState->getGridColor(r, g, b);
-    sceneGraph->setGridColor(r, g, b);
+    // Test setting grid color through GridNode and bounds together
+    auto gridNode = sceneGraph->getGridNode();
+    gridNode->getState("color").value("0.5,0.5,0.5");
     
     cvc::bounding_box bounds(-25.0, -25.0, -25.0, 25.0, 25.0, 25.0);
     sceneGraph->updateGrid(bounds);

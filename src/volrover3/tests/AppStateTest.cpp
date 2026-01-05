@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <QApplication>
 #include <volrover3/AppState.h>
+#include <volrover3/CameraController.h>
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 #include <cvc/state.h>
@@ -212,29 +213,8 @@ TEST_F(AppStateTest, StateTreeWorldBounds) {
     EXPECT_DOUBLE_EQ(retrieved[5], 6.0);
 }
 
-TEST_F(AppStateTest, StateTreeGridVisible) {
-    state->setGridVisible(true);
-    
-    auto& stateTree = state->getRootState();
-    EXPECT_TRUE(stateTree("grid_visible").value<bool>());
-    EXPECT_TRUE(state->gridVisible());
-    
-    state->setGridVisible(false);
-    EXPECT_FALSE(stateTree("grid_visible").value<bool>());
-    EXPECT_FALSE(state->gridVisible());
-}
-
-TEST_F(AppStateTest, StateTreeAxisVisible) {
-    state->setAxisVisible(true);
-    
-    auto& stateTree = state->getRootState();
-    EXPECT_TRUE(stateTree("axis_visible").value<bool>());
-    EXPECT_TRUE(state->axisVisible());
-    
-    state->setAxisVisible(false);
-    EXPECT_FALSE(stateTree("axis_visible").value<bool>());
-    EXPECT_FALSE(state->axisVisible());
-}
+// Grid and axis visibility now managed by GraphicsNode state tree
+// See GridNodeTest.cpp for grid visibility tests
 
 TEST_F(AppStateTest, StateTreeKeyBindings) {
     state->setCameraKeyForward(Qt::Key_W);
@@ -317,47 +297,8 @@ TEST_F(AppStateTest, WorldBoundsChangedCallback) {
     connection.disconnect();
 }
 
-TEST_F(AppStateTest, GridVisibilityChangedCallback) {
-    int callback_count = 0;
-    
-    // Ensure we know the current state
-    state->setGridVisible(true);
-    
-    auto connection = state->onGridVisibilityChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Now change to false (should trigger)
-    state->setGridVisible(false);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    state->setGridVisible(true);
-    EXPECT_GT(callback_count, prev_count);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, AxisVisibilityChangedCallback) {
-    int callback_count = 0;
-    
-    // Ensure we know the current state
-    state->setAxisVisible(true);
-    
-    auto connection = state->onAxisVisibilityChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Now change to false (should trigger)
-    state->setAxisVisible(false);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    state->setAxisVisible(true);
-    EXPECT_GT(callback_count, prev_count);
-    
-    connection.disconnect();
-}
+// Grid and axis visibility callback tests removed - GraphicsNode manages its own state
+// See GridNodeTest.cpp for grid-related tests
 
 TEST_F(AppStateTest, MultipleCallbacksForSameState) {
     int callback1_count = 0;
@@ -420,19 +361,19 @@ TEST_F(AppStateTest, StateTreeTriggerCallback) {
 TEST_F(AppStateTest, CallbackDisconnection) {
     int callback_count = 0;
     
-    auto connection = state->onGridVisibilityChanged([&callback_count]() {
+    auto connection = state->onCameraModeChanged([&callback_count]() {
         callback_count++;
     });
     
-    // Trigger callback
-    state->setGridVisible(false);
+    // Trigger callback (default is ORBIT_MODE, so change to FLY_MODE)
+    state->setCameraMode(FLY_MODE);
     EXPECT_EQ(callback_count, 1);
     
     // Disconnect
     connection.disconnect();
     
     // Trigger again - should not fire
-    state->setGridVisible(true);
+    state->setCameraMode(ORBIT_MODE);
     EXPECT_EQ(callback_count, 1);  // Should still be 1
 }
 
@@ -456,7 +397,6 @@ TEST_F(AppStateTest, StateTreePersistence) {
     // Set values
     state->setCameraPosition(11.0, 22.0, 33.0);
     state->setCameraSpeed(5.5);
-    state->setGridVisible(true);
     
     // Verify values persist in state tree
     auto& stateTree = state->getRootState();
@@ -464,7 +404,6 @@ TEST_F(AppStateTest, StateTreePersistence) {
     EXPECT_DOUBLE_EQ(stateTree("camera.position.y").value<double>(), 22.0);
     EXPECT_DOUBLE_EQ(stateTree("camera.position.z").value<double>(), 33.0);
     EXPECT_DOUBLE_EQ(stateTree("camera.speed").value<double>(), 5.5);
-    EXPECT_TRUE(stateTree("grid_visible").value<bool>());
     
     // Values should persist across multiple reads
     EXPECT_DOUBLE_EQ(stateTree("camera.position.x").value<double>(), 11.0);
@@ -472,262 +411,9 @@ TEST_F(AppStateTest, StateTreePersistence) {
 }
 
 // ===========================
-// Color State Tests
+// Note: Grid-specific tests removed
 // ===========================
+// Grid visibility and properties are now managed by GridNode at volrover3.graphics.root.children.grid
+// See GridNodeTest.cpp for grid-related tests
 
-TEST_F(AppStateTest, GridColor) {
-    // Set grid color
-    state->setGridColor(0.8, 0.6, 0.4);
-    
-    // Read back
-    double r, g, b;
-    state->getGridColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.8);
-    EXPECT_DOUBLE_EQ(g, 0.6);
-    EXPECT_DOUBLE_EQ(b, 0.4);
-}
-
-TEST_F(AppStateTest, StateTreeGridColor) {
-    // Set via state tree
-    auto& stateTree = state->getRootState();
-    stateTree("grid_color").value("0.1,0.2,0.3");
-    
-    // Read via AppState
-    double r, g, b;
-    state->getGridColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.1);
-    EXPECT_DOUBLE_EQ(g, 0.2);
-    EXPECT_DOUBLE_EQ(b, 0.3);
-}
-
-TEST_F(AppStateTest, ColorDefaultValues) {
-    // Reset to default values first
-    auto& stateTree = state->getRootState();
-    stateTree("grid_color").value("0.5,0.5,0.5");
-    
-    // Test default values from fresh state
-    double r, g, b;
-    
-    // Grid should default to gray
-    state->getGridColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.5);
-    EXPECT_DOUBLE_EQ(g, 0.5);
-    EXPECT_DOUBLE_EQ(b, 0.5);
-}
-
-TEST_F(AppStateTest, GridColorChangedCallback) {
-    int callback_count = 0;
-    
-    auto connection = state->onGridColorChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Trigger color change
-    state->setGridColor(1.0, 0.5, 0.0);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    state->setGridColor(0.0, 0.5, 1.0);
-    EXPECT_GT(callback_count, prev_count);
-    
-    // Cleanup
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, ColorBoundaryValues) {
-    // Test with boundary values (0.0 and 1.0)
-    state->setGridColor(0.0, 1.0, 0.0);
-    
-    double r, g, b;
-    state->getGridColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-}
-
-// ===========================
-// Grid-Specific Tests
-// ===========================
-
-TEST_F(AppStateTest, GridPlaneVisibility) {
-    state->setGridYZPlaneVisible(true);
-    EXPECT_TRUE(state->gridYZPlaneVisible());
-    
-    state->setGridXZPlaneVisible(false);
-    EXPECT_FALSE(state->gridXZPlaneVisible());
-    
-    state->setGridXYPlaneVisible(true);
-    EXPECT_TRUE(state->gridXYPlaneVisible());
-}
-
-TEST_F(AppStateTest, GridDivisions) {
-    state->setGridDivisions(16, 32, 64);
-    
-    int x, y, z;
-    state->getGridDivisions(x, y, z);
-    EXPECT_EQ(x, 16);
-    EXPECT_EQ(y, 32);
-    EXPECT_EQ(z, 64);
-}
-
-TEST_F(AppStateTest, GridTickIntervals) {
-    state->setGridTickIntervals(4, 8, 16);
-    
-    int x, y, z;
-    state->getGridTickIntervals(x, y, z);
-    EXPECT_EQ(x, 4);
-    EXPECT_EQ(y, 8);
-    EXPECT_EQ(z, 16);
-}
-
-TEST_F(AppStateTest, GridTicksVisible) {
-    // Reset to test default value
-    state->getRootState()("grid_ticks_visible").reset();
-    
-    // Default should be true
-    EXPECT_TRUE(state->gridTicksVisible());
-    
-    state->setGridTicksVisible(false);
-    EXPECT_FALSE(state->gridTicksVisible());
-    
-    state->setGridTicksVisible(true);
-    EXPECT_TRUE(state->gridTicksVisible());
-}
-
-TEST_F(AppStateTest, GridPlaneColors) {
-    state->setGridYZPlaneColor(1.0, 0.0, 0.0);
-    state->setGridXZPlaneColor(0.0, 1.0, 0.0);
-    state->setGridXYPlaneColor(0.0, 0.0, 1.0);
-    
-    double r, g, b;
-    state->getGridYZPlaneColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 0.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-    
-    state->getGridXZPlaneColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-    
-    state->getGridXYPlaneColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.0);
-    EXPECT_DOUBLE_EQ(g, 0.0);
-    EXPECT_DOUBLE_EQ(b, 1.0);
-}
-
-TEST_F(AppStateTest, GridTickLabelProperties) {
-    state->setGridTickLabelColor(0.8, 0.6, 0.4);
-    state->setGridTickLabelFontSize(20);
-    
-    double r, g, b;
-    state->getGridTickLabelColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 0.8);
-    EXPECT_DOUBLE_EQ(g, 0.6);
-    EXPECT_DOUBLE_EQ(b, 0.4);
-    
-    EXPECT_EQ(state->gridTickLabelFontSize(), 20);
-}
-
-TEST_F(AppStateTest, GridPlaneVisibilityCallbacks) {
-    int callback_count = 0;
-    
-    auto connection = state->onGridPlaneVisibilityChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    // Toggle from current state to trigger callbacks
-    bool currentYZ = state->gridYZPlaneVisible();
-    state->setGridYZPlaneVisible(!currentYZ);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    bool currentXZ = state->gridXZPlaneVisible();
-    state->setGridXZPlaneVisible(!currentXZ);
-    EXPECT_GT(callback_count, prev_count);
-    
-    prev_count = callback_count;
-    bool currentXY = state->gridXYPlaneVisible();
-    state->setGridXYPlaneVisible(!currentXY);
-    EXPECT_GT(callback_count, prev_count);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, GridDivisionsCallbacks) {
-    int callback_count = 0;
-    
-    auto connection = state->onGridDivisionsChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    state->setGridDivisions(10, 20, 30);
-    EXPECT_GT(callback_count, 0);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, GridTickIntervalsCallbacks) {
-    int callback_count = 0;
-    
-    auto connection = state->onGridTickIntervalsChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    state->setGridTickIntervals(5, 10, 15);
-    EXPECT_GT(callback_count, 0);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, GridTicksVisibleCallbacks) {
-    int callback_count = 0;
-    
-    // Set initial value to true so we can detect change to false
-    state->setGridTicksVisible(true);
-    
-    auto connection = state->onGridTicksVisibleChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    state->setGridTicksVisible(false);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    state->setGridTicksVisible(true);
-    EXPECT_GT(callback_count, prev_count);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, GridPlaneColorsCallbacks) {
-    int callback_count = 0;
-    
-    auto connection = state->onGridPlaneColorsChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    state->setGridYZPlaneColor(1.0, 0.5, 0.0);
-    EXPECT_GT(callback_count, 0);
-    
-    connection.disconnect();
-}
-
-TEST_F(AppStateTest, GridTickLabelPropertiesCallbacks) {
-    int callback_count = 0;
-    
-    
-    auto connection = state->onGridTickLabelPropertiesChanged([&callback_count]() {
-        callback_count++;
-    });
-    
-    state->setGridTickLabelColor(0.5, 0.5, 0.5);
-    EXPECT_GT(callback_count, 0);
-    
-    int prev_count = callback_count;
-    state->setGridTickLabelFontSize(18);
-    EXPECT_GT(callback_count, prev_count);
-    
-    connection.disconnect();
-}
 
