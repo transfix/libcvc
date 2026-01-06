@@ -26,6 +26,7 @@ private slots:
     void onGraphicsChildrenChanged();
     void onMaterialPropertyChanged();
     void onDeleteButtonClicked();
+    void onNodeStateChanged();
 
 private:
     void setupUI();
@@ -55,6 +56,7 @@ private:
     
     // State tree connection
     boost::signals2::scoped_connection m_graphicsChildrenConnection;
+    boost::signals2::scoped_connection m_nodeStateConnection;
     
     // Flag to prevent recursive updates
     bool m_updating;

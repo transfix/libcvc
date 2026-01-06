@@ -275,9 +275,27 @@ void GeometryDialog::onGeometrySelected(int index)
 {
     if (m_updating) return;
     
+    // Disconnect from previous node's state changes
+    m_nodeStateConnection.disconnect();
+    
     if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) {
         setPropertiesEnabled(false);
         return;
+    }
+    
+    // Connect to selected node's state changes
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (geomNode) {
+        // Connect to the node's childChanged signal (fires when any child state changes)
+        m_nodeStateConnection = geomNode->getState().childChanged.connect(
+            [this](const std::string&) {
+                // Use Qt's queued connection for thread-safe UI updates
+                QMetaObject::invokeMethod(this, "onNodeStateChanged", Qt::QueuedConnection);
+            }
+        );
     }
     
     setPropertiesEnabled(true);
@@ -327,6 +345,12 @@ void GeometryDialog::updatePropertiesFromNode()
     try { m_lineWidthSpinBox->setValue(geomNode->getState("line_width").value<double>()); } catch (const std::exception&) {} catch (...) {}
     
     m_updating = false;
+}
+
+void GeometryDialog::onNodeStateChanged()
+{
+    // Update UI from state tree when node state changes
+    updatePropertiesFromNode();
 }
 
 void GeometryDialog::onRenderModeChanged(int index)

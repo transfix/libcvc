@@ -229,9 +229,28 @@ void VolumeDialog::onVolumeSelected(int index)
 {
     if (m_updating) return;
     
+    // Disconnect from previous node's state changes
+    m_nodeStateConnection.disconnect();
+    
     if (index < 0 || index >= static_cast<int>(m_volumePaths.size())) {
         setPropertiesEnabled(false);
         return;
+    }
+    
+    // Connect to selected node's state changes
+    const std::string& volumePath = m_volumePaths[index];
+    auto allVolumes = m_sceneGraph->getAllVolumeGraphics();
+    for (const auto& volumeNode : allVolumes) {
+        if (volumeNode && volumeNode->getState().fullName() == volumePath) {
+            // Connect to the node's childChanged signal (fires when any child state changes)
+            m_nodeStateConnection = volumeNode->getState().childChanged.connect(
+                [this](const std::string&) {
+                    // Use Qt's queued connection for thread-safe UI updates
+                    QMetaObject::invokeMethod(this, "onNodeStateChanged", Qt::QueuedConnection);
+                }
+            );
+            break;
+        }
     }
     
     setPropertiesEnabled(true);
@@ -267,6 +286,12 @@ void VolumeDialog::updatePropertiesFromNode()
             break;
         }
     }
+}
+
+void VolumeDialog::onNodeStateChanged()
+{
+    // Update UI from state tree when node state changes
+    updatePropertiesFromNode();
 }
 
 void VolumeDialog::onMaterialPropertyChanged()
