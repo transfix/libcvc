@@ -1,4 +1,6 @@
 #include <volrover3/NullGraphicNode.h>
+#include <volrover3/GridNode.h>
+#include <volrover3/AxisNode.h>
 #include <cvc/state.h>
 #include <cvc/app.h>
 #include <vtkActor.h>
@@ -102,10 +104,35 @@ void NullGraphicNode::setSyncBoundsWithChildren(bool sync)
     }
 }
 
+void NullGraphicNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
+{
+    // Call parent implementation first
+    GraphicsNode::addGraphicsChild(child);
+    
+    // Auto-sync bounds to encompass new child
+    if (m_syncBoundsWithChildren) {
+        syncBoundsToChildren();
+    }
+}
+
+void NullGraphicNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child)
+{
+    // Call parent implementation first
+    GraphicsNode::removeGraphicsChild(child);
+    
+    // Auto-sync bounds after removing child
+    if (m_syncBoundsWithChildren) {
+        syncBoundsToChildren();
+    }
+}
+
 void NullGraphicNode::syncBoundsToChildren()
 {
     if (!m_syncBoundsWithChildren)
         return;
+    
+    std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Syncing bounds for node '" 
+              << getName() << "', children count: " << m_graphicsChildren.size() << std::endl;
     
     // Calculate combined bounds of all children (without including our own bounds)
     double acc_minx = std::numeric_limits<double>::max();
@@ -119,6 +146,11 @@ void NullGraphicNode::syncBoundsToChildren()
     
     for (const auto& child : m_graphicsChildren) {
         if (!child) continue;
+        
+        // Skip grid and axis nodes - they don't contribute to scene bounds
+        if (dynamic_cast<GridNode*>(child.get()) || dynamic_cast<AxisNode*>(child.get())) {
+            continue;
+        }
         
         cvc::bounding_box childBBox = child->getCombinedBoundingBox();
         
@@ -162,6 +194,10 @@ void NullGraphicNode::syncBoundsToChildren()
     // Update bounds to match children (if we have any valid children)
     if (hasChildren && acc_minx <= acc_maxx && acc_miny <= acc_maxy && acc_minz <= acc_maxz) {
         m_bounds = cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
+        
+        std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Updated bounds to [" 
+                  << acc_minx << "," << acc_miny << "," << acc_minz 
+                  << "] to [" << acc_maxx << "," << acc_maxy << "," << acc_maxz << "]" << std::endl;
         
         // Update state tree
         std::ostringstream oss;

@@ -5,6 +5,7 @@
 #include <QDockWidget>
 #include <QLabel>
 #include <QProgressBar>
+#include <QToolBar>
 #include <memory>
 #include <vector>
 #include <boost/signals2.hpp>
@@ -43,12 +44,14 @@ private slots:
     void showVolume();
     void aboutVolRover();
     void updateThreadStatus();
+    void resetCamera();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
     void createMenus();
+    void createToolBar();
     void createDockWidgets();
     void setupConnections();
     void initializeCameraFromState();
@@ -65,6 +68,9 @@ private:
     GeometryDialog *m_geometryDialog;
     VolumeDialog *m_volumeDialog;
 
+    // Toolbar
+    QToolBar *m_mainToolBar;
+    
     // Status bar widgets for thread monitoring
     QLabel *m_threadNameLabel;
     QLabel *m_threadInfoLabel;

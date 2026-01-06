@@ -193,6 +193,9 @@ void GridNode::removeFromRenderer(vtkRenderer* renderer)
 
 void GridNode::setBounds(const cvc::bounding_box& bounds)
 {
+    std::cout << "[DEBUG] GridNode::setBounds called with bounds: ["
+              << bounds[0] << "," << bounds[1] << "," << bounds[2] << "] to ["
+              << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
     m_bounds = bounds;
     createGridPlanes();
     updateTickLabelsInRenderer();

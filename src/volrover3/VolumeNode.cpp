@@ -1,4 +1,5 @@
 #include <volrover3/VolumeNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <cvc/volume.h>
 #include <cvc/state.h>
 #include <cvc/app.h>
@@ -236,6 +237,15 @@ void VolumeNode::setVolume(const cvc::volume &vol)
     
     // Update bbox to match volume bounds
     updateBoundingBoxNode();
+    
+    // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
+    if (m_parent) {
+        auto nullParent = dynamic_cast<NullGraphicNode*>(m_parent);
+        if (nullParent) {
+            nullParent->syncBoundsToChildren();
+        }
+    }
+    
     cvcapp.log(0, "=================================\n");
 }
 

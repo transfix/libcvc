@@ -46,14 +46,28 @@ SceneGraph::SceneGraph(const std::string& statePrefix)
     
     // Create grid and axis as graphics children of the root null graphic
     // They will live in the null graphic's coordinate system and state tree
-    m_gridNode = m_nullGraphic->addGraphicsChild<GridNode>("grid");
-    m_axisNode = m_nullGraphic->addGraphicsChild<AxisNode>("axis");
+    m_gridNode = m_nullGraphic->template addGraphicsChild<GridNode>("grid");
+    m_axisNode = m_nullGraphic->template addGraphicsChild<AxisNode>("axis");
     
     // GridNode and AxisNode initialize their own default state and colors
+    
+    // Subscribe to root node bounds changes to update world bounds in AppState
+    m_rootBoundsConnection = m_nullGraphic->getState("bounds").valueChanged.connect(
+        [this]() {
+            cvc::bounding_box bounds = m_nullGraphic->getBoundingBox();
+            std::cout << "[DEBUG] SceneGraph - Root node bounds changed, updating world bounds to [" 
+                      << bounds[0] << "," << bounds[1] << "," << bounds[2] 
+                      << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
+            AppState::instance().setWorldBounds(bounds);
+        }
+    );
 }
 
 SceneGraph::~SceneGraph()
 {
+    // Disconnect root bounds subscription
+    m_rootBoundsConnection.disconnect();
+    
     // Process any remaining events before shutdown
     processEvents();
     
@@ -145,12 +159,20 @@ void SceneGraph::setGridColor(double r, double g, double b)
 
 void SceneGraph::updateGrid(const cvc::bounding_box& bounds)
 {
+    std::cout << "[DEBUG] SceneGraph::updateGrid - Input bounds: [" 
+              << bounds[0] << "," << bounds[1] << "," << bounds[2] 
+              << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
+    
     // Update the null graphic's own bounds
     m_nullGraphic->setBounds(bounds);
     
     // Get combined bounds of null graphic (respecting children's local coordinate systems)
     // This automatically excludes grid and axis as they're just visualization helpers
     cvc::bounding_box combinedBounds = m_nullGraphic->getCombinedBoundingBox();
+    
+    std::cout << "[DEBUG] SceneGraph::updateGrid - Combined bounds: [" 
+              << combinedBounds[0] << "," << combinedBounds[1] << "," << combinedBounds[2] 
+              << "] to [" << combinedBounds[3] << "," << combinedBounds[4] << "," << combinedBounds[5] << "]" << std::endl;
     
     // Update grid to match combined bounds
     m_gridNode->setBounds(combinedBounds);

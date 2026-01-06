@@ -13,6 +13,7 @@
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/GeometryNode.h>
+#include <boost/signals2.hpp>
 
 class vtkRenderer;
 class vtkMultiVolume;
@@ -171,6 +172,9 @@ private:
     // Null graphic management
     void ensureNullGraphicIfEmpty();
     void removeNullGraphicIfPresent();
+    
+    // Connection for root node bounds changes
+    boost::signals2::connection m_rootBoundsConnection;
 };
 
 #endif // SCENEGRAPH_H

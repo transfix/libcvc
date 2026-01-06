@@ -1,4 +1,5 @@
 #include <volrover3/GeometryNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/app.h>
@@ -340,6 +341,14 @@ void GeometryNode::setGeometry(const cvc::geometry& geom)
         updateBoundingBoxNode();
         
         updateMetadata(geom);
+        
+        // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
+        if (m_parent) {
+            auto nullParent = dynamic_cast<NullGraphicNode*>(m_parent);
+            if (nullParent) {
+                nullParent->syncBoundsToChildren();
+            }
+        }
     });
 }
 

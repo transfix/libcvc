@@ -5,6 +5,7 @@
 #include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <volrover3/GridNode.h>
 #include <volrover3/VolumeNode.h>
 #include <volrover3/AppState.h>
@@ -48,6 +49,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_isosurfaceDialog(nullptr)
     , m_geometryDialog(nullptr)
     , m_volumeDialog(nullptr)
+    , m_mainToolBar(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
     , m_threadProgressBar(nullptr)
@@ -80,6 +82,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     createDockWidgets();
     createMenus();
+    createToolBar();
     setupStatusBar();
     setupConnections();
 
@@ -94,6 +97,10 @@ MainWindow::MainWindow(QWidget *parent)
     // Connect to state changes
     AppState::instance().onWorldBoundsChanged([this]() {
         cvc::bounding_box bounds = AppState::instance().worldBounds();
+        
+        std::cout << "[DEBUG] MainWindow - World bounds changed: [" 
+                  << bounds[0] << "," << bounds[1] << "," << bounds[2] 
+                  << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
         
         // Always update grid to match new world bounds
         m_sceneGraph->updateGrid(bounds);
@@ -115,26 +122,7 @@ MainWindow::MainWindow(QWidget *parent)
     // and updates VTK actors automatically. No MainWindow callbacks needed.
     // Grid state is at: volrover3.graphics.root.children.grid.*
     
-    // Connect camera state changes to update rendering
-    AppState::instance().onCameraChanged([this]() {
-        CameraController* camCtrl = m_renderWidget->getCameraController();
-        if (camCtrl) {
-            double pos[3], dir[3], up[3], fov;
-            AppState::instance().getCameraPosition(pos[0], pos[1], pos[2]);
-            AppState::instance().getCameraViewDirection(dir[0], dir[1], dir[2]);
-            AppState::instance().getCameraUpVector(up[0], up[1], up[2]);
-            fov = AppState::instance().cameraFieldOfView();
-            
-            // Set flag to prevent feedback loop: we're updating FROM AppState, so don't save back
-            camCtrl->setUpdatingFromAppState(true);
-            camCtrl->setCameraState(pos, dir, up, fov);
-            camCtrl->setUpdatingFromAppState(false);
-            
-            m_renderWidget->render();
-        }
-    });
-    
-    // Initialize camera settings from AppState
+    // Initialize camera settings from state tree
     initializeCameraFromState();
 }
 
@@ -262,6 +250,38 @@ void MainWindow::createMenus()
     QAction *aboutAction = new QAction(tr("&About VolRover3"), this);
     connect(aboutAction, &QAction::triggered, this, &MainWindow::aboutVolRover);
     helpMenu->addAction(aboutAction);
+}
+
+void MainWindow::createToolBar()
+{
+    m_mainToolBar = addToolBar(tr("Main Toolbar"));
+    m_mainToolBar->setObjectName("MainToolBar");
+    m_mainToolBar->setMovable(true);
+    
+    // Reset Camera button
+    QAction *resetCameraAction = new QAction(QIcon::fromTheme("view-refresh"), tr("Reset Camera"), this);
+    resetCameraAction->setToolTip(tr("Reset camera to view all content"));
+    resetCameraAction->setShortcut(tr("Ctrl+R"));
+    connect(resetCameraAction, &QAction::triggered, this, &MainWindow::resetCamera);
+    m_mainToolBar->addAction(resetCameraAction);
+    
+    m_mainToolBar->addSeparator();
+    
+    // Grid toggle
+    QAction *gridAction = new QAction(QIcon::fromTheme("view-grid"), tr("Toggle Grid"), this);
+    gridAction->setToolTip(tr("Show/hide grid"));
+    gridAction->setCheckable(true);
+    gridAction->setChecked(m_gridVisible);
+    connect(gridAction, &QAction::triggered, this, &MainWindow::toggleGrid);
+    m_mainToolBar->addAction(gridAction);
+    
+    // Axis toggle
+    QAction *axisAction = new QAction(QIcon::fromTheme("show-axis"), tr("Toggle Axis"), this);
+    axisAction->setToolTip(tr("Show/hide coordinate axis"));
+    axisAction->setCheckable(true);
+    axisAction->setChecked(m_axisVisible);
+    connect(axisAction, &QAction::triggered, this, &MainWindow::toggleAxis);
+    m_mainToolBar->addAction(axisAction);
 }
 
 void MainWindow::createDockWidgets()
@@ -480,14 +500,9 @@ void MainWindow::openFile()
         }
     }
     
-    // Note: No manual sync needed - nodes auto-sync via state_object
-    
-    // Update world bounding box to include all graphics
-    cvc::bounding_box graphicsBounds = m_sceneGraph->computeGraphicsBounds();
-    if (graphicsBounds[0] <= graphicsBounds[3]) { // Valid bounds
-        AppState::instance().setWorldBounds(graphicsBounds);
-        // Grid will update automatically via onWorldBoundsChanged callback
-    }
+    // Note: World bounds are automatically updated when root NullGraphicNode
+    // syncs its bounds to children (happens in GeometryNode::setGeometry/VolumeNode::setVolume)
+    // Grid will update automatically via onWorldBoundsChanged callback
     
     // Update render
     m_renderWidget->render();
@@ -790,6 +805,14 @@ void MainWindow::aboutVolRover()
            "<p>Copyright © 2025 CVC</p>"));
 }
 
+void MainWindow::resetCamera()
+{
+    if (m_renderWidget) {
+        // Use VTK's ResetCamera which just adjusts view without changing controller state
+        m_renderWidget->resetCamera();
+    }
+}
+
 void MainWindow::setupStatusBar()
 {
     // Create status bar widgets for thread monitoring
@@ -883,13 +906,8 @@ void MainWindow::initializeCameraFromState()
         AppState::instance().cameraKeyDown()
     );
     
-    // Load camera position, direction, up vector, and FOV
-    double pos[3], dir[3], up[3], fov;
-    AppState::instance().getCameraPosition(pos[0], pos[1], pos[2]);
-    AppState::instance().getCameraViewDirection(dir[0], dir[1], dir[2]);
-    AppState::instance().getCameraUpVector(up[0], up[1], up[2]);
-    fov = AppState::instance().cameraFieldOfView();
-    camCtrl->setCameraState(pos, dir, up, fov);
+    // Camera state is now managed entirely through CameraController's state tree
+    // No need to load from AppState
     
     // Set orbit center to world bounds center
     cvc::bounding_box bounds = AppState::instance().worldBounds();

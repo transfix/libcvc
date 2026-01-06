@@ -637,6 +637,37 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const
 void GraphicsNode::setMetadata(const std::string& key, const std::any& value)
 {
     m_metadata[key] = value;
+    
+    // Also sync to state tree for persistence and visibility
+    // Create metadata substate if needed
+    try {
+        std::string metadataPath = "metadata." + key;
+        
+        // Convert std::any to appropriate type and store in state
+        if (value.type() == typeid(int)) {
+            getState(metadataPath).value(std::any_cast<int>(value));
+            getState(metadataPath).readOnly(true);
+        }
+        else if (value.type() == typeid(double)) {
+            getState(metadataPath).value(std::any_cast<double>(value));
+            getState(metadataPath).readOnly(true);
+        }
+        else if (value.type() == typeid(std::string)) {
+            getState(metadataPath).value(std::any_cast<std::string>(value));
+            getState(metadataPath).readOnly(true);
+        }
+        else if (value.type() == typeid(const char*)) {
+            getState(metadataPath).value(std::string(std::any_cast<const char*>(value)));
+            getState(metadataPath).readOnly(true);
+        }
+        else if (value.type() == typeid(bool)) {
+            getState(metadataPath).value(std::any_cast<bool>(value));
+            getState(metadataPath).readOnly(true);
+        }
+        // Add more types as needed
+    } catch (...) {
+        // Ignore metadata sync errors
+    }
 }
 
 std::any GraphicsNode::getMetadata(const std::string& key) const

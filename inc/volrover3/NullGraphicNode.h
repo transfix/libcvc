@@ -47,6 +47,14 @@ public:
     // Manually trigger bounds sync to children
     void syncBoundsToChildren();
     
+    // Override child management to auto-sync bounds
+    // Bring template version from base class into scope
+    using GraphicsNode::addGraphicsChild;
+    void addGraphicsChild(std::shared_ptr<GraphicsNode> child) override;
+    
+    using GraphicsNode::removeGraphicsChild;
+    void removeGraphicsChild(std::shared_ptr<GraphicsNode> child) override;
+    
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
 

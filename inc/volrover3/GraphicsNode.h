@@ -94,8 +94,8 @@ public:
         return child;
     }
     
-    // Non-template version for adding existing nodes
-    void addGraphicsChild(std::shared_ptr<GraphicsNode> child);
+    // Non-template version for adding existing nodes (virtual to allow override)
+    virtual void addGraphicsChild(std::shared_ptr<GraphicsNode> child);
     
     // Generic template method for creating child graphics nodes with data
     // Usage: auto geomNode = parent->createChild<GeometryNode>("name", geomData);
@@ -117,7 +117,7 @@ public:
     // Overload for creating child without data (uses NullGraphicNode)
     std::shared_ptr<GraphicsNode> createChild(const std::string& name);
     
-    void removeGraphicsChild(std::shared_ptr<GraphicsNode> child);
+    virtual void removeGraphicsChild(std::shared_ptr<GraphicsNode> child);
     std::shared_ptr<GraphicsNode> findChildByName(const std::string& name);
     const std::vector<std::shared_ptr<GraphicsNode>>& getGraphicsChildren() const { return m_graphicsChildren; }
     
