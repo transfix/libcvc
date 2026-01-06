@@ -646,6 +646,15 @@ namespace CVC_NAMESPACE
     boost::this_thread::interruption_point();
     boost::mutex::scoped_lock lock(_threadsMutex);
 
+    // For keyed threads, check the persistent progress map first
+    // This allows querying progress even after the thread has exited
+    if(!key.empty())
+    {
+      if(_threadProgressByKey.find(key) != _threadProgressByKey.end())
+        return _threadProgressByKey[key];
+    }
+
+    // Fall back to thread ID lookup for current thread or legacy behavior
     boost::thread::id tid;
     if(key.empty())
       tid = boost::this_thread::get_id();
@@ -688,6 +697,8 @@ namespace CVC_NAMESPACE
         {
           tid = _threads[key]->get_id();
           changed = true;
+          // Also store in the persistent key-based map
+          _threadProgressByKey[key] = progress;
         }
 
       if(changed)
@@ -709,11 +720,18 @@ namespace CVC_NAMESPACE
         tid = boost::this_thread::get_id();
       else if(_threads.find(key)!=_threads.end() &&
               _threads[key])
+      {
         tid = _threads[key]->get_id();
+        // Store 100% in the persistent key-based map
+        // This allows querying progress even after thread exits
+        _threadProgressByKey[key] = 1.0;
+      }
       else
         return;
 
-      _threadProgress.erase(tid);
+      // Set progress to 100% instead of erasing it
+      // This allows the UI to show the thread as completed
+      _threadProgress[tid] = 1.0;
     }
     threadsChanged(key);
   }
@@ -758,9 +776,18 @@ namespace CVC_NAMESPACE
         tid = boost::this_thread::get_id();
       else if(_threads.find(key)!=_threads.end() &&
               _threads[key])
+      {
         tid = _threads[key]->get_id();
+        // Also store in persistent map by key
+        _threadInfoByKey[key] = infostr;
+      }
       else
+      {
+        // Thread may have already exited, just update persistent map
+        if (!key.empty())
+          _threadInfoByKey[key] = infostr;
         return;
+      }
 
       _threadInfo[tid] = infostr;
     }
@@ -773,6 +800,15 @@ namespace CVC_NAMESPACE
     {
       boost::mutex::scoped_lock lock(_threadsMutex);
       
+      // For keyed threads, check the persistent info map first
+      // This allows querying status even after the thread has exited
+      if(!key.empty())
+      {
+        if(_threadInfoByKey.find(key) != _threadInfoByKey.end())
+          return _threadInfoByKey[key];
+      }
+      
+      // Fall back to thread ID lookup for current thread or legacy behavior
       boost::thread::id tid;
       if(key.empty())
         tid = boost::this_thread::get_id();

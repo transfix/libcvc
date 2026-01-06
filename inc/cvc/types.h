@@ -123,8 +123,10 @@ namespace CVC_NAMESPACE
   typedef boost::shared_ptr<boost::thread>                   thread_ptr;
   typedef std::map<std::string, thread_ptr>                  thread_map;
   typedef std::map<boost::thread::id, double>                thread_progress_map;
+  typedef std::map<std::string, double>                      thread_progress_by_key_map;
   typedef std::map<boost::thread::id, std::string>           thread_key_map;
   typedef std::map<boost::thread::id, std::string>           thread_info_map;
+  typedef std::map<std::string, std::string>                 thread_info_by_key_map;
   typedef boost::function<bool (const std::string&)>         data_reader;
   typedef std::vector<data_reader>                           data_reader_collection;
   typedef boost::shared_ptr<boost::mutex>                    mutex_ptr;

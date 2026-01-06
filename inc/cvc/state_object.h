@@ -402,11 +402,13 @@ namespace CVC_NAMESPACE
         if (useThreading) {
           // Threading enabled - spawn thread (unlock first to avoid holding lock)
           lock.unlock();
-          cvcapp.startThread(stateName(childState) + "_stateChanged",
-                             boost::bind(&state_object<This>::handleStateChanged, 
-                                         boost::ref(*this),
-                                         childState));
-        } else {
+          std::string threadKey = stateName(childState) + "_stateChanged";
+          cvcapp.startThread(threadKey,
+                             [this, childState, threadKey]() {
+                               cvc::app::thread_feedback feedback(threadKey);
+                               this->handleStateChanged(childState);
+                             });
+        } else{
           // Threading disabled - call synchronously (unlock first)
           lock.unlock();
           handleStateChanged(childState);

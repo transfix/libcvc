@@ -295,50 +295,52 @@ void GeometryNode::setGeometry(const cvc::geometry& geom)
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    // Store the geometry object
-    m_geometry = std::make_shared<cvc::geometry>(geom);
-    m_hasGeometry = true;  // Set this BEFORE setRenderMode so it can update
-    
-    // Auto-detect render mode from geometry type
-    GeometryRenderMode autoMode = GeometryRenderMode::TRIS; // default
-    
-    switch (geom.get_geometry_type()) {
-        case cvc::geometry::SURFACE_TRI:
-            autoMode = GeometryRenderMode::TRIS;
-            break;
-        case cvc::geometry::SURFACE_QUAD:
-            autoMode = GeometryRenderMode::QUADS;
-            break;
-        case cvc::geometry::VOLUME_TET:
-            autoMode = GeometryRenderMode::TETS;
-            break;
-        case cvc::geometry::VOLUME_HEX:
-            autoMode = GeometryRenderMode::HEXS;
-            break;
-        case cvc::geometry::MIXED:
-            // For mixed, prefer tris if available, otherwise quads
-            if (geom.num_tris() > 0) {
+    // CRITICAL: Entire method must run on main thread to avoid Qt threading errors
+    // Even creating std::shared_ptr or setting member variables can trigger VTK
+    // smart pointer operations that touch Qt objects
+    runOnMainThread([this, geom]() {
+        // Store the geometry object
+        m_geometry = std::make_shared<cvc::geometry>(geom);
+        m_hasGeometry = true;  // Set this BEFORE setRenderMode so it can update
+        
+        // Auto-detect render mode from geometry type
+        GeometryRenderMode autoMode = GeometryRenderMode::TRIS; // default
+        
+        switch (geom.get_geometry_type()) {
+            case cvc::geometry::SURFACE_TRI:
                 autoMode = GeometryRenderMode::TRIS;
-            } else if (geom.num_quads() > 0) {
+                break;
+            case cvc::geometry::SURFACE_QUAD:
                 autoMode = GeometryRenderMode::QUADS;
-            } else if (geom.num_tets() > 0) {
+                break;
+            case cvc::geometry::VOLUME_TET:
                 autoMode = GeometryRenderMode::TETS;
-            } else if (geom.num_hexs() > 0) {
+                break;
+            case cvc::geometry::VOLUME_HEX:
                 autoMode = GeometryRenderMode::HEXS;
-            }
-            break;
-    }
-    
-    // Update render mode and geometry data immediately on main thread
-    // This ensures the geometry is ready when the node is added to the renderer
-    runOnMainThread([this, autoMode]() {
+                break;
+            case cvc::geometry::MIXED:
+                // For mixed, prefer tris if available, otherwise quads
+                if (geom.num_tris() > 0) {
+                    autoMode = GeometryRenderMode::TRIS;
+                } else if (geom.num_quads() > 0) {
+                    autoMode = GeometryRenderMode::QUADS;
+                } else if (geom.num_tets() > 0) {
+                    autoMode = GeometryRenderMode::TETS;
+                } else if (geom.num_hexs() > 0) {
+                    autoMode = GeometryRenderMode::HEXS;
+                }
+                break;
+        }
+        
+        // Update render mode and geometry data
         m_renderMode = autoMode;
         getState("render_mode").value(renderModeToString(autoMode));
         updateRenderModeVTK();  // This calls updatePolyData() internally
         updateBoundingBoxNode();
+        
+        updateMetadata(geom);
     });
-    
-    updateMetadata(geom);
 }
 
 void GeometryNode::updatePolyData(const cvc::geometry& geom)
