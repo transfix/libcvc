@@ -736,7 +736,7 @@ void MainWindow::showGeometry()
     
     // Create Geometry dialog as a separate window if not already created
     if (!m_geometryDialog) {
-        m_geometryDialog = new GeometryDialog(m_sceneGraph);
+        m_geometryDialog = new GeometryDialog(m_sceneGraph, this);
         m_geometryDialog->setWindowTitle(tr("Geometry Properties - VolRover3"));
         m_geometryDialog->setAttribute(Qt::WA_DeleteOnClose);
         
@@ -758,7 +758,7 @@ void MainWindow::showVolume()
     
     // Create Volume dialog as a separate window if not already created
     if (!m_volumeDialog) {
-        m_volumeDialog = new VolumeDialog(m_sceneGraph);
+        m_volumeDialog = new VolumeDialog(m_sceneGraph, this);
         m_volumeDialog->setWindowTitle(tr("Volume Properties - VolRover3"));
         m_volumeDialog->setAttribute(Qt::WA_DeleteOnClose);
         

@@ -24,7 +24,8 @@ public:
 private slots:
     void onVolumeSelected(int index);
     void onGraphicsChildrenChanged();
-    void onRenderingPropertyChanged();
+    void onMaterialPropertyChanged();
+    void onDeleteButtonClicked();
 
 private:
     void setupUI();
@@ -37,6 +38,7 @@ private:
     
     // UI elements
     QComboBox *m_volumeComboBox;
+    QPushButton *m_deleteButton;
     
     // Rendering properties
     QCheckBox *m_shadingCheckBox;

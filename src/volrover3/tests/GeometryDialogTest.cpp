@@ -283,6 +283,111 @@ TEST_F(GeometryDialogTest, NestedGeometries) {
     EXPECT_EQ(comboBox->count(), 2);
 }
 
+// Test safe deletion of geometry from state tree
+TEST_F(GeometryDialogTest, SafeGeometryDeletion) {
+    cvc::geometry geom = createTestGeometry();
+    auto node = sceneGraph->addGraphics("test_geom", geom);
+    ASSERT_NE(node, nullptr);
+    
+    // Verify geometry is in scene graph
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 1);
+    
+    // Get weak pointer to track object lifetime
+    std::weak_ptr<GraphicsNode> weakNode = node;
+    node.reset(); // Release our reference
+    
+    // Object should still exist (held by scene graph)
+    EXPECT_FALSE(weakNode.expired());
+    
+    // Remove geometry - should not crash
+    sceneGraph->removeGraphics("test_geom");
+    
+    // Verify removal was clean - C++ object should be destroyed
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 0);
+    
+    // The GraphicsNode object should now be destroyed (no more references)
+    EXPECT_TRUE(weakNode.expired());
+    
+    // State tree should still be accessible without crashes (even if nodes remain)
+    std::string statePrefix = sceneGraph->getStatePrefix();
+    EXPECT_NO_THROW({
+        auto& state = cvc::state::instance()(statePrefix + ".graphics.root.children");
+        // State tree nodes may persist, but accessing them shouldn't crash
+        size_t childCount = state.numChildren();
+        EXPECT_GE(childCount, 0); // Just verify we can read without crashing
+    });
+}
+
+// Test multiple additions and removals
+TEST_F(GeometryDialogTest, MultipleAddRemoveCycles) {
+    cvc::geometry geom = createTestGeometry();
+    
+    // Perform multiple add/remove cycles
+    for (int i = 0; i < 5; ++i) {
+        auto node = sceneGraph->addGraphics("cycle_geom", geom);
+        ASSERT_NE(node, nullptr);
+        EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 1);
+        
+        sceneGraph->removeGraphics("cycle_geom");
+        EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 0);
+    }
+    
+    // State tree should still be valid
+    std::string statePrefix = sceneGraph->getStatePrefix();
+    EXPECT_NO_THROW({
+        auto& state = cvc::state::instance()(statePrefix + ".graphics.root");
+        EXPECT_TRUE(true); // Just verify no crash accessing state
+    });
+}
+
+// Test removal of nested geometries
+TEST_F(GeometryDialogTest, SafeNestedGeometryDeletion) {
+    cvc::geometry geom1 = createTestGeometry();
+    cvc::geometry geom2 = createTestGeometry();
+    
+    // Create parent-child hierarchy
+    auto parent = sceneGraph->addGraphics("parent", geom1);
+    ASSERT_NE(parent, nullptr);
+    
+    auto child = parent->createChild<GeometryNode>("child", geom2);
+    ASSERT_NE(child, nullptr);
+    
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 2);
+    
+    // Remove parent (should handle child cleanup)
+    sceneGraph->removeGraphics("parent");
+    
+    // Should not crash and should clean up properly
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 0);
+}
+
+// Test repeated add/remove cycles for memory safety
+TEST_F(GeometryDialogTest, RepeatedAddRemoveSafety) {
+    cvc::geometry geom = createTestGeometry();
+    
+    // Perform multiple add/remove cycles
+    for (int i = 0; i < 10; ++i) {
+        auto node = sceneGraph->addGraphics("test_geom_" + std::to_string(i % 3), geom);
+        ASSERT_NE(node, nullptr);
+        
+        // Immediately remove it
+        sceneGraph->removeGraphics("test_geom_" + std::to_string(i % 3));
+    }
+    
+    // Should complete without crashes or memory issues
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 0);
+}
+
+// Test removal of non-existent geometry (error handling)
+TEST_F(GeometryDialogTest, RemoveNonExistentGeometry) {
+    // Should not crash when removing non-existent geometry
+    EXPECT_NO_THROW({
+        sceneGraph->removeGraphics("does_not_exist");
+    });
+    
+    EXPECT_EQ(sceneGraph->getAllGeometryGraphics().size(), 0);
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

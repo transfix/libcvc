@@ -11,6 +11,8 @@
 #include <QDoubleSpinBox>
 #include <QCheckBox>
 #include <QLabel>
+#include <QPushButton>
+#include <QMessageBox>
 #include <QMetaObject>
 
 VolumeDialog::VolumeDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
@@ -60,10 +62,17 @@ void VolumeDialog::setupUI()
     
     // Volume Selection Group
     QGroupBox *selectionGroup = new QGroupBox(tr("Volume Selection"), this);
-    QFormLayout *selectionLayout = new QFormLayout(selectionGroup);
+    QVBoxLayout *selectionVLayout = new QVBoxLayout(selectionGroup);
     
+    // Combo box and delete button in horizontal layout
+    QHBoxLayout *comboLayout = new QHBoxLayout();
     m_volumeComboBox = new QComboBox(this);
-    selectionLayout->addRow(tr("Volume:"), m_volumeComboBox);
+    m_deleteButton = new QPushButton(tr("Delete"), this);
+    m_deleteButton->setToolTip(tr("Remove selected volume from scene"));
+    comboLayout->addWidget(new QLabel(tr("Volume:"), this));
+    comboLayout->addWidget(m_volumeComboBox, 1);
+    comboLayout->addWidget(m_deleteButton);
+    selectionVLayout->addLayout(comboLayout);
     
     mainLayout->addWidget(selectionGroup);
     
@@ -131,24 +140,26 @@ void VolumeDialog::connectSignals()
 {
     connect(m_volumeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &VolumeDialog::onVolumeSelected);
+    connect(m_deleteButton, &QPushButton::clicked,
+            this, &VolumeDialog::onDeleteButtonClicked);
     
     // Rendering property signals
     connect(m_shadingCheckBox, &QCheckBox::toggled,
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_ambientSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_diffuseSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_specularSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_specularPowerSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_scalarOpacityUnitDistanceSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_sampleDistanceSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
     connect(m_autoAdjustSampleDistancesCheckBox, &QCheckBox::toggled,
-            this, &VolumeDialog::onRenderingPropertyChanged);
+            this, &VolumeDialog::onMaterialPropertyChanged);
 }
 
 void VolumeDialog::populateVolumeList()
@@ -258,7 +269,7 @@ void VolumeDialog::updatePropertiesFromNode()
     }
 }
 
-void VolumeDialog::onRenderingPropertyChanged()
+void VolumeDialog::onMaterialPropertyChanged()
 {
     if (m_updating) return;
     
@@ -297,8 +308,37 @@ void VolumeDialog::onRenderingPropertyChanged()
     }
 }
 
+void VolumeDialog::onDeleteButtonClicked()
+{
+    if (!m_sceneGraph) return;
+    
+    int currentIndex = m_volumeComboBox->currentIndex();
+    if (currentIndex < 0 || currentIndex >= static_cast<int>(m_volumePaths.size())) {
+        return;
+    }
+    
+    // Extract the volume name from the full path (last component after the last dot)
+    std::string volumePath = m_volumePaths[currentIndex];
+    size_t lastDot = volumePath.find_last_of('.');
+    std::string volumeName = (lastDot != std::string::npos) ? 
+                             volumePath.substr(lastDot + 1) : volumePath;
+    
+    // Confirm deletion
+    QMessageBox::StandardButton reply;
+    reply = QMessageBox::question(this, tr("Delete Volume"),
+                                   tr("Are you sure you want to delete '%1'?")
+                                       .arg(QString::fromStdString(volumeName)),
+                                   QMessageBox::Yes | QMessageBox::No);
+    
+    if (reply == QMessageBox::Yes) {
+        m_sceneGraph->removeGraphics(volumeName);
+        // The combo box will update automatically via the state tree signal
+    }
+}
+
 void VolumeDialog::setPropertiesEnabled(bool enabled)
 {
+    m_deleteButton->setEnabled(enabled);
     m_shadingCheckBox->setEnabled(enabled);
     m_ambientSpinBox->setEnabled(enabled);
     m_diffuseSpinBox->setEnabled(enabled);

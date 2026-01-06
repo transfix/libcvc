@@ -27,6 +27,7 @@ private slots:
     void onRenderModeChanged(int index);
     void onColorChanged();
     void onMaterialPropertyChanged();
+    void onDeleteButtonClicked();
 
 private:
     void setupUI();
@@ -39,6 +40,7 @@ private:
     
     // UI elements
     QComboBox *m_geometryComboBox;
+    QPushButton *m_deleteButton;
     QComboBox *m_renderModeComboBox;
     
     // Color controls

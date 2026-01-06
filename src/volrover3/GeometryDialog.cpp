@@ -11,6 +11,8 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
+#include <QPushButton>
+#include <QMessageBox>
 #include <QMetaObject>
 
 GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
@@ -63,10 +65,17 @@ void GeometryDialog::setupUI()
     
     // Geometry Selection Group
     QGroupBox *selectionGroup = new QGroupBox(tr("Geometry Selection"), this);
-    QFormLayout *selectionLayout = new QFormLayout(selectionGroup);
+    QVBoxLayout *selectionVLayout = new QVBoxLayout(selectionGroup);
     
+    // Combo box and delete button in horizontal layout
+    QHBoxLayout *comboLayout = new QHBoxLayout();
     m_geometryComboBox = new QComboBox(this);
-    selectionLayout->addRow(tr("Geometry:"), m_geometryComboBox);
+    m_deleteButton = new QPushButton(tr("Delete"), this);
+    m_deleteButton->setToolTip(tr("Remove selected geometry from scene"));
+    comboLayout->addWidget(new QLabel(tr("Geometry:"), this));
+    comboLayout->addWidget(m_geometryComboBox, 1);
+    comboLayout->addWidget(m_deleteButton);
+    selectionVLayout->addLayout(comboLayout);
     
     mainLayout->addWidget(selectionGroup);
     
@@ -168,6 +177,8 @@ void GeometryDialog::connectSignals()
 {
     connect(m_geometryComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &GeometryDialog::onGeometrySelected);
+    connect(m_deleteButton, &QPushButton::clicked,
+            this, &GeometryDialog::onDeleteButtonClicked);
     connect(m_renderModeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &GeometryDialog::onRenderModeChanged);
     
@@ -387,8 +398,33 @@ void GeometryDialog::onMaterialPropertyChanged()
     }
 }
 
+void GeometryDialog::onDeleteButtonClicked()
+{
+    if (!m_sceneGraph) return;
+    
+    int currentIndex = m_geometryComboBox->currentIndex();
+    if (currentIndex < 0 || currentIndex >= static_cast<int>(m_geometryNames.size())) {
+        return;
+    }
+    
+    std::string geometryName = m_geometryNames[currentIndex];
+    
+    // Confirm deletion
+    QMessageBox::StandardButton reply;
+    reply = QMessageBox::question(this, tr("Delete Geometry"),
+                                   tr("Are you sure you want to delete '%1'?")
+                                       .arg(QString::fromStdString(geometryName)),
+                                   QMessageBox::Yes | QMessageBox::No);
+    
+    if (reply == QMessageBox::Yes) {
+        m_sceneGraph->removeGraphics(geometryName);
+        // The combo box will update automatically via the state tree signal
+    }
+}
+
 void GeometryDialog::setPropertiesEnabled(bool enabled)
 {
+    m_deleteButton->setEnabled(enabled);
     m_renderModeComboBox->setEnabled(enabled);
     m_colorRSpinBox->setEnabled(enabled);
     m_colorGSpinBox->setEnabled(enabled);
