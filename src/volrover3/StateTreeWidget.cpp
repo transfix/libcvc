@@ -65,6 +65,8 @@ StateTreeWidget::StateTreeWidget(QWidget *parent)
 
 StateTreeWidget::~StateTreeWidget()
 {
+    // Disconnect state change signal
+    m_stateChangeConnection.disconnect();
 }
 
 void StateTreeWidget::setRootState(cvc::state* root)
@@ -155,6 +157,9 @@ void StateTreeWidget::populateTree(QTreeWidgetItem* parentItem, cvc::state* stat
 
 void StateTreeWidget::onTreeItemSelected()
 {
+    // Disconnect from previous state's change signal
+    m_stateChangeConnection.disconnect();
+    
     QList<QTreeWidgetItem*> selected = m_treeWidget->selectedItems();
     if (selected.isEmpty()) {
         m_tableWidget->setRowCount(0);
@@ -171,6 +176,22 @@ void StateTreeWidget::onTreeItemSelected()
     m_deleteButton->setEnabled(m_currentState != m_rootState);
     
     populateTable(m_currentState);
+    
+    // Connect to new state's valueChanged signal to update UI when value changes
+    if (m_currentState) {
+        m_stateChangeConnection = m_currentState->valueChanged.connect([this]() {
+            // Use Qt's queued connection to update UI from signal thread
+            QMetaObject::invokeMethod(this, "onCurrentStateChanged", Qt::QueuedConnection);
+        });
+    }
+}
+
+void StateTreeWidget::onCurrentStateChanged()
+{
+    // Re-populate table with updated values from current state
+    if (m_currentState) {
+        populateTable(m_currentState);
+    }
 }
 
 void StateTreeWidget::populateTable(cvc::state* state)

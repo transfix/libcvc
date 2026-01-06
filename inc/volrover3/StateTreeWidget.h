@@ -8,6 +8,7 @@
 #include <QVBoxLayout>
 #include <QSplitter>
 #include <cvc/state.h>
+#include <boost/signals2.hpp>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@ private slots:
     void onTableValueChanged(int row, int column);
     void onAddStateClicked();
     void onDeleteStateClicked();
+    void onCurrentStateChanged();
 
 private:
     void populateTree(QTreeWidgetItem* parentItem, cvc::state* state, const std::string& path);
@@ -44,6 +46,7 @@ private:
     QPushButton* m_deleteButton;
     cvc::state* m_rootState;
     cvc::state* m_currentState;
+    boost::signals2::connection m_stateChangeConnection;
 };
 
 #endif // STATETREEWIDGET_H
