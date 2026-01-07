@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QMessageBox>
+#include <QTabWidget>
 #include <QMetaObject>
 
 GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
@@ -44,17 +45,25 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
         std::string graphicsChildrenPath = statePrefix + ".graphics.root.children";
         
         try {
+            // Access the state to ensure it exists (this will create it if needed)
             auto& childrenState = cvc::state::instance()(graphicsChildrenPath);
+            
+            // Touch it once to ensure the state tree entry is fully initialized
+            // This is important for the dataChanged signal to work properly
+            childrenState.touch();
             
             // Listen to dataChanged which fires when touch() is called
             // (i.e., when the collection structure changes via add/remove)
+            // Use AutoConnection so Qt determines the best way to invoke (direct or queued)
             m_graphicsChildrenConnection = childrenState.dataChanged.connect(
                 [this]() {
-                    QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+                    QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::AutoConnection);
                 }
             );
+        } catch (const std::exception& e) {
+            cvcapp.log(0, std::string("GeometryDialog: Failed to connect to state tree: ") + e.what());
         } catch (...) {
-            // State might not exist yet
+            cvcapp.log(0, "GeometryDialog: Failed to connect to state tree (unknown error)");
         }
     }
 }
@@ -63,13 +72,14 @@ void GeometryDialog::setupUI()
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     
-    // Geometry Selection Group
+    // Geometry Selection Group (always visible at top)
     QGroupBox *selectionGroup = new QGroupBox(tr("Geometry Selection"), this);
     QVBoxLayout *selectionVLayout = new QVBoxLayout(selectionGroup);
     
     // Combo box and delete button in horizontal layout
     QHBoxLayout *comboLayout = new QHBoxLayout();
     m_geometryComboBox = new QComboBox(this);
+    m_geometryComboBox->setObjectName("geometryComboBox");
     m_deleteButton = new QPushButton(tr("Delete"), this);
     m_deleteButton->setToolTip(tr("Remove selected geometry from scene"));
     comboLayout->addWidget(new QLabel(tr("Geometry:"), this));
@@ -79,81 +89,106 @@ void GeometryDialog::setupUI()
     
     mainLayout->addWidget(selectionGroup);
     
+    // Create tab widget for geometry properties
+    QTabWidget *tabWidget = new QTabWidget(this);
+    
+    // === Appearance Tab ===
+    QWidget *appearanceTab = new QWidget();
+    QVBoxLayout *appearanceLayout = new QVBoxLayout(appearanceTab);
+    
     // Render Mode Group
-    QGroupBox *renderGroup = new QGroupBox(tr("Render Mode"), this);
+    QGroupBox *renderGroup = new QGroupBox(tr("Render Mode"), appearanceTab);
     QFormLayout *renderLayout = new QFormLayout(renderGroup);
     
     m_renderModeComboBox = new QComboBox(this);
+    m_renderModeComboBox->setObjectName("renderModeComboBox");
     m_renderModeComboBox->addItem(tr("Surface (Triangles)"), static_cast<int>(GeometryRenderMode::TRIS));
     m_renderModeComboBox->addItem(tr("Surface (Quads)"), static_cast<int>(GeometryRenderMode::QUADS));
     m_renderModeComboBox->addItem(tr("Wireframe"), static_cast<int>(GeometryRenderMode::LINES));
     m_renderModeComboBox->addItem(tr("Points"), static_cast<int>(GeometryRenderMode::POINTS));
     renderLayout->addRow(tr("Mode:"), m_renderModeComboBox);
     
-    mainLayout->addWidget(renderGroup);
+    appearanceLayout->addWidget(renderGroup);
     
     // Color Group
-    QGroupBox *colorGroup = new QGroupBox(tr("Color"), this);
+    QGroupBox *colorGroup = new QGroupBox(tr("Color"), appearanceTab);
     QFormLayout *colorLayout = new QFormLayout(colorGroup);
     
     m_colorRSpinBox = new QDoubleSpinBox(this);
+    m_colorRSpinBox->setObjectName("colorRSpinBox");
     m_colorRSpinBox->setRange(0.0, 1.0);
     m_colorRSpinBox->setSingleStep(0.01);
     m_colorRSpinBox->setDecimals(3);
     colorLayout->addRow(tr("Red:"), m_colorRSpinBox);
     
     m_colorGSpinBox = new QDoubleSpinBox(this);
+    m_colorGSpinBox->setObjectName("colorGSpinBox");
     m_colorGSpinBox->setRange(0.0, 1.0);
     m_colorGSpinBox->setSingleStep(0.01);
     m_colorGSpinBox->setDecimals(3);
     colorLayout->addRow(tr("Green:"), m_colorGSpinBox);
     
     m_colorBSpinBox = new QDoubleSpinBox(this);
+    m_colorBSpinBox->setObjectName("colorBSpinBox");
     m_colorBSpinBox->setRange(0.0, 1.0);
     m_colorBSpinBox->setSingleStep(0.01);
     m_colorBSpinBox->setDecimals(3);
     colorLayout->addRow(tr("Blue:"), m_colorBSpinBox);
     
-    mainLayout->addWidget(colorGroup);
+    appearanceLayout->addWidget(colorGroup);
     
-    // Material Properties Group
-    QGroupBox *materialGroup = new QGroupBox(tr("Material Properties"), this);
-    QFormLayout *materialLayout = new QFormLayout(materialGroup);
-    
-    m_ambientSpinBox = new QDoubleSpinBox(this);
-    m_ambientSpinBox->setRange(0.0, 1.0);
-    m_ambientSpinBox->setSingleStep(0.01);
-    m_ambientSpinBox->setDecimals(3);
-    materialLayout->addRow(tr("Ambient:"), m_ambientSpinBox);
-    
-    m_diffuseSpinBox = new QDoubleSpinBox(this);
-    m_diffuseSpinBox->setRange(0.0, 1.0);
-    m_diffuseSpinBox->setSingleStep(0.01);
-    m_diffuseSpinBox->setDecimals(3);
-    materialLayout->addRow(tr("Diffuse:"), m_diffuseSpinBox);
-    
-    m_specularSpinBox = new QDoubleSpinBox(this);
-    m_specularSpinBox->setRange(0.0, 1.0);
-    m_specularSpinBox->setSingleStep(0.01);
-    m_specularSpinBox->setDecimals(3);
-    materialLayout->addRow(tr("Specular:"), m_specularSpinBox);
-    
-    m_specularPowerSpinBox = new QDoubleSpinBox(this);
-    m_specularPowerSpinBox->setRange(0.0, 128.0);
-    m_specularPowerSpinBox->setSingleStep(1.0);
-    m_specularPowerSpinBox->setDecimals(1);
-    materialLayout->addRow(tr("Specular Power:"), m_specularPowerSpinBox);
+    // Opacity in appearance tab
+    QGroupBox *opacityGroup = new QGroupBox(tr("Transparency"), appearanceTab);
+    QFormLayout *opacityLayout = new QFormLayout(opacityGroup);
     
     m_opacitySpinBox = new QDoubleSpinBox(this);
     m_opacitySpinBox->setRange(0.0, 1.0);
     m_opacitySpinBox->setSingleStep(0.01);
     m_opacitySpinBox->setDecimals(3);
-    materialLayout->addRow(tr("Opacity:"), m_opacitySpinBox);
+    opacityLayout->addRow(tr("Opacity:"), m_opacitySpinBox);
     
-    mainLayout->addWidget(materialGroup);
+    appearanceLayout->addWidget(opacityGroup);
+    appearanceLayout->addStretch();
     
-    // Point and Line Properties Group
-    QGroupBox *sizeGroup = new QGroupBox(tr("Point and Line Properties"), this);
+    // === Material Tab ===
+    QWidget *materialTab = new QWidget();
+    QVBoxLayout *materialLayout = new QVBoxLayout(materialTab);
+    
+    QGroupBox *materialGroup = new QGroupBox(tr("Material Properties"), materialTab);
+    QFormLayout *matLayout = new QFormLayout(materialGroup);
+    
+    m_ambientSpinBox = new QDoubleSpinBox(this);
+    m_ambientSpinBox->setRange(0.0, 1.0);
+    m_ambientSpinBox->setSingleStep(0.01);
+    m_ambientSpinBox->setDecimals(3);
+    matLayout->addRow(tr("Ambient:"), m_ambientSpinBox);
+    
+    m_diffuseSpinBox = new QDoubleSpinBox(this);
+    m_diffuseSpinBox->setRange(0.0, 1.0);
+    m_diffuseSpinBox->setSingleStep(0.01);
+    m_diffuseSpinBox->setDecimals(3);
+    matLayout->addRow(tr("Diffuse:"), m_diffuseSpinBox);
+    
+    m_specularSpinBox = new QDoubleSpinBox(this);
+    m_specularSpinBox->setRange(0.0, 1.0);
+    m_specularSpinBox->setSingleStep(0.01);
+    m_specularSpinBox->setDecimals(3);
+    matLayout->addRow(tr("Specular:"), m_specularSpinBox);
+    
+    m_specularPowerSpinBox = new QDoubleSpinBox(this);
+    m_specularPowerSpinBox->setRange(0.0, 128.0);
+    m_specularPowerSpinBox->setSingleStep(1.0);
+    m_specularPowerSpinBox->setDecimals(1);
+    matLayout->addRow(tr("Specular Power:"), m_specularPowerSpinBox);
+    
+    materialLayout->addWidget(materialGroup);
+    materialLayout->addStretch();
+    
+    // === Rendering Tab ===
+    QWidget *renderingTab = new QWidget();
+    QVBoxLayout *renderingLayout = new QVBoxLayout(renderingTab);
+    
+    QGroupBox *sizeGroup = new QGroupBox(tr("Point and Line Properties"), renderingTab);
     QFormLayout *sizeLayout = new QFormLayout(sizeGroup);
     
     m_pointSizeSpinBox = new QDoubleSpinBox(this);
@@ -168,7 +203,15 @@ void GeometryDialog::setupUI()
     m_lineWidthSpinBox->setDecimals(1);
     sizeLayout->addRow(tr("Line Width:"), m_lineWidthSpinBox);
     
-    mainLayout->addWidget(sizeGroup);
+    renderingLayout->addWidget(sizeGroup);
+    renderingLayout->addStretch();
+    
+    // Add tabs to tab widget
+    tabWidget->addTab(appearanceTab, tr("Appearance"));
+    tabWidget->addTab(materialTab, tr("Material"));
+    tabWidget->addTab(renderingTab, tr("Rendering"));
+    
+    mainLayout->addWidget(tabWidget);
     
     setLayout(mainLayout);
 }
@@ -290,10 +333,10 @@ void GeometryDialog::onGeometrySelected(int index)
     
     if (geomNode) {
         // Connect to the node's childChanged signal (fires when any child state changes)
+        // Use AutoConnection so Qt determines the best way to invoke (direct or queued)
         m_nodeStateConnection = geomNode->getState().childChanged.connect(
             [this](const std::string&) {
-                // Use Qt's queued connection for thread-safe UI updates
-                QMetaObject::invokeMethod(this, "onNodeStateChanged", Qt::QueuedConnection);
+                QMetaObject::invokeMethod(this, "onNodeStateChanged", Qt::AutoConnection);
             }
         );
     }

@@ -56,14 +56,14 @@ void AppState::initializeDefaults()
     getState("camera.position.z").value(5.0);
     
     // Initialize camera view direction (looking at origin)
-    getState("camera.view_dir.x").value(0.0);
-    getState("camera.view_dir.y").value(1.0);
-    getState("camera.view_dir.z").value(-0.5);
+    getState("camera.view_direction.x").value(0.0);
+    getState("camera.view_direction.y").value(1.0);
+    getState("camera.view_direction.z").value(-0.5);
     
     // Initialize camera up vector (standard Z-up)
-    getState("camera.up.x").value(0.0);
-    getState("camera.up.y").value(0.0);
-    getState("camera.up.z").value(1.0);
+    getState("camera.up_vector.x").value(0.0);
+    getState("camera.up_vector.y").value(0.0);
+    getState("camera.up_vector.z").value(1.0);
     
     // Initialize field of view (degrees)
     getState("camera.fov").value(60.0);
@@ -244,30 +244,30 @@ void AppState::setCameraPosition(double x, double y, double z)
 
 void AppState::getCameraViewDirection(double& x, double& y, double& z)
 {
-    x = getState("camera.view_dir.x").value<double>();
-    y = getState("camera.view_dir.y").value<double>();
-    z = getState("camera.view_dir.z").value<double>();
+    x = getState("camera.view_direction.x").value<double>();
+    y = getState("camera.view_direction.y").value<double>();
+    z = getState("camera.view_direction.z").value<double>();
 }
 
 void AppState::setCameraViewDirection(double x, double y, double z)
 {
-    getState("camera.view_dir.x").value(x);
-    getState("camera.view_dir.y").value(y);
-    getState("camera.view_dir.z").value(z);
+    getState("camera.view_direction.x").value(x);
+    getState("camera.view_direction.y").value(y);
+    getState("camera.view_direction.z").value(z);
 }
 
 void AppState::getCameraUpVector(double& x, double& y, double& z)
 {
-    x = getState("camera.up.x").value<double>();
-    y = getState("camera.up.y").value<double>();
-    z = getState("camera.up.z").value<double>();
+    x = getState("camera.up_vector.x").value<double>();
+    y = getState("camera.up_vector.y").value<double>();
+    z = getState("camera.up_vector.z").value<double>();
 }
 
 void AppState::setCameraUpVector(double x, double y, double z)
 {
-    getState("camera.up.x").value(x);
-    getState("camera.up.y").value(y);
-    getState("camera.up.z").value(z);
+    getState("camera.up_vector.x").value(x);
+    getState("camera.up_vector.y").value(y);
+    getState("camera.up_vector.z").value(z);
 }
 
 double AppState::cameraFieldOfView()

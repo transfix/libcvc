@@ -65,18 +65,39 @@ StateTreeWidget::StateTreeWidget(QWidget *parent)
 
 StateTreeWidget::~StateTreeWidget()
 {
-    // Disconnect state change signal
+    // Disconnect all signals
     m_stateChangeConnection.disconnect();
+    m_treeChangeConnection.disconnect();
+    m_currentStateDestroyedConnection.disconnect();
 }
 
 void StateTreeWidget::setRootState(cvc::state* root)
 {
+    // Disconnect from previous root's signals
+    m_treeChangeConnection.disconnect();
+    
     m_rootState = root;
+    
+    // Connect to root state's childChanged signal to detect additions/deletions
+    if (m_rootState) {
+        m_treeChangeConnection = m_rootState->childChanged.connect(
+            [this](const std::string&) {
+                QMetaObject::invokeMethod(this, "onTreeStructureChanged", Qt::QueuedConnection);
+            }
+        );
+    }
+    
     refresh();
 }
 
 void StateTreeWidget::refresh()
 {
+    // Save currently selected state's full name to restore after refresh
+    std::string previousSelectionName;
+    if (m_currentState && m_currentState->initialized()) {
+        previousSelectionName = m_currentState->fullName();
+    }
+    
     m_treeWidget->clear();
     m_tableWidget->setRowCount(0);
     
@@ -91,6 +112,41 @@ void StateTreeWidget::refresh()
     populateTree(rootItem, m_rootState, "");
     
     rootItem->setExpanded(true);
+    
+    // Restore selection if the previously selected state still exists and is initialized
+    if (!previousSelectionName.empty()) {
+        try {
+            // Try to get the state from the root using the saved full name
+            // We need to navigate from root to the state
+            cvc::state* restoredState = m_rootState;
+            std::string remainingPath = previousSelectionName;
+            
+            // Remove root name prefix if present
+            std::string rootName = m_rootState->fullName();
+            if (remainingPath.find(rootName) == 0) {
+                remainingPath = remainingPath.substr(rootName.length());
+                if (!remainingPath.empty() && remainingPath[0] == '.') {
+                    remainingPath = remainingPath.substr(1);
+                }
+            }
+            
+            // Navigate to the state if path is not empty
+            if (!remainingPath.empty()) {
+                restoredState = &((*m_rootState)(remainingPath));
+            }
+            
+            // Only restore selection if state is still initialized
+            if (restoredState && restoredState->initialized()) {
+                QTreeWidgetItem* itemToSelect = findTreeItem(rootItem, restoredState);
+                if (itemToSelect) {
+                    m_treeWidget->setCurrentItem(itemToSelect);
+                    // Note: setCurrentItem will trigger onTreeItemSelected, which will update m_currentState
+                }
+            }
+        } catch (const std::exception&) {
+            // State no longer exists, selection will remain cleared
+        }
+    }
 }
 
 void StateTreeWidget::populateTree(QTreeWidgetItem* parentItem, cvc::state* state, const std::string& path)
@@ -157,8 +213,9 @@ void StateTreeWidget::populateTree(QTreeWidgetItem* parentItem, cvc::state* stat
 
 void StateTreeWidget::onTreeItemSelected()
 {
-    // Disconnect from previous state's change signal
+    // Disconnect from previous state's signals
     m_stateChangeConnection.disconnect();
+    m_currentStateDestroyedConnection.disconnect();
     
     QList<QTreeWidgetItem*> selected = m_treeWidget->selectedItems();
     if (selected.isEmpty()) {
@@ -183,6 +240,11 @@ void StateTreeWidget::onTreeItemSelected()
             // Use Qt's queued connection to update UI from signal thread
             QMetaObject::invokeMethod(this, "onCurrentStateChanged", Qt::QueuedConnection);
         });
+        
+        // Connect to destroyed signal to handle deletion of current state
+        m_currentStateDestroyedConnection = m_currentState->destroyed.connect([this]() {
+            QMetaObject::invokeMethod(this, "onCurrentStateDestroyed", Qt::QueuedConnection);
+        });
     }
 }
 
@@ -192,6 +254,48 @@ void StateTreeWidget::onCurrentStateChanged()
     if (m_currentState) {
         populateTable(m_currentState);
     }
+}
+
+void StateTreeWidget::onTreeStructureChanged()
+{
+    // The tree structure changed (child added or removed)
+    // Refresh the entire tree to show the changes
+    // The refresh() method will preserve the current selection if it still exists
+    refresh();
+}
+
+void StateTreeWidget::onCurrentStateDestroyed()
+{
+    // The currently selected state was deleted
+    // Clear the selection and show empty state
+    m_currentState = nullptr;
+    m_treeWidget->clearSelection();
+    m_tableWidget->setRowCount(0);
+    m_deleteButton->setEnabled(false);
+    
+    // Refresh the tree to remove the deleted state from the UI
+    refresh();
+}
+
+QTreeWidgetItem* StateTreeWidget::findTreeItem(QTreeWidgetItem* parent, cvc::state* state)
+{
+    if (!parent || !state) return nullptr;
+    
+    // Check if this item matches the state we're looking for
+    void* itemStatePtr = parent->data(0, Qt::UserRole).value<void*>();
+    if (itemStatePtr == static_cast<void*>(state)) {
+        return parent;
+    }
+    
+    // Recursively search children
+    for (int i = 0; i < parent->childCount(); ++i) {
+        QTreeWidgetItem* found = findTreeItem(parent->child(i), state);
+        if (found) {
+            return found;
+        }
+    }
+    
+    return nullptr;
 }
 
 void StateTreeWidget::populateTable(cvc::state* state)

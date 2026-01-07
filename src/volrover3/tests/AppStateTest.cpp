@@ -150,9 +150,9 @@ TEST_F(AppStateTest, StateTreeCameraViewDirection) {
     state->setCameraViewDirection(1.0, 0.0, 0.0);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.x").value<double>(), 1.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.y").value<double>(), 0.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera.view_dir.z").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_direction.x").value<double>(), 1.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_direction.y").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.view_direction.z").value<double>(), 0.0);
     
     double x, y, z;
     state->getCameraViewDirection(x, y, z);
@@ -165,9 +165,9 @@ TEST_F(AppStateTest, StateTreeCameraUpVector) {
     state->setCameraUpVector(0.0, 1.0, 0.0);
     
     auto& stateTree = state->getRootState();
-    EXPECT_DOUBLE_EQ(stateTree("camera.up.x").value<double>(), 0.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera.up.y").value<double>(), 1.0);
-    EXPECT_DOUBLE_EQ(stateTree("camera.up.z").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up_vector.x").value<double>(), 0.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up_vector.y").value<double>(), 1.0);
+    EXPECT_DOUBLE_EQ(stateTree("camera.up_vector.z").value<double>(), 0.0);
     
     double x, y, z;
     state->getCameraUpVector(x, y, z);
