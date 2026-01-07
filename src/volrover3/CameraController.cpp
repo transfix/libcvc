@@ -15,6 +15,7 @@ CameraController::CameraController(const std::string& statePath)
     , m_pitch(0.0)
     , m_mouseLeftPressed(false)
     , m_mouseRightPressed(false)
+    , m_mouseMiddlePressed(false)
     , m_movementSpeed(5.0)
     , m_mouseSensitivity(1.0)
     , m_invertMouse(false)
@@ -420,6 +421,11 @@ void CameraController::handleMousePress(int button)
         getState("input.mouse_right_pressed").readOnly(false);
         getState("input.mouse_right_pressed").value(true);
         getState("input.mouse_right_pressed").readOnly(true);
+    } else if (button == Qt::MiddleButton) {
+        m_mouseMiddlePressed = true;
+        getState("input.mouse_middle_pressed").readOnly(false);
+        getState("input.mouse_middle_pressed").value(true);
+        getState("input.mouse_middle_pressed").readOnly(true);
     }
 }
 
@@ -435,6 +441,11 @@ void CameraController::handleMouseRelease(int button)
         getState("input.mouse_right_pressed").readOnly(false);
         getState("input.mouse_right_pressed").value(false);
         getState("input.mouse_right_pressed").readOnly(true);
+    } else if (button == Qt::MiddleButton) {
+        m_mouseMiddlePressed = false;
+        getState("input.mouse_middle_pressed").readOnly(false);
+        getState("input.mouse_middle_pressed").value(false);
+        getState("input.mouse_middle_pressed").readOnly(true);
     }
 }
 
@@ -462,6 +473,9 @@ void CameraController::handleMouseMove(int dx, int dy)
 
             updateOrientation();
         }
+    } else if (m_mouseMiddlePressed) {
+        // Middle mouse button - pan camera
+        panCamera(dx, dy);
     }
 }
 
@@ -637,6 +651,104 @@ void CameraController::orbitCamera(int dx, int dy)
     });
     
     syncCameraToState();
+}
+
+void CameraController::panCamera(int dx, int dy)
+{
+    if (!m_camera) return;
+    
+    // Pan speed factor
+    double panSpeed = 0.001 * m_mouseSensitivity;
+    
+    if (m_mode == ORBIT_MODE) {
+        // In orbit mode, pan by moving the orbit center
+        // Get camera right and up vectors
+        double pos[3], focal[3], up[3];
+        m_camera->GetPosition(pos);
+        m_camera->GetFocalPoint(focal);
+        m_camera->GetViewUp(up);
+        
+        // Calculate right vector (cross product of view direction and up)
+        double viewDir[3] = {focal[0] - pos[0], focal[1] - pos[1], focal[2] - pos[2]};
+        double right[3];
+        right[0] = viewDir[1] * up[2] - viewDir[2] * up[1];
+        right[1] = viewDir[2] * up[0] - viewDir[0] * up[2];
+        right[2] = viewDir[0] * up[1] - viewDir[1] * up[0];
+        
+        // Normalize vectors
+        double rightLen = sqrt(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+        double upLen = sqrt(up[0]*up[0] + up[1]*up[1] + up[2]*up[2]);
+        if (rightLen > 1e-9 && upLen > 1e-9) {
+            for (int i = 0; i < 3; i++) {
+                right[i] /= rightLen;
+                up[i] /= upLen;
+            }
+            
+            // Pan is proportional to distance from center
+            double panFactor = m_orbitDistance * panSpeed;
+            
+            // Update orbit center
+            m_orbitCenter[0] += (-dx * right[0] + dy * up[0]) * panFactor;
+            m_orbitCenter[1] += (-dx * right[1] + dy * up[1]) * panFactor;
+            m_orbitCenter[2] += (-dx * right[2] + dy * up[2]) * panFactor;
+            
+            // Update state
+            getState("orbit.center.x").value(m_orbitCenter[0]);
+            getState("orbit.center.y").value(m_orbitCenter[1]);
+            getState("orbit.center.z").value(m_orbitCenter[2]);
+            
+            // Reposition camera around new orbit center
+            orbitCamera(0, 0);
+        }
+    } else {
+        // Fly mode - pan by moving both position and focal point
+        // Get camera right and up vectors
+        double pos[3], focal[3], up[3];
+        m_camera->GetPosition(pos);
+        m_camera->GetFocalPoint(focal);
+        m_camera->GetViewUp(up);
+        
+        // Calculate right vector
+        double viewDir[3] = {focal[0] - pos[0], focal[1] - pos[1], focal[2] - pos[2]};
+        double right[3];
+        right[0] = viewDir[1] * up[2] - viewDir[2] * up[1];
+        right[1] = viewDir[2] * up[0] - viewDir[0] * up[2];
+        right[2] = viewDir[0] * up[1] - viewDir[1] * up[0];
+        
+        // Normalize vectors
+        double rightLen = sqrt(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+        double upLen = sqrt(up[0]*up[0] + up[1]*up[1] + up[2]*up[2]);
+        if (rightLen > 1e-9 && upLen > 1e-9) {
+            for (int i = 0; i < 3; i++) {
+                right[i] /= rightLen;
+                up[i] /= upLen;
+            }
+            
+            // Pan factor for fly mode
+            double panFactor = 0.1 * panSpeed * m_movementSpeed;
+            
+            // Pan delta
+            double deltaX = (-dx * right[0] + dy * up[0]) * panFactor;
+            double deltaY = (-dx * right[1] + dy * up[1]) * panFactor;
+            double deltaZ = (-dx * right[2] + dy * up[2]) * panFactor;
+            
+            // Update position and focal point
+            m_position[0] += deltaX;
+            m_position[1] += deltaY;
+            m_position[2] += deltaZ;
+            m_focalPoint[0] += deltaX;
+            m_focalPoint[1] += deltaY;
+            m_focalPoint[2] += deltaZ;
+            
+            // Apply to camera
+            runOnMainThread([this]() {
+                m_camera->SetPosition(m_position);
+                m_camera->SetFocalPoint(m_focalPoint);
+            });
+            
+            syncCameraToState();
+        }
+    }
 }
 
 void CameraController::updateOrbitCenterFromBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ)

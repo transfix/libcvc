@@ -102,7 +102,10 @@ void VTKRenderWidget::mousePressEvent(QMouseEvent *event)
     if (m_cameraController) {
         m_cameraController->handleMousePress(event->button());
     }
-    QVTK_WIDGET_BASE::mousePressEvent(event);
+    // Don't pass middle mouse to VTK to avoid conflicts with our CameraController
+    if (event->button() != Qt::MiddleButton) {
+        QVTK_WIDGET_BASE::mousePressEvent(event);
+    }
 }
 
 void VTKRenderWidget::mouseReleaseEvent(QMouseEvent *event)
@@ -110,7 +113,10 @@ void VTKRenderWidget::mouseReleaseEvent(QMouseEvent *event)
     if (m_cameraController) {
         m_cameraController->handleMouseRelease(event->button());
     }
-    QVTK_WIDGET_BASE::mouseReleaseEvent(event);
+    // Don't pass middle mouse to VTK to avoid conflicts with our CameraController
+    if (event->button() != Qt::MiddleButton) {
+        QVTK_WIDGET_BASE::mouseReleaseEvent(event);
+    }
 }
 
 void VTKRenderWidget::mouseMoveEvent(QMouseEvent *event)
@@ -122,7 +128,11 @@ void VTKRenderWidget::mouseMoveEvent(QMouseEvent *event)
         renderWindow()->Render();
     }
     m_lastMousePos = event->pos();
-    QVTK_WIDGET_BASE::mouseMoveEvent(event);
+    // Don't pass middle mouse moves to VTK when middle button is pressed
+    bool isMiddlePressed = (event->buttons() & Qt::MiddleButton);
+    if (!isMiddlePressed) {
+        QVTK_WIDGET_BASE::mouseMoveEvent(event);
+    }
 }
 
 void VTKRenderWidget::wheelEvent(QWheelEvent *event)

@@ -278,14 +278,6 @@ void MainWindow::createToolBar()
     
     m_mainToolBar->addSeparator();
     
-    // Grid toggle
-    QAction *gridAction = new QAction(QIcon::fromTheme("view-grid"), tr("Toggle Grid"), this);
-    gridAction->setToolTip(tr("Show/hide grid"));
-    gridAction->setCheckable(true);
-    gridAction->setChecked(m_gridVisible);
-    connect(gridAction, &QAction::triggered, this, &MainWindow::toggleGrid);
-    m_mainToolBar->addAction(gridAction);
-    
     // Axis toggle
     QAction *axisAction = new QAction(QIcon::fromTheme("show-axis"), tr("Toggle Axis"), this);
     axisAction->setToolTip(tr("Show/hide coordinate axis"));
@@ -860,9 +852,15 @@ void MainWindow::aboutVolRover()
 
 void MainWindow::resetCamera()
 {
-    if (m_renderWidget) {
-        // Use VTK's ResetCamera which just adjusts view without changing controller state
-        m_renderWidget->resetCamera();
+    CameraController *camCtrl = m_renderWidget->getCameraController();
+    if (camCtrl) {
+        // Use CameraController's resetView to properly update state tree
+        cvc::bounding_box bounds = AppState::instance().worldBounds();
+        camCtrl->resetView(
+            bounds.minx, bounds.miny, bounds.minz,
+            bounds.maxx, bounds.maxy, bounds.maxz
+        );
+        m_renderWidget->render();
     }
 }
 

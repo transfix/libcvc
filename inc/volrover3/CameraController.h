@@ -55,6 +55,7 @@ private:
     void updateOrientation();
     void move(double forward, double right, double up);
     void orbitCamera(int dx, int dy);
+    void panCamera(int dx, int dy);
     void initializeState();
     void syncCameraToState();
 
@@ -79,6 +80,7 @@ private:
     std::set<int> m_keysPressed;
     bool m_mouseLeftPressed;
     bool m_mouseRightPressed;
+    bool m_mouseMiddlePressed;
     
     // Settings
     double m_movementSpeed;
