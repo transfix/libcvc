@@ -57,6 +57,10 @@ public:
     void setRenderMode(GeometryRenderMode mode);
     GeometryRenderMode getRenderMode() const { return m_renderMode; }
     
+    // Single color mode control
+    void setUseSingleColor(bool useSingleColor);
+    bool getUseSingleColor() const { return m_useSingleColor; }
+    
     // Material property setters (sync with state tree)
     void setColor(double r, double g, double b);
     void setSpecular(double value);
@@ -91,6 +95,7 @@ private:
     bool m_hasGeometry;
     std::shared_ptr<cvc::geometry> m_geometry;
     GeometryRenderMode m_renderMode;
+    bool m_useSingleColor;  // When true, use single color; when false, use per-vertex colors
     
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;

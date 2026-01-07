@@ -25,6 +25,7 @@ GeometryNode::GeometryNode(const std::string& statePath, const std::string& name
     : GraphicsNode(statePath, name)
     , m_hasGeometry(false)
     , m_renderMode(GeometryRenderMode::TRIS)
+    , m_useSingleColor(false)
     , m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_polyData(vtkSmartPointer<vtkPolyData>::New())
@@ -43,6 +44,9 @@ GeometryNode::GeometryNode(const std::string& statePath, const std::string& name
         
         // Render mode
         getState("render_mode").value(renderModeToString(m_renderMode));
+        
+        // Single color mode (default: false - use per-vertex colors if available)
+        getState("use_single_color").value(false);
         
         // Material color (RGB 0-1)
         getState("color_r").value(0.8);
@@ -159,6 +163,22 @@ void GeometryNode::handleStateChanged(const std::string& childState)
             if (!m_actor) return;
             double lineWidth = getState("line_width").value<double>();
             m_actor->GetProperty()->SetLineWidth(lineWidth);
+        });
+    }
+    else if (childState == "use_single_color") {
+        runOnMainThread([this]() {
+            try {
+                bool useSingleColor = getState("use_single_color").value<bool>();
+                if (m_useSingleColor != useSingleColor) {
+                    m_useSingleColor = useSingleColor;
+                    // Re-apply geometry colors
+                    if (m_hasGeometry && m_geometry) {
+                        updatePolyData(*m_geometry);
+                    }
+                }
+            } catch (...) {
+                // Ignore if state not available
+            }
         });
     }
     else {
@@ -285,6 +305,21 @@ void GeometryNode::setPointSize(double size)
 void GeometryNode::setLineWidth(double width)
 {
     getState("line_width").value(width);
+}
+
+void GeometryNode::setUseSingleColor(bool useSingleColor)
+{
+    if (m_useSingleColor == useSingleColor) return;
+    
+    m_useSingleColor = useSingleColor;
+    getState("use_single_color").value(useSingleColor);
+    
+    // Re-apply geometry colors on main thread
+    runOnMainThread([this]() {
+        if (m_hasGeometry && m_geometry) {
+            updatePolyData(*m_geometry);
+        }
+    });
 }
 
 vtkProp* GeometryNode::getProp()
@@ -533,8 +568,8 @@ void GeometryNode::updatePolyData(const cvc::geometry& geom)
         m_polyData->GetPointData()->SetNormals(nullptr);
     }
 
-    // Add colors if available
-    if (geom.colors().size() == geom.num_points()) {
+    // Add per-vertex colors if available AND single color mode is disabled
+    if (!m_useSingleColor && geom.colors().size() == geom.num_points()) {
         vtkSmartPointer<vtkFloatArray> colors = vtkSmartPointer<vtkFloatArray>::New();
         colors->SetNumberOfComponents(3);
         colors->SetNumberOfTuples(geom.num_points());
@@ -546,6 +581,13 @@ void GeometryNode::updatePolyData(const cvc::geometry& geom)
         }
 
         m_polyData->GetPointData()->SetScalars(colors);
+        // Tell VTK mapper to use vertex colors
+        m_mapper->SetScalarModeToUsePointData();
+        m_mapper->ScalarVisibilityOn();
+    } else {
+        // Use single color from actor property - clear per-vertex colors
+        m_polyData->GetPointData()->SetScalars(nullptr);
+        m_mapper->ScalarVisibilityOff();
     }
 
     m_polyData->Modified();

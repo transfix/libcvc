@@ -10,10 +10,13 @@
 #include <QGroupBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QCheckBox>
 #include <QLabel>
 #include <QPushButton>
 #include <QMessageBox>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QMetaObject>
 
 GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
@@ -21,6 +24,7 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     , m_sceneGraph(sceneGraph)
     , m_geometryComboBox(nullptr)
     , m_renderModeComboBox(nullptr)
+    , m_singleColorCheckBox(nullptr)
     , m_colorRSpinBox(nullptr)
     , m_colorGSpinBox(nullptr)
     , m_colorBSpinBox(nullptr)
@@ -31,6 +35,7 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     , m_opacitySpinBox(nullptr)
     , m_pointSizeSpinBox(nullptr)
     , m_lineWidthSpinBox(nullptr)
+    , m_infoTable(nullptr)
     , m_updating(false)
 {
     setWindowTitle(tr("Geometry Properties"));
@@ -112,7 +117,17 @@ void GeometryDialog::setupUI()
     
     // Color Group
     QGroupBox *colorGroup = new QGroupBox(tr("Color"), appearanceTab);
-    QFormLayout *colorLayout = new QFormLayout(colorGroup);
+    QVBoxLayout *colorVLayout = new QVBoxLayout(colorGroup);
+    
+    // Single color checkbox
+    m_singleColorCheckBox = new QCheckBox(tr("Use single color (override vertex colors)"), this);
+    m_singleColorCheckBox->setObjectName("singleColorCheckBox");
+    m_singleColorCheckBox->setChecked(false);
+    m_singleColorCheckBox->setToolTip(tr("When enabled, all vertices use the color specified below.\nWhen disabled, per-vertex colors from the geometry data are used if available."));
+    colorVLayout->addWidget(m_singleColorCheckBox);
+    
+    // Color controls in form layout
+    QFormLayout *colorLayout = new QFormLayout();
     
     m_colorRSpinBox = new QDoubleSpinBox(this);
     m_colorRSpinBox->setObjectName("colorRSpinBox");
@@ -134,6 +149,8 @@ void GeometryDialog::setupUI()
     m_colorBSpinBox->setSingleStep(0.01);
     m_colorBSpinBox->setDecimals(3);
     colorLayout->addRow(tr("Blue:"), m_colorBSpinBox);
+    
+    colorVLayout->addLayout(colorLayout);
     
     appearanceLayout->addWidget(colorGroup);
     
@@ -206,10 +223,30 @@ void GeometryDialog::setupUI()
     renderingLayout->addWidget(sizeGroup);
     renderingLayout->addStretch();
     
+    // === Info Tab ===
+    QWidget *infoTab = new QWidget();
+    QVBoxLayout *infoLayout = new QVBoxLayout(infoTab);
+    
+    QLabel *infoLabel = new QLabel(tr("Geometry node metadata:"), infoTab);
+    infoLayout->addWidget(infoLabel);
+    
+    m_infoTable = new QTableWidget(this);
+    m_infoTable->setObjectName("infoTable");
+    m_infoTable->setColumnCount(2);
+    m_infoTable->setHorizontalHeaderLabels({tr("Property"), tr("Value")});
+    m_infoTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_infoTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_infoTable->verticalHeader()->setVisible(false);
+    m_infoTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_infoTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_infoTable->setAlternatingRowColors(true);
+    infoLayout->addWidget(m_infoTable);
+    
     // Add tabs to tab widget
     tabWidget->addTab(appearanceTab, tr("Appearance"));
     tabWidget->addTab(materialTab, tr("Material"));
     tabWidget->addTab(renderingTab, tr("Rendering"));
+    tabWidget->addTab(infoTab, tr("Info"));
     
     mainLayout->addWidget(tabWidget);
     
@@ -226,6 +263,8 @@ void GeometryDialog::connectSignals()
             this, &GeometryDialog::onRenderModeChanged);
     
     // Color signals
+    connect(m_singleColorCheckBox, &QCheckBox::toggled,
+            this, &GeometryDialog::onSingleColorChanged);
     connect(m_colorRSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &GeometryDialog::onColorChanged);
     connect(m_colorGSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -387,6 +426,41 @@ void GeometryDialog::updatePropertiesFromNode()
     try { m_pointSizeSpinBox->setValue(geomNode->getState("point_size").value<double>()); } catch (const std::exception&) {} catch (...) {}
     try { m_lineWidthSpinBox->setValue(geomNode->getState("line_width").value<double>()); } catch (const std::exception&) {} catch (...) {}
     
+    // Update single color checkbox
+    try { m_singleColorCheckBox->setChecked(geomNode->getState("use_single_color").value<bool>()); } catch (const std::exception&) { m_singleColorCheckBox->setChecked(false); } catch (...) { m_singleColorCheckBox->setChecked(false); }
+    
+    // Update info table with metadata
+    m_infoTable->setRowCount(0);
+    const auto& metadata = geomNode->getAllMetadata();
+    for (const auto& kv : metadata) {
+        int row = m_infoTable->rowCount();
+        m_infoTable->insertRow(row);
+        
+        m_infoTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(kv.first)));
+        
+        // Convert std::any to string for display
+        QString valueStr;
+        try {
+            if (kv.second.type() == typeid(int)) {
+                valueStr = QString::number(std::any_cast<int>(kv.second));
+            } else if (kv.second.type() == typeid(double)) {
+                valueStr = QString::number(std::any_cast<double>(kv.second), 'g', 6);
+            } else if (kv.second.type() == typeid(float)) {
+                valueStr = QString::number(std::any_cast<float>(kv.second), 'g', 6);
+            } else if (kv.second.type() == typeid(std::string)) {
+                valueStr = QString::fromStdString(std::any_cast<std::string>(kv.second));
+            } else if (kv.second.type() == typeid(bool)) {
+                valueStr = std::any_cast<bool>(kv.second) ? tr("true") : tr("false");
+            } else {
+                valueStr = tr("<unknown type>");
+            }
+        } catch (...) {
+            valueStr = tr("<error>");
+        }
+        
+        m_infoTable->setItem(row, 1, new QTableWidgetItem(valueStr));
+    }
+    
     m_updating = false;
 }
 
@@ -430,6 +504,22 @@ void GeometryDialog::onColorChanged()
     geomNode->setColor(m_colorRSpinBox->value(),
                       m_colorGSpinBox->value(),
                       m_colorBSpinBox->value());
+}
+
+void GeometryDialog::onSingleColorChanged(bool checked)
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (!geomNode) return;
+    
+    geomNode->setUseSingleColor(checked);
 }
 
 void GeometryDialog::onMaterialPropertyChanged()
@@ -493,6 +583,7 @@ void GeometryDialog::setPropertiesEnabled(bool enabled)
 {
     m_deleteButton->setEnabled(enabled);
     m_renderModeComboBox->setEnabled(enabled);
+    m_singleColorCheckBox->setEnabled(enabled);
     m_colorRSpinBox->setEnabled(enabled);
     m_colorGSpinBox->setEnabled(enabled);
     m_colorBSpinBox->setEnabled(enabled);

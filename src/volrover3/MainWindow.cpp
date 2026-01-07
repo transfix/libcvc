@@ -658,6 +658,14 @@ void MainWindow::showThreadMonitor()
         connect(m_threadMonitor, &QObject::destroyed, [this]() {
             m_threadMonitor = nullptr;
         });
+        
+        // Connect to thread completion signal for status bar updates
+        connect(m_threadMonitor, &ThreadMonitorWidget::threadCompleted, 
+                [this](const QString& threadName, const QString& threadInfo) {
+                    statusBar()->showMessage(
+                        tr("Thread '%1' completed: %2").arg(threadName).arg(threadInfo), 
+                        10000);  // Show for 10 seconds
+                });
     }
     
     // Show and raise the window
@@ -842,10 +850,11 @@ void MainWindow::setupStatusBar()
     m_threadProgressBar->hide();
     
     // Register callback for thread changes
+    // Use QMetaObject::invokeMethod to ensure UI updates happen on the main thread
     m_connections.push_back(
         cvc::app::instance().threadsChanged.connect(
             [this](const std::string&) {
-                updateThreadStatus();
+                QMetaObject::invokeMethod(this, "updateThreadStatus", Qt::QueuedConnection);
             }
         )
     );
@@ -864,21 +873,68 @@ void MainWindow::updateThreadStatus()
         m_threadNameLabel->hide();
         m_threadInfoLabel->hide();
         m_threadProgressBar->hide();
-        statusBar()->clearMessage();
+        // Don't clear message - let completion messages persist
     } else {
-        // Find the most recently updated thread (last in the map)
-        auto lastThread = threads.rbegin();
-        std::string threadKey = lastThread->first;
-        auto threadPtr = lastThread->second;
+        // Find the best thread to display:
+        // 1. Prefer running threads (progress < 1.0)
+        // 2. Otherwise show the most recent thread
+        std::string displayThreadKey;
+        double displayProgress = -1.0;
+        bool hasRunningThread = false;
+        
+        for (const auto& entry : threads) {
+            const std::string& threadKey = entry.first;
+            const cvc::thread_ptr& threadPtr = entry.second;
+            
+            if (!threadPtr) continue;
+            
+            double progress = cvc::app::instance().threadProgress(threadKey);
+            bool isComplete = (progress >= 1.0) || !threadPtr->joinable();
+            
+            if (!isComplete) {
+                // Found a running thread - prefer this
+                if (!hasRunningThread || progress > displayProgress) {
+                    displayThreadKey = threadKey;
+                    displayProgress = progress;
+                    hasRunningThread = true;
+                }
+            } else if (!hasRunningThread) {
+                // No running threads yet, track completed ones
+                displayThreadKey = threadKey;
+                displayProgress = progress;
+            }
+        }
+        
+        if (displayThreadKey.empty()) {
+            // Fallback to first thread
+            displayThreadKey = threads.begin()->first;
+            displayProgress = cvc::app::instance().threadProgress(displayThreadKey);
+        }
         
         // Get thread info
-        std::string info = cvc::app::instance().threadInfo(threadKey);
-        double progress = cvc::app::instance().threadProgress(threadKey);
+        std::string info = cvc::app::instance().threadInfo(displayThreadKey);
+        
+        // Add status indicator
+        auto threadPtr = threads[displayThreadKey];
+        bool isComplete = (displayProgress >= 1.0) || (threadPtr && !threadPtr->joinable());
+        if (isComplete) {
+            if (info.empty()) info = "completed";
+            else info += " (completed)";
+        } else if (info.empty()) {
+            info = "running...";
+        }
         
         // Update status bar widgets
-        m_threadNameLabel->setText(QString::fromStdString(threadKey));
+        m_threadNameLabel->setText(QString::fromStdString(displayThreadKey));
         m_threadInfoLabel->setText(QString::fromStdString(info));
-        m_threadProgressBar->setValue(static_cast<int>(progress * 100.0));
+        m_threadProgressBar->setValue(static_cast<int>(displayProgress * 100.0));
+        
+        // Color the progress bar based on status
+        if (isComplete) {
+            m_threadProgressBar->setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }");
+        } else {
+            m_threadProgressBar->setStyleSheet("");  // Default color
+        }
         
         // Show widgets
         m_threadNameLabel->show();

@@ -9,6 +9,7 @@
 #include <QElapsedTimer>
 #include <boost/signals2/connection.hpp>
 #include <cvc/app.h>
+#include <map>
 
 class ThreadMonitorWidget : public QWidget
 {
@@ -18,10 +19,15 @@ public:
     explicit ThreadMonitorWidget(QWidget *parent = nullptr);
     ~ThreadMonitorWidget();
 
+signals:
+    // Emitted when a thread completes, with thread name and info for status bar
+    void threadCompleted(const QString& threadName, const QString& threadInfo);
+
 public slots:
     void requestUpdate();
     void performUpdate();
     void cancelThread(const std::string& threadKey);
+    void cleanupCompletedThreads();
 
 private:
     void setupUI();
@@ -32,8 +38,13 @@ private:
     
     QTableWidget* m_threadTable;
     QTimer* m_updateTimer;
+    QTimer* m_cleanupTimer;  // Timer to remove completed threads after delay
     QElapsedTimer m_lastUpdateTime;
     bool m_updatePending;
+    
+    // Track when threads completed (thread key -> completion timestamp)
+    std::map<std::string, qint64> m_completedThreads;
+    static const int CLEANUP_DELAY_MS = 60000;  // Remove completed threads after 60 seconds
     
     // Callback connections for cleanup
     std::vector<boost::signals2::connection> m_connections;

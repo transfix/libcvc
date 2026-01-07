@@ -11,6 +11,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
 class QGroupBox;
+class QTableWidget;
 class SceneGraph;
 
 class GeometryDialog : public QDialog
@@ -26,6 +27,7 @@ private slots:
     void onGraphicsChildrenChanged();
     void onRenderModeChanged(int index);
     void onColorChanged();
+    void onSingleColorChanged(bool checked);
     void onMaterialPropertyChanged();
     void onDeleteButtonClicked();
     void onNodeStateChanged();
@@ -45,9 +47,13 @@ private:
     QComboBox *m_renderModeComboBox;
     
     // Color controls
+    QCheckBox *m_singleColorCheckBox;
     QDoubleSpinBox *m_colorRSpinBox;
     QDoubleSpinBox *m_colorGSpinBox;
     QDoubleSpinBox *m_colorBSpinBox;
+    
+    // Info tab
+    QTableWidget *m_infoTable;
     
     // Material properties
     QDoubleSpinBox *m_ambientSpinBox;
