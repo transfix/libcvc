@@ -38,6 +38,7 @@ private slots:
     void onBBoxColorChanged();
     void onShowExtentLabelsChanged(bool checked);
     void onExtentLabelColorChanged();
+    void onExtentLabelFontSizeChanged(int size);
     void onInvertNormalsClicked();
     void onReorientClicked();
     void onProjectClicked();
@@ -78,6 +79,7 @@ private:
     // Extent label controls
     QCheckBox *m_showExtentLabelsCheckBox;
     QPushButton *m_extentLabelColorButton;
+    QSpinBox *m_extentLabelFontSizeSpinBox;
     double m_extentLabelColor[3];
     
     // Geometry operations buttons

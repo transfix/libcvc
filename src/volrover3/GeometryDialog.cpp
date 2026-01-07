@@ -296,6 +296,17 @@ void GeometryDialog::setupUI()
     extentLabelColorLayout->addStretch();
     bboxLayout->addLayout(extentLabelColorLayout);
     
+    QHBoxLayout *extentLabelFontSizeLayout = new QHBoxLayout();
+    extentLabelFontSizeLayout->addWidget(new QLabel(tr("Font Size:"), this));
+    m_extentLabelFontSizeSpinBox = new QSpinBox(this);
+    m_extentLabelFontSizeSpinBox->setObjectName("extentLabelFontSizeSpinBox");
+    m_extentLabelFontSizeSpinBox->setRange(8, 72);
+    m_extentLabelFontSizeSpinBox->setValue(12);
+    m_extentLabelFontSizeSpinBox->setToolTip(tr("Set the font size for extent labels"));
+    extentLabelFontSizeLayout->addWidget(m_extentLabelFontSizeSpinBox);
+    extentLabelFontSizeLayout->addStretch();
+    bboxLayout->addLayout(extentLabelFontSizeLayout);
+    
     renderingLayout->addWidget(bboxGroup);
     renderingLayout->addStretch();
     
@@ -503,6 +514,8 @@ void GeometryDialog::connectSignals()
             this, &GeometryDialog::onShowExtentLabelsChanged);
     connect(m_extentLabelColorButton, &QPushButton::clicked,
             this, &GeometryDialog::onExtentLabelColorChanged);
+    connect(m_extentLabelFontSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &GeometryDialog::onExtentLabelFontSizeChanged);
     
     // Geometry operations signals
     connect(m_invertNormalsButton, &QPushButton::clicked,
@@ -704,6 +717,16 @@ void GeometryDialog::updatePropertiesFromNode()
         m_extentLabelColor[0] = m_extentLabelColor[1] = m_extentLabelColor[2] = 1.0; // Default to white
     }
     updateExtentLabelColorButton();
+    
+    // Update extent label font size
+    try { 
+        int fontSize = geomNode->getState("extent_label_font_size").value<int>(); 
+        m_extentLabelFontSizeSpinBox->setValue(fontSize); 
+    } catch (const std::exception&) { 
+        m_extentLabelFontSizeSpinBox->setValue(12); // Default font size
+    } catch (...) { 
+        m_extentLabelFontSizeSpinBox->setValue(12); // Default font size
+    }
     
     // Update info table with metadata
     m_infoTable->setRowCount(0);
@@ -1007,6 +1030,21 @@ void GeometryDialog::updateExtentLabelColorButton()
     int b = static_cast<int>(m_extentLabelColor[2] * 255);
     QString style = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
     m_extentLabelColorButton->setStyleSheet(style);
+}
+
+void GeometryDialog::onExtentLabelFontSizeChanged(int size)
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    
+    if (!graphicsNode) return;
+    
+    graphicsNode->setExtentLabelFontSize(size);
 }
 
 void GeometryDialog::onInvertNormalsClicked()

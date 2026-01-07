@@ -140,6 +140,8 @@ public:
     bool getShowExtentLabels() const;
     void setExtentLabelColor(double r, double g, double b);
     void getExtentLabelColor(double& r, double& g, double& b) const;
+    void setExtentLabelFontSize(int size);
+    int getExtentLabelFontSize() const;
     
     // Clipping plane control
     void setClipChildren(bool clip);

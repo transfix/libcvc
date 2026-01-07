@@ -786,6 +786,24 @@ void GraphicsNode::getExtentLabelColor(double& r, double& g, double& b) const
     }
 }
 
+void GraphicsNode::setExtentLabelFontSize(int size)
+{
+    // Update state tree value
+    getState("extent_label_font_size").value(size);
+    
+    if (m_bboxNode) {
+        m_bboxNode->setCoordinateLabelFontSize(size);
+    }
+}
+
+int GraphicsNode::getExtentLabelFontSize() const
+{
+    if (m_bboxNode) {
+        return m_bboxNode->getCoordinateLabelFontSize();
+    }
+    return 12; // Default font size
+}
+
 void GraphicsNode::setShowLabel(bool show)
 {
     if (m_showLabel == show)
