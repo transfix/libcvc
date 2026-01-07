@@ -4934,7 +4934,7 @@ TEST(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh)
 // Normal Inversion Tests
 // ============================================================================
 
-TEST(AlgorithmTest, InvertNormalsBasic)
+TEST(GeometryMethodTest, InvertNormalsBasic)
 {
   // Create a simple geometry with known normals
   geometry geom;
@@ -4955,8 +4955,8 @@ TEST(AlgorithmTest, InvertNormalsBasic)
   // Store original normals
   auto original_normals = geom.normals();
   
-  // Invert normals
-  invert_normals(geom);
+  // Invert normals using geometry method
+  geom.invert_normals();
   
   // Check that normals are inverted
   for(size_t i = 0; i < geom.normals().size(); i++) {
@@ -4966,7 +4966,7 @@ TEST(AlgorithmTest, InvertNormalsBasic)
   }
   
   // Invert again - should restore original
-  invert_normals(geom);
+  geom.invert_normals();
   
   for(size_t i = 0; i < geom.normals().size(); i++) {
     EXPECT_DOUBLE_EQ(geom.normals()[i][0], original_normals[i][0]);
@@ -4975,7 +4975,7 @@ TEST(AlgorithmTest, InvertNormalsBasic)
   }
 }
 
-TEST(AlgorithmTest, InvertNormalsBunny)
+TEST(GeometryMethodTest, InvertNormalsBunny)
 {
   // Load the bunny and test normal inversion
   geometry bunny = read_geometry("test.bunny");
@@ -4985,8 +4985,8 @@ TEST(AlgorithmTest, InvertNormalsBunny)
   // Store original normals
   auto original_normals = bunny.normals();
   
-  // Invert normals
-  invert_normals(bunny);
+  // Invert normals using geometry method
+  bunny.invert_normals();
   
   // Check that all normals are inverted
   for(size_t i = 0; i < bunny.normals().size(); i++) {
@@ -4996,7 +4996,7 @@ TEST(AlgorithmTest, InvertNormalsBunny)
   }
   
   // Double inversion should restore original
-  invert_normals(bunny);
+  bunny.invert_normals();
   
   for(size_t i = 0; i < bunny.normals().size(); i++) {
     EXPECT_DOUBLE_EQ(bunny.normals()[i][0], original_normals[i][0]);
@@ -5005,13 +5005,13 @@ TEST(AlgorithmTest, InvertNormalsBunny)
   }
 }
 
-TEST(AlgorithmTest, InvertNormalsEmpty)
+TEST(GeometryMethodTest, InvertNormalsEmpty)
 {
   // Test with empty geometry
   geometry geom;
   
   // Should not crash on empty geometry
-  EXPECT_NO_THROW(invert_normals(geom));
+  EXPECT_NO_THROW(geom.invert_normals());
   EXPECT_TRUE(geom.normals().empty());
 }
 

@@ -9,6 +9,7 @@
 
 class QComboBox;
 class QDoubleSpinBox;
+class QSpinBox;
 class QCheckBox;
 class QGroupBox;
 class QTableWidget;
@@ -36,6 +37,10 @@ private slots:
     void onShowBBoxChanged(bool checked);
     void onBBoxColorChanged();
     void onInvertNormalsClicked();
+    void onReorientClicked();
+    void onProjectClicked();
+    void onSmoothingClicked();
+    void onQualityImproveClicked();
 
 private:
     void setupUI();
@@ -44,6 +49,7 @@ private:
     void updatePropertiesFromNode();
     void setPropertiesEnabled(bool enabled);
     void updateBBoxColorButton();
+    void setOperationButtonsEnabled(bool enabled);
 
     std::shared_ptr<SceneGraph> m_sceneGraph;
     
@@ -66,8 +72,21 @@ private:
     QPushButton *m_bboxColorButton;
     double m_bboxColor[3];
     
-    // Invert normals button
+    // Geometry operations buttons
     QPushButton *m_invertNormalsButton;
+    QPushButton *m_reorientButton;
+    QPushButton *m_projectButton;
+    QComboBox *m_projectTargetComboBox;
+    QPushButton *m_smoothingButton;
+    QDoubleSpinBox *m_smoothingDeltaSpinBox;
+    QCheckBox *m_smoothingFixBoundaryCheckBox;
+    QCheckBox *m_smoothingPerturb1CheckBox;
+    QCheckBox *m_smoothingGeoFlowCheckBox;
+    QCheckBox *m_smoothingEnabledCheckBox;
+    QCheckBox *m_smoothingPerturb2CheckBox;
+    QPushButton *m_qualityImproveButton;
+    QSpinBox *m_qualityIterationsSpinBox;
+    QComboBox *m_qualityMethodComboBox;
     
     // Info tab
     QTableWidget *m_infoTable;

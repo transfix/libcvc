@@ -5,12 +5,15 @@
 #include <cvc/geometry.h>
 #include <cvc/algorithm.h>
 #include <cvc/state.h>
+#include <cvc/app.h>
+#include <cvc/types.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QCheckBox>
 #include <QLabel>
 #include <QPushButton>
@@ -34,6 +37,19 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     , m_showBBoxCheckBox(nullptr)
     , m_bboxColorButton(nullptr)
     , m_invertNormalsButton(nullptr)
+    , m_reorientButton(nullptr)
+    , m_projectButton(nullptr)
+    , m_projectTargetComboBox(nullptr)
+    , m_smoothingButton(nullptr)
+    , m_smoothingDeltaSpinBox(nullptr)
+    , m_smoothingFixBoundaryCheckBox(nullptr)
+    , m_smoothingPerturb1CheckBox(nullptr)
+    , m_smoothingGeoFlowCheckBox(nullptr)
+    , m_smoothingEnabledCheckBox(nullptr)
+    , m_smoothingPerturb2CheckBox(nullptr)
+    , m_qualityImproveButton(nullptr)
+    , m_qualityIterationsSpinBox(nullptr)
+    , m_qualityMethodComboBox(nullptr)
     , m_ambientSpinBox(nullptr)
     , m_diffuseSpinBox(nullptr)
     , m_specularSpinBox(nullptr)
@@ -262,18 +278,132 @@ void GeometryDialog::setupUI()
     bboxLayout->addLayout(bboxColorLayout);
     
     renderingLayout->addWidget(bboxGroup);
+    renderingLayout->addStretch();
     
-    // Geometry Operations Group
-    QGroupBox *operationsGroup = new QGroupBox(tr("Geometry Operations"), renderingTab);
-    QVBoxLayout *operationsLayout = new QVBoxLayout(operationsGroup);
+    // === Operations Tab ===
+    QWidget *operationsTab = new QWidget();
+    QVBoxLayout *operationsTabLayout = new QVBoxLayout(operationsTab);
     
+    // Normals Group
+    QGroupBox *normalsGroup = new QGroupBox(tr("Normals"), operationsTab);
+    QVBoxLayout *normalsLayout = new QVBoxLayout(normalsGroup);
+    
+    // Invert Normals button
     m_invertNormalsButton = new QPushButton(tr("Invert Normals"), this);
     m_invertNormalsButton->setObjectName("invertNormalsButton");
     m_invertNormalsButton->setToolTip(tr("Invert all vertex and face normals of this geometry"));
-    operationsLayout->addWidget(m_invertNormalsButton);
+    normalsLayout->addWidget(m_invertNormalsButton);
     
-    renderingLayout->addWidget(operationsGroup);
-    renderingLayout->addStretch();
+    // Reorient button
+    m_reorientButton = new QPushButton(tr("Reorient"), this);
+    m_reorientButton->setObjectName("reorientButton");
+    m_reorientButton->setToolTip(tr("Make normals consistent across the mesh"));
+    normalsLayout->addWidget(m_reorientButton);
+    
+    operationsTabLayout->addWidget(normalsGroup);
+    
+    // Project Group
+    QGroupBox *projectGroup = new QGroupBox(tr("Projection"), operationsTab);
+    QVBoxLayout *projectGroupLayout = new QVBoxLayout(projectGroup);
+    
+    QHBoxLayout *projectLayout = new QHBoxLayout();
+    m_projectButton = new QPushButton(tr("Project"), this);
+    m_projectButton->setObjectName("projectButton");
+    m_projectButton->setToolTip(tr("Project boundary vertices to target geometry"));
+    projectLayout->addWidget(m_projectButton);
+    projectLayout->addWidget(new QLabel(tr("Target:"), this));
+    m_projectTargetComboBox = new QComboBox(this);
+    m_projectTargetComboBox->setObjectName("projectTargetComboBox");
+    m_projectTargetComboBox->setToolTip(tr("Select target geometry for projection"));
+    projectLayout->addWidget(m_projectTargetComboBox, 1);
+    projectGroupLayout->addLayout(projectLayout);
+    
+    operationsTabLayout->addWidget(projectGroup);
+    
+    // Smoothing Group
+    QGroupBox *smoothingGroup = new QGroupBox(tr("Smoothing"), operationsTab);
+    QVBoxLayout *smoothingGroupLayout = new QVBoxLayout(smoothingGroup);
+    
+    // Smoothing section - first row with button and delta
+    QHBoxLayout *smoothingLayout = new QHBoxLayout();
+    m_smoothingButton = new QPushButton(tr("Smooth"), this);
+    m_smoothingButton->setObjectName("smoothingButton");
+    m_smoothingButton->setToolTip(tr("Apply smoothing to the mesh"));
+    smoothingLayout->addWidget(m_smoothingButton);
+    smoothingLayout->addWidget(new QLabel(tr("Delta:"), this));
+    m_smoothingDeltaSpinBox = new QDoubleSpinBox(this);
+    m_smoothingDeltaSpinBox->setObjectName("smoothingDeltaSpinBox");
+    m_smoothingDeltaSpinBox->setRange(0.001, 1.0);
+    m_smoothingDeltaSpinBox->setSingleStep(0.01);
+    m_smoothingDeltaSpinBox->setValue(0.1);
+    m_smoothingDeltaSpinBox->setDecimals(3);
+    m_smoothingDeltaSpinBox->setToolTip(tr("Smoothing delta parameter (default 0.1)"));
+    smoothingLayout->addWidget(m_smoothingDeltaSpinBox);
+    smoothingLayout->addStretch();
+    smoothingGroupLayout->addLayout(smoothingLayout);
+    
+    // Smoothing options - second row with checkboxes
+    QHBoxLayout *smoothingOptionsLayout = new QHBoxLayout();
+    m_smoothingFixBoundaryCheckBox = new QCheckBox(tr("Fix Boundary"), this);
+    m_smoothingFixBoundaryCheckBox->setObjectName("smoothingFixBoundaryCheckBox");
+    m_smoothingFixBoundaryCheckBox->setToolTip(tr("Keep boundary vertices fixed during smoothing"));
+    smoothingOptionsLayout->addWidget(m_smoothingFixBoundaryCheckBox);
+    m_smoothingPerturb1CheckBox = new QCheckBox(tr("Perturb 1"), this);
+    m_smoothingPerturb1CheckBox->setObjectName("smoothingPerturb1CheckBox");
+    m_smoothingPerturb1CheckBox->setToolTip(tr("Apply initial perturbation before smoothing"));
+    smoothingOptionsLayout->addWidget(m_smoothingPerturb1CheckBox);
+    m_smoothingGeoFlowCheckBox = new QCheckBox(tr("Geo Flow"), this);
+    m_smoothingGeoFlowCheckBox->setObjectName("smoothingGeoFlowCheckBox");
+    m_smoothingGeoFlowCheckBox->setChecked(true);  // Default enabled
+    m_smoothingGeoFlowCheckBox->setToolTip(tr("Apply geometric flow smoothing"));
+    smoothingOptionsLayout->addWidget(m_smoothingGeoFlowCheckBox);
+    m_smoothingEnabledCheckBox = new QCheckBox(tr("Smooth"), this);
+    m_smoothingEnabledCheckBox->setObjectName("smoothingEnabledCheckBox");
+    m_smoothingEnabledCheckBox->setChecked(true);  // Default enabled
+    m_smoothingEnabledCheckBox->setToolTip(tr("Apply smoothing pass"));
+    smoothingOptionsLayout->addWidget(m_smoothingEnabledCheckBox);
+    m_smoothingPerturb2CheckBox = new QCheckBox(tr("Perturb 2"), this);
+    m_smoothingPerturb2CheckBox->setObjectName("smoothingPerturb2CheckBox");
+    m_smoothingPerturb2CheckBox->setToolTip(tr("Apply final perturbation after smoothing"));
+    smoothingOptionsLayout->addWidget(m_smoothingPerturb2CheckBox);
+    smoothingOptionsLayout->addStretch();
+    smoothingGroupLayout->addLayout(smoothingOptionsLayout);
+    
+    operationsTabLayout->addWidget(smoothingGroup);
+    
+    // Quality Improve Group
+    QGroupBox *qualityGroup = new QGroupBox(tr("Quality Improvement"), operationsTab);
+    QVBoxLayout *qualityGroupLayout = new QVBoxLayout(qualityGroup);
+    
+    QHBoxLayout *qualityLayout = new QHBoxLayout();
+    m_qualityImproveButton = new QPushButton(tr("Quality Improve"), this);
+    m_qualityImproveButton->setObjectName("qualityImproveButton");
+    m_qualityImproveButton->setToolTip(tr("Improve mesh quality"));
+    qualityLayout->addWidget(m_qualityImproveButton);
+    qualityLayout->addWidget(new QLabel(tr("Iters:"), this));
+    m_qualityIterationsSpinBox = new QSpinBox(this);
+    m_qualityIterationsSpinBox->setObjectName("qualityIterationsSpinBox");
+    m_qualityIterationsSpinBox->setRange(1, 100);
+    m_qualityIterationsSpinBox->setValue(1);
+    m_qualityIterationsSpinBox->setToolTip(tr("Number of improvement iterations"));
+    qualityLayout->addWidget(m_qualityIterationsSpinBox);
+    qualityLayout->addWidget(new QLabel(tr("Method:"), this));
+    m_qualityMethodComboBox = new QComboBox(this);
+    m_qualityMethodComboBox->setObjectName("qualityMethodComboBox");
+    m_qualityMethodComboBox->addItem(tr("No Improve"), 0);
+    m_qualityMethodComboBox->addItem(tr("Geo Flow"), 1);
+    m_qualityMethodComboBox->addItem(tr("Edge Contract"), 2);
+    m_qualityMethodComboBox->addItem(tr("Joe Liu"), 3);
+    m_qualityMethodComboBox->addItem(tr("Minimal Vol"), 4);
+    m_qualityMethodComboBox->addItem(tr("Optimization"), 5);
+    m_qualityMethodComboBox->setCurrentIndex(1);  // Default to Geo Flow
+    m_qualityMethodComboBox->setToolTip(tr("Select mesh improvement method"));
+    qualityLayout->addWidget(m_qualityMethodComboBox);
+    qualityLayout->addStretch();
+    qualityGroupLayout->addLayout(qualityLayout);
+    
+    operationsTabLayout->addWidget(qualityGroup);
+    operationsTabLayout->addStretch();
     
     // === Info Tab ===
     QWidget *infoTab = new QWidget();
@@ -298,6 +428,7 @@ void GeometryDialog::setupUI()
     tabWidget->addTab(appearanceTab, tr("Appearance"));
     tabWidget->addTab(materialTab, tr("Material"));
     tabWidget->addTab(renderingTab, tr("Rendering"));
+    tabWidget->addTab(operationsTab, tr("Operations"));
     tabWidget->addTab(infoTab, tr("Info"));
     
     mainLayout->addWidget(tabWidget);
@@ -350,14 +481,23 @@ void GeometryDialog::connectSignals()
     connect(m_bboxColorButton, &QPushButton::clicked,
             this, &GeometryDialog::onBBoxColorChanged);
     
-    // Invert normals signal
+    // Geometry operations signals
     connect(m_invertNormalsButton, &QPushButton::clicked,
             this, &GeometryDialog::onInvertNormalsClicked);
+    connect(m_reorientButton, &QPushButton::clicked,
+            this, &GeometryDialog::onReorientClicked);
+    connect(m_projectButton, &QPushButton::clicked,
+            this, &GeometryDialog::onProjectClicked);
+    connect(m_smoothingButton, &QPushButton::clicked,
+            this, &GeometryDialog::onSmoothingClicked);
+    connect(m_qualityImproveButton, &QPushButton::clicked,
+            this, &GeometryDialog::onQualityImproveClicked);
 }
 
 void GeometryDialog::populateGeometryList()
 {
     m_geometryComboBox->clear();
+    m_projectTargetComboBox->clear();
     m_geometryNames.clear();
     
     if (!m_sceneGraph) return;
@@ -370,6 +510,7 @@ void GeometryDialog::populateGeometryList()
             std::string name = geomNode->getName();
             m_geometryNames.push_back(name);
             m_geometryComboBox->addItem(QString::fromStdString(name));
+            m_projectTargetComboBox->addItem(QString::fromStdString(name));
         }
     }
     
@@ -687,7 +828,25 @@ void GeometryDialog::setPropertiesEnabled(bool enabled)
     m_visibilityCheckBox->setEnabled(enabled);
     m_showBBoxCheckBox->setEnabled(enabled);
     m_bboxColorButton->setEnabled(enabled);
+    setOperationButtonsEnabled(enabled);
+}
+
+void GeometryDialog::setOperationButtonsEnabled(bool enabled)
+{
     m_invertNormalsButton->setEnabled(enabled);
+    m_reorientButton->setEnabled(enabled);
+    m_projectButton->setEnabled(enabled);
+    m_projectTargetComboBox->setEnabled(enabled);
+    m_smoothingButton->setEnabled(enabled);
+    m_smoothingDeltaSpinBox->setEnabled(enabled);
+    m_smoothingFixBoundaryCheckBox->setEnabled(enabled);
+    m_smoothingPerturb1CheckBox->setEnabled(enabled);
+    m_smoothingGeoFlowCheckBox->setEnabled(enabled);
+    m_smoothingEnabledCheckBox->setEnabled(enabled);
+    m_smoothingPerturb2CheckBox->setEnabled(enabled);
+    m_qualityImproveButton->setEnabled(enabled);
+    m_qualityIterationsSpinBox->setEnabled(enabled);
+    m_qualityMethodComboBox->setEnabled(enabled);
 }
 
 void GeometryDialog::onVisibilityChanged(bool checked)
@@ -768,12 +927,355 @@ void GeometryDialog::onInvertNormalsClicked()
     
     if (!geomNode || !geomNode->getGeometry()) return;
     
-    // Get the geometry, invert normals, and set it back
+    // Get a copy of the geometry for thread-safe operation
     cvc::geometry geom = *geomNode->getGeometry();
     
-    // Invert the normals using the algorithm function
-    cvc::invert_normals(geom);
+    // Create unique thread key
+    std::string threadKey = "invert_normals_" + geomName;
     
-    // Set the modified geometry back to the node
-    geomNode->setGeometry(geom);
+    // Disable button while processing
+    m_invertNormalsButton->setEnabled(false);
+    
+    // Start the operation in a background thread
+    cvc::app::instance().startThread(
+        threadKey,
+        [this, geom, geomName, threadKey]() mutable {
+            // Use thread_feedback for proper progress tracking
+            cvc::app::thread_feedback feedback(threadKey);
+            
+            try {
+                cvc::app::instance().threadProgress(threadKey, 0.1);
+                cvc::app::instance().threadInfo(threadKey, "Inverting normals...");
+                
+                // Perform the normal inversion
+                geom.invert_normals();
+                
+                cvc::app::instance().threadProgress(threadKey, 0.9);
+                cvc::app::instance().threadInfo(threadKey, "Updating scene...");
+                
+                // Post scene update to main thread
+                m_sceneGraph->postEvent([this, geom, geomName, threadKey]() {
+                    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+                    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+                    
+                    if (geomNode) {
+                        geomNode->setGeometry(geom);
+                    }
+                    
+                    cvc::app::instance().finishThreadProgress(threadKey);
+                    
+                    // Re-enable button on Qt thread
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_invertNormalsButton->setEnabled(true);
+                    }, Qt::QueuedConnection);
+                });
+                
+            } catch (const boost::thread_interrupted&) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_invertNormalsButton->setEnabled(true);
+                }, Qt::QueuedConnection);
+            } catch (const std::exception& e) {
+                std::string errorMsg = std::string("Error inverting normals: ") + e.what();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    m_invertNormalsButton->setEnabled(true);
+                    QMessageBox::warning(this, tr("Error"), QString::fromStdString(errorMsg));
+                }, Qt::QueuedConnection);
+            }
+        },
+        false  // Don't wait for existing thread
+    );
+}
+
+void GeometryDialog::onReorientClicked()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (!geomNode || !geomNode->getGeometry()) return;
+    
+    // Get a copy of the geometry for thread-safe operation
+    cvc::geometry geom = *geomNode->getGeometry();
+    
+    // Create unique thread key
+    std::string threadKey = "reorient_" + geomName;
+    
+    // Disable button while processing
+    m_reorientButton->setEnabled(false);
+    
+    // Start the operation in a background thread
+    cvc::app::instance().startThread(
+        threadKey,
+        [this, geom, geomName, threadKey]() mutable {
+            cvc::app::thread_feedback feedback(threadKey);
+            
+            try {
+                cvc::app::instance().threadProgress(threadKey, 0.1);
+                cvc::app::instance().threadInfo(threadKey, "Reorienting mesh...");
+                
+                // Perform the reorient operation
+                geom.reorient();
+                
+                cvc::app::instance().threadProgress(threadKey, 0.9);
+                cvc::app::instance().threadInfo(threadKey, "Updating scene...");
+                
+                // Post scene update to main thread
+                m_sceneGraph->postEvent([this, geom, geomName, threadKey]() {
+                    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+                    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+                    
+                    if (geomNode) {
+                        geomNode->setGeometry(geom);
+                    }
+                    
+                    cvc::app::instance().finishThreadProgress(threadKey);
+                    
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_reorientButton->setEnabled(true);
+                    }, Qt::QueuedConnection);
+                });
+                
+            } catch (const boost::thread_interrupted&) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_reorientButton->setEnabled(true);
+                }, Qt::QueuedConnection);
+            } catch (const std::exception& e) {
+                std::string errorMsg = std::string("Error reorienting: ") + e.what();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    m_reorientButton->setEnabled(true);
+                    QMessageBox::warning(this, tr("Error"), QString::fromStdString(errorMsg));
+                }, Qt::QueuedConnection);
+            }
+        },
+        false
+    );
+}
+
+void GeometryDialog::onProjectClicked()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    int targetIndex = m_projectTargetComboBox->currentIndex();
+    if (targetIndex < 0 || targetIndex >= static_cast<int>(m_geometryNames.size())) return;
+    
+    // Don't project onto self
+    if (index == targetIndex) {
+        QMessageBox::warning(this, tr("Warning"), tr("Cannot project geometry onto itself"));
+        return;
+    }
+    
+    const std::string& geomName = m_geometryNames[index];
+    const std::string& targetName = m_geometryNames[targetIndex];
+    
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    auto targetGraphicsNode = m_sceneGraph->getGraphics(targetName);
+    auto targetGeomNode = std::dynamic_pointer_cast<GeometryNode>(targetGraphicsNode);
+    
+    if (!geomNode || !geomNode->getGeometry() || !targetGeomNode || !targetGeomNode->getGeometry()) return;
+    
+    // Get copies of the geometries
+    cvc::geometry geom = *geomNode->getGeometry();
+    cvc::geometry targetGeom = *targetGeomNode->getGeometry();
+    
+    std::string threadKey = "project_" + geomName;
+    
+    m_projectButton->setEnabled(false);
+    
+    cvc::app::instance().startThread(
+        threadKey,
+        [this, geom, targetGeom, geomName, threadKey]() mutable {
+            cvc::app::thread_feedback feedback(threadKey);
+            
+            try {
+                cvc::app::instance().threadProgress(threadKey, 0.1);
+                cvc::app::instance().threadInfo(threadKey, "Projecting to target geometry...");
+                
+                // Perform the projection
+                geom.project(targetGeom);
+                
+                cvc::app::instance().threadProgress(threadKey, 0.9);
+                cvc::app::instance().threadInfo(threadKey, "Updating scene...");
+                
+                m_sceneGraph->postEvent([this, geom, geomName, threadKey]() {
+                    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+                    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+                    
+                    if (geomNode) {
+                        geomNode->setGeometry(geom);
+                    }
+                    
+                    cvc::app::instance().finishThreadProgress(threadKey);
+                    
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_projectButton->setEnabled(true);
+                    }, Qt::QueuedConnection);
+                });
+                
+            } catch (const boost::thread_interrupted&) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_projectButton->setEnabled(true);
+                }, Qt::QueuedConnection);
+            } catch (const std::exception& e) {
+                std::string errorMsg = std::string("Error projecting: ") + e.what();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    m_projectButton->setEnabled(true);
+                    QMessageBox::warning(this, tr("Error"), QString::fromStdString(errorMsg));
+                }, Qt::QueuedConnection);
+            }
+        },
+        false
+    );
+}
+
+void GeometryDialog::onSmoothingClicked()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (!geomNode || !geomNode->getGeometry()) return;
+    
+    // Get parameters from UI
+    float delta = static_cast<float>(m_smoothingDeltaSpinBox->value());
+    bool fixBoundary = m_smoothingFixBoundaryCheckBox->isChecked();
+    bool perturb1 = m_smoothingPerturb1CheckBox->isChecked();
+    bool geoFlow = m_smoothingGeoFlowCheckBox->isChecked();
+    bool smoothingEnabled = m_smoothingEnabledCheckBox->isChecked();
+    bool perturb2 = m_smoothingPerturb2CheckBox->isChecked();
+    
+    cvc::geometry geom = *geomNode->getGeometry();
+    
+    std::string threadKey = "smoothing_" + geomName;
+    
+    m_smoothingButton->setEnabled(false);
+    
+    cvc::app::instance().startThread(
+        threadKey,
+        [this, geom, delta, fixBoundary, perturb1, geoFlow, smoothingEnabled, perturb2, geomName, threadKey]() mutable {
+            cvc::app::thread_feedback feedback(threadKey);
+            
+            try {
+                cvc::app::instance().threadProgress(threadKey, 0.1);
+                cvc::app::instance().threadInfo(threadKey, "Smoothing mesh...");
+                
+                // Perform the smoothing operation with all parameters
+                geom.smoothing(delta, fixBoundary, perturb1, geoFlow, smoothingEnabled, perturb2);
+                
+                cvc::app::instance().threadProgress(threadKey, 0.9);
+                cvc::app::instance().threadInfo(threadKey, "Updating scene...");
+                
+                m_sceneGraph->postEvent([this, geom, geomName, threadKey]() {
+                    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+                    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+                    
+                    if (geomNode) {
+                        geomNode->setGeometry(geom);
+                    }
+                    
+                    cvc::app::instance().finishThreadProgress(threadKey);
+                    
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_smoothingButton->setEnabled(true);
+                    }, Qt::QueuedConnection);
+                });
+                
+            } catch (const boost::thread_interrupted&) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_smoothingButton->setEnabled(true);
+                }, Qt::QueuedConnection);
+            } catch (const std::exception& e) {
+                std::string errorMsg = std::string("Error smoothing: ") + e.what();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    m_smoothingButton->setEnabled(true);
+                    QMessageBox::warning(this, tr("Error"), QString::fromStdString(errorMsg));
+                }, Qt::QueuedConnection);
+            }
+        },
+        false
+    );
+}
+
+void GeometryDialog::onQualityImproveClicked()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (!geomNode || !geomNode->getGeometry()) return;
+    
+    // Get parameters from UI
+    int iterations = m_qualityIterationsSpinBox->value();
+    int methodInt = m_qualityMethodComboBox->currentData().toInt();
+    cvc::improvement_method method = static_cast<cvc::improvement_method>(methodInt);
+    
+    cvc::geometry geom = *geomNode->getGeometry();
+    
+    std::string threadKey = "quality_improve_" + geomName;
+    
+    m_qualityImproveButton->setEnabled(false);
+    
+    cvc::app::instance().startThread(
+        threadKey,
+        [this, geom, iterations, method, geomName, threadKey]() mutable {
+            cvc::app::thread_feedback feedback(threadKey);
+            
+            try {
+                cvc::app::instance().threadProgress(threadKey, 0.1);
+                cvc::app::instance().threadInfo(threadKey, "Improving mesh quality...");
+                
+                // Perform the quality improvement
+                geom.quality_improve(iterations, method);
+                
+                cvc::app::instance().threadProgress(threadKey, 0.9);
+                cvc::app::instance().threadInfo(threadKey, "Updating scene...");
+                
+                m_sceneGraph->postEvent([this, geom, geomName, threadKey]() {
+                    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+                    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+                    
+                    if (geomNode) {
+                        geomNode->setGeometry(geom);
+                    }
+                    
+                    cvc::app::instance().finishThreadProgress(threadKey);
+                    
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_qualityImproveButton->setEnabled(true);
+                    }, Qt::QueuedConnection);
+                });
+                
+            } catch (const boost::thread_interrupted&) {
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_qualityImproveButton->setEnabled(true);
+                }, Qt::QueuedConnection);
+            } catch (const std::exception& e) {
+                std::string errorMsg = std::string("Error improving quality: ") + e.what();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    m_qualityImproveButton->setEnabled(true);
+                    QMessageBox::warning(this, tr("Error"), QString::fromStdString(errorMsg));
+                }, Qt::QueuedConnection);
+            }
+        },
+        false
+    );
 }

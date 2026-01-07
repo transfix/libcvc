@@ -357,8 +357,12 @@ namespace CVC_NAMESPACE
       if(wait && hasThread(key))
         {
           thread_ptr tptr = threads(key);
-          tptr->interrupt(); //initiate thread quit
-          tptr->join();      //wait for it to quit
+          // Check if tptr is valid - it may have been removed by another thread
+          // between hasThread() and threads() calls (race condition)
+          if(tptr) {
+            tptr->interrupt(); //initiate thread quit
+            tptr->join();      //wait for it to quit
+          }
         }
 
       threads(

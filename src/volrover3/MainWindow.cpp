@@ -51,6 +51,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_geometryDialog(nullptr)
     , m_volumeDialog(nullptr)
     , m_viewerOptionsDialog(nullptr)
+    , m_cameraDialog(nullptr)
     , m_mainToolBar(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
@@ -568,71 +569,85 @@ void MainWindow::editCameraSettings()
     CameraController *camCtrl = m_renderWidget->getCameraController();
     if (!camCtrl) return;
     
-    // Get current settings from AppState
-    CameraSettingsDialog::CameraSettings settings;
-    settings.mode = AppState::instance().cameraMode();
-    settings.flySpeed = AppState::instance().cameraSpeed();
-    settings.mouseSensitivity = AppState::instance().cameraSensitivity();
-    settings.invertMouse = AppState::instance().cameraInvertMouse();
-    settings.keyForward = AppState::instance().cameraKeyForward();
-    settings.keyBackward = AppState::instance().cameraKeyBackward();
-    settings.keyStrafeLeft = AppState::instance().cameraKeyLeft();
-    settings.keyStrafeRight = AppState::instance().cameraKeyRight();
-    settings.keyUp = AppState::instance().cameraKeyUp();
-    settings.keyDown = AppState::instance().cameraKeyDown();
-    
-    CameraSettingsDialog dialog(settings, this);
-    
-    // Connect reset view signal
-    connect(&dialog, &CameraSettingsDialog::resetViewRequested, [this, camCtrl]() {
-        cvc::bounding_box bounds = AppState::instance().worldBounds();
-        camCtrl->resetView(
-            bounds.minx, bounds.miny, bounds.minz,
-            bounds.maxx, bounds.maxy, bounds.maxz
-        );
-        m_renderWidget->render();
-    });
-    
-    if (dialog.exec() == QDialog::Accepted) {
-        CameraSettingsDialog::CameraSettings newSettings = dialog.getSettings();
+    if (!m_cameraDialog) {
+        // Get current settings from AppState for initial setup
+        CameraSettingsDialog::CameraSettings settings;
+        settings.mode = AppState::instance().cameraMode();
+        settings.flySpeed = AppState::instance().cameraSpeed();
+        settings.mouseSensitivity = AppState::instance().cameraSensitivity();
+        settings.invertMouse = AppState::instance().cameraInvertMouse();
+        settings.keyForward = AppState::instance().cameraKeyForward();
+        settings.keyBackward = AppState::instance().cameraKeyBackward();
+        settings.keyStrafeLeft = AppState::instance().cameraKeyLeft();
+        settings.keyStrafeRight = AppState::instance().cameraKeyRight();
+        settings.keyUp = AppState::instance().cameraKeyUp();
+        settings.keyDown = AppState::instance().cameraKeyDown();
         
-        // Save settings to AppState
-        AppState::instance().setCameraMode(newSettings.mode);
-        AppState::instance().setCameraSpeed(newSettings.flySpeed);
-        AppState::instance().setCameraSensitivity(newSettings.mouseSensitivity);
-        AppState::instance().setCameraInvertMouse(newSettings.invertMouse);
-        AppState::instance().setCameraKeyForward(newSettings.keyForward);
-        AppState::instance().setCameraKeyBackward(newSettings.keyBackward);
-        AppState::instance().setCameraKeyLeft(newSettings.keyStrafeLeft);
-        AppState::instance().setCameraKeyRight(newSettings.keyStrafeRight);
-        AppState::instance().setCameraKeyUp(newSettings.keyUp);
-        AppState::instance().setCameraKeyDown(newSettings.keyDown);
+        // Pass camera state tree for live state display (subscribes to childChanged signal)
+        cvc::state& cameraState = camCtrl->getState();
         
-        // Apply settings to controller
-        camCtrl->setMode(static_cast<CameraMode>(newSettings.mode));
-        camCtrl->setMovementSpeed(newSettings.flySpeed);
-        camCtrl->setMouseSensitivity(newSettings.mouseSensitivity);
-        camCtrl->setInvertMouse(newSettings.invertMouse);
-        camCtrl->setKeyBindings(
-            newSettings.keyForward,
-            newSettings.keyBackward,
-            newSettings.keyStrafeLeft,
-            newSettings.keyStrafeRight,
-            newSettings.keyUp,
-            newSettings.keyDown
-        );
+        m_cameraDialog = new CameraSettingsDialog(settings, &cameraState, this);
+        m_cameraDialog->setAttribute(Qt::WA_DeleteOnClose);
         
-        // Update orbit center to world bounds center when switching to orbit mode
-        if (newSettings.mode == 0) {
+        // Connect destroyed signal to reset pointer
+        connect(m_cameraDialog, &QObject::destroyed, [this]() {
+            m_cameraDialog = nullptr;
+        });
+        
+        // Connect reset view signal
+        connect(m_cameraDialog, &CameraSettingsDialog::resetViewRequested, [this, camCtrl]() {
             cvc::bounding_box bounds = AppState::instance().worldBounds();
-            double cx = (bounds[0] + bounds[3]) * 0.5;
-            double cy = (bounds[1] + bounds[4]) * 0.5;
-            double cz = (bounds[2] + bounds[5]) * 0.5;
-            camCtrl->setOrbitCenter(cx, cy, cz);
-        }
+            camCtrl->resetView(
+                bounds.minx, bounds.miny, bounds.minz,
+                bounds.maxx, bounds.maxy, bounds.maxz
+            );
+            m_renderWidget->render();
+        });
         
-        m_renderWidget->render();
+        // Connect settings changed signal for real-time application
+        connect(m_cameraDialog, &CameraSettingsDialog::settingsChanged, [this, camCtrl](const CameraSettingsDialog::CameraSettings& newSettings) {
+            // Save settings to AppState
+            AppState::instance().setCameraMode(newSettings.mode);
+            AppState::instance().setCameraSpeed(newSettings.flySpeed);
+            AppState::instance().setCameraSensitivity(newSettings.mouseSensitivity);
+            AppState::instance().setCameraInvertMouse(newSettings.invertMouse);
+            AppState::instance().setCameraKeyForward(newSettings.keyForward);
+            AppState::instance().setCameraKeyBackward(newSettings.keyBackward);
+            AppState::instance().setCameraKeyLeft(newSettings.keyStrafeLeft);
+            AppState::instance().setCameraKeyRight(newSettings.keyStrafeRight);
+            AppState::instance().setCameraKeyUp(newSettings.keyUp);
+            AppState::instance().setCameraKeyDown(newSettings.keyDown);
+            
+            // Apply settings to controller
+            camCtrl->setMode(static_cast<CameraMode>(newSettings.mode));
+            camCtrl->setMovementSpeed(newSettings.flySpeed);
+            camCtrl->setMouseSensitivity(newSettings.mouseSensitivity);
+            camCtrl->setInvertMouse(newSettings.invertMouse);
+            camCtrl->setKeyBindings(
+                newSettings.keyForward,
+                newSettings.keyBackward,
+                newSettings.keyStrafeLeft,
+                newSettings.keyStrafeRight,
+                newSettings.keyUp,
+                newSettings.keyDown
+            );
+            
+            // Update orbit center to world bounds center when switching to orbit mode
+            if (newSettings.mode == 0) {
+                cvc::bounding_box bounds = AppState::instance().worldBounds();
+                double cx = (bounds[0] + bounds[3]) * 0.5;
+                double cy = (bounds[1] + bounds[4]) * 0.5;
+                double cz = (bounds[2] + bounds[5]) * 0.5;
+                camCtrl->setOrbitCenter(cx, cy, cz);
+            }
+            
+            m_renderWidget->render();
+        });
     }
+    
+    m_cameraDialog->show();
+    m_cameraDialog->raise();
+    m_cameraDialog->activateWindow();
 }
 
 void MainWindow::showGridOptions()

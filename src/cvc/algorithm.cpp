@@ -1187,25 +1187,6 @@ namespace CVC_NAMESPACE
     return surface;
   }
 
-  // --------------
-  // invert_normals
-  // --------------
-  // Purpose:
-  //   Invert (negate) all vertex normals in a geometry.
-  // ---- Change History ----
-  // 01/06/2026 -- Joe R. -- Creation.
-  void invert_normals(geometry& geom)
-  {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Invert all vertex normals
-    for (auto& normal : geom.normals()) {
-      normal[0] = -normal[0];
-      normal[1] = -normal[1];
-      normal[2] = -normal[2];
-    }
-  }
-
   // ---------------------------------------
   // Volumetric Property Interpolation
   // ---------------------------------------

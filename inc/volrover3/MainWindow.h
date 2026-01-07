@@ -21,6 +21,7 @@ class IsosurfaceDialog;
 class GeometryDialog;
 class VolumeDialog;
 class ViewerOptionsDialog;
+class CameraSettingsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -70,6 +71,7 @@ private:
     GeometryDialog *m_geometryDialog;
     VolumeDialog *m_volumeDialog;
     ViewerOptionsDialog *m_viewerOptionsDialog;
+    CameraSettingsDialog *m_cameraDialog;
 
     // Toolbar
     QToolBar *m_mainToolBar;

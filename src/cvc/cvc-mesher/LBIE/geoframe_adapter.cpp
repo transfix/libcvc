@@ -513,15 +513,25 @@ geoframe to_geoframe(const CVC_NAMESPACE::geometry& geom)
 {
   geoframe gf;
   
-  const auto& points = geom.const_points();
-  const auto& normals = geom.const_normals();
-  const auto& colors = geom.const_colors();
-  const auto& curvatures = geom.const_curvatures();
-  const auto& functions = geom.const_functions();
-  const auto& tris = geom.const_tris();
-  const auto& quads = geom.const_quads();
-  const auto& tets = geom.const_tets();
-  const auto& hexs = geom.const_hexs();
+  // Create working copy of geometry to ensure normals are computed
+  CVC_NAMESPACE::geometry working_geom(geom);
+  
+  // Ensure normals are computed if we have triangles or quads
+  const auto& normals = working_geom.const_normals();
+  const auto& tris = working_geom.const_tris();
+  const auto& quads = working_geom.const_quads();
+  
+  if (normals.size() < working_geom.num_points() && (!tris.empty() || !quads.empty())) {
+    working_geom.compute_normals();
+  }
+  
+  const auto& points = working_geom.const_points();
+  const auto& computed_normals = working_geom.const_normals();
+  const auto& colors = working_geom.const_colors();
+  const auto& curvatures = working_geom.const_curvatures();
+  const auto& functions = working_geom.const_functions();
+  const auto& tets = working_geom.const_tets();
+  const auto& hexs = working_geom.const_hexs();
   
   // Copy vertex data
   gf.numverts = points.size();
@@ -536,12 +546,12 @@ geoframe to_geoframe(const CVC_NAMESPACE::geometry& geom)
   // Quality improvement algorithms need this initialized
   gf.bound_sign.resize(gf.numverts, 0);
   
-  // Copy normals
-  if (normals.size() >= points.size()) {
+  // Copy normals (now guaranteed to exist if we have triangles/quads)
+  if (computed_normals.size() >= points.size()) {
     gf.normals.resize(gf.numverts);
-    for (size_t i = 0; i < normals.size() && i < points.size(); ++i) {
+    for (size_t i = 0; i < computed_normals.size() && i < points.size(); ++i) {
       for (int j = 0; j < 3; ++j) {
-        gf.normals[i][j] = static_cast<float>(normals[i][j]);
+        gf.normals[i][j] = static_cast<float>(computed_normals[i][j]);
       }
     }
   }

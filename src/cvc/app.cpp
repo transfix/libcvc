@@ -600,8 +600,13 @@ namespace CVC_NAMESPACE
   {
     boost::this_thread::interruption_point();
 
-    if(hasThread(key))
-      threads(key)->interrupt();
+    if(hasThread(key)) {
+      thread_ptr tptr = threads(key);
+      // Check if tptr is valid - it may have been removed by another thread
+      // between hasThread() and threads() calls (race condition)
+      if(tptr)
+        tptr->interrupt();
+    }
 
     {
       boost::mutex::scoped_lock lock(_threadsMutex);
@@ -716,22 +721,41 @@ namespace CVC_NAMESPACE
       boost::mutex::scoped_lock lock(_threadsMutex);
 
       boost::thread::id tid;
+      std::string threadKey = key;
+      
       if(key.empty())
+      {
+        // No key provided - use current thread ID to find the key
         tid = boost::this_thread::get_id();
+        
+        // Look up the key from thread ID
+        if(_threadKeys.find(tid) != _threadKeys.end())
+          threadKey = _threadKeys[tid];
+      }
       else if(_threads.find(key)!=_threads.end() &&
               _threads[key])
       {
         tid = _threads[key]->get_id();
-        // Store 100% in the persistent key-based map
-        // This allows querying progress even after thread exits
-        _threadProgressByKey[key] = 1.0;
       }
       else
+      {
+        // Thread not found - nothing to clean up
         return;
-
-      // Set progress to 100% instead of erasing it
-      // This allows the UI to show the thread as completed
-      _threadProgress[tid] = 1.0;
+      }
+      
+      // Store 100% in the persistent key-based map
+      if(!threadKey.empty())
+      {
+        _threadProgressByKey[threadKey] = 1.0;
+        
+        // Clean up the thread from the map since it's finished
+        _threads.erase(threadKey);
+      }
+      
+      // Clean up by thread ID
+      _threadKeys.erase(tid);
+      _threadProgress.erase(tid);
+      _threadInfo.erase(tid);
     }
     threadsChanged(key);
   }
