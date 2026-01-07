@@ -396,12 +396,21 @@ void SDFDialog::onComputeClicked()
     // Start computation in background thread
     cvc::app::instance().startThread(
         m_activeThreadKey,
-        [this, geom, dim, bbox, algorithm, flipNormals, geomName]() {
-            cvc::thread_info ti("SDF Computation");
+        [this, geom, dim, bbox, algorithm, flipNormals, geomName, activeKey = m_activeThreadKey]() {
+            // Use thread_feedback for proper progress tracking (must be at thread entry point)
+            cvc::app::thread_feedback feedback(activeKey);
             
             try {
+                // Update progress to indicate we've started
+                cvc::app::instance().threadProgress(activeKey, 0.1);
+                cvc::app::instance().threadInfo(activeKey, "Computing SDF...");
+                
                 // Compute SDF (this is safe to do in background thread)
                 cvc::volume sdfVol = cvc::sdf(geom, dim, bbox, algorithm, flipNormals);
+                
+                // Update progress
+                cvc::app::instance().threadProgress(activeKey, 0.9);
+                cvc::app::instance().threadInfo(activeKey, "Adding volume to scene...");
                 
                 // SDF computation complete, now adding to scene
                 QMetaObject::invokeMethod(this, [this]() {
@@ -409,9 +418,8 @@ void SDFDialog::onComputeClicked()
                 }, Qt::QueuedConnection);
                 
                 // Post all SceneGraph/VTK operations to main thread via SceneGraph event queue
-                m_sceneGraph->postEvent([this, sdfVol, geomName]() {
-                    cvc::thread_info ti("Add SDF Volume");
-                    
+                // Capture activeKey for finish call
+                m_sceneGraph->postEvent([this, sdfVol, geomName, activeKey]() {
                     try {
                         // Sanitize the name to ensure it's a valid C identifier
                         std::string rawName = geomName + "_sdf";
@@ -437,12 +445,16 @@ void SDFDialog::onComputeClicked()
                             throw std::runtime_error("Failed to create SDF volume node");
                         }
                         
+                        // Mark thread as finished
+                        cvc::app::instance().finishThreadProgress(activeKey);
+                        
                         // Update UI on Qt thread
                         QMetaObject::invokeMethod(this, [this]() {
                             onComputeFinished(true, "SDF computed successfully");
                         }, Qt::QueuedConnection);
                     } catch (const std::exception& e) {
                         std::string errorMsg = std::string("Failed to create volume node: ") + e.what();
+                        cvc::app::instance().finishThreadProgress(activeKey);
                         QMetaObject::invokeMethod(this, [this, errorMsg]() {
                             onComputeFinished(false, errorMsg);
                         }, Qt::QueuedConnection);

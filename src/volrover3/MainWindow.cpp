@@ -12,6 +12,7 @@
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraSettingsDialog.h>
 #include <volrover3/GridOptionsDialog.h>
+#include <volrover3/ViewerOptionsDialog.h>
 #include <volrover3/SDFDialog.h>
 #include <volrover3/IsosurfaceDialog.h>
 #include <volrover3/GeometryDialog.h>
@@ -49,6 +50,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_isosurfaceDialog(nullptr)
     , m_geometryDialog(nullptr)
     , m_volumeDialog(nullptr)
+    , m_viewerOptionsDialog(nullptr)
     , m_mainToolBar(nullptr)
     , m_threadNameLabel(nullptr)
     , m_threadInfoLabel(nullptr)
@@ -153,6 +155,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (m_isosurfaceDialog) {
         m_isosurfaceDialog->close();
     }
+    if (m_viewerOptionsDialog) {
+        m_viewerOptionsDialog->close();
+    }
     
     // Accept the close event
     QMainWindow::closeEvent(event);
@@ -206,6 +211,11 @@ void MainWindow::createMenus()
     gridOptionsAction->setShortcut(tr("Ctrl+G"));
     connect(gridOptionsAction, &QAction::triggered, this, &MainWindow::showGridOptions);
     viewMenu->addAction(gridOptionsAction);
+    
+    QAction *viewerOptionsAction = new QAction(tr("&Viewer Options..."), this);
+    viewerOptionsAction->setShortcut(tr("Ctrl+Shift+V"));
+    connect(viewerOptionsAction, &QAction::triggered, this, &MainWindow::showViewerOptions);
+    viewMenu->addAction(viewerOptionsAction);
     
     viewMenu->addSeparator();
     
@@ -646,6 +656,26 @@ void MainWindow::showGridOptions()
     m_gridOptionsDialog->activateWindow();
 }
 
+void MainWindow::showViewerOptions()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    if (!m_viewerOptionsDialog) {
+        m_viewerOptionsDialog = new ViewerOptionsDialog(m_renderWidget, m_sceneGraph);
+        m_viewerOptionsDialog->setWindowTitle(tr("Viewer Options - VolRover3"));
+        m_viewerOptionsDialog->setAttribute(Qt::WA_DeleteOnClose);
+        
+        // Reset pointer when dialog is closed
+        connect(m_viewerOptionsDialog, &QObject::destroyed, [this]() {
+            m_viewerOptionsDialog = nullptr;
+        });
+    }
+    
+    m_viewerOptionsDialog->show();
+    m_viewerOptionsDialog->raise();
+    m_viewerOptionsDialog->activateWindow();
+}
+
 void MainWindow::showThreadMonitor()
 {
     // Create thread monitor widget as a separate window if not already created
@@ -889,7 +919,7 @@ void MainWindow::updateThreadStatus()
             if (!threadPtr) continue;
             
             double progress = cvc::app::instance().threadProgress(threadKey);
-            bool isComplete = (progress >= 1.0) || !threadPtr->joinable();
+            bool isComplete = (progress >= 1.0);
             
             if (!isComplete) {
                 // Found a running thread - prefer this
@@ -915,8 +945,7 @@ void MainWindow::updateThreadStatus()
         std::string info = cvc::app::instance().threadInfo(displayThreadKey);
         
         // Add status indicator
-        auto threadPtr = threads[displayThreadKey];
-        bool isComplete = (displayProgress >= 1.0) || (threadPtr && !threadPtr->joinable());
+        bool isComplete = (displayProgress >= 1.0);
         if (isComplete) {
             if (info.empty()) info = "completed";
             else info += " (completed)";

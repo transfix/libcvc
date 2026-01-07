@@ -288,6 +288,17 @@ namespace CVC_NAMESPACE
   // For volumetric meshes (tets/hexs), extracts boundary faces
   geometry extract_surface(const geometry& geom);
   
+  // --------------
+  // invert_normals
+  // --------------
+  // Purpose:
+  //   Invert (negate) all vertex normals in a geometry.
+  //   This is useful for correcting inside-out surfaces or for
+  //   toggling the orientation of normals.
+  // ---- Change History ----
+  // 01/06/2026 -- Joe R. -- Creation.
+  void invert_normals(geometry& geom);
+  
   // ---------------------------------------
   // Volumetric Property Interpolation (Week 3 Option 2)
   // ---------------------------------------

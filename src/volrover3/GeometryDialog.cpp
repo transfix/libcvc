@@ -3,6 +3,7 @@
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/GeometryNode.h>
 #include <cvc/geometry.h>
+#include <cvc/algorithm.h>
 #include <cvc/state.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -18,6 +19,7 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QMetaObject>
+#include <QColorDialog>
 
 GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
     : QDialog(parent)
@@ -28,6 +30,10 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     , m_colorRSpinBox(nullptr)
     , m_colorGSpinBox(nullptr)
     , m_colorBSpinBox(nullptr)
+    , m_visibilityCheckBox(nullptr)
+    , m_showBBoxCheckBox(nullptr)
+    , m_bboxColorButton(nullptr)
+    , m_invertNormalsButton(nullptr)
     , m_ambientSpinBox(nullptr)
     , m_diffuseSpinBox(nullptr)
     , m_specularSpinBox(nullptr)
@@ -38,6 +44,7 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     , m_infoTable(nullptr)
     , m_updating(false)
 {
+    m_bboxColor[0] = m_bboxColor[1] = m_bboxColor[2] = 1.0;  // Default white
     setWindowTitle(tr("Geometry Properties"));
     setMinimumWidth(400);
     setupUI();
@@ -221,6 +228,51 @@ void GeometryDialog::setupUI()
     sizeLayout->addRow(tr("Line Width:"), m_lineWidthSpinBox);
     
     renderingLayout->addWidget(sizeGroup);
+    
+    // Visibility Group
+    QGroupBox *visibilityGroup = new QGroupBox(tr("Visibility"), renderingTab);
+    QVBoxLayout *visibilityLayout = new QVBoxLayout(visibilityGroup);
+    
+    m_visibilityCheckBox = new QCheckBox(tr("Visible"), this);
+    m_visibilityCheckBox->setObjectName("visibilityCheckBox");
+    m_visibilityCheckBox->setChecked(true);
+    m_visibilityCheckBox->setToolTip(tr("Show or hide this geometry in the scene"));
+    visibilityLayout->addWidget(m_visibilityCheckBox);
+    
+    renderingLayout->addWidget(visibilityGroup);
+    
+    // Bounding Box Group
+    QGroupBox *bboxGroup = new QGroupBox(tr("Bounding Box"), renderingTab);
+    QVBoxLayout *bboxLayout = new QVBoxLayout(bboxGroup);
+    
+    m_showBBoxCheckBox = new QCheckBox(tr("Show Bounding Box"), this);
+    m_showBBoxCheckBox->setObjectName("showBBoxCheckBox");
+    m_showBBoxCheckBox->setChecked(false);
+    m_showBBoxCheckBox->setToolTip(tr("Display the bounding box of this geometry"));
+    bboxLayout->addWidget(m_showBBoxCheckBox);
+    
+    QHBoxLayout *bboxColorLayout = new QHBoxLayout();
+    bboxColorLayout->addWidget(new QLabel(tr("Color:"), this));
+    m_bboxColorButton = new QPushButton(this);
+    m_bboxColorButton->setFixedSize(50, 25);
+    m_bboxColorButton->setToolTip(tr("Click to change bounding box color"));
+    updateBBoxColorButton();
+    bboxColorLayout->addWidget(m_bboxColorButton);
+    bboxColorLayout->addStretch();
+    bboxLayout->addLayout(bboxColorLayout);
+    
+    renderingLayout->addWidget(bboxGroup);
+    
+    // Geometry Operations Group
+    QGroupBox *operationsGroup = new QGroupBox(tr("Geometry Operations"), renderingTab);
+    QVBoxLayout *operationsLayout = new QVBoxLayout(operationsGroup);
+    
+    m_invertNormalsButton = new QPushButton(tr("Invert Normals"), this);
+    m_invertNormalsButton->setObjectName("invertNormalsButton");
+    m_invertNormalsButton->setToolTip(tr("Invert all vertex and face normals of this geometry"));
+    operationsLayout->addWidget(m_invertNormalsButton);
+    
+    renderingLayout->addWidget(operationsGroup);
     renderingLayout->addStretch();
     
     // === Info Tab ===
@@ -287,6 +339,20 @@ void GeometryDialog::connectSignals()
             this, &GeometryDialog::onMaterialPropertyChanged);
     connect(m_lineWidthSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &GeometryDialog::onMaterialPropertyChanged);
+    
+    // Visibility signals
+    connect(m_visibilityCheckBox, &QCheckBox::toggled,
+            this, &GeometryDialog::onVisibilityChanged);
+    
+    // Bounding box signals
+    connect(m_showBBoxCheckBox, &QCheckBox::toggled,
+            this, &GeometryDialog::onShowBBoxChanged);
+    connect(m_bboxColorButton, &QPushButton::clicked,
+            this, &GeometryDialog::onBBoxColorChanged);
+    
+    // Invert normals signal
+    connect(m_invertNormalsButton, &QPushButton::clicked,
+            this, &GeometryDialog::onInvertNormalsClicked);
 }
 
 void GeometryDialog::populateGeometryList()
@@ -428,6 +494,30 @@ void GeometryDialog::updatePropertiesFromNode()
     
     // Update single color checkbox
     try { m_singleColorCheckBox->setChecked(geomNode->getState("use_single_color").value<bool>()); } catch (const std::exception&) { m_singleColorCheckBox->setChecked(false); } catch (...) { m_singleColorCheckBox->setChecked(false); }
+    
+    // Update visibility checkbox
+    try { 
+        int visible = geomNode->getState("visible").value<int>(); 
+        m_visibilityCheckBox->setChecked(visible != 0); 
+    } catch (const std::exception&) { 
+        m_visibilityCheckBox->setChecked(true); 
+    } catch (...) { 
+        m_visibilityCheckBox->setChecked(true); 
+    }
+    
+    // Update bounding box controls
+    try { 
+        int showBBox = geomNode->getState("show_bbox").value<int>(); 
+        m_showBBoxCheckBox->setChecked(showBBox != 0); 
+    } catch (const std::exception&) { 
+        m_showBBoxCheckBox->setChecked(false); 
+    } catch (...) { 
+        m_showBBoxCheckBox->setChecked(false); 
+    }
+    
+    // Update bounding box color
+    geomNode->getBBoxColor(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+    updateBBoxColorButton();
     
     // Update info table with metadata
     m_infoTable->setRowCount(0);
@@ -594,4 +684,96 @@ void GeometryDialog::setPropertiesEnabled(bool enabled)
     m_opacitySpinBox->setEnabled(enabled);
     m_pointSizeSpinBox->setEnabled(enabled);
     m_lineWidthSpinBox->setEnabled(enabled);
+    m_visibilityCheckBox->setEnabled(enabled);
+    m_showBBoxCheckBox->setEnabled(enabled);
+    m_bboxColorButton->setEnabled(enabled);
+    m_invertNormalsButton->setEnabled(enabled);
+}
+
+void GeometryDialog::onVisibilityChanged(bool checked)
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    
+    if (!graphicsNode) return;
+    
+    graphicsNode->setVisible(checked);
+}
+
+void GeometryDialog::onShowBBoxChanged(bool checked)
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    
+    if (!graphicsNode) return;
+    
+    graphicsNode->setShowBBox(checked);
+}
+
+void GeometryDialog::onBBoxColorChanged()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    QColor currentColor = QColor::fromRgbF(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+    QColor color = QColorDialog::getColor(currentColor, this, tr("Select Bounding Box Color"));
+    
+    if (color.isValid()) {
+        m_bboxColor[0] = color.redF();
+        m_bboxColor[1] = color.greenF();
+        m_bboxColor[2] = color.blueF();
+        
+        const std::string& geomName = m_geometryNames[index];
+        auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+        
+        if (graphicsNode) {
+            graphicsNode->setBBoxColor(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
+        }
+        
+        updateBBoxColorButton();
+    }
+}
+
+void GeometryDialog::updateBBoxColorButton()
+{
+    int r = static_cast<int>(m_bboxColor[0] * 255);
+    int g = static_cast<int>(m_bboxColor[1] * 255);
+    int b = static_cast<int>(m_bboxColor[2] * 255);
+    QString style = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
+    m_bboxColorButton->setStyleSheet(style);
+}
+
+void GeometryDialog::onInvertNormalsClicked()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    auto geomNode = std::dynamic_pointer_cast<GeometryNode>(graphicsNode);
+    
+    if (!geomNode || !geomNode->getGeometry()) return;
+    
+    // Get the geometry, invert normals, and set it back
+    cvc::geometry geom = *geomNode->getGeometry();
+    
+    // Invert the normals using the algorithm function
+    cvc::invert_normals(geom);
+    
+    // Set the modified geometry back to the node
+    geomNode->setGeometry(geom);
 }

@@ -266,6 +266,8 @@ namespace
     using namespace std;
     using namespace CVC_NAMESPACE;
 
+    cvc::app::instance().threadProgress(0.05);  // Starting
+
     // Convert cvc::geometry to FaceVertSet3D
     // Use vectors to avoid default constructor issues
     std::vector<Point3f> verts_vec;
@@ -288,6 +290,8 @@ namespace
     if (flipNormals) {
       fvs.flipTriNormals();
     }
+
+    cvc::app::instance().threadProgress(0.10);  // Geometry prepared
 
     // Calculate scale factors to match the requested bounding box
     // With the new constructor, we can specify the center directly
@@ -324,7 +328,13 @@ namespace
     // Use new constructor with user-specified center to respect arbitrary bbox
     DistanceTransform dt(fvs, dims, bbox_center, 0.5f, 
                         scale_factors[0], scale_factors[1], scale_factors[2]);
+    
+    cvc::app::instance().threadProgress(0.15);  // Distance transform initialized
+    
+    // Note: dt.transform() is the main computation, typically 60-80% of total time
     dt.transform();
+
+    cvc::app::instance().threadProgress(0.85);  // Distance transform complete
 
     // Get the result data directly from DistanceTransform
     const Reg3Data<float>& result = dt.getReg3Data();
@@ -340,6 +350,8 @@ namespace
     }
     
     std::memcpy(volData, result.getData(), nverts * sizeof(float));
+    
+    cvc::app::instance().threadProgress(1.0);  // Complete
     
     return cv;
   }
@@ -1173,6 +1185,25 @@ namespace CVC_NAMESPACE
     }
     
     return surface;
+  }
+
+  // --------------
+  // invert_normals
+  // --------------
+  // Purpose:
+  //   Invert (negate) all vertex normals in a geometry.
+  // ---- Change History ----
+  // 01/06/2026 -- Joe R. -- Creation.
+  void invert_normals(geometry& geom)
+  {
+    thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    // Invert all vertex normals
+    for (auto& normal : geom.normals()) {
+      normal[0] = -normal[0];
+      normal[1] = -normal[1];
+      normal[2] = -normal[2];
+    }
   }
 
   // ---------------------------------------

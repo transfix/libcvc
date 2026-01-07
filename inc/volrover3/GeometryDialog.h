@@ -12,6 +12,7 @@ class QDoubleSpinBox;
 class QCheckBox;
 class QGroupBox;
 class QTableWidget;
+class QPushButton;
 class SceneGraph;
 
 class GeometryDialog : public QDialog
@@ -31,6 +32,10 @@ private slots:
     void onMaterialPropertyChanged();
     void onDeleteButtonClicked();
     void onNodeStateChanged();
+    void onVisibilityChanged(bool checked);
+    void onShowBBoxChanged(bool checked);
+    void onBBoxColorChanged();
+    void onInvertNormalsClicked();
 
 private:
     void setupUI();
@@ -38,6 +43,7 @@ private:
     void populateGeometryList();
     void updatePropertiesFromNode();
     void setPropertiesEnabled(bool enabled);
+    void updateBBoxColorButton();
 
     std::shared_ptr<SceneGraph> m_sceneGraph;
     
@@ -51,6 +57,17 @@ private:
     QDoubleSpinBox *m_colorRSpinBox;
     QDoubleSpinBox *m_colorGSpinBox;
     QDoubleSpinBox *m_colorBSpinBox;
+    
+    // Visibility controls
+    QCheckBox *m_visibilityCheckBox;
+    
+    // Bounding box controls
+    QCheckBox *m_showBBoxCheckBox;
+    QPushButton *m_bboxColorButton;
+    double m_bboxColor[3];
+    
+    // Invert normals button
+    QPushButton *m_invertNormalsButton;
     
     // Info tab
     QTableWidget *m_infoTable;

@@ -155,7 +155,8 @@ void ThreadMonitorWidget::updateThreadTable()
     // Get current threads from cvc::app
     cvc::thread_map threads = cvc::app::instance().threads();
     
-    // Track which threads are completed (100% progress or thread finished)
+    // Track which threads are completed (100% progress)
+    // Note: We avoid calling thread->joinable() frequently as it can be expensive
     qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
     for (const auto& entry : threads) {
         const std::string& threadKey = entry.first;
@@ -164,7 +165,7 @@ void ThreadMonitorWidget::updateThreadTable()
         if (!thread) continue;
         
         double progress = cvc::app::instance().threadProgress(threadKey);
-        bool isComplete = (progress >= 1.0) || !thread->joinable();
+        bool isComplete = (progress >= 1.0);
         
         if (isComplete) {
             // Mark thread as completed if not already tracked
@@ -203,7 +204,7 @@ void ThreadMonitorWidget::updateThreadTable()
         // Column 1: Status (thread info)
         std::string statusInfo = cvc::app::instance().threadInfo(threadKey);
         double progress = cvc::app::instance().threadProgress(threadKey);
-        bool isComplete = (progress >= 1.0) || !thread->joinable();
+        bool isComplete = (progress >= 1.0);
         
         if (isComplete) {
             statusInfo = statusInfo.empty() ? "completed" : statusInfo + " (completed)";

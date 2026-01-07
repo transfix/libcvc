@@ -1,10 +1,13 @@
 #include <volrover3/VTKRenderWidget.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/CameraController.h>
+#include <volrover3/AppState.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkCamera.h>
+#include <vtkCornerAnnotation.h>
+#include <vtkTextProperty.h>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -14,12 +17,24 @@ VTKRenderWidget::VTKRenderWidget(QWidget *parent)
     , m_renderWindow(vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New())
     , m_renderer(vtkSmartPointer<vtkRenderer>::New())
     , m_cameraController(std::make_unique<CameraController>())
+    , m_fpsAnnotation(vtkSmartPointer<vtkCornerAnnotation>::New())
+    , m_showFPS(false)
 {
     initializeVTK();
     
     // Set up timer to process SceneGraph events on main thread
     connect(&m_eventTimer, &QTimer::timeout, this, &VTKRenderWidget::processSceneGraphEvents);
     m_eventTimer.start(16);  // ~60fps event processing
+    
+    // Set up timer to update FPS display (every 500ms)
+    connect(&m_fpsTimer, &QTimer::timeout, this, &VTKRenderWidget::updateFPSDisplay);
+    
+    // Load FPS display setting from state
+    m_showFPS = AppState::instance().showFPS();
+    if (m_showFPS) {
+        m_fpsAnnotation->SetVisibility(true);
+        m_fpsTimer.start(500);
+    }
 }
 
 VTKRenderWidget::~VTKRenderWidget()
@@ -43,6 +58,13 @@ void VTKRenderWidget::initializeVTK()
 
     // Initialize camera controller
     m_cameraController->setCamera(camera);
+
+    // Set up FPS annotation in top-left corner
+    m_fpsAnnotation->SetText(2, "FPS: --");  // Position 2 = upper left
+    m_fpsAnnotation->GetTextProperty()->SetColor(1.0, 1.0, 0.0);  // Yellow
+    m_fpsAnnotation->GetTextProperty()->SetFontSize(14);
+    m_fpsAnnotation->SetVisibility(false);  // Hidden by default
+    m_renderer->AddActor2D(m_fpsAnnotation);
 
     // Enable focus for keyboard input
     setFocusPolicy(Qt::StrongFocus);
@@ -143,5 +165,52 @@ void VTKRenderWidget::processSceneGraphEvents()
         if (m_sceneGraph->checkAndResetRenderNeeded()) {
             render();
         }
+    }
+}
+
+void VTKRenderWidget::setShowFPS(bool show)
+{
+    m_showFPS = show;
+    
+    if (m_fpsAnnotation) {
+        m_fpsAnnotation->SetVisibility(show ? 1 : 0);
+    }
+    
+    if (show) {
+        // Start timer to update FPS display
+        m_fpsTimer.start(500);  // Update every 500ms
+        updateFPSDisplay();
+    } else {
+        m_fpsTimer.stop();
+    }
+    
+    // Trigger a render to show/hide the annotation
+    if (m_renderWindow) {
+        m_renderWindow->Render();
+    }
+}
+
+void VTKRenderWidget::updateFPSDisplay()
+{
+    if (!m_showFPS || !m_renderer || !m_fpsAnnotation) {
+        return;
+    }
+    
+    // Get the last render time from the renderer
+    double renderTime = m_renderer->GetLastRenderTimeInSeconds();
+    
+    QString fpsText;
+    if (renderTime > 0.0) {
+        double fps = 1.0 / renderTime;
+        fpsText = QString("FPS: %1").arg(fps, 0, 'f', 1);
+    } else {
+        fpsText = "FPS: --";
+    }
+    
+    m_fpsAnnotation->SetText(2, fpsText.toStdString().c_str());
+    
+    // Trigger render to update the display
+    if (m_renderWindow) {
+        m_renderWindow->Render();
     }
 }

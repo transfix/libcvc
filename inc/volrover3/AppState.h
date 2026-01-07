@@ -71,6 +71,10 @@ public:
     double cameraFieldOfView();
     void setCameraFieldOfView(double fov);
     
+    // Viewer options
+    bool showFPS();
+    void setShowFPS(bool show);
+    
     // Register callbacks for state changes
     // Returns a connection object that can be used to disconnect the callback
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);

@@ -20,6 +20,7 @@ class SDFDialog;
 class IsosurfaceDialog;
 class GeometryDialog;
 class VolumeDialog;
+class ViewerOptionsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -36,6 +37,7 @@ private slots:
     void editBoundingBox();
     void editCameraSettings();
     void showGridOptions();
+    void showViewerOptions();
     void showThreadMonitor();
     void showStateTree();
     void showSDF();
@@ -67,6 +69,7 @@ private:
     IsosurfaceDialog *m_isosurfaceDialog;
     GeometryDialog *m_geometryDialog;
     VolumeDialog *m_volumeDialog;
+    ViewerOptionsDialog *m_viewerOptionsDialog;
 
     // Toolbar
     QToolBar *m_mainToolBar;

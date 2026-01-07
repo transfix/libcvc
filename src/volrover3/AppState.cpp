@@ -67,6 +67,9 @@ void AppState::initializeDefaults()
     
     // Initialize field of view (degrees)
     getState("camera.fov").value(60.0);
+    
+    // Initialize viewer options
+    getState("viewer.show_fps").value(false);
 }
 
 cvc::state& AppState::getState(const std::string& path)
@@ -278,6 +281,16 @@ double AppState::cameraFieldOfView()
 void AppState::setCameraFieldOfView(double fov)
 {
     getState("camera.fov").value(fov);
+}
+
+bool AppState::showFPS()
+{
+    return getState("viewer.show_fps").value<bool>();
+}
+
+void AppState::setShowFPS(bool show)
+{
+    getState("viewer.show_fps").value(show);
 }
 
 boost::signals2::connection AppState::onCameraChanged(const boost::function<void()>& callback)
