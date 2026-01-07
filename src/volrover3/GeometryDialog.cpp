@@ -277,6 +277,25 @@ void GeometryDialog::setupUI()
     bboxColorLayout->addStretch();
     bboxLayout->addLayout(bboxColorLayout);
     
+    // Extent Labels
+    m_showExtentLabelsCheckBox = new QCheckBox(tr("Show Extent Labels"), this);
+    m_showExtentLabelsCheckBox->setObjectName("showExtentLabelsCheckBox");
+    m_showExtentLabelsCheckBox->setChecked(false);
+    m_showExtentLabelsCheckBox->setToolTip(tr("Display min/max coordinate labels on the bounding box"));
+    bboxLayout->addWidget(m_showExtentLabelsCheckBox);
+    
+    QHBoxLayout *extentLabelColorLayout = new QHBoxLayout();
+    extentLabelColorLayout->addWidget(new QLabel(tr("Label Color:"), this));
+    m_extentLabelColorButton = new QPushButton(this);
+    m_extentLabelColorButton->setFixedSize(50, 25);
+    m_extentLabelColorButton->setToolTip(tr("Click to change extent label color"));
+    // Initialize extent label color to white
+    m_extentLabelColor[0] = m_extentLabelColor[1] = m_extentLabelColor[2] = 1.0;
+    updateExtentLabelColorButton();
+    extentLabelColorLayout->addWidget(m_extentLabelColorButton);
+    extentLabelColorLayout->addStretch();
+    bboxLayout->addLayout(extentLabelColorLayout);
+    
     renderingLayout->addWidget(bboxGroup);
     renderingLayout->addStretch();
     
@@ -480,6 +499,10 @@ void GeometryDialog::connectSignals()
             this, &GeometryDialog::onShowBBoxChanged);
     connect(m_bboxColorButton, &QPushButton::clicked,
             this, &GeometryDialog::onBBoxColorChanged);
+    connect(m_showExtentLabelsCheckBox, &QCheckBox::toggled,
+            this, &GeometryDialog::onShowExtentLabelsChanged);
+    connect(m_extentLabelColorButton, &QPushButton::clicked,
+            this, &GeometryDialog::onExtentLabelColorChanged);
     
     // Geometry operations signals
     connect(m_invertNormalsButton, &QPushButton::clicked,
@@ -659,6 +682,28 @@ void GeometryDialog::updatePropertiesFromNode()
     // Update bounding box color
     geomNode->getBBoxColor(m_bboxColor[0], m_bboxColor[1], m_bboxColor[2]);
     updateBBoxColorButton();
+    
+    // Update extent label controls
+    try { 
+        int showExtentLabels = geomNode->getState("show_extent_labels").value<int>(); 
+        m_showExtentLabelsCheckBox->setChecked(showExtentLabels != 0); 
+    } catch (const std::exception&) { 
+        m_showExtentLabelsCheckBox->setChecked(false); 
+    } catch (...) { 
+        m_showExtentLabelsCheckBox->setChecked(false); 
+    }
+    
+    // Update extent label color
+    try { 
+        m_extentLabelColor[0] = geomNode->getState("extent_label_color_r").value<double>();
+        m_extentLabelColor[1] = geomNode->getState("extent_label_color_g").value<double>();
+        m_extentLabelColor[2] = geomNode->getState("extent_label_color_b").value<double>();
+    } catch (const std::exception&) { 
+        m_extentLabelColor[0] = m_extentLabelColor[1] = m_extentLabelColor[2] = 1.0; // Default to white
+    } catch (...) { 
+        m_extentLabelColor[0] = m_extentLabelColor[1] = m_extentLabelColor[2] = 1.0; // Default to white
+    }
+    updateExtentLabelColorButton();
     
     // Update info table with metadata
     m_infoTable->setRowCount(0);
@@ -912,6 +957,56 @@ void GeometryDialog::updateBBoxColorButton()
     int b = static_cast<int>(m_bboxColor[2] * 255);
     QString style = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
     m_bboxColorButton->setStyleSheet(style);
+}
+
+void GeometryDialog::onShowExtentLabelsChanged(bool checked)
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    const std::string& geomName = m_geometryNames[index];
+    auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+    
+    if (!graphicsNode) return;
+    
+    graphicsNode->setShowExtentLabels(checked);
+}
+
+void GeometryDialog::onExtentLabelColorChanged()
+{
+    if (m_updating) return;
+    
+    int index = m_geometryComboBox->currentIndex();
+    if (index < 0 || index >= static_cast<int>(m_geometryNames.size())) return;
+    
+    QColor currentColor = QColor::fromRgbF(m_extentLabelColor[0], m_extentLabelColor[1], m_extentLabelColor[2]);
+    QColor color = QColorDialog::getColor(currentColor, this, tr("Select Extent Label Color"));
+    
+    if (color.isValid()) {
+        m_extentLabelColor[0] = color.redF();
+        m_extentLabelColor[1] = color.greenF();
+        m_extentLabelColor[2] = color.blueF();
+        
+        const std::string& geomName = m_geometryNames[index];
+        auto graphicsNode = m_sceneGraph->getGraphics(geomName);
+        
+        if (graphicsNode) {
+            graphicsNode->setExtentLabelColor(m_extentLabelColor[0], m_extentLabelColor[1], m_extentLabelColor[2]);
+        }
+        
+        updateExtentLabelColorButton();
+    }
+}
+
+void GeometryDialog::updateExtentLabelColorButton()
+{
+    int r = static_cast<int>(m_extentLabelColor[0] * 255);
+    int g = static_cast<int>(m_extentLabelColor[1] * 255);
+    int b = static_cast<int>(m_extentLabelColor[2] * 255);
+    QString style = QString("background-color: rgb(%1, %2, %3);").arg(r).arg(g).arg(b);
+    m_extentLabelColorButton->setStyleSheet(style);
 }
 
 void GeometryDialog::onInvertNormalsClicked()

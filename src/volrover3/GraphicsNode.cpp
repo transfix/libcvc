@@ -747,6 +747,45 @@ void GraphicsNode::getBBoxColor(double& r, double& g, double& b) const
     }
 }
 
+void GraphicsNode::setShowExtentLabels(bool show)
+{
+    // Update state tree value
+    getState("show_extent_labels").value(show ? 1 : 0);
+    
+    if (m_bboxNode) {
+        m_bboxNode->setCoordinatesVisible(show);
+    }
+}
+
+bool GraphicsNode::getShowExtentLabels() const
+{
+    if (m_bboxNode) {
+        return m_bboxNode->getCoordinatesVisible();
+    }
+    return false;
+}
+
+void GraphicsNode::setExtentLabelColor(double r, double g, double b)
+{
+    // Update state tree values
+    getState("extent_label_color_r").value(r);
+    getState("extent_label_color_g").value(g);
+    getState("extent_label_color_b").value(b);
+    
+    if (m_bboxNode) {
+        m_bboxNode->setCoordinateLabelColor(r, g, b);
+    }
+}
+
+void GraphicsNode::getExtentLabelColor(double& r, double& g, double& b) const
+{
+    if (m_bboxNode) {
+        m_bboxNode->getCoordinateLabelColor(r, g, b);
+    } else {
+        r = g = b = 1.0;
+    }
+}
+
 void GraphicsNode::setShowLabel(bool show)
 {
     if (m_showLabel == show)

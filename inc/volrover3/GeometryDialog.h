@@ -36,6 +36,8 @@ private slots:
     void onVisibilityChanged(bool checked);
     void onShowBBoxChanged(bool checked);
     void onBBoxColorChanged();
+    void onShowExtentLabelsChanged(bool checked);
+    void onExtentLabelColorChanged();
     void onInvertNormalsClicked();
     void onReorientClicked();
     void onProjectClicked();
@@ -49,6 +51,7 @@ private:
     void updatePropertiesFromNode();
     void setPropertiesEnabled(bool enabled);
     void updateBBoxColorButton();
+    void updateExtentLabelColorButton();
     void setOperationButtonsEnabled(bool enabled);
 
     std::shared_ptr<SceneGraph> m_sceneGraph;
@@ -71,6 +74,11 @@ private:
     QCheckBox *m_showBBoxCheckBox;
     QPushButton *m_bboxColorButton;
     double m_bboxColor[3];
+    
+    // Extent label controls
+    QCheckBox *m_showExtentLabelsCheckBox;
+    QPushButton *m_extentLabelColorButton;
+    double m_extentLabelColor[3];
     
     // Geometry operations buttons
     QPushButton *m_invertNormalsButton;

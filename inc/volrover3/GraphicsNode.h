@@ -135,6 +135,12 @@ public:
     void setBBoxColor(double r, double g, double b);
     void getBBoxColor(double& r, double& g, double& b) const;
     
+    // Bounding box extent labels
+    void setShowExtentLabels(bool show);
+    bool getShowExtentLabels() const;
+    void setExtentLabelColor(double r, double g, double b);
+    void getExtentLabelColor(double& r, double& g, double& b) const;
+    
     // Clipping plane control
     void setClipChildren(bool clip);
     bool getClipChildren() const { return m_clipChildren; }
