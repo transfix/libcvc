@@ -82,13 +82,12 @@ SceneNode::~SceneNode()
 void SceneNode::addToRenderer(vtkRenderer *renderer)
 {
     m_renderer = renderer;
-    if (m_visible && getProp()) {
+    // Capture the prop pointer before queuing the lambda
+    vtkProp* prop = m_visible ? getProp() : nullptr;
+    if (prop) {
         // Wrap VTK operation in runOnMainThread
-        runOnMainThread([this, renderer]() {
-            vtkProp* prop = getProp();
-            if (prop) {
-                renderer->AddViewProp(prop);
-            }
+        runOnMainThread([prop, renderer]() {
+            renderer->AddViewProp(prop);
         });
     }
 
@@ -99,13 +98,13 @@ void SceneNode::addToRenderer(vtkRenderer *renderer)
 
 void SceneNode::removeFromRenderer(vtkRenderer *renderer)
 {
-    if (getProp()) {
+    // Capture the prop pointer before queuing the lambda to avoid accessing 'this'
+    // after the node might be deleted
+    vtkProp* prop = getProp();
+    if (prop) {
         // Wrap VTK operation in runOnMainThread
-        runOnMainThread([this, renderer]() {
-            vtkProp* prop = getProp();
-            if (prop) {
-                renderer->RemoveViewProp(prop);
-            }
+        runOnMainThread([prop, renderer]() {
+            renderer->RemoveViewProp(prop);
         });
     }
 

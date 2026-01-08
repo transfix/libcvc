@@ -354,6 +354,9 @@ TEST_F(NullGraphicNodeTest, SyncBoundsToChildrenDisabled) {
     auto nullNode = std::dynamic_pointer_cast<NullGraphicNode>(sceneGraph.getGraphicsRoot());
     ASSERT_NE(nullNode, nullptr);
     
+    // Disable sync BEFORE setting custom bounds and adding geometry
+    nullNode->setSyncBoundsWithChildren(false);
+    
     // Set custom bounds
     nullNode->setBounds(-100.0, -100.0, -100.0, 100.0, 100.0, 100.0);
     
@@ -363,9 +366,6 @@ TEST_F(NullGraphicNodeTest, SyncBoundsToChildrenDisabled) {
     geom.points()[0][0] = 0; geom.points()[0][1] = 0; geom.points()[0][2] = 0;
     geom.points()[1][0] = 10; geom.points()[1][1] = 10; geom.points()[1][2] = 10;
     sceneGraph.addGraphics("test_geom", geom);
-    
-    // Disable sync
-    nullNode->setSyncBoundsWithChildren(false);
     
     // Call syncBoundsToChildren - should have no effect
     nullNode->syncBoundsToChildren();

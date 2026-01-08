@@ -19,6 +19,7 @@
 #include <volrover3/VolumeDialog.h>
 #include <volrover3/GraphicsParentDialog.h>
 #include <volrover3/CameraController.h>
+#include <volrover3/ProceduralGeometryDialog.h>
 #include <volrover3/ThreadMonitorWidget.h>
 #include <volrover3/StateTreeWidget.h>
 #include <QMenuBar>
@@ -254,6 +255,41 @@ void MainWindow::createMenus()
     isoAction->setShortcut(tr("Ctrl+I"));
     connect(isoAction, &QAction::triggered, this, &MainWindow::showIsosurface);
     toolsMenu->addAction(isoAction);
+    
+    toolsMenu->addSeparator();
+    
+    // Generate submenu
+    QMenu *generateMenu = toolsMenu->addMenu(tr("&Generate"));
+    
+    // Geometry submenu under Generate
+    QMenu *generateGeometryMenu = generateMenu->addMenu(tr("&Geometry"));
+    
+    QAction *bunnyAction = new QAction(tr("Stanford &Bunny"), this);
+    bunnyAction->setToolTip(tr("Generate the Stanford Bunny test geometry"));
+    connect(bunnyAction, &QAction::triggered, this, &MainWindow::generateStanfordBunny);
+    generateGeometryMenu->addAction(bunnyAction);
+    
+    generateGeometryMenu->addSeparator();
+    
+    QAction *sphereAction = new QAction(tr("&Sphere..."), this);
+    sphereAction->setToolTip(tr("Generate a parametric sphere"));
+    connect(sphereAction, &QAction::triggered, this, &MainWindow::generateSphere);
+    generateGeometryMenu->addAction(sphereAction);
+    
+    QAction *cubeAction = new QAction(tr("&Cube..."), this);
+    cubeAction->setToolTip(tr("Generate a parametric cube"));
+    connect(cubeAction, &QAction::triggered, this, &MainWindow::generateCube);
+    generateGeometryMenu->addAction(cubeAction);
+    
+    QAction *torusAction = new QAction(tr("&Torus..."), this);
+    torusAction->setToolTip(tr("Generate a parametric torus"));
+    connect(torusAction, &QAction::triggered, this, &MainWindow::generateTorus);
+    generateGeometryMenu->addAction(torusAction);
+    
+    QAction *coneAction = new QAction(tr("C&one..."), this);
+    coneAction->setToolTip(tr("Generate a parametric cone"));
+    connect(coneAction, &QAction::triggered, this, &MainWindow::generateCone);
+    generateGeometryMenu->addAction(coneAction);
 
     // Help menu
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -861,6 +897,87 @@ void MainWindow::resetCamera()
             bounds.maxx, bounds.maxy, bounds.maxz
         );
         m_renderWidget->render();
+    }
+}
+
+void MainWindow::generateStanfordBunny()
+{
+    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+    
+    try {
+        // Load the built-in Stanford Bunny using the .bunny extension
+        // The bunny_io class handles this special extension and returns the embedded mesh
+        cvc::geometry geom = cvc::read_geometry("stanford.bunny");
+        
+        // Create unique name for the geometry
+        std::string baseName = "StanfordBunny";
+        std::string graphicsName = baseName;
+        int counter = 1;
+        while (m_sceneGraph->getGraphics(graphicsName)) {
+            graphicsName = baseName + "_" + std::to_string(counter++);
+        }
+        
+        // Create geometry node under root
+        auto graphicsNode = m_sceneGraph->getGraphicsRoot()->addGraphicsChild<GeometryNode>(graphicsName);
+        m_sceneGraph->registerGraphics(graphicsName, graphicsNode);
+        
+        // Set geometry and metadata
+        graphicsNode->setGeometry(geom);
+        graphicsNode->setMetadata("type", std::string("geometry"));
+        graphicsNode->setMetadata("filename", std::string("stanford.bunny"));
+        graphicsNode->setMetadata("num_vertices", static_cast<int>(geom.num_points()));
+        graphicsNode->setMetadata("num_triangles", static_cast<int>(geom.num_tris()));
+        graphicsNode->setMetadata("source", std::string("built-in"));
+        
+        // Update world bounds and reset camera to show new geometry
+        AppState::instance().setWorldBounds(geom.extents());
+        resetCamera();
+        
+        statusBar()->showMessage(
+            tr("Generated Stanford Bunny: %1 vertices, %2 triangles")
+                .arg(geom.num_points())
+                .arg(geom.num_tris()),
+            5000);
+                
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Generation Error"),
+            tr("Failed to generate Stanford Bunny:\n%1").arg(e.what()));
+    }
+}
+
+void MainWindow::generateSphere()
+{
+    ProceduralGeometryDialog dialog(ProceduralGeometryType::Sphere, m_sceneGraph, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        resetCamera();
+        statusBar()->showMessage(tr("Generated Sphere"), 3000);
+    }
+}
+
+void MainWindow::generateCube()
+{
+    ProceduralGeometryDialog dialog(ProceduralGeometryType::Cube, m_sceneGraph, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        resetCamera();
+        statusBar()->showMessage(tr("Generated Cube"), 3000);
+    }
+}
+
+void MainWindow::generateTorus()
+{
+    ProceduralGeometryDialog dialog(ProceduralGeometryType::Torus, m_sceneGraph, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        resetCamera();
+        statusBar()->showMessage(tr("Generated Torus"), 3000);
+    }
+}
+
+void MainWindow::generateCone()
+{
+    ProceduralGeometryDialog dialog(ProceduralGeometryType::Cone, m_sceneGraph, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        resetCamera();
+        statusBar()->showMessage(tr("Generated Cone"), 3000);
     }
 }
 

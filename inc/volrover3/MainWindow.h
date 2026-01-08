@@ -48,6 +48,11 @@ private slots:
     void aboutVolRover();
     void updateThreadStatus();
     void resetCamera();
+    void generateStanfordBunny();
+    void generateSphere();
+    void generateCube();
+    void generateTorus();
+    void generateCone();
 
 protected:
     void closeEvent(QCloseEvent *event) override;

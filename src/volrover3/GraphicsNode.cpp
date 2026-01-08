@@ -883,31 +883,32 @@ void GraphicsNode::addToRenderer(vtkRenderer* renderer)
     
     // Add bbox if it should be visible
     if (m_showBBox && m_bboxNode) {
-        runOnMainThread([this, renderer]() {
-            updateBoundingBoxNode();
-            m_bboxNode->addToRenderer(renderer);
+        // Update and capture references before queuing
+        updateBoundingBoxNode();
+        auto bboxNode = m_bboxNode;
+        runOnMainThread([bboxNode, renderer]() {
+            bboxNode->addToRenderer(renderer);
         });
     }
     
     // Add label if it should be visible
     if (m_showLabel && m_labelActor) {
-        runOnMainThread([this, renderer]() {
-            updateLabel();
-            if (m_labelActor) {
-                renderer->AddActor2D(m_labelActor);
-            }
+        // Update and capture the actor before queuing
+        updateLabel();
+        vtkActor2D* labelActor = m_labelActor;
+        runOnMainThread([labelActor, renderer]() {
+            renderer->AddActor2D(labelActor);
         });
     }
 }
 
 void GraphicsNode::removeFromRenderer(vtkRenderer* renderer)
 {
-    // Remove label
-    if (m_labelActor) {
-        runOnMainThread([this, renderer]() {
-            if (m_labelActor) {
-                renderer->RemoveActor2D(m_labelActor);
-            }
+    // Remove label - capture the actor pointer to avoid accessing 'this' after deletion
+    vtkActor2D* labelActor = m_labelActor;
+    if (labelActor) {
+        runOnMainThread([labelActor, renderer]() {
+            renderer->RemoveActor2D(labelActor);
         });
     }
     

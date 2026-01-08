@@ -61,6 +61,7 @@ set(VOLROVER3_SOURCES
   GeometryDialog.cpp
   VolumeDialog.cpp
   GraphicsParentDialog.cpp
+  ProceduralGeometryDialog.cpp
 )
 
 # Header files
@@ -89,6 +90,7 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GeometryDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/VolumeDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/ProceduralGeometryDialog.h
 )
 
 # Create executable

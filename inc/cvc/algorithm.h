@@ -428,7 +428,47 @@ namespace CVC_NAMESPACE
                                    double threshold,
                                    quality_metric metric = TET_ASPECT_RATIO);
   
+  // ---------------------------------------
+  // Procedural Geometry Generation
+  // ---------------------------------------
+  // Purpose:
+  //   Generate parametric primitive geometries with proper normals.
+  // ---- Change History ----
+  // 01/07/2026 -- Joe R. -- Creation.
+  
+  // Generate a sphere centered at (cx, cy, cz) with specified radius and resolution
+  // thetaRes: number of segments around equator (longitude)
+  // phiRes: number of segments from pole to pole (latitude)
+  // Returns triangular mesh with normals
+  geometry generate_sphere(double cx, double cy, double cz,
+                          double radius,
+                          int thetaRes = 32,
+                          int phiRes = 16);
+  
+  // Generate a cube centered at (cx, cy, cz) with specified dimensions
+  // Returns triangular mesh with proper face normals (vertices duplicated per face)
+  geometry generate_cube(double cx, double cy, double cz,
+                        double sizeX, double sizeY, double sizeZ);
+  
+  // Generate a torus centered at (cx, cy, cz) with specified radii and resolution
+  // majorRadius: distance from torus center to tube center
+  // minorRadius: radius of the tube
+  // majorRes: number of segments around the torus
+  // minorRes: number of segments around the tube
+  // Returns triangular mesh with normals
+  geometry generate_torus(double cx, double cy, double cz,
+                         double majorRadius, double minorRadius,
+                         int majorRes = 32,
+                         int minorRes = 16);
+  
+  // Generate a cone centered at (cx, cy, cz) with specified dimensions and resolution
+  // Cone extends from base at cy - height/2 to apex at cy + height/2
+  // res: number of segments around the cone
+  // Returns triangular mesh with normals (separate vertices for side and base cap)
+  geometry generate_cone(double cx, double cy, double cz,
+                        double radius, double height,
+                        int res = 32);
+  
 }
 
 #endif
-

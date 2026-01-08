@@ -18,9 +18,15 @@ protected:
         
         // Initialize Qt if not already initialized
         if (!QApplication::instance()) {
-            int argc = 0;
-            char** argv = nullptr;
+            // Qt requires valid argc/argv pointers, otherwise X11 backend crashes
+            // when trying to access QCoreApplication::arguments()
+            static int argc = 1;
+            static char appName[] = "test";
+            static char* argv[] = { appName, nullptr };
             static QApplication app(argc, argv);
+            
+            // Disable session management to prevent X11 session manager crashes
+            app.setProperty("sessionManagement", false);
         }
     }
     
