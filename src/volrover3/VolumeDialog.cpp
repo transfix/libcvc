@@ -35,24 +35,13 @@ VolumeDialog::VolumeDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *pare
     connectSignals();
     populateVolumeList();
     
-    // Connect to state tree to monitor for new/removed volumes
+    // Connect to SceneGraph signal to monitor for new/removed volumes
     if (m_sceneGraph) {
-        std::string statePrefix = m_sceneGraph->getStatePrefix();
-        std::string graphicsChildrenPath = statePrefix + ".graphics.root.children";
-        
-        try {
-            auto& childrenState = cvc::state::instance()(graphicsChildrenPath);
-            
-            // Listen to dataChanged which fires when touch() is called
-            // (i.e., when the collection structure changes)
-            m_graphicsChildrenConnection = childrenState.dataChanged.connect(
-                [this]() {
-                    QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
-                }
-            );
-        } catch (...) {
-            // State might not exist yet
-        }
+        m_graphicsChangedConnection = m_sceneGraph->graphicsChanged.connect(
+            [this]() {
+                QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+            }
+        );
     }
 }
 
@@ -195,33 +184,31 @@ void VolumeDialog::onGraphicsChildrenChanged()
 {
     if (!m_sceneGraph) return;
     
-    // Get current volume count
-    size_t currentCount = m_volumePaths.size();
+    // Save current selection (by path)
+    QString currentSelection;
+    int currentIndex = m_volumeComboBox->currentIndex();
+    if (currentIndex >= 0 && currentIndex < static_cast<int>(m_volumePaths.size())) {
+        currentSelection = QString::fromStdString(m_volumePaths[currentIndex]);
+    }
     
-    // Count volume nodes in scene graph recursively
-    size_t sceneVolumeCount = m_sceneGraph->getVolumeGraphicsCount();
+    // Refresh the list
+    populateVolumeList();
     
-    // If counts differ, refresh the list
-    if (sceneVolumeCount != currentCount) {
-        // Save current selection (by path)
-        QString currentSelection;
-        int currentIndex = m_volumeComboBox->currentIndex();
-        if (currentIndex >= 0 && currentIndex < static_cast<int>(m_volumePaths.size())) {
-            currentSelection = QString::fromStdString(m_volumePaths[currentIndex]);
-        }
-        
-        // Refresh the list
-        populateVolumeList();
-        
-        // Try to restore the previous selection by matching path
-        if (!currentSelection.isEmpty()) {
-            for (int i = 0; i < static_cast<int>(m_volumePaths.size()); ++i) {
-                if (QString::fromStdString(m_volumePaths[i]) == currentSelection) {
-                    m_volumeComboBox->setCurrentIndex(i);
-                    break;
-                }
+    // Try to restore the previous selection by matching path
+    bool selectionRestored = false;
+    if (!currentSelection.isEmpty()) {
+        for (int i = 0; i < static_cast<int>(m_volumePaths.size()); ++i) {
+            if (QString::fromStdString(m_volumePaths[i]) == currentSelection) {
+                m_volumeComboBox->setCurrentIndex(i);
+                selectionRestored = true;
+                break;
             }
         }
+    }
+    
+    // If selection couldn't be restored (volume was deleted), disable controls if no volumes
+    if (!selectionRestored && m_volumeComboBox->count() == 0) {
+        setPropertiesEnabled(false);
     }
 }
 
@@ -299,7 +286,10 @@ void VolumeDialog::onMaterialPropertyChanged()
     if (m_updating) return;
     
     int index = m_volumeComboBox->currentIndex();
-    if (index < 0 || index >= static_cast<int>(m_volumePaths.size())) return;
+    if (index < 0 || index >= static_cast<int>(m_volumePaths.size())) {
+        setPropertiesEnabled(false);
+        return;
+    }
     
     const std::string& volumePath = m_volumePaths[index];
     

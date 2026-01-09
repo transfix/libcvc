@@ -113,8 +113,8 @@ private:
     // Geometry tracking
     std::vector<std::string> m_geometryNames;
     
-    // State tree connection
-    boost::signals2::scoped_connection m_graphicsChildrenConnection;
+    // Signal connections
+    boost::signals2::scoped_connection m_graphicsChangedConnection;
     boost::signals2::scoped_connection m_nodeStateConnection;
     
     // Flag to prevent recursive updates

@@ -56,6 +56,7 @@ public:
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name, const cvc::geometry& geom);
     std::shared_ptr<VolumeNode> addGraphics(const std::string& name, const cvc::volume& vol);
     std::shared_ptr<GraphicsNode> addGraphics(const std::string& name); // Empty graphics node for hierarchy
+    bool hasGraphics(const std::string& name) const;
     void removeGraphics(const std::string& name);
     std::shared_ptr<GraphicsNode> getGraphics(const std::string& name);
     std::shared_ptr<GraphicsNode> getGraphicsRoot() { return m_graphicsRoot; }
@@ -140,6 +141,9 @@ public:
     // Transfer function update
     void updateTransferFunction(const std::vector<double> &colorTable,
                                 const std::vector<double> &opacityTable);
+    
+    // Signal emitted when graphics are added or removed
+    boost::signals2::signal<void()> graphicsChanged;
 
 private:
     vtkRenderer *m_renderer;

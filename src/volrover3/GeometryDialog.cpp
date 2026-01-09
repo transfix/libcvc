@@ -67,32 +67,14 @@ GeometryDialog::GeometryDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *
     connectSignals();
     populateGeometryList();
     
-    // Connect to state tree to monitor for new/removed geometry
+    // Connect to SceneGraph's graphicsChanged signal to update the combo box
+    // when graphics are added or removed
     if (m_sceneGraph) {
-        std::string statePrefix = m_sceneGraph->getStatePrefix();
-        std::string graphicsChildrenPath = statePrefix + ".graphics.root.children";
-        
-        try {
-            // Access the state to ensure it exists (this will create it if needed)
-            auto& childrenState = cvc::state::instance()(graphicsChildrenPath);
-            
-            // Touch it once to ensure the state tree entry is fully initialized
-            // This is important for the dataChanged signal to work properly
-            childrenState.touch();
-            
-            // Listen to dataChanged which fires when touch() is called
-            // (i.e., when the collection structure changes via add/remove)
-            // Use AutoConnection so Qt determines the best way to invoke (direct or queued)
-            m_graphicsChildrenConnection = childrenState.dataChanged.connect(
-                [this]() {
-                    QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::AutoConnection);
-                }
-            );
-        } catch (const std::exception& e) {
-            cvcapp.log(0, std::string("GeometryDialog: Failed to connect to state tree: ") + e.what());
-        } catch (...) {
-            cvcapp.log(0, "GeometryDialog: Failed to connect to state tree (unknown error)");
-        }
+        m_graphicsChangedConnection = m_sceneGraph->graphicsChanged.connect(
+            [this]() {
+                QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+            }
+        );
     }
 }
 

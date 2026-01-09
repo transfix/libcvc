@@ -41,15 +41,10 @@ IsosurfaceDialog::IsosurfaceDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidg
     connectSignals();
     populateVolumeList();
     
-    // Connect to state tree to monitor for new volumes
-    // Listen to graphics root's children changes
+    // Connect to SceneGraph signal to monitor for new volumes
     if (m_sceneGraph) {
-        std::string statePrefix = m_sceneGraph->getStatePrefix();
-        std::string graphicsRootPath = statePrefix + ".graphics.root.children";
-        
-        m_graphicsChildrenConnection = cvc::state::instance()(graphicsRootPath).childChanged.connect(
-            [this](const std::string&) {
-                // Post to Qt event loop to ensure thread safety
+        m_graphicsChangedConnection = m_sceneGraph->graphicsChanged.connect(
+            [this]() {
                 QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
             }
         );
@@ -170,40 +165,38 @@ void IsosurfaceDialog::onGraphicsChildrenChanged()
 {
     if (!m_sceneGraph) return;
     
-    // Get current volume count
-    size_t currentCount = m_volumePaths.size();
+    // Save current selection (by path)
+    QString currentSelection;
+    int currentIndex = m_volumeComboBox->currentIndex();
+    if (currentIndex >= 0 && currentIndex < static_cast<int>(m_volumePaths.size())) {
+        currentSelection = QString::fromStdString(m_volumePaths[currentIndex]);
+    }
     
-    // Count volume nodes in scene graph recursively
-    size_t sceneVolumeCount = m_sceneGraph->getVolumeGraphicsCount();
+    // Refresh the list
+    populateVolumeList();
     
-    // If counts differ, refresh the list
-    if (sceneVolumeCount != currentCount) {
-        // Save current selection (by path)
-        QString currentSelection;
-        int currentIndex = m_volumeComboBox->currentIndex();
-        if (currentIndex >= 0 && currentIndex < static_cast<int>(m_volumePaths.size())) {
-            currentSelection = QString::fromStdString(m_volumePaths[currentIndex]);
-        }
-        
-        // Refresh the list
-        populateVolumeList();
-        
-        // Try to restore the previous selection by matching path
-        if (!currentSelection.isEmpty()) {
-            for (int i = 0; i < static_cast<int>(m_volumePaths.size()); ++i) {
-                if (QString::fromStdString(m_volumePaths[i]) == currentSelection) {
-                    m_volumeComboBox->setCurrentIndex(i);
-                    break;
-                }
+    // Try to restore the previous selection by matching path
+    bool selectionRestored = false;
+    if (!currentSelection.isEmpty()) {
+        for (int i = 0; i < static_cast<int>(m_volumePaths.size()); ++i) {
+            if (QString::fromStdString(m_volumePaths[i]) == currentSelection) {
+                m_volumeComboBox->setCurrentIndex(i);
+                selectionRestored = true;
+                break;
             }
         }
-        
-        // Update status if volumes are now available
-        if (m_volumeComboBox->count() > 0 && !m_computing) {
-            m_computeButton->setEnabled(true);
-            if (m_statusLabel->text() == tr("No volumes available")) {
-                m_statusLabel->setText(tr("Ready"));
-            }
+    }
+    
+    // Update UI state based on volume availability
+    if (m_volumeComboBox->count() > 0 && !m_computing) {
+        m_computeButton->setEnabled(true);
+        if (m_statusLabel->text() == tr("No volumes available")) {
+            m_statusLabel->setText(tr("Ready"));
+        }
+    } else if (m_volumeComboBox->count() == 0) {
+        m_computeButton->setEnabled(false);
+        if (!m_computing) {
+            m_statusLabel->setText(tr("No volumes available"));
         }
     }
 }
@@ -266,13 +259,14 @@ void IsosurfaceDialog::onComputeClicked()
         return;
     }
     
-    if (m_volumeComboBox->currentIndex() < 0) {
+    int currentIndex = m_volumeComboBox->currentIndex();
+    if (currentIndex < 0 || currentIndex >= static_cast<int>(m_volumePaths.size())) {
         QMessageBox::warning(this, tr("No Volume"),
                            tr("Please select a volume to extract isosurface."));
         return;
     }
     
-    const std::string& volumePath = m_volumePaths[m_volumeComboBox->currentIndex()];
+    const std::string& volumePath = m_volumePaths[currentIndex];
     
     // Find the volume node
     std::shared_ptr<VolumeNode> volumeNode;
@@ -324,7 +318,7 @@ void IsosurfaceDialog::onComputeClicked()
     // Start computation in background thread
     cvc::app::instance().startThread(
         m_activeThreadKey,
-        [this, vol, isovalue, method, improveIterations, normalType, volumeName]() {
+        [this, vol, isovalue, method, improveIterations, normalType, volumeName, volumeNode]() {
             cvc::thread_info ti("Isosurface Extraction");
             
             try {
@@ -337,7 +331,7 @@ void IsosurfaceDialog::onComputeClicked()
                 }, Qt::QueuedConnection);
                 
                 // Post all SceneGraph/VTK operations to main thread via SceneGraph event queue
-                m_sceneGraph->postEvent([this, isoGeom, volumeName, isovalue]() {
+                m_sceneGraph->postEvent([this, isoGeom, volumeName, isovalue, volumeNode]() {
                     cvc::thread_info ti("Add Isosurface");
                     
                     try {
@@ -350,12 +344,6 @@ void IsosurfaceDialog::onComputeClicked()
                         if (existingNode) {
                             // Remove existing isosurface
                             m_sceneGraph->removeGraphics(isoName);
-                        }
-                        
-                        // Get the parent volume node first
-                        auto volumeNode = m_sceneGraph->getGraphics(volumeName);
-                        if (!volumeNode) {
-                            throw std::runtime_error("Volume node not found");
                         }
                         
                         // Add isosurface as child of volume using the template createChild method

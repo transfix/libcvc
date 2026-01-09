@@ -57,8 +57,8 @@ private:
     bool m_computing;
     std::string m_activeThreadKey;
     
-    // State tree connection
-    boost::signals2::scoped_connection m_graphicsChildrenConnection;
+    // Signal connections
+    boost::signals2::scoped_connection m_graphicsChangedConnection;
 };
 
 #endif // ISOSURFACEDIALOG_H

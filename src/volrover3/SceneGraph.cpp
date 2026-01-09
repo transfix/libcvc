@@ -339,6 +339,9 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, c
         // State might not exist yet
     }
     
+    // Emit signal for dialogs
+    graphicsChanged();
+    
     return graphicsNode;
 }
 
@@ -368,7 +371,15 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
         // State might not exist yet
     }
     
+    // Emit signal for dialogs
+    graphicsChanged();
+    
     return graphicsNode;
+}
+
+bool SceneGraph::hasGraphics(const std::string& name) const
+{
+    return m_graphicsNodes.find(name) != m_graphicsNodes.end();
 }
 
 void SceneGraph::removeGraphics(const std::string& name)
@@ -396,6 +407,9 @@ void SceneGraph::removeGraphics(const std::string& name)
     } catch (...) {
         // State might not exist yet during initialization
     }
+    
+    // Emit signal for dialogs
+    graphicsChanged();
     
     // If scene is now empty, add null graphic back
     ensureNullGraphicIfEmpty();
@@ -449,6 +463,9 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
     } catch (...) {
         // State might not exist yet
     }
+    
+    // Emit signal for dialogs
+    graphicsChanged();
     
     return volumeNode;
 }
