@@ -1,7 +1,6 @@
 #ifndef BBOXNODE_H
 #define BBOXNODE_H
 
-#include <volrover3/SceneNode.h>
 #include <cvc/bounding_box.h>
 #include <vtkSmartPointer.h>
 #include <vector>
@@ -10,19 +9,23 @@ class vtkActor;
 class vtkPolyDataMapper;
 class vtkActor2D;
 class vtkRenderer;
+class vtkMatrix4x4;
 
-class BBoxNode : public SceneNode
+// Simple VTK wrapper for bounding box visualization
+// Not a SceneNode - controlled by parent GraphicsNode's show_bbox state
+class BBoxNode
 {
 public:
     BBoxNode();
-    ~BBoxNode() override;
+    ~BBoxNode();
 
-    vtkProp* getProp() override;
-    void addToRenderer(vtkRenderer* renderer) override;
-    void removeFromRenderer(vtkRenderer* renderer) override;
+    void addToRenderer(vtkRenderer* renderer);
+    void removeFromRenderer(vtkRenderer* renderer);
     
     void setBoundingBox(const cvc::bounding_box& bbox);
     cvc::bounding_box getBoundingBox() const { return m_bbox; }
+    
+    void setTransform(vtkMatrix4x4* transform);
     
     void setColor(double r, double g, double b);
     void getColor(double& r, double& g, double& b) const;
@@ -45,6 +48,7 @@ private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     cvc::bounding_box m_bbox;
+    vtkSmartPointer<vtkMatrix4x4> m_transform;  // Store world transform for coordinate labels
     
     // Coordinate label members
     std::vector<vtkSmartPointer<vtkActor2D>> m_coordinateLabelActors;

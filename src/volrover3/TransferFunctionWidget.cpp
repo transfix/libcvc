@@ -2,6 +2,7 @@
 #include <volrover3/SceneGraph.h>
 #include <volrover3/VolumeNode.h>
 #include <cvc/app.h>
+#include <cvc/state.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -264,6 +265,7 @@ TransferFunctionWidget::TransferFunctionWidget(QWidget *parent)
     , m_sceneGraph(nullptr)
     , m_dataMin(0.0)
     , m_dataMax(1.0)
+    , m_updatingFromState(false)
 {
     setupUI();
     createDefaultTransferFunction();
@@ -339,6 +341,56 @@ void TransferFunctionWidget::setSceneGraph(SceneGraph* sceneGraph)
 {
     m_sceneGraph = sceneGraph;
     refreshVolumeList();
+    
+    // Connect to state tree to monitor for new volumes
+    // Listen to graphics root's children changes
+    if (m_sceneGraph) {
+        std::string statePrefix = m_sceneGraph->getStatePrefix();
+        std::string graphicsRootPath = statePrefix + ".graphics.root.children";
+        
+        m_graphicsChildrenConnection = cvc::state::instance()(graphicsRootPath).childChanged.connect(
+            [this](const std::string&) {
+                // Post to Qt event loop to ensure thread safety
+                QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+            }
+        );
+    }
+}
+
+void TransferFunctionWidget::onGraphicsChildrenChanged()
+{
+    if (!m_sceneGraph || !m_volumeCombo) {
+        return;
+    }
+    
+    // Get current volume list from scene graph
+    auto volumeGraphics = m_sceneGraph->getAllVolumeGraphics();
+    
+    // Check if count changed
+    if (volumeGraphics.size() != m_volumes.size()) {
+        refreshVolumeList();
+        return;
+    }
+    
+    // Check if the set of volume names changed (handles reordering and replacement)
+    std::set<std::string> newNames;
+    for (const auto& vol : volumeGraphics) {
+        if (vol) {
+            newNames.insert(vol->getName());
+        }
+    }
+    
+    std::set<std::string> currentNames;
+    for (const auto& vol : m_volumes) {
+        if (vol) {
+            currentNames.insert(vol->getName());
+        }
+    }
+    
+    if (newNames != currentNames) {
+        refreshVolumeList();
+        return;
+    }
 }
 
 void TransferFunctionWidget::refreshVolumeList()
@@ -389,7 +441,10 @@ void TransferFunctionWidget::onVolumeSelected(int index)
     if (index >= 0 && index < static_cast<int>(m_volumes.size())) {
         auto volume = m_volumes[index];
         emit selectedVolumeChanged(volume);
+        connectToVolumeState(volume);
         loadTransferFunctionFromVolume(volume);
+    } else {
+        disconnectFromVolumeState();
     }
 }
 
@@ -401,7 +456,6 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
     }
 
     // Update data range from volume's metadata
-    // The metadata contains computed min/max values
     auto minVal = volume->getMetadata("data_min");
     auto maxVal = volume->getMetadata("data_max");
     
@@ -421,7 +475,6 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
             }
             cvcapp.log(0, "  Set data range to: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]\n");
         } catch (const std::exception& e) {
-            // If conversion fails, use defaults
             cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
                        "]: Failed to convert metadata (" + std::string(e.what()) + "), using defaults [0.0, 1.0]");
             m_dataMin = 0.0;
@@ -434,10 +487,61 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
         m_dataMax = 1.0;
     }
     
-    // Note: We don't load the actual transfer function from the volume
-    // because VolumeNode doesn't expose the TF getters. Instead, we keep
-    // the current TF in the widget and just update the data range.
-    // The user can then adjust the TF as needed for this volume.
+    // Load transfer function from volume's state tree
+    std::vector<double> colorTable = volume->getTransferFunctionColorTable();
+    std::vector<double> opacityTable = volume->getTransferFunctionOpacityTable();
+    
+    cvcapp.log(0, "  Raw from state: " + std::to_string(colorTable.size()) + " color values, " +
+               std::to_string(opacityTable.size()) + " opacity values");
+    
+    if (!colorTable.empty() && !opacityTable.empty()) {
+        // Parse color table into color points (format: scalar, r, g, b, ...)
+        m_colorPoints.clear();
+        
+        cvcapp.log(0, "  Parsing color table: " + std::to_string(colorTable.size()) + 
+                   " values = " + std::to_string(colorTable.size() / 4) + " points");
+        
+        for (size_t i = 0; i + 3 < colorTable.size(); i += 4) {
+            double scalar = colorTable[i];
+            double r = colorTable[i + 1];
+            double g = colorTable[i + 2];
+            double b = colorTable[i + 3];
+            
+            // Convert to normalized value [0, 1]
+            double normalizedValue = (m_dataMax > m_dataMin) ? 
+                (scalar - m_dataMin) / (m_dataMax - m_dataMin) : 0.0;
+            
+            m_colorPoints.push_back({
+                normalizedValue,
+                QColor::fromRgbF(r, g, b)
+            });
+        }
+        
+        // Parse opacity table into opacity points (format: scalar, opacity, ...)
+        m_opacityPoints.clear();
+        for (size_t i = 0; i + 1 < opacityTable.size(); i += 2) {
+            double scalar = opacityTable[i];
+            double opacity = opacityTable[i + 1];
+            
+            // Convert to normalized value [0, 1]
+            double normalizedValue = (m_dataMax > m_dataMin) ? 
+                (scalar - m_dataMin) / (m_dataMax - m_dataMin) : 0.0;
+            
+            m_opacityPoints.push_back({normalizedValue, opacity});
+        }
+        
+        // Update UI
+        updateColorBar();
+        if (m_opacityWidget) {
+            auto opacityWidget = static_cast<OpacityGraphWidget*>(m_opacityWidget);
+            opacityWidget->setOpacityPoints(m_opacityPoints);
+        }
+        
+        cvcapp.log(0, "  Loaded TF: " + std::to_string(m_colorPoints.size()) + " color pts, " +
+                   std::to_string(m_opacityPoints.size()) + " opacity pts");
+    } else {
+        cvcapp.log(0, "  No transfer function in state, keeping current widget TF");
+    }
 }
 
 void TransferFunctionWidget::applyPreset(const QString &presetName)
@@ -477,6 +581,17 @@ void TransferFunctionWidget::applyPreset(const QString &presetName)
     }
 
     updateColorBar();
+    
+    // Apply to selected volume
+    if (m_updatingFromState == 0) {
+        auto selectedVolume = getSelectedVolume();
+        if (selectedVolume) {
+            m_updatingFromState++;  // Increment before calling to prevent feedback
+            selectedVolume->setTransferFunction(getColorTable(), getOpacityTable());
+            m_updatingFromState--;  // Decrement after
+        }
+    }
+    
     emit transferFunctionChanged();
 }
 
@@ -498,7 +613,16 @@ void TransferFunctionWidget::onColorMapClicked(double x, double y)
 
 void TransferFunctionWidget::onOpacityGraphChanged()
 {
-    emit transferFunctionChanged();
+    if (m_updatingFromState == 0) {
+        // Apply to selected volume
+        auto selectedVolume = getSelectedVolume();
+        if (selectedVolume) {
+            m_updatingFromState++;  // Increment before calling to prevent feedback
+            selectedVolume->setTransferFunction(getColorTable(), getOpacityTable());
+            m_updatingFromState--;  // Decrement after
+        }
+        emit transferFunctionChanged();
+    }
 }
 
 void TransferFunctionWidget::updateColorBar()
@@ -511,6 +635,9 @@ std::vector<double> TransferFunctionWidget::getColorTable() const
 {
     std::vector<double> table;
     
+    cvcapp.log(0, "TransferFunctionWidget::getColorTable() - m_colorPoints.size() = " + 
+               std::to_string(m_colorPoints.size()));
+    
     for (const auto &pt : m_colorPoints) {
         double scalar = m_dataMin + pt.value * (m_dataMax - m_dataMin);
         table.push_back(scalar);
@@ -518,6 +645,9 @@ std::vector<double> TransferFunctionWidget::getColorTable() const
         table.push_back(pt.color.greenF());
         table.push_back(pt.color.blueF());
     }
+    
+    cvcapp.log(0, "  Returning color table with " + std::to_string(table.size()) + " values (" +
+               std::to_string(table.size() / 4) + " points)");
     
     return table;
 }
@@ -536,6 +666,57 @@ std::vector<double> TransferFunctionWidget::getOpacityTable() const
     }
     
     return table;
+}
+
+void TransferFunctionWidget::connectToVolumeState(std::shared_ptr<VolumeNode> volume)
+{
+    disconnectFromVolumeState();
+    
+    if (!volume) {
+        return;
+    }
+    
+    // Connect to transfer function state changes
+    std::string statePath = volume->getState().fullName();
+    
+    auto colorTFPath = statePath + ".transfer_function.color";
+    auto opacityTFPath = statePath + ".transfer_function.opacity";
+    
+    // Use DirectConnection instead of QueuedConnection to ensure m_updatingFromState flag works correctly
+    m_colorTFConnection = cvc::state::instance()(colorTFPath).valueChanged.connect(
+        [this]() {
+            // Only reload if we're not currently updating state from widget
+            if (m_updatingFromState == 0) {
+                onVolumeTransferFunctionChanged();
+            }
+        }
+    );
+    
+    m_opacityTFConnection = cvc::state::instance()(opacityTFPath).valueChanged.connect(
+        [this]() {
+            // Only reload if we're not currently updating state from widget
+            if (m_updatingFromState == 0) {
+                onVolumeTransferFunctionChanged();
+            }
+        }
+    );
+}
+
+void TransferFunctionWidget::disconnectFromVolumeState()
+{
+    m_colorTFConnection.disconnect();
+    m_opacityTFConnection.disconnect();
+}
+
+void TransferFunctionWidget::onVolumeTransferFunctionChanged()
+{
+    // Reload transfer function from selected volume's state
+    auto volume = getSelectedVolume();
+    if (volume && m_updatingFromState == 0) {
+        m_updatingFromState++;
+        loadTransferFunctionFromVolume(volume);
+        m_updatingFromState--;
+    }
 }
 
 #include "TransferFunctionWidget.moc"

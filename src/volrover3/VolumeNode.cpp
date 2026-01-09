@@ -1,4 +1,5 @@
 #include <volrover3/VolumeNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <cvc/volume.h>
 #include <cvc/state.h>
 #include <cvc/app.h>
@@ -8,15 +9,17 @@
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkVolumeProperty.h>
+#include <vtkTransform.h>
 #include <vtkRenderer.h>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <set>
 
-VolumeNode::VolumeNode(const std::string& name)
-    : GraphicsNode(name)
+VolumeNode::VolumeNode(const std::string& statePath, const std::string& name)
+    : GraphicsNode(statePath, name)
     , m_hasVolume(false)
     , m_vtkVolume(vtkSmartPointer<vtkVolume>::New())
     , m_mapper(vtkSmartPointer<vtkSmartVolumeMapper>::New())
@@ -34,7 +37,6 @@ VolumeNode::VolumeNode(const std::string& name)
     , m_scalarOpacityUnitDistance(1.0)
     , m_sampleDistance(0.5)
     , m_autoAdjustSampleDistances(true)
-    , m_stateNode(nullptr)
 {
     // Initialize with empty 1x1x1 volume to avoid VTK errors before data is loaded
     m_imageData->SetDimensions(1, 1, 1);
@@ -69,12 +71,38 @@ VolumeNode::VolumeNode(const std::string& name)
 
     m_vtkVolume->SetProperty(m_volumeProperty);
 
+    // Initialize state tree with all rendering attributes
+    if (!statePath.empty()) {
+        getState("visible").value(1);  // Visible by default
+        
+        // Shading properties
+        getState("shading").value(m_shading ? 1 : 0);
+        getState("ambient").value(m_ambient);
+        getState("diffuse").value(m_diffuse);
+        getState("specular").value(m_specular);
+        getState("specular_power").value(m_specularPower);
+        
+        // Sampling properties
+        getState("scalar_opacity_unit_distance").value(m_scalarOpacityUnitDistance);
+        getState("sample_distance").value(m_sampleDistance);
+        getState("auto_adjust_sample_distances").value(m_autoAdjustSampleDistances ? 1 : 0);
+        
+        // Data range (will be updated when volume is loaded)
+        getState("data_min").value(m_dataMin);
+        getState("data_max").value(m_dataMax);
+        
+        // Transfer function state (stored as serialized arrays)
+        getState("transfer_function.color").value("");
+        getState("transfer_function.opacity").value("");
+    }
+
     // Initialize with default transfer function
     setDefaultTransferFunction();
 }
 
 VolumeNode::~VolumeNode()
 {
+    // Disconnect all signal connections to prevent new handlers from queuing
     m_dataConnection.disconnect();
     m_shadingConnection.disconnect();
     m_ambientConnection.disconnect();
@@ -84,11 +112,33 @@ VolumeNode::~VolumeNode()
     m_scalarOpacityUnitDistanceConnection.disconnect();
     m_sampleDistanceConnection.disconnect();
     m_autoAdjustSampleDistancesConnection.disconnect();
+    
+    // Note: Do NOT call waitForHandlers() here! 
+    // The base class state_object<VolumeNode> destructor will handle it,
+    // but only AFTER our VTK members are destroyed. Calling it here would
+    // allow handlers to access destroyed VTK objects.
 }
 
 vtkProp* VolumeNode::getProp()
 {
     return m_vtkVolume;
+}
+
+void VolumeNode::applyTransformToVTK()
+{
+    // Use generic helper to apply world transform
+    applyWorldTransformToProps({m_vtkVolume});
+}
+
+void VolumeNode::applyClipPlanes(vtkPlaneCollection* planes)
+{
+    if (m_mapper) {
+        if (planes && planes->GetNumberOfItems() > 0) {
+            m_mapper->SetClippingPlanes(planes);
+        } else {
+            m_mapper->RemoveAllClippingPlanes();
+        }
+    }
 }
 
 void VolumeNode::addToRenderer(vtkRenderer* renderer)
@@ -159,6 +209,10 @@ void VolumeNode::setVolume(const cvc::volume &vol)
     m_dataMin = vol.min();
     m_dataMax = vol.max();
     
+    // Update state tree with data range
+    getState("data_min").value(m_dataMin);
+    getState("data_max").value(m_dataMax);
+    
     cvcapp.log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
     cvcapp.log(0, "  Dimensions: [" + std::to_string(vol.XDim()) + ", " + std::to_string(vol.YDim()) + ", " + std::to_string(vol.ZDim()) + "]");
     cvcapp.log(0, "  Bounding box: [" + std::to_string(vol.XMin()) + "," + std::to_string(vol.XMax()) + "], [" +
@@ -183,6 +237,15 @@ void VolumeNode::setVolume(const cvc::volume &vol)
     
     // Update bbox to match volume bounds
     updateBoundingBoxNode();
+    
+    // Notify parent to resync bounds if it's a NullGraphicNode with auto-sync enabled
+    if (m_parent) {
+        auto nullParent = dynamic_cast<NullGraphicNode*>(m_parent);
+        if (nullParent) {
+            nullParent->syncBoundsToChildren();
+        }
+    }
+    
     cvcapp.log(0, "=================================\n");
 }
 
@@ -275,6 +338,17 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
                std::to_string(colorTable.size() / 4) + " color pts, " +
                std::to_string(opacityTable.size() / 2) + " opacity pts");
     
+    // DEBUG: Log first few color values to see what we're getting
+    if (colorTable.size() >= 8) {
+        cvcapp.log(0, "  First 2 color points:");
+        cvcapp.log(0, "    [0]: scalar=" + std::to_string(colorTable[0]) + 
+                   ", rgb=(" + std::to_string(colorTable[1]) + "," + 
+                   std::to_string(colorTable[2]) + "," + std::to_string(colorTable[3]) + ")");
+        cvcapp.log(0, "    [1]: scalar=" + std::to_string(colorTable[4]) + 
+                   ", rgb=(" + std::to_string(colorTable[5]) + "," + 
+                   std::to_string(colorTable[6]) + "," + std::to_string(colorTable[7]) + ")");
+    }
+    
     // Clear existing functions
     m_colorFunc->RemoveAllPoints();
     m_opacityFunc->RemoveAllPoints();
@@ -301,6 +375,29 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
     }
 
     updateTransferFunctions();
+    
+    // Save to state tree only if values changed
+    // Build strings for comparison
+    std::ostringstream colorStr, opacityStr;
+    for (size_t i = 0; i < colorTable.size(); ++i) {
+        if (i > 0) colorStr << ",";
+        colorStr << std::fixed << std::setprecision(6) << colorTable[i];
+    }
+    for (size_t i = 0; i < opacityTable.size(); ++i) {
+        if (i > 0) opacityStr << ",";
+        opacityStr << std::fixed << std::setprecision(6) << opacityTable[i];
+    }
+    
+    // Only update state if values actually changed
+    std::string currentColorStr = getState("transfer_function.color").value();
+    std::string currentOpacityStr = getState("transfer_function.opacity").value();
+    
+    if (colorStr.str() != currentColorStr) {
+        getState("transfer_function.color").value(colorStr.str());
+    }
+    if (opacityStr.str() != currentOpacityStr) {
+        getState("transfer_function.opacity").value(opacityStr.str());
+    }
 }
 
 void VolumeNode::setDefaultTransferFunction()
@@ -315,70 +412,89 @@ void VolumeNode::setDefaultTransferFunction()
     // Default opacity ramp using actual data range
     m_opacityFunc->AddPoint(m_dataMin, 0.0);
     m_opacityFunc->AddPoint(m_dataMax, 1.0);
+    
+    // Save to state tree
+    std::ostringstream colorStr, opacityStr;
+    colorStr << m_dataMin << ",0,0,0," << m_dataMax << ",1,1,1";
+    opacityStr << m_dataMin << ",0," << m_dataMax << ",1";
+    getState("transfer_function.color").value(colorStr.str());
+    getState("transfer_function.opacity").value(opacityStr.str());
+}
+
+std::vector<double> VolumeNode::getTransferFunctionColorTable() const
+{
+    std::string tableStr = getState("transfer_function.color").value();
+    std::vector<double> table;
+    
+    if (tableStr.empty()) {
+        return table;
+    }
+    
+    std::istringstream iss(tableStr);
+    std::string value;
+    while (std::getline(iss, value, ',')) {
+        table.push_back(std::stod(value));
+    }
+    
+    return table;
+}
+
+std::vector<double> VolumeNode::getTransferFunctionOpacityTable() const
+{
+    std::string tableStr = getState("transfer_function.opacity").value();
+    std::vector<double> table;
+    
+    if (tableStr.empty()) {
+        return table;
+    }
+    
+    std::istringstream iss(tableStr);
+    std::string value;
+    while (std::getline(iss, value, ',')) {
+        table.push_back(std::stod(value));
+    }
+    
+    return table;
 }
 
 void VolumeNode::setShading(bool enabled)
 {
-    m_shading = enabled;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetShade(enabled);
-    }
+    getState("shading").value(enabled ? 1 : 0);
 }
 
 void VolumeNode::setAmbient(double value)
 {
-    m_ambient = value;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetAmbient(value);
-    }
+    getState("ambient").value(value);
 }
 
 void VolumeNode::setDiffuse(double value)
 {
-    m_diffuse = value;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetDiffuse(value);
-    }
+    getState("diffuse").value(value);
 }
 
 void VolumeNode::setSpecular(double value)
 {
-    m_specular = value;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetSpecular(value);
-    }
+    getState("specular").value(value);
 }
 
 void VolumeNode::setSpecularPower(double value)
 {
-    m_specularPower = value;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetSpecularPower(value);
-    }
+    getState("specular_power").value(value);
 }
 
 void VolumeNode::setScalarOpacityUnitDistance(double value)
 {
-    m_scalarOpacityUnitDistance = value;
-    if (m_volumeProperty) {
-        m_volumeProperty->SetScalarOpacityUnitDistance(value);
-    }
+    getState("scalar_opacity_unit_distance").value(value);
 }
 
 void VolumeNode::setSampleDistance(double value)
 {
-    m_sampleDistance = value;
-    if (m_mapper) {
-        m_mapper->SetSampleDistance(value);
-    }
+    getState("sample_distance").value(value);
 }
 
 void VolumeNode::setAutoAdjustSampleDistances(bool enabled)
 {
-    m_autoAdjustSampleDistances = enabled;
-    if (m_mapper) {
-        m_mapper->SetAutoAdjustSampleDistances(enabled);
-    }
+    getState("auto_adjust_sample_distances").value(enabled ? 1 : 0);
 }
 
 void VolumeNode::updateTransferFunctions()
@@ -414,115 +530,94 @@ cvc::bounding_box VolumeNode::getBoundingBox() const
     return cvc::bounding_box(0, 0, 0, 0, 0, 0);
 }
 
-void VolumeNode::syncToState(cvc::state& parentState)
+// Note: syncToState and syncFromState removed - state_object handles state synchronization automatically
+
+void VolumeNode::handleStateChanged(const std::string& childState)
 {
-    cvc::state& myState = parentState(m_name);
-    myState.comment("Graphics object with volume data and transform");
+    cvcapp.log(2, str(boost::format("VolumeNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
-    // Store volume data
-    if (m_volume) {
-        myState.data(*m_volume);
-    }
-    
-    // Store transform as comma-separated string (row-major 4x4 matrix)
-    std::string transformStr;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!transformStr.empty()) transformStr += ",";
-            transformStr += std::to_string(m_transform->GetElement(i, j));
-        }
-    }
-    cvc::state& transformState = myState("transform");
-    transformState.value(transformStr);
-    transformState.comment("4x4 transformation matrix in row-major order");
-    
-    // Store metadata with appropriate readOnly flags and comments
-    cvc::state& metadataState = myState("metadata");
-    metadataState.comment("Computed volume statistics and properties");
-    
-    for (const auto& [key, value] : m_metadata) {
-        try {
-            cvc::state& metaEntry = metadataState(key);
-            
-            if (value.type() == typeid(std::string)) {
-                metaEntry.value(std::any_cast<std::string>(value));
-            } else if (value.type() == typeid(double)) {
-                metaEntry.value(std::any_cast<double>(value));
-            } else if (value.type() == typeid(int)) {
-                metaEntry.value(std::any_cast<int>(value));
-            } else if (value.type() == typeid(bool)) {
-                bool boolVal = std::any_cast<bool>(value);
-                metaEntry.value(boolVal ? "true" : "false");
+    // Handle volume-specific state changes
+    if (childState == "shading") {
+        runOnMainThread([this]() {
+            m_shading = getState("shading").value<bool>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetShade(m_shading ? 1 : 0);
             }
-            
-            // Set readOnly flag for computed metadata
-            metaEntry.readOnly(isComputedMetadata(key));
-            
-            // Set descriptive comments for known metadata keys
-            if (key == "dim_x") metaEntry.comment("Volume dimension in X (number of voxels)");
-            else if (key == "dim_y") metaEntry.comment("Volume dimension in Y (number of voxels)");
-            else if (key == "dim_z") metaEntry.comment("Volume dimension in Z (number of voxels)");
-            else if (key == "bbox_min_x") metaEntry.comment("Minimum X coordinate of bounding box");
-            else if (key == "bbox_min_y") metaEntry.comment("Minimum Y coordinate of bounding box");
-            else if (key == "bbox_min_z") metaEntry.comment("Minimum Z coordinate of bounding box");
-            else if (key == "bbox_max_x") metaEntry.comment("Maximum X coordinate of bounding box");
-            else if (key == "bbox_max_y") metaEntry.comment("Maximum Y coordinate of bounding box");
-            else if (key == "bbox_max_z") metaEntry.comment("Maximum Z coordinate of bounding box");
-            else if (key == "spacing_x") metaEntry.comment("Voxel spacing in X dimension");
-            else if (key == "spacing_y") metaEntry.comment("Voxel spacing in Y dimension");
-            else if (key == "spacing_z") metaEntry.comment("Voxel spacing in Z dimension");
-            else if (key == "data_range_min") metaEntry.comment("Minimum voxel value in volume");
-            else if (key == "data_range_max") metaEntry.comment("Maximum voxel value in volume");
-            else if (key == "voxel_type") metaEntry.comment("Data type of voxels");
-            else if (key == "bounding_box") metaEntry.comment("Complete bounding box as comma-separated values");
-            else if (key == "filename") metaEntry.comment("Source filename for the volume");
-            
-        } catch (...) {
-            // Skip metadata that can't be serialized
-        }
+        });
     }
-    
-    // Store bbox flag
-    myState("show_bbox").value(m_showBBox ? "true" : "false");
-    
-    // Store label settings
-    myState("show_label").value(m_showLabel ? "true" : "false");
-    myState("label_text").value(m_labelText);
-    myState("label_size").value(std::to_string(m_labelSize));
-    std::ostringstream labelColorStr;
-    labelColorStr << m_labelColor[0] << "," << m_labelColor[1] << "," << m_labelColor[2];
-    myState("label_color").value(labelColorStr.str());
-    
-    // Store volume rendering properties
-    cvc::state& renderingState = myState("rendering");
-    renderingState.comment("Volume rendering properties");
-    
-    renderingState("shading").value(m_shading ? "true" : "false");
-    renderingState("shading").comment("Enable/disable shading");
-    
-    renderingState("ambient").value(m_ambient);
-    renderingState("ambient").comment("Ambient lighting coefficient (0.0-1.0)");
-    
-    renderingState("diffuse").value(m_diffuse);
-    renderingState("diffuse").comment("Diffuse lighting coefficient (0.0-1.0)");
-    
-    renderingState("specular").value(m_specular);
-    renderingState("specular").comment("Specular lighting coefficient (0.0-1.0)");
-    
-    renderingState("specular_power").value(m_specularPower);
-    renderingState("specular_power").comment("Specular power (shininess)");
-    
-    renderingState("scalar_opacity_unit_distance").value(m_scalarOpacityUnitDistance);
-    renderingState("scalar_opacity_unit_distance").comment("Scalar opacity unit distance");
-    
-    renderingState("sample_distance").value(m_sampleDistance);
-    renderingState("sample_distance").comment("Ray casting sample distance");
-    
-    renderingState("auto_adjust_sample_distances").value(m_autoAdjustSampleDistances ? "true" : "false");
-    renderingState("auto_adjust_sample_distances").comment("Auto-adjust sample distances");
-    
-    // Save common graphics attributes (transform, bbox, label, children, combined bbox if has children)
-    saveCommonStateAttributes(myState);
+    else if (childState == "ambient") {
+        runOnMainThread([this]() {
+            m_ambient = getState("ambient").value<double>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetAmbient(m_ambient);
+            }
+        });
+    }
+    else if (childState == "diffuse") {
+        runOnMainThread([this]() {
+            m_diffuse = getState("diffuse").value<double>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetDiffuse(m_diffuse);
+            }
+        });
+    }
+    else if (childState == "specular") {
+        runOnMainThread([this]() {
+            m_specular = getState("specular").value<double>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetSpecular(m_specular);
+            }
+        });
+    }
+    else if (childState == "specular_power") {
+        runOnMainThread([this]() {
+            m_specularPower = getState("specular_power").value<double>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetSpecularPower(m_specularPower);
+            }
+        });
+    }
+    else if (childState == "scalar_opacity_unit_distance") {
+        runOnMainThread([this]() {
+            m_scalarOpacityUnitDistance = getState("scalar_opacity_unit_distance").value<double>();
+            if (m_volumeProperty) {
+                m_volumeProperty->SetScalarOpacityUnitDistance(m_scalarOpacityUnitDistance);
+            }
+        });
+    }
+    else if (childState == "sample_distance") {
+        runOnMainThread([this]() {
+            m_sampleDistance = getState("sample_distance").value<double>();
+            if (m_mapper) {
+                m_mapper->SetSampleDistance(m_sampleDistance);
+            }
+        });
+    }
+    else if (childState == "auto_adjust_sample_distances") {
+        runOnMainThread([this]() {
+            m_autoAdjustSampleDistances = getState("auto_adjust_sample_distances").value<bool>();
+            if (m_mapper) {
+                m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
+            }
+        });
+    }
+    else if (childState == "data_min" || childState == "data_max") {
+        runOnMainThread([this]() {
+            try {
+                // Data range changed - update transfer functions
+                m_dataMin = getState("data_min").value<double>();
+                m_dataMax = getState("data_max").value<double>();
+                setDefaultTransferFunction();
+                updateTransferFunctions();
+            } catch (const boost::bad_lexical_cast&) {
+                // Ignore - state initialization may trigger before all components are set
+            }
+        });
+    }
+    else {
+        // Delegate to parent for common graphics fields
+        GraphicsNode::handleStateChanged(childState);
+    }
 }
 
 bool VolumeNode::isComputedMetadata(const std::string& key)
@@ -542,228 +637,6 @@ bool VolumeNode::isComputedMetadata(const std::string& key)
     };
     
     return computedKeys.find(key) != computedKeys.end();
-}
-
-void VolumeNode::syncFromState(cvc::state& parentState)
-{
-    try {
-        cvc::state& myState = parentState(m_name);
-        
-        m_stateNode = &myState;
-        m_dataConnection.disconnect(); // Disconnect any previous connection
-        m_dataConnection = myState.dataChanged.connect([this]() {
-            onDataChanged();
-        });
-        
-        // Load volume data
-        if (myState.isData<cvc::volume>()) {
-            try {
-                const cvc::volume& vol = boost::any_cast<const cvc::volume&>(myState.data());
-                setVolume(vol);
-            } catch (...) {}
-        }
-        
-        // Load transform
-        try {
-            std::string transformStr = myState("transform").value();
-            std::vector<double> values;
-            std::stringstream ss(transformStr);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                values.push_back(std::stod(token));
-            }
-            
-            if (values.size() == 16) {
-                for (int i = 0; i < 4; ++i) {
-                    for (int j = 0; j < 4; ++j) {
-                        m_transform->SetElement(i, j, values[i * 4 + j]);
-                    }
-                }
-                updateTransform();
-            }
-        } catch (...) {}
-        
-        // Load metadata
-        try {
-            cvc::state& metadataState = myState("metadata");
-            std::vector<std::string> metadataKeys = metadataState.children();
-            
-            // Filter to direct children only
-            std::string metadataPath = metadataState.fullName();
-            int expectedDepth = std::count(metadataPath.begin(), metadataPath.end(), '.') + 1;
-            
-            for (const auto& descendant : metadataKeys) {
-                int depth = std::count(descendant.begin(), descendant.end(), '.');
-                if (depth == expectedDepth) {
-                    // Extract just the key name
-                    size_t lastDot = descendant.find_last_of('.');
-                    std::string key = (lastDot != std::string::npos) ? descendant.substr(lastDot + 1) : descendant;
-                    
-                    try {
-                        std::string value = metadataState(key).value();
-                        
-                        // Store all metadata as strings when loading from state
-                        // The state tree stores everything as strings anyway
-                        if (value == "true") {
-                            setMetadata(key, true);
-                        } else if (value == "false") {
-                            setMetadata(key, false);
-                        } else {
-                            setMetadata(key, value);
-                        }
-                    } catch (...) {}
-                }
-            }
-        } catch (...) {}
-        
-        // Load bbox flag
-        try {
-            std::string showBBoxStr = myState("show_bbox").value();
-            setShowBBox(showBBoxStr == "true");
-        } catch (...) {}
-        
-        // Load label settings
-        try {
-            std::string showLabelStr = myState("show_label").value();
-            setShowLabel(showLabelStr == "true");
-        } catch (...) {}
-        
-        try {
-            std::string labelText = myState("label_text").value();
-            setLabelText(labelText);
-        } catch (...) {}
-        
-        try {
-            int labelSize = std::stoi(myState("label_size").value());
-            setLabelSize(labelSize);
-        } catch (...) {}
-        
-        try {
-            std::string colorStr = myState("label_color").value();
-            std::istringstream iss(colorStr);
-            double r, g, b;
-            char comma;
-            if (iss >> r >> comma >> g >> comma >> b) {
-                setLabelColor(r, g, b);
-            }
-        } catch (...) {}
-        
-        // Load volume rendering properties
-        try {
-            cvc::state& renderingState = myState("rendering");
-            
-            // Disconnect existing connections
-            m_shadingConnection.disconnect();
-            m_ambientConnection.disconnect();
-            m_diffuseConnection.disconnect();
-            m_specularConnection.disconnect();
-            m_specularPowerConnection.disconnect();
-            m_scalarOpacityUnitDistanceConnection.disconnect();
-            m_sampleDistanceConnection.disconnect();
-            m_autoAdjustSampleDistancesConnection.disconnect();
-            
-            // Load shading
-            try {
-                std::string shadingStr = renderingState("shading").value();
-                m_shading = (shadingStr == "true");
-                m_volumeProperty->SetShade(m_shading ? 1 : 0);
-                m_shadingConnection = renderingState("shading").valueChanged.connect([this, &renderingState]() {
-                    m_shading = (renderingState("shading").value() == "true");
-                    m_volumeProperty->SetShade(m_shading ? 1 : 0);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load ambient
-            try {
-                m_ambient = std::stod(renderingState("ambient").value());
-                m_volumeProperty->SetAmbient(m_ambient);
-                m_ambientConnection = renderingState("ambient").valueChanged.connect([this, &renderingState]() {
-                    m_ambient = std::stod(renderingState("ambient").value());
-                    m_volumeProperty->SetAmbient(m_ambient);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load diffuse
-            try {
-                m_diffuse = std::stod(renderingState("diffuse").value());
-                m_volumeProperty->SetDiffuse(m_diffuse);
-                m_diffuseConnection = renderingState("diffuse").valueChanged.connect([this, &renderingState]() {
-                    m_diffuse = std::stod(renderingState("diffuse").value());
-                    m_volumeProperty->SetDiffuse(m_diffuse);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load specular
-            try {
-                m_specular = std::stod(renderingState("specular").value());
-                m_volumeProperty->SetSpecular(m_specular);
-                m_specularConnection = renderingState("specular").valueChanged.connect([this, &renderingState]() {
-                    m_specular = std::stod(renderingState("specular").value());
-                    m_volumeProperty->SetSpecular(m_specular);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load specular power
-            try {
-                m_specularPower = std::stod(renderingState("specular_power").value());
-                m_volumeProperty->SetSpecularPower(m_specularPower);
-                m_specularPowerConnection = renderingState("specular_power").valueChanged.connect([this, &renderingState]() {
-                    m_specularPower = std::stod(renderingState("specular_power").value());
-                    m_volumeProperty->SetSpecularPower(m_specularPower);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load scalar opacity unit distance
-            try {
-                m_scalarOpacityUnitDistance = std::stod(renderingState("scalar_opacity_unit_distance").value());
-                m_volumeProperty->SetScalarOpacityUnitDistance(m_scalarOpacityUnitDistance);
-                m_scalarOpacityUnitDistanceConnection = renderingState("scalar_opacity_unit_distance").valueChanged.connect([this, &renderingState]() {
-                    m_scalarOpacityUnitDistance = std::stod(renderingState("scalar_opacity_unit_distance").value());
-                    m_volumeProperty->SetScalarOpacityUnitDistance(m_scalarOpacityUnitDistance);
-                    m_volumeProperty->Modified();
-                    m_vtkVolume->Modified();
-                });
-            } catch (...) {}
-            
-            // Load sample distance
-            try {
-                m_sampleDistance = std::stod(renderingState("sample_distance").value());
-                m_mapper->SetSampleDistance(m_sampleDistance);
-                m_sampleDistanceConnection = renderingState("sample_distance").valueChanged.connect([this, &renderingState]() {
-                    m_sampleDistance = std::stod(renderingState("sample_distance").value());
-                    m_mapper->SetSampleDistance(m_sampleDistance);
-                    m_mapper->Modified();
-                });
-            } catch (...) {}
-            
-            // Load auto adjust sample distances
-            try {
-                std::string autoAdjustStr = renderingState("auto_adjust_sample_distances").value();
-                m_autoAdjustSampleDistances = (autoAdjustStr == "true");
-                m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
-                m_autoAdjustSampleDistancesConnection = renderingState("auto_adjust_sample_distances").valueChanged.connect([this, &renderingState]() {
-                    m_autoAdjustSampleDistances = (renderingState("auto_adjust_sample_distances").value() == "true");
-                    m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
-                    m_mapper->Modified();
-                });
-            } catch (...) {}
-            
-        } catch (...) {
-            // Rendering state doesn't exist - use defaults
-        }
-    } catch (...) {
-        // State doesn't exist or can't be loaded
-    }
 }
 
 void VolumeNode::updateMetadata(const cvc::volume &vol)
@@ -815,11 +688,10 @@ void VolumeNode::updateMetadata(const cvc::volume &vol)
 void VolumeNode::onDataChanged()
 {
     // Called when state data changes - reload volume from state
-    if (!m_stateNode) return;
-    
-    if (m_stateNode->isData<cvc::volume>()) {
+    // Note: With state_object, we access state via getState() instead of m_stateNode
+    if (getState().isData<cvc::volume>()) {
         try {
-            const cvc::volume& vol = boost::any_cast<const cvc::volume&>(m_stateNode->data());
+            const cvc::volume& vol = boost::any_cast<const cvc::volume&>(getState().data());
             setVolume(vol);
         } catch (...) {
             // Failed to load volume from state

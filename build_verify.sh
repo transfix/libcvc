@@ -1,10 +1,10 @@
 #!/bin/bash
-# Build verification script for trans-cvc
+# Build verification script for libcvc
 
 set -e  # Exit on error
 
 echo "=========================================="
-echo "Trans-CVC Build Verification Script"
+echo "libcvc Build Verification Script"
 echo "=========================================="
 echo ""
 
@@ -124,8 +124,8 @@ fi
 echo ""
 echo "Verifying build outputs..."
 
-if [ -f "bin/trans-cvc" ]; then
-    echo -e "${GREEN}✓ Executable: bin/trans-cvc${NC}"
+if [ -f "bin/libcvc" ]; then
+    echo -e "${GREEN}✓ Executable: bin/libcvc${NC}"
 else
     echo -e "${RED}✗ Executable not found${NC}"
 fi
@@ -145,5 +145,5 @@ echo "To install, run:"
 echo "  cd $BUILD_DIR && sudo cmake --install ."
 echo ""
 echo "To run the executable:"
-echo "  ./$BUILD_DIR/bin/trans-cvc"
+echo "  ./$BUILD_DIR/bin/libcvc"
 echo ""

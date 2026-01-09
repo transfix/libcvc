@@ -548,8 +548,8 @@ endif()
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 
 # Create executable
-add_executable(trans-cvc trans-cvc.cpp)
-target_link_libraries(trans-cvc PRIVATE cvc::cvc)
+add_executable(libcvc libcvc.cpp)
+target_link_libraries(libcvc PRIVATE cvc::cvc)
 
 # Generate config.h
 configure_file(
@@ -562,8 +562,8 @@ if(WIN32)
   file(TO_NATIVE_PATH "${Boost_LIBRARY_DIRS}" BOOST_LOCATION)
   file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" BINARIES_LOCATION)
   configure_file(
-    trans-cvc.bat.cmake
-    ${CMAKE_BINARY_DIR}/trans-cvc.bat
+    libcvc.bat.cmake
+    ${CMAKE_BINARY_DIR}/libcvc.bat
   )
 endif()
 

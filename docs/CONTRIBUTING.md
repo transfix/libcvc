@@ -1,6 +1,6 @@
-# Contributing to trans-cvc
+# Contributing to libcvc
 
-Thank you for your interest in contributing to trans-cvc! This document provides guidelines for contributing to the project.
+Thank you for your interest in contributing to libcvc! This document provides guidelines for contributing to the project.
 
 ## Code of Conduct
 
@@ -14,8 +14,8 @@ Thank you for your interest in contributing to trans-cvc! This document provides
 
 1. **Fork and clone the repository**
    ```bash
-   git clone https://github.com/transfix/trans-cvc.git
-   cd trans-cvc
+   git clone https://github.com/transfix/libcvc.git
+   cd libcvc
    ```
 
 2. **Install dependencies** (see README.md)
@@ -56,7 +56,7 @@ Thank you for your interest in contributing to trans-cvc! This document provides
 3. **Test your changes**
    ```bash
    cmake --build build
-   ./build/bin/trans-cvc  # Test the executable
+   ./build/bin/libcvc  # Test the executable
    ```
 
 4. **Commit your changes**
@@ -299,4 +299,4 @@ By contributing, you agree that your contributions will be licensed under the sa
 
 Contributors will be acknowledged in release notes and documentation.
 
-Thank you for helping improve trans-cvc!
+Thank you for helping improve libcvc!

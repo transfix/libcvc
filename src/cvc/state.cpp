@@ -374,7 +374,7 @@ namespace CVC_NAMESPACE
     }
 
     valueChanged();
-    if(parent()) parent()->childChanged(full_name);
+    if(parent()) parent()->childChanged(name());
     return *this;
   }
 
@@ -406,7 +406,7 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 03/16/2012 -- Joe R. -- Creation.
   // 03/30/2012 -- Joe R. -- Resetting comment.
-  void state::reset()
+  void state::reset(bool resetChildren, bool fireCallbacks)
   {
     boost::this_thread::interruption_point();
     {
@@ -417,10 +417,17 @@ namespace CVC_NAMESPACE
       _comment = std::string();
       _hidden = false;
       _initialized = false;
-      BOOST_FOREACH(child_map::value_type val, _children)
-        val.second->reset();
+      if (resetChildren) {
+        BOOST_FOREACH(child_map::value_type val, _children)
+          val.second->reset(resetChildren, fireCallbacks);
+      } else {
+        // Detach children without resetting them - they persist via shared_ptr
+        _children.clear();
+      }
     }
-    touch();
+    if (fireCallbacks) {
+      touch();
+    }
   }
 
   // ------------
@@ -597,7 +604,7 @@ namespace CVC_NAMESPACE
       _dataCondition.notify_all();
     }
     dataChanged();
-    if(parent()) parent()->childChanged(full_name);
+    if(parent()) parent()->childChanged(name());
     return *this;
   }
 

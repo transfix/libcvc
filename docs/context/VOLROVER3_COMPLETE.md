@@ -1,6 +1,6 @@
 # VolRover3 - Complete Application Implementation
 
-**Project**: trans-cvc  
+**Project**: libcvc  
 **Component**: volrover3  
 **Date**: December 29, 2025  
 **Status**: ✅ Implementation Complete

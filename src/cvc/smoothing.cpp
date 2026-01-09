@@ -200,7 +200,20 @@ namespace
     VerticesBackup_gf.resize(NumVertices_i*3);
     BOOST_FOREACH(float& v, VerticesBackup_gf) v = 0.0f;
     VertexNormal_gf.resize(NumVertices_i*3);
-    BOOST_FOREACH(float& v, VertexNormal_gf) v = 0.0f;
+    
+    // Initialize normals from existing geometry normals if available, otherwise zero
+    const auto& existing_normals = geo.const_normals();
+    if (existing_normals.size() >= static_cast<size_t>(NumVertices_i)) {
+      // Use existing normals as starting point
+      for (i = 0; i < NumVertices_i; i++) {
+        VertexNormal_gf[i*3 + 0] = static_cast<float>(existing_normals[i][0]);
+        VertexNormal_gf[i*3 + 1] = static_cast<float>(existing_normals[i][1]);
+        VertexNormal_gf[i*3 + 2] = static_cast<float>(existing_normals[i][2]);
+      }
+    } else {
+      // Initialize to zero - normals will be computed from faces later
+      BOOST_FOREACH(float& v, VertexNormal_gf) v = 0.0f;
+    }
     FaceIndex_gi.resize(NumTriangles_i*3);
     BOOST_FOREACH(int& v, FaceIndex_gi) v = -1;
     FixedVertices_guc.resize(NumVertices_i);
@@ -616,6 +629,12 @@ namespace
 
     points_t& pts = geo.points();
     normals_t& norm = geo.normals();
+    
+    // Ensure normals array is sized to match points
+    // This prevents crashes when geometry has no normals or mismatched sizes
+    if(norm.size() != static_cast<size_t>(NumVertices_i))
+      norm.resize(NumVertices_i);
+    
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif

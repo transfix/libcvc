@@ -1,7 +1,7 @@
 #ifndef GRIDNODE_H
 #define GRIDNODE_H
 
-#include <volrover3/SceneNode.h>
+#include <volrover3/GraphicsNode.h>
 #include <vtkSmartPointer.h>
 #include <cvc/bounding_box.h>
 #include <vector>
@@ -12,10 +12,10 @@ class vtkRenderer;
 class vtkActor2D;
 class vtkTextMapper;
 
-class GridNode : public SceneNode
+class GridNode : public GraphicsNode
 {
 public:
-    GridNode();
+    GridNode(const std::string& statePath, const std::string& name = "grid");
     ~GridNode() override;
 
     void setBounds(const cvc::bounding_box& bounds);
@@ -58,8 +58,13 @@ public:
     void addToRenderer(vtkRenderer* renderer) override;
     void removeFromRenderer(vtkRenderer* renderer) override;
 
+    cvc::bounding_box getBoundingBox() const override;
+
 protected:
     vtkProp* getProp() override; // Returns first actor (for compatibility)
+    void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to all grid actors
+    void applyClipPlanes(vtkPlaneCollection* planes) override;  // Apply clip planes to all grid mappers
 
 private:
     void createGridPlanes();

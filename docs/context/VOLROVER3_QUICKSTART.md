@@ -2,7 +2,7 @@
 
 ## What is VolRover3?
 
-VolRover3 is a modern 3D visualization application for scientific data, built on top of the trans-cvc library. It combines:
+VolRover3 is a modern 3D visualization application for scientific data, built on top of the libcvc library. It combines:
 
 - **Volume Rendering**: Visualize 3D scalar fields as semi-transparent volumes
 - **Surface Meshes**: Display triangle meshes with lighting and colors

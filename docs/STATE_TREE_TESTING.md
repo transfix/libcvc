@@ -128,7 +128,7 @@ This prevents dangling references and segfaults when AppState singleton outlives
 ### Direct Access
 ```cpp
 auto& stateTree = cvc::state::instance()("volrover3");
-double x = stateTree("camera_position_x").value<double>();
+double x = stateTree("camera.position.x").value<double>();
 ```
 
 ### Via AppState

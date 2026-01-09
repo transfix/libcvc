@@ -2,7 +2,7 @@
 
 ## Overview
 
-Trans-cvc now uses modern CMake 3.17+ native CUDA language support instead of the legacy FindCUDA module. This provides better integration, simpler syntax, and improved build performance.
+libcvc now uses modern CMake 3.17+ native CUDA language support instead of the legacy FindCUDA module. This provides better integration, simpler syntax, and improved build performance.
 
 ## Requirements
 
@@ -446,7 +446,7 @@ Key differences:
 
 ## Summary
 
-Modern CUDA support in trans-cvc:
+Modern CUDA support in libcvc:
 - ✅ Uses CMake 3.17+ native CUDA language
 - ✅ Automatic nvcc integration
 - ✅ Target-specific architecture compilation

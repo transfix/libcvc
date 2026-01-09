@@ -600,8 +600,13 @@ namespace CVC_NAMESPACE
   {
     boost::this_thread::interruption_point();
 
-    if(hasThread(key))
-      threads(key)->interrupt();
+    if(hasThread(key)) {
+      thread_ptr tptr = threads(key);
+      // Check if tptr is valid - it may have been removed by another thread
+      // between hasThread() and threads() calls (race condition)
+      if(tptr)
+        tptr->interrupt();
+    }
 
     {
       boost::mutex::scoped_lock lock(_threadsMutex);
@@ -646,6 +651,15 @@ namespace CVC_NAMESPACE
     boost::this_thread::interruption_point();
     boost::mutex::scoped_lock lock(_threadsMutex);
 
+    // For keyed threads, check the persistent progress map first
+    // This allows querying progress even after the thread has exited
+    if(!key.empty())
+    {
+      if(_threadProgressByKey.find(key) != _threadProgressByKey.end())
+        return _threadProgressByKey[key];
+    }
+
+    // Fall back to thread ID lookup for current thread or legacy behavior
     boost::thread::id tid;
     if(key.empty())
       tid = boost::this_thread::get_id();
@@ -688,6 +702,8 @@ namespace CVC_NAMESPACE
         {
           tid = _threads[key]->get_id();
           changed = true;
+          // Also store in the persistent key-based map
+          _threadProgressByKey[key] = progress;
         }
 
       if(changed)
@@ -705,15 +721,41 @@ namespace CVC_NAMESPACE
       boost::mutex::scoped_lock lock(_threadsMutex);
 
       boost::thread::id tid;
+      std::string threadKey = key;
+      
       if(key.empty())
+      {
+        // No key provided - use current thread ID to find the key
         tid = boost::this_thread::get_id();
+        
+        // Look up the key from thread ID
+        if(_threadKeys.find(tid) != _threadKeys.end())
+          threadKey = _threadKeys[tid];
+      }
       else if(_threads.find(key)!=_threads.end() &&
               _threads[key])
+      {
         tid = _threads[key]->get_id();
+      }
       else
+      {
+        // Thread not found - nothing to clean up
         return;
-
+      }
+      
+      // Store 100% in the persistent key-based map
+      if(!threadKey.empty())
+      {
+        _threadProgressByKey[threadKey] = 1.0;
+        
+        // Clean up the thread from the map since it's finished
+        _threads.erase(threadKey);
+      }
+      
+      // Clean up by thread ID
+      _threadKeys.erase(tid);
       _threadProgress.erase(tid);
+      _threadInfo.erase(tid);
     }
     threadsChanged(key);
   }
@@ -758,9 +800,18 @@ namespace CVC_NAMESPACE
         tid = boost::this_thread::get_id();
       else if(_threads.find(key)!=_threads.end() &&
               _threads[key])
+      {
         tid = _threads[key]->get_id();
+        // Also store in persistent map by key
+        _threadInfoByKey[key] = infostr;
+      }
       else
+      {
+        // Thread may have already exited, just update persistent map
+        if (!key.empty())
+          _threadInfoByKey[key] = infostr;
         return;
+      }
 
       _threadInfo[tid] = infostr;
     }
@@ -773,6 +824,15 @@ namespace CVC_NAMESPACE
     {
       boost::mutex::scoped_lock lock(_threadsMutex);
       
+      // For keyed threads, check the persistent info map first
+      // This allows querying status even after the thread has exited
+      if(!key.empty())
+      {
+        if(_threadInfoByKey.find(key) != _threadInfoByKey.end())
+          return _threadInfoByKey[key];
+      }
+      
+      // Fall back to thread ID lookup for current thread or legacy behavior
       boost::thread::id tid;
       if(key.empty())
         tid = boost::this_thread::get_id();
@@ -790,11 +850,15 @@ namespace CVC_NAMESPACE
   //stream operators.
   // 09/09/2011 -- Joe R. -- Removing references to cvcapp because it will crash
   //                         if you try to use them in ~App.
-  void app::log(unsigned int verbosity_level, const std::string& buf)
+  void app::log(unsigned int verbosity_level, const std::string& buf, bool append_newline)
   {
 #ifdef USING_LOG4CPLUS_DEFAULT
     static log4cplus::Logger logger = log4cplus::Logger::getInstance("cvc.app.log");
-    std::string msg = buf.substr(0, buf.length()-1); // take off trailing newline
+    std::string msg = buf;
+    // Remove trailing newline if present and append_newline is false
+    if (!append_newline && !msg.empty() && msg[msg.length()-1] == '\n') {
+      msg = msg.substr(0, msg.length()-1);
+    }
     if (verbosity_level == 0) {// || verbosity_level == 1) {
       LOG4CPLUS_ERROR(logger, msg);
     }
@@ -825,6 +889,9 @@ namespace CVC_NAMESPACE
         string log_prefix = properties("system.log_prefix");
         string log_postfix = properties("system.log_postfix");
         string output_string = log_prefix+buf+log_postfix;
+        if (append_newline && (output_string.empty() || output_string[output_string.length()-1] != '\n')) {
+          output_string += "\n";
+        }
 
         vector<string> key_idents;
         split(key_idents,output_locs,is_any_of(","));

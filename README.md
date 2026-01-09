@@ -1,4 +1,4 @@
-# trans-cvc
+# libcvc
 
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
@@ -31,7 +31,7 @@
 
 ## Overview
 
-A comprehensive computational visualization library from the Computational Visualization Center at UT Austin. Trans-cvc provides the computational core functionality of the VolumeRover package, including volume processing, geometry manipulation, isosurfacing, and signed distance function calculations.
+A comprehensive computational visualization library from the Computational Visualization Center at UT Austin. libcvc provides the computational core functionality of the VolumeRover package, including volume processing, geometry manipulation, isosurfacing, and signed distance function calculations.
 
 **Maintainer:** Joe Rivera - j@jriv.us
 
@@ -83,7 +83,7 @@ sudo apt-get install -y \
 
 ```bash
 # Clone or navigate to the repository
-cd /path/to/trans-cvc
+cd /path/to/libcvc
 
 # Create and enter build directory
 mkdir build && cd build
@@ -154,7 +154,7 @@ See `PROJECT_REPORT.md` for a complete list of build options.
 
 ## Testing
 
-Trans-cvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
+libcvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
 ### Test Suite: 363 Tests (100% Passing)
 
@@ -489,7 +489,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 ## Project Structure
 
 ```
-trans-cvc/
+libcvc/
 ├── CMakeLists.txt          # Root build configuration
 ├── CMake/                  # CMake helper modules
 ├── inc/                    # Public headers

@@ -1,6 +1,6 @@
 # Volume and Voxels API Reference (VolMagick)
 
-*Complete reference for the trans-cvc/VolMagick volume data library*
+*Complete reference for the libcvc/VolMagick volume data library*
 
 ## Table of Contents
 
@@ -42,7 +42,7 @@
 
 ## Overview
 
-The **VolMagick** library provides the `voxels` and `volume` classes for managing 3D volumetric data. These classes form the foundation for scientific visualization, medical imaging, and computational geometry in trans-cvc.
+The **VolMagick** library provides the `voxels` and `volume` classes for managing 3D volumetric data. These classes form the foundation for scientific visualization, medical imaging, and computational geometry in libcvc.
 
 **Key Features:**
 - **Type-safe voxel data**: Support for UChar, UShort, UInt, Float, Double, UInt64

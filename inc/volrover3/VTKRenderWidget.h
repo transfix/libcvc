@@ -2,6 +2,7 @@
 #define VTKRENDERWIDGET_H
 
 #include <QWidget>
+#include <QTimer>
 #include <vtkSmartPointer.h>
 #include <memory>
 
@@ -17,6 +18,7 @@
 class vtkRenderer;
 class vtkRenderWindow;
 class vtkGenericOpenGLRenderWindow;
+class vtkCornerAnnotation;
 class SceneGraph;
 class CameraController;
 
@@ -32,6 +34,10 @@ public:
     void resetCamera();
     void render();  // Force an immediate render
     
+    // FPS display control
+    void setShowFPS(bool show);
+    bool showFPS() const { return m_showFPS; }
+    
     CameraController* getCameraController() { return m_cameraController.get(); }
 
 protected:
@@ -42,6 +48,10 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
 
+private slots:
+    void processSceneGraphEvents();
+    void updateFPSDisplay();
+
 private:
     void initializeVTK();
     void updateCamera();
@@ -50,6 +60,12 @@ private:
     vtkSmartPointer<vtkRenderer> m_renderer;
     std::shared_ptr<SceneGraph> m_sceneGraph;
     std::unique_ptr<CameraController> m_cameraController;
+    QTimer m_eventTimer;  // Timer for processing SceneGraph events
+    
+    // FPS display
+    vtkSmartPointer<vtkCornerAnnotation> m_fpsAnnotation;
+    QTimer m_fpsTimer;  // Timer for updating FPS display
+    bool m_showFPS;
     
     QPoint m_lastMousePos;
 };

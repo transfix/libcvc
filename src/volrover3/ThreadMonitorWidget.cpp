@@ -6,11 +6,14 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QMessageBox>
+#include <QDateTime>
+#include <QMetaObject>
 
 ThreadMonitorWidget::ThreadMonitorWidget(QWidget *parent)
     : QWidget(parent)
     , m_threadTable(nullptr)
     , m_updateTimer(nullptr)
+    , m_cleanupTimer(nullptr)
     , m_updatePending(false)
 {
     setupUI();
@@ -19,6 +22,12 @@ ThreadMonitorWidget::ThreadMonitorWidget(QWidget *parent)
     m_updateTimer = new QTimer(this);
     m_updateTimer->setSingleShot(true);
     connect(m_updateTimer, &QTimer::timeout, this, &ThreadMonitorWidget::performUpdate);
+    
+    // Set up cleanup timer to remove completed threads after delay
+    m_cleanupTimer = new QTimer(this);
+    m_cleanupTimer->setInterval(10000);  // Check every 10 seconds
+    connect(m_cleanupTimer, &QTimer::timeout, this, &ThreadMonitorWidget::cleanupCompletedThreads);
+    m_cleanupTimer->start();
     
     // Start tracking time for rate limiting
     m_lastUpdateTime.start();
@@ -36,6 +45,9 @@ ThreadMonitorWidget::~ThreadMonitorWidget()
     
     if (m_updateTimer) {
         m_updateTimer->stop();
+    }
+    if (m_cleanupTimer) {
+        m_cleanupTimer->stop();
     }
 }
 
@@ -92,9 +104,10 @@ void ThreadMonitorWidget::registerCallbacks()
 {
     // Connect to the app's thread map changes signal
     // This fires whenever a thread is added, removed, or its state changes
+    // Use QMetaObject::invokeMethod to ensure UI updates happen on the main thread
     auto connection = cvc::app::instance().threadsChanged.connect(
         [this](const std::string&) {
-            requestUpdate();
+            QMetaObject::invokeMethod(this, "requestUpdate", Qt::QueuedConnection);
         }
     );
     m_connections.push_back(connection);
@@ -142,6 +155,34 @@ void ThreadMonitorWidget::updateThreadTable()
     // Get current threads from cvc::app
     cvc::thread_map threads = cvc::app::instance().threads();
     
+    // Track which threads are completed (100% progress)
+    // Note: We avoid calling thread->joinable() frequently as it can be expensive
+    qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& entry : threads) {
+        const std::string& threadKey = entry.first;
+        const cvc::thread_ptr& thread = entry.second;
+        
+        if (!thread) continue;
+        
+        double progress = cvc::app::instance().threadProgress(threadKey);
+        bool isComplete = (progress >= 1.0);
+        
+        if (isComplete) {
+            // Mark thread as completed if not already tracked
+            if (m_completedThreads.find(threadKey) == m_completedThreads.end()) {
+                m_completedThreads[threadKey] = currentTime;
+                
+                // Emit signal for status bar update
+                std::string info = cvc::app::instance().threadInfo(threadKey);
+                emit threadCompleted(QString::fromStdString(threadKey), 
+                                   QString::fromStdString(info.empty() ? "completed" : info));
+            }
+        } else {
+            // Thread is running again (restarted?), remove from completed tracking
+            m_completedThreads.erase(threadKey);
+        }
+    }
+    
     // Clear existing rows
     m_threadTable->setRowCount(0);
     
@@ -162,17 +203,29 @@ void ThreadMonitorWidget::updateThreadTable()
         
         // Column 1: Status (thread info)
         std::string statusInfo = cvc::app::instance().threadInfo(threadKey);
-        if (statusInfo.empty()) {
+        double progress = cvc::app::instance().threadProgress(threadKey);
+        bool isComplete = (progress >= 1.0);
+        
+        if (isComplete) {
+            statusInfo = statusInfo.empty() ? "completed" : statusInfo + " (completed)";
+        } else if (statusInfo.empty()) {
             statusInfo = "running";
         }
         QTableWidgetItem* statusItem = new QTableWidgetItem(QString::fromStdString(statusInfo));
+        
+        // Color completed threads differently
+        if (isComplete) {
+            statusItem->setForeground(QColor(0, 128, 0));  // Green for completed
+        }
         m_threadTable->setItem(row, COL_STATUS, statusItem);
         
         // Column 2: Progress percentage
-        double progress = cvc::app::instance().threadProgress(threadKey);
         QString progressText = formatProgress(progress);
         QTableWidgetItem* progressItem = new QTableWidgetItem(progressText);
         progressItem->setTextAlignment(Qt::AlignCenter);
+        if (isComplete) {
+            progressItem->setForeground(QColor(0, 128, 0));
+        }
         m_threadTable->setItem(row, COL_PROGRESS, progressItem);
         
         // Column 3: Progress bar
@@ -181,16 +234,22 @@ void ThreadMonitorWidget::updateThreadTable()
         progressBar->setValue(static_cast<int>(progress * 100));
         progressBar->setTextVisible(false);
         progressBar->setMaximumHeight(20);
+        if (isComplete) {
+            progressBar->setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }");
+        }
         m_threadTable->setCellWidget(row, COL_PROGRESS_BAR, progressBar);
         
-        // Column 4: Cancel button
-        QPushButton* cancelBtn = new QPushButton(tr("Cancel"));
+        // Column 4: Cancel button (disabled for completed threads)
+        QPushButton* cancelBtn = new QPushButton(isComplete ? tr("Done") : tr("Cancel"));
         cancelBtn->setMaximumWidth(80);
+        cancelBtn->setEnabled(!isComplete);
         
         // Capture threadKey by value for the lambda
-        connect(cancelBtn, &QPushButton::clicked, [this, threadKey]() {
-            cancelThread(threadKey);
-        });
+        if (!isComplete) {
+            connect(cancelBtn, &QPushButton::clicked, [this, threadKey]() {
+                cancelThread(threadKey);
+            });
+        }
         
         m_threadTable->setCellWidget(row, COL_CANCEL, cancelBtn);
         
@@ -251,4 +310,34 @@ void ThreadMonitorWidget::cancelThread(const std::string& threadKey)
     
     // Request update (will be rate-limited)
     requestUpdate();
+}
+
+void ThreadMonitorWidget::cleanupCompletedThreads()
+{
+    qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
+    std::vector<std::string> threadsToRemove;
+    
+    // Find threads that have been completed for longer than the delay
+    for (const auto& entry : m_completedThreads) {
+        const std::string& threadKey = entry.first;
+        qint64 completionTime = entry.second;
+        
+        if (currentTime - completionTime >= CLEANUP_DELAY_MS) {
+            threadsToRemove.push_back(threadKey);
+        }
+    }
+    
+    // Remove the completed threads from the app's thread map
+    for (const std::string& threadKey : threadsToRemove) {
+        // Remove from our tracking
+        m_completedThreads.erase(threadKey);
+        
+        // Remove from the app's thread map
+        cvc::app::instance().removeThread(threadKey);
+    }
+    
+    // Request UI update if we removed any threads
+    if (!threadsToRemove.empty()) {
+        requestUpdate();
+    }
 }

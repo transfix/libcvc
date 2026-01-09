@@ -406,7 +406,7 @@ Week 3 builds upon and integrates with:
 ## Build Verification
 
 ```bash
-cd /home/joe/src/trans-cvc/build
+cd /home/joe/src/libcvc/build
 make -j$(nproc)
 ./bin/geometry_test
 

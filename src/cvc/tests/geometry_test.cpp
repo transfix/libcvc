@@ -4930,6 +4930,92 @@ TEST(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh)
   EXPECT_GT(hex_mesh.num_hexs(), 0);  // Should have created some hexs
 }
 
+// ============================================================================
+// Normal Inversion Tests
+// ============================================================================
+
+TEST(GeometryMethodTest, InvertNormalsBasic)
+{
+  // Create a simple geometry with known normals
+  geometry geom;
+  
+  // Create a simple triangle with normals
+  geom.points().resize(3);
+  geom.points()[0] = {{0.0, 0.0, 0.0}};
+  geom.points()[1] = {{1.0, 0.0, 0.0}};
+  geom.points()[2] = {{0.5, 1.0, 0.0}};
+  
+  geom.normals().resize(3);
+  geom.normals()[0] = {{0.0, 0.0, 1.0}};
+  geom.normals()[1] = {{0.0, 0.0, 1.0}};
+  geom.normals()[2] = {{0.0, 0.0, 1.0}};
+  
+  geom.tris().push_back({{0, 1, 2}});
+  
+  // Store original normals
+  auto original_normals = geom.normals();
+  
+  // Invert normals using geometry method
+  geom.invert_normals();
+  
+  // Check that normals are inverted
+  for(size_t i = 0; i < geom.normals().size(); i++) {
+    EXPECT_DOUBLE_EQ(geom.normals()[i][0], -original_normals[i][0]);
+    EXPECT_DOUBLE_EQ(geom.normals()[i][1], -original_normals[i][1]);
+    EXPECT_DOUBLE_EQ(geom.normals()[i][2], -original_normals[i][2]);
+  }
+  
+  // Invert again - should restore original
+  geom.invert_normals();
+  
+  for(size_t i = 0; i < geom.normals().size(); i++) {
+    EXPECT_DOUBLE_EQ(geom.normals()[i][0], original_normals[i][0]);
+    EXPECT_DOUBLE_EQ(geom.normals()[i][1], original_normals[i][1]);
+    EXPECT_DOUBLE_EQ(geom.normals()[i][2], original_normals[i][2]);
+  }
+}
+
+TEST(GeometryMethodTest, InvertNormalsBunny)
+{
+  // Load the bunny and test normal inversion
+  geometry bunny = read_geometry("test.bunny");
+  
+  ASSERT_GT(bunny.normals().size(), 0) << "Bunny should have normals";
+  
+  // Store original normals
+  auto original_normals = bunny.normals();
+  
+  // Invert normals using geometry method
+  bunny.invert_normals();
+  
+  // Check that all normals are inverted
+  for(size_t i = 0; i < bunny.normals().size(); i++) {
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][0], -original_normals[i][0]);
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][1], -original_normals[i][1]);
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][2], -original_normals[i][2]);
+  }
+  
+  // Double inversion should restore original
+  bunny.invert_normals();
+  
+  for(size_t i = 0; i < bunny.normals().size(); i++) {
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][0], original_normals[i][0]);
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][1], original_normals[i][1]);
+    EXPECT_DOUBLE_EQ(bunny.normals()[i][2], original_normals[i][2]);
+  }
+}
+
+TEST(GeometryMethodTest, InvertNormalsEmpty)
+{
+  // Test with empty geometry
+  geometry geom;
+  
+  // Should not crash on empty geometry
+  EXPECT_NO_THROW(geom.invert_normals());
+  EXPECT_TRUE(geom.normals().empty());
+}
+
+
 
 
 

@@ -187,6 +187,10 @@ namespace CVC_NAMESPACE
     //sets non boundary vertex normals to 0.0,0.0,0.0 until further notice
     geometry& calculate_surf_normals();
 
+    //computes vertex normals from face geometry (triangles/quads)
+    //replaces any existing normals with freshly computed ones
+    geometry& compute_normals();
+
     //This is a little hack to get a simple tetra or hex mesh rendering,
     //using the lines array to draw an internal wireframe
     geometry generate_wire_interior() const;

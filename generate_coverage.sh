@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Code coverage generation script for trans-cvc
+# Code coverage generation script for libcvc
 # Automatically configures, builds, runs tests, and generates coverage reports
 #
 
@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 BUILD_DIR="${BUILD_DIR:-build-coverage}"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo -e "${BLUE}=== trans-cvc Code Coverage Generator ===${NC}\n"
+echo -e "${BLUE}=== libcvc Code Coverage Generator ===${NC}\n"
 
 # Check for required tools
 check_tool() {

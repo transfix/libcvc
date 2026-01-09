@@ -1343,4 +1343,313 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
   // The final state after join() is not reliable due to thread pool cleanup timing.
 }
 
+// ===========================
+// Persistent Progress Tests
+// ===========================
+
+TEST(AppTest, ThreadProgressPersistsAfterCompletion) {
+  std::string thread_key = "test.persistent.progress";
+  std::atomic<bool> thread_finished(false);
+  
+  // Start a thread that sets progress and completes quickly
+  cvcapp.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(thread_key);
+    cvcapp.threadProgress(thread_key, 0.5);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    thread_finished = true;
+    // thread_feedback destructor will set progress to 100%
+  });
+  
+  // Wait for thread to finish
+  for (int i = 0; i < 100 && !thread_finished.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(thread_finished.load()) << "Thread should have completed";
+  
+  // Give thread time to fully exit
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // CRITICAL: Progress should be readable even after thread exits
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01) 
+    << "Progress should be 100% after thread completion (thread_feedback sets it)";
+  
+  // Clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr && tptr->joinable()) tptr->join();
+  }
+}
+
+TEST(AppTest, ThreadProgressPersistenceWithMultipleThreads) {
+  std::vector<std::string> thread_keys = {
+    "test.multi.thread1",
+    "test.multi.thread2", 
+    "test.multi.thread3"
+  };
+  std::atomic<int> completed_count(0);
+  
+  // Start multiple threads with different progress values
+  for (size_t i = 0; i < thread_keys.size(); i++) {
+    double target_progress = (i + 1) * 0.25; // 0.25, 0.5, 0.75
+    cvcapp.startThread(thread_keys[i], [&, i, target_progress]() {
+      cvc::app::thread_feedback feedback(thread_keys[i]);
+      cvcapp.threadProgress(thread_keys[i], target_progress);
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+      completed_count++;
+      // thread_feedback destructor sets to 100%
+    });
+  }
+  
+  // Wait for all threads to complete
+  for (int i = 0; i < 100 && completed_count.load() < 3; i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(completed_count.load(), 3) << "All threads should have completed";
+  
+  // Give threads time to exit
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // All threads should show 100% progress after completion
+  for (const auto& key : thread_keys) {
+    double progress = cvcapp.threadProgress(key);
+    EXPECT_NEAR(progress, 1.0, 0.01) 
+      << "Thread " << key << " should show 100% after completion";
+  }
+  
+  // Clean up
+  for (const auto& key : thread_keys) {
+    if (cvcapp.hasThread(key)) {
+      thread_ptr tptr = cvcapp.threads(key);
+      if (tptr && tptr->joinable()) tptr->join();
+    }
+  }
+}
+
+TEST(AppTest, ThreadProgressZeroToOneHundred) {
+  std::string thread_key = "test.zero.to.hundred";
+  std::atomic<bool> at_zero(false);
+  std::atomic<bool> at_fifty(false);
+  std::atomic<bool> finished(false);
+  
+  cvcapp.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(thread_key);
+    // thread_feedback constructor sets to 0%
+    at_zero = true;
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+    
+    cvcapp.threadProgress(thread_key, 0.5);
+    at_fifty = true;
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+    
+    finished = true;
+    // thread_feedback destructor sets to 100%
+  });
+  
+  // Check progress at 0%
+  for (int i = 0; i < 50 && !at_zero.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  if (at_zero.load()) {
+    double progress = cvcapp.threadProgress(thread_key);
+    EXPECT_NEAR(progress, 0.0, 0.01) << "Progress should be 0% at start";
+  }
+  
+  // Check progress at 50%
+  for (int i = 0; i < 50 && !at_fifty.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  if (at_fifty.load()) {
+    double progress = cvcapp.threadProgress(thread_key);
+    EXPECT_NEAR(progress, 0.5, 0.01) << "Progress should be 50% midway";
+  }
+  
+  // Wait for completion
+  for (int i = 0; i < 50 && !finished.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(finished.load());
+  
+  // Give thread time to exit
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Check final progress persists at 100%
+  double final_progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(final_progress, 1.0, 0.01) 
+    << "Progress should persist at 100% after thread exits";
+  
+  // Clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr && tptr->joinable()) tptr->join();
+  }
+}
+
+TEST(AppTest, ThreadProgressQueryAfterThreadDestruction) {
+  std::string thread_key = "test.progress.after.destroy";
+  
+  {
+    // Start thread in inner scope
+    std::atomic<bool> done(false);
+    cvcapp.startThread(thread_key, [&]() {
+      cvc::app::thread_feedback feedback(thread_key);
+      cvcapp.threadProgress(thread_key, 0.75);
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+      done = true;
+    });
+    
+    // Wait for completion
+    for (int i = 0; i < 50 && !done.load(); i++) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    }
+    
+    // Join thread
+    if (cvcapp.hasThread(thread_key)) {
+      thread_ptr tptr = cvcapp.threads(thread_key);
+      if (tptr && tptr->joinable()) tptr->join();
+    }
+  }
+  
+  // Thread object has been destroyed, but progress should still be queryable
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01)
+    << "Progress should be queryable at 100% even after thread object destroyed";
+}
+
+TEST(AppTest, ThreadFeedbackExceptionSafety) {
+  std::string thread_key = "test.feedback.exception";
+  std::atomic<bool> exception_thrown(false);
+  
+  cvcapp.startThread(thread_key, [&]() {
+    try {
+      cvc::app::thread_feedback feedback(thread_key);
+      cvcapp.threadProgress(thread_key, 0.3);
+      
+      // Simulate an exception during processing
+      exception_thrown = true;
+      throw std::runtime_error("Simulated error");
+    }
+    catch (const std::exception& e) {
+      // thread_feedback destructor should still set progress to 100%
+      // even when exception is thrown
+    }
+  });
+  
+  // Wait for exception
+  for (int i = 0; i < 50 && !exception_thrown.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(exception_thrown.load());
+  
+  // Give thread time to exit
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Progress should still be set to 100% by thread_feedback destructor
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01)
+    << "Progress should be 100% even when exception occurs (RAII cleanup)";
+  
+  // Clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr && tptr->joinable()) tptr->join();
+  }
+}
+
+TEST(AppTest, ThreadProgressWithThreadInterruption) {
+  std::string thread_key = "test.progress.interruption";
+  std::atomic<bool> started(false);
+  std::atomic<bool> interrupted(false);
+  
+  cvcapp.startThread(thread_key, [&]() {
+    try {
+      cvc::app::thread_feedback feedback(thread_key);
+      started = true;
+      cvcapp.threadProgress(thread_key, 0.2);
+      
+      // Sleep with interruption point
+      for (int i = 0; i < 100; i++) {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+        boost::this_thread::interruption_point();
+      }
+    }
+    catch (boost::thread_interrupted&) {
+      interrupted = true;
+      // thread_feedback destructor should still execute and set to 100%
+    }
+  });
+  
+  // Wait for thread to start
+  for (int i = 0; i < 50 && !started.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(started.load());
+  
+  // Interrupt the thread
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr) tptr->interrupt();
+  }
+  
+  // Wait for interruption to be caught
+  for (int i = 0; i < 50 && !interrupted.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  
+  // Give thread time to clean up
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Even with interruption, thread_feedback destructor should set progress
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01)
+    << "Progress should be 100% even after thread interruption (RAII cleanup)";
+  
+  // Clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr && tptr->joinable()) tptr->join();
+  }
+}
+
+TEST(AppTest, ThreadStatusShowsCompleted) {
+  std::string thread_key = "test.status.completed";
+  std::atomic<bool> finished(false);
+  
+  cvcapp.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(thread_key);
+    cvcapp.threadInfo(thread_key, "processing");
+    cvcapp.threadProgress(thread_key, 0.5);
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
+    finished = true;
+    // thread_feedback destructor sets status to "completed" and progress to 100%
+  });
+  
+  // Wait for thread to finish
+  for (int i = 0; i < 50 && !finished.load(); i++) {
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(finished.load());
+  
+  // Give thread time to exit
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  
+  // Verify status is "completed" after thread exits
+  std::string status = cvcapp.threadInfo(thread_key);
+  EXPECT_EQ(status, "completed") 
+    << "Thread status should be 'completed' after thread exits";
+  
+  // Verify progress is 100%
+  double progress = cvcapp.threadProgress(thread_key);
+  EXPECT_NEAR(progress, 1.0, 0.01)
+    << "Progress should be 100% when status is completed";
+  
+  // Clean up
+  if (cvcapp.hasThread(thread_key)) {
+    thread_ptr tptr = cvcapp.threads(thread_key);
+    if (tptr && tptr->joinable()) tptr->join();
+  }
+}
+
 // Main function is provided by gtest_main library

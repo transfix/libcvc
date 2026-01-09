@@ -1,6 +1,6 @@
 # Image Processing Algorithms - API Reference
 
-This document provides detailed technical documentation for the image processing algorithms implemented in the trans-cvc library. These algorithms operate on volumetric data through the `voxels` class interface.
+This document provides detailed technical documentation for the image processing algorithms implemented in the libcvc library. These algorithms operate on volumetric data through the `voxels` class interface.
 
 ## Table of Contents
 - [Anisotropic Diffusion](#anisotropic-diffusion)
@@ -727,5 +727,5 @@ saveVolume(volume, "processed.raw");
 
 *Document Version: 1.0*  
 *Last Updated: December 2025*  
-*Library: trans-cvc*  
+*Library: libcvc*  
 *Tested Version: All algorithms validated with comprehensive test suite (271 tests)*

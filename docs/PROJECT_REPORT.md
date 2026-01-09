@@ -1,4 +1,4 @@
-# Trans-CVC Project Report
+# libcvc Project Report
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@
 
 ## Project Overview
 
-**Project Name:** trans-cvc  
+**Project Name:** libcvc  
 **Version:** 2.0.0 (updated from 1.0.0)  
 **Description:** Computational Visualization Center library from the VolumeRover package at UT Austin  
 **Language:** C++ (with C components)  
@@ -40,7 +40,7 @@
 ## Project Structure
 
 ```
-trans-cvc/
+libcvc/
 ├── CMakeLists.txt                 # Root build configuration
 ├── CMake/                         # CMake helper modules
 │   ├── SetupBoost.cmake          # Boost configuration
@@ -214,7 +214,7 @@ trans-cvc/
 
 ```bash
 # Clone or navigate to repository
-cd /home/joe/src/trans-cvc
+cd /home/joe/src/libcvc
 
 # Create build directory
 mkdir build && cd build
@@ -274,9 +274,9 @@ cmake --build . --config Release
 **Purpose:** XML-RPC client/server for network communication  
 **Platform Support:** Cross-platform with platform-specific socket handling
 
-### Executable: trans-cvc
+### Executable: libcvc
 
-**Target:** `trans-cvc`  
+**Target:** `libcvc`  
 **Purpose:** Command-line tool for volume/geometry operations  
 **Dependencies:** Links to libcvc
 
@@ -477,7 +477,7 @@ Default installation layout (with `USING_STANDARD_INSTALL_LOCATION=ON`):
 ```
 ${CMAKE_INSTALL_PREFIX}/
 ├── bin/
-│   └── trans-cvc
+│   └── libcvc
 ├── lib/
 │   ├── libcvc.so (or .dylib, .dll)
 │   └── libxmlrpc.so (if enabled)
@@ -799,7 +799,7 @@ See [FUTURES_API.md](FUTURES_API.md) for complete documentation and examples.
 
 ## Summary
 
-The trans-cvc project has been successfully modernized to use CMake 3.15+ with modern best practices. The build system now:
+The libcvc project has been successfully modernized to use CMake 3.15+ with modern best practices. The build system now:
 
 - Uses contemporary CMake idioms and target-based design
 - Provides better dependency management

@@ -10,6 +10,8 @@
 #include <vtkTextMapper.h>
 #include <vtkTextProperty.h>
 #include <vtkCoordinate.h>
+#include <vtkMatrix4x4.h>
+#include <vtkTransform.h>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -18,10 +20,12 @@ BBoxNode::BBoxNode()
     : m_actor(vtkSmartPointer<vtkActor>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+    , m_transform(vtkSmartPointer<vtkMatrix4x4>::New())
     , m_coordinatesVisible(true)
     , m_coordinateLabelFontSize(12)
     , m_renderer(nullptr)
 {
+    m_transform->Identity();
     m_actor->SetMapper(m_mapper);
     
     // Set default appearance
@@ -39,14 +43,9 @@ BBoxNode::~BBoxNode()
 {
 }
 
-vtkProp* BBoxNode::getProp()
-{
-    return m_actor;
-}
-
 void BBoxNode::addToRenderer(vtkRenderer* renderer)
 {
-    if (renderer && isVisible()) {
+    if (renderer) {
         m_renderer = renderer;  // Store renderer reference
         renderer->AddActor(m_actor);
         if (m_coordinatesVisible) {
@@ -93,6 +92,22 @@ void BBoxNode::getColor(double& r, double& g, double& b) const
 void BBoxNode::setLineWidth(double width)
 {
     m_actor->GetProperty()->SetLineWidth(width);
+}
+
+void BBoxNode::setTransform(vtkMatrix4x4* transform)
+{
+    if (transform && m_actor) {
+        // Store the transform for coordinate label positioning
+        m_transform->DeepCopy(transform);
+        
+        // Apply to bbox actor
+        vtkSmartPointer<vtkTransform> vtkTrans = vtkSmartPointer<vtkTransform>::New();
+        vtkTrans->SetMatrix(transform);
+        m_actor->SetUserTransform(vtkTrans);
+        
+        // Update coordinate labels with new transformed positions
+        createCoordinateLabels();
+    }
 }
 
 void BBoxNode::createBBox()
@@ -149,8 +164,8 @@ void BBoxNode::setCoordinatesVisible(bool visible)
         actor->SetVisibility(visible);
     }
     
-    // If we have a renderer and the bbox itself is visible, add/remove labels
-    if (m_renderer && isVisible()) {
+    // If we have a renderer, add/remove labels
+    if (m_renderer) {
         if (visible) {
             for (auto& actor : m_coordinateLabelActors) {
                 m_renderer->AddActor2D(actor);
@@ -226,8 +241,13 @@ void BBoxNode::createCoordinateLabels()
     
     if (spanX <= 0.0 || spanY <= 0.0 || spanZ <= 0.0) return;
     
-    // Helper lambda to create a label
+    // Helper lambda to create a label at world-transformed position
     auto createLabel = [&](double x, double y, double z, const std::string& text) {
+        // Transform local position to world position
+        double localPos[4] = {x, y, z, 1.0};
+        double worldPos[4];
+        m_transform->MultiplyPoint(localPos, worldPos);
+        
         vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
         textMapper->SetInput(text.c_str());
         textMapper->GetTextProperty()->SetFontSize(m_coordinateLabelFontSize);
@@ -238,7 +258,7 @@ void BBoxNode::createCoordinateLabels()
         vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
         textActor->SetMapper(textMapper);
         textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
-        textActor->GetPositionCoordinate()->SetValue(x, y, z);
+        textActor->GetPositionCoordinate()->SetValue(worldPos[0], worldPos[1], worldPos[2]);
         textActor->SetVisibility(m_coordinatesVisible);
         
         m_coordinateLabelActors.push_back(textActor);
@@ -257,7 +277,7 @@ void BBoxNode::createCoordinateLabels()
     createLabel(maxX, maxY, maxZ, oss.str());
     
     // Add new labels to renderer if we have one and coordinates are visible
-    if (m_renderer && m_coordinatesVisible && isVisible()) {
+    if (m_renderer && m_coordinatesVisible) {
         for (auto& actor : m_coordinateLabelActors) {
             m_renderer->AddActor2D(actor);
         }

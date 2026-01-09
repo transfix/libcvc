@@ -23,6 +23,7 @@
 #include <cvc/geometry.h>
 #include <cvc/geometry_file_io.h>
 #include <cvc/utility.h>
+#include <cmath>
 
 #ifdef CVC_GEOMETRY_ENABLE_PROJECT
 //Requires CGAL
@@ -365,6 +366,98 @@ namespace CVC_NAMESPACE
         normals().push_back(norm);
       }
 
+    return *this;
+  }
+  
+  geometry& geometry::compute_normals()
+  {
+    using namespace std;
+    
+    // Clear existing normals and resize to match points
+    normals().clear();
+    normals().resize(num_points(), vector_t{{0.0, 0.0, 0.0}});
+    
+    // Process triangles
+    for (size_t i = 0; i < const_tris().size(); ++i) {
+      const tri_t& tri = const_tris()[i];
+      
+      // Validate triangle indices
+      if (tri[0] >= num_points() || tri[1] >= num_points() || tri[2] >= num_points()) 
+        continue;
+      
+      const point_t& v0 = const_points()[tri[0]];
+      const point_t& v1 = const_points()[tri[1]];
+      const point_t& v2 = const_points()[tri[2]];
+      
+      // Compute face normal using cross product
+      vector_t e1 = {{ v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] }};
+      vector_t e2 = {{ v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] }};
+      vector_t face_normal;
+      cross(face_normal, e1, e2);
+      
+      // Add to each vertex normal
+      for (int j = 0; j < 3; ++j) {
+        normals()[tri[0]][j] += face_normal[j];
+        normals()[tri[1]][j] += face_normal[j];
+        normals()[tri[2]][j] += face_normal[j];
+      }
+    }
+    
+    // Process quads 
+    for (size_t i = 0; i < const_quads().size(); ++i) {
+      const quad_t& quad = const_quads()[i];
+      
+      // Validate quad indices
+      if (quad[0] >= num_points() || quad[1] >= num_points() || 
+          quad[2] >= num_points() || quad[3] >= num_points()) 
+        continue;
+      
+      const point_t& v0 = const_points()[quad[0]];
+      const point_t& v1 = const_points()[quad[1]];
+      const point_t& v2 = const_points()[quad[2]];
+      const point_t& v3 = const_points()[quad[3]];
+      
+      // Split quad into two triangles and compute normals
+      // Triangle 1: v0, v1, v2
+      vector_t e1 = {{ v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] }};
+      vector_t e2 = {{ v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] }};
+      vector_t normal1;
+      cross(normal1, e1, e2);
+      
+      // Triangle 2: v0, v2, v3
+      e1[0] = v2[0] - v0[0]; e1[1] = v2[1] - v0[1]; e1[2] = v2[2] - v0[2];
+      e2[0] = v3[0] - v0[0]; e2[1] = v3[1] - v0[1]; e2[2] = v3[2] - v0[2];
+      vector_t normal2;
+      cross(normal2, e1, e2);
+      
+      // Average the two triangle normals
+      vector_t avg_normal = {{ (normal1[0] + normal2[0]) * 0.5,
+                               (normal1[1] + normal2[1]) * 0.5,
+                               (normal1[2] + normal2[2]) * 0.5 }};
+      
+      // Add to each vertex normal
+      for (int j = 0; j < 3; ++j) {
+        normals()[quad[0]][j] += avg_normal[j];
+        normals()[quad[1]][j] += avg_normal[j];
+        normals()[quad[2]][j] += avg_normal[j];
+        normals()[quad[3]][j] += avg_normal[j];
+      }
+    }
+    
+    // Normalize all vertex normals
+    for (size_t i = 0; i < normals().size(); ++i) {
+      vector_t& n = normals()[i];
+      scalar_t len = sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+      if (len > 1e-9) {
+        n[0] /= len;
+        n[1] /= len;
+        n[2] /= len;
+      } else {
+        // Degenerate case - set to default upward normal
+        n[0] = 0.0; n[1] = 0.0; n[2] = 1.0;
+      }
+    }
+    
     return *this;
   }
   

@@ -36,9 +36,12 @@ namespace cvc {
 class VolumeNode : public GraphicsNode
 {
 public:
-    VolumeNode(const std::string& name = "volume");
+    VolumeNode(const std::string& statePath, const std::string& name = "volume");
     ~VolumeNode() override;
 
+    // Generic setData for template compatibility
+    void setData(const cvc::volume& vol) { setVolume(vol); }
+    
     void setVolume(const cvc::volume &vol);
     bool hasVolume() const { return m_hasVolume; }
     const cvc::volume* getVolume() const { return m_volume.get(); }
@@ -46,6 +49,9 @@ public:
     void setTransferFunction(const std::vector<double> &colorTable,
                             const std::vector<double> &opacityTable);
     void setDefaultTransferFunction();
+    
+    std::vector<double> getTransferFunctionColorTable() const;
+    std::vector<double> getTransferFunctionOpacityTable() const;
     
     // Volume rendering property getters and setters
     void setShading(bool enabled);
@@ -74,8 +80,6 @@ public:
     
     // Implement GraphicsNode abstract methods
     cvc::bounding_box getBoundingBox() const override;
-    void syncToState(cvc::state& parentState) override;
-    void syncFromState(cvc::state& parentState) override;
     
     // Override to add logging
     void addToRenderer(vtkRenderer* renderer) override;
@@ -85,6 +89,9 @@ public:
 
 protected:
     vtkProp* getProp() override;
+    void handleStateChanged(const std::string& childState) override;
+    void applyTransformToVTK() override;  // Apply transform to volume
+    void applyClipPlanes(vtkPlaneCollection* planes) override;  // Apply clip planes to volume mapper
     void updateImageData(const cvc::volume &vol);
     void updateTransferFunctions();
     void updateMetadata(const cvc::volume &vol);

@@ -64,14 +64,13 @@ void setCameraFieldOfView(double fov);
 void onCameraChanged(const boost::function<void()>& callback);
 ```
 
-**State Keys**:
-- `camera_position_x/y/z`: Position coordinates
-- `camera_view_dir_x/y/z`: View direction vector
-- `camera_up_x/y/z`: Up vector
-- `camera_fov`: Field of view angle
-- `camera_changed`: Notification trigger
+**State Keys** (hierarchical structure):
+- `camera.position.x/y/z`: Position coordinates
+- `camera.view_dir.x/y/z`: View direction vector
+- `camera.up.x/y/z`: Up vector
+- `camera.fov`: Field of view angle
 
-All setters trigger the `camera_changed` notification for reactive updates.
+All setters automatically trigger change notifications through the hierarchical state tree - any change to camera.* will trigger the `onCameraChanged` callback.
 
 ### CameraController Enhancements
 
@@ -187,7 +186,9 @@ CameraController::saveCameraStateToAppState()
     ↓
 AppState::setCameraPosition/Direction/Up/FOV()
     ↓
-Trigger "camera_changed" notification
+Hierarchical state tree update (camera.position.*, camera.view_dir.*, etc.)
+    ↓
+Automatic callback notification via state tree
     ↓
 MainWindow camera listener
     ↓
@@ -197,8 +198,9 @@ Render update
 ```
 
 ### Reactive Updates
-The camera state system is fully reactive:
-- Any camera movement triggers state save
+The camera state system is fully reactive using the hierarchical state tree:
+- Any camera movement triggers state save to camera.* paths
+- State tree automatically notifies all listeners on the "camera" parent node
 - State changes trigger notifications
 - Other UI components can listen to camera changes
 - Future features (camera bookmarks, synchronized views) can easily plug in

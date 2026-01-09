@@ -5,6 +5,7 @@
 #include <QDockWidget>
 #include <QLabel>
 #include <QProgressBar>
+#include <QToolBar>
 #include <memory>
 #include <vector>
 #include <boost/signals2.hpp>
@@ -14,6 +15,13 @@ class TransferFunctionWidget;
 class SceneGraph;
 class ThreadMonitorWidget;
 class StateTreeWidget;
+class GridOptionsDialog;
+class SDFDialog;
+class IsosurfaceDialog;
+class GeometryDialog;
+class VolumeDialog;
+class ViewerOptionsDialog;
+class CameraSettingsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -30,16 +38,28 @@ private slots:
     void editBoundingBox();
     void editCameraSettings();
     void showGridOptions();
+    void showViewerOptions();
     void showThreadMonitor();
     void showStateTree();
+    void showSDF();
+    void showIsosurface();
+    void showGeometry();
+    void showVolume();
     void aboutVolRover();
     void updateThreadStatus();
+    void resetCamera();
+    void generateStanfordBunny();
+    void generateSphere();
+    void generateCube();
+    void generateTorus();
+    void generateCone();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
     void createMenus();
+    void createToolBar();
     void createDockWidgets();
     void setupConnections();
     void initializeCameraFromState();
@@ -50,7 +70,17 @@ private:
     std::shared_ptr<SceneGraph> m_sceneGraph;
     ThreadMonitorWidget *m_threadMonitor;
     StateTreeWidget *m_stateTreeWidget;
+    GridOptionsDialog *m_gridOptionsDialog;
+    SDFDialog *m_sdfDialog;
+    IsosurfaceDialog *m_isosurfaceDialog;
+    GeometryDialog *m_geometryDialog;
+    VolumeDialog *m_volumeDialog;
+    ViewerOptionsDialog *m_viewerOptionsDialog;
+    CameraSettingsDialog *m_cameraDialog;
 
+    // Toolbar
+    QToolBar *m_mainToolBar;
+    
     // Status bar widgets for thread monitoring
     QLabel *m_threadNameLabel;
     QLabel *m_threadInfoLabel;

@@ -19,7 +19,7 @@
 
 ## What Changed
 
-The trans-cvc project's CUDA support has been completely modernized from the legacy FindCUDA module (pre-CMake 3.17) to CMake's native CUDA language support.
+The libcvc project's CUDA support has been completely modernized from the legacy FindCUDA module (pre-CMake 3.17) to CMake's native CUDA language support.
 
 ## Key Changes
 
@@ -99,7 +99,7 @@ endif()
 option(CVC_ENABLE_CUDA "Enable CUDA" OFF)
 
 if(CVC_ENABLE_CUDA)
-  project(trans-cvc LANGUAGES C CXX CUDA)
+  project(libcvc LANGUAGES C CXX CUDA)
 endif()
 
 add_library(cvc source.cpp kernel.cu)  # Mixed sources work!

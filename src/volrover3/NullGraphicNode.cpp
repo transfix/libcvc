@@ -1,23 +1,36 @@
 #include <volrover3/NullGraphicNode.h>
+#include <volrover3/GridNode.h>
+#include <volrover3/AxisNode.h>
 #include <cvc/state.h>
+#include <cvc/app.h>
 #include <vtkActor.h>
 #include <sstream>
 #include <limits>
 #include <algorithm>
 
-NullGraphicNode::NullGraphicNode(const std::string& name)
-    : GraphicsNode(name)
-    , m_bounds(-100.0, -100.0, -100.0, 100.0, 100.0, 100.0)  // Default 200x200x200 box
+NullGraphicNode::NullGraphicNode(const std::string& statePath, const std::string& name)
+    : GraphicsNode(statePath, name)
+    , m_bounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5)  // Default 1x1x1 box centered at origin
     , m_dummyActor(vtkSmartPointer<vtkActor>::New())
-    , m_stateNode(nullptr)
+    , m_includeOwnBounds(false)  // Don't include own bounds by default (typical for root nodes)
+    , m_syncBoundsWithChildren(true)  // By default, sync bounds to encompass children
 {
     // Dummy actor has no mapper, won't render anything
     // This node exists only to provide bounding box extents
+    
+    // Initialize bounds in state tree
+    if (!statePath.empty()) {
+        std::ostringstream oss;
+        oss << m_bounds.minx << "," << m_bounds.miny << "," << m_bounds.minz << ","
+            << m_bounds.maxx << "," << m_bounds.maxy << "," << m_bounds.maxz;
+        getState("bounds").value(oss.str());
+        getState("include_own_bounds").value(m_includeOwnBounds ? 1 : 0);
+        getState("sync_bounds_with_children").value(m_syncBoundsWithChildren ? 1 : 0);
+    }
 }
 
 NullGraphicNode::~NullGraphicNode()
 {
-    m_dataConnection.disconnect();
 }
 
 vtkProp* NullGraphicNode::getProp()
@@ -29,6 +42,13 @@ vtkProp* NullGraphicNode::getProp()
 void NullGraphicNode::setBounds(const cvc::bounding_box& bbox)
 {
     m_bounds = bbox;
+    
+    // Update state tree
+    std::ostringstream oss;
+    oss << bbox[0] << "," << bbox[1] << "," << bbox[2] << ","
+        << bbox[3] << "," << bbox[4] << "," << bbox[5];
+    getState("bounds").value(oss.str());
+    
     updateBoundingBoxNode();
 }
 
@@ -36,6 +56,13 @@ void NullGraphicNode::setBounds(double minX, double minY, double minZ,
                                 double maxX, double maxY, double maxZ)
 {
     m_bounds = cvc::bounding_box(minX, minY, minZ, maxX, maxY, maxZ);
+    
+    // Update state tree
+    std::ostringstream oss;
+    oss << minX << "," << minY << "," << minZ << ","
+        << maxX << "," << maxY << "," << maxZ;
+    getState("bounds").value(oss.str());
+    
     updateBoundingBoxNode();
 }
 
@@ -47,112 +74,172 @@ cvc::bounding_box NullGraphicNode::getBoundingBox() const
     return m_bounds;
 }
 
-void NullGraphicNode::syncToState(cvc::state& parentState)
+void NullGraphicNode::setIncludeOwnBounds(bool include)
 {
-    cvc::state& myState = parentState(m_name);
-    myState.comment("Null graphics object (defines bounding box extents only)");
+    if (m_includeOwnBounds == include)
+        return;
     
-    // Store bounding box (user-modifiable unlike other graphics)
-    cvc::state& boundsState = myState("bounds");
-    boundsState.comment("User-defined bounding box extents");
+    m_includeOwnBounds = include;
     
-    boundsState("min_x").value(m_bounds[0]);
-    boundsState("min_x").comment("Minimum X coordinate");
+    // Update state tree
+    getState("include_own_bounds").value(include ? 1 : 0);
     
-    boundsState("min_y").value(m_bounds[1]);
-    boundsState("min_y").comment("Minimum Y coordinate");
+    // Update bbox visualization since combined bounds may have changed
+    updateBoundingBoxNode();
+}
+
+void NullGraphicNode::setSyncBoundsWithChildren(bool sync)
+{
+    if (m_syncBoundsWithChildren == sync)
+        return;
     
-    boundsState("min_z").value(m_bounds[2]);
-    boundsState("min_z").comment("Minimum Z coordinate");
+    m_syncBoundsWithChildren = sync;
     
-    boundsState("max_x").value(m_bounds[3]);
-    boundsState("max_x").comment("Maximum X coordinate");
+    // Update state tree
+    getState("sync_bounds_with_children").value(sync ? 1 : 0);
     
-    boundsState("max_y").value(m_bounds[4]);
-    boundsState("max_y").comment("Maximum Y coordinate");
-    
-    boundsState("max_z").value(m_bounds[5]);
-    boundsState("max_z").comment("Maximum Z coordinate");
-    
-    // Store bbox flag
-    myState("show_bbox").value(m_showBBox ? "true" : "false");
-    
-    // Store label settings
-    myState("show_label").value(m_showLabel ? "true" : "false");
-    myState("label_text").value(m_labelText);
-    myState("label_size").value(std::to_string(m_labelSize));
-    std::ostringstream labelColorStr;
-    labelColorStr << m_labelColor[0] << "," << m_labelColor[1] << "," << m_labelColor[2];
-    myState("label_color").value(labelColorStr.str());
-    
-    // Sync children if we have any
-    const auto& children = getGraphicsChildren();
-    if (!children.empty()) {
-        cvc::state& childrenState = myState("children");
-        childrenState.comment("Child graphics objects");
-        for (const auto& child : children) {
-            child->syncToState(childrenState);
-        }
+    // If enabling sync, update bounds immediately to match children
+    if (sync) {
+        syncBoundsToChildren();
     }
 }
 
-void NullGraphicNode::syncFromState(cvc::state& parentState)
+void NullGraphicNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child)
 {
-    try {
-        cvc::state& myState = parentState(m_name);
+    // Call parent implementation first
+    GraphicsNode::addGraphicsChild(child);
+    
+    // Auto-sync bounds to encompass new child
+    if (m_syncBoundsWithChildren) {
+        syncBoundsToChildren();
+    }
+}
+
+void NullGraphicNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child)
+{
+    // Call parent implementation first
+    GraphicsNode::removeGraphicsChild(child);
+    
+    // Auto-sync bounds after removing child
+    if (m_syncBoundsWithChildren) {
+        syncBoundsToChildren();
+    }
+}
+
+void NullGraphicNode::syncBoundsToChildren()
+{
+    if (!m_syncBoundsWithChildren)
+        return;
+    
+    std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Syncing bounds for node '" 
+              << getName() << "', children count: " << m_graphicsChildren.size() << std::endl;
+    
+    // Calculate combined bounds of all children (without including our own bounds)
+    double acc_minx = std::numeric_limits<double>::max();
+    double acc_miny = std::numeric_limits<double>::max();
+    double acc_minz = std::numeric_limits<double>::max();
+    double acc_maxx = std::numeric_limits<double>::lowest();
+    double acc_maxy = std::numeric_limits<double>::lowest();
+    double acc_maxz = std::numeric_limits<double>::lowest();
+    
+    bool hasChildren = false;
+    
+    for (const auto& child : m_graphicsChildren) {
+        if (!child) continue;
         
-        m_stateNode = &myState;
-        m_dataConnection.disconnect();
-        m_dataConnection = myState.dataChanged.connect([this]() {
-            // No data to reload for null graphic
-        });
+        // Skip grid and axis nodes - they don't contribute to scene bounds
+        if (dynamic_cast<GridNode*>(child.get()) || dynamic_cast<AxisNode*>(child.get())) {
+            continue;
+        }
         
-        // Load bounding box
-        try {
-            cvc::state& boundsState = myState("bounds");
+        cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+        
+        // Skip invalid bounding boxes
+        if (childBBox[0] > childBBox[3] || 
+            childBBox[1] > childBBox[4] || 
+            childBBox[2] > childBBox[5]) {
+            continue;
+        }
+        
+        // Transform child's bbox by child's local transform
+        vtkMatrix4x4* childTransform = child->getTransform();
+        
+        double corners[8][3] = {
+            {childBBox[0], childBBox[1], childBBox[2]},
+            {childBBox[3], childBBox[1], childBBox[2]},
+            {childBBox[0], childBBox[4], childBBox[2]},
+            {childBBox[3], childBBox[4], childBBox[2]},
+            {childBBox[0], childBBox[1], childBBox[5]},
+            {childBBox[3], childBBox[1], childBBox[5]},
+            {childBBox[0], childBBox[4], childBBox[5]},
+            {childBBox[3], childBBox[4], childBBox[5]}
+        };
+        
+        for (int i = 0; i < 8; ++i) {
+            double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
+            double out[4];
+            childTransform->MultiplyPoint(in, out);
             
-            double minX = std::stod(boundsState("min_x").value());
-            double minY = std::stod(boundsState("min_y").value());
-            double minZ = std::stod(boundsState("min_z").value());
-            double maxX = std::stod(boundsState("max_x").value());
-            double maxY = std::stod(boundsState("max_y").value());
-            double maxZ = std::stod(boundsState("max_z").value());
-            
+            acc_minx = std::min(acc_minx, out[0]);
+            acc_miny = std::min(acc_miny, out[1]);
+            acc_minz = std::min(acc_minz, out[2]);
+            acc_maxx = std::max(acc_maxx, out[0]);
+            acc_maxy = std::max(acc_maxy, out[1]);
+            acc_maxz = std::max(acc_maxz, out[2]);
+        }
+        
+        hasChildren = true;
+    }
+    
+    // Update bounds to match children (if we have any valid children)
+    if (hasChildren && acc_minx <= acc_maxx && acc_miny <= acc_maxy && acc_minz <= acc_maxz) {
+        m_bounds = cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
+        
+        std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Updated bounds to [" 
+                  << acc_minx << "," << acc_miny << "," << acc_minz 
+                  << "] to [" << acc_maxx << "," << acc_maxy << "," << acc_maxz << "]" << std::endl;
+        
+        // Update state tree
+        std::ostringstream oss;
+        oss << m_bounds.minx << "," << m_bounds.miny << "," << m_bounds.minz << ","
+            << m_bounds.maxx << "," << m_bounds.maxy << "," << m_bounds.maxz;
+        getState("bounds").value(oss.str());
+        
+        // Update visualization
+        updateBoundingBoxNode();
+    }
+}
+
+void NullGraphicNode::handleStateChanged(const std::string& childState)
+{
+    // Handle bounds state changes (no VTK calls, so no runOnMainThread needed)
+    if (childState == "bounds") {
+        std::string boundsStr = getState("bounds").value<std::string>();
+        std::istringstream iss(boundsStr);
+        double minX, minY, minZ, maxX, maxY, maxZ;
+        char comma;
+        if (iss >> minX >> comma >> minY >> comma >> minZ >> comma 
+                >> maxX >> comma >> maxY >> comma >> maxZ) {
             setBounds(minX, minY, minZ, maxX, maxY, maxZ);
-        } catch (...) {}
-        
-        // Load bbox flag
-        try {
-            std::string showBBoxStr = myState("show_bbox").value();
-            setShowBBox(showBBoxStr == "true");
-        } catch (...) {}
-        
-        // Load label settings
-        try {
-            std::string showLabelStr = myState("show_label").value();
-            setShowLabel(showLabelStr == "true");
-        } catch (...) {}
-        
-        try {
-            std::string labelText = myState("label_text").value();
-            setLabelText(labelText);
-        } catch (...) {}
-        
-        try {
-            int labelSize = std::stoi(myState("label_size").value());
-            setLabelSize(labelSize);
-        } catch (...) {}
-        
-        try {
-            std::string colorStr = myState("label_color").value();
-            std::istringstream iss(colorStr);
-            double r, g, b;
-            char comma;
-            if (iss >> r >> comma >> g >> comma >> b) {
-                setLabelColor(r, g, b);
-            }
-        } catch (...) {}
-    } catch (...) {
-        // State doesn't exist or can't be loaded
+        }
+    }
+    else if (childState == "include_own_bounds") {
+        int includeOwn = getState("include_own_bounds").value<int>();
+        m_includeOwnBounds = (includeOwn != 0);
+        // Update bbox visualization since combined bounds may have changed
+        updateBoundingBoxNode();
+    }
+    else if (childState == "sync_bounds_with_children") {
+        int syncBounds = getState("sync_bounds_with_children").value<int>();
+        m_syncBoundsWithChildren = (syncBounds != 0);
+        // If enabling sync, update bounds immediately
+        if (m_syncBoundsWithChildren) {
+            syncBoundsToChildren();
+        }
+    }
+    else {
+        // Delegate to parent for common graphics fields
+        // Parent will handle its own runOnMainThread wrapping
+        GraphicsNode::handleStateChanged(childState);
     }
 }

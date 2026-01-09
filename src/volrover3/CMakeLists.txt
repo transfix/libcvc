@@ -13,9 +13,9 @@ set(CMAKE_AUTORCC ON)
 
 # Find required packages
 # Try Qt6 first, fall back to Qt5 if VTK requires it
-find_package(Qt6 QUIET COMPONENTS Core Widgets OpenGL OpenGLWidgets)
+find_package(Qt6 QUIET COMPONENTS Core Widgets OpenGL OpenGLWidgets Test)
 if(NOT Qt6_FOUND)
-  find_package(Qt5 REQUIRED COMPONENTS Core Widgets OpenGL)
+  find_package(Qt5 REQUIRED COMPONENTS Core Widgets OpenGL Test)
   set(QT_VERSION_MAJOR 5)
 else()
   set(QT_VERSION_MAJOR 6)
@@ -55,7 +55,13 @@ set(VOLROVER3_SOURCES
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
   GridOptionsDialog.cpp
+  ViewerOptionsDialog.cpp
+  SDFDialog.cpp
+  IsosurfaceDialog.cpp
+  GeometryDialog.cpp
+  VolumeDialog.cpp
   GraphicsParentDialog.cpp
+  ProceduralGeometryDialog.cpp
 )
 
 # Header files
@@ -78,7 +84,13 @@ set(VOLROVER3_HEADERS
   ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/ViewerOptionsDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/SDFDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/IsosurfaceDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/GeometryDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/VolumeDialog.h
   ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
+  ${CMAKE_SOURCE_DIR}/inc/volrover3/ProceduralGeometryDialog.h
 )
 
 # Create executable
@@ -255,4 +267,25 @@ if(CVC_BUILD_TESTS)
     GTest::gtest
     GTest::gtest_main)
   add_test(NAME BoundingBoxSemanticsTest COMMAND volrover3_bbox_semantics_test)
+  
+  # GeometryDialog tests
+  add_executable(volrover3_geometrydialog_test
+    tests/GeometryDialogTest.cpp)
+  target_link_libraries(volrover3_geometrydialog_test
+    volrover3_lib
+    Qt${QT_VERSION_MAJOR}::Test
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME GeometryDialogTest COMMAND volrover3_geometrydialog_test)
+  
+  # VolumeDialog tests
+  add_executable(volrover3_volumedialog_test
+    tests/VolumeDialogTest.cpp)
+  target_link_libraries(volrover3_volumedialog_test
+    volrover3_lib
+    Qt${QT_VERSION_MAJOR}::Test
+    GTest::gtest
+    GTest::gtest_main)
+  add_test(NAME VolumeDialogTest COMMAND volrover3_volumedialog_test)
 endif()
+

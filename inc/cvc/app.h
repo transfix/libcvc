@@ -357,8 +357,12 @@ namespace CVC_NAMESPACE
       if(wait && hasThread(key))
         {
           thread_ptr tptr = threads(key);
-          tptr->interrupt(); //initiate thread quit
-          tptr->join();      //wait for it to quit
+          // Check if tptr is valid - it may have been removed by another thread
+          // between hasThread() and threads() calls (race condition)
+          if(tptr) {
+            tptr->interrupt(); //initiate thread quit
+            tptr->join();      //wait for it to quit
+          }
         }
 
       threads(
@@ -407,14 +411,22 @@ namespace CVC_NAMESPACE
     public:
       thread_info(const std::string& info = "running")
         {
-          _origInfo = app::instance().thisThreadInfo();
-          _origProgress = app::instance().threadProgress();
-          app::instance().thisThreadInfo(info);
+          try {
+            _origInfo = app::instance().thisThreadInfo();
+            _origProgress = app::instance().threadProgress();
+            app::instance().thisThreadInfo(info);
+          } catch (...) {
+            // Swallow exceptions during construction (thread may be interrupted)
+          }
         }
       ~thread_info()
         {
-          app::instance().thisThreadInfo(_origInfo);
-          app::instance().threadProgress(_origProgress);
+          try {
+            app::instance().thisThreadInfo(_origInfo);
+          } catch (...) {}
+          try {
+            app::instance().threadProgress(_origProgress);
+          } catch (...) {}
         }
     private:
       std::string _origInfo;
@@ -426,23 +438,47 @@ namespace CVC_NAMESPACE
     class thread_feedback
     {
     public:
-      thread_feedback(const std::string& info = "running")
-        : _threadInfo(info)
+      thread_feedback(const std::string& key = "")
+        : _threadInfo(key.empty() ? "running" : key)
+        , _key(key)
         {
-          app::instance().threadProgress(0.0);
+          try {
+            // Set initial progress using key if available, otherwise use thread ID
+            if (!_key.empty())
+              app::instance().threadProgress(_key, 0.0);
+            else
+              app::instance().threadProgress(0.0);
+          } catch (...) {
+            // Swallow exceptions during construction (thread may be interrupted)
+          }
         }
 
       ~thread_feedback()
         {
-          app::instance().finishThreadProgress();
-          app::instance().removeThread(app::instance().threadKey());
+          // CRITICAL: Must catch exceptions in destructor to prevent std::terminate()
+          // finishThreadProgress() invokes interruption_point() which throws when interrupted
+          try {
+            // Set status to "completed" and progress to 100%
+            if (!_key.empty()) {
+              app::instance().threadInfo(_key, "completed");
+              app::instance().finishThreadProgress(_key);
+            }
+            else {
+              app::instance().finishThreadProgress();
+            }
+          } catch (...) {}
         }
     private:
       thread_info _threadInfo;
+      std::string _key;
     };
 
     //output
-    void log(unsigned int level, const std::string& buf);
+#ifdef USING_LOG4CPLUS_DEFAULT
+    void log(unsigned int level, const std::string& buf, bool append_newline = false);
+#else
+    void log(unsigned int level, const std::string& buf, bool append_newline = true);
+#endif
 
     template<class T>
     void registerDataType(const std::string& datatypename)
@@ -561,8 +597,10 @@ namespace CVC_NAMESPACE
     boost::mutex           _propertiesMutex;
     thread_map             _threads;
     thread_progress_map    _threadProgress;
+    thread_progress_by_key_map _threadProgressByKey;
     thread_key_map         _threadKeys;
     thread_info_map        _threadInfo;
+    thread_info_by_key_map _threadInfoByKey;
     void                   updateThreadKeys();
     boost::mutex           _threadsMutex;
     boost::mutex           _logMutex;

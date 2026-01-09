@@ -1,5 +1,5 @@
 #
-# Modern CUDA setup for trans-cvc
+# Modern CUDA setup for libcvc
 # Requires CMake 3.17+ for native CUDA language support
 #
 

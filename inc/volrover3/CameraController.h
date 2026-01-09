@@ -3,6 +3,7 @@
 
 #include <vtkCamera.h>
 #include <vtkSmartPointer.h>
+#include <volrover3/SceneNode.h>
 #include <set>
 
 enum CameraMode {
@@ -10,10 +11,10 @@ enum CameraMode {
     FLY_MODE = 1
 };
 
-class CameraController
+class CameraController : public SceneNode
 {
 public:
-    CameraController();
+    CameraController(const std::string& statePath = "volrover3.camera");
     ~CameraController();
 
     void setCamera(vtkCamera *camera);
@@ -24,8 +25,6 @@ public:
     void handleMouseRelease(int button);
     void handleMouseMove(int dx, int dy);
     void handleMouseWheel(int delta);
-
-    void update();
 
     void setMovementSpeed(double speed) { m_movementSpeed = speed; }
     void setMouseSensitivity(double sensitivity) { m_mouseSensitivity = sensitivity; }
@@ -45,14 +44,20 @@ public:
     void setCameraState(const double pos[3], const double dir[3], const double up[3], double fov);
     void applyCameraToVTK();
     
-    // Control whether setCameraState should update AppState (to prevent feedback loops)
-    void setUpdatingFromAppState(bool updating) { m_updatingFromAppState = updating; }
+    // SceneNode overrides
+    void update() override;
+
+protected:
+    vtkProp* getProp() override { return nullptr; } // Camera is not a renderable prop
+    void handleStateChanged(const std::string& childState) override;
 
 private:
     void updateOrientation();
     void move(double forward, double right, double up);
     void orbitCamera(int dx, int dy);
-    void saveCameraStateToAppState();
+    void panCamera(int dx, int dy);
+    void initializeState();
+    void syncCameraToState();
 
     vtkSmartPointer<vtkCamera> m_camera;
     
@@ -75,6 +80,7 @@ private:
     std::set<int> m_keysPressed;
     bool m_mouseLeftPressed;
     bool m_mouseRightPressed;
+    bool m_mouseMiddlePressed;
     
     // Settings
     double m_movementSpeed;
@@ -88,9 +94,6 @@ private:
     int m_keyStrafeRight;
     int m_keyUp;
     int m_keyDown;
-    
-    // Guard flag to prevent feedback loops
-    bool m_updatingFromAppState;
 };
 
 #endif // CAMERACONTROLLER_H

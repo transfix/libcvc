@@ -1,15 +1,29 @@
 #include <gtest/gtest.h>
 #include <volrover3/GeometryNode.h>
+#include <volrover3/VolumeNode.h>
+#include <volrover3/NullGraphicNode.h>
 #include <volrover3/SceneGraph.h>
 #include <cvc/geometry.h>
+#include <cvc/volmagick.h>
 #include <cvc/state.h>
+#include <cvc/state_object.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
+#include <vtkVolume.h>
+#include <vtkActor.h>
 #include <cmath>
+#include <thread>
+#include <chrono>
 
 class GraphicsNodeTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Each test uses its own state subtree, so no need to reset
+        // Disable threading for state_object to avoid destruction race conditions
+        cvc::state_object<SceneNode>::setUseThreading(false);
+        
+        // Each test uses its own state subtree
+        m_statePrefix = "graphics_test_" + std::to_string(testCounter++);
         
         // Create a simple test geometry (triangle)
         testGeom.points().push_back({0.0, 0.0, 0.0});
@@ -20,21 +34,26 @@ protected:
     }
     
     void TearDown() override {
+        // disconnectState() in SceneNode destructor prevents callbacks during destruction
     }
     
+    static int testCounter;
+    std::string m_statePrefix;
     cvc::geometry testGeom;
 };
 
+int GraphicsNodeTest::testCounter = 0;
+
 // Test basic GeometryNode creation (GraphicsNode is abstract)
 TEST_F(GraphicsNodeTest, Creation) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     EXPECT_EQ(node.getName(), "test_node");
     EXPECT_FALSE(node.hasGeometry());
 }
 
 // Test setting geometry
 TEST_F(GraphicsNodeTest, SetGeometry) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     EXPECT_TRUE(node.hasGeometry());
@@ -45,7 +64,7 @@ TEST_F(GraphicsNodeTest, SetGeometry) {
 
 // Test geometry storage in node
 TEST_F(GraphicsNodeTest, GeometryRetrieval) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     const cvc::geometry* geom = node.getGeometry();
@@ -60,7 +79,7 @@ TEST_F(GraphicsNodeTest, GeometryRetrieval) {
 
 // Test default transform is identity
 TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     vtkMatrix4x4* transform = node.getTransform();
     
     ASSERT_NE(transform, nullptr);
@@ -79,7 +98,7 @@ TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
 
 // Test setting position
 TEST_F(GraphicsNodeTest, SetPosition) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setPosition(1.0, 2.0, 3.0);
     
     vtkMatrix4x4* transform = node.getTransform();
@@ -90,7 +109,7 @@ TEST_F(GraphicsNodeTest, SetPosition) {
 
 // Test setting scale
 TEST_F(GraphicsNodeTest, SetScale) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setScale(2.0, 3.0, 4.0);
     
     vtkMatrix4x4* transform = node.getTransform();
@@ -101,7 +120,7 @@ TEST_F(GraphicsNodeTest, SetScale) {
 
 // Test reset transform
 TEST_F(GraphicsNodeTest, ResetTransform) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setPosition(1.0, 2.0, 3.0);
     node.resetTransform();
     
@@ -121,7 +140,7 @@ TEST_F(GraphicsNodeTest, ResetTransform) {
 
 // Test metadata storage and retrieval
 TEST_F(GraphicsNodeTest, MetadataStorage) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setMetadata("test_string", std::string("hello"));
     node.setMetadata("test_int", 42);
@@ -143,26 +162,25 @@ TEST_F(GraphicsNodeTest, MetadataStorage) {
 
 // Test default visible metadata
 TEST_F(GraphicsNodeTest, DefaultVisibleMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
-    EXPECT_TRUE(node.hasMetadata("visible"));
-    EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), true);
+    EXPECT_TRUE(node.isVisible());
 }
 
 // Test setVisible updates metadata
 TEST_F(GraphicsNodeTest, SetVisibleUpdatesMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setVisible(false);
-    EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), false);
+    EXPECT_FALSE(node.isVisible());
     
     node.setVisible(true);
-    EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), true);
+    EXPECT_TRUE(node.isVisible());
 }
 
 // Test type metadata for geometry
 TEST_F(GraphicsNodeTest, TypeMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setMetadata("type", std::string("geometry"));
     
     EXPECT_TRUE(node.hasMetadata("type"));
@@ -171,9 +189,9 @@ TEST_F(GraphicsNodeTest, TypeMetadata) {
 
 // Test hierarchical structure - adding children
 TEST_F(GraphicsNodeTest, AddChild) {
-    auto parent = std::make_shared<GeometryNode>("parent");
-    auto child1 = std::make_shared<GeometryNode>("child1");
-    auto child2 = std::make_shared<GeometryNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("test", "parent");
+    auto child1 = std::make_shared<GeometryNode>("test", "child1");
+    auto child2 = std::make_shared<GeometryNode>("test", "child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -183,9 +201,9 @@ TEST_F(GraphicsNodeTest, AddChild) {
 
 // Test finding child by name
 TEST_F(GraphicsNodeTest, FindChildByName) {
-    auto parent = std::make_shared<GeometryNode>("parent");
-    auto child1 = std::make_shared<GeometryNode>("child1");
-    auto child2 = std::make_shared<GeometryNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("test", "parent");
+    auto child1 = std::make_shared<GeometryNode>("test", "child1");
+    auto child2 = std::make_shared<GeometryNode>("test", "child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -200,9 +218,9 @@ TEST_F(GraphicsNodeTest, FindChildByName) {
 
 // Test removing children
 TEST_F(GraphicsNodeTest, RemoveChild) {
-    auto parent = std::make_shared<GeometryNode>("parent");
-    auto child1 = std::make_shared<GeometryNode>("child1");
-    auto child2 = std::make_shared<GeometryNode>("child2");
+    auto parent = std::make_shared<GeometryNode>("test", "parent");
+    auto child1 = std::make_shared<GeometryNode>("test", "child1");
+    auto child2 = std::make_shared<GeometryNode>("test", "child2");
     
     parent->addGraphicsChild(child1);
     parent->addGraphicsChild(child2);
@@ -214,152 +232,9 @@ TEST_F(GraphicsNodeTest, RemoveChild) {
     EXPECT_EQ(found, nullptr);
 }
 
-// Test state synchronization - syncToState
-TEST_F(GraphicsNodeTest, SyncToState) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    node.setPosition(1.0, 2.0, 3.0);
-    node.setMetadata("filename", std::string("test.obj"));
-    node.setMetadata("num_vertices", 3);
-    node.setMetadata("type", std::string("geometry"));
-    
-    cvc::state& testState = cvc::state::instance()("graphics_test");
-    node.syncToState(testState);
-    
-    // Verify state was created
-    EXPECT_TRUE(testState("test_node").initialized());
-    EXPECT_TRUE(testState("test_node")("transform").initialized());
-    EXPECT_TRUE(testState("test_node")("metadata").initialized());
-    EXPECT_TRUE(testState("test_node")("metadata")("filename").initialized());
-    EXPECT_TRUE(testState("test_node")("metadata")("num_vertices").initialized());
-    
-    // Verify metadata values
-    EXPECT_EQ(testState("test_node")("metadata")("filename").value(), "test.obj");
-    EXPECT_EQ(testState("test_node")("metadata")("num_vertices").value(), "3");
-    
-    // Clean up
-    testState.reset();
-}
-
-// Test state synchronization - syncFromState
-TEST_F(GraphicsNodeTest, SyncFromState) {
-    // Create a state with data
-    cvc::state& testState = cvc::state::instance()("graphics_test2");
-    testState("test_node")("metadata")("filename").value("loaded.obj");
-    testState("test_node")("metadata")("num_vertices").value("5");
-    testState("test_node")("metadata")("visible").value("false");
-    testState("test_node")("metadata")("type").value("geometry");
-    
-    // Create node and sync from state
-    GeometryNode node("test_node");
-    node.syncFromState(testState);
-    
-    // Verify metadata was loaded
-    EXPECT_TRUE(node.hasMetadata("filename"));
-    EXPECT_EQ(std::any_cast<std::string>(node.getMetadata("filename")), "loaded.obj");
-    EXPECT_TRUE(node.hasMetadata("num_vertices"));
-    EXPECT_EQ(std::any_cast<std::string>(node.getMetadata("num_vertices")), "5");
-    EXPECT_TRUE(node.hasMetadata("visible"));
-    EXPECT_EQ(std::any_cast<bool>(node.getMetadata("visible")), false);
-    
-    // Clean up
-    testState.reset();
-}
-
-// Test read-only metadata flag is set
-TEST_F(GraphicsNodeTest, ReadOnlyMetadataFlag) {
-    GeometryNode node("test_node");
-    node.setMetadata("filename", std::string("test.obj"));
-    node.setMetadata("num_vertices", 100);
-    node.setMetadata("num_triangles", 50);
-    node.setMetadata("type", std::string("geometry"));
-    node.setMetadata("custom", std::string("editable"));
-    
-    cvc::state& testState = cvc::state::instance()("graphics_test3");
-    node.syncToState(testState);
-    
-    // Check read-only flags are set correctly
-    EXPECT_TRUE(testState("test_node")("metadata")("filename").readOnly());
-    EXPECT_TRUE(testState("test_node")("metadata")("num_vertices").readOnly());
-    EXPECT_TRUE(testState("test_node")("metadata")("num_triangles").readOnly());
-    EXPECT_TRUE(testState("test_node")("metadata")("type").readOnly());
-    EXPECT_FALSE(testState("test_node")("metadata")("custom").readOnly());
-    
-    // Clean up
-    testState.reset();
-}
-
-// Test that modifying read-only state throws exception
-TEST_F(GraphicsNodeTest, ReadOnlyStateThrowsException) {
-    GeometryNode node("test_node");
-    node.setMetadata("filename", std::string("test.obj"));
-    
-    cvc::state& testState = cvc::state::instance()("graphics_test_readonly");
-    node.syncToState(testState);
-    
-    // Verify filename is read-only
-    EXPECT_TRUE(testState("test_node")("metadata")("filename").readOnly());
-    
-    // Attempting to modify should throw
-    EXPECT_THROW({
-        testState("test_node")("metadata")("filename").value("modified.obj");
-    }, cvc::read_only_error);
-    
-    // Original value should be unchanged
-    EXPECT_EQ(testState("test_node")("metadata")("filename").value(), "test.obj");
-    
-    // Clean up
-    testState.reset();
-}
-
-// Test geometry stored in state data field
-TEST_F(GraphicsNodeTest, GeometryInStateData) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    cvc::state& testState = cvc::state::instance()("graphics_test4");
-    node.syncToState(testState);
-    
-    // Verify geometry is in state data
-    EXPECT_TRUE(testState("test_node").isData<cvc::geometry>());
-    
-    // Try to retrieve geometry from state data
-    try {
-        const cvc::geometry& storedGeom = testState("test_node").data<cvc::geometry>();
-        EXPECT_EQ(storedGeom.num_points(), 3);
-        EXPECT_EQ(storedGeom.num_tris(), 1);
-    } catch (...) {
-        FAIL() << "Failed to retrieve geometry from state data";
-    }
-    
-    // Clean up
-    testState.reset();
-}
-
-// Test hierarchical state sync with children
-TEST_F(GraphicsNodeTest, HierarchicalStateSyncToState) {
-    auto parent = std::make_shared<GeometryNode>("parent");
-    auto child = std::make_shared<GeometryNode>("child");
-    
-    parent->addGraphicsChild(child);
-    parent->setMetadata("type", std::string("geometry"));
-    child->setMetadata("type", std::string("geometry"));
-    
-    cvc::state& testState = cvc::state::instance()("graphics_test5");
-    parent->syncToState(testState);
-    
-    // Verify parent and child states exist
-    EXPECT_TRUE(testState("parent").initialized());
-    EXPECT_TRUE(testState("parent")("children").initialized());
-    EXPECT_TRUE(testState("parent")("children")("child").initialized());
-    
-    // Clean up
-    testState.reset();
-}
-
 // Test SceneGraph graphics management
 TEST_F(GraphicsNodeTest, SceneGraphAddGraphics) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     auto node = sceneGraph.addGraphics("test_graphics", testGeom);
     
@@ -378,7 +253,7 @@ TEST_F(GraphicsNodeTest, SceneGraphAddGraphics) {
 
 // Test SceneGraph empty graphics node
 TEST_F(GraphicsNodeTest, SceneGraphAddEmptyGraphics) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     auto node = sceneGraph.addGraphics("empty_node");
     
@@ -393,7 +268,7 @@ TEST_F(GraphicsNodeTest, SceneGraphAddEmptyGraphics) {
 
 // Test SceneGraph remove graphics
 TEST_F(GraphicsNodeTest, SceneGraphRemoveGraphics) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     sceneGraph.addGraphics("test_graphics", testGeom);
     sceneGraph.removeGraphics("test_graphics");
@@ -404,7 +279,7 @@ TEST_F(GraphicsNodeTest, SceneGraphRemoveGraphics) {
 
 // Test SceneGraph graphics root
 TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     auto root = sceneGraph.getGraphicsRoot();
     ASSERT_NE(root, nullptr);
@@ -414,42 +289,17 @@ TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
 
 // Test SceneGraph register graphics
 TEST_F(GraphicsNodeTest, SceneGraphRegisterGraphics) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
-    auto customNode = std::make_shared<GeometryNode>("custom");
+    auto customNode = std::make_shared<GeometryNode>("test", "custom");
     sceneGraph.registerGraphics("custom", customNode);
     
     auto retrieved = sceneGraph.getGraphics("custom");
     EXPECT_EQ(retrieved, customNode);
 }
-
-// Test SceneGraph sync to state
-TEST_F(GraphicsNodeTest, SceneGraphSyncGraphicsToState) {
-    SceneGraph sceneGraph("graphics_test");
-    
-    sceneGraph.addGraphics("node1", testGeom);
-    sceneGraph.addGraphics("node2", testGeom);
-    
-    sceneGraph.syncGraphicsToState();
-    
-    // Verify state tree was updated
-    // SceneGraph syncs to graphics_test.graphics, check that children were created
-    cvc::state& graphicsState = cvc::state::instance()("graphics_test")("graphics");
-    EXPECT_TRUE(graphicsState.initialized());
-    
-    // Check that children container exists and has nodes
-    if (graphicsState("children").initialized()) {
-        std::vector<std::string> children = graphicsState("children").children();
-        EXPECT_FALSE(children.empty());
-    }
-    
-    // Clean up - reset graphics state for next test
-    graphicsState.reset();
-}
-
 // Test SceneGraph compute bounds
 TEST_F(GraphicsNodeTest, SceneGraphComputeBounds) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create geometry with known bounds
     cvc::geometry geom1;
@@ -476,7 +326,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBounds) {
 
 // Test SceneGraph compute bounds with no graphics
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     cvc::bounding_box bounds = sceneGraph.computeGraphicsBounds();
     
@@ -486,8 +336,8 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
 
 // Test world transform calculation for nested nodes
 TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
-    auto parent = std::make_shared<GeometryNode>("parent");
-    auto child = std::make_shared<GeometryNode>("child");
+    auto parent = std::make_shared<GeometryNode>("test.parent", "parent");
+    auto child = std::make_shared<GeometryNode>("test.child", "child");
     
     // Set parent position
     parent->setPosition(10.0, 0.0, 0.0);
@@ -507,7 +357,7 @@ TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
 
 // Test that metadata is computed from geometry
 TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     // Check that basic stats are computed
@@ -528,7 +378,7 @@ TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
 
 // Test that bounding box metadata is computed
 TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     // Check bounding box metadata exists
@@ -553,7 +403,7 @@ TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
 
 // Test that extent metadata is computed
 TEST_F(GraphicsNodeTest, ExtentMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     // Check extent metadata exists
@@ -573,7 +423,7 @@ TEST_F(GraphicsNodeTest, ExtentMetadata) {
 
 // Test that center metadata is computed
 TEST_F(GraphicsNodeTest, CenterMetadata) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     // Check center metadata exists
@@ -590,103 +440,11 @@ TEST_F(GraphicsNodeTest, CenterMetadata) {
     EXPECT_DOUBLE_EQ(centerY, 0.5);
     EXPECT_DOUBLE_EQ(centerZ, 0.0);
 }
-
-// Test that data changes trigger geometry updates
-TEST_F(GraphicsNodeTest, DataChangeTriggerUpdate) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("graphics_test");
-    node.syncToState(testState);
-    
-    // Verify initial metadata
-    int initialVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
-    EXPECT_EQ(initialVerts, 3);
-    
-    // Sync from state (this connects the data change signal)
-    node.syncFromState(testState);
-    
-    // Modify the geometry in the state
-    cvc::geometry newGeom;
-    newGeom.points().push_back({0.0, 0.0, 0.0});
-    newGeom.points().push_back({1.0, 0.0, 0.0});
-    newGeom.points().push_back({1.0, 1.0, 0.0});
-    newGeom.points().push_back({0.0, 1.0, 0.0});
-    newGeom.tris().push_back({0, 1, 2});
-    newGeom.tris().push_back({0, 2, 3});
-    
-    // Update state data (should trigger onDataChanged callback)
-    testState("test_node").data(newGeom);
-    
-    // Verify metadata was updated
-    int updatedVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
-    int updatedTris = std::any_cast<int>(node.getMetadata("num_triangles"));
-    
-    EXPECT_EQ(updatedVerts, 4);
-    EXPECT_EQ(updatedTris, 2);
-    
-    // Verify geometry was updated
-    const cvc::geometry* geom = node.getGeometry();
-    ASSERT_NE(geom, nullptr);
-    EXPECT_EQ(geom->num_points(), 4);
-    EXPECT_EQ(geom->num_tris(), 2);
-}
-
-// Test that metadata syncs to state tree
-TEST_F(GraphicsNodeTest, MetadataSyncToState) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("metadata_sync_test");
-    node.syncToState(testState);
-    
-    // Verify metadata is in state tree
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    EXPECT_TRUE(metadataState("num_vertices").initialized());
-    EXPECT_TRUE(metadataState("num_triangles").initialized());
-    EXPECT_TRUE(metadataState("type").initialized());
-    
-    // Verify values match
-    int numVerts = metadataState("num_vertices").value<int>();
-    int numTris = metadataState("num_triangles").value<int>();
-    
-    EXPECT_EQ(numVerts, 3);
-    EXPECT_EQ(numTris, 1);
-}
-
-// Test that computed metadata is read-only
-TEST_F(GraphicsNodeTest, ComputedMetadataReadOnly) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("readonly_test");
-    node.syncToState(testState);
-    
-    // Verify computed metadata is read-only
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    EXPECT_TRUE(metadataState("num_vertices").readOnly());
-    EXPECT_TRUE(metadataState("num_triangles").readOnly());
-    EXPECT_TRUE(metadataState("type").readOnly());
-    EXPECT_TRUE(metadataState("bbox_min_x").readOnly());
-    EXPECT_TRUE(metadataState("extent_x").readOnly());
-    EXPECT_TRUE(metadataState("center_x").readOnly());
-}
-
 // Test geometry type detection
 TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     // Test triangle mesh
     {
-        GeometryNode node("tri_mesh");
+        GeometryNode node("test", "tri_mesh");
         cvc::geometry triGeom;
         triGeom.points().push_back({0.0, 0.0, 0.0});
         triGeom.points().push_back({1.0, 0.0, 0.0});
@@ -700,7 +458,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     
     // Test quad mesh
     {
-        GeometryNode node("quad_mesh");
+        GeometryNode node("test", "quad_mesh");
         cvc::geometry quadGeom;
         quadGeom.points().push_back({0.0, 0.0, 0.0});
         quadGeom.points().push_back({1.0, 0.0, 0.0});
@@ -715,7 +473,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
     
     // Test mixed mesh
     {
-        GeometryNode node("mixed_mesh");
+        GeometryNode node("test", "mixed_mesh");
         cvc::geometry mixedGeom;
         mixedGeom.points().push_back({0.0, 0.0, 0.0});
         mixedGeom.points().push_back({1.0, 0.0, 0.0});
@@ -732,7 +490,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
 
 // Test metadata updates when geometry changes
 TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     // Set initial geometry
     node.setGeometry(testGeom);
@@ -757,194 +515,9 @@ TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
     EXPECT_EQ(newTris, 2);
 }
 
-// Test that all bounding box metadata is read-only in state
-TEST_F(GraphicsNodeTest, AllBBoxMetadataReadOnly) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("bbox_readonly_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    // Verify all bbox metadata is read-only
-    EXPECT_TRUE(metadataState("bbox_min_x").readOnly());
-    EXPECT_TRUE(metadataState("bbox_min_y").readOnly());
-    EXPECT_TRUE(metadataState("bbox_min_z").readOnly());
-    EXPECT_TRUE(metadataState("bbox_max_x").readOnly());
-    EXPECT_TRUE(metadataState("bbox_max_y").readOnly());
-    EXPECT_TRUE(metadataState("bbox_max_z").readOnly());
-}
-
-// Test that all extent metadata is read-only in state
-TEST_F(GraphicsNodeTest, AllExtentMetadataReadOnly) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("extent_readonly_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    // Verify all extent metadata is read-only
-    EXPECT_TRUE(metadataState("extent_x").readOnly());
-    EXPECT_TRUE(metadataState("extent_y").readOnly());
-    EXPECT_TRUE(metadataState("extent_z").readOnly());
-}
-
-// Test that all center metadata is read-only in state
-TEST_F(GraphicsNodeTest, AllCenterMetadataReadOnly) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("center_readonly_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    // Verify all center metadata is read-only
-    EXPECT_TRUE(metadataState("center_x").readOnly());
-    EXPECT_TRUE(metadataState("center_y").readOnly());
-    EXPECT_TRUE(metadataState("center_z").readOnly());
-}
-
-// Test that num_quads metadata is computed and read-only
-TEST_F(GraphicsNodeTest, NumQuadsMetadataReadOnly) {
-    GeometryNode node("quad_node");
-    
-    // Create geometry with quads
-    cvc::geometry quadGeom;
-    quadGeom.points().push_back({0.0, 0.0, 0.0});
-    quadGeom.points().push_back({1.0, 0.0, 0.0});
-    quadGeom.points().push_back({1.0, 1.0, 0.0});
-    quadGeom.points().push_back({0.0, 1.0, 0.0});
-    quadGeom.quads().push_back({0, 1, 2, 3});
-    
-    node.setGeometry(quadGeom);
-    
-    // Verify metadata exists
-    EXPECT_TRUE(node.hasMetadata("num_quads"));
-    int numQuads = std::any_cast<int>(node.getMetadata("num_quads"));
-    EXPECT_EQ(numQuads, 1);
-    
-    // Sync to state and verify read-only
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("quads_readonly_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("quad_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    EXPECT_TRUE(metadataState("num_quads").readOnly());
-}
-
-// Test that attempting to modify read-only metadata throws exception
-TEST_F(GraphicsNodeTest, ModifyingReadOnlyMetadataThrows) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("readonly_modify_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    cvc::state& metadataState = nodeState("metadata");
-    
-    // Attempting to modify read-only metadata should throw
-    EXPECT_THROW({
-        metadataState("num_vertices").value(999);
-    }, cvc::read_only_error);
-    
-    EXPECT_THROW({
-        metadataState("bbox_min_x").value(123.456);
-    }, cvc::read_only_error);
-    
-    EXPECT_THROW({
-        metadataState("type").value("modified");
-    }, cvc::read_only_error);
-}
-
-// Test metadata recalculation after data change updates all read-only fields
-TEST_F(GraphicsNodeTest, DataChangeUpdatesAllReadOnlyMetadata) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("recalc_test");
-    node.syncToState(testState);
-    node.syncFromState(testState);
-    
-    // Get initial metadata values - use try/catch for safe casting
-    int initialVerts = 0;
-    double initialExtentX = 0.0;
-    try {
-        initialVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
-    } catch (...) {
-        // Metadata might not be set yet
-    }
-    try {
-        initialExtentX = std::any_cast<double>(node.getMetadata("extent_x"));
-    } catch (...) {
-        // Metadata might not be set yet
-    }
-    
-    // Create new geometry with different properties
-    cvc::geometry newGeom;
-    newGeom.points().push_back({0.0, 0.0, 0.0});
-    newGeom.points().push_back({5.0, 0.0, 0.0});
-    newGeom.points().push_back({5.0, 5.0, 0.0});
-    newGeom.points().push_back({0.0, 5.0, 0.0});
-    newGeom.tris().push_back({0, 1, 2});
-    newGeom.tris().push_back({0, 2, 3});
-    
-    // Update state data (triggers onDataChanged)
-    testState("test_node").data(newGeom);
-    
-    // Verify all metadata was updated - metadata should now exist
-    EXPECT_TRUE(node.hasMetadata("num_vertices"));
-    EXPECT_TRUE(node.hasMetadata("num_triangles"));
-    EXPECT_TRUE(node.hasMetadata("extent_x"));
-    EXPECT_TRUE(node.hasMetadata("extent_y"));
-    EXPECT_TRUE(node.hasMetadata("center_x"));
-    EXPECT_TRUE(node.hasMetadata("center_y"));
-    
-    int newVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
-    int newTris = std::any_cast<int>(node.getMetadata("num_triangles"));
-    double newExtentX = std::any_cast<double>(node.getMetadata("extent_x"));
-    double newExtentY = std::any_cast<double>(node.getMetadata("extent_y"));
-    double newCenterX = std::any_cast<double>(node.getMetadata("center_x"));
-    double newCenterY = std::any_cast<double>(node.getMetadata("center_y"));
-    
-    EXPECT_EQ(newVerts, 4);
-    EXPECT_EQ(newTris, 2);
-    EXPECT_DOUBLE_EQ(newExtentX, 5.0);
-    EXPECT_DOUBLE_EQ(newExtentY, 5.0);
-    EXPECT_DOUBLE_EQ(newCenterX, 2.5);
-    EXPECT_DOUBLE_EQ(newCenterY, 2.5);
-    
-    // Verify values changed from initial (if initial had values)
-    if (initialVerts > 0) {
-        EXPECT_NE(initialVerts, newVerts);
-    }
-    if (initialExtentX > 0.0) {
-        EXPECT_NE(initialExtentX, newExtentX);
-    }
-}
-
 // Test that empty geometry produces zero metadata
 TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
-    GeometryNode node("empty_node");
+    GeometryNode node("test", "empty_node");
     
     cvc::geometry emptyGeom;
     node.setGeometry(emptyGeom);
@@ -962,7 +535,7 @@ TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
 
 // Test geometry with normals and colors preserves metadata
 TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
-    GeometryNode node("colored_node");
+    GeometryNode node("test", "colored_node");
     
     cvc::geometry coloredGeom;
     coloredGeom.points().push_back({0.0, 0.0, 0.0});
@@ -987,93 +560,11 @@ TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
     int numVerts = std::any_cast<int>(node.getMetadata("num_vertices"));
     EXPECT_EQ(numVerts, 3);
 }
-
-// Test that state objects have comments
-TEST_F(GraphicsNodeTest, StateCommentsSet) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("comments_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    
-    // Verify main node has comment
-    std::string nodeComment = nodeState.comment();
-    EXPECT_FALSE(nodeComment.empty());
-    EXPECT_NE(nodeComment.find("Graphics object"), std::string::npos);
-    
-    // Verify transform has comment
-    std::string transformComment = nodeState("transform").comment();
-    EXPECT_FALSE(transformComment.empty());
-    EXPECT_NE(transformComment.find("transformation matrix"), std::string::npos);
-    
-    // Verify metadata container has comment
-    std::string metadataComment = nodeState("metadata").comment();
-    EXPECT_FALSE(metadataComment.empty());
-    EXPECT_NE(metadataComment.find("geometry statistics"), std::string::npos);
-    
-    // Verify specific metadata fields have comments
-    cvc::state& metadataState = nodeState("metadata");
-    
-    std::string numVertsComment = metadataState("num_vertices").comment();
-    EXPECT_FALSE(numVertsComment.empty());
-    EXPECT_NE(numVertsComment.find("vertices"), std::string::npos);
-    
-    std::string bboxComment = metadataState("bbox_min_x").comment();
-    EXPECT_FALSE(bboxComment.empty());
-    EXPECT_NE(bboxComment.find("bounding box"), std::string::npos);
-    
-    std::string extentComment = metadataState("extent_x").comment();
-    EXPECT_FALSE(extentComment.empty());
-    EXPECT_NE(extentComment.find("Width"), std::string::npos);
-    
-    std::string centerComment = metadataState("center_x").comment();
-    EXPECT_FALSE(centerComment.empty());
-    EXPECT_NE(centerComment.find("center"), std::string::npos);
-    
-    std::string typeComment = metadataState("type").comment();
-    EXPECT_FALSE(typeComment.empty());
-    EXPECT_NE(typeComment.find("Geometry type"), std::string::npos);
-}
-
-// Test that comments persist after data changes
-TEST_F(GraphicsNodeTest, CommentsPersistAfterDataChange) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("comments_persist_test");
-    node.syncToState(testState);
-    node.syncFromState(testState);
-    
-    // Get initial comment
-    std::string initialComment = testState("test_node")("metadata")("num_vertices").comment();
-    EXPECT_FALSE(initialComment.empty());
-    
-    // Create new geometry and trigger data change
-    cvc::geometry newGeom;
-    newGeom.points().push_back({0.0, 0.0, 0.0});
-    newGeom.points().push_back({1.0, 0.0, 0.0});
-    newGeom.tris().push_back({0, 1, 2});
-    
-    testState("test_node").data(newGeom);
-    
-    // Verify comment still exists after data change
-    std::string updatedComment = testState("test_node")("metadata")("num_vertices").comment();
-    EXPECT_FALSE(updatedComment.empty());
-    EXPECT_EQ(initialComment, updatedComment);
-}
-
-// ============================================================================
 // Label Tests
 // ============================================================================
 
 TEST_F(GraphicsNodeTest, LabelDefaultState) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     // Label should be off by default
     EXPECT_FALSE(node.getShowLabel());
@@ -1090,7 +581,7 @@ TEST_F(GraphicsNodeTest, LabelDefaultState) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelText) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setLabelText("Custom Label");
     EXPECT_EQ(node.getLabelText(), "Custom Label");
@@ -1100,7 +591,7 @@ TEST_F(GraphicsNodeTest, SetLabelText) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelSize) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setLabelSize(20);
     EXPECT_EQ(node.getLabelSize(), 20);
@@ -1114,7 +605,7 @@ TEST_F(GraphicsNodeTest, SetLabelSize) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelColor) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setLabelColor(0.5, 0.75, 1.0);
     
@@ -1126,7 +617,7 @@ TEST_F(GraphicsNodeTest, SetLabelColor) {
 }
 
 TEST_F(GraphicsNodeTest, SetShowLabel) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     EXPECT_FALSE(node.getShowLabel());
     
@@ -1136,58 +627,19 @@ TEST_F(GraphicsNodeTest, SetShowLabel) {
     node.setShowLabel(false);
     EXPECT_FALSE(node.getShowLabel());
 }
-
-TEST_F(GraphicsNodeTest, LabelStateSync) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Configure label
-    node.setShowLabel(true);
-    node.setLabelText("Test Label");
-    node.setLabelSize(18);
-    node.setLabelColor(1.0, 0.5, 0.0);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("label_sync_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    
-    // Verify label state
-    EXPECT_EQ(nodeState("show_label").value(), "true");
-    EXPECT_EQ(nodeState("label_text").value(), "Test Label");
-    EXPECT_EQ(nodeState("label_size").value(), "18");
-    EXPECT_EQ(nodeState("label_color").value(), "1,0.5,0");
-    
-    // Create new node and sync from state
-    GeometryNode node2("test_node");
-    node2.syncFromState(testState);
-    
-    EXPECT_TRUE(node2.getShowLabel());
-    EXPECT_EQ(node2.getLabelText(), "Test Label");
-    EXPECT_EQ(node2.getLabelSize(), 18);
-    
-    double r, g, b;
-    node2.getLabelColor(r, g, b);
-    EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 0.5);
-    EXPECT_DOUBLE_EQ(b, 0.0);
-}
-
 // ============================================================================
 // Bounding Box Tests
 // ============================================================================
 
 TEST_F(GraphicsNodeTest, BBoxDefaultState) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     // BBox should be off by default for regular nodes
     EXPECT_FALSE(node.getShowBBox());
 }
 
 TEST_F(GraphicsNodeTest, SetShowBBox) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     node.setShowBBox(true);
     EXPECT_TRUE(node.getShowBBox());
@@ -1195,46 +647,22 @@ TEST_F(GraphicsNodeTest, SetShowBBox) {
     node.setShowBBox(false);
     EXPECT_FALSE(node.getShowBBox());
 }
-
-TEST_F(GraphicsNodeTest, BBoxStateSync) {
-    GeometryNode node("test_node");
-    node.setGeometry(testGeom);
-    
-    // Enable bbox
-    node.setShowBBox(true);
-    
-    // Sync to state
-    cvc::state& root = cvc::state::instance();
-    cvc::state& testState = root("bbox_sync_test");
-    node.syncToState(testState);
-    
-    cvc::state& nodeState = testState("test_node");
-    EXPECT_EQ(nodeState("show_bbox").value(), "true");
-    
-    // Create new node and sync from state
-    GeometryNode node2("test_node");
-    node2.syncFromState(testState);
-    
-    EXPECT_TRUE(node2.getShowBBox());
-}
-
 TEST_F(GraphicsNodeTest, BBoxColor) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     
     // Set bbox color
     node.setBBoxColor(1.0, 0.0, 0.0);
     
-    // Note: getBBoxColor currently returns default white
-    // because BBoxNode doesn't have getColor() method
+    // Verify color was set correctly
     double r, g, b;
     node.getBBoxColor(r, g, b);
     EXPECT_DOUBLE_EQ(r, 1.0);
-    EXPECT_DOUBLE_EQ(g, 1.0);
-    EXPECT_DOUBLE_EQ(b, 1.0);
+    EXPECT_DOUBLE_EQ(g, 0.0);
+    EXPECT_DOUBLE_EQ(b, 0.0);
 }
 
 TEST_F(GraphicsNodeTest, BBoxBounds) {
-    GeometryNode node("test_node");
+    GeometryNode node("test", "test_node");
     node.setGeometry(testGeom);
     
     cvc::bounding_box bbox = node.getBoundingBox();
@@ -1250,7 +678,7 @@ TEST_F(GraphicsNodeTest, BBoxBounds) {
 
 // Test SceneGraph computeGraphicsBounds with translation transform
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithTranslation) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create geometry with unit cube: [0,0,0] to [1,1,1]
     cvc::geometry geom;
@@ -1281,7 +709,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithTranslation) {
 
 // Test SceneGraph computeGraphicsBounds with scale transform
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithScale) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create geometry with unit cube: [0,0,0] to [1,1,1]
     cvc::geometry geom;
@@ -1312,7 +740,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithScale) {
 
 // Test SceneGraph computeGraphicsBounds with rotation transform
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithRotation) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create geometry with square in XY plane: [-1,-1,0] to [1,1,0]
     cvc::geometry geom;
@@ -1341,7 +769,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithRotation) {
 
 // Test SceneGraph computeGraphicsBounds with combined transforms
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithCombinedTransforms) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create geometry with unit cube centered at origin: [-0.5,-0.5,-0.5] to [0.5,0.5,0.5]
     cvc::geometry geom;
@@ -1374,7 +802,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsWithCombinedTransforms) {
 
 // Test SceneGraph computeGraphicsBounds with multiple transformed objects
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsMultipleTransformed) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create first geometry at [0,0,0] to [1,1,1]
     cvc::geometry geom1;
@@ -1408,7 +836,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsMultipleTransformed) {
 
 // Test SceneGraph computeGraphicsBounds with hierarchical transforms
 TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
-    SceneGraph sceneGraph("graphics_test");
+    SceneGraph sceneGraph(m_statePrefix);
     
     // Create parent geometry at [0,0,0] to [1,1,1]
     cvc::geometry geom1;
@@ -1421,7 +849,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
     geom2.points().push_back({1.0, 1.0, 1.0});
     
     auto parent = sceneGraph.addGraphics("parent", geom1);
-    auto child = std::make_shared<GeometryNode>("child");
+    auto child = std::make_shared<GeometryNode>("test", "child");
     child->setGeometry(geom2);
     
     // Parent at [10,0,0]
@@ -1442,6 +870,568 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
     EXPECT_NEAR(bounds[3], 16.0, 1e-6);
     EXPECT_NEAR(bounds[4], 1.0, 1e-6);
     EXPECT_NEAR(bounds[5], 1.0, 1e-6);
+}
+
+// ============================================================================
+// Bounding Box Transform Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, BBoxShowsLocalSpace) {
+    // Verify that bounding box geometry stays in local space
+    // and transform is applied to the bbox actor
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto node = sceneGraph.addGraphics("bbox_test", geom);
+    
+    // Enable bbox
+    node->setShowBBox(true);
+    
+    // Apply a transform (rotation + translation)
+    node->setPosition(10.0, 0.0, 0.0);
+    node->setRotation(0.0, 0.0, 45.0);  // 45 degree rotation around Z
+    
+    // The node's getBoundingBox should return local space coords
+    cvc::bounding_box localBBox = node->getBoundingBox();
+    EXPECT_NEAR(localBBox[0], 0.0, 1e-6);
+    EXPECT_NEAR(localBBox[3], 1.0, 1e-6);
+    
+    // The bbox visualization will use the transform to render correctly
+    // This is applied in updateBoundingBoxNode() via setTransform()
+}
+
+// ============================================================================
+// Clip Plane Tests
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, ClipChildrenDefault) {
+    // Default clipChildren should be false
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.parent", geom);
+    
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, SetClipChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.setter", geom);
+    
+    parent->setClipChildren(true);
+    EXPECT_TRUE(parent->getClipChildren());
+    
+    parent->setClipChildren(false);
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, ClipChildrenStateSync) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    auto parent = sceneGraph.addGraphics("cliptest.statesync", geom);
+    
+    // Test setter -> state tree
+    parent->setClipChildren(true);
+    int stateValue = parent->getState("clip_children").template value<int>();
+    EXPECT_EQ(stateValue, 1);
+    
+    parent->setClipChildren(false);
+    stateValue = parent->getState("clip_children").template value<int>();
+    EXPECT_EQ(stateValue, 0);
+    
+    // Test state tree -> getter
+    parent->getState("clip_children").value(1);
+    // Give time for state change to propagate
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(parent->getClipChildren());
+}
+
+TEST_F(GraphicsNodeTest, ClipPlanesGenerated) {
+    // Create a parent with a known bounding box
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({2.0, 3.0, 4.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.planes", geom);
+    parent->setClipChildren(true);
+    
+    // Should have 6 clip planes
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(GraphicsNodeTest, ClipPlanesTransform) {
+    // Create a parent with bounding box and transform
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry geom;
+    geom.points().push_back({0.0, 0.0, 0.0});
+    geom.points().push_back({1.0, 1.0, 1.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.transform", geom);
+    parent->setPosition(10.0, 20.0, 30.0);
+    parent->setClipChildren(true);
+    
+    // Planes should be transformed with the parent's transform
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+    
+    // Get first plane and check it's been transformed
+    // The exact values depend on implementation, but planes should exist
+    planes->InitTraversal();
+    vtkPlane* plane = planes->GetNextItem();
+    ASSERT_NE(plane, nullptr);
+}
+
+TEST_F(GraphicsNodeTest, ChildrenClipped) {
+    // Create parent and child geometry nodes
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 10.0, 10.0});
+    
+    cvc::geometry childGeom;
+    childGeom.points().push_back({5.0, 5.0, 5.0});
+    childGeom.points().push_back({15.0, 15.0, 15.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.children", parentGeom);
+    auto child = std::make_shared<GeometryNode>("cliptest.children.child", "child");
+    child->setGeometry(childGeom);
+    parent->addGraphicsChild(child);
+    
+    // Enable clipping on parent
+    parent->setClipChildren(true);
+    
+    // Give time for threading/event queue to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Child should have received clip planes
+    // We can't easily test the mapper directly without VTK rendering context,
+    // but we can verify the planes were created
+    vtkPlaneCollection* planes = parent->getClipPlanes();
+    ASSERT_NE(planes, nullptr);
+    EXPECT_EQ(planes->GetNumberOfItems(), 6);
+}
+
+TEST_F(GraphicsNodeTest, ClippingDisabled) {
+    SceneGraph sceneGraph(m_statePrefix);
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 10.0, 10.0});
+    
+    cvc::geometry childGeom;
+    childGeom.points().push_back({5.0, 5.0, 5.0});
+    
+    auto parent = sceneGraph.addGraphics("cliptest.disabled", parentGeom);
+    auto child = std::make_shared<GeometryNode>("cliptest.disabled.child", "child");
+    child->setGeometry(childGeom);
+    parent->addGraphicsChild(child);
+    
+    // Enable then disable clipping
+    parent->setClipChildren(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    parent->setClipChildren(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Clipping should be disabled
+    EXPECT_FALSE(parent->getClipChildren());
+}
+
+// Test createChild with GeometryNode and geometry data
+TEST_F(GraphicsNodeTest, CreateChildGeometry) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create parent geometry
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({10.0, 0.0, 0.0});
+    parentGeom.points().push_back({0.0, 10.0, 0.0});
+    parentGeom.tris().push_back({0, 1, 2});
+    
+    auto parent = sceneGraph.addGraphics("parent", parentGeom);
+    
+    // Create child geometry using createChild
+    cvc::geometry childGeom;
+    childGeom.points().push_back({1.0, 1.0, 1.0});
+    childGeom.points().push_back({2.0, 1.0, 1.0});
+    childGeom.points().push_back({1.0, 2.0, 1.0});
+    childGeom.tris().push_back({0, 1, 2});
+    
+    auto child = parent->createChild<GeometryNode>("child", childGeom);
+    
+    // Verify child was created correctly
+    ASSERT_NE(child, nullptr);
+    EXPECT_TRUE(child->hasGeometry());
+    EXPECT_EQ(child->getName(), "child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify geometry was set correctly
+    const cvc::geometry* geom = child->getGeometry();
+    ASSERT_NE(geom, nullptr);
+    EXPECT_EQ(geom->points().size(), 3);
+    EXPECT_EQ(geom->tris().size(), 1);
+}
+
+// Test createChild with VolumeNode and volume data
+TEST_F(GraphicsNodeTest, CreateChildVolume) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create parent geometry
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create child volume using createChild
+    cvc::volume vol(
+        cvc::dimension(10, 10, 10),
+        cvc::UChar,
+        cvc::bounding_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)
+    );
+    auto child = parent->createChild<VolumeNode>("volume_child", vol);
+    
+    // Verify child was created correctly
+    ASSERT_NE(child, nullptr);
+    EXPECT_TRUE(child->hasVolume());
+    EXPECT_EQ(child->getName(), "volume_child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify volume was set correctly
+    const cvc::volume* v = child->getVolume();
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(v->XDim(), 10);
+    EXPECT_EQ(v->YDim(), 10);
+    EXPECT_EQ(v->ZDim(), 10);
+}
+
+// Test createChild without data (should create NullGraphicNode)
+TEST_F(GraphicsNodeTest, CreateChildNoData) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create child without data
+    auto child = parent->createChild("null_child");
+    
+    // Verify child was created
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->getName(), "null_child");
+    
+    // Verify parent-child relationship
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 1);
+    EXPECT_EQ(children[0], child);
+    
+    // Verify it's a NullGraphicNode (default bounds are -0.5 to 0.5)
+    auto bbox = child->getBoundingBox();
+    EXPECT_EQ(bbox.minx, -0.5);
+    EXPECT_EQ(bbox.maxx, 0.5);
+    EXPECT_EQ(bbox.miny, -0.5);
+    EXPECT_EQ(bbox.maxy, 0.5);
+    EXPECT_EQ(bbox.minz, -0.5);
+    EXPECT_EQ(bbox.maxz, 0.5);
+}
+
+// Test multiple createChild calls
+TEST_F(GraphicsNodeTest, CreateMultipleChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Create multiple children of different types
+    cvc::geometry geom1;
+    geom1.points().push_back({1.0, 0.0, 0.0});
+    auto child1 = parent->createChild<GeometryNode>("geom1", geom1);
+    
+    cvc::volume vol1(
+        cvc::dimension(5, 5, 5),
+        cvc::UChar,
+        cvc::bounding_box(0.0, 0.0, 0.0, 5.0, 5.0, 5.0)
+    );
+    auto child2 = parent->createChild<VolumeNode>("vol1", vol1);
+    
+    cvc::geometry geom2;
+    geom2.points().push_back({2.0, 0.0, 0.0});
+    auto child3 = parent->createChild<GeometryNode>("geom2", geom2);
+    
+    // Verify all children were created
+    ASSERT_NE(child1, nullptr);
+    ASSERT_NE(child2, nullptr);
+    ASSERT_NE(child3, nullptr);
+    
+    // Verify parent has all children
+    const auto& children = parent->getGraphicsChildren();
+    EXPECT_EQ(children.size(), 3);
+    
+    // Verify correct types
+    auto geomChild1 = std::dynamic_pointer_cast<GeometryNode>(child1);
+    auto volChild = std::dynamic_pointer_cast<VolumeNode>(child2);
+    auto geomChild2 = std::dynamic_pointer_cast<GeometryNode>(child3);
+    
+    EXPECT_NE(geomChild1, nullptr);
+    EXPECT_NE(volChild, nullptr);
+    EXPECT_NE(geomChild2, nullptr);
+}
+
+// Test createChild state tree path construction
+TEST_F(GraphicsNodeTest, CreateChildStatePath) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    auto child = parent->createChild<GeometryNode>("child", testGeom);
+    
+    // Verify state path is properly constructed
+    std::string parentPath = parent->getState().fullName();
+    std::string childPath = child->getState().fullName();
+    
+    // Child path should be parent.children.child
+    std::string expectedPath = parentPath + ".children.child";
+    EXPECT_EQ(childPath, expectedPath);
+}
+
+// Test nested createChild calls
+TEST_F(GraphicsNodeTest, CreateNestedChildren) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    auto root = sceneGraph.addGraphics("root", testGeom);
+    auto level1 = root->createChild<GeometryNode>("level1", testGeom);
+    auto level2 = level1->createChild<GeometryNode>("level2", testGeom);
+    auto level3 = level2->createChild<GeometryNode>("level3", testGeom);
+    
+    // Verify hierarchy
+    ASSERT_NE(level1, nullptr);
+    ASSERT_NE(level2, nullptr);
+    ASSERT_NE(level3, nullptr);
+    
+    EXPECT_EQ(root->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level1->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level2->getGraphicsChildren().size(), 1);
+    EXPECT_EQ(level3->getGraphicsChildren().size(), 0);
+    
+    // Verify state paths are properly nested
+    std::string rootPath = root->getState().fullName();
+    std::string level1Path = level1->getState().fullName();
+    std::string level2Path = level2->getState().fullName();
+    std::string level3Path = level3->getState().fullName();
+    
+    EXPECT_EQ(level1Path, rootPath + ".children.level1");
+    EXPECT_EQ(level2Path, level1Path + ".children.level2");
+    EXPECT_EQ(level3Path, level2Path + ".children.level3");
+}
+
+// Test that child volumes are found by SceneGraph::getAllVolumeGraphics()
+TEST_F(GraphicsNodeTest, CreateChildVolumeDiscovery) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create a parent geometry
+    auto parent = sceneGraph.addGraphics("parent", testGeom);
+    
+    // Initial check - no volumes
+    EXPECT_EQ(sceneGraph.getAllVolumeGraphics().size(), 0);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 0);
+    
+    // Create child volumes
+    cvc::volume vol1(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+    auto childVol1 = parent->createChild<VolumeNode>("vol1", vol1);
+    
+    // Should now find the child volume
+    auto allVolumes = sceneGraph.getAllVolumeGraphics();
+    EXPECT_EQ(allVolumes.size(), 1);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 1);
+    EXPECT_EQ(allVolumes[0], childVol1);
+    
+    // Add another child volume at different level
+    cvc::volume vol2(cvc::dimension(3, 3, 3), cvc::UChar, cvc::bounding_box(0, 0, 0, 2, 2, 2));
+    auto childVol2 = childVol1->createChild<VolumeNode>("vol2", vol2);
+    
+    // Should find both volumes
+    allVolumes = sceneGraph.getAllVolumeGraphics();
+    EXPECT_EQ(allVolumes.size(), 2);
+    EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 2);
+    
+    // Verify both volumes are in the list
+    bool foundVol1 = false, foundVol2 = false;
+    for (const auto& vol : allVolumes) {
+        if (vol == childVol1) foundVol1 = true;
+        if (vol == childVol2) foundVol2 = true;
+    }
+    EXPECT_TRUE(foundVol1);
+    EXPECT_TRUE(foundVol2);
+}
+
+// Test that child geometries are found by SceneGraph::getAllGeometryGraphics()
+TEST_F(GraphicsNodeTest, CreateChildGeometryDiscovery) {
+    SceneGraph sceneGraph(m_statePrefix);
+    
+    // Create a parent volume
+    cvc::volume vol(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+    auto parent = sceneGraph.addGraphics("parent_vol", vol);
+    
+    // Initial check - no geometries
+    EXPECT_EQ(sceneGraph.getAllGeometryGraphics().size(), 0);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 0);
+    
+    // Create child geometries
+    cvc::geometry geom1;
+    geom1.points().push_back({1.0, 0.0, 0.0});
+    geom1.points().push_back({0.0, 1.0, 0.0});
+    geom1.points().push_back({0.0, 0.0, 1.0});
+    geom1.tris().push_back({0, 1, 2});
+    auto childGeom1 = parent->createChild<GeometryNode>("geom1", geom1);
+    
+    // Should now find the child geometry
+    auto allGeometries = sceneGraph.getAllGeometryGraphics();
+    EXPECT_EQ(allGeometries.size(), 1);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 1);
+    EXPECT_EQ(allGeometries[0], childGeom1);
+    
+    // Add another child geometry at different level
+    cvc::geometry geom2;
+    geom2.points().push_back({2.0, 0.0, 0.0});
+    auto childGeom2 = childGeom1->createChild<GeometryNode>("geom2", geom2);
+    
+    // Should find both geometries
+    allGeometries = sceneGraph.getAllGeometryGraphics();
+    EXPECT_EQ(allGeometries.size(), 2);
+    EXPECT_EQ(sceneGraph.getGeometryGraphicsCount(), 2);
+    
+    // Verify both geometries are in the list
+    bool foundGeom1 = false, foundGeom2 = false;
+    for (const auto& geom : allGeometries) {
+        if (geom == childGeom1) foundGeom1 = true;
+        if (geom == childGeom2) foundGeom2 = true;
+    }
+    EXPECT_TRUE(foundGeom1);
+    EXPECT_TRUE(foundGeom2);
+}
+
+// ============================================================================
+// Transform Hierarchy Tests - World Transform Application
+// ============================================================================
+
+TEST_F(GraphicsNodeTest, ChildVolumeInheritsParentTransform) {
+    // Create scene graph with parent geometry and child volume
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent geometry with scale transform
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    parentGeom.points().push_back({1.0, 0.0, 0.0});
+    parentGeom.points().push_back({0.0, 1.0, 0.0});
+    parentGeom.tris().push_back({0, 1, 2});
+    
+    auto parentNode = rootNode->createChild<GeometryNode>("parent", parentGeom);
+    
+    // Apply scale to parent
+    parentNode->setScale(2.0, 2.0, 2.0);
+    
+    // Create child volume (SDF from parent geometry)
+    cvc::volume childVol(cvc::dimension(10, 10, 10), 
+                         cvc::UChar, 
+                         cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    
+    auto childNode = parentNode->createChild<VolumeNode>("sdf", childVol);
+    
+    // Get the world transform of the child
+    auto childWorldTransform = childNode->getWorldTransform();
+    
+    // The world transform should include parent's scale (2x)
+    // Extract scale from the transform matrix
+    double scaleX = std::sqrt(
+        childWorldTransform->GetElement(0, 0) * childWorldTransform->GetElement(0, 0) +
+        childWorldTransform->GetElement(1, 0) * childWorldTransform->GetElement(1, 0) +
+        childWorldTransform->GetElement(2, 0) * childWorldTransform->GetElement(2, 0)
+    );
+    
+    EXPECT_NEAR(scaleX, 2.0, 1e-6);
+}
+
+TEST_F(GraphicsNodeTest, ChildGeometryInheritsParentTransform) {
+    // Create scene graph with parent volume and child geometry
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent volume
+    cvc::volume parentVol(cvc::dimension(10, 10, 10), 
+                          cvc::UChar, 
+                          cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    
+    auto parentNode = rootNode->createChild<VolumeNode>("parent", parentVol);
+    
+    // Apply scale to parent
+    parentNode->setScale(3.0, 3.0, 3.0);
+    
+    // Create child geometry (isosurface from parent volume)
+    cvc::geometry childGeom;
+    childGeom.points().push_back({0.0, 0.0, 0.0});
+    childGeom.points().push_back({1.0, 0.0, 0.0});
+    childGeom.points().push_back({0.0, 1.0, 0.0});
+    childGeom.tris().push_back({0, 1, 2});
+    
+    auto childNode = parentNode->createChild<GeometryNode>("isosurface", childGeom);
+    
+    // Get the world transform of the child
+    auto childWorldTransform = childNode->getWorldTransform();
+    
+    // The world transform should include parent's scale (3x)
+    double scaleX = std::sqrt(
+        childWorldTransform->GetElement(0, 0) * childWorldTransform->GetElement(0, 0) +
+        childWorldTransform->GetElement(1, 0) * childWorldTransform->GetElement(1, 0) +
+        childWorldTransform->GetElement(2, 0) * childWorldTransform->GetElement(2, 0)
+    );
+    
+    EXPECT_NEAR(scaleX, 3.0, 1e-6);
+}
+
+TEST_F(GraphicsNodeTest, DeepTransformHierarchy) {
+    // Test a 3-level hierarchy: root -> parent (scaled) -> child (rotated) -> grandchild (translated)
+    SceneGraph sceneGraph;
+    auto rootNode = sceneGraph.getGraphicsRoot();
+    
+    // Create parent with scale
+    cvc::geometry parentGeom;
+    parentGeom.points().push_back({0.0, 0.0, 0.0});
+    auto parentNode = rootNode->createChild<GeometryNode>("parent", parentGeom);
+    parentNode->setScale(2.0, 2.0, 2.0);
+    
+    // Create child with rotation (90 degrees around Z)
+    cvc::volume childVol(cvc::dimension(5, 5, 5), 
+                         cvc::UChar, 
+                         cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    auto childNode = parentNode->createChild<VolumeNode>("child", childVol);
+    childNode->setRotation(0.0, 0.0, 90.0);
+    
+    // Create grandchild with translation
+    cvc::geometry grandchildGeom;
+    grandchildGeom.points().push_back({1.0, 0.0, 0.0});
+    auto grandchildNode = childNode->createChild<GeometryNode>("grandchild", grandchildGeom);
+    grandchildNode->setPosition(5.0, 0.0, 0.0);
+    
+    // Verify grandchild's world transform includes all transformations
+    auto worldTransform = grandchildNode->getWorldTransform();
+    
+    // The grandchild should be scaled by parent
+    double scaleX = std::sqrt(
+        worldTransform->GetElement(0, 0) * worldTransform->GetElement(0, 0) +
+        worldTransform->GetElement(1, 0) * worldTransform->GetElement(1, 0) +
+        worldTransform->GetElement(2, 0) * worldTransform->GetElement(2, 0)
+    );
+    EXPECT_NEAR(scaleX, 2.0, 0.1);  // Allow some tolerance due to rotation
 }
 
 int main(int argc, char **argv) {

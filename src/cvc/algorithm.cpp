@@ -174,6 +174,8 @@ namespace
     uint64 max_dim = *max_element(dim.dim_.begin(), dim.dim_.end());
     uint64 size = next_power_of_2(max_dim);
 
+    cvc::app::instance().threadProgress(0.05);  // Starting
+
     // Use new thread-safe API
     std::unique_ptr<float[]> values;
     {
@@ -186,7 +188,11 @@ namespace
 	for(int j = 0; j < 3; j++)
 	  t[i*3+j] = geom.tris()[i][j];
       
+      cvc::app::instance().threadProgress(0.10);  // Geometry prepared
+      
       // Call the new thread-safe API
+      // Note: SDFLibrary::computeSDF_MT is external and doesn't report progress
+      // This computation typically takes 60-80% of total time
       values = SDFLibrary::computeSDF_MT(geom.num_points(), v.get(), 
                                           geom.num_tris(), t.get(),
                                           static_cast<int>(size), flipNormalsInt,
@@ -194,31 +200,52 @@ namespace
       if(!values) throw sign_distance_function_error("SDFLibrary::computeSDF_MT() failed");
     }
 
+    cvc::app::instance().threadProgress(0.85);  // SDF computation complete
+
     volume cv(dimension(size,size,size),Float,bbox);
     float* choppedValues = reinterpret_cast<float*>(*cv);
     {
       int i, j, k;
       int c=0;
+      uint64 total_iterations = (size + 1) * (size + 1) * (size + 1);
+      uint64 iteration = 0;
       for( i=0; i<=size; i++ )
 	for( j=0; j<=size; j++ )
-	  for( k=0; k<=size; k++ )
+	  for( k=0; k<=size; k++ ) {
 	    if( i!=size && j!=size && k!=size )
 	      choppedValues[c++] = values[i*(size+1)*(size+1) + j*(size+1) + k];
+	    
+	    // Update progress every 10% of iterations
+	    if (++iteration % (total_iterations / 10) == 0) {
+	      cvc::app::instance().threadProgress(0.85 + 0.05 * (float(iteration) / float(total_iterations)));
+	    }
+	  }
     }
     // Smart pointer automatically cleans up values
+
+    cvc::app::instance().threadProgress(0.92);  // Data extraction complete
 
     // Negate all SDF values if flipNormals is true (inverts inside/outside)
     if (flipNormals) {
       uint64 total_values = size * size * size;
       for (uint64 i = 0; i < total_values; i++) {
         choppedValues[i] = -choppedValues[i];
+        
+        // Update progress every 10%
+        if (i % (total_values / 10) == 0) {
+          cvc::app::instance().threadProgress(0.92 + 0.04 * (float(i) / float(total_values)));
+        }
       }
     }
+
+    cvc::app::instance().threadProgress(0.96);  // Flip normals complete (if needed)
 
     // Resize to requested dimensions if different from computed size
     if (dim.xdim != size || dim.ydim != size || dim.zdim != size) {
       cv.resize(dim);
     }
+
+    cvc::app::instance().threadProgress(1.0);  // Complete
     return cv;
   }
 
@@ -238,6 +265,8 @@ namespace
   {
     using namespace std;
     using namespace CVC_NAMESPACE;
+
+    cvc::app::instance().threadProgress(0.05);  // Starting
 
     // Convert cvc::geometry to FaceVertSet3D
     // Use vectors to avoid default constructor issues
@@ -261,6 +290,8 @@ namespace
     if (flipNormals) {
       fvs.flipTriNormals();
     }
+
+    cvc::app::instance().threadProgress(0.10);  // Geometry prepared
 
     // Calculate scale factors to match the requested bounding box
     // With the new constructor, we can specify the center directly
@@ -297,7 +328,13 @@ namespace
     // Use new constructor with user-specified center to respect arbitrary bbox
     DistanceTransform dt(fvs, dims, bbox_center, 0.5f, 
                         scale_factors[0], scale_factors[1], scale_factors[2]);
+    
+    cvc::app::instance().threadProgress(0.15);  // Distance transform initialized
+    
+    // Note: dt.transform() is the main computation, typically 60-80% of total time
     dt.transform();
+
+    cvc::app::instance().threadProgress(0.85);  // Distance transform complete
 
     // Get the result data directly from DistanceTransform
     const Reg3Data<float>& result = dt.getReg3Data();
@@ -313,6 +350,8 @@ namespace
     }
     
     std::memcpy(volData, result.getData(), nverts * sizeof(float));
+    
+    cvc::app::instance().threadProgress(1.0);  // Complete
     
     return cv;
   }
@@ -2315,5 +2354,286 @@ namespace CVC_NAMESPACE
     
     return result;
   }
-}
 
+  // ---------------------------------------
+  // Procedural Geometry Generation
+  // ---------------------------------------
+  // Purpose:
+  //   Generate parametric primitive geometries with proper normals.
+  // ---- Change History ----
+  // 01/07/2026 -- Joe R. -- Creation.
+
+  geometry generate_sphere(double cx, double cy, double cz,
+                          double radius,
+                          int thetaRes,
+                          int phiRes)
+  {
+    geometry geom;
+    
+    // Add top pole
+    geom.points().push_back(point_t{cx, cy + radius, cz});
+    geom.normals().push_back(vector_t{0.0, 1.0, 0.0});
+    
+    // Add middle vertices
+    for (int i = 1; i < phiRes; ++i) {
+      double phi = M_PI * i / phiRes;
+      double y = radius * std::cos(phi);
+      double ringRadius = radius * std::sin(phi);
+      
+      for (int j = 0; j < thetaRes; ++j) {
+        double theta = 2.0 * M_PI * j / thetaRes;
+        double x = ringRadius * std::cos(theta);
+        double z = ringRadius * std::sin(theta);
+        
+        point_t p{cx + x, cy + y, cz + z};
+        vector_t n{x / radius, y / radius, z / radius};
+        
+        geom.points().push_back(p);
+        geom.normals().push_back(n);
+      }
+    }
+    
+    // Add bottom pole
+    geom.points().push_back(point_t{cx, cy - radius, cz});
+    geom.normals().push_back(vector_t{0.0, -1.0, 0.0});
+    
+    // Generate triangles - top cap
+    for (int j = 0; j < thetaRes; ++j) {
+      int next = (j + 1) % thetaRes;
+      geom.tris().push_back(tri_t{0, 
+        static_cast<unsigned int>(1 + j), 
+        static_cast<unsigned int>(1 + next)});
+    }
+    
+    // Middle rows
+    for (int i = 0; i < phiRes - 2; ++i) {
+      int rowStart = 1 + i * thetaRes;
+      int nextRowStart = 1 + (i + 1) * thetaRes;
+      
+      for (int j = 0; j < thetaRes; ++j) {
+        int next = (j + 1) % thetaRes;
+        
+        geom.tris().push_back(tri_t{
+          static_cast<unsigned int>(rowStart + j),
+          static_cast<unsigned int>(nextRowStart + j),
+          static_cast<unsigned int>(nextRowStart + next)});
+        geom.tris().push_back(tri_t{
+          static_cast<unsigned int>(rowStart + j),
+          static_cast<unsigned int>(nextRowStart + next),
+          static_cast<unsigned int>(rowStart + next)});
+      }
+    }
+    
+    // Bottom cap
+    int bottomPole = static_cast<int>(geom.points().size()) - 1;
+    int lastRowStart = 1 + (phiRes - 2) * thetaRes;
+    for (int j = 0; j < thetaRes; ++j) {
+      int next = (j + 1) % thetaRes;
+      geom.tris().push_back(tri_t{
+        static_cast<unsigned int>(lastRowStart + j),
+        static_cast<unsigned int>(bottomPole),
+        static_cast<unsigned int>(lastRowStart + next)});
+    }
+    
+    return geom;
+  }
+
+  geometry generate_cube(double cx, double cy, double cz,
+                        double sizeX, double sizeY, double sizeZ)
+  {
+    double sx = sizeX / 2.0;
+    double sy = sizeY / 2.0;
+    double sz = sizeZ / 2.0;
+    
+    geometry geom;
+    
+    // 8 corner vertices
+    point_t vertices[8] = {
+      {cx - sx, cy - sy, cz - sz},  // 0: left-bottom-back
+      {cx + sx, cy - sy, cz - sz},  // 1: right-bottom-back
+      {cx + sx, cy + sy, cz - sz},  // 2: right-top-back
+      {cx - sx, cy + sy, cz - sz},  // 3: left-top-back
+      {cx - sx, cy - sy, cz + sz},  // 4: left-bottom-front
+      {cx + sx, cy - sy, cz + sz},  // 5: right-bottom-front
+      {cx + sx, cy + sy, cz + sz},  // 6: right-top-front
+      {cx - sx, cy + sy, cz + sz}   // 7: left-top-front
+    };
+    
+    // Duplicate vertices for proper face normals
+    // Front face (+Z)
+    geom.points().push_back(vertices[4]); geom.normals().push_back({0, 0, 1});
+    geom.points().push_back(vertices[5]); geom.normals().push_back({0, 0, 1});
+    geom.points().push_back(vertices[6]); geom.normals().push_back({0, 0, 1});
+    geom.points().push_back(vertices[7]); geom.normals().push_back({0, 0, 1});
+    geom.tris().push_back({0, 1, 2});
+    geom.tris().push_back({0, 2, 3});
+    
+    // Back face (-Z)
+    geom.points().push_back(vertices[1]); geom.normals().push_back({0, 0, -1});
+    geom.points().push_back(vertices[0]); geom.normals().push_back({0, 0, -1});
+    geom.points().push_back(vertices[3]); geom.normals().push_back({0, 0, -1});
+    geom.points().push_back(vertices[2]); geom.normals().push_back({0, 0, -1});
+    geom.tris().push_back({4, 5, 6});
+    geom.tris().push_back({4, 6, 7});
+    
+    // Right face (+X)
+    geom.points().push_back(vertices[5]); geom.normals().push_back({1, 0, 0});
+    geom.points().push_back(vertices[1]); geom.normals().push_back({1, 0, 0});
+    geom.points().push_back(vertices[2]); geom.normals().push_back({1, 0, 0});
+    geom.points().push_back(vertices[6]); geom.normals().push_back({1, 0, 0});
+    geom.tris().push_back({8, 9, 10});
+    geom.tris().push_back({8, 10, 11});
+    
+    // Left face (-X)
+    geom.points().push_back(vertices[0]); geom.normals().push_back({-1, 0, 0});
+    geom.points().push_back(vertices[4]); geom.normals().push_back({-1, 0, 0});
+    geom.points().push_back(vertices[7]); geom.normals().push_back({-1, 0, 0});
+    geom.points().push_back(vertices[3]); geom.normals().push_back({-1, 0, 0});
+    geom.tris().push_back({12, 13, 14});
+    geom.tris().push_back({12, 14, 15});
+    
+    // Top face (+Y)
+    geom.points().push_back(vertices[7]); geom.normals().push_back({0, 1, 0});
+    geom.points().push_back(vertices[6]); geom.normals().push_back({0, 1, 0});
+    geom.points().push_back(vertices[2]); geom.normals().push_back({0, 1, 0});
+    geom.points().push_back(vertices[3]); geom.normals().push_back({0, 1, 0});
+    geom.tris().push_back({16, 17, 18});
+    geom.tris().push_back({16, 18, 19});
+    
+    // Bottom face (-Y)
+    geom.points().push_back(vertices[0]); geom.normals().push_back({0, -1, 0});
+    geom.points().push_back(vertices[1]); geom.normals().push_back({0, -1, 0});
+    geom.points().push_back(vertices[5]); geom.normals().push_back({0, -1, 0});
+    geom.points().push_back(vertices[4]); geom.normals().push_back({0, -1, 0});
+    geom.tris().push_back({20, 21, 22});
+    geom.tris().push_back({20, 22, 23});
+    
+    return geom;
+  }
+
+  geometry generate_torus(double cx, double cy, double cz,
+                         double majorRadius, double minorRadius,
+                         int majorRes,
+                         int minorRes)
+  {
+    geometry geom;
+    
+    // Generate vertices
+    for (int i = 0; i < majorRes; ++i) {
+      double theta = 2.0 * M_PI * i / majorRes;
+      double cosTheta = std::cos(theta);
+      double sinTheta = std::sin(theta);
+      
+      for (int j = 0; j < minorRes; ++j) {
+        double phi = 2.0 * M_PI * j / minorRes;
+        double cosPhi = std::cos(phi);
+        double sinPhi = std::sin(phi);
+        
+        // Position
+        double x = (majorRadius + minorRadius * cosPhi) * cosTheta;
+        double y = minorRadius * sinPhi;
+        double z = (majorRadius + minorRadius * cosPhi) * sinTheta;
+        
+        // Normal
+        double nx = cosPhi * cosTheta;
+        double ny = sinPhi;
+        double nz = cosPhi * sinTheta;
+        
+        geom.points().push_back(point_t{cx + x, cy + y, cz + z});
+        geom.normals().push_back(vector_t{nx, ny, nz});
+      }
+    }
+    
+    // Generate triangles
+    for (int i = 0; i < majorRes; ++i) {
+      int nextI = (i + 1) % majorRes;
+      
+      for (int j = 0; j < minorRes; ++j) {
+        int nextJ = (j + 1) % minorRes;
+        
+        int v0 = i * minorRes + j;
+        int v1 = nextI * minorRes + j;
+        int v2 = nextI * minorRes + nextJ;
+        int v3 = i * minorRes + nextJ;
+        
+        geom.tris().push_back(tri_t{
+          static_cast<unsigned int>(v0),
+          static_cast<unsigned int>(v1),
+          static_cast<unsigned int>(v2)});
+        geom.tris().push_back(tri_t{
+          static_cast<unsigned int>(v0),
+          static_cast<unsigned int>(v2),
+          static_cast<unsigned int>(v3)});
+      }
+    }
+    
+    return geom;
+  }
+
+  geometry generate_cone(double cx, double cy, double cz,
+                        double radius, double height,
+                        int res)
+  {
+    geometry geom;
+    
+    double apexY = cy + height / 2.0;
+    double baseY = cy - height / 2.0;
+    
+    // Apex vertex
+    geom.points().push_back(point_t{cx, apexY, cz});
+    geom.normals().push_back(vector_t{0, 1, 0});
+    
+    // Side vertices
+    double slopeAngle = std::atan2(radius, height);
+    double normalY = std::cos(slopeAngle);
+    double normalXZ = std::sin(slopeAngle);
+    
+    for (int i = 0; i < res; ++i) {
+      double theta = 2.0 * M_PI * i / res;
+      double cosTheta = std::cos(theta);
+      double sinTheta = std::sin(theta);
+      
+      double x = radius * cosTheta;
+      double z = radius * sinTheta;
+      
+      geom.points().push_back(point_t{cx + x, baseY, cz + z});
+      geom.normals().push_back(vector_t{normalXZ * cosTheta, normalY, normalXZ * sinTheta});
+    }
+    
+    // Generate side triangles
+    for (int i = 0; i < res; ++i) {
+      int next = (i + 1) % res;
+      geom.tris().push_back(tri_t{
+        0,
+        static_cast<unsigned int>(1 + next),
+        static_cast<unsigned int>(1 + i)});
+    }
+    
+    // Base cap center
+    int baseCenterIdx = static_cast<int>(geom.points().size());
+    geom.points().push_back(point_t{cx, baseY, cz});
+    geom.normals().push_back(vector_t{0, -1, 0});
+    
+    // Base cap ring vertices
+    int baseRingStart = static_cast<int>(geom.points().size());
+    for (int i = 0; i < res; ++i) {
+      double theta = 2.0 * M_PI * i / res;
+      double x = radius * std::cos(theta);
+      double z = radius * std::sin(theta);
+      
+      geom.points().push_back(point_t{cx + x, baseY, cz + z});
+      geom.normals().push_back(vector_t{0, -1, 0});
+    }
+    
+    // Generate base cap triangles
+    for (int i = 0; i < res; ++i) {
+      int next = (i + 1) % res;
+      geom.tris().push_back(tri_t{
+        static_cast<unsigned int>(baseCenterIdx),
+        static_cast<unsigned int>(baseRingStart + i),
+        static_cast<unsigned int>(baseRingStart + next)});
+    }
+    
+    return geom;
+  }
+}

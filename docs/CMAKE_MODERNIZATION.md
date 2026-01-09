@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document summarizes all changes made to modernize the trans-cvc project's CMake build system from version 2.6/2.8 to modern CMake 3.15+ standards.
+This document summarizes all changes made to modernize the libcvc project's CMake build system from version 2.6/2.8 to modern CMake 3.15+ standards.
 
 ## Files Modified
 
@@ -41,13 +41,13 @@ This document summarizes all changes made to modernize the trans-cvc project's C
 **Before:**
 ```cmake
 cmake_minimum_required(VERSION 2.8)
-project(trans-cvc)
+project(libcvc)
 ```
 
 **After:**
 ```cmake
 cmake_minimum_required(VERSION 3.15...3.28)
-project(trans-cvc
+project(libcvc
   VERSION 2.0.0
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
@@ -473,7 +473,7 @@ endif()
 option(CVC_ENABLE_CUDA "Enable CUDA support" OFF)
 
 if(CVC_ENABLE_CUDA)
-  project(trans-cvc LANGUAGES C CXX CUDA)
+  project(libcvc LANGUAGES C CXX CUDA)
 endif()
 
 add_library(cvc ${SOURCE_FILES})  # .cu files automatically handled
@@ -500,7 +500,7 @@ See **CUDA_GUIDE.md** for complete documentation.
 
 ## Conclusion
 
-The trans-cvc project has been successfully modernized to use contemporary CMake best practices while maintaining backward compatibility with the existing codebase. The build system is now:
+The libcvc project has been successfully modernized to use contemporary CMake best practices while maintaining backward compatibility with the existing codebase. The build system is now:
 
 - More maintainable
 - Better documented

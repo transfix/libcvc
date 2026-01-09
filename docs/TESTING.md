@@ -1,4 +1,4 @@
-# Comprehensive Testing Guide for trans-cvc
+# Comprehensive Testing Guide for libcvc
 
 *Last Updated: December 29, 2025*
 
@@ -95,7 +95,7 @@
 
 ## Overview
 
-The trans-cvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
+The libcvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
 
 **Key Features:**
 - 371 comprehensive tests with 99.7% pass rate
@@ -158,10 +158,10 @@ Tests are controlled by the `CVC_BUILD_TESTS` CMake option, which is **ON by def
 
 ```bash
 # Disable tests
-cmake -DCVC_BUILD_TESTS=OFF /path/to/trans-cvc
+cmake -DCVC_BUILD_TESTS=OFF /path/to/libcvc
 
 # Enable tests (default)
-cmake -DCVC_BUILD_TESTS=ON /path/to/trans-cvc
+cmake -DCVC_BUILD_TESTS=ON /path/to/libcvc
 ```
 
 ### Building with Tests
@@ -1395,7 +1395,7 @@ TEST(StateTest, ConcurrentWritesToSameNode) {
 
 ## Conclusion
 
-The trans-cvc testing infrastructure provides comprehensive validation of core functionality with:
+The libcvc testing infrastructure provides comprehensive validation of core functionality with:
 
 - ✅ **363 tests** with 100% pass rate
 - ✅ **90.5% coverage** on core components
@@ -1414,4 +1414,4 @@ The tests are well-organized, thoroughly documented, and easy to extend. The inf
 - CUDA GPU acceleration coverage (20 tests)
 - Real-world validation (Stanford Bunny, 34,834 triangles)
 
-The testing foundation ensures trans-cvc is reliable, performant, and ready for production use.
+The testing foundation ensures libcvc is reliable, performant, and ready for production use.

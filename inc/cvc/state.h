@@ -245,7 +245,7 @@ namespace CVC_NAMESPACE
       }
       
       valueChanged();
-      if(parent()) parent()->childChanged(full_name);
+      if(parent()) parent()->childChanged(name());
       return *this;
     }
     
@@ -379,7 +379,7 @@ namespace CVC_NAMESPACE
       return ret_data;
     }
 
-    void reset();
+    void reset(bool resetChildren = true, bool fireCallbacks = true);
 
     //converting to and from a boost property tree.  Useful for saving and restoring state.
     boost::property_tree::ptree ptree();

@@ -25,55 +25,6 @@ public:
     cvc::bounding_box worldBounds();
     void setWorldBounds(const cvc::bounding_box& bounds);
     
-    bool gridVisible();
-    void setGridVisible(bool visible);
-    
-    bool axisVisible();
-    void setAxisVisible(bool visible);
-    
-    // Grid plane visibility (individual planes)
-    bool gridYZPlaneVisible();
-    void setGridYZPlaneVisible(bool visible);
-    
-    bool gridXZPlaneVisible();
-    void setGridXZPlaneVisible(bool visible);
-    
-    bool gridXYPlaneVisible();
-    void setGridXYPlaneVisible(bool visible);
-    
-    // Grid divisions per axis
-    void getGridDivisions(int& x, int& y, int& z);
-    void setGridDivisions(int x, int y, int z);
-    
-    // Grid tick intervals
-    void getGridTickIntervals(int& x, int& y, int& z);
-    void setGridTickIntervals(int x, int y, int z);
-    
-    // Grid ticks visibility
-    bool gridTicksVisible();
-    void setGridTicksVisible(bool visible);
-    
-    // Grid and bbox colors (RGB triplets)
-    void getGridColor(double& r, double& g, double& b);
-    void setGridColor(double r, double g, double b);
-    
-    // Per-plane grid colors
-    void getGridYZPlaneColor(double& r, double& g, double& b);
-    void setGridYZPlaneColor(double r, double g, double b);
-    
-    void getGridXZPlaneColor(double& r, double& g, double& b);
-    void setGridXZPlaneColor(double r, double g, double b);
-    
-    void getGridXYPlaneColor(double& r, double& g, double& b);
-    void setGridXYPlaneColor(double r, double g, double b);
-    
-    // Grid tick label properties
-    void getGridTickLabelColor(double& r, double& g, double& b);
-    void setGridTickLabelColor(double r, double g, double b);
-    
-    int gridTickLabelFontSize();
-    void setGridTickLabelFontSize(int size);
-    
     // Camera control mode (0 = orbit, 1 = fly)
     int cameraMode();
     void setCameraMode(int mode);
@@ -120,28 +71,15 @@ public:
     double cameraFieldOfView();
     void setCameraFieldOfView(double fov);
     
-    // Transfer function (color and opacity tables)
-    std::vector<double> transferFunctionColorTable();
-    void setTransferFunctionColorTable(const std::vector<double>& table);
-    
-    std::vector<double> transferFunctionOpacityTable();
-    void setTransferFunctionOpacityTable(const std::vector<double>& table);
+    // Viewer options
+    bool showFPS();
+    void setShowFPS(bool show);
     
     // Register callbacks for state changes
     // Returns a connection object that can be used to disconnect the callback
     boost::signals2::connection onWorldBoundsChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridVisibilityChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onAxisVisibilityChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridColorChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridPlaneVisibilityChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridDivisionsChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridTickIntervalsChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridTicksVisibleChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridPlaneColorsChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onGridTickLabelPropertiesChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraModeChanged(const boost::function<void()>& callback);
     boost::signals2::connection onCameraChanged(const boost::function<void()>& callback);
-    boost::signals2::connection onTransferFunctionChanged(const boost::function<void()>& callback);
     
     // State tree access for debugging/inspection
     cvc::state& getRootState();
