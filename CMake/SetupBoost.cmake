@@ -8,13 +8,13 @@ function(SetupBoost TargetName)
   set(Boost_USE_MULTITHREADED ON)
   
   # Find required Boost components
+  # Note: system and chrono are header-only since Boost 1.69/1.72
+  # and should not be listed as compiled COMPONENTS
   find_package(Boost 1.58 REQUIRED COMPONENTS 
     thread 
     date_time 
     regex 
-    filesystem 
-    system
-    chrono
+    filesystem
   )
   
   if(Boost_FOUND)
