@@ -238,3 +238,41 @@ endif()
 
 add_subdirectory(src)
 
+# ************* CPack configuration for libcvc *************
+include(GNUInstallDirs)
+include(InstallRequiredSystemLibraries)
+
+if(WIN32)
+  set(CPACK_GENERATOR "NSIS;ZIP")
+elseif(APPLE)
+  set(CPACK_GENERATOR "DragNDrop;ZIP")
+else()
+  set(CPACK_GENERATOR "TGZ;DEB")
+endif()
+
+set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_VENDOR "Computational Visualization Center")
+set(CPACK_PACKAGE_CONTACT "transfix@ices.utexas.edu")
+set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "libcvc ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+set(CPACK_SOURCE_PACKAGE_FILE_NAME "libcvc-${PROJECT_VERSION}")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+set(CPACK_STRIP_FILES ON)
+
+# NSIS settings (Windows)
+set(CPACK_NSIS_DISPLAY_NAME "libcvc ${PROJECT_VERSION}")
+set(CPACK_NSIS_HELP_LINK "https://github.com/transfix/cvc")
+set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/transfix/cvc")
+set(CPACK_NSIS_CONTACT "transfix@ices.utexas.edu")
+set(CPACK_NSIS_MODIFY_PATH ON)
+
+# DEB settings (Linux)
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Joe Rivera")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libboost-all-dev")
+set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
+
+include(CPack)

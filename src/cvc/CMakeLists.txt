@@ -551,6 +551,24 @@ target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 add_executable(libcvc libcvc.cpp)
 target_link_libraries(libcvc PRIVATE cvc::cvc)
 
+# Install targets
+include(GNUInstallDirs)
+
+install(TARGETS cvc libcvc
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/inc/cvc/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  FILES_MATCHING PATTERN "*.h"
+)
+
+install(FILES ${CMAKE_BINARY_DIR}/inc/cvc/config.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+)
+
 # Generate config.h
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake
