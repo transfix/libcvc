@@ -43,7 +43,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <math.h>
+#include <cmath>
 #ifdef __SOLARIS__
 #include <ieeefp.h>
 #endif
@@ -178,10 +178,8 @@ static inline void geterrstr(int errnum, char *strerrbuf, size_t buflen)
 #endif
 }
 
-// XXX: This is UGLY. Windows does not have this function in its math library.
-#if defined(_MSC_VER)
-static inline int finite(float) { return 0; }
-#endif
+// Use std::isfinite for portability (finite() removed on macOS/MSVC)
+using std::isfinite;
 
 namespace CVC_NAMESPACE
 {
@@ -404,7 +402,7 @@ namespace CVC_NAMESPACE
           // we need to double check the meaning of xlength
           // (plus some extra paranoia)
           if (header.xlength<=0.0 || header.ylength<=0.0 || header.zlength<=0.0
-              || !finite(header.xlength) || !finite(header.ylength) || !finite(header.zlength))
+              || !isfinite(header.xlength) || !isfinite(header.ylength) || !isfinite(header.zlength))
             d._boundingBox = bounding_box(0.0,0.0,0.0,
                                           header.nx,header.ny,header.nz);
           else
@@ -425,7 +423,7 @@ namespace CVC_NAMESPACE
           d._voxelTypes.push_back(mrcTypes[header.mode]);
 
           // make sure we aren't using garbage values
-          if (!finite(header.xorigin) || !finite(header.yorigin) || !finite(header.zorigin))
+          if (!isfinite(header.xorigin) || !isfinite(header.yorigin) || !isfinite(header.zorigin))
             {
               tmpmin[0] = 0.0;
               tmpmin[1] = 0.0;
@@ -443,7 +441,7 @@ namespace CVC_NAMESPACE
           // xlength, ylength, zlength means the size of the volume, that means xlength=boundingbox.xmax()-boundingbox.xmin()
           // similar to ylenght and zlength. So xlength, ylength, zlength are positive.
           if (header.xlength<=0.0 || header.ylength<=0.0 || header.zlength<=0.0
-              || !finite(header.xlength) || !finite(header.ylength) || !finite(header.zlength))
+              || !isfinite(header.xlength) || !isfinite(header.ylength) || !isfinite(header.zlength))
             {
               // hmm, this is wierd //not necessary.
               tmpmax[0] = tmpmin[0] + header.nx;
