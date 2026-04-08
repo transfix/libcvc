@@ -528,6 +528,11 @@ target_compile_definitions(cvc
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
 
+# Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
+if(DISABLE_CGAL)
+  target_compile_definitions(cvc PUBLIC DISABLE_CGAL)
+endif()
+
 # Setup dependencies
 SetupBoost(cvc)
 
