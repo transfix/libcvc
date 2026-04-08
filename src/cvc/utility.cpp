@@ -50,11 +50,10 @@ namespace CVC_NAMESPACE
     ip::address addr;
     try
       {
-        io_service netService;
+        io_context netService;
         ip::udp::resolver   resolver(netService);
-        ip::udp::resolver::query query(ip::udp::v4(), "utexas.edu", "");
-        ip::udp::resolver::iterator endpoints = resolver.resolve(query);
-        ip::udp::endpoint ep = *endpoints;
+        ip::udp::resolver::results_type endpoints = resolver.resolve(ip::udp::v4(), "utexas.edu", "");
+        ip::udp::endpoint ep = *endpoints.begin();
         ip::udp::socket socket(netService);
         socket.connect(ep);
         addr = socket.local_endpoint().address();
