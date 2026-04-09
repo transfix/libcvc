@@ -51,7 +51,7 @@ namespace LBIE
     
     cerr << "LBIE::Mesher::set_octree_volume(): set volume: ";
     //LBIE requires volumes with dimension (2^n+1)^3
-    unsigned int dim[3] = { localvol.XDim(), localvol.YDim(), localvol.ZDim() };
+    unsigned int dim[3] = { static_cast<unsigned int>(localvol.XDim()), static_cast<unsigned int>(localvol.YDim()), static_cast<unsigned int>(localvol.ZDim()) };
     unsigned int maxdim = *std::max_element(dim,dim+3);
     if((dim[0] != dim[1]) ||
        (dim[0] != dim[2]) ||
