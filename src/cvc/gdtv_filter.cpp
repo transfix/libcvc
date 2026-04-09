@@ -59,13 +59,13 @@ namespace CVC_NAMESPACE
 
     float val[6];
 
-    for(unsigned int i = 0; i < input.XDim(); i++)
+    for(int i = 0; i < (int)input.XDim(); i++)
       {
 #ifdef _OPENMP
 	#pragma omp parallel for private(val) schedule(dynamic)
 #endif
-	for(unsigned int j = 0; j < input.YDim(); j++)
-	  for(unsigned int k = 0; k < input.ZDim(); k++)
+	for(int j = 0; j < (int)input.YDim(); j++)
+	  for(int k = 0; k < (int)input.ZDim(); k++)
 	    {
 	      for(int l = 0; l < 6; l++)
 		{
@@ -98,13 +98,13 @@ namespace CVC_NAMESPACE
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
     float val[26];
-    for(unsigned int i = 0; i < input.XDim(); i++)
+    for(int i = 0; i < (int)input.XDim(); i++)
       {
 #ifdef _OPENMP
 	#pragma omp parallel for private(val) schedule(dynamic)
 #endif
-	for(unsigned int j = 0; j < input.YDim(); j++)
-	  for(unsigned int k = 0; k < input.ZDim(); k++)
+	for(int j = 0; j < (int)input.YDim(); j++)
+	  for(int k = 0; k < (int)input.ZDim(); k++)
 	    {
 	      for(int l = 0; l < 26; l++)
 		{

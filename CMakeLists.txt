@@ -30,10 +30,17 @@ if(CVC_ENABLE_CUDA)
   endif()
 endif()
 
-# Require C++14 as a minimum, but allow newer standards
-set(CMAKE_CXX_STANDARD 14)
+# Require C++14 as a minimum, but allow newer standards via -DCMAKE_CXX_STANDARD=17
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 14)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# MSVC-specific: enable M_PI and suppress snprintf warnings
+if(MSVC)
+  add_compile_definitions(_USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # Use modern CMake policies
 if(POLICY CMP0074)

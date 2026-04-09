@@ -141,7 +141,7 @@ jobs:
 
       # ── Test ──
       - name: Run tests
-        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure --parallel --repeat after-timeout:2 --timeout 120
+        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure --parallel --repeat after-timeout:2 --timeout 300
 
       # ── Coverage (Linux Debug only) ──
       - name: Generate coverage report

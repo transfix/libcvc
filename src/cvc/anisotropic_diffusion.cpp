@@ -73,7 +73,7 @@ namespace CVC_NAMESPACE
     // CPU implementation - original algorithm
     double cn, cs, ce, cw, cu, cd;
     double delta_n, delta_s, delta_e, delta_w, delta_u, delta_d;
-    uint64 i, j;
+    int64_t i, j;
     // Use deep copy for temporary buffer to avoid race conditions with OpenMP
     voxels tempt(voxel_dimensions(), voxelType());
     tempt.copy(*this, true);  // Deep copy

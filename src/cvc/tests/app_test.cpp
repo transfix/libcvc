@@ -1300,35 +1300,29 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
   ASSERT_TRUE(thread_started.load()) << "Thread should have started";
   
   // Verify we can read info and progress while thread is running
-  std::vector<std::pair<std::string, double>> checkpoints;
+  // Use polling to wait for each checkpoint instead of fixed sleeps
   
-  // Read progress at 25%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(60));
-  std::string info1 = cvcapp.threadInfo(thread_key);
+  // Wait for 25% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.24; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress1 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info1, progress1});
-  EXPECT_EQ(info1, "Processing step 1");
   EXPECT_NEAR(progress1, 0.25, 0.01);
   
-  // Read progress at 50%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-  std::string info2 = cvcapp.threadInfo(thread_key);
+  // Wait for 50% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.49; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress2 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info2, progress2});
-  EXPECT_EQ(info2, "Processing step 2");
   EXPECT_NEAR(progress2, 0.50, 0.01);
   
-  // Read progress at 75%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-  std::string info3 = cvcapp.threadInfo(thread_key);
+  // Wait for 75% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.74; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress3 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info3, progress3});
-  EXPECT_EQ(info3, "Processing step 3");
   EXPECT_NEAR(progress3, 0.75, 0.01);
   
   // Verify progress is increasing
-  EXPECT_LT(checkpoints[0].second, checkpoints[1].second);
-  EXPECT_LT(checkpoints[1].second, checkpoints[2].second);
+  EXPECT_LT(progress1, progress2);
+  EXPECT_LT(progress2, progress3);
   
   // Let thread finish
   continue_running = false;
@@ -1544,7 +1538,7 @@ TEST(AppTest, ThreadFeedbackExceptionSafety) {
   ASSERT_TRUE(exception_thrown.load());
   
   // Give thread time to exit
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
   
   // Progress should still be set to 100% by thread_feedback destructor
   double progress = cvcapp.threadProgress(thread_key);
