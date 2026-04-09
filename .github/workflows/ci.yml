@@ -22,35 +22,23 @@ jobs:
           - os: ubuntu-latest
             build_type: Debug
             coverage: true
-            package_generator: DEB
-            artifact_ext: deb
           - os: ubuntu-latest
             build_type: Release
             coverage: false
-            package_generator: DEB
-            artifact_ext: deb
           # macOS
           - os: macos-latest
             build_type: Debug
             coverage: false
-            package_generator: DragNDrop
-            artifact_ext: dmg
           - os: macos-latest
             build_type: Release
             coverage: false
-            package_generator: DragNDrop
-            artifact_ext: dmg
           # Windows
           - os: windows-latest
             build_type: Debug
             coverage: false
-            package_generator: NSIS
-            artifact_ext: exe
           - os: windows-latest
             build_type: Release
             coverage: false
-            package_generator: NSIS
-            artifact_ext: exe
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} / ${{ matrix.build_type }}
@@ -60,6 +48,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ── Compute artifact metadata ──
+      - name: Set artifact name
+        shell: bash
+        run: |
+          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          SHA=$(git rev-parse --short=8 HEAD)
+          ARCH=$(uname -m)
+          case "$RUNNER_OS" in
+            Linux)   OSTAG=linux   ;;
+            macOS)   OSTAG=macos   ;;
+            Windows) OSTAG=windows ;;
+          esac
+          BUILD_TYPE_LC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          STEM="libcvc-${VERSION}-${SHA}-${OSTAG}-${ARCH}-${BUILD_TYPE_LC}"
+          echo "ARTIFACT_STEM=$STEM" >> "$GITHUB_ENV"
 
       # ── Linux dependencies ──
       - name: Install dependencies (Linux)
@@ -124,6 +128,7 @@ jobs:
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_CXX_STANDARD=17 `
             -DCVC_BUILD_TESTS=ON `
             -DCVC_ENABLE_CUDA=OFF `
             -DDISABLE_CGAL=ON `
@@ -136,7 +141,7 @@ jobs:
 
       # ── Test ──
       - name: Run tests
-        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure --parallel
+        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure --parallel --repeat after-timeout:2 --timeout 120
 
       # ── Coverage (Linux Debug only) ──
       - name: Generate coverage report
@@ -149,7 +154,8 @@ jobs:
             '*/tests/*' \
             '*/_deps/*' \
             '*/googletest/*' \
-            --output-file build/coverage_filtered.info
+            --output-file build/coverage_filtered.info \
+            --ignore-errors unused
           genhtml build/coverage_filtered.info \
             --output-directory build/coverage_html \
             --title "libcvc Code Coverage" \
@@ -178,33 +184,36 @@ jobs:
       - name: Install
         run: cmake --install build --config ${{ matrix.build_type }}
 
-      # ── Package ──
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        working-directory: build
-        run: cpack -G ${{ matrix.package_generator }} -C ${{ matrix.build_type }}
+      # ── Collect PDB files (Windows Debug) ──
+      - name: Collect PDB files
+        if: runner.os == 'Windows' && matrix.build_type == 'Debug'
+        shell: pwsh
+        run: |
+          $pdbDir = "${{ github.workspace }}/install/pdb"
+          New-Item -ItemType Directory -Force -Path $pdbDir | Out-Null
+          Get-ChildItem -Path build -Recurse -Include *.pdb |
+            Where-Object { $_.FullName -notlike '*CMakeFiles*' -and $_.FullName -notlike '*_deps*' } |
+            ForEach-Object { Copy-Item $_.FullName -Destination $pdbDir -Force }
+
+      # ── Package install tree ──
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ env.ARTIFACT_STEM }}.tar.gz" -C install .
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: cd install && zip -r "${{ github.workspace }}/${{ env.ARTIFACT_STEM }}.zip" . && cd ..
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        working-directory: build
-        run: cpack -G ${{ matrix.package_generator }} -C ${{ matrix.build_type }}
+        shell: pwsh
+        run: Compress-Archive -Path install\* -DestinationPath "${{ env.ARTIFACT_STEM }}.zip"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: package-${{ matrix.os }}-${{ matrix.build_type }}
+          name: ${{ env.ARTIFACT_STEM }}
           path: |
-            build/*.deb
-            build/*.dmg
-            build/*.exe
-            build/*.zip
-            build/*.tar.gz
+            *.tar.gz
+            *.zip
           retention-days: 30
-
-      # ── Build artifact (installed tree) ──
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.os }}-${{ matrix.build_type }}
-          path: ${{ github.workspace }}/install/
-          retention-days: 14

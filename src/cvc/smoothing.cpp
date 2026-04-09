@@ -181,12 +181,9 @@ namespace
     float       sum_0, sum_1[3], Normal_f[3], delta_t, area, t;
     float       Min_f[3], Max_f[3], Half_f[3], Length_f;
     float       AveCenter_f[3];
-    float       nx, ny, nz, r, g, b;
 
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    nx = r; ny = g; nz = b;
-    //delta_t = 0.1f;
     delta_t = delta;
 
     NumVertices_i = geo.num_points();

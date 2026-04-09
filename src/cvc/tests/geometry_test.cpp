@@ -1756,7 +1756,7 @@ TEST(AlgorithmTest, SDFV2ParallelExecution) {
   geometries[0].points().push_back({{0.5, 0.5, 0.5}});
   geometries[0].points().push_back({{-0.5, 0.5, 0.5}});
   for (int i = 0; i < 6; i++) {
-    int base = i * 2;
+    uint64_t base = static_cast<uint64_t>(i * 2);
     geometries[0].tris().push_back({{base % 8, (base + 1) % 8, (base + 2) % 8}});
     geometries[0].tris().push_back({{base % 8, (base + 2) % 8, (base + 3) % 8}});
   }
