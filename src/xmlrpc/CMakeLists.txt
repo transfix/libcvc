@@ -15,7 +15,7 @@ add_library(cvc::xmlrpc ALIAS xmlrpc)
 # Modern include directory handling
 target_include_directories(xmlrpc
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/inc>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
     $<INSTALL_INTERFACE:include>
 )
 

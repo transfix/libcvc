@@ -513,7 +513,7 @@ endif()
 # Modern include directory handling
 target_include_directories(cvc
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/inc>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/inc>
     $<INSTALL_INTERFACE:include>
   PRIVATE
@@ -565,7 +565,7 @@ install(TARGETS cvc libcvc
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/inc/cvc/
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
   FILES_MATCHING PATTERN "*.h"
 )
