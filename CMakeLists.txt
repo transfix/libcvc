@@ -245,6 +245,12 @@ endif()
 
 add_subdirectory(src)
 
+# ************* Install documentation *************
+install(FILES README.md DESTINATION .)
+install(FILES LICENSE DESTINATION .)
+install(FILES src/volutils/README.md DESTINATION share/doc/volutils
+        RENAME README.md)
+
 # ************* CPack configuration for libcvc *************
 include(GNUInstallDirs)
 include(InstallRequiredSystemLibraries)
@@ -268,6 +274,7 @@ set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "libcvc ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
 set(CPACK_SOURCE_PACKAGE_FILE_NAME "libcvc-${PROJECT_VERSION}")
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
+set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
 set(CPACK_STRIP_FILES ON)
 
 # NSIS settings (Windows)

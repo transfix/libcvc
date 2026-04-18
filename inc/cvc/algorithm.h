@@ -36,10 +36,13 @@
 #include <boost/optional.hpp>
 
 // Forward declaration to avoid circular dependency
+#ifdef CVC_ENABLE_MESHER
 namespace LBIE { class Mesher; }
+#endif
 
 namespace CVC_NAMESPACE
 {
+#ifdef CVC_ENABLE_SDF
   // ---
   // sdf
   // ---
@@ -68,7 +71,9 @@ namespace CVC_NAMESPACE
 	       Flip normals to invert inside/outside (true = flip, false = no flip)
 	     */
 	     bool flipNormals = false);
+#endif // CVC_ENABLE_SDF
 
+#ifdef CVC_ENABLE_MESHER
   // ---
   // iso
   // ---
@@ -153,6 +158,7 @@ namespace CVC_NAMESPACE
                            improvement_method improve_method = NO_IMPROVE,
                            normal_type normals = BSPLINE_CONVOLUTION,
                            int improve_iterations = 0);
+#endif // CVC_ENABLE_MESHER
 
 #if 0
   /*

@@ -4,6 +4,7 @@
 #include <cvc/utility.h>
 
 #include <fstream>
+#include <iomanip>
 
 namespace CVC_NAMESPACE
 {
@@ -194,12 +195,31 @@ namespace CVC_NAMESPACE
     // off_io::write
     // -------------
     // Purpose:
-    //   Supposed to write geometry to OFF file format, but is unimplemented so throws an error for now.
+    //   Writes geometry to OFF file format.
     // ---- Change History ----
     // 01/11/2014 -- Joe R. -- Creation.
+    // 01/2025 -- Joe R. -- Implemented.
     virtual void write(const geometry& geom, const std::string& filename) const
     {
-      throw write_error(BOOST_CURRENT_FUNCTION);
+      using namespace std;
+      ofstream out(filename.c_str());
+      if(!out)
+        throw write_error(string(BOOST_CURRENT_FUNCTION) +
+                          string(": Could not open ") + filename);
+
+      out << "OFF\n";
+      out << geom.num_points() << " " << geom.num_tris() << " 0\n";
+
+      out << fixed << setprecision(6);
+      for(uint64 i = 0; i < geom.num_points(); i++)
+        out << geom.const_points()[i][0] << " "
+            << geom.const_points()[i][1] << " "
+            << geom.const_points()[i][2] << "\n";
+
+      for(uint64 i = 0; i < geom.num_tris(); i++)
+        out << "3 " << geom.const_tris()[i][0] << " "
+                     << geom.const_tris()[i][1] << " "
+                     << geom.const_tris()[i][2] << "\n";
     }
 
   protected:

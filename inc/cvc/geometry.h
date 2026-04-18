@@ -214,7 +214,9 @@ namespace CVC_NAMESPACE
                         bool smoothing_enabled = true, bool perturb_2 = false);
 
     //LBIE mesh quality improvement
+#ifdef CVC_ENABLE_MESHER
     geometry& quality_improve(int iterations = 1, improvement_method method = GEO_FLOW);
+#endif
 
     //read file directly into data structure
     geometry& read(const std::string& filename);

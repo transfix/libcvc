@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Linux: .tar.gz + .deb ──
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libboost-all-dev libhdf5-dev \
+            libfftw3-dev libgsl-dev \
+            libmagick++-dev \
+            dpkg-dev
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DDISABLE_CGAL=ON \
+            -DCVC_BUILD_VOLROVER3=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --parallel --timeout 300
+
+      - name: Build packages
+        run: |
+          cd build
+          cpack -G DEB
+          cpack -G TGZ
+          cp *.deb *.tar.gz ../
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            *.deb
+            *.tar.gz
+
+  # ── macOS: .dmg + .zip ──
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DDISABLE_CGAL=ON \
+            -DCVC_BUILD_VOLROVER3=OFF \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/_install
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --parallel --timeout 300
+
+      - name: Build packages
+        run: |
+          cd build
+          cpack -G DragNDrop
+          cpack -G ZIP
+          cp *.dmg *.zip ../
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: |
+            *.dmg
+            *.zip
+
+  # ── Windows: NSIS + ZIP ──
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl --triplet x64-windows
+        env:
+          VCPKG_MAX_CONCURRENCY: 4
+
+      - name: Configure
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_CXX_STANDARD=17 `
+            -DCVC_BUILD_TESTS=ON `
+            -DCVC_ENABLE_CUDA=OFF `
+            -DDISABLE_CGAL=ON `
+            -DCVC_BUILD_VOLROVER3=OFF `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/_install"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --build-config Release --output-on-failure --parallel --timeout 300
+
+      - name: Install and verify DLLs
+        shell: pwsh
+        run: |
+          cmake --install build --config Release
+          Write-Host "=== Installed bin/ contents ==="
+          Get-ChildItem "${{ github.workspace }}/_install/bin" | Select-Object Name
+          Write-Host ""
+          Write-Host "=== volutils DLL dependencies ==="
+          $dumpbin = & vswhere -latest -find '**/dumpbin.exe' | Select-Object -First 1
+          if ($dumpbin) {
+            & $dumpbin /dependents "${{ github.workspace }}/_install/bin/volutils.exe" | Select-String '\.dll'
+          } else {
+            Write-Host "dumpbin not found, skipping dependency check"
+          }
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y
+
+      - name: Create packages
+        shell: pwsh
+        working-directory: build
+        run: |
+          $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\NSIS' -ErrorAction SilentlyContinue).'(default)'
+          if (-not $nsisPath) {
+            $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
+          }
+          if ($nsisPath) {
+            $env:PATH = "$nsisPath;$env:PATH"
+          }
+          cpack -G NSIS -C Release
+          cpack -G ZIP -C Release
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: |
+            build/*.exe
+            build/*.zip
+
+  # ── Create GitHub Release ──
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.deb
+            artifacts/*.tar.gz
+            artifacts/*.dmg
+            artifacts/*.exe
+            artifacts/*.zip

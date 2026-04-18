@@ -31,12 +31,14 @@
 #include <CGAL/Bbox_3.h>
 #endif
 
+#ifdef CVC_ENABLE_SDF
 #include <SDF/SignDistanceFunction/sdfLib.h>
 
 // Include SDF v2 headers
 #include <SDF/SignDistanceFunction_v2/DistanceTransform.h>
 #include <SDF/SignDistanceFunction_v2/FaceVertSet3D.h>
 #include <SDF/SignDistanceFunction_v2/reg3data.h>
+#endif // CVC_ENABLE_SDF
 
 // Undef conflicting macros from SDF v2 before including mesher headers
 #ifdef MIN
@@ -46,7 +48,9 @@
 #undef MAX
 #endif
 
+#ifdef CVC_ENABLE_MESHER
 #include <cvc-mesher/Mesher/mesher.h>
+#endif // CVC_ENABLE_MESHER
 
 #include <boost/any.hpp>
 #include <boost/scoped_array.hpp>
@@ -54,6 +58,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <numeric>
 #include <map>
 
 #ifndef DISABLE_CGAL
@@ -128,8 +133,12 @@ namespace {
 
 namespace
 {
+#ifdef CVC_ENABLE_SDF
   CVC_DEF_EXCEPTION(sign_distance_function_error);
+#endif
+#ifdef CVC_ENABLE_MESHER
   CVC_DEF_EXCEPTION(cvc_mesher_error);
+#endif
   
   // Helper function to round up to nearest power of 2
   CVC_NAMESPACE::uint64 next_power_of_2(CVC_NAMESPACE::uint64 n) {
@@ -142,6 +151,7 @@ namespace
     return power;
   }
   
+#ifdef CVC_ENABLE_SDF
   // -----------
   // sdf_library
   // -----------
@@ -355,7 +365,9 @@ namespace
     
     return cv;
   }
+#endif // CVC_ENABLE_SDF
 
+#ifdef CVC_ENABLE_MESHER
   // -------
   // get_arg
   // -------
@@ -640,10 +652,12 @@ namespace
     // Week 4: Use new geometry-based API (no conversion needed)
     return LBIE::quality_improve_geometry(geom, improvement_method_enum, improve_iterations);
   }
+#endif // CVC_ENABLE_MESHER
 }
 
 namespace CVC_NAMESPACE
 {
+#ifdef CVC_ENABLE_SDF
   // ---
   // sdf
   // ---
@@ -731,7 +745,9 @@ namespace CVC_NAMESPACE
     
     return vol;
   }
+#endif // CVC_ENABLE_SDF
 
+#ifdef CVC_ENABLE_MESHER
   // ---
   // iso
   // ---
@@ -884,6 +900,7 @@ namespace CVC_NAMESPACE
     *this = cvc_mesher(*this, args);
     return *this;
   }
+#endif // CVC_ENABLE_MESHER
 
   // -------------------------
   // Volumetric Mesh Utilities

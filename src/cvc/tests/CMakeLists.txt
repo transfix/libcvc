@@ -8,6 +8,7 @@ add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(geometry_test geometry_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
+add_executable(volume_ops_test volume_ops_test.cpp)
 
 # Track all test targets so we can conditionally add HDF5 tests
 set(TEST_TARGETS
@@ -17,6 +18,7 @@ set(TEST_TARGETS
   volume_test
   geometry_test
   procedural_geometry_test
+  volume_ops_test
 )
 
 # Link against the CVC library and Google Test
@@ -60,6 +62,13 @@ target_link_libraries(procedural_geometry_test
     cvc
 )
 
+target_link_libraries(volume_ops_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -67,6 +76,7 @@ target_compile_features(voxels_test PRIVATE cxx_std_14)
 target_compile_features(volume_test PRIVATE cxx_std_14)
 target_compile_features(geometry_test PRIVATE cxx_std_14)
 target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
+target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -93,6 +103,7 @@ gtest_discover_tests(state_test)
 gtest_discover_tests(voxels_test)
 gtest_discover_tests(volume_test)
 gtest_discover_tests(geometry_test)
+gtest_discover_tests(volume_ops_test)
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)

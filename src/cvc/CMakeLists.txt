@@ -29,6 +29,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
+  ../../inc/cvc/volume_ops.h
 )
 
 # Source files
@@ -56,6 +57,7 @@ set(SOURCE_FILES
   volume.cpp
   volume_file_io.cpp
   volume_file_info.cpp
+  volume_ops.cpp
   vtk_io.cpp
 )
 
@@ -552,18 +554,28 @@ endif()
 # Link libraries
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 
-# Create executable
-add_executable(libcvc libcvc.cpp)
-target_link_libraries(libcvc PRIVATE cvc::cvc)
+# Create executable (requires mesher/SDF for full functionality)
+if(CVC_ENABLE_MESHER AND CVC_ENABLE_SDF)
+  add_executable(libcvc libcvc.cpp)
+  target_link_libraries(libcvc PRIVATE cvc::cvc)
+endif()
 
 # Install targets
 include(GNUInstallDirs)
 
-install(TARGETS cvc libcvc
+install(TARGETS cvc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TARGET libcvc)
+  install(TARGETS libcvc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  # Windows: bundle runtime DLLs alongside executables
+  if(WIN32)
+    install(FILES $<TARGET_RUNTIME_DLLS:libcvc> TYPE BIN)
+  endif()
+endif()
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc

@@ -77,7 +77,8 @@ jobs:
             libboost-all-dev \
             libhdf5-dev \
             libfftw3-dev \
-            libgsl-dev
+            libgsl-dev \
+            libmagick++-dev
           # Coverage tools
           if [ "${{ matrix.coverage }}" = "true" ]; then
             sudo apt-get install -y --no-install-recommends lcov
@@ -93,7 +94,8 @@ jobs:
             boost \
             hdf5 \
             fftw \
-            gsl
+            gsl \
+            imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
 
@@ -101,7 +103,7 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl --triplet x64-windows
+          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl magick --triplet x64-windows
 
       # ── Configure ──
       - name: Configure (Unix)
