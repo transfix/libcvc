@@ -180,12 +180,8 @@ endif()
 if(NOT DISABLE_CGAL)
   find_package(CGAL CONFIG)
   if(CGAL_FOUND)
-    include(${CGAL_USE_FILE})
     add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
     list(APPEND INCLUDE_FILES ../../inc/cvc/project_verts.h)
-    # CGAL may have special compiler requirements
-    string(APPEND CMAKE_CXX_FLAGS " ${CGAL_CXX_FLAGS_INIT}")
-    list(APPEND CVC_LINK_LIBS ${CGAL_LIBRARIES} ${GMP_LIBRARIES} ${GMPXX_LIBRARIES})
   endif()
 endif()
 
@@ -484,6 +480,40 @@ if(CVC_ENABLE_CUDA)
   message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
 endif()
 
+# ImageMagick support (for volume_ops image I/O)
+option(CVC_ENABLE_IMAGEMAGICK "Enable ImageMagick support for image I/O in volume_ops" ON)
+if(CVC_ENABLE_IMAGEMAGICK)
+  find_package(ImageMagick COMPONENTS Magick++ MagickCore)
+  if(ImageMagick_FOUND)
+    message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS}")
+  else()
+    message(STATUS "ImageMagick not found - disabling image I/O in volume_ops")
+    set(CVC_ENABLE_IMAGEMAGICK OFF)
+  endif()
+endif()
+
+# FFTW support (for volume_ops filtered back-projection)
+option(CVC_ENABLE_FFTW "Enable FFTW support for filtered back-projection in volume_ops" ON)
+if(CVC_ENABLE_FFTW)
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(FFTW3 QUIET fftw3)
+  endif()
+  if(NOT FFTW3_FOUND)
+    find_path(FFTW3_INCLUDE_DIRS fftw3.h)
+    find_library(FFTW3_LIBRARIES NAMES fftw3)
+    if(FFTW3_INCLUDE_DIRS AND FFTW3_LIBRARIES)
+      set(FFTW3_FOUND TRUE)
+    endif()
+  endif()
+  if(FFTW3_FOUND)
+    message(STATUS "FFTW3 found: ${FFTW3_LIBRARIES}")
+  else()
+    message(STATUS "FFTW3 not found - disabling filtered back-projection in volume_ops")
+    set(CVC_ENABLE_FFTW OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -530,6 +560,14 @@ target_compile_definitions(cvc
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
 
+# Public feature flags so consumers can check what libcvc was built with
+if(CVC_ENABLE_MESHER)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_MESHER)
+endif()
+if(CVC_ENABLE_SDF)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_SDF)
+endif()
+
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
 if(DISABLE_CGAL)
   target_compile_definitions(cvc PUBLIC DISABLE_CGAL)
@@ -551,39 +589,71 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
 endif()
 
+# ImageMagick linking
+if(CVC_ENABLE_IMAGEMAGICK)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_IMAGEMAGICK
+    MAGICKCORE_QUANTUM_DEPTH=16
+    MAGICKCORE_HDRI_ENABLE=0)
+  target_include_directories(cvc PUBLIC ${ImageMagick_INCLUDE_DIRS})
+  target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
+endif()
+
+# FFTW linking
+if(CVC_ENABLE_FFTW)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
+  target_include_directories(cvc PUBLIC ${FFTW3_INCLUDE_DIRS})
+  target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+endif()
+
 # Link libraries
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 
-# Create executable (requires mesher/SDF for full functionality)
-if(CVC_ENABLE_MESHER AND CVC_ENABLE_SDF)
-  add_executable(libcvc libcvc.cpp)
-  target_link_libraries(libcvc PRIVATE cvc::cvc)
-endif()
-
 # Install targets
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 install(TARGETS cvc
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  EXPORT cvcTargets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
 )
 
-if(TARGET libcvc)
-  install(TARGETS libcvc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-  # Windows: bundle runtime DLLs alongside executables
-  if(WIN32)
-    install(FILES $<TARGET_RUNTIME_DLLS:libcvc> TYPE BIN)
-  endif()
-endif()
+install(EXPORT cvcTargets
+  FILE cvcTargets.cmake
+  NAMESPACE cvc::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+  COMPONENT libcvc
+)
+
+configure_package_config_file(
+  "${PROJECT_SOURCE_DIR}/CMake/cvcConfig.cmake.in"
+  "${CMAKE_BINARY_DIR}/cvcConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+)
+
+write_basic_package_version_file(
+  "${CMAKE_BINARY_DIR}/cvcConfigVersion.cmake"
+  VERSION ${CVC_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  "${CMAKE_BINARY_DIR}/cvcConfig.cmake"
+  "${CMAKE_BINARY_DIR}/cvcConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+  COMPONENT libcvc
+)
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  COMPONENT libcvc
   FILES_MATCHING PATTERN "*.h"
 )
 
 install(FILES ${CMAKE_BINARY_DIR}/inc/cvc/config.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  COMPONENT libcvc
 )
 
 # Generate config.h

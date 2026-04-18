@@ -1,11 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-#project(volrover3 VERSION 3.0.0)
-
-# Set C++ standard
-#set(CMAKE_CXX_STANDARD 17)
-#set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
 # Enable automoc, autouic, autorcc for Qt
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -23,15 +17,6 @@ endif()
 
 find_package(VTK REQUIRED)
 find_package(OpenGL REQUIRED)
-
-# Include VTK use file
-include(${VTK_USE_FILE})
-
-# Include directories
-include_directories(
-  ${CMAKE_SOURCE_DIR}/inc
-  ${VTK_INCLUDE_DIRS}
-)
 
 # Source files
 set(VOLROVER3_SOURCES
@@ -66,31 +51,31 @@ set(VOLROVER3_SOURCES
 
 # Header files
 set(VOLROVER3_HEADERS
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/MainWindow.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/VTKRenderWidget.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/SceneGraph.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/SceneNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GeometryNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/VolumeNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GridNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/AxisNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/BBoxNode.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraController.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/TransferFunctionWidget.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/ThreadMonitorWidget.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/StateTreeWidget.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/AppState.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/ViewerOptionsDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/SDFDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/IsosurfaceDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GeometryDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/VolumeDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
-  ${CMAKE_SOURCE_DIR}/inc/volrover3/ProceduralGeometryDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/MainWindow.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/VTKRenderWidget.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/SceneGraph.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/SceneNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GeometryNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GraphicsNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/VolumeNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GridNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/AxisNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/BBoxNode.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/CameraController.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/TransferFunctionWidget.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/ThreadMonitorWidget.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/StateTreeWidget.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/AppState.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GridOptionsDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/ViewerOptionsDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/SDFDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/IsosurfaceDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GeometryDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/VolumeDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/GraphicsParentDialog.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/ProceduralGeometryDialog.h
 )
 
 # Create executable
@@ -99,10 +84,12 @@ add_executable(volrover3
   ${VOLROVER3_HEADERS}
 )
 
+target_include_directories(volrover3 PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+
 # Link libraries
 if(QT_VERSION_MAJOR EQUAL 6)
   target_link_libraries(volrover3
-    cvc
+    cvc::cvc
     Qt6::Core
     Qt6::Widgets
     Qt6::OpenGL
@@ -112,7 +99,7 @@ if(QT_VERSION_MAJOR EQUAL 6)
   )
 else()
   target_link_libraries(volrover3
-    cvc
+    cvc::cvc
     Qt5::Core
     Qt5::Widgets
     Qt5::OpenGL
@@ -129,20 +116,27 @@ vtk_module_autoinit(
 
 # Install target
 install(TARGETS volrover3
-  RUNTIME DESTINATION bin
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  COMPONENT volrover3
 )
 
+# Windows: bundle runtime DLLs alongside the executable
+if(WIN32)
+  install(FILES $<TARGET_RUNTIME_DLLS:volrover3> TYPE BIN COMPONENT volrover3)
+endif()
+
 # Tests
-if(CVC_BUILD_TESTS)  
+if(CVC_BUILD_TESTS)
   # Create a library with all volrover3 components except main.cpp for testing
   set(VOLROVER3_LIB_SOURCES ${VOLROVER3_SOURCES})
   list(REMOVE_ITEM VOLROVER3_LIB_SOURCES main.cpp)
   
   add_library(volrover3_lib STATIC ${VOLROVER3_LIB_SOURCES} ${VOLROVER3_HEADERS})
+  target_include_directories(volrover3_lib PUBLIC ${PROJECT_SOURCE_DIR}/inc)
   
   if(QT_VERSION_MAJOR EQUAL 6)
     target_link_libraries(volrover3_lib
-      cvc
+      cvc::cvc
       Qt6::Core
       Qt6::Widgets
       Qt6::OpenGL
@@ -152,7 +146,7 @@ if(CVC_BUILD_TESTS)
     )
   else()
     target_link_libraries(volrover3_lib
-      cvc
+      cvc::cvc
       Qt5::Core
       Qt5::Widgets
       Qt5::OpenGL
@@ -165,10 +159,6 @@ if(CVC_BUILD_TESTS)
     TARGETS volrover3_lib
     MODULES ${VTK_LIBRARIES}
   )
-  
-  # Find GTest
-  find_package(GTest REQUIRED)
-  include_directories(${GTEST_INCLUDE_DIRS})
   
   # AppState tests
   add_executable(volrover3_appstate_test

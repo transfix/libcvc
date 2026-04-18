@@ -12,6 +12,15 @@ jobs:
   # ── Linux: .tar.gz + .deb ──
   linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: libcvc
+            build_volrover3: "OFF"
+            extra_deps: ""
+          - name: volrover3
+            build_volrover3: "ON"
+            extra_deps: "qt6-base-dev libvtk9-dev libcgal-dev"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,7 +34,7 @@ jobs:
             libboost-all-dev libhdf5-dev \
             libfftw3-dev libgsl-dev \
             libmagick++-dev \
-            dpkg-dev
+            dpkg-dev ${{ matrix.extra_deps }}
 
       - name: Configure
         run: |
@@ -33,8 +42,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_TESTS=ON \
             -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=ON \
-            -DCVC_BUILD_VOLROVER3=OFF \
+            -DDISABLE_CGAL=${{ matrix.build_volrover3 == 'ON' && 'OFF' || 'ON' }} \
+            -DCVC_BUILD_VOLROVER3=${{ matrix.build_volrover3 }} \
+            -DCVC_ENABLE_MESHER=${{ matrix.build_volrover3 }} \
+            -DCVC_ENABLE_SDF=${{ matrix.build_volrover3 }} \
             -DCMAKE_INSTALL_PREFIX=/usr
 
       - name: Build
@@ -43,17 +54,43 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --parallel --timeout 300
 
-      - name: Build packages
+      - name: Build libcvc packages
+        if: matrix.name == 'libcvc'
         run: |
           cd build
-          cpack -G DEB
-          cpack -G TGZ
-          cp *.deb *.tar.gz ../
+          cpack -G DEB -D CPACK_COMPONENTS_ALL=libcvc
+          cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc
+          for f in *.deb *.tar.gz; do [ -f "$f" ] && cp "$f" ../; done
+
+      - name: Build volrover3 packages
+        if: matrix.name == 'volrover3'
+        run: |
+          # Install to staging directory
+          cmake --install build --prefix staging/usr --component libcvc
+          cmake --install build --prefix staging/usr --component volrover3
+          # Bundle non-system shared library dependencies
+          mkdir -p staging/usr/lib/volrover3
+          ldd staging/usr/bin/volrover3 | awk '/=>/ && !/linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread|librt\.so|libstdc\+\+|libgcc_s|libX/ {print $3}' | while read lib; do
+            [ -f "$lib" ] && cp -L "$lib" staging/usr/lib/volrover3/
+          done
+          # Create wrapper script
+          cat > staging/usr/bin/volrover3-wrapper <<'EOF'
+          #!/bin/sh
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/../lib/volrover3:${LD_LIBRARY_PATH}"
+          exec "$DIR/volrover3" "$@"
+          EOF
+          chmod +x staging/usr/bin/volrover3-wrapper
+          # Create tarball
+          tar czf "volrover3-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C staging .
+          cd build
+          cpack -G DEB -D CPACK_COMPONENTS_ALL="libcvc;volrover3"
+          for f in *.deb; do [ -f "$f" ] && cp "$f" "../volrover3-${f#*-}"; done
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-packages
+          name: linux-${{ matrix.name }}-packages
           path: |
             *.deb
             *.tar.gz
@@ -61,6 +98,15 @@ jobs:
   # ── macOS: .dmg + .zip ──
   macos:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - name: libcvc
+            build_volrover3: "OFF"
+            extra_deps: ""
+          - name: volrover3
+            build_volrover3: "ON"
+            extra_deps: "qt@6 vtk cgal"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,7 +114,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick ${{ matrix.extra_deps }}
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
 
@@ -78,8 +124,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_TESTS=ON \
             -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=ON \
-            -DCVC_BUILD_VOLROVER3=OFF \
+            -DDISABLE_CGAL=${{ matrix.build_volrover3 == 'ON' && 'OFF' || 'ON' }} \
+            -DCVC_BUILD_VOLROVER3=${{ matrix.build_volrover3 }} \
+            -DCVC_ENABLE_MESHER=${{ matrix.build_volrover3 }} \
+            -DCVC_ENABLE_SDF=${{ matrix.build_volrover3 }} \
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/_install
 
       - name: Build
@@ -88,17 +136,35 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --parallel --timeout 300
 
-      - name: Build packages
+      - name: Build libcvc packages
+        if: matrix.name == 'libcvc'
         run: |
           cd build
-          cpack -G DragNDrop
-          cpack -G ZIP
-          cp *.dmg *.zip ../
+          cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=libcvc
+          cpack -G ZIP -D CPACK_COMPONENTS_ALL=libcvc
+          for f in *.dmg *.zip; do [ -f "$f" ] && cp "$f" ../; done
+
+      - name: Build volrover3 packages
+        if: matrix.name == 'volrover3'
+        run: |
+          # Install to staging directory
+          cmake --install build --prefix staging --component libcvc
+          cmake --install build --prefix staging --component volrover3
+          # Bundle shared library dependencies
+          mkdir -p staging/lib/volrover3
+          otool -L staging/bin/volrover3 | awk '/\t.*\.dylib/ && !/\/usr\/lib\// && !/libSystem/ {gsub(/\t/,""); print $1}' | while read lib; do
+            [ -f "$lib" ] && cp -L "$lib" staging/lib/volrover3/
+          done
+          # Create zip with bundled deps
+          cd staging && zip -r "../volrover3-${GITHUB_REF_NAME}-macos.zip" . && cd ..
+          cd build
+          cpack -G DragNDrop -D CPACK_COMPONENTS_ALL="libcvc;volrover3"
+          for f in *.dmg; do [ -f "$f" ] && cp "$f" "../volrover3-${f#*-}"; done
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-packages
+          name: macos-${{ matrix.name }}-packages
           path: |
             *.dmg
             *.zip
@@ -106,6 +172,15 @@ jobs:
   # ── Windows: NSIS + ZIP ──
   windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - name: libcvc
+            build_volrover3: "OFF"
+            extra_vcpkg: ""
+          - name: volrover3
+            build_volrover3: "ON"
+            extra_vcpkg: "qt6-base vtk cgal"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,7 +188,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl --triplet x64-windows
+          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl ${{ matrix.extra_vcpkg }} --triplet x64-windows
         env:
           VCPKG_MAX_CONCURRENCY: 4
 
@@ -125,8 +200,10 @@ jobs:
             -DCMAKE_CXX_STANDARD=17 `
             -DCVC_BUILD_TESTS=ON `
             -DCVC_ENABLE_CUDA=OFF `
-            -DDISABLE_CGAL=ON `
-            -DCVC_BUILD_VOLROVER3=OFF `
+            -DDISABLE_CGAL=${{ matrix.build_volrover3 == 'ON' && 'OFF' || 'ON' }} `
+            -DCVC_BUILD_VOLROVER3=${{ matrix.build_volrover3 }} `
+            -DCVC_ENABLE_MESHER=${{ matrix.build_volrover3 }} `
+            -DCVC_ENABLE_SDF=${{ matrix.build_volrover3 }} `
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/_install"
 
       - name: Build
@@ -135,26 +212,12 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --build-config Release --output-on-failure --parallel --timeout 300
 
-      - name: Install and verify DLLs
-        shell: pwsh
-        run: |
-          cmake --install build --config Release
-          Write-Host "=== Installed bin/ contents ==="
-          Get-ChildItem "${{ github.workspace }}/_install/bin" | Select-Object Name
-          Write-Host ""
-          Write-Host "=== volutils DLL dependencies ==="
-          $dumpbin = & vswhere -latest -find '**/dumpbin.exe' | Select-Object -First 1
-          if ($dumpbin) {
-            & $dumpbin /dependents "${{ github.workspace }}/_install/bin/volutils.exe" | Select-String '\.dll'
-          } else {
-            Write-Host "dumpbin not found, skipping dependency check"
-          }
-
       - name: Install NSIS
         shell: pwsh
         run: choco install nsis -y
 
-      - name: Create packages
+      - name: Build libcvc packages
+        if: matrix.name == 'libcvc'
         shell: pwsh
         working-directory: build
         run: |
@@ -162,16 +225,27 @@ jobs:
           if (-not $nsisPath) {
             $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
           }
-          if ($nsisPath) {
-            $env:PATH = "$nsisPath;$env:PATH"
+          if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
+          cpack -G NSIS -C Release -D CPACK_COMPONENTS_ALL=libcvc
+          cpack -G ZIP -C Release -D CPACK_COMPONENTS_ALL=libcvc
+
+      - name: Build volrover3 packages
+        if: matrix.name == 'volrover3'
+        shell: pwsh
+        working-directory: build
+        run: |
+          $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\NSIS' -ErrorAction SilentlyContinue).'(default)'
+          if (-not $nsisPath) {
+            $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
           }
-          cpack -G NSIS -C Release
-          cpack -G ZIP -C Release
+          if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
+          cpack -G NSIS -C Release -D CPACK_COMPONENTS_ALL="libcvc;volrover3"
+          cpack -G ZIP -C Release -D CPACK_COMPONENTS_ALL="libcvc;volrover3"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-packages
+          name: windows-${{ matrix.name }}-packages
           path: |
             build/*.exe
             build/*.zip

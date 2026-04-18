@@ -5,9 +5,6 @@ option(CVC_USING_XMLRPC "Enable cvc::state network sharing with XMLRPC" OFF)
 
 add_subdirectory(cvc)
 
-# Volume utilities CLI
-add_subdirectory(volutils)
-
 if(CVC_USING_XMLRPC)
   add_subdirectory(xmlrpc)
 endif()

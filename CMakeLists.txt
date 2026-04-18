@@ -246,10 +246,8 @@ endif()
 add_subdirectory(src)
 
 # ************* Install documentation *************
-install(FILES README.md DESTINATION .)
-install(FILES LICENSE DESTINATION .)
-install(FILES src/volutils/README.md DESTINATION share/doc/volutils
-        RENAME README.md)
+install(FILES README.md DESTINATION . COMPONENT libcvc)
+install(FILES LICENSE DESTINATION . COMPONENT libcvc)
 
 # ************* CPack configuration for libcvc *************
 include(GNUInstallDirs)
@@ -277,6 +275,22 @@ set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
 set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
 set(CPACK_STRIP_FILES ON)
 
+# Component-based packaging: separate libcvc and volrover3 artifacts
+set(CPACK_COMPONENTS_ALL libcvc volrover3)
+set(CPACK_COMPONENT_LIBCVC_DISPLAY_NAME "libcvc Library")
+set(CPACK_COMPONENT_LIBCVC_DESCRIPTION "CVC library, headers, and CMake config files")
+set(CPACK_COMPONENT_LIBCVC_REQUIRED ON)
+set(CPACK_COMPONENT_VOLROVER3_DISPLAY_NAME "VolumeRover3 Application")
+set(CPACK_COMPONENT_VOLROVER3_DESCRIPTION "VolumeRover3 desktop visualization application")
+set(CPACK_COMPONENT_VOLROVER3_DEPENDS libcvc)
+
+# DEB component packaging
+set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_DEBIAN_LIBCVC_PACKAGE_NAME "libcvc")
+set(CPACK_DEBIAN_VOLROVER3_PACKAGE_NAME "volrover3")
+set(CPACK_DEBIAN_LIBCVC_PACKAGE_DEPENDS "libboost-all-dev")
+set(CPACK_DEBIAN_VOLROVER3_PACKAGE_DEPENDS "libcvc, libqt6-dev")
+
 # NSIS settings (Windows)
 set(CPACK_NSIS_DISPLAY_NAME "libcvc ${PROJECT_VERSION}")
 set(CPACK_NSIS_HELP_LINK "https://github.com/transfix/cvc")
@@ -288,5 +302,8 @@ set(CPACK_NSIS_MODIFY_PATH ON)
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Joe Rivera")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libboost-all-dev")
 set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
+
+# Archive component packaging (TGZ, ZIP)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
 
 include(CPack)
