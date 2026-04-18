@@ -41,7 +41,7 @@ typedef unsigned int	u_int;
 const unsigned int BAD_INDEX = 0xFFFFFFFF;
 
 extern int verbose;
-extern void (*errorHandler)(char *, int);
+extern void (*errorHandler)(const char *, int);
 
 //--------------------------------------------------------------------
 //
@@ -146,7 +146,7 @@ class Data {
       // signature functions
       virtual int   getNFunctions(void) = 0; // # of signature functions
       virtual float *compFunction(int, u_int &, float **) = 0;
-      virtual char *fName(int) = 0; // # signature function name
+      virtual const char *fName(int) = 0; // # signature function name
  					   
       // add by fan : overloading
       virtual float *compFunction(int, u_int &, float ***,

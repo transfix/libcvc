@@ -170,7 +170,7 @@ void		setVerboseLevel(int level);
 
 		/* set the library's error handler */
 
-void		setErrorHandler(void (*handler)(char *, int));
+void		setErrorHandler(void (*handler)(const char *, int));
 
 		/* create a new dataset for unstructured data */
 

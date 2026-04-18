@@ -154,7 +154,7 @@ public:
 	}
 
 	// Debug
-	void                  fprint(FILE* file, char* str) const;
+	void                  fprint(FILE* file, const char* str) const;
 };
 
 
@@ -298,7 +298,7 @@ public:
 	}
 
 	// Debug
-	void                  fprint(FILE* file, char* str) const;
+	void                  fprint(FILE* file, const char* str) const;
 };
 
 
@@ -461,7 +461,7 @@ public:
 	}
 
 	// Debug
-	void                  fprint(FILE* file, char* str) const;
+	void                  fprint(FILE* file, const char* str) const;
 };
 
 
@@ -627,7 +627,7 @@ public:
 	matrix33      &invert();
 
 	// Debug
-	void          fprint(FILE* file, char* str) const;
+	void          fprint(FILE* file, const char* str) const;
 };
 
 matrix33    IdentityMatrix33();
@@ -834,7 +834,7 @@ public:
 	void toArray(float *);
 
 	// Debug
-	void          fprint(FILE* file, char* str) const;
+	void          fprint(FILE* file, const char* str) const;
 };
 
 matrix44    IdentityMatrix44();

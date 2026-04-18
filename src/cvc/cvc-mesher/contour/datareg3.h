@@ -65,7 +65,7 @@ class Datareg3 : public Data {
       int	getNFunctions(void)  { return(4); } 
       float	*compFunction(int, u_int &, float **);
       float	*compFunction(int, u_int &, float ***, float ***, float ***); // add by fan
-      char	*fName(int);   // signature function name
+      const char	*fName(int);   // signature function name
 
    protected :				// signature functions: currently 4
 

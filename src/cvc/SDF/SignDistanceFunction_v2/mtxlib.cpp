@@ -710,25 +710,25 @@ matrix44    OrthoNormalMatrix44(const vector3 &xdir,
 //
 
 // Print a vector2 to a file
-void vector2::fprint(FILE* file, char* str) const 
+void vector2::fprint(FILE* file, const char* str) const 
 {
 	fprintf(file, "%svector2: <%f, %f>\n", str, x, y);
 }
 
 // Print a vector3 to a file
-void vector3::fprint(FILE* file, char* str) const 
+void vector3::fprint(FILE* file, const char* str) const 
 {
 	fprintf(file, "%svector3: <%f, %f, %f>\n", str, x, y, z);
 }
 
 // Print a vector4 to a file
-void vector4::fprint(FILE* file, char* str) const 
+void vector4::fprint(FILE* file, const char* str) const 
 {
 	fprintf(file, "%svector4: <%f, %f, %f, %f>\n", str, x, y, z, w);
 }
 
 // Print a matrix33 to a file
-void matrix33::fprint(FILE* file, char * str) const 
+void matrix33::fprint(FILE* file, const char * str) const 
 {
 	fprintf(file, "%smatrix33:\n", str);
 	vector3 row0(col[0][0], col[1][0], col[2][0]);
@@ -740,7 +740,7 @@ void matrix33::fprint(FILE* file, char * str) const
 }
 
 // Print a matrix44 to a file
-void matrix44::fprint(FILE* file, char* str) const 
+void matrix44::fprint(FILE* file, const char* str) const 
 {
 	fprintf(file, "%smatrix44:\n", str);
 	vector4 row0(col[0][0], col[1][0], col[2][0], col[3][0]);

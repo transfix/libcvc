@@ -220,9 +220,9 @@ void b3dError(FILE *out, char *format, ...)
   
   vsprintf(errorMess, format, args);
   if (out && !storeError)
-    fprintf(out, errorMess);
+    fprintf(out, "%s", errorMess);
   if (out == stderr && storeError < 0)
-    fprintf(stdout, errorMess);
+    fprintf(stdout, "%s", errorMess);
   va_end(args);
 }
 

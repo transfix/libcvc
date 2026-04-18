@@ -222,7 +222,7 @@ namespace
       }
 
     unsigned short dataVal;
-    register unsigned int _r, _c, _d;
+    unsigned int _r, _c, _d;
     FLOAT *ptr = NULL;
     for(_d = 0; _d < di.n_input[2]; _d++)
       for(_c = 0; _c < di.n_input[1]; _c++)
@@ -296,7 +296,7 @@ namespace
     fputs(str, fd);  
     unsigned short dataval;
     FLOAT datavalf;
-    register unsigned int _r, _c, _d;
+    unsigned int _r, _c, _d;
     const FLOAT *ptr = NULL;
     for(_d = 0; _d < di.n[2]; _d++)
       for(_c = 0; _c < di.n[1]; _c++)

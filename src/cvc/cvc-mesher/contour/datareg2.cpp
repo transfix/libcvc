@@ -379,7 +379,7 @@ float *Datareg2::compFunction(int n, u_int &len, float **fx)
 //
 //------------------------------------------------------------------------
 
-char *Datareg2::fName(int n)
+const char *Datareg2::fName(int n)
 {
    switch (n) {
       case 0:
