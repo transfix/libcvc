@@ -20,8 +20,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef __CVCGEOM_H__
-#define __CVCGEOM_H__
+#ifndef __CVC_GEOMETRY_H__
+#define __CVC_GEOMETRY_H__
 
 #include <cvc/namespace.h>
 #include <cvc/types.h>

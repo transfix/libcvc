@@ -555,8 +555,9 @@ target_include_directories(cvc
 
 # Compile definitions
 target_compile_definitions(cvc
-  PRIVATE
+  PUBLIC
     CVC_NAMESPACE=${CVC_NAMESPACE}
+  PRIVATE
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
 
