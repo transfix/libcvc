@@ -146,6 +146,7 @@ namespace CVC_NAMESPACE
     // it here guarantees the handler map is populated before any lookup
     // (e.g. volume_file_info::read) regardless of whether the caller has
     // explicitly touched the app singleton.
+    // TODO: Remove this lazy trigger once the singleton is removed.
     (void)app::instance();
 
     return *p;
