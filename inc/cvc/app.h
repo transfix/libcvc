@@ -664,9 +664,35 @@ namespace CVC_NAMESPACE
   typedef app::thread_info     thread_info;
   typedef app::thread_feedback thread_feedback;
   typedef app::scoped_lock     scoped_lock;
+
+  // ---------------------------------------------------------------------------
+  // Process-wide free helpers (no app instance required)
+  // ---------------------------------------------------------------------------
+  // These replace the common singleton accesses that do not actually need
+  // any per-app state:
+  //   cvcapp.dataType<T>()  → cvc::dataType<T>()
+  //   cvcapp.log(lvl, msg)  → cvc::log(lvl, msg)
+  //
+  // dataType<T>() uses a process-wide static registry populated on first
+  // access. log() writes to log4cplus (if available) or std::cerr.
+
+  // Returns the data_type enum for C++ type T, or Undefined if not registered.
+  template<class T>
+  data_type dataType();
+
+  // Returns a human-readable name for the data_type enum, or empty string.
+  std::string dataTypeName(data_type dt);
+
+  // Lightweight process-wide logger. Verbosity levels follow the legacy
+  // convention used by cvc::app::log: 0=error, 1=warn, 2=info, 3=debug,
+  // higher = trace. append_newline adds a trailing '\n' if the message
+  // doesn't already end with one.
+  void log(unsigned int level, const std::string& msg, bool append_newline = true);
 }
 
-//Shorthand to access the app object from anywhere
+// Shorthand to access the app object from anywhere.
+// DEPRECATED: retained only while migrating callers to explicit app& params.
+// TODO: remove once all cvcapp usage has been migrated.
 #define cvcapp CVC_NAMESPACE::app::instance()
 
 #endif

@@ -452,7 +452,7 @@ namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE
 {
-  void register_vtk_io()
+  void register_vtk_io(app& /*ctx*/)
   {
     volume_file_io::insertHandler(
       volume_file_io::ptr(new vtk_io)

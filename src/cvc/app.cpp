@@ -248,18 +248,18 @@ namespace CVC_NAMESPACE
 
   void app::registerDefaultHandlers()
   {
-    register_rawiv_io();
-    register_rawv_io();
-    register_mrc_io();
-    register_vtk_io();
-    register_spider_io();
-    register_null_io();
+    register_rawiv_io(*this);
+    register_rawv_io(*this);
+    register_mrc_io(*this);
+    register_vtk_io(*this);
+    register_spider_io(*this);
+    register_null_io(*this);
 #ifdef CVC_USING_HDF5
-    register_hdf5_io();
+    register_hdf5_io(*this);
 #endif
-    register_bunny_io();
-    register_off_io();
-    register_cvcraw_io();
+    register_bunny_io(*this);
+    register_off_io(*this);
+    register_cvcraw_io(*this);
   }
 
   app::~app()
@@ -1141,5 +1141,117 @@ namespace CVC_NAMESPACE
     
     // Try to start another worker if there are pending tasks
     tryStartWorker();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Process-wide free helpers (no app instance required)
+  // ---------------------------------------------------------------------------
+  namespace {
+
+    // Meyer's singleton: built once on first call, thread-safe since C++11.
+    const std::map<std::string, data_type>& staticDataTypeEnum()
+    {
+      static const std::map<std::string, data_type> m = [] {
+        std::map<std::string, data_type> mm;
+        mm[typeid(char).name()]           = Char;
+        mm[typeid(unsigned char).name()]  = UChar;
+        mm[typeid(unsigned short).name()] = UShort;
+        mm[typeid(int).name()]            = Int;
+        mm[typeid(unsigned int).name()]   = UInt;
+        mm[typeid(float).name()]          = Float;
+        mm[typeid(double).name()]         = Double;
+        mm[typeid(int64).name()]          = Int64;
+        mm[typeid(uint64).name()]         = UInt64;
+        return mm;
+      }();
+      return m;
+    }
+
+    const char* staticDataTypeName(data_type dt)
+    {
+      switch (dt) {
+        case Char:   return "char";
+        case UChar:  return "unsigned char";
+        case UShort: return "unsigned short";
+        case Int:    return "int";
+        case UInt:   return "unsigned int";
+        case Float:  return "float";
+        case Double: return "double";
+        case Int64:  return "int64";
+        case UInt64: return "uint64";
+        default:     return "";
+      }
+    }
+
+    boost::mutex& freeLogMutex()
+    {
+      static boost::mutex m;
+      return m;
+    }
+
+  } // anonymous namespace
+
+  template<class T>
+  data_type dataType()
+  {
+    const auto& m = staticDataTypeEnum();
+    auto it = m.find(typeid(T).name());
+    return (it != m.end()) ? it->second : Undefined;
+  }
+
+  // Explicit instantiations for every type registered in registerDefaultTypes.
+  template data_type dataType<char>();
+  template data_type dataType<unsigned char>();
+  template data_type dataType<unsigned short>();
+  template data_type dataType<int>();
+  template data_type dataType<unsigned int>();
+  template data_type dataType<float>();
+  template data_type dataType<double>();
+  template data_type dataType<int64>();
+  template data_type dataType<uint64>();
+
+  std::string dataTypeName(data_type dt)
+  {
+    return std::string(staticDataTypeName(dt));
+  }
+
+  void log(unsigned int level, const std::string& buf, bool append_newline)
+  {
+#ifdef USING_LOG4CPLUS_DEFAULT
+    static log4cplus::Logger logger =
+      log4cplus::Logger::getInstance("cvc.log");
+    std::string msg = buf;
+    if (!append_newline && !msg.empty() && msg[msg.length() - 1] == '\n') {
+      msg = msg.substr(0, msg.length() - 1);
+    }
+    if (level == 0)
+      LOG4CPLUS_ERROR(logger, msg);
+    else if (level == 1)
+      LOG4CPLUS_WARN(logger, msg);
+    else if (level == 2)
+      LOG4CPLUS_INFO(logger, msg);
+    else if (level == 3)
+      LOG4CPLUS_DEBUG(logger, msg);
+    else
+      LOG4CPLUS_TRACE(logger, msg);
+#else
+    // Read a process-wide verbosity threshold from an environment variable,
+    // defaulting to 6 (matches the legacy app::log default).
+    static const unsigned int threshold = [] {
+      if (const char* env = std::getenv("CVC_LOG_VERBOSITY")) {
+        try { return static_cast<unsigned int>(std::stoul(env)); }
+        catch (...) {}
+      }
+      return 6u;
+    }();
+    if (level >= threshold) return;
+
+    std::string out = buf;
+    if (append_newline && (out.empty() || out.back() != '\n')) {
+      out += '\n';
+    }
+    boost::mutex::scoped_lock lock(freeLogMutex());
+    std::cerr << out;
+#endif
   }
 }

@@ -298,7 +298,7 @@ namespace CVC_NAMESPACE
                  const std::string& hdf5_objname)
     {
       scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
 			       % BOOST_CURRENT_FUNCTION
 			       % hdf5_filename
 			       % hdf5_objname));
@@ -333,7 +333,7 @@ namespace CVC_NAMESPACE
                    const std::string& hdf5_objname)
     {
       scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
 			       % BOOST_CURRENT_FUNCTION
 			       % hdf5_filename
 			       % hdf5_objname));
@@ -367,7 +367,7 @@ namespace CVC_NAMESPACE
     bool objectExists(const std::string& hdf5_filename,
                       const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
 			       % BOOST_CURRENT_FUNCTION
 			       % hdf5_filename
 			       % hdf5_objname));
@@ -391,7 +391,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename
 			% hdf5_objname));
@@ -422,7 +422,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
-      cvcapp.log(10,str(format("%1%: %2%\n") 
+      cvc::log(10,str(format("%1%: %2%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename));
 
@@ -454,7 +454,7 @@ namespace CVC_NAMESPACE
                      bool replace)
     {
       using namespace boost;
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -507,7 +507,7 @@ namespace CVC_NAMESPACE
       using namespace H5;
       using namespace boost;
 
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -546,7 +546,7 @@ namespace CVC_NAMESPACE
             shared_ptr<H5File> file = getH5File(hdf5_filename);
 
             std::string groupPath = algorithm::join(groupNames,"/");
-            cvcapp.log(10,str(format("%1%: group: %2%\n")
+            cvc::log(10,str(format("%1%: group: %2%\n")
 			      % BOOST_CURRENT_FUNCTION
 			      % groupPath));
             shared_ptr<Group> cvc_group = 
@@ -785,7 +785,7 @@ namespace CVC_NAMESPACE
                        const std::string& value,
                        bool createGroups)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n")
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n")
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -811,7 +811,7 @@ namespace CVC_NAMESPACE
                      const std::string& hdf5_objname,
                      std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: called\n") % BOOST_CURRENT_FUNCTION));
+      cvc::log(10,boost::str(boost::format("%1%: called\n") % BOOST_CURRENT_FUNCTION));
 
       dimension dim = getObjectDimension(hdf5_filename,
                                          hdf5_objname);
@@ -834,7 +834,7 @@ namespace CVC_NAMESPACE
                       const std::string& hdf5_objname,
                       const std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -863,7 +863,7 @@ namespace CVC_NAMESPACE
     dimension getObjectDimension(const std::string& hdf5_filename,
                                  const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -890,7 +890,7 @@ namespace CVC_NAMESPACE
                             const std::string& hdf5_objname,
                             const dimension& dim)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -917,7 +917,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -958,7 +958,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -1000,7 +1000,7 @@ namespace CVC_NAMESPACE
         { off_z, off_y, off_x };
 
       for(int i = 0; i < RANK; i++)
-        cvcapp.log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
+        cvc::log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
 
       hsize_t stride[RANK];
       for(int i = 0; i < RANK; i++)
@@ -1012,14 +1012,14 @@ namespace CVC_NAMESPACE
         }
 
       for(int i = 0; i < RANK; i++)
-        cvcapp.log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
+        cvc::log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
       
       hsize_t count[RANK];
       for(int i = 0; i < RANK; i++)
         count[i] = fulldim[RANK-1-i]/stride[i];
 
       for(int i = 0; i < RANK; i++)
-        cvcapp.log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
+        cvc::log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
       
       return dimension(count[2],count[1],count[0]);
     }
@@ -1036,7 +1036,7 @@ namespace CVC_NAMESPACE
     bounding_box getObjectBoundingBox(const std::string& hdf5_filename,
                                      const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1066,7 +1066,7 @@ namespace CVC_NAMESPACE
                               const std::string& hdf5_objname,
                               const bounding_box& boundingBox)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1093,7 +1093,7 @@ namespace CVC_NAMESPACE
     std::string getDataSetInfo(const std::string& hdf5_filename,
                                const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1118,7 +1118,7 @@ namespace CVC_NAMESPACE
     data_type getDataSetType(const std::string& hdf5_filename,
                              const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1150,7 +1150,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       std::vector<std::string> objnames;
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -1205,7 +1205,7 @@ namespace CVC_NAMESPACE
     double getDataSetMinimum(const std::string& hdf5_filename,
                              const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1229,7 +1229,7 @@ namespace CVC_NAMESPACE
     double getDataSetMaximum(const std::string& hdf5_filename,
                              const std::string& hdf5_objname)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));

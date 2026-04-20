@@ -1271,7 +1271,7 @@ namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE
 {
-  void register_mrc_io()
+  void register_mrc_io(app& /*ctx*/)
   {
     volume_file_io::insertHandler(
       volume_file_io::ptr(new mrc_io)

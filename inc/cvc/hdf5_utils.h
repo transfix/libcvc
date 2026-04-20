@@ -191,7 +191,7 @@ namespace CVC_NAMESPACE
                                     "Invalid number of dimensions (expecting 1D)");
         }
     
-      attr.read(getPredType(cvcapp.dataType<T>()), values);
+      attr.read(getPredType(cvc::dataType<T>()), values);
     }
 
     // ---------------------
@@ -280,11 +280,11 @@ namespace CVC_NAMESPACE
           hsize_t dim[] = { len };
           DataSpace attrDS(1,dim);
           attr = obj.createAttribute(name,
-                                     getPredType(cvcapp.dataType<T>()),
+                                     getPredType(cvc::dataType<T>()),
                                      attrDS);
         }
 
-      attr.write(getPredType(cvcapp.dataType<T>()), values);
+      attr.write(getPredType(cvc::dataType<T>()), values);
     }
 
     // ---------------------
@@ -633,7 +633,7 @@ namespace CVC_NAMESPACE
     {
       using namespace H5;
 
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -711,7 +711,7 @@ namespace CVC_NAMESPACE
 
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
           d->read(values, 
-                  getPredType(cvcapp.dataType<T>()),
+                  getPredType(cvc::dataType<T>()),
                   vol_dataspace,
                   filespace);
         }
@@ -743,7 +743,7 @@ namespace CVC_NAMESPACE
                             data_type dataType,
                             T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -831,7 +831,7 @@ namespace CVC_NAMESPACE
       using namespace H5;
       using namespace boost;
 
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      cvc::log(10,str(format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -888,7 +888,7 @@ namespace CVC_NAMESPACE
             { off_z, off_y, off_x };
           
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
+            cvc::log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
           
           hsize_t stride[RANK];
           for(int i = 0; i < RANK; i++)
@@ -900,14 +900,14 @@ namespace CVC_NAMESPACE
             }
         
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
+            cvc::log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
 
           hsize_t count[RANK];
           for(int i = 0; i < RANK; i++)
             count[i] = fulldim[RANK-1-i]/stride[i];
           
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
+            cvc::log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
           
           actualDim = dimension(count[2],count[1],count[0]);
           data.reset(new T[actualDim.size()]);
@@ -920,7 +920,7 @@ namespace CVC_NAMESPACE
           
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset, stride);
           d->read(data.get(), 
-                  getPredType(cvcapp.dataType<T>()),
+                  getPredType(cvc::dataType<T>()),
                   vol_dataspace,
                   filespace);
         }
@@ -957,7 +957,7 @@ namespace CVC_NAMESPACE
                   data_type dataType,
                   const dimension& maxdim = dimension(256,256,256))
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1102,7 +1102,7 @@ namespace CVC_NAMESPACE
     {
       using namespace H5;
 
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -1152,7 +1152,7 @@ namespace CVC_NAMESPACE
 
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
           d->write(values, 
-                   getPredType(cvcapp.dataType<T>()),
+                   getPredType(cvc::dataType<T>()),
                    vol_dataspace,
                    filespace);
 
@@ -1190,7 +1190,7 @@ namespace CVC_NAMESPACE
                              const dimension& values_dim,
                              const T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -1225,7 +1225,7 @@ namespace CVC_NAMESPACE
                              const T* values,
                              double min_val, double max_val)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1318,7 +1318,7 @@ namespace CVC_NAMESPACE
                              size_t len,
                              T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1385,7 +1385,7 @@ namespace CVC_NAMESPACE
                                         size_t len,
                                         data_type* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1411,7 +1411,7 @@ namespace CVC_NAMESPACE
                              const std::string& attribname,
                              T& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1438,7 +1438,7 @@ namespace CVC_NAMESPACE
                                           const std::string& attribname,
                                           std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1506,7 +1506,7 @@ namespace CVC_NAMESPACE
                              size_t len,
                              const T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1572,7 +1572,7 @@ namespace CVC_NAMESPACE
                                         size_t len,
                                         const data_type* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1598,7 +1598,7 @@ namespace CVC_NAMESPACE
                              const std::string& attribname,
                              const T& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1625,7 +1625,7 @@ namespace CVC_NAMESPACE
                                           const std::string& attribname,
                                           const std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1689,7 +1689,7 @@ namespace CVC_NAMESPACE
                              const std::string& attribname,
                              const char* value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      cvc::log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname

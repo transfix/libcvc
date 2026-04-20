@@ -75,20 +75,24 @@ namespace
   class build_hierarchy
   {
   public:
-    build_hierarchy(const std::string& threadKey,
+    build_hierarchy(CVC_NAMESPACE::app& ctx,
+                    const std::string& threadKey,
 		    const std::string& hdf5_filename,
 		    const std::string& hdf5_volumeDataSet)
-      : _threadKey(threadKey),
+      : _ctx(ctx),
+        _threadKey(threadKey),
         _hdf5_filename(hdf5_filename),
         _hdf5_volumeDataSet(hdf5_volumeDataSet) {}
 
     build_hierarchy(const build_hierarchy& t)
-      : _threadKey(t._threadKey),
+      : _ctx(t._ctx),
+        _threadKey(t._threadKey),
         _hdf5_filename(t._hdf5_filename),
         _hdf5_volumeDataSet(t._hdf5_volumeDataSet) {}
 
     build_hierarchy& operator=(const build_hierarchy& t)
     {
+      // Note: _ctx is a reference and cannot be reassigned.
       _threadKey = t._threadKey;
       _hdf5_filename = t._hdf5_filename;
       _hdf5_volumeDataSet = t._hdf5_volumeDataSet;
@@ -115,7 +119,7 @@ namespace
           {
             dimension targetDim = curDim;
             const uint64 maxdim_size = 
-              cvcapp.properties<uint64>("volmagick.hdf5_io.buildhierarchy.chunk_size");
+              _ctx.properties<uint64>("volmagick.hdf5_io.buildhierarchy.chunk_size");
             boost::array<double,3> theSize =
               {
                 maxdim_size*bbox.XSpan(fullDim),
@@ -145,16 +149,16 @@ namespace
       using namespace hdf5_utils;
       using namespace boost;
 
-      thread_feedback feedback;
+      thread_feedback feedback(_ctx);
 
       //read/write 128^3 chunks by default
-      if(!cvcapp.hasProperty("volmagick.hdf5_io.buildhierarchy.chunk_size"))
-        cvcapp.properties("volmagick.hdf5_io.buildhierarchy.chunk_size",uint64(128));
+      if(!_ctx.hasProperty("volmagick.hdf5_io.buildhierarchy.chunk_size"))
+        _ctx.properties("volmagick.hdf5_io.buildhierarchy.chunk_size",uint64(128));
 
       //Sleep for a second before beginning so we don't thrash about
       //if writeVolumeFile is called several times in succession.
       {
-        thread_info ti("sleeping");
+        thread_info ti(_ctx, "sleeping");
         boost::xtime xt;
         boost::xtime_get( &xt, boost::TIME_UTC_ );
         xt.sec++;
@@ -188,14 +192,14 @@ namespace
               getAttribute(_hdf5_filename, hier_volume_name, "dirty", isDirty);
               if(isDirty)
                 {
-                  cvcapp.log(1,str(format("%1% :: computing %2%\n")
-                                   % BOOST_CURRENT_FUNCTION
-                                   % hier_volume_name));
+                  _ctx.log(1,str(format("%1% :: computing %2%\n")
+                                 % BOOST_CURRENT_FUNCTION
+                                 % hier_volume_name));
 
                   {
                     dimension targetDim = curDim;
                     const uint64 maxdim_size = 
-                      cvcapp.properties<uint64>("volmagick.hdf5_io.buildhierarchy.chunk_size");
+                      _ctx.properties<uint64>("volmagick.hdf5_io.buildhierarchy.chunk_size");
                     boost::array<double,3> theSize =
                       {
                         maxdim_size*bbox.XSpan(fullDim),
@@ -213,7 +217,7 @@ namespace
                               off_x < bbox.maxx;
                               off_x += theSize[0])
                             {
-                              volume vol(cvcapp);
+                              volume vol(_ctx);
                               bounding_box subvolbox(
 						     off_x,off_y,off_z,
 						     std::min(off_x+theSize[0],bbox.maxx),
@@ -230,7 +234,7 @@ namespace
 					      _hdf5_filename + "|" + hier_volume_name,
 					      0,0,subvolbox
 					      );
-                              cvcapp.threadProgress(float(++steps)/float(numSteps));
+                              _ctx.threadProgress(float(++steps)/float(numSteps));
                             }
                       }
                   }
@@ -238,47 +242,50 @@ namespace
                   //Done, now mark this one clean.
                   setAttribute(_hdf5_filename, hier_volume_name, "dirty", 0);
 
-                  cvcapp.properties("volmagick.hdf5_io.buildhierarchy.latest",
-                                    _hdf5_filename + "|" + hier_volume_name);
+                  _ctx.properties("volmagick.hdf5_io.buildhierarchy.latest",
+                                  _hdf5_filename + "|" + hier_volume_name);
 
                 }
               else
                 {
-                  cvcapp.log(1,str(format("%1% :: %2% not dirty\n")
-                                   % BOOST_CURRENT_FUNCTION
-                                   % hier_volume_name));
+                  _ctx.log(1,str(format("%1% :: %2% not dirty\n")
+                                 % BOOST_CURRENT_FUNCTION
+                                 % hier_volume_name));
                 }
 
               prevDim = curDim;
             }
 
-          cvcapp.threadProgress(1.0f);
+          _ctx.threadProgress(1.0f);
         }
       catch(boost::thread_interrupted&)
         {
-          cvcapp.log(6,str(format("%1% :: thread %2% interrupted\n")
-                           % BOOST_CURRENT_FUNCTION
-                           % cvcapp.threadKey()));
+          _ctx.log(6,str(format("%1% :: thread %2% interrupted\n")
+                         % BOOST_CURRENT_FUNCTION
+                         % _ctx.threadKey()));
         }
       catch(CVC_NAMESPACE::exception& e)
         {
-          cvcapp.log(1,str(format("%1% :: ERROR :: %2%\n")
-                           % BOOST_CURRENT_FUNCTION
-                           % e.what()));
+          _ctx.log(1,str(format("%1% :: ERROR :: %2%\n")
+                         % BOOST_CURRENT_FUNCTION
+                         % e.what()));
         }
     }
 
-    static void start(const std::string& threadKey,
+    static void start(CVC_NAMESPACE::app& ctx,
+                      const std::string& threadKey,
                       const std::string& hdf5_filename,
                       const std::string& hdf5_volumeDataSet)
     {
-      cvcapp.startThread(threadKey,
-                         build_hierarchy(threadKey,
-					 hdf5_filename,
-					 hdf5_volumeDataSet));
+      ctx.startThread(threadKey,
+                      build_hierarchy(ctx,
+                                      threadKey,
+                                      hdf5_filename,
+                                      hdf5_volumeDataSet));
     }
 
   protected:
+    CVC_NAMESPACE::app& _ctx;
     std::string _threadKey;
     std::string _hdf5_filename;
     std::string _hdf5_volumeDataSet;
@@ -338,16 +345,16 @@ namespace CVC_NAMESPACE
     // 09/17/2011 -- Joe R. -- Maxdim is now on the property map.
     // 09/30/2011 -- Joe R. -- Checking that the maxdim property doesn't exist
     //                         before setting it.
-    hdf5_io()
-      : _id("hdf5_io : v1.0")
+    hdf5_io(CVC_NAMESPACE::app& ctx)
+      : _ctx(ctx), _id("hdf5_io : v1.0")
     {
       _extensions.push_back(".h5");
       _extensions.push_back(".hdf5");
       _extensions.push_back(".hdf");
       _extensions.push_back(".cvc");
       
-      if(!cvcapp.hasProperty("volmagick.hdf5_io.maxdim"))
-        cvcapp.properties("volmagick.hdf5_io.maxdim","128,128,128");
+      if(!_ctx.hasProperty("volmagick.hdf5_io.maxdim"))
+        _ctx.properties("volmagick.hdf5_io.maxdim","128,128,128");
     }
 
     // -----------
@@ -422,7 +429,7 @@ namespace CVC_NAMESPACE
       uint64 numVariables, numTimesteps;
       if(!oldVolMagick)
         {
-          cvcapp.log(6,str(format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n")
+          _ctx.log(6,str(format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n")
                            % BOOST_CURRENT_FUNCTION));
 
           d._boundingBox = getObjectBoundingBox(actualFileName,objectName);
@@ -438,7 +445,7 @@ namespace CVC_NAMESPACE
         }
       else
         {
-          cvcapp.log(5,str(format("%s :: using old VolMagick cvc-hdf5 format\n")
+          _ctx.log(5,str(format("%s :: using old VolMagick cvc-hdf5 format\n")
                            % BOOST_CURRENT_FUNCTION));
 
           //some older files will have attributes named like this...
@@ -507,7 +514,7 @@ namespace CVC_NAMESPACE
       else
         {
           if(numVariables > 1 || numTimesteps > 1)
-            cvcapp.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
 
@@ -589,7 +596,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
         {
           if(var > 0 || time > 0)
-            cvcapp.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
           var = 0; time = 0;
@@ -687,7 +694,7 @@ namespace CVC_NAMESPACE
           //at various resolutions.
 
           //get the maximum dimensions to extract
-          std::vector<uint64> maxdim_vec = cvcapp.listProperty<uint64>("volmagick.hdf5_io.maxdim");
+          std::vector<uint64> maxdim_vec = _ctx.listProperty<uint64>("volmagick.hdf5_io.maxdim");
           while(maxdim_vec.size() < 3)
             maxdim_vec.push_back(128);
           dimension maxdim(maxdim_vec);
@@ -732,7 +739,7 @@ namespace CVC_NAMESPACE
           //now select a dataset
           BOOST_FOREACH(std::string obj, hierarchy_objects)
             {
-              cvcapp.log(3,str(format("%s: %s\n")
+              _ctx.log(3,str(format("%s: %s\n")
                                % BOOST_CURRENT_FUNCTION
                                % obj));
 
@@ -759,7 +766,7 @@ namespace CVC_NAMESPACE
                 }
             }
 
-          cvcapp.log(2,str(format("%s: selected object %s\n")
+          _ctx.log(2,str(format("%s: selected object %s\n")
                            % BOOST_CURRENT_FUNCTION
                            % hierarchy_object));
 
@@ -768,7 +775,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
         {
           if(var > 0 || time > 0)
-            cvcapp.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
           var = 0; time = 0;
@@ -855,7 +862,7 @@ namespace CVC_NAMESPACE
       for(unsigned int var = 0; var < numVariables; var++)
         for(unsigned int time = 0; time < numTimesteps; time++)
           {
-            cvcapp.threadProgress(float(cur_step)/float(steps));
+            _ctx.threadProgress(float(cur_step)/float(steps));
           
             //Name of actual dataset.  The group name in 'objectName' can contain several
             //instances of the same dataset at various resolutions.  This function just makes space
@@ -876,7 +883,7 @@ namespace CVC_NAMESPACE
                           boundingBox, dimension, voxelTypes[var]);
           }
 
-      cvcapp.threadProgress(1.0);      
+      _ctx.threadProgress(1.0);      
     }
 
     // ------------------------
@@ -929,9 +936,9 @@ namespace CVC_NAMESPACE
 
 	  //If we have a thread running already computing the hierarchy, stop it!
 	  std::string threadKey(volume_name + " hierarchy_thread");
-	  if(cvcapp.hasThread(threadKey))
+	  if(_ctx.hasThread(threadKey))
 	    {
-	      thread_ptr t = cvcapp.threads(threadKey);
+	      thread_ptr t = _ctx.threads(threadKey);
 	      t->interrupt(); //initiate thread quit
 	      t->join(); //wait for it to quit
 	    }
@@ -953,7 +960,7 @@ namespace CVC_NAMESPACE
 		    % volume_name
 		    % curDim[0] % curDim[1] % curDim[2]);
 
-	      cvcapp.log(10,str(format("%1% :: marking %2% dirty\n")
+	      _ctx.log(10,str(format("%1% :: marking %2% dirty\n")
 				% BOOST_CURRENT_FUNCTION
 				% hier_volume_name));
 
@@ -969,7 +976,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
 	{
 	  if(var > 0 || time > 0)
-	    cvcapp.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+	    _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
 				    "with more than one variable or timestep!\n")
 			     % BOOST_CURRENT_FUNCTION));
 	  var = 0; time = 0;
@@ -988,7 +995,8 @@ namespace CVC_NAMESPACE
       if(doBuildHierarchy)
 	{
 	  std::string threadKey("build_hierarchy_" + volume_name);
-	  build_hierarchy::start(threadKey,
+	  build_hierarchy::start(_ctx,
+				 threadKey,
 				 actualFileName,
 				 volume_name);
 	}
@@ -1058,6 +1066,7 @@ namespace CVC_NAMESPACE
     }
 
   protected:
+    CVC_NAMESPACE::app& _ctx;
     std::string _id;
     extension_list _extensions;
   };
@@ -1065,10 +1074,10 @@ namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE
 {
-  void register_hdf5_io()
+  void register_hdf5_io(CVC_NAMESPACE::app& ctx)
   {
     volume_file_io::insertHandler(
-      volume_file_io::ptr(new hdf5_io)
+      volume_file_io::ptr(new hdf5_io(ctx))
     );
   }
 }
