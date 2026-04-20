@@ -476,12 +476,12 @@ namespace CVC_NAMESPACE
   //                         and slow function but I think it does the trick.
   // 09/10/2011 -- Joe R. -- Adding thread progress feedback.
   // 09/11/2011 -- Joe R. -- Fixing an indexing bug.
-  void writeVolumeFile(const volume& vol, 
+  void writeVolumeFile(app& ctx, const volume& vol, 
 		       const std::string& filename,
 		       unsigned int var, unsigned int time,
 		       const bounding_box& subvolbox)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     volume localvol(vol);
     volume_file_info volinfo(filename);
@@ -524,11 +524,19 @@ namespace CVC_NAMESPACE
                                                  double(j)/ymax,
                                                  double(k)/zmax));
             }
-        cvcapp.threadProgress(float(k)/float(subvol.ZDim()));
+        ctx.threadProgress(float(k)/float(subvol.ZDim()));
       }
     
-    cvcapp.threadProgress(1.0);
+    ctx.threadProgress(1.0);
     writeVolumeFile(subvol,filename,var,time,off_x,off_y,off_z);
+  }
+
+  void writeVolumeFile(const volume& vol, 
+		       const std::string& filename,
+		       unsigned int var, unsigned int time,
+		       const bounding_box& subvolbox)
+  {
+    writeVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
   }
 
   // ---------------
@@ -682,6 +690,85 @@ namespace CVC_NAMESPACE
 	errors
       )
     );
+  }
+
+  // ---- app& overloads ----
+  // These accept an explicit app context instead of using the singleton.
+  // Functions that don't use app internally simply forward to the legacy
+  // implementation. The bbox-based writeVolumeFile above is the canonical
+  // version; the legacy one delegates to it via app::instance().
+
+  void readVolumeFile(app& /*ctx*/, volume& vol,
+		      const std::string& filename,
+		      unsigned int var, unsigned int time)
+  {
+    readVolumeFile(vol, filename, var, time);
+  }
+
+  void readVolumeFile(app& /*ctx*/, volume& vol,
+		      const std::string& filename,
+		      unsigned int var, unsigned int time,
+		      uint64 off_x, uint64 off_y, uint64 off_z,
+		      const dimension& subvoldim)
+  {
+    readVolumeFile(vol, filename, var, time, off_x, off_y, off_z, subvoldim);
+  }
+
+  void readVolumeFile(app& /*ctx*/, volume& vol,
+		      const std::string& filename,
+		      unsigned int var, unsigned int time,
+		      const bounding_box& subvolbox)
+  {
+    readVolumeFile(vol, filename, var, time, subvolbox);
+  }
+
+  void readVolumeFile(app& ctx, std::vector<volume>& vols,
+		      const std::string& filename)
+  {
+    volume_file_info volinfo(filename);
+    volume vol;
+    vols.clear();
+    for(unsigned int var=0; var<volinfo.numVariables(); var++)
+      for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
+	{
+	  readVolumeFile(ctx, vol, filename, var, time);
+	  vols.push_back(vol);
+	}
+  }
+
+  void writeVolumeFile(app& /*ctx*/, const volume& vol,
+		       const std::string& filename,
+		       unsigned int var, unsigned int time,
+		       uint64 off_x, uint64 off_y, uint64 off_z)
+  {
+    writeVolumeFile(vol, filename, var, time, off_x, off_y, off_z);
+  }
+
+  void writeVolumeFile(app& ctx, const std::vector<volume>& vols,
+		       const std::string& filename)
+  {
+    uint64 i;
+
+    if(vols.size() == 0) return;
+
+    std::vector<data_type> voxelTypes;
+    for(i=0; i<vols.size(); i++) voxelTypes.push_back(vols[i].voxelType());
+
+    createVolumeFile(ctx, filename, vols[0].boundingBox(),
+		     vols[0].voxel_dimensions(), voxelTypes, vols.size());
+    for(i=0; i<vols.size(); i++)
+      writeVolumeFile(ctx, vols[i], filename, i);
+  }
+
+  void createVolumeFile(app& /*ctx*/, const std::string& filename,
+			const bounding_box& boundingBox,
+			const dimension& dimension,
+			const std::vector<data_type>& voxelTypes,
+			unsigned int numVariables, unsigned int numTimesteps,
+			double min_time, double max_time)
+  {
+    createVolumeFile(filename, boundingBox, dimension, voxelTypes,
+		     numVariables, numTimesteps, min_time, max_time);
   }
 
 }
