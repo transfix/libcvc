@@ -1,4 +1,5 @@
 #include <cvc/geometry_file_io.h>
+#include <cvc/app.h>
 
 #include <boost/foreach.hpp>
 #include <boost/regex.hpp>
@@ -34,6 +35,14 @@ namespace CVC_NAMESPACE
   {
     //It's ok to leak: http://www.parashift.com/c++-faq-lite/ctors.html#faq-10.15
     static handler_map* p = initialize_map();
+
+    // Ensure the default I/O handlers have been registered. Registration
+    // happens lazily when the app singleton is first accessed; triggering
+    // it here guarantees the handler map is populated before any lookup
+    // regardless of whether the caller has explicitly touched the app
+    // singleton.
+    (void)app::instance();
+
     return *p;
   }
 

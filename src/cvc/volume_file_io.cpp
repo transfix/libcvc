@@ -140,6 +140,14 @@ namespace CVC_NAMESPACE
   {
     //It's ok to leak: http://www.parashift.com/c++-faq-lite/ctors.html#faq-10.15
     static handler_map* p = initializeMap();
+
+    // Ensure the default I/O handlers have been registered. Registration
+    // happens lazily when the app singleton is first accessed; triggering
+    // it here guarantees the handler map is populated before any lookup
+    // (e.g. volume_file_info::read) regardless of whether the caller has
+    // explicitly touched the app singleton.
+    (void)app::instance();
+
     return *p;
   }
 

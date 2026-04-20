@@ -72,32 +72,49 @@ namespace CVC_NAMESPACE
   // 05/11/2012 -- Joe R. -- Adding state.
   app::app_ptr app::instancePtr()
   {
-    boost::mutex::scoped_lock lock(_instanceMutex);
-    if(!_instance)
-      {
-        _instance.reset(new app);
+    bool newly_created = false;
+    app_ptr result;
+    {
+      boost::mutex::scoped_lock lock(_instanceMutex);
+      if(!_instance)
+        {
+          // Construct without handler registration so that _instance is
+          // assigned before any code that might re-enter app::instance()
+          // (e.g. handler constructors that touch cvcapp) runs.
+          _instance.reset(new app(no_init_t{}));
+          _instance->registerDefaultTypes();
 
-        //Register a call to wait for all child threads to finish before exiting
-        //the main thread.
-        std::atexit(wait_for_threads);
+          //Register a call to wait for all child threads to finish before exiting
+          //the main thread.
+          std::atexit(wait_for_threads);
 
 #ifdef USING_LOG4CPLUS_DEFAULT
-        // Initialize log4cplus
-        std::ifstream testfile("log4cplus.properties");
-        if (testfile)
-          {
-            testfile.close();
-            log4cplus::PropertyConfigurator::doConfigure("log4cplus.properties");
-          }
-        else 
-          {
-            log4cplus::BasicConfigurator::doConfigure();
-          }
-        static log4cplus::Logger logger = log4cplus::Logger::getInstance("app");
-        LOG4CPLUS_ERROR(logger, "log4cplus initialized");
- #endif
-      }
-    return _instance;
+          // Initialize log4cplus
+          std::ifstream testfile("log4cplus.properties");
+          if (testfile)
+            {
+              testfile.close();
+              log4cplus::PropertyConfigurator::doConfigure("log4cplus.properties");
+            }
+          else
+            {
+              log4cplus::BasicConfigurator::doConfigure();
+            }
+          static log4cplus::Logger logger = log4cplus::Logger::getInstance("app");
+          LOG4CPLUS_ERROR(logger, "log4cplus initialized");
+#endif
+          newly_created = true;
+        }
+      result = _instance;
+    }
+
+    // Register default I/O handlers outside the instance mutex so that
+    // handler constructors that call app::instance() (via cvcapp) do not
+    // deadlock against the lock we just released.
+    if(newly_created)
+      result->registerDefaultHandlers();
+
+    return result;
   }
 
   // ---------------------
