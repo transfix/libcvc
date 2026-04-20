@@ -164,16 +164,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class null_io_init
+  void register_null_io()
   {
-  public:
-    null_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::null_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new null_io)
+    );
+  }
 }

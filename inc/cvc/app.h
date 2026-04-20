@@ -578,6 +578,7 @@ namespace CVC_NAMESPACE
 
   protected:
     void registerDefaultTypes();
+    void registerDefaultHandlers();
 
     void propertyTreeTraverse(const boost::property_tree::ptree& pt,
                               const std::string& parentkey = std::string());

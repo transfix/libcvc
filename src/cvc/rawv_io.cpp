@@ -878,17 +878,13 @@ namespace CVC_NAMESPACE
   };
 };
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class rawv_io_init
+  void register_rawv_io()
   {
-  public:
-    rawv_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::rawv_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new rawv_io)
+    );
+  }
 }
 

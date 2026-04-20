@@ -31,6 +31,7 @@
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 #include <cvc/voxels.h>
+#include <cvc/io_handlers.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
 #include <log4cplus/logger.h>
@@ -178,6 +179,7 @@ namespace CVC_NAMESPACE
       _activeWorkers(0)
   {
     registerDefaultTypes();
+    registerDefaultHandlers();
   }
 
   app::app(no_init_t) 
@@ -225,6 +227,22 @@ namespace CVC_NAMESPACE
     registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
     registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
     registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
+  }
+
+  void app::registerDefaultHandlers()
+  {
+    register_rawiv_io();
+    register_rawv_io();
+    register_mrc_io();
+    register_vtk_io();
+    register_spider_io();
+    register_null_io();
+#ifdef CVC_USING_HDF5
+    register_hdf5_io();
+#endif
+    register_bunny_io();
+    register_off_io();
+    register_cvcraw_io();
   }
 
   app::~app()

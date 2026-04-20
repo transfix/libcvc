@@ -1063,16 +1063,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class hdf5_io_init
+  void register_hdf5_io()
   {
-  public:
-    hdf5_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::hdf5_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new hdf5_io)
+    );
+  }
 }

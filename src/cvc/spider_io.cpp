@@ -823,17 +823,13 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class spider_io_init
+  void register_spider_io()
   {
-  public:
-    spider_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::spider_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new spider_io)
+    );
+  }
 }
 

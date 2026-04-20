@@ -228,16 +228,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class off_io_init
+  void register_off_io()
   {
-  public:
-    off_io_init()
-    {
-      CVC_NAMESPACE::geometry_file_io::insert_handler(
-        CVC_NAMESPACE::geometry_file_io::ptr(new CVC_NAMESPACE::off_io)
-      );
-    }
-  } static_init;
+    geometry_file_io::insert_handler(
+      geometry_file_io::ptr(new off_io)
+    );
+  }
 }

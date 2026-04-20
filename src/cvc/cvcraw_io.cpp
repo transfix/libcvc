@@ -516,16 +516,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class cvcraw_io_init
+  void register_cvcraw_io()
   {
-  public:
-    cvcraw_io_init()
-    {
-      CVC_NAMESPACE::geometry_file_io::insert_handler(
-        CVC_NAMESPACE::geometry_file_io::ptr(new CVC_NAMESPACE::cvcraw_io)
-      );
-    }
-  } static_init;
+    geometry_file_io::insert_handler(
+      geometry_file_io::ptr(new cvcraw_io)
+    );
+  }
 }

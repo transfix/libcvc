@@ -110,16 +110,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class bunny_io_init
+  void register_bunny_io()
   {
-  public:
-    bunny_io_init()
-    {
-      CVC_NAMESPACE::geometry_file_io::insert_handler(
-        CVC_NAMESPACE::geometry_file_io::ptr(new CVC_NAMESPACE::bunny_io)
-      );
-    }
-  } static_init;
+    geometry_file_io::insert_handler(
+      geometry_file_io::ptr(new bunny_io)
+    );
+  }
 }

@@ -1269,23 +1269,13 @@ namespace CVC_NAMESPACE
 #endif
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class mrc_io_init
+  void register_mrc_io()
   {
-  public:
-    mrc_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::mrc_io)
-      );
-
-#ifdef CVC_USING_IMOD_MRC
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::imod_mrc_io)
-      );
-#endif
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new mrc_io)
+    );
+  }
 }
 

@@ -864,17 +864,13 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class rawiv_io_init
+  void register_rawiv_io()
   {
-  public:
-    rawiv_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::rawiv_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new rawiv_io)
+    );
+  }
 }
 
