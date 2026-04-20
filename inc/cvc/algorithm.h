@@ -53,7 +53,8 @@ namespace CVC_NAMESPACE
   // 01/08/2014 - removing sdf_method, always using SDFLibrary now
   // 12/23/2025 - adding algorithm selection enum to switch between v1 and v2
   // 12/27/2025 - adding flipNormals parameter to invert inside/outside
-  volume sdf(const geometry& geom,
+  volume sdf(app& ctx,
+             const geometry& geom,
 	     /*
 	       Dimension of output sdf vol.
 	     */

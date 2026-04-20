@@ -148,8 +148,7 @@ Octree::~Octree()
 //void Octree::setVolume(SimpleVolumeData * volData)
 void Octree::setVolume(const VolMagick::Volume& volData)
 {
-  VolMagick::Volume volumeData;
-  volumeData = volData;
+  VolMagick::Volume volumeData(volData);
   volumeData.voxelType(VolMagick::Float); //I think this library wants a float*
   loadData(volumeData);
   
@@ -2580,7 +2579,7 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 	int propDimZ = propVol.ZDim();
 	
 	// If property volume dimensions don't match octree dimensions, resize it
-	VolMagick::Volume resizedPropVol;
+	VolMagick::Volume resizedPropVol(propVol);
 	const VolMagick::Volume* propVolPtr = &propVol;
 	
 	if(propDimX != dim[0] || propDimY != dim[1] || propDimZ != dim[2]) {
@@ -2590,8 +2589,7 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 		          << dim[0] << "x" << dim[1] << "x" << dim[2] 
 		          << "). Resizing using trilinear interpolation..." << std::endl;
 		
-		// Create a copy and resize it to match octree dimensions
-		resizedPropVol = propVol;
+		// Resize the copy to match octree dimensions
 		resizedPropVol.resize(VolMagick::Dimension(dim[0], dim[1], dim[2]));
 		propVolPtr = &resizedPropVol;
 		

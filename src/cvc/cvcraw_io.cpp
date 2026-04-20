@@ -394,11 +394,11 @@ namespace CVC_NAMESPACE
       bool printColors = (ends_with(filename,".rawc") || ends_with(filename,".rawnc"));
 
       if (printNormals && !haveNormals) {
-	cvcapp.log(3,"WARNING: file with normals requested but not available.");
+	std::cerr << "WARNING: file with normals requested but not available." << std::endl;
       }
 
       if (printColors && !haveColors) {
-	cvcapp.log(3,"WARNING: file with normals requested but not available.");
+	std::cerr << "WARNING: file with colors requested but not available." << std::endl;
       }
     
       for(points_t::const_iterator i = geom.points().begin();

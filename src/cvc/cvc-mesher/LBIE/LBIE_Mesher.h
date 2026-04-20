@@ -23,7 +23,8 @@ namespace LBIE
     enum NormalType { BSPLINE_CONVOLUTION, CENTRAL_DIFFERENCE, BSPLINE_INTERPOLATION };
     enum ExtractionMethod { DUALLIB, FASTCONTOURING, LIBISOCONTOUR };
 
-    Mesher(float isovalue = DEFAULT_IVAL,
+    Mesher(CVC_NAMESPACE::app& ctx,
+	   float isovalue = DEFAULT_IVAL,
 	   float isovalue_in = DEFAULT_IVAL_IN,
 	   float err = DEFAULT_ERR,
 	   float err_in = DEFAULT_ERR_IN,
@@ -36,7 +37,8 @@ namespace LBIE
         _err(err), _err_in(err_in), _meshType(meshtype),
         _improveMethod(improveMethod), _normalType(normtype),
         _extractionMethod(extractionMethod), _dual(dual_contouring),
-        _octree_volume_updated(false)
+        _octree_volume_updated(false),
+        _contourExtractor(ctx)
    {
      _octree.set_isovalue(_isovalue);
      _octree.set_isovalue_in(_isovalue_in);

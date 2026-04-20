@@ -213,7 +213,7 @@ namespace
                               off_x < bbox.maxx;
                               off_x += theSize[0])
                             {
-                              volume vol;
+                              volume vol(cvcapp);
                               bounding_box subvolbox(
 						     off_x,off_y,off_z,
 						     std::min(off_x+theSize[0],bbox.maxx),
