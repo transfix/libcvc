@@ -530,7 +530,7 @@ namespace CVC_NAMESPACE
   // 01/17/2014 -- transfix -- using TIME_UTC_
   void app::sleep(double ms)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(*this, BOOST_CURRENT_FUNCTION);
     boost::xtime xt;
     boost::xtime_get( &xt, boost::TIME_UTC_ );
     xt.nsec += uint64(ms * std::pow(10.0,6.0));
@@ -1075,7 +1075,7 @@ namespace CVC_NAMESPACE
 
   void app::threadPoolWorker(ThreadPoolTask task)
   {
-    thread_info ti("Processing: " + task.key);
+    thread_info ti(*this, "Processing: " + task.key);
     
     try
     {

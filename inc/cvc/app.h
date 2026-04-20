@@ -420,26 +420,35 @@ namespace CVC_NAMESPACE
     class thread_info
     {
     public:
-      thread_info(const std::string& info = "running")
+      // New: explicit app context
+      thread_info(app& ctx, const std::string& info = "running")
+        : _app(ctx)
         {
           try {
-            _origInfo = app::instance().thisThreadInfo();
-            _origProgress = app::instance().threadProgress();
-            app::instance().thisThreadInfo(info);
+            _origInfo = _app.thisThreadInfo();
+            _origProgress = _app.threadProgress();
+            _app.thisThreadInfo(info);
           } catch (...) {
             // Swallow exceptions during construction (thread may be interrupted)
           }
         }
+
+      // Legacy: uses app::instance()
+      thread_info(const std::string& info = "running")
+        : thread_info(app::instance(), info)
+        {}
+
       ~thread_info()
         {
           try {
-            app::instance().thisThreadInfo(_origInfo);
+            _app.thisThreadInfo(_origInfo);
           } catch (...) {}
           try {
-            app::instance().threadProgress(_origProgress);
+            _app.threadProgress(_origProgress);
           } catch (...) {}
         }
     private:
+      app& _app;
       std::string _origInfo;
       double _origProgress;
     };
@@ -449,20 +458,26 @@ namespace CVC_NAMESPACE
     class thread_feedback
     {
     public:
-      thread_feedback(const std::string& key = "")
-        : _threadInfo(key.empty() ? "running" : key)
+      // New: explicit app context
+      thread_feedback(app& ctx, const std::string& key = "")
+        : _app(ctx)
+        , _threadInfo(ctx, key.empty() ? "running" : key)
         , _key(key)
         {
           try {
-            // Set initial progress using key if available, otherwise use thread ID
             if (!_key.empty())
-              app::instance().threadProgress(_key, 0.0);
+              _app.threadProgress(_key, 0.0);
             else
-              app::instance().threadProgress(0.0);
+              _app.threadProgress(0.0);
           } catch (...) {
             // Swallow exceptions during construction (thread may be interrupted)
           }
         }
+
+      // Legacy: uses app::instance()
+      thread_feedback(const std::string& key = "")
+        : thread_feedback(app::instance(), key)
+        {}
 
       ~thread_feedback()
         {
@@ -471,15 +486,16 @@ namespace CVC_NAMESPACE
           try {
             // Set status to "completed" and progress to 100%
             if (!_key.empty()) {
-              app::instance().threadInfo(_key, "completed");
-              app::instance().finishThreadProgress(_key);
+              _app.threadInfo(_key, "completed");
+              _app.finishThreadProgress(_key);
             }
             else {
-              app::instance().finishThreadProgress();
+              _app.finishThreadProgress();
             }
           } catch (...) {}
         }
     private:
+      app& _app;
       thread_info _threadInfo;
       std::string _key;
     };
