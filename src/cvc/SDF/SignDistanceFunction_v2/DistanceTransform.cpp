@@ -122,8 +122,9 @@ void DistanceTransform::init() {
 	printf("distance min: %f, max = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
 }
 
-DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], float dist,
+DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3], float dist,
 									 float sx, float sy, float sz)
+	: _ctx(ctx)
 {
 	float factor[3];
 	factor[0] = sx; factor[1] = sy; factor[2] = sz;
@@ -182,8 +183,9 @@ DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], float dist,
 }
 
 // Constructor with user-specified center (allows arbitrary bounding boxes)
-DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], const float user_center[3], 
+DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3], const float user_center[3], 
                                      float dist, float sx, float sy, float sz)
+	: _ctx(ctx)
 {
 	float factor[3];
 	factor[0] = sx; factor[1] = sy; factor[2] = sz;
@@ -232,7 +234,8 @@ DistanceTransform::DistanceTransform(FaceVertSet3D& fvs, int dim[3], const float
 	init();
 }
 
-DistanceTransform::DistanceTransform(FaceVertSet3D &fvs, const Reg3Data<float>& reg3)
+DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D &fvs, const Reg3Data<float>& reg3)
+	: _ctx(ctx)
 {
 	p_Data = new Reg3Data<float>(reg3);
 	p_Surf = &fvs;
@@ -264,7 +267,7 @@ void DistanceTransform::transform()
 	p_Data->getSpan(span);
 	p_Data->getOrig(orig);
 
-	cvc::app::instance().threadProgress(0.02);  // Starting
+	_ctx.threadProgress(0.02);  // Starting
 
 	// 1D distance transform along x (0-30% of work)
 
@@ -288,7 +291,7 @@ void DistanceTransform::transform()
 			
 			// Update progress every 5% of X iterations
 			if (++x_iteration % (total_x_iterations / 20) == 0) {
-				cvc::app::instance().threadProgress(0.02 + 0.28 * (float(x_iteration) / float(total_x_iterations)));
+							_ctx.threadProgress(0.02 + 0.28 * (float(x_iteration) / float(total_x_iterations)));
 			}
 		}
 	}
@@ -297,7 +300,7 @@ void DistanceTransform::transform()
 	delete[] d;
 	delete[] p;
 
-	cvc::app::instance().threadProgress(0.30);  // X transform complete
+	_ctx.threadProgress(0.30);  // X transform complete
 
 	f = new float[dim[1]];
 	d = new float[dim[1]];
@@ -320,7 +323,7 @@ void DistanceTransform::transform()
 			
 			// Update progress every 5% of Y iterations
 			if (++y_iteration % (total_y_iterations / 20) == 0) {
-				cvc::app::instance().threadProgress(0.30 + 0.30 * (float(y_iteration) / float(total_y_iterations)));
+							_ctx.threadProgress(0.30 + 0.30 * (float(y_iteration) / float(total_y_iterations)));
 			}
 		}
 	}
@@ -329,7 +332,7 @@ void DistanceTransform::transform()
 	delete[] d;
 	delete[] p;
 	
-	cvc::app::instance().threadProgress(0.60);  // Y transform complete
+	_ctx.threadProgress(0.60);  // Y transform complete
 	
 	f = new float[dim[2]];
 	d = new float[dim[2]];
@@ -353,7 +356,7 @@ void DistanceTransform::transform()
 			
 			// Update progress every 5% of Z iterations
 			if (++z_iteration % (total_z_iterations / 20) == 0) {
-				cvc::app::instance().threadProgress(0.60 + 0.15 * (float(z_iteration) / float(total_z_iterations)));
+							_ctx.threadProgress(0.60 + 0.15 * (float(z_iteration) / float(total_z_iterations)));
 			}
 		}
 	}
@@ -361,7 +364,7 @@ void DistanceTransform::transform()
 	delete[] d;
 	delete[] p;
 
-	cvc::app::instance().threadProgress(0.75);  // Z transform complete
+	_ctx.threadProgress(0.75);  // Z transform complete
 
 //	for(i = 0; i < nverts; i++) {
 //		if (i%1000 == 1) {
@@ -396,11 +399,11 @@ void DistanceTransform::transform()
 		
 		// Update progress every k slice
 		if (k % (total_near_iterations / 15) == 0) {
-			cvc::app::instance().threadProgress(0.75 + 0.15 * (float(k) / float(total_near_iterations)));
+					_ctx.threadProgress(0.75 + 0.15 * (float(k) / float(total_near_iterations)));
 		}
 	}
 
-	cvc::app::instance().threadProgress(0.90);  // Near distance computation complete
+	_ctx.threadProgress(0.90);  // Near distance computation complete
 
 	// update the distances for other points (90-100% of work)
 	int total_update_iterations = dim[2];
@@ -433,7 +436,7 @@ void DistanceTransform::transform()
 		
 		// Update progress every k slice
 		if (k % (total_update_iterations / 10) == 0) {
-			cvc::app::instance().threadProgress(0.90 + 0.10 * (float(k) / float(total_update_iterations)));
+					_ctx.threadProgress(0.90 + 0.10 * (float(k) / float(total_update_iterations)));
 		}
 	}
 	delete[] closest;
@@ -442,7 +445,7 @@ void DistanceTransform::transform()
 	printf("min dist = %f , max dist = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
 	delete[] parent;
 	
-	cvc::app::instance().threadProgress(1.0);  // Complete
+	_ctx.threadProgress(1.0);  // Complete
 }
 
 float DistanceTransform::computeNearDistance(int ix, int iy, int iz, Point3f& nearPnt)

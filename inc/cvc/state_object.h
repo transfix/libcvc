@@ -178,18 +178,26 @@ namespace CVC_NAMESPACE
   class state_object
   {
   public:
+    // Legacy constructor - uses app::instance() singleton
     state_object(const std::string state_path = std::string()) 
-      : _batchDepth(0),
+      : state_object(app::instance(), state_path)
+    {
+    }
+
+    // Constructor with explicit app context
+    state_object(app& ctx, const std::string state_path = std::string()) 
+      : _ctx(ctx),
+        _batchDepth(0),
         _hasInstanceThreading(false),
         _instanceThreading(false),
         _state_path(state_path.empty() ?
-          cvcapp.dataTypeName<This>()+
+          _ctx.dataTypeName<This>()+
           CVC_NAMESPACE::state::SEPARATOR+
           boost::lexical_cast<std::string>(this) :
           state_path)
     {
       // Register the data type - avoid the macro by using template syntax
-      cvcapp.template registerDataType<This>(cvcapp.dataTypeName<This>());
+      _ctx.template registerDataType<This>(_ctx.dataTypeName<This>());
 
       //watch this object's state
       _stateConnection = getState().childChanged.connect(
@@ -206,7 +214,7 @@ namespace CVC_NAMESPACE
       // Wait for handler threads to complete to avoid dangling references
       // Handler threads are named as stateName(childState) + "_stateChanged"
       std::string threadPrefix = stateName();
-      thread_map threads = cvcapp.threads();
+      thread_map threads = _ctx.threads();
       BOOST_FOREACH(thread_map::value_type& val, threads)
         {
           // Check if this thread belongs to this state_object instance
@@ -218,7 +226,7 @@ namespace CVC_NAMESPACE
                 {
                   if(!val.second->timed_join(boost::posix_time::milliseconds(5000)))
                     {
-                      cvcapp.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish in time, interrupting")
+                      _ctx.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish in time, interrupting")
                                        % val.first));
                       val.second->interrupt();
                       val.second->join();
@@ -273,7 +281,7 @@ namespace CVC_NAMESPACE
         // Threading enabled - spawn threads for each change
         BOOST_FOREACH(const std::string& childState, pendingCopy)
           {
-            cvcapp.startThread(stateName(childState) + "_stateChanged",
+            _ctx.startThread(stateName(childState) + "_stateChanged",
                                boost::bind(&state_object<This>::handleStateChanged, 
                                            boost::ref(*this),
                                            childState));
@@ -291,7 +299,7 @@ namespace CVC_NAMESPACE
     void waitForHandlers()
     {
       std::string threadPrefix = stateName();
-      thread_map threads = cvcapp.threads();
+      thread_map threads = _ctx.threads();
       BOOST_FOREACH(thread_map::value_type& val, threads)
         {
           if(val.first.find(threadPrefix) == 0 && 
@@ -350,6 +358,7 @@ namespace CVC_NAMESPACE
     }
 
   protected:
+    app&        _ctx;
     std::string _state_path;
 
     boost::signals2::connection _stateConnection;
@@ -381,7 +390,7 @@ namespace CVC_NAMESPACE
     //Note: each call happens in its own thread (unless threading is disabled).
     virtual void handleStateChanged(const std::string& childState)
     {
-      cvcapp.log(2,str(boost::format("%s :: state changed: %s\n")
+      _ctx.log(2,str(boost::format("%s :: state changed: %s\n")
                        % BOOST_CURRENT_FUNCTION
                        % childState));
     }
@@ -403,7 +412,7 @@ namespace CVC_NAMESPACE
           // Threading enabled - spawn thread (unlock first to avoid holding lock)
           lock.unlock();
           std::string threadKey = stateName(childState) + "_stateChanged";
-          cvcapp.startThread(threadKey,
+          _ctx.startThread(threadKey,
                              [this, childState, threadKey]() {
                                cvc::app::thread_feedback feedback(threadKey);
                                this->handleStateChanged(childState);

@@ -236,7 +236,7 @@ namespace CVC_NAMESPACE
         
         if(_value == str_value) return *this; //do nothing if equal
         
-        _valueTypeName = cvcapp.dataTypeName<T>();
+        _valueTypeName = _ctx.dataTypeName<T>();
         _value = str_value;
         _lastMod = boost::posix_time::microsec_clock::universal_time();
         _initialized = true;
@@ -418,11 +418,13 @@ namespace CVC_NAMESPACE
     static void on_startup(const nullary_func& init_func);
 
   protected:
-    state(const std::string& n = std::string(),
+    state(app& ctx,
+          const std::string& n = std::string(),
           const state* p = NULL);
 
     void notifyParent(const std::string& childname);
 
+    app&                             _ctx;
     boost::mutex                     _mutex;
     boost::posix_time::ptime         _lastMod;
 

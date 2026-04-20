@@ -338,7 +338,7 @@ namespace
                     static_cast<int>(dim.zdim) };
     
     // Use new constructor with user-specified center to respect arbitrary bbox
-    DistanceTransform dt(fvs, dims, bbox_center, 0.5f, 
+    DistanceTransform dt(ctx, fvs, dims, bbox_center, 0.5f, 
                         scale_factors[0], scale_factors[1], scale_factors[2]);
     
     ctx.threadProgress(0.15);  // Distance transform initialized
