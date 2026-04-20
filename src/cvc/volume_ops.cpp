@@ -46,7 +46,7 @@ namespace CVC_NAMESPACE
 
   static volume make_like(const volume& src)
   {
-    volume out(src.voxel_dimensions(), Float, src.boundingBox());
+    volume out(src.ctx(), src.voxel_dimensions(), Float, src.boundingBox());
     return out;
   }
 
@@ -298,7 +298,7 @@ namespace CVC_NAMESPACE
     double new_ymax = vol.YMin() + (ny - 1) * vol.YSpan() * fy;
     double new_zmax = vol.ZMin() + (nz - 1) * vol.ZSpan() * fz;
 
-    volume out(dimension(nx, ny, nz), Float,
+    volume out(vol.ctx(), dimension(nx, ny, nz), Float,
                bounding_box(vol.XMin(), vol.YMin(), vol.ZMin(),
                             new_xmax, new_ymax, new_zmax));
 
@@ -439,9 +439,7 @@ namespace CVC_NAMESPACE
           count++;
         }
 
-    ssim_result result;
-    result.mean_ssim = count > 0 ? ssim_sum / count : 0.0;
-    result.ssim_map = ssim_map;
+    ssim_result result = {count > 0 ? ssim_sum / count : 0.0, ssim_map};
     return result;
   }
 
@@ -460,7 +458,7 @@ namespace CVC_NAMESPACE
                              (vol.ZMax()-vol.ZMin())*(vol.ZMax()-vol.ZMin())/4.0);
 
     // output: XDim × YDim × num_angles
-    volume out(dimension(vol.XDim(), vol.YDim(), na), Float,
+    volume out(vol.ctx(), dimension(vol.XDim(), vol.YDim(), na), Float,
                bounding_box(vol.XMin(), vol.YMin(), 0,
                             vol.XMax(), vol.YMax(), (double)na));
 
@@ -568,7 +566,7 @@ namespace CVC_NAMESPACE
 #endif
 
     unsigned int d = output_dim;
-    volume out(dimension(d, d, d), Float,
+    volume out(projections.ctx(), dimension(d, d, d), Float,
                bounding_box(0, 0, 0, d-1, d-1, d-1));
 
     // back-project
@@ -642,7 +640,7 @@ namespace CVC_NAMESPACE
 #endif
   }
 
-  volume slices_to_volume(const std::vector<std::string>& paths,
+  volume slices_to_volume(app& ctx, const std::vector<std::string>& paths,
                           const bounding_box& bbox)
   {
 #ifdef CVC_ENABLE_IMAGEMAGICK
@@ -654,7 +652,7 @@ namespace CVC_NAMESPACE
     uint64 w = first.columns(), h = first.rows();
     uint64 d = paths.size();
 
-    volume out(dimension(w, h, d), UChar, bbox);
+    volume out(ctx, dimension(w, h, d), UChar, bbox);
 
     for(uint64 k = 0; k < d; k++)
     {
@@ -688,7 +686,7 @@ namespace CVC_NAMESPACE
     // Create a volume with 4x the X dimension to pack RGBA interleaved
     // This stores R,G,B,A as consecutive voxels
     uint64 nx = r.XDim(), ny = r.YDim(), nz = r.ZDim();
-    volume out(dimension(nx * 4, ny, nz), Float, r.boundingBox());
+    volume out(r.ctx(), dimension(nx * 4, ny, nz), Float, r.boundingBox());
 
     for(uint64 k = 0; k < nz; k++)
       for(uint64 j = 0; j < ny; j++)

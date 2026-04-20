@@ -147,7 +147,7 @@ namespace CVC_NAMESPACE
 
   // Import a stack of images into a volume.
   // paths: ordered list of image file paths (one per Z-slice).
-  volume slices_to_volume(const std::vector<std::string>& paths,
+  volume slices_to_volume(app& ctx, const std::vector<std::string>& paths,
                           const bounding_box& bbox = bounding_box(0,0,0,1,1,1));
 
   // ── RGBA multi-variable operations ──

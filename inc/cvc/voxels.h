@@ -137,6 +137,7 @@ namespace CVC_NAMESPACE
 #endif
 
   class composite_function;
+  class app;
 
   /**
    * @class voxels
@@ -173,10 +174,13 @@ namespace CVC_NAMESPACE
   class voxels
   {
   public:
-    voxels(const dimension& d = dimension(4,4,4), data_type vt = UChar);
-    voxels(const void *v, const dimension& d, data_type vt);
+    voxels(app& ctx, const dimension& d = dimension(4,4,4), data_type vt = UChar);
+    voxels(app& ctx, const void *v, const dimension& d, data_type vt);
     voxels(const voxels& v);
     virtual ~voxels();
+
+    app& ctx() { return _ctx; }
+    app& ctx() const { return _ctx; }
 
     dimension& voxel_dimensions() { return _dimension; }
     const dimension& voxel_dimensions() const { return _dimension; }
@@ -295,7 +299,6 @@ namespace CVC_NAMESPACE
 	       const dimension& dim) const;
     double max(uint64 off_x, uint64 off_y, uint64 off_z,
 	       const dimension& dim) const;
-
     voxels& operator=(const voxels& vox) { copy(vox); return *this; }
 
     bool operator==(const voxels& vox) const 
@@ -447,6 +450,9 @@ namespace CVC_NAMESPACE
 	}
     }
     void calcHistogram(uint64 size) const;
+
+    // Application context reference (required for thread progress reporting)
+    app& _ctx;
 
     // Single shared_array for voxel data (all types stored as bytes, cast as needed)
     boost::shared_array<unsigned char> _voxels;

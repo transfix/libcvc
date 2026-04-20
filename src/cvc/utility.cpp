@@ -65,16 +65,16 @@ namespace CVC_NAMESPACE
     return addr.to_string();
   } 
 
-  void calcGradient(std::vector<volume>& grad, const volume& vol, data_type vt)
+  void calcGradient(app& ctx, std::vector<volume>& grad, const volume& vol, data_type vt)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     double dx,dy,dz,length;
     int i, j, k;
 
-    volume gradx(vol.voxel_dimensions(),vt,vol.boundingBox());
-    volume grady(vol.voxel_dimensions(),vt,vol.boundingBox());
-    volume gradz(vol.voxel_dimensions(),vt,vol.boundingBox());
+    volume gradx(ctx, vol.voxel_dimensions(),vt,vol.boundingBox());
+    volume grady(ctx, vol.voxel_dimensions(),vt,vol.boundingBox());
+    volume gradz(ctx, vol.voxel_dimensions(),vt,vol.boundingBox());
 
     //central differences algorithm
     for(k=0; k<int(vol.ZDim()); k++)
@@ -118,7 +118,7 @@ namespace CVC_NAMESPACE
 	      gradz(i,j,k, dz);
 	    }
 
-	cvcapp.threadProgress(float(k)/float(vol.ZDim()));
+	ctx.threadProgress(float(k)/float(vol.ZDim()));
       }
 
     grad.clear();
@@ -126,14 +126,19 @@ namespace CVC_NAMESPACE
     grad.push_back(grady);
     grad.push_back(gradz);
 
-    cvcapp.threadProgress(1.0f);
+    ctx.threadProgress(1.0f);
   }
 
-  void sub(volume& dest, const volume& vol, 
+  void calcGradient(std::vector<volume>& grad, const volume& vol, data_type vt)
+  {
+    calcGradient(app::instance(), grad, vol, vt);
+  }
+
+  void sub(app& ctx, volume& dest, const volume& vol, 
 	   uint64 off_x, uint64 off_y, uint64 off_z,
 	   const dimension& subvoldim)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     if(!(dimension(off_x+subvoldim[0],off_y+subvoldim[1],off_z+subvoldim[2]) <= vol.voxel_dimensions()))
       throw index_out_of_bounds("Subvolume offset and dimension exceeds the boundary of input volume.");
@@ -154,14 +159,21 @@ namespace CVC_NAMESPACE
 	  dest(i,j,k, vol(i+off_x,j+off_y,k+off_z));
   }
 
-  void volconvert(const std::string& input_volume_file,
+  void sub(volume& dest, const volume& vol, 
+	   uint64 off_x, uint64 off_y, uint64 off_z,
+	   const dimension& subvoldim)
+  {
+    sub(app::instance(), dest, vol, off_x, off_y, off_z, subvoldim);
+  }
+
+  void volconvert(app& ctx, const std::string& input_volume_file,
                   const std::string& output_volume_file)
   {
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-    cvcapp.log(2,str(format("%s :: out-of-core convert\n")
+    ctx.log(2,str(format("%s :: out-of-core convert\n")
                      % BOOST_CURRENT_FUNCTION));
       
     volume_file_info volinfo;
@@ -176,7 +188,7 @@ namespace CVC_NAMESPACE
         for(unsigned int var=0; var<volinfo.numVariables(); var++)
           for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
             {
-              volume vol;
+              volume vol(ctx);
               readVolumeFile(vol,input_volume_file,
                              var,time,
                              0,0,k,
@@ -187,8 +199,14 @@ namespace CVC_NAMESPACE
                               var,time,
                               0,0,k);
             }
-        cvcapp.threadProgress(((float)k)/((float)((int)(volinfo.ZDim()-1))));
+        ctx.threadProgress(((float)k)/((float)((int)(volinfo.ZDim()-1))));
       }
+  }
+
+  void volconvert(const std::string& input_volume_file,
+                  const std::string& output_volume_file)
+  {
+    volconvert(app::instance(), input_volume_file, output_volume_file);
   }
 
   // ----
@@ -298,9 +316,9 @@ namespace CVC_NAMESPACE
     return false;
   }
 
-  boost::any load(const std::string& filename)
+  boost::any load(app& ctx, const std::string& filename)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     std::string errors;
     boost::regex file_extension("^(.*)(\\.\\S*)$");
     boost::smatch what;
@@ -312,7 +330,7 @@ namespace CVC_NAMESPACE
       }
     else if(is_volume_filename(filename))
       {
-	CVC_NAMESPACE::volume vol(filename);
+	CVC_NAMESPACE::volume vol(ctx, filename);
 	return vol;
       }
     else
@@ -321,9 +339,14 @@ namespace CVC_NAMESPACE
     return boost::any();
   }
 
-  void save(const boost::any& data, const std::string& filename)
+  boost::any load(const std::string& filename)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    return load(app::instance(), filename);
+  }
+
+  void save(app& ctx, const boost::any& data, const std::string& filename)
+  {
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     if(is_geometry(data))
       {
         CVC_NAMESPACE::geometry geo = boost::any_cast<CVC_NAMESPACE::geometry>(data);
@@ -336,5 +359,10 @@ namespace CVC_NAMESPACE
       }
     else
       throw CVC_NAMESPACE::write_error(BOOST_CURRENT_FUNCTION);
+  }
+
+  void save(const boost::any& data, const std::string& filename)
+  {
+    save(app::instance(), data, filename);
   }  
 }

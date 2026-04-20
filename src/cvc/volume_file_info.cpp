@@ -92,7 +92,7 @@ namespace CVC_NAMESPACE
   {
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    volume vol;
+    volume vol(app::instance());
     const uint64 maxdim = 128; //read in 128^3 chunks
     for(unsigned int off_z = 0; off_z < ZDim(); off_z+=maxdim)
       for(unsigned int off_y = 0; off_y < YDim(); off_y+=maxdim)

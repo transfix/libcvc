@@ -35,6 +35,7 @@ protected:
     bunny = read_geometry("test.bunny");
   }
 
+  cvc::app ctx;
   geometry bunny;
 };
 
@@ -1081,7 +1082,12 @@ TEST_F(GeometryTest, ProjectToTargetSurface) {
 // Algorithm Tests - SDF and Isosurface Extraction
 // ============================================================================
 
-TEST(AlgorithmTest, SDFBasic) {
+class AlgorithmTest : public ::testing::Test {
+protected:
+  cvc::app ctx;
+};
+
+TEST_F(AlgorithmTest, SDFBasic) {
   // Create a simple cube geometry
   geometry cube;
   
@@ -1140,12 +1146,12 @@ TEST(AlgorithmTest, SDFBasic) {
   EXPECT_TRUE(has_positive) << "SDF should have positive values outside";
 }
 
-TEST(AlgorithmTest, IsoBasic) {
+TEST_F(AlgorithmTest, IsoBasic) {
   // Create a simple volume with a known isosurface
   dimension dim(16, 16, 16);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
   
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere-like distance function
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -1176,11 +1182,11 @@ TEST(AlgorithmTest, IsoBasic) {
   EXPECT_FALSE(isosurface.empty());
 }
 
-TEST(AlgorithmTest, IsoWithDifferentIsovalues) {
+TEST_F(AlgorithmTest, IsoWithDifferentIsovalues) {
   dimension dim(16, 16, 16);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
   
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Linear gradient in x direction
   for (uint64 k = 0; k < dim[2]; k++) {
@@ -1203,7 +1209,7 @@ TEST(AlgorithmTest, IsoWithDifferentIsovalues) {
   EXPECT_GT(iso3.num_points(), 0);
 }
 
-TEST(AlgorithmTest, SDFThenIsoRoundtrip) {
+TEST_F(AlgorithmTest, SDFThenIsoRoundtrip) {
   // Create simple geometry
   geometry original;
   
@@ -1246,7 +1252,7 @@ TEST(AlgorithmTest, SDFThenIsoRoundtrip) {
   EXPECT_LE(recon_max[1], 1.5);
 }
 
-TEST(AlgorithmTest, BunnySDF_IsoRoundtrip) {
+TEST_F(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   // Load the Stanford Bunny geometry
   geometry bunny_original = read_geometry("test.bunny");
   
@@ -1331,7 +1337,7 @@ TEST(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   std::cout << "Bunny SDF->ISO roundtrip test completed successfully!" << std::endl;
 }
 
-TEST(AlgorithmTest, BunnyVolumeConvergence) {
+TEST_F(AlgorithmTest, BunnyVolumeConvergence) {
   if (!enable_stress_tests) {
     GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
   }
@@ -1465,7 +1471,7 @@ TEST(AlgorithmTest, BunnyVolumeConvergence) {
 // SDF v2 Algorithm Tests
 // ============================================================================
 
-TEST(AlgorithmTest, SDFV2Basic) {
+TEST_F(AlgorithmTest, SDFV2Basic) {
   // Create a simple cube geometry
   geometry cube;
   
@@ -1519,7 +1525,7 @@ TEST(AlgorithmTest, SDFV2Basic) {
   EXPECT_TRUE(has_positive) << "SDF v2 should have positive values outside";
 }
 
-TEST(AlgorithmTest, SDFV1vsV2Comparison) {
+TEST_F(AlgorithmTest, SDFV1vsV2Comparison) {
   // Create a simple pyramid geometry
   geometry pyramid;
   
@@ -1578,7 +1584,7 @@ TEST(AlgorithmTest, SDFV1vsV2Comparison) {
   }
 }
 
-TEST(AlgorithmTest, SDFFlipNormalsV1) {
+TEST_F(AlgorithmTest, SDFFlipNormalsV1) {
   std::cout << "\n=== Testing SDF v1 FlipNormals Parameter ===" << std::endl;
   
   // Create a simple cube mesh
@@ -1627,7 +1633,7 @@ TEST(AlgorithmTest, SDFFlipNormalsV1) {
   std::cout << "SUCCESS: FlipNormals correctly inverts inside/outside for SDF v1" << std::endl;
 }
 
-TEST(AlgorithmTest, SDFFlipNormalsV2) {
+TEST_F(AlgorithmTest, SDFFlipNormalsV2) {
   std::cout << "\n=== Testing SDF v2 FlipNormals Parameter ===" << std::endl;
   
   // Create a simple cube mesh
@@ -1740,7 +1746,7 @@ TEST_F(GeometryTest, SDFV1MultipleSequentialCalls) {
 // if index2cell() returned -1 for out-of-bounds cell indices. Geometries with vertices
 // extending outside the grid bounding box would cause negative array indexing.
 // Fix: Added bounds check (if nc < 0) continue; before accessing p_Cells[nc]
-TEST(AlgorithmTest, SDFV2ParallelExecution) {
+TEST_F(AlgorithmTest, SDFV2ParallelExecution) {
   std::cout << "\n=== Testing SDF v2 Parallel Execution (No Global State) ===" << std::endl;
   
   // Create multiple different geometries
@@ -1804,7 +1810,9 @@ TEST(AlgorithmTest, SDFV2ParallelExecution) {
   bounding_box bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
   
   // Run SDF computations in parallel using thread pool
-  std::vector<volume> results(4);
+  std::vector<volume> results;
+  results.reserve(4);
+  for (int i = 0; i < 4; i++) results.emplace_back(ctx);
   std::atomic<int> completed(0);
   std::vector<std::string> task_keys;
   
@@ -1887,7 +1895,7 @@ double get_memory_usage_mb() {
   return static_cast<double>(usage.ru_maxrss) / 1024.0;
 }
 
-TEST(AlgorithmTest, SDFStressTest) {
+TEST_F(AlgorithmTest, SDFStressTest) {
   if (!enable_stress_tests) {
     GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
   }
@@ -1942,7 +1950,7 @@ TEST(AlgorithmTest, SDFStressTest) {
     dimension dim(res, res, res);
     long v1_time = 0, v2_time = 0;
     int v1_interior_voxels = 0;
-    volume v1_result, v2_result;
+    volume v1_result(ctx), v2_result(ctx);
     
     // Test SDF v1
     {
@@ -2618,7 +2626,7 @@ TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
 // Isosurface Extraction Method Comparison Tests
 // ============================================================================
 
-TEST(AlgorithmTest, IsoExtractionMethodComparison) {
+TEST_F(AlgorithmTest, IsoExtractionMethodComparison) {
   std::cout << "\n=== Isosurface Extraction Methods Comparison ===" << std::endl;
   std::cout << std::string(100, '=') << std::endl;
   
@@ -2627,7 +2635,7 @@ TEST(AlgorithmTest, IsoExtractionMethodComparison) {
   bounding_box bbox;
   bbox.minx = bbox.miny = bbox.minz = -1.0;
   bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
-  volume sphere_vol(dim, Float, bbox);
+  volume sphere_vol(ctx, dim, Float, bbox);
   
   // Fill with sphere SDF (radius 0.5)
   for (uint64 k = 0; k < dim.zdim; k++) {
@@ -2686,7 +2694,7 @@ TEST(AlgorithmTest, IsoExtractionMethodComparison) {
   std::cout << std::string(100, '=') << std::endl;
 }
 
-TEST(AlgorithmTest, IsoImprovementIterationsComparison) {
+TEST_F(AlgorithmTest, IsoImprovementIterationsComparison) {
   std::cout << "\n=== Isosurface Quality Improvement Comparison ===" << std::endl;
   std::cout << std::string(100, '=') << std::endl;
   
@@ -2695,7 +2703,7 @@ TEST(AlgorithmTest, IsoImprovementIterationsComparison) {
   bounding_box bbox;
   bbox.minx = bbox.miny = bbox.minz = -1.0;
   bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
-  volume sphere_vol(dim, Float, bbox);
+  volume sphere_vol(ctx, dim, Float, bbox);
   
   double radius = 0.5;
   for (uint64 k = 0; k < dim.zdim; k++) {
@@ -2766,7 +2774,7 @@ TEST(AlgorithmTest, IsoImprovementIterationsComparison) {
   std::cout << "Note: Hausdorff distance measures max deviation from baseline (0 iterations)" << std::endl;
 }
 
-TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
+TEST_F(AlgorithmTest, IsoMethodAndIterationAccuracy) {
   std::cout << "\n=== Extraction Method + Improvement Accuracy Test ===" << std::endl;
   std::cout << std::string(120, '=') << std::endl;
   
@@ -2775,7 +2783,7 @@ TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
   bounding_box bbox;
   bbox.minx = bbox.miny = bbox.minz = -1.0;
   bbox.maxx = bbox.maxy = bbox.maxz = 1.0;
-  volume sphere_vol(dim, Float, bbox);
+  volume sphere_vol(ctx, dim, Float, bbox);
   
   double radius = 0.5;
   for (uint64 k = 0; k < dim.zdim; k++) {
@@ -2863,7 +2871,7 @@ TEST(AlgorithmTest, IsoMethodAndIterationAccuracy) {
   std::cout << "- More iterations generally improve accuracy at the cost of time" << std::endl;
 }
 
-TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
+TEST_F(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
   if (!enable_stress_tests) {
     GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
   }
@@ -3128,7 +3136,7 @@ TEST(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
 // Property Interpolation Integration Test
 // ============================================================================
 
-TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
+TEST_F(AlgorithmTest, PropertyInterpolationWithSegmentation) {
   // Integration test: Create an SDF, segment it with property values,
   // mesh with property interpolation, then verify function values
   
@@ -3160,7 +3168,7 @@ TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
   // The mesher will automatically resize it to match the octree's adjusted dimensions
   // - Region 1 (x < 0): property value = 100.0
   // - Region 2 (x >= 0): property value = 200.0
-  volume prop_vol(dimension(dim, dim, dim), 
+  volume prop_vol(ctx, dimension(dim, dim, dim), Float,
                   bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0));
   
   for(unsigned int k = 0; k < dim; k++) {
@@ -3252,7 +3260,7 @@ TEST(AlgorithmTest, PropertyInterpolationWithSegmentation) {
 // Normal Type Tests
 // ============================================================================
 
-TEST(AlgorithmTest, NormalTypeIsosurface) {
+TEST_F(AlgorithmTest, NormalTypeIsosurface) {
   // Test all three normal type methods for isosurface extraction
   // Verifies all normal types produce valid meshes
   
@@ -3307,7 +3315,7 @@ TEST(AlgorithmTest, NormalTypeIsosurface) {
   std::cout << "\nAll normal types produced valid isosurface meshes." << std::endl;
 }
 
-TEST(AlgorithmTest, NormalTypeVolumetricMesh) {
+TEST_F(AlgorithmTest, NormalTypeVolumetricMesh) {
   // Test normal types with volumetric meshing (tetrahedralize)
   
   std::cout << "\n=== Normal Type Volumetric Mesh Test ===" << std::endl;
@@ -4153,7 +4161,7 @@ TEST_F(GeometryTest, TetrahedralizeProducesGeometry) {
   // Test: tetrahedralize() produces a mesh (currently returns surface representation)
   dimension dim(16, 16, 16);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere-like distance function
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4187,7 +4195,7 @@ TEST_F(GeometryTest, HexahedralizeProducesGeometry) {
   // Test: hexahedralize() produces a mesh (currently returns surface representation)
   dimension dim(16, 16, 16);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere-like distance function
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4221,7 +4229,7 @@ TEST_F(GeometryTest, VolumetricMeshQualityImprove) {
   // Test: quality_improve() works on meshes produced by tetrahedralize
   dimension dim(16, 16, 16);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere-like distance function
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4259,12 +4267,12 @@ TEST_F(GeometryTest, VolumetricMeshQualityImprove) {
 // Week 3 Option 1: Extract Surface from Volumetric Meshes
 // ----------------
 
-TEST(AlgorithmTest, ExtractSurfaceFromTetMesh)
+TEST_F(AlgorithmTest, ExtractSurfaceFromTetMesh)
 {
   // Create a tetrahedral mesh from a simple volume
   dimension dim(10, 10, 10);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere SDF
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4302,12 +4310,12 @@ TEST(AlgorithmTest, ExtractSurfaceFromTetMesh)
   EXPECT_EQ(surface.num_points(), tet_mesh.num_points());
 }
 
-TEST(AlgorithmTest, ExtractSurfaceFromHexMesh)
+TEST_F(AlgorithmTest, ExtractSurfaceFromHexMesh)
 {
   // Create a hexahedral mesh from a simple volume
   dimension dim(10, 10, 10);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere SDF
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4345,12 +4353,12 @@ TEST(AlgorithmTest, ExtractSurfaceFromHexMesh)
   EXPECT_EQ(surface.num_points(), hex_mesh.num_points());
 }
 
-TEST(AlgorithmTest, ExtractSurfaceFromSurfaceMesh)
+TEST_F(AlgorithmTest, ExtractSurfaceFromSurfaceMesh)
 {
   // Create a simple surface mesh (already a surface)
   dimension dim(10, 10, 10);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   // Create a sphere SDF
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4387,7 +4395,7 @@ TEST(AlgorithmTest, ExtractSurfaceFromSurfaceMesh)
 // Week 3 Option 2: Property Interpolation for Volumetric Meshes
 // ----------------
 
-TEST(AlgorithmTest, TetBarycentricCoordinates)
+TEST_F(AlgorithmTest, TetBarycentricCoordinates)
 {
   // Create a simple tetrahedron
   geometry::point_t v0 = {{0.0, 0.0, 0.0}};
@@ -4409,7 +4417,7 @@ TEST(AlgorithmTest, TetBarycentricCoordinates)
   EXPECT_NEAR(wc[0], 0.25, 0.1);  // Approximately equal for this tet
 }
 
-TEST(AlgorithmTest, PropertyInterpolationInTet)
+TEST_F(AlgorithmTest, PropertyInterpolationInTet)
 {
   // Create a simple tet mesh with one tetrahedron
   geometry geom;
@@ -4435,7 +4443,7 @@ TEST(AlgorithmTest, PropertyInterpolationInTet)
   EXPECT_NEAR(value, 0.75, 0.1);
 }
 
-TEST(AlgorithmTest, PropertyInterpolationInHex)
+TEST_F(AlgorithmTest, PropertyInterpolationInHex)
 {
   // Create a simple hex (unit cube)
   geometry geom;
@@ -4465,13 +4473,13 @@ TEST(AlgorithmTest, PropertyInterpolationInHex)
   EXPECT_NEAR(value, 1.5, 0.2);
 }
 
-TEST(AlgorithmTest, VolumetricMeshWithPropertyInterpolation)
+TEST_F(AlgorithmTest, VolumetricMeshWithPropertyInterpolation)
 {
   // Create a volume with both SDF and property data
   dimension dim(10, 10, 10);
   bounding_box bbox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-  volume sdf_vol(dim, Float, bbox);
-  volume prop_vol(dim, Float, bbox);
+  volume sdf_vol(ctx, dim, Float, bbox);
+  volume prop_vol(ctx, dim, Float, bbox);
   
   // Create a sphere SDF and linear property field
   double center_x = 0.5, center_y = 0.5, center_z = 0.5;
@@ -4537,7 +4545,7 @@ TEST(AlgorithmTest, VolumetricMeshWithPropertyInterpolation)
 // Week 3 Option 3: Volumetric Mesh Quality Metrics
 // ----------------
 
-TEST(AlgorithmTest, TetVolumeMetric)
+TEST_F(AlgorithmTest, TetVolumeMetric)
 {
   // Create a simple regular tetrahedron
   geometry::point_t v0 = {{0.0, 0.0, 0.0}};
@@ -4552,7 +4560,7 @@ TEST(AlgorithmTest, TetVolumeMetric)
   EXPECT_NEAR(vol, 0.118, 0.01);
 }
 
-TEST(AlgorithmTest, TetAspectRatioMetric)
+TEST_F(AlgorithmTest, TetAspectRatioMetric)
 {
   // Equilateral tetrahedron
   geometry::point_t v0 = {{0.0, 0.0, 0.0}};
@@ -4574,7 +4582,7 @@ TEST(AlgorithmTest, TetAspectRatioMetric)
   EXPECT_GT(ar_bad, ar);
 }
 
-TEST(AlgorithmTest, TetMinDihedralAngle)
+TEST_F(AlgorithmTest, TetMinDihedralAngle)
 {
   // Regular tetrahedron
   geometry::point_t v0 = {{0.0, 0.0, 0.0}};
@@ -4589,7 +4597,7 @@ TEST(AlgorithmTest, TetMinDihedralAngle)
   EXPECT_LT(min_angle, 80.0);
 }
 
-TEST(AlgorithmTest, HexVolumeMetric)
+TEST_F(AlgorithmTest, HexVolumeMetric)
 {
   // Unit cube
   geometry::point_t vertices[8] = {
@@ -4603,7 +4611,7 @@ TEST(AlgorithmTest, HexVolumeMetric)
   EXPECT_NEAR(vol, 1.0, 0.01);
 }
 
-TEST(AlgorithmTest, HexJacobianMetric)
+TEST_F(AlgorithmTest, HexJacobianMetric)
 {
   // Unit cube (should have positive Jacobian)
   geometry::point_t vertices[8] = {
@@ -4622,7 +4630,7 @@ TEST(AlgorithmTest, HexJacobianMetric)
   EXPECT_LE(scaled_jac, 1.0);
 }
 
-TEST(AlgorithmTest, TetMeshQualityStatistics)
+TEST_F(AlgorithmTest, TetMeshQualityStatistics)
 {
   // Create a simple tet mesh
   geometry geom;
@@ -4654,7 +4662,7 @@ TEST(AlgorithmTest, TetMeshQualityStatistics)
 // Week 3 Option 4: Advanced Mesh Utilities
 // ----------------
 
-TEST(AlgorithmTest, FindTetsContainingPoint)
+TEST_F(AlgorithmTest, FindTetsContainingPoint)
 {
   // Create a simple tet mesh
   geometry geom;
@@ -4675,7 +4683,7 @@ TEST(AlgorithmTest, FindTetsContainingPoint)
   EXPECT_EQ(tets_outside.size(), 0);
 }
 
-TEST(AlgorithmTest, ComputeMeshBounds)
+TEST_F(AlgorithmTest, ComputeMeshBounds)
 {
   // Create a simple mesh
   geometry geom;
@@ -4693,7 +4701,7 @@ TEST(AlgorithmTest, ComputeMeshBounds)
   EXPECT_NEAR(bounds[5], 6.0, 1e-10);   // max_z
 }
 
-TEST(AlgorithmTest, FilterTetsByQuality)
+TEST_F(AlgorithmTest, FilterTetsByQuality)
 {
   // Create mesh with good and bad tets
   geometry geom;
@@ -4717,7 +4725,7 @@ TEST(AlgorithmTest, FilterTetsByQuality)
   EXPECT_EQ(good_tets[0], 0);  // First tet should be the good one
 }
 
-TEST(AlgorithmTest, ExtractQualityElements)
+TEST_F(AlgorithmTest, ExtractQualityElements)
 {
   // Create mesh with mixed quality
   geometry geom;
@@ -4744,7 +4752,7 @@ TEST(AlgorithmTest, ExtractQualityElements)
 // Performance Tests for Point Location on Large Meshes
 // ----------------
 
-TEST(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh)
+TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh)
 {
   // Create high-resolution SDF from bunny mesh
   geometry bunny = read_geometry("test.bunny");  // Uses bunny_io to load embedded data
@@ -4816,7 +4824,7 @@ TEST(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh)
   EXPECT_GT(total_found, 0);
 }
 
-TEST(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh)
+TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh)
 {
   // Create high-resolution SDF from bunny mesh
   geometry bunny = read_geometry("test.bunny");

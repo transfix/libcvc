@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include <cvc/volume.h>
+#include <cvc/app.h>
 #include <cmath>
 
 using namespace CVC_NAMESPACE;
@@ -14,8 +15,14 @@ using namespace CVC_NAMESPACE;
 // Construction and Basic Properties Tests
 // ============================================================================
 
-TEST(VolumeTest, DefaultConstruction) {
-  volume vol;
+
+class VolumeTest : public ::testing::Test {
+protected:
+    cvc::app ctx;
+};
+
+TEST_F(VolumeTest, DefaultConstruction) {
+  volume vol(ctx);
   
   // Default dimension is 4x4x4
   EXPECT_EQ(vol.XDim(), 4u);
@@ -34,11 +41,11 @@ TEST(VolumeTest, DefaultConstruction) {
   EXPECT_DOUBLE_EQ(vol.ZMax(), 0.5);
 }
 
-TEST(VolumeTest, CustomConstruction) {
+TEST_F(VolumeTest, CustomConstruction) {
   dimension dim(10, 20, 30);
   bounding_box bbox(0.0, 0.0, 0.0, 10.0, 20.0, 30.0);
   
-  volume vol(dim, Float, bbox);
+  volume vol(ctx, dim, Float, bbox);
   
   EXPECT_EQ(vol.XDim(), 10u);
   EXPECT_EQ(vol.YDim(), 20u);
@@ -53,10 +60,10 @@ TEST(VolumeTest, CustomConstruction) {
   EXPECT_DOUBLE_EQ(vol.ZMax(), 30.0);
 }
 
-TEST(VolumeTest, CopyConstruction) {
+TEST_F(VolumeTest, CopyConstruction) {
   dimension dim(8, 8, 8);
   bounding_box bbox(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
-  volume vol1(dim, Float, bbox);
+  volume vol1(ctx, dim, Float, bbox);
   vol1.desc("Test Volume");
   vol1.fill(42.0);
   
@@ -71,13 +78,13 @@ TEST(VolumeTest, CopyConstruction) {
   EXPECT_DOUBLE_EQ(vol2(4, 4, 4), 42.0);
 }
 
-TEST(VolumeTest, Assignment) {
-  volume vol1(dimension(10, 10, 10), Float, 
+TEST_F(VolumeTest, Assignment) {
+  volume vol1(ctx, dimension(10, 10, 10), Float, 
               bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   vol1.desc("Volume One");
   vol1.fill(100.0);
   
-  volume vol2;
+  volume vol2(ctx);
   vol2 = vol1;
   
   EXPECT_EQ(vol2.XDim(), 10u);
@@ -90,10 +97,10 @@ TEST(VolumeTest, Assignment) {
 // Span Calculation Tests
 // ============================================================================
 
-TEST(VolumeTest, SpanCalculation) {
+TEST_F(VolumeTest, SpanCalculation) {
   // 10x10x10 volume in [0,9]³ space
   // Span should be (9-0)/(10-1) = 1.0
-  volume vol(dimension(10, 10, 10), Float,
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   
   EXPECT_DOUBLE_EQ(vol.XSpan(), 1.0);
@@ -101,9 +108,9 @@ TEST(VolumeTest, SpanCalculation) {
   EXPECT_DOUBLE_EQ(vol.ZSpan(), 1.0);
 }
 
-TEST(VolumeTest, SpanWithNonUniformBoundingBox) {
+TEST_F(VolumeTest, SpanWithNonUniformBoundingBox) {
   // 5x10x20 volume in [0,4]x[0,18]x[0,38] space
-  volume vol(dimension(5, 10, 20), Float,
+  volume vol(ctx, dimension(5, 10, 20), Float,
              bounding_box(0.0, 0.0, 0.0, 4.0, 18.0, 38.0));
   
   EXPECT_DOUBLE_EQ(vol.XSpan(), 1.0);  // 4/(5-1) = 1.0
@@ -111,9 +118,9 @@ TEST(VolumeTest, SpanWithNonUniformBoundingBox) {
   EXPECT_DOUBLE_EQ(vol.ZSpan(), 2.0);  // 38/(20-1) = 2.0
 }
 
-TEST(VolumeTest, SpanWithSingleVoxelDimension) {
+TEST_F(VolumeTest, SpanWithSingleVoxelDimension) {
   // 1x10x10 volume - X span should be 0
-  volume vol(dimension(1, 10, 10), Float,
+  volume vol(ctx, dimension(1, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 5.0, 9.0, 9.0));
   
   EXPECT_DOUBLE_EQ(vol.XSpan(), 0.0);
@@ -125,9 +132,9 @@ TEST(VolumeTest, SpanWithSingleVoxelDimension) {
 // Interpolation Tests
 // ============================================================================
 
-TEST(VolumeTest, InterpolationCornerValues) {
+TEST_F(VolumeTest, InterpolationCornerValues) {
   // Simple 2x2x2 volume with known values at corners
-  volume vol(dimension(2, 2, 2), Float,
+  volume vol(ctx, dimension(2, 2, 2), Float,
              bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
   
   vol(0, 0, 0, 0.0);
@@ -146,9 +153,9 @@ TEST(VolumeTest, InterpolationCornerValues) {
   EXPECT_DOUBLE_EQ(vol.interpolate(1.0, 1.0, 1.0), 7.0);
 }
 
-TEST(VolumeTest, InterpolationMidpoint) {
+TEST_F(VolumeTest, InterpolationMidpoint) {
   // 2x2x2 volume with linear gradient
-  volume vol(dimension(2, 2, 2), Float,
+  volume vol(ctx, dimension(2, 2, 2), Float,
              bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
   
   vol(0, 0, 0, 0.0);
@@ -165,8 +172,8 @@ TEST(VolumeTest, InterpolationMidpoint) {
   EXPECT_NEAR(mid, 1.0, 0.01);
 }
 
-TEST(VolumeTest, InterpolationOutOfBounds) {
-  volume vol(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, InterpolationOutOfBounds) {
+  volume vol(ctx, dimension(5, 5, 5), Float,
              bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol.fill(1.0);
   
@@ -176,9 +183,9 @@ TEST(VolumeTest, InterpolationOutOfBounds) {
   EXPECT_THROW(vol.interpolate(2.0, 2.0, -0.5), index_out_of_bounds);
 }
 
-TEST(VolumeTest, InterpolationLinearGradient) {
+TEST_F(VolumeTest, InterpolationLinearGradient) {
   // Volume with linear gradient along X
-  volume vol(dimension(11, 5, 5), Float,
+  volume vol(ctx, dimension(11, 5, 5), Float,
              bounding_box(0.0, 0.0, 0.0, 10.0, 4.0, 4.0));
   
   for (uint64 i = 0; i < 11; ++i) {
@@ -200,8 +207,8 @@ TEST(VolumeTest, InterpolationLinearGradient) {
 // Subvolume Tests
 // ============================================================================
 
-TEST(VolumeTest, SubvolumeByOffset) {
-  volume vol(dimension(10, 10, 10), Float,
+TEST_F(VolumeTest, SubvolumeByOffset) {
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   
   // Fill with position-dependent values
@@ -236,8 +243,8 @@ TEST(VolumeTest, SubvolumeByOffset) {
   EXPECT_DOUBLE_EQ(vol(0, 0, 0), 432.0);  // 2 + 3*10 + 4*100
 }
 
-TEST(VolumeTest, SubvolumeByBoundingBox) {
-  volume vol(dimension(10, 10, 10), Float,
+TEST_F(VolumeTest, SubvolumeByBoundingBox) {
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   vol.fill(5.0);
   
@@ -256,8 +263,8 @@ TEST(VolumeTest, SubvolumeByBoundingBox) {
   EXPECT_NEAR(vol.YMax(), 7.0, 0.1);
 }
 
-TEST(VolumeTest, SubvolumeWithDifferentResolution) {
-  volume vol(dimension(20, 20, 20), Float,
+TEST_F(VolumeTest, SubvolumeWithDifferentResolution) {
+  volume vol(ctx, dimension(20, 20, 20), Float,
              bounding_box(0.0, 0.0, 0.0, 19.0, 19.0, 19.0));
   
   // Fill with gradient
@@ -288,8 +295,8 @@ TEST(VolumeTest, SubvolumeWithDifferentResolution) {
   EXPECT_LT(vol(0, 0, 0), 6.0);
 }
 
-TEST(VolumeTest, SubvolumeOutOfBounds) {
-  volume vol(dimension(10, 10, 10), Float,
+TEST_F(VolumeTest, SubvolumeOutOfBounds) {
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   
   // Subvolume extends outside original bounds
@@ -302,13 +309,13 @@ TEST(VolumeTest, SubvolumeOutOfBounds) {
 // Combine Volumes Tests
 // ============================================================================
 
-TEST(VolumeTest, CombineWithNonOverlapping) {
+TEST_F(VolumeTest, CombineWithNonOverlapping) {
   // Two non-overlapping volumes
-  volume vol1(dimension(5, 5, 5), Float,
+  volume vol1(ctx, dimension(5, 5, 5), Float,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol1.fill(10.0);
   
-  volume vol2(dimension(5, 5, 5), Float,
+  volume vol2(ctx, dimension(5, 5, 5), Float,
               bounding_box(5.0, 5.0, 5.0, 9.0, 9.0, 9.0));
   vol2.fill(20.0);
   
@@ -326,13 +333,13 @@ TEST(VolumeTest, CombineWithNonOverlapping) {
   EXPECT_EQ(vol1.XDim(), 5u);
 }
 
-TEST(VolumeTest, CombineWithOverlapping) {
+TEST_F(VolumeTest, CombineWithOverlapping) {
   // Two overlapping volumes
-  volume vol1(dimension(6, 6, 6), Float,
+  volume vol1(ctx, dimension(6, 6, 6), Float,
               bounding_box(0.0, 0.0, 0.0, 5.0, 5.0, 5.0));
   vol1.fill(100.0);
   
-  volume vol2(dimension(6, 6, 6), Float,
+  volume vol2(ctx, dimension(6, 6, 6), Float,
               bounding_box(3.0, 3.0, 3.0, 8.0, 8.0, 8.0));
   vol2.fill(200.0);
   
@@ -348,12 +355,12 @@ TEST(VolumeTest, CombineWithOverlapping) {
   EXPECT_GT(val_in_vol2_region, 150.0);
 }
 
-TEST(VolumeTest, CombineWithCustomDimension) {
-  volume vol1(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, CombineWithCustomDimension) {
+  volume vol1(ctx, dimension(5, 5, 5), Float,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol1.fill(50.0);
   
-  volume vol2(dimension(5, 5, 5), Float,
+  volume vol2(ctx, dimension(5, 5, 5), Float,
               bounding_box(5.0, 5.0, 5.0, 9.0, 9.0, 9.0));
   vol2.fill(50.0);
   
@@ -369,8 +376,8 @@ TEST(VolumeTest, CombineWithCustomDimension) {
 // Equality and Comparison Tests
 // ============================================================================
 
-TEST(VolumeTest, Equality) {
-  volume vol1(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, Equality) {
+  volume vol1(ctx, dimension(5, 5, 5), Float,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol1.fill(42.0);
   
@@ -380,12 +387,12 @@ TEST(VolumeTest, Equality) {
   EXPECT_FALSE(vol1 != vol2);
 }
 
-TEST(VolumeTest, InequalityDifferentBoundingBox) {
-  volume vol1(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, InequalityDifferentBoundingBox) {
+  volume vol1(ctx, dimension(5, 5, 5), Float,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol1.fill(42.0);
   
-  volume vol2(dimension(5, 5, 5), Float,
+  volume vol2(ctx, dimension(5, 5, 5), Float,
               bounding_box(1.0, 1.0, 1.0, 5.0, 5.0, 5.0));
   vol2.fill(42.0);
   
@@ -393,14 +400,14 @@ TEST(VolumeTest, InequalityDifferentBoundingBox) {
   EXPECT_FALSE(vol1 == vol2);
 }
 
-TEST(VolumeTest, InequalityDifferentData) {
+TEST_F(VolumeTest, InequalityDifferentData) {
   // Create two volumes with same bounding box but different data
   // Use UChar for reliable comparison (Float might have precision issues)
-  volume vol1(dimension(5, 5, 5), UChar,
+  volume vol1(ctx, dimension(5, 5, 5), UChar,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol1.fill(42.0);
   
-  volume vol2(dimension(5, 5, 5), UChar,
+  volume vol2(ctx, dimension(5, 5, 5), UChar,
               bounding_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0));
   vol2.fill(100.0);
   
@@ -416,8 +423,8 @@ TEST(VolumeTest, InequalityDifferentData) {
 // Description Tests
 // ============================================================================
 
-TEST(VolumeTest, Description) {
-  volume vol;
+TEST_F(VolumeTest, Description) {
+  volume vol(ctx);
   
   EXPECT_EQ(vol.desc(), "No Name");
   
@@ -428,14 +435,14 @@ TEST(VolumeTest, Description) {
   EXPECT_EQ(vol.desc(), "Modified Description");
 }
 
-TEST(VolumeTest, DescriptionPersistsThroughCopy) {
-  volume vol1;
+TEST_F(VolumeTest, DescriptionPersistsThroughCopy) {
+  volume vol1(ctx);
   vol1.desc("Original");
   
   volume vol2(vol1);
   EXPECT_EQ(vol2.desc(), "Original");
   
-  volume vol3;
+  volume vol3(ctx);
   vol3 = vol1;
   EXPECT_EQ(vol3.desc(), "Original");
 }
@@ -444,8 +451,8 @@ TEST(VolumeTest, DescriptionPersistsThroughCopy) {
 // Edge Cases and Boundary Tests
 // ============================================================================
 
-TEST(VolumeTest, InterpolationAtBoundaryEdges) {
-  volume vol(dimension(3, 3, 3), Float,
+TEST_F(VolumeTest, InterpolationAtBoundaryEdges) {
+  volume vol(ctx, dimension(3, 3, 3), Float,
              bounding_box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
   
   for (uint64 i = 0; i < 27; ++i) {
@@ -458,8 +465,8 @@ TEST(VolumeTest, InterpolationAtBoundaryEdges) {
   EXPECT_NO_THROW(vol.interpolate(0.0, 1.0, 2.0));
 }
 
-TEST(VolumeTest, VerySmallBoundingBox) {
-  volume vol(dimension(10, 10, 10), Float,
+TEST_F(VolumeTest, VerySmallBoundingBox) {
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 0.001, 0.001, 0.001));
   
   vol.fill(1.0);
@@ -474,8 +481,8 @@ TEST(VolumeTest, VerySmallBoundingBox) {
   EXPECT_NEAR(val, 1.0, 0.1);
 }
 
-TEST(VolumeTest, NegativeBoundingBox) {
-  volume vol(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, NegativeBoundingBox) {
+  volume vol(ctx, dimension(5, 5, 5), Float,
              bounding_box(-10.0, -10.0, -10.0, -6.0, -6.0, -6.0));
   vol.fill(3.14);
   
@@ -487,8 +494,8 @@ TEST(VolumeTest, NegativeBoundingBox) {
   EXPECT_NEAR(val, 3.14, 0.1);
 }
 
-TEST(VolumeTest, LargeBoundingBox) {
-  volume vol(dimension(5, 5, 5), Float,
+TEST_F(VolumeTest, LargeBoundingBox) {
+  volume vol(ctx, dimension(5, 5, 5), Float,
              bounding_box(0.0, 0.0, 0.0, 1000.0, 1000.0, 1000.0));
   vol.fill(99.0);
   
@@ -504,8 +511,8 @@ TEST(VolumeTest, LargeBoundingBox) {
 // Subvolume Preservation Tests
 // ============================================================================
 
-TEST(VolumeTest, SubvolumePreservesValues) {
-  volume vol(dimension(10, 10, 10), Float,
+TEST_F(VolumeTest, SubvolumePreservesValues) {
+  volume vol(ctx, dimension(10, 10, 10), Float,
              bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
   
   // Set specific value at center
@@ -520,9 +527,9 @@ TEST(VolumeTest, SubvolumePreservesValues) {
   EXPECT_NEAR(vol(1, 1, 1), 123.456, 0.001);
 }
 
-TEST(VolumeTest, SubvolumeInterpolationAccuracy) {
+TEST_F(VolumeTest, SubvolumeInterpolationAccuracy) {
   // Create volume with known interpolatable pattern
-  volume vol(dimension(11, 11, 11), Float,
+  volume vol(ctx, dimension(11, 11, 11), Float,
              bounding_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0));
   
   // Linear gradient

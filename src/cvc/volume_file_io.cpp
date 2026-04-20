@@ -393,15 +393,7 @@ namespace CVC_NAMESPACE
   void readVolumeFile(std::vector<volume>& vols,
 		      const std::string& filename)
   {
-    volume_file_info volinfo(filename);
-    volume vol;
-    vols.clear();
-    for(unsigned int var=0; var<volinfo.numVariables(); var++)
-      for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
-	{
-	  readVolumeFile(vol,filename,var,time);
-	  vols.push_back(vol);
-	}
+    readVolumeFile(app::instance(), vols, filename);
   }
 
   // ---------------
@@ -500,7 +492,7 @@ namespace CVC_NAMESPACE
     if(dim[1] + off_y > volinfo.YDim()) dim[1] = volinfo.YDim() <= 1 ? 1 : volinfo.YDim() - off_y;
     if(dim[2] + off_z > volinfo.ZDim()) dim[2] = volinfo.ZDim() <= 1 ? 1 : volinfo.ZDim() - off_z;
 
-    volume subvol(dim,volinfo.voxelTypes(var),
+    volume subvol(ctx, dim,volinfo.voxelTypes(var),
 		  bounding_box(volinfo.XMin() + off_x*volinfo.XSpan(),
 					 volinfo.YMin() + off_y*volinfo.YSpan(),
 					 volinfo.ZMin() + off_z*volinfo.ZSpan(),
@@ -726,7 +718,7 @@ namespace CVC_NAMESPACE
 		      const std::string& filename)
   {
     volume_file_info volinfo(filename);
-    volume vol;
+    volume vol(ctx);
     vols.clear();
     for(unsigned int var=0; var<volinfo.numVariables(); var++)
       for(unsigned int time=0; time<volinfo.numTimesteps(); time++)

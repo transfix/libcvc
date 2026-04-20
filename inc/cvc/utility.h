@@ -161,23 +161,25 @@ namespace CVC_NAMESPACE
   */
   void calcGradient(std::vector<volume>& grad, const volume& vol, data_type vt = Float);
 
-  /*
-    Copies a subvolume of vol to dest.
-  */
   void sub(volume& dest, const volume& vol, 
 	   uint64 off_x, uint64 off_y, uint64 off_z,
 	   const dimension& subvoldim);
 
-  // ----------
-  // volconvert
-  // ----------
-  // Purpose: 
-  //   Converts (or copies) volume from one file or filetype to another.  Basically
-  //   the same as the VolUtils cmd line program.
-  // ---- Change History ----
-  // 09/18/2011 -- Joe R. -- Creation.
   void volconvert(const std::string& input_volume_file,
                   const std::string& output_volume_file);
+
+  // ---- Overloads accepting explicit app& context ----
+  void calcGradient(app& ctx, std::vector<volume>& grad, const volume& vol, data_type vt = Float);
+
+  void sub(app& ctx, volume& dest, const volume& vol,
+	   uint64 off_x, uint64 off_y, uint64 off_z,
+	   const dimension& subvoldim);
+
+  void volconvert(app& ctx, const std::string& input_volume_file,
+                  const std::string& output_volume_file);
+
+  boost::any load(app& ctx, const std::string& filename);
+  void save(app& ctx, const boost::any& data, const std::string& filename);
 
 
   /*

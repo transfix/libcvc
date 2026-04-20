@@ -781,9 +781,9 @@ namespace CVC_NAMESPACE
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const
     {
-      thread_info ti(BOOST_CURRENT_FUNCTION);
+      thread_info ti(wvol.ctx(), BOOST_CURRENT_FUNCTION);
 
-      volume vol;
+      volume vol(wvol.ctx());
 
       if(var > 0)
 	throw index_out_of_bounds("Variable index out of bounds.");

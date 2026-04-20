@@ -30,7 +30,7 @@ namespace CVC_NAMESPACE
 {
   voxels& voxels::bilateralFilter(double radiometricSigma, double spatialSigma, unsigned int filterRadius)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     int i,j,k,x,y,z,c,index;
     int filterDiameter = filterRadius*2+1;
@@ -67,12 +67,12 @@ namespace CVC_NAMESPACE
     if (_using_cuda && _cuda_unified_ptr) {
       try {
         // Create temporary buffer and copy source data
-        voxels temp(voxel_dimensions(), voxelType());
+        voxels temp(_ctx, voxel_dimensions(), voxelType());
         temp.copy(*this, true);  // Deep copy first
         temp.enableCUDA(_cuda_device_id);  // Then enable CUDA (migrates to GPU)
         
         // Allocate CUDA unified memory for destination
-        voxels result(voxel_dimensions(), voxelType());
+        voxels result(_ctx, voxel_dimensions(), voxelType());
         result.enableCUDA(_cuda_device_id);
         
         // Launch CUDA kernel for bilateral filtering
@@ -89,19 +89,19 @@ namespace CVC_NAMESPACE
         // Copy the result
         copy(result);
         delete [] spatialMask;
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         
         return *this;
       } catch (const cuda_error& e) {
         // Fall back to CPU implementation if CUDA fails
-        cvcapp.log(2, std::string("CUDA bilateral filter failed: ") + e.what() + ", falling back to CPU");
+        _ctx.log(2, std::string("CUDA bilateral filter failed: ") + e.what() + ", falling back to CPU");
       }
     }
 #endif
     
     // CPU implementation (fallback or when CUDA not available)
     // Use temporary buffer with deep copy to avoid race conditions with OpenMP
-    voxels temp(voxel_dimensions(), voxelType());
+    voxels temp(_ctx, voxel_dimensions(), voxelType());
     temp.copy(*this, true);  // Deep copy
     
     // Call preWrite() once BEFORE parallel region to avoid race on _histogramDirty flag
@@ -159,10 +159,10 @@ namespace CVC_NAMESPACE
 		}
 	    }
 
-        cvcapp.threadProgress(float(k)/float(numSteps));
+        _ctx.threadProgress(float(k)/float(numSteps));
       }
 
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     delete [] spatialMask;
     return *this;
   }
