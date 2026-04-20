@@ -75,46 +75,6 @@ namespace CVC_NAMESPACE
     if(!_instance)
       {
         _instance.reset(new app);
-        
-        //Register some primitive types with the system
-        _instance->registerDataType(char);
-        _instance->registerDataType<char>(Char);
-        _instance->registerDataType(unsigned char);
-        _instance->registerDataType<unsigned char>(UChar);
-        _instance->registerDataType(unsigned short);
-        _instance->registerDataType<unsigned short>(UShort);
-        _instance->registerDataType(int);
-        _instance->registerDataType<int>(Int);
-        _instance->registerDataType(unsigned int);
-        _instance->registerDataType<unsigned int>(UInt);
-        _instance->registerDataType(float);
-        _instance->registerDataType<float>(Float);
-        _instance->registerDataType(double);
-        _instance->registerDataType<double>(Double);
-        _instance->registerDataType(int64);
-        _instance->registerDataType<int64>(Int64);
-        _instance->registerDataType(uint64);
-        _instance->registerDataType<uint64>(UInt64);
-        _instance->registerDataType(std::string);
-        _instance->registerDataType(bounding_box);
-        _instance->registerDataType(dimension);
-        _instance->registerDataType(bool);
-        _instance->registerDataType(boost::shared_array<unsigned char>);
-        _instance->registerDataType(boost::shared_array<float>);
-        _instance->registerDataType(boost::shared_array<double>);
-        _instance->registerDataType(state);
-        
-        // Register core CVC data types with full C++ qualified names
-        _instance->registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
-        _instance->registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
-        _instance->registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
-        _instance->registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
-        _instance->registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
-        
-        // Register shared pointers to these types as well
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
 
         //Register a call to wait for all child threads to finish before exiting
         //the main thread.
@@ -217,6 +177,54 @@ namespace CVC_NAMESPACE
                    boost::thread::hardware_concurrency() : 4),
       _activeWorkers(0)
   {
+    registerDefaultTypes();
+  }
+
+  app::app(no_init_t) 
+    : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? 
+                   boost::thread::hardware_concurrency() : 4),
+      _activeWorkers(0)
+  {
+  }
+
+  void app::registerDefaultTypes()
+  {
+    registerDataType(char);
+    registerDataType<char>(Char);
+    registerDataType(unsigned char);
+    registerDataType<unsigned char>(UChar);
+    registerDataType(unsigned short);
+    registerDataType<unsigned short>(UShort);
+    registerDataType(int);
+    registerDataType<int>(Int);
+    registerDataType(unsigned int);
+    registerDataType<unsigned int>(UInt);
+    registerDataType(float);
+    registerDataType<float>(Float);
+    registerDataType(double);
+    registerDataType<double>(Double);
+    registerDataType(int64);
+    registerDataType<int64>(Int64);
+    registerDataType(uint64);
+    registerDataType<uint64>(UInt64);
+    registerDataType(std::string);
+    registerDataType(bounding_box);
+    registerDataType(dimension);
+    registerDataType(bool);
+    registerDataType(boost::shared_array<unsigned char>);
+    registerDataType(boost::shared_array<float>);
+    registerDataType(boost::shared_array<double>);
+    registerDataType(state);
+    
+    registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
+    registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
+    registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
+    registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
+    registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
+    
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
   }
 
   app::~app()

@@ -96,10 +96,21 @@ namespace CVC_NAMESPACE
   // 02/24/2012 -- Joe R. -- Moved wait_for_threads() to app.
   // 03/31/3012 -- Joe R. -- Added boost::any dataTypeName().
   // 01/12/2014 -- Joe R. -- Added sleep().
+
+  // Tag type for constructing an app without default type registration.
+  // Useful for test contexts or lightweight usage.
+  struct no_init_t {};
+
   class app
   {
   public:
     typedef boost::shared_ptr<app> app_ptr;
+
+    // Construct an app with default type registration.
+    app();
+
+    // Construct an app without type registration (for tests/lightweight use).
+    explicit app(no_init_t);
 
     //virtual ~app(); // arand: why virtual?
     ~app();
@@ -550,7 +561,7 @@ namespace CVC_NAMESPACE
     void sleep(double ms);
 
   protected:
-    app();
+    void registerDefaultTypes();
 
     void propertyTreeTraverse(const boost::property_tree::ptree& pt,
                               const std::string& parentkey = std::string());
