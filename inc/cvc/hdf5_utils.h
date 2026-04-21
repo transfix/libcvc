@@ -680,7 +680,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::DataSet> d;
         
@@ -879,7 +879,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::DataSet> d;
         
@@ -1143,7 +1143,7 @@ namespace CVC_NAMESPACE
       
       try
         {
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
 
           /*
            * Turn off the auto-printing when failure occurs so that we can
@@ -1366,7 +1366,7 @@ namespace CVC_NAMESPACE
           H5::Exception::dontPrint();
 
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1488,7 +1488,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1557,7 +1557,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1679,7 +1679,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;

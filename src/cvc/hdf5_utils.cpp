@@ -298,7 +298,7 @@ namespace CVC_NAMESPACE
                              const std::string& hdf5_filename,
                  const std::string& hdf5_objname)
     {
-      scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+      scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
       ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
 			       % BOOST_CURRENT_FUNCTION
 			       % hdf5_filename
@@ -334,7 +334,7 @@ namespace CVC_NAMESPACE
                              const std::string& hdf5_filename,
                    const std::string& hdf5_objname)
     {
-      scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+      scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
       ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
 			       % BOOST_CURRENT_FUNCTION
 			       % hdf5_filename
@@ -394,7 +394,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+      scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
       ctx.log(10,str(format("%1%: %2%, %3%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename
@@ -426,7 +426,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+      scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
       ctx.log(10,str(format("%1%: %2%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename));
@@ -475,7 +475,7 @@ namespace CVC_NAMESPACE
                                    % "object exists!"));
 
       {
-        scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+        scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
         try
           {
             boost::shared_ptr<H5::H5File> f = getH5File(hdf5_filename);
@@ -529,7 +529,7 @@ namespace CVC_NAMESPACE
                                    % "object exists!"));
 
       {
-        scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+        scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
         const dimension maxdim(256,256,256);
 
         typedef std::vector<std::string> split_vector_type;
@@ -1175,7 +1175,7 @@ namespace CVC_NAMESPACE
                         % hdf5_objname));
 
       {
-        scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+        scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
 
         try
           {
