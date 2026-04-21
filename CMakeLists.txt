@@ -54,6 +54,8 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # CMake Modules
+# Use PROJECT_SOURCE_DIR so libcvc's vendored CMake modules are found first
+# even when libcvc is consumed as a subproject (FetchContent/add_subdirectory).
 list(PREPEND CMAKE_MODULE_PATH
   "${PROJECT_SOURCE_DIR}/CMake"
 )
