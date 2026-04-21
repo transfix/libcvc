@@ -32,3 +32,18 @@ endif()
 if(WIN32)
   target_link_libraries(xmlrpc PRIVATE wsock32 ws2_32)
 endif()
+
+# Install into the same export set as the main cvc target so downstream
+# consumers of libcvc (FetchContent or find_package) get cvc::xmlrpc.
+include(GNUInstallDirs)
+install(TARGETS xmlrpc
+  EXPORT cvcTargets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
+)
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/xmlrpc
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  COMPONENT libcvc
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.H"
+)
