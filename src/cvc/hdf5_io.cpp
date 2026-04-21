@@ -167,8 +167,8 @@ namespace
 
       try
         {
-          dimension fullDim = getObjectDimension(_hdf5_filename,_hdf5_volumeDataSet);
-          bounding_box bbox = getObjectBoundingBox(_hdf5_filename,_hdf5_volumeDataSet);
+          dimension fullDim = getObjectDimension(_ctx, _hdf5_filename,_hdf5_volumeDataSet);
+          bounding_box bbox = getObjectBoundingBox(_ctx, _hdf5_filename,_hdf5_volumeDataSet);
           dimension prevDim(fullDim);
 
           uint64 numSteps = countNumSteps(fullDim,bbox);
@@ -189,7 +189,7 @@ namespace
                     % curDim[0] % curDim[1] % curDim[2]);
 
               int isDirty = 0;
-              getAttribute(_hdf5_filename, hier_volume_name, "dirty", isDirty);
+              getAttribute(_ctx, _hdf5_filename, hier_volume_name, "dirty", isDirty);
               if(isDirty)
                 {
                   _ctx.log(1,str(format("%1% :: computing %2%\n")
@@ -240,7 +240,7 @@ namespace
                   }
 
                   //Done, now mark this one clean.
-                  setAttribute(_hdf5_filename, hier_volume_name, "dirty", 0);
+                  setAttribute(_ctx, _hdf5_filename, hier_volume_name, "dirty", 0);
 
                   _ctx.properties("volmagick.hdf5_io.buildhierarchy.latest",
                                   _hdf5_filename + "|" + hier_volume_name);
@@ -416,13 +416,13 @@ namespace CVC_NAMESPACE
       try
         {
           uint64 vm_version;
-          getAttribute(actualFileName,objectName,"VolMagick_version",vm_version);
+          getAttribute(_ctx, actualFileName,objectName,"VolMagick_version",vm_version);
           oldVolMagick = true;
         }
       catch(hdf5_exception &)
         {
           std::string version;
-          getAttribute(actualFileName,objectName,"libcvc_version",version);
+          getAttribute(_ctx, actualFileName,objectName,"libcvc_version",version);
           oldVolMagick = false;
         }
 
@@ -432,16 +432,16 @@ namespace CVC_NAMESPACE
           _ctx.log(6,str(format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n")
                            % BOOST_CURRENT_FUNCTION));
 
-          d._boundingBox = getObjectBoundingBox(actualFileName,objectName);
-          d._dimension   = getObjectDimension(actualFileName,objectName);
+          d._boundingBox = getObjectBoundingBox(_ctx, actualFileName,objectName);
+          d._dimension   = getObjectDimension(_ctx, actualFileName,objectName);
 
-          getAttribute(actualFileName,objectName,"numVariables",numVariables);
-          getAttribute(actualFileName,objectName,"numTimesteps",numTimesteps);
+          getAttribute(_ctx, actualFileName,objectName,"numVariables",numVariables);
+          getAttribute(_ctx, actualFileName,objectName,"numTimesteps",numTimesteps);
           d._numVariables = numVariables;
           d._numTimesteps = numTimesteps;
         
-          getAttribute(actualFileName,objectName,"min_time",d._tmin);
-          getAttribute(actualFileName,objectName,"max_time",d._tmax);
+          getAttribute(_ctx, actualFileName,objectName,"min_time",d._tmin);
+          getAttribute(_ctx, actualFileName,objectName,"max_time",d._tmax);
         }
       else
         {
@@ -449,24 +449,24 @@ namespace CVC_NAMESPACE
                            % BOOST_CURRENT_FUNCTION));
 
           //some older files will have attributes named like this...
-          getAttribute(actualFileName,objectName,"XMin",d._boundingBox.minx);
-          getAttribute(actualFileName,objectName,"YMin",d._boundingBox.miny);
-          getAttribute(actualFileName,objectName,"ZMin",d._boundingBox.minz);
-          getAttribute(actualFileName,objectName,"XMax",d._boundingBox.maxx);
-          getAttribute(actualFileName,objectName,"YMax",d._boundingBox.maxy);
-          getAttribute(actualFileName,objectName,"ZMax",d._boundingBox.maxz);
+          getAttribute(_ctx, actualFileName,objectName,"XMin",d._boundingBox.minx);
+          getAttribute(_ctx, actualFileName,objectName,"YMin",d._boundingBox.miny);
+          getAttribute(_ctx, actualFileName,objectName,"ZMin",d._boundingBox.minz);
+          getAttribute(_ctx, actualFileName,objectName,"XMax",d._boundingBox.maxx);
+          getAttribute(_ctx, actualFileName,objectName,"YMax",d._boundingBox.maxy);
+          getAttribute(_ctx, actualFileName,objectName,"ZMax",d._boundingBox.maxz);
 
-          getAttribute(actualFileName,objectName,"XDim",d._dimension.xdim);
-          getAttribute(actualFileName,objectName,"YDim",d._dimension.ydim);
-          getAttribute(actualFileName,objectName,"ZDim",d._dimension.zdim);
+          getAttribute(_ctx, actualFileName,objectName,"XDim",d._dimension.xdim);
+          getAttribute(_ctx, actualFileName,objectName,"YDim",d._dimension.ydim);
+          getAttribute(_ctx, actualFileName,objectName,"ZDim",d._dimension.zdim);
 
-          getAttribute(actualFileName,objectName,"numVariables",numVariables);
-          getAttribute(actualFileName,objectName,"numTimesteps",numTimesteps);
+          getAttribute(_ctx, actualFileName,objectName,"numVariables",numVariables);
+          getAttribute(_ctx, actualFileName,objectName,"numTimesteps",numTimesteps);
           d._numVariables = numVariables;
           d._numTimesteps = numTimesteps;
 
-          getAttribute(actualFileName,objectName,"min_time",d._tmin);
-          getAttribute(actualFileName,objectName,"max_time",d._tmax);
+          getAttribute(_ctx, actualFileName,objectName,"min_time",d._tmin);
+          getAttribute(_ctx, actualFileName,objectName,"max_time",d._tmax);
         }
 
       d._minIsSet.resize(numVariables);
@@ -478,7 +478,7 @@ namespace CVC_NAMESPACE
 
       //The current hdf5_io implementation prefers storing 3D datasets in groups.
       //Check if the object is a group.  If not, read it as a 1 var 1 timestep lone dataset.
-      if(isGroup(actualFileName,objectName))
+      if(isGroup(_ctx, actualFileName,objectName))
         {
           for(unsigned int i = 0; i < d._numVariables; i++)
             {
@@ -497,16 +497,16 @@ namespace CVC_NAMESPACE
                                i % j
                                );
 
-                  d._min[i][j] = getDataSetMinimum(actualFileName,volume_name);
+                  d._min[i][j] = getDataSetMinimum(_ctx, actualFileName,volume_name);
                   d._minIsSet[i][j]=true;
-                  d._max[i][j] = getDataSetMaximum(actualFileName,volume_name);
+                  d._max[i][j] = getDataSetMaximum(_ctx, actualFileName,volume_name);
                   d._maxIsSet[i][j]=true;
-                  d._names[i] = getDataSetInfo(actualFileName,volume_name);
+                  d._names[i] = getDataSetInfo(_ctx, actualFileName,volume_name);
                   uint64 voxelType;
                   if(oldVolMagick)
-                    getAttribute(actualFileName,volume_name,"voxelType",voxelType);
+                    getAttribute(_ctx, actualFileName,volume_name,"voxelType",voxelType);
                   else
-                    getAttribute(actualFileName,volume_name,"dataType",voxelType);
+                    getAttribute(_ctx, actualFileName,volume_name,"dataType",voxelType);
                   d._voxelTypes[i]=data_type(voxelType);
                 }
             }
@@ -533,16 +533,16 @@ namespace CVC_NAMESPACE
           d._maxIsSet[i].resize(numTimesteps);
           d._max[i].resize(numTimesteps);
 
-          d._min[i][j] = getDataSetMinimum(actualFileName,volume_name);
+          d._min[i][j] = getDataSetMinimum(_ctx, actualFileName,volume_name);
           d._minIsSet[i][j]=true;
-          d._max[i][j] = getDataSetMaximum(actualFileName,volume_name);
+          d._max[i][j] = getDataSetMaximum(_ctx, actualFileName,volume_name);
           d._maxIsSet[i][j]=true;
-          d._names[i] = getDataSetInfo(actualFileName,volume_name);
+          d._names[i] = getDataSetInfo(_ctx, actualFileName,volume_name);
           uint64 voxelType;
           if(oldVolMagick)
-            getAttribute(actualFileName,volume_name,"voxelType",voxelType);
+            getAttribute(_ctx, actualFileName,volume_name,"voxelType",voxelType);
           else
-            getAttribute(actualFileName,volume_name,"dataType",voxelType);
+            getAttribute(_ctx, actualFileName,volume_name,"dataType",voxelType);
           d._voxelTypes[i]=data_type(voxelType);
         }
     }
@@ -580,7 +580,7 @@ namespace CVC_NAMESPACE
 
       std::string volume_name;
 
-      if(isGroup(actualFileName,objectName))
+      if(isGroup(_ctx, actualFileName,objectName))
         {
           //Name of actual dataset.  The group name in 'objectName' can contain several
           //instances of the same dataset at various resolutions.  This function assumes
@@ -645,11 +645,11 @@ namespace CVC_NAMESPACE
       if(off_x == 0 && off_y == 0 && off_z == 0 &&
          vfi.voxel_dimensions() == subvoldim)
         {
-          vol.min(getDataSetMinimum(actualFileName,volume_name));
-          vol.max(getDataSetMaximum(actualFileName,volume_name));
+          vol.min(getDataSetMinimum(_ctx, actualFileName,volume_name));
+          vol.max(getDataSetMaximum(_ctx, actualFileName,volume_name));
         }
     
-      readDataSet(actualFileName,volume_name,
+      readDataSet(_ctx, actualFileName,volume_name,
                   off_x,off_y,off_z,
                   subvoldim,
                   vol.voxelType(),
@@ -688,7 +688,7 @@ namespace CVC_NAMESPACE
         splitRawFilename(filename);
 
       std::string volume_name;
-      if(isGroup(actualFileName,objectName))
+      if(isGroup(_ctx, actualFileName,objectName))
         {
           //The group name in 'objectName' can contain several instances of the same dataset
           //at various resolutions.
@@ -707,13 +707,13 @@ namespace CVC_NAMESPACE
           std::string filter = str(format("%1%:%2%") % var % time);
 
           std::vector<std::string> hierarchy_objects = 
-            getChildObjects(actualFileName, objectName, filter);
+            getChildObjects(_ctx, actualFileName, objectName, filter);
           if(hierarchy_objects.empty())
             throw hdf5_exception(str(format("%s :: no child objects!")
 				     % BOOST_CURRENT_FUNCTION));
         
           dimension dim = 
-            getDataSetDimensionForBoundingBox(actualFileName,
+            getDataSetDimensionForBoundingBox(_ctx, actualFileName,
                                               objectName+"/"+hierarchy_objects[0],
                                               subvolbox);
           std::string hierarchy_object = hierarchy_objects[0];
@@ -724,7 +724,7 @@ namespace CVC_NAMESPACE
               int isDirty = 0;
               try
                 {
-                  getAttribute(actualFileName,
+                  getAttribute(_ctx, actualFileName,
                                objectName+"/"+obj,
                                "dirty",isDirty);
                 }
@@ -747,14 +747,14 @@ namespace CVC_NAMESPACE
               int isDirty = 0;
               try
                 {
-                  getAttribute(actualFileName,
+                  getAttribute(_ctx, actualFileName,
                                objectName+"/"+obj,
                                "dirty",isDirty);
                 }
               catch(std::exception&){}
 
               dimension newdim = 
-                getDataSetDimensionForBoundingBox(actualFileName,
+                getDataSetDimensionForBoundingBox(_ctx, actualFileName,
                                                   objectName+"/"+obj,
                                                   subvolbox);
               if(!isDirty &&
@@ -792,15 +792,15 @@ namespace CVC_NAMESPACE
       //volume in the file.
       if(vfi.boundingBox() == subvolbox)
         {
-          vol.min(getDataSetMinimum(actualFileName,volume_name));
-          vol.max(getDataSetMaximum(actualFileName,volume_name));
+          vol.min(getDataSetMinimum(_ctx, actualFileName,volume_name));
+          vol.max(getDataSetMaximum(_ctx, actualFileName,volume_name));
         }
 
       boost::shared_array<unsigned char> data;
       dimension dim;
     
       boost::tie(data,dim) = 
-        readDataSet(actualFileName, volume_name,
+        readDataSet(_ctx, actualFileName, volume_name,
                     subvolbox, vol.voxelType());
     
       vol.voxel_dimensions(dim);
@@ -844,18 +844,18 @@ namespace CVC_NAMESPACE
       //create it if it doesn't exist, else just reuse the file.
       fs::path full_path(actualFileName);
       if(!fs::exists(full_path))
-        createHDF5File(actualFileName);
+        createHDF5File(_ctx, actualFileName);
 
-      createGroup(actualFileName, objectName, true);
-      setAttribute(actualFileName, objectName, "objectType", "cvc::volume");
-      setAttribute(actualFileName, objectName, "libcvc_version", CVC_VERSION_STRING);
-      setObjectBoundingBox(actualFileName, objectName, boundingBox);
-      setObjectDimension(actualFileName, objectName, dimension);
-      setAttribute(actualFileName, objectName, "dataTypes", voxelTypes.size(), &(voxelTypes[0]));
-      setAttribute(actualFileName, objectName, "numVariables", numVariables);
-      setAttribute(actualFileName, objectName, "numTimesteps", numTimesteps);
-      setAttribute(actualFileName, objectName, "min_time", min_time);
-      setAttribute(actualFileName, objectName, "max_time", max_time);
+      createGroup(_ctx, actualFileName, objectName, true);
+      setAttribute(_ctx, actualFileName, objectName, "objectType", "cvc::volume");
+      setAttribute(_ctx, actualFileName, objectName, "libcvc_version", CVC_VERSION_STRING);
+      setObjectBoundingBox(_ctx, actualFileName, objectName, boundingBox);
+      setObjectDimension(_ctx, actualFileName, objectName, dimension);
+      setAttribute(_ctx, actualFileName, objectName, "dataTypes", voxelTypes.size(), &(voxelTypes[0]));
+      setAttribute(_ctx, actualFileName, objectName, "numVariables", numVariables);
+      setAttribute(_ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
+      setAttribute(_ctx, actualFileName, objectName, "min_time", min_time);
+      setAttribute(_ctx, actualFileName, objectName, "max_time", max_time);
     
       unsigned int steps = numVariables*numTimesteps;
       unsigned int cur_step = 0;
@@ -879,7 +879,7 @@ namespace CVC_NAMESPACE
             if(voxelTypes.size() <= var)
               throw invalid_hdf5_file("voxelTypes array not large enough!");
 
-            createDataSet(actualFileName, volume_name, 
+            createDataSet(_ctx, actualFileName, volume_name, 
                           boundingBox, dimension, voxelTypes[var]);
           }
 
@@ -919,7 +919,7 @@ namespace CVC_NAMESPACE
 
       std::string volume_name;
       bool doBuildHierarchy = false;
-      if(isGroup(actualFileName,objectName))
+      if(isGroup(_ctx, actualFileName,objectName))
 	{
 	  //Name of actual dataset.  The group name in 'objectName' can contain several
 	  //instances of the same dataset at various resolutions.  This function assumes
@@ -945,7 +945,7 @@ namespace CVC_NAMESPACE
 
 	  //Now mark all of the hierarchy datasets dirty, creating them if they don't exist.
 	  //The build_hierarchy thread fills these in with proper data later.
-	  dimension prevDim(getObjectDimension(actualFileName,objectName));
+	  dimension prevDim(getObjectDimension(_ctx, actualFileName,objectName));
 	  while(1)
 	    {
 	      uint64 maxdim = std::max(prevDim.xdim,std::max(prevDim.ydim,prevDim.zdim));
@@ -964,11 +964,11 @@ namespace CVC_NAMESPACE
 				% BOOST_CURRENT_FUNCTION
 				% hier_volume_name));
 
-	      if(!isDataSet(actualFileName,hier_volume_name))
-		createVolumeDataSet(actualFileName,hier_volume_name,
-				    getObjectBoundingBox(actualFileName,volume_name),
+	      if(!isDataSet(_ctx, actualFileName,hier_volume_name))
+		createVolumeDataSet(_ctx, actualFileName,hier_volume_name,
+				    getObjectBoundingBox(_ctx, actualFileName,volume_name),
 				    curDim, wvol.voxelType());
-	      setAttribute(actualFileName, hier_volume_name, "dirty", 1);
+	      setAttribute(_ctx, actualFileName, hier_volume_name, "dirty", 1);
 
 	      prevDim = curDim;
 	    }
@@ -983,14 +983,14 @@ namespace CVC_NAMESPACE
 	  volume_name = objectName;
 	}
 
-      writeDataSet(actualFileName, volume_name, 
+      writeDataSet(_ctx, actualFileName, volume_name, 
 		   off_x, off_y, off_z,
 		   wvol.voxel_dimensions(),
 		   wvol.voxelType(),
 		   *wvol,
 		   wvol.min(), wvol.max());
     
-      setAttribute(actualFileName, volume_name, "info", wvol.desc());
+      setAttribute(_ctx, actualFileName, volume_name, "info", wvol.desc());
 
       if(doBuildHierarchy)
 	{
@@ -1022,15 +1022,15 @@ namespace CVC_NAMESPACE
       boost::tie(actualFileName, objectName) =
         splitRawFilename(filename);
     
-      if(isGroup(actualFileName,objectName))
+      if(isGroup(_ctx, actualFileName,objectName))
         {
-          std::vector<std::string> children = getChildObjects(actualFileName,
+          std::vector<std::string> children = getChildObjects(_ctx, actualFileName,
                                                               objectName);
           BOOST_FOREACH(std::string val, children)
-            setObjectBoundingBox(actualFileName, objectName + "/" + val, bbox);
+            setObjectBoundingBox(_ctx, actualFileName, objectName + "/" + val, bbox);
         }
 
-      setObjectBoundingBox(actualFileName, objectName, bbox);
+      setObjectBoundingBox(_ctx, actualFileName, objectName, bbox);
     }
 
     // ----------------------------
@@ -1042,7 +1042,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 09/09/2011 -- Joe R. -- Creation.
     // 09/30/2011 -- Joe R. -- Added objectType attribute.
-    static void createVolumeDataSet(const std::string& hdf5_filename,
+    static void createVolumeDataSet(app& ctx, const std::string& hdf5_filename,
                                     const std::string& volumeDataSet,
                                     const bounding_box& boundingBox,
                                     const dimension& dimension,
@@ -1050,19 +1050,19 @@ namespace CVC_NAMESPACE
     {
       using namespace hdf5_utils;
 
-      createDataSet(hdf5_filename, volumeDataSet,
+      createDataSet(ctx, hdf5_filename, volumeDataSet,
                     boundingBox, dimension, voxelType, true);
-      setAttribute(hdf5_filename, volumeDataSet, 
+      setAttribute(ctx, hdf5_filename, volumeDataSet, 
                    "objectType", "cvc::volume");
-      setAttribute(hdf5_filename, volumeDataSet, 
+      setAttribute(ctx, hdf5_filename, volumeDataSet, 
                    "libcvc_version", CVC_VERSION_STRING);
-      setObjectBoundingBox(hdf5_filename, volumeDataSet, boundingBox);
-      setObjectDimension(hdf5_filename, volumeDataSet, dimension);
-      setAttribute(hdf5_filename, volumeDataSet, "dataTypes", 1, &voxelType);
-      setAttribute(hdf5_filename, volumeDataSet, "numVariables", 1);
-      setAttribute(hdf5_filename, volumeDataSet, "numTimesteps", 1);
-      setAttribute(hdf5_filename, volumeDataSet, "min_time", 0.0);
-      setAttribute(hdf5_filename, volumeDataSet, "max_time", 0.0);
+      setObjectBoundingBox(ctx, hdf5_filename, volumeDataSet, boundingBox);
+      setObjectDimension(ctx, hdf5_filename, volumeDataSet, dimension);
+      setAttribute(ctx, hdf5_filename, volumeDataSet, "dataTypes", 1, &voxelType);
+      setAttribute(ctx, hdf5_filename, volumeDataSet, "numVariables", 1);
+      setAttribute(ctx, hdf5_filename, volumeDataSet, "numTimesteps", 1);
+      setAttribute(ctx, hdf5_filename, volumeDataSet, "min_time", 0.0);
+      setAttribute(ctx, hdf5_filename, volumeDataSet, "max_time", 0.0);
     }
 
   protected:
