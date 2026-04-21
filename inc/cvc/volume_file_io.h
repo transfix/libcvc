@@ -381,6 +381,8 @@ namespace CVC_NAMESPACE
   void writeBoundingBox(app& ctx,
                         const bounding_box& bbox,
                         const std::string& filename);
+
+  bounding_box readBoundingBox(app& ctx, const std::string& filename);
 }
 
 #endif

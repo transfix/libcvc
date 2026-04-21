@@ -617,7 +617,12 @@ namespace CVC_NAMESPACE
   // 04/06/2012 -- Joe R. -- Creation.
   bounding_box readBoundingBox(const std::string& filename)
   {
-    return volume_file_info(filename).boundingBox();
+    return readBoundingBox(app::instance(), filename);
+  }
+
+  bounding_box readBoundingBox(app& ctx, const std::string& filename)
+  {
+    return volume_file_info(ctx, filename).boundingBox();
   }
 
   // ----------------
