@@ -1183,12 +1183,6 @@ namespace CVC_NAMESPACE
       }
     }
 
-    boost::mutex& freeLogMutex()
-    {
-      static boost::mutex m;
-      return m;
-    }
-
   } // anonymous namespace
 
   template<class T>
@@ -1213,45 +1207,5 @@ namespace CVC_NAMESPACE
   std::string dataTypeName(data_type dt)
   {
     return std::string(staticDataTypeName(dt));
-  }
-
-  void log(unsigned int level, const std::string& buf, bool append_newline)
-  {
-#ifdef USING_LOG4CPLUS_DEFAULT
-    static log4cplus::Logger logger =
-      log4cplus::Logger::getInstance("cvc.log");
-    std::string msg = buf;
-    if (!append_newline && !msg.empty() && msg[msg.length() - 1] == '\n') {
-      msg = msg.substr(0, msg.length() - 1);
-    }
-    if (level == 0)
-      LOG4CPLUS_ERROR(logger, msg);
-    else if (level == 1)
-      LOG4CPLUS_WARN(logger, msg);
-    else if (level == 2)
-      LOG4CPLUS_INFO(logger, msg);
-    else if (level == 3)
-      LOG4CPLUS_DEBUG(logger, msg);
-    else
-      LOG4CPLUS_TRACE(logger, msg);
-#else
-    // Read a process-wide verbosity threshold from an environment variable,
-    // defaulting to 6 (matches the legacy app::log default).
-    static const unsigned int threshold = [] {
-      if (const char* env = std::getenv("CVC_LOG_VERBOSITY")) {
-        try { return static_cast<unsigned int>(std::stoul(env)); }
-        catch (...) {}
-      }
-      return 6u;
-    }();
-    if (level >= threshold) return;
-
-    std::string out = buf;
-    if (append_newline && (out.empty() || out.back() != '\n')) {
-      out += '\n';
-    }
-    boost::mutex::scoped_lock lock(freeLogMutex());
-    std::cerr << out;
-#endif
   }
 }
