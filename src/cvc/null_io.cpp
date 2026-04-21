@@ -83,7 +83,8 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& /*data*/,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& /*data*/,
 				   const std::string& /*filename*/) const
     {
       throw read_error(
@@ -120,7 +121,8 @@ namespace CVC_NAMESPACE
     //   Creates an empty volume file to be later filled in by writeVolumeFile
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void createVolumeFile(const std::string& /*filename*/,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& /*filename*/,
 				  const bounding_box& /*boundingBox*/,
 				  const dimension& /*dimension*/,
 				  const std::vector<data_type>& /*voxelTypes*/,

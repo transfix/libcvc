@@ -603,7 +603,8 @@ namespace CVC_NAMESPACE
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
     // 12/11/2009 -- Joe R. -- Freeing buf if read successful.
-    virtual void getVolumeFileInfo(volume_file_info::data& d,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& d,
 				   const std::string& filename) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -730,7 +731,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
 				  const bounding_box& boundingBox,
 				  const dimension& dimension,
 				  const std::vector<data_type>& voxelTypes,
@@ -797,7 +799,7 @@ namespace CVC_NAMESPACE
 	}
       catch(read_error &e)
 	{
-	  createVolumeFile(filename,
+	  CVC_NAMESPACE::createVolumeFile(filename,
 			   bounding_box(0.0,0.0,0.0,1.0,1.0,1.0),
 			   wvol.voxel_dimensions(),
 			   std::vector<data_type>(1,wvol.voxelType()),

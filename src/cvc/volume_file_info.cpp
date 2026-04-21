@@ -45,6 +45,15 @@ namespace CVC_NAMESPACE
   //                         if the provided filename is a file|obj tuple.
   void volume_file_info::read(const std::string& filename)
   {
+    // Legacy overload: delegate to the ctx-aware overload using the
+    // process-wide singleton. New code should call the (app&, filename)
+    // overload directly.
+    read(app::instance(), filename);
+  }
+
+  void volume_file_info::read(app& ctx, const std::string& filename)
+  {
+    _ctx = &ctx;
     std::string errors;
     boost::regex file_extension("^(.*)(\\.\\S*)$");
     boost::smatch what;
@@ -69,7 +78,7 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->getVolumeFileInfo(_data,filename);
+		  (*i)->getVolumeFileInfo(ctx,_data,filename);
 		  return;
 		}
 	    }
@@ -90,9 +99,10 @@ namespace CVC_NAMESPACE
 
   void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const
   {
+    app& ctx = _ctx ? *_ctx : app::instance();
     thread_info ti(BOOST_CURRENT_FUNCTION);
 
-    volume vol(app::instance());
+    volume vol(ctx);
     const uint64 maxdim = 128; //read in 128^3 chunks
     for(unsigned int off_z = 0; off_z < ZDim(); off_z+=maxdim)
       for(unsigned int off_y = 0; off_y < YDim(); off_y+=maxdim)
@@ -101,7 +111,7 @@ namespace CVC_NAMESPACE
 	    dimension read_dim(std::min(XDim()-off_x,maxdim),
 			       std::min(YDim()-off_y,maxdim),
 			       std::min(ZDim()-off_z,maxdim));
-	    readVolumeFile(vol,filename(),var,time,
+	    readVolumeFile(ctx,vol,filename(),var,time,
 			   off_x,off_y,off_z,read_dim);
 	    if(off_x==0 && off_y==0 && off_z==0)
 	      {

@@ -85,7 +85,7 @@ namespace CVC_NAMESPACE
 				     unsigned int time,
 				     const bounding_box& subvolbox) const
   {
-    volume_file_info volinfo(filename);
+    volume_file_info volinfo(vol.ctx(), filename);
     if(!subvolbox.isWithin(volinfo.boundingBox()))
       throw sub_volume_out_of_bounds("The subvolume bounding box must be within the file's bounding box.");
     uint64 off_x = uint64((subvolbox.minx - volinfo.XMin())/volinfo.XSpan());
@@ -584,49 +584,9 @@ namespace CVC_NAMESPACE
 			unsigned int numVariables, unsigned int numTimesteps,
 			double min_time, double max_time)
   {
-    std::string errors;
-    boost::smatch what;
-
-    std::string actualFileName;
-    std::string objectName;
-
-    boost::tie(actualFileName, objectName) =
-      volume_file_io::splitRawFilename(filename);
-
-    const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
-    if(boost::regex_match(actualFileName, what, file_extension))
-      {
-	if(volume_file_io::handlerMap()[what[2]].empty())
-	  throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) + 
-					     std::string(": Cannot create ") + filename);
-	volume_file_io::handlers& h = volume_file_io::handlerMap()[what[2]];
-	//use the first handler that succeds
-	for(volume_file_io::handlers::iterator i = h.begin();
-	    i != h.end();
-	    i++)
-	  try
-	    {
-	      if(*i)
-		{
-		  (*i)->createVolumeFile(filename,boundingBox,dimension,
-					 voxelTypes,numVariables,numTimesteps,
-					 min_time,max_time);
-		  return;
-		}
-	    }
-	  catch(exception& e)
-	    {
-	      errors += std::string(" :: ") + e.what();
-	    }
-      }
-    throw unsupported_volume_file_type(
-      boost::str(
-	boost::format("%1% : Cannot read '%2%'%3%") % 
-	BOOST_CURRENT_FUNCTION %
-	filename %
-	errors
-      )
-    );
+    createVolumeFile(app::instance(), filename, boundingBox, dimension,
+		     voxelTypes, numVariables, numTimesteps,
+		     min_time, max_time);
   }
 
   // ---------------
@@ -726,7 +686,7 @@ namespace CVC_NAMESPACE
   void readVolumeFile(app& ctx, std::vector<volume>& vols,
 		      const std::string& filename)
   {
-    volume_file_info volinfo(filename);
+    volume_file_info volinfo(ctx, filename);
     volume vol(ctx);
     vols.clear();
     for(unsigned int var=0; var<volinfo.numVariables(); var++)
@@ -761,15 +721,56 @@ namespace CVC_NAMESPACE
       writeVolumeFile(ctx, vols[i], filename, i);
   }
 
-  void createVolumeFile(app& /*ctx*/, const std::string& filename,
+  void createVolumeFile(app& ctx, const std::string& filename,
 			const bounding_box& boundingBox,
 			const dimension& dimension,
 			const std::vector<data_type>& voxelTypes,
 			unsigned int numVariables, unsigned int numTimesteps,
 			double min_time, double max_time)
   {
-    createVolumeFile(filename, boundingBox, dimension, voxelTypes,
-		     numVariables, numTimesteps, min_time, max_time);
+    std::string errors;
+    boost::smatch what;
+
+    std::string actualFileName;
+    std::string objectName;
+
+    boost::tie(actualFileName, objectName) =
+      volume_file_io::splitRawFilename(filename);
+
+    const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
+    if(boost::regex_match(actualFileName, what, file_extension))
+      {
+	if(volume_file_io::handlerMap()[what[2]].empty())
+	  throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
+					     std::string(": Cannot create ") + filename);
+	volume_file_io::handlers& h = volume_file_io::handlerMap()[what[2]];
+	//use the first handler that succeds
+	for(volume_file_io::handlers::iterator i = h.begin();
+	    i != h.end();
+	    i++)
+	  try
+	    {
+	      if(*i)
+		{
+		  (*i)->createVolumeFile(ctx, filename, boundingBox, dimension,
+					 voxelTypes, numVariables, numTimesteps,
+					 min_time, max_time);
+		  return;
+		}
+	    }
+	  catch(exception& e)
+	    {
+	      errors += std::string(" :: ") + e.what();
+	    }
+      }
+    throw unsupported_volume_file_type(
+      boost::str(
+	boost::format("%1% : Cannot read '%2%'%3%") %
+	BOOST_CURRENT_FUNCTION %
+	filename %
+	errors
+      )
+    );
   }
 
 }

@@ -395,7 +395,8 @@ namespace CVC_NAMESPACE
     // 09/02/2011 -- Joe R. -- Forgot to copy filename to data.
     // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
     //                         multi-res hierarchy thread code simpler.
-    virtual void getVolumeFileInfo(volume_file_info::data& d,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& d,
                                    const std::string& filename) const
     {
       using namespace hdf5_utils;
@@ -819,7 +820,8 @@ namespace CVC_NAMESPACE
     // 09/02/2011 -- Joe R. -- Calling new createHDF5File function.
     // 09/08/2011 -- Joe R. -- Only creating a file if none exists, else just re-using it.
     // 09/30/2011 -- Joe R. -- Added objectType attribute.
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
                                   const bounding_box& boundingBox,
                                   const dimension& dimension,
                                   const std::vector<data_type>& voxelTypes,

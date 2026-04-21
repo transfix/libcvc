@@ -105,8 +105,9 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& /*data*/,
-				   const std::string& /*filename*/) const = 0;
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+                                   volume_file_info::data& /*data*/,
+                                   const std::string& /*filename*/) const = 0;
 
     // -----------------------------
     // volume_file_io::readVolumeFile
@@ -145,14 +146,15 @@ namespace CVC_NAMESPACE
     //   Creates an empty volume file to be later filled in by writeVolumeFile
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void createVolumeFile(const std::string& /*filename*/,
-				  const bounding_box& /*boundingBox*/,
-				  const dimension& /*dimension*/,
-				  const std::vector<data_type>& /*voxelTypes*/,
-				  unsigned int /*numVariables*/,
-				  unsigned int /*numTimesteps*/,
-				  double /*min_time*/,
-				  double /*max_time*/) const = 0;
+    virtual void createVolumeFile(app& /*ctx*/,
+                                  const std::string& /*filename*/,
+                                  const bounding_box& /*boundingBox*/,
+                                  const dimension& /*dimension*/,
+                                  const std::vector<data_type>& /*voxelTypes*/,
+                                  unsigned int /*numVariables*/,
+                                  unsigned int /*numTimesteps*/,
+                                  double /*min_time*/,
+                                  double /*max_time*/) const = 0;
 
     // -------------------------------
     // volume_file_io::writeVolumeFile
