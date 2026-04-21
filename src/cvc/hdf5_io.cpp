@@ -225,11 +225,13 @@ namespace
 						     std::min(off_z+theSize[2],bbox.maxz)
 						     );
                               readVolumeFile(
+					     _ctx,
 					     vol,
 					     _hdf5_filename + "|" + _hdf5_volumeDataSet,
 					     0,0,subvolbox
 					     );
                               writeVolumeFile(
+					      _ctx,
 					      vol,
 					      _hdf5_filename + "|" + hier_volume_name,
 					      0,0,subvolbox

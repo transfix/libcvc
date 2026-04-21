@@ -180,7 +180,7 @@ namespace CVC_NAMESPACE
     volinfo.read(input_volume_file);
 
     //createVolumeFile in Utlity.h 
-    createVolumeFile(output_volume_file,volinfo); 
+    createVolumeFile(ctx,output_volume_file,volinfo); 
 
     //read in slice by slice
     for(unsigned int k = 0; k < volinfo.ZDim(); k++)
@@ -189,13 +189,13 @@ namespace CVC_NAMESPACE
           for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
             {
               volume vol(ctx);
-              readVolumeFile(vol,input_volume_file,
+              readVolumeFile(ctx,vol,input_volume_file,
                              var,time,
                              0,0,k,
                              dimension(volinfo.XDim(),volinfo.YDim(),1));
                   
               vol.desc(volinfo.name(var));
-              writeVolumeFile(vol,output_volume_file,
+              writeVolumeFile(ctx,vol,output_volume_file,
                               var,time,
                               0,0,k);
             }
