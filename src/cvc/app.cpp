@@ -133,8 +133,20 @@ namespace CVC_NAMESPACE
   {
     using namespace CVC_NAMESPACE;
 
+    // Atexit context: use the existing singleton if it's still alive
+    // rather than re-entering app::instance() (which would re-create
+    // the instance + register handlers after the runtime has already
+    // begun tearing things down).
+    app_ptr self;
+    {
+      boost::mutex::scoped_lock lock(_instanceMutex);
+      self = _instance;
+    }
+    if(!self) return;
+    app& a = *self;
+
     //Get all the threads
-    thread_map map = cvcapp.threads();
+    thread_map map = a.threads();
     
     // Phase 1: Interrupt all threads to signal them to exit
     // Many algorithms have interruption checkpoints that allow clean exit
@@ -156,7 +168,7 @@ namespace CVC_NAMESPACE
           {
             using namespace boost;
             if (val.second && val.second->joinable()) {
-              cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
+              a.log(3,str(format("%s :: waiting for thread %s\n")
                                % BOOST_CURRENT_FUNCTION
                                % val.first));
               // Try to join with a 5 second timeout per thread
@@ -179,7 +191,7 @@ namespace CVC_NAMESPACE
       BOOST_FOREACH(const std::string& thread_name, failed_threads) {
         msg += str(format("  - %s\n") % thread_name);
       }
-      cvcapp.log(0, msg); // Error level
+      a.log(0, msg); // Error level
       std::cerr << msg; // Also print to stderr to ensure visibility
     }
   }
