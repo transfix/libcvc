@@ -72,9 +72,9 @@ namespace
         point_t min_pt = geo.min_point();
         point_t max_pt = geo.max_point();
         cout << "min_point: " << 
-          str(format("%1%,%2%,%3%") % min_pt[0] % min_pt[1] % min_pt[2]) << endl;
+          str(boost::format("%1%,%2%,%3%") % min_pt[0] % min_pt[1] % min_pt[2]) << endl;
         cout << "max_point: " << 
-          str(format("%1%,%2%,%3%") % max_pt[0] % max_pt[1] % max_pt[2]) << endl;
+          str(boost::format("%1%,%2%,%3%") % max_pt[0] % max_pt[1] % max_pt[2]) << endl;
       }
     else if(is_volume_filename(args[0]))
       {
@@ -211,7 +211,7 @@ namespace
 #ifdef USING_XMLRPC
       commands["server"] = 
         boost::make_tuple(command_func(server),
-                          str(format(string("server [port]\n"
+                          str(boost::format(string("server [port]\n"
                                                           "Starts an xmlrpc server at the specified port. Defaults to %d"))
                               % CVC_NAMESPACE::XMLRPC_DEFAULT_PORT));
       commands["client"] = 

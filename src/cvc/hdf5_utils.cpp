@@ -395,7 +395,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename
 			% hdf5_objname));
@@ -407,7 +407,7 @@ namespace CVC_NAMESPACE
         }
       catch(H5::Exception& error)
         {
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -427,7 +427,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
-      ctx.log(10,str(format("%1%: %2%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%\n") 
 			% BOOST_CURRENT_FUNCTION
 			% hdf5_filename));
 
@@ -437,7 +437,7 @@ namespace CVC_NAMESPACE
         }
       catch(H5::Exception& error)
         {
-          throw hdf5_exception(str(format("filename: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, msg: %s")
                                    % hdf5_filename
                                    % error.getDetailMsg()));
         }
@@ -469,7 +469,7 @@ namespace CVC_NAMESPACE
         if(replace)
           removeObject(ctx, hdf5_filename,hdf5_objname);
         else
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % "object exists!"));
@@ -483,7 +483,7 @@ namespace CVC_NAMESPACE
           }
         catch(H5::Exception& error)
           {
-            throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+            throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                      % hdf5_filename
                                      % hdf5_objname
                                      % error.getDetailMsg()));
@@ -514,7 +514,7 @@ namespace CVC_NAMESPACE
       using namespace H5;
       using namespace boost;
 
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -523,7 +523,7 @@ namespace CVC_NAMESPACE
         if(replace)
           removeObject(ctx, hdf5_filename,hdf5_objname);
         else
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % "object exists!"));
@@ -553,7 +553,7 @@ namespace CVC_NAMESPACE
             shared_ptr<H5File> file = getH5File(hdf5_filename);
 
             std::string groupPath = algorithm::join(groupNames,"/");
-            ctx.log(10,str(format("%1%: group: %2%\n")
+            ctx.log(10,str(boost::format("%1%: group: %2%\n")
 			      % BOOST_CURRENT_FUNCTION
 			      % groupPath));
             shared_ptr<Group> cvc_group = 
@@ -745,7 +745,7 @@ namespace CVC_NAMESPACE
               default:
                 throw write_error(
                   str(
-                    format("%1% : invalid type :: %2%") 
+                    boost::format("%1% : invalid type :: %2%") 
 		    % BOOST_CURRENT_FUNCTION 
 		    % dataType
                   )
@@ -756,7 +756,7 @@ namespace CVC_NAMESPACE
         catch( H5::Exception& error )
           {
             using namespace boost;
-            throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+            throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                      % hdf5_filename
                                      % hdf5_objname
                                      % error.getDetailMsg()));
@@ -930,7 +930,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -972,7 +972,7 @@ namespace CVC_NAMESPACE
     {
       using namespace boost;
 
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -996,7 +996,7 @@ namespace CVC_NAMESPACE
 
       if(fulldim.isNull())
         {
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                   % hdf5_filename
                                   % hdf5_objname
                                   % "Null voxel selection"));
@@ -1014,7 +1014,7 @@ namespace CVC_NAMESPACE
         { off_z, off_y, off_x };
 
       for(int i = 0; i < RANK; i++)
-        ctx.log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
+        ctx.log(10,str(boost::format("offset[%1%]: %2%\n") % i % offset[i]));
 
       hsize_t stride[RANK];
       for(int i = 0; i < RANK; i++)
@@ -1026,14 +1026,14 @@ namespace CVC_NAMESPACE
         }
 
       for(int i = 0; i < RANK; i++)
-        ctx.log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
+        ctx.log(10,str(boost::format("stride[%1%]: %2%\n") % i % stride[i]));
       
       hsize_t count[RANK];
       for(int i = 0; i < RANK; i++)
         count[i] = fulldim[RANK-1-i]/stride[i];
 
       for(int i = 0; i < RANK; i++)
-        ctx.log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
+        ctx.log(10,str(boost::format("count[%1%]: %2%\n") % i % count[i]));
       
       return dimension(count[2],count[1],count[0]);
     }
@@ -1169,7 +1169,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
 
       std::vector<std::string> objnames;
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -1203,7 +1203,7 @@ namespace CVC_NAMESPACE
           }
         catch( H5::Exception& error )
           {
-            throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+            throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                      % hdf5_filename
                                      % hdf5_objname
                                      % error.getDetailMsg()));

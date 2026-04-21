@@ -214,7 +214,7 @@ namespace
     FLOAT* dataPtr = (FLOAT*)calloc(nMem, sizeof(FLOAT)); // initialize mem to zero - so that padded part is set to zero!
     if(dataPtr == NULL)
       {
-	string errStr(str(format("Error reading file '%1%': Could not allocate %2% bytes of memory!") 
+	string errStr(str(boost::format("Error reading file '%1%': Could not allocate %2% bytes of memory!") 
 			  % string(filename)
 			  % (nMem*sizeof(FLOAT))));
 	fclose(fd); 

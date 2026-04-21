@@ -149,7 +149,7 @@ namespace CVC_NAMESPACE
     std::string str() const
     {
       using namespace boost;
-      return boost::str(format("%1%,%2%,%3%")
+      return boost::str(boost::format("%1%,%2%,%3%")
                         % xdim % ydim % zdim);
     }
 

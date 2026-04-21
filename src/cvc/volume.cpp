@@ -156,7 +156,7 @@ namespace CVC_NAMESPACE
     */
 
     if(!boundingBox().contains(obj_x,obj_y,obj_z)) 
-      throw index_out_of_bounds(str(format("Coordinates are outside of bounding box :: "
+      throw index_out_of_bounds(str(boost::format("Coordinates are outside of bounding box :: "
                                            "bbox (%f,%f,%f),(%f,%f,%f) coord (%f,%f,%f)")
                                     % boundingBox().minx
                                     % boundingBox().miny

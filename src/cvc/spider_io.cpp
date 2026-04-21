@@ -750,9 +750,9 @@ namespace CVC_NAMESPACE
       if(dimension.isNull())
 	throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
-	throw invalid_spider_file(str(format("Spider format only supports 1 variable (%d requested)") % numVariables));
+	throw invalid_spider_file(str(boost::format("Spider format only supports 1 variable (%d requested)") % numVariables));
       if(numTimesteps > 1)
-	throw invalid_spider_file(str(format("Spider format only supports 1 timestep (%d requested)") % numTimesteps));
+	throw invalid_spider_file(str(boost::format("Spider format only supports 1 timestep (%d requested)") % numTimesteps));
       if(voxelTypes.size() > 1)
 	throw invalid_spider_file("Spider format only supports 1 variable and 1 timestep. (too many voxel types specified)");
       if(voxelTypes[0] != Float)

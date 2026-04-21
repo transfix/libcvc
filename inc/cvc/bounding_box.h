@@ -323,7 +323,7 @@ namespace CVC_NAMESPACE
     std::string str() const
     {
       using namespace boost;
-      return boost::str(format("%1%,%2%,%3%,%4%,%5%,%6%")
+      return boost::str(boost::format("%1%,%2%,%3%,%4%,%5%,%6%")
                         % minx % miny % minz
                         % maxx % maxy % maxz);
     }
@@ -357,21 +357,21 @@ namespace CVC_NAMESPACE
       std::string buf;
       if(minx > maxx)
 	{
-          buf = boost::str(format("minx: %f, maxx: %f")
+          buf = boost::str(boost::format("minx: %f, maxx: %f")
                            % double(minx)
                            % double(maxx));
 	  throw invalid_bounding_box(buf);
 	}
       else if(miny > maxy)
 	{
-          buf = boost::str(format("miny: %f, maxy: %f")
+          buf = boost::str(boost::format("miny: %f, maxy: %f")
                            % double(miny)
                            % double(maxy));
 	  throw invalid_bounding_box(buf);
 	}
       else if(minz > maxz)
 	{
-          buf = boost::str(format("minz: %f, maxz: %f")
+          buf = boost::str(boost::format("minz: %f, maxz: %f")
                            % double(minz)
                            % double(maxz));
 	  throw invalid_bounding_box(buf);

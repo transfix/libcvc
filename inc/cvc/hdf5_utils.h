@@ -739,7 +739,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -854,7 +854,7 @@ namespace CVC_NAMESPACE
       using namespace H5;
       using namespace boost;
 
-      ctx.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
@@ -911,7 +911,7 @@ namespace CVC_NAMESPACE
             { off_z, off_y, off_x };
           
           for(int i = 0; i < RANK; i++)
-            ctx.log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
+            ctx.log(10,str(boost::format("offset[%1%]: %2%\n") % i % offset[i]));
           
           hsize_t stride[RANK];
           for(int i = 0; i < RANK; i++)
@@ -923,14 +923,14 @@ namespace CVC_NAMESPACE
             }
         
           for(int i = 0; i < RANK; i++)
-            ctx.log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
+            ctx.log(10,str(boost::format("stride[%1%]: %2%\n") % i % stride[i]));
 
           hsize_t count[RANK];
           for(int i = 0; i < RANK; i++)
             count[i] = fulldim[RANK-1-i]/stride[i];
           
           for(int i = 0; i < RANK; i++)
-            ctx.log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
+            ctx.log(10,str(boost::format("count[%1%]: %2%\n") % i % count[i]));
           
           actualDim = dimension(count[2],count[1],count[0]);
           data.reset(new T[actualDim.size()]);
@@ -950,7 +950,7 @@ namespace CVC_NAMESPACE
       catch(H5::Exception& error)
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -1194,7 +1194,7 @@ namespace CVC_NAMESPACE
       catch(H5::Exception& error)
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -1393,7 +1393,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1515,7 +1515,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1584,7 +1584,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1706,7 +1706,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname

@@ -236,9 +236,9 @@ namespace
 
     for (k=0; k<3; k++) Half_f[k] = (Min_f[k] + Max_f[k])/2;
         
-    ctx.log(3,str(format("Min = %.4f %.4f %.4f\n") % Min_f[0] % Min_f[1] % Min_f[2]));
-    ctx.log(3,str(format("Max = %.4f %.4f %.4f\n") % Max_f[0] % Max_f[1] % Max_f[2]));
-    ctx.log(3,str(format("Half = %.4f %.4f %.4f\n") % Half_f[0] % Half_f[1] % Half_f[2]));
+    ctx.log(3,str(boost::format("Min = %.4f %.4f %.4f\n") % Min_f[0] % Min_f[1] % Min_f[2]));
+    ctx.log(3,str(boost::format("Max = %.4f %.4f %.4f\n") % Max_f[0] % Max_f[1] % Max_f[2]));
+    ctx.log(3,str(boost::format("Half = %.4f %.4f %.4f\n") % Half_f[0] % Half_f[1] % Half_f[2]));
 
     for (i = 0; i < NumTriangles_i; i++) {
 

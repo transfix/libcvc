@@ -173,7 +173,7 @@ namespace CVC_NAMESPACE
 
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-    ctx.log(2,str(format("%s :: out-of-core convert\n")
+    ctx.log(2,str(boost::format("%s :: out-of-core convert\n")
                      % BOOST_CURRENT_FUNCTION));
       
     volume_file_info volinfo;

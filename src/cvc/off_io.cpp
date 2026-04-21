@@ -77,7 +77,7 @@ namespace CVC_NAMESPACE
 
       getline(inf, line); line_num++; // junk the first line
       if(!inf)
-	throw read_error(str(format("Error reading file %1%, line %2%")
+	throw read_error(str(boost::format("Error reading file %1%, line %2%")
 			     % filename
 			     % line_num));
 
@@ -85,13 +85,13 @@ namespace CVC_NAMESPACE
       //inf >> headword;    
       //if (headword.compare("OFF") != 0 && 
       //  headword.compare("COFF") != 0) {
-      //  throw read_error(str(format("Error reading header for file %1%")
+      //  throw read_error(str(boost::format("Error reading header for file %1%")
       //                % filename));
       //}
 
       getline(inf, line); line_num++;
       if(!inf)
-	throw read_error(str(format("Error reading file %1%, line %2%")
+	throw read_error(str(boost::format("Error reading file %1%, line %2%")
 			     % filename
 			     % line_num));
       trim(line);
@@ -100,7 +100,7 @@ namespace CVC_NAMESPACE
 	    is_any_of(" "),
 	    token_compress_on);
       if(split_line.size() != 3)
-	throw read_error(str(format("Not an OFF file (wrong number of tokens in line 2: [%1%])")
+	throw read_error(str(boost::format("Not an OFF file (wrong number of tokens in line 2: [%1%])")
 			     % split_line.size()));
 
       try
@@ -113,7 +113,7 @@ namespace CVC_NAMESPACE
 	    {
 	      getline(inf, line); line_num++;
 	      if(!inf)
-		throw read_error(str(format("Error reading file %1%, line %2%")
+		throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				     % filename
 				     % line_num));
 	      trim(line);
@@ -138,7 +138,7 @@ namespace CVC_NAMESPACE
 		  geom.points().push_back(point);
 		  break;
 		default:
-		  throw read_error(str(format("Error reading file %1%, line %2%")
+		  throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				       % filename
 				       % line_num));
 		}
@@ -146,7 +146,7 @@ namespace CVC_NAMESPACE
 	}
       catch(std::exception& e)
 	{
-	  throw read_error(str(format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
+	  throw read_error(str(boost::format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
 			       % filename
 			       % line_num
 			       % line
@@ -157,7 +157,7 @@ namespace CVC_NAMESPACE
 	{
 	  getline(inf, line); line_num++;
 	  if(!inf)
-	    throw read_error(str(format("Error reading file %1%, line %2%")
+	    throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				 % filename
 				 % line_num));
 	  trim(line);
@@ -171,7 +171,7 @@ namespace CVC_NAMESPACE
 	  // don't handle segments yet... just planar facets
 	  if (size < 3) 
 	    {
-	      throw read_error(str(format("Error reading file %1%, line %2%")
+	      throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				   % filename
 				   % line_num));
 	    }

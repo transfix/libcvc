@@ -195,7 +195,7 @@ namespace CVC_NAMESPACE
       }
     throw unsupported_geometry_file_type(
       str(
-	format("%1% : Cannot read '%2%'%3%") % 
+	boost::format("%1% : Cannot read '%2%'%3%") % 
 	BOOST_CURRENT_FUNCTION %
 	filename %
 	errors
@@ -239,7 +239,7 @@ namespace CVC_NAMESPACE
       }
     throw unsupported_geometry_file_type(
       str(
-	format("%1% : Cannot write '%2%'%3%") % 
+	boost::format("%1% : Cannot write '%2%'%3%") % 
 	BOOST_CURRENT_FUNCTION %
 	filename %
 	errors

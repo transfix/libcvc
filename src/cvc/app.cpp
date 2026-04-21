@@ -168,7 +168,7 @@ namespace CVC_NAMESPACE
           {
             using namespace boost;
             if (val.second && val.second->joinable()) {
-              a.log(3,str(format("%s :: waiting for thread %s\n")
+              a.log(3,str(boost::format("%s :: waiting for thread %s\n")
                                % BOOST_CURRENT_FUNCTION
                                % val.first));
               // Try to join with a 5 second timeout per thread
@@ -185,11 +185,11 @@ namespace CVC_NAMESPACE
     // Phase 3: Report any threads that failed to join
     if (!failed_threads.empty()) {
       using namespace boost;
-      std::string msg = str(format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
+      std::string msg = str(boost::format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
                             % BOOST_CURRENT_FUNCTION
                             % failed_threads.size());
       BOOST_FOREACH(const std::string& thread_name, failed_threads) {
-        msg += str(format("  - %s\n") % thread_name);
+        msg += str(boost::format("  - %s\n") % thread_name);
       }
       a.log(0, msg); // Error level
       std::cerr << msg; // Also print to stderr to ensure visibility

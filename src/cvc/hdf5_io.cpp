@@ -184,7 +184,7 @@ namespace
               if(curDim.size()==1) break; //we're done if the dims hit 1
 
               std::string hier_volume_name =
-                str(format("%1%_%2%x%3%x%4%") 
+                str(boost::format("%1%_%2%x%3%x%4%") 
                     % _hdf5_volumeDataSet
                     % curDim[0] % curDim[1] % curDim[2]);
 
@@ -192,7 +192,7 @@ namespace
               getAttribute(_ctx, _hdf5_filename, hier_volume_name, "dirty", isDirty);
               if(isDirty)
                 {
-                  _ctx.log(1,str(format("%1% :: computing %2%\n")
+                  _ctx.log(1,str(boost::format("%1% :: computing %2%\n")
                                  % BOOST_CURRENT_FUNCTION
                                  % hier_volume_name));
 
@@ -250,7 +250,7 @@ namespace
                 }
               else
                 {
-                  _ctx.log(1,str(format("%1% :: %2% not dirty\n")
+                  _ctx.log(1,str(boost::format("%1% :: %2% not dirty\n")
                                  % BOOST_CURRENT_FUNCTION
                                  % hier_volume_name));
                 }
@@ -262,13 +262,13 @@ namespace
         }
       catch(boost::thread_interrupted&)
         {
-          _ctx.log(6,str(format("%1% :: thread %2% interrupted\n")
+          _ctx.log(6,str(boost::format("%1% :: thread %2% interrupted\n")
                          % BOOST_CURRENT_FUNCTION
                          % _ctx.threadKey()));
         }
       catch(CVC_NAMESPACE::exception& e)
         {
-          _ctx.log(1,str(format("%1% :: ERROR :: %2%\n")
+          _ctx.log(1,str(boost::format("%1% :: ERROR :: %2%\n")
                          % BOOST_CURRENT_FUNCTION
                          % e.what()));
         }
@@ -432,7 +432,7 @@ namespace CVC_NAMESPACE
       uint64 numVariables, numTimesteps;
       if(!oldVolMagick)
         {
-          _ctx.log(6,str(format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n")
+          _ctx.log(6,str(boost::format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n")
                            % BOOST_CURRENT_FUNCTION));
 
           d._boundingBox = getObjectBoundingBox(_ctx, actualFileName,objectName);
@@ -448,7 +448,7 @@ namespace CVC_NAMESPACE
         }
       else
         {
-          _ctx.log(5,str(format("%s :: using old VolMagick cvc-hdf5 format\n")
+          _ctx.log(5,str(boost::format("%s :: using old VolMagick cvc-hdf5 format\n")
                            % BOOST_CURRENT_FUNCTION));
 
           //some older files will have attributes named like this...
@@ -517,7 +517,7 @@ namespace CVC_NAMESPACE
       else
         {
           if(numVariables > 1 || numTimesteps > 1)
-            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
 
@@ -599,7 +599,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
         {
           if(var > 0 || time > 0)
-            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
           var = 0; time = 0;
@@ -707,12 +707,12 @@ namespace CVC_NAMESPACE
           // ---
         
           //filter out other variables and timesteps
-          std::string filter = str(format("%1%:%2%") % var % time);
+          std::string filter = str(boost::format("%1%:%2%") % var % time);
 
           std::vector<std::string> hierarchy_objects = 
             getChildObjects(_ctx, actualFileName, objectName, filter);
           if(hierarchy_objects.empty())
-            throw hdf5_exception(str(format("%s :: no child objects!")
+            throw hdf5_exception(str(boost::format("%s :: no child objects!")
 				     % BOOST_CURRENT_FUNCTION));
         
           dimension dim = 
@@ -742,7 +742,7 @@ namespace CVC_NAMESPACE
           //now select a dataset
           BOOST_FOREACH(std::string obj, hierarchy_objects)
             {
-              _ctx.log(3,str(format("%s: %s\n")
+              _ctx.log(3,str(boost::format("%s: %s\n")
                                % BOOST_CURRENT_FUNCTION
                                % obj));
 
@@ -769,7 +769,7 @@ namespace CVC_NAMESPACE
                 }
             }
 
-          _ctx.log(2,str(format("%s: selected object %s\n")
+          _ctx.log(2,str(boost::format("%s: selected object %s\n")
                            % BOOST_CURRENT_FUNCTION
                            % hierarchy_object));
 
@@ -778,7 +778,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
         {
           if(var > 0 || time > 0)
-            _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+            _ctx.log(1,str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
                                     "with more than one variable or timestep!\n")
                              % BOOST_CURRENT_FUNCTION));
           var = 0; time = 0;
@@ -930,7 +930,7 @@ namespace CVC_NAMESPACE
 	  //you want the highest resolution dataset, which uses the following naming convention.
 	  volume_name =
 	    str(
-		format("%1%/%2%:%3%:%4%") %
+		boost::format("%1%/%2%:%3%:%4%") %
 		objectName %
 		DEFAULT_VOLUME_NAME %
 		var % time
@@ -960,11 +960,11 @@ namespace CVC_NAMESPACE
 	      if(curDim.size()==1) break; //we're done if the dims hit zero
 
 	      std::string hier_volume_name =
-		str(format("%1%_%2%x%3%x%4%") 
+		str(boost::format("%1%_%2%x%3%x%4%") 
 		    % volume_name
 		    % curDim[0] % curDim[1] % curDim[2]);
 
-	      _ctx.log(10,str(format("%1% :: marking %2% dirty\n")
+	      _ctx.log(10,str(boost::format("%1% :: marking %2% dirty\n")
 				% BOOST_CURRENT_FUNCTION
 				% hier_volume_name));
 
@@ -980,7 +980,7 @@ namespace CVC_NAMESPACE
       else //Ungrouped dataset
 	{
 	  if(var > 0 || time > 0)
-	    _ctx.log(1,str(format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+	    _ctx.log(1,str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
 				    "with more than one variable or timestep!\n")
 			     % BOOST_CURRENT_FUNCTION));
 	  var = 0; time = 0;

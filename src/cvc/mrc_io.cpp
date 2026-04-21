@@ -717,9 +717,9 @@ namespace CVC_NAMESPACE
       if(dimension.isNull())
         throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
-        throw invalid_mrc_header(str(format("MRC format only supports 1 variable (%1% requested)") % numVariables));
+        throw invalid_mrc_header(str(boost::format("MRC format only supports 1 variable (%1% requested)") % numVariables));
       if(numTimesteps > 1)
-        throw invalid_mrc_header(str(format("MRC format only supports 1 timestep (%1% requested)") % numTimesteps));
+        throw invalid_mrc_header(str(boost::format("MRC format only supports 1 timestep (%1% requested)") % numTimesteps));
       if(voxelTypes.size() > 1)
         throw invalid_mrc_header("MRC format only supports 1 variable and 1 timestep. (too many voxel types specified)");
       if(min_time != max_time)
@@ -729,7 +729,7 @@ namespace CVC_NAMESPACE
       if(voxelTypes[0] == UInt ||
          voxelTypes[0] == Double ||
          voxelTypes[0] == UInt64)
-        throw invalid_mrc_header(str(format("Unsupported type: %1%") % data_type_strings[voxelTypes[0]]));
+        throw invalid_mrc_header(str(boost::format("Unsupported type: %1%") % data_type_strings[voxelTypes[0]]));
 
       memset(&mrcHeader,0,sizeof(mrc_header));
 
