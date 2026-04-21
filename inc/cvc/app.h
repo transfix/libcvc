@@ -548,8 +548,22 @@ namespace CVC_NAMESPACE
     class scoped_lock
     {
     public:
+      // Preferred: explicit app context
+      scoped_lock(app& ctx,
+                  const std::string& name,
+                  const std::string& info = std::string()) :
+        _ctx(ctx),
+        _scopedLock(*ctx.mutex(name)),
+        _name(name)
+          {
+            //prepend the thread key
+            _ctx.mutexInfo(name,
+                           _ctx.threadKey() + ": " + info);
+          }
+      // Legacy: uses app::instance()
       scoped_lock(const std::string& name,
-                  const std::string& info = std::string()) : 
+                  const std::string& info = std::string()) :
+        _ctx(app::instance()),
         _scopedLock(*app::instance().mutex(name)),
         _name(name)
           {
@@ -559,9 +573,10 @@ namespace CVC_NAMESPACE
           }
       ~scoped_lock()
         {
-          app::instance().mutexInfo(_name,"");
+          _ctx.mutexInfo(_name,"");
         }
     private:
+      app& _ctx;
       boost::mutex::scoped_lock _scopedLock;
       std::string _name;
     };

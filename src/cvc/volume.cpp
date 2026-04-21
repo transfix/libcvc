@@ -276,16 +276,20 @@ namespace CVC_NAMESPACE
 		       const bounding_box& subvolbox)
   {
     if(!subvolbox.isNull())
-      readVolumeFile(*this, filename, var, time, subvolbox);
+      readVolumeFile(ctx(), *this, filename, var, time, subvolbox);
     else
-      readVolumeFile(*this, filename, var, time);
+      readVolumeFile(ctx(), *this, filename, var, time);
     return *this;
   }
 
   // 12/29/2013 -- Joe R. -- Creation.
   volume& volume::write(const std::string& filename)
   {
-    createVolumeFile(*this, filename);
+    createVolumeFile(ctx(), filename,
+		     boundingBox(),
+		     voxel_dimensions(),
+		     std::vector<data_type>(1, voxelType()));
+    writeVolumeFile(ctx(), *this, filename);
     return *this;
   }
 }
