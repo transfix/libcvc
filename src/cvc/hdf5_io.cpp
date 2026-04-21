@@ -558,7 +558,7 @@ namespace CVC_NAMESPACE
     // 08/05/2011 -- Joe R. -- Using HDF5 Utilities now.
     // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
     //                         multi-res hierarchy thread code simpler.
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
                                 const std::string& filename, 
                                 unsigned int var, unsigned int time,
                                 uint64 off_x, uint64 off_y, uint64 off_z,
@@ -671,7 +671,7 @@ namespace CVC_NAMESPACE
     //                         multi-res hierarchy thread code simpler.
     // 09/17/2011 -- Joe R. -- Picking out the closest dimension to the maxdim in
     //                         the hierarchy.
-    virtual void readVolumeFile(volume& vol, 
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol, 
                                 const std::string& filename, 
                                 unsigned int var,
                                 unsigned int time,
@@ -903,7 +903,7 @@ namespace CVC_NAMESPACE
     // 08/28/2011 -- Joe R. -- Using HDF5 Utilities now.
     // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
     //                         multi-res hierarchy thread code simpler.
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& /*ctx*/, const volume& wvol, 
                                  const std::string& filename,
                                  unsigned int var, unsigned int time,
                                  uint64 off_x, uint64 off_y, uint64 off_z) const
@@ -1011,7 +1011,7 @@ namespace CVC_NAMESPACE
     //   Writes the specified bounding box to the file.
     // ---- Change History ----
     // 04/06/2012 -- Joe R. -- Creation.
-    virtual void writeBoundingBox(const bounding_box& bbox, const std::string& filename) const
+    virtual void writeBoundingBox(app& /*ctx*/, const bounding_box& bbox, const std::string& filename) const
     {
       using namespace hdf5_utils;
       using namespace boost;

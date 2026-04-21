@@ -282,7 +282,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -613,7 +613,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& /*ctx*/, const volume& wvol, 
 				 const std::string& filename,
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const

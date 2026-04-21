@@ -666,7 +666,7 @@ namespace CVC_NAMESPACE
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
     // 12/11/2009 -- Joe R. -- Freeing data buffer.
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -778,14 +778,14 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& ctx, const volume& wvol, 
 				 const std::string& filename,
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const
     {
-      thread_info ti(wvol.ctx(), BOOST_CURRENT_FUNCTION);
+      thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-      volume vol(wvol.ctx());
+      volume vol(ctx);
 
       if(var > 0)
 	throw index_out_of_bounds("Variable index out of bounds.");
@@ -794,17 +794,17 @@ namespace CVC_NAMESPACE
 
       try
 	{
-	  volume_file_info volinfo(filename);
-	  readVolumeFile(vol,filename,0,0,0,0,0,volinfo.voxel_dimensions());
+	  volume_file_info volinfo(ctx, filename);
+	  readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, volinfo.voxel_dimensions());
 	}
       catch(read_error &e)
 	{
-	  CVC_NAMESPACE::createVolumeFile(filename,
+	  CVC_NAMESPACE::createVolumeFile(ctx, filename,
 			   bounding_box(0.0,0.0,0.0,1.0,1.0,1.0),
 			   wvol.voxel_dimensions(),
 			   std::vector<data_type>(1,wvol.voxelType()),
 			   0,0,0.0,0.0);
-	  readVolumeFile(vol,filename,0,0,0,0,0,wvol.voxel_dimensions());
+	  readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, wvol.voxel_dimensions());
 	}
 
       for(uint64 k = 0; k < wvol.ZDim(); k++)

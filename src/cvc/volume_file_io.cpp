@@ -79,13 +79,14 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 01/03/2010 -- Joe R. -- Creation.
   // 05/11/2010 -- Joe R. -- Fixing off-by-one indexing problem.
-  void volume_file_io::readVolumeFile(volume& vol, 
+  void volume_file_io::readVolumeFile(app& ctx,
+                                     volume& vol, 
 				     const std::string& filename, 
 				     unsigned int var,
 				     unsigned int time,
 				     const bounding_box& subvolbox) const
   {
-    volume_file_info volinfo(vol.ctx(), filename);
+    volume_file_info volinfo(ctx, filename);
     if(!subvolbox.isWithin(volinfo.boundingBox()))
       throw sub_volume_out_of_bounds("The subvolume bounding box must be within the file's bounding box.");
     uint64 off_x = uint64((subvolbox.minx - volinfo.XMin())/volinfo.XSpan());
@@ -99,7 +100,7 @@ namespace CVC_NAMESPACE
     if(dim[0] + off_x > volinfo.XDim()) dim[0] = volinfo.XDim() - off_x;
     if(dim[1] + off_y > volinfo.YDim()) dim[1] = volinfo.YDim() - off_y;
     if(dim[2] + off_z > volinfo.ZDim()) dim[2] = volinfo.ZDim() - off_z;
-    readVolumeFile(vol,filename,var,time,off_x,off_y,off_z,dim);
+    readVolumeFile(ctx, vol, filename, var, time, off_x, off_y, off_z, dim);
     //vol.sub(subvolbox,dim); //get a subvolume that is exactly the size of subvolbox
     //just force the bounding box for now.. this might lead to aliasing errors
     vol.boundingBox(subvolbox);
@@ -114,9 +115,10 @@ namespace CVC_NAMESPACE
   //   basis.
   // ---- Change History ----
   // 04/06/2012 -- Joe R. -- Creation.
-  void volume_file_io::writeBoundingBox(const bounding_box& bbox, const std::string& filename) const
+  void volume_file_io::writeBoundingBox(app& ctx,
+                                        const bounding_box& bbox,
+                                        const std::string& filename) const
   {
-    app& ctx = app::instance();
     std::vector<volume> vols;
     volume_file_info vfi(ctx, filename);
     vfi.boundingBox(bbox);
@@ -298,7 +300,7 @@ namespace CVC_NAMESPACE
   // --------------
   // readVolumeFile (ctx-aware)
   // --------------
-  void readVolumeFile(app& /*ctx*/, volume& vol,
+  void readVolumeFile(app& ctx, volume& vol,
                       const std::string& filename,
                       unsigned int var, unsigned int time,
                       uint64 off_x, uint64 off_y, uint64 off_z,
@@ -330,8 +332,8 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->readVolumeFile(vol,filename,var,time,
-				       off_x,off_y,off_z,subvoldim);
+		  (*i)->readVolumeFile(ctx, vol, filename, var, time,
+				       off_x, off_y, off_z, subvoldim);
 		  return;
 		}
 	    }
@@ -372,7 +374,7 @@ namespace CVC_NAMESPACE
   // --------------
   // readVolumeFile (ctx-aware, bbox)
   // --------------
-  void readVolumeFile(app& /*ctx*/, volume& vol,
+  void readVolumeFile(app& ctx, volume& vol,
                       const std::string& filename,
                       unsigned int var, unsigned int time,
                       const bounding_box& subvolbox)
@@ -403,7 +405,7 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->readVolumeFile(vol,filename,var,time,
+		  (*i)->readVolumeFile(ctx, vol, filename, var, time,
 				       subvolbox);
 		  return;
 		}
@@ -453,7 +455,7 @@ namespace CVC_NAMESPACE
   // ---------------
   // writeVolumeFile (ctx-aware, offset)
   // ---------------
-  void writeVolumeFile(app& /*ctx*/, const volume& vol,
+  void writeVolumeFile(app& ctx, const volume& vol,
                        const std::string& filename,
                        unsigned int var, unsigned int time,
                        uint64 off_x, uint64 off_y, uint64 off_z)
@@ -482,7 +484,8 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->writeVolumeFile(vol,filename,var,time,off_x,off_y,off_z);
+		  (*i)->writeVolumeFile(ctx, vol, filename, var, time,
+                                        off_x, off_y, off_z);
 		  return;
 		}
 	    }
@@ -633,7 +636,14 @@ namespace CVC_NAMESPACE
   //  Changes a volume file's bounding box.
   // ---- Change History ----
   // 04/06/2012 -- Joe R. -- Creation.
-  void writeBoundingBox(const bounding_box& bbox, const std::string& filename)                        
+  void writeBoundingBox(const bounding_box& bbox, const std::string& filename)
+  {
+    writeBoundingBox(app::instance(), bbox, filename);
+  }
+
+  void writeBoundingBox(app& ctx,
+                        const bounding_box& bbox,
+                        const std::string& filename)
   {
     std::string errors;
     boost::smatch what;
@@ -659,7 +669,7 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->writeBoundingBox(bbox,filename);
+		  (*i)->writeBoundingBox(ctx, bbox, filename);
 		  return;
 		}
 	    }

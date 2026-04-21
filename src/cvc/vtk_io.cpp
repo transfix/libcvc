@@ -396,7 +396,7 @@ namespace CVC_NAMESPACE
     //   Writes to a Volume object after reading from a volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& /*vol*/,
+    virtual void readVolumeFile(app& /*ctx*/, volume& /*vol*/,
 				const std::string& /*filename*/, 
 				unsigned int /*var*/, unsigned int /*time*/,
 				uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/,
@@ -437,7 +437,7 @@ namespace CVC_NAMESPACE
     //   createVolumeFile to replace the volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void writeVolumeFile(const volume& /*wvol*/, 
+    virtual void writeVolumeFile(app& /*ctx*/, const volume& /*wvol*/, 
 				 const std::string& /*filename*/,
 				 unsigned int /*var*/, unsigned int /*time*/,
 				 uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/) const
