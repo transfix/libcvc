@@ -900,7 +900,7 @@ namespace CVC_NAMESPACE
     Arguments args;
     args["improve_iterations"] = iterations;
     args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(method);
-    *this = cvc_mesher(cvc::app::instance(), *this, args);
+    *this = cvc_mesher(ctx(), *this, args);
     return *this;
   }
 #endif // CVC_ENABLE_MESHER

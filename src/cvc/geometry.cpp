@@ -23,6 +23,7 @@
 #include <cvc/geometry.h>
 #include <cvc/geometry_file_io.h>
 #include <cvc/utility.h>
+#include <cvc/app.h>
 #include <cmath>
 
 #ifdef CVC_GEOMETRY_ENABLE_PROJECT
@@ -49,7 +50,18 @@
 namespace CVC_NAMESPACE
 {
   geometry::geometry()
-    : _geom_type(SURFACE_TRI), _extents_set(false)
+    : _geom_type(SURFACE_TRI), _extents_set(false),
+      _ctx(&app::instance())
+  {
+    for(uint64_t i = 0; i < 3; i++)
+      _min[i] = _max[i] = 0.0;
+
+    init_ptrs();
+  }
+
+  geometry::geometry(app& ctx)
+    : _geom_type(SURFACE_TRI), _extents_set(false),
+      _ctx(&ctx)
   {
     for(uint64_t i = 0; i < 3; i++)
       _min[i] = _max[i] = 0.0;
@@ -64,7 +76,8 @@ namespace CVC_NAMESPACE
       _lines(geom._lines), _tris(geom._tris),
       _quads(geom._quads), _tets(geom._tets), _hexs(geom._hexs),
       _geom_type(geom._geom_type), _extents_set(geom._extents_set),
-      _min(geom._min), _max(geom._max) 
+      _min(geom._min), _max(geom._max),
+      _ctx(geom._ctx)
   {
     //make sure all our pointers are valid
     init_ptrs();
@@ -109,7 +122,7 @@ namespace CVC_NAMESPACE
     _extents_set = geom._extents_set;
     _min = geom._min;
     _max = geom._max;
-
+    _ctx = geom._ctx;
     //make sure all our pointers are valid
     init_ptrs();
   }
@@ -717,7 +730,9 @@ namespace CVC_NAMESPACE
   // 01/12/2014 - Joe R. -- calling read_geometry now.
   geometry& geometry::read(const std::string& filename)
   {
+    app* saved_ctx = _ctx;
     *this = read_geometry(filename);
+    _ctx = saved_ctx;    // preserve the caller's ctx across the read
     return *this;
   }
 
@@ -731,7 +746,21 @@ namespace CVC_NAMESPACE
   // arand: written 4-11-2011
   //        directly read a cvc-raw type file into the data structure
   geometry::geometry(const std::string& filename)
+    : _geom_type(SURFACE_TRI), _extents_set(false),
+      _ctx(&app::instance())
   {
+    for(uint64_t i = 0; i < 3; i++)
+      _min[i] = _max[i] = 0.0;
+    init_ptrs();
+    read(filename);
+  }
+
+  geometry::geometry(app& ctx, const std::string& filename)
+    : _geom_type(SURFACE_TRI), _extents_set(false),
+      _ctx(&ctx)
+  {
+    for(uint64_t i = 0; i < 3; i++)
+      _min[i] = _max[i] = 0.0;
     init_ptrs();
     read(filename);
   }

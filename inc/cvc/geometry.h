@@ -36,6 +36,8 @@
 
 namespace CVC_NAMESPACE
 {
+  class app;
+
   typedef boost::uint64_t uint64_t;
 
   // --------
@@ -120,6 +122,11 @@ namespace CVC_NAMESPACE
     geometry();
     geometry(const geometry& geom);
     geometry(const std::string & filename);
+
+    // ---- Overloads accepting explicit app& context ----
+    explicit geometry(app& ctx);
+    geometry(app& ctx, const std::string& filename);
+
     ~geometry();
 
     void copy(const geometry& geom, bool deepCopy = false);
@@ -224,6 +231,10 @@ namespace CVC_NAMESPACE
     //write data structure to file
     void write(const std::string& filename) const;
 
+    //app context accessors
+    app& ctx() { return *_ctx; }
+    app& ctx() const { return *_ctx; }
+
   protected:
     void init_ptrs();
     void calc_extents() const;
@@ -250,6 +261,9 @@ namespace CVC_NAMESPACE
     mutable bool _extents_set; //if true, the min/max extents are valid
     mutable point_t _min;
     mutable point_t _max;
+
+    //non-owning pointer to the app context.  Never null after any ctor.
+    app* _ctx;
   };
 
   typedef geometry::scalar_t    scalar_t;

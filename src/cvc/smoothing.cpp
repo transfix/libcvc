@@ -667,7 +667,7 @@ namespace CVC_NAMESPACE
                                 bool perturb_1, bool geometric_flow,
                                 bool smoothing_enabled, bool perturb_2)
   {
-    smooth_geometry(app::instance(), *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled, perturb_2);
+    smooth_geometry(ctx(), *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled, perturb_2);
     return *this;
   }
 }
