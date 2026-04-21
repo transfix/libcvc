@@ -269,8 +269,7 @@ namespace CVC_NAMESPACE
 		      const std::string& filename,
 		      unsigned int var, unsigned int time)
   {
-    volume_file_info volinfo(filename);
-    readVolumeFile(vol,filename,var,time,0,0,0,volinfo.voxel_dimensions());
+    readVolumeFile(app::instance(), vol, filename, var, time);
   }
 
   // --------------
@@ -290,6 +289,19 @@ namespace CVC_NAMESPACE
 		      unsigned int var, unsigned int time,
 		      uint64 off_x, uint64 off_y, uint64 off_z,
 		      const dimension& subvoldim)
+  {
+    readVolumeFile(app::instance(), vol, filename, var, time,
+                   off_x, off_y, off_z, subvoldim);
+  }
+
+  // --------------
+  // readVolumeFile (ctx-aware)
+  // --------------
+  void readVolumeFile(app& /*ctx*/, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      uint64 off_x, uint64 off_y, uint64 off_z,
+                      const dimension& subvoldim)
   {
     vol.unsetMinMax();
 
@@ -352,6 +364,17 @@ namespace CVC_NAMESPACE
 		      const std::string& filename, 
 		      unsigned int var, unsigned int time,
 		      const bounding_box& subvolbox)
+  {
+    readVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
+  }
+
+  // --------------
+  // readVolumeFile (ctx-aware, bbox)
+  // --------------
+  void readVolumeFile(app& /*ctx*/, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      const bounding_box& subvolbox)
   {
     vol.unsetMinMax();
 
@@ -422,6 +445,18 @@ namespace CVC_NAMESPACE
 		       unsigned int var, unsigned int time,
 		       uint64 off_x, uint64 off_y, uint64 off_z)
   {
+    writeVolumeFile(app::instance(), vol, filename, var, time,
+                    off_x, off_y, off_z);
+  }
+
+  // ---------------
+  // writeVolumeFile (ctx-aware, offset)
+  // ---------------
+  void writeVolumeFile(app& /*ctx*/, const volume& vol,
+                       const std::string& filename,
+                       unsigned int var, unsigned int time,
+                       uint64 off_x, uint64 off_y, uint64 off_z)
+  {
     std::string errors;
     boost::smatch what;
 
@@ -485,7 +520,7 @@ namespace CVC_NAMESPACE
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     volume localvol(vol);
-    volume_file_info volinfo(filename);
+    volume_file_info volinfo(ctx, filename);
     if(!subvolbox.isWithin(volinfo.boundingBox()))
       throw sub_volume_out_of_bounds("The subvolume bounding box must be within the file's bounding box.");
 
@@ -529,7 +564,7 @@ namespace CVC_NAMESPACE
       }
     
     ctx.threadProgress(1.0);
-    writeVolumeFile(subvol,filename,var,time,off_x,off_y,off_z);
+    writeVolumeFile(ctx, subvol, filename, var, time, off_x, off_y, off_z);
   }
 
   void writeVolumeFile(const volume& vol, 
@@ -551,18 +586,7 @@ namespace CVC_NAMESPACE
   void writeVolumeFile(const std::vector<volume>& vols,
 		       const std::string& filename)
   {
-    uint64 i;
-
-    if(vols.size() == 0) return;
-    
-    //create types vector
-    std::vector<data_type> voxelTypes;
-    for(i=0; i<vols.size(); i++) voxelTypes.push_back(vols[i].voxelType());
-
-    //create the file and write the volume info
-    createVolumeFile(filename,vols[0].boundingBox(),vols[0].voxel_dimensions(),voxelTypes,vols.size());
-    for(i=0; i<vols.size(); i++)
-      writeVolumeFile(vols[i],filename,i);
+    writeVolumeFile(app::instance(), vols, filename);
   }
 
   // ----------------
@@ -655,32 +679,16 @@ namespace CVC_NAMESPACE
 
   // ---- app& overloads ----
   // These accept an explicit app context instead of using the singleton.
-  // Functions that don't use app internally simply forward to the legacy
-  // implementation. The bbox-based writeVolumeFile above is the canonical
-  // version; the legacy one delegates to it via app::instance().
+  // The ctx-aware versions are primary; legacy overloads delegate to them
+  // via app::instance() for backward compatibility.
 
-  void readVolumeFile(app& /*ctx*/, volume& vol,
+  void readVolumeFile(app& ctx, volume& vol,
 		      const std::string& filename,
 		      unsigned int var, unsigned int time)
   {
-    readVolumeFile(vol, filename, var, time);
-  }
-
-  void readVolumeFile(app& /*ctx*/, volume& vol,
-		      const std::string& filename,
-		      unsigned int var, unsigned int time,
-		      uint64 off_x, uint64 off_y, uint64 off_z,
-		      const dimension& subvoldim)
-  {
-    readVolumeFile(vol, filename, var, time, off_x, off_y, off_z, subvoldim);
-  }
-
-  void readVolumeFile(app& /*ctx*/, volume& vol,
-		      const std::string& filename,
-		      unsigned int var, unsigned int time,
-		      const bounding_box& subvolbox)
-  {
-    readVolumeFile(vol, filename, var, time, subvolbox);
+    volume_file_info volinfo(ctx, filename);
+    readVolumeFile(ctx, vol, filename, var, time, 0, 0, 0,
+                   volinfo.voxel_dimensions());
   }
 
   void readVolumeFile(app& ctx, std::vector<volume>& vols,
@@ -695,14 +703,6 @@ namespace CVC_NAMESPACE
 	  readVolumeFile(ctx, vol, filename, var, time);
 	  vols.push_back(vol);
 	}
-  }
-
-  void writeVolumeFile(app& /*ctx*/, const volume& vol,
-		       const std::string& filename,
-		       unsigned int var, unsigned int time,
-		       uint64 off_x, uint64 off_y, uint64 off_z)
-  {
-    writeVolumeFile(vol, filename, var, time, off_x, off_y, off_z);
   }
 
   void writeVolumeFile(app& ctx, const std::vector<volume>& vols,
