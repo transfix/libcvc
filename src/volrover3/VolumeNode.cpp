@@ -144,29 +144,29 @@ void VolumeNode::applyClipPlanes(vtkPlaneCollection* planes)
 
 void VolumeNode::addToRenderer(vtkRenderer* renderer)
 {
-    cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");
+    volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");
     GraphicsNode::addToRenderer(renderer);
     
     // Verify it was actually added and log detailed info
     if (renderer && renderer->GetVolumes()->IsItemPresent(m_vtkVolume)) {
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: CONFIRMED - Volume is in renderer");
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Total volumes in renderer: " + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: CONFIRMED - Volume is in renderer");
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Total volumes in renderer: " + 
                    std::to_string(renderer->GetVolumes()->GetNumberOfItems()));
         
         // Log volume property details
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume visibility: " + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume visibility: " + 
                    std::to_string(m_vtkVolume->GetVisibility()));
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume pickable: " + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume pickable: " + 
                    std::to_string(m_vtkVolume->GetPickable()));
         
         // Log image data details
         int dims[3];
         m_imageData->GetDimensions(dims);
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Image data dimensions: [" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Image data dimensions: [" + 
                    std::to_string(dims[0]) + ", " + std::to_string(dims[1]) + ", " + std::to_string(dims[2]) + "]");
         
         double* bounds = m_vtkVolume->GetBounds();
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume bounds: [" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume bounds: [" + 
                    std::to_string(bounds[0]) + ", " + std::to_string(bounds[1]) + ", " + 
                    std::to_string(bounds[2]) + ", " + std::to_string(bounds[3]) + ", " + 
                    std::to_string(bounds[4]) + ", " + std::to_string(bounds[5]) + "]");
@@ -175,25 +175,25 @@ void VolumeNode::addToRenderer(vtkRenderer* renderer)
         double colorRange[2], opacityRange[2];
         m_colorFunc->GetRange(colorRange);
         m_opacityFunc->GetRange(opacityRange);
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Color TF range: [" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Color TF range: [" + 
                    std::to_string(colorRange[0]) + ", " + std::to_string(colorRange[1]) + "]");
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity TF range: [" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity TF range: [" + 
                    std::to_string(opacityRange[0]) + ", " + std::to_string(opacityRange[1]) + "]");
         
         // Log opacity at a few sample points
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMin(" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMin(" + 
                    std::to_string(m_dataMin) + "): " + std::to_string(m_opacityFunc->GetValue(m_dataMin)));
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMid: " + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMid: " + 
                    std::to_string(m_opacityFunc->GetValue((m_dataMin + m_dataMax) / 2.0)));
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMax(" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMax(" + 
                    std::to_string(m_dataMax) + "): " + std::to_string(m_opacityFunc->GetValue(m_dataMax)));
         
         // Log scalar range from image data
         double* scalarRange = m_imageData->GetScalarRange();
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: Image data scalar range: [" + 
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Image data scalar range: [" + 
                    std::to_string(scalarRange[0]) + ", " + std::to_string(scalarRange[1]) + "]");
     } else {
-        cvc::log(0, "VolumeNode::addToRenderer[" + getName() + "]: WARNING - Volume NOT in renderer!");
+        volrover3::app().log(0, "VolumeNode::addToRenderer[" + getName() + "]: WARNING - Volume NOT in renderer!");
     }
 }
 
@@ -201,7 +201,7 @@ void VolumeNode::setVolume(const cvc::volume &vol)
 {
     cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
     
-    cvc::log(0, "\n=== VolumeNode::setVolume[" + getName() + "] ===");
+    volrover3::app().log(0, "\n=== VolumeNode::setVolume[" + getName() + "] ===");
     
     // Store the volume object
     m_volume = std::make_shared<cvc::volume>(vol);
@@ -214,23 +214,23 @@ void VolumeNode::setVolume(const cvc::volume &vol)
     getState("data_min").value(m_dataMin);
     getState("data_max").value(m_dataMax);
     
-    cvc::log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
-    cvc::log(0, "  Dimensions: [" + std::to_string(vol.XDim()) + ", " + std::to_string(vol.YDim()) + ", " + std::to_string(vol.ZDim()) + "]");
-    cvc::log(0, "  Bounding box: [" + std::to_string(vol.XMin()) + "," + std::to_string(vol.XMax()) + "], [" +
+    volrover3::app().log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
+    volrover3::app().log(0, "  Dimensions: [" + std::to_string(vol.XDim()) + ", " + std::to_string(vol.YDim()) + ", " + std::to_string(vol.ZDim()) + "]");
+    volrover3::app().log(0, "  Bounding box: [" + std::to_string(vol.XMin()) + "," + std::to_string(vol.XMax()) + "], [" +
                std::to_string(vol.YMin()) + "," + std::to_string(vol.YMax()) + "], [" +
                std::to_string(vol.ZMin()) + "," + std::to_string(vol.ZMax()) + "]");
-    cvc::log(0, "  Spans: [" + std::to_string(vol.XSpan()) + ", " + std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) + "]");
+    volrover3::app().log(0, "  Spans: [" + std::to_string(vol.XSpan()) + ", " + std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) + "]");
     
     // Calculate appropriate scalar opacity unit distance based on volume diagonal
     double dx = vol.XSpan();
     double dy = vol.YSpan();
     double dz = vol.ZSpan();
     double diagonal = std::sqrt(dx*dx + dy*dy + dz*dz);
-    cvc::log(0, "  Diagonal: " + std::to_string(diagonal) + ", ScalarOpacityUnitDistance: " + std::to_string(diagonal / 100.0));
+    volrover3::app().log(0, "  Diagonal: " + std::to_string(diagonal) + ", ScalarOpacityUnitDistance: " + std::to_string(diagonal / 100.0));
     m_volumeProperty->SetScalarOpacityUnitDistance(diagonal / 100.0);
     
     // Set transfer function using actual data range
-    cvc::log(0, "  Setting default transfer function...");
+    volrover3::app().log(0, "  Setting default transfer function...");
     setDefaultTransferFunction();
     updateTransferFunctions();
     updateMetadata(vol);
@@ -247,12 +247,12 @@ void VolumeNode::setVolume(const cvc::volume &vol)
         }
     }
     
-    cvc::log(0, "=================================\n");
+    volrover3::app().log(0, "=================================\n");
 }
 
 void VolumeNode::updateImageData(const cvc::volume &vol)
 {
-    cvc::log(0, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
+    volrover3::app().log(0, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
     
     // Get dimensions
     int dims[3] = {
@@ -261,10 +261,10 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
         static_cast<int>(vol.ZDim())
     };
     
-    cvc::log(0, "    CVC Volume bounds: X=[" + std::to_string(vol.XMin()) + ", " + std::to_string(vol.XMax()) + "]");
-    cvc::log(0, "                       Y=[" + std::to_string(vol.YMin()) + ", " + std::to_string(vol.YMax()) + "]");
-    cvc::log(0, "                       Z=[" + std::to_string(vol.ZMin()) + ", " + std::to_string(vol.ZMax()) + "]");
-    cvc::log(0, "    CVC XSpan/YSpan/ZSpan: [" + std::to_string(vol.XSpan()) + ", " + 
+    volrover3::app().log(0, "    CVC Volume bounds: X=[" + std::to_string(vol.XMin()) + ", " + std::to_string(vol.XMax()) + "]");
+    volrover3::app().log(0, "                       Y=[" + std::to_string(vol.YMin()) + ", " + std::to_string(vol.YMax()) + "]");
+    volrover3::app().log(0, "                       Z=[" + std::to_string(vol.ZMin()) + ", " + std::to_string(vol.ZMax()) + "]");
+    volrover3::app().log(0, "    CVC XSpan/YSpan/ZSpan: [" + std::to_string(vol.XSpan()) + ", " + 
                std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) + "]");
 
     // CRITICAL FIX: Calculate spacing directly from bounding box, not from Span() methods
@@ -275,7 +275,7 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
         (vol.ZMax() - vol.ZMin()) / vol.ZDim()
     };
     
-    cvc::log(0, "    Calculated spacing: [" + std::to_string(spacing[0]) + ", " + 
+    volrover3::app().log(0, "    Calculated spacing: [" + std::to_string(spacing[0]) + ", " + 
                std::to_string(spacing[1]) + ", " + std::to_string(spacing[2]) + "]");
 
     // Get origin
@@ -285,7 +285,7 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
         vol.ZMin()
     };
     
-    cvc::log(0, "    Origin: [" + std::to_string(origin[0]) + ", " + 
+    volrover3::app().log(0, "    Origin: [" + std::to_string(origin[0]) + ", " + 
                std::to_string(origin[1]) + ", " + std::to_string(origin[2]) + "]");
 
     // Determine VTK scalar type
@@ -300,7 +300,7 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
         default:          scalarType = VTK_FLOAT; scalarTypeName = "Float (default)"; break;
     }
     
-    cvc::log(0, "    Voxel type: " + scalarTypeName);
+    volrover3::app().log(0, "    Voxel type: " + scalarTypeName);
 
     // Set up image data
     m_imageData->SetDimensions(dims);
@@ -316,17 +316,17 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
     size_t bytesPerVoxel = vol.voxelSize();
     size_t totalBytes = numVoxels * bytesPerVoxel;
     
-    cvc::log(0, "    Total voxels: " + std::to_string(numVoxels) + 
+    volrover3::app().log(0, "    Total voxels: " + std::to_string(numVoxels) + 
                   ", bytes per voxel: " + std::to_string(bytesPerVoxel) +
                   ", total bytes: " + std::to_string(totalBytes));
-    cvc::log(0, "    CVC data pointer: " + std::string(cvcPtr ? "VALID" : "NULL"));
-    cvc::log(0, "    VTK data pointer: " + std::string(vtkPtr ? "VALID" : "NULL"));
+    volrover3::app().log(0, "    CVC data pointer: " + std::string(cvcPtr ? "VALID" : "NULL"));
+    volrover3::app().log(0, "    VTK data pointer: " + std::string(vtkPtr ? "VALID" : "NULL"));
     
     if (cvcPtr && vtkPtr) {
         std::memcpy(vtkPtr, cvcPtr, totalBytes);
-        cvc::log(0, "    \u2713 Data copied successfully");
+        volrover3::app().log(0, "    \u2713 Data copied successfully");
     } else {
-        cvc::log(0, "    \u2717 ERROR: Cannot copy data - null pointer!");
+        volrover3::app().log(0, "    \u2717 ERROR: Cannot copy data - null pointer!");
     }
 
     m_imageData->Modified();
@@ -335,17 +335,17 @@ void VolumeNode::updateImageData(const cvc::volume &vol)
 void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
                                     const std::vector<double> &opacityTable)
 {
-    cvc::log(0, "\nVolumeNode::setTransferFunction[" + getName() + "]: " + 
+    volrover3::app().log(0, "\nVolumeNode::setTransferFunction[" + getName() + "]: " + 
                std::to_string(colorTable.size() / 4) + " color pts, " +
                std::to_string(opacityTable.size() / 2) + " opacity pts");
     
     // DEBUG: Log first few color values to see what we're getting
     if (colorTable.size() >= 8) {
-        cvc::log(0, "  First 2 color points:");
-        cvc::log(0, "    [0]: scalar=" + std::to_string(colorTable[0]) + 
+        volrover3::app().log(0, "  First 2 color points:");
+        volrover3::app().log(0, "    [0]: scalar=" + std::to_string(colorTable[0]) + 
                    ", rgb=(" + std::to_string(colorTable[1]) + "," + 
                    std::to_string(colorTable[2]) + "," + std::to_string(colorTable[3]) + ")");
-        cvc::log(0, "    [1]: scalar=" + std::to_string(colorTable[4]) + 
+        volrover3::app().log(0, "    [1]: scalar=" + std::to_string(colorTable[4]) + 
                    ", rgb=(" + std::to_string(colorTable[5]) + "," + 
                    std::to_string(colorTable[6]) + "," + std::to_string(colorTable[7]) + ")");
     }
@@ -370,7 +370,7 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
         m_opacityFunc->AddPoint(scalar, opacity);
         
         if (i < 3) {  // Log first few points
-            cvc::log(0, "  Opacity[" + std::to_string(i) + "]: scalar=" + std::to_string(scalar) + 
+            volrover3::app().log(0, "  Opacity[" + std::to_string(i) + "]: scalar=" + std::to_string(scalar) + 
                        ", opacity=" + std::to_string(opacity));
         }
     }
@@ -502,8 +502,8 @@ void VolumeNode::updateTransferFunctions()
 {
     static int callCount = 0;
     if (callCount++ == 0) {
-        cvc::log(0, "\nVolumeNode::updateTransferFunctions[" + getName() + "]: First call");
-        cvc::log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
+        volrover3::app().log(0, "\nVolumeNode::updateTransferFunctions[" + getName() + "]: First call");
+        volrover3::app().log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
     }
     
     m_colorFunc->Modified();
@@ -535,7 +535,7 @@ cvc::bounding_box VolumeNode::getBoundingBox() const
 
 void VolumeNode::handleStateChanged(const std::string& childState)
 {
-    cvc::log(2, str(boost::format("VolumeNode::handleStateChanged(%s) for '%s'") % childState % getName()));
+    volrover3::app().log(2, str(boost::format("VolumeNode::handleStateChanged(%s) for '%s'") % childState % getName()));
     
     // Handle volume-specific state changes
     if (childState == "shading") {
