@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/SceneNode.h>
 #include <volrover3/GeometryNode.h>
@@ -318,7 +319,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, c
     
     // Check if name already exists
     if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
+        cvc::log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
         removeGraphics(name);
     }
     
@@ -351,7 +352,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
     
     // Check if name already exists
     if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
+        cvc::log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
         removeGraphics(name);
     }
     
@@ -388,7 +389,7 @@ void SceneGraph::removeGraphics(const std::string& name)
     
     auto it = m_graphicsNodes.find(name);
     if (it == m_graphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
+        cvc::log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
         return;
     }
     
@@ -440,7 +441,7 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, con
     
     // Check if name already exists
     if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        cvcapp.log(0, "SceneGraph::addGraphics: Volume '" + name + "' already exists, replacing");
+        cvc::log(0, "SceneGraph::addGraphics: Volume '" + name + "' already exists, replacing");
         removeGraphics(name);
     }
     

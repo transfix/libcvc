@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/VolumeNode.h>
@@ -451,7 +452,7 @@ void TransferFunctionWidget::onVolumeSelected(int index)
 void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<VolumeNode> volume)
 {
     if (!volume || !volume->hasVolume()) {
-        cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume: No volume or volume not loaded");
+        cvc::log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume: No volume or volume not loaded");
         return;
     }
 
@@ -459,7 +460,7 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
     auto minVal = volume->getMetadata("data_min");
     auto maxVal = volume->getMetadata("data_max");
     
-    cvcapp.log(0, "\nTransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + "]: Getting metadata");
+    cvc::log(0, "\nTransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + "]: Getting metadata");
     
     if (minVal.has_value() && maxVal.has_value()) {
         try {
@@ -473,15 +474,15 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
                 m_dataMin = std::stod(minStr);
                 m_dataMax = std::stod(maxStr);
             }
-            cvcapp.log(0, "  Set data range to: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]\n");
+            cvc::log(0, "  Set data range to: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]\n");
         } catch (const std::exception& e) {
-            cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
+            cvc::log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
                        "]: Failed to convert metadata (" + std::string(e.what()) + "), using defaults [0.0, 1.0]");
             m_dataMin = 0.0;
             m_dataMax = 1.0;
         }
     } else {
-        cvcapp.log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
+        cvc::log(0, "TransferFunctionWidget::loadTransferFunctionFromVolume[" + volume->getName() + 
                    "]: No metadata found, using defaults [0.0, 1.0]");
         m_dataMin = 0.0;
         m_dataMax = 1.0;
@@ -491,14 +492,14 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
     std::vector<double> colorTable = volume->getTransferFunctionColorTable();
     std::vector<double> opacityTable = volume->getTransferFunctionOpacityTable();
     
-    cvcapp.log(0, "  Raw from state: " + std::to_string(colorTable.size()) + " color values, " +
+    cvc::log(0, "  Raw from state: " + std::to_string(colorTable.size()) + " color values, " +
                std::to_string(opacityTable.size()) + " opacity values");
     
     if (!colorTable.empty() && !opacityTable.empty()) {
         // Parse color table into color points (format: scalar, r, g, b, ...)
         m_colorPoints.clear();
         
-        cvcapp.log(0, "  Parsing color table: " + std::to_string(colorTable.size()) + 
+        cvc::log(0, "  Parsing color table: " + std::to_string(colorTable.size()) + 
                    " values = " + std::to_string(colorTable.size() / 4) + " points");
         
         for (size_t i = 0; i + 3 < colorTable.size(); i += 4) {
@@ -537,10 +538,10 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
             opacityWidget->setOpacityPoints(m_opacityPoints);
         }
         
-        cvcapp.log(0, "  Loaded TF: " + std::to_string(m_colorPoints.size()) + " color pts, " +
+        cvc::log(0, "  Loaded TF: " + std::to_string(m_colorPoints.size()) + " color pts, " +
                    std::to_string(m_opacityPoints.size()) + " opacity pts");
     } else {
-        cvcapp.log(0, "  No transfer function in state, keeping current widget TF");
+        cvc::log(0, "  No transfer function in state, keeping current widget TF");
     }
 }
 
@@ -635,7 +636,7 @@ std::vector<double> TransferFunctionWidget::getColorTable() const
 {
     std::vector<double> table;
     
-    cvcapp.log(0, "TransferFunctionWidget::getColorTable() - m_colorPoints.size() = " + 
+    cvc::log(0, "TransferFunctionWidget::getColorTable() - m_colorPoints.size() = " + 
                std::to_string(m_colorPoints.size()));
     
     for (const auto &pt : m_colorPoints) {
@@ -646,7 +647,7 @@ std::vector<double> TransferFunctionWidget::getColorTable() const
         table.push_back(pt.color.blueF());
     }
     
-    cvcapp.log(0, "  Returning color table with " + std::to_string(table.size()) + " values (" +
+    cvc::log(0, "  Returning color table with " + std::to_string(table.size()) + " values (" +
                std::to_string(table.size() / 4) + " points)");
     
     return table;

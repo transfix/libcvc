@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/StateTreeWidget.h>
 #include <cvc/app.h>
 #include <QHeaderView>
@@ -498,7 +499,7 @@ std::string StateTreeWidget::getStateDataType(cvc::state* state)
         }
         
         // Use cvcapp's registered type names
-        std::string typeName = cvcapp.dataTypeName(anyData);
+        std::string typeName = volrover3::app().dataTypeName(anyData);
         return typeName;
     }
     catch (const std::exception& e) {
