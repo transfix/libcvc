@@ -21,6 +21,7 @@ find_package(OpenGL REQUIRED)
 # Source files
 set(VOLROVER3_SOURCES
   main.cpp
+  volrover3_app.cpp
   MainWindow.cpp
   VTKRenderWidget.cpp
   SceneGraph.cpp

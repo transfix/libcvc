@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/SDFDialog.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/GraphicsNode.h>
@@ -324,7 +325,7 @@ void SDFDialog::onComputeClicked()
     if (m_computing) {
         // Cancel ongoing computation
         if (!m_activeThreadKey.empty()) {
-            cvc::app::instance().threads(m_activeThreadKey)->interrupt();
+            volrover3::app().threads(m_activeThreadKey)->interrupt();
         }
         setControlsEnabled(true);
         m_statusLabel->setText(tr("Cancelled"));
@@ -394,7 +395,7 @@ void SDFDialog::onComputeClicked()
     m_activeThreadKey = "sdf_computation_" + geomName;
     
     // Start computation in background thread
-    cvc::app::instance().startThread(
+    volrover3::app().startThread(
         m_activeThreadKey,
         [this, geom, dim, bbox, algorithm, flipNormals, geomName, activeKey = m_activeThreadKey]() {
             // Use thread_feedback for proper progress tracking (must be at thread entry point)
@@ -402,15 +403,15 @@ void SDFDialog::onComputeClicked()
             
             try {
                 // Update progress to indicate we've started
-                cvc::app::instance().threadProgress(activeKey, 0.1);
-                cvc::app::instance().threadInfo(activeKey, "Computing SDF...");
+                volrover3::app().threadProgress(activeKey, 0.1);
+                volrover3::app().threadInfo(activeKey, "Computing SDF...");
                 
                 // Compute SDF (this is safe to do in background thread)
                 cvc::volume sdfVol = cvc::sdf(geom, dim, bbox, algorithm, flipNormals);
                 
                 // Update progress
-                cvc::app::instance().threadProgress(activeKey, 0.9);
-                cvc::app::instance().threadInfo(activeKey, "Adding volume to scene...");
+                volrover3::app().threadProgress(activeKey, 0.9);
+                volrover3::app().threadInfo(activeKey, "Adding volume to scene...");
                 
                 // SDF computation complete, now adding to scene
                 QMetaObject::invokeMethod(this, [this]() {
@@ -446,7 +447,7 @@ void SDFDialog::onComputeClicked()
                         }
                         
                         // Mark thread as finished
-                        cvc::app::instance().finishThreadProgress(activeKey);
+                        volrover3::app().finishThreadProgress(activeKey);
                         
                         // Update UI on Qt thread
                         QMetaObject::invokeMethod(this, [this]() {
@@ -454,7 +455,7 @@ void SDFDialog::onComputeClicked()
                         }, Qt::QueuedConnection);
                     } catch (const std::exception& e) {
                         std::string errorMsg = std::string("Failed to create volume node: ") + e.what();
-                        cvc::app::instance().finishThreadProgress(activeKey);
+                        volrover3::app().finishThreadProgress(activeKey);
                         QMetaObject::invokeMethod(this, [this, errorMsg]() {
                             onComputeFinished(false, errorMsg);
                         }, Qt::QueuedConnection);

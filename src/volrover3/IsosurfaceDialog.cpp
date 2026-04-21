@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/IsosurfaceDialog.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/GraphicsNode.h>
@@ -249,7 +250,7 @@ void IsosurfaceDialog::onComputeClicked()
     if (m_computing) {
         // Cancel ongoing computation
         if (!m_activeThreadKey.empty()) {
-            cvc::app::instance().threads(m_activeThreadKey)->interrupt();
+            volrover3::app().threads(m_activeThreadKey)->interrupt();
         }
         setControlsEnabled(true);
         m_statusLabel->setText(tr("Cancelled"));
@@ -316,7 +317,7 @@ void IsosurfaceDialog::onComputeClicked()
     m_activeThreadKey = "iso_extraction_" + volumeName;
     
     // Start computation in background thread
-    cvc::app::instance().startThread(
+    volrover3::app().startThread(
         m_activeThreadKey,
         [this, vol, isovalue, method, improveIterations, normalType, volumeName, volumeNode]() {
             cvc::thread_info ti("Isosurface Extraction");
