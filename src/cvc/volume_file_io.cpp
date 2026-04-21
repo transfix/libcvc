@@ -116,14 +116,15 @@ namespace CVC_NAMESPACE
   // 04/06/2012 -- Joe R. -- Creation.
   void volume_file_io::writeBoundingBox(const bounding_box& bbox, const std::string& filename) const
   {
+    app& ctx = app::instance();
     std::vector<volume> vols;
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
     vfi.boundingBox(bbox);
-    CVC_NAMESPACE::readVolumeFile(vols,filename);
+    CVC_NAMESPACE::readVolumeFile(ctx, vols, filename);
     BOOST_FOREACH(volume& vol, vols)
       vol.boundingBox(bbox);
-    CVC_NAMESPACE::createVolumeFile(filename,vfi); //TODO: don't overwrite existing file until temp file write is complete
-    CVC_NAMESPACE::writeVolumeFile(vols,filename);
+    CVC_NAMESPACE::createVolumeFile(ctx, filename, vfi); //TODO: don't overwrite existing file until temp file write is complete
+    CVC_NAMESPACE::writeVolumeFile(ctx, vols, filename);
   }
 
   // ---------------------------

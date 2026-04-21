@@ -122,6 +122,19 @@ namespace CVC_NAMESPACE
 		     volinfo.TMin(),volinfo.TMax());
   }
 
+  static inline void createVolumeFile(app& ctx,
+                                      const std::string& filename,
+                                      const volume_file_info& volinfo)
+  {
+    createVolumeFile(ctx, filename,
+                     volinfo.boundingBox(),
+                     volinfo.voxel_dimensions(),
+                     volinfo.voxelTypes(),
+                     volinfo.numVariables(),
+                     volinfo.numTimesteps(),
+                     volinfo.TMin(), volinfo.TMax());
+  }
+
   // ----------------
   // createVolumeFile
   // ----------------
@@ -140,6 +153,17 @@ namespace CVC_NAMESPACE
     writeVolumeFile(vol,filename);
   }
 
+  static inline void createVolumeFile(app& ctx,
+                                      const volume& vol,
+                                      const std::string& filename)
+  {
+    createVolumeFile(ctx, filename,
+                     vol.boundingBox(),
+                     vol.voxel_dimensions(),
+                     std::vector<data_type>(1, vol.voxelType()));
+    writeVolumeFile(ctx, vol, filename);
+  }
+
   // ----------------
   // createVolumeFile
   // ----------------
@@ -152,6 +176,13 @@ namespace CVC_NAMESPACE
 				      const volume& vol)
   {
     createVolumeFile(vol,filename);
+  }
+
+  static inline void createVolumeFile(app& ctx,
+                                      const std::string& filename,
+                                      const volume& vol)
+  {
+    createVolumeFile(ctx, vol, filename);
   }
 
   /*
