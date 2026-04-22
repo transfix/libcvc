@@ -566,7 +566,7 @@ endforeach()
 target_include_directories(cvc
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
-    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/inc>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/inc>
     $<INSTALL_INTERFACE:include>
     "$<BUILD_INTERFACE:${_CVC_PUBLIC_INCLUDE_DIRS}>"
   PRIVATE
@@ -673,15 +673,18 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   FILES_MATCHING PATTERN "*.h"
 )
 
-install(FILES ${CMAKE_BINARY_DIR}/inc/cvc/config.h
+install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/config.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
   COMPONENT libcvc
 )
 
 # Generate config.h
+# Use PROJECT_BINARY_DIR (not CMAKE_BINARY_DIR) so the generated header lands
+# under libcvc's own build tree when consumed via FetchContent/add_subdirectory.
+# Downstream projects can then add ${libcvc_BINARY_DIR}/inc to their include path.
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake
-  ${CMAKE_BINARY_DIR}/inc/cvc/config.h
+  ${PROJECT_BINARY_DIR}/inc/cvc/config.h
 )
 
 # Windows-specific batch file

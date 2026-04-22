@@ -103,7 +103,7 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl magick --triplet x64-windows
+          vcpkg install boost-thread boost-date-time boost-regex boost-filesystem boost-system boost-chrono boost-program-options boost-signals2 boost-format boost-property-tree boost-algorithm boost-asio boost-any boost-array boost-dynamic-bitset boost-exception boost-foreach boost-function boost-lambda boost-lexical-cast boost-multi-array boost-optional boost-smart-ptr boost-tuple boost-utility hdf5 fftw3 gsl --triplet x64-windows
 
       # ── Configure ──
       - name: Configure (Unix)
@@ -133,6 +133,7 @@ jobs:
             -DCMAKE_CXX_STANDARD=17 `
             -DCVC_BUILD_TESTS=ON `
             -DCVC_ENABLE_CUDA=OFF `
+            -DCVC_ENABLE_IMAGEMAGICK=OFF `
             -DDISABLE_CGAL=ON `
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"

@@ -29,4 +29,9 @@
 #define CVC_NAMESPACE cvc
 #endif
 
+// Backward-compat alias so legacy code that uses `CVC::` continues to work.
+// (Older code in F2Dock / volrover / TexMol references CVC::Foo.)
+namespace CVC_NAMESPACE {}
+namespace CVC = CVC_NAMESPACE;
+
 #endif
