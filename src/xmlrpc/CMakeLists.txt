@@ -15,6 +15,11 @@ source_group("Header Files" FILES ${INCLUDE_FILES})
 add_library(xmlrpc STATIC ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::xmlrpc ALIAS xmlrpc)
 
+# Position-independent code so this STATIC library can be linked into a
+# SHARED libcvc (consumers build libcvc as .so / .dylib; without PIC the
+# linker rejects with "final link failed: bad value").
+set_target_properties(xmlrpc PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Modern include directory handling
 target_include_directories(xmlrpc
   PUBLIC
