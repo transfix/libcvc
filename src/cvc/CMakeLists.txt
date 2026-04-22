@@ -609,6 +609,12 @@ endif()
 if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
+  # voxels.cpp uses unsigned loop indices and OpenMP `min`/`max` reductions
+  # that the classic MSVC OpenMP runtime (spec 2.0) rejects. Opt into the
+  # LLVM OpenMP runtime on MSVC so those constructs compile as-is.
+  if(MSVC)
+    target_compile_options(cvc PRIVATE -openmp:llvm)
+  endif()
 endif()
 
 # ImageMagick linking

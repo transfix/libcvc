@@ -37,15 +37,20 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# MSVC-specific: enable M_PI and suppress snprintf warnings
+# MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and
+# force-include a tiny header that undoes UCRT's `snprintf -> _snprintf`
+# macro remap (see inc/cvc/msvc_compat.h for rationale).
 if(MSVC)
-  add_compile_definitions(_USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
-  # Disable the MSVC CRT's `snprintf -> _snprintf` macro remap.  When it is
-  # enabled (the default), Boost.Core's type_name.hpp and Boost.Asio's
-  # config.ipp both fail to compile on modern MSVC (VS 17.10+) because their
-  # `std::snprintf(...)` call gets textually rewritten to `std::_snprintf(...)`
-  # and `_snprintf` was removed from namespace std.
-  add_compile_definitions(_CRT_INTERNAL_NONSTDC_NAMES=0)
+  add_compile_definitions(
+    _USE_MATH_DEFINES
+    _CRT_SECURE_NO_WARNINGS
+    _CRT_NONSTDC_NO_WARNINGS
+    _CRT_NONSTDC_NO_DEPRECATE
+  )
+  # Force-include the compatibility shim in every translation unit so that
+  # third-party headers (Boost.Core, Boost.Asio) see `std::snprintf` rather
+  # than the macro-mangled `std::_snprintf`.
+  add_compile_options(/FI"${PROJECT_SOURCE_DIR}/inc/cvc/msvc_compat.h")
 endif()
 
 # Use modern CMake policies
