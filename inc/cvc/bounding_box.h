@@ -381,6 +381,10 @@ namespace CVC_NAMESPACE
 
   typedef generic_bounding_box<double> bounding_box;       // object space
   typedef generic_bounding_box<uint64> index_bounding_box; // image space
+
+  // Legacy PascalCase aliases (Phase 8 compat layer).
+  typedef bounding_box       BoundingBox;
+  typedef index_bounding_box IndexBoundingBox;
 };
 
 #endif

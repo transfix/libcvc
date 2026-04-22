@@ -9,7 +9,10 @@ source_group("Source Files" FILES ${SOURCE_FILES})
 source_group("Header Files" FILES ${INCLUDE_FILES})
 
 # Create library
-add_library(xmlrpc ${SOURCE_FILES} ${INCLUDE_FILES})
+# Force STATIC to side-step Windows DLL symbol-export issues (the sources
+# don't carry __declspec(dllexport) annotations, so a SHARED build on MSVC
+# produces a DLL with no import library and downstream links fail).
+add_library(xmlrpc STATIC ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::xmlrpc ALIAS xmlrpc)
 
 # Modern include directory handling
