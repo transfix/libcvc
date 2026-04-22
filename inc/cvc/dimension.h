@@ -175,9 +175,9 @@ namespace CVC_NAMESPACE
         }
     }
   };
-
-  // Legacy PascalCase alias (Phase 8 compat layer).
-  typedef dimension Dimension;
 };
+
+// Legacy PascalCase alias (Phase 8 compat layer).
+namespace CVC { typedef CVC_NAMESPACE::dimension Dimension; }
 
 #endif

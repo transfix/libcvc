@@ -133,32 +133,6 @@ namespace CVC_NAMESPACE
   typedef boost::tuple<mutex_ptr,std::string>                mutex_map_element;
   typedef std::map<std::string, mutex_map_element>           mutex_map;
 
-  // ------------------------------------------------------------------
-  // Legacy PascalCase aliases (Phase 8 compat layer).
-  // Kept alongside the canonical snake_case names so that consumer code
-  // compiled on case-insensitive filesystems (which resolves legacy
-  // <CVC/Types.h> to this header) still finds CVC::DataType etc.
-  // ------------------------------------------------------------------
-  typedef data_type                            DataType;
-  static const unsigned int*                   DataTypeSizes   = data_type_sizes;
-  static const char**                          DataTypeStrings = data_type_strings;
-  typedef signal                               Signal;
-  typedef map_change_signal                    MapChangeSignal;
-  typedef data_map                             DataMap;
-  typedef data_type_name_map                   DataTypeNameMap;
-  typedef data_type_enum_map                   DataTypeEnumMap;
-  typedef property_map                         PropertyMap;
-  typedef thread_ptr                           ThreadPtr;
-  typedef thread_map                           ThreadMap;
-  typedef thread_progress_map                  ThreadProgressMap;
-  typedef thread_key_map                       ThreadKeyMap;
-  typedef thread_info_map                      ThreadInfoMap;
-  typedef data_reader                          DataReader;
-  typedef data_reader_collection               DataReaderCollection;
-  typedef mutex_ptr                            MutexPtr;
-  typedef mutex_map_element                    MutexMapElement;
-  typedef mutex_map                            MutexMap;
-
   // Thread pool priority levels
   enum thread_priority
   {
@@ -231,6 +205,36 @@ namespace CVC_NAMESPACE
     CENTRAL_DIFFERENCE = 1,     // Central difference (faster, less accurate)
     BSPLINE_INTERPOLATION = 2   // B-spline interpolation (balanced)
   };
+}
+
+// ------------------------------------------------------------------
+// Legacy PascalCase aliases (Phase 8 compat layer).
+// Placed in a *separate* `namespace CVC` block (not inside CVC_NAMESPACE)
+// so that internal libcvc code in `namespace cvc` is unaffected by any
+// symbol-name collisions (e.g. SDF's local `struct BoundingBox`), while
+// consumer code reaching this header via case-insensitive resolution of
+// <CVC/Types.h> still finds CVC::DataType, CVC::DataMap, etc.
+// ------------------------------------------------------------------
+namespace CVC
+{
+  typedef CVC_NAMESPACE::data_type                  DataType;
+
+  typedef CVC_NAMESPACE::signal                     Signal;
+  typedef CVC_NAMESPACE::map_change_signal          MapChangeSignal;
+  typedef CVC_NAMESPACE::data_map                   DataMap;
+  typedef CVC_NAMESPACE::data_type_name_map         DataTypeNameMap;
+  typedef CVC_NAMESPACE::data_type_enum_map         DataTypeEnumMap;
+  typedef CVC_NAMESPACE::property_map               PropertyMap;
+  typedef CVC_NAMESPACE::thread_ptr                 ThreadPtr;
+  typedef CVC_NAMESPACE::thread_map                 ThreadMap;
+  typedef CVC_NAMESPACE::thread_progress_map        ThreadProgressMap;
+  typedef CVC_NAMESPACE::thread_key_map             ThreadKeyMap;
+  typedef CVC_NAMESPACE::thread_info_map            ThreadInfoMap;
+  typedef CVC_NAMESPACE::data_reader                DataReader;
+  typedef CVC_NAMESPACE::data_reader_collection     DataReaderCollection;
+  typedef CVC_NAMESPACE::mutex_ptr                  MutexPtr;
+  typedef CVC_NAMESPACE::mutex_map_element          MutexMapElement;
+  typedef CVC_NAMESPACE::mutex_map                  MutexMap;
 }
 
 #endif

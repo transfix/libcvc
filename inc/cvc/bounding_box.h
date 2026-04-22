@@ -381,10 +381,15 @@ namespace CVC_NAMESPACE
 
   typedef generic_bounding_box<double> bounding_box;       // object space
   typedef generic_bounding_box<uint64> index_bounding_box; // image space
-
-  // Legacy PascalCase aliases (Phase 8 compat layer).
-  typedef bounding_box       BoundingBox;
-  typedef index_bounding_box IndexBoundingBox;
 };
+
+// Legacy PascalCase aliases (Phase 8 compat layer). Separate `namespace CVC`
+// block so internal libcvc code in `namespace cvc` is unaffected by possible
+// name collisions (e.g. SDF's local `struct BoundingBox`).
+namespace CVC
+{
+  typedef CVC_NAMESPACE::bounding_box       BoundingBox;
+  typedef CVC_NAMESPACE::index_bounding_box IndexBoundingBox;
+}
 
 #endif

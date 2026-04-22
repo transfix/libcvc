@@ -69,10 +69,11 @@ namespace CVC_NAMESPACE
   CVC_DEF_EXCEPTION(timeout_error);
   CVC_DEF_EXCEPTION(type_conversion_error);
   CVC_DEF_EXCEPTION(read_only_error);
-
-  // Legacy PascalCase alias (Phase 8 compat layer).
-  typedef exception Exception;
 };
+
+// Legacy PascalCase alias (Phase 8 compat layer). Separate namespace so
+// this does not interfere with the internal libcvc cvc::exception class.
+namespace CVC { typedef CVC_NAMESPACE::exception Exception; }
 
 #endif
 
