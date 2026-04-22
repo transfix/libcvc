@@ -703,11 +703,19 @@ namespace CVC_NAMESPACE
 // consumer compat shims are bypassed.
 #ifndef CVC_COMPAT_APP_DEFINED
 #define CVC_COMPAT_APP_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef app                   App;
+  typedef app::thread_info      ThreadInfo;
+  typedef app::thread_feedback  ThreadFeedback;
+  typedef app::scoped_lock      ScopedLock;
+}
 namespace CVC
 {
   typedef CVC_NAMESPACE::app             App;
   typedef CVC_NAMESPACE::thread_info     ThreadInfo;
   typedef CVC_NAMESPACE::thread_feedback ThreadFeedback;
+  typedef CVC_NAMESPACE::scoped_lock     ScopedLock;
 }
 #endif // CVC_COMPAT_APP_DEFINED
 

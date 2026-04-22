@@ -250,4 +250,32 @@ namespace CVC
 }
 #endif // CVC_COMPAT_TYPES_STATICS_DEFINED
 
+// PascalCase aliases inside CVC_NAMESPACE itself so sources nested in
+// `namespace cvc { ... }` can refer to unqualified `DataType`, `PropertyMap`,
+// etc. on case-insensitive filesystems (macOS) where consumer compat shims
+// are bypassed.
+#ifndef CVC_COMPAT_PASCAL_TYPES_DEFINED
+#define CVC_COMPAT_PASCAL_TYPES_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef data_type                  DataType;
+  typedef signal                     Signal;
+  typedef map_change_signal          MapChangeSignal;
+  typedef data_map                   DataMap;
+  typedef data_type_name_map         DataTypeNameMap;
+  typedef data_type_enum_map         DataTypeEnumMap;
+  typedef property_map               PropertyMap;
+  typedef thread_ptr                 ThreadPtr;
+  typedef thread_map                 ThreadMap;
+  typedef thread_progress_map        ThreadProgressMap;
+  typedef thread_key_map             ThreadKeyMap;
+  typedef thread_info_map            ThreadInfoMap;
+  typedef data_reader                DataReader;
+  typedef data_reader_collection     DataReaderCollection;
+  typedef mutex_ptr                  MutexPtr;
+  typedef mutex_map_element          MutexMapElement;
+  typedef mutex_map                  MutexMap;
+}
+#endif // CVC_COMPAT_PASCAL_TYPES_DEFINED
+
 #endif

@@ -475,4 +475,18 @@ namespace CVC_NAMESPACE
 //Shorthand to access the cvc::state object from anywhere
 #define cvcstate CVC_NAMESPACE::state::instance()
 
+// PascalCase aliases for consumer compat shims bypassed on case-insensitive
+// filesystems (macOS).
+#ifndef CVC_COMPAT_STATE_DEFINED
+#define CVC_COMPAT_STATE_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef state State;
+}
+namespace CVC
+{
+  typedef CVC_NAMESPACE::state State;
+}
+#endif // CVC_COMPAT_STATE_DEFINED
+
 #endif
