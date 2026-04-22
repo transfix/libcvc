@@ -71,9 +71,12 @@ namespace CVC_NAMESPACE
   CVC_DEF_EXCEPTION(read_only_error);
 };
 
-// Legacy PascalCase alias (Phase 8 compat layer). Separate namespace so
-// this does not interfere with the internal libcvc cvc::exception class.
-namespace CVC { typedef CVC_NAMESPACE::exception Exception; }
+// NOTE: Intentionally NO 'namespace CVC { typedef cvc::exception Exception; }'
+// block here. Consumer compat shims (TexMol, volrover) define their own
+// CVC::Exception types with different bases (std::exception vs boost::exception)
+// so we let those shims own the name on Linux; on case-insensitive macOS
+// where shims are bypassed, VolMagick code that needs CVC::Exception will
+// have to be ported to cvc::exception.
 
 #endif
 
