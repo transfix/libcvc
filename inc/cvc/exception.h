@@ -71,12 +71,33 @@ namespace CVC_NAMESPACE
   CVC_DEF_EXCEPTION(read_only_error);
 };
 
-// NOTE: Intentionally NO 'namespace CVC { typedef cvc::exception Exception; }'
-// block here. Consumer compat shims (TexMol, volrover) define their own
-// CVC::Exception types with different bases (std::exception vs boost::exception)
-// so we let those shims own the name on Linux; on case-insensitive macOS
-// where shims are bypassed, VolMagick code that needs CVC::Exception will
-// have to be ported to cvc::exception.
+// Legacy PascalCase aliases for case-insensitive filesystems (macOS).
+// Guarded so consumer compat shims can opt-out by defining the guard first.
+// The typedef-based approach means CVC::Exception == cvc::exception (which
+// derives from boost::exception; matches volrover's static_assert, and is
+// acceptable for TexMol's VolMagick since its derived classes override
+// what_str()).
+#ifndef CVC_COMPAT_EXCEPTION_DEFINED
+#define CVC_COMPAT_EXCEPTION_DEFINED
+namespace CVC
+{
+  typedef CVC_NAMESPACE::exception                          Exception;
+  typedef CVC_NAMESPACE::read_error                         ReadError;
+  typedef CVC_NAMESPACE::write_error                        WriteError;
+  typedef CVC_NAMESPACE::memory_allocation_error            MemoryAllocationError;
+  typedef CVC_NAMESPACE::index_out_of_bounds                IndexOutOfBounds;
+  typedef CVC_NAMESPACE::volume_properties_mismatch         VolumePropertiesMismatch;
+  typedef CVC_NAMESPACE::volume_cache_directory_file_error  VolumeCacheDirectoryFileError;
+  typedef CVC_NAMESPACE::unsupported_exception              UnsupportedVolumeFileType;
+  typedef CVC_NAMESPACE::unsupported_exception              UnsupportedGeometryFileType;
+
+  // Locally-defined exceptions that have no cvc:: equivalent
+  CVC_DEF_EXCEPTION(SubVolumeOutOfBounds);
+  CVC_DEF_EXCEPTION(NullDimension);
+  CVC_DEF_EXCEPTION(NetworkError);
+  CVC_DEF_EXCEPTION(XmlRpcServerTerminate);
+}
+#endif // CVC_COMPAT_EXCEPTION_DEFINED
 
 #endif
 

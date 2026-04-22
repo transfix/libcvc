@@ -40,11 +40,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # MSVC-specific: enable M_PI and suppress snprintf warnings
 if(MSVC)
   add_compile_definitions(_USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
-  # Restore legacy std::_snprintf etc. that newer MSVC STL (VS 17.10+ /
-  # MSVC 14.44+) removed. Needed because Boost.Core's type_name.hpp and
-  # Boost.Asio still reference std::_snprintf in code paths guarded for
-  # older MSVC versions.
-  add_compile_definitions(_CRT_INTERNAL_NONSTDC_NAMES=1)
+  # Disable the MSVC CRT's `snprintf -> _snprintf` macro remap.  When it is
+  # enabled (the default), Boost.Core's type_name.hpp and Boost.Asio's
+  # config.ipp both fail to compile on modern MSVC (VS 17.10+) because their
+  # `std::snprintf(...)` call gets textually rewritten to `std::_snprintf(...)`
+  # and `_snprintf` was removed from namespace std.
+  add_compile_definitions(_CRT_INTERNAL_NONSTDC_NAMES=0)
 endif()
 
 # Use modern CMake policies

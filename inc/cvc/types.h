@@ -237,4 +237,17 @@ namespace CVC
   typedef CVC_NAMESPACE::mutex_map                  MutexMap;
 }
 
+// Guarded statics/extra typedefs for case-insensitive filesystems (macOS)
+// where consumer compat shims are bypassed and libcvc's header is the only
+// source of CVC::-namespace aliases.  Consumer shims may opt-out by defining
+// CVC_COMPAT_TYPES_STATICS_DEFINED before including this header.
+#ifndef CVC_COMPAT_TYPES_STATICS_DEFINED
+#define CVC_COMPAT_TYPES_STATICS_DEFINED
+namespace CVC
+{
+  static const unsigned int* const         DataTypeSizes   = CVC_NAMESPACE::data_type_sizes;
+  static const char* const*                DataTypeStrings = CVC_NAMESPACE::data_type_strings;
+}
+#endif // CVC_COMPAT_TYPES_STATICS_DEFINED
+
 #endif

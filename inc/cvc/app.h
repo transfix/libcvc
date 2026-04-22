@@ -699,4 +699,16 @@ namespace CVC_NAMESPACE
 // TODO: remove once all cvcapp usage has been migrated.
 #define cvcapp CVC_NAMESPACE::app::instance()
 
+// Guarded PascalCase aliases for case-insensitive filesystems (macOS) where
+// consumer compat shims are bypassed.
+#ifndef CVC_COMPAT_APP_DEFINED
+#define CVC_COMPAT_APP_DEFINED
+namespace CVC
+{
+  typedef CVC_NAMESPACE::app             App;
+  typedef CVC_NAMESPACE::thread_info     ThreadInfo;
+  typedef CVC_NAMESPACE::thread_feedback ThreadFeedback;
+}
+#endif // CVC_COMPAT_APP_DEFINED
+
 #endif
