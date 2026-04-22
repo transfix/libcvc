@@ -549,14 +549,29 @@ if(CVC_ENABLE_CUDA)
 endif()
 
 # Modern include directory handling
+# Split CVC_INCLUDE_DIRS: absolute paths (external deps like HDF5, FFTW,
+# Log4cplus) go PUBLIC so downstream consumers that include transitive
+# headers (e.g. cvc/hdf5_utils.h) can find them. Relative paths (e.g.
+# libiimod, SDF internals) stay PRIVATE.
+set(_CVC_PUBLIC_INCLUDE_DIRS "")
+set(_CVC_PRIVATE_INCLUDE_DIRS "")
+foreach(_inc IN LISTS CVC_INCLUDE_DIRS)
+  if(IS_ABSOLUTE "${_inc}")
+    list(APPEND _CVC_PUBLIC_INCLUDE_DIRS "${_inc}")
+  else()
+    list(APPEND _CVC_PRIVATE_INCLUDE_DIRS "${_inc}")
+  endif()
+endforeach()
+
 target_include_directories(cvc
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/inc>
     $<INSTALL_INTERFACE:include>
+    "$<BUILD_INTERFACE:${_CVC_PUBLIC_INCLUDE_DIRS}>"
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CVC_INCLUDE_DIRS}
+    ${_CVC_PRIVATE_INCLUDE_DIRS}
 )
 
 # Compile definitions
