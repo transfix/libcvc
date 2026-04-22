@@ -245,8 +245,8 @@ namespace CVC
 #define CVC_COMPAT_TYPES_STATICS_DEFINED
 namespace CVC
 {
-  static const unsigned int* const         DataTypeSizes   = CVC_NAMESPACE::data_type_sizes;
-  static const char* const*                DataTypeStrings = CVC_NAMESPACE::data_type_strings;
+  static const unsigned int*               DataTypeSizes   = CVC_NAMESPACE::data_type_sizes;
+  static const char**                      DataTypeStrings = CVC_NAMESPACE::data_type_strings;
 }
 #endif // CVC_COMPAT_TYPES_STATICS_DEFINED
 
