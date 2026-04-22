@@ -956,7 +956,7 @@ namespace CVC_NAMESPACE
                                    % error.getDetailMsg()));
         }
 
-      return make_tuple(data,actualDim);
+      return boost::make_tuple(data,actualDim);
     }
 
     // ---------------------
