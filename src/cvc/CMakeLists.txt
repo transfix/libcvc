@@ -498,6 +498,12 @@ if(CVC_ENABLE_FFTW)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
     pkg_check_modules(FFTW3 QUIET fftw3)
+    # pkg_check_modules sets <prefix>_LIBRARIES to bare `-l` names and puts
+    # full paths in <prefix>_LINK_LIBRARIES. Prefer the full-path form so
+    # the linker doesn't need a separate -L for Homebrew etc.
+    if(FFTW3_FOUND AND FFTW3_LINK_LIBRARIES)
+      set(FFTW3_LIBRARIES ${FFTW3_LINK_LIBRARIES})
+    endif()
   endif()
   if(NOT FFTW3_FOUND)
     find_path(FFTW3_INCLUDE_DIRS fftw3.h)
