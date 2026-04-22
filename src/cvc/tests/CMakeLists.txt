@@ -6,7 +6,6 @@ add_executable(app_test app_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
-add_executable(geometry_test geometry_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 
@@ -16,10 +15,19 @@ set(TEST_TARGETS
   state_test
   voxels_test
   volume_test
-  geometry_test
   procedural_geometry_test
   volume_ops_test
 )
+
+# geometry_test exercises sdf(), iso(), tetrahedralize(), and
+# geometry::quality_improve(), which are only available when SDF and
+# Mesher are enabled. Skip it otherwise so core CI stays green.
+if(CVC_ENABLE_SDF AND CVC_ENABLE_MESHER)
+  add_executable(geometry_test geometry_test.cpp)
+  list(APPEND TEST_TARGETS geometry_test)
+else()
+  message(STATUS "SDF/Mesher disabled; skipping geometry_test")
+endif()
 
 # Link against the CVC library and Google Test
 target_link_libraries(app_test
@@ -50,12 +58,14 @@ target_link_libraries(volume_test
     GTest::gtest_main
 )
 
-target_link_libraries(geometry_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+if(TARGET geometry_test)
+  target_link_libraries(geometry_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
 
 target_link_libraries(procedural_geometry_test
   PRIVATE
@@ -74,7 +84,9 @@ target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
 target_compile_features(voxels_test PRIVATE cxx_std_14)
 target_compile_features(volume_test PRIVATE cxx_std_14)
-target_compile_features(geometry_test PRIVATE cxx_std_14)
+if(TARGET geometry_test)
+  target_compile_features(geometry_test PRIVATE cxx_std_14)
+endif()
 target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
 target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 
@@ -102,7 +114,9 @@ gtest_discover_tests(app_test)
 gtest_discover_tests(state_test)
 gtest_discover_tests(voxels_test)
 gtest_discover_tests(volume_test)
-gtest_discover_tests(geometry_test)
+if(TARGET geometry_test)
+  gtest_discover_tests(geometry_test)
+endif()
 gtest_discover_tests(volume_ops_test)
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)

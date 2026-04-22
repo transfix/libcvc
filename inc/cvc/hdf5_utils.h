@@ -1736,6 +1736,159 @@ namespace CVC_NAMESPACE
       setAttribute(ctx, hdf5_filename, hdf5_objname,
                    attribname, std::string(value));
     }
+
+    // ============================================================
+    // Context-less convenience overloads (inject cvc::app::instance())
+    // ============================================================
+    inline bool isGroup(const std::string& hdf5_filename,
+                        const std::string& hdf5_objname)
+    {
+      return isGroup(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline bool isDataSet(const std::string& hdf5_filename,
+                          const std::string& hdf5_objname)
+    {
+      return isDataSet(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline bool objectExists(const std::string& hdf5_filename,
+                             const std::string& hdf5_objname)
+    {
+      return objectExists(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void removeObject(const std::string& hdf5_filename,
+                             const std::string& hdf5_objname)
+    {
+      removeObject(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void createHDF5File(const std::string& hdf5_filename)
+    {
+      createHDF5File(app::instance(), hdf5_filename);
+    }
+
+    inline void createGroup(const std::string& hdf5_filename,
+                            const std::string& hdf5_objname,
+                            bool replace = false)
+    {
+      createGroup(app::instance(), hdf5_filename, hdf5_objname, replace);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const bounding_box& boundingBox,
+                              const dimension& dimension,
+                              data_type dataType,
+                              const bool replace = false,
+                              const bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    boundingBox, dimension, dataType,
+                    replace, createGroups);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const dimension& dimension,
+                              data_type dataType,
+                              const bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    dimension, dataType, createGroups);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const std::string& value,
+                              bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    value, createGroups);
+    }
+
+    inline dimension getObjectDimension(const std::string& hdf5_filename,
+                                        const std::string& hdf5_objname)
+    {
+      return getObjectDimension(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void setObjectDimension(const std::string& hdf5_filename,
+                                   const std::string& hdf5_objname,
+                                   const dimension& dim)
+    {
+      setObjectDimension(app::instance(), hdf5_filename, hdf5_objname, dim);
+    }
+
+    inline dimension getDataSetDimensionForBoundingBox(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname,
+        const bounding_box& subvolbox)
+    {
+      return getDataSetDimensionForBoundingBox(app::instance(),
+                                               hdf5_filename, hdf5_objname,
+                                               subvolbox);
+    }
+
+    inline dimension getDataSetDimension(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname,
+        const bounding_box& subvolbox,
+        const dimension& maxdim = dimension(256, 256, 256))
+    {
+      return getDataSetDimension(app::instance(),
+                                 hdf5_filename, hdf5_objname,
+                                 subvolbox, maxdim);
+    }
+
+    inline bounding_box getObjectBoundingBox(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname)
+    {
+      return getObjectBoundingBox(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void setObjectBoundingBox(const std::string& hdf5_filename,
+                                     const std::string& hdf5_objname,
+                                     const bounding_box& boundingBox)
+    {
+      setObjectBoundingBox(app::instance(),
+                           hdf5_filename, hdf5_objname, boundingBox);
+    }
+
+    inline double getDataSetMinimum(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetMinimum(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline double getDataSetMaximum(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetMaximum(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline std::string getDataSetInfo(const std::string& hdf5_filename,
+                                      const std::string& hdf5_objname)
+    {
+      return getDataSetInfo(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline data_type getDataSetType(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetType(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline std::vector<std::string> getChildObjects(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname = "/",
+        const std::string& filter = std::string())
+    {
+      return getChildObjects(app::instance(),
+                             hdf5_filename, hdf5_objname, filter);
+    }
   }
 }
 
