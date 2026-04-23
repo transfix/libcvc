@@ -57,7 +57,6 @@ if(MSVC)
   # flags variable. Keep quoting so paths with spaces work.
   set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/msvc_compat.h")
   string(APPEND CMAKE_CXX_FLAGS " /FI\"${_CVC_MSVC_FI_HDR}\"")
-  string(APPEND CMAKE_C_FLAGS   " /FI\"${_CVC_MSVC_FI_HDR}\"")
 endif()
 
 # Use modern CMake policies

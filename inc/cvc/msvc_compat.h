@@ -22,7 +22,7 @@
 #ifndef CVC_MSVC_COMPAT_H
 #define CVC_MSVC_COMPAT_H
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && defined(__cplusplus)
 #  include <cstdio>
 #  include <cstdarg>
 #  ifdef snprintf
