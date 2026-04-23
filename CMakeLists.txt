@@ -50,7 +50,14 @@ if(MSVC)
   # Force-include the compatibility shim in every translation unit so that
   # third-party headers (Boost.Core, Boost.Asio) see `std::snprintf` rather
   # than the macro-mangled `std::_snprintf`.
-  add_compile_options(/FI"${PROJECT_SOURCE_DIR}/inc/cvc/msvc_compat.h")
+  #
+  # Use string(APPEND CMAKE_CXX_FLAGS ...) rather than add_compile_options()
+  # because the VS generator silently drops /FI"path-with-spaces" entries
+  # supplied via add_compile_options, but respects them via the global
+  # flags variable. Keep quoting so paths with spaces work.
+  set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/msvc_compat.h")
+  string(APPEND CMAKE_CXX_FLAGS " /FI\"${_CVC_MSVC_FI_HDR}\"")
+  string(APPEND CMAKE_C_FLAGS   " /FI\"${_CVC_MSVC_FI_HDR}\"")
 endif()
 
 # Use modern CMake policies

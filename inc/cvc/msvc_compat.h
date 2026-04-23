@@ -24,12 +24,22 @@
 
 #if defined(_MSC_VER)
 #  include <cstdio>
+#  include <cstdarg>
 #  ifdef snprintf
 #    undef snprintf
 #  endif
 #  ifdef vsnprintf
 #    undef vsnprintf
 #  endif
+   // Defense-in-depth: if a TU is parsed in an order where a template
+   // like `std::snprintf` was already textually rewritten to
+   // `std::_snprintf` before the undefs above took effect, inject a
+   // using-declaration so the mangled qualified name still resolves to
+   // the legacy MSVC function in the global namespace.
+namespace std {
+   using ::_snprintf;
+   using ::_vsnprintf;
+}  // namespace std
 #endif
 
 #endif  // CVC_MSVC_COMPAT_H

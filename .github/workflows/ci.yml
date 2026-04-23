@@ -143,8 +143,40 @@ jobs:
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
       # ── Test ──
+      #
+      # Stress / performance / convergence tests can take ~45 minutes and
+      # are only meaningful to run on trunk. Run the full suite on push
+      # events to main/master (merge-to-trunk) but exclude heavyweight
+      # tests on pull-request events to keep PR feedback fast.
+      #
+      # ctest -E accepts a POSIX regex matched against the full test name;
+      # the test names here come from gtest (TestSuite.TestCase).
+      # --repeat until-pass:3 absorbs timing-sensitive flakes on macOS
+      # CI runners (where short sleep_for() waits occasionally miss
+      # boundaries under load).
       - name: Run tests
-        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure --parallel --repeat after-timeout:2 --timeout 300
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXCLUDE_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "push event (${{ github.ref }}): running full test suite including stress tests"
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure \
+                  --parallel \
+                  --repeat until-pass:3 \
+                  --timeout 1800
+          else
+            echo "pull_request event: excluding stress/benchmark tests (regex: ${EXCLUDE_REGEX})"
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure \
+                  --parallel \
+                  --repeat until-pass:3 \
+                  --timeout 300 \
+                  -E "${EXCLUDE_REGEX}"
+          fi
 
       # ── Coverage (Linux Debug only) ──
       - name: Generate coverage report

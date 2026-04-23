@@ -372,8 +372,16 @@ namespace CVC_NAMESPACE
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
-    // Parallel map-reduce: each thread finds min in its chunk, then combine
+    // Parallel map-reduce: each thread finds min in its chunk, then combine.
+    // MSVC's LLVM OpenMP frontend (/openmp:llvm) is strict about the form
+    // permitted inside `collapse(...)`: the inner loop bounds here are
+    // non-rectangular w.r.t. OpenMP's "canonical loop form" and get rejected
+    // with C7720. Fall back to a plain outer-loop parallel-for on MSVC.
+    #if defined(_MSC_VER)
+    #pragma omp parallel for reduction(min:val) schedule(static)
+    #else
     #pragma omp parallel for reduction(min:val) collapse(3) schedule(static)
+    #endif
 #endif
     for(uint64 k=0; k<dim[2]; k++)
       for(uint64 j=0; j<dim[1]; j++)
@@ -416,8 +424,13 @@ namespace CVC_NAMESPACE
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
-    // Parallel map-reduce: each thread finds max in its chunk, then combine
+    // Parallel map-reduce: each thread finds max in its chunk, then combine.
+    // See the min() variant above for why collapse(3) is disabled on MSVC.
+    #if defined(_MSC_VER)
+    #pragma omp parallel for reduction(max:val) schedule(static)
+    #else
     #pragma omp parallel for reduction(max:val) collapse(3) schedule(static)
+    #endif
 #endif
     for(uint64 k=0; k<dim[2]; k++)
       for(uint64 j=0; j<dim[1]; j++)
