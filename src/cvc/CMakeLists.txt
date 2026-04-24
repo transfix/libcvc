@@ -531,6 +531,14 @@ set_target_properties(cvc PROPERTIES
   OUTPUT_NAME cvc
 )
 
+# On Windows, the sources have no __declspec(dllexport) annotations, so
+# a SHARED build would produce a .dll with an empty export table and no
+# import .lib — breaking every consumer (including our own tests).
+# Ask CMake to auto-generate the export table from all public symbols.
+if(WIN32)
+  set_target_properties(cvc PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 # CUDA-specific configuration
 if(CVC_ENABLE_CUDA)
   # Set CUDA properties for the target

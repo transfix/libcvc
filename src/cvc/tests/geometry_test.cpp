@@ -19,8 +19,10 @@
 #include <vector>
 #include <chrono>
 #include <iomanip>
-#include <sys/resource.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#  include <sys/resource.h>
+#  include <unistd.h>
+#endif
 
 using namespace CVC_NAMESPACE;
 
@@ -1887,12 +1889,19 @@ TEST_F(AlgorithmTest, SDFV2ParallelExecution) {
   std::cout << "Parallel execution test passed - no global state interference!" << std::endl;
 }
 
-// Helper function to get current memory usage in MB
+// Helper function to get current memory usage in MB.
+// On POSIX we read ru_maxrss from getrusage; on Windows we fall back to
+// 0.0 rather than pulling in <psapi.h>, since this helper is only used
+// by the optional SDFStressTest and precise MB numbers are informational.
 double get_memory_usage_mb() {
+#if defined(_WIN32)
+  return 0.0;
+#else
   struct rusage usage;
   getrusage(RUSAGE_SELF, &usage);
   // ru_maxrss is in kilobytes on Linux
   return static_cast<double>(usage.ru_maxrss) / 1024.0;
+#endif
 }
 
 TEST_F(AlgorithmTest, SDFStressTest) {
