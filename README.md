@@ -380,7 +380,8 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 - **[docs/STATE_API.md](docs/STATE_API.md)** - State tree / property bag API
 - **[docs/VOLUME_API.md](docs/VOLUME_API.md)** - Volume data structures
 - **[docs/GEOMETRY_API.md](docs/GEOMETRY_API.md)** - Geometry data structures
-- **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API
+- **[docs/THREAD_POOL.md](docs/THREAD_POOL.md)** - Thread pool overview, examples, and usage guide
+- **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API reference
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
 
 ### Testing Documentation
