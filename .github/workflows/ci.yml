@@ -158,51 +158,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Tests known to be flaky / broken under optimization on macOS:
-          # StateObjectBatchedChanges and StateObjectNestedBatching exercise
-          # state_change_batch_scope, which has a release-mode race between
-          # batch scope teardown and waitForHandlers() observable on macOS
-          # CI. Excluded here (TODO: fix underlying race in state.cpp).
-          MACOS_BROKEN='|StateTest\.StateObjectBatchedChanges|StateTest\.StateObjectNestedBatching|AppTest\.ThreadProgressZeroToOneHundred'
-
           # Heavyweight tests (~minutes each) only meaningful on trunk.
           STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
 
-          EXCLUDE_REGEX="${STRESS_REGEX}"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            EXCLUDE_REGEX="(${STRESS_REGEX}${MACOS_BROKEN})"
-          fi
-
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "push event (${{ github.ref }}): full suite (excluding ${EXCLUDE_REGEX})"
-            # Stress tests run on trunk only; still skip the macOS-broken
-            # ones on macOS to keep trunk green until they are fixed.
-            if [ "${{ runner.os }}" = "macOS" ]; then
-              ctest --test-dir build \
-                    --build-config ${{ matrix.build_type }} \
-                    --output-on-failure \
-                    --parallel \
-                    --repeat until-pass:3 \
-                    --timeout 1800 \
-                    -E "(${MACOS_BROKEN#|})"
-            else
-              ctest --test-dir build \
-                    --build-config ${{ matrix.build_type }} \
-                    --output-on-failure \
-                    --parallel \
-                    --repeat until-pass:3 \
-                    --timeout 1800
-            fi
+            echo "push event (${{ github.ref }}): full suite including stress tests"
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure \
+                  --parallel \
+                  --repeat until-pass:3 \
+                  --timeout 1800
           else
-            echo "pull_request event: excluding ${EXCLUDE_REGEX}"
+            echo "pull_request event: excluding ${STRESS_REGEX}"
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure \
                   --parallel \
                   --repeat until-pass:3 \
                   --timeout 300 \
-                  -E "${EXCLUDE_REGEX}"
+                  -E "${STRESS_REGEX}"
           fi
 
       # ── Coverage (Linux Debug only) ──

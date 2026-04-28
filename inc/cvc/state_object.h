@@ -145,6 +145,64 @@ namespace CVC_NAMESPACE
     bool _flushed;
   };
 
+  // ----------------------
+  // cvc::state_init_scope
+  // ----------------------
+  // Purpose:
+  //   RAII wrapper for *establishing* initial state on a state_object
+  //   without firing change handlers. Use this in the body of a derived
+  //   class's constructor (and only there) so that seed values do not
+  //   spawn handler threads that would race with subsequent caller-
+  //   initiated changes.
+  //
+  //   Without this, an object like:
+  //
+  //     class Cfg : public state_object<Cfg> {
+  //       Cfg() {
+  //         getState("width").value(1920);   // spawns thread T1
+  //         getState("height").value(1080);  // spawns thread T2
+  //       }
+  //     };
+  //
+  //   has a window between construction and the caller's first action
+  //   in which T1/T2 have been spawned but not yet finished. Their
+  //   completion is unordered with respect to the caller's batch and
+  //   waitForHandlers() observations, producing flaky handler-count
+  //   accounting (initial vs final snapshot races).
+  //
+  //   Usage:
+  //     Cfg() : ... {
+  //       state_init_scope<Cfg> init(*this);
+  //       getState("width").value(1920);   // change signal suppressed
+  //       getState("height").value(1080);  // change signal suppressed
+  //     } // scope ends; queued changes discarded, no handlers spawned.
+  //
+  // ---- Change History ----
+  // 04/2026 -- Joe R. -- Creation. Added to fix StateObjectBatchedChanges /
+  //                      StateObjectNestedBatching race on macOS Release.
+  template <class This>
+  class state_init_scope
+  {
+  public:
+    explicit state_init_scope(state_object<This>& obj)
+      : _obj(obj)
+    {
+      _obj.beginInit();
+    }
+
+    ~state_init_scope()
+    {
+      _obj.endInit();
+    }
+
+    // Non-copyable
+    state_init_scope(const state_init_scope&) = delete;
+    state_init_scope& operator=(const state_init_scope&) = delete;
+
+  private:
+    state_object<This>& _obj;
+  };
+
   // -----------------
   // cvc::state_object
   // -----------------
@@ -188,6 +246,7 @@ namespace CVC_NAMESPACE
     state_object(app& ctx, const std::string state_path = std::string()) 
       : _ctx(ctx),
         _batchDepth(0),
+        _initDepth(0),
         _hasInstanceThreading(false),
         _instanceThreading(false),
         _state_path(state_path.empty() ?
@@ -255,6 +314,25 @@ namespace CVC_NAMESPACE
     {
       boost::mutex::scoped_lock lock(_batchMutex);
       _batchDepth++;
+    }
+
+    // Begin an *initialization* region. While _initDepth > 0, change
+    // signals received by stateChanged() are dropped instead of being
+    // queued or spawned. Used by state_init_scope to set seed values in
+    // a constructor without spawning racy handler threads.
+    void beginInit()
+    {
+      boost::mutex::scoped_lock lock(_batchMutex);
+      _initDepth++;
+    }
+
+    // End an initialization region. Pairs with beginInit().
+    void endInit()
+    {
+      boost::mutex::scoped_lock lock(_batchMutex);
+      if (_initDepth > 0) {
+        _initDepth--;
+      }
     }
 
     // End batching and flush all pending handlers (spawn threads for unique changes)
@@ -366,6 +444,7 @@ namespace CVC_NAMESPACE
     // Batching support
     mutable boost::mutex _batchMutex;
     int _batchDepth;
+    int _initDepth;
     std::set<std::string> _pendingChanges;
 
     // State locking support
@@ -402,7 +481,15 @@ namespace CVC_NAMESPACE
     void stateChanged(const std::string& childState)
     {
       boost::mutex::scoped_lock lock(_batchMutex);
-      
+
+      // Initialization region: drop the change entirely. Used by
+      // state_init_scope to seed default state from a constructor
+      // without spawning handler threads that would race with the
+      // caller's first observable interactions.
+      if (_initDepth > 0) {
+        return;
+      }
+
       if (_batchDepth > 0) {
         // Batching enabled - queue this change (set automatically deduplicates)
         _pendingChanges.insert(childState);

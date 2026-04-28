@@ -1855,7 +1855,12 @@ public:
   
   ConfigurationObject() : resizeCount(0), fullscreenCount(0), totalHandlerCalls(0),
                           lastWidth(0), lastHeight(0), lastFullscreen(false) {
-    // Initialize default values
+    // Initialize default values without firing handlers — these are
+    // seed values, not user-driven changes. Without state_init_scope,
+    // the value() calls below would each spawn a handler thread, and
+    // those threads would race with the test body's subsequent
+    // operations and waitForHandlers() observations.
+    state_init_scope<ConfigurationObject> init(*this);
     getState("width").value(1920);
     getState("height").value(1080);
     getState("fullscreen").value(false);
