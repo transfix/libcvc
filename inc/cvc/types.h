@@ -38,7 +38,7 @@
 #include <vector>
 
 #ifndef CVC_VERSION_STRING
-#define CVC_VERSION_STRING "1.0.0"
+#define CVC_VERSION_STRING "3.0.0"
 #endif
 
 #define CVC_ENABLE_LOCALE_BOOL
