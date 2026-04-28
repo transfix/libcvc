@@ -2623,7 +2623,7 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 		float grid_x = (geofrm.verts[i][0] - minext[0]) / span[0];
 		float grid_y = (geofrm.verts[i][1] - minext[1]) / span[1];
 		float grid_z = (geofrm.verts[i][2] - minext[2]) / span[2];
-		
+
 		x = (int) grid_x;
 		y = (int) grid_y;
 		z = (int) grid_z;
@@ -2631,6 +2631,24 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 		dx = grid_x - x;
 		dy = grid_y - y;
 		dz = grid_z - z;
+
+		// Clamp the trilinear-interpolation cell to be in-bounds.
+		// xyz2octcell at oct_depth requires 0 <= x,y,z < dim-1, and
+		// idx2vtx then reads the eight cell corners (x..x+1, y..y+1, z..z+1)
+		// from orig_vol which is sized dim[0]*dim[1]*dim[2]. A vertex sitting
+		// exactly on the maximum extent gives x == dim-1 (or numerical noise
+		// could produce x == dim or x == -1) and idx2vtx returns indices
+		// outside orig_vol's range. On MSVC Debug this trips the bounds-checked
+		// vector subscript and aborts with STATUS_STACK_BUFFER_OVERRUN
+		// (0xC0000409). Clamping keeps the interpolation cell inside the grid;
+		// dx/dy/dz are forced to 0 or 1 so the trilinear weighting still picks
+		// the correct corner value.
+		if (x < 0)             { x = 0;            dx = 0.0f; }
+		else if (x >= dim[0]-1){ x = dim[0]-2;     dx = 1.0f; }
+		if (y < 0)             { y = 0;            dy = 0.0f; }
+		else if (y >= dim[1]-1){ y = dim[1]-2;     dy = 1.0f; }
+		if (z < 0)             { z = 0;            dz = 0.0f; }
+		else if (z >= dim[2]-1){ z = dim[2]-2;     dz = 1.0f; }
 
 		oc_id = xyz2octcell(x, y, z, oct_depth);
 		idx2vtx(oc_id, oct_depth, vtx);
