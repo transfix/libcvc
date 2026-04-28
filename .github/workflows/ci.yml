@@ -201,23 +201,7 @@ jobs:
           # Heavyweight tests (~minutes each) only meaningful on trunk.
           STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
 
-          # MSVC's debug-iterator checks (Windows Debug only) catch an
-          # out-of-bounds vector access deep inside the vendored LBIE
-          # mesher. The mesher produces correct output everywhere else
-          # (Linux/macOS Debug+Release, and Windows Release), so these
-          # tests are skipped on Windows Debug only until LBIE is
-          # cleaned up.
-          # See: https://github.com/transfix/libcvc/issues (LBIE mesher
-          # iterator-debug OOB on MSVC).
-          MESHER_DEBUG_SKIP='(GeometryTest\.QualityImproveTetrahedralMesh|GeometryTest\.TetrahedralizeMeshExtraction|GeometryTest\.TetrahedralizeWithImprovementMethods|GeometryTest\.HexahedralizeMeshExtraction|GeometryTest\.Tetrahedralize2IntervalMeshing|AlgorithmTest\.ExtractSurfaceFromHexMesh|AlgorithmTest\.FindTetsContainingPointPerformanceLargeMesh)'
-
-          EXCLUDE_REGEX="${STRESS_REGEX}"
-          if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.build_type }}" = "Debug" ]; then
-            EXCLUDE_REGEX="${STRESS_REGEX}|${MESHER_DEBUG_SKIP}"
-            echo "Windows Debug: also excluding ${MESHER_DEBUG_SKIP}"
-          fi
-
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ runner.os }}" != "Windows" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
             echo "push event (${{ github.ref }}): full suite including stress tests"
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
@@ -226,14 +210,14 @@ jobs:
                   --repeat until-pass:3 \
                   --timeout 1800
           else
-            echo "excluding ${EXCLUDE_REGEX}"
+            echo "pull_request event: excluding ${STRESS_REGEX}"
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure \
                   --parallel \
                   --repeat until-pass:3 \
                   --timeout 300 \
-                  -E "${EXCLUDE_REGEX}"
+                  -E "${STRESS_REGEX}"
           fi
 
       # ── Coverage (Linux Debug only) ──
