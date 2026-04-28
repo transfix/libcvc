@@ -292,16 +292,19 @@ jobs:
           echo "arch=x86_64"      >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"       >> "$GITHUB_OUTPUT"
 
-      - name: Export GitHub Actions cache env
-        uses: actions/github-script@v7
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
         with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v3-
+            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-
 
       - name: Install dependencies
-        env:
-          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
         shell: pwsh
         run: |
           $packages = @(
@@ -316,11 +319,14 @@ jobs:
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             $packages += @('qt6-base','vtk','cgal')
           }
-          for ($i = 1; $i -le 3; $i++) {
+          for ($i = 1; $i -le 5; $i++) {
+            Write-Host "vcpkg install attempt $i / 5"
             vcpkg install @packages --triplet x64-windows
             if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 3) { exit $LASTEXITCODE }
-            Start-Sleep -Seconds 30
+            if ($i -eq 5) { exit $LASTEXITCODE }
+            $sleep = [Math]::Min(60 * $i, 180)
+            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
+            Start-Sleep -Seconds $sleep
           }
 
       - name: Configure

@@ -104,23 +104,26 @@ jobs:
       # vcpkg builds Boost from source by downloading per-library tarballs
       # from github.com/boostorg/*. github.com periodically returns 502s
       # for raw tarball requests, breaking CI. Mitigations:
-      #   1) GitHub Actions binary cache (x-gha) — once a tag is cached,
-      #      subsequent runs pull pre-built binaries instead of rebuilding,
-      #      sidestepping the source-tarball downloads entirely.
-      #   2) Retry loop — gives transient 502s up to 3 attempts before
-      #      failing the job.
-      - name: Export GitHub Actions cache env (Windows)
+      #   1) Filesystem binary cache persisted via actions/cache. Once a
+      #      successful run populates the cache, subsequent runs reuse the
+      #      pre-built binaries and skip source downloads entirely. (The
+      #      old `x-gha` backend was removed by vcpkg in 2026.)
+      #   2) Outer retry loop — handles transient 502s on cold caches.
+      - name: Cache vcpkg installed packages (Windows)
         if: runner.os == 'Windows'
-        uses: actions/github-script@v7
+        uses: actions/cache@v4
         with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-${{ runner.os }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.build_type }}-v3-
+            vcpkg-${{ runner.os }}-${{ matrix.build_type }}-
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        env:
-          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
         shell: pwsh
         run: |
           $packages = @(
@@ -132,7 +135,7 @@ jobs:
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
             'boost-utility','hdf5','fftw3','gsl'
           )
-          $maxAttempts = 3
+          $maxAttempts = 5
           for ($i = 1; $i -le $maxAttempts; $i++) {
             Write-Host "vcpkg install attempt $i / $maxAttempts"
             vcpkg install @packages --triplet x64-windows
@@ -141,8 +144,9 @@ jobs:
               Write-Error "vcpkg install failed after $maxAttempts attempts"
               exit $LASTEXITCODE
             }
-            Write-Host "Retrying after transient failure..."
-            Start-Sleep -Seconds 30
+            $sleep = [Math]::Min(60 * $i, 180)
+            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
+            Start-Sleep -Seconds $sleep
           }
 
       # ── Configure ──
