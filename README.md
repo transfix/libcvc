@@ -506,6 +506,17 @@ libcvc/
 
 ## Version History
 
+- **3.0.0** (2026) - **Production-grade packaging & CI/CD release**
+  - Cross-platform release artifacts: Linux (.tar.gz, .deb, AppImage),
+    macOS (.zip, .dmg with VolumeRover3.app bundle), Windows (.zip,
+    NSIS installer with desktop/start-menu shortcuts)
+  - Separate libcvc SDK (Debug + Release) and volrover3 user-app
+    components, packaged independently per platform
+  - Portable `find_package(cvc)` with full transitive dependency
+    discovery (Boost, CGAL, HDF5, OpenMP, FFTW, CUDAToolkit, etc.)
+  - Qt deployment integration (windeployqt, macdeployqt, linuxdeploy)
+  - Multi-platform CI matrix (Ubuntu, macOS, Windows) with vcpkg
+    binary caching
 - **2.0.0** (2025) - **Major modernization release**
   - Thread-safe SDF library with 11x performance improvement
   - Modernized CMake build system with proper CUDA integration

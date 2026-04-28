@@ -66,7 +66,7 @@ set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
 
 # The libcvc version number
-set(CVC_VERSION_MAJOR 2)
+set(CVC_VERSION_MAJOR 3)
 set(CVC_VERSION_MINOR 0)
 set(CVC_VERSION ${CVC_VERSION_MAJOR}.${CVC_VERSION_MINOR})
 message(STATUS "libcvc version: ${CVC_VERSION}")
