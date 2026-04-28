@@ -6,7 +6,7 @@
 
 - [Overview](#overview)
 - [Test Suite Summary](#test-suite-summary)
-  - [Total Tests: 369 (99.7% Passing)](#total-tests-369-997-passing-)
+  - [Total Tests: 577 (100% Passing)](#total-tests-577-100-passing-)
   - [Test Execution Speed](#test-execution-speed)
 - [Building Tests](#building-tests)
   - [Prerequisites](#prerequisites)
@@ -98,31 +98,33 @@
 The libcvc library uses Google Test (gtest) for comprehensive unit testing. The test infrastructure is modern, well-documented, and integrated seamlessly with CMake. Tests are **enabled by default** and cover core functionality, multithreaded operations, async programming, CUDA GPU acceleration, and real-world scenarios.
 
 **Key Features:**
-- 371 comprehensive tests with 99.7% pass rate
+- 577 comprehensive tests with 100% pass rate
 - Automatic Google Test integration via CMake FetchContent
 - Code coverage analysis with lcov/gcov
-- Multithreaded concurrency testing (12 tests)
-- Futures API async programming tests (11 tests)
-- CUDA GPU acceleration tests (22 tests)
+- Multithreaded concurrency testing
+- Futures API async programming tests
+- CUDA GPU acceleration tests
 - Real-world stress tests (SDF convergence, state_object patterns)
 
 ## Test Suite Summary
 
-### Total Tests: 371 (99.7% Passing) ✅
+### Total Tests: 577 (100% Passing) ✅
 
-*Last Updated: December 29, 2025*
+*Last Updated: April 2026*
 
-| Component | Tests | Focus Areas |
-|-----------|-------|-------------|
-| **App** | 114 | Application framework, data/property management, threading |
-| **State** | 105 | State tree, hierarchies, signals, async operations, state_object pattern |
-| **Voxels** | 130 | Volume data, algorithms, **22 CUDA GPU tests** |
-| **Volume** | 29 | Spatial coordinates, interpolation, subvolumes |
-| **Geometry** | 50 | Mesh operations, normals, I/O, **deep copy semantics** |
-| **Algorithm** | 6 | SDF computation, isosurface extraction, convergence |
+| Component  | Tests | Focus Areas |
+|------------|-------|-------------|
+| **App**    | 72    | Application framework, data/property management, threading |
+| **State**  | 158   | State tree, hierarchies, signals, async operations, state_object pattern |
+| **Voxels** | 133   | Volume data, algorithms, CUDA GPU paths |
+| **Volume** | 29    | Spatial coordinates, interpolation, subvolumes |
+| **Geometry** | 119 | Mesh operations, normals, I/O, SDF computation, isosurface extraction |
+| **Volume-Ops** | 42 | Filtering, contrast enhancement, anisotropic diffusion, GDTV |
+| **HDF5**   | 24    | `.cvc` file format round-trip and metadata |
+| **Procedural Geometry** | typed fixtures | Templated parameterized tests over generated meshes |
 
 **Key Metrics:**
-- **Success Rate**: 99.7% (370/371 passing; 1 cleanup issue in StateTest.StateObjectStateName)
+- **Success Rate**: 100%
 - **Execution Time**: ~280 seconds (includes intensive SDF convergence test)
 - **Coverage**: Target 64.6% overall, **94.1% on core components**
 
@@ -145,7 +147,7 @@ The libcvc library uses Google Test (gtest) for comprehensive unit testing. The 
 
 **Required:**
 - CMake 3.15 or higher
-- C++14 compatible compiler (GCC 5+, Clang 3.8+, MSVC 2017+)
+- C++17 compatible compiler (GCC 7+, Clang 5+, MSVC 2017+); C++14/20/23 selectable via `-DCMAKE_CXX_STANDARD=`
 - Boost libraries (>= 1.58): thread, date_time, regex, filesystem, system, chrono
 
 **Optional (for coverage):**
@@ -1122,9 +1124,9 @@ Bilateral filter also shows excellent GPU performance:
 - Voxels tests expanded to 128
 - CUDA GPU tests (20)
 
-### Current Status (December 2025)
+### Current Status (April 2026)
 
-- **363 tests**: 100% passing
+- **577 tests**: 100% passing
 - **90.5% coverage**: On core components
 - **Comprehensive documentation**: Consolidated TESTING.md
 - **Real-world validation**: Stanford Bunny, SDF convergence
@@ -1397,11 +1399,11 @@ TEST(StateTest, ConcurrentWritesToSameNode) {
 
 The libcvc testing infrastructure provides comprehensive validation of core functionality with:
 
-- ✅ **363 tests** with 100% pass rate
+- ✅ **577 tests** with 100% pass rate
 - ✅ **90.5% coverage** on core components
-- ✅ **Multithreaded validation** (12 tests)
-- ✅ **Async programming** via futures API (11 tests)
-- ✅ **GPU acceleration** testing (20 CUDA tests)
+- ✅ **Multithreaded validation**
+- ✅ **Async programming** via futures API
+- ✅ **GPU acceleration** testing (CUDA)
 - ✅ **Real-world stress tests** (SDF convergence, state_object patterns)
 - ✅ **Production-ready** thread-safe architecture
 

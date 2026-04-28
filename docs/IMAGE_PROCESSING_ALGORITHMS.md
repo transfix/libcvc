@@ -726,6 +726,6 @@ saveVolume(volume, "processed.raw");
 ---
 
 *Document Version: 1.0*  
-*Last Updated: December 2025*  
-*Library: libcvc*  
-*Tested Version: All algorithms validated with comprehensive test suite (271 tests)*
+*Last Updated: April 2026*  
+*Library: libcvc 3.0.0*  
+*Tested Version: All algorithms validated by the libcvc test suite (volume-ops, geometry, voxels)*

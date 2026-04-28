@@ -1,9 +1,9 @@
 # libcvc
 
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
-[![C++](https://img.shields.io/badge/C++-14%2F17%2F20-orange.svg)](https://isocpp.org/)
+[![C++](https://img.shields.io/badge/C++-17%2B-orange.svg)](https://isocpp.org/)
 [![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-577%20passing-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-64.6%25%20lines%20%7C%2068.1%25%20functions-yellow.svg)](docs/TESTING.md)
 
 ## Table of Contents
@@ -51,7 +51,7 @@ A comprehensive computational visualization library from the Computational Visua
 
 **Required:**
 - CMake 3.15 or higher
-- C++14 compatible compiler (GCC 5+, Clang 3.8+, MSVC 2017+)
+- C++17 compatible compiler (GCC 7+, Clang 5+, MSVC 2017+); C++14/20/23 selectable via `-DCMAKE_CXX_STANDARD=`
 - Boost libraries (>= 1.58): thread, date_time, regex, filesystem, system
 
 **Optional:**
@@ -154,14 +154,16 @@ The dramatic slowdown in Debug builds is due to:
 
 libcvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 363 Tests (100% Passing)
+### Test Suite: 577 Tests (100% Passing)
 
-- **114 App Tests** - Core application framework, data/property management, threading
-- **102 State Tests** - State tree, hierarchies, signals, async operations, futures API, state_object pattern (11 tests)
-- **128 Voxels Tests** - Volume data operations, algorithms, **20 CUDA tests** (GPU-accelerated resize, multithreading)
-- **29 Volume Tests** - Spatial coordinates, interpolation, subvolumes, bounding boxes
-- **47 Geometry Tests** - Mesh operations, normals, I/O using Stanford Bunny
-- **6 Algorithm Tests** - SDF computation, isosurface extraction, convergence tests
+- **72 App Tests** — Core application framework, data/property management, threading
+- **158 State Tests** — State tree, hierarchies, signals, async operations, futures API, state_object pattern
+- **133 Voxels Tests** — Volume data operations, algorithms, CUDA GPU acceleration
+- **29 Volume Tests** — Spatial coordinates, interpolation, subvolumes, bounding boxes
+- **119 Geometry Tests** — Mesh operations, normals, I/O, SDF computation, isosurface extraction
+- **42 Volume-Ops Tests** — Filtering, contrast enhancement, anisotropic diffusion, GDTV
+- **24 HDF5 Tests** — .cvc file format round-trip and metadata
+- **Procedural Geometry Tests** — Templated/parameterized fixtures over generated meshes
 
 ### Code Coverage: 90.5% on Core Components
 
@@ -216,7 +218,7 @@ cmake --build build --target check
 ### Documentation
 
 See **[docs/TESTING.md](docs/TESTING.md)** for comprehensive testing documentation:
-- 363 tests with 100% pass rate (114 app, 102 state, 128 voxels, 29 volume, 47 geometry, 6 algorithm)
+- 577 tests with 100% pass rate (72 app, 158 state, 133 voxels, 29 volume, 119 geometry, 42 volume-ops, 24 hdf5, plus procedural-geometry typed fixtures)
 - 90.5% coverage on core components
 - How to run tests (CTest, Google Test)
 - Test coverage details and analysis
@@ -384,12 +386,12 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 ### Testing Documentation
 
 - **[docs/TESTING.md](docs/TESTING.md)** - Comprehensive testing guide
-  - **363 tests with 100% pass rate** (114 app, 102 state, 128 voxels, 29 volume, 47 geometry, 6 algorithm)
+  - **577 tests with 100% pass rate** (72 app, 158 state, 133 voxels, 29 volume, 119 geometry, 42 volume-ops, 24 hdf5, plus procedural-geometry typed fixtures)
   - **90.5% coverage on core components** (1,366/1,509 lines)
   - Running tests (CTest, Google Test, custom check target)
   - Test organization and naming conventions
   - Detailed coverage analysis with lcov/gcov
-  - Advanced features: multithreaded tests (12), futures API (11), state_object (11), CUDA GPU (20)
+  - Advanced features: multithreaded tests, futures API, state_object pattern, CUDA GPU
   - Performance benchmarks (SDF v2.0: 11x speedup)
   - Adding new tests with examples
   - Common testing patterns (fixtures, parameterized tests, multithreading)
@@ -406,7 +408,6 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Performance benchmarks and build type impact analysis
   - Development history: v1.x (global state) → v2.0 (thread-safe)
   - Migration guide from deprecated v1.x API
-  - Test coverage: 353/353 tests passing (100%)
   - **Future plans**: CUDA GPU acceleration roadmap (10-100x speedup target)
   - Thread-safe parallel computation examples
   - Consolidates all previous SDF documentation
@@ -419,7 +420,6 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - **Contrast Enhancement**: Adaptive histogram equalization with resistor propagation
   - **GDTV Filter**: Gradient-dependent total variation regularization
   - Complete algorithm details, parameters, usage examples, and best practices
-  - Based on 271-test validation suite
 
 ### API Documentation
 
@@ -525,33 +525,6 @@ libcvc/
   - Complete refactoring of global-state architecture to thread-safe contexts
 - **1.0.0** (Legacy) - Original release with global-state architecture
 
-## Recent Additions
-
-### December 2025: SDF v2.0 - Thread-Safe Refactoring
-
-**Major Achievement**: Complete rewrite of SDF library achieving thread safety and massive performance gains
-
-**Key Improvements**:
-- ✅ **Thread-safe architecture**: `SDFContext` class replaces all global variables
-- ✅ **11x performance improvement**: Cell reference caching optimization (2600s → 234s for 256³)
-- ✅ **100% test success**: All 353 tests passing (up from 349/353)
-- ✅ **Memory safety**: Smart pointers eliminate leaks
-- ✅ **Build type documentation**: Performance impact clearly documented (Release vs Debug)
-- ✅ **GPU-ready**: Architecture prepared for CUDA kernel implementation
-
-**Technical Details**:
-- Replaced 18 global variables with encapsulated `SDFContext` instances
-- `boost::multi_array<cell, 3>` for thread-safe octree structure
-- Cell reference caching: `cell& c = ctx->sdf[i][j][k];` pattern
-- BOOST_DISABLE_ASSERTS unconditionally enabled for acceptable Debug performance
-- Complete migration guide from v1.x deprecated API
-
-**Documentation**:
-- [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) - Consolidated comprehensive guide
-- Includes: Quick start, API reference, benchmarks, CUDA roadmap, migration guide
-
-**Next Steps**: CUDA GPU acceleration (Q2 2025 target, 10-100x speedup expected)
-
 ## Contributing
 
 This is a modernization of legacy research software. Contributions welcome:
@@ -565,17 +538,7 @@ This is a modernization of legacy research software. Contributions welcome:
 ## Known Issues
 
 - Duplicate VolMagick code in mesher component (historical TODO)
-- No CUDA source files yet (infrastructure ready - see CUDA_GUIDE.md)
 - Coverage race conditions in multithreaded tests (use `--ignore-errors negative` with lcov)
-
-## Recent Additions (December 2025)
-
-- ✅ **SDF Thread-Safe Refactoring (v2.0)** - Complete rewrite using SDFContext
-- ✅ **353 Total Tests** - 100% passing including intensive SDF convergence tests  
-- ✅ **11x Performance Gain** - SDF optimization via cell reference caching
-- ✅ **64.6% Overall Coverage** - 10,272 of 15,903 lines tested
-- ✅ **SDF API Documentation** - Comprehensive guide with examples and benchmarks
-- ✅ **Geometry Tests** - 47 tests using Stanford Bunny (34,834 triangles)
 - ✅ **Algorithm Tests** - 6 SDF/isosurface tests including 256³ stress test
 - ✅ **Volume & Voxels** - 157 combined tests for volumetric data structures
 
