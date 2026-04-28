@@ -12,6 +12,7 @@
 
 #include <cvc/app.h>
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -680,7 +681,8 @@ TEST(AppTest, ReadDataWithReaders) {
 // ===========================
 
 TEST(AppTest, PropertyMapSaveLoad) {
-  std::string temp_file = "/tmp/test_property_map.info";
+  std::string temp_file =
+      (std::filesystem::temp_directory_path() / "test_property_map.info").string();
   
   // Set up some properties
   cvcapp.properties("io.test.prop1", "value1");

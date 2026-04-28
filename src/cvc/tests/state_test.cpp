@@ -18,6 +18,7 @@
 #include <cvc/bounding_box.h>
 #include <cvc/dimension.h>
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -711,7 +712,8 @@ TEST(StateTest, JSONRoundtrip) {
 // ===========================
 
 TEST(StateTest, SaveAndRestore) {
-  std::string temp_file = "/tmp/test_state_save.json";
+  std::string temp_file =
+      (std::filesystem::temp_directory_path() / "test_state_save.json").string();
   
   // Create state
   cvcstate("test.file2.x").value("saved_x");
