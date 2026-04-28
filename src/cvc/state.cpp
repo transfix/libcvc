@@ -42,7 +42,10 @@
 
 namespace CVC_NAMESPACE
 {
-  const std::string state::SEPARATOR(".");
+  // SEPARATOR is now an inline variable defined in state.h (C++17).
+  // Keeping the symbol exported from the DLL would otherwise require an
+  // explicit __declspec(dllexport), since WINDOWS_EXPORT_ALL_SYMBOLS only
+  // covers function symbols, not data members.
   state::init_func_vec state::_startup;
   state::state_ptr state::_instance;
   boost::mutex state::_instanceMutex;

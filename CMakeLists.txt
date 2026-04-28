@@ -30,9 +30,12 @@ if(CVC_ENABLE_CUDA)
   endif()
 endif()
 
-# Require C++14 as a minimum, but allow newer standards via -DCMAKE_CXX_STANDARD=17
+# Require C++17 as a minimum, but allow newer standards via -DCMAKE_CXX_STANDARD=20
+# We bumped from C++14 to C++17 so we can rely on inline variables for
+# header-defined static data members; this avoids requiring per-symbol
+# __declspec(dllexport) annotations for clean Windows DLL builds.
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

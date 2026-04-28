@@ -162,7 +162,12 @@ namespace CVC_NAMESPACE
     typedef boost::function<void ()> nullary_func;
     typedef std::vector<nullary_func> init_func_vec;
 
-    static const std::string SEPARATOR;
+    // Inline variable so every TU using this header gets its own
+    // definition. Avoids needing per-symbol __declspec(dllexport) on
+    // MSVC: WINDOWS_EXPORT_ALL_SYMBOLS auto-exports functions but not
+    // data members, so a .cpp-defined static const std::string would
+    // have no DLL export and downstream test TUs would fail to link.
+    inline static const std::string SEPARATOR{"."};
     static init_func_vec _startup;
 
     virtual ~state();
