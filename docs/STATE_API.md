@@ -1925,4 +1925,3 @@ TEST(StateTest, TypeConversionError) {
 
 - **[../README.md](../README.md)** - Project overview and quick start
 - **[TESTING_COVERAGE.md](TESTING_COVERAGE.md)** - Test coverage metrics
-- **[PROJECT_REPORT.md](PROJECT_REPORT.md)** - Complete project documentation

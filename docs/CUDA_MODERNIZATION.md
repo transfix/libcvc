@@ -308,6 +308,5 @@ All infrastructure is ready - just add `.cu` files!
 📚 **Resources:**
 - See **CUDA_GUIDE.md** for detailed usage
 - Check CMakePresets.json for build configurations
-- Refer to PROJECT_REPORT.md for all options
 
 The CUDA infrastructure is now production-ready and follows modern CMake best practices!

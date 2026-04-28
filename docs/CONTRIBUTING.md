@@ -200,7 +200,6 @@ TEST_CASE("Volume loading", "[volume][io]") {
 ### README and Guides
 
 - Update README.md for user-facing changes
-- Update PROJECT_REPORT.md for architecture changes
 - Add examples for new features
 
 ## Pull Request Process

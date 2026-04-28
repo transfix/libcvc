@@ -150,8 +150,6 @@ The dramatic slowdown in Debug builds is due to:
 
 **Note**: All build types produce identical, deterministic results. The difference is purely execution speed.
 
-See `PROJECT_REPORT.md` for a complete list of build options.
-
 ## Testing
 
 libcvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
@@ -375,12 +373,13 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Core Documentation
 
-- **[docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md)** - Comprehensive project documentation
-  - Full dependency list and installation instructions
-  - Detailed build options (all 20+ options explained)
-  - Architecture overview
-  - Migration guide from version 1.x to 2.0
-  - Platform support (Linux, Windows, macOS, BSD)
+- **[USAGE.md](USAGE.md)** - Consumer guide for `find_package(cvc)` from a CMake project
+- **[docs/APP_API.md](docs/APP_API.md)** - `cvc::app` runtime context API
+- **[docs/STATE_API.md](docs/STATE_API.md)** - State tree / property bag API
+- **[docs/VOLUME_API.md](docs/VOLUME_API.md)** - Volume data structures
+- **[docs/GEOMETRY_API.md](docs/GEOMETRY_API.md)** - Geometry data structures
+- **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API
+- **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
 
 ### Testing Documentation
 

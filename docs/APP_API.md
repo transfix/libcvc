@@ -1548,5 +1548,4 @@ void setVolume(const cvc::volume& vol) {
 **Full Documentation:**
 - [State API (cvc::state)](STATE_API.md)
 - [Testing Guide](TESTING.md)
-- [Project Overview](PROJECT_REPORT.md)
 - [SDF Library](SDF_LIBRARY.md)
