@@ -1427,41 +1427,55 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   std::atomic<bool> at_zero(false);
   std::atomic<bool> at_fifty(false);
   std::atomic<bool> finished(false);
-  
+  // Acknowledgement gates: the worker waits for the main thread to sample
+  // each phase before advancing. Without these the worker can race through
+  // 0% → 50% → 100% before the main thread's polling loop wakes up to
+  // observe the intermediate states (seen on fast macOS Release runners).
+  std::atomic<bool> zero_observed(false);
+  std::atomic<bool> fifty_observed(false);
+
   cvcapp.startThread(thread_key, [&]() {
     cvc::app::thread_feedback feedback(thread_key);
     // thread_feedback constructor sets to 0%
     at_zero = true;
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
-    
+    while (!zero_observed.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+    }
+
     cvcapp.threadProgress(thread_key, 0.5);
     at_fifty = true;
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
-    
+    while (!fifty_observed.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+    }
+
     finished = true;
     // thread_feedback destructor sets to 100%
   });
-  
+
   // Check progress at 0%
-  for (int i = 0; i < 50 && !at_zero.load(); i++) {
+  for (int i = 0; i < 200 && !at_zero.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
-  if (at_zero.load()) {
+  ASSERT_TRUE(at_zero.load());
+  {
     double progress = cvcapp.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.0, 0.01) << "Progress should be 0% at start";
   }
-  
+  zero_observed = true;
+
   // Check progress at 50%
-  for (int i = 0; i < 50 && !at_fifty.load(); i++) {
+  for (int i = 0; i < 200 && !at_fifty.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
-  if (at_fifty.load()) {
+  ASSERT_TRUE(at_fifty.load());
+  {
     double progress = cvcapp.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.5, 0.01) << "Progress should be 50% midway";
   }
-  
+  fifty_observed = true;
+
   // Wait for completion
-  for (int i = 0; i < 50 && !finished.load(); i++) {
+  for (int i = 0; i < 200 && !finished.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
   ASSERT_TRUE(finished.load());
