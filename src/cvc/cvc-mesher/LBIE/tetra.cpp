@@ -3,7 +3,6 @@
 #include"e_face.h"
 #include"cubes.h"
 #include<stdio.h>
-#include<cstdlib>
 #include"vtkMarchingCubesCases.h"
 #include"pcio.h"
 #include"LBIE_geoframe.h"
@@ -19,15 +18,6 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 	int vtx_num, intersect_id, my_vtx[4], con_id[4];
 	unsigned int vtx[4], my_vertex, my_vertex_1;
 	float val[8];
-
-	// CI diagnostic: enabled when CVC_LBIE_DEBUG env var is set
-	const bool dbg = (std::getenv("CVC_LBIE_DEBUG") != nullptr);
-	long long n_intersect_pos = 0, n_intersect_neg = 0;
-	long long n_intersect_2pos = 0, n_intersect_2neg = 0;
-	long long n_is_min_edge_true = 0, n_is_min_edge_2_true = 0;
-	long long n_add_2_tetra = 0, n_add_tetra = 0;
-	int numtris_at_start = geofrm.numtris;
-	int numverts_at_start = geofrm.numverts;
 
 	for (k = 0; k < octcell_num; k++) vtx_idx_arr[k] = -1;
 	for (k = 0; k < dim[0]*dim[1]*dim[2]; k++) grid_idx_arr[k] = -1;
@@ -50,17 +40,10 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 
 			if (is_eflag_on(x,y,z,level,j)) continue;
 			intersect_id = is_intersect(val, j);
-			if (dbg) {
-				if (intersect_id == 1) ++n_intersect_pos;
-				else if (intersect_id == -1) ++n_intersect_neg;
-				else if (intersect_id == 2) ++n_intersect_2pos;
-				else if (intersect_id == -2) ++n_intersect_2neg;
-			}
 
 			// intersection edge
 			if (intersect_id == 1 || intersect_id == -1) {
 				if (is_min_edge(valid_leaf , j , vtx , vtx_num , intersect_id , geofrm)) {
-					if (dbg) ++n_is_min_edge_true;
 					eflag_on(x , y , z , level , j);
 					geofrm.AddBound(vtx[0], 1);	geofrm.AddBound(vtx[1], 1);
 					geofrm.AddBound(vtx[2], 1);	geofrm.AddBound(vtx[3], 1);
@@ -76,7 +59,6 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 					//geofrm.AddPyramid(vtx, my_vertex, vtx_num);
 					//geofrm.AddTetra(vtx[0], vtx[2], vtx[1], my_vertex);
 					//geofrm.AddTetra(vtx[0], vtx[3], vtx[2], my_vertex);
-					if (dbg) ++n_add_2_tetra;
 					geofrm.Add_2_Tetra(vtx, my_vertex);
 					//geofrm.Extend_Tetra(vtx);
 				}
@@ -85,7 +67,6 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 			//else if((intersect_id == 2 || intersect_id == -2) && (! is_skipcell(valid_leaf))) {
 			else if((intersect_id == 2 || intersect_id == -2) && minmax[valid_leaf].min <= iso_val) {
 				if (is_min_edge_2(valid_leaf, j, my_vtx, vtx_num, con_id, intersect_id, geofrm)) {
-					if (dbg) ++n_is_min_edge_2_true;
 					eflag_on(x, y, z, level, j);
 
 					if( (my_vtx[0] == my_vtx[1] || my_vtx[0] == -1 || my_vtx[1] == -1) && 
@@ -114,25 +95,17 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 
 					
 					//if(my_vtx[0] != -1 && my_vtx[1] != -1 && con_id[0] == 1 && my_vtx[0] != my_vtx[1])
-					if(my_vtx[0] != -1 && my_vtx[1] != -1 && my_vtx[0] != my_vtx[1]) {
-						if (dbg) ++n_add_tetra;
+					if(my_vtx[0] != -1 && my_vtx[1] != -1 && my_vtx[0] != my_vtx[1])
 						geofrm.AddTetra(my_vtx[0], my_vtx[1], my_vertex, my_vertex_1);
-					}
 					//if(my_vtx[1] != -1 && my_vtx[2] != -1 && con_id[1] == 1 && my_vtx[1] != my_vtx[2])
-					if(my_vtx[1] != -1 && my_vtx[2] != -1 && my_vtx[1] != my_vtx[2]) {
-						if (dbg) ++n_add_tetra;
+					if(my_vtx[1] != -1 && my_vtx[2] != -1 && my_vtx[1] != my_vtx[2])
 						geofrm.AddTetra(my_vtx[1], my_vtx[2], my_vertex, my_vertex_1);
-					}
 					//if(my_vtx[2] != -1 && my_vtx[3] != -1 && con_id[2] == 1 && my_vtx[2] != my_vtx[3])
-					if(my_vtx[2] != -1 && my_vtx[3] != -1 && my_vtx[2] != my_vtx[3]) {
-						if (dbg) ++n_add_tetra;
+					if(my_vtx[2] != -1 && my_vtx[3] != -1 && my_vtx[2] != my_vtx[3])
 						geofrm.AddTetra(my_vtx[2], my_vtx[3], my_vertex, my_vertex_1);
-					}
 					//if(my_vtx[3] != -1 && my_vtx[0] != -1 && con_id[3] == 1 && my_vtx[3] != my_vtx[0])
-					if(my_vtx[3] != -1 && my_vtx[0] != -1 && my_vtx[3] != my_vtx[0]) {
-						if (dbg) ++n_add_tetra;
+					if(my_vtx[3] != -1 && my_vtx[0] != -1 && my_vtx[3] != my_vtx[0])
 						geofrm.AddTetra(my_vtx[3], my_vtx[0], my_vertex, my_vertex_1);
-					}
 				}
 			}
 			else
@@ -149,23 +122,6 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 			//add_tetra_cube_adaptive(valid_leaf, level, geofrm);
 		}
 
-	}
-	if (dbg) {
-		fprintf(stderr,
-			"[CVC_LBIE_DEBUG tetrahedralize] leaf_num=%d "
-			"intersect{+1=%lld,-1=%lld,+2=%lld,-2=%lld} "
-			"is_min_edge_true=%lld is_min_edge_2_true=%lld "
-			"Add_2_Tetra_calls=%lld AddTetra_calls=%lld "
-			"verts: %d->%d  numtris: %d->%d (delta tris=%d, delta tets=%d)\n",
-			leaf_num,
-			n_intersect_pos, n_intersect_neg, n_intersect_2pos, n_intersect_2neg,
-			n_is_min_edge_true, n_is_min_edge_2_true,
-			n_add_2_tetra, n_add_tetra,
-			numverts_at_start, geofrm.numverts,
-			numtris_at_start, geofrm.numtris,
-			geofrm.numtris - numtris_at_start,
-			(geofrm.numtris - numtris_at_start)/4);
-		fflush(stderr);
 	}
 }
 

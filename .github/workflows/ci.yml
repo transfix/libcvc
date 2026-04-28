@@ -196,8 +196,6 @@ jobs:
       # boundaries under load).
       - name: Run tests
         shell: bash
-        env:
-          CVC_LBIE_DEBUG: "1"
         run: |
           set -euo pipefail
           # Heavyweight tests (~minutes each) only meaningful on trunk.
