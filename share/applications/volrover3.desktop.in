@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VolumeRover3
+GenericName=Volumetric Data Visualizer
+Comment=Interactive visualization of volumetric data
+Exec=volrover3 %F
+Icon=volrover_logo
+Terminal=false
+Categories=Graphics;Science;DataVisualization;Education;
+StartupNotify=true
+MimeType=application/x-rawiv;application/x-mrc;application/x-hdf5;
+Keywords=volume;visualization;rendering;medical;scientific;

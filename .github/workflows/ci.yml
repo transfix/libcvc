@@ -272,19 +272,39 @@ jobs:
             Where-Object { $_.FullName -notlike '*CMakeFiles*' -and $_.FullName -notlike '*_deps*' } |
             ForEach-Object { Copy-Item $_.FullName -Destination $pdbDir -Force }
 
-      # ── Package install tree ──
+      # ── Package install tree (CPack, matches release.yml layout) ──
+      #
+      # CI artifacts include the commit SHA in the file name so per-PR /
+      # per-push builds are uniquely identifiable. Tag-driven release
+      # artifacts (release.yml) deliberately omit the SHA.
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf "${{ env.ARTIFACT_STEM }}.tar.gz" -C install .
+        working-directory: build
+        run: |
+          cpack -G TGZ \
+                      -D CPACK_COMPONENTS_ALL=libcvc \
+                      -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
+          mv "${{ env.ARTIFACT_STEM }}-libcvc.tar.gz" "${{ env.ARTIFACT_STEM }}.tar.gz"
+          cp "${{ env.ARTIFACT_STEM }}.tar.gz" "$GITHUB_WORKSPACE/"
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: cd install && zip -r "${{ github.workspace }}/${{ env.ARTIFACT_STEM }}.zip" . && cd ..
+        working-directory: build
+        run: |
+          cpack -G ZIP \
+                      -D CPACK_COMPONENTS_ALL=libcvc \
+                      -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
+          mv "${{ env.ARTIFACT_STEM }}-libcvc.zip" "${{ env.ARTIFACT_STEM }}.zip"
+          cp "${{ env.ARTIFACT_STEM }}.zip" "$GITHUB_WORKSPACE/"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path install\* -DestinationPath "${{ env.ARTIFACT_STEM }}.zip"
+        working-directory: build
+        run: |
+          cpack -G ZIP -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=libcvc -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
+          Move-Item "${{ env.ARTIFACT_STEM }}-libcvc.zip" "${{ env.ARTIFACT_STEM }}.zip"
+          Copy-Item "${{ env.ARTIFACT_STEM }}.zip" "$env:GITHUB_WORKSPACE/"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

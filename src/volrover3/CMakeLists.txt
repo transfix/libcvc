@@ -79,11 +79,64 @@ set(VOLROVER3_HEADERS
   ${PROJECT_SOURCE_DIR}/inc/volrover3/ProceduralGeometryDialog.h
 )
 
+# Platform-specific bundle / icon resources
+# ─────────────────────────────────────────
+# Linux: a simple PNG icon installed alongside a .desktop file.
+# macOS: the .icns is copied into the .app bundle's Resources/ directory.
+# Windows: the .ico is compiled into the EXE via a generated .rc file.
+set(_VOLROVER3_ICON_DIR "${PROJECT_SOURCE_DIR}/share/icons")
+set(_VOLROVER3_ICON_PNG  "${_VOLROVER3_ICON_DIR}/volrover_logo.png")
+set(_VOLROVER3_ICON_ICNS "${_VOLROVER3_ICON_DIR}/volrover_logo.icns")
+set(_VOLROVER3_ICON_ICO  "${_VOLROVER3_ICON_DIR}/volrover_logo.ico")
+
+set(_VOLROVER3_PLATFORM_SOURCES "")
+
+if(WIN32 AND EXISTS "${_VOLROVER3_ICON_ICO}")
+  # Generate a Windows resource script that embeds the icon and basic
+  # version info into the EXE so Explorer + Task-Manager show the logo.
+  set(_VOLROVER3_RC "${CMAKE_CURRENT_BINARY_DIR}/volrover3.rc")
+  file(WRITE "${_VOLROVER3_RC}"
+"#include <windows.h>\n"
+"IDI_ICON1 ICON DISCARDABLE \"${_VOLROVER3_ICON_ICO}\"\n"
+)
+  list(APPEND _VOLROVER3_PLATFORM_SOURCES "${_VOLROVER3_RC}")
+endif()
+
+if(APPLE AND EXISTS "${_VOLROVER3_ICON_ICNS}")
+  # Mark the .icns as a bundle resource so CMake copies it into
+  # Contents/Resources/ during install.
+  set_source_files_properties("${_VOLROVER3_ICON_ICNS}" PROPERTIES
+    MACOSX_PACKAGE_LOCATION "Resources")
+  list(APPEND _VOLROVER3_PLATFORM_SOURCES "${_VOLROVER3_ICON_ICNS}")
+endif()
+
 # Create executable
 add_executable(volrover3
   ${VOLROVER3_SOURCES}
   ${VOLROVER3_HEADERS}
+  ${_VOLROVER3_PLATFORM_SOURCES}
 )
+
+# Apple bundle / Windows GUI subsystem properties
+if(APPLE)
+  set_target_properties(volrover3 PROPERTIES
+    MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_BUNDLE_NAME           "VolumeRover3"
+    MACOSX_BUNDLE_BUNDLE_VERSION        "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING  "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_LONG_VERSION_STRING   "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_GUI_IDENTIFIER        "edu.utexas.cvc.volrover3"
+    MACOSX_BUNDLE_INFO_STRING           "VolumeRover3 ${PROJECT_VERSION}"
+    MACOSX_BUNDLE_COPYRIGHT             "Copyright (c) The University of Texas at Austin / CVC"
+    MACOSX_BUNDLE_ICON_FILE             "volrover_logo.icns"
+    MACOSX_BUNDLE_INFO_PLIST            "${PROJECT_SOURCE_DIR}/CMake/Info.plist.in"
+    OUTPUT_NAME                         "VolumeRover3"
+  )
+elseif(WIN32)
+  # WIN32_EXECUTABLE TRUE => /SUBSYSTEM:WINDOWS so no console window pops
+  # up when launching from Explorer.
+  set_target_properties(volrover3 PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
 
 target_include_directories(volrover3 PRIVATE ${PROJECT_SOURCE_DIR}/inc)
 
@@ -116,14 +169,102 @@ vtk_module_autoinit(
 )
 
 # Install target
-install(TARGETS volrover3
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-  COMPONENT volrover3
-)
+if(APPLE)
+  # Drop the .app bundle directly under the install prefix so a user can
+  # drag VolumeRover3.app into /Applications.
+  install(TARGETS volrover3
+    BUNDLE      DESTINATION .            COMPONENT volrover3
+    RUNTIME     DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT volrover3
+  )
+else()
+  install(TARGETS volrover3
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT volrover3
+  )
+endif()
 
-# Windows: bundle runtime DLLs alongside the executable
+# Linux: install a Freedesktop .desktop file and PNG icon for the menu /
+# launcher. The hicolor PNG installation is owned by the root CMakeLists.
+if(UNIX AND NOT APPLE)
+  if(EXISTS "${PROJECT_SOURCE_DIR}/share/applications/volrover3.desktop.in")
+    configure_file(
+      "${PROJECT_SOURCE_DIR}/share/applications/volrover3.desktop.in"
+      "${CMAKE_CURRENT_BINARY_DIR}/volrover3.desktop"
+      @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/volrover3.desktop"
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
+      COMPONENT volrover3)
+  endif()
+endif()
+
+# Bundle the README + LICENSE with the volrover3 component for the
+# end-user-facing distributions.
+install(FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+  "${PROJECT_SOURCE_DIR}/LICENSE"
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/volrover3
+  COMPONENT volrover3)
+
+# Windows: bundle runtime DLLs alongside the executable AND run windeployqt
+# to copy Qt platform plugins (qwindows.dll), styles, and translations.
+# Without windeployqt the resulting EXE will not start on a vanilla
+# Windows machine because Qt cannot find a platform plugin.
 if(WIN32)
-  install(FILES $<TARGET_RUNTIME_DLLS:volrover3> TYPE BIN COMPONENT volrover3)
+  install(FILES $<TARGET_RUNTIME_DLLS:volrover3>
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT volrover3)
+
+  if(QT_VERSION_MAJOR EQUAL 6)
+    set(_qt_bin_hint "${Qt6_DIR}/../../../bin")
+  else()
+    set(_qt_bin_hint "${Qt5_DIR}/../../../bin")
+  endif()
+  find_program(WINDEPLOYQT_EXECUTABLE
+    NAMES windeployqt
+    HINTS "${_qt_bin_hint}")
+  if(WINDEPLOYQT_EXECUTABLE)
+    # CPack runs `cmake --install` per-component before invoking the
+    # archive / NSIS generator, so this install(CODE) script is the right
+    # hook to materialize Qt's platform plugins into the staged tree.
+    install(CODE "
+      execute_process(COMMAND \"${WINDEPLOYQT_EXECUTABLE}\"
+        --release
+        --no-translations
+        --no-system-d3d-compiler
+        --no-opengl-sw
+        --no-compiler-runtime
+        \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/volrover3.exe\")
+    " COMPONENT volrover3)
+  else()
+    message(WARNING "windeployqt not found — Windows volrover3 packages "
+      "will be missing Qt platform plugins and will fail to launch on "
+      "machines without Qt installed.")
+  endif()
+endif()
+
+# macOS: run macdeployqt during install so the .app bundle is fully
+# self-contained (Qt frameworks, plugins, VTK & libcvc dylibs all
+# rewritten with @executable_path/.. references).
+if(APPLE)
+  if(QT_VERSION_MAJOR EQUAL 6)
+    set(_qt_bin_hint "${Qt6_DIR}/../../../bin")
+  else()
+    set(_qt_bin_hint "${Qt5_DIR}/../../../bin")
+  endif()
+  find_program(MACDEPLOYQT_EXECUTABLE
+    NAMES macdeployqt
+    HINTS "${_qt_bin_hint}")
+  if(MACDEPLOYQT_EXECUTABLE)
+    install(CODE "
+      execute_process(COMMAND \"${MACDEPLOYQT_EXECUTABLE}\"
+        \"\${CMAKE_INSTALL_PREFIX}/VolumeRover3.app\"
+        -always-overwrite)
+    " COMPONENT volrover3)
+  else()
+    message(WARNING "macdeployqt not found — macOS volrover3 .app will "
+      "not be self-contained and will fail to launch without a Qt "
+      "installation on the target machine.")
+  endif()
 endif()
 
 # Tests

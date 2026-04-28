@@ -267,14 +267,49 @@ endif()
 
 add_subdirectory(src)
 
-# ************* Install documentation *************
-install(FILES README.md DESTINATION . COMPONENT libcvc)
-install(FILES LICENSE DESTINATION . COMPONENT libcvc)
+# ************* Install documentation & resources *************
+install(FILES README.md USAGE.md LICENSE
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}
+  COMPONENT libcvc)
 
-# ************* CPack configuration for libcvc *************
+# Application icons (used by both libcvc and volrover3 components on
+# Linux for desktop integration; on macOS/Windows the icon is embedded
+# into the app bundle / EXE rather than installed standalone).
+if(NOT WIN32 AND NOT APPLE)
+  install(FILES share/icons/volrover_logo.png
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/256x256/apps
+    RENAME volrover_logo.png
+    COMPONENT volrover3
+    OPTIONAL)
+endif()
+
+# ************* CPack configuration *************
 include(GNUInstallDirs)
 include(InstallRequiredSystemLibraries)
 
+# Compute architecture tag for archive file names.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "(arm|aarch)64|ARM64")
+    set(_CVC_ARCH "arm64")
+  else()
+    set(_CVC_ARCH "x86_64")
+  endif()
+else()
+  set(_CVC_ARCH "x86")
+endif()
+
+string(TOLOWER "${CMAKE_SYSTEM_NAME}" _CVC_OS)
+if(_CVC_OS STREQUAL "darwin")
+  set(_CVC_OS "macos")
+endif()
+
+string(TOLOWER "${CMAKE_BUILD_TYPE}" _CVC_BUILD_LC)
+if(NOT _CVC_BUILD_LC)
+  set(_CVC_BUILD_LC "release")
+endif()
+
+# Per-platform generator selection happens at cpack time via -G; the
+# CMakeLists declares all viable generators so the user can pick.
 if(WIN32)
   set(CPACK_GENERATOR "NSIS;ZIP")
 elseif(APPLE)
@@ -287,6 +322,7 @@ set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_VENDOR "Computational Visualization Center")
 set(CPACK_PACKAGE_CONTACT "transfix@ices.utexas.edu")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/transfix/libcvc")
 set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
 set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
 set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
@@ -297,6 +333,11 @@ set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
 set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
 set(CPACK_STRIP_FILES ON)
 
+# Default file-name stem (callers / CI may override CPACK_PACKAGE_FILE_NAME
+# to inject a commit SHA for non-tag CI artifacts).
+set(CPACK_PACKAGE_FILE_NAME
+  "${PROJECT_NAME}-${PROJECT_VERSION}-${_CVC_OS}-${_CVC_ARCH}-${_CVC_BUILD_LC}")
+
 # Component-based packaging: separate libcvc and volrover3 artifacts
 set(CPACK_COMPONENTS_ALL libcvc volrover3)
 set(CPACK_COMPONENT_LIBCVC_DISPLAY_NAME "libcvc Library")
@@ -306,26 +347,58 @@ set(CPACK_COMPONENT_VOLROVER3_DISPLAY_NAME "VolumeRover3 Application")
 set(CPACK_COMPONENT_VOLROVER3_DESCRIPTION "VolumeRover3 desktop visualization application")
 set(CPACK_COMPONENT_VOLROVER3_DEPENDS libcvc)
 
-# DEB component packaging
-set(CPACK_DEB_COMPONENT_INSTALL ON)
-set(CPACK_DEBIAN_LIBCVC_PACKAGE_NAME "libcvc")
-set(CPACK_DEBIAN_VOLROVER3_PACKAGE_NAME "volrover3")
-set(CPACK_DEBIAN_LIBCVC_PACKAGE_DEPENDS "libboost-all-dev")
-set(CPACK_DEBIAN_VOLROVER3_PACKAGE_DEPENDS "libcvc, libqt6-dev")
-
-# NSIS settings (Windows)
-set(CPACK_NSIS_DISPLAY_NAME "libcvc ${PROJECT_VERSION}")
-set(CPACK_NSIS_HELP_LINK "https://github.com/transfix/cvc")
-set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/transfix/cvc")
-set(CPACK_NSIS_CONTACT "transfix@ices.utexas.edu")
-set(CPACK_NSIS_MODIFY_PATH ON)
-
-# DEB settings (Linux)
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Joe Rivera")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libboost-all-dev")
-set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
-
-# Archive component packaging (TGZ, ZIP)
+# Archive component packaging (TGZ, ZIP) — put each component in its own
+# archive so libcvc-*.tar.gz and volrover3-*.tar.gz are produced separately
+# even when both are built in the same install tree.
 set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
 
+# DEB component packaging (Linux): produce libcvc and volrover3 .deb files.
+set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Joe Rivera")
+set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_LIBCVC_PACKAGE_NAME "libcvc")
+set(CPACK_DEBIAN_LIBCVC_PACKAGE_SECTION "libs")
+set(CPACK_DEBIAN_VOLROVER3_PACKAGE_NAME "volrover3")
+set(CPACK_DEBIAN_VOLROVER3_PACKAGE_SECTION "graphics")
+set(CPACK_DEBIAN_VOLROVER3_PACKAGE_DEPENDS "libcvc")
+
+# NSIS settings (Windows volrover3 installer)
+# Provide a desktop / start-menu entry, branded icons, and modify-PATH.
+set(CPACK_NSIS_DISPLAY_NAME "VolumeRover3 ${PROJECT_VERSION}")
+set(CPACK_NSIS_PACKAGE_NAME "VolumeRover3")
+set(CPACK_NSIS_HELP_LINK "https://github.com/transfix/libcvc")
+set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/transfix/libcvc")
+set(CPACK_NSIS_CONTACT "transfix@ices.utexas.edu")
+set(CPACK_NSIS_MODIFY_PATH ON)
+set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+set(CPACK_NSIS_MUI_FINISHPAGE_RUN "volrover3.exe")
+# Branded icons. The .ico file ships in share/icons/.
+if(EXISTS "${PROJECT_SOURCE_DIR}/share/icons/volrover_logo.ico")
+  set(CPACK_NSIS_MUI_ICON
+    "${PROJECT_SOURCE_DIR}/share/icons/volrover_logo.ico")
+  set(CPACK_NSIS_MUI_UNIICON
+    "${PROJECT_SOURCE_DIR}/share/icons/volrover_logo.ico")
+  set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\volrover3.exe")
+endif()
+# CPACK_PACKAGE_EXECUTABLES creates Start-Menu entries automatically:
+# pairs of (binary-name-without-ext, display-name). Setting it here means
+# the NSIS installer offers a Start-Menu shortcut to volrover3.
+set(CPACK_PACKAGE_EXECUTABLES
+  "volrover3" "VolumeRover3"
+)
+# CPACK_CREATE_DESKTOP_LINKS adds a Desktop shortcut for the same exe.
+set(CPACK_CREATE_DESKTOP_LINKS volrover3)
+
 include(CPack)
+
+# Per-component CPack groupings. Configured AFTER include(CPack) so the
+# cpack_add_component / cpack_add_component_group commands are defined.
+cpack_add_component(libcvc
+  DISPLAY_NAME "libcvc Library"
+  DESCRIPTION  "CVC library, headers, and CMake config files"
+  REQUIRED)
+cpack_add_component(volrover3
+  DISPLAY_NAME "VolumeRover3 Application"
+  DESCRIPTION  "VolumeRover3 desktop visualization application"
+  DEPENDS libcvc)
