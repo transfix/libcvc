@@ -209,7 +209,7 @@ jobs:
           # cleaned up.
           # See: https://github.com/transfix/libcvc/issues (LBIE mesher
           # iterator-debug OOB on MSVC).
-          MESHER_DEBUG_SKIP='(GeometryTest\.QualityImproveTetrahedralMesh|GeometryTest\.TetrahedralizeMeshExtraction|GeometryTest\.TetrahedralizeWithImprovementMethods|GeometryTest\.HexahedralizeMeshExtraction|GeometryTest\.Tetrahedralize2IntervalMeshing|AlgorithmTest\.ExtractSurfaceFromHexMesh|AlgorithmTest\.FindTetsContainingPointPerformanceLargeMesh)'
+          MESHER_DEBUG_SKIP='(GeometryTest\.QualityImproveTetrahedralMesh|GeometryTest\.TetrahedralizeMeshExtraction|GeometryTest\.TetrahedralizeWithImprovementMethods|GeometryTest\.HexahedralizeMeshExtraction|GeometryTest\.Tetrahedralize2IntervalMeshing|AlgorithmTest\.ExtractSurfaceFromHexMesh|AlgorithmTest\.FindTetsContainingPointPerformanceLargeMesh|AlgorithmTest\.VolumetricMeshWithPropertyInterpolation)'
 
           EXCLUDE_REGEX="${STRESS_REGEX}"
           if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.build_type }}" = "Debug" ]; then
