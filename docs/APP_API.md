@@ -1,12 +1,13 @@
 # Application Framework API (cvc::app)
 
-*Complete reference for the libcvc application singleton*
+*Reference for the `cvc::app` context object — the data, properties,
+threads, and named-mutex hub used throughout libcvc.*
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Quick Start](#quick-start)
-- [Singleton Access](#singleton-access)
+- [Constructing an App](#constructing-an-app)
 - [Data Management](#data-management)
   - [Basic Data Operations](#basic-data-operations)
   - [Type-Safe Data Access](#type-safe-data-access)
@@ -41,86 +42,139 @@
 
 ## Overview
 
-The `cvc::app` class is a **singleton** that serves as the central hub for managing:
+`cvc::app` is a **constructible context object** that bundles the
+state libcvc components share among themselves:
 
-- **Data objects** - Type-safe storage for application data using `boost::any`
-- **Properties** - String-based key-value configuration storage
-- **Threads** - Thread lifecycle management with progress tracking
-- **Mutexes** - Named mutex management for resource synchronization
-- **Signals** - Observer pattern for monitoring state changes
+- **Data objects** — type-safe storage via `boost::any`
+- **Properties** — string-keyed configuration values with `lexical_cast` shortcuts
+- **Threads** — lifecycle management with progress reporting and an optional priority pool
+- **Named mutexes** — process-wide resource locks identified by string name
+- **Signals** — `boost::signals2` change notifications on the four maps above
 
-**Key Characteristics:**
+Construct as many `cvc::app` instances as you need — typically one
+per logical application or per test fixture — and pass references
+into the components that should share state.
+
+```cpp
+cvc::app app;          // default-constructed: registers libcvc's built-in types
+// ... or, for a stripped-down instance (e.g. tests):
+cvc::app bare(cvc::no_init_t{});
+```
+
+> **Migration note.** Earlier versions of libcvc exposed `cvc::app`
+> as a process-wide singleton accessed via `app::instance()` and the
+> `cvcapp` macro. Both are still present so existing code keeps
+> compiling, but they are now deprecated transitional shims that
+> simply forward to a hidden default instance and will be removed in
+> a future release. New code — and any code being touched — should
+> construct an `app` explicitly and pass it as `cvc::app& ctx`. The
+> RAII helpers `thread_info`, `thread_feedback`, and `scoped_lock`
+> all accept a leading `app& ctx` parameter for this reason.
+
+**Key characteristics:**
 - Thread-safe with fine-grained locking
 - Type-agnostic data storage via `boost::any`
-- Automatic type name resolution
-- Built-in change notification via Boost.Signals2
-- Progress tracking for long-running operations
-- Named mutex system for resource locks
-
-**Accessed via global macro:**
-```cpp
-cvcapp  // Expands to CVC_NAMESPACE::app::instance()
-```
+- Optional human-readable type name registration
+- Change notification via `boost::signals2`
+- Progress tracking and an optional priority thread pool
+- Named-mutex system for cross-thread resource locks
 
 ## Quick Start
 
 ```cpp
 #include <cvc/app.h>
 
+cvc::app app;   // your application's context object
+
 // Store data
-cvcapp.data("volume", myVolume);
-cvcapp.data("geometry", myGeometry);
+app.data("volume", myVolume);
+app.data("geometry", myGeometry);
 
 // Retrieve data
-auto vol = cvcapp.data<cvc::volume>("volume");
-auto geom = cvcapp.data<cvc::geometry>("geometry");
+auto vol  = app.data<cvc::volume>("volume");
+auto geom = app.data<cvc::geometry>("geometry");
 
-// Set properties
-cvcapp.properties("window.width", 1920);
-cvcapp.properties("window.height", 1080);
-cvcapp.properties("render.quality", "high");
+// Set properties (lexical_cast shortcut for non-string types)
+app.properties("window.width", 1920);
+app.properties("window.height", 1080);
+app.properties("render.quality", "high");
 
 // Get properties
-int width = cvcapp.properties<int>("window.width");
-std::string quality = cvcapp.properties("render.quality");
+int width            = app.properties<int>("window.width");
+std::string quality  = app.properties("render.quality");
 
-// Start a background thread
-cvcapp.startThread("loader", [&]() {
-    thread_feedback feedback("Loading data...");
-    // Long-running operation
-    cvcapp.threadProgress(0.5);
-    // More work...
-    cvcapp.threadProgress(1.0);
+// Start a background thread; pass `app` to the RAII helper so it
+// reports into this app's thread map.
+app.startThread("loader", [&app]() {
+    cvc::thread_feedback feedback(app, "Loading data...");
+    app.threadProgress(0.5);
+    // ... more work ...
+    app.threadProgress(1.0);
 });
 
 // Named mutex for file access
 {
-    scoped_lock lock("output.dat", "Writing results");
-    // Exclusive access to output.dat
+    cvc::scoped_lock lock(app, "output.dat", "Writing results");
     writeFile("output.dat", results);
 }
 ```
 
-## Singleton Access
+Throughout the rest of this document, `app` denotes a `cvc::app`
+instance you have constructed (as in the snippet above).
 
-### instance()
-
-Returns a reference to the singleton application object.
+## Constructing an App
 
 ```cpp
-static app& instance();
+namespace cvc {
+  struct no_init_t {};            // tag type for the bare overload
+
+  class app {
+  public:
+    app();                        // registers libcvc's built-in data types
+    explicit app(no_init_t);      // skips type registration
+    ~app();
+    // ... (rest of the API documented below)
+  };
+}
 ```
 
-**Usage:**
+### Default construction
+
 ```cpp
-// Direct access
-cvc::app& myApp = cvc::app::instance();
-
-// Via global macro (preferred)
-cvcapp.data("key", value);
+cvc::app app;
 ```
 
-**Thread Safety:** ✅ Thread-safe singleton initialization
+Registers libcvc's built-in C++ → human-readable type-name
+mappings (`cvc::volume`, `cvc::geometry`, the scalar types, etc.)
+and installs the default file-format handlers.
+
+### Bare construction (tests, lightweight callers)
+
+```cpp
+cvc::app bare(cvc::no_init_t{});
+```
+
+Skips type registration and default-handler installation. Useful in
+unit tests that exercise just the data map or property store and
+don't want the global IO handlers fired up.
+
+### Lifetime
+
+`cvc::app` is move-only-ish (the copy constructor is private).
+Construct one at the scope that owns it (`main`, a test fixture, a
+cluster-node `cvcsrv` instance) and pass references downward.
+
+### Deprecated: `app::instance()` / `cvcapp`
+
+```cpp
+// Still compiles; do not use in new code.
+cvc::app& legacy = cvc::app::instance();
+cvcapp.data("key", value);              // macro form
+```
+
+Both forms forward to a single hidden process-wide instance and
+exist only to keep older callers compiling while they migrate. They
+will be removed in a future release; treat them as legacy shims.
 
 ## Data Management
 
@@ -137,7 +191,7 @@ data_map data();
 Returns a copy of the entire data map.
 
 ```cpp
-data_map allData = cvcapp.data();
+data_map allData = app.data();
 for (const auto& pair : allData) {
     std::cout << pair.first << std::endl;
 }
@@ -152,7 +206,7 @@ boost::any data(const std::string& key);
 Returns the raw `boost::any` value for the given key.
 
 ```cpp
-boost::any rawValue = cvcapp.data("volume");
+boost::any rawValue = app.data("volume");
 ```
 
 #### data(key, value) - Set Single Value
@@ -164,9 +218,9 @@ void data(const std::string& key, const boost::any& value);
 Stores a value in the data map. Fires `dataChanged` signal.
 
 ```cpp
-cvcapp.data("volume", myVolume);
-cvcapp.data("count", 42);
-cvcapp.data("name", std::string("MyApp"));
+app.data("volume", myVolume);
+app.data("count", 42);
+app.data("name", std::string("MyApp"));
 ```
 
 #### data(map) - Batch Set
@@ -181,7 +235,7 @@ Merges all entries from the input map into the data map.
 data_map batch;
 batch["volume1"] = vol1;
 batch["volume2"] = vol2;
-cvcapp.data(batch);
+app.data(batch);
 ```
 
 ### Type-Safe Data Access
@@ -196,9 +250,9 @@ T data(const std::string& key);
 Returns the value cast to type `T`. Throws `boost::bad_any_cast` if type doesn't match.
 
 ```cpp
-auto vol = cvcapp.data<cvc::volume>("myVolume");
-int count = cvcapp.data<int>("iteration");
-std::string name = cvcapp.data<std::string>("projectName");
+auto vol = app.data<cvc::volume>("myVolume");
+int count = app.data<int>("iteration");
+std::string name = app.data<std::string>("projectName");
 ```
 
 #### isData\<T\>(key) - Type Check
@@ -211,8 +265,8 @@ bool isData(const std::string& key);
 Returns `true` if the key exists and can be cast to type `T`.
 
 ```cpp
-if (cvcapp.isData<cvc::volume>("volume")) {
-    auto vol = cvcapp.data<cvc::volume>("volume");
+if (app.isData<cvc::volume>("volume")) {
+    auto vol = app.data<cvc::volume>("volume");
     processVolume(vol);
 }
 ```
@@ -230,10 +284,10 @@ Returns all keys that contain data of type `T`.
 
 ```cpp
 // Find all volumes in the data map
-std::vector<std::string> volumeKeys = cvcapp.data<cvc::volume>();
+std::vector<std::string> volumeKeys = app.data<cvc::volume>();
 
 for (const auto& key : volumeKeys) {
-    auto vol = cvcapp.data<cvc::volume>(key);
+    auto vol = app.data<cvc::volume>(key);
     std::cout << "Volume: " << key << " - " 
               << vol.XDim() << "x" << vol.YDim() << "x" << vol.ZDim() 
               << std::endl;
@@ -251,7 +305,7 @@ Returns a vector of objects corresponding to the given keys.
 
 ```cpp
 std::vector<std::string> keys = {"vol1", "vol2", "vol3"};
-std::vector<cvc::volume> volumes = cvcapp.data<cvc::volume>(keys);
+std::vector<cvc::volume> volumes = app.data<cvc::volume>(keys);
 ```
 
 ### Batch Data Operations
@@ -269,7 +323,7 @@ Sets multiple data entries from parallel arrays.
 ```cpp
 std::vector<std::string> keys = {"result1", "result2", "result3"};
 std::vector<cvc::volume> results = computeResults();
-cvcapp.data(keys, results);
+app.data(keys, results);
 ```
 
 #### data(keys, value) - Duplicate Value
@@ -283,7 +337,7 @@ Sets the same value for all specified keys.
 
 ```cpp
 std::vector<std::string> layers = {"layer1", "layer2", "layer3"};
-cvcapp.data(layers, defaultVolume);
+app.data(layers, defaultVolume);
 ```
 
 ### List-Based Data Access
@@ -299,11 +353,11 @@ Parses a comma-separated list of keys and returns corresponding objects.
 
 ```cpp
 // Property contains: "volume1, volume2, volume3"
-cvcapp.properties("input.volumes", "volume1, volume2, volume3");
+app.properties("input.volumes", "volume1, volume2, volume3");
 
 // Retrieve all volumes in one call
-auto volumes = cvcapp.listData<cvc::volume>(
-    cvcapp.properties("input.volumes")
+auto volumes = app.listData<cvc::volume>(
+    app.properties("input.volumes")
 );
 ```
 
@@ -324,7 +378,7 @@ property_map properties();
 Returns a copy of all properties.
 
 ```cpp
-property_map props = cvcapp.properties();
+property_map props = app.properties();
 for (const auto& pair : props) {
     std::cout << pair.first << " = " << pair.second << std::endl;
 }
@@ -339,8 +393,8 @@ std::string properties(const std::string& key);
 Returns the property value as a string.
 
 ```cpp
-std::string quality = cvcapp.properties("render.quality");
-std::string outputPath = cvcapp.properties("output.path");
+std::string quality = app.properties("render.quality");
+std::string outputPath = app.properties("output.path");
 ```
 
 #### properties(key, val) - Set Value (String)
@@ -352,8 +406,8 @@ void properties(const std::string& key, const std::string& val);
 Sets a property value. Fires `propertiesChanged` signal.
 
 ```cpp
-cvcapp.properties("render.quality", "high");
-cvcapp.properties("output.format", "rawiv");
+app.properties("render.quality", "high");
+app.properties("output.format", "rawiv");
 ```
 
 #### properties(map) - Set Multiple
@@ -368,7 +422,7 @@ Replaces all properties with the given map.
 property_map config;
 config["window.width"] = "1920";
 config["window.height"] = "1080";
-cvcapp.properties(config);
+app.properties(config);
 ```
 
 #### addProperties(map) - Merge Properties
@@ -382,7 +436,7 @@ Merges properties without clearing existing ones.
 ```cpp
 property_map additional;
 additional["plugin.path"] = "/usr/local/plugins";
-cvcapp.addProperties(additional);
+app.addProperties(additional);
 ```
 
 #### hasProperty(key) - Check Existence
@@ -394,8 +448,8 @@ bool hasProperty(const std::string& key);
 Returns `true` if the property exists.
 
 ```cpp
-if (cvcapp.hasProperty("output.path")) {
-    std::string path = cvcapp.properties("output.path");
+if (app.hasProperty("output.path")) {
+    std::string path = app.properties("output.path");
 }
 ```
 
@@ -411,10 +465,10 @@ void properties(const std::string& key, const T& val);
 Converts value to string using `boost::lexical_cast` before storing.
 
 ```cpp
-cvcapp.properties("window.width", 1920);
-cvcapp.properties("threshold", 0.5);
-cvcapp.properties("iterations", 100);
-cvcapp.properties("enabled", true);
+app.properties("window.width", 1920);
+app.properties("threshold", 0.5);
+app.properties("iterations", 100);
+app.properties("enabled", true);
 ```
 
 #### properties\<T\>(key) - Get with Conversion
@@ -427,9 +481,9 @@ T properties(const std::string& key);
 Converts string property to type `T` using `boost::lexical_cast`. Returns default-constructed `T()` if property doesn't exist.
 
 ```cpp
-int width = cvcapp.properties<int>("window.width");
-double threshold = cvcapp.properties<double>("threshold");
-bool enabled = cvcapp.properties<bool>("enabled");
+int width = app.properties<int>("window.width");
+double threshold = app.properties<double>("threshold");
+bool enabled = app.properties<bool>("enabled");
 ```
 
 ### List Properties
@@ -445,12 +499,12 @@ Parses a comma-separated property value into a vector of strings.
 
 ```cpp
 // Property: "input.files" = "data1.rawiv, data2.rawiv, data3.rawiv"
-auto files = cvcapp.listProperty("input.files");
+auto files = app.listProperty("input.files");
 // files = {"data1.rawiv", "data2.rawiv", "data3.rawiv"}
 
 // With unique elements
-cvcapp.properties("layers", "layer1, layer2, layer1, layer3");
-auto uniqueLayers = cvcapp.listProperty("layers", true);
+app.properties("layers", "layer1, layer2, layer1, layer3");
+auto uniqueLayers = app.listProperty("layers", true);
 // uniqueLayers = {"layer1", "layer2", "layer3"}
 ```
 
@@ -466,11 +520,11 @@ Parses and converts each element to type `T`.
 
 ```cpp
 // Property: "thresholds" = "0.1, 0.5, 0.9"
-auto thresholds = cvcapp.listProperty<double>("thresholds");
+auto thresholds = app.listProperty<double>("thresholds");
 // thresholds = {0.1, 0.5, 0.9}
 
 // Property: "resolutions" = "64, 128, 256, 512"
-auto sizes = cvcapp.listProperty<int>("resolutions");
+auto sizes = app.listProperty<int>("resolutions");
 // sizes = {64, 128, 256, 512}
 ```
 
@@ -483,9 +537,9 @@ void listPropertyAppend(const std::string& key, const std::string& val);
 Appends a value to a comma-separated list property.
 
 ```cpp
-cvcapp.properties("recent.files", "file1.dat");
-cvcapp.listPropertyAppend("recent.files", "file2.dat");
-cvcapp.listPropertyAppend("recent.files", "file3.dat");
+app.properties("recent.files", "file1.dat");
+app.listPropertyAppend("recent.files", "file2.dat");
+app.listPropertyAppend("recent.files", "file3.dat");
 // "recent.files" = "file1.dat, file2.dat, file3.dat"
 ```
 
@@ -498,7 +552,7 @@ void listPropertyRemove(const std::string& key, const std::string& val);
 Removes a value from a comma-separated list property.
 
 ```cpp
-cvcapp.listPropertyRemove("recent.files", "file2.dat");
+app.listPropertyRemove("recent.files", "file2.dat");
 // "recent.files" = "file1.dat, file3.dat"
 ```
 
@@ -516,15 +570,15 @@ Reads a comma-separated list from a property, treats each item as a data key, an
 
 ```cpp
 // Store volumes in data map
-cvcapp.data("input1", volume1);
-cvcapp.data("input2", volume2);
-cvcapp.data("input3", volume3);
+app.data("input1", volume1);
+app.data("input2", volume2);
+app.data("input3", volume3);
 
 // Configure which volumes to process via property
-cvcapp.properties("pipeline.inputs", "input1, input2, input3");
+app.properties("pipeline.inputs", "input1, input2, input3");
 
 // Retrieve all input volumes in one call
-auto inputs = cvcapp.propertyData<cvc::volume>("pipeline.inputs");
+auto inputs = app.propertyData<cvc::volume>("pipeline.inputs");
 // inputs = {volume1, volume2, volume3}
 
 // Process them
@@ -544,8 +598,8 @@ void readPropertyMap(const std::string& path);
 Loads properties from a file (INI or JSON format via Boost.PropertyTree).
 
 ```cpp
-cvcapp.readPropertyMap("config.ini");
-cvcapp.readPropertyMap("settings.json");
+app.readPropertyMap("config.ini");
+app.readPropertyMap("settings.json");
 ```
 
 #### writePropertyMap(path) - Save Properties
@@ -557,8 +611,8 @@ void writePropertyMap(const std::string& path);
 Saves all properties to a file.
 
 ```cpp
-cvcapp.writePropertyMap("config.ini");
-cvcapp.writePropertyMap("settings.json");
+app.writePropertyMap("config.ini");
+app.writePropertyMap("settings.json");
 ```
 
 ## Thread Management
@@ -583,7 +637,7 @@ Starts a new thread running the given functor.
 
 ```cpp
 // Simple thread
-cvcapp.startThread("worker", []() {
+app.startThread("worker", []() {
     std::cout << "Working..." << std::endl;
 });
 
@@ -591,14 +645,14 @@ cvcapp.startThread("worker", []() {
 auto processData = [&volume]() {
     thread_feedback feedback("Processing volume...");
     // Long operation
-    cvcapp.threadProgress(0.5);
+    app.threadProgress(0.5);
     // More work
-    cvcapp.threadProgress(1.0);
+    app.threadProgress(1.0);
 };
-cvcapp.startThread("processor", processData);
+app.startThread("processor", processData);
 
 // Don't wait for existing thread (generates unique key)
-cvcapp.startThread("task", task, false); // Creates "task.1", "task.2", etc.
+app.startThread("task", task, false); // Creates "task.1", "task.2", etc.
 ```
 
 ### Thread Progress Tracking
@@ -612,7 +666,7 @@ double threadProgress(const std::string& key = std::string());
 Returns progress (0.0 to 1.0) for the specified thread, or current thread if key is empty.
 
 ```cpp
-double progress = cvcapp.threadProgress("loader");
+double progress = app.threadProgress("loader");
 std::cout << "Loading: " << (progress * 100) << "%" << std::endl;
 ```
 
@@ -629,7 +683,7 @@ Sets progress for current thread or specified thread.
 // In a thread
 for (int i = 0; i < 100; i++) {
     processItem(i);
-    cvcapp.threadProgress(i / 100.0);
+    app.threadProgress(i / 100.0);
 }
 ```
 
@@ -642,7 +696,7 @@ void finishThreadProgress(const std::string& key = std::string());
 Sets progress to 1.0 for the thread.
 
 ```cpp
-cvcapp.finishThreadProgress(); // Current thread
+app.finishThreadProgress(); // Current thread
 ```
 
 ### Thread Information
@@ -657,12 +711,12 @@ std::string threadInfo(const std::string& key = std::string());
 Associates a status string with a thread for monitoring.
 
 ```cpp
-cvcapp.threadInfo("loader", "Loading file 1 of 10");
+app.threadInfo("loader", "Loading file 1 of 10");
 // Later
-cvcapp.threadInfo("loader", "Parsing data...");
+app.threadInfo("loader", "Parsing data...");
 
 // Query status
-std::string status = cvcapp.threadInfo("loader");
+std::string status = app.threadInfo("loader");
 ```
 
 #### thisThreadInfo() - Convenience Wrappers
@@ -675,7 +729,7 @@ std::string thisThreadInfo();
 Shorthand for current thread.
 
 ```cpp
-cvcapp.thisThreadInfo("Initializing...");
+app.thisThreadInfo("Initializing...");
 ```
 
 ### Thread Lifecycle Helpers
@@ -685,30 +739,31 @@ cvcapp.thisThreadInfo("Initializing...");
 ```cpp
 class thread_feedback {
 public:
-    thread_feedback(const std::string& info = "running");
+    // Preferred: bind to a specific app context.
+    thread_feedback(app& ctx, const std::string& key = "");
+    // Legacy: routes through app::instance() — deprecated.
+    thread_feedback(const std::string& key = "");
     ~thread_feedback();
 };
 ```
 
 Automatically manages thread lifecycle:
-- Constructor: Sets progress to 0.0
-- Destructor: Sets progress to 1.0, removes thread from map
+- Constructor: sets progress to 0.0 in the bound app's thread map.
+- Destructor: marks the thread "completed" and finishes its progress entry.
 
 ```cpp
-void workerThread() {
-    thread_feedback feedback("Processing data");
-    
-    // Work happens here
+void workerThread(cvc::app& app) {
+    cvc::thread_feedback feedback(app, "Processing data");
+
     for (int i = 0; i < 100; i++) {
         processItem(i);
-        cvcapp.threadProgress(i / 100.0);
-        cvcapp.thisThreadInfo("Processing item " + std::to_string(i));
+        app.threadProgress(i / 100.0);
+        app.thisThreadInfo("Processing item " + std::to_string(i));
     }
-    
-    // Automatic cleanup on scope exit
+    // Automatic cleanup on scope exit.
 }
 
-cvcapp.startThread("worker", workerThread);
+app.startThread("worker", [&app]{ workerThread(app); });
 ```
 
 #### thread_info - RAII Info Stack
@@ -716,6 +771,9 @@ cvcapp.startThread("worker", workerThread);
 ```cpp
 class thread_info {
 public:
+    // Preferred: bind to a specific app context.
+    thread_info(app& ctx, const std::string& info = "running");
+    // Legacy: routes through app::instance() — deprecated.
     thread_info(const std::string& info = "running");
     ~thread_info();
 };
@@ -724,17 +782,17 @@ public:
 Saves and restores thread info/progress when entering/exiting scopes.
 
 ```cpp
-void outerFunction() {
-    thread_info info("Outer function");
-    cvcapp.threadProgress(0.2);
-    
+void outerFunction(cvc::app& app) {
+    cvc::thread_info info(app, "Outer function");
+    app.threadProgress(0.2);
+
     {
-        thread_info innerInfo("Inner function");
-        cvcapp.threadProgress(0.5);
-        // Do work
+        cvc::thread_info innerInfo(app, "Inner function");
+        app.threadProgress(0.5);
+        // Do work.
     } // Progress and info restored to 0.2, "Outer function"
     
-    cvcapp.threadProgress(0.8);
+    app.threadProgress(0.8);
 }
 ```
 
@@ -751,12 +809,12 @@ Blocks until all threads complete. Useful for cleanup or shutdown.
 
 ```cpp
 // Start multiple threads
-cvcapp.startThread("worker1", task1);
-cvcapp.startThread("worker2", task2);
-cvcapp.startThread("worker3", task3);
+app.startThread("worker1", task1);
+app.startThread("worker2", task2);
+app.startThread("worker3", task3);
 
 // Wait for all to complete
-cvcapp.wait();
+app.wait();
 
 std::cout << "All workers finished" << std::endl;
 ```
@@ -772,7 +830,7 @@ thread_map threads();
 Returns map of all active threads.
 
 ```cpp
-thread_map active = cvcapp.threads();
+thread_map active = app.threads();
 std::cout << "Active threads: " << active.size() << std::endl;
 ```
 
@@ -785,7 +843,7 @@ bool hasThread(const std::string& key);
 Returns `true` if thread exists.
 
 ```cpp
-if (cvcapp.hasThread("loader")) {
+if (app.hasThread("loader")) {
     std::cout << "Loader is running" << std::endl;
 }
 ```
@@ -807,7 +865,7 @@ std::string uniqueThreadKey(const std::string& hint = std::string());
 Generates a unique thread key based on a hint.
 
 ```cpp
-std::string key = cvcapp.uniqueThreadKey("worker");
+std::string key = app.uniqueThreadKey("worker");
 // Returns "worker.1", "worker.2", etc.
 ```
 
@@ -826,7 +884,7 @@ mutex_ptr mutex(const std::string& name);
 Returns a shared pointer to the named mutex, creating it if necessary.
 
 ```cpp
-auto fileMutex = cvcapp.mutex("output.dat");
+auto fileMutex = app.mutex("output.dat");
 boost::mutex::scoped_lock lock(*fileMutex);
 // Exclusive access
 writeToFile("output.dat", data);
@@ -839,32 +897,39 @@ writeToFile("output.dat", data);
 ```cpp
 class scoped_lock {
 public:
+    // Preferred: bind to a specific app context.
+    scoped_lock(app& ctx,
+                const std::string& name,
+                const std::string& info = std::string());
+    // Legacy: routes through app::instance() — deprecated.
     scoped_lock(const std::string& name,
                 const std::string& info = std::string());
     ~scoped_lock();
 };
 ```
 
-Acquires named mutex on construction, releases on destruction. Automatically adds thread key to info string.
+Acquires the named mutex from `ctx.mutex(name)` on construction and
+releases it on destruction. The current thread key is automatically
+prepended to the `info` string registered via `mutexInfo`, so the
+mutex's debug record identifies the holder.
 
 ```cpp
 // Simple usage
 {
-    scoped_lock lock("database");
-    // Exclusive database access
-    updateDatabase();
-} // Lock released
+    cvc::scoped_lock lock(app, "database");
+    updateDatabase();   // exclusive access
+} // lock released
 
 // With description for debugging
 {
-    scoped_lock lock("output.vti", "Writing volume");
+    cvc::scoped_lock lock(app, "output.vti", "Writing volume");
     volume.write("output.vti");
 }
 ```
 
-**Typedef:**
+**Typedef** (in `namespace cvc`):
 ```cpp
-typedef cvc::app::scoped_lock scoped_lock;
+typedef app::scoped_lock scoped_lock;
 ```
 
 ### Mutex Debugging
@@ -880,10 +945,10 @@ Associates debug information with a mutex to track who holds it.
 
 ```cpp
 // Set manually
-cvcapp.mutexInfo("file.dat", "Thread 5: Writing results");
+app.mutexInfo("file.dat", "Thread 5: Writing results");
 
 // Query (useful for debugging deadlocks)
-std::string holder = cvcapp.mutexInfo("file.dat");
+std::string holder = app.mutexInfo("file.dat");
 std::cout << "Lock held by: " << holder << std::endl;
 ```
 
@@ -905,9 +970,9 @@ void registerDataType(const std::string& datatypename);
 Associates a friendly name with a C++ type.
 
 ```cpp
-cvcapp.registerDataType<cvc::volume>("Volume");
-cvcapp.registerDataType<cvc::geometry>("Geometry");
-cvcapp.registerDataType<std::vector<double>>("DoubleVector");
+app.registerDataType<cvc::volume>("Volume");
+app.registerDataType<cvc::geometry>("Geometry");
+app.registerDataType<std::vector<double>>("DoubleVector");
 ```
 
 **Macro Shorthand:**
@@ -915,8 +980,8 @@ cvcapp.registerDataType<std::vector<double>>("DoubleVector");
 #define registerDataType(type) registerDataType<type>(#type)
 
 // Usage
-cvcapp.registerDataType(volume);      // Registers as "volume"
-cvcapp.registerDataType(geometry);    // Registers as "geometry"
+app.registerDataType(volume);      // Registers as "volume"
+app.registerDataType(geometry);    // Registers as "geometry"
 ```
 
 #### dataTypeName(key) - Get Name from Key
@@ -928,8 +993,8 @@ std::string dataTypeName(const std::string& key);
 Returns the registered name for the type of data at the key.
 
 ```cpp
-cvcapp.data("myVol", volume);
-std::string type = cvcapp.dataTypeName("myVol");
+app.data("myVol", volume);
+std::string type = app.dataTypeName("myVol");
 // type = "Volume" (if registered)
 ```
 
@@ -943,7 +1008,7 @@ std::string dataTypeName();
 Returns the registered name for type `T`.
 
 ```cpp
-std::string volTypeName = cvcapp.dataTypeName<cvc::volume>();
+std::string volTypeName = app.dataTypeName<cvc::volume>();
 // volTypeName = "Volume"
 ```
 
@@ -957,7 +1022,7 @@ Returns the registered name for a `boost::any` value.
 
 ```cpp
 boost::any data = myVolume;
-std::string name = cvcapp.dataTypeName(data);
+std::string name = app.dataTypeName(data);
 ```
 
 ### Registering Type Enums
@@ -972,8 +1037,8 @@ void registerDataType(data_type dt);
 Associates a `data_type` enum value with a C++ type.
 
 ```cpp
-cvcapp.registerDataType<cvc::volume>(cvc::VolumeData);
-cvcapp.registerDataType<cvc::geometry>(cvc::GeometryData);
+app.registerDataType<cvc::volume>(cvc::VolumeData);
+app.registerDataType<cvc::geometry>(cvc::GeometryData);
 ```
 
 #### dataType(key) - Get Enum from Key
@@ -985,7 +1050,7 @@ data_type dataType(const std::string& key);
 Returns the enum for the type of data at the key.
 
 ```cpp
-data_type type = cvcapp.dataType("myVolume");
+data_type type = app.dataType("myVolume");
 if (type == cvc::VolumeData) {
     // Handle volume
 }
@@ -1001,7 +1066,7 @@ data_type dataType();
 Returns the registered enum for type `T`.
 
 ```cpp
-data_type volType = cvcapp.dataType<cvc::volume>();
+data_type volType = app.dataType<cvc::volume>();
 // volType = cvc::VolumeData
 ```
 
@@ -1022,19 +1087,19 @@ map_change_signal mutexesChanged;    // Fired when mutex map changes
 
 ```cpp
 // Monitor data changes
-cvcapp.dataChanged.connect([](const std::string& key) {
+app.dataChanged.connect([](const std::string& key) {
     std::cout << "Data changed: " << key << std::endl;
 });
 
 // Monitor property changes
-cvcapp.propertiesChanged.connect([](const std::string& key) {
+app.propertiesChanged.connect([](const std::string& key) {
     std::cout << "Property changed: " << key << std::endl;
 });
 
 // Monitor thread lifecycle
-cvcapp.threadsChanged.connect([](const std::string& key) {
-    if (cvcapp.hasThread(key)) {
-        double progress = cvcapp.threadProgress(key);
+app.threadsChanged.connect([](const std::string& key) {
+    if (app.hasThread(key)) {
+        double progress = app.threadProgress(key);
         std::cout << key << ": " << (progress * 100) << "%" << std::endl;
     }
 });
@@ -1053,7 +1118,7 @@ std::vector<std::string> listify(const std::string& keylist);
 Parses a comma-separated string into a vector.
 
 ```cpp
-auto items = cvcapp.listify("item1, item2, item3");
+auto items = app.listify("item1, item2, item3");
 // items = {"item1", "item2", "item3"}
 ```
 
@@ -1067,7 +1132,7 @@ Joins a vector into a comma-separated string.
 
 ```cpp
 std::vector<std::string> items = {"a", "b", "c"};
-std::string list = cvcapp.listify(items);
+std::string list = app.listify(items);
 // list = "a, b, c"
 ```
 
@@ -1080,7 +1145,7 @@ void sleep(double ms);
 Sleeps for the specified milliseconds.
 
 ```cpp
-cvcapp.sleep(100); // Sleep 100ms
+app.sleep(100); // Sleep 100ms
 ```
 
 ### log - Logging Output
@@ -1092,9 +1157,9 @@ void log(unsigned int level, const std::string& buf);
 Outputs a log message at the specified level.
 
 ```cpp
-cvcapp.log(0, "Info: Application started");
-cvcapp.log(1, "Warning: Low memory");
-cvcapp.log(2, "Error: Failed to load file");
+app.log(0, "Info: Application started");
+app.log(1, "Warning: Low memory");
+app.log(2, "Error: Failed to load file");
 ```
 
 ## Design Patterns
@@ -1103,29 +1168,29 @@ cvcapp.log(2, "Error: Failed to load file");
 
 ```cpp
 // Load configuration
-cvcapp.readPropertyMap("config.ini");
+app.readPropertyMap("config.ini");
 
 // Access throughout application
-int width = cvcapp.properties<int>("window.width");
-std::string theme = cvcapp.properties("ui.theme");
+int width = app.properties<int>("window.width");
+std::string theme = app.properties("ui.theme");
 
 // Save modified configuration
-cvcapp.writePropertyMap("config.ini");
+app.writePropertyMap("config.ini");
 ```
 
 ### Data Pipeline Pattern
 
 ```cpp
 // Stage 1: Load data
-cvcapp.data("input", loadVolume("data.rawiv"));
+app.data("input", loadVolume("data.rawiv"));
 
 // Stage 2: Process
-auto input = cvcapp.data<cvc::volume>("input");
+auto input = app.data<cvc::volume>("input");
 auto processed = applyFilter(input);
-cvcapp.data("filtered", processed);
+app.data("filtered", processed);
 
 // Stage 3: Save results
-auto result = cvcapp.data<cvc::volume>("filtered");
+auto result = app.data<cvc::volume>("filtered");
 result.write("output.rawiv");
 ```
 
@@ -1134,9 +1199,9 @@ result.write("output.rawiv");
 ```cpp
 // GUI thread
 void updateProgressBar() {
-    if (cvcapp.hasThread("processor")) {
-        double progress = cvcapp.threadProgress("processor");
-        std::string info = cvcapp.threadInfo("processor");
+    if (app.hasThread("processor")) {
+        double progress = app.threadProgress("processor");
+        std::string info = app.threadInfo("processor");
         
         progressBar->setValue(progress * 100);
         statusLabel->setText(info);
@@ -1144,12 +1209,12 @@ void updateProgressBar() {
 }
 
 // Worker thread
-cvcapp.startThread("processor", []() {
+app.startThread("processor", []() {
     thread_feedback feedback("Processing...");
     
     for (int i = 0; i < 100; i++) {
-        cvcapp.thisThreadInfo("Processing item " + std::to_string(i));
-        cvcapp.threadProgress(i / 100.0);
+        app.thisThreadInfo("Processing item " + std::to_string(i));
+        app.threadProgress(i / 100.0);
         processItem(i);
     }
 });
@@ -1166,10 +1231,10 @@ void writeResults(const std::string& filename, const Results& r) {
 }
 
 // Called from multiple threads safely
-cvcapp.startThread("worker1", [&]() {
+app.startThread("worker1", [&]() {
     writeResults("output.txt", results1);
 });
-cvcapp.startThread("worker2", [&]() {
+app.startThread("worker2", [&]() {
     writeResults("output.txt", results2);
 });
 ```
@@ -1178,15 +1243,15 @@ cvcapp.startThread("worker2", [&]() {
 
 ```cpp
 // Setup observer
-cvcapp.dataChanged.connect([](const std::string& key) {
+app.dataChanged.connect([](const std::string& key) {
     if (key == "volume") {
-        auto vol = cvcapp.data<cvc::volume>(key);
+        auto vol = app.data<cvc::volume>(key);
         updateVisualization(vol);
     }
 });
 
 // Any code that modifies data triggers update
-cvcapp.data("volume", newVolume);  // Observer fires automatically
+app.data("volume", newVolume);  // Observer fires automatically
 ```
 
 ## Thread Safety
@@ -1197,9 +1262,9 @@ cvcapp.data("volume", newVolume);  // Observer fires automatically
 
 ```cpp
 // Safe from multiple threads
-cvcapp.data("key1", value1);  // Thread 1
-cvcapp.data("key2", value2);  // Thread 2
-cvcapp.properties("prop", val); // Thread 3
+app.data("key1", value1);  // Thread 1
+app.data("key2", value2);  // Thread 2
+app.properties("prop", val); // Thread 3
 ```
 
 ### Interruption Points
@@ -1207,7 +1272,7 @@ cvcapp.properties("prop", val); // Thread 3
 All operations check for thread interruption:
 
 ```cpp
-cvcapp.startThread("worker", []() {
+app.startThread("worker", []() {
     try {
         for (int i = 0; i < 1000; i++) {
             boost::this_thread::interruption_point();
@@ -1219,7 +1284,7 @@ cvcapp.startThread("worker", []() {
 });
 
 // Later, from another thread
-auto thread = cvcapp.threads("worker");
+auto thread = app.threads("worker");
 thread->interrupt(); // Cooperative cancellation
 ```
 
@@ -1229,14 +1294,20 @@ Signals are fired **outside of lock scopes** to prevent deadlocks when observers
 
 ```cpp
 // Safe: Observer can access app without deadlock
-cvcapp.dataChanged.connect([](const std::string& key) {
-    // Can safely call cvcapp methods here
-    auto val = cvcapp.data(key);
-    cvcapp.properties("last.modified", key);
+app.dataChanged.connect([](const std::string& key) {
+    // Can safely call app methods here
+    auto val = app.data(key);
+    app.properties("last.modified", key);
 });
 ```
 
 ## Complete Examples
+
+The examples below assume an `app` of type `cvc::app&` is reachable
+from the surrounding scope (a function parameter, a class member,
+or a local variable created with `cvc::app app;`). Any thread
+function or lambda that uses it should capture it by reference
+(e.g. `[&app]`).
 
 ### Example 1: Volume Processing Pipeline
 
@@ -1246,40 +1317,40 @@ cvcapp.dataChanged.connect([](const std::string& key) {
 
 void processingPipeline() {
     // Register types
-    cvcapp.registerDataType<cvc::volume>("Volume");
+    app.registerDataType<cvc::volume>("Volume");
     
     // Load configuration
-    cvcapp.readPropertyMap("pipeline.ini");
+    app.readPropertyMap("pipeline.ini");
     
     // Get input files from config
-    auto inputFiles = cvcapp.listProperty("pipeline.inputs");
+    auto inputFiles = app.listProperty("pipeline.inputs");
     
     // Load all volumes
     for (size_t i = 0; i < inputFiles.size(); i++) {
         auto key = "input" + std::to_string(i);
-        cvcapp.data(key, cvc::volume(inputFiles[i]));
+        app.data(key, cvc::volume(inputFiles[i]));
     }
     
     // Process each volume in parallel
-    auto volumeKeys = cvcapp.data<cvc::volume>();
+    auto volumeKeys = app.data<cvc::volume>();
     for (const auto& key : volumeKeys) {
-        cvcapp.startThread("process_" + key, [key]() {
+        app.startThread("process_" + key, [key]() {
             thread_feedback feedback("Processing " + key);
             
-            auto vol = cvcapp.data<cvc::volume>(key);
+            auto vol = app.data<cvc::volume>(key);
             
-            cvcapp.thisThreadInfo("Applying bilateral filter...");
+            app.thisThreadInfo("Applying bilateral filter...");
             vol.bilateralFilter(2.0, 0.1);
-            cvcapp.threadProgress(0.5);
+            app.threadProgress(0.5);
             
-            cvcapp.thisThreadInfo("Saving result...");
+            app.thisThreadInfo("Saving result...");
             vol.write("processed_" + key + ".rawiv");
-            cvcapp.threadProgress(1.0);
+            app.threadProgress(1.0);
         });
     }
     
     // Wait for all processing to complete
-    cvcapp.wait();
+    app.wait();
     
     std::cout << "Pipeline complete" << std::endl;
 }
@@ -1294,38 +1365,38 @@ void parallelProcessing() {
     
     // Store in app
     for (size_t i = 0; i < inputs.size(); i++) {
-        cvcapp.data("input" + std::to_string(i), inputs[i]);
+        app.data("input" + std::to_string(i), inputs[i]);
     }
     
     // Process in parallel
     for (size_t i = 0; i < inputs.size(); i++) {
         std::string key = "input" + std::to_string(i);
-        cvcapp.startThread("worker" + std::to_string(i), [key, i]() {
+        app.startThread("worker" + std::to_string(i), [key, i]() {
             thread_feedback feedback;
             
-            auto vol = cvcapp.data<cvc::volume>(key);
+            auto vol = app.data<cvc::volume>(key);
             
             for (int step = 0; step < 10; step++) {
-                cvcapp.thisThreadInfo("Step " + std::to_string(step));
-                cvcapp.threadProgress(step / 10.0);
+                app.thisThreadInfo("Step " + std::to_string(step));
+                app.threadProgress(step / 10.0);
                 
                 processStep(vol, step);
                 
-                cvcapp.sleep(100); // Simulate work
+                app.sleep(100); // Simulate work
             }
             
-            cvcapp.data("output" + std::to_string(i), vol);
+            app.data("output" + std::to_string(i), vol);
         });
     }
     
     // Monitor progress
-    while (cvcapp.threads().size() > 0) {
-        std::cout << "Active threads: " << cvcapp.threads().size() << std::endl;
-        cvcapp.sleep(500);
+    while (app.threads().size() > 0) {
+        std::cout << "Active threads: " << app.threads().size() << std::endl;
+        app.sleep(500);
     }
     
     // Collect results
-    auto outputs = cvcapp.data<cvc::volume>();
+    auto outputs = app.data<cvc::volume>();
     std::cout << "Processed " << outputs.size() << " volumes" << std::endl;
 }
 ```
@@ -1337,54 +1408,54 @@ class MyApplication {
 public:
     void initialize() {
         // Register types
-        cvcapp.registerDataType<cvc::volume>("Volume");
-        cvcapp.registerDataType<cvc::geometry>("Geometry");
+        app.registerDataType<cvc::volume>("Volume");
+        app.registerDataType<cvc::geometry>("Geometry");
         
         // Load configuration
-        cvcapp.readPropertyMap("myapp.ini");
+        app.readPropertyMap("myapp.ini");
         
         // Setup from configuration
-        int width = cvcapp.properties<int>("window.width");
-        int height = cvcapp.properties<int>("window.height");
-        std::string theme = cvcapp.properties("ui.theme");
+        int width = app.properties<int>("window.width");
+        int height = app.properties<int>("window.height");
+        std::string theme = app.properties("ui.theme");
         
         createWindow(width, height, theme);
         
         // Load recent files
-        auto recentFiles = cvcapp.listProperty("recent.files");
+        auto recentFiles = app.listProperty("recent.files");
         populateRecentMenu(recentFiles);
         
         // Monitor configuration changes
-        cvcapp.propertiesChanged.connect([this](const std::string& key) {
+        app.propertiesChanged.connect([this](const std::string& key) {
             if (key == "ui.theme") {
-                applyTheme(cvcapp.properties("ui.theme"));
+                applyTheme(app.properties("ui.theme"));
             }
         });
     }
     
     void loadFile(const std::string& path) {
-        cvcapp.startThread("loader", [this, path]() {
+        app.startThread("loader", [this, path]() {
             thread_feedback feedback("Loading file");
             
-            cvcapp.thisThreadInfo("Reading file: " + path);
+            app.thisThreadInfo("Reading file: " + path);
             auto vol = cvc::volume(path);
-            cvcapp.threadProgress(0.5);
+            app.threadProgress(0.5);
             
-            cvcapp.thisThreadInfo("Updating display");
-            cvcapp.data("current.volume", vol);
-            cvcapp.threadProgress(1.0);
+            app.thisThreadInfo("Updating display");
+            app.data("current.volume", vol);
+            app.threadProgress(1.0);
             
             // Update recent files
-            cvcapp.listPropertyAppend("recent.files", path);
+            app.listPropertyAppend("recent.files", path);
         });
     }
     
     void shutdown() {
         // Wait for pending operations
-        cvcapp.wait();
+        app.wait();
         
         // Save configuration
-        cvcapp.writePropertyMap("myapp.ini");
+        app.writePropertyMap("myapp.ini");
     }
 };
 ```
@@ -1396,7 +1467,7 @@ void multiThreadedFileWriter() {
     std::vector<std::string> workers = {"A", "B", "C", "D"};
     
     for (const auto& name : workers) {
-        cvcapp.startThread("writer_" + name, [name]() {
+        app.startThread("writer_" + name, [name]() {
             thread_feedback feedback("Writer " + name);
             
             for (int i = 0; i < 10; i++) {
@@ -1409,13 +1480,13 @@ void multiThreadedFileWriter() {
                     out << "Writer " << name << " - Iteration " << i << std::endl;
                 }
                 
-                cvcapp.threadProgress(i / 10.0);
-                cvcapp.sleep(100);
+                app.threadProgress(i / 10.0);
+                app.sleep(100);
             }
         });
     }
     
-    cvcapp.wait();
+    app.wait();
     std::cout << "All writes complete" << std::endl;
 }
 ```
@@ -1426,13 +1497,13 @@ void multiThreadedFileWriter() {
 
 ```cpp
 // Good
-cvcapp.startThread("worker", []() {
+app.startThread("worker", []() {
     thread_feedback feedback("Working");
     // Automatic progress initialization and cleanup
 });
 
 // Avoid
-cvcapp.startThread("worker", []() {
+app.startThread("worker", []() {
     // Manual progress management (error-prone)
 });
 ```
@@ -1441,23 +1512,23 @@ cvcapp.startThread("worker", []() {
 
 ```cpp
 // Good
-cvcapp.data("user.preferences.volume1", vol);
-cvcapp.properties("render.quality.high", "true");
+app.data("user.preferences.volume1", vol);
+app.properties("render.quality.high", "true");
 
 // Avoid
-cvcapp.data("v1", vol);
-cvcapp.properties("q", "true");
+app.data("v1", vol);
+app.properties("q", "true");
 ```
 
 ### 3. Leverage Type Registration
 
 ```cpp
 // Register early in main()
-cvcapp.registerDataType<cvc::volume>("Volume");
-cvcapp.registerDataType<cvc::geometry>("Geometry");
+app.registerDataType<cvc::volume>("Volume");
+app.registerDataType<cvc::geometry>("Geometry");
 
 // Now get nice names
-std::string type = cvcapp.dataTypeName("myVolume");
+std::string type = app.dataTypeName("myVolume");
 // type = "Volume" instead of mangled C++ name
 ```
 
@@ -1465,8 +1536,8 @@ std::string type = cvcapp.dataTypeName("myVolume");
 
 ```cpp
 // Good - easy to modify without recompiling
-cvcapp.properties("iterations", 100);
-cvcapp.writePropertyMap("config.ini");
+app.properties("iterations", 100);
+app.writePropertyMap("config.ini");
 
 // Avoid - hardcoded
 const int ITERATIONS = 100;
@@ -1476,17 +1547,17 @@ const int ITERATIONS = 100;
 
 ```cpp
 // Good
-cvcapp.startThread("processor", []() {
+app.startThread("processor", []() {
     thread_feedback feedback("Processing");
     for (int i = 0; i < 100; i++) {
-        cvcapp.threadProgress(i / 100.0);
-        cvcapp.thisThreadInfo("Processing item " + std::to_string(i));
+        app.threadProgress(i / 100.0);
+        app.thisThreadInfo("Processing item " + std::to_string(i));
         // work
     }
 });
 
 // Avoid - no progress feedback
-cvcapp.startThread("processor", []() {
+app.startThread("processor", []() {
     // User has no idea what's happening
 });
 ```
@@ -1501,7 +1572,7 @@ cvcapp.startThread("processor", []() {
 }
 
 // Avoid - manual lock management
-auto m = cvcapp.mutex("resource");
+auto m = app.mutex("resource");
 m->lock();
 accessResource();
 m->unlock(); // Easy to forget!
@@ -1511,7 +1582,7 @@ m->unlock(); // Easy to forget!
 
 ```cpp
 // Good
-cvcapp.startThread("worker", []() {
+app.startThread("worker", []() {
     try {
         for (int i = 0; i < 1000; i++) {
             boost::this_thread::interruption_point();
@@ -1523,14 +1594,14 @@ cvcapp.startThread("worker", []() {
 });
 
 // Can safely interrupt
-cvcapp.threads("worker")->interrupt();
+app.threads("worker")->interrupt();
 ```
 
 ### 8. Use Signals for Loose Coupling
 
 ```cpp
 // Good - Observer pattern
-cvcapp.dataChanged.connect([](const std::string& key) {
+app.dataChanged.connect([](const std::string& key) {
     if (key.find("volume.") == 0) {
         updateVisualization();
     }
@@ -1538,7 +1609,7 @@ cvcapp.dataChanged.connect([](const std::string& key) {
 
 // Avoid - Tight coupling
 void setVolume(const cvc::volume& vol) {
-    cvcapp.data("volume", vol);
+    app.data("volume", vol);
     updateVisualization(); // Hard-coded dependency
 }
 ```
