@@ -292,6 +292,8 @@ jobs:
           echo "arch=x86_64"      >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"       >> "$GITHUB_OUTPUT"
 
+      # Cache key intentionally excludes hashFiles(workflow) so editing
+      # this file does not invalidate the warm vcpkg cache.
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
@@ -299,10 +301,25 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/release.yml') }}
+          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v4
           restore-keys: |
-            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v3-
             vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-
+
+      # Install Qt6 from official prebuilt binaries via aqtinstall.
+      # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
+      # we route Qt around vcpkg entirely; VTK and CGAL still come from
+      # vcpkg. install-qt-action prepends Qt's bin/ to PATH and exports
+      # Qt6_DIR + QT_ROOT_DIR for CMake to find.
+      - name: Install Qt6 (volrover3)
+        if: matrix.kind == 'volrover3'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: ''
+          cache: true
 
       - name: Install dependencies
         shell: pwsh
@@ -317,7 +334,8 @@ jobs:
             'boost-utility','hdf5','fftw3','gsl'
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
-            $packages += @('qt6-base','vtk','cgal')
+            # qt6-base intentionally omitted — handled by install-qt-action above.
+            $packages += @('vtk','cgal')
           }
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
