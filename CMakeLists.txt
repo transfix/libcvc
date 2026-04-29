@@ -30,12 +30,15 @@ if(CVC_ENABLE_CUDA)
   endif()
 endif()
 
-# Require C++17 as a minimum, but allow newer standards via -DCMAKE_CXX_STANDARD=20
-# We bumped from C++14 to C++17 so we can rely on inline variables for
-# header-defined static data members; this avoids requiring per-symbol
-# __declspec(dllexport) annotations for clean Windows DLL builds.
+# Default to C++20 so we can use std::format (and other C++20 features)
+# in place of deprecated APIs like sprintf. Callers may still override
+# via -DCMAKE_CXX_STANDARD=23. We bumped from C++14 to C++17 so we can
+# rely on inline variables for header-defined static data members; this
+# avoids requiring per-symbol __declspec(dllexport) annotations for
+# clean Windows DLL builds. C++20 is supported by GCC 13+, Clang 17+,
+# and MSVC 19.29+, all of which the project's CI already exercises.
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
 endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

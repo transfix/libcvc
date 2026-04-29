@@ -24,6 +24,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <format>
 
 #include <cstdio>
 #include <cstdlib>
@@ -511,15 +512,15 @@ namespace CVC_NAMESPACE
 	throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
 	{
-	  char buf[256];
-	  sprintf(buf,"RawIV format only supports 1 variable (%d requested)",numVariables);
-	  throw invalid_rawiv_header(buf);
+	  throw invalid_rawiv_header(
+	    std::format("RawIV format only supports 1 variable ({} requested)",
+	                numVariables));
 	}
       if(numTimesteps > 1)
 	{
-	  char buf[256];
-	  sprintf(buf,"RawIV format only supports 1 timestep (%d requested)",numTimesteps);
-	  throw invalid_rawiv_header(buf);
+	  throw invalid_rawiv_header(
+	    std::format("RawIV format only supports 1 timestep ({} requested)",
+	                numTimesteps));
 	}
       if(voxelTypes.size() > 1)
 	throw invalid_rawiv_header("RawIV format only supports 1 variable and 1 timestep. (too many voxel types specified)");

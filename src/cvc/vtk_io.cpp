@@ -33,6 +33,7 @@
 #include <cstring>
 #include <cmath>
 #include <errno.h>
+#include <format>
 
 #include <boost/format.hpp>
 
@@ -272,28 +273,19 @@ namespace
 	string errStr = "Error opening file '" + string(filename) + "': " + string(buf);
 	throw CVC_NAMESPACE::write_error(errStr);
       }
-    char str[256];
     unsigned long nMem = di.n[0]*di.n[1]*di.n[2];
-    sprintf(str, "# vtk DataFile Version 3.0\n");
-    fputs(str, fd);
-    sprintf(str, "created by levelSet (Ojaswa Sharma). Zero level: %f\n", value_increment);
-    fputs(str, fd);
-    sprintf(str, "BINARY\n");
-    fputs(str, fd);  
-    sprintf(str, "DATASET STRUCTURED_POINTS\n");
-    fputs(str, fd);  
-    sprintf(str, "DIMENSIONS %d %d %d\n", di.n[0], di.n[1], di.n[2]);
-    fputs(str, fd);  
-    sprintf(str, "ORIGIN 0.000000 0.000000 0.000000\n");
-    fputs(str, fd);  
-    sprintf(str, "SPACING 1.000000 1.000000 1.000000\n");
-    fputs(str, fd);  
-    sprintf(str, "POINT_DATA %lu\n", nMem);
-    fputs(str, fd);  
-    sprintf(str, "SCALARS image_data unsigned_short\n");
-    fputs(str, fd);  
-    sprintf(str, "LOOKUP_TABLE default\n");
-    fputs(str, fd);  
+    fputs("# vtk DataFile Version 3.0\n", fd);
+    fputs(std::format("created by levelSet (Ojaswa Sharma). Zero level: {:f}\n",
+                      value_increment).c_str(), fd);
+    fputs("BINARY\n", fd);
+    fputs("DATASET STRUCTURED_POINTS\n", fd);
+    fputs(std::format("DIMENSIONS {} {} {}\n",
+                      di.n[0], di.n[1], di.n[2]).c_str(), fd);
+    fputs("ORIGIN 0.000000 0.000000 0.000000\n", fd);
+    fputs("SPACING 1.000000 1.000000 1.000000\n", fd);
+    fputs(std::format("POINT_DATA {}\n", nMem).c_str(), fd);
+    fputs("SCALARS image_data unsigned_short\n", fd);
+    fputs("LOOKUP_TABLE default\n", fd);
     unsigned short dataval;
     FLOAT datavalf;
     unsigned int _r, _c, _d;
