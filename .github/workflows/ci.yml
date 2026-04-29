@@ -817,7 +817,9 @@ jobs:
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
-            $packages += @('vtk','cgal')
+            # vtk[qt] enables VTK's GUISupportQt module, which provides
+            # QVTKOpenGLNativeWidget.h that volrover3 includes.
+            $packages += @('vtk[qt]','cgal')
           }
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
