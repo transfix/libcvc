@@ -576,11 +576,19 @@ target_include_directories(cvc
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/inc>
     $<INSTALL_INTERFACE:include>
-    "$<BUILD_INTERFACE:${_CVC_PUBLIC_INCLUDE_DIRS}>"
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_CVC_PRIVATE_INCLUDE_DIRS}
 )
+
+# Public absolute include dirs (external deps): wrap each in its own
+# BUILD_INTERFACE genex so CMake's list separator (`;`) does not collide
+# with the genex's argument boundary. Embedding a list directly in
+# "$<BUILD_INTERFACE:${list}>" would either be syntactically invalid or
+# silently drop all but the first entry.
+foreach(_inc IN LISTS _CVC_PUBLIC_INCLUDE_DIRS)
+  target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_inc}>")
+endforeach()
 
 # Compile definitions
 target_compile_definitions(cvc
