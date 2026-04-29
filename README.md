@@ -386,19 +386,13 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Testing Documentation
 
-- **[docs/TESTING.md](docs/TESTING.md)** - Comprehensive testing guide
-  - **577 tests with 100% pass rate** (72 app, 158 state, 133 voxels, 29 volume, 119 geometry, 42 volume-ops, 24 hdf5, plus procedural-geometry typed fixtures)
-  - **90.5% coverage on core components** (1,366/1,509 lines)
-  - Running tests (CTest, Google Test, custom check target)
-  - Test organization and naming conventions
-  - Detailed coverage analysis with lcov/gcov
-  - Advanced features: multithreaded tests, futures API, state_object pattern, CUDA GPU
-  - Performance benchmarks (SDF v2.0: 11x speedup)
+- **[docs/TESTING.md](docs/TESTING.md)** — testing guide
+  - Running the test suite (CTest, Google Test, custom `check` target)
+  - Test organization, naming conventions, and fixtures
+  - Coverage analysis with `lcov`/`gcov`
+  - Multithreaded tests, futures API, `state_object` pattern, CUDA-enabled tests
   - Adding new tests with examples
-  - Common testing patterns (fixtures, parameterized tests, multithreading)
-  - CI/CD integration examples
-  - Troubleshooting guide
-  - Best practices and future improvements
+  - CI/CD integration and troubleshooting
 
 ### SDF Library
 
@@ -471,11 +465,6 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
   - Modern CMake CUDA integration
   - CUDA architecture configuration
   - Example CUDA code patterns
-
-- **[docs/CUDA_MODERNIZATION.md](docs/CUDA_MODERNIZATION.md)** - CUDA migration
-  - Legacy to modern CMake CUDA
-  - Before/after comparisons
-  - Build examples
 
 ### Development Guidelines
 
