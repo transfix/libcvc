@@ -462,6 +462,11 @@ jobs:
           cp AppDir/usr/share/icons/hicolor/256x256/apps/volrover_logo.png AppDir/volrover_logo.png
           export QML_SOURCES_PATHS=""
           export OUTPUT="${STEM}.AppImage"
+          # linuxdeploy walks the volrover3 ELF NEEDED entries and
+          # resolves them by name; libcvc.so.3 lives under
+          # AppDir/usr/lib/x86_64-linux-gnu/ (Debian's GNUInstallDirs
+          # default) which is not on the default search path.
+          export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
           ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
                         --desktop-file AppDir/volrover3.desktop \
                         --icon-file    AppDir/volrover_logo.png || \
