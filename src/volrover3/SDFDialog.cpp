@@ -407,7 +407,7 @@ void SDFDialog::onComputeClicked()
                 volrover3::app().threadInfo(activeKey, "Computing SDF...");
                 
                 // Compute SDF (this is safe to do in background thread)
-                cvc::volume sdfVol = cvc::sdf(geom, dim, bbox, algorithm, flipNormals);
+                cvc::volume sdfVol = cvc::sdf(volrover3::app(), geom, dim, bbox, algorithm, flipNormals);
                 
                 // Update progress
                 volrover3::app().threadProgress(activeKey, 0.9);

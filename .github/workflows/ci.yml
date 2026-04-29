@@ -53,6 +53,10 @@ jobs:
   format-check:
     name: clang-format (changed lines)
     runs-on: ubuntu-24.04
+    # Non-blocking while the codebase is gradually formatted. After
+    # the whole-tree clang-format pass lands on master, flip this to
+    # a hard failure.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -372,7 +376,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-v1
+          key: vtk-9.5.0-qt6-${{ runner.os }}-v2
 
       - name: Build VTK 9.5 from source (Qt6)
         if: matrix.kind == 'volrover3' && steps.vtk-cache.outputs.cache-hit != 'true'
@@ -386,6 +390,8 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DVTK_GROUP_ENABLE_Qt=YES \
             -DVTK_QT_VERSION=6 \
+            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO \
+            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO \
             -DVTK_BUILD_TESTING=OFF \
             -DVTK_BUILD_EXAMPLES=OFF \
             -DVTK_BUILD_DOCUMENTATION=OFF \
