@@ -418,7 +418,6 @@ jobs:
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DCMAKE_CXX_STANDARD=17 `
             -DCVC_BUILD_TESTS=OFF `
             -DCVC_ENABLE_CUDA=OFF `
             -DDISABLE_CGAL=$cgal `
