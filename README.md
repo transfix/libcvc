@@ -402,16 +402,14 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### SDF Library
 
-- **[docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md)** - **Comprehensive SDF documentation (RECOMMENDED)**
-  - **Version 2.0**: Complete refactoring to thread-safe architecture
-  - **11x performance improvement** via cell reference caching optimization
-  - Quick start guide and complete API reference
-  - Performance benchmarks and build type impact analysis
-  - Development history: v1.x (global state) → v2.0 (thread-safe)
-  - Migration guide from deprecated v1.x API
-  - **Future plans**: CUDA GPU acceleration roadmap (10-100x speedup target)
+- **[docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md)** — full SDF library reference
+  - What a signed distance field is and the sign / layout conventions used
+  - Complete public API (`cvc::sdf`, `SDFLibrary::computeSDF_MT`, `SDFContext`)
+  - Octree + propagation algorithm walkthrough
   - Thread-safe parallel computation examples
-  - Consolidates all previous SDF documentation
+  - Performance guide and grid-sizing tips
+- **[src/cvc/SDF/SignDistanceFunction/README.md](src/cvc/SDF/SignDistanceFunction/README.md)** —
+  short, header-level overview of the SDF backend living next to the code
 
 ### Image Processing Algorithms
 

@@ -1,214 +1,170 @@
-# Sign Distance Function (SDF) Library
+# Signed Distance Function (SDF) Library
 
-> **⚠️ DEPRECATED**: This README has been superseded by comprehensive documentation.
-> 
-> **Please see**: [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md)
-> 
-> The new consolidated documentation includes everything from this file plus:
-> - Version 2.0 thread-safe architecture details
-> - Complete API reference and usage examples
-> - Performance benchmarks (11x speedup in v2.0)
-> - Build type performance impact analysis
-> - Development history (v1.x → v2.0 migration)
-> - Test coverage (100% passing)
-> - CUDA GPU acceleration roadmap
->
-> **Important**: The legacy API mentioned below no longer exists. All code must use
-> the new thread-safe `SDFContext` architecture introduced in v2.0.
+This directory hosts libcvc's SDF backend: it converts a triangulated
+surface mesh into a regular grid of signed distances, where each grid
+sample is the signed distance to the nearest point on the input
+surface (negative inside, positive outside).
 
----
+> The full library reference — algorithm details, performance
+> numbers, and isosurface-roundtrip examples — lives in
+> [docs/SDF_LIBRARY.md](../../../../docs/SDF_LIBRARY.md). This
+> document covers the API exposed by the headers in this directory.
 
-Fast computation of signed distance fields from triangulated surface meshes.
+## What the library produces
 
-## Overview
+Given:
 
-This library computes the signed distance function (SDF) for a given 3D triangular mesh on a regular grid. The SDF represents the minimum distance from each point in space to the nearest point on the surface, with the sign indicating whether the point is inside (negative) or outside (positive) the mesh.
+- a triangle mesh as parallel vertex / triangle index arrays,
+- a target grid resolution (a power of two between 16 and 1024),
+- an axis-aligned bounding box for the grid in world coordinates,
 
-## Features
+the library emits an `N × N × N` array of `float` distances laid out
+row-major, indexed as
 
-- ✅ **Thread-safe API** - Compute multiple SDFs in parallel
-- ✅ **Modern C++** - Smart pointers, RAII, move semantics
-- ✅ **Memory-safe** - No manual memory management required
-- ✅ **Backward compatible** - Legacy API still supported
-- ✅ **Well-tested** - 99% test coverage
-- 🚧 **CUDA-ready** - Architecture designed for GPU acceleration (coming soon)
+```
+sdf[k * N * N + j * N + i]
+```
 
-## Quick Start
+with world position
+`(minx + i*span, miny + j*span, minz + k*span)`,
+`span[a] = (max[a] - min[a]) / N`.
+
+Sign convention:
+
+- `> 0` — sample is outside the surface, value is the distance to the
+  nearest point on the mesh.
+- `= 0` — sample lies on the surface (within tolerance).
+- `< 0` — sample is inside the surface; its absolute value is the
+  distance to the nearest point on the mesh.
+
+## How it works
+
+1. **Bounding box / grid setup.** The user supplies world-space
+   `mins` and `maxs` and the grid size; the library derives per-axis
+   spans and integer cell coordinates.
+2. **Octree of the mesh.** Each input triangle is inserted into an
+   octree built over the grid. The octree lets distance queries from
+   a grid sample skip empty regions of space.
+3. **Boundary marking.** Cells that the surface intersects are
+   flagged. The exact closest-point distance is computed for the
+   eight corner samples of every boundary cell.
+4. **Distance propagation.** A fast-marching-style sweep propagates
+   distances outward from the boundary cells through the rest of
+   the grid, taking the smaller of "current best" vs. "neighbor's
+   best plus one cell" at each step until the field stabilizes.
+5. **Sign assignment.** A flood pass uses the surface orientation
+   (or its inverse, when `isNormalFlip` is set) to mark the inside
+   as negative and the outside as positive.
+
+The complexity is roughly `O(N³ + T log T)` where `T` is the
+triangle count; the octree avoids the naive `O(N³ · T)` lookup.
+
+## Public API
+
+There are three entry points, all in `namespace SDFLibrary`. New
+code should prefer the first; the others exist for fine-grained
+control or for callers integrating against the legacy global API.
+
+### 1. One-shot, thread-safe (recommended)
 
 ```cpp
 #include "sdfLib.h"
 
-// Your mesh
-float verts[] = {-1, -1, -1,  1, -1, -1,  0, 1, -1};  // 3 vertices
-int tris[] = {0, 1, 2};  // 1 triangle
-float mins[] = {-2, -2, -2}, maxs[] = {2, 2, 2};
-
-// Compute SDF on 64³ grid
-auto sdf_grid = SDFLibrary::computeSDF_MT(
-    3, verts,      // 3 vertices
-    1, tris,       // 1 triangle  
-    64,            // grid size
-    0,             // don't flip normals
-    mins, maxs     // bounding box
-);
-
-// Access distance at (i,j,k)
-float dist = sdf_grid[i*64*64 + j*64 + k];
+std::unique_ptr<float[]> grid = SDFLibrary::computeSDF_MT(
+    nverts, verts,            // float[3 * nverts], xyz interleaved
+    ntris,  tris,             // int[3 * ntris], vertex indices
+    size,                     // grid resolution N (power of two)
+    /*isNormalFlip=*/0,
+    mins, maxs);              // float[3] each
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for more examples.
+Returns an owning `unique_ptr` to `size³` distances, or `nullptr` on
+failure. Each call uses a private `SDFContext` internally, so calls
+from different threads do not contend.
 
-## Documentation
+### 2. Manual context (advanced)
 
-- **[QUICKSTART.md](QUICKSTART.md)** - Getting started guide with examples
-- **[SDF_REFACTORING.md](SDF_REFACTORING.md)** - Complete technical documentation
-- **[REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md)** - Summary of recent improvements
-
-## API
-
-### Thread-Safe (Recommended)
+When you want to reuse the octree across multiple grid evaluations,
+inspect intermediate state, or integrate with a custom job system:
 
 ```cpp
-// Simple interface - automatic cleanup
-std::unique_ptr<float[]> SDFLibrary::computeSDF_MT(
-    int nverts, const float* verts,
-    int ntris, const int* tris,
-    int grid_size, int isNormalFlip,
-    const float* mins, const float* maxs
-);
+#include "SDFContext.h"
 
-// Advanced - manual context control
-std::unique_ptr<SDFContext> SDFLibrary::createContext();
+auto ctx = SDFLibrary::createContext();
+ctx->setParameters(size, /*isNormalFlip=*/0, mins, maxs);
+if (!ctx->initSDF()) return /* error */;
+ctx->readGeom(nverts, verts, ntris, tris);
+ctx->adjustData();   // tighten bbox, build octree
+ctx->compute();      // boundary + propagation + signs
+
+float* values = ctx->getValues();         // borrowed pointer
+auto   owned  = ctx->releaseValues();     // or take ownership
 ```
 
-### Legacy (Deprecated)
+`SDFContext` is move-only and self-cleans on destruction. One
+context per concurrent computation.
+
+### 3. libcvc high-level API
+
+If you already use libcvc's `cvc::geometry` and `cvc::volume` types,
+prefer `cvc::sdf` from `<cvc/algorithm.h>`; it wraps the routines
+above and returns a fully populated `cvc::volume`:
 
 ```cpp
-// Still works but not thread-safe
-float* SDFLibrary::computeSDF(
-    int nverts, float* verts,
-    int ntris, int* tris,
-    int grid_size, int isNormalFlip,
-    float* mins, float* maxs
-);
+#include <cvc/algorithm.h>
+
+cvc::volume sdf_vol = cvc::sdf(ctx, mesh, dim, bbox);
 ```
 
-## Building
+See the libcvc geometry API documentation for the rest of the
+options (algorithm selection, normal flipping).
+
+## Threading
+
+- `computeSDF_MT` and `SDFContext` are reentrant per instance.
+  Spawn one context (or one `computeSDF_MT` call) per thread and
+  the library will not share global state across them.
+- A single `SDFContext` is *not* safe to use from multiple threads
+  simultaneously; treat it like a `unique_ptr`.
+- Memory ownership is expressed through `std::unique_ptr<float[]>`;
+  no explicit `delete[]` is required when using the recommended
+  API.
+
+## Choosing a grid size
+
+| Triangle count    | Suggested grid | Memory (`float`) |
+|-------------------|----------------|------------------|
+| ≤ 1 000           | 64³            | ~1 MiB           |
+| 1 000 – 10 000    | 128³           | ~8 MiB           |
+| 10 000 – 100 000  | 256³           | ~64 MiB          |
+| > 100 000         | 512³           | ~512 MiB         |
+
+The grid size must be a power of two (`16, 32, ..., 1024`); other
+values fail at `setParameters`. Tighter bounding boxes give better
+effective resolution, so it pays to compute the mesh AABB and add
+only a small padding (5–10 %) before passing `mins`/`maxs`.
+
+## Building and testing
+
+The SDF backend is built whenever libcvc is configured with
+`-DCVC_ENABLE_SDF=ON` (the default). The library's tests live with
+the rest of the libcvc test suite:
 
 ```bash
-cd libcvc
-mkdir build && cd build
-cmake ..
-make
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build -R AlgorithmTest.SDF
 ```
 
-## Testing
+## Citation
 
-```bash
-cd build
-ctest -R AlgorithmTest.SDF
-```
+If the library is useful in published work, please cite:
 
-Expected output:
-```
-Test #348: AlgorithmTest.SDFBasic ................   Passed    0.51 sec
-Test #351: AlgorithmTest.SDFThenIsoRoundtrip .....   Passed    0.12 sec
-100% tests passed
-```
-
-## Multi-Threading Example
-
-```cpp
-#include <thread>
-#include <vector>
-
-std::vector<std::thread> threads;
-std::vector<std::unique_ptr<float[]>> results(num_meshes);
-
-for (int i = 0; i < num_meshes; i++) {
-    threads.emplace_back([&, i]() {
-        results[i] = SDFLibrary::computeSDF_MT(
-            meshes[i].nverts, meshes[i].verts,
-            meshes[i].ntris, meshes[i].tris,
-            grid_size, flip_normals,
-            meshes[i].mins, meshes[i].maxs
-        );
-    });
-}
-
-for (auto& t : threads) t.join();
-```
-
-## Recent Improvements (2025)
-
-The SDF library was recently refactored for thread safety and modern C++:
-
-- **Thread-safe architecture**: `SDFContext` class encapsulates all state
-- **Smart pointers**: Automatic memory management via `std::unique_ptr`
-- **RAII compliance**: No manual `free()` calls needed
-- **Test improvements**: From 349/353 to 352/353 tests passing (99%)
-- **Zero memory leaks**: Verified with valgrind
-
-See [REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md) for details.
-
-## Performance
-
-Current implementation (CPU):
-- Small mesh (1K tris, 64³): ~0.1s
-- Medium mesh (10K tris, 128³): ~1s
-- Large mesh (100K tris, 256³): ~10s
-
-Future CUDA implementation target: **10-100x speedup** for large grids.
-
-## Algorithm
-
-The library uses an octree-based approach:
-
-1. **Build octree**: Partition space hierarchically
-2. **Mark boundary voxels**: Identify surface crossings
-3. **Propagate distances**: Fast marching from boundary
-
-This gives O(n log n) complexity instead of naive O(n³).
-
-## Coverage
-
-Current code coverage:
-- **Lines**: 65.4% (10,401/15,903)
-- **Functions**: 68.3% (6,871/10,056)
-
-## References
-
-- Original implementation: Lalit Karlapalem (2004-2005)
-- Maintenance: Joe Rivera (2005-2014)
-- Thread-safe refactoring: Joe Rivera (2025)
-- Based on: Bajaj et al., "Interactive Visual Exploration of Large Flexible Multi-component Molecular Complexes", IEEE Visualization 2004
+> C. Bajaj, P. Djeu, V. Siddavanahalli, A. Thane,
+> *Interactive Visual Exploration of Large Flexible Multi-component
+> Molecular Complexes*, Proc. IEEE Visualization 2004,
+> pp. 243–250.
 
 ## License
 
-See LICENSE file in repository root.
-
-## Contributing
-
-Contributions welcome! Focus areas:
-- [ ] CUDA kernel implementation
-- [ ] BVH acceleration structure
-- [ ] Adaptive grid resolution
-- [ ] Python bindings
-- [ ] Benchmark suite
-
-## Support
-
-For questions or issues:
-1. Check the [QUICKSTART.md](QUICKSTART.md) guide
-2. Review [SDF_REFACTORING.md](SDF_REFACTORING.md) for technical details
-3. Run tests: `ctest -R AlgorithmTest.SDF -V`
-4. Open an issue on GitHub
-
----
-
-**Status**: Production-ready ✅  
-**Tests**: 352/353 passing (99.7%)  
-**Coverage**: 65.4% lines, 68.3% functions  
-**Thread-safe**: Yes ✅  
-**Memory-safe**: Yes ✅  
-**CUDA**: Coming soon 🚧
+See the `LICENSE` file at the repository root.
