@@ -43,6 +43,65 @@ concurrency:
 # ───────────────────────────────────────────────────────────────────
 
 jobs:
+  # ─────────────────────── Format check ────────────────────────
+  #
+  # Enforces .clang-format on lines changed by this PR/push only.
+  # The codebase is not yet fully formatted, so this guard prevents
+  # *new* violations rather than flagging the historical baseline.
+  # When a wholesale format pass lands on main, this job can be
+  # tightened to check entire files.
+  format-check:
+    name: clang-format (changed lines)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+
+      - name: Determine merge base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            # For push events, diff against the previous commit.
+            base="${{ github.event.before }}"
+            # Fallback for the very first push to a new branch.
+            if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              base="HEAD~1"
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Run git-clang-format on changed lines
+        run: |
+          set -euo pipefail
+          base="${{ steps.base.outputs.base }}"
+          # git-clang-format prints the diff it would apply; --diff
+          # exits 0 if everything is clean and 1 otherwise (older
+          # versions print "no modified files to format" / "clang-format
+          # did not modify any files" on success).
+          out=$(git clang-format --diff "$base" -- \
+                  '*.c' '*.cc' '*.cpp' '*.cxx' \
+                  '*.h' '*.hh' '*.hpp' '*.hxx' || true)
+          if [ -z "$out" ] \
+             || [ "$out" = "no modified files to format" ] \
+             || [ "$out" = "clang-format did not modify any files" ]; then
+            echo "Formatting OK on changed lines."
+            exit 0
+          fi
+          echo "::error::clang-format would reformat changed lines. Run:"
+          echo "  git clang-format $base"
+          echo "and commit the result."
+          echo
+          echo "$out"
+          exit 1
+
   # ──────────────────────────── Tests ────────────────────────────
   #
   # Runs the libcvc test suite across the OS / build_type matrix and
