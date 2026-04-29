@@ -285,11 +285,18 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: |
           sudo apt-get update
+          # NOTE: Ubuntu 24.04's libvtk9-qt-dev is built against Qt5,
+          # not Qt6. We therefore install Qt5 here so volrover3's CMake
+          # fallback path (QVTKOpenGLWidget) is taken and the entire
+          # build links a single, consistent Qt major version. Switching
+          # to a Qt6-built VTK on Linux requires either a PPA or building
+          # VTK from source, neither of which is currently set up.
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev \
-            qt6-base-dev qt6-base-dev-tools \
+            qtbase5-dev qttools5-dev qttools5-dev-tools \
+            libqt5opengl5-dev \
             libvtk9-dev libvtk9-qt-dev libcgal-dev \
             libfuse2 file desktop-file-utils
 
@@ -565,7 +572,10 @@ jobs:
           version: '6.7.*'
           host: 'windows'
           target: 'desktop'
-          arch: 'win64_msvc2022_64'
+          # Qt does not publish msvc2022_64 binaries for 6.7.x; the
+          # msvc2019_64 build is ABI-compatible with the MSVC 2022
+          # toolchain that windows-latest provides.
+          arch: 'win64_msvc2019_64'
           modules: ''
           cache: true
 
