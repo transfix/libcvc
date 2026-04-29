@@ -510,8 +510,16 @@ jobs:
           ./linuxdeploy --appdir AppDir --output appimage \
                         --desktop-file AppDir/volrover3.desktop \
                         --icon-file    AppDir/volrover_logo.png
+          # Rename the produced AppImage to the canonical STEM only if
+          # appimagetool didn't already write it under that name.
+          # (linuxdeploy honors OUTPUT=$STEM.AppImage, so usually it
+          # is already correct; older versions wrote a generic name.)
           for f in *.AppImage; do
-            case "$f" in linuxdeploy*) ;; *) mv "$f" "${STEM}.AppImage" ;; esac
+            case "$f" in
+              linuxdeploy*) ;;
+              "${STEM}.AppImage") ;;
+              *) mv "$f" "${STEM}.AppImage" ;;
+            esac
           done
 
       # One artifact per file so each shows its real extension on GitHub.
@@ -761,6 +769,40 @@ jobs:
           modules: ''
           cache: true
 
+      - name: Free disk space (Windows)
+        if: matrix.kind == 'volrover3'
+        shell: pwsh
+        run: |
+          # vcpkg builds VTK + CGAL from source; their buildtrees alone
+          # exceed the free space available on C: of windows-latest
+          # runners (~14 GB free at job start). Reclaim space by
+          # removing pre-installed toolchains we don't use, and pass
+          # --clean-after-build to vcpkg below to GC each port's
+          # buildtree once it is installed.
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files (x86)\dotnet',
+            'C:\Program Files\dotnet\sdk\NuGetFallbackFolder',
+            'C:\Program Files (x86)\Google',
+            'C:\Program Files\MySQL',
+            'C:\Program Files\Mozilla Firefox',
+            'C:\Program Files\Microsoft SDKs\Azure',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\PyPy',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\node'
+          )
+          $before = (Get-PSDrive C).Free / 1GB
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $p
+            }
+          }
+          $after = (Get-PSDrive C).Free / 1GB
+          Write-Host ("Free space on C: {0:N1} GB -> {1:N1} GB" -f $before, $after)
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -779,7 +821,10 @@ jobs:
           }
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
-            vcpkg install @packages --triplet x64-windows
+            # --clean-after-build deletes each port's buildtree/packages
+            # immediately after installation so the disk does not fill
+            # while iterating through hundreds of dependencies.
+            vcpkg install @packages --triplet x64-windows --clean-after-build
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq 5) { exit $LASTEXITCODE }
             $sleep = [Math]::Min(60 * $i, 180)
