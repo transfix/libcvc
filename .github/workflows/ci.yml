@@ -12,27 +12,60 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# ───────────────────────────────────────────────────────────────────
+# Per-PR / per-commit artifact set
+#
+# For every push and pull_request we produce the same artifact set
+# released by release.yml so reviewers can QA a branch end-to-end
+# before merging. CI artifacts include the short commit SHA in their
+# filenames; tag-driven release artifacts (release.yml) deliberately
+# omit it.
+#
+# Each artifact is uploaded individually with its full filename
+# (extension included) as the artifact name, so the GitHub UI shows
+# the format up front. (The download itself is always wrapped in a
+# zip by GitHub Actions; that is a platform limitation and applies to
+# every artifact regardless of inner format.)
+#
+# libcvc developer SDK (per OS, both Debug + Release):
+#   - Linux:   libcvc-<ver>-<sha>-linux-<arch>-<config>.tar.gz
+#   - macOS:   libcvc-<ver>-<sha>-macos-<arch>-<config>.zip
+#   - Windows: libcvc-<ver>-<sha>-windows-<arch>-<config>.zip
+#
+# volrover3 end-user app (per OS, Release only):
+#   - Linux:   volrover3-<ver>-<sha>-linux-<arch>.tar.gz
+#              volrover3-<ver>-<sha>-linux-<arch>.deb
+#              VolumeRover3-<ver>-<sha>-<arch>.AppImage
+#   - macOS:   VolumeRover3-<ver>-<sha>-macos-<arch>.dmg
+#              VolumeRover3-<ver>-<sha>-macos-<arch>.zip
+#   - Windows: VolumeRover3-<ver>-<sha>-windows-<arch>.zip
+#              VolumeRover3-<ver>-<sha>-windows-<arch>-setup.exe
+# ───────────────────────────────────────────────────────────────────
+
 jobs:
-  build:
+  # ──────────────────────────── Tests ────────────────────────────
+  #
+  # Runs the libcvc test suite across the OS / build_type matrix and
+  # generates a coverage report on Linux Debug. This job intentionally
+  # does NOT produce release artifacts; the package-* jobs below
+  # handle that and run in parallel.
+  test:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux
           - os: ubuntu-latest
             build_type: Debug
             coverage: true
           - os: ubuntu-latest
             build_type: Release
             coverage: false
-          # macOS
           - os: macos-latest
             build_type: Debug
             coverage: false
           - os: macos-latest
             build_type: Release
             coverage: false
-          # Windows
           - os: windows-latest
             build_type: Debug
             coverage: false
@@ -41,7 +74,7 @@ jobs:
             coverage: false
 
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} / ${{ matrix.build_type }}
+    name: test / ${{ matrix.os }} / ${{ matrix.build_type }}
 
     steps:
       - name: Checkout
@@ -49,66 +82,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── Compute artifact metadata ──
-      - name: Set artifact name
-        shell: bash
-        run: |
-          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
-          SHA=$(git rev-parse --short=8 HEAD)
-          ARCH=$(uname -m)
-          case "$RUNNER_OS" in
-            Linux)   OSTAG=linux   ;;
-            macOS)   OSTAG=macos   ;;
-            Windows) OSTAG=windows ;;
-          esac
-          BUILD_TYPE_LC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
-          STEM="libcvc-${VERSION}-${SHA}-${OSTAG}-${ARCH}-${BUILD_TYPE_LC}"
-          echo "ARTIFACT_STEM=$STEM" >> "$GITHUB_ENV"
-
-      # ── Linux dependencies ──
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libboost-all-dev \
-            libhdf5-dev \
-            libfftw3-dev \
-            libgsl-dev \
+            build-essential cmake ninja-build \
+            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev
-          # Coverage tools
           if [ "${{ matrix.coverage }}" = "true" ]; then
             sudo apt-get install -y --no-install-recommends lcov
           fi
 
-      # ── macOS dependencies ──
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install \
-            cmake \
-            ninja \
-            boost \
-            hdf5 \
-            fftw \
-            gsl \
-            imagemagick
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
 
-      # ── Windows dependencies (vcpkg) ──
-      #
       # vcpkg builds Boost from source by downloading per-library tarballs
       # from github.com/boostorg/*. github.com periodically returns 502s
       # for raw tarball requests, breaking CI. Mitigations:
       #   1) Filesystem binary cache persisted via actions/cache. Once a
       #      successful run populates the cache, subsequent runs reuse the
-      #      pre-built binaries and skip source downloads entirely. (The
-      #      old `x-gha` backend was removed by vcpkg in 2026.)
-      #   2) Outer retry loop — handles transient 502s on cold caches.
+      #      pre-built binaries and skip source downloads entirely.
+      #   2) Outer retry loop with backoff for transient 502s on cold caches.
       - name: Cache vcpkg installed packages (Windows)
         if: runner.os == 'Windows'
         uses: actions/cache@v4
@@ -117,10 +116,10 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-${{ runner.os }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/ci.yml') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.build_type }}-v3-
-            vcpkg-${{ runner.os }}-${{ matrix.build_type }}-
+            vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-v3-
+            vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -135,21 +134,16 @@ jobs:
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
             'boost-utility','hdf5','fftw3','gsl'
           )
-          $maxAttempts = 5
-          for ($i = 1; $i -le $maxAttempts; $i++) {
-            Write-Host "vcpkg install attempt $i / $maxAttempts"
+          for ($i = 1; $i -le 5; $i++) {
+            Write-Host "vcpkg install attempt $i / 5"
             vcpkg install @packages --triplet x64-windows
             if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq $maxAttempts) {
-              Write-Error "vcpkg install failed after $maxAttempts attempts"
-              exit $LASTEXITCODE
-            }
+            if ($i -eq 5) { exit $LASTEXITCODE }
             $sleep = [Math]::Min(60 * $i, 180)
             Write-Host "Retrying after transient failure (sleeping $sleep s)..."
             Start-Sleep -Seconds $sleep
           }
 
-      # ── Configure ──
       - name: Configure (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -161,7 +155,6 @@ jobs:
             -DCVC_ENABLE_CUDA=OFF
             -DDISABLE_CGAL=ON
             -DCVC_BUILD_VOLROVER3=OFF
-            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install
           )
           if [ "${{ matrix.coverage }}" = "true" ]; then
             cmake_args+=(-DCVC_ENABLE_COVERAGE=ON)
@@ -179,22 +172,14 @@ jobs:
             -DCVC_ENABLE_CUDA=OFF `
             -DCVC_ENABLE_IMAGEMAGICK=OFF `
             -DDISABLE_CGAL=ON `
-            -DCVC_BUILD_VOLROVER3=OFF `
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"
+            -DCVC_BUILD_VOLROVER3=OFF
 
-      # ── Build ──
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
-      # ── Test ──
-      #
-      # Stress / performance / convergence tests can take ~45 minutes and
-      # are only meaningful to run on trunk. Run the full suite on push
-      # events to main/master (merge-to-trunk) but exclude heavyweight
-      # tests on pull-request events to keep PR feedback fast.
-      #
-      # ctest -E accepts a POSIX regex matched against the full test name;
-      # the test names here come from gtest (TestSuite.TestCase).
+      # Stress / convergence / benchmark / perf-hierarchy tests can run
+      # for many minutes and are only meaningful on trunk. Run the full
+      # suite on push to main/master, exclude heavyweights on PRs.
       # --repeat until-pass:3 absorbs timing-sensitive flakes on macOS
       # CI runners (where short sleep_for() waits occasionally miss
       # boundaries under load).
@@ -202,47 +187,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Heavyweight tests (~minutes each) only meaningful on trunk.
           STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
-
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "push event (${{ github.ref }}): full suite including stress tests"
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
-                  --output-on-failure \
-                  --parallel \
-                  --repeat until-pass:3 \
-                  --timeout 1800
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 1800
           else
             echo "pull_request event: excluding ${STRESS_REGEX}"
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
-                  --output-on-failure \
-                  --parallel \
-                  --repeat until-pass:3 \
-                  --timeout 300 \
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 300 \
                   -E "${STRESS_REGEX}"
           fi
 
-      # ── Coverage (Linux Debug only) ──
       - name: Generate coverage report
         if: matrix.coverage
         run: |
           lcov --directory build --capture --output-file build/coverage.info --ignore-errors mismatch
           lcov --remove build/coverage.info \
-            '/usr/*' \
-            '*/test/*' \
-            '*/tests/*' \
-            '*/_deps/*' \
-            '*/googletest/*' \
+            '/usr/*' '*/test/*' '*/tests/*' '*/_deps/*' '*/googletest/*' \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
           genhtml build/coverage_filtered.info \
             --output-directory build/coverage_html \
             --title "libcvc Code Coverage" \
-            --legend \
-            --demangle-cpp \
-            --ignore-errors source
+            --legend --demangle-cpp --ignore-errors source
 
       - name: Upload coverage report
         if: matrix.coverage
@@ -261,60 +233,423 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      # ── Install ──
-      - name: Install
-        run: cmake --install build --config ${{ matrix.build_type }}
+  # ──────────────────────────── Linux packaging ────────────────────────────
+  #
+  # Mirrors release.yml's linux job exactly, but injects -<sha> into
+  # the artifact filename stem and uploads each output file as its own
+  # GitHub artifact so the format/extension is visible in the UI.
+  package-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: libcvc-debug
+            kind: libcvc
+            build_type: Debug
+          - name: libcvc-release
+            kind: libcvc
+            build_type: Release
+          - name: volrover3
+            kind: volrover3
+            build_type: Release
+    name: package-linux / ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # ── Collect PDB files (Windows Debug) ──
-      - name: Collect PDB files
-        if: runner.os == 'Windows' && matrix.build_type == 'Debug'
-        shell: pwsh
+      - name: Compute artifact metadata
+        id: meta
         run: |
-          $pdbDir = "${{ github.workspace }}/install/pdb"
-          New-Item -ItemType Directory -Force -Path $pdbDir | Out-Null
-          Get-ChildItem -Path build -Recurse -Include *.pdb |
-            Where-Object { $_.FullName -notlike '*CMakeFiles*' -and $_.FullName -notlike '*_deps*' } |
-            ForEach-Object { Copy-Item $_.FullName -Destination $pdbDir -Force }
+          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          SHA=$(git rev-parse --short=8 HEAD)
+          ARCH=$(uname -m)
+          BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"          >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
 
-      # ── Package install tree (CPack, matches release.yml layout) ──
-      #
-      # CI artifacts include the commit SHA in the file name so per-PR /
-      # per-push builds are uniquely identifiable. Tag-driven release
-      # artifacts (release.yml) deliberately omit the SHA.
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies (libcvc)
+        if: matrix.kind == 'libcvc'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
+            libmagick++-dev
+
+      - name: Install dependencies (volrover3)
+        if: matrix.kind == 'volrover3'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
+            libmagick++-dev \
+            qt6-base-dev qt6-base-dev-tools \
+            libvtk9-dev libvtk9-qt-dev libcgal-dev \
+            libfuse2 file desktop-file-utils
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Pack libcvc tarball
+        if: matrix.kind == 'libcvc'
         working-directory: build
         run: |
-          cpack -G TGZ \
-                      -D CPACK_COMPONENTS_ALL=libcvc \
-                      -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
-          mv "${{ env.ARTIFACT_STEM }}-libcvc.tar.gz" "${{ env.ARTIFACT_STEM }}.tar.gz"
-          cp "${{ env.ARTIFACT_STEM }}.tar.gz" "$GITHUB_WORKSPACE/"
+          STEM="libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
+                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
+          echo "STEM=$STEM" >> "$GITHUB_ENV"
 
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
+      - name: Pack volrover3 tarball + .deb
+        if: matrix.kind == 'volrover3'
         working-directory: build
         run: |
-          cpack -G ZIP \
-                      -D CPACK_COMPONENTS_ALL=libcvc \
-                      -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
-          mv "${{ env.ARTIFACT_STEM }}-libcvc.zip" "${{ env.ARTIFACT_STEM }}.zip"
-          cp "${{ env.ARTIFACT_STEM }}.zip" "$GITHUB_WORKSPACE/"
+          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}"
+          cpack -G TGZ -D CPACK_COMPONENTS_ALL=volrover3 \
+                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          mv "$STEM-volrover3.tar.gz" "$STEM.tar.gz"
+          cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
+          cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
+                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          for f in volrover3*.deb; do [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/$STEM.deb"; done
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        working-directory: build
+      - name: Build AppImage
+        if: matrix.kind == 'volrover3'
         run: |
-          cpack -G ZIP -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=libcvc -D CPACK_PACKAGE_FILE_NAME="${{ env.ARTIFACT_STEM }}"
-          Move-Item "${{ env.ARTIFACT_STEM }}-libcvc.zip" "${{ env.ARTIFACT_STEM }}.zip"
-          Copy-Item "${{ env.ARTIFACT_STEM }}.zip" "$env:GITHUB_WORKSPACE/"
+          set -euo pipefail
+          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}"
+          DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component libcvc
+          DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component volrover3
+          curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -L -o linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+          cp AppDir/usr/share/applications/volrover3.desktop AppDir/
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/volrover_logo.png AppDir/volrover_logo.png
+          export QML_SOURCES_PATHS=""
+          export OUTPUT="${STEM}.AppImage"
+          ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
+                        --desktop-file AppDir/volrover3.desktop \
+                        --icon-file    AppDir/volrover_logo.png || \
+          ./linuxdeploy --appdir AppDir --output appimage \
+                        --desktop-file AppDir/volrover3.desktop \
+                        --icon-file    AppDir/volrover_logo.png
+          for f in *.AppImage; do
+            case "$f" in linuxdeploy*) ;; *) mv "$f" "${STEM}.AppImage" ;; esac
+          done
 
-      - name: Upload package artifact
+      # One artifact per file so each shows its real extension on GitHub.
+      - name: Upload Linux libcvc tarball
+        if: matrix.kind == 'libcvc'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_STEM }}
+          name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
+          path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux volrover3 tarball
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.tar.gz
+          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux volrover3 .deb
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.deb
+          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux volrover3 AppImage
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}.AppImage
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}.AppImage
+          if-no-files-found: error
+          retention-days: 30
+
+  # ──────────────────────────── macOS packaging ────────────────────────────
+  package-macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: libcvc-debug
+            kind: libcvc
+            build_type: Debug
+          - name: libcvc-release
+            kind: libcvc
+            build_type: Release
+          - name: volrover3
+            kind: volrover3
+            build_type: Release
+    name: package-macos / ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute artifact metadata
+        id: meta
+        run: |
+          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          SHA=$(git rev-parse --short=8 HEAD)
+          ARCH=$(uname -m)
+          BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"          >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies (libcvc)
+        if: matrix.kind == 'libcvc'
+        run: |
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+
+      - name: Install dependencies (volrover3)
+        if: matrix.kind == 'volrover3'
+        run: |
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
+          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6)" >> $GITHUB_ENV
+          echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Pack libcvc zip
+        if: matrix.kind == 'libcvc'
+        working-directory: build
+        run: |
+          STEM="libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          cpack -G ZIP -D CPACK_COMPONENTS_ALL=libcvc \
+                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          mv "$STEM-libcvc.zip" "$STEM.zip"
+          cp "$STEM.zip" "$GITHUB_WORKSPACE/"
+
+      - name: Pack volrover3 .dmg + .zip
+        if: matrix.kind == 'volrover3'
+        working-directory: build
+        run: |
+          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}"
+          cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=volrover3 \
+                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          cpack -G ZIP       -D CPACK_COMPONENTS_ALL=volrover3 \
+                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
+          mv "$STEM-volrover3.dmg" "$STEM.dmg"
+          mv "$STEM-volrover3.zip" "$STEM.zip"
+          cp "$STEM.dmg" "$STEM.zip" "$GITHUB_WORKSPACE/"
+
+      - name: Upload macOS libcvc zip
+        if: matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS volrover3 dmg
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.dmg
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS volrover3 zip
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.zip
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # ──────────────────────────── Windows packaging ────────────────────────────
+  package-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: libcvc-debug
+            kind: libcvc
+            build_type: Debug
+          - name: libcvc-release
+            kind: libcvc
+            build_type: Release
+          - name: volrover3
+            kind: volrover3
+            build_type: Release
+    name: package-windows / ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: bash
+        run: |
+          VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          SHA=$(git rev-parse --short=8 HEAD)
+          BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"          >> "$GITHUB_OUTPUT"
+          echo "arch=x86_64"       >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
+
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
+        with:
           path: |
-            *.tar.gz
-            *.zip
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v3-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v3-
+            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $packages = @(
+            'boost-thread','boost-date-time','boost-regex','boost-filesystem',
+            'boost-system','boost-chrono','boost-program-options','boost-signals2',
+            'boost-format','boost-property-tree','boost-algorithm','boost-asio',
+            'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
+            'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
+            'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
+            'boost-utility','hdf5','fftw3','gsl'
+          )
+          if ('${{ matrix.kind }}' -eq 'volrover3') {
+            $packages += @('qt6-base','vtk','cgal')
+          }
+          for ($i = 1; $i -le 5; $i++) {
+            Write-Host "vcpkg install attempt $i / 5"
+            vcpkg install @packages --triplet x64-windows
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 5) { exit $LASTEXITCODE }
+            $sleep = [Math]::Min(60 * $i, 180)
+            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
+            Start-Sleep -Seconds $sleep
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
+          $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_CXX_STANDARD=17 `
+            -DCVC_BUILD_TESTS=OFF `
+            -DCVC_ENABLE_CUDA=OFF `
+            -DDISABLE_CGAL=$cgal `
+            -DCVC_BUILD_VOLROVER3=$vol `
+            -DCVC_ENABLE_MESHER=$vol `
+            -DCVC_ENABLE_SDF=$vol
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Install NSIS
+        if: matrix.kind == 'volrover3'
+        run: choco install nsis -y
+
+      - name: Pack libcvc zip
+        if: matrix.kind == 'libcvc'
+        shell: pwsh
+        working-directory: build
+        run: |
+          $stem = "libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          cpack -G ZIP -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=libcvc -D CPACK_PACKAGE_FILE_NAME="$stem"
+          Move-Item "$stem-libcvc.zip" "$stem.zip"
+          Copy-Item "$stem.zip" "$env:GITHUB_WORKSPACE/"
+
+      - name: Pack volrover3 zip + NSIS
+        if: matrix.kind == 'volrover3'
+        shell: pwsh
+        working-directory: build
+        run: |
+          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}"
+          $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\NSIS' -ErrorAction SilentlyContinue).'(default)'
+          if (-not $nsisPath) {
+            $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
+          }
+          if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
+
+          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem"
+          Move-Item "$stem-volrover3.zip" "$stem.zip"
+          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
+
+          Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
+          Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
+
+      - name: Upload Windows libcvc zip
+        if: matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows volrover3 zip
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}.zip
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows volrover3 NSIS installer
+        if: matrix.kind == 'volrover3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-setup.exe
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-setup.exe
+          if-no-files-found: error
           retention-days: 30
