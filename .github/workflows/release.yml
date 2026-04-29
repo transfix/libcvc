@@ -282,16 +282,21 @@ jobs:
         if: matrix.kind == 'volrover3'
         working-directory: build
         run: |
+          set -euo pipefail
           STEM="VolumeRover3-${{ steps.meta.outputs.version }}-macos-${{ steps.meta.outputs.arch }}"
           # macdeployqt runs during `cmake --install volrover3`; CPack
           # will trigger that, leaving a self-contained VolumeRover3.app
-          # inside the staged tree before generating .dmg / .zip.
+          # inside the staged tree before generating .dmg.
           cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=volrover3 \
                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          cpack -G ZIP       -D CPACK_COMPONENTS_ALL=volrover3 \
-                            -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-volrover3.dmg" "$STEM.dmg"
-          mv "$STEM-volrover3.zip" "$STEM.zip"
+          # Zip the deployed .app directly with ditto rather than running
+          # cpack -G ZIP a second time — the second cpack pass triggers a
+          # fresh install/macdeployqt cycle that hits a CPack component
+          # dependency edge case (volrover3 → libcvc) and aborts during
+          # compression.
+          APP_DIR="_CPack_Packages/Darwin/DragNDrop/$STEM/volrover3"
+          ditto -c -k --keepParent "$APP_DIR/VolumeRover3.app" "$STEM.zip"
           cp "$STEM.dmg" "$STEM.zip" "$GITHUB_WORKSPACE/"
 
       - name: Upload macOS artifacts

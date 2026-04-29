@@ -575,13 +575,24 @@ jobs:
         if: matrix.kind == 'volrover3'
         working-directory: build
         run: |
+          set -euo pipefail
           STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}"
+          # CPack DragNDrop runs the install rules (which invoke
+          # macdeployqt) and produces a deployed VolumeRover3.app under
+          # _CPack_Packages/Darwin/DragNDrop/<STEM>/volrover3/, then
+          # wraps it into the .dmg.
           cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=volrover3 \
                              -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          cpack -G ZIP       -D CPACK_COMPONENTS_ALL=volrover3 \
-                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-volrover3.dmg" "$STEM.dmg"
-          mv "$STEM-volrover3.zip" "$STEM.zip"
+          # Zip the already-deployed .app instead of running cpack -G ZIP
+          # a second time. Re-running cpack triggers a fresh install +
+          # macdeployqt pass that hits a component-dependency edge case
+          # in CPack (volrover3 → libcvc) and aborts during compression.
+          # `ditto -c -k --keepParent` is the canonical macOS-native zip
+          # for app bundles (preserves resource forks, symlinks, perms,
+          # extended attrs, codesign metadata).
+          APP_DIR="_CPack_Packages/Darwin/DragNDrop/$STEM/volrover3"
+          ditto -c -k --keepParent "$APP_DIR/VolumeRover3.app" "$STEM.zip"
           cp "$STEM.dmg" "$STEM.zip" "$GITHUB_WORKSPACE/"
 
       - name: Upload macOS libcvc zip
