@@ -289,13 +289,12 @@ jobs:
           # inside the staged tree before generating .dmg.
           cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=volrover3 \
                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          mv "$STEM-volrover3.dmg" "$STEM.dmg"
           # Zip the deployed .app directly with ditto rather than running
           # cpack -G ZIP a second time — the second cpack pass triggers a
           # fresh install/macdeployqt cycle that hits a CPack component
           # dependency edge case (volrover3 → libcvc) and aborts during
           # compression.
-          APP_DIR="_CPack_Packages/Darwin/DragNDrop/$STEM/volrover3"
+          APP_DIR="_CPack_Packages/Darwin/DragNDrop/$STEM/ALL_IN_ONE"
           ditto -c -k --keepParent "$APP_DIR/VolumeRover3.app" "$STEM.zip"
           cp "$STEM.dmg" "$STEM.zip" "$GITHUB_WORKSPACE/"
 
