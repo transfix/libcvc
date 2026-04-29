@@ -77,22 +77,58 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: |
           sudo apt-get update
-          # NOTE: Ubuntu 24.04's libvtk9-qt-dev is built against Qt5,
-          # not Qt6. Install Qt5 so volrover3's CMake fallback path is
-          # taken and Qt major versions stay consistent across the link.
+          # Use Qt6 across the board; Ubuntu's libvtk9-qt-dev is
+          # Qt5-only, so VTK is built from source against Qt6 in the
+          # next step (cached).
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev \
-            qtbase5-dev qttools5-dev qttools5-dev-tools \
-            libqt5opengl5-dev \
-            libvtk9-dev libvtk9-qt-dev libcgal-dev \
+            qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev \
+            libgl1-mesa-dev libxt-dev mesa-common-dev libglew-dev \
+            libxrender-dev libxcursor-dev libxinerama-dev libxi-dev \
+            libcgal-dev \
             libfuse2 file desktop-file-utils
+
+      # ── VTK 9.5 built against Qt6, cached ──
+      # Cache key matches ci.yml so the build is shared across both
+      # workflows and only happens once per (vtk_version, qt_major, os).
+      - name: Cache VTK (Qt6) install tree
+        if: matrix.kind == 'volrover3'
+        id: vtk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/vtk-qt6
+          key: vtk-9.5.0-qt6-${{ runner.os }}-v1
+
+      - name: Build VTK 9.5 from source (Qt6)
+        if: matrix.kind == 'volrover3' && steps.vtk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
+          tar xzf vtk.tar.gz
+          cmake -S VTK-9.5.0 -B vtk-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=$HOME/vtk-qt6 \
+            -DBUILD_SHARED_LIBS=ON \
+            -DVTK_GROUP_ENABLE_Qt=YES \
+            -DVTK_QT_VERSION=6 \
+            -DVTK_BUILD_TESTING=OFF \
+            -DVTK_BUILD_EXAMPLES=OFF \
+            -DVTK_BUILD_DOCUMENTATION=OFF \
+            -DVTK_LEGACY_REMOVE=ON
+          cmake --build vtk-build --parallel --target install
+          rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
 
       - name: Configure
         run: |
+          extra_prefix=""
+          if [ "${{ matrix.kind }}" = "volrover3" ]; then
+            extra_prefix="$HOME/vtk-qt6"
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=OFF \
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \

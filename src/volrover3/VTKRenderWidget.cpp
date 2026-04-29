@@ -64,7 +64,7 @@ void VTKRenderWidget::initializeVTK()
     m_fpsAnnotation->GetTextProperty()->SetColor(1.0, 1.0, 0.0);  // Yellow
     m_fpsAnnotation->GetTextProperty()->SetFontSize(14);
     m_fpsAnnotation->SetVisibility(false);  // Hidden by default
-    m_renderer->AddActor2D(m_fpsAnnotation);
+    m_renderer->AddViewProp(m_fpsAnnotation);
 
     // Enable focus for keyboard input
     setFocusPolicy(Qt::StrongFocus);

@@ -214,6 +214,14 @@ namespace CVC_NAMESPACE
 	  return double(reinterpret_cast<const double*>(data)[idx]);
 	case UInt64:
 	  return double(reinterpret_cast<const uint64*>(data)[idx]);
+	case Char:
+	  return double(reinterpret_cast<const signed char*>(data)[idx]);
+	case Int:
+	  return double(reinterpret_cast<const int*>(data)[idx]);
+	case Int64:
+	  return double(reinterpret_cast<const int64*>(data)[idx]);
+	case Undefined:
+	  break;
 	}
       return 0;
     }
@@ -258,6 +266,17 @@ namespace CVC_NAMESPACE
 	  break;
 	case UInt64:
 	  reinterpret_cast<uint64*>(data)[idx] = static_cast<uint64>(val);
+	  break;
+	case Char:
+	  reinterpret_cast<signed char*>(data)[idx] = static_cast<signed char>(val);
+	  break;
+	case Int:
+	  reinterpret_cast<int*>(data)[idx] = static_cast<int>(val);
+	  break;
+	case Int64:
+	  reinterpret_cast<int64*>(data)[idx] = static_cast<int64>(val);
+	  break;
+	case Undefined:
 	  break;
 	}
 

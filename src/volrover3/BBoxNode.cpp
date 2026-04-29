@@ -50,7 +50,7 @@ void BBoxNode::addToRenderer(vtkRenderer* renderer)
         renderer->AddActor(m_actor);
         if (m_coordinatesVisible) {
             for (auto& actor : m_coordinateLabelActors) {
-                renderer->AddActor2D(actor);
+                renderer->AddViewProp(actor);
             }
         }
     }
@@ -61,7 +61,7 @@ void BBoxNode::removeFromRenderer(vtkRenderer* renderer)
     if (renderer) {
         renderer->RemoveActor(m_actor);
         for (auto& actor : m_coordinateLabelActors) {
-            renderer->RemoveActor2D(actor);
+            renderer->RemoveViewProp(actor);
         }
         if (renderer == m_renderer) {
             m_renderer = nullptr;
@@ -168,11 +168,11 @@ void BBoxNode::setCoordinatesVisible(bool visible)
     if (m_renderer) {
         if (visible) {
             for (auto& actor : m_coordinateLabelActors) {
-                m_renderer->AddActor2D(actor);
+                m_renderer->AddViewProp(actor);
             }
         } else {
             for (auto& actor : m_coordinateLabelActors) {
-                m_renderer->RemoveActor2D(actor);
+                m_renderer->RemoveViewProp(actor);
             }
         }
     }
@@ -218,7 +218,7 @@ void BBoxNode::createCoordinateLabels()
         for (auto& actor : m_coordinateLabelActors) {
             // Only remove if actor was actually added to a renderer
             if (actor->GetReferenceCount() > 1) {
-                m_renderer->RemoveActor2D(actor);
+                m_renderer->RemoveViewProp(actor);
             }
         }
     }
@@ -279,7 +279,7 @@ void BBoxNode::createCoordinateLabels()
     // Add new labels to renderer if we have one and coordinates are visible
     if (m_renderer && m_coordinatesVisible) {
         for (auto& actor : m_coordinateLabelActors) {
-            m_renderer->AddActor2D(actor);
+            m_renderer->AddViewProp(actor);
         }
     }
 }

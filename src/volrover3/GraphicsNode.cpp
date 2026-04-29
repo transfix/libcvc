@@ -816,9 +816,9 @@ void GraphicsNode::setShowLabel(bool show)
     if (m_renderer) {
         if (m_showLabel && isVisible()) {
             updateLabel();
-            m_renderer->AddActor2D(m_labelActor);
+            m_renderer->AddViewProp(m_labelActor);
         } else {
-            m_renderer->RemoveActor2D(m_labelActor);
+            m_renderer->RemoveViewProp(m_labelActor);
         }
     }
 }
@@ -897,7 +897,7 @@ void GraphicsNode::addToRenderer(vtkRenderer* renderer)
         updateLabel();
         vtkActor2D* labelActor = m_labelActor;
         runOnMainThread([labelActor, renderer]() {
-            renderer->AddActor2D(labelActor);
+            renderer->AddViewProp(labelActor);
         });
     }
 }
@@ -908,7 +908,7 @@ void GraphicsNode::removeFromRenderer(vtkRenderer* renderer)
     vtkActor2D* labelActor = m_labelActor;
     if (labelActor) {
         runOnMainThread([labelActor, renderer]() {
-            renderer->RemoveActor2D(labelActor);
+            renderer->RemoveViewProp(labelActor);
         });
     }
     

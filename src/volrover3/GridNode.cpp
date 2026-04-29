@@ -152,19 +152,19 @@ void GridNode::addToRenderer(vtkRenderer* renderer)
         if (m_yzPlaneVisible) {
             renderer->AddActor(m_yzActor);
             for (auto& actor : m_yzTickLabelActors) {
-                renderer->AddActor2D(actor);
+                renderer->AddViewProp(actor);
             }
         }
         if (m_xzPlaneVisible) {
             renderer->AddActor(m_xzActor);
             for (auto& actor : m_xzTickLabelActors) {
-                renderer->AddActor2D(actor);
+                renderer->AddViewProp(actor);
             }
         }
         if (m_xyPlaneVisible) {
             renderer->AddActor(m_xyActor);
             for (auto& actor : m_xyTickLabelActors) {
-                renderer->AddActor2D(actor);
+                renderer->AddViewProp(actor);
             }
         }
     }
@@ -178,13 +178,13 @@ void GridNode::removeFromRenderer(vtkRenderer* renderer)
         renderer->RemoveActor(m_xyActor);
         
         for (auto& actor : m_yzTickLabelActors) {
-            renderer->RemoveActor2D(actor);
+            renderer->RemoveViewProp(actor);
         }
         for (auto& actor : m_xzTickLabelActors) {
-            renderer->RemoveActor2D(actor);
+            renderer->RemoveViewProp(actor);
         }
         for (auto& actor : m_xyTickLabelActors) {
-            renderer->RemoveActor2D(actor);
+            renderer->RemoveViewProp(actor);
         }
         
         m_renderer = nullptr;  // Clear renderer reference
@@ -884,13 +884,13 @@ void GridNode::updateTickLabelsInRenderer()
     // Remove old tick labels from renderer if present
     if (m_renderer) {
         for (auto& actor : m_yzTickLabelActors) {
-            m_renderer->RemoveActor2D(actor);
+            m_renderer->RemoveViewProp(actor);
         }
         for (auto& actor : m_xzTickLabelActors) {
-            m_renderer->RemoveActor2D(actor);
+            m_renderer->RemoveViewProp(actor);
         }
         for (auto& actor : m_xyTickLabelActors) {
-            m_renderer->RemoveActor2D(actor);
+            m_renderer->RemoveViewProp(actor);
         }
     }
     
@@ -902,17 +902,17 @@ void GridNode::updateTickLabelsInRenderer()
     if (m_renderer && isVisible() && ticksVisible) {
         if (m_yzPlaneVisible) {
             for (auto& actor : m_yzTickLabelActors) {
-                m_renderer->AddActor2D(actor);
+                m_renderer->AddViewProp(actor);
             }
         }
         if (m_xzPlaneVisible) {
             for (auto& actor : m_xzTickLabelActors) {
-                m_renderer->AddActor2D(actor);
+                m_renderer->AddViewProp(actor);
             }
         }
         if (m_xyPlaneVisible) {
             for (auto& actor : m_xyTickLabelActors) {
-                m_renderer->AddActor2D(actor);
+                m_renderer->AddViewProp(actor);
             }
         }
     }
