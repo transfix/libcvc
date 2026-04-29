@@ -147,7 +147,7 @@ The libcvc library uses Google Test (gtest) for comprehensive unit testing. The 
 
 **Required:**
 - CMake 3.15 or higher
-- C++17 compatible compiler (GCC 7+, Clang 5+, MSVC 2017+); C++14/20/23 selectable via `-DCMAKE_CXX_STANDARD=`
+- C++20 compatible compiler (GCC 13+, Clang 17+, MSVC 19.29+); C++23 selectable via `-DCMAKE_CXX_STANDARD=23`
 - Boost libraries (>= 1.58): thread, date_time, regex, filesystem, system, chrono
 
 **Optional (for coverage):**

@@ -150,7 +150,7 @@ volrover3/
 
 ### Build-time
 - CMake 3.16+
-- C++17 compiler (GCC 7+, Clang 5+, MSVC 2017+)
+- C++20 compiler (GCC 13+, Clang 17+, MSVC 19.29+)
 - Qt6 development libraries
 - VTK development libraries
 

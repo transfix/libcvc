@@ -260,7 +260,7 @@ make volrover3
 - Qt6 (Core, Widgets, OpenGL, OpenGLWidgets)
 - VTK 9.0+
 - OpenGL 3.3+
-- C++17 compiler
+- C++20 compiler
 - libcvc (from this project)
 
 ### Installation
