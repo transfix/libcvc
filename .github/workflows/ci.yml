@@ -8,9 +8,16 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# Concurrency: split into two pools.
+#  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
+#    fast feedback.
+#  * Heavy package jobs use job-level concurrency that does NOT cancel
+#    in-progress, so a long VTK / vcpkg build always finishes and seeds
+#    its cache. Without this, a push during a 22-min VTK build cancels
+#    the run before the post-job cache save can fire, which traps the
+#    workflow in a permanent cold-cache state.
+#
+# (Defined per-job below.)
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
@@ -53,6 +60,10 @@ jobs:
   format-check:
     name: clang-format (changed lines, advisory)
     runs-on: ubuntu-24.04
+    # Cheap job: cancel previous in-progress runs on new pushes for fast feedback.
+    concurrency:
+      group: ci-${{ github.ref }}-format-check
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,6 +143,10 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: test / ${{ matrix.os }} / ${{ matrix.build_type }}
+    # Cheap job: cancel previous in-progress runs on new pushes.
+    concurrency:
+      group: ci-${{ github.ref }}-test-${{ matrix.os }}-${{ matrix.build_type }}
+      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -314,6 +329,13 @@ jobs:
             kind: volrover3
             build_type: Release
     name: package-linux / ${{ matrix.name }}
+    # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
+    # Cancellation strands the cache and forces every subsequent run
+    # back through a 22-min cold rebuild. Once a run completes, the
+    # cache is warm and future runs are fast.
+    concurrency:
+      group: ci-${{ github.ref }}-package-linux-${{ matrix.name }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -366,10 +388,15 @@ jobs:
       # and reuse the install tree from cache thereafter (~30s warm).
       # The cache is keyed on (VTK version, Qt major, runner OS) and
       # is shared between ci.yml and release.yml.
-      - name: Cache VTK (Qt6) install tree
+      #
+      # We use the split restore/save pattern so the cache is committed
+      # to the store IMMEDIATELY after VTK installs successfully, rather
+      # than as a post-job step that never runs when the workflow is
+      # cancelled mid-flight.
+      - name: Restore VTK (Qt6) cache
         if: matrix.kind == 'volrover3'
         id: vtk-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/vtk-qt6
           key: vtk-9.5.0-qt6-${{ runner.os }}-v2
@@ -395,6 +422,16 @@ jobs:
           cmake --build vtk-build --parallel --target install
           # Free disk before continuing.
           rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
+
+      # Persist the install tree as soon as it lands, before the rest of
+      # the job (which may take another 5-15 min) has any chance of
+      # being cancelled.
+      - name: Save VTK (Qt6) cache
+        if: matrix.kind == 'volrover3' && steps.vtk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/vtk-qt6
+          key: vtk-9.5.0-qt6-${{ runner.os }}-v2
 
       - name: Configure
         run: |
@@ -534,6 +571,10 @@ jobs:
             kind: volrover3
             build_type: Release
     name: package-macos / ${{ matrix.name }}
+    # Heavy job: do not cancel in-progress runs (mirrors package-linux).
+    concurrency:
+      group: ci-${{ github.ref }}-package-macos-${{ matrix.name }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -660,6 +701,11 @@ jobs:
             kind: volrover3
             build_type: Release
     name: package-windows / ${{ matrix.name }}
+    # Heavy job (vcpkg builds VTK + CGAL from source): do NOT cancel
+    # in-progress runs. See package-linux for rationale.
+    concurrency:
+      group: ci-${{ github.ref }}-package-windows-${{ matrix.name }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -679,8 +725,13 @@ jobs:
 
       # Cache key intentionally excludes hashFiles(workflow) so editing
       # this file does not invalidate the warm vcpkg cache.
-      - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
+      #
+      # Split restore/save: we commit the cache immediately after the
+      # vcpkg install step succeeds rather than waiting for a post-job
+      # save that gets skipped on cancellation.
+      - name: Restore vcpkg cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
@@ -735,6 +786,18 @@ jobs:
             Write-Host "Retrying after transient failure (sleeping $sleep s)..."
             Start-Sleep -Seconds $sleep
           }
+
+      # Persist vcpkg state as soon as install completes successfully so
+      # later cancellations don't strand a 20+ minute build.
+      - name: Save vcpkg cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v4
 
       - name: Configure
         shell: pwsh
