@@ -170,6 +170,7 @@ jobs:
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
                       -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
+                      -D CPACK_DEBIAN_PACKAGE_SHLIBDEPS=OFF \
                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
           # CPack DEB names follow Debian convention; rename whatever
           # .deb landed to match our naming scheme.

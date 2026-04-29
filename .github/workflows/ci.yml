@@ -444,6 +444,7 @@ jobs:
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
                        -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
+                       -D CPACK_DEBIAN_PACKAGE_SHLIBDEPS=OFF \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           for f in volrover3*.deb; do [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/$STEM.deb"; done
 
