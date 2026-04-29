@@ -32,14 +32,14 @@ concurrency:
 #   - macOS:   libcvc-<ver>-<sha>-macos-<arch>-<config>.zip
 #   - Windows: libcvc-<ver>-<sha>-windows-<arch>-<config>.zip
 #
-# volrover3 end-user app (per OS, Release only):
-#   - Linux:   volrover3-<ver>-<sha>-linux-<arch>.tar.gz
-#              volrover3-<ver>-<sha>-linux-<arch>.deb
-#              VolumeRover3-<ver>-<sha>-<arch>.AppImage
-#   - macOS:   VolumeRover3-<ver>-<sha>-macos-<arch>.dmg
-#              VolumeRover3-<ver>-<sha>-macos-<arch>.zip
-#   - Windows: VolumeRover3-<ver>-<sha>-windows-<arch>.zip
-#              VolumeRover3-<ver>-<sha>-windows-<arch>-setup.exe
+# volrover3 end-user app (per OS, both Debug + Release):
+#   - Linux:   volrover3-<ver>-<sha>-linux-<arch>-<config>.tar.gz
+#              volrover3-<ver>-<sha>-linux-<arch>-<config>.deb
+#              VolumeRover3-<ver>-<sha>-<arch>-<config>.AppImage
+#   - macOS:   VolumeRover3-<ver>-<sha>-macos-<arch>-<config>.dmg
+#              VolumeRover3-<ver>-<sha>-macos-<arch>-<config>.zip
+#   - Windows: VolumeRover3-<ver>-<sha>-windows-<arch>-<config>.zip
+#              VolumeRover3-<ver>-<sha>-windows-<arch>-<config>-setup.exe
 # ───────────────────────────────────────────────────────────────────
 
 jobs:
@@ -308,7 +308,10 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
-          - name: volrover3
+          - name: volrover3-debug
+            kind: volrover3
+            build_type: Debug
+          - name: volrover3-release
             kind: volrover3
             build_type: Release
     name: package-linux / ${{ matrix.name }}
@@ -428,12 +431,19 @@ jobs:
         if: matrix.kind == 'volrover3'
         working-directory: build
         run: |
-          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}"
+          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          # Override CPACK_COMPONENT_VOLROVER3_DEPENDS so cpack does not
+          # try to package the libcvc component as well — with
+          # CPACK_ARCHIVE_COMPONENT_INSTALL=ON / CPACK_DEB_COMPONENT_INSTALL=ON,
+          # cpack iterates dependencies and aborts when no libcvc
+          # install tree exists for this volrover3-only build.
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=volrover3 \
+                       -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-volrover3.tar.gz" "$STEM.tar.gz"
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
+                       -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           for f in volrover3*.deb; do [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/$STEM.deb"; done
 
@@ -441,7 +451,7 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: |
           set -euo pipefail
-          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}"
+          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
           DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component libcvc
           DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component volrover3
           curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
@@ -475,8 +485,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.tar.gz
-          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.tar.gz
+          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
+          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
           if-no-files-found: error
           retention-days: 30
 
@@ -484,8 +494,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.deb
-          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}.deb
+          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.deb
+          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.deb
           if-no-files-found: error
           retention-days: 30
 
@@ -493,8 +503,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}.AppImage
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}.AppImage
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.AppImage
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -511,7 +521,10 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
-          - name: volrover3
+          - name: volrover3-debug
+            kind: volrover3
+            build_type: Debug
+          - name: volrover3-release
             kind: volrover3
             build_type: Release
     name: package-macos / ${{ matrix.name }}
@@ -576,7 +589,7 @@ jobs:
         working-directory: build
         run: |
           set -euo pipefail
-          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}"
+          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
           # CPack DragNDrop runs the install rules (which invoke
           # macdeployqt) and produces a deployed VolumeRover3.app under
           # _CPack_Packages/Darwin/DragNDrop/<STEM>/ALL_IN_ONE/, then
@@ -607,8 +620,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.dmg
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.dmg
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.dmg
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.dmg
           if-no-files-found: error
           retention-days: 30
 
@@ -616,8 +629,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.zip
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}.zip
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -634,7 +647,10 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
-          - name: volrover3
+          - name: volrover3-debug
+            kind: volrover3
+            build_type: Debug
+          - name: volrover3-release
             kind: volrover3
             build_type: Release
     name: package-windows / ${{ matrix.name }}
@@ -752,16 +768,19 @@ jobs:
         shell: pwsh
         working-directory: build
         run: |
-          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}"
+          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
           $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\NSIS' -ErrorAction SilentlyContinue).'(default)'
           if (-not $nsisPath) {
             $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
           }
           if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
 
-          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem"
+          # Override CPACK_COMPONENT_VOLROVER3_DEPENDS so cpack does not
+          # try to package the libcvc component (which has no install
+          # tree in this volrover3-only build).
+          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem"
           Move-Item "$stem-volrover3.zip" "$stem.zip"
-          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
+          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
 
           Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
           Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
@@ -779,8 +798,8 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}.zip
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}.zip
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -788,7 +807,7 @@ jobs:
         if: matrix.kind == 'volrover3'
         uses: actions/upload-artifact@v4
         with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-setup.exe
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-setup.exe
+          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}-setup.exe
+          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}-setup.exe
           if-no-files-found: error
           retention-days: 30

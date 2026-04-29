@@ -158,11 +158,18 @@ jobs:
         working-directory: build
         run: |
           STEM="volrover3-${{ steps.meta.outputs.version }}-linux-${{ steps.meta.outputs.arch }}"
+          # Override CPACK_COMPONENT_VOLROVER3_DEPENDS so cpack does not
+          # try to package the libcvc component as well — with
+          # CPACK_ARCHIVE_COMPONENT_INSTALL=ON / CPACK_DEB_COMPONENT_INSTALL=ON,
+          # cpack iterates dependencies and aborts when no libcvc
+          # install tree exists for this volrover3-only build.
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=volrover3 \
+                      -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-volrover3.tar.gz" "$STEM.tar.gz"
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
+                      -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
           # CPack DEB names follow Debian convention; rename whatever
           # .deb landed to match our naming scheme.
@@ -441,11 +448,11 @@ jobs:
           }
           if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
 
-          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem"
+          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem"
           Move-Item "$stem-volrover3.zip" "$stem.zip"
           # NSIS installs all components selected; we want only volrover3.
           # The NSIS exe name is taken directly from CPACK_PACKAGE_FILE_NAME.
-          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
+          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
 
           Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
           Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
