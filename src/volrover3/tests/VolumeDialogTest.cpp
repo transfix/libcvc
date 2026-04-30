@@ -3,6 +3,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QTest>
+#include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/volume.h>
 #include <gtest/gtest.h>
@@ -45,9 +46,10 @@ protected:
 
   cvc::volume createTestVolume() {
     // Create a simple test volume (data doesn't matter for dialog tests)
-    return cvc::volume(cvc::dimension(4, 4, 4), cvc::UChar);
+    return cvc::volume(ctx, cvc::dimension(4, 4, 4), cvc::UChar);
   }
 
+  cvc::app ctx;
   std::shared_ptr<SceneGraph> sceneGraph;
   VolumeDialog *dialog;
 };

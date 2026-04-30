@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/volume.h>
@@ -27,6 +28,7 @@ protected:
 
   void TearDown() override { delete sceneGraph; }
 
+  cvc::app ctx;
   SceneGraph *sceneGraph;
   AppState *appState;
 };
@@ -50,7 +52,7 @@ TEST_F(SceneGraphTest, AddGeometryNode) {
 }
 
 TEST_F(SceneGraphTest, AddVolumeNode) {
-  cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
+  cvc::volume vol(ctx, cvc::dimension(4, 4, 4), cvc::UChar);
 
   auto node = sceneGraph->addGraphics("test_vol", vol);
 
@@ -95,7 +97,7 @@ TEST_F(SceneGraphTest, ResetCamera) {
 
 TEST_F(SceneGraphTest, TransferFunctionUpdate) {
   // Create a volume first
-  cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
+  cvc::volume vol(ctx, cvc::dimension(4, 4, 4), cvc::UChar);
   auto volNode = sceneGraph->addGraphics("test_vol", vol);
 
   // Update transfer function
@@ -114,7 +116,7 @@ TEST_F(SceneGraphTest, MultipleUpdates) {
   geom.points().push_back({0.0, 0.0, 0.0});
   sceneGraph->addGraphics("test_geom", geom);
 
-  cvc::volume vol(cvc::dimension(2, 2, 2), cvc::UChar);
+  cvc::volume vol(ctx, cvc::dimension(2, 2, 2), cvc::UChar);
   sceneGraph->addGraphics("test_vol", vol);
 
   sceneGraph->setGridVisible(true);
@@ -147,7 +149,7 @@ TEST_F(SceneGraphTest, VisibilityStateTree) {
 /*
 TEST_F(SceneGraphTest, TransferFunctionFromState) {
     // Create volume
-    cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
+    cvc::volume vol(ctx, cvc::dimension(4, 4, 4), cvc::UChar);
     sceneGraph->addGraphics("test_vol", vol);
 
     // Get transfer function from AppState
@@ -433,7 +435,7 @@ TEST_F(SceneGraphTest, EventQueueWithVolumeNode) {
   SceneGraph *threadedGraph = new SceneGraph();
 
   // Create volume node
-  cvc::volume vol(cvc::dimension(4, 4, 4), cvc::UChar);
+  cvc::volume vol(ctx, cvc::dimension(4, 4, 4), cvc::UChar);
   auto node = threadedGraph->addGraphics("test_vol", vol);
 
   // Get raw pointer for lambda capture

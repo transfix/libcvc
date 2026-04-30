@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/volume.h>
@@ -21,7 +22,7 @@ protected:
 
   void SetUp() override {
     // Create a simple test volume with known data range
-    testVolume = cvc::volume(cvc::dimension(10, 10, 10), cvc::UChar,
+    testVolume = cvc::volume(ctx, cvc::dimension(10, 10, 10), cvc::UChar,
                              cvc::bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0));
 
     // Fill with gradient data
@@ -38,7 +39,7 @@ protected:
     testVolume.max(27.0);
 
     // Create a volume with larger bounds for spacing tests
-    largeVolume = cvc::volume(cvc::dimension(171, 171, 171), cvc::Float,
+    largeVolume = cvc::volume(ctx, cvc::dimension(171, 171, 171), cvc::Float,
                               cvc::bounding_box(0.0, 0.0, 0.0, 945.0, 945.0, 945.0));
 
     // Fill with test data
@@ -56,8 +57,9 @@ protected:
 
   void TearDown() override {}
 
-  cvc::volume testVolume;
-  cvc::volume largeVolume;
+  cvc::app ctx;
+  cvc::volume testVolume{ctx};
+  cvc::volume largeVolume{ctx};
 };
 
 // ============================================================================

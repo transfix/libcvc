@@ -619,7 +619,7 @@ struct mrc_io : public volume_file_io {
       for (i = 0; i < len; i++) {
         char c = *((char *)(*vol + i * vol.voxelSize()));
         //*((unsigned char*)(*vol+i*vol.voxelSize())) = ((float(c) - SCHAR_MIN)/(SCHAR_MAX -
-        //SCHAR_MIN))*UCHAR_MAX;
+        // SCHAR_MIN))*UCHAR_MAX;
         *((unsigned char *)(*vol + i * vol.voxelSize())) = float(c) + shift;
       }
     } break;
@@ -638,7 +638,7 @@ struct mrc_io : public volume_file_io {
       for (i = 0; i < len; i++) {
         short c = *((short *)(*vol + i * vol.voxelSize()));
         //*((unsigned short*)(*vol+i*vol.voxelSize())) = ((float(c) - SHRT_MIN)/(SHRT_MAX -
-        //SHRT_MIN))*USHRT_MAX;
+        // SHRT_MIN))*USHRT_MAX;
 
         *((unsigned short *)(*vol + i * vol.voxelSize())) = float(c) + shift;
       }

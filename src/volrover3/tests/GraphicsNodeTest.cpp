@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/state_object.h>
@@ -39,6 +40,7 @@ protected:
 
   static int testCounter;
   std::string m_statePrefix;
+  cvc::app ctx;
   cvc::geometry testGeom;
 };
 
@@ -1093,7 +1095,7 @@ TEST_F(GraphicsNodeTest, CreateChildVolume) {
   auto parent = sceneGraph.addGraphics("parent", testGeom);
 
   // Create child volume using createChild
-  cvc::volume vol(cvc::dimension(10, 10, 10), cvc::UChar,
+  cvc::volume vol(ctx, cvc::dimension(10, 10, 10), cvc::UChar,
                   cvc::bounding_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0));
   auto child = parent->createChild<VolumeNode>("volume_child", vol);
 
@@ -1154,7 +1156,7 @@ TEST_F(GraphicsNodeTest, CreateMultipleChildren) {
   geom1.points().push_back({1.0, 0.0, 0.0});
   auto child1 = parent->createChild<GeometryNode>("geom1", geom1);
 
-  cvc::volume vol1(cvc::dimension(5, 5, 5), cvc::UChar,
+  cvc::volume vol1(ctx, cvc::dimension(5, 5, 5), cvc::UChar,
                    cvc::bounding_box(0.0, 0.0, 0.0, 5.0, 5.0, 5.0));
   auto child2 = parent->createChild<VolumeNode>("vol1", vol1);
 
@@ -1239,7 +1241,7 @@ TEST_F(GraphicsNodeTest, CreateChildVolumeDiscovery) {
   EXPECT_EQ(sceneGraph.getVolumeGraphicsCount(), 0);
 
   // Create child volumes
-  cvc::volume vol1(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+  cvc::volume vol1(ctx, cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
   auto childVol1 = parent->createChild<VolumeNode>("vol1", vol1);
 
   // Should now find the child volume
@@ -1249,7 +1251,7 @@ TEST_F(GraphicsNodeTest, CreateChildVolumeDiscovery) {
   EXPECT_EQ(allVolumes[0], childVol1);
 
   // Add another child volume at different level
-  cvc::volume vol2(cvc::dimension(3, 3, 3), cvc::UChar, cvc::bounding_box(0, 0, 0, 2, 2, 2));
+  cvc::volume vol2(ctx, cvc::dimension(3, 3, 3), cvc::UChar, cvc::bounding_box(0, 0, 0, 2, 2, 2));
   auto childVol2 = childVol1->createChild<VolumeNode>("vol2", vol2);
 
   // Should find both volumes
@@ -1274,7 +1276,7 @@ TEST_F(GraphicsNodeTest, CreateChildGeometryDiscovery) {
   SceneGraph sceneGraph(m_statePrefix);
 
   // Create a parent volume
-  cvc::volume vol(cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
+  cvc::volume vol(ctx, cvc::dimension(5, 5, 5), cvc::UChar, cvc::bounding_box(0, 0, 0, 4, 4, 4));
   auto parent = sceneGraph.addGraphics("parent_vol", vol);
 
   // Initial check - no geometries
@@ -1339,7 +1341,7 @@ TEST_F(GraphicsNodeTest, ChildVolumeInheritsParentTransform) {
   parentNode->setScale(2.0, 2.0, 2.0);
 
   // Create child volume (SDF from parent geometry)
-  cvc::volume childVol(cvc::dimension(10, 10, 10), cvc::UChar,
+  cvc::volume childVol(ctx, cvc::dimension(10, 10, 10), cvc::UChar,
                        cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
 
   auto childNode = parentNode->createChild<VolumeNode>("sdf", childVol);
@@ -1363,7 +1365,7 @@ TEST_F(GraphicsNodeTest, ChildGeometryInheritsParentTransform) {
   auto rootNode = sceneGraph.getGraphicsRoot();
 
   // Create parent volume
-  cvc::volume parentVol(cvc::dimension(10, 10, 10), cvc::UChar,
+  cvc::volume parentVol(ctx, cvc::dimension(10, 10, 10), cvc::UChar,
                         cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
 
   auto parentNode = rootNode->createChild<VolumeNode>("parent", parentVol);
@@ -1404,7 +1406,7 @@ TEST_F(GraphicsNodeTest, DeepTransformHierarchy) {
   parentNode->setScale(2.0, 2.0, 2.0);
 
   // Create child with rotation (90 degrees around Z)
-  cvc::volume childVol(cvc::dimension(5, 5, 5), cvc::UChar,
+  cvc::volume childVol(ctx, cvc::dimension(5, 5, 5), cvc::UChar,
                        cvc::bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
   auto childNode = parentNode->createChild<VolumeNode>("child", childVol);
   childNode->setRotation(0.0, 0.0, 90.0);
