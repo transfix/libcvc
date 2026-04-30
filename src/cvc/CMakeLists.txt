@@ -657,9 +657,12 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
   # voxels.cpp uses unsigned loop indices and OpenMP `min`/`max` reductions
   # that the classic MSVC OpenMP runtime (spec 2.0) rejects. Opt into the
-  # LLVM OpenMP runtime on MSVC so those constructs compile as-is.
+  # LLVM OpenMP runtime on MSVC so those constructs compile as-is. Gate on
+  # COMPILE_LANGUAGE:CXX so nvcc (which rejects the unknown flag with
+  # "nvcc fatal: Unknown option '-openmp:llvm'") does not see it when it
+  # walks cvc's INTERFACE_COMPILE_OPTIONS for .cu sources.
   if(MSVC)
-    target_compile_options(cvc PRIVATE -openmp:llvm)
+    target_compile_options(cvc PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-openmp:llvm>)
   endif()
 endif()
 
