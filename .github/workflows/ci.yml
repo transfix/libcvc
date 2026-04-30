@@ -52,13 +52,13 @@ on:
 jobs:
   # ─────────────────────── Format check ────────────────────────
   #
-  # Enforces .clang-format on lines changed by this PR/push only.
-  # The codebase is not yet fully formatted, so this guard prevents
-  # *new* violations rather than flagging the historical baseline.
-  # When a wholesale format pass lands on main, this job can be
-  # tightened to check entire files.
+  # Enforces .clang-format on lines changed by this PR/push.
+  # A whole-tree format pass landed on master, so this job is now
+  # strict: any unformatted change fails the build. Run
+  # `git clang-format <merge-base>` locally before pushing, or
+  # `clang-format -i <file>` on touched files.
   format-check:
-    name: clang-format (changed lines, advisory)
+    name: clang-format (changed lines)
     runs-on: ubuntu-24.04
     # Cheap job: cancel previous in-progress runs on new pushes for fast feedback.
     concurrency:
@@ -102,14 +102,11 @@ jobs:
             echo "Formatting OK on changed lines."
             exit 0
           fi
-          # Advisory only while the codebase is gradually formatted.
-          # After the whole-tree clang-format pass lands on master,
-          # change this to `exit 1` to enforce the style.
-          echo "::warning::clang-format would reformat changed lines. To apply:"
+          echo "::error::clang-format would reformat changed lines. To apply:"
           echo "  git clang-format $base"
           echo
           echo "$out"
-          exit 0
+          exit 1
 
   # ──────────────────────────── Tests ────────────────────────────
   #
