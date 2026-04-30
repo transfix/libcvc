@@ -18,11 +18,9 @@
 
 BBoxNode::BBoxNode()
     : m_actor(vtkSmartPointer<vtkActor>::New()),
-      m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
-      m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
-      m_coordinatesVisible(true), m_coordinateLabelFontSize(12),
-      m_renderer(nullptr) {
+      m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()), m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
+      m_transform(vtkSmartPointer<vtkMatrix4x4>::New()), m_coordinatesVisible(true),
+      m_coordinateLabelFontSize(12), m_renderer(nullptr) {
   m_transform->Identity();
   m_actor->SetMapper(m_mapper);
 
@@ -32,8 +30,7 @@ BBoxNode::BBoxNode()
   m_actor->GetProperty()->SetOpacity(1.0);
 
   // Default coordinate label color (white)
-  m_coordinateLabelColor[0] = m_coordinateLabelColor[1] =
-      m_coordinateLabelColor[2] = 1.0;
+  m_coordinateLabelColor[0] = m_coordinateLabelColor[1] = m_coordinateLabelColor[2] = 1.0;
 
   createBBox();
 }
@@ -70,9 +67,7 @@ void BBoxNode::setBoundingBox(const cvc::bounding_box &bbox) {
   createCoordinateLabels();
 }
 
-void BBoxNode::setColor(double r, double g, double b) {
-  m_actor->GetProperty()->SetColor(r, g, b);
-}
+void BBoxNode::setColor(double r, double g, double b) { m_actor->GetProperty()->SetColor(r, g, b); }
 
 void BBoxNode::getColor(double &r, double &g, double &b) const {
   double *color = m_actor->GetProperty()->GetColor();
@@ -81,9 +76,7 @@ void BBoxNode::getColor(double &r, double &g, double &b) const {
   b = color[2];
 }
 
-void BBoxNode::setLineWidth(double width) {
-  m_actor->GetProperty()->SetLineWidth(width);
-}
+void BBoxNode::setLineWidth(double width) { m_actor->GetProperty()->SetLineWidth(width); }
 
 void BBoxNode::setTransform(vtkMatrix4x4 *transform) {
   if (transform && m_actor) {
@@ -91,8 +84,7 @@ void BBoxNode::setTransform(vtkMatrix4x4 *transform) {
     m_transform->DeepCopy(transform);
 
     // Apply to bbox actor
-    vtkSmartPointer<vtkTransform> vtkTrans =
-        vtkSmartPointer<vtkTransform>::New();
+    vtkSmartPointer<vtkTransform> vtkTrans = vtkSmartPointer<vtkTransform>::New();
     vtkTrans->SetMatrix(transform);
     m_actor->SetUserTransform(vtkTrans);
 
@@ -180,8 +172,7 @@ void BBoxNode::setCoordinateLabelColor(double r, double g, double b) {
   }
 }
 
-void BBoxNode::getCoordinateLabelColor(double &r, double &g,
-                                       double &b) const {
+void BBoxNode::getCoordinateLabelColor(double &r, double &g, double &b) const {
   r = m_coordinateLabelColor[0];
   g = m_coordinateLabelColor[1];
   b = m_coordinateLabelColor[2];
@@ -230,27 +221,23 @@ void BBoxNode::createCoordinateLabels() {
     return;
 
   // Helper lambda to create a label at world-transformed position
-  auto createLabel = [&](double x, double y, double z,
-                         const std::string &text) {
+  auto createLabel = [&](double x, double y, double z, const std::string &text) {
     // Transform local position to world position
     double localPos[4] = {x, y, z, 1.0};
     double worldPos[4];
     m_transform->MultiplyPoint(localPos, worldPos);
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(text.c_str());
     textMapper->GetTextProperty()->SetFontSize(m_coordinateLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_coordinateLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
-    textActor->GetPositionCoordinate()->SetValue(worldPos[0], worldPos[1],
-                                                 worldPos[2]);
+    textActor->GetPositionCoordinate()->SetValue(worldPos[0], worldPos[1], worldPos[2]);
     textActor->SetVisibility(m_coordinatesVisible);
 
     m_coordinateLabelActors.push_back(textActor);
@@ -261,14 +248,14 @@ void BBoxNode::createCoordinateLabels() {
   std::ostringstream oss;
 
   // Minimum corner
-  oss << "Min: (" << std::fixed << std::setprecision(2) << minX << ", "
-      << minY << ", " << minZ << ")";
+  oss << "Min: (" << std::fixed << std::setprecision(2) << minX << ", " << minY << ", " << minZ
+      << ")";
   createLabel(minX, minY, minZ, oss.str());
 
   // Maximum corner
   oss.str("");
-  oss << "Max: (" << std::fixed << std::setprecision(2) << maxX << ", "
-      << maxY << ", " << maxZ << ")";
+  oss << "Max: (" << std::fixed << std::setprecision(2) << maxX << ", " << maxY << ", " << maxZ
+      << ")";
   createLabel(maxX, maxY, maxZ, oss.str());
 
   // Add new labels to renderer if we have one and coordinates are visible

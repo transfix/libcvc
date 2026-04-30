@@ -1,6 +1,6 @@
 BasedOnStyle: LLVM
 BreakBeforeBraces: Attach  # Braces on the same line as function declarations and control statements (e.g., void foo() { ... })
-ColumnLimit: 78            # Max 78 column width (will wrap where practical)
+ColumnLimit: 100           # Max 100 column width (will wrap where practical)
 IndentWidth: 2             # 2-space indentation
 UseTab: Never              # Use spaces only, no tabs
 SortIncludes: CaseSensitive

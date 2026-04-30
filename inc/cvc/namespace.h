@@ -36,6 +36,8 @@
 // `namespace CVC { ... }` to add its own aliases (which would be forbidden
 // if CVC were a namespace *alias*).
 namespace CVC_NAMESPACE {}
-namespace CVC { using namespace CVC_NAMESPACE; }
+namespace CVC {
+using namespace CVC_NAMESPACE;
+}
 
 #endif

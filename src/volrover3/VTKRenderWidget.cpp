@@ -17,18 +17,15 @@ VTKRenderWidget::VTKRenderWidget(QWidget *parent)
       m_renderWindow(vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New()),
       m_renderer(vtkSmartPointer<vtkRenderer>::New()),
       m_cameraController(std::make_unique<CameraController>()),
-      m_fpsAnnotation(vtkSmartPointer<vtkCornerAnnotation>::New()),
-      m_showFPS(false) {
+      m_fpsAnnotation(vtkSmartPointer<vtkCornerAnnotation>::New()), m_showFPS(false) {
   initializeVTK();
 
   // Set up timer to process SceneGraph events on main thread
-  connect(&m_eventTimer, &QTimer::timeout, this,
-          &VTKRenderWidget::processSceneGraphEvents);
+  connect(&m_eventTimer, &QTimer::timeout, this, &VTKRenderWidget::processSceneGraphEvents);
   m_eventTimer.start(16); // ~60fps event processing
 
   // Set up timer to update FPS display (every 500ms)
-  connect(&m_fpsTimer, &QTimer::timeout, this,
-          &VTKRenderWidget::updateFPSDisplay);
+  connect(&m_fpsTimer, &QTimer::timeout, this, &VTKRenderWidget::updateFPSDisplay);
 
   // Load FPS display setting from state
   m_showFPS = AppState::instance().showFPS();
@@ -58,7 +55,7 @@ void VTKRenderWidget::initializeVTK() {
   m_cameraController->setCamera(camera);
 
   // Set up FPS annotation in top-left corner
-  m_fpsAnnotation->SetText(2, "FPS: --"); // Position 2 = upper left
+  m_fpsAnnotation->SetText(2, "FPS: --");                      // Position 2 = upper left
   m_fpsAnnotation->GetTextProperty()->SetColor(1.0, 1.0, 0.0); // Yellow
   m_fpsAnnotation->GetTextProperty()->SetFontSize(14);
   m_fpsAnnotation->SetVisibility(false); // Hidden by default

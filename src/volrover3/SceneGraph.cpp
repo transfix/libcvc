@@ -1,626 +1,579 @@
-#include <volrover3/volrover3_app.h>
-#include <volrover3/SceneGraph.h>
-#include <volrover3/SceneNode.h>
-#include <volrover3/GeometryNode.h>
-#include <volrover3/GraphicsNode.h>
-#include <volrover3/NullGraphicNode.h>
-#include <volrover3/VolumeNode.h>
-#include <volrover3/VolumeNode.h>
-#include <volrover3/GridNode.h>
+#include <algorithm>
+#include <cvc/app.h>
+#include <cvc/geometry.h>
+#include <cvc/state.h>
+#include <cvc/volume.h>
+#include <limits>
+#include <volrover3/AppState.h>
 #include <volrover3/AxisNode.h>
 #include <volrover3/BBoxNode.h>
-#include <volrover3/AppState.h>
-#include <cvc/geometry.h>
-#include <cvc/volume.h>
-#include <cvc/state.h>
-#include <cvc/app.h>
-#include <vtkRenderer.h>
-#include <vtkMultiVolume.h>
+#include <volrover3/GeometryNode.h>
+#include <volrover3/GraphicsNode.h>
+#include <volrover3/GridNode.h>
+#include <volrover3/NullGraphicNode.h>
+#include <volrover3/SceneGraph.h>
+#include <volrover3/SceneNode.h>
+#include <volrover3/VolumeNode.h>
+#include <volrover3/volrover3_app.h>
 #include <vtkGPUVolumeRayCastMapper.h>
-#include <algorithm>
-#include <limits>
+#include <vtkMultiVolume.h>
+#include <vtkRenderer.h>
 
-SceneGraph::SceneGraph(const std::string& statePrefix)
-    : m_renderer(nullptr)
-    , m_statePrefix(statePrefix)
-    , m_gridNode(nullptr)
-    , m_axisNode(nullptr)
-    , m_graphicsRoot(nullptr)
-    , m_nullGraphic(nullptr)
-    , m_multiVolumeRenderingEnabled(false)
-    , m_renderNeeded(false)
-{
-    // Create null graphic as THE root graphics node (all graphics go under this)
-    // State path: {statePrefix}.graphics.root
-    std::string rootStatePath = statePrefix + ".graphics.root";
-    m_nullGraphic = std::make_shared<NullGraphicNode>(rootStatePath, "root");
-    
-    // Set SceneGraph reference IMMEDIATELY after construction
-    // This enables threading for event posting (nodes disable threading in constructor)
-    m_nullGraphic->setSceneGraph(this);
-    
-    m_nullGraphic->setShowBBox(true);  // Show bbox by default
-    m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);  // Default unit cube when empty
-    m_nullGraphic->setIncludeOwnBounds(true);  // Include root bounds in visualization (will change to false when children are added)
-    m_graphicsRoot = m_nullGraphic;  // NullGraphic IS the graphics root
-    m_rootNodes.push_back(m_graphicsRoot);
-    
-    // Create grid and axis as graphics children of the root null graphic
-    // They will live in the null graphic's coordinate system and state tree
-    m_gridNode = m_nullGraphic->template addGraphicsChild<GridNode>("grid");
-    m_axisNode = m_nullGraphic->template addGraphicsChild<AxisNode>("axis");
-    
-    // GridNode and AxisNode initialize their own default state and colors
-    
-    // Subscribe to root node bounds changes to update world bounds in AppState
-    m_rootBoundsConnection = m_nullGraphic->getState("bounds").valueChanged.connect(
-        [this]() {
-            cvc::bounding_box bounds = m_nullGraphic->getBoundingBox();
-            std::cout << "[DEBUG] SceneGraph - Root node bounds changed, updating world bounds to [" 
-                      << bounds[0] << "," << bounds[1] << "," << bounds[2] 
-                      << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
-            AppState::instance().setWorldBounds(bounds);
-        }
-    );
+SceneGraph::SceneGraph(const std::string &statePrefix)
+    : m_renderer(nullptr), m_statePrefix(statePrefix), m_gridNode(nullptr), m_axisNode(nullptr),
+      m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
+      m_renderNeeded(false) {
+  // Create null graphic as THE root graphics node (all graphics go under this)
+  // State path: {statePrefix}.graphics.root
+  std::string rootStatePath = statePrefix + ".graphics.root";
+  m_nullGraphic = std::make_shared<NullGraphicNode>(rootStatePath, "root");
+
+  // Set SceneGraph reference IMMEDIATELY after construction
+  // This enables threading for event posting (nodes disable threading in constructor)
+  m_nullGraphic->setSceneGraph(this);
+
+  m_nullGraphic->setShowBBox(true);                          // Show bbox by default
+  m_nullGraphic->setBounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5); // Default unit cube when empty
+  m_nullGraphic->setIncludeOwnBounds(
+      true); // Include root bounds in visualization (will change to false when children are added)
+  m_graphicsRoot = m_nullGraphic; // NullGraphic IS the graphics root
+  m_rootNodes.push_back(m_graphicsRoot);
+
+  // Create grid and axis as graphics children of the root null graphic
+  // They will live in the null graphic's coordinate system and state tree
+  m_gridNode = m_nullGraphic->template addGraphicsChild<GridNode>("grid");
+  m_axisNode = m_nullGraphic->template addGraphicsChild<AxisNode>("axis");
+
+  // GridNode and AxisNode initialize their own default state and colors
+
+  // Subscribe to root node bounds changes to update world bounds in AppState
+  m_rootBoundsConnection = m_nullGraphic->getState("bounds").valueChanged.connect([this]() {
+    cvc::bounding_box bounds = m_nullGraphic->getBoundingBox();
+    std::cout << "[DEBUG] SceneGraph - Root node bounds changed, updating world bounds to ["
+              << bounds[0] << "," << bounds[1] << "," << bounds[2] << "] to [" << bounds[3] << ","
+              << bounds[4] << "," << bounds[5] << "]" << std::endl;
+    AppState::instance().setWorldBounds(bounds);
+  });
 }
 
-SceneGraph::~SceneGraph()
-{
-    // Disconnect root bounds subscription
-    m_rootBoundsConnection.disconnect();
-    
-    // Process any remaining events before shutdown
-    processEvents();
-    
-    if (m_renderer) {
-        for (auto &node : m_rootNodes) {
-            node->removeFromRenderer(m_renderer);
-        }
-    }
-    
-    // Clear SceneGraph reference from all nodes
+SceneGraph::~SceneGraph() {
+  // Disconnect root bounds subscription
+  m_rootBoundsConnection.disconnect();
+
+  // Process any remaining events before shutdown
+  processEvents();
+
+  if (m_renderer) {
     for (auto &node : m_rootNodes) {
-        node->setSceneGraph(nullptr);
+      node->removeFromRenderer(m_renderer);
     }
+  }
+
+  // Clear SceneGraph reference from all nodes
+  for (auto &node : m_rootNodes) {
+    node->setSceneGraph(nullptr);
+  }
 }
 
-void SceneGraph::postEvent(std::function<void()> callback)
-{
+void SceneGraph::postEvent(std::function<void()> callback) {
+  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+  m_eventQueue.push(std::move(callback));
+  m_renderNeeded = true;
+}
+
+void SceneGraph::processEvents() {
+  // Process all pending events on the main thread
+  // Extract all events while holding the lock, then execute without lock
+  std::queue<std::function<void()>> events;
+  {
     std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-    m_eventQueue.push(std::move(callback));
-    m_renderNeeded = true;
+    std::swap(events, m_eventQueue);
+  }
+
+  // Execute all events on the main thread
+  while (!events.empty()) {
+    auto &callback = events.front();
+    if (callback) {
+      callback();
+    }
+    events.pop();
+  }
 }
 
-void SceneGraph::processEvents()
-{
-    // Process all pending events on the main thread
-    // Extract all events while holding the lock, then execute without lock
-    std::queue<std::function<void()>> events;
-    {
-        std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-        std::swap(events, m_eventQueue);
-    }
-    
-    // Execute all events on the main thread
-    while (!events.empty()) {
-        auto& callback = events.front();
-        if (callback) {
-            callback();
-        }
-        events.pop();
-    }
+bool SceneGraph::checkAndResetRenderNeeded() {
+  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+  bool needed = m_renderNeeded;
+  m_renderNeeded = false;
+  return needed;
 }
 
-bool SceneGraph::checkAndResetRenderNeeded()
-{
-    std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-    bool needed = m_renderNeeded;
-    m_renderNeeded = false;
-    return needed;
-}
-
-void SceneGraph::setRenderer(vtkRenderer *renderer)
-{
-    if (m_renderer) {
-        for (auto &node : m_rootNodes) {
-            node->removeFromRenderer(m_renderer);
-        }
-    }
-
-    m_renderer = renderer;
-
-    if (m_renderer) {
-        for (auto &node : m_rootNodes) {
-            node->addToRenderer(m_renderer);
-        }
-    }
-}
-
-void SceneGraph::update()
-{
+void SceneGraph::setRenderer(vtkRenderer *renderer) {
+  if (m_renderer) {
     for (auto &node : m_rootNodes) {
-        node->update();
+      node->removeFromRenderer(m_renderer);
     }
-}
+  }
 
-void SceneGraph::setGridVisible(bool visible)
-{
-    m_gridNode->setVisible(visible);
-}
+  m_renderer = renderer;
 
-void SceneGraph::setAxisVisible(bool visible)
-{
-    m_axisNode->setVisible(visible);
-}
-
-void SceneGraph::setGridColor(double r, double g, double b)
-{
-    m_gridNode->setColor(r, g, b);
-}
-
-void SceneGraph::updateGrid(const cvc::bounding_box& bounds)
-{
-    std::cout << "[DEBUG] SceneGraph::updateGrid - Input bounds: [" 
-              << bounds[0] << "," << bounds[1] << "," << bounds[2] 
-              << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]" << std::endl;
-    
-    // Update the null graphic's own bounds
-    m_nullGraphic->setBounds(bounds);
-    
-    // Get combined bounds of null graphic (respecting children's local coordinate systems)
-    // This automatically excludes grid and axis as they're just visualization helpers
-    cvc::bounding_box combinedBounds = m_nullGraphic->getCombinedBoundingBox();
-    
-    std::cout << "[DEBUG] SceneGraph::updateGrid - Combined bounds: [" 
-              << combinedBounds[0] << "," << combinedBounds[1] << "," << combinedBounds[2] 
-              << "] to [" << combinedBounds[3] << "," << combinedBounds[4] << "," << combinedBounds[5] << "]" << std::endl;
-    
-    // Update grid to match combined bounds
-    m_gridNode->setBounds(combinedBounds);
-    
-    // Scale axis length to be proportional to combined bounding box size
-    double spanX = combinedBounds[3] - combinedBounds[0];
-    double spanY = combinedBounds[4] - combinedBounds[1];
-    double spanZ = combinedBounds[5] - combinedBounds[2];
-    double maxSpan = std::max({spanX, spanY, spanZ});
-    
-    // Set axis to be about 20% of the maximum span
-    double axisLength = maxSpan * 0.2;
-    if (axisLength > 0.0) {
-        m_axisNode->setAxisLength(axisLength);
+  if (m_renderer) {
+    for (auto &node : m_rootNodes) {
+      node->addToRenderer(m_renderer);
     }
+  }
 }
 
-void SceneGraph::setGridPlaneVisibility(bool yz, bool xz, bool xy)
-{
-    m_gridNode->setYZPlaneVisible(yz);
-    m_gridNode->setXZPlaneVisible(xz);
-    m_gridNode->setXYPlaneVisible(xy);
+void SceneGraph::update() {
+  for (auto &node : m_rootNodes) {
+    node->update();
+  }
 }
 
-void SceneGraph::setGridDivisions(int x, int y, int z)
-{
-    m_gridNode->setGridDivisions(x, y, z);
+void SceneGraph::setGridVisible(bool visible) { m_gridNode->setVisible(visible); }
+
+void SceneGraph::setAxisVisible(bool visible) { m_axisNode->setVisible(visible); }
+
+void SceneGraph::setGridColor(double r, double g, double b) { m_gridNode->setColor(r, g, b); }
+
+void SceneGraph::updateGrid(const cvc::bounding_box &bounds) {
+  std::cout << "[DEBUG] SceneGraph::updateGrid - Input bounds: [" << bounds[0] << "," << bounds[1]
+            << "," << bounds[2] << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5]
+            << "]" << std::endl;
+
+  // Update the null graphic's own bounds
+  m_nullGraphic->setBounds(bounds);
+
+  // Get combined bounds of null graphic (respecting children's local coordinate systems)
+  // This automatically excludes grid and axis as they're just visualization helpers
+  cvc::bounding_box combinedBounds = m_nullGraphic->getCombinedBoundingBox();
+
+  std::cout << "[DEBUG] SceneGraph::updateGrid - Combined bounds: [" << combinedBounds[0] << ","
+            << combinedBounds[1] << "," << combinedBounds[2] << "] to [" << combinedBounds[3] << ","
+            << combinedBounds[4] << "," << combinedBounds[5] << "]" << std::endl;
+
+  // Update grid to match combined bounds
+  m_gridNode->setBounds(combinedBounds);
+
+  // Scale axis length to be proportional to combined bounding box size
+  double spanX = combinedBounds[3] - combinedBounds[0];
+  double spanY = combinedBounds[4] - combinedBounds[1];
+  double spanZ = combinedBounds[5] - combinedBounds[2];
+  double maxSpan = std::max({spanX, spanY, spanZ});
+
+  // Set axis to be about 20% of the maximum span
+  double axisLength = maxSpan * 0.2;
+  if (axisLength > 0.0) {
+    m_axisNode->setAxisLength(axisLength);
+  }
 }
 
-void SceneGraph::setGridTickIntervals(int x, int y, int z)
-{
-    m_gridNode->setTickIntervals(x, y, z);
+void SceneGraph::setGridPlaneVisibility(bool yz, bool xz, bool xy) {
+  m_gridNode->setYZPlaneVisible(yz);
+  m_gridNode->setXZPlaneVisible(xz);
+  m_gridNode->setXYPlaneVisible(xy);
 }
 
-void SceneGraph::setGridPlaneColors(double yzR, double yzG, double yzB,
-                                     double xzR, double xzG, double xzB,
-                                     double xyR, double xyG, double xyB)
-{
-    m_gridNode->setYZPlaneColor(yzR, yzG, yzB);
-    m_gridNode->setXZPlaneColor(xzR, xzG, xzB);
-    m_gridNode->setXYPlaneColor(xyR, xyG, xyB);
+void SceneGraph::setGridDivisions(int x, int y, int z) { m_gridNode->setGridDivisions(x, y, z); }
+
+void SceneGraph::setGridTickIntervals(int x, int y, int z) {
+  m_gridNode->setTickIntervals(x, y, z);
 }
 
-void SceneGraph::setGridTickLabelProperties(double r, double g, double b, int fontSize)
-{
-    m_gridNode->setTickLabelColor(r, g, b);
-    m_gridNode->setTickLabelFontSize(fontSize);
+void SceneGraph::setGridPlaneColors(double yzR, double yzG, double yzB, double xzR, double xzG,
+                                    double xzB, double xyR, double xyG, double xyB) {
+  m_gridNode->setYZPlaneColor(yzR, yzG, yzB);
+  m_gridNode->setXZPlaneColor(xzR, xzG, xzB);
+  m_gridNode->setXYPlaneColor(xyR, xyG, xyB);
+}
+
+void SceneGraph::setGridTickLabelProperties(double r, double g, double b, int fontSize) {
+  m_gridNode->setTickLabelColor(r, g, b);
+  m_gridNode->setTickLabelFontSize(fontSize);
 }
 
 void SceneGraph::updateTransferFunction(const std::vector<double> &colorTable,
-                                        const std::vector<double> &opacityTable)
-{
-    // Apply transfer function to all volume nodes
-    auto volumes = getAllVolumeGraphics();
-    for (auto& volNode : volumes) {
-        volNode->setTransferFunction(colorTable, opacityTable);
-    }
+                                        const std::vector<double> &opacityTable) {
+  // Apply transfer function to all volume nodes
+  auto volumes = getAllVolumeGraphics();
+  for (auto &volNode : volumes) {
+    volNode->setTransferFunction(colorTable, opacityTable);
+  }
 }
 
-cvc::bounding_box SceneGraph::computeGraphicsBounds() const
-{
-    cvc::bounding_box combinedBounds;
-    bool first = true;
-    
-    // Process each direct child of the graphics root
-    // Each child's getCombinedBoundingBox() already includes its descendants recursively
-    if (m_graphicsRoot) {
-        for (const auto& child : m_graphicsRoot->getGraphicsChildren()) {
-            if (!child) continue;
-            
-            // Skip grid and axis nodes - they don't contribute to scene bounds
-            if (child.get() == m_gridNode.get() || child.get() == m_axisNode.get()) {
-                continue;
-            }
-            
-            // Get combined bbox of this child (includes all its descendants in local space)
-            cvc::bounding_box childBBox = child->getCombinedBoundingBox();
-            
-            // Skip invalid bounding boxes
-            if (childBBox[0] > childBBox[3] || 
-                childBBox[1] > childBBox[4] || 
-                childBBox[2] > childBBox[5]) {
-                continue;
-            }
-            
-            // Apply world transform to the bounding box by transforming all 8 corners
-            vtkSmartPointer<vtkMatrix4x4> worldTransform = child->getWorldTransform();
-            
-            double corners[8][3] = {
-                {childBBox[0], childBBox[1], childBBox[2]},  // min, min, min
-                {childBBox[3], childBBox[1], childBBox[2]},  // max, min, min
-                {childBBox[0], childBBox[4], childBBox[2]},  // min, max, min
-                {childBBox[3], childBBox[4], childBBox[2]},  // max, max, min
-                {childBBox[0], childBBox[1], childBBox[5]},  // min, min, max
-                {childBBox[3], childBBox[1], childBBox[5]},  // max, min, max
-                {childBBox[0], childBBox[4], childBBox[5]},  // min, max, max
-                {childBBox[3], childBBox[4], childBBox[5]}   // max, max, max
-            };
-            
-            // Transform all corners and find new axis-aligned bounds
-            double minx = std::numeric_limits<double>::max();
-            double miny = std::numeric_limits<double>::max();
-            double minz = std::numeric_limits<double>::max();
-            double maxx = std::numeric_limits<double>::lowest();
-            double maxy = std::numeric_limits<double>::lowest();
-            double maxz = std::numeric_limits<double>::lowest();
-            
-            for (int i = 0; i < 8; ++i) {
-                double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
-                double out[4];
-                worldTransform->MultiplyPoint(in, out);
-                
-                minx = std::min(minx, out[0]);
-                miny = std::min(miny, out[1]);
-                minz = std::min(minz, out[2]);
-                maxx = std::max(maxx, out[0]);
-                maxy = std::max(maxy, out[1]);
-                maxz = std::max(maxz, out[2]);
-            }
-            
-            // Merge with combined bounds
-            if (first) {
-                combinedBounds = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
-                first = false;
-            } else {
-                combinedBounds[0] = std::min(combinedBounds[0], minx);
-                combinedBounds[1] = std::min(combinedBounds[1], miny);
-                combinedBounds[2] = std::min(combinedBounds[2], minz);
-                combinedBounds[3] = std::max(combinedBounds[3], maxx);
-                combinedBounds[4] = std::max(combinedBounds[4], maxy);
-                combinedBounds[5] = std::max(combinedBounds[5], maxz);
-            }
-        }
+cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
+  cvc::bounding_box combinedBounds;
+  bool first = true;
+
+  // Process each direct child of the graphics root
+  // Each child's getCombinedBoundingBox() already includes its descendants recursively
+  if (m_graphicsRoot) {
+    for (const auto &child : m_graphicsRoot->getGraphicsChildren()) {
+      if (!child)
+        continue;
+
+      // Skip grid and axis nodes - they don't contribute to scene bounds
+      if (child.get() == m_gridNode.get() || child.get() == m_axisNode.get()) {
+        continue;
+      }
+
+      // Get combined bbox of this child (includes all its descendants in local space)
+      cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+
+      // Skip invalid bounding boxes
+      if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] ||
+          childBBox[2] > childBBox[5]) {
+        continue;
+      }
+
+      // Apply world transform to the bounding box by transforming all 8 corners
+      vtkSmartPointer<vtkMatrix4x4> worldTransform = child->getWorldTransform();
+
+      double corners[8][3] = {
+          {childBBox[0], childBBox[1], childBBox[2]}, // min, min, min
+          {childBBox[3], childBBox[1], childBBox[2]}, // max, min, min
+          {childBBox[0], childBBox[4], childBBox[2]}, // min, max, min
+          {childBBox[3], childBBox[4], childBBox[2]}, // max, max, min
+          {childBBox[0], childBBox[1], childBBox[5]}, // min, min, max
+          {childBBox[3], childBBox[1], childBBox[5]}, // max, min, max
+          {childBBox[0], childBBox[4], childBBox[5]}, // min, max, max
+          {childBBox[3], childBBox[4], childBBox[5]}  // max, max, max
+      };
+
+      // Transform all corners and find new axis-aligned bounds
+      double minx = std::numeric_limits<double>::max();
+      double miny = std::numeric_limits<double>::max();
+      double minz = std::numeric_limits<double>::max();
+      double maxx = std::numeric_limits<double>::lowest();
+      double maxy = std::numeric_limits<double>::lowest();
+      double maxz = std::numeric_limits<double>::lowest();
+
+      for (int i = 0; i < 8; ++i) {
+        double in[4] = {corners[i][0], corners[i][1], corners[i][2], 1.0};
+        double out[4];
+        worldTransform->MultiplyPoint(in, out);
+
+        minx = std::min(minx, out[0]);
+        miny = std::min(miny, out[1]);
+        minz = std::min(minz, out[2]);
+        maxx = std::max(maxx, out[0]);
+        maxy = std::max(maxy, out[1]);
+        maxz = std::max(maxz, out[2]);
+      }
+
+      // Merge with combined bounds
+      if (first) {
+        combinedBounds = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+        first = false;
+      } else {
+        combinedBounds[0] = std::min(combinedBounds[0], minx);
+        combinedBounds[1] = std::min(combinedBounds[1], miny);
+        combinedBounds[2] = std::min(combinedBounds[2], minz);
+        combinedBounds[3] = std::max(combinedBounds[3], maxx);
+        combinedBounds[4] = std::max(combinedBounds[4], maxy);
+        combinedBounds[5] = std::max(combinedBounds[5], maxz);
+      }
     }
-    
-    return combinedBounds;
+  }
+
+  return combinedBounds;
 }
 
 // Multi-object graphics management
-std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name, const cvc::geometry& geom)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Check if name already exists
-    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        volrover3::app().log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
-        removeGraphics(name);
-    }
-    
-    // Create new geometry node using template factory (automatically creates proper state path)
-    auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
-    graphicsNode->setGeometry(geom);
-    
-    // Add to lookup map
-    m_graphicsNodes[name] = graphicsNode;
-    
-    // Remove null graphic since we now have real graphics
-    removeNullGraphicIfPresent();
-    
-    // Notify dialogs that children collection has changed
-    try {
-        m_graphicsRoot->getState("children").touch();
-    } catch (...) {
-        // State might not exist yet
-    }
-    
-    // Emit signal for dialogs
-    graphicsChanged();
-    
-    return graphicsNode;
+std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
+                                                      const cvc::geometry &geom) {
+  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+
+  // Check if name already exists
+  if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+    volrover3::app().log(0, "SceneGraph::addGraphics: Graphics object '" + name +
+                                "' already exists, replacing");
+    removeGraphics(name);
+  }
+
+  // Create new geometry node using template factory (automatically creates proper state path)
+  auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
+  graphicsNode->setGeometry(geom);
+
+  // Add to lookup map
+  m_graphicsNodes[name] = graphicsNode;
+
+  // Remove null graphic since we now have real graphics
+  removeNullGraphicIfPresent();
+
+  // Notify dialogs that children collection has changed
+  try {
+    m_graphicsRoot->getState("children").touch();
+  } catch (...) {
+    // State might not exist yet
+  }
+
+  // Emit signal for dialogs
+  graphicsChanged();
+
+  return graphicsNode;
 }
 
-std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string& name)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Check if name already exists
-    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        volrover3::app().log(0, "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
-        removeGraphics(name);
-    }
-    
-    // Create new empty geometry node using template factory (automatically creates proper state path)
-    auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
-    
-    // Add to lookup map
-    m_graphicsNodes[name] = graphicsNode;
-    
-    // Remove null graphic since we now have real graphics
-    removeNullGraphicIfPresent();
-    
-    // Notify dialogs that children collection has changed
-    try {
-        m_graphicsRoot->getState("children").touch();
-    } catch (...) {
-        // State might not exist yet
-    }
-    
-    // Emit signal for dialogs
-    graphicsChanged();
-    
-    return graphicsNode;
+std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
+  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+
+  // Check if name already exists
+  if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+    volrover3::app().log(0, "SceneGraph::addGraphics: Graphics object '" + name +
+                                "' already exists, replacing");
+    removeGraphics(name);
+  }
+
+  // Create new empty geometry node using template factory (automatically creates proper state path)
+  auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
+
+  // Add to lookup map
+  m_graphicsNodes[name] = graphicsNode;
+
+  // Remove null graphic since we now have real graphics
+  removeNullGraphicIfPresent();
+
+  // Notify dialogs that children collection has changed
+  try {
+    m_graphicsRoot->getState("children").touch();
+  } catch (...) {
+    // State might not exist yet
+  }
+
+  // Emit signal for dialogs
+  graphicsChanged();
+
+  return graphicsNode;
 }
 
-bool SceneGraph::hasGraphics(const std::string& name) const
-{
-    return m_graphicsNodes.find(name) != m_graphicsNodes.end();
+bool SceneGraph::hasGraphics(const std::string &name) const {
+  return m_graphicsNodes.find(name) != m_graphicsNodes.end();
 }
 
-void SceneGraph::removeGraphics(const std::string& name)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    auto it = m_graphicsNodes.find(name);
-    if (it == m_graphicsNodes.end()) {
-        volrover3::app().log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
-        return;
-    }
-    
-    auto graphicsNode = it->second;
-    
-    // Remove from graphics root
-    m_graphicsRoot->removeGraphicsChild(graphicsNode);
-    
-    // Remove from lookup map
-    m_graphicsNodes.erase(it);
-    
-    // Explicitly notify state tree that children have changed
-    // This triggers dataChanged signals that dialogs are listening to
-    try {
-        m_graphicsRoot->getState("children").touch();
-    } catch (...) {
-        // State might not exist yet during initialization
-    }
-    
-    // Emit signal for dialogs
-    graphicsChanged();
-    
-    // If scene is now empty, add null graphic back
-    ensureNullGraphicIfEmpty();
-    
-    // Note: No manual sync needed - state_object handles state tree automatically
+void SceneGraph::removeGraphics(const std::string &name) {
+  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+
+  auto it = m_graphicsNodes.find(name);
+  if (it == m_graphicsNodes.end()) {
+    volrover3::app().log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
+    return;
+  }
+
+  auto graphicsNode = it->second;
+
+  // Remove from graphics root
+  m_graphicsRoot->removeGraphicsChild(graphicsNode);
+
+  // Remove from lookup map
+  m_graphicsNodes.erase(it);
+
+  // Explicitly notify state tree that children have changed
+  // This triggers dataChanged signals that dialogs are listening to
+  try {
+    m_graphicsRoot->getState("children").touch();
+  } catch (...) {
+    // State might not exist yet during initialization
+  }
+
+  // Emit signal for dialogs
+  graphicsChanged();
+
+  // If scene is now empty, add null graphic back
+  ensureNullGraphicIfEmpty();
+
+  // Note: No manual sync needed - state_object handles state tree automatically
 }
 
-std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string& name)
-{
-    auto it = m_graphicsNodes.find(name);
-    if (it != m_graphicsNodes.end()) {
-        return it->second;
-    }
-    return nullptr;
+std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string &name) {
+  auto it = m_graphicsNodes.find(name);
+  if (it != m_graphicsNodes.end()) {
+    return it->second;
+  }
+  return nullptr;
 }
 
-void SceneGraph::registerGraphics(const std::string& name, std::shared_ptr<GraphicsNode> node)
-{
-    if (node) {
-        m_graphicsNodes[name] = node;
-    }
+void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<GraphicsNode> node) {
+  if (node) {
+    m_graphicsNodes[name] = node;
+  }
 }
 
 // Volume graphics management
-std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string& name, const cvc::volume& vol)
-{
-    cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
-    
-    // Check if name already exists
-    if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-        volrover3::app().log(0, "SceneGraph::addGraphics: Volume '" + name + "' already exists, replacing");
-        removeGraphics(name);
-    }
-    
-    // Create new volume node using template factory (automatically creates proper state path)
-    auto volumeNode = m_graphicsRoot->addGraphicsChild<VolumeNode>(name);
-    volumeNode->setVolume(vol);
-    
-    // Add to lookup map
-    m_graphicsNodes[name] = volumeNode;
-    
-    // Remove null graphic since we now have real graphics
-    removeNullGraphicIfPresent();
-    
-    // Update multi-volume rendering if needed
-    updateVolumeRendering();
-    
-    // Notify dialogs that children collection has changed
-    try {
-        m_graphicsRoot->getState("children").touch();
-    } catch (...) {
-        // State might not exist yet
-    }
-    
-    // Emit signal for dialogs
-    graphicsChanged();
-    
-    return volumeNode;
+std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
+                                                    const cvc::volume &vol) {
+  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+
+  // Check if name already exists
+  if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
+    volrover3::app().log(0, "SceneGraph::addGraphics: Volume '" + name +
+                                "' already exists, replacing");
+    removeGraphics(name);
+  }
+
+  // Create new volume node using template factory (automatically creates proper state path)
+  auto volumeNode = m_graphicsRoot->addGraphicsChild<VolumeNode>(name);
+  volumeNode->setVolume(vol);
+
+  // Add to lookup map
+  m_graphicsNodes[name] = volumeNode;
+
+  // Remove null graphic since we now have real graphics
+  removeNullGraphicIfPresent();
+
+  // Update multi-volume rendering if needed
+  updateVolumeRendering();
+
+  // Notify dialogs that children collection has changed
+  try {
+    m_graphicsRoot->getState("children").touch();
+  } catch (...) {
+    // State might not exist yet
+  }
+
+  // Emit signal for dialogs
+  graphicsChanged();
+
+  return volumeNode;
 }
 
+cvc::bounding_box SceneGraph::computeVolumeBounds() const {
+  cvc::bounding_box combinedBounds;
+  bool first = true;
 
+  // Helper function to process volume graphics nodes recursively
+  std::function<void(const std::shared_ptr<GraphicsNode> &)> processBounds =
+      [&](const std::shared_ptr<GraphicsNode> &node) {
+        if (!node)
+          return;
 
-cvc::bounding_box SceneGraph::computeVolumeBounds() const
-{
-    cvc::bounding_box combinedBounds;
-    bool first = true;
-    
-    // Helper function to process volume graphics nodes recursively
-    std::function<void(const std::shared_ptr<GraphicsNode>&)> processBounds = 
-        [&](const std::shared_ptr<GraphicsNode>& node) {
-            if (!node) return;
-            
-            // Check if this is a VolumeNode
-            if (auto volNode = std::dynamic_pointer_cast<VolumeNode>(node)) {
-                // Get volume if available
-                if (volNode->hasVolume() && volNode->getVolume()) {
-                    cvc::bounding_box volBounds = volNode->getVolume()->boundingBox();
-                    
-                    if (first) {
-                        combinedBounds = volBounds;
-                        first = false;
-                    } else {
-                        // Expand to include this volume
-                        combinedBounds[0] = std::min(combinedBounds[0], volBounds[0]);
-                        combinedBounds[1] = std::min(combinedBounds[1], volBounds[1]);
-                        combinedBounds[2] = std::min(combinedBounds[2], volBounds[2]);
-                        combinedBounds[3] = std::max(combinedBounds[3], volBounds[3]);
-                        combinedBounds[4] = std::max(combinedBounds[4], volBounds[4]);
-                        combinedBounds[5] = std::max(combinedBounds[5], volBounds[5]);
-                    }
-                }
+        // Check if this is a VolumeNode
+        if (auto volNode = std::dynamic_pointer_cast<VolumeNode>(node)) {
+          // Get volume if available
+          if (volNode->hasVolume() && volNode->getVolume()) {
+            cvc::bounding_box volBounds = volNode->getVolume()->boundingBox();
+
+            if (first) {
+              combinedBounds = volBounds;
+              first = false;
+            } else {
+              // Expand to include this volume
+              combinedBounds[0] = std::min(combinedBounds[0], volBounds[0]);
+              combinedBounds[1] = std::min(combinedBounds[1], volBounds[1]);
+              combinedBounds[2] = std::min(combinedBounds[2], volBounds[2]);
+              combinedBounds[3] = std::max(combinedBounds[3], volBounds[3]);
+              combinedBounds[4] = std::max(combinedBounds[4], volBounds[4]);
+              combinedBounds[5] = std::max(combinedBounds[5], volBounds[5]);
             }
-            
-            // Process children recursively
-            for (const auto& child : node->getGraphicsChildren()) {
-                processBounds(child);
-            }
-        };
-    
-    // Start from unified graphics root (includes volumes)
-    if (m_graphicsRoot) {
-        processBounds(m_graphicsRoot);
-    }
-    
-    return combinedBounds;
+          }
+        }
+
+        // Process children recursively
+        for (const auto &child : node->getGraphicsChildren()) {
+          processBounds(child);
+        }
+      };
+
+  // Start from unified graphics root (includes volumes)
+  if (m_graphicsRoot) {
+    processBounds(m_graphicsRoot);
+  }
+
+  return combinedBounds;
 }
 
-void SceneGraph::enableMultiVolumeRendering(bool enable)
-{
-    if (m_multiVolumeRenderingEnabled == enable) {
-        return; // No change
-    }
-    
-    m_multiVolumeRenderingEnabled = enable;
-    
-    if (enable) {
-        setupMultiVolumeRendering();
-    } else {
-        teardownMultiVolumeRendering();
-    }
+void SceneGraph::enableMultiVolumeRendering(bool enable) {
+  if (m_multiVolumeRenderingEnabled == enable) {
+    return; // No change
+  }
+
+  m_multiVolumeRenderingEnabled = enable;
+
+  if (enable) {
+    setupMultiVolumeRendering();
+  } else {
+    teardownMultiVolumeRendering();
+  }
 }
 
-bool SceneGraph::isMultiVolumeRenderingEnabled() const
-{
-    return m_multiVolumeRenderingEnabled;
+bool SceneGraph::isMultiVolumeRenderingEnabled() const { return m_multiVolumeRenderingEnabled; }
+
+void SceneGraph::setupMultiVolumeRendering() {
+  if (!m_renderer) {
+    return;
+  }
+
+  // Create multi-volume if not already created
+  if (!m_multiVolume) {
+    m_multiVolume = vtkSmartPointer<vtkMultiVolume>::New();
+  }
+
+  // Collect all volume graphics nodes
+  auto allVolumes = getAllVolumeGraphics();
+
+  if (allVolumes.size() <= 1) {
+    return; // No need for multi-volume rendering with 0 or 1 volume
+  }
+
+  // TODO: Implement proper multi-volume rendering with GraphicsNode architecture
+  // For now, individual volumes are rendered separately
+  // Remove individual volume props from renderer
+  /*
+  for (const auto& volNode : allVolumes) {
+      volNode->removeFromRenderer(m_renderer);
+  }
+
+  // Add all volumes to the multi-volume
+  int port = 0;
+  for (const auto& volNode : allVolumes) {
+      // Note: vtkMultiVolume SetVolume takes a port number, not a transform
+      // Transforms should be already applied to individual vtkVolume actors
+      m_multiVolume->SetVolume(vol, port++);
+  }
+
+  // Add multi-volume to renderer
+  m_renderer->AddViewProp(m_multiVolume);
+  */
 }
 
-void SceneGraph::setupMultiVolumeRendering()
-{
-    if (!m_renderer) {
-        return;
-    }
-    
-    // Create multi-volume if not already created
-    if (!m_multiVolume) {
-        m_multiVolume = vtkSmartPointer<vtkMultiVolume>::New();
-    }
-    
-    // Collect all volume graphics nodes
-    auto allVolumes = getAllVolumeGraphics();
-    
-    if (allVolumes.size() <= 1) {
-        return; // No need for multi-volume rendering with 0 or 1 volume
-    }
-    
-    // TODO: Implement proper multi-volume rendering with GraphicsNode architecture
-    // For now, individual volumes are rendered separately
-    // Remove individual volume props from renderer
-    /*
-    for (const auto& volNode : allVolumes) {
-        volNode->removeFromRenderer(m_renderer);
-    }
-    
-    // Add all volumes to the multi-volume
-    int port = 0;
-    for (const auto& volNode : allVolumes) {
-        // Note: vtkMultiVolume SetVolume takes a port number, not a transform
-        // Transforms should be already applied to individual vtkVolume actors
-        m_multiVolume->SetVolume(vol, port++);
-    }
-    
-    // Add multi-volume to renderer
-    m_renderer->AddViewProp(m_multiVolume);
-    */
+void SceneGraph::teardownMultiVolumeRendering() {
+  if (!m_renderer || !m_multiVolume) {
+    return;
+  }
+
+  // TODO: Implement proper multi-volume teardown with GraphicsNode architecture
+  // For now, individual volumes are rendered separately
+  /*
+  // Remove multi-volume from renderer
+  m_renderer->RemoveViewProp(m_multiVolume);
+
+  // Re-add individual volume props
+  auto allVolumes = getAllVolumeGraphics();
+  for (const auto& volNode : allVolumes) {
+      volNode->addToRenderer(m_renderer);
+  }
+  */
 }
 
-void SceneGraph::teardownMultiVolumeRendering()
-{
-    if (!m_renderer || !m_multiVolume) {
-        return;
-    }
-    
-    // TODO: Implement proper multi-volume teardown with GraphicsNode architecture
-    // For now, individual volumes are rendered separately
-    /*
-    // Remove multi-volume from renderer
-    m_renderer->RemoveViewProp(m_multiVolume);
-    
-    // Re-add individual volume props
-    auto allVolumes = getAllVolumeGraphics();
-    for (const auto& volNode : allVolumes) {
-        volNode->addToRenderer(m_renderer);
-    }
-    */
+void SceneGraph::updateVolumeRendering() {
+  if (!m_renderer) {
+    return;
+  }
+
+  size_t volumeCount = getVolumeGraphicsCount();
+
+  // Enable multi-volume rendering if we have more than 1 volume
+  if (volumeCount > 1 && !m_multiVolumeRenderingEnabled) {
+    enableMultiVolumeRendering(true);
+  } else if (volumeCount <= 1 && m_multiVolumeRenderingEnabled) {
+    enableMultiVolumeRendering(false);
+  }
 }
 
-void SceneGraph::updateVolumeRendering()
-{
-    if (!m_renderer) {
-        return;
-    }
-    
-    size_t volumeCount = getVolumeGraphicsCount();
-    
-    // Enable multi-volume rendering if we have more than 1 volume
-    if (volumeCount > 1 && !m_multiVolumeRenderingEnabled) {
-        enableMultiVolumeRendering(true);
-    } else if (volumeCount <= 1 && m_multiVolumeRenderingEnabled) {
-        enableMultiVolumeRendering(false);
-    }
+void SceneGraph::ensureNullGraphicIfEmpty() {
+  // With new architecture: NullGraphicNode IS the graphics root, always present
+  // No need to add/remove it
 }
 
-void SceneGraph::ensureNullGraphicIfEmpty()
-{
-    // With new architecture: NullGraphicNode IS the graphics root, always present
-    // No need to add/remove it
-}
-
-void SceneGraph::removeNullGraphicIfPresent()
-{
-    // With new architecture: NullGraphicNode IS the graphics root, always present
-    // No need to add/remove it
+void SceneGraph::removeNullGraphicIfPresent() {
+  // With new architecture: NullGraphicNode IS the graphics root, always present
+  // No need to add/remove it
 }

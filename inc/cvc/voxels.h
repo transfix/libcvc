@@ -48,68 +48,61 @@ using byte = unsigned char;
 namespace CVC_NAMESPACE {
 #ifdef CVC_USING_CUDA
 // CUDA kernel launcher for trilinear resize (defined in voxels_kernels.cu)
-extern "C" void cuda_resize_trilinear(void *src_data, void *dst_data,
-                                      uint64 src_x, uint64 src_y,
-                                      uint64 src_z, uint64 dst_x,
-                                      uint64 dst_y, uint64 dst_z,
-                                      double inSpaceX, double inSpaceY,
-                                      double inSpaceZ, data_type voxel_type);
+extern "C" void cuda_resize_trilinear(void *src_data, void *dst_data, uint64 src_x, uint64 src_y,
+                                      uint64 src_z, uint64 dst_x, uint64 dst_y, uint64 dst_z,
+                                      double inSpaceX, double inSpaceY, double inSpaceZ,
+                                      data_type voxel_type);
 
 // CUDA kernel launcher for bounding box aware trilinear resize (defined in
 // voxels_kernels.cu)
-extern "C" void cuda_resize_bbox_trilinear(
-    void *src_data, void *dst_data, uint64 dim_x, uint64 dim_y, uint64 dim_z,
-    double offset_x, double offset_y, double offset_z, double scale_x,
-    double scale_y, double scale_z, data_type voxel_type);
+extern "C" void cuda_resize_bbox_trilinear(void *src_data, void *dst_data, uint64 dim_x,
+                                           uint64 dim_y, uint64 dim_z, double offset_x,
+                                           double offset_y, double offset_z, double scale_x,
+                                           double scale_y, double scale_z, data_type voxel_type);
 
 // CUDA kernel launcher for min computation over a subvolume (defined in
 // voxels_kernels.cu)
-extern "C" double cuda_compute_min(void *data, uint64 off_x, uint64 off_y,
-                                   uint64 off_z, uint64 dim_x, uint64 dim_y,
-                                   uint64 dim_z, uint64 vol_x, uint64 vol_y,
-                                   uint64 vol_z, data_type voxel_type);
+extern "C" double cuda_compute_min(void *data, uint64 off_x, uint64 off_y, uint64 off_z,
+                                   uint64 dim_x, uint64 dim_y, uint64 dim_z, uint64 vol_x,
+                                   uint64 vol_y, uint64 vol_z, data_type voxel_type);
 
 // CUDA kernel launcher for max computation over a subvolume (defined in
 // voxels_kernels.cu)
-extern "C" double cuda_compute_max(void *data, uint64 off_x, uint64 off_y,
-                                   uint64 off_z, uint64 dim_x, uint64 dim_y,
-                                   uint64 dim_z, uint64 vol_x, uint64 vol_y,
-                                   uint64 vol_z, data_type voxel_type);
+extern "C" double cuda_compute_max(void *data, uint64 off_x, uint64 off_y, uint64 off_z,
+                                   uint64 dim_x, uint64 dim_y, uint64 dim_z, uint64 vol_x,
+                                   uint64 vol_y, uint64 vol_z, data_type voxel_type);
 
 // CUDA kernel launcher for anisotropic diffusion slice (defined in
 // voxels_kernels.cu)
-extern "C" void
-cuda_anisotropic_diffusion_slice(void *src_data, void *dst_data, uint64 xdim,
-                                 uint64 ydim, uint64 zdim, uint64 slice_idx,
-                                 double K_para, double Lambda_para,
-                                 data_type voxel_type);
+extern "C" void cuda_anisotropic_diffusion_slice(void *src_data, void *dst_data, uint64 xdim,
+                                                 uint64 ydim, uint64 zdim, uint64 slice_idx,
+                                                 double K_para, double Lambda_para,
+                                                 data_type voxel_type);
 
 // CUDA kernel launcher for bilateral filter (defined in voxels_kernels.cu)
-extern "C" void
-cuda_bilateral_filter(void *src_data, void *dst_data, uint64 xdim,
-                      uint64 ydim, uint64 zdim, double radiometricSigma,
-                      double spatialSigma, unsigned int filterRadius,
-                      double valueRange, data_type voxel_type);
+extern "C" void cuda_bilateral_filter(void *src_data, void *dst_data, uint64 xdim, uint64 ydim,
+                                      uint64 zdim, double radiometricSigma, double spatialSigma,
+                                      unsigned int filterRadius, double valueRange,
+                                      data_type voxel_type);
 
 // CUDA kernel launcher for contrast enhancement stretching (defined in
 // voxels_kernels.cu)
-extern "C" void cuda_contrast_enhancement_stretching(
-    void *src_data, void *upmin_data, void *upmax_data, void *downmin_data,
-    void *downmax_data, void *imgavg_data, void *result_data, uint64 xdim,
-    uint64 ydim, uint64 zdim, double lmin_global, double lmax_global,
-    data_type voxel_type);
+extern "C" void cuda_contrast_enhancement_stretching(void *src_data, void *upmin_data,
+                                                     void *upmax_data, void *downmin_data,
+                                                     void *downmax_data, void *imgavg_data,
+                                                     void *result_data, uint64 xdim, uint64 ydim,
+                                                     uint64 zdim, double lmin_global,
+                                                     double lmax_global, data_type voxel_type);
 
 // CUDA kernel launcher for GDTV gradient computation (defined in
 // voxels_kernels.cu)
-extern "C" void cuda_gdtv_gradient(void *input_data, void *grad_data,
-                                   uint64 xdim, uint64 ydim, uint64 zdim,
-                                   data_type voxel_type);
+extern "C" void cuda_gdtv_gradient(void *input_data, void *grad_data, uint64 xdim, uint64 ydim,
+                                   uint64 zdim, data_type voxel_type);
 
 // CUDA kernel launcher for GDTV filter iteration (defined in
 // voxels_kernels.cu)
-extern "C" void cuda_gdtv_filter(void *input_data, void *grad_data,
-                                 void *funcval_data, void *funcvalue_data,
-                                 uint64 xdim, uint64 ydim, uint64 zdim,
+extern "C" void cuda_gdtv_filter(void *input_data, void *grad_data, void *funcval_data,
+                                 void *funcvalue_data, uint64 xdim, uint64 ydim, uint64 zdim,
                                  float q, float lbda, data_type voxel_type);
 #endif
 
@@ -155,8 +148,7 @@ class app;
  */
 class voxels {
 public:
-  voxels(app &ctx, const dimension &d = dimension(4, 4, 4),
-         data_type vt = UChar);
+  voxels(app &ctx, const dimension &d = dimension(4, 4, 4), data_type vt = UChar);
   voxels(app &ctx, const void *v, const dimension &d, data_type vt);
   voxels(const voxels &v);
   virtual ~voxels();
@@ -174,8 +166,7 @@ public:
   /*
     Voxel I/O - 3D indexing using linear offset calculation
   */
-  double operator()(uint64 i, uint64 j,
-                    uint64 k) const /* reading a voxel value */
+  double operator()(uint64 i, uint64 j, uint64 k) const /* reading a voxel value */
   {
     if (i >= XDim() || j >= YDim() || k >= ZDim())
       throw index_out_of_bounds("");
@@ -218,8 +209,7 @@ public:
     return (*this)(x, y, z);
   }
 
-  void operator()(uint64 i, uint64 j, uint64 k,
-                  double val) /* writing a voxel value */
+  void operator()(uint64 i, uint64 j, uint64 k, double val) /* writing a voxel value */
   {
     if (i >= XDim() || j >= YDim() || k >= ZDim())
       throw index_out_of_bounds("");
@@ -231,16 +221,13 @@ public:
 
     switch (voxelType()) {
     case UChar:
-      reinterpret_cast<unsigned char *>(data)[idx] =
-          static_cast<unsigned char>(val);
+      reinterpret_cast<unsigned char *>(data)[idx] = static_cast<unsigned char>(val);
       break;
     case UShort:
-      reinterpret_cast<unsigned short *>(data)[idx] =
-          static_cast<unsigned short>(val);
+      reinterpret_cast<unsigned short *>(data)[idx] = static_cast<unsigned short>(val);
       break;
     case UInt:
-      reinterpret_cast<unsigned int *>(data)[idx] =
-          static_cast<unsigned int>(val);
+      reinterpret_cast<unsigned int *>(data)[idx] = static_cast<unsigned int>(val);
       break;
     case Float:
       reinterpret_cast<float *>(data)[idx] = static_cast<float>(val);
@@ -252,8 +239,7 @@ public:
       reinterpret_cast<uint64 *>(data)[idx] = static_cast<uint64>(val);
       break;
     case Char:
-      reinterpret_cast<signed char *>(data)[idx] =
-          static_cast<signed char>(val);
+      reinterpret_cast<signed char *>(data)[idx] = static_cast<signed char>(val);
       break;
     case Int:
       reinterpret_cast<int *>(data)[idx] = static_cast<int>(val);
@@ -317,10 +303,8 @@ public:
   bool maxIsSet() const { return _maxIsSet; }
 
   /* calculate min and max values for selected subvolumes */
-  double min(uint64 off_x, uint64 off_y, uint64 off_z,
-             const dimension &dim) const;
-  double max(uint64 off_x, uint64 off_y, uint64 off_z,
-             const dimension &dim) const;
+  double min(uint64 off_x, uint64 off_y, uint64 off_z, const dimension &dim) const;
+  double max(uint64 off_x, uint64 off_y, uint64 off_z, const dimension &dim) const;
   voxels &operator=(const voxels &vox) {
     copy(vox);
     return *this;
@@ -352,29 +336,23 @@ public:
   /*
     operations!
   */
-  virtual voxels &
-  copy(const voxels &vox,
-       bool deepCopy = false); // turns this object into a copy of vox
-                               // (shallow by default, deep if requested)
-  virtual voxels &copy(); // creates a deep copy of itself (allocates new
-                          // memory and copies all data)
+  virtual voxels &copy(const voxels &vox,
+                       bool deepCopy = false); // turns this object into a copy of vox
+                                               // (shallow by default, deep if requested)
+  virtual voxels &copy();                      // creates a deep copy of itself (allocates new
+                                               // memory and copies all data)
   // subvolume extraction: removes voxels outside of the subvolume specified
-  virtual voxels &sub(uint64 off_x, uint64 off_y, uint64 off_z,
-                      const dimension &subvoldim);
+  virtual voxels &sub(uint64 off_x, uint64 off_y, uint64 off_z, const dimension &subvoldim);
   voxels &fill(double val); // set all voxels to the specified value
-  voxels &fillsub(uint64 off_x, uint64 off_y, uint64 off_z,
-                  const dimension &subvoldim,
-                  double val); // set all voxels in specified subvolume to val
-  voxels &map(double min_, double max_); // maps voxels from min to max
-  voxels &
-  resize(const dimension &newdim); // resizes this object to the specified
-                                   // dimension using trilinear interpolation
+  voxels &fillsub(uint64 off_x, uint64 off_y, uint64 off_z, const dimension &subvoldim,
+                  double val);             // set all voxels in specified subvolume to val
+  voxels &map(double min_, double max_);   // maps voxels from min to max
+  voxels &resize(const dimension &newdim); // resizes this object to the specified
+                                           // dimension using trilinear interpolation
   voxels &resize(const bounding_box &old_bbox,
-                 const bounding_box
-                     &new_bbox); // resizes voxels from one bounding box to
-                                 // another using trilinear interpolation
-  voxels &bilateralFilter(double radiometricSigma = 200.0,
-                          double spatialSigma = 1.5,
+                 const bounding_box &new_bbox); // resizes voxels from one bounding box to
+                                                // another using trilinear interpolation
+  voxels &bilateralFilter(double radiometricSigma = 200.0, double spatialSigma = 1.5,
                           unsigned int filterRadius = 2);
   // voxels& rotate(double deg_x, double deg_y, double deg_z); //rotates the
   // object about the x,y,z axis
@@ -383,8 +361,8 @@ public:
     the offset may be negative. Only the voxels that overlap will be subject
     to the composition function.
   */
-  virtual voxels &composite(const voxels &compVox, int64 off_x, int64 off_y,
-                            int64 off_z, const composite_function &func);
+  virtual voxels &composite(const voxels &compVox, int64 off_x, int64 off_y, int64 off_z,
+                            const composite_function &func);
 
   /*
    * Zeyun's Contrast enhancement: enhances contrast between voxel values.
@@ -402,8 +380,8 @@ public:
   /*
    * Dr. Zhang's gdtv filter.
    */
-  virtual voxels &gdtvFilter(double parameterq, double lambda,
-                             unsigned int iteration, unsigned int neigbour);
+  virtual voxels &gdtvFilter(double parameterq, double lambda, unsigned int iteration,
+                             unsigned int neigbour);
 
   /*
    * CUDA Unified Memory Support
@@ -428,30 +406,22 @@ public:
 
 #ifdef CVC_USING_CUDA
   // Get CUDA unified memory pointer (returns nullptr if CUDA not enabled)
-  void *cuda_data_ptr() {
-    return _using_cuda ? _cuda_unified_ptr.get() : nullptr;
-  }
-  const void *cuda_data_ptr() const {
-    return _using_cuda ? _cuda_unified_ptr.get() : nullptr;
-  }
+  void *cuda_data_ptr() { return _using_cuda ? _cuda_unified_ptr.get() : nullptr; }
+  const void *cuda_data_ptr() const { return _using_cuda ? _cuda_unified_ptr.get() : nullptr; }
 #endif
 
   // Switch to a different GPU (performs peer-to-peer copy if needed)
   virtual void switchGPU(int new_device_id);
 
   // Direct data pointer access for legacy compatibility
-  unsigned char *data_ptr() {
-    return reinterpret_cast<unsigned char *>(get_data_ptr());
-  }
+  unsigned char *data_ptr() { return reinterpret_cast<unsigned char *>(get_data_ptr()); }
   const unsigned char *data_ptr() const {
     return reinterpret_cast<const unsigned char *>(get_data_ptr());
   }
 
   // Legacy compatibility: convert to shared_array for old VolMagick code
   // Now we already use shared_array internally, so just return it directly
-  boost::shared_array<unsigned char> data_as_shared_array() const {
-    return _voxels;
-  }
+  boost::shared_array<unsigned char> data_as_shared_array() const { return _voxels; }
 
 protected:
   void calcMinMax() const;
@@ -461,9 +431,8 @@ protected:
   // using provided offset and scale parameters
   // clampCoords: whether to clamp coordinates and set xRes/yRes/zRes to 0 at
   // boundaries
-  void resizeTrilinearCPU(voxels &newvox, double offset_x, double offset_y,
-                          double offset_z, double scale_x, double scale_y,
-                          double scale_z, bool clampCoords) const;
+  void resizeTrilinearCPU(voxels &newvox, double offset_x, double offset_y, double offset_z,
+                          double scale_x, double scale_y, double scale_z, bool clampCoords) const;
 
   void preWrite() {
     _histogramDirty = true; // invalidate the histogram
@@ -492,8 +461,7 @@ protected:
         std::memcpy(_voxels.get(), tmp.get(), size);
       }
     } catch (std::bad_alloc &e) {
-      throw memory_allocation_error(
-          "Could not allocate memory for voxels during copy-on-write!");
+      throw memory_allocation_error("Could not allocate memory for voxels during copy-on-write!");
     }
   }
   void calcHistogram(uint64 size) const;

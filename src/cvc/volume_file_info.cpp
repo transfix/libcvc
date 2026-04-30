@@ -20,114 +20,89 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/volume_file_info.h>
-#include <cvc/exception.h>
-#include <cvc/volume_file_io.h>
-#include <cvc/utility.h>
-#include <cvc/app.h>
-
 #include <boost/regex.hpp>
+#include <cvc/app.h>
+#include <cvc/exception.h>
+#include <cvc/utility.h>
+#include <cvc/volume_file_info.h>
+#include <cvc/volume_file_io.h>
 
-namespace CVC_NAMESPACE
-{
-  // --------------------
-  // volume_file_info::read
-  // --------------------
-  // Purpose:
-  //   Refers to the handler map to choose an appropriate IO object for reading
-  //    the requested volume file.  Use this function to initialize the volume_file_info
-  //    object with info from a volume file.
-  // ---- Change History ----
-  // ??/??/2007 -- Joe R. -- Initially implemented.
-  // 11/13/2009 -- Joe R. -- Re-implemented using VolumeFile_IO handler map
-  // 12/28/2009 -- Joe R. -- Collecting exception error strings
-  // 09/08/2011 -- Joe R. -- Using splitRawFilename to extract real filename
-  //                         if the provided filename is a file|obj tuple.
-  void volume_file_info::read(const std::string& filename)
-  {
-    // Legacy overload: delegate to the ctx-aware overload using the
-    // process-wide singleton. New code should call the (app&, filename)
-    // overload directly.
-    read(app::instance(), filename);
-  }
-
-  void volume_file_info::read(app& ctx, const std::string& filename)
-  {
-    _ctx = &ctx;
-    std::string errors;
-    boost::regex file_extension("^(.*)(\\.\\S*)$");
-    boost::smatch what;
-
-    std::string actualFileName;
-    std::string objectName;
-
-    boost::tie(actualFileName, objectName) =
-      volume_file_io::splitRawFilename(filename);
-
-    if(boost::regex_match(actualFileName, what, file_extension))
-      {
-	if(volume_file_io::handlerMap()[what[2]].empty())
-	  throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) + 
-					     std::string(": Cannot read ") + filename);
-	volume_file_io::handlers& h = volume_file_io::handlerMap()[what[2]];
-	//use the first handler that succeds
-	for(volume_file_io::handlers::iterator i = h.begin();
-	    i != h.end();
-	    i++)
-	  try
-	    {
-	      if(*i)
-		{
-		  (*i)->getVolumeFileInfo(ctx,_data,filename);
-		  return;
-		}
-	    }
-	  catch(exception& e)
-	    {
-	      errors += std::string(" :: ") + e.what();
-	    }
-      }
-    throw unsupported_volume_file_type(
-      boost::str(
-	boost::format("%1% : Cannot read '%2%'%3%") % 
-	BOOST_CURRENT_FUNCTION %
-	filename %
-	errors
-      )
-    );
-  }
-
-  void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const
-  {
-    app& ctx = _ctx ? *_ctx : app::instance();
-    thread_info ti(BOOST_CURRENT_FUNCTION);
-
-    volume vol(ctx);
-    const uint64 maxdim = 128; //read in 128^3 chunks
-    for(unsigned int off_z = 0; off_z < ZDim(); off_z+=maxdim)
-      for(unsigned int off_y = 0; off_y < YDim(); off_y+=maxdim)
-	for(unsigned int off_x = 0; off_x < XDim(); off_x+=maxdim)
-	  {
-	    dimension read_dim(std::min(XDim()-off_x,maxdim),
-			       std::min(YDim()-off_y,maxdim),
-			       std::min(ZDim()-off_z,maxdim));
-	    readVolumeFile(ctx,vol,filename(),var,time,
-			   off_x,off_y,off_z,read_dim);
-	    if(off_x==0 && off_y==0 && off_z==0)
-	      {
-		_data._min[var][time] = vol.min();
-		_data._max[var][time] = vol.max();
-	      }
-	    else
-	      {
-		if(_data._min[var][time] > vol.min())
-		  _data._min[var][time] = vol.min();
-		if(_data._max[var][time] < vol.max())
-		  _data._max[var][time] = vol.max();
-	      }
-	  }
-
-    _data._minIsSet[var][time] = true;
-    _data._maxIsSet[var][time] = true;
-  }
+namespace CVC_NAMESPACE {
+// --------------------
+// volume_file_info::read
+// --------------------
+// Purpose:
+//   Refers to the handler map to choose an appropriate IO object for reading
+//    the requested volume file.  Use this function to initialize the volume_file_info
+//    object with info from a volume file.
+// ---- Change History ----
+// ??/??/2007 -- Joe R. -- Initially implemented.
+// 11/13/2009 -- Joe R. -- Re-implemented using VolumeFile_IO handler map
+// 12/28/2009 -- Joe R. -- Collecting exception error strings
+// 09/08/2011 -- Joe R. -- Using splitRawFilename to extract real filename
+//                         if the provided filename is a file|obj tuple.
+void volume_file_info::read(const std::string &filename) {
+  // Legacy overload: delegate to the ctx-aware overload using the
+  // process-wide singleton. New code should call the (app&, filename)
+  // overload directly.
+  read(app::instance(), filename);
 }
+
+void volume_file_info::read(app &ctx, const std::string &filename) {
+  _ctx = &ctx;
+  std::string errors;
+  boost::regex file_extension("^(.*)(\\.\\S*)$");
+  boost::smatch what;
+
+  std::string actualFileName;
+  std::string objectName;
+
+  boost::tie(actualFileName, objectName) = volume_file_io::splitRawFilename(filename);
+
+  if (boost::regex_match(actualFileName, what, file_extension)) {
+    if (volume_file_io::handlerMap()[what[2]].empty())
+      throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
+                                         std::string(": Cannot read ") + filename);
+    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
+    // use the first handler that succeds
+    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+      try {
+        if (*i) {
+          (*i)->getVolumeFileInfo(ctx, _data, filename);
+          return;
+        }
+      } catch (exception &e) {
+        errors += std::string(" :: ") + e.what();
+      }
+  }
+  throw unsupported_volume_file_type(boost::str(boost::format("%1% : Cannot read '%2%'%3%") %
+                                                BOOST_CURRENT_FUNCTION % filename % errors));
+}
+
+void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const {
+  app &ctx = _ctx ? *_ctx : app::instance();
+  thread_info ti(BOOST_CURRENT_FUNCTION);
+
+  volume vol(ctx);
+  const uint64 maxdim = 128; // read in 128^3 chunks
+  for (unsigned int off_z = 0; off_z < ZDim(); off_z += maxdim)
+    for (unsigned int off_y = 0; off_y < YDim(); off_y += maxdim)
+      for (unsigned int off_x = 0; off_x < XDim(); off_x += maxdim) {
+        dimension read_dim(std::min(XDim() - off_x, maxdim), std::min(YDim() - off_y, maxdim),
+                           std::min(ZDim() - off_z, maxdim));
+        readVolumeFile(ctx, vol, filename(), var, time, off_x, off_y, off_z, read_dim);
+        if (off_x == 0 && off_y == 0 && off_z == 0) {
+          _data._min[var][time] = vol.min();
+          _data._max[var][time] = vol.max();
+        } else {
+          if (_data._min[var][time] > vol.min())
+            _data._min[var][time] = vol.min();
+          if (_data._max[var][time] < vol.max())
+            _data._max[var][time] = vol.max();
+        }
+      }
+
+  _data._minIsSet[var][time] = true;
+  _data._maxIsSet[var][time] = true;
+}
+} // namespace CVC_NAMESPACE

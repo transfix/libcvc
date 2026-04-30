@@ -25,72 +25,72 @@
 
 #include <cvc/voxels.h>
 
-namespace CVC_NAMESPACE
-{
-  class composite_function
-  {
-  public:
-    composite_function() {}
-    virtual ~composite_function() {}
-
-    /*
-      in_vox - input voxels
-      in_i,j,k - input indices specifying the current input voxel being composited
-      this_vox - the destination voxels object where the result of the composition will be stored
-      this_i,j,k - the destination voxel indices
-      returns - the result of the composition
-    */
-    virtual double operator()(const voxels& in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
-			      const voxels& this_vox,uint64 this_i, uint64 this_j, uint64 this_k) const = 0;
-  };
+namespace CVC_NAMESPACE {
+class composite_function {
+public:
+  composite_function() {}
+  virtual ~composite_function() {}
 
   /*
-    Replaces the destination voxel with the input voxel
+    in_vox - input voxels
+    in_i,j,k - input indices specifying the current input voxel being composited
+    this_vox - the destination voxels object where the result of the composition will be stored
+    this_i,j,k - the destination voxel indices
+    returns - the result of the composition
   */
-  class copy_func : public composite_function
-  {
-  public:
-    copy_func() {}
-    virtual ~copy_func() {}
+  virtual double operator()(const voxels &in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
+                            const voxels &this_vox, uint64 this_i, uint64 this_j,
+                            uint64 this_k) const = 0;
+};
 
-    virtual double operator()(const voxels& in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
-			      const voxels& this_vox,uint64 this_i, uint64 this_j, uint64 this_k) const
-    {
-      return in_vox(in_i,in_j,in_k); /* make compiler happy.... */ this_vox(0); this_i=0; this_j=0; this_k=0;
-    }
-  };
+/*
+  Replaces the destination voxel with the input voxel
+*/
+class copy_func : public composite_function {
+public:
+  copy_func() {}
+  virtual ~copy_func() {}
 
-  /*
-    Adds the input voxel to the destination voxel;
-  */
-  class add_func : public composite_function
-  {
-  public:
-    add_func() {}
-    virtual ~add_func() {}
+  virtual double operator()(const voxels &in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
+                            const voxels &this_vox, uint64 this_i, uint64 this_j,
+                            uint64 this_k) const {
+    return in_vox(in_i, in_j, in_k); /* make compiler happy.... */
+    this_vox(0);
+    this_i = 0;
+    this_j = 0;
+    this_k = 0;
+  }
+};
 
-    virtual double operator()(const voxels& in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
-			      const voxels& this_vox,uint64 this_i, uint64 this_j, uint64 this_k) const
-    {
-      return this_vox(this_i,this_j,this_k) + in_vox(in_i,in_j,in_k);
-    }
-  };
+/*
+  Adds the input voxel to the destination voxel;
+*/
+class add_func : public composite_function {
+public:
+  add_func() {}
+  virtual ~add_func() {}
 
-  /*
-    Subtracts the destination voxel with the input voxel
-  */
-  class subtract_func : public composite_function
-  {
-  public:
-    subtract_func() {}
-    virtual ~subtract_func() {}
+  virtual double operator()(const voxels &in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
+                            const voxels &this_vox, uint64 this_i, uint64 this_j,
+                            uint64 this_k) const {
+    return this_vox(this_i, this_j, this_k) + in_vox(in_i, in_j, in_k);
+  }
+};
 
-    virtual double operator()(const voxels& in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
-			      const voxels& this_vox,uint64 this_i, uint64 this_j, uint64 this_k) const
-    {
-      return this_vox(this_i,this_j,this_k) - in_vox(in_i,in_j,in_k);
-    }
-  };
-}
+/*
+  Subtracts the destination voxel with the input voxel
+*/
+class subtract_func : public composite_function {
+public:
+  subtract_func() {}
+  virtual ~subtract_func() {}
+
+  virtual double operator()(const voxels &in_vox, uint64 in_i, uint64 in_j, uint64 in_k,
+                            const voxels &this_vox, uint64 this_i, uint64 this_j,
+                            uint64 this_k) const {
+    return this_vox(this_i, this_j, this_k) - in_vox(in_i, in_j, in_k);
+  }
+};
+} // namespace CVC_NAMESPACE
 
 #endif
