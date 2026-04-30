@@ -749,11 +749,13 @@ jobs:
           # is ~25 GB) exceed the free space on C: of windows-latest.
           # Two complementary fixes:
           #   1) Remove pre-installed toolchains we don't use to free C:.
-          #   2) Redirect vcpkg's heavy working dirs to D:, which has
-          #      ~80 GB free on windows-latest runners. We do this by
-          #      replacing C:\vcpkg\{buildtrees,packages,downloads} with
-          #      directory junctions to D:\vcpkg-*. cmake/vcpkg keep
-          #      seeing the C:\ paths, but the data lives on D:.
+          #   2) Redirect vcpkg's heavy working dirs to D: via vcpkg's
+          #      own relocation flags (VCPKG_DOWNLOADS env var,
+          #      --x-buildtrees-root, --x-packages-root). We deliberately
+          #      avoid filesystem junctions because Python's
+          #      os.path.relpath (used by meson inside harfbuzz/qt builds)
+          #      raises ValueError when a path crosses mount points via
+          #      a junction.
           $paths = @(
             'C:\Android',
             'C:\Program Files\Android',
@@ -777,18 +779,13 @@ jobs:
             }
           }
 
-          # Junction vcpkg's heavy dirs onto D:. Must happen BEFORE the
-          # cache restore step so the cache lands on D:.
-          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
-          foreach ($sub in 'buildtrees','packages','downloads') {
-            $src = Join-Path $vcpkg $sub
-            $dst = "D:\vcpkg-$sub"
-            New-Item -ItemType Directory -Force -Path $dst | Out-Null
-            if (Test-Path $src) {
-              Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
-            }
-            cmd /c mklink /J "$src" "$dst" | Out-Null
-          }
+          # Pre-create D: paths and export them as env vars for later steps.
+          New-Item -ItemType Directory -Force -Path D:\vcpkg-buildtrees | Out-Null
+          New-Item -ItemType Directory -Force -Path D:\vcpkg-packages   | Out-Null
+          New-Item -ItemType Directory -Force -Path D:\vcpkg-downloads  | Out-Null
+          "VCPKG_DOWNLOADS=D:\vcpkg-downloads"   | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
           $cAfter = (Get-PSDrive C).Free / 1GB
           $dAfter = (Get-PSDrive D).Free / 1GB
@@ -850,7 +847,14 @@ jobs:
             # --clean-after-build deletes each port's buildtree/packages
             # immediately after installation so the disk does not fill
             # while iterating through hundreds of dependencies.
-            vcpkg install @packages --triplet x64-windows --clean-after-build
+            # --x-buildtrees-root / --x-packages-root relocate vcpkg's
+            # heavy working directories to D: where free space is
+            # ~80 GB vs ~14 GB on C:. The install root and binary
+            # cache stay on C: so actions/cache picks them up.
+            vcpkg install @packages --triplet x64-windows `
+              --clean-after-build `
+              --x-buildtrees-root=D:\vcpkg-buildtrees `
+              --x-packages-root=D:\vcpkg-packages
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq 5) { exit $LASTEXITCODE }
             $sleep = [Math]::Min(60 * $i, 180)
