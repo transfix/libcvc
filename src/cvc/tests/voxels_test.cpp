@@ -3259,7 +3259,7 @@ TEST_F(VoxelsCUDATest, MultithreadedCUDAOperations) {
 
       cvcapp.startThreadPooled(
           key,
-          [t, &success_count, dim]() {
+          [this, t, &success_count, dim]() {
             try {
               voxels v(ctx, dimension(dim, dim, dim), Float);
 
@@ -3641,8 +3641,8 @@ TEST_F(VoxelsCUDATest, GDTVFilterPerformanceComparison) {
     dimension vol_dim(dim, dim, dim);
 
     // Create test volumes with noise
-    voxels v_cpu(vol_dim, Float);
-    voxels v_gpu(vol_dim, Float);
+    voxels v_cpu(ctx, vol_dim, Float);
+    voxels v_gpu(ctx, vol_dim, Float);
 
     for (uint64 k = 0; k < dim; k++) {
       for (uint64 j = 0; j < dim; j++) {
