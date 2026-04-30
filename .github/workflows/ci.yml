@@ -800,7 +800,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v4
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v5
           restore-keys: |
             vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-
 
@@ -838,9 +838,10 @@ jobs:
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
-            # vtk[qt] enables VTK's GUISupportQt module, which provides
-            # QVTKOpenGLNativeWidget.h that volrover3 includes.
-            $packages += @('vtk[qt]','cgal')
+            # vtk[qt,opengl] enables GUISupportQt (QVTKOpenGLNativeWidget.h)
+            # plus all OpenGL-rendering modules (RenderingVolumeOpenGL2,
+            # vtkSmartVolumeMapper.h, etc.) that volrover3 includes.
+            $packages += @('vtk[qt,opengl]','cgal')
           }
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
@@ -872,7 +873,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v4
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v5
 
       - name: Configure
         shell: pwsh
