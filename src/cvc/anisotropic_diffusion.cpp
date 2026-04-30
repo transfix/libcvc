@@ -32,7 +32,7 @@ namespace CVC_NAMESPACE
 {
   voxels& voxels::anisotropicDiffusion(unsigned int iterations)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     double K_para = 3;
     double Lamda_para = 0.16f;
@@ -57,7 +57,7 @@ namespace CVC_NAMESPACE
               K_para, Lamda_para,
               voxelType());
           
-          cvcapp.threadProgress(float(stepnum)/float(numSteps));
+          _ctx.threadProgress(float(stepnum)/float(numSteps));
           stepnum++;
         }
         
@@ -65,7 +65,7 @@ namespace CVC_NAMESPACE
         (*this) = tempt;
       }
       
-      cvcapp.threadProgress(1.0f);
+      _ctx.threadProgress(1.0f);
       return *this;
     }
 #endif
@@ -73,9 +73,9 @@ namespace CVC_NAMESPACE
     // CPU implementation - original algorithm
     double cn, cs, ce, cw, cu, cd;
     double delta_n, delta_s, delta_e, delta_w, delta_u, delta_d;
-    uint64 i, j;
+    int64_t i, j;
     // Use deep copy for temporary buffer to avoid race conditions with OpenMP
-    voxels tempt(voxel_dimensions(), voxelType());
+    voxels tempt(_ctx, voxel_dimensions(), voxelType());
     tempt.copy(*this, true);  // Deep copy
 
     for (m = 0; m < iterations; m++) {
@@ -124,7 +124,7 @@ namespace CVC_NAMESPACE
           }
         }
             
-        cvcapp.threadProgress(float(stepnum)/float(numSteps));
+        _ctx.threadProgress(float(stepnum)/float(numSteps));
         stepnum++;
       }
     
@@ -132,7 +132,7 @@ namespace CVC_NAMESPACE
       copy(tempt, true);
     }
 
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return *this;
   }
 }

@@ -133,7 +133,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void getVolumeFileInfo(volume_file_info::data& data,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& data,
 				   const std::string& filename) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -313,7 +314,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -574,7 +575,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
 				  const bounding_box& boundingBox,
 				  const dimension& dimension,
 				  const std::vector<data_type>& voxelTypes,
@@ -700,7 +702,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& ctx, const volume& wvol, 
 				 const std::string& filename,
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const
@@ -753,7 +755,7 @@ namespace CVC_NAMESPACE
 	  dim[0] += off_x;
 	  dim[1] += off_y;
 	  dim[2] += off_z;
-	  createVolumeFile(filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
+	  CVC_NAMESPACE::createVolumeFile(ctx,filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
 	  volinfo.read(filename);
 
 	  if(var >= volinfo.numVariables())
@@ -878,17 +880,13 @@ namespace CVC_NAMESPACE
   };
 };
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class rawv_io_init
+  void register_rawv_io(app& /*ctx*/)
   {
-  public:
-    rawv_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::rawv_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new rawv_io)
+    );
+  }
 }
 

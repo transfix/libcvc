@@ -1428,7 +1428,7 @@ int main() {
 **Compilation:**
 
 ```bash
-g++ -std=c++14 -O3 volumetric_mesh.cpp -lcvc -lboost_system -lboost_thread -o volumetric_mesh
+g++ -std=c++20 -O3 volumetric_mesh.cpp -lcvc -lboost_system -lboost_thread -o volumetric_mesh
 ./volumetric_mesh
 ```
 

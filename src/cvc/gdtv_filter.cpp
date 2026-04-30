@@ -36,9 +36,9 @@ namespace CVC_NAMESPACE
   }
 
   /*--------------------------------------------------------------------*/
-  void Gradient(const voxels& input, voxels& grad)
+  void Gradient(app& ctx, const voxels& input, voxels& grad)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
 #ifdef CVC_USING_CUDA
     // Use CUDA for gradient computation if both input and grad have CUDA enabled
@@ -49,23 +49,23 @@ namespace CVC_NAMESPACE
             grad.cuda_data_ptr(),
             input.XDim(), input.YDim(), input.ZDim(),
             input.voxelType());
-        cvcapp.threadProgress(1.0f);
+        ctx.threadProgress(1.0f);
         return;
       } catch (const cuda_error& e) {
-        cvcapp.log(2, std::string("CUDA GDTV gradient failed: ") + e.what() + ", falling back to CPU");
+        ctx.log(2, std::string("CUDA GDTV gradient failed: ") + e.what() + ", falling back to CPU");
       }
     }
 #endif
 
     float val[6];
 
-    for(unsigned int i = 0; i < input.XDim(); i++)
+    for(int i = 0; i < (int)input.XDim(); i++)
       {
 #ifdef _OPENMP
 	#pragma omp parallel for private(val) schedule(dynamic)
 #endif
-	for(unsigned int j = 0; j < input.YDim(); j++)
-	  for(unsigned int k = 0; k < input.ZDim(); k++)
+	for(int j = 0; j < (int)input.YDim(); j++)
+	  for(int k = 0; k < (int)input.ZDim(); k++)
 	    {
 	      for(int l = 0; l < 6; l++)
 		{
@@ -86,25 +86,25 @@ namespace CVC_NAMESPACE
 	      grad(i,j,k,sqrt(sum));
 	    }
 
-	cvcapp.threadProgress(float(i)/float(input.XDim()));
+	ctx.threadProgress(float(i)/float(input.XDim()));
       }
   }  
 
 
 
   /*--------------------------------------------------------------------*/
-  void Gradient2(const voxels& input, voxels& grad)
+  void Gradient2(app& ctx, const voxels& input, voxels& grad)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     float val[26];
-    for(unsigned int i = 0; i < input.XDim(); i++)
+    for(int i = 0; i < (int)input.XDim(); i++)
       {
 #ifdef _OPENMP
 	#pragma omp parallel for private(val) schedule(dynamic)
 #endif
-	for(unsigned int j = 0; j < input.YDim(); j++)
-	  for(unsigned int k = 0; k < input.ZDim(); k++)
+	for(int j = 0; j < (int)input.YDim(); j++)
+	  for(int k = 0; k < (int)input.ZDim(); k++)
 	    {
 	      for(int l = 0; l < 26; l++)
 		{
@@ -178,17 +178,17 @@ namespace CVC_NAMESPACE
 	      grad(i,j,k,sqrt(sum));
 	    }
 
-	cvcapp.threadProgress(float(i)/float(input.XDim()));
+	ctx.threadProgress(float(i)/float(input.XDim()));
       }
   }  
 
 
   /*------------------------------------------------------------------------*/
-  void filtGDTV(const voxels& input, const voxels& grad, voxels&  funcval, float q, float lbda)
+  void filtGDTV(app& ctx, const voxels& input, const voxels& grad, voxels&  funcval, float q, float lbda)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-    voxels funcvalue(grad.voxel_dimensions(), grad.voxelType());
+    voxels funcvalue(ctx, grad.voxel_dimensions(), grad.voxelType());
     
 #ifdef CVC_USING_CUDA
     // Enable CUDA on funcvalue if grad has CUDA enabled
@@ -213,10 +213,10 @@ namespace CVC_NAMESPACE
         
         // Copy result back to funcval
         funcval.copy(funcvalue);
-        cvcapp.threadProgress(1.0f);
+        ctx.threadProgress(1.0f);
         return;
       } catch (const cuda_error& e) {
-        cvcapp.log(2, std::string("CUDA GDTV filter failed: ") + e.what() + ", falling back to CPU");
+        ctx.log(2, std::string("CUDA GDTV filter failed: ") + e.what() + ", falling back to CPU");
       }
     }
 #endif
@@ -292,7 +292,7 @@ namespace CVC_NAMESPACE
 	      funcvalue(i,j,k,temple); 
 	    }
 	
-	cvcapp.threadProgress(float(i)/float(grad.XDim()));
+	ctx.threadProgress(float(i)/float(grad.XDim()));
       }
 
     for(unsigned int i = 0; i < grad.XDim(); i++)
@@ -306,9 +306,9 @@ namespace CVC_NAMESPACE
 
   /*----------------------------------------------------------------------------------------------*/
 
-  void filtGDTV2(const voxels& input, const voxels& grad, voxels&  funcval, float q, float lbda)
+  void filtGDTV2(app& ctx, const voxels& input, const voxels& grad, voxels&  funcval, float q, float lbda)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     voxels funcvalue(grad);
 
@@ -528,7 +528,7 @@ namespace CVC_NAMESPACE
 	      funcvalue(i,j,k,temple); 
 	    }
 
-	cvcapp.threadProgress(float(i)/float(grad.XDim()));
+	ctx.threadProgress(float(i)/float(grad.XDim()));
       }
 
     for(unsigned int i = 0; i < grad.XDim(); i++)
@@ -542,12 +542,13 @@ namespace CVC_NAMESPACE
 
   voxels& voxels::gdtvFilter(double parameterq, double lambda, unsigned int iteration, unsigned int neigbour)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
-    voxels filter(voxel_dimensions(), voxelType());  // Create independent copy
+
+    voxels filter(_ctx, voxel_dimensions(), voxelType());  // Create independent copy
     filter.copy(*this, true);  // Deep copy the data
     
-    voxels gradient(voxel_dimensions(), Float);
+    voxels gradient(_ctx, voxel_dimensions(), Float);
     
 #ifdef CVC_USING_CUDA
     // Enable CUDA on filter and gradient if source has CUDA enabled
@@ -558,17 +559,17 @@ namespace CVC_NAMESPACE
 #endif
     
     if(neigbour == 0){
-      Gradient((*this),gradient);
+      Gradient(_ctx, (*this),gradient);
       
       for(unsigned int tt = 0; tt < iteration; tt++){
-	filtGDTV((*this), gradient, filter, parameterq, lambda);
+	filtGDTV(_ctx, (*this), gradient, filter, parameterq, lambda);
       }
     }
     else {
-      Gradient2((*this),gradient);
+      Gradient2(_ctx, (*this),gradient);
       
       for(unsigned int tt = 0; tt < iteration; tt++){
-	filtGDTV2((*this), gradient, filter, parameterq, lambda);
+	filtGDTV2(_ctx, (*this), gradient, filter, parameterq, lambda);
       }
     }
 

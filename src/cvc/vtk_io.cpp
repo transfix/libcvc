@@ -33,6 +33,7 @@
 #include <cstring>
 #include <cmath>
 #include <errno.h>
+#include <format>
 
 #include <boost/format.hpp>
 
@@ -214,7 +215,7 @@ namespace
     FLOAT* dataPtr = (FLOAT*)calloc(nMem, sizeof(FLOAT)); // initialize mem to zero - so that padded part is set to zero!
     if(dataPtr == NULL)
       {
-	string errStr(str(format("Error reading file '%1%': Could not allocate %2% bytes of memory!") 
+	string errStr(str(boost::format("Error reading file '%1%': Could not allocate %2% bytes of memory!") 
 			  % string(filename)
 			  % (nMem*sizeof(FLOAT))));
 	fclose(fd); 
@@ -222,7 +223,7 @@ namespace
       }
 
     unsigned short dataVal;
-    register unsigned int _r, _c, _d;
+    unsigned int _r, _c, _d;
     FLOAT *ptr = NULL;
     for(_d = 0; _d < di.n_input[2]; _d++)
       for(_c = 0; _c < di.n_input[1]; _c++)
@@ -272,31 +273,22 @@ namespace
 	string errStr = "Error opening file '" + string(filename) + "': " + string(buf);
 	throw CVC_NAMESPACE::write_error(errStr);
       }
-    char str[256];
     unsigned long nMem = di.n[0]*di.n[1]*di.n[2];
-    sprintf(str, "# vtk DataFile Version 3.0\n");
-    fputs(str, fd);
-    sprintf(str, "created by levelSet (Ojaswa Sharma). Zero level: %f\n", value_increment);
-    fputs(str, fd);
-    sprintf(str, "BINARY\n");
-    fputs(str, fd);  
-    sprintf(str, "DATASET STRUCTURED_POINTS\n");
-    fputs(str, fd);  
-    sprintf(str, "DIMENSIONS %d %d %d\n", di.n[0], di.n[1], di.n[2]);
-    fputs(str, fd);  
-    sprintf(str, "ORIGIN 0.000000 0.000000 0.000000\n");
-    fputs(str, fd);  
-    sprintf(str, "SPACING 1.000000 1.000000 1.000000\n");
-    fputs(str, fd);  
-    sprintf(str, "POINT_DATA %lu\n", nMem);
-    fputs(str, fd);  
-    sprintf(str, "SCALARS image_data unsigned_short\n");
-    fputs(str, fd);  
-    sprintf(str, "LOOKUP_TABLE default\n");
-    fputs(str, fd);  
+    fputs("# vtk DataFile Version 3.0\n", fd);
+    fputs(std::format("created by levelSet (Ojaswa Sharma). Zero level: {:f}\n",
+                      value_increment).c_str(), fd);
+    fputs("BINARY\n", fd);
+    fputs("DATASET STRUCTURED_POINTS\n", fd);
+    fputs(std::format("DIMENSIONS {} {} {}\n",
+                      di.n[0], di.n[1], di.n[2]).c_str(), fd);
+    fputs("ORIGIN 0.000000 0.000000 0.000000\n", fd);
+    fputs("SPACING 1.000000 1.000000 1.000000\n", fd);
+    fputs(std::format("POINT_DATA {}\n", nMem).c_str(), fd);
+    fputs("SCALARS image_data unsigned_short\n", fd);
+    fputs("LOOKUP_TABLE default\n", fd);
     unsigned short dataval;
     FLOAT datavalf;
-    register unsigned int _r, _c, _d;
+    unsigned int _r, _c, _d;
     const FLOAT *ptr = NULL;
     for(_d = 0; _d < di.n[2]; _d++)
       for(_c = 0; _c < di.n[1]; _c++)
@@ -381,7 +373,8 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& /*d*/,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& /*d*/,
 				   const std::string& /*filename*/) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -395,7 +388,7 @@ namespace CVC_NAMESPACE
     //   Writes to a Volume object after reading from a volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& /*vol*/,
+    virtual void readVolumeFile(app& /*ctx*/, volume& /*vol*/,
 				const std::string& /*filename*/, 
 				unsigned int /*var*/, unsigned int /*time*/,
 				uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/,
@@ -412,7 +405,8 @@ namespace CVC_NAMESPACE
     //   Creates an empty volume file to be later filled in by writeVolumeFile
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void createVolumeFile(const std::string& /*filename*/,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& /*filename*/,
 				  const bounding_box& /*boundingBox*/,
 				  const dimension& /*dimension*/,
 				  const std::vector<data_type>& /*voxelTypes*/,
@@ -435,7 +429,7 @@ namespace CVC_NAMESPACE
     //   createVolumeFile to replace the volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void writeVolumeFile(const volume& /*wvol*/, 
+    virtual void writeVolumeFile(app& /*ctx*/, const volume& /*wvol*/, 
 				 const std::string& /*filename*/,
 				 unsigned int /*var*/, unsigned int /*time*/,
 				 uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/) const
@@ -450,17 +444,13 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class vtk_io_init
+  void register_vtk_io(app& /*ctx*/)
   {
-  public:
-    vtk_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::vtk_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new vtk_io)
+    );
+  }
 }
 

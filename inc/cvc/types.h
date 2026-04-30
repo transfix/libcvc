@@ -38,7 +38,7 @@
 #include <vector>
 
 #ifndef CVC_VERSION_STRING
-#define CVC_VERSION_STRING "1.0.0"
+#define CVC_VERSION_STRING "3.0.0"
 #endif
 
 #define CVC_ENABLE_LOCALE_BOOL
@@ -206,5 +206,76 @@ namespace CVC_NAMESPACE
     BSPLINE_INTERPOLATION = 2   // B-spline interpolation (balanced)
   };
 }
+
+// ------------------------------------------------------------------
+// Legacy PascalCase aliases (Phase 8 compat layer).
+// Placed in a *separate* `namespace CVC` block (not inside CVC_NAMESPACE)
+// so that internal libcvc code in `namespace cvc` is unaffected by any
+// symbol-name collisions (e.g. SDF's local `struct BoundingBox`), while
+// consumer code reaching this header via case-insensitive resolution of
+// <CVC/Types.h> still finds CVC::DataType, CVC::DataMap, etc.
+// ------------------------------------------------------------------
+namespace CVC
+{
+  typedef CVC_NAMESPACE::data_type                  DataType;
+
+  typedef CVC_NAMESPACE::signal                     Signal;
+  typedef CVC_NAMESPACE::map_change_signal          MapChangeSignal;
+  typedef CVC_NAMESPACE::data_map                   DataMap;
+  typedef CVC_NAMESPACE::data_type_name_map         DataTypeNameMap;
+  typedef CVC_NAMESPACE::data_type_enum_map         DataTypeEnumMap;
+  typedef CVC_NAMESPACE::property_map               PropertyMap;
+  typedef CVC_NAMESPACE::thread_ptr                 ThreadPtr;
+  typedef CVC_NAMESPACE::thread_map                 ThreadMap;
+  typedef CVC_NAMESPACE::thread_progress_map        ThreadProgressMap;
+  typedef CVC_NAMESPACE::thread_key_map             ThreadKeyMap;
+  typedef CVC_NAMESPACE::thread_info_map            ThreadInfoMap;
+  typedef CVC_NAMESPACE::data_reader                DataReader;
+  typedef CVC_NAMESPACE::data_reader_collection     DataReaderCollection;
+  typedef CVC_NAMESPACE::mutex_ptr                  MutexPtr;
+  typedef CVC_NAMESPACE::mutex_map_element          MutexMapElement;
+  typedef CVC_NAMESPACE::mutex_map                  MutexMap;
+}
+
+// Guarded statics/extra typedefs for case-insensitive filesystems (macOS)
+// where consumer compat shims are bypassed and libcvc's header is the only
+// source of CVC::-namespace aliases.  Consumer shims may opt-out by defining
+// CVC_COMPAT_TYPES_STATICS_DEFINED before including this header.
+#ifndef CVC_COMPAT_TYPES_STATICS_DEFINED
+#define CVC_COMPAT_TYPES_STATICS_DEFINED
+namespace CVC
+{
+  static const unsigned int*               DataTypeSizes   = CVC_NAMESPACE::data_type_sizes;
+  static const char**                      DataTypeStrings = CVC_NAMESPACE::data_type_strings;
+}
+#endif // CVC_COMPAT_TYPES_STATICS_DEFINED
+
+// PascalCase aliases inside CVC_NAMESPACE itself so sources nested in
+// `namespace cvc { ... }` can refer to unqualified `DataType`, `PropertyMap`,
+// etc. on case-insensitive filesystems (macOS) where consumer compat shims
+// are bypassed.
+#ifndef CVC_COMPAT_PASCAL_TYPES_DEFINED
+#define CVC_COMPAT_PASCAL_TYPES_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef data_type                  DataType;
+  typedef signal                     Signal;
+  typedef map_change_signal          MapChangeSignal;
+  typedef data_map                   DataMap;
+  typedef data_type_name_map         DataTypeNameMap;
+  typedef data_type_enum_map         DataTypeEnumMap;
+  typedef property_map               PropertyMap;
+  typedef thread_ptr                 ThreadPtr;
+  typedef thread_map                 ThreadMap;
+  typedef thread_progress_map        ThreadProgressMap;
+  typedef thread_key_map             ThreadKeyMap;
+  typedef thread_info_map            ThreadInfoMap;
+  typedef data_reader                DataReader;
+  typedef data_reader_collection     DataReaderCollection;
+  typedef mutex_ptr                  MutexPtr;
+  typedef mutex_map_element          MutexMapElement;
+  typedef mutex_map                  MutexMap;
+}
+#endif // CVC_COMPAT_PASCAL_TYPES_DEFINED
 
 #endif

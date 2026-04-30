@@ -145,6 +145,64 @@ namespace CVC_NAMESPACE
     bool _flushed;
   };
 
+  // ----------------------
+  // cvc::state_init_scope
+  // ----------------------
+  // Purpose:
+  //   RAII wrapper for *establishing* initial state on a state_object
+  //   without firing change handlers. Use this in the body of a derived
+  //   class's constructor (and only there) so that seed values do not
+  //   spawn handler threads that would race with subsequent caller-
+  //   initiated changes.
+  //
+  //   Without this, an object like:
+  //
+  //     class Cfg : public state_object<Cfg> {
+  //       Cfg() {
+  //         getState("width").value(1920);   // spawns thread T1
+  //         getState("height").value(1080);  // spawns thread T2
+  //       }
+  //     };
+  //
+  //   has a window between construction and the caller's first action
+  //   in which T1/T2 have been spawned but not yet finished. Their
+  //   completion is unordered with respect to the caller's batch and
+  //   waitForHandlers() observations, producing flaky handler-count
+  //   accounting (initial vs final snapshot races).
+  //
+  //   Usage:
+  //     Cfg() : ... {
+  //       state_init_scope<Cfg> init(*this);
+  //       getState("width").value(1920);   // change signal suppressed
+  //       getState("height").value(1080);  // change signal suppressed
+  //     } // scope ends; queued changes discarded, no handlers spawned.
+  //
+  // ---- Change History ----
+  // 04/2026 -- Joe R. -- Creation. Added to fix StateObjectBatchedChanges /
+  //                      StateObjectNestedBatching race on macOS Release.
+  template <class This>
+  class state_init_scope
+  {
+  public:
+    explicit state_init_scope(state_object<This>& obj)
+      : _obj(obj)
+    {
+      _obj.beginInit();
+    }
+
+    ~state_init_scope()
+    {
+      _obj.endInit();
+    }
+
+    // Non-copyable
+    state_init_scope(const state_init_scope&) = delete;
+    state_init_scope& operator=(const state_init_scope&) = delete;
+
+  private:
+    state_object<This>& _obj;
+  };
+
   // -----------------
   // cvc::state_object
   // -----------------
@@ -178,18 +236,27 @@ namespace CVC_NAMESPACE
   class state_object
   {
   public:
+    // Legacy constructor - uses app::instance() singleton
     state_object(const std::string state_path = std::string()) 
-      : _batchDepth(0),
+      : state_object(app::instance(), state_path)
+    {
+    }
+
+    // Constructor with explicit app context
+    state_object(app& ctx, const std::string state_path = std::string()) 
+      : _ctx(ctx),
+        _batchDepth(0),
+        _initDepth(0),
         _hasInstanceThreading(false),
         _instanceThreading(false),
         _state_path(state_path.empty() ?
-          cvcapp.dataTypeName<This>()+
+          _ctx.dataTypeName<This>()+
           CVC_NAMESPACE::state::SEPARATOR+
           boost::lexical_cast<std::string>(this) :
           state_path)
     {
       // Register the data type - avoid the macro by using template syntax
-      cvcapp.template registerDataType<This>(cvcapp.dataTypeName<This>());
+      _ctx.template registerDataType<This>(_ctx.dataTypeName<This>());
 
       //watch this object's state
       _stateConnection = getState().childChanged.connect(
@@ -206,7 +273,7 @@ namespace CVC_NAMESPACE
       // Wait for handler threads to complete to avoid dangling references
       // Handler threads are named as stateName(childState) + "_stateChanged"
       std::string threadPrefix = stateName();
-      thread_map threads = cvcapp.threads();
+      thread_map threads = _ctx.threads();
       BOOST_FOREACH(thread_map::value_type& val, threads)
         {
           // Check if this thread belongs to this state_object instance
@@ -218,7 +285,7 @@ namespace CVC_NAMESPACE
                 {
                   if(!val.second->timed_join(boost::posix_time::milliseconds(5000)))
                     {
-                      cvcapp.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish in time, interrupting")
+                      _ctx.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish in time, interrupting")
                                        % val.first));
                       val.second->interrupt();
                       val.second->join();
@@ -249,6 +316,25 @@ namespace CVC_NAMESPACE
       _batchDepth++;
     }
 
+    // Begin an *initialization* region. While _initDepth > 0, change
+    // signals received by stateChanged() are dropped instead of being
+    // queued or spawned. Used by state_init_scope to set seed values in
+    // a constructor without spawning racy handler threads.
+    void beginInit()
+    {
+      boost::mutex::scoped_lock lock(_batchMutex);
+      _initDepth++;
+    }
+
+    // End an initialization region. Pairs with beginInit().
+    void endInit()
+    {
+      boost::mutex::scoped_lock lock(_batchMutex);
+      if (_initDepth > 0) {
+        _initDepth--;
+      }
+    }
+
     // End batching and flush all pending handlers (spawn threads for unique changes)
     void endBatch()
     {
@@ -273,7 +359,7 @@ namespace CVC_NAMESPACE
         // Threading enabled - spawn threads for each change
         BOOST_FOREACH(const std::string& childState, pendingCopy)
           {
-            cvcapp.startThread(stateName(childState) + "_stateChanged",
+            _ctx.startThread(stateName(childState) + "_stateChanged",
                                boost::bind(&state_object<This>::handleStateChanged, 
                                            boost::ref(*this),
                                            childState));
@@ -291,7 +377,7 @@ namespace CVC_NAMESPACE
     void waitForHandlers()
     {
       std::string threadPrefix = stateName();
-      thread_map threads = cvcapp.threads();
+      thread_map threads = _ctx.threads();
       BOOST_FOREACH(thread_map::value_type& val, threads)
         {
           if(val.first.find(threadPrefix) == 0 && 
@@ -350,6 +436,7 @@ namespace CVC_NAMESPACE
     }
 
   protected:
+    app&        _ctx;
     std::string _state_path;
 
     boost::signals2::connection _stateConnection;
@@ -357,6 +444,7 @@ namespace CVC_NAMESPACE
     // Batching support
     mutable boost::mutex _batchMutex;
     int _batchDepth;
+    int _initDepth;
     std::set<std::string> _pendingChanges;
 
     // State locking support
@@ -381,7 +469,7 @@ namespace CVC_NAMESPACE
     //Note: each call happens in its own thread (unless threading is disabled).
     virtual void handleStateChanged(const std::string& childState)
     {
-      cvcapp.log(2,str(boost::format("%s :: state changed: %s\n")
+      _ctx.log(2,str(boost::format("%s :: state changed: %s\n")
                        % BOOST_CURRENT_FUNCTION
                        % childState));
     }
@@ -393,7 +481,15 @@ namespace CVC_NAMESPACE
     void stateChanged(const std::string& childState)
     {
       boost::mutex::scoped_lock lock(_batchMutex);
-      
+
+      // Initialization region: drop the change entirely. Used by
+      // state_init_scope to seed default state from a constructor
+      // without spawning handler threads that would race with the
+      // caller's first observable interactions.
+      if (_initDepth > 0) {
+        return;
+      }
+
       if (_batchDepth > 0) {
         // Batching enabled - queue this change (set automatically deduplicates)
         _pendingChanges.insert(childState);
@@ -403,7 +499,7 @@ namespace CVC_NAMESPACE
           // Threading enabled - spawn thread (unlock first to avoid holding lock)
           lock.unlock();
           std::string threadKey = stateName(childState) + "_stateChanged";
-          cvcapp.startThread(threadKey,
+          _ctx.startThread(threadKey,
                              [this, childState, threadKey]() {
                                cvc::app::thread_feedback feedback(threadKey);
                                this->handleStateChanged(childState);

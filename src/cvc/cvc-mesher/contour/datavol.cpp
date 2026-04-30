@@ -290,7 +290,7 @@ Datavol::compFunction(int n, u_int &len, float **fx)
    return(NULL);
 }
 
-char *Datavol::fName(int n)
+const char *Datavol::fName(int n)
 {
    switch (n) {
       case 0:

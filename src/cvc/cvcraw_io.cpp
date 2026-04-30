@@ -78,7 +78,7 @@ namespace CVC_NAMESPACE
     
       getline(inf, line); line_num++;
       if(!inf)
-	throw read_error(str(format("Error reading file %1%, line %2%")
+	throw read_error(str(boost::format("Error reading file %1%, line %2%")
 			     % filename
 			     % line_num));
       trim(line);
@@ -88,7 +88,7 @@ namespace CVC_NAMESPACE
 	    token_compress_on);
       if(split_line.size() != 1 &&
 	 split_line.size() != 2)
-	throw read_error(str(format("Not a cvc-raw file (wrong number of tokens: [%1%])")
+	throw read_error(str(boost::format("Not a cvc-raw file (wrong number of tokens: [%1%])")
 			     % split_line.size()));
 
 
@@ -102,7 +102,7 @@ namespace CVC_NAMESPACE
 	    {
 	      getline(inf, line); line_num++;
 	      if(!inf)
-		throw read_error(str(format("Error reading file %1%, line %2%")
+		throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				     % filename
 				     % line_num));
 	      trim(line);
@@ -177,7 +177,7 @@ namespace CVC_NAMESPACE
 		  break;
 		default:
 		  {
-		    throw read_error(str(format("Not a cvc-raw file (wrong number of tokens: [%1%])")
+		    throw read_error(str(boost::format("Not a cvc-raw file (wrong number of tokens: [%1%])")
 					 % split_line.size()));
 		  }
 		  break;
@@ -188,7 +188,7 @@ namespace CVC_NAMESPACE
 	    {
 	      getline(inf, line); line_num++;
 	      if(!inf)
-		throw read_error(str(format("Error reading file %1%, line %2%")
+		throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				     % filename
 				     % line_num));
 	      trim(line);
@@ -274,7 +274,7 @@ namespace CVC_NAMESPACE
 		  break;
 		default:
 		  {
-		    throw read_error(str(format("Not a cvc-raw file {num components found: %1%}") % split_line.size()));   
+		    throw read_error(str(boost::format("Not a cvc-raw file {num components found: %1%}") % split_line.size()));   
 		  }
 		  break;
 		}
@@ -282,7 +282,7 @@ namespace CVC_NAMESPACE
 	}
       catch(std::exception& e)
 	{
-	  throw read_error(str(format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
+	  throw read_error(str(boost::format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
 			       % filename
 			       % line_num
 			       % line
@@ -394,11 +394,11 @@ namespace CVC_NAMESPACE
       bool printColors = (ends_with(filename,".rawc") || ends_with(filename,".rawnc"));
 
       if (printNormals && !haveNormals) {
-	cvcapp.log(3,"WARNING: file with normals requested but not available.");
+	std::cerr << "WARNING: file with normals requested but not available." << std::endl;
       }
 
       if (printColors && !haveColors) {
-	cvcapp.log(3,"WARNING: file with normals requested but not available.");
+	std::cerr << "WARNING: file with colors requested but not available." << std::endl;
       }
     
       for(points_t::const_iterator i = geom.points().begin();
@@ -421,7 +421,7 @@ namespace CVC_NAMESPACE
 	    outf << " " << geom.boundary()[std::distance(geom.points().begin(),i)];
 	  outf << endl;
 	  if(!outf)
-	    throw write_error(str(format("Error writing vertex %1%") % std::distance(geom.points().begin(),i)));
+	    throw write_error(str(boost::format("Error writing vertex %1%") % std::distance(geom.points().begin(),i)));
 	}
     
       if(geom.lines().size() != 0)
@@ -437,7 +437,7 @@ namespace CVC_NAMESPACE
 		}
 
 	      if(!outf)
-		throw write_error(str(format("Error writing line %1%") % std::distance(geom.lines().begin(),i)));
+		throw write_error(str(boost::format("Error writing line %1%") % std::distance(geom.lines().begin(),i)));
 	    }
 	}
       else if(geom.tris().size() != 0)
@@ -455,7 +455,7 @@ namespace CVC_NAMESPACE
 		    }
                 
 		  if(!outf)
-		    throw write_error(str(format("Error writing triangle %1%") % std::distance(geom.tris().begin(),i)));
+		    throw write_error(str(boost::format("Error writing triangle %1%") % std::distance(geom.tris().begin(),i)));
 		}
 	    }
 	  else
@@ -465,7 +465,7 @@ namespace CVC_NAMESPACE
 		  outf << geom.tris()[4*i][0] << " " << geom.tris()[4*i][1] << " " 
 		       << geom.tris()[4*i][2] << " " << geom.tris()[4*i+1][2] << endl;
 		  if(!outf)
-		    throw write_error(str(format("Error writing tetrahedron %1%") % i));
+		    throw write_error(str(boost::format("Error writing tetrahedron %1%") % i));
 		}
 	    }
 	}
@@ -484,7 +484,7 @@ namespace CVC_NAMESPACE
 		    }
                 
 		  if(!outf)
-		    throw write_error(str(format("Error writing quad %1%") % std::distance(geom.quads().begin(),i)));
+		    throw write_error(str(boost::format("Error writing quad %1%") % std::distance(geom.quads().begin(),i)));
 		}
 	    }
 	  else
@@ -504,7 +504,7 @@ namespace CVC_NAMESPACE
                 
 
 		  if(!outf)
-		    throw write_error(str(format("Error writing hexahedron %1%") % i));           
+		    throw write_error(str(boost::format("Error writing hexahedron %1%") % i));           
 		}
 	    }
 	}
@@ -516,16 +516,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class cvcraw_io_init
+  void register_cvcraw_io(app& /*ctx*/)
   {
-  public:
-    cvcraw_io_init()
-    {
-      CVC_NAMESPACE::geometry_file_io::insert_handler(
-        CVC_NAMESPACE::geometry_file_io::ptr(new CVC_NAMESPACE::cvcraw_io)
-      );
-    }
-  } static_init;
+    geometry_file_io::insert_handler(
+      geometry_file_io::ptr(new cvcraw_io)
+    );
+  }
 }

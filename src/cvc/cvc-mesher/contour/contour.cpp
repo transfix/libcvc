@@ -39,7 +39,7 @@
 //
 //------------------------------------------------------------------------
 
-void	defaultHandler(char *str, int fatal)
+void	defaultHandler(const char *str, int fatal)
 {
     if (fatal)
 	{
@@ -68,7 +68,7 @@ void	defaultHandler(char *str, int fatal)
 
 int	verbose = 1;					// verbose level
 
-void	(*errorHandler)(char *, int) = defaultHandler;	// error handler
+void	(*errorHandler)(const char *, int) = defaultHandler;	// error handler
 
 //------------------------------------------------------------------------
 //
@@ -98,7 +98,7 @@ void	setVerboseLevel(int level)
 //
 //------------------------------------------------------------------------
 
-void	setErrorHandler(void (*handler)(char *, int))
+void	setErrorHandler(void (*handler)(const char *, int))
 {
     errorHandler = handler;
 }
@@ -151,10 +151,10 @@ ConDataset	*newDatasetUnstr(int datatype, int meshtype, int nvars,
       };
 					// allocate and init signature data
 
-    dataset->sfun = new (Signature**[dataset->data->nData()]);
+    dataset->sfun = new Signature**[dataset->data->nData()];
     for (var = 0; var < dataset->data->nData(); var++)
 	{
-	dataset->sfun[var] = new (Signature*[dataset->data->nTime()]);
+	dataset->sfun[var] = new Signature*[dataset->data->nTime()];
 	for (t = 0; t < dataset->data->nTime(); t++)
 	    dataset->sfun[var][t] = NULL;
 	}
@@ -221,10 +221,10 @@ ConDataset	*newDatasetReg(int datatype, int meshtype, int nvars,
       };
 					// allocate and init signature data
 
-    dataset->sfun = new (Signature**[dataset->data->nData()]);
+    dataset->sfun = new Signature**[dataset->data->nData()];
     for (var = 0; var < dataset->data->nData(); var++)
 	{
-	dataset->sfun[var] = new (Signature*[dataset->data->nTime()]);
+	dataset->sfun[var] = new Signature*[dataset->data->nTime()];
 	for (t = 0; t < dataset->data->nTime(); t++)
 	    dataset->sfun[var][t] = NULL;
 	}
@@ -325,10 +325,10 @@ ConDataset	*loadDataset(int datatype, int meshtype, int nvars,
 
 					// allocate and init signature data
 
-    dataset->sfun = new (Signature**[dataset->data->nData()]);
+    dataset->sfun = new Signature**[dataset->data->nData()];
     for (var = 0; var < dataset->data->nData(); var++)
 	{
-	dataset->sfun[var] = new (Signature*[dataset->data->nTime()]);
+	dataset->sfun[var] = new Signature*[dataset->data->nTime()];
 	for (t = 0; t < dataset->data->nTime(); t++)
 	    dataset->sfun[var][t] = NULL;
 	}

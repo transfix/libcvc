@@ -24,6 +24,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <format>
 
 #include <cstdio>
 #include <cstdlib>
@@ -132,7 +133,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class.
-    virtual void getVolumeFileInfo(volume_file_info::data& data,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& data,
 				   const std::string& filename) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -281,7 +283,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -486,7 +488,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
 				  const bounding_box& boundingBox,
 				  const dimension& dimension,
 				  const std::vector<data_type>& voxelTypes,
@@ -509,15 +512,15 @@ namespace CVC_NAMESPACE
 	throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
 	{
-	  char buf[256];
-	  sprintf(buf,"RawIV format only supports 1 variable (%d requested)",numVariables);
-	  throw invalid_rawiv_header(buf);
+	  throw invalid_rawiv_header(
+	    std::format("RawIV format only supports 1 variable ({} requested)",
+	                numVariables));
 	}
       if(numTimesteps > 1)
 	{
-	  char buf[256];
-	  sprintf(buf,"RawIV format only supports 1 timestep (%d requested)",numTimesteps);
-	  throw invalid_rawiv_header(buf);
+	  throw invalid_rawiv_header(
+	    std::format("RawIV format only supports 1 timestep ({} requested)",
+	                numTimesteps));
 	}
       if(voxelTypes.size() > 1)
 	throw invalid_rawiv_header("RawIV format only supports 1 variable and 1 timestep. (too many voxel types specified)");
@@ -611,7 +614,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& ctx, const volume& wvol, 
 				 const std::string& filename,
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const
@@ -666,7 +669,7 @@ namespace CVC_NAMESPACE
 	  dim[0] += off_x;
 	  dim[1] += off_y;
 	  dim[2] += off_z;
-	  createVolumeFile(filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
+	  CVC_NAMESPACE::createVolumeFile(ctx,filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
 	  volinfo.read(filename);
 
 	  if(var >= volinfo.numVariables())
@@ -864,17 +867,13 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class rawiv_io_init
+  void register_rawiv_io(app& /*ctx*/)
   {
-  public:
-    rawiv_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::rawiv_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new rawiv_io)
+    );
+  }
 }
 

@@ -21,7 +21,7 @@
 #include "conplotreg2.h"
 
 extern int verbose;
-extern void (*errorHandler)(char *, int);
+extern void (*errorHandler)(const char *, int);
 
 using namespace std;
 

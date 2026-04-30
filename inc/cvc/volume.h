@@ -70,22 +70,22 @@ namespace CVC_NAMESPACE
   class volume : public voxels
   {
   public:
-    volume(const dimension& d = dimension(4,4,4), 
+    volume(app& ctx, const dimension& d = dimension(4,4,4), 
 	   data_type vt = UChar, 
 	   const bounding_box& box = bounding_box(-0.5,-0.5,-0.5,0.5,0.5,0.5)) 
-      : voxels(d,vt), _boundingBox(box), _desc("No Name") {}
-    volume(const unsigned char *v, 
+      : voxels(ctx,d,vt), _boundingBox(box), _desc("No Name") {}
+    volume(app& ctx, const unsigned char *v, 
 	   const dimension& d, 
 	   data_type vt, 
 	   const bounding_box& box = bounding_box(-0.5,-0.5,-0.5,0.5,0.5,0.5))
-      : voxels(v,d,vt), _boundingBox(box), _desc("No Name") {}
+      : voxels(ctx,v,d,vt), _boundingBox(box), _desc("No Name") {}
     volume(const voxels& vox,
 	   const bounding_box& box = bounding_box(-0.5,-0.5,-0.5,0.5,0.5,0.5))
       : voxels(vox), _boundingBox(box), _desc("No Name") {}
     volume(const volume& vol)
       : voxels(vol), _boundingBox(vol.boundingBox()), _desc(vol.desc()) {}
-    volume(const std::string& filename)
-      { read(filename); }
+    volume(app& ctx, const std::string& filename)
+      : voxels(ctx) { read(filename); }
     ~volume() {}
 
     /*

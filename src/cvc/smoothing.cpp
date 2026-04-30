@@ -157,7 +157,7 @@ namespace
     return      Dist_f;
   }
 
-  void smooth_geometry(CVC_NAMESPACE::geometry& geo, float delta, bool fix_boundary,
+  void smooth_geometry(CVC_NAMESPACE::app& ctx, CVC_NAMESPACE::geometry& geo, float delta, bool fix_boundary,
                        bool perturb_1, bool geometric_flow, bool smoothing_enabled, bool perturb_2)
   {
     using namespace std;
@@ -181,12 +181,9 @@ namespace
     float       sum_0, sum_1[3], Normal_f[3], delta_t, area, t;
     float       Min_f[3], Max_f[3], Half_f[3], Length_f;
     float       AveCenter_f[3];
-    float       nx, ny, nz, r, g, b;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-    nx = r; ny = g; nz = b;
-    //delta_t = 0.1f;
     delta_t = delta;
 
     NumVertices_i = geo.num_points();
@@ -239,9 +236,9 @@ namespace
 
     for (k=0; k<3; k++) Half_f[k] = (Min_f[k] + Max_f[k])/2;
         
-    cvcapp.log(3,str(format("Min = %.4f %.4f %.4f\n") % Min_f[0] % Min_f[1] % Min_f[2]));
-    cvcapp.log(3,str(format("Max = %.4f %.4f %.4f\n") % Max_f[0] % Max_f[1] % Max_f[2]));
-    cvcapp.log(3,str(format("Half = %.4f %.4f %.4f\n") % Half_f[0] % Half_f[1] % Half_f[2]));
+    ctx.log(3,str(boost::format("Min = %.4f %.4f %.4f\n") % Min_f[0] % Min_f[1] % Min_f[2]));
+    ctx.log(3,str(boost::format("Max = %.4f %.4f %.4f\n") % Max_f[0] % Max_f[1] % Max_f[2]));
+    ctx.log(3,str(boost::format("Half = %.4f %.4f %.4f\n") % Half_f[0] % Half_f[1] % Half_f[2]));
 
     for (i = 0; i < NumTriangles_i; i++) {
 
@@ -261,7 +258,7 @@ namespace
 
     if(fix_boundary)
       {
-	thread_info ti("fix_boundary");
+	thread_info ti(ctx, "fix_boundary");
         map<int, unsigned char> NeighborVertices_m;
         map<int, unsigned char>::iterator NeighborVertices_it;
         int NumFixedVertices_i = 0, NumNeighborTriangles_i;
@@ -273,7 +270,7 @@ namespace
         if(has_explicit_boundary)
           {
             // Use explicit boundary markers from geometry
-            cvcapp.log(3,"Using explicit boundary markers...\n");
+            ctx.log(3,"Using explicit boundary markers...\n");
             for(i=0; i<NumVertices_i; i++) {
               FixedVertices_guc[i] = geo.const_boundary()[i];
               if(FixedVertices_guc[i]) NumFixedVertices_i++;
@@ -282,7 +279,7 @@ namespace
         else
           {
             // Auto-detect boundary vertices topologically
-            cvcapp.log(3,"Finding fixed vertices ...\n");
+            ctx.log(3,"Finding fixed vertices ...\n");
             for(i=0; i<NumVertices_i; i++) {
               NumNeighborTriangles_i = 0;
               NeighborVertices_m.clear();
@@ -308,7 +305,7 @@ namespace
               }
             }
           }
-	cvcapp.threadProgress(float(NumFixedVertices_i)/float(NumVertices_i));
+	ctx.threadProgress(float(NumFixedVertices_i)/float(NumVertices_i));
       }
     else
       {
@@ -317,7 +314,7 @@ namespace
 
     if(perturb_1)
     {
-      thread_info ti("PERTURB_1");
+      thread_info ti(ctx, "PERTURB_1");
       // calculate the normal for each vertex
       for(i = 0; i < NumVertices_i; i++) {
 	for(k = 0; k < 3; k++) VertexNormal_gf[i*3 + k] = 0.0f;
@@ -346,7 +343,7 @@ namespace
 
 	Length_f = Normalize(&VertexNormal_gf[i*3]);
 	if (fabs(Length_f)<1e-4) {
-	  cvcapp.log(3,"Error! Length is equal to zero\n");
+	  ctx.log(3,"Error! Length is equal to zero\n");
 	}
       }
 
@@ -377,7 +374,7 @@ namespace
     if(geometric_flow)
     {
       // Rounding sharp edges
-      thread_info ti("GEOMETRIC_FLOW");
+      thread_info ti(ctx, "GEOMETRIC_FLOW");
 
       // Adjusting each triangle size
       for(index = 0; index < maxIndex; index++) {
@@ -414,7 +411,7 @@ namespace
 
 	  Length_f = Normalize(&VertexNormal_gf[i*3]);
 	  if (fabs(Length_f)<1e-4) {
-	    cvcapp.log(3,"Error! Length is equal to zero\n");
+	    ctx.log(3,"Error! Length is equal to zero\n");
 	  }
                                 
 	}
@@ -474,7 +471,7 @@ namespace
 
     if(smoothing_enabled)
     {
-      thread_info ti("SMOOTHING");
+      thread_info ti(ctx, "SMOOTHING");
 
       // Smoothing
       for(index = 0; index < maxIndex; index++) {
@@ -511,7 +508,7 @@ namespace
         
 	  Length_f = Normalize(&VertexNormal_gf[i*3]);
 	  if (fabs(Length_f)<1e-4) {
-	    cvcapp.log(3,"Error! Length is equal to zero\n");
+	    ctx.log(3,"Error! Length is equal to zero\n");
 	  }
                                 
 	}
@@ -562,7 +559,7 @@ namespace
 
     if(perturb_2)
     {
-      thread_info ti("PERTURB_2");
+      thread_info ti(ctx, "PERTURB_2");
       // calculate the normal for each vertex
 #ifdef _OPENMP
       #pragma omp parallel for schedule(static)
@@ -597,7 +594,7 @@ namespace
 
         Length_f = Normalize(&VertexNormal_gf[i*3]);
         if (fabs(Length_f)<1e-4) {
-          cvcapp.log(3,"Error! Length is equal to zero\n");
+          ctx.log(3,"Error! Length is equal to zero\n");
         }
       }
 
@@ -670,7 +667,7 @@ namespace CVC_NAMESPACE
                                 bool perturb_1, bool geometric_flow,
                                 bool smoothing_enabled, bool perturb_2)
   {
-    smooth_geometry(*this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled, perturb_2);
+    smooth_geometry(ctx(), *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled, perturb_2);
     return *this;
   }
 }

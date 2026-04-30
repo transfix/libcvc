@@ -122,6 +122,19 @@ namespace CVC_NAMESPACE
 		     volinfo.TMin(),volinfo.TMax());
   }
 
+  static inline void createVolumeFile(app& ctx,
+                                      const std::string& filename,
+                                      const volume_file_info& volinfo)
+  {
+    createVolumeFile(ctx, filename,
+                     volinfo.boundingBox(),
+                     volinfo.voxel_dimensions(),
+                     volinfo.voxelTypes(),
+                     volinfo.numVariables(),
+                     volinfo.numTimesteps(),
+                     volinfo.TMin(), volinfo.TMax());
+  }
+
   // ----------------
   // createVolumeFile
   // ----------------
@@ -140,6 +153,17 @@ namespace CVC_NAMESPACE
     writeVolumeFile(vol,filename);
   }
 
+  static inline void createVolumeFile(app& ctx,
+                                      const volume& vol,
+                                      const std::string& filename)
+  {
+    createVolumeFile(ctx, filename,
+                     vol.boundingBox(),
+                     vol.voxel_dimensions(),
+                     std::vector<data_type>(1, vol.voxelType()));
+    writeVolumeFile(ctx, vol, filename);
+  }
+
   // ----------------
   // createVolumeFile
   // ----------------
@@ -154,6 +178,13 @@ namespace CVC_NAMESPACE
     createVolumeFile(vol,filename);
   }
 
+  static inline void createVolumeFile(app& ctx,
+                                      const std::string& filename,
+                                      const volume& vol)
+  {
+    createVolumeFile(ctx, vol, filename);
+  }
+
   /*
     Calculates the gradient vector field of the input voxels, and returns the xyz vector values as 3 volumes in 'grad'
     'vt' is the voxel type of the gradient volumes.  If 'vt' is of integral type (UChar, UShort, UInt), the first
@@ -161,23 +192,25 @@ namespace CVC_NAMESPACE
   */
   void calcGradient(std::vector<volume>& grad, const volume& vol, data_type vt = Float);
 
-  /*
-    Copies a subvolume of vol to dest.
-  */
   void sub(volume& dest, const volume& vol, 
 	   uint64 off_x, uint64 off_y, uint64 off_z,
 	   const dimension& subvoldim);
 
-  // ----------
-  // volconvert
-  // ----------
-  // Purpose: 
-  //   Converts (or copies) volume from one file or filetype to another.  Basically
-  //   the same as the VolUtils cmd line program.
-  // ---- Change History ----
-  // 09/18/2011 -- Joe R. -- Creation.
   void volconvert(const std::string& input_volume_file,
                   const std::string& output_volume_file);
+
+  // ---- Overloads accepting explicit app& context ----
+  void calcGradient(app& ctx, std::vector<volume>& grad, const volume& vol, data_type vt = Float);
+
+  void sub(app& ctx, volume& dest, const volume& vol,
+	   uint64 off_x, uint64 off_y, uint64 off_z,
+	   const dimension& subvoldim);
+
+  void volconvert(app& ctx, const std::string& input_volume_file,
+                  const std::string& output_volume_file);
+
+  boost::any load(app& ctx, const std::string& filename);
+  void save(app& ctx, const boost::any& data, const std::string& filename);
 
 
   /*

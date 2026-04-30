@@ -603,7 +603,8 @@ namespace CVC_NAMESPACE
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
     // 12/11/2009 -- Joe R. -- Freeing buf if read successful.
-    virtual void getVolumeFileInfo(volume_file_info::data& d,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& d,
 				   const std::string& filename) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -665,7 +666,7 @@ namespace CVC_NAMESPACE
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
     // 12/11/2009 -- Joe R. -- Freeing data buffer.
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -730,7 +731,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
 				  const bounding_box& boundingBox,
 				  const dimension& dimension,
 				  const std::vector<data_type>& voxelTypes,
@@ -740,7 +742,7 @@ namespace CVC_NAMESPACE
       using namespace boost;
       thread_info ti(BOOST_CURRENT_FUNCTION);
 
-      int dim[3] = { dimension[0], dimension[1], dimension[2] };
+      int dim[3] = { static_cast<int>(dimension[0]), static_cast<int>(dimension[1]), static_cast<int>(dimension[2]) };
       boost::scoped_array<float> data(new float[dimension.size()]);
 
       if(boundingBox.isNull())
@@ -748,9 +750,9 @@ namespace CVC_NAMESPACE
       if(dimension.isNull())
 	throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
-	throw invalid_spider_file(str(format("Spider format only supports 1 variable (%d requested)") % numVariables));
+	throw invalid_spider_file(str(boost::format("Spider format only supports 1 variable (%d requested)") % numVariables));
       if(numTimesteps > 1)
-	throw invalid_spider_file(str(format("Spider format only supports 1 timestep (%d requested)") % numTimesteps));
+	throw invalid_spider_file(str(boost::format("Spider format only supports 1 timestep (%d requested)") % numTimesteps));
       if(voxelTypes.size() > 1)
 	throw invalid_spider_file("Spider format only supports 1 variable and 1 timestep. (too many voxel types specified)");
       if(voxelTypes[0] != Float)
@@ -776,14 +778,14 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2008 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& ctx, const volume& wvol, 
 				 const std::string& filename,
 				 unsigned int var, unsigned int time,
 				 uint64 off_x, uint64 off_y, uint64 off_z) const
     {
-      thread_info ti(BOOST_CURRENT_FUNCTION);
+      thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
-      volume vol;
+      volume vol(ctx);
 
       if(var > 0)
 	throw index_out_of_bounds("Variable index out of bounds.");
@@ -792,17 +794,17 @@ namespace CVC_NAMESPACE
 
       try
 	{
-	  volume_file_info volinfo(filename);
-	  readVolumeFile(vol,filename,0,0,0,0,0,volinfo.voxel_dimensions());
+	  volume_file_info volinfo(ctx, filename);
+	  readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, volinfo.voxel_dimensions());
 	}
       catch(read_error &e)
 	{
-	  createVolumeFile(filename,
+	  CVC_NAMESPACE::createVolumeFile(ctx, filename,
 			   bounding_box(0.0,0.0,0.0,1.0,1.0,1.0),
 			   wvol.voxel_dimensions(),
 			   std::vector<data_type>(1,wvol.voxelType()),
 			   0,0,0.0,0.0);
-	  readVolumeFile(vol,filename,0,0,0,0,0,wvol.voxel_dimensions());
+	  readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, wvol.voxel_dimensions());
 	}
 
       for(uint64 k = 0; k < wvol.ZDim(); k++)
@@ -810,7 +812,7 @@ namespace CVC_NAMESPACE
 	  for(uint64 i = 0; i < wvol.XDim(); i++)
 	    vol(i+off_x,j+off_y,k+off_z, wvol(i,j,k));
 
-      int dim[] = { vol.XDim(), vol.YDim(), vol.ZDim() };
+      int dim[] = { static_cast<int>(vol.XDim()), static_cast<int>(vol.YDim()), static_cast<int>(vol.ZDim()) };
       vol.voxelType(Float); //make sure we have a float volume (though we shouldnt get here if we dont)
       int retval = writeSpiderFile(filename.c_str(),'V',dim,reinterpret_cast<float*>(*vol));
       if(retval)
@@ -823,17 +825,13 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class spider_io_init
+  void register_spider_io(app& /*ctx*/)
   {
-  public:
-    spider_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::spider_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new spider_io)
+    );
+  }
 }
 

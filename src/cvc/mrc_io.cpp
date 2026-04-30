@@ -43,7 +43,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <math.h>
+#include <cmath>
 #ifdef __SOLARIS__
 #include <ieeefp.h>
 #endif
@@ -178,10 +178,8 @@ static inline void geterrstr(int errnum, char *strerrbuf, size_t buflen)
 #endif
 }
 
-// XXX: This is UGLY. Windows does not have this function in its math library.
-#if defined(_MSC_VER)
-static inline int finite(float) { return 0; }
-#endif
+// Use std::isfinite for portability (finite() removed on macOS/MSVC)
+using std::isfinite;
 
 namespace CVC_NAMESPACE
 {
@@ -330,7 +328,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void getVolumeFileInfo(volume_file_info::data& d,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& d,
                                    const std::string& filename) const
     {
       thread_info ti(BOOST_CURRENT_FUNCTION);
@@ -404,7 +403,7 @@ namespace CVC_NAMESPACE
           // we need to double check the meaning of xlength
           // (plus some extra paranoia)
           if (header.xlength<=0.0 || header.ylength<=0.0 || header.zlength<=0.0
-              || !finite(header.xlength) || !finite(header.ylength) || !finite(header.zlength))
+              || !isfinite(header.xlength) || !isfinite(header.ylength) || !isfinite(header.zlength))
             d._boundingBox = bounding_box(0.0,0.0,0.0,
                                           header.nx,header.ny,header.nz);
           else
@@ -425,7 +424,7 @@ namespace CVC_NAMESPACE
           d._voxelTypes.push_back(mrcTypes[header.mode]);
 
           // make sure we aren't using garbage values
-          if (!finite(header.xorigin) || !finite(header.yorigin) || !finite(header.zorigin))
+          if (!isfinite(header.xorigin) || !isfinite(header.yorigin) || !isfinite(header.zorigin))
             {
               tmpmin[0] = 0.0;
               tmpmin[1] = 0.0;
@@ -443,7 +442,7 @@ namespace CVC_NAMESPACE
           // xlength, ylength, zlength means the size of the volume, that means xlength=boundingbox.xmax()-boundingbox.xmin()
           // similar to ylenght and zlength. So xlength, ylength, zlength are positive.
           if (header.xlength<=0.0 || header.ylength<=0.0 || header.zlength<=0.0
-              || !finite(header.xlength) || !finite(header.ylength) || !finite(header.zlength))
+              || !isfinite(header.xlength) || !isfinite(header.ylength) || !isfinite(header.zlength))
             {
               // hmm, this is wierd //not necessary.
               tmpmax[0] = tmpmin[0] + header.nx;
@@ -492,7 +491,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
                                 const std::string& filename, 
                                 unsigned int var, unsigned int time,
                                 uint64 off_x, uint64 off_y, uint64 off_z,
@@ -697,7 +696,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void createVolumeFile(const std::string& filename,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& filename,
                                   const bounding_box& boundingBox,
                                   const dimension& dimension,
                                   const std::vector<data_type>& voxelTypes,
@@ -717,9 +717,9 @@ namespace CVC_NAMESPACE
       if(dimension.isNull())
         throw invalid_bounding_box("Dimension must not be null");
       if(numVariables > 1)
-        throw invalid_mrc_header(str(format("MRC format only supports 1 variable (%1% requested)") % numVariables));
+        throw invalid_mrc_header(str(boost::format("MRC format only supports 1 variable (%1% requested)") % numVariables));
       if(numTimesteps > 1)
-        throw invalid_mrc_header(str(format("MRC format only supports 1 timestep (%1% requested)") % numTimesteps));
+        throw invalid_mrc_header(str(boost::format("MRC format only supports 1 timestep (%1% requested)") % numTimesteps));
       if(voxelTypes.size() > 1)
         throw invalid_mrc_header("MRC format only supports 1 variable and 1 timestep. (too many voxel types specified)");
       if(min_time != max_time)
@@ -729,7 +729,7 @@ namespace CVC_NAMESPACE
       if(voxelTypes[0] == UInt ||
          voxelTypes[0] == Double ||
          voxelTypes[0] == UInt64)
-        throw invalid_mrc_header(str(format("Unsupported type: %1%") % data_type_strings[voxelTypes[0]]));
+        throw invalid_mrc_header(str(boost::format("Unsupported type: %1%") % data_type_strings[voxelTypes[0]]));
 
       memset(&mrcHeader,0,sizeof(mrc_header));
 
@@ -816,7 +816,7 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // ??/??/2007 -- Joe R. -- Creation.
     // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-    virtual void writeVolumeFile(const volume& wvol, 
+    virtual void writeVolumeFile(app& ctx, const volume& wvol, 
                                  const std::string& filename,
                                  unsigned int var, unsigned int time,
                                  uint64 off_x, uint64 off_y, uint64 off_z) const
@@ -871,7 +871,7 @@ namespace CVC_NAMESPACE
           dim[1] += off_y;
           dim[2] += off_z;
 
-          createVolumeFile(filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
+          CVC_NAMESPACE::createVolumeFile(ctx,filename,box,dim,std::vector<data_type>(1,vol.voxelType()),1,1,0.0,0.0);
           volinfo.read(filename);
 
   
@@ -1095,7 +1095,8 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& data,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& data,
 				   const std::string& filename) const
     {
       using namespace std;
@@ -1171,7 +1172,7 @@ namespace CVC_NAMESPACE
     //   Writes to a Volume object after reading from a volume file.
     // ---- Change History ----
     // 11/20/2009 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& vol,
+    virtual void readVolumeFile(app& /*ctx*/, volume& vol,
 				const std::string& filename, 
 				unsigned int var, unsigned int time,
 				uint64 off_x, uint64 off_y, uint64 off_z,
@@ -1271,23 +1272,13 @@ namespace CVC_NAMESPACE
 #endif
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class mrc_io_init
+  void register_mrc_io(app& /*ctx*/)
   {
-  public:
-    mrc_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::mrc_io)
-      );
-
-#ifdef CVC_USING_IMOD_MRC
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::imod_mrc_io)
-      );
-#endif
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new mrc_io)
+    );
+  }
 }
 

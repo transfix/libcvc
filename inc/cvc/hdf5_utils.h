@@ -191,7 +191,7 @@ namespace CVC_NAMESPACE
                                     "Invalid number of dimensions (expecting 1D)");
         }
     
-      attr.read(getPredType(cvcapp.dataType<T>()), values);
+      attr.read(getPredType(cvc::dataType<T>()), values);
     }
 
     // ---------------------
@@ -280,11 +280,11 @@ namespace CVC_NAMESPACE
           hsize_t dim[] = { len };
           DataSpace attrDS(1,dim);
           attr = obj.createAttribute(name,
-                                     getPredType(cvcapp.dataType<T>()),
+                                     getPredType(cvc::dataType<T>()),
                                      attrDS);
         }
 
-      attr.write(getPredType(cvcapp.dataType<T>()), values);
+      attr.write(getPredType(cvc::dataType<T>()), values);
     }
 
     // ---------------------
@@ -376,7 +376,8 @@ namespace CVC_NAMESPACE
     //   testing for group in HDF5 file
     // ---- Change History ----
     // 06/24/2011 -- Joe R. -- Creation.
-    bool isGroup(const std::string& hdf5_filename,
+    bool isGroup(app& ctx,
+                             const std::string& hdf5_filename,
                  const std::string& hdf5_objname);
 
     // ---------------------
@@ -386,7 +387,8 @@ namespace CVC_NAMESPACE
     //   testing for dataset in HDF5 file
     // ---- Change History ----
     // 06/24/2011 -- Joe R. -- Creation.
-    bool isDataSet(const std::string& hdf5_filename,
+    bool isDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                    const std::string& hdf5_objname);
 
     // ---------------------
@@ -397,7 +399,8 @@ namespace CVC_NAMESPACE
     //   dataset or group in the specified hdf5 file.
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
-    bool objectExists(const std::string& hdf5_filename,
+    bool objectExists(app& ctx,
+                             const std::string& hdf5_filename,
                       const std::string& hdf5_objname);
 
     // ---------------------
@@ -408,7 +411,8 @@ namespace CVC_NAMESPACE
     //   file.
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
-    void removeObject(const std::string& hdf5_filename,
+    void removeObject(app& ctx,
+                             const std::string& hdf5_filename,
                       const std::string& hdf5_objname);
 
     // --------------
@@ -418,7 +422,8 @@ namespace CVC_NAMESPACE
     //   Creates a new HDF5 File.
     // ---- Change History ----
     // 09/02/2011 -- Joe R. -- Creation.
-    void createHDF5File(const std::string& hdf5_filename);
+    void createHDF5File(app& ctx,
+                             const std::string& hdf5_filename);
 
     // ---------------------
     // createGroup
@@ -430,7 +435,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/28/2011 -- Joe R. -- Throwing exception instead of using boolean ret val
-    void createGroup(const std::string& hdf5_filename,
+    void createGroup(app& ctx,
+                             const std::string& hdf5_filename,
                      const std::string& hdf5_objname,
                      bool replace = false);
 
@@ -445,7 +451,8 @@ namespace CVC_NAMESPACE
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/28/2011 -- Joe R. -- Throwing exception instead of using boolean ret val
     // 09/02/2011 -- Joe R. -- Adding replace arg
-    void createDataSet(const std::string& hdf5_filename,
+    void createDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                        const std::string& hdf5_objname,
                        const bounding_box& boundingBox,
                        const dimension& dimension,
@@ -462,13 +469,14 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/28/2011 -- Joe R. -- Throwing exception instead of using boolean ret val
-    inline void createDataSet(const std::string& hdf5_filename,
+    inline void createDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                               const std::string& hdf5_objname,
                               const dimension& dimension,
                               data_type dataType,
                               const bool createGroups = true)
     {
-      createDataSet(hdf5_filename,
+      createDataSet(ctx, hdf5_filename,
                     hdf5_objname,
                     bounding_box(0.0,0.0,0.0,
                                  1.0,1.0,1.0),
@@ -486,7 +494,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/22/2011 -- Joe R. -- Creation.
     // 08/28/2011 -- Joe R. -- Throwing exception instead of using boolean ret val
-    void createDataSet(const std::string& hdf5_filename,
+    void createDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                        const std::string& hdf5_objname,
                        const std::string& value,
                        bool createGroups = true);
@@ -499,7 +508,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
     // 08/05/2011 -- Joe R. -- Renamed and generalized for both datasets and groups.
-    dimension getObjectDimension(const std::string& hdf5_filename,
+    dimension getObjectDimension(app& ctx,
+                             const std::string& hdf5_filename,
                                  const std::string& hdf5_objname);
 
     // ---------------------
@@ -509,7 +519,8 @@ namespace CVC_NAMESPACE
     //   Sets the dimensions of the specified object
     // ---- Change History ----
     // 08/26/2011 -- Joe R. -- Creation.
-    void setObjectDimension(const std::string& hdf5_filename,
+    void setObjectDimension(app& ctx,
+                             const std::string& hdf5_filename,
                             const std::string& hdf5_objname,
                             const dimension& dim);
 
@@ -521,7 +532,8 @@ namespace CVC_NAMESPACE
     //   bounding box.
     // ---- Change History ----
     // 09/04/2011 -- Joe R. -- Creation.
-    dimension getDataSetDimensionForBoundingBox(const std::string& hdf5_filename,
+    dimension getDataSetDimensionForBoundingBox(app& ctx,
+                             const std::string& hdf5_filename,
                                                 const std::string& hdf5_objname,
                                                 const bounding_box& subvolbox);    
 
@@ -534,7 +546,8 @@ namespace CVC_NAMESPACE
     //   equal to the maxdim.
     // ---- Change History ----
     // 07/22/2011 -- Joe R. -- Creation.
-    dimension getDataSetDimension(const std::string& hdf5_filename,
+    dimension getDataSetDimension(app& ctx,
+                             const std::string& hdf5_filename,
                                   const std::string& hdf5_objname,
                                   const bounding_box& subvolbox,
                                   const dimension& maxdim = dimension(256,256,256));
@@ -547,7 +560,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
     // 08/05/2011 -- Joe R. -- Renamed and generalized for both datasets and groups.
-    bounding_box getObjectBoundingBox(const std::string& hdf5_filename,
+    bounding_box getObjectBoundingBox(app& ctx,
+                             const std::string& hdf5_filename,
                                       const std::string& hdf5_objname);
 
     // ---------------------
@@ -557,7 +571,8 @@ namespace CVC_NAMESPACE
     //   Sets the bounding box of the specified object
     // ---- Change History ----
     // 08/26/2011 -- Joe R. -- Creation.
-    void setObjectBoundingBox(const std::string& hdf5_filename,
+    void setObjectBoundingBox(app& ctx,
+                             const std::string& hdf5_filename,
                               const std::string& hdf5_objname,
                               const bounding_box& boundingBox);
 
@@ -568,7 +583,8 @@ namespace CVC_NAMESPACE
     //   Returns the minimum value of the dataset
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
-    double getDataSetMinimum(const std::string& hdf5_filename,
+    double getDataSetMinimum(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname);
 
     // ---------------------
@@ -578,7 +594,8 @@ namespace CVC_NAMESPACE
     //   Returns the maximum value of the dataset
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
-    double getDataSetMaximum(const std::string& hdf5_filename,
+    double getDataSetMaximum(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname);
 
 
@@ -589,7 +606,8 @@ namespace CVC_NAMESPACE
     //   Returns the dataset info string
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
-    std::string getDataSetInfo(const std::string& hdf5_filename,
+    std::string getDataSetInfo(app& ctx,
+                             const std::string& hdf5_filename,
                                const std::string& hdf5_objname);
     
     // ---------------------
@@ -599,7 +617,8 @@ namespace CVC_NAMESPACE
     //   Returns the dataset type
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
-    data_type getDataSetType(const std::string& hdf5_filename,
+    data_type getDataSetType(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname);
 
     // ---------------
@@ -612,7 +631,8 @@ namespace CVC_NAMESPACE
     // 09/02/2011 -- Joe R. -- Creation.
     // 09/17/2011 -- Joe R. -- Adding filter parameter.  A string isn't added
     //                         to the list if the filter IS NOT in the string
-    std::vector<std::string> getChildObjects(const std::string& hdf5_filename,
+    std::vector<std::string> getChildObjects(app& ctx,
+                             const std::string& hdf5_filename,
                                              const std::string& hdf5_objname = "/",
                                              const std::string& filter = std::string());
     
@@ -625,7 +645,8 @@ namespace CVC_NAMESPACE
     // 07/17/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<class T>
-    inline void readDataSet(const std::string& hdf5_filename,
+    inline void readDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                             const std::string& hdf5_objname,
                             uint64 off_x, uint64 off_y, uint64 off_z,
                             const dimension& subvoldim,
@@ -633,7 +654,7 @@ namespace CVC_NAMESPACE
     {
       using namespace H5;
 
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -641,9 +662,9 @@ namespace CVC_NAMESPACE
       if(subvoldim.isNull())
         throw hdf5_exception("Null subvoldim");
 
-      bounding_box boundingBox = getObjectBoundingBox(hdf5_filename,
+      bounding_box boundingBox = getObjectBoundingBox(ctx, hdf5_filename,
                                                       hdf5_objname);
-      dimension dimension = getObjectDimension(hdf5_filename,
+      dimension dimension = getObjectDimension(ctx, hdf5_filename,
                                                hdf5_objname);
 
       if(off_x + subvoldim[0] > dimension[0] ||
@@ -659,7 +680,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::DataSet> d;
         
@@ -711,14 +732,14 @@ namespace CVC_NAMESPACE
 
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
           d->read(values, 
-                  getPredType(cvcapp.dataType<T>()),
+                  getPredType(cvc::dataType<T>()),
                   vol_dataspace,
                   filespace);
         }
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -736,14 +757,15 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 08/05/2011 -- Joe R. -- Creation.
     template<class T>
-    inline void readDataSet(const std::string& hdf5_filename,
+    inline void readDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                             const std::string& hdf5_objname,
                             uint64 off_x, uint64 off_y, uint64 off_z,
                             const dimension& subvoldim,
                             data_type dataType,
                             T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -752,7 +774,7 @@ namespace CVC_NAMESPACE
         {
         case UChar:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<unsigned char*>(values));
@@ -760,7 +782,7 @@ namespace CVC_NAMESPACE
           break;
         case UShort:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<unsigned short*>(values));
@@ -768,7 +790,7 @@ namespace CVC_NAMESPACE
           break;
         case UInt:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<unsigned int*>(values));
@@ -776,7 +798,7 @@ namespace CVC_NAMESPACE
           break;
         case Float:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<float*>(values));
@@ -784,7 +806,7 @@ namespace CVC_NAMESPACE
           break;
         case Double:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<double*>(values));
@@ -792,7 +814,7 @@ namespace CVC_NAMESPACE
           break;
         case UInt64:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<uint64*>(values));
@@ -800,7 +822,7 @@ namespace CVC_NAMESPACE
           break;
         case Char:
           {
-            readDataSet(hdf5_filename, hdf5_objname,
+            readDataSet(ctx, hdf5_filename, hdf5_objname,
                         off_x, off_y, off_z,
                         subvoldim,
                         reinterpret_cast<char*>(values));
@@ -823,7 +845,8 @@ namespace CVC_NAMESPACE
     inline boost::tuple< 
       boost::shared_array<T>,
       dimension
-    > readDataSet(const std::string& hdf5_filename,
+    > readDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                   const std::string& hdf5_objname,
                   const bounding_box& subbox,
                   const dimension& maxdim = dimension(256,256,256))
@@ -831,15 +854,15 @@ namespace CVC_NAMESPACE
       using namespace H5;
       using namespace boost;
 
-      cvcapp.log(10,str(format("%1%: %2%, %3%\n") 
+      ctx.log(10,str(boost::format("%1%: %2%, %3%\n") 
                         % BOOST_CURRENT_FUNCTION
                         % hdf5_filename
                         % hdf5_objname));
 
       const int RANK = 3;
-      bounding_box boundingBox = getObjectBoundingBox(hdf5_filename,
+      bounding_box boundingBox = getObjectBoundingBox(ctx, hdf5_filename,
                                                       hdf5_objname);
-      dimension dim = getObjectDimension(hdf5_filename,
+      dimension dim = getObjectDimension(ctx, hdf5_filename,
                                                hdf5_objname);
       double xspan = dim.xdim == 0 ? 1.0 : (boundingBox.maxx-boundingBox.minx)/(dim.xdim-1);
       double yspan = dim.ydim == 0 ? 1.0 : (boundingBox.maxy-boundingBox.miny)/(dim.ydim-1);
@@ -856,7 +879,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::DataSet> d;
         
@@ -888,7 +911,7 @@ namespace CVC_NAMESPACE
             { off_z, off_y, off_x };
           
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("offset[%1%]: %2%\n") % i % offset[i]));
+            ctx.log(10,str(boost::format("offset[%1%]: %2%\n") % i % offset[i]));
           
           hsize_t stride[RANK];
           for(int i = 0; i < RANK; i++)
@@ -900,14 +923,14 @@ namespace CVC_NAMESPACE
             }
         
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("stride[%1%]: %2%\n") % i % stride[i]));
+            ctx.log(10,str(boost::format("stride[%1%]: %2%\n") % i % stride[i]));
 
           hsize_t count[RANK];
           for(int i = 0; i < RANK; i++)
             count[i] = fulldim[RANK-1-i]/stride[i];
           
           for(int i = 0; i < RANK; i++)
-            cvcapp.log(10,str(format("count[%1%]: %2%\n") % i % count[i]));
+            ctx.log(10,str(boost::format("count[%1%]: %2%\n") % i % count[i]));
           
           actualDim = dimension(count[2],count[1],count[0]);
           data.reset(new T[actualDim.size()]);
@@ -920,20 +943,20 @@ namespace CVC_NAMESPACE
           
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset, stride);
           d->read(data.get(), 
-                  getPredType(cvcapp.dataType<T>()),
+                  getPredType(cvc::dataType<T>()),
                   vol_dataspace,
                   filespace);
         }
       catch(H5::Exception& error)
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
         }
 
-      return make_tuple(data,actualDim);
+      return boost::make_tuple(data,actualDim);
     }
 
     // ---------------------
@@ -951,13 +974,14 @@ namespace CVC_NAMESPACE
     inline boost::tuple< 
       boost::shared_array<unsigned char>,
       dimension
-    > readDataSet(const std::string& hdf5_filename,
+    > readDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                   const std::string& hdf5_objname,
                   const bounding_box& subbox,
                   data_type dataType,
                   const dimension& maxdim = dimension(256,256,256))
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -967,7 +991,7 @@ namespace CVC_NAMESPACE
         {
         case UChar:
           {
-            return readDataSet<unsigned char>(hdf5_filename, hdf5_objname,
+            return readDataSet<unsigned char>(ctx, hdf5_filename, hdf5_objname,
                                               subbox, maxdim);
           }
           break;
@@ -975,7 +999,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<unsigned short> values;
             boost::tie(values,dim) =
-              readDataSet<unsigned short>(hdf5_filename, hdf5_objname,
+              readDataSet<unsigned short>(ctx, hdf5_filename, hdf5_objname,
                                           subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -987,7 +1011,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<unsigned int> values;
             boost::tie(values,dim) =
-              readDataSet<unsigned int>(hdf5_filename, hdf5_objname,
+              readDataSet<unsigned int>(ctx, hdf5_filename, hdf5_objname,
                                           subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -999,7 +1023,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<float> values;
             boost::tie(values,dim) =
-              readDataSet<float>(hdf5_filename, hdf5_objname,
+              readDataSet<float>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1011,7 +1035,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<double> values;
             boost::tie(values,dim) =
-              readDataSet<double>(hdf5_filename, hdf5_objname,
+              readDataSet<double>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1023,7 +1047,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<uint64> values;
             boost::tie(values,dim) =
-              readDataSet<uint64>(hdf5_filename, hdf5_objname,
+              readDataSet<uint64>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1035,7 +1059,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<char> values;
             boost::tie(values,dim) =
-              readDataSet<char>(hdf5_filename, hdf5_objname,
+              readDataSet<char>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1047,7 +1071,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<int> values;
             boost::tie(values,dim) =
-              readDataSet<int>(hdf5_filename, hdf5_objname,
+              readDataSet<int>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1059,7 +1083,7 @@ namespace CVC_NAMESPACE
           {
             boost::shared_array<int64> values;
             boost::tie(values,dim) =
-              readDataSet<int64>(hdf5_filename, hdf5_objname,
+              readDataSet<int64>(ctx, hdf5_filename, hdf5_objname,
                                  subbox, maxdim);
             size_t len = dim.size()*data_type_sizes[dataType];
             boost::shared_array<unsigned char> byte_values(new unsigned char[len]);
@@ -1080,7 +1104,8 @@ namespace CVC_NAMESPACE
     //   Read string dataset into string
     // ---- Change History ----
     // 07/22/2011 -- Joe R. -- Creation.
-    void readDataSet(const std::string& hdf5_filename,
+    void readDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                      const std::string& hdf5_objname,
                      std::string& value);
 
@@ -1093,7 +1118,8 @@ namespace CVC_NAMESPACE
     // 07/17/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<class T>
-    inline void writeDataSet(const std::string& hdf5_filename,
+    inline void writeDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              uint64 off_x, uint64 off_y, uint64 off_z,
                              const dimension& values_dim,
@@ -1102,7 +1128,7 @@ namespace CVC_NAMESPACE
     {
       using namespace H5;
 
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -1110,14 +1136,14 @@ namespace CVC_NAMESPACE
       if(values_dim.isNull())
         throw hdf5_exception("Null subvoldim");
 
-      bounding_box boundingBox = getObjectBoundingBox(hdf5_filename,
+      bounding_box boundingBox = getObjectBoundingBox(ctx, hdf5_filename,
                                                       hdf5_objname);
-      dimension dimension = getObjectDimension(hdf5_filename,
+      dimension dimension = getObjectDimension(ctx, hdf5_filename,
                                                hdf5_objname);
       
       try
         {
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
 
           /*
            * Turn off the auto-printing when failure occurs so that we can
@@ -1152,7 +1178,7 @@ namespace CVC_NAMESPACE
 
           filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
           d->write(values, 
-                   getPredType(cvcapp.dataType<T>()),
+                   getPredType(cvc::dataType<T>()),
                    vol_dataspace,
                    filespace);
 
@@ -1168,7 +1194,7 @@ namespace CVC_NAMESPACE
       catch(H5::Exception& error)
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % error.getDetailMsg()));
@@ -1184,13 +1210,14 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/17/2011 -- Joe R. -- Creation.
     template<class T>
-    inline void writeDataSet(const std::string& hdf5_filename,
+    inline void writeDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              uint64 off_x, uint64 off_y, uint64 off_z,
                              const dimension& values_dim,
                              const T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                               % BOOST_CURRENT_FUNCTION
                               % hdf5_filename
                               % hdf5_objname));
@@ -1199,7 +1226,7 @@ namespace CVC_NAMESPACE
       typedef std::list<int>::const_iterator iterator;
       std::pair< iterator, iterator > result = 
         boost::minmax_element(values, values+values_size);
-      writeDataSet(hdf5_filename,
+      writeDataSet(ctx, hdf5_filename,
                    hdf5_objname,
                    off_x,off_y,off_z,
                    values_dim,
@@ -1217,7 +1244,8 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 08/28/2011 -- Joe R. -- Creation.
     template<class T>
-    inline void writeDataSet(const std::string& hdf5_filename,
+    inline void writeDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              uint64 off_x, uint64 off_y, uint64 off_z,
                              const dimension& values_dim,
@@ -1225,7 +1253,7 @@ namespace CVC_NAMESPACE
                              const T* values,
                              double min_val, double max_val)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname));
@@ -1234,7 +1262,7 @@ namespace CVC_NAMESPACE
         {
         case UChar:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const unsigned char*>(values),
                          (unsigned char)min_val,(unsigned char)max_val);
@@ -1242,7 +1270,7 @@ namespace CVC_NAMESPACE
           break;
         case UShort:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const unsigned short*>(values),
                          (unsigned short)min_val,(unsigned short)max_val);
@@ -1250,7 +1278,7 @@ namespace CVC_NAMESPACE
           break;
         case UInt:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const unsigned int*>(values),
                          (unsigned int)min_val,(unsigned int)max_val);
@@ -1258,7 +1286,7 @@ namespace CVC_NAMESPACE
           break;
         case Float:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const float*>(values),
                          float(min_val),float(max_val));
@@ -1266,7 +1294,7 @@ namespace CVC_NAMESPACE
           break;
         case Double:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const double*>(values),
                          min_val,max_val);
@@ -1274,7 +1302,7 @@ namespace CVC_NAMESPACE
           break;
         case UInt64:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const uint64*>(values),
                          uint64(min_val),uint64(max_val));
@@ -1282,7 +1310,7 @@ namespace CVC_NAMESPACE
           break;
         case Char:
           {
-            writeDataSet(hdf5_filename, hdf5_objname,
+            writeDataSet(ctx, hdf5_filename, hdf5_objname,
                          off_x, off_y, off_z,
                          values_dim, reinterpret_cast<const char*>(values),
                          char(min_val),char(max_val));
@@ -1298,7 +1326,8 @@ namespace CVC_NAMESPACE
     //   Read string dataset into string
     // ---- Change History ----
     // 07/22/2011 -- Joe R. -- Creation.
-    void writeDataSet(const std::string& hdf5_filename,
+    void writeDataSet(app& ctx,
+                             const std::string& hdf5_filename,
                       const std::string& hdf5_objname,
                       const std::string& value);
 
@@ -1312,20 +1341,21 @@ namespace CVC_NAMESPACE
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<class T>
-    inline void getAttribute(const std::string& hdf5_filename,
+    inline void getAttribute(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              const std::string& attribname,
                              size_t len,
                              T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      bool isgroup = isGroup(hdf5_filename,hdf5_objname);
-      bool isdataset = isDataSet(hdf5_filename,hdf5_objname);
+      bool isgroup = isGroup(ctx, hdf5_filename,hdf5_objname);
+      bool isdataset = isDataSet(ctx, hdf5_filename,hdf5_objname);
 
       try
         {
@@ -1336,7 +1366,7 @@ namespace CVC_NAMESPACE
           H5::Exception::dontPrint();
 
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1363,7 +1393,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1379,20 +1409,21 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 08/26/2011 -- Joe R. -- Creation.
     template<>
-    inline void getAttribute<data_type>(const std::string& hdf5_filename,
+    inline void getAttribute<data_type>(app& ctx,
+                             const std::string& hdf5_filename,
                                         const std::string& hdf5_objname,
                                         const std::string& attribname,
                                         size_t len,
                                         data_type* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
       std::vector<uint64> dt_values(len);
-      getAttribute(hdf5_filename, hdf5_objname, attribname, len, &(dt_values[0]));
+      getAttribute(ctx, hdf5_filename, hdf5_objname, attribname, len, &(dt_values[0]));
       for(size_t i = 0; i < len; i++)
         values[i] = data_type(dt_values[i]);
     }                           
@@ -1406,18 +1437,19 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
     template<class T>
-    inline void getAttribute(const std::string& hdf5_filename,
+    inline void getAttribute(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              const std::string& attribname,
                              T& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      getAttribute(hdf5_filename,
+      getAttribute(ctx, hdf5_filename,
                    hdf5_objname,
                    attribname,
                    1, 
@@ -1433,19 +1465,20 @@ namespace CVC_NAMESPACE
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<>
-    inline void getAttribute<std::string>(const std::string& hdf5_filename,
+    inline void getAttribute<std::string>(app& ctx,
+                             const std::string& hdf5_filename,
                                           const std::string& hdf5_objname,
                                           const std::string& attribname,
                                           std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      bool isgroup = isGroup(hdf5_filename,hdf5_objname);
-      bool isdataset = isDataSet(hdf5_filename,hdf5_objname);
+      bool isgroup = isGroup(ctx, hdf5_filename,hdf5_objname);
+      bool isdataset = isDataSet(ctx, hdf5_filename,hdf5_objname);
 
       try
         {
@@ -1455,7 +1488,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1482,7 +1515,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1500,20 +1533,21 @@ namespace CVC_NAMESPACE
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<class T>
-    inline void setAttribute(const std::string& hdf5_filename,
+    inline void setAttribute(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              const std::string& attribname,
                              size_t len,
                              const T* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      bool isgroup = isGroup(hdf5_filename,hdf5_objname);
-      bool isdataset = isDataSet(hdf5_filename,hdf5_objname);
+      bool isgroup = isGroup(ctx, hdf5_filename,hdf5_objname);
+      bool isdataset = isDataSet(ctx, hdf5_filename,hdf5_objname);
 
       try
         {
@@ -1523,7 +1557,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1550,7 +1584,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1566,13 +1600,14 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 08/26/2011 -- Joe R. -- Creation.
     template<>
-    inline void setAttribute<data_type>(const std::string& hdf5_filename,
+    inline void setAttribute<data_type>(app& ctx,
+                             const std::string& hdf5_filename,
                                         const std::string& hdf5_objname,
                                         const std::string& attribname,
                                         size_t len,
                                         const data_type* values)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
@@ -1581,7 +1616,7 @@ namespace CVC_NAMESPACE
       std::vector<uint64> dt_values(len);
       for(size_t i = 0; i < len; i++)
         dt_values[i] = uint64(values[i]);
-      setAttribute(hdf5_filename, hdf5_objname, attribname, len, &(dt_values[0]));
+      setAttribute(ctx, hdf5_filename, hdf5_objname, attribname, len, &(dt_values[0]));
     }
 
     // ---------------------
@@ -1593,18 +1628,19 @@ namespace CVC_NAMESPACE
     // ---- Change History ----
     // 07/15/2011 -- Joe R. -- Creation.
     template<class T>
-    inline void setAttribute(const std::string& hdf5_filename,
+    inline void setAttribute(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              const std::string& attribname,
                              const T& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      setAttribute(hdf5_filename,
+      setAttribute(ctx, hdf5_filename,
                    hdf5_objname,
                    attribname,
                    1, 
@@ -1620,19 +1656,20 @@ namespace CVC_NAMESPACE
     // 07/15/2011 -- Joe R. -- Creation.
     // 08/26/2011 -- Joe R. -- Adding more detailed exception string
     template<>
-    inline void setAttribute<std::string>(const std::string& hdf5_filename,
+    inline void setAttribute<std::string>(app& ctx,
+                             const std::string& hdf5_filename,
                                           const std::string& hdf5_objname,
                                           const std::string& attribname,
                                           const std::string& value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      bool isgroup = isGroup(hdf5_filename,hdf5_objname);
-      bool isdataset = isDataSet(hdf5_filename,hdf5_objname);
+      bool isgroup = isGroup(ctx, hdf5_filename,hdf5_objname);
+      bool isdataset = isDataSet(ctx, hdf5_filename,hdf5_objname);
 
       try
         {
@@ -1642,7 +1679,7 @@ namespace CVC_NAMESPACE
            */
           H5::Exception::dontPrint();
 
-          scoped_lock lock(hdf5_filename,BOOST_CURRENT_FUNCTION);
+          scoped_lock lock(ctx,hdf5_filename,BOOST_CURRENT_FUNCTION);
           boost::shared_ptr<H5::H5File>  f;
           boost::shared_ptr<H5::Group>   g;
           boost::shared_ptr<H5::DataSet> d;
@@ -1669,7 +1706,7 @@ namespace CVC_NAMESPACE
       catch( H5::Exception& error )
         {
           using namespace boost;
-          throw hdf5_exception(str(format("filename: %s, object: %s, attrib: %s, msg: %s")
+          throw hdf5_exception(str(boost::format("filename: %s, object: %s, attrib: %s, msg: %s")
                                    % hdf5_filename
                                    % hdf5_objname
                                    % attribname
@@ -1684,19 +1721,173 @@ namespace CVC_NAMESPACE
     //   Sets a string attribute to an object via a char*
     // ---- Change History ----
     // 08/28/2011 -- Joe R. -- Creation.
-    inline void setAttribute(const std::string& hdf5_filename,
+    inline void setAttribute(app& ctx,
+                             const std::string& hdf5_filename,
                              const std::string& hdf5_objname,
                              const std::string& attribname,
                              const char* value)
     {
-      cvcapp.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
+      ctx.log(10,boost::str(boost::format("%1%: %2%, %3%, %4%\n") 
                                % BOOST_CURRENT_FUNCTION
                                % hdf5_filename
                                % hdf5_objname
                                % attribname));
 
-      setAttribute(hdf5_filename, hdf5_objname,
+      setAttribute(ctx, hdf5_filename, hdf5_objname,
                    attribname, std::string(value));
+    }
+
+    // ============================================================
+    // Context-less convenience overloads (inject cvc::app::instance())
+    // ============================================================
+    inline bool isGroup(const std::string& hdf5_filename,
+                        const std::string& hdf5_objname)
+    {
+      return isGroup(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline bool isDataSet(const std::string& hdf5_filename,
+                          const std::string& hdf5_objname)
+    {
+      return isDataSet(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline bool objectExists(const std::string& hdf5_filename,
+                             const std::string& hdf5_objname)
+    {
+      return objectExists(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void removeObject(const std::string& hdf5_filename,
+                             const std::string& hdf5_objname)
+    {
+      removeObject(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void createHDF5File(const std::string& hdf5_filename)
+    {
+      createHDF5File(app::instance(), hdf5_filename);
+    }
+
+    inline void createGroup(const std::string& hdf5_filename,
+                            const std::string& hdf5_objname,
+                            bool replace = false)
+    {
+      createGroup(app::instance(), hdf5_filename, hdf5_objname, replace);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const bounding_box& boundingBox,
+                              const dimension& dimension,
+                              data_type dataType,
+                              const bool replace = false,
+                              const bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    boundingBox, dimension, dataType,
+                    replace, createGroups);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const dimension& dimension,
+                              data_type dataType,
+                              const bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    dimension, dataType, createGroups);
+    }
+
+    inline void createDataSet(const std::string& hdf5_filename,
+                              const std::string& hdf5_objname,
+                              const std::string& value,
+                              bool createGroups = true)
+    {
+      createDataSet(app::instance(), hdf5_filename, hdf5_objname,
+                    value, createGroups);
+    }
+
+    inline dimension getObjectDimension(const std::string& hdf5_filename,
+                                        const std::string& hdf5_objname)
+    {
+      return getObjectDimension(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void setObjectDimension(const std::string& hdf5_filename,
+                                   const std::string& hdf5_objname,
+                                   const dimension& dim)
+    {
+      setObjectDimension(app::instance(), hdf5_filename, hdf5_objname, dim);
+    }
+
+    inline dimension getDataSetDimensionForBoundingBox(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname,
+        const bounding_box& subvolbox)
+    {
+      return getDataSetDimensionForBoundingBox(app::instance(),
+                                               hdf5_filename, hdf5_objname,
+                                               subvolbox);
+    }
+
+    inline dimension getDataSetDimension(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname,
+        const bounding_box& subvolbox,
+        const dimension& maxdim = dimension(256, 256, 256))
+    {
+      return getDataSetDimension(app::instance(),
+                                 hdf5_filename, hdf5_objname,
+                                 subvolbox, maxdim);
+    }
+
+    inline bounding_box getObjectBoundingBox(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname)
+    {
+      return getObjectBoundingBox(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline void setObjectBoundingBox(const std::string& hdf5_filename,
+                                     const std::string& hdf5_objname,
+                                     const bounding_box& boundingBox)
+    {
+      setObjectBoundingBox(app::instance(),
+                           hdf5_filename, hdf5_objname, boundingBox);
+    }
+
+    inline double getDataSetMinimum(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetMinimum(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline double getDataSetMaximum(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetMaximum(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline std::string getDataSetInfo(const std::string& hdf5_filename,
+                                      const std::string& hdf5_objname)
+    {
+      return getDataSetInfo(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline data_type getDataSetType(const std::string& hdf5_filename,
+                                    const std::string& hdf5_objname)
+    {
+      return getDataSetType(app::instance(), hdf5_filename, hdf5_objname);
+    }
+
+    inline std::vector<std::string> getChildObjects(
+        const std::string& hdf5_filename,
+        const std::string& hdf5_objname = "/",
+        const std::string& filter = std::string())
+    {
+      return getChildObjects(app::instance(),
+                             hdf5_filename, hdf5_objname, filter);
     }
   }
 }

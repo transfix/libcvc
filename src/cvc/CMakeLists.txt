@@ -29,6 +29,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
+  ../../inc/cvc/volume_ops.h
 )
 
 # Source files
@@ -56,6 +57,7 @@ set(SOURCE_FILES
   volume.cpp
   volume_file_io.cpp
   volume_file_info.cpp
+  volume_ops.cpp
   vtk_io.cpp
 )
 
@@ -64,7 +66,7 @@ set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
 
 # The libcvc version number
-set(CVC_VERSION_MAJOR 2)
+set(CVC_VERSION_MAJOR 3)
 set(CVC_VERSION_MINOR 0)
 set(CVC_VERSION ${CVC_VERSION_MAJOR}.${CVC_VERSION_MINOR})
 message(STATUS "libcvc version: ${CVC_VERSION}")
@@ -178,12 +180,8 @@ endif()
 if(NOT DISABLE_CGAL)
   find_package(CGAL CONFIG)
   if(CGAL_FOUND)
-    include(${CGAL_USE_FILE})
     add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
     list(APPEND INCLUDE_FILES ../../inc/cvc/project_verts.h)
-    # CGAL may have special compiler requirements
-    string(APPEND CMAKE_CXX_FLAGS " ${CGAL_CXX_FLAGS_INIT}")
-    list(APPEND CVC_LINK_LIBS ${CGAL_LIBRARIES} ${GMP_LIBRARIES} ${GMPXX_LIBRARIES})
   endif()
 endif()
 
@@ -482,6 +480,46 @@ if(CVC_ENABLE_CUDA)
   message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
 endif()
 
+# ImageMagick support (for volume_ops image I/O)
+option(CVC_ENABLE_IMAGEMAGICK "Enable ImageMagick support for image I/O in volume_ops" ON)
+if(CVC_ENABLE_IMAGEMAGICK)
+  find_package(ImageMagick COMPONENTS Magick++ MagickCore)
+  if(ImageMagick_FOUND)
+    message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS}")
+  else()
+    message(STATUS "ImageMagick not found - disabling image I/O in volume_ops")
+    set(CVC_ENABLE_IMAGEMAGICK OFF)
+  endif()
+endif()
+
+# FFTW support (for volume_ops filtered back-projection)
+option(CVC_ENABLE_FFTW "Enable FFTW support for filtered back-projection in volume_ops" ON)
+if(CVC_ENABLE_FFTW)
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(FFTW3 QUIET fftw3)
+    # pkg_check_modules sets <prefix>_LIBRARIES to bare `-l` names and puts
+    # full paths in <prefix>_LINK_LIBRARIES. Prefer the full-path form so
+    # the linker doesn't need a separate -L for Homebrew etc.
+    if(FFTW3_FOUND AND FFTW3_LINK_LIBRARIES)
+      set(FFTW3_LIBRARIES ${FFTW3_LINK_LIBRARIES})
+    endif()
+  endif()
+  if(NOT FFTW3_FOUND)
+    find_path(FFTW3_INCLUDE_DIRS fftw3.h)
+    find_library(FFTW3_LIBRARIES NAMES fftw3)
+    if(FFTW3_INCLUDE_DIRS AND FFTW3_LIBRARIES)
+      set(FFTW3_FOUND TRUE)
+    endif()
+  endif()
+  if(FFTW3_FOUND)
+    message(STATUS "FFTW3 found: ${FFTW3_LIBRARIES}")
+  else()
+    message(STATUS "FFTW3 not found - disabling filtered back-projection in volume_ops")
+    set(CVC_ENABLE_FFTW OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -492,6 +530,14 @@ set_target_properties(cvc PROPERTIES
   SOVERSION ${CVC_VERSION_MAJOR}
   OUTPUT_NAME cvc
 )
+
+# On Windows, the sources have no __declspec(dllexport) annotations, so
+# a SHARED build would produce a .dll with an empty export table and no
+# import .lib — breaking every consumer (including our own tests).
+# Ask CMake to auto-generate the export table from all public symbols.
+if(WIN32)
+  set_target_properties(cvc PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # CUDA-specific configuration
 if(CVC_ENABLE_CUDA)
@@ -511,22 +557,59 @@ if(CVC_ENABLE_CUDA)
 endif()
 
 # Modern include directory handling
+# Split CVC_INCLUDE_DIRS: absolute paths (external deps like HDF5, FFTW,
+# Log4cplus) go PUBLIC so downstream consumers that include transitive
+# headers (e.g. cvc/hdf5_utils.h) can find them. Relative paths (e.g.
+# libiimod, SDF internals) stay PRIVATE.
+set(_CVC_PUBLIC_INCLUDE_DIRS "")
+set(_CVC_PRIVATE_INCLUDE_DIRS "")
+foreach(_inc IN LISTS CVC_INCLUDE_DIRS)
+  if(IS_ABSOLUTE "${_inc}")
+    list(APPEND _CVC_PUBLIC_INCLUDE_DIRS "${_inc}")
+  else()
+    list(APPEND _CVC_PRIVATE_INCLUDE_DIRS "${_inc}")
+  endif()
+endforeach()
+
 target_include_directories(cvc
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/inc>
-    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/inc>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/inc>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/inc>
     $<INSTALL_INTERFACE:include>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CVC_INCLUDE_DIRS}
+    ${_CVC_PRIVATE_INCLUDE_DIRS}
 )
+
+# Public absolute include dirs (external deps): wrap each in its own
+# BUILD_INTERFACE genex so CMake's list separator (`;`) does not collide
+# with the genex's argument boundary. Embedding a list directly in
+# "$<BUILD_INTERFACE:${list}>" would either be syntactically invalid or
+# silently drop all but the first entry.
+foreach(_inc IN LISTS _CVC_PUBLIC_INCLUDE_DIRS)
+  target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_inc}>")
+endforeach()
 
 # Compile definitions
 target_compile_definitions(cvc
-  PRIVATE
+  PUBLIC
     CVC_NAMESPACE=${CVC_NAMESPACE}
+  PRIVATE
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
+
+# Public feature flags so consumers can check what libcvc was built with
+if(CVC_ENABLE_MESHER)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_MESHER)
+endif()
+if(CVC_ENABLE_SDF)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_SDF)
+endif()
+
+# Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
+if(DISABLE_CGAL)
+  target_compile_definitions(cvc PUBLIC DISABLE_CGAL)
+endif()
 
 # Setup dependencies
 SetupBoost(cvc)
@@ -542,19 +625,88 @@ endif()
 if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cvc PUBLIC OpenMP::OpenMP_CXX)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
+  # voxels.cpp uses unsigned loop indices and OpenMP `min`/`max` reductions
+  # that the classic MSVC OpenMP runtime (spec 2.0) rejects. Opt into the
+  # LLVM OpenMP runtime on MSVC so those constructs compile as-is.
+  if(MSVC)
+    target_compile_options(cvc PRIVATE -openmp:llvm)
+  endif()
+endif()
+
+# ImageMagick linking
+if(CVC_ENABLE_IMAGEMAGICK)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_IMAGEMAGICK
+    MAGICKCORE_QUANTUM_DEPTH=16
+    MAGICKCORE_HDRI_ENABLE=0)
+  target_include_directories(cvc PUBLIC ${ImageMagick_INCLUDE_DIRS})
+  target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
+endif()
+
+# FFTW linking
+if(CVC_ENABLE_FFTW)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
+  target_include_directories(cvc PUBLIC ${FFTW3_INCLUDE_DIRS})
+  target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
 endif()
 
 # Link libraries
 target_link_libraries(cvc PUBLIC ${CVC_LINK_LIBS})
 
-# Create executable
-add_executable(libcvc libcvc.cpp)
-target_link_libraries(libcvc PRIVATE cvc::cvc)
+# Install targets
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS cvc
+  EXPORT cvcTargets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT libcvc
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libcvc
+)
+
+install(EXPORT cvcTargets
+  FILE cvcTargets.cmake
+  NAMESPACE cvc::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+  COMPONENT libcvc
+)
+
+configure_package_config_file(
+  "${PROJECT_SOURCE_DIR}/CMake/cvcConfig.cmake.in"
+  "${CMAKE_BINARY_DIR}/cvcConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+)
+
+write_basic_package_version_file(
+  "${CMAKE_BINARY_DIR}/cvcConfigVersion.cmake"
+  VERSION ${CVC_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  "${CMAKE_BINARY_DIR}/cvcConfig.cmake"
+  "${CMAKE_BINARY_DIR}/cvcConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cvc
+  COMPONENT libcvc
+)
+
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  COMPONENT libcvc
+  FILES_MATCHING PATTERN "*.h"
+)
+
+install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/config.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+  COMPONENT libcvc
+)
 
 # Generate config.h
+# Use PROJECT_BINARY_DIR (not CMAKE_BINARY_DIR) so the generated header lands
+# under libcvc's own build tree when consumed via FetchContent/add_subdirectory.
+# Downstream projects can then add ${libcvc_BINARY_DIR}/inc to their include path.
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake
-  ${CMAKE_BINARY_DIR}/inc/cvc/config.h
+  ${PROJECT_BINARY_DIR}/inc/cvc/config.h
 )
 
 # Windows-specific batch file

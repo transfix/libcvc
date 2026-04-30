@@ -25,7 +25,7 @@
 using namespace std;
 
 extern int verbose;
-extern void (*errorHandler)(char *, int);
+extern void (*errorHandler)(const char *, int);
 
 //------------------------------------------------------------------------
 //

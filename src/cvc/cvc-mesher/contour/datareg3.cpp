@@ -708,7 +708,7 @@ Datareg3::compFunction(int n, u_int &len, float ***fx,
    return(NULL);
 }
 
-char *Datareg3::fName(int n)
+const char *Datareg3::fName(int n)
 {
    switch (n) {
       case 0:

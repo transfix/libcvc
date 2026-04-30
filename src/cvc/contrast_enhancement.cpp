@@ -35,10 +35,10 @@ namespace CVC_NAMESPACE
     int i, j;
     int xdim = paramin->XDim(), ydim = paramin->YDim();
 
-    voxels tmpmin(dimension(xdim,ydim,1),paramin->voxelType());
-    voxels tmpmax(dimension(xdim,ydim,1),paramin->voxelType());
-    voxels lcmin(dimension(xdim,ydim,1),paramin->voxelType());
-    voxels lcmax(dimension(xdim,ydim,1),paramin->voxelType());
+    voxels tmpmin(paramin->ctx(), dimension(xdim,ydim,1),paramin->voxelType());
+    voxels tmpmax(paramin->ctx(), dimension(xdim,ydim,1),paramin->voxelType());
+    voxels lcmin(paramin->ctx(), dimension(xdim,ydim,1),paramin->voxelType());
+    voxels lcmax(paramin->ctx(), dimension(xdim,ydim,1),paramin->voxelType());
 
     // Note: OpenMP removed to maintain deterministic numerical results
     for(j=0; j<ydim; j++)
@@ -160,7 +160,7 @@ namespace CVC_NAMESPACE
 
   voxels& voxels::contrastEnhancement(double resistor)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     int i,j,k, curstep=0;
     double origmin, origmax, lmin, lmax, img, avg;
@@ -179,7 +179,7 @@ namespace CVC_NAMESPACE
 
     /* Bottom-up propagation */
     contrastEnhancementSlice(resistor,&upmin,&upmax,&imgavg,0);
-    cvcapp.threadProgress(float(curstep++)/float(ZDim()*3));
+    _ctx.threadProgress(float(curstep++)/float(ZDim()*3));
 
     for(k=1; k<int(ZDim()); k++)
       {
@@ -195,12 +195,12 @@ namespace CVC_NAMESPACE
 		upmax(i,j,k, upmax(i,j,k) + resistor*(upmax(i,j,k-1)-upmax(i,j,k)));
 	    }
 	contrastEnhancementSlice(resistor,&upmin,&upmax,&imgavg,k);
-	cvcapp.threadProgress(float(curstep++)/float(ZDim()*3));
+	_ctx.threadProgress(float(curstep++)/float(ZDim()*3));
       }
 
     /* Top-down propagation */
     contrastEnhancementSlice(resistor,&downmin,&downmax,&imgavg,ZDim()-1);
-    cvcapp.threadProgress(float(curstep++)/float(ZDim()*3));
+    _ctx.threadProgress(float(curstep++)/float(ZDim()*3));
 
     for(k=ZDim()-2; k>=0; k--)
       {
@@ -216,7 +216,7 @@ namespace CVC_NAMESPACE
 		downmax(i,j,k, downmax(i,j,k) + resistor*(downmax(i,j,k+1)-downmax(i,j,k)));
 	    }
 	contrastEnhancementSlice(resistor,&downmin,&downmax,&imgavg,k);
-	cvcapp.threadProgress(float(curstep++)/float(ZDim()*3));
+	_ctx.threadProgress(float(curstep++)/float(ZDim()*3));
       }
 
     /* stretching */
@@ -263,14 +263,14 @@ namespace CVC_NAMESPACE
 	      else 
 		imgavg(i,j,k, img+lmin);
 	    }
-	cvcapp.threadProgress(float(curstep++)/float(ZDim()*3));
+	_ctx.threadProgress(float(curstep++)/float(ZDim()*3));
       }
 
     imgavg.unsetMinMax(); //we need to recalculate min and max for imgavg
     copy(imgavg);
 
     map(origmin,origmax); //restore the original min/max and relative values
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     
     return *this;
   }

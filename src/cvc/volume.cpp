@@ -103,12 +103,12 @@ namespace CVC_NAMESPACE
 
   volume& volume::sub(const bounding_box& subvolbox, const dimension& subvoldim)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(!subvolbox.isWithin(boundingBox()))
       throw sub_volume_out_of_bounds("Subvolume bounding box must be within the bounding box of the original volume.");
 
-    volume subvol(subvoldim,
+    volume subvol(_ctx, subvoldim,
                   voxelType(),
                   subvolbox);
 
@@ -133,7 +133,7 @@ namespace CVC_NAMESPACE
                   //                      " Possible floating point error\n",e.what());
                 }
             }
-        cvcapp.threadProgress(float(k)/float(subvol.ZDim()));
+        _ctx.threadProgress(float(k)/float(subvol.ZDim()));
       }
 
     copy(subvol);
@@ -156,7 +156,7 @@ namespace CVC_NAMESPACE
     */
 
     if(!boundingBox().contains(obj_x,obj_y,obj_z)) 
-      throw index_out_of_bounds(str(format("Coordinates are outside of bounding box :: "
+      throw index_out_of_bounds(str(boost::format("Coordinates are outside of bounding box :: "
                                            "bbox (%f,%f,%f),(%f,%f,%f) coord (%f,%f,%f)")
                                     % boundingBox().minx
                                     % boundingBox().miny
@@ -220,7 +220,7 @@ namespace CVC_NAMESPACE
 
   volume& volume::resize(const bounding_box& new_bbox)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     // If bounding boxes are the same, no work needed
     if(_boundingBox == new_bbox) return *this;
@@ -236,10 +236,10 @@ namespace CVC_NAMESPACE
 
   volume& volume::combineWith(const volume& vol, const dimension& dim)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     bounding_box combbox = boundingBox() + vol.boundingBox();
-    volume combvol(dim,voxelType(),combbox);
+    volume combvol(_ctx, dim,voxelType(),combbox);
 
     for(uint64 k = 0; k < combvol.ZDim(); k++)
       {
@@ -257,11 +257,11 @@ namespace CVC_NAMESPACE
                 combvol(i,j,k, interpolate(x,y,z));
             }
 
-        cvcapp.threadProgress(float(k)/float(dim[2]));
+        _ctx.threadProgress(float(k)/float(dim[2]));
       }
 
     (*this) = combvol;
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return (*this);
   }
 
@@ -276,16 +276,20 @@ namespace CVC_NAMESPACE
 		       const bounding_box& subvolbox)
   {
     if(!subvolbox.isNull())
-      readVolumeFile(*this, filename, var, time, subvolbox);
+      readVolumeFile(ctx(), *this, filename, var, time, subvolbox);
     else
-      readVolumeFile(*this, filename, var, time);
+      readVolumeFile(ctx(), *this, filename, var, time);
     return *this;
   }
 
   // 12/29/2013 -- Joe R. -- Creation.
   volume& volume::write(const std::string& filename)
   {
-    createVolumeFile(*this, filename);
+    createVolumeFile(ctx(), filename,
+		     boundingBox(),
+		     voxel_dimensions(),
+		     std::vector<data_type>(1, voxelType()));
+    writeVolumeFile(ctx(), *this, filename);
     return *this;
   }
 }

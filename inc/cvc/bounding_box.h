@@ -323,7 +323,7 @@ namespace CVC_NAMESPACE
     std::string str() const
     {
       using namespace boost;
-      return boost::str(format("%1%,%2%,%3%,%4%,%5%,%6%")
+      return boost::str(boost::format("%1%,%2%,%3%,%4%,%5%,%6%")
                         % minx % miny % minz
                         % maxx % maxy % maxz);
     }
@@ -357,21 +357,21 @@ namespace CVC_NAMESPACE
       std::string buf;
       if(minx > maxx)
 	{
-          buf = boost::str(format("minx: %f, maxx: %f")
+          buf = boost::str(boost::format("minx: %f, maxx: %f")
                            % double(minx)
                            % double(maxx));
 	  throw invalid_bounding_box(buf);
 	}
       else if(miny > maxy)
 	{
-          buf = boost::str(format("miny: %f, maxy: %f")
+          buf = boost::str(boost::format("miny: %f, maxy: %f")
                            % double(miny)
                            % double(maxy));
 	  throw invalid_bounding_box(buf);
 	}
       else if(minz > maxz)
 	{
-          buf = boost::str(format("minz: %f, maxz: %f")
+          buf = boost::str(boost::format("minz: %f, maxz: %f")
                            % double(minz)
                            % double(maxz));
 	  throw invalid_bounding_box(buf);
@@ -382,5 +382,14 @@ namespace CVC_NAMESPACE
   typedef generic_bounding_box<double> bounding_box;       // object space
   typedef generic_bounding_box<uint64> index_bounding_box; // image space
 };
+
+// Legacy PascalCase aliases (Phase 8 compat layer). Separate `namespace CVC`
+// block so internal libcvc code in `namespace cvc` is unaffected by possible
+// name collisions (e.g. SDF's local `struct BoundingBox`).
+namespace CVC
+{
+  typedef CVC_NAMESPACE::bounding_box       BoundingBox;
+  typedef CVC_NAMESPACE::index_bounding_box IndexBoundingBox;
+}
 
 #endif

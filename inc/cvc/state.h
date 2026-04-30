@@ -162,7 +162,12 @@ namespace CVC_NAMESPACE
     typedef boost::function<void ()> nullary_func;
     typedef std::vector<nullary_func> init_func_vec;
 
-    static const std::string SEPARATOR;
+    // Inline variable so every TU using this header gets its own
+    // definition. Avoids needing per-symbol __declspec(dllexport) on
+    // MSVC: WINDOWS_EXPORT_ALL_SYMBOLS auto-exports functions but not
+    // data members, so a .cpp-defined static const std::string would
+    // have no DLL export and downstream test TUs would fail to link.
+    inline static const std::string SEPARATOR{"."};
     static init_func_vec _startup;
 
     virtual ~state();
@@ -236,7 +241,7 @@ namespace CVC_NAMESPACE
         
         if(_value == str_value) return *this; //do nothing if equal
         
-        _valueTypeName = cvcapp.dataTypeName<T>();
+        _valueTypeName = _ctx.dataTypeName<T>();
         _value = str_value;
         _lastMod = boost::posix_time::microsec_clock::universal_time();
         _initialized = true;
@@ -418,11 +423,13 @@ namespace CVC_NAMESPACE
     static void on_startup(const nullary_func& init_func);
 
   protected:
-    state(const std::string& n = std::string(),
+    state(app& ctx,
+          const std::string& n = std::string(),
           const state* p = NULL);
 
     void notifyParent(const std::string& childname);
 
+    app&                             _ctx;
     boost::mutex                     _mutex;
     boost::posix_time::ptime         _lastMod;
 
@@ -472,5 +479,19 @@ namespace CVC_NAMESPACE
 
 //Shorthand to access the cvc::state object from anywhere
 #define cvcstate CVC_NAMESPACE::state::instance()
+
+// PascalCase aliases for consumer compat shims bypassed on case-insensitive
+// filesystems (macOS).
+#ifndef CVC_COMPAT_STATE_DEFINED
+#define CVC_COMPAT_STATE_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef state State;
+}
+namespace CVC
+{
+  typedef CVC_NAMESPACE::state State;
+}
+#endif // CVC_COMPAT_STATE_DEFINED
 
 #endif

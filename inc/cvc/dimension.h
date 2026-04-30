@@ -149,7 +149,7 @@ namespace CVC_NAMESPACE
     std::string str() const
     {
       using namespace boost;
-      return boost::str(format("%1%,%2%,%3%")
+      return boost::str(boost::format("%1%,%2%,%3%")
                         % xdim % ydim % zdim);
     }
 
@@ -176,5 +176,8 @@ namespace CVC_NAMESPACE
     }
   };
 };
+
+// Legacy PascalCase alias (Phase 8 compat layer).
+namespace CVC { typedef CVC_NAMESPACE::dimension Dimension; }
 
 #endif

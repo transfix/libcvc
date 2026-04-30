@@ -37,7 +37,7 @@ namespace LBIE
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/26/2025 -- Joe R. -- Removed string-based version, use enum only.
-  geoframe quality_improve(const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
+  geoframe quality_improve(CVC_NAMESPACE::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
 			   bool verbose = false);
 
   // -----------------------------------------------------------------------
@@ -75,6 +75,7 @@ namespace LBIE
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
   CVC_NAMESPACE::geometry quality_improve_geometry(
+      CVC_NAMESPACE::app& ctx,
       const CVC_NAMESPACE::geometry& geom,
       Mesher::ImproveMethod improve_method,
       int improve_iterations,

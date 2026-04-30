@@ -42,7 +42,10 @@
 
 namespace CVC_NAMESPACE
 {
-  const std::string state::SEPARATOR(".");
+  // SEPARATOR is now an inline variable defined in state.h (C++17).
+  // Keeping the symbol exported from the DLL would otherwise require an
+  // explicit __declspec(dllexport), since WINDOWS_EXPORT_ALL_SYMBOLS only
+  // covers function symbols, not data members.
   state::init_func_vec state::_startup;
   state::state_ptr state::_instance;
   boost::mutex state::_instanceMutex;
@@ -59,7 +62,8 @@ namespace CVC_NAMESPACE
   // 03/15/2012 -- Joe R. -- Added initialized flag.
   // 03/30/2012 -- Joe R. -- Added hidden flag.
   // 01/12/2014 -- Joe R. -- Removing notifyXmlRpc.
-  state::state(const std::string& n, const state* p) :
+  state::state(app& ctx, const std::string& n, const state* p) :
+    _ctx(ctx),
     _name(n),
     _parent(p),
     _lastMod(boost::posix_time::min_date_time),
@@ -108,10 +112,10 @@ namespace CVC_NAMESPACE
 	{
 	  //Keep our static instance in the data map!
 	  const std::string statekey("__state");
-	  state_ptr ptr(new state);
-	  cvcapp.data(statekey,ptr);
+	  state_ptr ptr(new state(app::instance()));
+	  app::instance().data(statekey,ptr);
 	  
-	  _instance = cvcapp.data<state_ptr>(statekey);
+	  _instance = app::instance().data<state_ptr>(statekey);
 	  do_startup = true;
 	}
     }
@@ -444,7 +448,7 @@ namespace CVC_NAMESPACE
     property_tree::ptree pt;
 
     boost::this_thread::interruption_point();
-    cvcapp.log(6,boost::str(boost::format("%s :: %s = %s\n")
+    _ctx.log(6,boost::str(boost::format("%s :: %s = %s\n")
                             % BOOST_CURRENT_FUNCTION
                             % fullName()
                             % value()));
@@ -617,7 +621,7 @@ namespace CVC_NAMESPACE
   // 03/31/2012 -- Joe R. -- Creation.
   std::string state::dataTypeName()
   {
-    return cvcapp.dataTypeName(data());
+    return _ctx.dataTypeName(data());
   }
 
   // -----------------
@@ -656,7 +660,7 @@ namespace CVC_NAMESPACE
         return (*_children[nearest])(join(keys,SEPARATOR));
       else
         {
-          state_ptr s(new state(nearest,this));
+          state_ptr s(new state(_ctx, nearest, this));
           _children[nearest] = s;
           _lastMod = boost::posix_time::microsec_clock::universal_time();
           _initialized = true;
@@ -689,13 +693,13 @@ namespace CVC_NAMESPACE
 		boost::regex expression(re.c_str());
 		boost::cmatch what;
 		
-		cvcapp.log(6,boost::str(boost::format("%s :: check match %s\n")
+		_ctx.log(6,boost::str(boost::format("%s :: check match %s\n")
 					% BOOST_CURRENT_FUNCTION
 					% val.second->fullName()));
 		
 		if(boost::regex_match(val.second->fullName().c_str(),what,expression))
 		  {
-		    cvcapp.log(6,boost::str(boost::format("%s :: matched! %s\n")
+		    _ctx.log(6,boost::str(boost::format("%s :: matched! %s\n")
 					    % BOOST_CURRENT_FUNCTION
 					    % val.second->fullName()));
 		    
@@ -704,7 +708,7 @@ namespace CVC_NAMESPACE
 	      }
 	    catch(boost::bad_expression&)
 	      {
-		cvcapp.log(2,boost::str(boost::format("%s :: invalid regex '%s'\n")
+		_ctx.log(2,boost::str(boost::format("%s :: invalid regex '%s'\n")
 					% BOOST_CURRENT_FUNCTION
 					% re));
 		return ret;

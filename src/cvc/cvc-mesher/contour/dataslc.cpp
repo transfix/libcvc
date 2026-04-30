@@ -374,7 +374,7 @@ Dataslc::compFunction(int n, u_int &len, float **fx)
    return(NULL);
 }
 
-char *Dataslc::fName(int n)
+const char *Dataslc::fName(int n)
 {
    switch (n) {
       case 0:

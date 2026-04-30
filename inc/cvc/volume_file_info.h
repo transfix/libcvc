@@ -32,6 +32,8 @@
 
 namespace CVC_NAMESPACE
 {
+  class app; // forward-declared to avoid pulling all of app.h into headers
+
   class volume_file_info
   {
   public:
@@ -41,7 +43,8 @@ namespace CVC_NAMESPACE
       _maxIsSet(_data._maxIsSet), _max(_data._max),
       _numVariables(_data._numVariables), _numTimesteps(_data._numTimesteps), 
       _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
-      _tmin(_data._tmin), _tmax(_data._tmax) {}
+      _tmin(_data._tmin), _tmax(_data._tmax),
+      _ctx(nullptr) {}
 
     volume_file_info(const std::string& file) :
       _dimension(_data._dimension), _boundingBox(_data._boundingBox),
@@ -49,8 +52,19 @@ namespace CVC_NAMESPACE
       _maxIsSet(_data._maxIsSet), _max(_data._max),
       _numVariables(_data._numVariables), _numTimesteps(_data._numTimesteps), 
       _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
-      _tmin(_data._tmin), _tmax(_data._tmax)
+      _tmin(_data._tmin), _tmax(_data._tmax),
+      _ctx(nullptr)
       { read(file); }
+
+    volume_file_info(app& ctx, const std::string& file) :
+      _dimension(_data._dimension), _boundingBox(_data._boundingBox),
+      _minIsSet(_data._minIsSet), _min(_data._min),
+      _maxIsSet(_data._maxIsSet), _max(_data._max),
+      _numVariables(_data._numVariables), _numTimesteps(_data._numTimesteps), 
+      _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
+      _tmin(_data._tmin), _tmax(_data._tmax),
+      _ctx(&ctx)
+      { read(ctx, file); }
 
     volume_file_info(const volume_file_info& vfi) :
       _dimension(_data._dimension), _boundingBox(_data._boundingBox),
@@ -59,7 +73,7 @@ namespace CVC_NAMESPACE
       _numVariables(_data._numVariables), _numTimesteps(_data._numTimesteps), 
       _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
       _tmin(_data._tmin), _tmax(_data._tmax),
-      _data(vfi._data) {}
+      _data(vfi._data), _ctx(vfi._ctx) {}
     ~volume_file_info() {}
 
     volume_file_info& operator=(const volume_file_info& vfi)
@@ -67,6 +81,7 @@ namespace CVC_NAMESPACE
 	if(this == &vfi)
 	  return *this;
 	_data = vfi._data;
+	_ctx = vfi._ctx;
 	return *this;
       }
 
@@ -75,6 +90,7 @@ namespace CVC_NAMESPACE
       the info in the supplied file header.
     */
     void read(const std::string& filename);
+    void read(app& ctx, const std::string& filename);
 
     /***** Volume info accessors *****/
     /*
@@ -184,6 +200,10 @@ namespace CVC_NAMESPACE
     double& _tmax;
 
     data _data;
+    // Non-owning pointer to the app context associated with this object.
+    // Set by the (app&, filename) ctor / read(app&, ...) overload so that
+    // later operations (e.g. calcMinMax) do not require app::instance().
+    app* _ctx;
   };
 }
 

@@ -4,6 +4,7 @@
 #include <cvc/utility.h>
 
 #include <fstream>
+#include <iomanip>
 
 namespace CVC_NAMESPACE
 {
@@ -76,7 +77,7 @@ namespace CVC_NAMESPACE
 
       getline(inf, line); line_num++; // junk the first line
       if(!inf)
-	throw read_error(str(format("Error reading file %1%, line %2%")
+	throw read_error(str(boost::format("Error reading file %1%, line %2%")
 			     % filename
 			     % line_num));
 
@@ -84,13 +85,13 @@ namespace CVC_NAMESPACE
       //inf >> headword;    
       //if (headword.compare("OFF") != 0 && 
       //  headword.compare("COFF") != 0) {
-      //  throw read_error(str(format("Error reading header for file %1%")
+      //  throw read_error(str(boost::format("Error reading header for file %1%")
       //                % filename));
       //}
 
       getline(inf, line); line_num++;
       if(!inf)
-	throw read_error(str(format("Error reading file %1%, line %2%")
+	throw read_error(str(boost::format("Error reading file %1%, line %2%")
 			     % filename
 			     % line_num));
       trim(line);
@@ -99,7 +100,7 @@ namespace CVC_NAMESPACE
 	    is_any_of(" "),
 	    token_compress_on);
       if(split_line.size() != 3)
-	throw read_error(str(format("Not an OFF file (wrong number of tokens in line 2: [%1%])")
+	throw read_error(str(boost::format("Not an OFF file (wrong number of tokens in line 2: [%1%])")
 			     % split_line.size()));
 
       try
@@ -112,7 +113,7 @@ namespace CVC_NAMESPACE
 	    {
 	      getline(inf, line); line_num++;
 	      if(!inf)
-		throw read_error(str(format("Error reading file %1%, line %2%")
+		throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				     % filename
 				     % line_num));
 	      trim(line);
@@ -137,7 +138,7 @@ namespace CVC_NAMESPACE
 		  geom.points().push_back(point);
 		  break;
 		default:
-		  throw read_error(str(format("Error reading file %1%, line %2%")
+		  throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				       % filename
 				       % line_num));
 		}
@@ -145,7 +146,7 @@ namespace CVC_NAMESPACE
 	}
       catch(std::exception& e)
 	{
-	  throw read_error(str(format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
+	  throw read_error(str(boost::format("Error reading file %1%, line %2%, contents: '%3%', reason: %4%")
 			       % filename
 			       % line_num
 			       % line
@@ -156,7 +157,7 @@ namespace CVC_NAMESPACE
 	{
 	  getline(inf, line); line_num++;
 	  if(!inf)
-	    throw read_error(str(format("Error reading file %1%, line %2%")
+	    throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				 % filename
 				 % line_num));
 	  trim(line);
@@ -170,7 +171,7 @@ namespace CVC_NAMESPACE
 	  // don't handle segments yet... just planar facets
 	  if (size < 3) 
 	    {
-	      throw read_error(str(format("Error reading file %1%, line %2%")
+	      throw read_error(str(boost::format("Error reading file %1%, line %2%")
 				   % filename
 				   % line_num));
 	    }
@@ -194,12 +195,31 @@ namespace CVC_NAMESPACE
     // off_io::write
     // -------------
     // Purpose:
-    //   Supposed to write geometry to OFF file format, but is unimplemented so throws an error for now.
+    //   Writes geometry to OFF file format.
     // ---- Change History ----
     // 01/11/2014 -- Joe R. -- Creation.
+    // 01/2025 -- Joe R. -- Implemented.
     virtual void write(const geometry& geom, const std::string& filename) const
     {
-      throw write_error(BOOST_CURRENT_FUNCTION);
+      using namespace std;
+      ofstream out(filename.c_str());
+      if(!out)
+        throw write_error(string(BOOST_CURRENT_FUNCTION) +
+                          string(": Could not open ") + filename);
+
+      out << "OFF\n";
+      out << geom.num_points() << " " << geom.num_tris() << " 0\n";
+
+      out << fixed << setprecision(6);
+      for(uint64 i = 0; i < geom.num_points(); i++)
+        out << geom.const_points()[i][0] << " "
+            << geom.const_points()[i][1] << " "
+            << geom.const_points()[i][2] << "\n";
+
+      for(uint64 i = 0; i < geom.num_tris(); i++)
+        out << "3 " << geom.const_tris()[i][0] << " "
+                     << geom.const_tris()[i][1] << " "
+                     << geom.const_tris()[i][2] << "\n";
     }
 
   protected:
@@ -208,16 +228,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class off_io_init
+  void register_off_io(app& /*ctx*/)
   {
-  public:
-    off_io_init()
-    {
-      CVC_NAMESPACE::geometry_file_io::insert_handler(
-        CVC_NAMESPACE::geometry_file_io::ptr(new CVC_NAMESPACE::off_io)
-      );
-    }
-  } static_init;
+    geometry_file_io::insert_handler(
+      geometry_file_io::ptr(new off_io)
+    );
+  }
 }

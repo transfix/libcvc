@@ -8,11 +8,15 @@ function(SetupBoost TargetName)
   set(Boost_USE_MULTITHREADED ON)
   
   # Find required Boost components
+  # system and chrono are header-only on newer Boost (>=1.69/1.72) but
+  # still compiled on older versions — use OPTIONAL_COMPONENTS so the
+  # lookup succeeds either way.
   find_package(Boost 1.58 REQUIRED COMPONENTS 
     thread 
     date_time 
     regex 
-    filesystem 
+    filesystem
+    OPTIONAL_COMPONENTS
     system
     chrono
   )

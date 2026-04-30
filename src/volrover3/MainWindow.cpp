@@ -1,3 +1,4 @@
+#include <volrover3/volrover3_app.h>
 #include <volrover3/MainWindow.h>
 #include <volrover3/VTKRenderWidget.h>
 #include <volrover3/TransferFunctionWidget.h>
@@ -444,7 +445,7 @@ void MainWindow::openFile()
             
             try {
                 // Try loading as volume
-                cvc::volume vol(fileName.toStdString());
+                cvc::volume vol(cvcapp, fileName.toStdString());
                 auto volumeNode = m_sceneGraph->addGraphics(graphicsName, vol);
                 volumeNode->setMetadata("type", std::string("volume"));
                 volumeNode->setMetadata("filename", fileName.toStdString());
@@ -1012,7 +1013,7 @@ void MainWindow::setupStatusBar()
     // Register callback for thread changes
     // Use QMetaObject::invokeMethod to ensure UI updates happen on the main thread
     m_connections.push_back(
-        cvc::app::instance().threadsChanged.connect(
+        volrover3::app().threadsChanged.connect(
             [this](const std::string&) {
                 QMetaObject::invokeMethod(this, "updateThreadStatus", Qt::QueuedConnection);
             }
@@ -1026,7 +1027,7 @@ void MainWindow::setupStatusBar()
 void MainWindow::updateThreadStatus()
 {
     // Get all threads
-    auto threads = cvc::app::instance().threads();
+    auto threads = volrover3::app().threads();
     
     if (threads.empty()) {
         // No threads active - hide widgets
@@ -1048,7 +1049,7 @@ void MainWindow::updateThreadStatus()
             
             if (!threadPtr) continue;
             
-            double progress = cvc::app::instance().threadProgress(threadKey);
+            double progress = volrover3::app().threadProgress(threadKey);
             bool isComplete = (progress >= 1.0);
             
             if (!isComplete) {
@@ -1068,11 +1069,11 @@ void MainWindow::updateThreadStatus()
         if (displayThreadKey.empty()) {
             // Fallback to first thread
             displayThreadKey = threads.begin()->first;
-            displayProgress = cvc::app::instance().threadProgress(displayThreadKey);
+            displayProgress = volrover3::app().threadProgress(displayThreadKey);
         }
         
         // Get thread info
-        std::string info = cvc::app::instance().threadInfo(displayThreadKey);
+        std::string info = volrover3::app().threadInfo(displayThreadKey);
         
         // Add status indicator
         bool isComplete = (displayProgress >= 1.0);

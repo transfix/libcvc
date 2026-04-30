@@ -38,6 +38,8 @@
 
 namespace CVC_NAMESPACE
 {
+  class app; // Forward declaration for app& overloads
+
   CVC_DEF_EXCEPTION(unsupported_volume_file_type);
 
   // --------------
@@ -103,8 +105,9 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& /*data*/,
-				   const std::string& /*filename*/) const = 0;
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+                                   volume_file_info::data& /*data*/,
+                                   const std::string& /*filename*/) const = 0;
 
     // -----------------------------
     // volume_file_io::readVolumeFile
@@ -113,7 +116,8 @@ namespace CVC_NAMESPACE
     //   Writes to a Volume object after reading from a volume file.  
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& /*vol*/, 
+    virtual void readVolumeFile(app& /*ctx*/,
+                                volume& /*vol*/,
 				const std::string& /*filename*/, 
 				unsigned int /*var*/,
 				unsigned int /*time*/,
@@ -130,7 +134,8 @@ namespace CVC_NAMESPACE
     //   subvol.  A default implementation is provided. 
     // ---- Change History ----
     // 01/03/2010 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& vol, 
+    virtual void readVolumeFile(app& ctx,
+                                volume& vol, 
 				const std::string& filename, 
 				unsigned int var,
 				unsigned int time,
@@ -143,14 +148,15 @@ namespace CVC_NAMESPACE
     //   Creates an empty volume file to be later filled in by writeVolumeFile
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void createVolumeFile(const std::string& /*filename*/,
-				  const bounding_box& /*boundingBox*/,
-				  const dimension& /*dimension*/,
-				  const std::vector<data_type>& /*voxelTypes*/,
-				  unsigned int /*numVariables*/,
-				  unsigned int /*numTimesteps*/,
-				  double /*min_time*/,
-				  double /*max_time*/) const = 0;
+    virtual void createVolumeFile(app& /*ctx*/,
+                                  const std::string& /*filename*/,
+                                  const bounding_box& /*boundingBox*/,
+                                  const dimension& /*dimension*/,
+                                  const std::vector<data_type>& /*voxelTypes*/,
+                                  unsigned int /*numVariables*/,
+                                  unsigned int /*numTimesteps*/,
+                                  double /*min_time*/,
+                                  double /*max_time*/) const = 0;
 
     // -------------------------------
     // volume_file_io::writeVolumeFile
@@ -164,7 +170,8 @@ namespace CVC_NAMESPACE
     //   createVolumeFile to replace the volume file.
     // ---- Change History ----
     // 11/13/2009 -- Joe R. -- Creation.
-    virtual void writeVolumeFile(const volume& /*wvol*/, 
+    virtual void writeVolumeFile(app& /*ctx*/,
+                                 const volume& /*wvol*/,
 				 const std::string& /*filename*/,
 				 unsigned int /*var*/,
 				 unsigned int /*time*/,
@@ -181,7 +188,9 @@ namespace CVC_NAMESPACE
     //   basis.
     // ---- Change History ----
     // 04/06/2012 -- Joe R. -- Creation.
-    virtual void writeBoundingBox(const bounding_box& bbox, const std::string& filename) const;
+    virtual void writeBoundingBox(app& ctx,
+                                  const bounding_box& bbox,
+                                  const std::string& filename) const;
 
     typedef boost::shared_ptr<volume_file_io> ptr;
     typedef std::vector<ptr> handlers;
@@ -258,7 +267,7 @@ namespace CVC_NAMESPACE
 
   // ------------------------- Volume I/O API
 
-    /*
+  /*
     read the specified subvolume from the specified file and copy it to the object
     vol.
   */
@@ -326,6 +335,54 @@ namespace CVC_NAMESPACE
   //Functions for reading and writing volume bounding boxes
   bounding_box readBoundingBox(const std::string& filename);
   void writeBoundingBox(const bounding_box& bbox, const std::string& filename);
+
+  // ---- Overloads accepting explicit app& context ----
+  // These avoid the app::instance() singleton. Legacy overloads above
+  // delegate to app::instance() internally.
+
+  void readVolumeFile(app& ctx, volume& vol,
+                      const std::string& filename,
+                      unsigned int var = 0, unsigned int time = 0);
+
+  void readVolumeFile(app& ctx, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      uint64 off_x, uint64 off_y, uint64 off_z,
+                      const dimension& subvoldim);
+
+  void readVolumeFile(app& ctx, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      const bounding_box& subvolbox);
+
+  void readVolumeFile(app& ctx, std::vector<volume>& vols,
+                      const std::string& filename);
+
+  void writeVolumeFile(app& ctx, const volume& vol,
+                       const std::string& filename,
+                       unsigned int var = 0, unsigned int time = 0,
+                       uint64 off_x = 0, uint64 off_y = 0, uint64 off_z = 0);
+
+  void writeVolumeFile(app& ctx, const volume& vol,
+                       const std::string& filename,
+                       unsigned int var, unsigned int time,
+                       const bounding_box& subvolbox);
+
+  void writeVolumeFile(app& ctx, const std::vector<volume>& vols,
+                       const std::string& filename);
+
+  void createVolumeFile(app& ctx, const std::string& filename,
+                        const bounding_box& boundingBox,
+                        const dimension& dimension,
+                        const std::vector<data_type>& voxelTypes = std::vector<data_type>(1, UChar),
+                        unsigned int numVariables = 1, unsigned int numTimesteps = 1,
+                        double min_time = 0.0, double max_time = 0.0);
+
+  void writeBoundingBox(app& ctx,
+                        const bounding_box& bbox,
+                        const std::string& filename);
+
+  bounding_box readBoundingBox(app& ctx, const std::string& filename);
 }
 
 #endif

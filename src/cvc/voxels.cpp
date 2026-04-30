@@ -30,8 +30,8 @@
 
 namespace CVC_NAMESPACE
 {
-  voxels::voxels(const dimension& d, data_type vt) 
-    : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
+  voxels::voxels(app& ctx, const dimension& d, data_type vt) 
+    : _ctx(ctx), _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
       _using_cuda(false), _cuda_device_id(-1)
   {
@@ -47,8 +47,8 @@ namespace CVC_NAMESPACE
       }
   }
 
-  voxels::voxels(const void *v, const dimension& d, data_type vt)
-    : _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
+  voxels::voxels(app& ctx, const void *v, const dimension& d, data_type vt)
+    : _ctx(ctx), _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
       _using_cuda(false), _cuda_device_id(-1)
   {
@@ -65,7 +65,8 @@ namespace CVC_NAMESPACE
   }
 
   voxels::voxels(const voxels& v)
-    : _dimension(v.voxel_dimensions()), 
+    : _ctx(v._ctx),
+      _dimension(v.voxel_dimensions()), 
       _voxelType(v.voxelType()), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true),
       _using_cuda(v._using_cuda), _cuda_device_id(v._cuda_device_id),
@@ -98,7 +99,7 @@ namespace CVC_NAMESPACE
   // 12/09/2025 -- Joe R. -- Updated for typed 3D arrays
   void voxels::voxel_dimensions(const dimension& d)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(d.isNull()) throw null_dimension("Null volume dimension.");
 
@@ -139,7 +140,7 @@ namespace CVC_NAMESPACE
   
   void voxels::voxelType(data_type vt)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(voxelType() == vt) return;
 
@@ -165,7 +166,7 @@ namespace CVC_NAMESPACE
 
   void voxels::calcMinMax() const
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     double val;
     size_t len = XDim()*YDim()*ZDim();
@@ -187,7 +188,7 @@ namespace CVC_NAMESPACE
 	      if(v > uchar_max) uchar_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double(uchar_min);
@@ -206,7 +207,7 @@ namespace CVC_NAMESPACE
 	      if(v > ushort_max) ushort_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double(ushort_min);
@@ -225,7 +226,7 @@ namespace CVC_NAMESPACE
 	      if(v > uint_max) uint_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double(uint_min);
@@ -244,7 +245,7 @@ namespace CVC_NAMESPACE
 	      if(v > float_max) float_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double(float_min);
@@ -263,7 +264,7 @@ namespace CVC_NAMESPACE
 	      if(v > double_max) double_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double_min;
@@ -282,7 +283,7 @@ namespace CVC_NAMESPACE
 	      if(v > uint64_max) uint64_max = v;
 	      if((i % (XDim()*YDim())) == 0)
                 {
-                  cvcapp.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
+                  _ctx.threadProgress(float(i/(XDim()*YDim()))/float(ZDim()));
                 }
 	    }
 	  _min = double(uint64_min);
@@ -292,12 +293,12 @@ namespace CVC_NAMESPACE
       }
 
     _minIsSet = _maxIsSet = true;
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
   }
 
   void voxels::calcHistogram(uint64 size) const
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(!_histogramDirty && _histogramSize == size) return;
 
@@ -317,7 +318,7 @@ namespace CVC_NAMESPACE
         // All values are the same, put everything in the middle bin
         _histogram[size/2] = XDim() * YDim() * ZDim();
         _histogramDirty = false;
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         return;
       }
 
@@ -336,17 +337,17 @@ namespace CVC_NAMESPACE
 #endif
 	      _histogram[offset]++;
 	    }
-        cvcapp.threadProgress(float(k)/float(ZDim()));
+        _ctx.threadProgress(float(k)/float(ZDim()));
       }
 
     _histogramDirty = false;
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
   }
 
   double voxels::min(uint64 off_x, uint64 off_y, uint64 off_z,
 		     const dimension& dim) const
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
 #ifdef CVC_USING_CUDA
     // Use CUDA kernel if CUDA is enabled and unified memory is available
@@ -359,7 +360,7 @@ namespace CVC_NAMESPACE
             voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
             voxelType());
         
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         return result;
       } catch (const cuda_error& e) {
         // Fall back to CPU implementation if CUDA fails
@@ -371,8 +372,16 @@ namespace CVC_NAMESPACE
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
-    // Parallel map-reduce: each thread finds min in its chunk, then combine
+    // Parallel map-reduce: each thread finds min in its chunk, then combine.
+    // MSVC's LLVM OpenMP frontend (/openmp:llvm) is strict about the form
+    // permitted inside `collapse(...)`: the inner loop bounds here are
+    // non-rectangular w.r.t. OpenMP's "canonical loop form" and get rejected
+    // with C7720. Fall back to a plain outer-loop parallel-for on MSVC.
+    #if defined(_MSC_VER)
+    #pragma omp parallel for reduction(min:val) schedule(static)
+    #else
     #pragma omp parallel for reduction(min:val) collapse(3) schedule(static)
+    #endif
 #endif
     for(uint64 k=0; k<dim[2]; k++)
       for(uint64 j=0; j<dim[1]; j++)
@@ -383,14 +392,14 @@ namespace CVC_NAMESPACE
 	      val = curr;
 	  }
     
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return val;
   }
 
   double voxels::max(uint64 off_x, uint64 off_y, uint64 off_z,
 		     const dimension& dim) const
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
 #ifdef CVC_USING_CUDA
     // Use CUDA kernel if CUDA is enabled and unified memory is available
@@ -403,7 +412,7 @@ namespace CVC_NAMESPACE
             voxel_dimensions()[0], voxel_dimensions()[1], voxel_dimensions()[2],
             voxelType());
         
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         return result;
       } catch (const cuda_error& e) {
         // Fall back to CPU implementation if CUDA fails
@@ -415,8 +424,13 @@ namespace CVC_NAMESPACE
     double val = (*this)(off_x,off_y,off_z);  // Initialize with first value in subvolume
     
 #ifdef _OPENMP
-    // Parallel map-reduce: each thread finds max in its chunk, then combine
+    // Parallel map-reduce: each thread finds max in its chunk, then combine.
+    // See the min() variant above for why collapse(3) is disabled on MSVC.
+    #if defined(_MSC_VER)
+    #pragma omp parallel for reduction(max:val) schedule(static)
+    #else
     #pragma omp parallel for reduction(max:val) collapse(3) schedule(static)
+    #endif
 #endif
     for(uint64 k=0; k<dim[2]; k++)
       for(uint64 j=0; j<dim[1]; j++)
@@ -427,7 +441,7 @@ namespace CVC_NAMESPACE
 	      val = curr;
 	  }
     
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return val;
   }
   
@@ -442,7 +456,7 @@ namespace CVC_NAMESPACE
   // 12/10/2025 -- Joe R. -- Creation.
   voxels& voxels::copy()
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
     
     // Create a temporary shallow copy to copy from
     voxels temp(*this);
@@ -511,7 +525,7 @@ namespace CVC_NAMESPACE
   voxels& voxels::sub(uint64 off_x, uint64 off_y, uint64 off_z,
 		      const dimension& subvoldim)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(off_x+subvoldim[0]-1 >= voxel_dimensions()[0] || 
        off_y+subvoldim[1]-1 >= voxel_dimensions()[1] || 
@@ -532,10 +546,10 @@ namespace CVC_NAMESPACE
 	for(uint64 j=0; j<voxel_dimensions()[1]; j++)
 	  for(uint64 i=0; i<voxel_dimensions()[0]; i++)
 	    (*this)(i,j,k,tmp(i+off_x,j+off_y,k+off_z));
-        cvcapp.threadProgress(float(k)/float(voxel_dimensions()[2]));
+        _ctx.threadProgress(float(k)/float(voxel_dimensions()[2]));
       }
 
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return *this;
   }
 
@@ -547,7 +561,7 @@ namespace CVC_NAMESPACE
   voxels& voxels::fillsub(uint64 off_x, uint64 off_y, uint64 off_z,
 			  const dimension& subvoldim, double val)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(off_x+subvoldim[0]-1 >= voxel_dimensions()[0] || 
        off_y+subvoldim[1]-1 >= voxel_dimensions()[1] || 
@@ -562,16 +576,16 @@ namespace CVC_NAMESPACE
 	for(uint64 j=0; j<subvoldim[1]; j++)
 	  for(uint64 i=0; i<subvoldim[0]; i++)
 	    (*this)(i+off_x,j+off_y,k+off_z,val);
-        cvcapp.threadProgress(float(k)/float(subvoldim[2]));
+        _ctx.threadProgress(float(k)/float(subvoldim[2]));
       }
 
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return *this;
   }
 
   voxels& voxels::map(double min_, double max_)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     // Compute min/max BEFORE parallel region to avoid race conditions
     // on _min/_max member variables when called from multiple threads
@@ -625,7 +639,7 @@ namespace CVC_NAMESPACE
 		  break;
 		}
 	    }
-        cvcapp.threadProgress(float(k)/float(zdim));
+        _ctx.threadProgress(float(k)/float(zdim));
       }
     min(min_); max(max_); // set the new min and max
     return *this;
@@ -742,13 +756,13 @@ namespace CVC_NAMESPACE
               }
           }
 
-        cvcapp.threadProgress(float(k)/float(newvox.ZDim()));
+        _ctx.threadProgress(float(k)/float(newvox.ZDim()));
       }
   }
 
   voxels& voxels::resize(const dimension& newdim)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     double inSpaceX, inSpaceY, inSpaceZ;
     double val[8];
@@ -763,7 +777,7 @@ namespace CVC_NAMESPACE
 
     if(voxel_dimensions() == newdim) return *this; //nothing needs to be done
 
-    voxels newvox(newdim,voxelType());
+    voxels newvox(_ctx, newdim, voxelType());
 
     //we require a dimension of at least 2^3 
     if(newdim < dimension(2,2,2)) 
@@ -808,7 +822,7 @@ namespace CVC_NAMESPACE
         
         // Copy the result
         copy(newvox);
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         
         return *this;
       } catch (const cuda_error& e) {
@@ -825,14 +839,14 @@ namespace CVC_NAMESPACE
     resizeTrilinearCPU(newvox, 0.0, 0.0, 0.0, inSpaceX, inSpaceY, inSpaceZ, false);
 
     copy(newvox); //make this into a copy of the interpolated voxels
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
 
     return *this;
   }
 
   voxels& voxels::resize(const bounding_box& old_bbox, const bounding_box& new_bbox)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if(voxel_dimensions().isNull()) throw null_dimension("Null voxels dimension.");
 
@@ -840,7 +854,7 @@ namespace CVC_NAMESPACE
     if(old_bbox == new_bbox) return *this;
 
     // Create temporary voxel array with same dimensions to hold resampled data
-    voxels newvox(voxel_dimensions(), voxelType());
+    voxels newvox(_ctx, voxel_dimensions(), voxelType());
 
     // Calculate the mapping from new bbox coordinates to old bbox coordinates
     // For each voxel in the grid, we need to find its position in the new bbox,
@@ -886,7 +900,7 @@ namespace CVC_NAMESPACE
         
         // Copy the result
         copy(newvox);
-        cvcapp.threadProgress(1.0f);
+        _ctx.threadProgress(1.0f);
         
         return *this;
       } catch (const cuda_error& e) {
@@ -902,14 +916,14 @@ namespace CVC_NAMESPACE
     resizeTrilinearCPU(newvox, offset_x, offset_y, offset_z, scale_x, scale_y, scale_z, true);
 
     copy(newvox); //make this into a copy of the interpolated voxels
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
 
     return *this;
   }
 
   voxels& voxels::composite(const voxels& compVox, int64 off_x, int64 off_y, int64 off_z, const composite_function& func)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     uint64 i,j,k;
 
@@ -926,10 +940,10 @@ namespace CVC_NAMESPACE
 	      (*this)(int64(i) + off_x, int64(j) + off_y, int64(k) + off_z,
 		      func(compVox,i,j,k,
 			   *this, int64(i) + off_x, int64(j) + off_y, int64(k) + off_z));
-        cvcapp.threadProgress(float(k)/float(compVox.ZDim()));
+        _ctx.threadProgress(float(k)/float(compVox.ZDim()));
       }
 
-    cvcapp.threadProgress(1.0f);
+    _ctx.threadProgress(1.0f);
     return *this;
   }
 
@@ -959,7 +973,7 @@ namespace CVC_NAMESPACE
 
   void voxels::enableCUDA(int device_id) {
 #ifdef CVC_USING_CUDA
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if (_using_cuda) {
       // Already using CUDA - maybe switch devices?
@@ -994,7 +1008,7 @@ namespace CVC_NAMESPACE
     _using_cuda = true;
     _cuda_device_id = device_id;
 
-    cvcapp.log(3, "CUDA unified memory enabled on device " + 
+    _ctx.log(3, "CUDA unified memory enabled on device " + 
                std::to_string(device_id));
 #else
     throw cuda_not_available("CVC was not compiled with CUDA support");
@@ -1003,7 +1017,7 @@ namespace CVC_NAMESPACE
 
   void voxels::disableCUDA() {
 #ifdef CVC_USING_CUDA
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if (!_using_cuda) {
       return; // Already disabled
@@ -1015,13 +1029,13 @@ namespace CVC_NAMESPACE
     _using_cuda = false;
     _cuda_device_id = -1;
 
-    cvcapp.log(3, "CUDA unified memory disabled");
+    _ctx.log(3, "CUDA unified memory disabled");
 #endif
   }
 
   void voxels::switchGPU(int new_device_id) {
 #ifdef CVC_USING_CUDA
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
     if (!_using_cuda) {
       // Not currently using CUDA, just enable on the new device
@@ -1076,7 +1090,7 @@ namespace CVC_NAMESPACE
     if (can_peer_access) {
       // Direct peer-to-peer copy
       CUDA_CHECK(cudaMemcpyPeer(new_data, new_device_id, old_data, old_device, data_size));
-      cvcapp.log(3, "Performed peer-to-peer GPU copy from device " +
+      _ctx.log(3, "Performed peer-to-peer GPU copy from device " +
                  std::to_string(old_device) + " to device " + std::to_string(new_device_id));
     } else {
       // Copy through host memory
@@ -1090,7 +1104,7 @@ namespace CVC_NAMESPACE
       cuda_device_manager::set_current_device(new_device_id);
       CUDA_CHECK(cudaMemcpy(new_data, temp_buffer.data(), data_size, cudaMemcpyHostToDevice));
       
-      cvcapp.log(3, "Performed host-mediated GPU copy from device " +
+      _ctx.log(3, "Performed host-mediated GPU copy from device " +
                  std::to_string(old_device) + " to device " + std::to_string(new_device_id));
     }
 

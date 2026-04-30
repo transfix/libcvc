@@ -71,7 +71,7 @@ namespace CVC_NAMESPACE
 
 
       for(int i = 0; i < 3; i++)
-        cvcapp.log(6,str(format("%s :: params[%d] = %s\n")
+        cvcapp.log(6,str(boost::format("%s :: params[%d] = %s\n")
                          % BOOST_CURRENT_FUNCTION
                          % i
                          % string(params[i])));

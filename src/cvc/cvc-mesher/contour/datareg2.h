@@ -68,7 +68,7 @@ class Datareg2 : public Data
       float *compFunction(int, u_int &, float **);
       float *compFunction(int, u_int &, float ***, 
                           float ***, float ***){return(NULL);} // add by fan
-      char *fName(int);
+      const char *fName(int);
 
    protected :				// signature functions
 

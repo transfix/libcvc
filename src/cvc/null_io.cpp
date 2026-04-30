@@ -83,7 +83,8 @@ namespace CVC_NAMESPACE
     //   from a volume file.
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void getVolumeFileInfo(volume_file_info::data& /*data*/,
+    virtual void getVolumeFileInfo(app& /*ctx*/,
+				   volume_file_info::data& /*data*/,
 				   const std::string& /*filename*/) const
     {
       throw read_error(
@@ -100,7 +101,7 @@ namespace CVC_NAMESPACE
     //   Writes to a volume object after reading from a volume file.
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void readVolumeFile(volume& /*vol*/,
+    virtual void readVolumeFile(app& /*ctx*/, volume& /*vol*/,
 				const std::string& /*filename*/, 
 				unsigned int /*var*/, unsigned int /*time*/,
 				uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/,
@@ -120,7 +121,8 @@ namespace CVC_NAMESPACE
     //   Creates an empty volume file to be later filled in by writeVolumeFile
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void createVolumeFile(const std::string& /*filename*/,
+    virtual void createVolumeFile(app& /*ctx*/,
+				  const std::string& /*filename*/,
 				  const bounding_box& /*boundingBox*/,
 				  const dimension& /*dimension*/,
 				  const std::vector<data_type>& /*voxelTypes*/,
@@ -146,7 +148,7 @@ namespace CVC_NAMESPACE
     //   createVolumeFile to replace the volume file.
     // ---- Change History ----
     // 12/04/2009 -- Joe R. -- Creation.
-    virtual void writeVolumeFile(const volume& /*wvol*/, 
+    virtual void writeVolumeFile(app& /*ctx*/, const volume& /*wvol*/, 
 				 const std::string& /*filename*/,
 				 unsigned int /*var*/, unsigned int /*time*/,
 				 uint64 /*off_x*/, uint64 /*off_y*/, uint64 /*off_z*/) const
@@ -164,16 +166,12 @@ namespace CVC_NAMESPACE
   };
 }
 
-namespace
+namespace CVC_NAMESPACE
 {
-  class null_io_init
+  void register_null_io(app& /*ctx*/)
   {
-  public:
-    null_io_init()
-    {
-      CVC_NAMESPACE::volume_file_io::insertHandler(
-        CVC_NAMESPACE::volume_file_io::ptr(new CVC_NAMESPACE::null_io)
-      );
-    }
-  } static_init;
+    volume_file_io::insertHandler(
+      volume_file_io::ptr(new null_io)
+    );
+  }
 }

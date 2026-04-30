@@ -79,13 +79,14 @@ namespace CVC_NAMESPACE
   // ---- Change History ----
   // 01/03/2010 -- Joe R. -- Creation.
   // 05/11/2010 -- Joe R. -- Fixing off-by-one indexing problem.
-  void volume_file_io::readVolumeFile(volume& vol, 
+  void volume_file_io::readVolumeFile(app& ctx,
+                                     volume& vol, 
 				     const std::string& filename, 
 				     unsigned int var,
 				     unsigned int time,
 				     const bounding_box& subvolbox) const
   {
-    volume_file_info volinfo(filename);
+    volume_file_info volinfo(ctx, filename);
     if(!subvolbox.isWithin(volinfo.boundingBox()))
       throw sub_volume_out_of_bounds("The subvolume bounding box must be within the file's bounding box.");
     uint64 off_x = uint64((subvolbox.minx - volinfo.XMin())/volinfo.XSpan());
@@ -99,7 +100,7 @@ namespace CVC_NAMESPACE
     if(dim[0] + off_x > volinfo.XDim()) dim[0] = volinfo.XDim() - off_x;
     if(dim[1] + off_y > volinfo.YDim()) dim[1] = volinfo.YDim() - off_y;
     if(dim[2] + off_z > volinfo.ZDim()) dim[2] = volinfo.ZDim() - off_z;
-    readVolumeFile(vol,filename,var,time,off_x,off_y,off_z,dim);
+    readVolumeFile(ctx, vol, filename, var, time, off_x, off_y, off_z, dim);
     //vol.sub(subvolbox,dim); //get a subvolume that is exactly the size of subvolbox
     //just force the bounding box for now.. this might lead to aliasing errors
     vol.boundingBox(subvolbox);
@@ -114,16 +115,18 @@ namespace CVC_NAMESPACE
   //   basis.
   // ---- Change History ----
   // 04/06/2012 -- Joe R. -- Creation.
-  void volume_file_io::writeBoundingBox(const bounding_box& bbox, const std::string& filename) const
+  void volume_file_io::writeBoundingBox(app& ctx,
+                                        const bounding_box& bbox,
+                                        const std::string& filename) const
   {
     std::vector<volume> vols;
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
     vfi.boundingBox(bbox);
-    CVC_NAMESPACE::readVolumeFile(vols,filename);
+    CVC_NAMESPACE::readVolumeFile(ctx, vols, filename);
     BOOST_FOREACH(volume& vol, vols)
       vol.boundingBox(bbox);
-    CVC_NAMESPACE::createVolumeFile(filename,vfi); //TODO: don't overwrite existing file until temp file write is complete
-    CVC_NAMESPACE::writeVolumeFile(vols,filename);
+    CVC_NAMESPACE::createVolumeFile(ctx, filename, vfi); //TODO: don't overwrite existing file until temp file write is complete
+    CVC_NAMESPACE::writeVolumeFile(ctx, vols, filename);
   }
 
   // ---------------------------
@@ -260,8 +263,7 @@ namespace CVC_NAMESPACE
 		      const std::string& filename,
 		      unsigned int var, unsigned int time)
   {
-    volume_file_info volinfo(filename);
-    readVolumeFile(vol,filename,var,time,0,0,0,volinfo.voxel_dimensions());
+    readVolumeFile(app::instance(), vol, filename, var, time);
   }
 
   // --------------
@@ -281,6 +283,19 @@ namespace CVC_NAMESPACE
 		      unsigned int var, unsigned int time,
 		      uint64 off_x, uint64 off_y, uint64 off_z,
 		      const dimension& subvoldim)
+  {
+    readVolumeFile(app::instance(), vol, filename, var, time,
+                   off_x, off_y, off_z, subvoldim);
+  }
+
+  // --------------
+  // readVolumeFile (ctx-aware)
+  // --------------
+  void readVolumeFile(app& ctx, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      uint64 off_x, uint64 off_y, uint64 off_z,
+                      const dimension& subvoldim)
   {
     vol.unsetMinMax();
 
@@ -308,8 +323,8 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->readVolumeFile(vol,filename,var,time,
-				       off_x,off_y,off_z,subvoldim);
+		  (*i)->readVolumeFile(ctx, vol, filename, var, time,
+				       off_x, off_y, off_z, subvoldim);
 		  return;
 		}
 	    }
@@ -344,6 +359,17 @@ namespace CVC_NAMESPACE
 		      unsigned int var, unsigned int time,
 		      const bounding_box& subvolbox)
   {
+    readVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
+  }
+
+  // --------------
+  // readVolumeFile (ctx-aware, bbox)
+  // --------------
+  void readVolumeFile(app& ctx, volume& vol,
+                      const std::string& filename,
+                      unsigned int var, unsigned int time,
+                      const bounding_box& subvolbox)
+  {
     vol.unsetMinMax();
 
     std::string errors;
@@ -370,7 +396,7 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->readVolumeFile(vol,filename,var,time,
+		  (*i)->readVolumeFile(ctx, vol, filename, var, time,
 				       subvolbox);
 		  return;
 		}
@@ -393,15 +419,7 @@ namespace CVC_NAMESPACE
   void readVolumeFile(std::vector<volume>& vols,
 		      const std::string& filename)
   {
-    volume_file_info volinfo(filename);
-    volume vol;
-    vols.clear();
-    for(unsigned int var=0; var<volinfo.numVariables(); var++)
-      for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
-	{
-	  readVolumeFile(vol,filename,var,time);
-	  vols.push_back(vol);
-	}
+    readVolumeFile(app::instance(), vols, filename);
   }
 
   // ---------------
@@ -420,6 +438,18 @@ namespace CVC_NAMESPACE
 		       const std::string& filename,
 		       unsigned int var, unsigned int time,
 		       uint64 off_x, uint64 off_y, uint64 off_z)
+  {
+    writeVolumeFile(app::instance(), vol, filename, var, time,
+                    off_x, off_y, off_z);
+  }
+
+  // ---------------
+  // writeVolumeFile (ctx-aware, offset)
+  // ---------------
+  void writeVolumeFile(app& ctx, const volume& vol,
+                       const std::string& filename,
+                       unsigned int var, unsigned int time,
+                       uint64 off_x, uint64 off_y, uint64 off_z)
   {
     std::string errors;
     boost::smatch what;
@@ -445,7 +475,8 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->writeVolumeFile(vol,filename,var,time,off_x,off_y,off_z);
+		  (*i)->writeVolumeFile(ctx, vol, filename, var, time,
+                                        off_x, off_y, off_z);
 		  return;
 		}
 	    }
@@ -476,15 +507,15 @@ namespace CVC_NAMESPACE
   //                         and slow function but I think it does the trick.
   // 09/10/2011 -- Joe R. -- Adding thread progress feedback.
   // 09/11/2011 -- Joe R. -- Fixing an indexing bug.
-  void writeVolumeFile(const volume& vol, 
+  void writeVolumeFile(app& ctx, const volume& vol, 
 		       const std::string& filename,
 		       unsigned int var, unsigned int time,
 		       const bounding_box& subvolbox)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     volume localvol(vol);
-    volume_file_info volinfo(filename);
+    volume_file_info volinfo(ctx, filename);
     if(!subvolbox.isWithin(volinfo.boundingBox()))
       throw sub_volume_out_of_bounds("The subvolume bounding box must be within the file's bounding box.");
 
@@ -500,7 +531,7 @@ namespace CVC_NAMESPACE
     if(dim[1] + off_y > volinfo.YDim()) dim[1] = volinfo.YDim() <= 1 ? 1 : volinfo.YDim() - off_y;
     if(dim[2] + off_z > volinfo.ZDim()) dim[2] = volinfo.ZDim() <= 1 ? 1 : volinfo.ZDim() - off_z;
 
-    volume subvol(dim,volinfo.voxelTypes(var),
+    volume subvol(ctx, dim,volinfo.voxelTypes(var),
 		  bounding_box(volinfo.XMin() + off_x*volinfo.XSpan(),
 					 volinfo.YMin() + off_y*volinfo.YSpan(),
 					 volinfo.ZMin() + off_z*volinfo.ZSpan(),
@@ -524,11 +555,19 @@ namespace CVC_NAMESPACE
                                                  double(j)/ymax,
                                                  double(k)/zmax));
             }
-        cvcapp.threadProgress(float(k)/float(subvol.ZDim()));
+        ctx.threadProgress(float(k)/float(subvol.ZDim()));
       }
     
-    cvcapp.threadProgress(1.0);
-    writeVolumeFile(subvol,filename,var,time,off_x,off_y,off_z);
+    ctx.threadProgress(1.0);
+    writeVolumeFile(ctx, subvol, filename, var, time, off_x, off_y, off_z);
+  }
+
+  void writeVolumeFile(const volume& vol, 
+		       const std::string& filename,
+		       unsigned int var, unsigned int time,
+		       const bounding_box& subvolbox)
+  {
+    writeVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
   }
 
   // ---------------
@@ -542,18 +581,7 @@ namespace CVC_NAMESPACE
   void writeVolumeFile(const std::vector<volume>& vols,
 		       const std::string& filename)
   {
-    uint64 i;
-
-    if(vols.size() == 0) return;
-    
-    //create types vector
-    std::vector<data_type> voxelTypes;
-    for(i=0; i<vols.size(); i++) voxelTypes.push_back(vols[i].voxelType());
-
-    //create the file and write the volume info
-    createVolumeFile(filename,vols[0].boundingBox(),vols[0].voxel_dimensions(),voxelTypes,vols.size());
-    for(i=0; i<vols.size(); i++)
-      writeVolumeFile(vols[i],filename,i);
+    writeVolumeFile(app::instance(), vols, filename);
   }
 
   // ----------------
@@ -575,49 +603,9 @@ namespace CVC_NAMESPACE
 			unsigned int numVariables, unsigned int numTimesteps,
 			double min_time, double max_time)
   {
-    std::string errors;
-    boost::smatch what;
-
-    std::string actualFileName;
-    std::string objectName;
-
-    boost::tie(actualFileName, objectName) =
-      volume_file_io::splitRawFilename(filename);
-
-    const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
-    if(boost::regex_match(actualFileName, what, file_extension))
-      {
-	if(volume_file_io::handlerMap()[what[2]].empty())
-	  throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) + 
-					     std::string(": Cannot create ") + filename);
-	volume_file_io::handlers& h = volume_file_io::handlerMap()[what[2]];
-	//use the first handler that succeds
-	for(volume_file_io::handlers::iterator i = h.begin();
-	    i != h.end();
-	    i++)
-	  try
-	    {
-	      if(*i)
-		{
-		  (*i)->createVolumeFile(filename,boundingBox,dimension,
-					 voxelTypes,numVariables,numTimesteps,
-					 min_time,max_time);
-		  return;
-		}
-	    }
-	  catch(exception& e)
-	    {
-	      errors += std::string(" :: ") + e.what();
-	    }
-      }
-    throw unsupported_volume_file_type(
-      boost::str(
-	boost::format("%1% : Cannot read '%2%'%3%") % 
-	BOOST_CURRENT_FUNCTION %
-	filename %
-	errors
-      )
-    );
+    createVolumeFile(app::instance(), filename, boundingBox, dimension,
+		     voxelTypes, numVariables, numTimesteps,
+		     min_time, max_time);
   }
 
   // ---------------
@@ -629,7 +617,12 @@ namespace CVC_NAMESPACE
   // 04/06/2012 -- Joe R. -- Creation.
   bounding_box readBoundingBox(const std::string& filename)
   {
-    return volume_file_info(filename).boundingBox();
+    return readBoundingBox(app::instance(), filename);
+  }
+
+  bounding_box readBoundingBox(app& ctx, const std::string& filename)
+  {
+    return volume_file_info(ctx, filename).boundingBox();
   }
 
   // ----------------
@@ -639,7 +632,14 @@ namespace CVC_NAMESPACE
   //  Changes a volume file's bounding box.
   // ---- Change History ----
   // 04/06/2012 -- Joe R. -- Creation.
-  void writeBoundingBox(const bounding_box& bbox, const std::string& filename)                        
+  void writeBoundingBox(const bounding_box& bbox, const std::string& filename)
+  {
+    writeBoundingBox(app::instance(), bbox, filename);
+  }
+
+  void writeBoundingBox(app& ctx,
+                        const bounding_box& bbox,
+                        const std::string& filename)
   {
     std::string errors;
     boost::smatch what;
@@ -665,7 +665,7 @@ namespace CVC_NAMESPACE
 	    {
 	      if(*i)
 		{
-		  (*i)->writeBoundingBox(bbox,filename);
+		  (*i)->writeBoundingBox(ctx, bbox, filename);
 		  return;
 		}
 	    }
@@ -677,6 +677,102 @@ namespace CVC_NAMESPACE
     throw unsupported_volume_file_type(
       boost::str(
 	boost::format("%1% : Cannot write '%2%'%3%") % 
+	BOOST_CURRENT_FUNCTION %
+	filename %
+	errors
+      )
+    );
+  }
+
+  // ---- app& overloads ----
+  // These accept an explicit app context instead of using the singleton.
+  // The ctx-aware versions are primary; legacy overloads delegate to them
+  // via app::instance() for backward compatibility.
+
+  void readVolumeFile(app& ctx, volume& vol,
+		      const std::string& filename,
+		      unsigned int var, unsigned int time)
+  {
+    volume_file_info volinfo(ctx, filename);
+    readVolumeFile(ctx, vol, filename, var, time, 0, 0, 0,
+                   volinfo.voxel_dimensions());
+  }
+
+  void readVolumeFile(app& ctx, std::vector<volume>& vols,
+		      const std::string& filename)
+  {
+    volume_file_info volinfo(ctx, filename);
+    volume vol(ctx);
+    vols.clear();
+    for(unsigned int var=0; var<volinfo.numVariables(); var++)
+      for(unsigned int time=0; time<volinfo.numTimesteps(); time++)
+	{
+	  readVolumeFile(ctx, vol, filename, var, time);
+	  vols.push_back(vol);
+	}
+  }
+
+  void writeVolumeFile(app& ctx, const std::vector<volume>& vols,
+		       const std::string& filename)
+  {
+    uint64 i;
+
+    if(vols.size() == 0) return;
+
+    std::vector<data_type> voxelTypes;
+    for(i=0; i<vols.size(); i++) voxelTypes.push_back(vols[i].voxelType());
+
+    createVolumeFile(ctx, filename, vols[0].boundingBox(),
+		     vols[0].voxel_dimensions(), voxelTypes, vols.size());
+    for(i=0; i<vols.size(); i++)
+      writeVolumeFile(ctx, vols[i], filename, i);
+  }
+
+  void createVolumeFile(app& ctx, const std::string& filename,
+			const bounding_box& boundingBox,
+			const dimension& dimension,
+			const std::vector<data_type>& voxelTypes,
+			unsigned int numVariables, unsigned int numTimesteps,
+			double min_time, double max_time)
+  {
+    std::string errors;
+    boost::smatch what;
+
+    std::string actualFileName;
+    std::string objectName;
+
+    boost::tie(actualFileName, objectName) =
+      volume_file_io::splitRawFilename(filename);
+
+    const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
+    if(boost::regex_match(actualFileName, what, file_extension))
+      {
+	if(volume_file_io::handlerMap()[what[2]].empty())
+	  throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
+					     std::string(": Cannot create ") + filename);
+	volume_file_io::handlers& h = volume_file_io::handlerMap()[what[2]];
+	//use the first handler that succeds
+	for(volume_file_io::handlers::iterator i = h.begin();
+	    i != h.end();
+	    i++)
+	  try
+	    {
+	      if(*i)
+		{
+		  (*i)->createVolumeFile(ctx, filename, boundingBox, dimension,
+					 voxelTypes, numVariables, numTimesteps,
+					 min_time, max_time);
+		  return;
+		}
+	    }
+	  catch(exception& e)
+	    {
+	      errors += std::string(" :: ") + e.what();
+	    }
+      }
+    throw unsupported_volume_file_type(
+      boost::str(
+	boost::format("%1% : Cannot read '%2%'%3%") %
 	BOOST_CURRENT_FUNCTION %
 	filename %
 	errors

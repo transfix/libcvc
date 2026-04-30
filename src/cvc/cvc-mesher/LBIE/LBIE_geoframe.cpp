@@ -76,7 +76,12 @@ geoframe::geoframe(const geoframe& geofrm)
     biggestDim(geofrm.biggestDim), centerx(geofrm.centerx), centery(geofrm.centery),
     centerz(geofrm.centerz), max_x(geofrm.max_x), min_x(geofrm.min_x),
     max_y(geofrm.max_y), min_y(geofrm.min_y), max_z(geofrm.max_z), min_z(geofrm.min_z),
-    mesh_type(SINGLE)
+    // BUGFIX (2026-04-28): previously hardcoded to SINGLE, which silently
+    // converted tet/hex meshes to surface tri meshes whenever NRVO was not
+    // applied (e.g. MSVC Debug builds). That made
+    // GeometryTest.TetrahedralizeMeshExtraction etc. report 0 tetrahedra on
+    // Windows Debug while passing on Linux.
+    mesh_type(geofrm.mesh_type)
 {
   for(int i=0; i<3; i++) span[i] = geofrm.span[i];
 }

@@ -31,6 +31,7 @@
 #include <cvc/geometry.h>
 #include <cvc/volume.h>
 #include <cvc/voxels.h>
+#include <cvc/io_handlers.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
 #include <log4cplus/logger.h>
@@ -71,72 +72,49 @@ namespace CVC_NAMESPACE
   // 05/11/2012 -- Joe R. -- Adding state.
   app::app_ptr app::instancePtr()
   {
-    boost::mutex::scoped_lock lock(_instanceMutex);
-    if(!_instance)
-      {
-        _instance.reset(new app);
-        
-        //Register some primitive types with the system
-        _instance->registerDataType(char);
-        _instance->registerDataType<char>(Char);
-        _instance->registerDataType(unsigned char);
-        _instance->registerDataType<unsigned char>(UChar);
-        _instance->registerDataType(unsigned short);
-        _instance->registerDataType<unsigned short>(UShort);
-        _instance->registerDataType(int);
-        _instance->registerDataType<int>(Int);
-        _instance->registerDataType(unsigned int);
-        _instance->registerDataType<unsigned int>(UInt);
-        _instance->registerDataType(float);
-        _instance->registerDataType<float>(Float);
-        _instance->registerDataType(double);
-        _instance->registerDataType<double>(Double);
-        _instance->registerDataType(int64);
-        _instance->registerDataType<int64>(Int64);
-        _instance->registerDataType(uint64);
-        _instance->registerDataType<uint64>(UInt64);
-        _instance->registerDataType(std::string);
-        _instance->registerDataType(bounding_box);
-        _instance->registerDataType(dimension);
-        _instance->registerDataType(bool);
-        _instance->registerDataType(boost::shared_array<unsigned char>);
-        _instance->registerDataType(boost::shared_array<float>);
-        _instance->registerDataType(boost::shared_array<double>);
-        _instance->registerDataType(state);
-        
-        // Register core CVC data types with full C++ qualified names
-        _instance->registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
-        _instance->registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
-        _instance->registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
-        _instance->registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
-        _instance->registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
-        
-        // Register shared pointers to these types as well
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
-        _instance->registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
+    bool newly_created = false;
+    app_ptr result;
+    {
+      boost::mutex::scoped_lock lock(_instanceMutex);
+      if(!_instance)
+        {
+          // Construct without handler registration so that _instance is
+          // assigned before any code that might re-enter app::instance()
+          // (e.g. handler constructors that touch cvcapp) runs.
+          _instance.reset(new app(no_init_t{}));
+          _instance->registerDefaultTypes();
 
-        //Register a call to wait for all child threads to finish before exiting
-        //the main thread.
-        std::atexit(wait_for_threads);
+          //Register a call to wait for all child threads to finish before exiting
+          //the main thread.
+          std::atexit(wait_for_threads);
 
 #ifdef USING_LOG4CPLUS_DEFAULT
-        // Initialize log4cplus
-        std::ifstream testfile("log4cplus.properties");
-        if (testfile)
-          {
-            testfile.close();
-            log4cplus::PropertyConfigurator::doConfigure("log4cplus.properties");
-          }
-        else 
-          {
-            log4cplus::BasicConfigurator::doConfigure();
-          }
-        static log4cplus::Logger logger = log4cplus::Logger::getInstance("app");
-        LOG4CPLUS_ERROR(logger, "log4cplus initialized");
- #endif
-      }
-    return _instance;
+          // Initialize log4cplus
+          std::ifstream testfile("log4cplus.properties");
+          if (testfile)
+            {
+              testfile.close();
+              log4cplus::PropertyConfigurator::doConfigure("log4cplus.properties");
+            }
+          else
+            {
+              log4cplus::BasicConfigurator::doConfigure();
+            }
+          static log4cplus::Logger logger = log4cplus::Logger::getInstance("app");
+          LOG4CPLUS_ERROR(logger, "log4cplus initialized");
+#endif
+          newly_created = true;
+        }
+      result = _instance;
+    }
+
+    // Register default I/O handlers outside the instance mutex so that
+    // handler constructors that call app::instance() (via cvcapp) do not
+    // deadlock against the lock we just released.
+    if(newly_created)
+      result->registerDefaultHandlers();
+
+    return result;
   }
 
   // ---------------------
@@ -155,8 +133,20 @@ namespace CVC_NAMESPACE
   {
     using namespace CVC_NAMESPACE;
 
+    // Atexit context: use the existing singleton if it's still alive
+    // rather than re-entering app::instance() (which would re-create
+    // the instance + register handlers after the runtime has already
+    // begun tearing things down).
+    app_ptr self;
+    {
+      boost::mutex::scoped_lock lock(_instanceMutex);
+      self = _instance;
+    }
+    if(!self) return;
+    app& a = *self;
+
     //Get all the threads
-    thread_map map = cvcapp.threads();
+    thread_map map = a.threads();
     
     // Phase 1: Interrupt all threads to signal them to exit
     // Many algorithms have interruption checkpoints that allow clean exit
@@ -178,7 +168,7 @@ namespace CVC_NAMESPACE
           {
             using namespace boost;
             if (val.second && val.second->joinable()) {
-              cvcapp.log(3,str(format("%s :: waiting for thread %s\n")
+              a.log(3,str(boost::format("%s :: waiting for thread %s\n")
                                % BOOST_CURRENT_FUNCTION
                                % val.first));
               // Try to join with a 5 second timeout per thread
@@ -195,13 +185,13 @@ namespace CVC_NAMESPACE
     // Phase 3: Report any threads that failed to join
     if (!failed_threads.empty()) {
       using namespace boost;
-      std::string msg = str(format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
+      std::string msg = str(boost::format("%s :: WARNING: %d thread(s) failed to join within timeout and may cause cleanup issues:\n")
                             % BOOST_CURRENT_FUNCTION
                             % failed_threads.size());
       BOOST_FOREACH(const std::string& thread_name, failed_threads) {
-        msg += str(format("  - %s\n") % thread_name);
+        msg += str(boost::format("  - %s\n") % thread_name);
       }
-      cvcapp.log(0, msg); // Error level
+      a.log(0, msg); // Error level
       std::cerr << msg; // Also print to stderr to ensure visibility
     }
   }
@@ -217,6 +207,71 @@ namespace CVC_NAMESPACE
                    boost::thread::hardware_concurrency() : 4),
       _activeWorkers(0)
   {
+    registerDefaultTypes();
+    registerDefaultHandlers();
+  }
+
+  app::app(no_init_t) 
+    : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? 
+                   boost::thread::hardware_concurrency() : 4),
+      _activeWorkers(0)
+  {
+  }
+
+  void app::registerDefaultTypes()
+  {
+    registerDataType(char);
+    registerDataType<char>(Char);
+    registerDataType(unsigned char);
+    registerDataType<unsigned char>(UChar);
+    registerDataType(unsigned short);
+    registerDataType<unsigned short>(UShort);
+    registerDataType(int);
+    registerDataType<int>(Int);
+    registerDataType(unsigned int);
+    registerDataType<unsigned int>(UInt);
+    registerDataType(float);
+    registerDataType<float>(Float);
+    registerDataType(double);
+    registerDataType<double>(Double);
+    registerDataType(int64);
+    registerDataType<int64>(Int64);
+    registerDataType(uint64);
+    registerDataType<uint64>(UInt64);
+    registerDataType(std::string);
+    registerDataType(bounding_box);
+    registerDataType(dimension);
+    registerDataType(bool);
+    registerDataType(boost::shared_array<unsigned char>);
+    registerDataType(boost::shared_array<float>);
+    registerDataType(boost::shared_array<double>);
+    registerDataType(state);
+    
+    registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
+    registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
+    registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
+    registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
+    registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
+    
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
+    registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
+  }
+
+  void app::registerDefaultHandlers()
+  {
+    register_rawiv_io(*this);
+    register_rawv_io(*this);
+    register_mrc_io(*this);
+    register_vtk_io(*this);
+    register_spider_io(*this);
+    register_null_io(*this);
+#ifdef CVC_USING_HDF5
+    register_hdf5_io(*this);
+#endif
+    register_bunny_io(*this);
+    register_off_io(*this);
+    register_cvcraw_io(*this);
   }
 
   app::~app()
@@ -522,7 +577,7 @@ namespace CVC_NAMESPACE
   // 01/17/2014 -- transfix -- using TIME_UTC_
   void app::sleep(double ms)
   {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(*this, BOOST_CURRENT_FUNCTION);
     boost::xtime xt;
     boost::xtime_get( &xt, boost::TIME_UTC_ );
     xt.nsec += uint64(ms * std::pow(10.0,6.0));
@@ -1067,7 +1122,7 @@ namespace CVC_NAMESPACE
 
   void app::threadPoolWorker(ThreadPoolTask task)
   {
-    thread_info ti("Processing: " + task.key);
+    thread_info ti(*this, "Processing: " + task.key);
     
     try
     {
@@ -1098,5 +1153,71 @@ namespace CVC_NAMESPACE
     
     // Try to start another worker if there are pending tasks
     tryStartWorker();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Process-wide free helpers (no app instance required)
+  // ---------------------------------------------------------------------------
+  namespace {
+
+    // Meyer's singleton: built once on first call, thread-safe since C++11.
+    const std::map<std::string, data_type>& staticDataTypeEnum()
+    {
+      static const std::map<std::string, data_type> m = [] {
+        std::map<std::string, data_type> mm;
+        mm[typeid(char).name()]           = Char;
+        mm[typeid(unsigned char).name()]  = UChar;
+        mm[typeid(unsigned short).name()] = UShort;
+        mm[typeid(int).name()]            = Int;
+        mm[typeid(unsigned int).name()]   = UInt;
+        mm[typeid(float).name()]          = Float;
+        mm[typeid(double).name()]         = Double;
+        mm[typeid(int64).name()]          = Int64;
+        mm[typeid(uint64).name()]         = UInt64;
+        return mm;
+      }();
+      return m;
+    }
+
+    const char* staticDataTypeName(data_type dt)
+    {
+      switch (dt) {
+        case Char:   return "char";
+        case UChar:  return "unsigned char";
+        case UShort: return "unsigned short";
+        case Int:    return "int";
+        case UInt:   return "unsigned int";
+        case Float:  return "float";
+        case Double: return "double";
+        case Int64:  return "int64";
+        case UInt64: return "uint64";
+        default:     return "";
+      }
+    }
+
+  } // anonymous namespace
+
+  template<class T>
+  data_type dataType()
+  {
+    const auto& m = staticDataTypeEnum();
+    auto it = m.find(typeid(T).name());
+    return (it != m.end()) ? it->second : Undefined;
+  }
+
+  // Explicit instantiations for every type registered in registerDefaultTypes.
+  template data_type dataType<char>();
+  template data_type dataType<unsigned char>();
+  template data_type dataType<unsigned short>();
+  template data_type dataType<int>();
+  template data_type dataType<unsigned int>();
+  template data_type dataType<float>();
+  template data_type dataType<double>();
+  template data_type dataType<int64>();
+  template data_type dataType<uint64>();
+
+  std::string dataTypeName(data_type dt)
+  {
+    return std::string(staticDataTypeName(dt));
   }
 }

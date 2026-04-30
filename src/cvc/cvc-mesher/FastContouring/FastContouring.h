@@ -21,7 +21,7 @@ namespace FastContouring
   class ContourExtractor
   {
   public:
-    ContourExtractor() {}
+    ContourExtractor(CVC_NAMESPACE::app& ctx) : m_Data(ctx) {}
     ContourExtractor(const ContourExtractor& copy)
       : m_Data(copy.m_Data),
         m_Buffers(copy.m_Buffers),

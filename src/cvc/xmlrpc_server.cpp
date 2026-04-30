@@ -108,11 +108,11 @@ namespace CVC_NAMESPACE
                   //So, make sure main() has a cvcapp.wait_for_threads() call at the end.
                   XmlRpc::setVerbosity(0);
                   if(!s.bindAndListen(port)) 
-                    throw xmlrpc_server_error_listen(str(format("could not bind to port %d") % port));
+                    throw xmlrpc_server_error_listen(str(boost::format("could not bind to port %d") % port));
                   s.enableIntrospection(true);
                   //s.work(-1.0);
                   
-                  cvcapp.log(1,str(format("%s :: \n%s\n")
+                  cvcapp.log(1,str(boost::format("%s :: \n%s\n")
                                    % BOOST_CURRENT_FUNCTION
                                    % cvcstate("__system").json()));
 
@@ -131,7 +131,7 @@ namespace CVC_NAMESPACE
               catch(std::exception& e)
                 {
                   using namespace boost;
-                  cvcapp.log(1,str(format("%s :: restarting server on xmlrpc_server_thread exception: %s\n")
+                  cvcapp.log(1,str(boost::format("%s :: restarting server on xmlrpc_server_thread exception: %s\n")
                                    % BOOST_CURRENT_FUNCTION % e.what()));
                 }
             }
@@ -139,7 +139,7 @@ namespace CVC_NAMESPACE
       catch(boost::thread_interrupted&)
         {
           using namespace boost;
-          cvcapp.log(1,str(format("%s :: xmlrpc_server_thread interrupted, shutting down\n")
+          cvcapp.log(1,str(boost::format("%s :: xmlrpc_server_thread interrupted, shutting down\n")
                            % BOOST_CURRENT_FUNCTION));    
         }
     }

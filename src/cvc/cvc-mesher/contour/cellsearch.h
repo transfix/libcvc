@@ -35,7 +35,7 @@ class CellBucket {
       u_int getCell(u_int i) { return(cells[i]); }
       void getCells(u_int *, u_int &);
       void traverseCells(void (*f)(u_int, void *), void*);
-      void dump(char *str);
+      void dump(const char *str);
       u_int *getCells(void) { return(cells); }
 
    private:
@@ -99,11 +99,11 @@ CellBucket::traverseCells(void (*f)(u_int, void *), void *data)
 
 inline
 void
-CellBucket::dump(char *str)
+CellBucket::dump(const char *str)
 {
    int i;
 
-   printf(str);
+   printf("%s", str);
    for (i=0; i<ncells; i++) {
       printf("%d ", cells[i]);
    }

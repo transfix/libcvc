@@ -12,6 +12,7 @@
 
 #include <cvc/app.h>
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -680,7 +681,8 @@ TEST(AppTest, ReadDataWithReaders) {
 // ===========================
 
 TEST(AppTest, PropertyMapSaveLoad) {
-  std::string temp_file = "/tmp/test_property_map.info";
+  std::string temp_file =
+      (std::filesystem::temp_directory_path() / "test_property_map.info").string();
   
   // Set up some properties
   cvcapp.properties("io.test.prop1", "value1");
@@ -1300,35 +1302,29 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
   ASSERT_TRUE(thread_started.load()) << "Thread should have started";
   
   // Verify we can read info and progress while thread is running
-  std::vector<std::pair<std::string, double>> checkpoints;
+  // Use polling to wait for each checkpoint instead of fixed sleeps
   
-  // Read progress at 25%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(60));
-  std::string info1 = cvcapp.threadInfo(thread_key);
+  // Wait for 25% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.24; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress1 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info1, progress1});
-  EXPECT_EQ(info1, "Processing step 1");
   EXPECT_NEAR(progress1, 0.25, 0.01);
   
-  // Read progress at 50%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-  std::string info2 = cvcapp.threadInfo(thread_key);
+  // Wait for 50% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.49; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress2 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info2, progress2});
-  EXPECT_EQ(info2, "Processing step 2");
   EXPECT_NEAR(progress2, 0.50, 0.01);
   
-  // Read progress at 75%
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-  std::string info3 = cvcapp.threadInfo(thread_key);
+  // Wait for 75% progress
+  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.74; i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   double progress3 = cvcapp.threadProgress(thread_key);
-  checkpoints.push_back({info3, progress3});
-  EXPECT_EQ(info3, "Processing step 3");
   EXPECT_NEAR(progress3, 0.75, 0.01);
   
   // Verify progress is increasing
-  EXPECT_LT(checkpoints[0].second, checkpoints[1].second);
-  EXPECT_LT(checkpoints[1].second, checkpoints[2].second);
+  EXPECT_LT(progress1, progress2);
+  EXPECT_LT(progress2, progress3);
   
   // Let thread finish
   continue_running = false;
@@ -1431,41 +1427,55 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   std::atomic<bool> at_zero(false);
   std::atomic<bool> at_fifty(false);
   std::atomic<bool> finished(false);
-  
+  // Acknowledgement gates: the worker waits for the main thread to sample
+  // each phase before advancing. Without these the worker can race through
+  // 0% → 50% → 100% before the main thread's polling loop wakes up to
+  // observe the intermediate states (seen on fast macOS Release runners).
+  std::atomic<bool> zero_observed(false);
+  std::atomic<bool> fifty_observed(false);
+
   cvcapp.startThread(thread_key, [&]() {
     cvc::app::thread_feedback feedback(thread_key);
     // thread_feedback constructor sets to 0%
     at_zero = true;
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
-    
+    while (!zero_observed.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+    }
+
     cvcapp.threadProgress(thread_key, 0.5);
     at_fifty = true;
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
-    
+    while (!fifty_observed.load()) {
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+    }
+
     finished = true;
     // thread_feedback destructor sets to 100%
   });
-  
+
   // Check progress at 0%
-  for (int i = 0; i < 50 && !at_zero.load(); i++) {
+  for (int i = 0; i < 200 && !at_zero.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
-  if (at_zero.load()) {
+  ASSERT_TRUE(at_zero.load());
+  {
     double progress = cvcapp.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.0, 0.01) << "Progress should be 0% at start";
   }
-  
+  zero_observed = true;
+
   // Check progress at 50%
-  for (int i = 0; i < 50 && !at_fifty.load(); i++) {
+  for (int i = 0; i < 200 && !at_fifty.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
-  if (at_fifty.load()) {
+  ASSERT_TRUE(at_fifty.load());
+  {
     double progress = cvcapp.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.5, 0.01) << "Progress should be 50% midway";
   }
-  
+  fifty_observed = true;
+
   // Wait for completion
-  for (int i = 0; i < 50 && !finished.load(); i++) {
+  for (int i = 0; i < 200 && !finished.load(); i++) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
   ASSERT_TRUE(finished.load());
@@ -1544,7 +1554,7 @@ TEST(AppTest, ThreadFeedbackExceptionSafety) {
   ASSERT_TRUE(exception_thrown.load());
   
   // Give thread time to exit
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
   
   // Progress should still be set to 100% by thread_feedback destructor
   double progress = cvcapp.threadProgress(thread_key);

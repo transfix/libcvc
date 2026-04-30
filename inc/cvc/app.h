@@ -96,10 +96,21 @@ namespace CVC_NAMESPACE
   // 02/24/2012 -- Joe R. -- Moved wait_for_threads() to app.
   // 03/31/3012 -- Joe R. -- Added boost::any dataTypeName().
   // 01/12/2014 -- Joe R. -- Added sleep().
+
+  // Tag type for constructing an app without default type registration.
+  // Useful for test contexts or lightweight usage.
+  struct no_init_t {};
+
   class app
   {
   public:
     typedef boost::shared_ptr<app> app_ptr;
+
+    // Construct an app with default type registration.
+    app();
+
+    // Construct an app without type registration (for tests/lightweight use).
+    explicit app(no_init_t);
 
     //virtual ~app(); // arand: why virtual?
     ~app();
@@ -409,26 +420,35 @@ namespace CVC_NAMESPACE
     class thread_info
     {
     public:
-      thread_info(const std::string& info = "running")
+      // New: explicit app context
+      thread_info(app& ctx, const std::string& info = "running")
+        : _app(ctx)
         {
           try {
-            _origInfo = app::instance().thisThreadInfo();
-            _origProgress = app::instance().threadProgress();
-            app::instance().thisThreadInfo(info);
+            _origInfo = _app.thisThreadInfo();
+            _origProgress = _app.threadProgress();
+            _app.thisThreadInfo(info);
           } catch (...) {
             // Swallow exceptions during construction (thread may be interrupted)
           }
         }
+
+      // Legacy: uses app::instance()
+      thread_info(const std::string& info = "running")
+        : thread_info(app::instance(), info)
+        {}
+
       ~thread_info()
         {
           try {
-            app::instance().thisThreadInfo(_origInfo);
+            _app.thisThreadInfo(_origInfo);
           } catch (...) {}
           try {
-            app::instance().threadProgress(_origProgress);
+            _app.threadProgress(_origProgress);
           } catch (...) {}
         }
     private:
+      app& _app;
       std::string _origInfo;
       double _origProgress;
     };
@@ -438,20 +458,26 @@ namespace CVC_NAMESPACE
     class thread_feedback
     {
     public:
-      thread_feedback(const std::string& key = "")
-        : _threadInfo(key.empty() ? "running" : key)
+      // New: explicit app context
+      thread_feedback(app& ctx, const std::string& key = "")
+        : _app(ctx)
+        , _threadInfo(ctx, key.empty() ? "running" : key)
         , _key(key)
         {
           try {
-            // Set initial progress using key if available, otherwise use thread ID
             if (!_key.empty())
-              app::instance().threadProgress(_key, 0.0);
+              _app.threadProgress(_key, 0.0);
             else
-              app::instance().threadProgress(0.0);
+              _app.threadProgress(0.0);
           } catch (...) {
             // Swallow exceptions during construction (thread may be interrupted)
           }
         }
+
+      // Legacy: uses app::instance()
+      thread_feedback(const std::string& key = "")
+        : thread_feedback(app::instance(), key)
+        {}
 
       ~thread_feedback()
         {
@@ -460,15 +486,16 @@ namespace CVC_NAMESPACE
           try {
             // Set status to "completed" and progress to 100%
             if (!_key.empty()) {
-              app::instance().threadInfo(_key, "completed");
-              app::instance().finishThreadProgress(_key);
+              _app.threadInfo(_key, "completed");
+              _app.finishThreadProgress(_key);
             }
             else {
-              app::instance().finishThreadProgress();
+              _app.finishThreadProgress();
             }
           } catch (...) {}
         }
     private:
+      app& _app;
       thread_info _threadInfo;
       std::string _key;
     };
@@ -521,8 +548,22 @@ namespace CVC_NAMESPACE
     class scoped_lock
     {
     public:
+      // Preferred: explicit app context
+      scoped_lock(app& ctx,
+                  const std::string& name,
+                  const std::string& info = std::string()) :
+        _ctx(ctx),
+        _scopedLock(*ctx.mutex(name)),
+        _name(name)
+          {
+            //prepend the thread key
+            _ctx.mutexInfo(name,
+                           _ctx.threadKey() + ": " + info);
+          }
+      // Legacy: uses app::instance()
       scoped_lock(const std::string& name,
-                  const std::string& info = std::string()) : 
+                  const std::string& info = std::string()) :
+        _ctx(app::instance()),
         _scopedLock(*app::instance().mutex(name)),
         _name(name)
           {
@@ -532,9 +573,10 @@ namespace CVC_NAMESPACE
           }
       ~scoped_lock()
         {
-          app::instance().mutexInfo(_name,"");
+          _ctx.mutexInfo(_name,"");
         }
     private:
+      app& _ctx;
       boost::mutex::scoped_lock _scopedLock;
       std::string _name;
     };
@@ -550,7 +592,8 @@ namespace CVC_NAMESPACE
     void sleep(double ms);
 
   protected:
-    app();
+    void registerDefaultTypes();
+    void registerDefaultHandlers();
 
     void propertyTreeTraverse(const boost::property_tree::ptree& pt,
                               const std::string& parentkey = std::string());
@@ -636,9 +679,44 @@ namespace CVC_NAMESPACE
   typedef app::thread_info     thread_info;
   typedef app::thread_feedback thread_feedback;
   typedef app::scoped_lock     scoped_lock;
+
+  // ---------------------------------------------------------------------------
+  // Process-wide free helpers (no app instance required)
+  // ---------------------------------------------------------------------------
+  // Replaces cvcapp.dataType<T>() which did not need any per-app state.
+  // Uses a process-wide static registry populated on first access.
+
+  // Returns the data_type enum for C++ type T, or Undefined if not registered.
+  template<class T>
+  data_type dataType();
+
+  // Returns a human-readable name for the data_type enum, or empty string.
+  std::string dataTypeName(data_type dt);
 }
 
-//Shorthand to access the app object from anywhere
+// Shorthand to access the app object from anywhere.
+// DEPRECATED: retained only while migrating callers to explicit app& params.
+// TODO: remove once all cvcapp usage has been migrated.
 #define cvcapp CVC_NAMESPACE::app::instance()
+
+// Guarded PascalCase aliases for case-insensitive filesystems (macOS) where
+// consumer compat shims are bypassed.
+#ifndef CVC_COMPAT_APP_DEFINED
+#define CVC_COMPAT_APP_DEFINED
+namespace CVC_NAMESPACE
+{
+  typedef app                   App;
+  typedef app::thread_info      ThreadInfo;
+  typedef app::thread_feedback  ThreadFeedback;
+  typedef app::scoped_lock      ScopedLock;
+}
+namespace CVC
+{
+  typedef CVC_NAMESPACE::app             App;
+  typedef CVC_NAMESPACE::thread_info     ThreadInfo;
+  typedef CVC_NAMESPACE::thread_feedback ThreadFeedback;
+  typedef CVC_NAMESPACE::scoped_lock     ScopedLock;
+}
+#endif // CVC_COMPAT_APP_DEFINED
 
 #endif

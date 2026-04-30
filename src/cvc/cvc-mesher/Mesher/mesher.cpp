@@ -32,7 +32,7 @@ namespace LBIE
   {
     using namespace std;
 
-    Mesher mesher;
+    Mesher mesher(vol.ctx());
 
     if(verbose)
       {
@@ -92,11 +92,11 @@ namespace LBIE
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/26/2025 -- Joe R. -- Removed string-based version, use enum only.
-  geoframe quality_improve(const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
+  geoframe quality_improve(CVC_NAMESPACE::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
 			   bool verbose)
   {
     using namespace std;
-    LBIE::Mesher mesher;
+    LBIE::Mesher mesher(ctx);
     
     if(verbose)
       {
@@ -169,6 +169,7 @@ namespace LBIE
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
   // 12/28/2025 -- Joe R. -- Fixed: work with copy to avoid temporary reference issues.
   CVC_NAMESPACE::geometry quality_improve_geometry(
+      CVC_NAMESPACE::app& ctx,
       const CVC_NAMESPACE::geometry& geom,
       Mesher::ImproveMethod improve_method,
       int improve_iterations,
@@ -181,7 +182,7 @@ namespace LBIE
     geoframe gf = to_geoframe(working_copy);
     
     // Call existing geoframe-based implementation
-    geoframe result = quality_improve(gf, improve_method, improve_iterations, verbose);
+    geoframe result = quality_improve(ctx, gf, improve_method, improve_iterations, verbose);
     
     // Convert result back to geometry
     return to_geometry(result);

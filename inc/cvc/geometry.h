@@ -20,8 +20,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef __CVCGEOM_H__
-#define __CVCGEOM_H__
+#ifndef __CVC_GEOMETRY_H__
+#define __CVC_GEOMETRY_H__
 
 #include <cvc/namespace.h>
 #include <cvc/types.h>
@@ -36,6 +36,8 @@
 
 namespace CVC_NAMESPACE
 {
+  class app;
+
   typedef boost::uint64_t uint64_t;
 
   // --------
@@ -120,6 +122,11 @@ namespace CVC_NAMESPACE
     geometry();
     geometry(const geometry& geom);
     geometry(const std::string & filename);
+
+    // ---- Overloads accepting explicit app& context ----
+    explicit geometry(app& ctx);
+    geometry(app& ctx, const std::string& filename);
+
     ~geometry();
 
     void copy(const geometry& geom, bool deepCopy = false);
@@ -214,13 +221,19 @@ namespace CVC_NAMESPACE
                         bool smoothing_enabled = true, bool perturb_2 = false);
 
     //LBIE mesh quality improvement
+#ifdef CVC_ENABLE_MESHER
     geometry& quality_improve(int iterations = 1, improvement_method method = GEO_FLOW);
+#endif
 
     //read file directly into data structure
     geometry& read(const std::string& filename);
 
     //write data structure to file
     void write(const std::string& filename) const;
+
+    //app context accessors
+    app& ctx() { return *_ctx; }
+    app& ctx() const { return *_ctx; }
 
   protected:
     void init_ptrs();
@@ -248,6 +261,9 @@ namespace CVC_NAMESPACE
     mutable bool _extents_set; //if true, the min/max extents are valid
     mutable point_t _min;
     mutable point_t _max;
+
+    //non-owning pointer to the app context.  Never null after any ctor.
+    app* _ctx;
   };
 
   typedef geometry::scalar_t    scalar_t;
