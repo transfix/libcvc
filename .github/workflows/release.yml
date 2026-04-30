@@ -73,6 +73,19 @@ jobs:
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev
 
+      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
+      # at runtime when an NVIDIA driver is present. cudart is linked
+      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
+      # only need the NVIDIA driver, not a CUDA install. CMake's
+      # check_language(CUDA) auto-disables CUDA gracefully if this step
+      # ever fails.
+      - name: Install CUDA toolkit (Linux)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
@@ -132,7 +145,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=OFF \
-            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_CUDA=ON \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
@@ -409,6 +423,17 @@ jobs:
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append $env:GITHUB_ENV
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
+      # CUDA toolkit so the shipped Windows artifacts can offload to
+      # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
+      # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
+      # so users only need the NVIDIA driver, not a CUDA install.
+      - name: Install CUDA toolkit (Windows)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
       - name: Install dependencies
         shell: pwsh
         env:
@@ -457,7 +482,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCVC_BUILD_TESTS=OFF `
-            -DCVC_ENABLE_CUDA=OFF `
+            -DCVC_ENABLE_CUDA=ON `
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=$cgal `
             -DCVC_BUILD_VOLROVER3=$vol `
             -DCVC_ENABLE_MESHER=$vol `
