@@ -456,9 +456,9 @@ struct hdf5_io : public volume_file_io {
   // 08/05/2011 -- Joe R. -- Using HDF5 Utilities now.
   // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
   //                         multi-res hierarchy thread code simpler.
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     using namespace H5;
     using namespace hdf5_utils;
     using namespace boost;
@@ -542,9 +542,8 @@ struct hdf5_io : public volume_file_io {
   //                         multi-res hierarchy thread code simpler.
   // 09/17/2011 -- Joe R. -- Picking out the closest dimension to the maxdim in
   //                         the hierarchy.
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time,
-                              const bounding_box &subvolbox) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, const bounding_box &subvolbox) const {
     using namespace hdf5_utils;
     using namespace boost;
 

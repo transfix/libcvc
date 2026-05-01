@@ -292,9 +292,9 @@ struct rawiv_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/13/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];

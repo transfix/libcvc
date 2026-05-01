@@ -468,9 +468,9 @@ struct mrc_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
@@ -1112,9 +1112,9 @@ struct imod_mrc_io : public mrc_io {
   //   Writes to a Volume object after reading from a volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     using namespace std;
     using namespace boost;
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
@@ -1208,7 +1208,5 @@ struct imod_mrc_io : public mrc_io {
 } // namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE {
-void register_mrc_io(app &ctx) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new mrc_io));
-}
+void register_mrc_io(app &ctx) { volume_file_io::insertHandler(volume_file_io::ptr(new mrc_io)); }
 } // namespace CVC_NAMESPACE

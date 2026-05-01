@@ -20,8 +20,7 @@ namespace {
  * Commands
  */
 
-typedef boost::function<void(CVC_NAMESPACE::app &, const std::vector<std::string> &)>
-    command_func;
+typedef boost::function<void(CVC_NAMESPACE::app &, const std::vector<std::string> &)> command_func;
 typedef boost::tuple<command_func, std::string> command;
 typedef std::map<std::string, command> command_map;
 command_map commands;

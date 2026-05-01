@@ -623,9 +623,9 @@ struct spider_io : public volume_file_io {
   // ??/??/2008 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
   // 12/11/2009 -- Joe R. -- Freeing data buffer.
-  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     int dim[3];

@@ -403,10 +403,9 @@ struct vtk_io : public volume_file_io {
   //   createVolumeFile to replace the volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void writeVolumeFile(app &ctx, const volume & /*wvol*/,
-                               const std::string & /*filename*/, unsigned int /*var*/,
-                               unsigned int /*time*/, uint64 /*off_x*/, uint64 /*off_y*/,
-                               uint64 /*off_z*/) const {
+  virtual void writeVolumeFile(app &ctx, const volume & /*wvol*/, const std::string & /*filename*/,
+                               unsigned int /*var*/, unsigned int /*time*/, uint64 /*off_x*/,
+                               uint64 /*off_y*/, uint64 /*off_z*/) const {
     thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     throw CVC_NAMESPACE::write_error("Writing VTK files doesn't work yet!");
   }
@@ -418,7 +417,5 @@ protected:
 } // namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE {
-void register_vtk_io(app &ctx) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new vtk_io));
-}
+void register_vtk_io(app &ctx) { volume_file_io::insertHandler(volume_file_io::ptr(new vtk_io)); }
 } // namespace CVC_NAMESPACE
