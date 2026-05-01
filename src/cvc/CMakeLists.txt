@@ -109,18 +109,27 @@ if(CVC_USING_HDF5)
   set(_hdf5_config_targets "")
   find_package(hdf5 CONFIG QUIET)
   if(hdf5_FOUND)
-    set(HDF5_FOUND TRUE)
+    # vcpkg names imported targets hdf5::hdf5-shared / -static (and
+    # _cpp variants); brew + upstream HDF5 ship hdf5::hdf5 /
+    # hdf5::hdf5_cpp with no shared/static suffix. Probe both.
     foreach(_cand
-        hdf5::hdf5-shared hdf5::hdf5-static
-        hdf5::hdf5_cpp-shared hdf5::hdf5_cpp-static)
+        hdf5::hdf5-shared hdf5::hdf5-static hdf5::hdf5
+        hdf5::hdf5_cpp-shared hdf5::hdf5_cpp-static hdf5::hdf5_cpp)
       if(TARGET ${_cand})
         list(APPEND _hdf5_config_targets ${_cand})
       endif()
     endforeach()
+  endif()
+  if(_hdf5_config_targets)
+    set(HDF5_FOUND TRUE)
     set(HDF5_LIBRARIES ${_hdf5_config_targets})
     set(HDF5_INCLUDE_DIRS "")  # imported targets carry includes
     set(HDF5_DEFINITIONS "")
   else()
+    # Either no hdf5-config.cmake on prefix path, or its targets
+    # don't match anything we recognize. Fall back to module-mode
+    # FindHDF5, which works for apt libhdf5-dev and most system
+    # installs that ship a usable FindHDF5.cmake path.
     find_package(HDF5 COMPONENTS C CXX)
   endif()
   if(HDF5_FOUND)
