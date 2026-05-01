@@ -20,12 +20,13 @@ namespace {
  * Commands
  */
 
-typedef boost::function<void(const std::vector<std::string> &)> command_func;
+typedef boost::function<void(CVC_NAMESPACE::app &, const std::vector<std::string> &)>
+    command_func;
 typedef boost::tuple<command_func, std::string> command;
 typedef std::map<std::string, command> command_map;
 command_map commands;
 
-void help(const std::vector<std::string> &args) {
+void help(CVC_NAMESPACE::app & /*ctx*/, const std::vector<std::string> &args) {
   using namespace std;
   cout << "Usage: libcvc <command> <command args>" << endl << endl;
   for (command_map::iterator i = commands.begin(); i != commands.end(); ++i) {
@@ -34,30 +35,30 @@ void help(const std::vector<std::string> &args) {
   }
 }
 
-void copy(const std::vector<std::string> &args) {
+void copy(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   if (args.empty())
     throw command_line_error("Missing input filename.");
   if (args.size() < 2)
     throw command_line_error("Missing output volume filename");
-  save(load(args[0]), args[1]);
+  save(ctx, load(ctx, args[0]), args[1]);
 }
 
-void info(const std::vector<std::string> &args) {
+void info(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   if (args.empty())
     throw command_line_error("Missing input filename.");
 
   if (is_geometry_filename(args[0])) {
-    geometry geo(args[0]);
+    geometry geo(ctx, args[0]);
     if (geo.num_points() > 0)
       cout << "Num vertices: " << geo.num_points() << endl;
     if (geo.num_lines() > 0)
@@ -75,7 +76,7 @@ void info(const std::vector<std::string> &args) {
          << endl;
   } else if (is_volume_filename(args[0])) {
     volume_file_info volinfo;
-    volinfo.read(args[0]);
+    volinfo.read(ctx, args[0]);
     cout << volinfo.filename() << ":" << endl;
     cout << "Num Variables: " << volinfo.numVariables() << endl;
     cout << "Num Timesteps: " << volinfo.numTimesteps() << endl;
@@ -111,10 +112,10 @@ void info(const std::vector<std::string> &args) {
 }
 
 // 01/11/2014 - Joe R. - moved bounding box to last argument and made optional.
-void sdf(const std::vector<std::string> &args) {
+void sdf(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing geometry filename");
   if (args.size() < 2)
@@ -122,47 +123,47 @@ void sdf(const std::vector<std::string> &args) {
   if (args.size() < 3)
     throw command_line_error("Missing output volume filename");
 
-  geometry geom(args[0]);
+  geometry geom(ctx, args[0]);
   bounding_box bbox = geom.extents();
   if (args.size() >= 4)
     bbox = bounding_box(args[3]);
 
-  sdf(geom, dimension(args[1]), bbox).write(args[2]);
+  sdf(ctx, geom, dimension(args[1]), bbox).write(args[2]);
 }
 
-void iso(const std::vector<std::string> &args) {
+void iso(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing volume filename");
   if (args.size() < 2)
     throw command_line_error("Missing isovalue");
   if (args.size() < 3)
     throw command_line_error("Missing output geometry filename");
-  iso(volume(args[0]), lexical_cast<double>(args[1])).write(args[2]);
+  iso(ctx, volume(ctx, args[0]), lexical_cast<double>(args[1])).write(args[2]);
 }
 
 #ifdef USING_XMLRPC
-void server(const std::vector<std::string> &args) {
+void server(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   int port = XMLRPC_DEFAULT_PORT;
   if (!args.empty())
     port = lexical_cast<int>(args[0]);
   cvcstate("__system.xmlrpc.port").value(port);
   cvcstate("__system.xmlrpc").value(int(1)); // start the server
-  cvcapp.wait();                             // wait for the server thread to quit
+  ctx.wait();                                // wait for the server thread to quit
 }
 
-void client(const std::vector<std::string> &args) {
+void client(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
   using namespace CVC_NAMESPACE;
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing host:port");
   if (args.size() < 2)
@@ -224,6 +225,8 @@ int main(int argc, char **argv) {
   using namespace std;
   using namespace CVC_NAMESPACE;
 
+  app cvc_ctx;
+
   vector<string> args;
   for (int i = 0; i < argc; i++)
     args.push_back(argv[i]);
@@ -238,7 +241,7 @@ int main(int argc, char **argv) {
     if (commands.find(cmd) == commands.end())
       throw command_line_error("Invalid command.");
 
-    commands[cmd].get<0>()(args);
+    commands[cmd].get<0>()(cvc_ctx, args);
   } catch (command_line_error &e) {
     if (!e.what_str().empty())
       cout << "Error: " << e.what_str() << endl;
