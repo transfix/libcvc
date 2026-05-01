@@ -85,6 +85,25 @@ file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
 # vcpkg's debug-config also resolves.
 file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
 
+# CMake's FindImageMagick.cmake searches for Magick++/MagickCore/
+# MagickWand/MagickWand-7.Q16HDRI/etc. and also CORE_RL_Magick++_,
+# but only on recent versions. Older CMakes (< 3.27 or so) and some
+# distro-patched FindImageMagick scripts only know the canonical
+# unprefixed names. The IM Windows installer ships only
+# 'CORE_RL_<component>_.lib', so create canonical-named hardlinks/
+# copies (Magick++.lib, MagickCore.lib, MagickWand.lib) to make
+# find_library() succeed regardless of FindImageMagick vintage.
+foreach(_im_lib_dir
+    "${CURRENT_PACKAGES_DIR}/lib" "${CURRENT_PACKAGES_DIR}/debug/lib")
+  foreach(_im_component Magick++ MagickCore MagickWand)
+    set(_src "${_im_lib_dir}/CORE_RL_${_im_component}_.lib")
+    set(_dst "${_im_lib_dir}/${_im_component}.lib")
+    if(EXISTS "${_src}" AND NOT EXISTS "${_dst}")
+      configure_file("${_src}" "${_dst}" COPYONLY)
+    endif()
+  endforeach()
+endforeach()
+
 # Runtime DLLs (CORE_RL_*, IM_MOD_RL_*, FILTER_*) plus the C/C++ runtime
 # bundled by the installer; ship them all so apps can resolve symbols.
 file(GLOB IM_DLLS
