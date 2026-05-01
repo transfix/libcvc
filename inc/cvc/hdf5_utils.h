@@ -25,14 +25,7 @@
 #ifndef __CVC_HDF5_UTILITIES_H__
 #define __CVC_HDF5_UTILITIES_H__
 
-#include <cvc/app.h>
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/exception.h>
-#include <cvc/types.h>
-
 #include <H5Cpp.h>
-
 #include <boost/algorithm/minmax_element.hpp>
 #include <boost/format.hpp>
 #include <boost/scoped_array.hpp>
@@ -40,6 +33,11 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <cstring>
+#include <cvc/app.h>
+#include <cvc/bounding_box.h>
+#include <cvc/dimension.h>
+#include <cvc/exception.h>
+#include <cvc/types.h>
 #include <iostream>
 #include <list>
 #include <string>

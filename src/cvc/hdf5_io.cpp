@@ -21,14 +21,8 @@
   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-#include <cvc/endians.h>
-#include <cvc/hdf5_utils.h>
-#include <cvc/utility.h>
-#include <cvc/volmagick.h>
-
 #include <H5Cpp.h>
 #include <H5PredType.h>
-
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <boost/array.hpp>
@@ -41,6 +35,10 @@
 #include <boost/scoped_array.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <cmath>
+#include <cvc/endians.h>
+#include <cvc/hdf5_utils.h>
+#include <cvc/utility.h>
+#include <cvc/volmagick.h>
 #include <iostream>
 #include <limits>
 

@@ -168,7 +168,7 @@ jobs:
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       # vcpkg builds Boost from source by downloading per-library tarballs
       # from github.com/boostorg/*. github.com periodically returns 502s
@@ -620,14 +620,14 @@ jobs:
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
       - name: Configure
