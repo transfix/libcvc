@@ -480,13 +480,13 @@ std::string StateTreeWidget::getStateDataType(cvc::state *state) {
     return "unknown";
 
   try {
-    // Get the boost::any data and use cvcapp to get the registered type name
+    // Get the boost::any data and use volrover3::app() to get the registered type name
     boost::any anyData = state->data();
     if (anyData.empty()) {
       return "<no data>";
     }
 
-    // Use cvcapp's registered type names
+    // Use volrover3::app()'s registered type names
     std::string typeName = volrover3::app().dataTypeName(anyData);
     return typeName;
   } catch (const std::exception &e) {
