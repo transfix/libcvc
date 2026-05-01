@@ -481,11 +481,41 @@ if(CVC_ENABLE_CUDA)
 endif()
 
 # ImageMagick support (for volume_ops image I/O)
+#
+# Quantum-depth and HDRI flags must match the installed library's build:
+# Q8 vs Q16, HDRI on/off. On Linux/macOS we ask pkg-config for the
+# canonical cflags, which include the right `MAGICKCORE_QUANTUM_DEPTH`
+# and `MAGICKCORE_HDRI_ENABLE` defines. On Windows our overlay vcpkg
+# port ships Q16-HDRI x64.
 option(CVC_ENABLE_IMAGEMAGICK "Enable ImageMagick support for image I/O in volume_ops" ON)
 if(CVC_ENABLE_IMAGEMAGICK)
+  set(CVC_IMAGEMAGICK_QUANTUM_DEPTH 16)
+  set(CVC_IMAGEMAGICK_HDRI_ENABLE 0)
+  if(NOT WIN32)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(IMAGEMAGICK_PC QUIET Magick++)
+      if(IMAGEMAGICK_PC_FOUND)
+        # Extract Q-depth / HDRI from -D flags. Drop them from the cflag
+        # list afterwards so we add them once via target_compile_definitions
+        # below (avoids per-source duplication).
+        foreach(_def IN LISTS IMAGEMAGICK_PC_CFLAGS_OTHER)
+          if(_def MATCHES "^-DMAGICKCORE_QUANTUM_DEPTH=([0-9]+)$")
+            set(CVC_IMAGEMAGICK_QUANTUM_DEPTH "${CMAKE_MATCH_1}")
+          elseif(_def MATCHES "^-DMAGICKCORE_HDRI_ENABLE=([0-9]+)$")
+            set(CVC_IMAGEMAGICK_HDRI_ENABLE "${CMAKE_MATCH_1}")
+          endif()
+        endforeach()
+      endif()
+    endif()
+  else()
+    set(CVC_IMAGEMAGICK_HDRI_ENABLE 1)  # Q16-HDRI x64 from vcpkg overlay
+  endif()
   find_package(ImageMagick COMPONENTS Magick++ MagickCore)
   if(ImageMagick_FOUND)
-    message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS}")
+    message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS} "
+                   "(Q${CVC_IMAGEMAGICK_QUANTUM_DEPTH}, "
+                   "HDRI=${CVC_IMAGEMAGICK_HDRI_ENABLE})")
   else()
     message(STATUS "ImageMagick not found - disabling image I/O in volume_ops")
     set(CVC_ENABLE_IMAGEMAGICK OFF)
@@ -636,8 +666,8 @@ endif()
 # ImageMagick linking
 if(CVC_ENABLE_IMAGEMAGICK)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_IMAGEMAGICK
-    MAGICKCORE_QUANTUM_DEPTH=16
-    MAGICKCORE_HDRI_ENABLE=0)
+    MAGICKCORE_QUANTUM_DEPTH=${CVC_IMAGEMAGICK_QUANTUM_DEPTH}
+    MAGICKCORE_HDRI_ENABLE=${CVC_IMAGEMAGICK_HDRI_ENABLE})
   target_include_directories(cvc PUBLIC ${ImageMagick_INCLUDE_DIRS})
   target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
 endif()

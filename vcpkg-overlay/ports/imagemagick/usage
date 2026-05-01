@@ -1,0 +1,9 @@
+imagemagick provides Q16-HDRI x64 development files for Windows. Use
+CMake's stock module to consume it:
+
+    find_package(ImageMagick COMPONENTS Magick++ MagickCore)
+    target_include_directories(your_target PRIVATE ${ImageMagick_INCLUDE_DIRS})
+    target_link_libraries(your_target PRIVATE ${ImageMagick_LIBRARIES})
+    target_compile_definitions(your_target PRIVATE
+        MAGICKCORE_QUANTUM_DEPTH=16
+        MAGICKCORE_HDRI_ENABLE=1)

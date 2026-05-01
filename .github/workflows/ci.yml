@@ -190,13 +190,18 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-v4
+          key: vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-v6
           restore-keys: |
             vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
+          # repackaged from the upstream Inno Setup installer; see
+          # vcpkg-overlay/ports/imagemagick/portfile.cmake).
+          VCPKG_OVERLAY_PORTS: ${{ github.workspace }}\vcpkg-overlay\ports
         run: |
           $packages = @(
             'boost-thread','boost-date-time','boost-regex','boost-filesystem',
@@ -205,7 +210,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5','fftw3','gsl'
+            'boost-utility','hdf5','fftw3','gsl','imagemagick'
           )
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
@@ -242,7 +247,6 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCVC_BUILD_TESTS=ON `
             -DCVC_ENABLE_CUDA=OFF `
-            -DCVC_ENABLE_IMAGEMAGICK=OFF `
             -DDISABLE_CGAL=ON `
             -DCVC_BUILD_VOLROVER3=OFF
 
@@ -265,7 +269,7 @@ jobs:
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel \
-                  --repeat until-pass:3 --timeout 1800
+                  --repeat until-pass:3 --timeout 3600
           else
             echo "pull_request event: excluding ${STRESS_REGEX}"
             ctest --test-dir build \
@@ -800,7 +804,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v5
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
           restore-keys: |
             vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-
 
@@ -826,6 +830,11 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
+        env:
+          # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
+          # repackaged from the upstream Inno Setup installer; see
+          # vcpkg-overlay/ports/imagemagick/portfile.cmake).
+          VCPKG_OVERLAY_PORTS: ${{ github.workspace }}\vcpkg-overlay\ports
         run: |
           $packages = @(
             'boost-thread','boost-date-time','boost-regex','boost-filesystem',
@@ -834,7 +843,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5','fftw3','gsl'
+            'boost-utility','hdf5','fftw3','gsl','imagemagick'
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
@@ -873,7 +882,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v5
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
 
       - name: Configure
         shell: pwsh
