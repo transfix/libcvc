@@ -219,9 +219,16 @@ if(WIN32)
   else()
     set(_qt_bin_hint "${Qt5_DIR}/../../../bin")
   endif()
+  # Prefer aqtinstall's windeployqt (exported via $ENV{QT_ROOT_DIR}) over
+  # any vcpkg-shipped one. vcpkg's qt6-base port lacks translations/
+  # catalogs.json and (for debug builds) Qt6OpenGLWidgetsd.dll, so its
+  # windeployqt fails the dependency walk and emits warnings about
+  # missing translation catalogs. Search aqtinstall's bin first, then
+  # the Qt cmake-config-derived hint, then fall back to PATH.
   find_program(WINDEPLOYQT_EXECUTABLE
     NAMES windeployqt
-    HINTS "${_qt_bin_hint}")
+    HINTS "$ENV{QT_ROOT_DIR}/bin" "${_qt_bin_hint}"
+    NO_CMAKE_SYSTEM_PATH)
   if(WINDEPLOYQT_EXECUTABLE)
     # CPack runs `cmake --install` per-component before invoking the
     # archive / NSIS generator, so this install(CODE) script is the right
