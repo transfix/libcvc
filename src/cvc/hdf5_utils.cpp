@@ -22,21 +22,13 @@
 
 #define H5_SIZEOF_SSIZE_T 0
 
-#include <cvc/hdf5_utils.h>
-
-#if defined(WIN32)
-#include <cpp/H5PredType.h>
-#include <cpp/H5StrType.h>
-#else
-#include <H5PredType.h>
-#include <H5StrType.h>
-#endif
-
+#include <H5Cpp.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/current_function.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
+#include <cvc/hdf5_utils.h>
 
 namespace CVC_NAMESPACE {
 namespace hdf5_utils {

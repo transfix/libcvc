@@ -22,7 +22,6 @@
 */
 
 #include <H5Cpp.h>
-#include <H5PredType.h>
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <boost/array.hpp>
