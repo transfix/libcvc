@@ -26,13 +26,8 @@
 #include <cvc/utility.h>
 #include <cvc/volmagick.h>
 
-#if defined(WIN32)
-#include <cpp/H5Cpp.h>
-#include <cpp/H5PredType.h>
-#else
 #include <H5Cpp.h>
 #include <H5PredType.h>
-#endif
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>

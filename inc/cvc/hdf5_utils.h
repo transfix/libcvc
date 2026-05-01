@@ -31,12 +31,7 @@
 #include <cvc/exception.h>
 #include <cvc/types.h>
 
-#if defined(WIN32)
-#include <cpp/H5Cpp.h> //it appears this has changed back to H5Cpp.h - transfix 03/30/2012
-// but not on windows...
-#else
 #include <H5Cpp.h>
-#endif
 
 #include <boost/algorithm/minmax_element.hpp>
 #include <boost/format.hpp>
