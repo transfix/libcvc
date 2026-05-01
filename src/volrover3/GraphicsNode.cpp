@@ -17,14 +17,11 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
-GraphicsNode::GraphicsNode(const std::string &statePath,
-                           const std::string &name)
-    : SceneNode(statePath), m_name(name),
-      m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
-      m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr),
-      m_showBBox(false), m_bboxNode(std::make_shared<BBoxNode>()),
-      m_showLabel(false), m_labelText(name), m_labelSize(14),
-      m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),
+GraphicsNode::GraphicsNode(const std::string &statePath, const std::string &name)
+    : SceneNode(statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
+      m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
+      m_bboxNode(std::make_shared<BBoxNode>()), m_showLabel(false), m_labelText(name),
+      m_labelSize(14), m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),
       m_clipPlanes(vtkSmartPointer<vtkPlaneCollection>::New()) {
   // Initialize transform to identity
   m_transform->Identity();
@@ -34,8 +31,7 @@ GraphicsNode::GraphicsNode(const std::string &statePath,
   m_labelColor[0] = m_labelColor[1] = m_labelColor[2] = 1.0;
 
   // Setup label actor
-  vtkSmartPointer<vtkTextMapper> textMapper =
-      vtkSmartPointer<vtkTextMapper>::New();
+  vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
   textMapper->SetInput(m_labelText.c_str());
   textMapper->GetTextProperty()->SetFontSize(m_labelSize);
   textMapper->GetTextProperty()->SetColor(m_labelColor);
@@ -130,8 +126,7 @@ void GraphicsNode::setPosition(double x, double y, double z) {
 
 void GraphicsNode::setRotation(double x, double y, double z) {
   // Create transform with rotation
-  vtkSmartPointer<vtkTransform> transform =
-      vtkSmartPointer<vtkTransform>::New();
+  vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
   transform->Identity();
   transform->RotateZ(z);
   transform->RotateY(y);
@@ -162,8 +157,7 @@ void GraphicsNode::setScale(double x, double y, double z) {
   double tz = m_transform->GetElement(2, 3);
 
   // Extract rotation part (normalize the 3x3 upper-left)
-  vtkSmartPointer<vtkMatrix4x4> rotation =
-      vtkSmartPointer<vtkMatrix4x4>::New();
+  vtkSmartPointer<vtkMatrix4x4> rotation = vtkSmartPointer<vtkMatrix4x4>::New();
   for (int i = 0; i < 3; ++i) {
     double len = 0.0;
     for (int j = 0; j < 3; ++j) {
@@ -212,8 +206,7 @@ void GraphicsNode::resetTransform() {
 }
 
 vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const {
-  vtkSmartPointer<vtkMatrix4x4> worldTransform =
-      vtkSmartPointer<vtkMatrix4x4>::New();
+  vtkSmartPointer<vtkMatrix4x4> worldTransform = vtkSmartPointer<vtkMatrix4x4>::New();
 
   if (m_parent) {
     // Get parent's world transform
@@ -252,15 +245,13 @@ void GraphicsNode::updateTransform() {
   }
 }
 
-void GraphicsNode::applyWorldTransformToProps(
-    const std::vector<vtkProp *> &props) {
+void GraphicsNode::applyWorldTransformToProps(const std::vector<vtkProp *> &props) {
   if (props.empty())
     return;
 
   // Compute world transform once
   auto worldTransform = getWorldTransform();
-  vtkSmartPointer<vtkTransform> vtkWorldTransform =
-      vtkSmartPointer<vtkTransform>::New();
+  vtkSmartPointer<vtkTransform> vtkWorldTransform = vtkSmartPointer<vtkTransform>::New();
   vtkWorldTransform->SetMatrix(worldTransform);
 
   // Apply to all props (cast to vtkProp3D which has SetUserTransform)
@@ -356,8 +347,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
         char comma;
         if (iss >> rx >> comma >> ry >> comma >> rz) {
           // Create transform with rotation
-          vtkSmartPointer<vtkTransform> transform =
-              vtkSmartPointer<vtkTransform>::New();
+          vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
           transform->Identity();
           transform->RotateZ(rz);
           transform->RotateY(ry);
@@ -390,8 +380,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
           double tz = m_transform->GetElement(2, 3);
 
           // Extract rotation part (normalize the 3x3 upper-left)
-          vtkSmartPointer<vtkMatrix4x4> rotation =
-              vtkSmartPointer<vtkMatrix4x4>::New();
+          vtkSmartPointer<vtkMatrix4x4> rotation = vtkSmartPointer<vtkMatrix4x4>::New();
           for (int i = 0; i < 3; ++i) {
             double len = 0.0;
             for (int j = 0; j < 3; ++j) {
@@ -401,8 +390,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
             len = std::sqrt(len);
             if (len > 0.0) {
               for (int j = 0; j < 3; ++j) {
-                rotation->SetElement(i, j,
-                                     m_transform->GetElement(i, j) / len);
+                rotation->SetElement(i, j, m_transform->GetElement(i, j) / len);
               }
             }
           }
@@ -411,8 +399,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
           for (int i = 0; i < 3; ++i) {
             double scale = (i == 0) ? sx : (i == 1) ? sy : sz;
             for (int j = 0; j < 3; ++j) {
-              m_transform->SetElement(i, j,
-                                      rotation->GetElement(i, j) * scale);
+              m_transform->SetElement(i, j, rotation->GetElement(i, j) * scale);
             }
           }
 
@@ -490,8 +477,7 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   }
 }
 
-std::shared_ptr<GraphicsNode>
-GraphicsNode::createChild(const std::string &name) {
+std::shared_ptr<GraphicsNode> GraphicsNode::createChild(const std::string &name) {
   // Create NullGraphicNode child for placeholder/hierarchy purposes
   return addGraphicsChild<NullGraphicNode>(name);
 }
@@ -501,8 +487,7 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
     return;
 
   // Remove from graphics children
-  auto it =
-      std::find(m_graphicsChildren.begin(), m_graphicsChildren.end(), child);
+  auto it = std::find(m_graphicsChildren.begin(), m_graphicsChildren.end(), child);
   if (it != m_graphicsChildren.end()) {
     m_graphicsChildren.erase(it);
     child->m_parent = nullptr;
@@ -518,8 +503,7 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   }
 }
 
-std::shared_ptr<GraphicsNode>
-GraphicsNode::findChildByName(const std::string &name) {
+std::shared_ptr<GraphicsNode> GraphicsNode::findChildByName(const std::string &name) {
   for (auto &child : m_graphicsChildren) {
     if (child->getName() == name) {
       return child;
@@ -535,8 +519,7 @@ GraphicsNode::findChildByName(const std::string &name) {
 
 cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
   // Check if this is a NullGraphicNode and if it should include own bounds
-  const NullGraphicNode *nullNode =
-      dynamic_cast<const NullGraphicNode *>(this);
+  const NullGraphicNode *nullNode = dynamic_cast<const NullGraphicNode *>(this);
   bool includeOwnBounds = true;
   if (nullNode) {
     includeOwnBounds = nullNode->getIncludeOwnBounds();
@@ -571,8 +554,7 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
     cvc::bounding_box childBBox = child->getCombinedBoundingBox();
 
     // Skip invalid bounding boxes
-    if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] ||
-        childBBox[2] > childBBox[5]) {
+    if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] || childBBox[2] > childBBox[5]) {
       continue;
     }
 
@@ -627,12 +609,10 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
     return cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);
   }
 
-  return cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy,
-                           acc_maxz);
+  return cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
 }
 
-void GraphicsNode::setMetadata(const std::string &key,
-                               const std::any &value) {
+void GraphicsNode::setMetadata(const std::string &key, const std::any &value) {
   m_metadata[key] = value;
 
   // Also sync to state tree for persistence and visibility
@@ -651,8 +631,7 @@ void GraphicsNode::setMetadata(const std::string &key,
       getState(metadataPath).value(std::any_cast<std::string>(value));
       getState(metadataPath).readOnly(true);
     } else if (value.type() == typeid(const char *)) {
-      getState(metadataPath)
-          .value(std::string(std::any_cast<const char *>(value)));
+      getState(metadataPath).value(std::string(std::any_cast<const char *>(value)));
       getState(metadataPath).readOnly(true);
     } else if (value.type() == typeid(bool)) {
       getState(metadataPath).value(std::any_cast<bool>(value));
@@ -761,8 +740,7 @@ void GraphicsNode::setExtentLabelColor(double r, double g, double b) {
   }
 }
 
-void GraphicsNode::getExtentLabelColor(double &r, double &g,
-                                       double &b) const {
+void GraphicsNode::getExtentLabelColor(double &r, double &g, double &b) const {
   if (m_bboxNode) {
     m_bboxNode->getCoordinateLabelColor(r, g, b);
   } else {
@@ -806,8 +784,7 @@ void GraphicsNode::setShowLabel(bool show) {
 
 void GraphicsNode::setLabelText(const std::string &text) {
   m_labelText = text;
-  vtkTextMapper *mapper =
-      vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
+  vtkTextMapper *mapper = vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
   if (mapper) {
     mapper->SetInput(m_labelText.c_str());
   }
@@ -815,8 +792,7 @@ void GraphicsNode::setLabelText(const std::string &text) {
 
 void GraphicsNode::setLabelSize(int size) {
   m_labelSize = std::max(1, size);
-  vtkTextMapper *mapper =
-      vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
+  vtkTextMapper *mapper = vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
   if (mapper) {
     mapper->GetTextProperty()->SetFontSize(m_labelSize);
   }
@@ -826,8 +802,7 @@ void GraphicsNode::setLabelColor(double r, double g, double b) {
   m_labelColor[0] = r;
   m_labelColor[1] = g;
   m_labelColor[2] = b;
-  vtkTextMapper *mapper =
-      vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
+  vtkTextMapper *mapper = vtkTextMapper::SafeDownCast(m_labelActor->GetMapper());
   if (mapper) {
     mapper->GetTextProperty()->SetColor(r, g, b);
   }
@@ -852,8 +827,7 @@ void GraphicsNode::updateLabel() {
   double worldCenter[4];
   worldTransform->MultiplyPoint(localCenter, worldCenter);
 
-  m_labelActor->GetPositionCoordinate()->SetValue(
-      worldCenter[0], worldCenter[1], worldCenter[2]);
+  m_labelActor->GetPositionCoordinate()->SetValue(worldCenter[0], worldCenter[1], worldCenter[2]);
 }
 
 void GraphicsNode::addToRenderer(vtkRenderer *renderer) {
@@ -865,8 +839,7 @@ void GraphicsNode::addToRenderer(vtkRenderer *renderer) {
     // Update and capture references before queuing
     updateBoundingBoxNode();
     auto bboxNode = m_bboxNode;
-    runOnMainThread(
-        [bboxNode, renderer]() { bboxNode->addToRenderer(renderer); });
+    runOnMainThread([bboxNode, renderer]() { bboxNode->addToRenderer(renderer); });
   }
 
   // Add label if it should be visible
@@ -874,8 +847,7 @@ void GraphicsNode::addToRenderer(vtkRenderer *renderer) {
     // Update and capture the actor before queuing
     updateLabel();
     vtkActor2D *labelActor = m_labelActor;
-    runOnMainThread(
-        [labelActor, renderer]() { renderer->AddViewProp(labelActor); });
+    runOnMainThread([labelActor, renderer]() { renderer->AddViewProp(labelActor); });
   }
 }
 
@@ -884,8 +856,7 @@ void GraphicsNode::removeFromRenderer(vtkRenderer *renderer) {
   // deletion
   vtkActor2D *labelActor = m_labelActor;
   if (labelActor) {
-    runOnMainThread(
-        [labelActor, renderer]() { renderer->RemoveViewProp(labelActor); });
+    runOnMainThread([labelActor, renderer]() { renderer->RemoveViewProp(labelActor); });
   }
 
   // Remove bbox
@@ -921,8 +892,7 @@ void GraphicsNode::setClipChildren(bool clip) {
 void GraphicsNode::updateClipPlanes() {
   // Get this node's OWN bounding box (not combined)
   cvc::bounding_box bbox = getBoundingBox();
-  double bounds[6] = {bbox.minx, bbox.maxx, bbox.miny,
-                      bbox.maxy, bbox.minz, bbox.maxz};
+  double bounds[6] = {bbox.minx, bbox.maxx, bbox.miny, bbox.maxy, bbox.minz, bbox.maxz};
 
   // Get world transform to transform the planes
   vtkSmartPointer<vtkMatrix4x4> worldTransform = getWorldTransform();
@@ -940,39 +910,30 @@ void GraphicsNode::updateClipPlanes() {
 
   // Plane origins in local space (centers of each face)
   double origins[6][3] = {
-      {bounds[1], (bounds[2] + bounds[3]) / 2.0,
-       (bounds[4] + bounds[5]) / 2.0}, // +X
-      {bounds[0], (bounds[2] + bounds[3]) / 2.0,
-       (bounds[4] + bounds[5]) / 2.0}, // -X
-      {(bounds[0] + bounds[1]) / 2.0, bounds[3],
-       (bounds[4] + bounds[5]) / 2.0}, // +Y
-      {(bounds[0] + bounds[1]) / 2.0, bounds[2],
-       (bounds[4] + bounds[5]) / 2.0}, // -Y
-      {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0,
-       bounds[5]}, // +Z
-      {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0,
-       bounds[4]} // -Z
+      {bounds[1], (bounds[2] + bounds[3]) / 2.0, (bounds[4] + bounds[5]) / 2.0}, // +X
+      {bounds[0], (bounds[2] + bounds[3]) / 2.0, (bounds[4] + bounds[5]) / 2.0}, // -X
+      {(bounds[0] + bounds[1]) / 2.0, bounds[3], (bounds[4] + bounds[5]) / 2.0}, // +Y
+      {(bounds[0] + bounds[1]) / 2.0, bounds[2], (bounds[4] + bounds[5]) / 2.0}, // -Y
+      {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0, bounds[5]}, // +Z
+      {(bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0, bounds[4]}  // -Z
   };
 
   // Transform and set each plane
   for (int i = 0; i < 6; ++i) {
     // Transform origin to world space
-    double worldOrigin[4] = {origins[i][0], origins[i][1], origins[i][2],
-                             1.0};
+    double worldOrigin[4] = {origins[i][0], origins[i][1], origins[i][2], 1.0};
     double transformedOrigin[4];
     worldTransform->MultiplyPoint(worldOrigin, transformedOrigin);
 
     // Transform normal to world space (using transpose of inverse for
     // normals) For orthogonal transforms (rotation + uniform scale), we can
     // use the matrix directly
-    vtkSmartPointer<vtkMatrix4x4> normalMatrix =
-        vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkSmartPointer<vtkMatrix4x4> normalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     normalMatrix->DeepCopy(worldTransform);
     normalMatrix->Invert();
     normalMatrix->Transpose();
 
-    double worldNormal[4] = {normals[i][0], normals[i][1], normals[i][2],
-                             0.0};
+    double worldNormal[4] = {normals[i][0], normals[i][1], normals[i][2], 0.0};
     double transformedNormal[4];
     normalMatrix->MultiplyPoint(worldNormal, transformedNormal);
 
@@ -1001,8 +962,7 @@ void GraphicsNode::updateClipPlanes() {
 
 void GraphicsNode::applyClipPlanesToChildren() {
   for (auto &child : m_graphicsChildren) {
-    child->runOnMainThread(
-        [this, child]() { child->applyClipPlanes(m_clipPlanes); });
+    child->runOnMainThread([this, child]() { child->applyClipPlanes(m_clipPlanes); });
   }
 }
 

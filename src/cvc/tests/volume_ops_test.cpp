@@ -2,33 +2,31 @@
   Unit tests for volume_ops (volume arithmetic and utility operations)
 */
 
-#include <gtest/gtest.h>
-#include <cvc/volume_ops.h>
-#include <cvc/app.h>
 #include <cmath>
+#include <cvc/app.h>
+#include <cvc/volume_ops.h>
+#include <gtest/gtest.h>
 
 using namespace CVC_NAMESPACE;
 
 // Helper: create a small Float volume with a constant value
-static volume make_const_vol(app& ctx, uint64 dim, double val,
-                             const bounding_box& bb = bounding_box(0,0,0,1,1,1))
-{
+static volume make_const_vol(app &ctx, uint64 dim, double val,
+                             const bounding_box &bb = bounding_box(0, 0, 0, 1, 1, 1)) {
   volume v(ctx, dimension(dim, dim, dim), Float, bb);
-  for(uint64 k = 0; k < dim; k++)
-    for(uint64 j = 0; j < dim; j++)
-      for(uint64 i = 0; i < dim; i++)
+  for (uint64 k = 0; k < dim; k++)
+    for (uint64 j = 0; j < dim; j++)
+      for (uint64 i = 0; i < dim; i++)
         v(i, j, k, val);
   return v;
 }
 
 // Helper: create a volume with linearly increasing values
-static volume make_ramp_vol(app& ctx, uint64 dim)
-{
-  volume v(ctx, dimension(dim, dim, dim), Float, bounding_box(0,0,0,1,1,1));
+static volume make_ramp_vol(app &ctx, uint64 dim) {
+  volume v(ctx, dimension(dim, dim, dim), Float, bounding_box(0, 0, 0, 1, 1, 1));
   double n = 0.0;
-  for(uint64 k = 0; k < dim; k++)
-    for(uint64 j = 0; j < dim; j++)
-      for(uint64 i = 0; i < dim; i++)
+  for (uint64 k = 0; k < dim; k++)
+    for (uint64 j = 0; j < dim; j++)
+      for (uint64 i = 0; i < dim; i++)
         v(i, j, k, n++);
   return v;
 }
@@ -37,10 +35,9 @@ static volume make_ramp_vol(app& ctx, uint64 dim)
 // Statistics Tests
 // ============================================================================
 
-
 class VolumeOpsTest : public ::testing::Test {
 protected:
-    cvc::app ctx;
+  cvc::app ctx;
 };
 
 TEST_F(VolumeOpsTest, StatsConstant) {
@@ -64,7 +61,7 @@ TEST_F(VolumeOpsTest, StatsRamp) {
 }
 
 TEST_F(VolumeOpsTest, StatsBoundedRegion) {
-  auto vol = make_const_vol(ctx, 4, 10.0, bounding_box(0,0,0,3,3,3));
+  auto vol = make_const_vol(ctx, 4, 10.0, bounding_box(0, 0, 0, 3, 3, 3));
   // Region covering roughly the first quadrant
   bounding_box region(0, 0, 0, 1, 1, 1);
   auto s = compute_stats(vol, region);
@@ -74,7 +71,7 @@ TEST_F(VolumeOpsTest, StatsBoundedRegion) {
 }
 
 TEST_F(VolumeOpsTest, StatsEmptyRegion) {
-  auto vol = make_const_vol(ctx, 4, 10.0, bounding_box(0,0,0,1,1,1));
+  auto vol = make_const_vol(ctx, 4, 10.0, bounding_box(0, 0, 0, 1, 1, 1));
   // Region outside the volume
   bounding_box region(5, 5, 5, 6, 6, 6);
   auto s = compute_stats(vol, region);
@@ -90,34 +87,34 @@ TEST_F(VolumeOpsTest, Add) {
   auto b = make_const_vol(ctx, 4, 7.0);
   auto c = vol_add(a, b);
   EXPECT_EQ(c.XDim(), 4u);
-  EXPECT_DOUBLE_EQ(c(0,0,0), 10.0);
-  EXPECT_DOUBLE_EQ(c(3,3,3), 10.0);
+  EXPECT_DOUBLE_EQ(c(0, 0, 0), 10.0);
+  EXPECT_DOUBLE_EQ(c(3, 3, 3), 10.0);
 }
 
 TEST_F(VolumeOpsTest, Subtract) {
   auto a = make_const_vol(ctx, 4, 10.0);
   auto b = make_const_vol(ctx, 4, 3.0);
   auto c = vol_subtract(a, b);
-  EXPECT_DOUBLE_EQ(c(0,0,0), 7.0);
+  EXPECT_DOUBLE_EQ(c(0, 0, 0), 7.0);
 }
 
 TEST_F(VolumeOpsTest, Difference) {
   auto a = make_const_vol(ctx, 4, 3.0);
   auto b = make_const_vol(ctx, 4, 10.0);
   auto c = vol_difference(a, b);
-  EXPECT_DOUBLE_EQ(c(0,0,0), 7.0);
+  EXPECT_DOUBLE_EQ(c(0, 0, 0), 7.0);
 }
 
 TEST_F(VolumeOpsTest, Average) {
   auto a = make_const_vol(ctx, 4, 2.0);
   auto b = make_const_vol(ctx, 4, 8.0);
   auto c = vol_average(a, b);
-  EXPECT_DOUBLE_EQ(c(0,0,0), 5.0);
+  EXPECT_DOUBLE_EQ(c(0, 0, 0), 5.0);
 }
 
 TEST_F(VolumeOpsTest, DimensionMismatchThrows) {
-  volume a(ctx, dimension(4,4,4), Float);
-  volume b(ctx, dimension(8,8,8), Float);
+  volume a(ctx, dimension(4, 4, 4), Float);
+  volume b(ctx, dimension(8, 8, 8), Float);
   EXPECT_THROW(vol_add(a, b), dimension_mismatch);
   EXPECT_THROW(vol_subtract(a, b), dimension_mismatch);
   EXPECT_THROW(vol_difference(a, b), dimension_mismatch);
@@ -131,28 +128,28 @@ TEST_F(VolumeOpsTest, DimensionMismatchThrows) {
 TEST_F(VolumeOpsTest, Scale) {
   auto vol = make_const_vol(ctx, 4, 5.0);
   auto out = vol_scale(vol, 3.0);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 15.0);
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 15.0);
 }
 
 TEST_F(VolumeOpsTest, Normalize) {
   auto vol = make_ramp_vol(ctx, 4); // 0..63
   auto out = vol_normalize(vol, 0.0, 1.0);
-  EXPECT_NEAR(out(0,0,0), 0.0, 1e-10);
+  EXPECT_NEAR(out(0, 0, 0), 0.0, 1e-10);
   // Last voxel: index (3,3,3) = 63
-  EXPECT_NEAR(out(3,3,3), 1.0, 1e-10);
+  EXPECT_NEAR(out(3, 3, 3), 1.0, 1e-10);
 }
 
 TEST_F(VolumeOpsTest, NormalizeConstant) {
   auto vol = make_const_vol(ctx, 4, 5.0);
   // All same value → normalized to new_min
   auto out = vol_normalize(vol, 10.0, 20.0);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 10.0);
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 10.0);
 }
 
 TEST_F(VolumeOpsTest, Clip) {
   auto vol = make_ramp_vol(ctx, 4);
   auto out = vol_clip(vol, 32.0);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 0.0); // 0 < 32 → kept
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 0.0); // 0 < 32 → kept
   // Voxel with value 32 should be zeroed (>= threshold)
   // value 32 is at index 32 → (0, 0, 2) since 32 = 0 + 0*4 + 2*16
   EXPECT_DOUBLE_EQ(out(0, 0, 2), 0.0);
@@ -161,14 +158,14 @@ TEST_F(VolumeOpsTest, Clip) {
 TEST_F(VolumeOpsTest, ClampMin) {
   auto vol = make_ramp_vol(ctx, 4);
   auto out = vol_clamp_min(vol, 30.0);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 30.0); // 0 < 30 → clamped to 30
-  EXPECT_DOUBLE_EQ(out(3,3,3), 63.0); // 63 > 30 → unchanged
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 30.0); // 0 < 30 → clamped to 30
+  EXPECT_DOUBLE_EQ(out(3, 3, 3), 63.0); // 63 > 30 → unchanged
 }
 
 TEST_F(VolumeOpsTest, Negate) {
   auto vol = make_const_vol(ctx, 4, 5.0);
   auto out = vol_negate(vol);
-  EXPECT_DOUBLE_EQ(out(0,0,0), -5.0);
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), -5.0);
 }
 
 // ============================================================================
@@ -183,9 +180,9 @@ TEST_F(VolumeOpsTest, Mask) {
   mask(1, 1, 1, 1.0);
 
   auto out = vol_mask(intensity, mask);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 0.0);    // masked out
-  EXPECT_DOUBLE_EQ(out(1,1,1), 0.0);    // masked out
-  EXPECT_DOUBLE_EQ(out(2,2,2), 10.0);   // not masked
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 0.0);  // masked out
+  EXPECT_DOUBLE_EQ(out(1, 1, 1), 0.0);  // masked out
+  EXPECT_DOUBLE_EQ(out(2, 2, 2), 10.0); // not masked
 }
 
 TEST_F(VolumeOpsTest, InverseMask) {
@@ -194,13 +191,13 @@ TEST_F(VolumeOpsTest, InverseMask) {
   mask(0, 0, 0, 1.0);
 
   auto out = vol_inverse_mask(intensity, mask);
-  EXPECT_DOUBLE_EQ(out(0,0,0), 10.0);   // mask is nonzero → kept
-  EXPECT_DOUBLE_EQ(out(2,2,2), 0.0);    // mask is zero → zeroed
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 10.0); // mask is nonzero → kept
+  EXPECT_DOUBLE_EQ(out(2, 2, 2), 0.0);  // mask is zero → zeroed
 }
 
 TEST_F(VolumeOpsTest, MaskDimensionMismatch) {
-  volume a(ctx, dimension(4,4,4), Float);
-  volume b(ctx, dimension(8,8,8), Float);
+  volume a(ctx, dimension(4, 4, 4), Float);
+  volume b(ctx, dimension(8, 8, 8), Float);
   EXPECT_THROW(vol_mask(a, b), dimension_mismatch);
 }
 
@@ -215,9 +212,9 @@ TEST_F(VolumeOpsTest, Downsample) {
   EXPECT_EQ(out.YDim(), 4u);
   EXPECT_EQ(out.ZDim(), 4u);
   // First voxel: stride 0 → value at (0,0,0) = 0
-  EXPECT_DOUBLE_EQ(out(0,0,0), 0.0);
+  EXPECT_DOUBLE_EQ(out(0, 0, 0), 0.0);
   // Second voxel in x: stride 2 → value at (2,0,0) = 2
-  EXPECT_DOUBLE_EQ(out(1,0,0), 2.0);
+  EXPECT_DOUBLE_EQ(out(1, 0, 0), 2.0);
 }
 
 TEST_F(VolumeOpsTest, DownsampleZeroFactor) {
@@ -249,8 +246,8 @@ TEST_F(VolumeOpsTest, AddPreservesBoundingBox) {
 
 TEST_F(VolumeOpsTest, OutputIsFloat) {
   // Even if input is UChar, outputs should be Float for full precision
-  volume a(ctx, dimension(4,4,4), UChar);
-  volume b(ctx, dimension(4,4,4), UChar);
+  volume a(ctx, dimension(4, 4, 4), UChar);
+  volume b(ctx, dimension(4, 4, 4), UChar);
   auto c = vol_add(a, b);
   EXPECT_EQ(c.voxelType(), Float);
 }
@@ -266,10 +263,10 @@ TEST_F(VolumeOpsTest, RotateZeroAngle) {
   EXPECT_EQ(rot.YDim(), vol.YDim());
   EXPECT_EQ(rot.ZDim(), vol.ZDim());
   // Zero-angle rotation should preserve values (up to interpolation)
-  for(uint64 k = 1; k < vol.ZDim()-1; k++)
-    for(uint64 j = 1; j < vol.YDim()-1; j++)
-      for(uint64 i = 1; i < vol.XDim()-1; i++)
-        EXPECT_NEAR(rot(i,j,k), vol(i,j,k), 1e-6);
+  for (uint64 k = 1; k < vol.ZDim() - 1; k++)
+    for (uint64 j = 1; j < vol.YDim() - 1; j++)
+      for (uint64 i = 1; i < vol.XDim() - 1; i++)
+        EXPECT_NEAR(rot(i, j, k), vol(i, j, k), 1e-6);
 }
 
 TEST_F(VolumeOpsTest, RotatePreservesDimensions) {
@@ -285,7 +282,7 @@ TEST_F(VolumeOpsTest, Rotate180Symmetry) {
   auto rot = vol_rotate_z(vol, M_PI);
   // For a constant volume, 180-degree rotation should yield same values
   // (center voxels at least)
-  EXPECT_NEAR(rot(4,4,4), 42.0, 1e-6);
+  EXPECT_NEAR(rot(4, 4, 4), 42.0, 1e-6);
 }
 
 // ============================================================================
@@ -322,7 +319,7 @@ TEST_F(VolumeOpsTest, SSIMBadWindowSize) {
 
 TEST_F(VolumeOpsTest, SSIMDimensionMismatch) {
   auto a = make_const_vol(ctx, 4, 1.0);
-  volume b(ctx, dimension(8,8,8), Float, bounding_box(0,0,0,1,1,1));
+  volume b(ctx, dimension(8, 8, 8), Float, bounding_box(0, 0, 0, 1, 1, 1));
   EXPECT_THROW(vol_ssim(a, b), dimension_mismatch);
 }
 
@@ -341,7 +338,7 @@ TEST_F(VolumeOpsTest, ProjectSingleAngle) {
 
 TEST_F(VolumeOpsTest, ProjectMultipleAngles) {
   auto vol = make_const_vol(ctx, 8, 1.0);
-  std::vector<double> angles = {0.0, M_PI/4.0, M_PI/2.0};
+  std::vector<double> angles = {0.0, M_PI / 4.0, M_PI / 2.0};
   auto proj = vol_project(vol, angles, 0.5);
   EXPECT_EQ(proj.ZDim(), (uint64)3);
 }
@@ -358,9 +355,10 @@ TEST_F(VolumeOpsTest, ProjectNonzeroIntegrals) {
   auto proj = vol_project(vol, angles, 0.1);
   // A constant volume should produce positive projection values
   bool has_nonzero = false;
-  for(uint64 j = 0; j < proj.YDim(); j++)
-    for(uint64 i = 0; i < proj.XDim(); i++)
-      if(proj(i,j,0) > 0) has_nonzero = true;
+  for (uint64 j = 0; j < proj.YDim(); j++)
+    for (uint64 i = 0; i < proj.XDim(); i++)
+      if (proj(i, j, 0) > 0)
+        has_nonzero = true;
   EXPECT_TRUE(has_nonzero);
 }
 
@@ -370,12 +368,12 @@ TEST_F(VolumeOpsTest, ProjectNonzeroIntegrals) {
 
 TEST_F(VolumeOpsTest, BackProjectDimensions) {
   // Create a small "projection" volume: 8 x 8 x 2 (2 angles)
-  volume proj(ctx, dimension(8, 8, 2), Float, bounding_box(0,0,0,7,7,1));
-  for(uint64 k = 0; k < 2; k++)
-    for(uint64 j = 0; j < 8; j++)
-      for(uint64 i = 0; i < 8; i++)
+  volume proj(ctx, dimension(8, 8, 2), Float, bounding_box(0, 0, 0, 7, 7, 1));
+  for (uint64 k = 0; k < 2; k++)
+    for (uint64 j = 0; j < 8; j++)
+      for (uint64 i = 0; i < 8; i++)
         proj(i, j, k, 1.0);
-  std::vector<double> angles = {0.0, M_PI/2.0};
+  std::vector<double> angles = {0.0, M_PI / 2.0};
   auto recon = vol_back_project(proj, angles, 8, true);
   EXPECT_EQ(recon.XDim(), (uint64)8);
   EXPECT_EQ(recon.YDim(), (uint64)8);
@@ -383,9 +381,9 @@ TEST_F(VolumeOpsTest, BackProjectDimensions) {
 }
 
 TEST_F(VolumeOpsTest, BackProjectNoFilter) {
-  volume proj(ctx, dimension(4, 4, 1), Float, bounding_box(0,0,0,3,3,0));
-  for(uint64 j = 0; j < 4; j++)
-    for(uint64 i = 0; i < 4; i++)
+  volume proj(ctx, dimension(4, 4, 1), Float, bounding_box(0, 0, 0, 3, 3, 0));
+  for (uint64 j = 0; j < 4; j++)
+    for (uint64 i = 0; i < 4; i++)
       proj(i, j, 0, 1.0);
   std::vector<double> angles = {0.0};
   auto recon = vol_back_project(proj, angles, 4, false);
@@ -393,7 +391,7 @@ TEST_F(VolumeOpsTest, BackProjectNoFilter) {
 }
 
 TEST_F(VolumeOpsTest, BackProjectEmptyAngles) {
-  volume proj(ctx, dimension(4, 4, 1), Float, bounding_box(0,0,0,3,3,0));
+  volume proj(ctx, dimension(4, 4, 1), Float, bounding_box(0, 0, 0, 3, 3, 0));
   std::vector<double> empty;
   EXPECT_THROW(vol_back_project(proj, empty, 4), std::invalid_argument);
 }
@@ -420,10 +418,10 @@ TEST_F(VolumeOpsTest, RGBAMergeValues) {
   auto a = make_const_vol(ctx, 4, 40.0);
   auto merged = vol_rgba_merge(r, g, b, a);
   // Check interleaved pattern for voxel (1,1,1)
-  EXPECT_DOUBLE_EQ(merged(1*4+0, 1, 1), 10.0);
-  EXPECT_DOUBLE_EQ(merged(1*4+1, 1, 1), 20.0);
-  EXPECT_DOUBLE_EQ(merged(1*4+2, 1, 1), 30.0);
-  EXPECT_DOUBLE_EQ(merged(1*4+3, 1, 1), 40.0);
+  EXPECT_DOUBLE_EQ(merged(1 * 4 + 0, 1, 1), 10.0);
+  EXPECT_DOUBLE_EQ(merged(1 * 4 + 1, 1, 1), 20.0);
+  EXPECT_DOUBLE_EQ(merged(1 * 4 + 2, 1, 1), 30.0);
+  EXPECT_DOUBLE_EQ(merged(1 * 4 + 3, 1, 1), 40.0);
 }
 
 TEST_F(VolumeOpsTest, RGBAMergeMismatch) {

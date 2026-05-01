@@ -1,28 +1,27 @@
 /******************************************************************************
-				Copyright   
+                                Copyright
 
-This code is developed within the Computational Visualization Center at The 
+This code is developed within the Computational Visualization Center at The
 University of Texas at Austin.
 
-This code has been made available to you under the auspices of a Lesser General 
-Public License (LGPL) (http://www.ices.utexas.edu/cvc/software/license.html) 
+This code has been made available to you under the auspices of a Lesser General
+Public License (LGPL) (http://www.ices.utexas.edu/cvc/software/license.html)
 and terms that you have agreed to.
 
-Upon accepting the LGPL, we request you agree to acknowledge the use of use of 
-the code that results in any published work, including scientific papers, 
+Upon accepting the LGPL, we request you agree to acknowledge the use of use of
+the code that results in any published work, including scientific papers,
 films, and videotapes by citing the following references:
 
 C. Bajaj, Z. Yu, M. Auer
 Volumetric Feature Extraction and Visualization of Tomographic Molecular Imaging
-Journal of Structural Biology, Volume 144, Issues 1-2, October 2003, Pages 
+Journal of Structural Biology, Volume 144, Issues 1-2, October 2003, Pages
 132-143.
 
-If you desire to use this code for a profit venture, or if you do not wish to 
-accept LGPL, but desire usage of this code, please contact Chandrajit Bajaj 
-(bajaj@ices.utexas.edu) at the Computational Visualization Center at The 
+If you desire to use this code for a profit venture, or if you do not wish to
+accept LGPL, but desire usage of this code, please contact Chandrajit Bajaj
+(bajaj@ices.utexas.edu) at the Computational Visualization Center at The
 University of Texas at Austin for a different license.
 ******************************************************************************/
-
 
 #ifndef _XMLRPCSERVER_H_
 #define _XMLRPCSERVER_H_
@@ -30,12 +29,12 @@ University of Texas at Austin for a different license.
 // XmlRpc++ Copyright (c) 2002-2003 by Chris Morley
 //
 #if defined(_MSC_VER)
-# pragma warning(disable:4786)    // identifier was truncated in debug info
+#pragma warning(disable : 4786) // identifier was truncated in debug info
 #endif
 
 #ifndef MAKEDEPEND
-# include <map>
-# include <string>
+#include <map>
+#include <string>
 #endif
 
 #include <xmlrpc/XmlRpcDispatch.h>
@@ -43,87 +42,83 @@ University of Texas at Austin for a different license.
 
 namespace XmlRpc {
 
+// An abstract class supporting XML RPC methods
+class XmlRpcServerMethod;
 
-  // An abstract class supporting XML RPC methods
-  class XmlRpcServerMethod;
+// Class representing connections to specific clients
+class XmlRpcServerConnection;
 
-  // Class representing connections to specific clients
-  class XmlRpcServerConnection;
+// Class representing argument and result values
+class XmlRpcValue;
 
-  // Class representing argument and result values
-  class XmlRpcValue;
+//! A class to handle XML RPC requests
+class XmlRpcServer : public XmlRpcSource {
+public:
+  //! Create a server object.
+  XmlRpcServer();
+  //! Destructor.
+  virtual ~XmlRpcServer();
 
+  //! Specify whether introspection is enabled or not. Default is not enabled.
+  void enableIntrospection(bool enabled = true);
 
-  //! A class to handle XML RPC requests
-  class XmlRpcServer : public XmlRpcSource {
-  public:
-    //! Create a server object.
-    XmlRpcServer();
-    //! Destructor.
-    virtual ~XmlRpcServer();
+  //! Add a command to the RPC server
+  void addMethod(XmlRpcServerMethod *method);
 
-    //! Specify whether introspection is enabled or not. Default is not enabled.
-    void enableIntrospection(bool enabled=true);
+  //! Remove a command from the RPC server
+  void removeMethod(XmlRpcServerMethod *method);
 
-    //! Add a command to the RPC server
-    void addMethod(XmlRpcServerMethod* method);
+  //! Remove a command from the RPC server by name
+  void removeMethod(const std::string &methodName);
 
-    //! Remove a command from the RPC server
-    void removeMethod(XmlRpcServerMethod* method);
+  //! Look up a method by name
+  XmlRpcServerMethod *findMethod(const std::string &name) const;
 
-    //! Remove a command from the RPC server by name
-    void removeMethod(const std::string& methodName);
+  //! Create a socket, bind to the specified port, and
+  //! set it in listen mode to make it available for clients.
+  bool bindAndListen(int port, int backlog = 5);
 
-    //! Look up a method by name
-    XmlRpcServerMethod* findMethod(const std::string& name) const;
+  //! Process client requests for the specified time
+  void work(double msTime);
 
-    //! Create a socket, bind to the specified port, and
-    //! set it in listen mode to make it available for clients.
-    bool bindAndListen(int port, int backlog = 5);
+  //! Temporarily stop processing client requests and exit the work() method.
+  void exit();
 
-    //! Process client requests for the specified time
-    void work(double msTime);
+  //! Close all connections with clients and the socket file descriptor
+  void shutdown();
 
-    //! Temporarily stop processing client requests and exit the work() method.
-    void exit();
+  //! Introspection support
+  void listMethods(XmlRpcValue &result);
 
-    //! Close all connections with clients and the socket file descriptor
-    void shutdown();
+  // XmlRpcSource interface implementation
 
-    //! Introspection support
-    void listMethods(XmlRpcValue& result);
+  //! Handle client connection requests
+  virtual unsigned handleEvent(unsigned eventType);
 
-    // XmlRpcSource interface implementation
+  //! Remove a connection from the dispatcher
+  virtual void removeConnection(XmlRpcServerConnection *);
 
-    //! Handle client connection requests
-    virtual unsigned handleEvent(unsigned eventType);
+protected:
+  //! Accept a client connection request
+  virtual void acceptConnection();
 
-    //! Remove a connection from the dispatcher
-    virtual void removeConnection(XmlRpcServerConnection*);
+  //! Create a new connection object for processing requests from a specific client.
+  virtual XmlRpcServerConnection *createConnection(int socket);
 
-  protected:
+  // Whether the introspection API is supported by this server
+  bool _introspectionEnabled;
 
-    //! Accept a client connection request
-    virtual void acceptConnection();
+  // Event dispatcher
+  XmlRpcDispatch _disp;
 
-    //! Create a new connection object for processing requests from a specific client.
-    virtual XmlRpcServerConnection* createConnection(int socket);
+  // Collection of methods. This could be a set keyed on method name if we wanted...
+  typedef std::map<std::string, XmlRpcServerMethod *> MethodMap;
+  MethodMap _methods;
 
-    // Whether the introspection API is supported by this server
-    bool _introspectionEnabled;
-
-    // Event dispatcher
-    XmlRpcDispatch _disp;
-
-    // Collection of methods. This could be a set keyed on method name if we wanted...
-    typedef std::map< std::string, XmlRpcServerMethod* > MethodMap;
-    MethodMap _methods;
-
-    // system methods
-    XmlRpcServerMethod* _listMethods;
-    XmlRpcServerMethod* _methodHelp;
-
-  };
+  // system methods
+  XmlRpcServerMethod *_listMethods;
+  XmlRpcServerMethod *_methodHelp;
+};
 } // namespace XmlRpc
 
 #endif //_XMLRPCSERVER_H_

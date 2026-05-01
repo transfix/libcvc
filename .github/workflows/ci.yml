@@ -52,13 +52,13 @@ on:
 jobs:
   # ─────────────────────── Format check ────────────────────────
   #
-  # Enforces .clang-format on lines changed by this PR/push only.
-  # The codebase is not yet fully formatted, so this guard prevents
-  # *new* violations rather than flagging the historical baseline.
-  # When a wholesale format pass lands on main, this job can be
-  # tightened to check entire files.
+  # Enforces .clang-format on lines changed by this PR/push.
+  # A whole-tree format pass landed on master, so this job is now
+  # strict: any unformatted change fails the build. Run
+  # `git clang-format <merge-base>` locally before pushing, or
+  # `clang-format -i <file>` on touched files.
   format-check:
-    name: clang-format (changed lines, advisory)
+    name: clang-format (changed lines)
     runs-on: ubuntu-24.04
     # Cheap job: cancel previous in-progress runs on new pushes for fast feedback.
     concurrency:
@@ -102,14 +102,11 @@ jobs:
             echo "Formatting OK on changed lines."
             exit 0
           fi
-          # Advisory only while the codebase is gradually formatted.
-          # After the whole-tree clang-format pass lands on master,
-          # change this to `exit 1` to enforce the style.
-          echo "::warning::clang-format would reformat changed lines. To apply:"
+          echo "::error::clang-format would reformat changed lines. To apply:"
           echo "  git clang-format $base"
           echo
           echo "$out"
-          exit 0
+          exit 1
 
   # ──────────────────────────── Tests ────────────────────────────
   #
@@ -171,7 +168,7 @@ jobs:
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       # vcpkg builds Boost from source by downloading per-library tarballs
       # from github.com/boostorg/*. github.com periodically returns 502s
@@ -210,7 +207,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
           )
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
@@ -366,6 +363,19 @@ jobs:
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev
 
+      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
+      # at runtime when an NVIDIA driver is present. cudart is linked
+      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
+      # only need the NVIDIA driver, not a CUDA install. CMake's
+      # check_language(CUDA) auto-disables CUDA gracefully if this step
+      # ever fails.
+      - name: Install CUDA toolkit (Linux)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
@@ -447,7 +457,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=OFF \
-            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_CUDA=ON \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
@@ -609,14 +620,14 @@ jobs:
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
       - name: Configure
@@ -828,6 +839,17 @@ jobs:
           modules: ''
           cache: true
 
+      # CUDA toolkit so the shipped Windows artifacts can offload to
+      # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
+      # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
+      # so users only need the NVIDIA driver, not a CUDA install.
+      - name: Install CUDA toolkit (Windows)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
       - name: Install dependencies
         shell: pwsh
         env:
@@ -843,7 +865,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
@@ -889,11 +911,20 @@ jobs:
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) so CMake
+          # picks aqtinstall's complete Qt over vcpkg's qt6-base (which
+          # vtk[qt] pulls in transitively). The vcpkg qt6-base port is
+          # missing translations/Qt6/catalogs.json and (in Debug)
+          # Qt6OpenGLWidgetsd.dll, breaking windeployqt at install time.
+          # Empty fallback for libcvc-only jobs (no Qt env exported).
+          $qtPrefix = if ($env:QT_ROOT_DIR) { $env:QT_ROOT_DIR } else { '' }
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=OFF `
-            -DCVC_ENABLE_CUDA=OFF `
+            -DCVC_ENABLE_CUDA=ON `
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=$cgal `
             -DCVC_BUILD_VOLROVER3=$vol `
             -DCVC_ENABLE_MESHER=$vol `

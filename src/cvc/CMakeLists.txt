@@ -97,16 +97,47 @@ endif()
 
 # HDF5 support
 if(CVC_USING_HDF5)
-  find_package(HDF5 COMPONENTS C CXX)
+  # Prefer CMake CONFIG mode first: vcpkg ships a working
+  # hdf5-config.cmake (lowercase package name 'hdf5') that exposes
+  # imported targets like hdf5::hdf5-shared / hdf5::hdf5_cpp-shared.
+  # The bundled FindHDF5.cmake module-mode probe does not understand
+  # vcpkg's layout on Windows: it sniffs a stray header for the
+  # version, returns "found version 2.1.1" but never sets
+  # HDF5_INCLUDE_DIRS, so the build silently disables *.cvc support.
+  # Fall back to module mode for system installs (apt libhdf5-dev,
+  # brew hdf5) which provide a working FindHDF5 path but no config.
+  set(_hdf5_config_targets "")
+  find_package(hdf5 CONFIG QUIET)
+  if(hdf5_FOUND)
+    # vcpkg names imported targets hdf5::hdf5-shared / -static (and
+    # _cpp variants); brew + upstream HDF5 ship hdf5::hdf5 /
+    # hdf5::hdf5_cpp with no shared/static suffix. Probe both.
+    foreach(_cand
+        hdf5::hdf5-shared hdf5::hdf5-static hdf5::hdf5
+        hdf5::hdf5_cpp-shared hdf5::hdf5_cpp-static hdf5::hdf5_cpp)
+      if(TARGET ${_cand})
+        list(APPEND _hdf5_config_targets ${_cand})
+      endif()
+    endforeach()
+  endif()
+  if(_hdf5_config_targets)
+    set(HDF5_FOUND TRUE)
+    set(HDF5_LIBRARIES ${_hdf5_config_targets})
+    set(HDF5_INCLUDE_DIRS "")  # imported targets carry includes
+    set(HDF5_DEFINITIONS "")
+  else()
+    # Either no hdf5-config.cmake on prefix path, or its targets
+    # don't match anything we recognize. Fall back to module-mode
+    # FindHDF5, which works for apt libhdf5-dev and most system
+    # installs that ship a usable FindHDF5.cmake path.
+    find_package(HDF5 COMPONENTS C CXX)
+  endif()
   if(HDF5_FOUND)
     message(STATUS "HDF5 found - Enabling *.cvc file support")
-    
+
     add_compile_definitions(CVC_USING_HDF5 ${HDF5_DEFINITIONS})
     list(APPEND INCLUDE_FILES ../../inc/cvc/hdf5_utils.h)
-    list(APPEND SOURCE_FILES
-      hdf5_io.cpp
-      hdf5_utils.cpp
-    )
+    list(APPEND SOURCE_FILES hdf5_io.cpp hdf5_utils.cpp)
     list(APPEND CVC_INCLUDE_DIRS ${HDF5_INCLUDE_DIRS})
     list(APPEND CVC_LINK_LIBS ${HDF5_LIBRARIES})
   else()
@@ -657,9 +688,12 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_compile_definitions(cvc PUBLIC CVC_USING_OPENMP)
   # voxels.cpp uses unsigned loop indices and OpenMP `min`/`max` reductions
   # that the classic MSVC OpenMP runtime (spec 2.0) rejects. Opt into the
-  # LLVM OpenMP runtime on MSVC so those constructs compile as-is.
+  # LLVM OpenMP runtime on MSVC so those constructs compile as-is. Gate on
+  # COMPILE_LANGUAGE:CXX so nvcc (which rejects the unknown flag with
+  # "nvcc fatal: Unknown option '-openmp:llvm'") does not see it when it
+  # walks cvc's INTERFACE_COMPILE_OPTIONS for .cu sources.
   if(MSVC)
-    target_compile_options(cvc PRIVATE -openmp:llvm)
+    target_compile_options(cvc PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-openmp:llvm>)
   endif()
 endif()
 

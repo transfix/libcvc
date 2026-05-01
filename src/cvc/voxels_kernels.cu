@@ -54,8 +54,8 @@ __device__ inline double getTriVal_device(double val[8], double x, double y, dou
 // Template kernel for different voxel types
 template<typename T>
 __global__ void resize_trilinear_kernel(
-    const T* __restrict__ src_data,
-    T* __restrict__ dst_data,
+    const T* src_data,
+    T* dst_data,
     uint64 src_x, uint64 src_y, uint64 src_z,
     uint64 dst_x, uint64 dst_y, uint64 dst_z,
     double inSpaceX, double inSpaceY, double inSpaceZ)
@@ -229,8 +229,8 @@ extern "C" void cuda_resize_trilinear(
 // Template kernel for bounding box aware resize
 template<typename T>
 __global__ void resize_bbox_trilinear_kernel(
-    const T* __restrict__ src_data,
-    T* __restrict__ dst_data,
+    const T* src_data,
+    T* dst_data,
     uint64 dim_x, uint64 dim_y, uint64 dim_z,
     double offset_x, double offset_y, double offset_z,
     double scale_x, double scale_y, double scale_z)
@@ -388,9 +388,9 @@ extern "C" void cuda_resize_bbox_trilinear(
 // Kernel to compute partial min/max for a block of voxels
 template<typename T>
 __global__ void minmax_reduction_kernel(
-    const T* __restrict__ data,
-    double* __restrict__ block_mins,
-    double* __restrict__ block_maxs,
+    const T* data,
+    double* block_mins,
+    double* block_maxs,
     uint64 off_x, uint64 off_y, uint64 off_z,
     uint64 dim_x, uint64 dim_y, uint64 dim_z,
     uint64 vol_x, uint64 vol_y, uint64 vol_z)
@@ -619,8 +619,8 @@ extern "C" double cuda_compute_max(
 // Anisotropic diffusion kernel - processes one slice at a time
 template<typename T>
 __global__ void anisotropic_diffusion_slice_kernel(
-    const T* __restrict__ src_data,
-    T* __restrict__ dst_data,
+    const T* src_data,
+    T* dst_data,
     uint64 xdim, uint64 ydim,
     uint64 slice_idx, uint64 zdim,
     double K_para, double Lambda_para)
@@ -798,11 +798,11 @@ extern "C" void cuda_anisotropic_diffusion_slice(
 // Uses shared memory for the radiometric table to reduce global memory access
 template<typename T>
 __global__ void bilateral_filter_kernel(
-    const T* __restrict__ src_data,
-    T* __restrict__ dst_data,
+    const T* src_data,
+    T* dst_data,
     uint64 xdim, uint64 ydim, uint64 zdim,
-    const double* __restrict__ radiometricTable,
-    const double* __restrict__ spatialMask,
+    const double* radiometricTable,
+    const double* spatialMask,
     int filterRadius,
     double valueRange)
 {

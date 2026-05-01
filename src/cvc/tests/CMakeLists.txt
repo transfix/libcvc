@@ -92,7 +92,27 @@ target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
-  find_package(HDF5 REQUIRED COMPONENTS C CXX)
+  # Mirror src/cvc/CMakeLists.txt: prefer CONFIG (vcpkg), fall back to
+  # MODULE (apt/brew). The cvc target already links against HDF5, so
+  # this lookup is just to populate HDF5_LIBRARIES / HDF5_INCLUDE_DIRS
+  # for hdf5_test.cpp.
+  set(_hdf5_config_targets "")
+  find_package(hdf5 CONFIG QUIET)
+  if(hdf5_FOUND)
+    foreach(_cand
+        hdf5::hdf5-shared hdf5::hdf5-static hdf5::hdf5
+        hdf5::hdf5_cpp-shared hdf5::hdf5_cpp-static hdf5::hdf5_cpp)
+      if(TARGET ${_cand})
+        list(APPEND _hdf5_config_targets ${_cand})
+      endif()
+    endforeach()
+  endif()
+  if(_hdf5_config_targets)
+    set(HDF5_LIBRARIES ${_hdf5_config_targets})
+    set(HDF5_INCLUDE_DIRS "")
+  else()
+    find_package(HDF5 REQUIRED COMPONENTS C CXX)
+  endif()
   add_executable(hdf5_test hdf5_test.cpp)
   target_link_libraries(hdf5_test
     PRIVATE

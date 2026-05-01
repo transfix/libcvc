@@ -73,6 +73,19 @@ jobs:
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
             libmagick++-dev
 
+      # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
+      # at runtime when an NVIDIA driver is present. cudart is linked
+      # statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below) so users
+      # only need the NVIDIA driver, not a CUDA install. CMake's
+      # check_language(CUDA) auto-disables CUDA gracefully if this step
+      # ever fails.
+      - name: Install CUDA toolkit (Linux)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
@@ -132,7 +145,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=OFF \
-            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_CUDA=ON \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
@@ -258,14 +272,14 @@ jobs:
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
           brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6)" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
       - name: Configure
@@ -409,6 +423,17 @@ jobs:
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append $env:GITHUB_ENV
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
+      # CUDA toolkit so the shipped Windows artifacts can offload to
+      # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
+      # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
+      # so users only need the NVIDIA driver, not a CUDA install.
+      - name: Install CUDA toolkit (Windows)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
       - name: Install dependencies
         shell: pwsh
         env:
@@ -424,7 +449,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
@@ -453,11 +478,20 @@ jobs:
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) so CMake
+          # picks aqtinstall's complete Qt over vcpkg's qt6-base (which
+          # vtk[qt] pulls in transitively). The vcpkg qt6-base port is
+          # missing translations/Qt6/catalogs.json and (in Debug)
+          # Qt6OpenGLWidgetsd.dll, breaking windeployqt at install time.
+          # Empty fallback for libcvc-only jobs (no Qt env exported).
+          $qtPrefix = if ($env:QT_ROOT_DIR) { $env:QT_ROOT_DIR } else { '' }
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=OFF `
-            -DCVC_ENABLE_CUDA=OFF `
+            -DCVC_ENABLE_CUDA=ON `
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=$cgal `
             -DCVC_BUILD_VOLROVER3=$vol `
             -DCVC_ENABLE_MESHER=$vol `

@@ -11,9 +11,8 @@
 //   volrover3.  Uses a function-local static so callers never touch
 //   cvc::app::instance() (the singleton being phased out).
 // --------------------------------------------------------------------
-namespace volrover3
-{
-  cvc::app& app();
+namespace volrover3 {
+cvc::app &app();
 }
 
 #endif

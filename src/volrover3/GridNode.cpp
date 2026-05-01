@@ -18,24 +18,20 @@
 #include <vtkTransform.h>
 
 GridNode::GridNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name),
-      m_yzActor(vtkSmartPointer<vtkActor>::New()),
-      m_xzActor(vtkSmartPointer<vtkActor>::New()),
-      m_xyActor(vtkSmartPointer<vtkActor>::New()),
+    : GraphicsNode(statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
+      m_xzActor(vtkSmartPointer<vtkActor>::New()), m_xyActor(vtkSmartPointer<vtkActor>::New()),
       m_yzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_xzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_xyMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0), m_divisionsX(64),
-      m_divisionsY(64), m_divisionsZ(64), m_tickIntervalX(8),
-      m_tickIntervalY(8), m_tickIntervalZ(8), m_tickLabelFontSize(12),
-      m_yzPlaneVisible(true), m_xzPlaneVisible(true), m_xyPlaneVisible(true),
-      m_renderer(nullptr) {
+      m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0), m_divisionsX(64), m_divisionsY(64),
+      m_divisionsZ(64), m_tickIntervalX(8), m_tickIntervalY(8), m_tickIntervalZ(8),
+      m_tickLabelFontSize(12), m_yzPlaneVisible(true), m_xzPlaneVisible(true),
+      m_xyPlaneVisible(true), m_renderer(nullptr) {
   // Initialize default colors
   m_yzPlaneColor[0] = m_yzPlaneColor[1] = m_yzPlaneColor[2] = 0.5;
   m_xzPlaneColor[0] = m_xzPlaneColor[1] = m_xzPlaneColor[2] = 0.5;
   m_xyPlaneColor[0] = m_xyPlaneColor[1] = m_xyPlaneColor[2] = 0.5;
-  m_tickLabelColor[0] = m_tickLabelColor[1] = m_tickLabelColor[2] =
-      1.0; // White
+  m_tickLabelColor[0] = m_tickLabelColor[1] = m_tickLabelColor[2] = 1.0; // White
 
   // Setup YZ plane actor (at X=0)
   m_yzActor->SetMapper(m_yzMapper);
@@ -184,10 +180,9 @@ void GridNode::removeFromRenderer(vtkRenderer *renderer) {
 }
 
 void GridNode::setBounds(const cvc::bounding_box &bounds) {
-  std::cout << "[DEBUG] GridNode::setBounds called with bounds: ["
-            << bounds[0] << "," << bounds[1] << "," << bounds[2] << "] to ["
-            << bounds[3] << "," << bounds[4] << "," << bounds[5] << "]"
-            << std::endl;
+  std::cout << "[DEBUG] GridNode::setBounds called with bounds: [" << bounds[0] << "," << bounds[1]
+            << "," << bounds[2] << "] to [" << bounds[3] << "," << bounds[4] << "," << bounds[5]
+            << "]" << std::endl;
   m_bounds = bounds;
   createGridPlanes();
   updateTickLabelsInRenderer();
@@ -232,8 +227,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
         actor->SetVisibility(m_xyPlaneVisible);
       }
     });
-  } else if (childState == "yz_plane.color_r" ||
-             childState == "yz_plane.color_g" ||
+  } else if (childState == "yz_plane.color_r" || childState == "yz_plane.color_g" ||
              childState == "yz_plane.color_b") {
     runOnMainThread([this]() {
       // Only update if all color components can be read
@@ -256,8 +250,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
       double opacity = getState("yz_plane.opacity").value<double>();
       m_yzActor->GetProperty()->SetOpacity(opacity);
     });
-  } else if (childState == "xz_plane.color_r" ||
-             childState == "xz_plane.color_g" ||
+  } else if (childState == "xz_plane.color_r" || childState == "xz_plane.color_g" ||
              childState == "xz_plane.color_b") {
     runOnMainThread([this]() {
       try {
@@ -279,8 +272,7 @@ void GridNode::handleStateChanged(const std::string &childState) {
       double opacity = getState("xz_plane.opacity").value<double>();
       m_xzActor->GetProperty()->SetOpacity(opacity);
     });
-  } else if (childState == "xy_plane.color_r" ||
-             childState == "xy_plane.color_g" ||
+  } else if (childState == "xy_plane.color_r" || childState == "xy_plane.color_g" ||
              childState == "xy_plane.color_b") {
     runOnMainThread([this]() {
       try {
@@ -315,24 +307,19 @@ void GridNode::handleStateChanged(const std::string &childState) {
         // Ignore - values not fully initialized yet
       }
     });
-  } else if (childState == "tics.interval_x" ||
-             childState == "tics.interval_y" ||
+  } else if (childState == "tics.interval_x" || childState == "tics.interval_y" ||
              childState == "tics.interval_z") {
     runOnMainThread([this]() {
       try {
-        m_tickIntervalX =
-            std::max(1, getState("tics.interval_x").value<int>());
-        m_tickIntervalY =
-            std::max(1, getState("tics.interval_y").value<int>());
-        m_tickIntervalZ =
-            std::max(1, getState("tics.interval_z").value<int>());
+        m_tickIntervalX = std::max(1, getState("tics.interval_x").value<int>());
+        m_tickIntervalY = std::max(1, getState("tics.interval_y").value<int>());
+        m_tickIntervalZ = std::max(1, getState("tics.interval_z").value<int>());
         updateTickLabelsInRenderer();
       } catch (const boost::bad_lexical_cast &) {
         // Ignore - values not fully initialized yet
       }
     });
-  } else if (childState == "tics.label_color_r" ||
-             childState == "tics.label_color_g" ||
+  } else if (childState == "tics.label_color_r" || childState == "tics.label_color_g" ||
              childState == "tics.label_color_b") {
     runOnMainThread([this]() {
       try {
@@ -341,16 +328,14 @@ void GridNode::handleStateChanged(const std::string &childState) {
         m_tickLabelColor[2] = getState("tics.label_color_b").value<double>();
 
         // Update all existing labels
-        auto updateLabels =
-            [&](std::vector<vtkSmartPointer<vtkActor2D>> &actors) {
-              for (auto &actor : actors) {
-                vtkTextMapper *mapper =
-                    vtkTextMapper::SafeDownCast(actor->GetMapper());
-                if (mapper) {
-                  mapper->GetTextProperty()->SetColor(m_tickLabelColor);
-                }
-              }
-            };
+        auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>> &actors) {
+          for (auto &actor : actors) {
+            vtkTextMapper *mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
+            if (mapper) {
+              mapper->GetTextProperty()->SetColor(m_tickLabelColor);
+            }
+          }
+        };
 
         updateLabels(m_yzTickLabelActors);
         updateLabels(m_xzTickLabelActors);
@@ -361,20 +346,17 @@ void GridNode::handleStateChanged(const std::string &childState) {
     });
   } else if (childState == "tics.label_font_size") {
     runOnMainThread([this]() {
-      m_tickLabelFontSize =
-          std::max(1, getState("tics.label_font_size").value<int>());
+      m_tickLabelFontSize = std::max(1, getState("tics.label_font_size").value<int>());
 
       // Update all existing labels
-      auto updateLabels =
-          [&](std::vector<vtkSmartPointer<vtkActor2D>> &actors) {
-            for (auto &actor : actors) {
-              vtkTextMapper *mapper =
-                  vtkTextMapper::SafeDownCast(actor->GetMapper());
-              if (mapper) {
-                mapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
-              }
-            }
-          };
+      auto updateLabels = [&](std::vector<vtkSmartPointer<vtkActor2D>> &actors) {
+        for (auto &actor : actors) {
+          vtkTextMapper *mapper = vtkTextMapper::SafeDownCast(actor->GetMapper());
+          if (mapper) {
+            mapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
+          }
+        }
+      };
 
       updateLabels(m_yzTickLabelActors);
       updateLabels(m_xzTickLabelActors);
@@ -659,16 +641,14 @@ void GridNode::createYZTickLabels() {
     std::ostringstream oss;
     oss << j;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
@@ -686,16 +666,14 @@ void GridNode::createYZTickLabels() {
     std::ostringstream oss;
     oss << k;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
@@ -737,16 +715,14 @@ void GridNode::createXZTickLabels() {
     std::ostringstream oss;
     oss << i;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
@@ -764,16 +740,14 @@ void GridNode::createXZTickLabels() {
     std::ostringstream oss;
     oss << k;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
@@ -815,16 +789,14 @@ void GridNode::createXYTickLabels() {
     std::ostringstream oss;
     oss << i;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
@@ -842,16 +814,14 @@ void GridNode::createXYTickLabels() {
     std::ostringstream oss;
     oss << j;
 
-    vtkSmartPointer<vtkTextMapper> textMapper =
-        vtkSmartPointer<vtkTextMapper>::New();
+    vtkSmartPointer<vtkTextMapper> textMapper = vtkSmartPointer<vtkTextMapper>::New();
     textMapper->SetInput(oss.str().c_str());
     textMapper->GetTextProperty()->SetFontSize(m_tickLabelFontSize);
     textMapper->GetTextProperty()->SetColor(m_tickLabelColor);
     textMapper->GetTextProperty()->SetJustificationToCentered();
     textMapper->GetTextProperty()->SetVerticalJustificationToCentered();
 
-    vtkSmartPointer<vtkActor2D> textActor =
-        vtkSmartPointer<vtkActor2D>::New();
+    vtkSmartPointer<vtkActor2D> textActor = vtkSmartPointer<vtkActor2D>::New();
     textActor->SetMapper(textMapper);
 
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
