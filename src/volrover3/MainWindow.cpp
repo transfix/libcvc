@@ -422,7 +422,7 @@ void MainWindow::openFile() {
 
       try {
         // Try loading as volume
-        cvc::volume vol(cvcapp, fileName.toStdString());
+        cvc::volume vol(volrover3::app(), fileName.toStdString());
         auto volumeNode = m_sceneGraph->addGraphics(graphicsName, vol);
         volumeNode->setMetadata("type", std::string("volume"));
         volumeNode->setMetadata("filename", fileName.toStdString());
