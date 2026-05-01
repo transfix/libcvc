@@ -229,10 +229,6 @@ void volume_file_io::insertHandler(handler_map &hm, const ptr &vfio) {
   }
 }
 
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, unsigned int time) {
-  readVolumeFile(app::instance(), vol, filename, var, time);
-}
-
 // --------------
 // readVolumeFile
 // --------------
@@ -245,11 +241,6 @@ void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, 
 // 12/28/2009 -- Joe R. -- Collecting exception error strings
 // 09/05/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, unsigned int time,
-                    uint64 off_x, uint64 off_y, uint64 off_z, const dimension &subvoldim) {
-  readVolumeFile(app::instance(), vol, filename, var, time, off_x, off_y, off_z, subvoldim);
-}
-
 // --------------
 // readVolumeFile (ctx-aware)
 // --------------
@@ -298,11 +289,6 @@ void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned
 // 01/03/2010 -- Joe R. -- Re-implemented using volume_file_io handler map.
 // 09/05/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, unsigned int time,
-                    const bounding_box &subvolbox) {
-  readVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
-}
-
 // --------------
 // readVolumeFile (ctx-aware, bbox)
 // --------------
@@ -339,10 +325,6 @@ void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned
                                                 BOOST_CURRENT_FUNCTION % filename % errors));
 }
 
-void readVolumeFile(std::vector<volume> &vols, const std::string &filename) {
-  readVolumeFile(app::instance(), vols, filename);
-}
-
 // ---------------
 // writeVolumeFile
 // ---------------
@@ -355,11 +337,6 @@ void readVolumeFile(std::vector<volume> &vols, const std::string &filename) {
 // 12/28/2009 -- Joe R. -- Collecting exception error strings
 // 09/05/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
-void writeVolumeFile(const volume &vol, const std::string &filename, unsigned int var,
-                     unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z) {
-  writeVolumeFile(app::instance(), vol, filename, var, time, off_x, off_y, off_z);
-}
-
 // ---------------
 // writeVolumeFile (ctx-aware, offset)
 // ---------------
@@ -457,11 +434,6 @@ void writeVolumeFile(app &ctx, const volume &vol, const std::string &filename, u
   writeVolumeFile(ctx, subvol, filename, var, time, off_x, off_y, off_z);
 }
 
-void writeVolumeFile(const volume &vol, const std::string &filename, unsigned int var,
-                     unsigned int time, const bounding_box &subvolbox) {
-  writeVolumeFile(app::instance(), vol, filename, var, time, subvolbox);
-}
-
 // ---------------
 // writeVolumeFile
 // ---------------
@@ -470,9 +442,6 @@ void writeVolumeFile(const volume &vol, const std::string &filename, unsigned in
 //   such an operation.
 // ---- Change History ----
 // ??/??/2007 -- Joe R. -- Creation.
-void writeVolumeFile(const std::vector<volume> &vols, const std::string &filename) {
-  writeVolumeFile(app::instance(), vols, filename);
-}
 
 // ----------------
 // createVolumeFile
@@ -486,13 +455,6 @@ void writeVolumeFile(const std::vector<volume> &vols, const std::string &filenam
 // 12/28/2009 -- Joe R. -- Collecting exception error strings
 // 09/05/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
-void createVolumeFile(const std::string &filename, const bounding_box &boundingBox,
-                      const dimension &dimension, const std::vector<data_type> &voxelTypes,
-                      unsigned int numVariables, unsigned int numTimesteps, double min_time,
-                      double max_time) {
-  createVolumeFile(app::instance(), filename, boundingBox, dimension, voxelTypes, numVariables,
-                   numTimesteps, min_time, max_time);
-}
 
 // ---------------
 // readBoundingBox
@@ -501,10 +463,6 @@ void createVolumeFile(const std::string &filename, const bounding_box &boundingB
 //  Returns a volume file's bounding box.
 // ---- Change History ----
 // 04/06/2012 -- Joe R. -- Creation.
-bounding_box readBoundingBox(const std::string &filename) {
-  return readBoundingBox(app::instance(), filename);
-}
-
 bounding_box readBoundingBox(app &ctx, const std::string &filename) {
   return volume_file_info(ctx, filename).boundingBox();
 }
@@ -516,10 +474,6 @@ bounding_box readBoundingBox(app &ctx, const std::string &filename) {
 //  Changes a volume file's bounding box.
 // ---- Change History ----
 // 04/06/2012 -- Joe R. -- Creation.
-void writeBoundingBox(const bounding_box &bbox, const std::string &filename) {
-  writeBoundingBox(app::instance(), bbox, filename);
-}
-
 void writeBoundingBox(app &ctx, const bounding_box &bbox, const std::string &filename) {
   std::string errors;
   boost::smatch what;
@@ -551,9 +505,8 @@ void writeBoundingBox(app &ctx, const bounding_box &bbox, const std::string &fil
 }
 
 // ---- app& overloads ----
-// These accept an explicit app context instead of using the singleton.
-// The ctx-aware versions are primary; legacy overloads delegate to them
-// via app::instance() for backward compatibility.
+// Convenience overloads that fill in defaulted args / build composite
+// behavior on top of the primary ctx-aware bridges defined above.
 
 void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
                     unsigned int time) {

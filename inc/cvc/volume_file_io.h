@@ -244,66 +244,11 @@ private:
 };
 
 // ------------------------- Volume I/O API
-
-/*
-  read the specified subvolume from the specified file and copy it to the object
-  vol.
-*/
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, unsigned int time,
-                    uint64 off_x, uint64 off_y, uint64 off_z, const dimension &subvoldim);
-
-/*
-  read the specified subvolume from the specified file and copy it to the object
-  vol.
-*/
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var, unsigned int time,
-                    const bounding_box &subvolbox);
-
-/*
-  read the entire volume from the specified file and copy it to the object vol.
-*/
-void readVolumeFile(volume &vol, const std::string &filename, unsigned int var = 0,
-                    unsigned int time = 0);
-
-/*
-  Read multi-volume file and add each volume to the vector vols.
-*/
-void readVolumeFile(std::vector<volume> &vols, const std::string &filename);
-
-/*
-  write the specified volume to the specified offset in file 'filename'
-*/
-void writeVolumeFile(const volume &vol, const std::string &filename, unsigned int var = 0,
-                     unsigned int time = 0, uint64 off_x = 0, uint64 off_y = 0, uint64 off_z = 0);
-
-/*
-  write the specified volume to the specified subvolume bounding box in file 'filename'
-*/
-void writeVolumeFile(const volume &vol, const std::string &filename, unsigned int var,
-                     unsigned int time, const bounding_box &subvolbox);
-
-/*
-  Writes the vector 'vols' to the specified file.  Make sure that the file extension
-  specified is for a volume file type that supports multi-volumes. Assumes 1 timestep.
-*/
-void writeVolumeFile(const std::vector<volume> &vols, const std::string &filename);
-
-/*
-  Creates a volume file using the specified information.
-*/
-void createVolumeFile(const std::string &filename, const bounding_box &boundingBox,
-                      const dimension &dimension,
-                      const std::vector<data_type> &voxelTypes = std::vector<data_type>(1, UChar),
-                      unsigned int numVariables = 1, unsigned int numTimesteps = 1,
-                      double min_time = 0.0, double max_time = 0.0);
-
-// Functions for reading and writing volume bounding boxes
-bounding_box readBoundingBox(const std::string &filename);
-void writeBoundingBox(const bounding_box &bbox, const std::string &filename);
-
-// ---- Overloads accepting explicit app& context ----
-// These avoid the app::instance() singleton. Legacy overloads above
-// delegate to app::instance() internally.
+//
+// All free-function I/O takes an explicit cvc::app context so each
+// caller controls thread/property/data scoping. (The earlier
+// parameterless overloads that delegated to app::instance() have been
+// removed.)
 
 void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var = 0,
                     unsigned int time = 0);
