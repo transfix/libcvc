@@ -118,10 +118,6 @@ void calcGradient(app &ctx, std::vector<volume> &grad, const volume &vol, data_t
   ctx.threadProgress(1.0f);
 }
 
-void calcGradient(std::vector<volume> &grad, const volume &vol, data_type vt) {
-  calcGradient(app::instance(), grad, vol, vt);
-}
-
 void sub(app &ctx, volume &dest, const volume &vol, uint64 off_x, uint64 off_y, uint64 off_z,
          const dimension &subvoldim) {
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
@@ -144,11 +140,6 @@ void sub(app &ctx, volume &dest, const volume &vol, uint64 off_x, uint64 off_y, 
     for (uint64 j = 0; j < subvoldim[1]; j++)
       for (uint64 i = 0; i < subvoldim[0]; i++)
         dest(i, j, k, vol(i + off_x, j + off_y, k + off_z));
-}
-
-void sub(volume &dest, const volume &vol, uint64 off_x, uint64 off_y, uint64 off_z,
-         const dimension &subvoldim) {
-  sub(app::instance(), dest, vol, off_x, off_y, off_z, subvoldim);
 }
 
 void volconvert(app &ctx, const std::string &input_volume_file,
@@ -178,10 +169,6 @@ void volconvert(app &ctx, const std::string &input_volume_file,
       }
     ctx.threadProgress(((float)k) / ((float)((int)(volinfo.ZDim() - 1))));
   }
-}
-
-void volconvert(const std::string &input_volume_file, const std::string &output_volume_file) {
-  volconvert(app::instance(), input_volume_file, output_volume_file);
 }
 
 // ----
@@ -291,8 +278,6 @@ boost::any load(app &ctx, const std::string &filename) {
   return boost::any();
 }
 
-boost::any load(const std::string &filename) { return load(app::instance(), filename); }
-
 void save(app &ctx, const boost::any &data, const std::string &filename) {
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (is_geometry(data)) {
@@ -305,7 +290,4 @@ void save(app &ctx, const boost::any &data, const std::string &filename) {
     throw CVC_NAMESPACE::write_error(BOOST_CURRENT_FUNCTION);
 }
 
-void save(const boost::any &data, const std::string &filename) {
-  save(app::instance(), data, filename);
-}
 } // namespace CVC_NAMESPACE
