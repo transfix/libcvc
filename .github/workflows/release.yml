@@ -478,9 +478,17 @@ jobs:
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) so CMake
+          # picks aqtinstall's complete Qt over vcpkg's qt6-base (which
+          # vtk[qt] pulls in transitively). The vcpkg qt6-base port is
+          # missing translations/Qt6/catalogs.json and (in Debug)
+          # Qt6OpenGLWidgetsd.dll, breaking windeployqt at install time.
+          # Empty fallback for libcvc-only jobs (no Qt env exported).
+          $qtPrefix = if ($env:QT_ROOT_DIR) { $env:QT_ROOT_DIR } else { '' }
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=OFF `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
