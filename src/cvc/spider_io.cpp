@@ -553,9 +553,9 @@ struct spider_io : public volume_file_io {
   // ??/??/2008 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
   // 12/11/2009 -- Joe R. -- Freeing buf if read successful.
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data &d,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data &d,
                                  const std::string &filename) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     int dim[3];
     float *buf = NULL;
@@ -623,10 +623,10 @@ struct spider_io : public volume_file_io {
   // ??/??/2008 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
   // 12/11/2009 -- Joe R. -- Freeing data buffer.
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
                               unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
                               uint64 off_z, const dimension &subvoldim) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     int dim[3];
     float *data = NULL;
@@ -681,12 +681,12 @@ struct spider_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2008 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class.
-  virtual void createVolumeFile(app & /*ctx*/, const std::string &filename,
+  virtual void createVolumeFile(app &ctx, const std::string &filename,
                                 const bounding_box &boundingBox, const dimension &dimension,
                                 const std::vector<data_type> &voxelTypes, unsigned int numVariables,
                                 unsigned int numTimesteps, double min_time, double max_time) const {
     using namespace boost;
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     int dim[3] = {static_cast<int>(dimension[0]), static_cast<int>(dimension[1]),
                   static_cast<int>(dimension[2])};
@@ -772,7 +772,7 @@ protected:
 } // namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE {
-void register_spider_io(app & /*ctx*/) {
+void register_spider_io(app &ctx) {
   volume_file_io::insertHandler(volume_file_io::ptr(new spider_io));
 }
 } // namespace CVC_NAMESPACE

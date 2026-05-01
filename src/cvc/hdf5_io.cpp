@@ -311,12 +311,12 @@ struct hdf5_io : public volume_file_io {
   // 09/02/2011 -- Joe R. -- Forgot to copy filename to data.
   // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
   //                         multi-res hierarchy thread code simpler.
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data &d,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data &d,
                                  const std::string &filename) const {
     using namespace hdf5_utils;
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
@@ -456,14 +456,14 @@ struct hdf5_io : public volume_file_io {
   // 08/05/2011 -- Joe R. -- Using HDF5 Utilities now.
   // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
   //                         multi-res hierarchy thread code simpler.
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
                               unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
                               uint64 off_z, const dimension &subvoldim) const {
     using namespace H5;
     using namespace hdf5_utils;
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
@@ -542,13 +542,13 @@ struct hdf5_io : public volume_file_io {
   //                         multi-res hierarchy thread code simpler.
   // 09/17/2011 -- Joe R. -- Picking out the closest dimension to the maxdim in
   //                         the hierarchy.
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename,
                               unsigned int var, unsigned int time,
                               const bounding_box &subvolbox) const {
     using namespace hdf5_utils;
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
@@ -666,7 +666,7 @@ struct hdf5_io : public volume_file_io {
   // 09/02/2011 -- Joe R. -- Calling new createHDF5File function.
   // 09/08/2011 -- Joe R. -- Only creating a file if none exists, else just re-using it.
   // 09/30/2011 -- Joe R. -- Added objectType attribute.
-  virtual void createVolumeFile(app & /*ctx*/, const std::string &filename,
+  virtual void createVolumeFile(app &ctx, const std::string &filename,
                                 const bounding_box &boundingBox, const dimension &dimension,
                                 const std::vector<data_type> &voxelTypes, unsigned int numVariables,
                                 unsigned int numTimesteps, double min_time, double max_time) const {
@@ -674,7 +674,7 @@ struct hdf5_io : public volume_file_io {
     namespace fs = boost::filesystem;
     using boost::filesystem::path;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
@@ -738,13 +738,13 @@ struct hdf5_io : public volume_file_io {
   // 08/28/2011 -- Joe R. -- Using HDF5 Utilities now.
   // 09/09/2011 -- Joe R. -- Adding support for ungrouped, lone datasets to make
   //                         multi-res hierarchy thread code simpler.
-  virtual void writeVolumeFile(app & /*ctx*/, const volume &wvol, const std::string &filename,
+  virtual void writeVolumeFile(app &ctx, const volume &wvol, const std::string &filename,
                                unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
                                uint64 off_z) const {
     using namespace hdf5_utils;
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
@@ -825,12 +825,12 @@ struct hdf5_io : public volume_file_io {
   //   Writes the specified bounding box to the file.
   // ---- Change History ----
   // 04/06/2012 -- Joe R. -- Creation.
-  virtual void writeBoundingBox(app & /*ctx*/, const bounding_box &bbox,
+  virtual void writeBoundingBox(app &ctx, const bounding_box &bbox,
                                 const std::string &filename) const {
     using namespace hdf5_utils;
     using namespace boost;
 
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     std::string actualFileName;
     std::string objectName;
