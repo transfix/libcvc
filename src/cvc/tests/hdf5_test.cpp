@@ -17,10 +17,12 @@
 #include <cvc/dimension.h>
 #include <cvc/hdf5_utils.h>
 #include <cvc/volume.h>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace CVC_NAMESPACE;
@@ -28,7 +30,7 @@ using namespace CVC_NAMESPACE;
 // ===========================
 // HDF5 Test Fixture
 // ===========================
-// Creates temporary test files in a process-ID-specific directory
+// Creates temporary test files in a thread/process-unique directory
 // to allow parallel test execution
 
 class HDF5Test : public ::testing::Test {
@@ -36,20 +38,23 @@ protected:
   std::string test_dir;
 
   virtual void SetUp() {
-    // Create a unique directory for this test process
-    pid_t pid = getpid();
-    test_dir =
-        std::string(getenv("CMAKE_CURRENT_BINARY_DIR") ? getenv("CMAKE_CURRENT_BINARY_DIR") : ".") +
-        "/hdf5_test_" + boost::lexical_cast<std::string>(pid);
-
-    // Create directory if it doesn't exist
-    mkdir(test_dir.c_str(), 0777);
+    // Create a unique directory for this test process. std::filesystem +
+    // std::this_thread::get_id() is portable across POSIX and Windows
+    // (the previous getpid() / mkdir(mode) usage is POSIX-only).
+    namespace fs = std::filesystem;
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    fs::path base = std::getenv("CMAKE_CURRENT_BINARY_DIR")
+                        ? fs::path(std::getenv("CMAKE_CURRENT_BINARY_DIR"))
+                        : fs::current_path();
+    fs::path dir = base / ("hdf5_test_" + oss.str());
+    fs::create_directories(dir);
+    test_dir = dir.string();
   }
 
   virtual void TearDown() {
-    // Clean up test files
-    std::string cmd = "rm -rf " + test_dir;
-    system(cmd.c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(test_dir, ec);
   }
 
   std::string getTestFilePath(const std::string &filename) { return test_dir + "/" + filename; }
