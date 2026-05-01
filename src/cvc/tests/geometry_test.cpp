@@ -934,7 +934,7 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   // First create an SDF from the bunny
   std::cout << "Creating SDF from bunny mesh..." << std::endl;
   dimension sdf_dim(64, 64, 64);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract a tetrahedral mesh from the SDF
   std::cout << "Extracting tetrahedral mesh from SDF..." << std::endl;
@@ -1092,7 +1092,7 @@ TEST_F(AlgorithmTest, SDFBasic) {
   dimension dim(32, 32, 32);
   bounding_box bbox(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
 
-  volume sdf_vol = sdf(cvcapp, cube, dim, bbox);
+  volume sdf_vol = sdf(ctx, cube, dim, bbox);
 
   // Verify SDF properties
   EXPECT_EQ(sdf_vol.XDim(), 32);
@@ -1200,7 +1200,7 @@ TEST_F(AlgorithmTest, SDFThenIsoRoundtrip) {
   // Convert to SDF (use smaller dimensions to avoid memory issues)
   dimension dim(16, 16, 16);
   bounding_box bbox(-2.0, -2.0, -1.0, 2.0, 2.0, 2.0);
-  volume sdf_vol = sdf(cvcapp, original, dim, bbox);
+  volume sdf_vol = sdf(ctx, original, dim, bbox);
 
   // Extract isosurface
   geometry reconstructed = iso(sdf_vol, 0.0);
@@ -1248,7 +1248,7 @@ TEST_F(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   dimension dim(64, 64, 64);
 
   std::cout << "Computing SDF at 64^3 resolution..." << std::endl;
-  volume sdf_vol = sdf(cvcapp, bunny_original, dim, bbox);
+  volume sdf_vol = sdf(ctx, bunny_original, dim, bbox);
 
   // Verify SDF was created
   EXPECT_EQ(sdf_vol.XDim(), 64);
@@ -1369,7 +1369,7 @@ TEST_F(AlgorithmTest, BunnyVolumeConvergence) {
 
     // Generate SDF at this resolution
     dimension dim(res, res, res);
-    volume sdf_vol = sdf(cvcapp, bunny_geom, dim, bbox);
+    volume sdf_vol = sdf(ctx, bunny_geom, dim, bbox);
 
     // Verify SDF was created
     EXPECT_EQ(sdf_vol.XDim(), static_cast<uint64>(res));
@@ -1477,7 +1477,7 @@ TEST_F(AlgorithmTest, SDFV2Basic) {
   dimension dim(32, 32, 32);
   bounding_box bbox(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
 
-  volume sdf_vol = sdf(cvcapp, cube, dim, bbox, SDF_V2);
+  volume sdf_vol = sdf(ctx, cube, dim, bbox, SDF_V2);
 
   // Verify SDF properties
   EXPECT_EQ(sdf_vol.XDim(), 32);
@@ -1526,10 +1526,10 @@ TEST_F(AlgorithmTest, SDFV1vsV2Comparison) {
 
   // Compute SDF with both algorithms
   std::cout << "Computing SDF v1..." << std::endl;
-  volume sdf_v1 = sdf(cvcapp, pyramid, dim, bbox, SDF_V1);
+  volume sdf_v1 = sdf(ctx, pyramid, dim, bbox, SDF_V1);
 
   std::cout << "Computing SDF v2..." << std::endl;
-  volume sdf_v2 = sdf(cvcapp, pyramid, dim, bbox, SDF_V2);
+  volume sdf_v2 = sdf(ctx, pyramid, dim, bbox, SDF_V2);
 
   // Both should have reasonable interior voxel counts
   EXPECT_EQ(sdf_v1.XDim(), 32);
@@ -1594,10 +1594,10 @@ TEST_F(AlgorithmTest, SDFFlipNormalsV1) {
   bounding_box bbox(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
 
   // Compute SDF with normal normals
-  volume sdf_normal = sdf(cvcapp, cube, dim, bbox, SDF_V1, false);
+  volume sdf_normal = sdf(ctx, cube, dim, bbox, SDF_V1, false);
 
   // Compute SDF with flipped normals
-  volume sdf_flipped = sdf(cvcapp, cube, dim, bbox, SDF_V1, true);
+  volume sdf_flipped = sdf(ctx, cube, dim, bbox, SDF_V1, true);
 
   std::cout << "Testing center point (should be inside cube)" << std::endl;
   std::cout << "  Normal SDF:  " << sdf_normal(8, 8, 8) << std::endl;
@@ -1649,10 +1649,10 @@ TEST_F(AlgorithmTest, SDFFlipNormalsV2) {
   bounding_box bbox(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0);
 
   // Compute SDF with normal normals
-  volume sdf_normal = sdf(cvcapp, cube, dim, bbox, SDF_V2, false);
+  volume sdf_normal = sdf(ctx, cube, dim, bbox, SDF_V2, false);
 
   // Compute SDF with flipped normals
-  volume sdf_flipped = sdf(cvcapp, cube, dim, bbox, SDF_V2, true);
+  volume sdf_flipped = sdf(ctx, cube, dim, bbox, SDF_V2, true);
 
   std::cout << "Testing center point (should be inside cube)" << std::endl;
   std::cout << "  Normal SDF:  " << sdf_normal(8, 8, 8) << std::endl;
@@ -1707,7 +1707,7 @@ TEST_F(GeometryTest, SDFV1MultipleSequentialCalls) {
     std::cout << "Call " << (i + 1) << ": Computing SDF v1 at " << dim_size << "³..." << std::flush;
 
     try {
-      volume sdf_vol = sdf(cvcapp, bunny, dim, bbox, SDF_V1);
+      volume sdf_vol = sdf(ctx, bunny, dim, bbox, SDF_V1);
 
       // Verify dimensions
       EXPECT_EQ(sdf_vol.XDim(), dim_size);
@@ -1815,8 +1815,8 @@ TEST_F(AlgorithmTest, SDFV2ParallelExecution) {
   std::cout << "Launching 4 parallel SDF v2 computations via thread pool..." << std::endl;
 
   // Set pool size to allow all 4 to run concurrently if we have cores
-  unsigned int original_pool_size = cvcapp.getThreadPoolSize();
-  cvcapp.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
+  unsigned int original_pool_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
 
   // Submit all tasks with unique keys (wait=false means don't wait for existing thread)
   for (int i = 0; i < 4; i++) {
@@ -1825,11 +1825,11 @@ TEST_F(AlgorithmTest, SDFV2ParallelExecution) {
 
     // Capture by value to avoid dangling references
     geometry geom = geometries[i];
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
-        [&results, &completed, geom, i, dim, bbox]() {
+        [this, &results, &completed, geom, i, dim, bbox]() {
           std::cout << "  Thread " << i << " computing SDF v2..." << std::endl;
-          results[i] = sdf(cvcapp, geom, dim, bbox, SDF_V2);
+          results[i] = sdf(ctx, geom, dim, bbox, SDF_V2);
           completed++;
           std::cout << "  Thread " << i << " completed!" << std::endl;
         },
@@ -1838,15 +1838,15 @@ TEST_F(AlgorithmTest, SDFV2ParallelExecution) {
 
   // Wait for all threads to complete
   for (const auto &key : task_keys) {
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr)
         tptr->join();
     }
   }
 
   // Restore original pool size
-  cvcapp.setThreadPoolSize(original_pool_size);
+  ctx.setThreadPoolSize(original_pool_size);
 
   std::cout << "All threads completed: " << completed.load() << "/4" << std::endl;
   EXPECT_EQ(completed.load(), 4);
@@ -1965,7 +1965,7 @@ TEST_F(AlgorithmTest, SDFStressTest) {
         long mem_before = get_memory_usage_mb();
         auto start = std::chrono::high_resolution_clock::now();
 
-        volume sdf_vol = sdf(cvcapp, bunny, dim, bbox, SDF_V1);
+        volume sdf_vol = sdf(ctx, bunny, dim, bbox, SDF_V1);
 
         auto end = std::chrono::high_resolution_clock::now();
         long mem_after = get_memory_usage_mb();
@@ -2007,7 +2007,7 @@ TEST_F(AlgorithmTest, SDFStressTest) {
         long mem_before = get_memory_usage_mb();
         auto start = std::chrono::high_resolution_clock::now();
 
-        volume sdf_vol = sdf(cvcapp, bunny, dim, bbox, SDF_V2);
+        volume sdf_vol = sdf(ctx, bunny, dim, bbox, SDF_V2);
 
         auto end = std::chrono::high_resolution_clock::now();
         long mem_after = get_memory_usage_mb();
@@ -2140,7 +2140,7 @@ TEST_F(GeometryTest, SDFResizePerformanceComparison) {
 
     // Compute SDF v1 with CPU resize (default)
     auto sdf_start = std::chrono::high_resolution_clock::now();
-    volume sdf_cpu = sdf(cvcapp, bunny, dim, bbox, SDF_V1);
+    volume sdf_cpu = sdf(ctx, bunny, dim, bbox, SDF_V1);
     auto sdf_end = std::chrono::high_resolution_clock::now();
     auto sdf_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sdf_end - sdf_start);
     double sdf_time_ms = sdf_duration.count();
@@ -2152,7 +2152,7 @@ TEST_F(GeometryTest, SDFResizePerformanceComparison) {
     dimension pow2_dim(pow2, pow2, pow2);
 
     // Compute at power-of-2
-    volume sdf_pow2 = sdf(cvcapp, bunny, pow2_dim, bbox, SDF_V1);
+    volume sdf_pow2 = sdf(ctx, bunny, pow2_dim, bbox, SDF_V1);
 
     // CPU resize
     volume sdf_cpu_resized(sdf_pow2);
@@ -2244,7 +2244,7 @@ TEST_F(GeometryTest, SDFFullPipelineWithResizeBreakdown) {
     try {
       // Time the full pipeline (SDF v1 auto-resizes internally)
       auto total_start = std::chrono::high_resolution_clock::now();
-      volume sdf_vol = sdf(cvcapp, bunny, dim, bbox, SDF_V1);
+      volume sdf_vol = sdf(ctx, bunny, dim, bbox, SDF_V1);
       auto total_end = std::chrono::high_resolution_clock::now();
       auto total_duration =
           std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start);
@@ -2257,7 +2257,7 @@ TEST_F(GeometryTest, SDFFullPipelineWithResizeBreakdown) {
       dimension pow2_dim(pow2, pow2, pow2);
 
       auto compute_start = std::chrono::high_resolution_clock::now();
-      volume sdf_pow2 = sdf(cvcapp, bunny, pow2_dim, bbox, SDF_V1);
+      volume sdf_pow2 = sdf(ctx, bunny, pow2_dim, bbox, SDF_V1);
       auto compute_end = std::chrono::high_resolution_clock::now();
       auto compute_duration =
           std::chrono::duration_cast<std::chrono::milliseconds>(compute_end - compute_start);
@@ -2371,7 +2371,7 @@ TEST_F(GeometryTest, SDFNonWatertightMeshes) {
     std::string v1_result = "OK";
     bool v1_crashed = false;
     try {
-      volume sdf_v1 = sdf(cvcapp, damaged, dim, bbox, SDF_V1);
+      volume sdf_v1 = sdf(ctx, damaged, dim, bbox, SDF_V1);
       EXPECT_EQ(sdf_v1.XDim(), 64u);
       EXPECT_EQ(sdf_v1.YDim(), 64u);
       EXPECT_EQ(sdf_v1.ZDim(), 64u);
@@ -2404,7 +2404,7 @@ TEST_F(GeometryTest, SDFNonWatertightMeshes) {
     std::string v2_result = "OK";
     bool v2_crashed = false;
     try {
-      volume sdf_v2 = sdf(cvcapp, damaged, dim, bbox, SDF_V2);
+      volume sdf_v2 = sdf(ctx, damaged, dim, bbox, SDF_V2);
       EXPECT_EQ(sdf_v2.XDim(), 64u);
       EXPECT_EQ(sdf_v2.YDim(), 64u);
       EXPECT_EQ(sdf_v2.ZDim(), 64u);
@@ -2500,8 +2500,8 @@ TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
     // Compute reference SDFs from intact mesh
     std::cout << "Computing reference SDFs from intact bunny (" << original_num_tris
               << " triangles)..." << std::endl;
-    volume sdf_v1_intact = sdf(cvcapp, bunny, dim, bbox, SDF_V1);
-    volume sdf_v2_intact = sdf(cvcapp, bunny, dim, bbox, SDF_V2);
+    volume sdf_v1_intact = sdf(ctx, bunny, dim, bbox, SDF_V1);
+    volume sdf_v2_intact = sdf(ctx, bunny, dim, bbox, SDF_V2);
 
     std::cout << "\n"
               << std::setw(12) << "% Removed" << std::setw(12) << "Triangles" << std::setw(18)
@@ -2531,8 +2531,8 @@ TEST_F(GeometryTest, SDFSignAmbiguityThreshold) {
           (1.0 - static_cast<double>(final_num_tris) / original_num_tris) * 100.0;
 
       // Compute SDFs for damaged mesh
-      volume sdf_v1_damaged = sdf(cvcapp, damaged, dim, bbox, SDF_V1);
-      volume sdf_v2_damaged = sdf(cvcapp, damaged, dim, bbox, SDF_V2);
+      volume sdf_v1_damaged = sdf(ctx, damaged, dim, bbox, SDF_V1);
+      volume sdf_v2_damaged = sdf(ctx, damaged, dim, bbox, SDF_V2);
 
       // Compare signs and compute statistics
       uint64_t v1_sign_errors = 0;
@@ -2917,7 +2917,7 @@ TEST_F(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
     double mem_before = get_memory_usage_mb();
     auto sdf_start = std::chrono::high_resolution_clock::now();
 
-    volume bunny_sdf = sdf(cvcapp, bunny, dim, bunny_bbox);
+    volume bunny_sdf = sdf(ctx, bunny, dim, bunny_bbox);
 
     auto sdf_end = std::chrono::high_resolution_clock::now();
     auto sdf_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sdf_end - sdf_start);
@@ -2947,7 +2947,7 @@ TEST_F(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
             << "Method " << method_name << " with " << iters << " iterations produced no triangles";
 
         // Compute SDF of extracted mesh to compare with original
-        volume extracted_sdf = sdf(cvcapp, extracted_mesh, dim, bunny_bbox);
+        volume extracted_sdf = sdf(ctx, extracted_mesh, dim, bunny_bbox);
 
         // Compute RMS error between SDFs
         double sum_sq_error = 0.0;
@@ -3141,7 +3141,7 @@ TEST_F(AlgorithmTest, PropertyInterpolationWithSegmentation) {
   // Create SDF volume
   const unsigned int dim = 32;
   volume sdf_vol =
-      sdf(cvcapp, cube, dimension(dim, dim, dim), bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0));
+      sdf(ctx, cube, dimension(dim, dim, dim), bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0));
 
   // Create property volume with the SAME dimensions as the SDF
   // The mesher will automatically resize it to match the octree's adjusted dimensions
@@ -3249,7 +3249,7 @@ TEST_F(AlgorithmTest, NormalTypeIsosurface) {
 
   // Create SDF
   dimension sdf_dim(32, 32, 32); // Smaller for faster test
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Test each normal type
   struct NormalTypeTest {
@@ -3328,7 +3328,7 @@ TEST_F(AlgorithmTest, NormalTypeVolumetricMesh) {
   // Create SDF
   dimension sdf_dim(32, 32, 32);
   bounding_box bbox(-1.5, -1.5, -1.5, 1.5, 1.5, 1.5);
-  volume sdf_vol = sdf(cvcapp, sphere, sdf_dim, bbox, SDF_V2);
+  volume sdf_vol = sdf(ctx, sphere, sdf_dim, bbox, SDF_V2);
 
   // Test tetrahedral meshing with each normal type
   std::vector<std::pair<normal_type, std::string>> tests = {
@@ -3395,7 +3395,7 @@ TEST_F(GeometryTest, TetrahedralizeMeshExtraction) {
 
   // Create SDF from bunny
   dimension sdf_dim(64, 64, 64);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract tetrahedral mesh
   geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
@@ -3418,7 +3418,7 @@ TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
   std::cout << "\n=== Testing Tetrahedralize with Different Improvement Methods ===" << std::endl;
 
   dimension sdf_dim(32, 32, 32); // Smaller for faster testing
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   struct MethodTest {
     improvement_method method;
@@ -3496,7 +3496,7 @@ TEST_F(GeometryTest, HexahedralizeMeshExtraction) {
 
   // Create SDF from a simple cube geometry for hex meshing
   dimension sdf_dim(32, 32, 32);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract hexahedral mesh
   geometry hex_mesh = hexahedralize(sdf_vol, 0.0);
@@ -3519,7 +3519,7 @@ TEST_F(GeometryTest, Tetrahedralize2MeshExtraction) {
   std::cout << "\n=== Testing Dual Tetrahedral (Tet2) Mesh Extraction ===" << std::endl;
 
   dimension sdf_dim(32, 32, 32);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract tet2 mesh
   geometry tet2_mesh = tetrahedralize2(sdf_vol, 0.0);
@@ -3567,7 +3567,7 @@ TEST_F(GeometryTest, Tetrahedralize2IntervalMeshing) {
 
   // Create a sphere SDF for testing
   dimension sdf_dim(32, 32, 32);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   std::cout << "SDF value range: [" << sdf_vol.min() << ", " << sdf_vol.max() << "]" << std::endl;
 
@@ -3653,7 +3653,7 @@ TEST_F(GeometryTest, VolumetricMeshNumericalAccuracy) {
   }
 
   bounding_box bbox(-2, -2, -2, 2, 2, 2);
-  volume sdf_vol = sdf(cvcapp, sphere, sdf_dim, bbox, SDF_V2);
+  volume sdf_vol = sdf(ctx, sphere, sdf_dim, bbox, SDF_V2);
 
   // Test tetrahedral mesh
   geometry tet_mesh = tetrahedralize(sdf_vol, 0.0, DUALLIB, NO_IMPROVE, BSPLINE_CONVOLUTION, 0);
@@ -3705,7 +3705,7 @@ TEST_F(GeometryTest, VolumetricMeshComparisonTest) {
   std::cout << "\n=== Comparing Different Volumetric Mesh Types ===" << std::endl;
 
   dimension sdf_dim(32, 32, 32);
-  volume sdf_vol = sdf(cvcapp, bunny, sdf_dim, bunny.extents(), SDF_V2);
+  volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract different mesh types
   geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
@@ -4691,7 +4691,7 @@ TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
 
   // Create SDF with reasonable resolution for large tet mesh
   dimension dim(64, 64, 64); // Reasonable resolution for performance testing
-  volume bunny_vol = sdf(cvcapp, bunny, dim, bunny.extents(), SDF_V2);
+  volume bunny_vol = sdf(ctx, bunny, dim, bunny.extents(), SDF_V2);
 
   std::cout << "  SDF volume: " << dim.xdim << "x" << dim.ydim << "x" << dim.zdim << std::endl;
 
@@ -4763,7 +4763,7 @@ TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
 
   // Create SDF with medium-high resolution (hex meshes are typically coarser)
   dimension dim(64, 64, 64);
-  volume bunny_vol = sdf(cvcapp, bunny, dim, bunny.extents(), SDF_V2);
+  volume bunny_vol = sdf(ctx, bunny, dim, bunny.extents(), SDF_V2);
 
   std::cout << "  SDF volume: " << dim.xdim << "x" << dim.ydim << "x" << dim.zdim << std::endl;
 
