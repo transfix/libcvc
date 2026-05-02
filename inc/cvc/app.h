@@ -331,7 +331,7 @@ public:
       }
     }
 
-    threads(wait ? key : app::instance().uniqueThreadKey(key),
+    threads(wait ? key : this->uniqueThreadKey(key),
             CVC_NAMESPACE::thread_ptr(new boost::thread(t)));
   }
 
