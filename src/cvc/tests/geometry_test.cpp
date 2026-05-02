@@ -759,7 +759,7 @@ TEST_F(GeometryTest, SmoothingPreservesTopology) {
   uint64_t original_tris = geom.num_tris();
 
   // Apply smoothing
-  geom.smoothing(0.1f, false);
+  geom.smoothing(ctx, 0.1f, false);
 
   // Topology should be preserved
   EXPECT_EQ(geom.num_points(), original_points);
@@ -771,7 +771,7 @@ TEST_F(GeometryTest, SmoothingMovesVertices) {
   geometry smoothed(bunny);
 
   // Apply smoothing
-  smoothed.smoothing(0.5f, false);
+  smoothed.smoothing(ctx, 0.5f, false);
 
   // Vertices should have moved
   bool vertices_moved = false;
@@ -808,7 +808,7 @@ TEST_F(GeometryTest, SmoothingWithBoundaryFixed) {
   }
 
   // Apply smoothing with boundary fixed
-  geom.smoothing(0.5f, true);
+  geom.smoothing(ctx, 0.5f, true);
 
   // Boundary vertices should not have moved (allow small numerical errors)
   for (size_t i = 0; i < 10; i++) {
