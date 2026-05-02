@@ -39,6 +39,15 @@ protected:
   cvc::app ctx;
 };
 
+// Fixture for tests that exercise state_object subclasses. Provides a
+// fresh cvc::app context so that subclass constructors can be passed
+// the explicit ctx instead of falling through state_object's
+// app::instance()-using default ctor.
+class StateObjectFixture : public ::testing::Test {
+protected:
+  cvc::app ctx;
+};
+
 // ===========================
 // Basic Singleton Tests
 // ===========================
@@ -1776,7 +1785,8 @@ public:
   std::atomic<int> handleCount;
   std::atomic<int> errorCount;
 
-  TestStateObject() : handleCount(0), errorCount(0) {}
+  TestStateObject(cvc::app &ctx)
+      : state_object<TestStateObject>(ctx), handleCount(0), errorCount(0) {}
 
 protected:
   virtual void handleStateChanged(const std::string &childState) override {
@@ -1791,8 +1801,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectMultithreaded) {
-  TestStateObject obj;
+TEST_F(StateObjectFixture, StateObjectMultithreaded) {
+  TestStateObject obj(ctx);
 
   const int num_threads = 8;
   const int ops_per_thread = 25;
@@ -1843,9 +1853,9 @@ public:
   int lastHeight;
   bool lastFullscreen;
 
-  ConfigurationObject()
-      : resizeCount(0), fullscreenCount(0), totalHandlerCalls(0), lastWidth(0), lastHeight(0),
-        lastFullscreen(false) {
+  ConfigurationObject(cvc::app &ctx)
+      : state_object<ConfigurationObject>(ctx), resizeCount(0), fullscreenCount(0),
+        totalHandlerCalls(0), lastWidth(0), lastHeight(0), lastFullscreen(false) {
     // Initialize default values without firing handlers — these are
     // seed values, not user-driven changes. Without state_init_scope,
     // the value() calls below would each spawn a handler thread, and
@@ -1883,8 +1893,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectConfiguration) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectConfiguration) {
+  ConfigurationObject config(ctx);
 
   // Verify default initialization
   EXPECT_EQ(config.getState("width").value<int>(), 1920);
@@ -1914,8 +1924,8 @@ TEST(StateTest, StateObjectConfiguration) {
 }
 
 // Test batching state changes to avoid thread floods
-TEST(StateTest, StateObjectBatchedChanges) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectBatchedChanges) {
+  ConfigurationObject config(ctx);
 
   int initialHandlerCalls = config.totalHandlerCalls.load();
 
@@ -1955,8 +1965,8 @@ TEST(StateTest, StateObjectBatchedChanges) {
 }
 
 // Test nested batching
-TEST(StateTest, StateObjectNestedBatching) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectNestedBatching) {
+  ConfigurationObject config(ctx);
 
   int initialCalls = config.totalHandlerCalls.load();
 
@@ -1987,8 +1997,8 @@ TEST(StateTest, StateObjectNestedBatching) {
 }
 
 // Test manual flush within batch scope
-TEST(StateTest, StateObjectManualFlush) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectManualFlush) {
+  ConfigurationObject config(ctx);
 
   int initialCalls = config.totalHandlerCalls.load();
 
@@ -2019,8 +2029,8 @@ TEST(StateTest, StateObjectManualFlush) {
 }
 
 // Test batching with rapid concurrent changes
-TEST(StateTest, StateObjectBatchingUnderLoad) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectBatchingUnderLoad) {
+  ConfigurationObject config(ctx);
 
   {
     state_change_batch_scope<ConfigurationObject> batch(config);
@@ -2043,8 +2053,8 @@ TEST(StateTest, StateObjectBatchingUnderLoad) {
 }
 
 // Test state locking - exclusive access coordination
-TEST(StateTest, StateObjectLocking) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectLocking) {
+  ConfigurationObject config(ctx);
   std::atomic<int> thread1_value(0);
   std::atomic<int> thread2_value(0);
 
@@ -2081,8 +2091,8 @@ TEST(StateTest, StateObjectLocking) {
 }
 
 // Test that state lock doesn't block parent state
-TEST(StateTest, StateObjectLockDoesNotBlockParent) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectLockDoesNotBlockParent) {
+  ConfigurationObject config(ctx);
   std::atomic<bool> parent_modified(false);
 
   // Hold lock on config
@@ -2121,9 +2131,9 @@ TEST(StateTest, StateObjectLockDoesNotBlockParent) {
 }
 
 // Test multiple concurrent locks on different objects
-TEST(StateTest, StateObjectMultipleLocks) {
-  ConfigurationObject config1;
-  ConfigurationObject config2;
+TEST_F(StateObjectFixture, StateObjectMultipleLocks) {
+  ConfigurationObject config1(ctx);
+  ConfigurationObject config2(ctx);
   std::atomic<int> config1_mods(0);
   std::atomic<int> config2_mods(0);
 
@@ -2160,8 +2170,8 @@ TEST(StateTest, StateObjectMultipleLocks) {
 }
 
 // Test lock with batching
-TEST(StateTest, StateObjectLockWithBatching) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectLockWithBatching) {
+  ConfigurationObject config(ctx);
 
   {
     state_lock_scope<ConfigurationObject> lock(config);
@@ -2183,8 +2193,8 @@ TEST(StateTest, StateObjectLockWithBatching) {
 }
 
 // Test early unlock
-TEST(StateTest, StateObjectLockEarlyUnlock) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectLockEarlyUnlock) {
+  ConfigurationObject config(ctx);
   std::atomic<bool> other_thread_ran(false);
 
   boost::thread t1([&config, &other_thread_ran]() {
@@ -2225,7 +2235,8 @@ public:
   std::string lastStatus;
   boost::mutex statusMutex;
 
-  DataProcessorObject() : statusChangeCount(0), errorAlertCount(0) {
+  DataProcessorObject(cvc::app &ctx)
+      : state_object<DataProcessorObject>(ctx), statusChangeCount(0), errorAlertCount(0) {
     getState("status").value("idle");
     getState("progress").value(0.0);
     getState("error_count").value(0);
@@ -2266,8 +2277,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectDataProcessor) {
-  DataProcessorObject processor;
+TEST_F(StateObjectFixture, StateObjectDataProcessor) {
+  DataProcessorObject processor(ctx);
 
   // Verify initial state
   EXPECT_EQ(processor.getState("status").value(), "idle");
@@ -2304,7 +2315,9 @@ public:
   std::string lastRenderMode;
   boost::mutex modeMutex;
 
-  RendererObject() : cameraUpdateCount(0), renderModeChangeCount(0), redrawRequestCount(0) {
+  RendererObject(cvc::app &ctx)
+      : state_object<RendererObject>(ctx), cameraUpdateCount(0), renderModeChangeCount(0),
+        redrawRequestCount(0) {
     getState("camera.position").value("0,0,10");
     getState("camera.target").value("0,0,0");
     getState("render_mode").value("solid");
@@ -2325,8 +2338,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectRenderer) {
-  RendererObject renderer;
+TEST_F(StateObjectFixture, StateObjectRenderer) {
+  RendererObject renderer(ctx);
 
   // Verify initial state
   EXPECT_EQ(renderer.getState("camera.position").value(), "0,0,10");
@@ -2365,7 +2378,9 @@ public:
   std::string lastTheme;
   boost::mutex themeMutex;
 
-  AppSettingsObject() : themeChangeCount(0) { loadDefaults(); }
+  AppSettingsObject(cvc::app &ctx) : state_object<AppSettingsObject>(ctx), themeChangeCount(0) {
+    loadDefaults();
+  }
 
   void loadDefaults() {
     getState("window.width").value(1920);
@@ -2385,8 +2400,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectAppSettings) {
-  AppSettingsObject settings;
+TEST_F(StateObjectFixture, StateObjectAppSettings) {
+  AppSettingsObject settings(ctx);
 
   // Verify defaults
   EXPECT_EQ(settings.getState("window.width").value<int>(), 1920);
@@ -2409,8 +2424,8 @@ TEST(StateTest, StateObjectAppSettings) {
 }
 
 // Test external state access pattern
-TEST(StateTest, StateObjectExternalAccess) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectExternalAccess) {
+  ConfigurationObject config(ctx);
 
   // Get the state path
   std::string widthPath = config.stateName("width");
@@ -2431,7 +2446,7 @@ class NestedStateObject : public state_object<NestedStateObject> {
 public:
   std::atomic<int> deepPathChangeCount;
 
-  NestedStateObject() : deepPathChangeCount(0) {
+  NestedStateObject(cvc::app &ctx) : state_object<NestedStateObject>(ctx), deepPathChangeCount(0) {
     getState("level1.level2.level3.value").value("deep");
   }
 
@@ -2444,8 +2459,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectNestedPaths) {
-  NestedStateObject obj;
+TEST_F(StateObjectFixture, StateObjectNestedPaths) {
+  NestedStateObject obj(ctx);
 
   // Verify deep path initialization
   EXPECT_EQ(obj.getState("level1.level2.level3.value").value(), "deep");
@@ -2460,8 +2475,8 @@ TEST(StateTest, StateObjectNestedPaths) {
 }
 
 // Test state_object state name generation
-TEST(StateTest, StateObjectStateName) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectStateName) {
+  ConfigurationObject config(ctx);
 
   // stateName() should include instance information
   std::string name = config.stateName();
@@ -2475,9 +2490,9 @@ TEST(StateTest, StateObjectStateName) {
 }
 
 // Test multiple instances of same state_object type
-TEST(StateTest, StateObjectMultipleInstances) {
-  ConfigurationObject config1;
-  ConfigurationObject config2;
+TEST_F(StateObjectFixture, StateObjectMultipleInstances) {
+  ConfigurationObject config1(ctx);
+  ConfigurationObject config2(ctx);
 
   // Each instance should have unique state path
   std::string name1 = config1.stateName();
@@ -2503,7 +2518,10 @@ public:
   int lastDataValue;
   boost::mutex dataMutex;
 
-  DataStateObject() : dataChangeCount(0), lastDataValue(0) { getState("data_value").data(42); }
+  DataStateObject(cvc::app &ctx)
+      : state_object<DataStateObject>(ctx), dataChangeCount(0), lastDataValue(0) {
+    getState("data_value").data(42);
+  }
 
 protected:
   virtual void handleStateChanged(const std::string &childState) override {
@@ -2518,8 +2536,8 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectWithData) {
-  DataStateObject obj;
+TEST_F(StateObjectFixture, StateObjectWithData) {
+  DataStateObject obj(ctx);
 
   // Verify initial data
   EXPECT_TRUE(obj.getState("data_value").isData<int>());
@@ -2540,8 +2558,8 @@ TEST(StateTest, StateObjectWithData) {
 }
 
 // Test state_object async handler execution
-TEST(StateTest, StateObjectAsyncHandlers) {
-  ConfigurationObject config;
+TEST_F(StateObjectFixture, StateObjectAsyncHandlers) {
+  ConfigurationObject config(ctx);
 
   int initialCount = config.resizeCount.load();
 
@@ -4368,9 +4386,9 @@ public:
   std::atomic<int> threadedCount;
   boost::thread::id constructorThreadId;
 
-  ThreadingTestObject()
-      : handleCount(0), synchronousCount(0), threadedCount(0),
-        constructorThreadId(boost::this_thread::get_id()) {}
+  ThreadingTestObject(cvc::app &ctx)
+      : state_object<ThreadingTestObject>(ctx), handleCount(0), synchronousCount(0),
+        threadedCount(0), constructorThreadId(boost::this_thread::get_id()) {}
 
 protected:
   virtual void handleStateChanged(const std::string &childState) override {
@@ -4388,11 +4406,11 @@ protected:
   }
 };
 
-TEST(StateTest, StateObjectThreadingDisabled) {
+TEST_F(StateObjectFixture, StateObjectThreadingDisabled) {
   // Disable threading for this test
   state_object<ThreadingTestObject>::setUseThreading(false);
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   // Make multiple state changes
   for (int i = 0; i < 10; ++i) {
@@ -4414,11 +4432,11 @@ TEST(StateTest, StateObjectThreadingDisabled) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectThreadingEnabled) {
+TEST_F(StateObjectFixture, StateObjectThreadingEnabled) {
   // Ensure threading is enabled (default)
   state_object<ThreadingTestObject>::setUseThreading(true);
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   // Make multiple state changes
   for (int i = 0; i < 10; ++i) {
@@ -4439,14 +4457,14 @@ TEST(StateTest, StateObjectThreadingEnabled) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectThreadingToggle) {
+TEST_F(StateObjectFixture, StateObjectThreadingToggle) {
   // Test that we can toggle threading on and off
 
   // Start with threading disabled
   state_object<ThreadingTestObject>::setUseThreading(false);
   EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
 
-  ThreadingTestObject obj1;
+  ThreadingTestObject obj1(ctx);
   obj1.getState("prop1").value("value1");
   obj1.waitForHandlers();
   EXPECT_EQ(obj1.synchronousCount.load(), 1);
@@ -4456,7 +4474,7 @@ TEST(StateTest, StateObjectThreadingToggle) {
   state_object<ThreadingTestObject>::setUseThreading(true);
   EXPECT_TRUE(state_object<ThreadingTestObject>::getUseThreading());
 
-  ThreadingTestObject obj2;
+  ThreadingTestObject obj2(ctx);
   obj2.getState("prop2").value("value2");
   obj2.waitForHandlers();
   EXPECT_EQ(obj2.handleCount.load(), 1);
@@ -4466,7 +4484,7 @@ TEST(StateTest, StateObjectThreadingToggle) {
   state_object<ThreadingTestObject>::setUseThreading(false);
   EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
 
-  ThreadingTestObject obj3;
+  ThreadingTestObject obj3(ctx);
   obj3.getState("prop3").value("value3");
   obj3.waitForHandlers();
   EXPECT_EQ(obj3.synchronousCount.load(), 1);
@@ -4481,11 +4499,11 @@ TEST(StateTest, StateObjectThreadingToggle) {
   obj3.getState().reset();
 }
 
-TEST(StateTest, StateObjectBatchingWithThreadingDisabled) {
+TEST_F(StateObjectFixture, StateObjectBatchingWithThreadingDisabled) {
   // Test that batching works correctly even with threading disabled
   state_object<ThreadingTestObject>::setUseThreading(false);
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   {
     state_change_batch_scope<ThreadingTestObject> batch(obj);
@@ -4512,11 +4530,12 @@ TEST(StateTest, StateObjectBatchingWithThreadingDisabled) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectThreadingPerTemplateType) {
+TEST_F(StateObjectFixture, StateObjectThreadingPerTemplateType) {
   // Test that threading control is independent per template instantiation
 
   class TypeA : public state_object<TypeA> {
   public:
+    TypeA(cvc::app &ctx) : state_object<TypeA>(ctx) {}
     std::atomic<bool> called{false};
 
   protected:
@@ -4525,6 +4544,7 @@ TEST(StateTest, StateObjectThreadingPerTemplateType) {
 
   class TypeB : public state_object<TypeB> {
   public:
+    TypeB(cvc::app &ctx) : state_object<TypeB>(ctx) {}
     std::atomic<bool> called{false};
 
   protected:
@@ -4538,8 +4558,8 @@ TEST(StateTest, StateObjectThreadingPerTemplateType) {
   EXPECT_FALSE(state_object<TypeA>::getUseThreading());
   EXPECT_TRUE(state_object<TypeB>::getUseThreading());
 
-  TypeA objA;
-  TypeB objB;
+  TypeA objA(ctx);
+  TypeB objB(ctx);
 
   objA.getState("test").value("value");
   objB.getState("test").value("value");
@@ -4562,11 +4582,11 @@ TEST(StateTest, StateObjectThreadingPerTemplateType) {
 // Per-Instance Threading Tests
 // ===========================
 
-TEST(StateTest, StateObjectInstanceThreadingEnabled) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingEnabled) {
   // Test enabling instance threading on a single object
   state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   // Should follow global flag initially
   EXPECT_FALSE(obj.getInstanceThreading());
@@ -4593,11 +4613,11 @@ TEST(StateTest, StateObjectInstanceThreadingEnabled) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectInstanceThreadingDisabled) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingDisabled) {
   // Test disabling instance threading on a single object
   state_object<ThreadingTestObject>::setUseThreading(true); // Global enabled
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   // Should follow global flag initially
   EXPECT_TRUE(obj.getInstanceThreading());
@@ -4617,11 +4637,11 @@ TEST(StateTest, StateObjectInstanceThreadingDisabled) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectMixedInstanceThreading) {
+TEST_F(StateObjectFixture, StateObjectMixedInstanceThreading) {
   // Test multiple objects with different instance threading settings
   state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
 
-  ThreadingTestObject obj1, obj2, obj3;
+  ThreadingTestObject obj1(ctx), obj2(ctx), obj3(ctx);
 
   // All should follow global flag initially
   EXPECT_FALSE(obj1.getInstanceThreading());
@@ -4663,11 +4683,11 @@ TEST(StateTest, StateObjectMixedInstanceThreading) {
   obj3.getState().reset();
 }
 
-TEST(StateTest, StateObjectClearInstanceThreading) {
+TEST_F(StateObjectFixture, StateObjectClearInstanceThreading) {
   // Test clearing instance threading to revert to global flag
   state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
 
   // Enable instance threading
   obj.setInstanceThreading(true);
@@ -4693,11 +4713,11 @@ TEST(StateTest, StateObjectClearInstanceThreading) {
   obj.getState().reset();
 }
 
-TEST(StateTest, StateObjectInstanceThreadingWithGlobalChange) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingWithGlobalChange) {
   // Test that instance threading persists across global flag changes
   state_object<ThreadingTestObject>::setUseThreading(false);
 
-  ThreadingTestObject obj1, obj2;
+  ThreadingTestObject obj1(ctx), obj2(ctx);
 
   // Enable instance threading on obj1
   obj1.setInstanceThreading(true);
@@ -4729,7 +4749,7 @@ TEST(StateTest, StateObjectInstanceThreadingWithGlobalChange) {
   obj2.getState().reset();
 }
 
-TEST(StateTest, StateObjectInstanceThreadingStressTest) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingStressTest) {
   // Stress test with multiple objects and mixed threading settings
   state_object<ThreadingTestObject>::setUseThreading(false);
 
@@ -4738,7 +4758,7 @@ TEST(StateTest, StateObjectInstanceThreadingStressTest) {
 
   // Create objects with alternating threading settings
   for (int i = 0; i < numObjects; ++i) {
-    auto obj = std::make_shared<ThreadingTestObject>();
+    auto obj = std::make_shared<ThreadingTestObject>(ctx);
     if (i % 2 == 0) {
       obj->setInstanceThreading(true); // Even indices: threaded
     }
@@ -4785,7 +4805,7 @@ TEST(StateTest, StateObjectInstanceThreadingStressTest) {
   }
 }
 
-TEST(StateTest, StateObjectInstanceThreadingConcurrentStress) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingConcurrentStress) {
   // Stress test with concurrent modifications from multiple threads
   state_object<ThreadingTestObject>::setUseThreading(false);
 
@@ -4794,7 +4814,7 @@ TEST(StateTest, StateObjectInstanceThreadingConcurrentStress) {
 
   // Create objects with alternating threading settings
   for (int i = 0; i < numObjects; ++i) {
-    auto obj = std::make_shared<ThreadingTestObject>();
+    auto obj = std::make_shared<ThreadingTestObject>(ctx);
     if (i % 2 == 0) {
       obj->setInstanceThreading(true);
     }
@@ -4848,11 +4868,11 @@ TEST(StateTest, StateObjectInstanceThreadingConcurrentStress) {
   }
 }
 
-TEST(StateTest, StateObjectInstanceThreadingBatching) {
+TEST_F(StateObjectFixture, StateObjectInstanceThreadingBatching) {
   // Test that batching works correctly with instance threading
   state_object<ThreadingTestObject>::setUseThreading(false);
 
-  ThreadingTestObject obj;
+  ThreadingTestObject obj(ctx);
   obj.setInstanceThreading(true);
 
   {
