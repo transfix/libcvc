@@ -3250,14 +3250,14 @@ TEST_F(VoxelsCUDATest, MultithreadedCUDAOperations) {
     std::vector<std::string> task_keys;
 
     // Set pool size
-    unsigned int original_pool_size = cvcapp.getThreadPoolSize();
-    cvcapp.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
+    unsigned int original_pool_size = ctx.getThreadPoolSize();
+    ctx.setThreadPoolSize(std::min(4u, boost::thread::hardware_concurrency()));
 
     for (int t = 0; t < num_threads; t++) {
       std::string key = "cuda_voxels_" + std::to_string(t);
       task_keys.push_back(key);
 
-      cvcapp.startThreadPooled(
+      ctx.startThreadPooled(
           key,
           [this, t, &success_count, dim]() {
             try {
@@ -3289,15 +3289,15 @@ TEST_F(VoxelsCUDATest, MultithreadedCUDAOperations) {
 
     // Wait for all tasks to complete
     for (const auto &key : task_keys) {
-      if (cvcapp.hasThread(key)) {
-        thread_ptr tptr = cvcapp.threads(key);
+      if (ctx.hasThread(key)) {
+        thread_ptr tptr = ctx.threads(key);
         if (tptr)
           tptr->join();
       }
     }
 
     // Restore original pool size
-    cvcapp.setThreadPoolSize(original_pool_size);
+    ctx.setThreadPoolSize(original_pool_size);
 
     EXPECT_EQ(success_count.load(), num_threads);
   }
