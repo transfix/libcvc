@@ -43,7 +43,7 @@ class volume;
  */
 class GraphicsNode : public SceneNode {
 public:
-  GraphicsNode(const std::string &statePath, const std::string &name = "");
+  GraphicsNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "");
   virtual ~GraphicsNode();
 
   // Identity and naming
@@ -84,7 +84,7 @@ public:
     std::string childStatePath = getState().fullName() + ".children." + name;
 
     // Create the child node with proper state path and name
-    auto child = std::make_shared<T>(childStatePath, name);
+    auto child = std::make_shared<T>(this->app(), childStatePath, name);
 
     // Add to children using the non-template version
     addGraphicsChild(std::static_pointer_cast<GraphicsNode>(child));

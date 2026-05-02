@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QKeyEvent>
+#include <cvc/app.h>
 #include <cvc/state.h>
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
@@ -10,6 +11,7 @@
 
 class CameraControllerTest : public ::testing::Test {
 protected:
+  cvc::app ctx;
   static void SetUpTestSuite() {
     if (!QApplication::instance()) {
       int argc = 0;
@@ -27,7 +29,7 @@ protected:
     // Create unique state path for each test instance
     std::stringstream ss;
     ss << "volrover3.camera.test" << testCounter++;
-    controller = new CameraController(ss.str());
+    controller = new CameraController(ctx, ss.str());
     controller->setCamera(camera);
 
     // Get AppState singleton

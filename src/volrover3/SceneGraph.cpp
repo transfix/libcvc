@@ -26,7 +26,7 @@ SceneGraph::SceneGraph(const std::string &statePrefix)
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
-  m_nullGraphic = std::make_shared<NullGraphicNode>(rootStatePath, "root");
+  m_nullGraphic = std::make_shared<NullGraphicNode>(volrover3::app(), rootStatePath, "root");
 
   // Set SceneGraph reference IMMEDIATELY after construction
   // This enables threading for event posting (nodes disable threading in constructor)

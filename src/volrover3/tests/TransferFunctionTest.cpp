@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <cvc/app.h>
 #include <cvc/state.h>
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
@@ -8,6 +9,7 @@
 // Need QApplication for Qt widgets
 class TransferFunctionTest : public ::testing::Test {
 protected:
+  cvc::app ctx;
   static void SetUpTestSuite() {
     if (!QApplication::instance()) {
       int argc = 0;
@@ -189,7 +191,7 @@ TEST_F(TransferFunctionTest, NoFeedbackLoopOnStateUpdate) {
   // This test verifies that the counter mechanism prevents feedback loops
   // by checking that repeated setTransferFunction calls don't cause exponential growth
 
-  auto volume = std::make_shared<VolumeNode>("test_volume");
+  auto volume = std::make_shared<VolumeNode>(ctx, "test_volume");
 
   widget->setDataRange(0.0, 100.0);
   widget->applyPreset("Rainbow");
@@ -215,7 +217,7 @@ TEST_F(TransferFunctionTest, NoFeedbackLoopOnStateUpdate) {
 TEST_F(TransferFunctionTest, StateRoundTripPreservesData) {
   // Test that data survives round-trip through state tree without corruption
 
-  auto volume = std::make_shared<VolumeNode>("test_volume");
+  auto volume = std::make_shared<VolumeNode>(ctx, "test_volume");
 
   widget->setDataRange(0.0, 255.0);
   widget->applyPreset("Rainbow");
@@ -247,8 +249,8 @@ TEST_F(TransferFunctionTest, StateRoundTripPreservesData) {
 TEST_F(TransferFunctionTest, PerVolumeStateSeparation) {
   // Test that each volume has independent transfer function state
 
-  auto volume1 = std::make_shared<VolumeNode>("volume_1");
-  auto volume2 = std::make_shared<VolumeNode>("volume_2");
+  auto volume1 = std::make_shared<VolumeNode>(ctx, "volume_1");
+  auto volume2 = std::make_shared<VolumeNode>(ctx, "volume_2");
 
   // Set different transfer functions for each volume
   widget->setDataRange(0.0, 100.0);
@@ -275,7 +277,7 @@ TEST_F(TransferFunctionTest, PerVolumeStateSeparation) {
 TEST_F(TransferFunctionTest, DefaultTransferFunctionSet) {
   // Test that VolumeNode gets a default transfer function when created
 
-  auto volume = std::make_shared<VolumeNode>("test_volume");
+  auto volume = std::make_shared<VolumeNode>(ctx, "test_volume");
 
   // Set default TF
   volume->setDefaultTransferFunction();

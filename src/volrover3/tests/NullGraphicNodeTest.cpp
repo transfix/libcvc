@@ -1,3 +1,4 @@
+#include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/state_object.h>
@@ -8,6 +9,7 @@
 
 class NullGraphicNodeTest : public ::testing::Test {
 protected:
+  cvc::app ctx;
   void SetUp() override {
     // Disable threading for state_object to avoid destruction race conditions
     cvc::state_object<SceneNode>::setUseThreading(false);
@@ -27,7 +29,7 @@ int NullGraphicNodeTest::testCounter = 0;
 
 // Test NullGraphicNode default construction
 TEST_F(NullGraphicNodeTest, DefaultConstruction) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test.null", "test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test.null", "test_null");
 
   ASSERT_NE(nullNode, nullptr);
   EXPECT_EQ(nullNode->getName(), "test_null");
@@ -44,7 +46,7 @@ TEST_F(NullGraphicNodeTest, DefaultConstruction) {
 
 // Test NullGraphicNode bounds can be modified
 TEST_F(NullGraphicNodeTest, SetBoundsArray) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   cvc::bounding_box newBounds(-50, -25, -10, 50, 25, 10);
   nullNode->setBounds(newBounds);
@@ -60,7 +62,7 @@ TEST_F(NullGraphicNodeTest, SetBoundsArray) {
 
 // Test NullGraphicNode bounds can be set with individual values
 TEST_F(NullGraphicNodeTest, SetBoundsIndividual) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   nullNode->setBounds(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
 
@@ -193,7 +195,7 @@ TEST_F(NullGraphicNodeTest, NullGraphicNotInGraphicsMap) {
 
 // Test large custom bounds
 TEST_F(NullGraphicNodeTest, LargeCustomBounds) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   nullNode->setBounds(-1000.0, -2000.0, -3000.0, 1000.0, 2000.0, 3000.0);
 
@@ -208,7 +210,7 @@ TEST_F(NullGraphicNodeTest, LargeCustomBounds) {
 
 // Test asymmetric bounds
 TEST_F(NullGraphicNodeTest, AsymmetricBounds) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   nullNode->setBounds(-500.0, 100.0, -200.0, 300.0, 1000.0, 500.0);
 
@@ -223,7 +225,7 @@ TEST_F(NullGraphicNodeTest, AsymmetricBounds) {
 
 // Test includeOwnBounds flag - default should be false
 TEST_F(NullGraphicNodeTest, IncludeOwnBoundsDefault) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   // Default should be false (typical for root nodes)
   EXPECT_FALSE(nullNode->getIncludeOwnBounds());
@@ -231,7 +233,7 @@ TEST_F(NullGraphicNodeTest, IncludeOwnBoundsDefault) {
 
 // Test setting includeOwnBounds flag
 TEST_F(NullGraphicNodeTest, SetIncludeOwnBounds) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   nullNode->setIncludeOwnBounds(true);
   EXPECT_TRUE(nullNode->getIncludeOwnBounds());
@@ -242,7 +244,7 @@ TEST_F(NullGraphicNodeTest, SetIncludeOwnBounds) {
 
 // Test includeOwnBounds state tree synchronization
 TEST_F(NullGraphicNodeTest, IncludeOwnBoundsStateSync) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test.null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test.null");
 
   // Set via method
   nullNode->setIncludeOwnBounds(true);
@@ -260,7 +262,7 @@ TEST_F(NullGraphicNodeTest, IncludeOwnBoundsStateSync) {
 
 // Test syncBoundsWithChildren flag - default should be true
 TEST_F(NullGraphicNodeTest, SyncBoundsWithChildrenDefault) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   // Default should be true (auto-sync enabled)
   EXPECT_TRUE(nullNode->getSyncBoundsWithChildren());
@@ -268,7 +270,7 @@ TEST_F(NullGraphicNodeTest, SyncBoundsWithChildrenDefault) {
 
 // Test setting syncBoundsWithChildren flag
 TEST_F(NullGraphicNodeTest, SetSyncBoundsWithChildren) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test_null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test_null");
 
   nullNode->setSyncBoundsWithChildren(false);
   EXPECT_FALSE(nullNode->getSyncBoundsWithChildren());
@@ -279,7 +281,7 @@ TEST_F(NullGraphicNodeTest, SetSyncBoundsWithChildren) {
 
 // Test syncBoundsWithChildren state tree synchronization
 TEST_F(NullGraphicNodeTest, SyncBoundsWithChildrenStateSync) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test.null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test.null");
 
   // Set via method
   nullNode->setSyncBoundsWithChildren(false);
@@ -428,7 +430,7 @@ TEST_F(NullGraphicNodeTest, SyncBoundsToChildrenDisabled) {
 
 // Test bounds state tree synchronization
 TEST_F(NullGraphicNodeTest, BoundsStateTreeSync) {
-  auto nullNode = std::make_shared<NullGraphicNode>("test.null");
+  auto nullNode = std::make_shared<NullGraphicNode>(ctx, "test.null");
 
   // Set bounds via method
   nullNode->setBounds(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
@@ -535,7 +537,7 @@ TEST_F(NullGraphicNodeTest, NestedTransforms) {
   ASSERT_NE(rootNull, nullptr);
 
   // Create child null node
-  auto childNull = std::make_shared<NullGraphicNode>("test.child_null", "child");
+  auto childNull = std::make_shared<NullGraphicNode>(ctx, "test.child_null", "child");
   rootNull->addGraphicsChild(childNull);
 
   // Set transforms

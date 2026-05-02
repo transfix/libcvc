@@ -83,7 +83,7 @@ TEST_F(VolumeNodeTest, VolumeSpanCalculation) {
 }
 
 TEST_F(VolumeNodeTest, VolumeSpacingForVTK) {
-  VolumeNode node("test_volume");
+  VolumeNode node(ctx, "test_volume");
   node.setVolume(largeVolume);
 
   // The critical fix: spacing should be (Max - Min) / Dim, NOT Span() / Dim
@@ -130,7 +130,7 @@ TEST_F(VolumeNodeTest, VolumeSpacingNotSpanDivDim) {
 // ============================================================================
 
 TEST_F(VolumeNodeTest, VolumeDataRange) {
-  VolumeNode node("test_volume");
+  VolumeNode node(ctx, "test_volume");
   node.setVolume(testVolume);
 
   // Verify metadata contains correct data range
@@ -145,7 +145,7 @@ TEST_F(VolumeNodeTest, VolumeDataRange) {
 }
 
 TEST_F(VolumeNodeTest, LargeVolumeDataRange) {
-  VolumeNode node("large_volume");
+  VolumeNode node(ctx, "large_volume");
   node.setVolume(largeVolume);
 
   // Verify the actual data range from the problematic volume
@@ -164,7 +164,7 @@ TEST_F(VolumeNodeTest, LargeVolumeDataRange) {
 // ============================================================================
 
 TEST_F(VolumeNodeTest, VolumeLabelDefaultState) {
-  VolumeNode node("test.volume", "test_volume");
+  VolumeNode node(ctx, "test.volume", "test_volume");
 
   // Label should be off by default
   EXPECT_FALSE(node.getShowLabel());
@@ -179,7 +179,7 @@ TEST_F(VolumeNodeTest, VolumeLabelDefaultState) {
 // ============================================================================
 
 TEST_F(VolumeNodeTest, VolumeBBoxBounds) {
-  VolumeNode node("test_volume");
+  VolumeNode node(ctx, "test_volume");
   node.setVolume(testVolume);
 
   cvc::bounding_box bbox = node.getBoundingBox();
@@ -198,7 +198,7 @@ TEST_F(VolumeNodeTest, VolumeBBoxBounds) {
 // ============================================================================
 
 TEST_F(VolumeNodeTest, VolumeMetadataComplete) {
-  VolumeNode node("test_volume");
+  VolumeNode node(ctx, "test_volume");
   node.setVolume(testVolume);
 
   // Check all expected metadata fields exist
@@ -213,7 +213,7 @@ TEST_F(VolumeNodeTest, VolumeMetadataComplete) {
 }
 
 TEST_F(VolumeNodeTest, VolumeMetadataValues) {
-  VolumeNode node("test_volume");
+  VolumeNode node(ctx, "test_volume");
   node.setVolume(testVolume);
 
   // Verify dimension metadata
@@ -276,7 +276,7 @@ TEST_F(VolumeNodeTest, VolumeClipsGeometryChild) {
   childGeom.points().push_back({15.0, 15.0, 15.0});
 
   auto geomChild =
-      std::make_shared<GeometryNode>("volume_clip_test.vol_parent.geom_child", "child");
+      std::make_shared<GeometryNode>(ctx, "volume_clip_test.vol_parent.geom_child", "child");
   geomChild->setGeometry(childGeom);
   volumeParent->addGraphicsChild(geomChild);
 
@@ -304,7 +304,7 @@ TEST_F(VolumeNodeTest, GeometryClipsVolumeChild) {
 
   // Create a volume child
   auto volumeChild =
-      std::make_shared<VolumeNode>("volume_clip_test.geom_parent.vol_child", "volume");
+      std::make_shared<VolumeNode>(ctx, "volume_clip_test.geom_parent.vol_child", "volume");
   volumeChild->setVolume(testVolume);
   geomParent->addGraphicsChild(volumeChild);
 

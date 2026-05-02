@@ -17,8 +17,8 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
-GridNode::GridNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
+GridNode::GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GraphicsNode(ctx, statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
       m_xzActor(vtkSmartPointer<vtkActor>::New()), m_xyActor(vtkSmartPointer<vtkActor>::New()),
       m_yzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_xzMapper(vtkSmartPointer<vtkPolyDataMapper>::New()),

@@ -23,7 +23,8 @@ class state;
  */
 class NullGraphicNode : public GraphicsNode {
 public:
-  NullGraphicNode(const std::string &statePath, const std::string &name = "null");
+  NullGraphicNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+                  const std::string &name = "null");
   ~NullGraphicNode() override;
 
   // Set custom bounding box extents (user-modifiable)

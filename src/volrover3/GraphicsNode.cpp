@@ -17,8 +17,8 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
-GraphicsNode::GraphicsNode(const std::string &statePath, const std::string &name)
-    : SceneNode(statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
+GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
       m_bboxNode(std::make_shared<BBoxNode>()), m_showLabel(false), m_labelText(name),
       m_labelSize(14), m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),

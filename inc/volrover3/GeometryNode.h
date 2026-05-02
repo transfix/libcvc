@@ -42,7 +42,8 @@ enum class GeometryRenderMode {
  */
 class GeometryNode : public GraphicsNode {
 public:
-  GeometryNode(const std::string &statePath, const std::string &name = "geometry");
+  GeometryNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+               const std::string &name = "geometry");
   ~GeometryNode() override;
 
   // Generic setData for template compatibility

@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <cvc/app.h>
 #include <cvc/bounding_box.h>
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
@@ -10,6 +11,7 @@
 
 class GridNodeTest : public ::testing::Test {
 protected:
+  cvc::app ctx;
   static void SetUpTestSuite() {
     if (!QApplication::instance()) {
       int argc = 0;
@@ -21,7 +23,7 @@ protected:
   }
 
   void SetUp() override {
-    gridNode = new GridNode("test.grid", "grid");
+    gridNode = new GridNode(ctx, "test.grid", "grid");
     renderer = vtkRenderer::New();
     appState = &AppState::instance();
   }

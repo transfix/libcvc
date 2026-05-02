@@ -21,9 +21,10 @@
 #include <vtkTransform.h>
 #include <vtkVertex.h>
 
-GeometryNode::GeometryNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name), m_hasGeometry(false), m_renderMode(GeometryRenderMode::TRIS),
-      m_useSingleColor(false), m_actor(vtkSmartPointer<vtkActor>::New()),
+GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
+      m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
+      m_actor(vtkSmartPointer<vtkActor>::New()),
       m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()) {
   m_mapper->SetInputData(m_polyData);

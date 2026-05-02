@@ -5,8 +5,8 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
-AxisNode::AxisNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name), m_axesActor(vtkSmartPointer<vtkAxesActor>::New()) {
+AxisNode::AxisNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GraphicsNode(ctx, statePath, name), m_axesActor(vtkSmartPointer<vtkAxesActor>::New()) {
   // Set axis length
   m_axesActor->SetTotalLength(2.0, 2.0, 2.0);
   m_axesActor->SetShaftTypeToLine();
