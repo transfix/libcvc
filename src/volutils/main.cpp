@@ -97,7 +97,7 @@ static int cmd_info(int argc, char **argv) {
   }
   po::notify(vm);
 
-  cvc::volume_file_info vfi(vm["input"].as<std::string>());
+  cvc::volume_file_info vfi(volutils_app(), vm["input"].as<std::string>());
 
   std::cout << "File:       " << vfi.filename() << "\n"
             << "Dimensions: " << vfi.XDim() << " x " << vfi.YDim() << " x " << vfi.ZDim() << "\n"

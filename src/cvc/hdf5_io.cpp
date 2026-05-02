@@ -492,7 +492,7 @@ struct hdf5_io : public volume_file_io {
       volume_name = objectName;
     }
 
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
     bounding_box boundingBox = vfi.boundingBox();
     dimension dimension = vfi.voxel_dimensions();
 
@@ -630,7 +630,7 @@ struct hdf5_io : public volume_file_io {
       volume_name = objectName;
     }
 
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
 
     vol.voxelType(vfi.voxelTypes(var));
     vol.desc(vfi.name(var));

@@ -691,7 +691,7 @@ struct rawv_io : public volume_file_io {
 
     // check if the file exists and we can write the specified subvolume to it
     try {
-      volinfo.read(filename);
+      volinfo.read(ctx, filename);
       // if(!(Dimension(off_x+vol.XDim(),off_y+vol.YDim(),off_z+vol.ZDim()) <=
       // volinfo.voxel_dimensions()))
       if (off_x + vol.XDim() > volinfo.voxel_dimensions()[0] &&
@@ -726,7 +726,7 @@ struct rawv_io : public volume_file_io {
       dim[2] += off_z;
       CVC_NAMESPACE::createVolumeFile(ctx, filename, box, dim,
                                       std::vector<data_type>(1, vol.voxelType()), 1, 1, 0.0, 0.0);
-      volinfo.read(filename);
+      volinfo.read(ctx, filename);
 
       if (var >= volinfo.numVariables()) {
         std::string errStr =
