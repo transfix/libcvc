@@ -100,4 +100,6 @@ namespace CVC_NAMESPACE {
 void register_bunny_io(app & /*ctx*/) {
   geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io));
 }
+
+void register_bunny_io() { geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io)); }
 } // namespace CVC_NAMESPACE

@@ -1,7 +1,7 @@
 #include <boost/foreach.hpp>
 #include <boost/regex.hpp>
-#include <cvc/app.h>
 #include <cvc/geometry_file_io.h>
+#include <cvc/io_handlers.h>
 
 namespace CVC_NAMESPACE {
 // A regex to extract a filename extension
@@ -32,13 +32,20 @@ geometry_file_io::handler_map &geometry_file_io::get_handlers() {
   // It's ok to leak: http://www.parashift.com/c++-faq-lite/ctors.html#faq-10.15
   static handler_map *p = initialize_map();
 
-  // Ensure the default I/O handlers have been registered. Registration
-  // happens lazily when the app singleton is first accessed; triggering
-  // it here guarantees the handler map is populated before any lookup
-  // regardless of whether the caller has explicitly touched the app
-  // singleton.
-  // TODO: Remove this lazy trigger once the singleton is removed.
-  (void)app::instance();
+  // Ensure the default geometry I/O handlers are registered the first
+  // time the handler map is requested. The handler register_* helpers
+  // call back into insert_handler() and therefore re-enter
+  // get_handlers(); an explicit guard avoids re-entering the same
+  // function-local static initialiser, which would be undefined
+  // behaviour.
+  static bool _registering_defaults = false;
+  static bool _defaults_registered = false;
+  if (!_defaults_registered && !_registering_defaults) {
+    _registering_defaults = true;
+    register_default_geometry_handlers();
+    _defaults_registered = true;
+    _registering_defaults = false;
+  }
 
   return *p;
 }
@@ -193,5 +200,18 @@ void write_geometry(const geometry &geo, const std::string &filename) {
   }
   throw unsupported_geometry_file_type(str(boost::format("%1% : Cannot write '%2%'%3%") %
                                            BOOST_CURRENT_FUNCTION % filename % errors));
+}
+
+// -----------------------------------
+// register_default_geometry_handlers
+// -----------------------------------
+// Purpose:
+//   Register the built-in geometry I/O handlers without requiring a
+//   cvc::app instance. Called from geometry_file_io::get_handlers() the
+//   first time the handler map is requested.
+void register_default_geometry_handlers() {
+  register_bunny_io();
+  register_off_io();
+  register_cvcraw_io();
 }
 } // namespace CVC_NAMESPACE
