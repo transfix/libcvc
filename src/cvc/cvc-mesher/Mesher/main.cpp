@@ -2,12 +2,14 @@
 #include <string>
 #include <cstdlib>
 #include <VolMagickCompat.h>
+#include <cvc/app.h>
 #include <mesher.h>
 #include <boost/program_options.hpp>
 #include <stdexcept>
 
 int main(int argc, char **argv)
 {
+  CVC_NAMESPACE::app cvc_ctx;
   using namespace std;
   namespace po = boost::program_options;
 
@@ -79,7 +81,7 @@ int main(int argc, char **argv)
     if(operation == "mesh")
       {
 	VolMagick::Volume vol;
-	VolMagick::readVolumeFile(vol,input_file);
+	CVC_NAMESPACE::readVolumeFile(cvc_ctx, vol, input_file);
 	
 	// Convert string arguments to enums
 	LBIE::Mesher::ExtractionMethod extraction_method_enum;

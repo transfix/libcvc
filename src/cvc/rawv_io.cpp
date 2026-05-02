@@ -117,9 +117,9 @@ struct rawv_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data &data,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data &data,
                                  const std::string &filename) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
     data_type rawv_type_conv[] = {UChar, UChar, UShort, UInt, Float, Double};
@@ -296,10 +296,10 @@ struct rawv_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
     data_type rawv_type_conv[] = {UChar, UChar, UShort, UInt, Float, Double};
@@ -554,11 +554,11 @@ struct rawv_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void createVolumeFile(app & /*ctx*/, const std::string &filename,
+  virtual void createVolumeFile(app &ctx, const std::string &filename,
                                 const bounding_box &boundingBox, const dimension &dimension,
                                 const std::vector<data_type> &voxelTypes, unsigned int numVariables,
                                 unsigned int numTimesteps, double min_time, double max_time) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
     unsigned char rawv_inv_type_conv[] = {1, 2, 3, 4, 5};
@@ -676,7 +676,7 @@ struct rawv_io : public volume_file_io {
   virtual void writeVolumeFile(app &ctx, const volume &wvol, const std::string &filename,
                                unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
                                uint64 off_z) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
     unsigned char rawv_inv_type_conv[] = {1, 2, 3, 4, 5};

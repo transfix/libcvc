@@ -13,6 +13,7 @@
 #include <boost/format.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/app.h>
 #include <cvc/bounding_box.h>
 #include <cvc/dimension.h>
 #include <cvc/hdf5_utils.h>
@@ -36,6 +37,7 @@ using namespace CVC_NAMESPACE;
 class HDF5Test : public ::testing::Test {
 protected:
   std::string test_dir;
+  app ctx;
 
   virtual void SetUp() {
     // Create a unique directory for this test process. std::filesystem +
@@ -248,11 +250,11 @@ TEST_F(HDF5Test, UnlinkDataSet) {
     hsize_t dims[1] = {10};
     H5::DataSpace dataspace(1, dims);
     file->createDataSet("data_to_remove", H5::PredType::NATIVE_DOUBLE, dataspace);
-    EXPECT_TRUE(hdf5_utils::objectExists(filepath, "data_to_remove"));
+    EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "data_to_remove"));
 
     // Unlink it
     hdf5_utils::unlink(*file, "data_to_remove");
-    EXPECT_FALSE(hdf5_utils::objectExists(filepath, "data_to_remove"));
+    EXPECT_FALSE(hdf5_utils::objectExists(ctx, filepath, "data_to_remove"));
   }
 }
 
@@ -268,11 +270,11 @@ TEST_F(HDF5Test, UnlinkNestedObject) {
     hsize_t dims[1] = {10};
     H5::DataSpace dataspace(1, dims);
     grp->createDataSet("data", H5::PredType::NATIVE_DOUBLE, dataspace);
-    EXPECT_TRUE(hdf5_utils::objectExists(filepath, "group/subgroup/data"));
+    EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "group/subgroup/data"));
 
     // Unlink it
     hdf5_utils::unlink(*file, "group/subgroup/data");
-    EXPECT_FALSE(hdf5_utils::objectExists(filepath, "group/subgroup/data"));
+    EXPECT_FALSE(hdf5_utils::objectExists(ctx, filepath, "group/subgroup/data"));
   }
 }
 
@@ -356,8 +358,8 @@ TEST_F(HDF5Test, MultipleGroupsAndDataSets) {
   }
 
   // Verify all groups were created
-  EXPECT_TRUE(hdf5_utils::objectExists(filepath, "group0"));
-  EXPECT_TRUE(hdf5_utils::objectExists(filepath, "group4"));
+  EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "group0"));
+  EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "group4"));
 }
 
 TEST_F(HDF5Test, MixedAttributes) {
@@ -416,8 +418,8 @@ TEST_F(HDF5Test, CreateModifyRead) {
   {
     boost::shared_ptr<H5::H5File> file = hdf5_utils::getH5File(filepath, false);
 
-    EXPECT_TRUE(hdf5_utils::objectExists(filepath, "data"));
-    EXPECT_TRUE(hdf5_utils::objectExists(filepath, "data/values"));
+    EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "data"));
+    EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "data/values"));
 
     boost::shared_ptr<H5::DataSet> dataset = hdf5_utils::getDataSet(*file, "data/values", false);
 

@@ -103,14 +103,9 @@ static inline double getTriVal(double val[8], double x, double y, double z, doub
 }
 
 /*
-  Shortcut for creating a volume file based on a volume file info object
+  Shortcut for creating a volume file based on a volume file info object.
+  All overloads require an explicit cvc::app context.
 */
-static inline void createVolumeFile(const std::string &filename, const volume_file_info &volinfo) {
-  createVolumeFile(filename, volinfo.boundingBox(), volinfo.voxel_dimensions(),
-                   volinfo.voxelTypes(), volinfo.numVariables(), volinfo.numTimesteps(),
-                   volinfo.TMin(), volinfo.TMax());
-}
-
 static inline void createVolumeFile(app &ctx, const std::string &filename,
                                     const volume_file_info &volinfo) {
   createVolumeFile(ctx, filename, volinfo.boundingBox(), volinfo.voxel_dimensions(),
@@ -126,12 +121,6 @@ static inline void createVolumeFile(app &ctx, const std::string &filename,
 //   writes the volume data in the object to the specified file.
 // ---- Change History ----
 // 01/04/2010 -- Joe R. -- Creation.
-static inline void createVolumeFile(const volume &vol, const std::string &filename) {
-  createVolumeFile(filename, vol.boundingBox(), vol.voxel_dimensions(),
-                   std::vector<data_type>(1, vol.voxelType()));
-  writeVolumeFile(vol, filename);
-}
-
 static inline void createVolumeFile(app &ctx, const volume &vol, const std::string &filename) {
   createVolumeFile(ctx, filename, vol.boundingBox(), vol.voxel_dimensions(),
                    std::vector<data_type>(1, vol.voxelType()));
@@ -146,10 +135,6 @@ static inline void createVolumeFile(app &ctx, const volume &vol, const std::stri
 //   createVolumeFile call
 // ---- Change History ----
 // 01/04/2010 -- Joe R. -- Creation.
-static inline void createVolumeFile(const std::string &filename, const volume &vol) {
-  createVolumeFile(vol, filename);
-}
-
 static inline void createVolumeFile(app &ctx, const std::string &filename, const volume &vol) {
   createVolumeFile(ctx, vol, filename);
 }
@@ -160,14 +145,7 @@ static inline void createVolumeFile(app &ctx, const std::string &filename, const
   (UChar, UShort, UInt), the first half of the set of integers maps to [-1.0,0) and the last half
   maps to (0,1.0].
 */
-void calcGradient(std::vector<volume> &grad, const volume &vol, data_type vt = Float);
-
-void sub(volume &dest, const volume &vol, uint64 off_x, uint64 off_y, uint64 off_z,
-         const dimension &subvoldim);
-
-void volconvert(const std::string &input_volume_file, const std::string &output_volume_file);
-
-// ---- Overloads accepting explicit app& context ----
+// ---- All free functions take an explicit cvc::app context. ----
 void calcGradient(app &ctx, std::vector<volume> &grad, const volume &vol, data_type vt = Float);
 
 void sub(app &ctx, volume &dest, const volume &vol, uint64 off_x, uint64 off_y, uint64 off_z,
@@ -241,7 +219,5 @@ bool is_volume(const boost::any &data);
 bool is_volume_file_info(const boost::any &data);
 bool is_geometry_filename(const std::string &filename);
 bool is_volume_filename(const std::string &filename);
-boost::any load(const std::string &filename);
-void save(const boost::any &data, const std::string &filename);
 } // namespace CVC_NAMESPACE
 #endif

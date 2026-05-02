@@ -313,9 +313,9 @@ struct mrc_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data &d,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data &d,
                                  const std::string &filename) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
     FILE *input;
@@ -468,10 +468,10 @@ struct mrc_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     char buf[256];
 
@@ -661,12 +661,12 @@ struct mrc_io : public volume_file_io {
   // ---- Change History ----
   // ??/??/2007 -- Joe R. -- Creation.
   // 11/20/2009 -- Joe R. -- Converted to a volume_file_io class
-  virtual void createVolumeFile(app & /*ctx*/, const std::string &filename,
+  virtual void createVolumeFile(app &ctx, const std::string &filename,
                                 const bounding_box &boundingBox, const dimension &dimension,
                                 const std::vector<data_type> &voxelTypes, unsigned int numVariables,
                                 unsigned int numTimesteps, double min_time, double max_time) const {
     using namespace boost;
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     mrc_header mrcHeader;
 
@@ -778,7 +778,7 @@ struct mrc_io : public volume_file_io {
                                unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
                                uint64 off_z) const {
     using namespace boost;
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     volume_file_info volinfo;
     char buf[256];
@@ -1036,11 +1036,11 @@ struct imod_mrc_io : public mrc_io {
   //   from a volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data &data,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data &data,
                                  const std::string &filename) const {
     using namespace std;
     using namespace boost;
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     data_type mrcTypes[] = {UChar, UShort, Float};
     MrcHeader header;
@@ -1112,12 +1112,12 @@ struct imod_mrc_io : public mrc_io {
   //   Writes to a Volume object after reading from a volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void readVolumeFile(app & /*ctx*/, volume &vol, const std::string &filename,
-                              unsigned int var, unsigned int time, uint64 off_x, uint64 off_y,
-                              uint64 off_z, const dimension &subvoldim) const {
+  virtual void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned int var,
+                              unsigned int time, uint64 off_x, uint64 off_y, uint64 off_z,
+                              const dimension &subvoldim) const {
     using namespace std;
     using namespace boost;
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
     if (var > 0)
       throw index_out_of_bounds("Variable index out of bounds.");
@@ -1208,7 +1208,5 @@ struct imod_mrc_io : public mrc_io {
 } // namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE {
-void register_mrc_io(app & /*ctx*/) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new mrc_io));
-}
+void register_mrc_io(app &ctx) { volume_file_io::insertHandler(volume_file_io::ptr(new mrc_io)); }
 } // namespace CVC_NAMESPACE

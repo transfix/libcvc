@@ -81,7 +81,7 @@ void volume_file_info::read(app &ctx, const std::string &filename) {
 
 void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const {
   app &ctx = _ctx ? *_ctx : app::instance();
-  thread_info ti(BOOST_CURRENT_FUNCTION);
+  thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   volume vol(ctx);
   const uint64 maxdim = 128; // read in 128^3 chunks

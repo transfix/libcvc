@@ -353,9 +353,9 @@ struct vtk_io : public volume_file_io {
   //   from a volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void getVolumeFileInfo(app & /*ctx*/, volume_file_info::data & /*d*/,
+  virtual void getVolumeFileInfo(app &ctx, volume_file_info::data & /*d*/,
                                  const std::string & /*filename*/) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     throw read_error("Reading VTK files doesn't work yet!");
   }
 
@@ -366,11 +366,11 @@ struct vtk_io : public volume_file_io {
   //   Writes to a Volume object after reading from a volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void readVolumeFile(app & /*ctx*/, volume & /*vol*/, const std::string & /*filename*/,
+  virtual void readVolumeFile(app &ctx, volume & /*vol*/, const std::string & /*filename*/,
                               unsigned int /*var*/, unsigned int /*time*/, uint64 /*off_x*/,
                               uint64 /*off_y*/, uint64 /*off_z*/,
                               const dimension & /*subvoldim*/) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     throw read_error("Reading VTK files doesn't work yet!");
   }
 
@@ -381,13 +381,13 @@ struct vtk_io : public volume_file_io {
   //   Creates an empty volume file to be later filled in by writeVolumeFile
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void createVolumeFile(app & /*ctx*/, const std::string & /*filename*/,
+  virtual void createVolumeFile(app &ctx, const std::string & /*filename*/,
                                 const bounding_box & /*boundingBox*/,
                                 const dimension & /*dimension*/,
                                 const std::vector<data_type> & /*voxelTypes*/,
                                 unsigned int /*numVariables*/, unsigned int /*numTimesteps*/,
                                 double /*min_time*/, double /*max_time*/) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     throw CVC_NAMESPACE::write_error("Writing VTK files doesn't work yet!");
   }
 
@@ -403,11 +403,10 @@ struct vtk_io : public volume_file_io {
   //   createVolumeFile to replace the volume file.
   // ---- Change History ----
   // 11/20/2009 -- Joe R. -- Creation.
-  virtual void writeVolumeFile(app & /*ctx*/, const volume & /*wvol*/,
-                               const std::string & /*filename*/, unsigned int /*var*/,
-                               unsigned int /*time*/, uint64 /*off_x*/, uint64 /*off_y*/,
-                               uint64 /*off_z*/) const {
-    thread_info ti(BOOST_CURRENT_FUNCTION);
+  virtual void writeVolumeFile(app &ctx, const volume & /*wvol*/, const std::string & /*filename*/,
+                               unsigned int /*var*/, unsigned int /*time*/, uint64 /*off_x*/,
+                               uint64 /*off_y*/, uint64 /*off_z*/) const {
+    thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
     throw CVC_NAMESPACE::write_error("Writing VTK files doesn't work yet!");
   }
 
@@ -418,7 +417,5 @@ protected:
 } // namespace CVC_NAMESPACE
 
 namespace CVC_NAMESPACE {
-void register_vtk_io(app & /*ctx*/) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new vtk_io));
-}
+void register_vtk_io(app &ctx) { volume_file_io::insertHandler(volume_file_io::ptr(new vtk_io)); }
 } // namespace CVC_NAMESPACE
