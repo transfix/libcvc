@@ -1318,7 +1318,8 @@ void GeometryDialog::onSmoothingClicked() {
           volrover3::app().threadInfo(threadKey, "Smoothing mesh...");
 
           // Perform the smoothing operation with all parameters
-          geom.smoothing(delta, fixBoundary, perturb1, geoFlow, smoothingEnabled, perturb2);
+          geom.smoothing(volrover3::app(), delta, fixBoundary, perturb1, geoFlow, smoothingEnabled,
+                         perturb2);
 
           volrover3::app().threadProgress(threadKey, 0.9);
           volrover3::app().threadInfo(threadKey, "Updating scene...");

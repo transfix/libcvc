@@ -244,9 +244,9 @@ public:
   geometry &project(const geometry &input);
 
   // sangmin park's smoothing method
-  geometry &smoothing(float delta = 0.1f, bool fix_boundary = false, bool perturb_1 = false,
-                      bool geometric_flow = true, bool smoothing_enabled = true,
-                      bool perturb_2 = false);
+  geometry &smoothing(app &ctx, float delta = 0.1f, bool fix_boundary = false,
+                      bool perturb_1 = false, bool geometric_flow = true,
+                      bool smoothing_enabled = true, bool perturb_2 = false);
 
   // LBIE mesh quality improvement
 #ifdef CVC_ENABLE_MESHER

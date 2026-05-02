@@ -47,7 +47,7 @@
 // #define CVC_GEOMETRY_CORRECT_INDEX_START
 
 namespace CVC_NAMESPACE {
-geometry::geometry() : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(&app::instance()) {
+geometry::geometry() : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(nullptr) {
   for (uint64_t i = 0; i < 3; i++)
     _min[i] = _max[i] = 0.0;
 
@@ -634,7 +634,7 @@ void geometry::write(const std::string &filename) const { write_geometry(*this, 
 // arand: written 4-11-2011
 //        directly read a cvc-raw type file into the data structure
 geometry::geometry(const std::string &filename)
-    : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(&app::instance()) {
+    : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(nullptr) {
   for (uint64_t i = 0; i < 3; i++)
     _min[i] = _max[i] = 0.0;
   init_ptrs();

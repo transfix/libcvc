@@ -655,9 +655,9 @@ void smooth_geometry(CVC_NAMESPACE::app &ctx, CVC_NAMESPACE::geometry &geo, floa
 }; // namespace
 
 namespace CVC_NAMESPACE {
-geometry &geometry::smoothing(float delta, bool fix_boundary, bool perturb_1, bool geometric_flow,
-                              bool smoothing_enabled, bool perturb_2) {
-  smooth_geometry(ctx(), *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled,
+geometry &geometry::smoothing(app &ctx, float delta, bool fix_boundary, bool perturb_1,
+                              bool geometric_flow, bool smoothing_enabled, bool perturb_2) {
+  smooth_geometry(ctx, *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled,
                   perturb_2);
   return *this;
 }
