@@ -19,15 +19,24 @@
 using namespace CVC_NAMESPACE;
 
 // ===========================
-// Basic Singleton Tests
+// AppTest fixture
+// ===========================
+// Each test gets a fresh, locally-owned cvc::app instance.  No reliance
+// on the ctx singleton — tests exercise per-instance behavior.
+
+class AppTest : public ::testing::Test {
+protected:
+  app ctx;
+};
+
+// ===========================
+// Basic Construction Tests
 // ===========================
 
-TEST(AppTest, SingletonInstance) {
-  // Test that instance() returns a valid reference
-  app &app1 = cvcapp;
-  app &app2 = cvcapp;
-
-  // Both references should point to the same singleton
+TEST_F(AppTest, ConstructionYieldsValidInstance) {
+  // Two references to the same local instance compare equal.
+  app &app1 = ctx;
+  app &app2 = ctx;
   EXPECT_EQ(&app1, &app2);
 }
 
@@ -35,137 +44,137 @@ TEST(AppTest, SingletonInstance) {
 // Data Management Tests
 // ===========================
 
-TEST(AppTest, DataSetAndGet) {
+TEST_F(AppTest, DataSetAndGet) {
   // Test setting and getting string data
   std::string test_key = "test.data.string";
   std::string test_value = "Hello, World!";
 
-  cvcapp.data(test_key, test_value);
+  ctx.data(test_key, test_value);
 
-  ASSERT_TRUE(cvcapp.isData<std::string>(test_key));
-  EXPECT_EQ(cvcapp.data<std::string>(test_key), test_value);
+  ASSERT_TRUE(ctx.isData<std::string>(test_key));
+  EXPECT_EQ(ctx.data<std::string>(test_key), test_value);
 
   // Clean up
-  cvcapp.data(test_key, boost::any());
+  ctx.data(test_key, boost::any());
 }
 
-TEST(AppTest, DataTypeInt) {
+TEST_F(AppTest, DataTypeInt) {
   std::string key = "test.data.int";
   int value = 42;
 
-  cvcapp.data(key, value);
+  ctx.data(key, value);
 
-  ASSERT_TRUE(cvcapp.isData<int>(key));
-  EXPECT_EQ(cvcapp.data<int>(key), value);
+  ASSERT_TRUE(ctx.isData<int>(key));
+  EXPECT_EQ(ctx.data<int>(key), value);
 
   // Clean up
-  cvcapp.data(key, boost::any());
+  ctx.data(key, boost::any());
 }
 
-TEST(AppTest, DataTypeDouble) {
+TEST_F(AppTest, DataTypeDouble) {
   std::string key = "test.data.double";
   double value = 3.14159;
 
-  cvcapp.data(key, value);
+  ctx.data(key, value);
 
-  ASSERT_TRUE(cvcapp.isData<double>(key));
-  EXPECT_DOUBLE_EQ(cvcapp.data<double>(key), value);
+  ASSERT_TRUE(ctx.isData<double>(key));
+  EXPECT_DOUBLE_EQ(ctx.data<double>(key), value);
 
   // Clean up
-  cvcapp.data(key, boost::any());
+  ctx.data(key, boost::any());
 }
 
-TEST(AppTest, DataTypeBool) {
+TEST_F(AppTest, DataTypeBool) {
   std::string key = "test.data.bool";
   bool value = true;
 
-  cvcapp.data(key, value);
+  ctx.data(key, value);
 
-  ASSERT_TRUE(cvcapp.isData<bool>(key));
-  EXPECT_EQ(cvcapp.data<bool>(key), value);
+  ASSERT_TRUE(ctx.isData<bool>(key));
+  EXPECT_EQ(ctx.data<bool>(key), value);
 
   // Clean up
-  cvcapp.data(key, boost::any());
+  ctx.data(key, boost::any());
 }
 
-TEST(AppTest, DataRemoval) {
+TEST_F(AppTest, DataRemoval) {
   std::string key = "test.data.removal";
   std::string value = "temporary";
 
-  cvcapp.data(key, value);
-  ASSERT_TRUE(cvcapp.isData<std::string>(key));
+  ctx.data(key, value);
+  ASSERT_TRUE(ctx.isData<std::string>(key));
 
   // Remove by setting empty boost::any
-  cvcapp.data(key, boost::any());
-  EXPECT_FALSE(cvcapp.isData<std::string>(key));
+  ctx.data(key, boost::any());
+  EXPECT_FALSE(ctx.isData<std::string>(key));
 }
 
-TEST(AppTest, DataTypeName) {
+TEST_F(AppTest, DataTypeName) {
   std::string key = "test.data.typename";
   int value = 123;
 
-  cvcapp.data(key, value);
+  ctx.data(key, value);
 
-  std::string typeName = cvcapp.dataTypeName(key);
+  std::string typeName = ctx.dataTypeName(key);
   EXPECT_FALSE(typeName.empty());
 
   // Clean up
-  cvcapp.data(key, boost::any());
+  ctx.data(key, boost::any());
 }
 
-TEST(AppTest, DataMap) {
+TEST_F(AppTest, DataMap) {
   // Test getting the entire data map
   std::string key1 = "test.map.key1";
   std::string key2 = "test.map.key2";
 
-  cvcapp.data(key1, 100);
-  cvcapp.data(key2, std::string("value2"));
+  ctx.data(key1, 100);
+  ctx.data(key2, std::string("value2"));
 
-  data_map map = cvcapp.data();
+  data_map map = ctx.data();
 
   EXPECT_TRUE(map.find(key1) != map.end());
   EXPECT_TRUE(map.find(key2) != map.end());
 
   // Clean up
-  cvcapp.data(key1, boost::any());
-  cvcapp.data(key2, boost::any());
+  ctx.data(key1, boost::any());
+  ctx.data(key2, boost::any());
 }
 
 // ===========================
 // Property Management Tests
 // ===========================
 
-TEST(AppTest, PropertySetAndGet) {
+TEST_F(AppTest, PropertySetAndGet) {
   std::string key = "test.property.simple";
   std::string value = "test_value";
 
-  cvcapp.properties(key, value);
+  ctx.properties(key, value);
 
-  EXPECT_EQ(cvcapp.properties(key), value);
-  EXPECT_TRUE(cvcapp.hasProperty(key));
+  EXPECT_EQ(ctx.properties(key), value);
+  EXPECT_TRUE(ctx.hasProperty(key));
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyRemoval) {
+TEST_F(AppTest, PropertyRemoval) {
   std::string key = "test.property.removal";
 
-  cvcapp.properties(key, "temporary");
-  ASSERT_TRUE(cvcapp.hasProperty(key));
+  ctx.properties(key, "temporary");
+  ASSERT_TRUE(ctx.hasProperty(key));
 
   // Remove by setting empty string
-  cvcapp.properties(key, std::string());
-  EXPECT_FALSE(cvcapp.hasProperty(key));
+  ctx.properties(key, std::string());
+  EXPECT_FALSE(ctx.hasProperty(key));
 }
 
-TEST(AppTest, PropertyList) {
+TEST_F(AppTest, PropertyList) {
   std::string key = "test.property.list";
 
   // Set comma-separated list
-  cvcapp.properties(key, "item1,item2,item3");
+  ctx.properties(key, "item1,item2,item3");
 
-  std::vector<std::string> items = cvcapp.listProperty(key);
+  std::vector<std::string> items = ctx.listProperty(key);
 
   ASSERT_EQ(items.size(), 3);
   EXPECT_EQ(items[0], "item1");
@@ -173,16 +182,16 @@ TEST(AppTest, PropertyList) {
   EXPECT_EQ(items[2], "item3");
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyListWithSpaces) {
+TEST_F(AppTest, PropertyListWithSpaces) {
   std::string key = "test.property.list.spaces";
 
   // Set list with spaces around commas
-  cvcapp.properties(key, "item1 , item2 , item3");
+  ctx.properties(key, "item1 , item2 , item3");
 
-  std::vector<std::string> items = cvcapp.listProperty(key);
+  std::vector<std::string> items = ctx.listProperty(key);
 
   ASSERT_EQ(items.size(), 3);
   EXPECT_EQ(items[0], "item1");
@@ -190,85 +199,85 @@ TEST(AppTest, PropertyListWithSpaces) {
   EXPECT_EQ(items[2], "item3");
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyListUnique) {
+TEST_F(AppTest, PropertyListUnique) {
   std::string key = "test.property.list.unique";
 
   // Set list with duplicates
-  cvcapp.properties(key, "item1,item2,item1,item3,item2");
+  ctx.properties(key, "item1,item2,item1,item3,item2");
 
-  std::vector<std::string> items = cvcapp.listProperty(key, true);
+  std::vector<std::string> items = ctx.listProperty(key, true);
 
   // Should have only unique items
   EXPECT_EQ(items.size(), 3);
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyListAppend) {
+TEST_F(AppTest, PropertyListAppend) {
   std::string key = "test.property.list.append";
 
-  cvcapp.properties(key, "item1,item2");
-  cvcapp.listPropertyAppend(key, "item3");
+  ctx.properties(key, "item1,item2");
+  ctx.listPropertyAppend(key, "item3");
 
-  std::vector<std::string> items = cvcapp.listProperty(key);
+  std::vector<std::string> items = ctx.listProperty(key);
 
   ASSERT_EQ(items.size(), 3);
   EXPECT_EQ(items[2], "item3");
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyListRemove) {
+TEST_F(AppTest, PropertyListRemove) {
   std::string key = "test.property.list.remove";
 
-  cvcapp.properties(key, "item1,item2,item3");
-  cvcapp.listPropertyRemove(key, "item2");
+  ctx.properties(key, "item1,item2,item3");
+  ctx.listPropertyRemove(key, "item2");
 
-  std::vector<std::string> items = cvcapp.listProperty(key);
+  std::vector<std::string> items = ctx.listProperty(key);
 
   ASSERT_EQ(items.size(), 2);
   EXPECT_EQ(items[0], "item1");
   EXPECT_EQ(items[1], "item3");
 
   // Clean up
-  cvcapp.properties(key, std::string());
+  ctx.properties(key, std::string());
 }
 
-TEST(AppTest, PropertyMap) {
+TEST_F(AppTest, PropertyMap) {
   // Test getting the entire property map
   std::string key1 = "test.propmap.key1";
   std::string key2 = "test.propmap.key2";
 
-  cvcapp.properties(key1, "value1");
-  cvcapp.properties(key2, "value2");
+  ctx.properties(key1, "value1");
+  ctx.properties(key2, "value2");
 
-  property_map map = cvcapp.properties();
+  property_map map = ctx.properties();
 
   EXPECT_TRUE(map.find(key1) != map.end());
   EXPECT_TRUE(map.find(key2) != map.end());
 
   // Clean up
-  cvcapp.properties(key1, std::string());
-  cvcapp.properties(key2, std::string());
+  ctx.properties(key1, std::string());
+  ctx.properties(key2, std::string());
 }
 
 // ===========================
 // Thread Management Tests
 // ===========================
 
-TEST(AppTest, ThreadKeyGeneration) {
+TEST_F(AppTest, ThreadKeyGeneration) {
   std::string hint = "test_thread";
-  std::string key1 = cvcapp.uniqueThreadKey(hint);
+  std::string key1 = ctx.uniqueThreadKey(hint);
 
   // Register the first key so the second will be different
-  cvcapp.threads(key1, thread_ptr(new boost::thread()));
+  ctx.threads(key1, thread_ptr(new boost::thread()));
 
-  std::string key2 = cvcapp.uniqueThreadKey(hint);
+  std::string key2 = ctx.uniqueThreadKey(hint);
 
   // Keys should be unique
   EXPECT_NE(key1, key2);
@@ -276,34 +285,34 @@ TEST(AppTest, ThreadKeyGeneration) {
   EXPECT_TRUE(key2.find(hint) != std::string::npos);
 
   // Clean up
-  cvcapp.removeThread(key1);
+  ctx.removeThread(key1);
 }
 
-TEST(AppTest, ThreadProgress) {
+TEST_F(AppTest, ThreadProgress) {
   // Test thread progress tracking
   double progress = 0.5;
-  cvcapp.threadProgress(progress);
+  ctx.threadProgress(progress);
 
-  double retrieved = cvcapp.threadProgress();
+  double retrieved = ctx.threadProgress();
   EXPECT_DOUBLE_EQ(retrieved, progress);
 }
 
-TEST(AppTest, ThreadProgressClamping) {
+TEST_F(AppTest, ThreadProgressClamping) {
   // Test that progress is clamped to [0.0, 1.0]
-  cvcapp.threadProgress(-0.5);
-  EXPECT_DOUBLE_EQ(cvcapp.threadProgress(), 0.0);
+  ctx.threadProgress(-0.5);
+  EXPECT_DOUBLE_EQ(ctx.threadProgress(), 0.0);
 
-  cvcapp.threadProgress(1.5);
-  EXPECT_DOUBLE_EQ(cvcapp.threadProgress(), 1.0);
+  ctx.threadProgress(1.5);
+  EXPECT_DOUBLE_EQ(ctx.threadProgress(), 1.0);
 }
 
 // ===========================
 // Listify Tests
 // ===========================
 
-TEST(AppTest, ListifyVectorToString) {
+TEST_F(AppTest, ListifyVectorToString) {
   std::vector<std::string> vec = {"item1", "item2", "item3"};
-  std::string result = cvcapp.listify(vec);
+  std::string result = ctx.listify(vec);
 
   EXPECT_FALSE(result.empty());
   EXPECT_TRUE(result.find("item1") != std::string::npos);
@@ -311,9 +320,9 @@ TEST(AppTest, ListifyVectorToString) {
   EXPECT_TRUE(result.find("item3") != std::string::npos);
 }
 
-TEST(AppTest, ListifyStringToVector) {
+TEST_F(AppTest, ListifyStringToVector) {
   std::string list = "item1,item2,item3";
-  std::vector<std::string> result = cvcapp.listify(list);
+  std::vector<std::string> result = ctx.listify(list);
 
   ASSERT_EQ(result.size(), 3);
   EXPECT_EQ(result[0], "item1");
@@ -321,10 +330,10 @@ TEST(AppTest, ListifyStringToVector) {
   EXPECT_EQ(result[2], "item3");
 }
 
-TEST(AppTest, ListifyRoundTrip) {
+TEST_F(AppTest, ListifyRoundTrip) {
   std::vector<std::string> original = {"alpha", "beta", "gamma"};
-  std::string stringified = cvcapp.listify(original);
-  std::vector<std::string> result = cvcapp.listify(stringified);
+  std::string stringified = ctx.listify(original);
+  std::vector<std::string> result = ctx.listify(stringified);
 
   ASSERT_EQ(result.size(), original.size());
   for (size_t i = 0; i < original.size(); ++i) {
@@ -336,23 +345,23 @@ TEST(AppTest, ListifyRoundTrip) {
 // Mutex Management Tests
 // ===========================
 
-TEST(AppTest, MutexCreation) {
+TEST_F(AppTest, MutexCreation) {
   std::string mutex_name = "test.mutex";
-  mutex_ptr mtx = cvcapp.mutex(mutex_name);
+  mutex_ptr mtx = ctx.mutex(mutex_name);
 
   ASSERT_NE(mtx, nullptr);
 
   // Getting the same mutex should return the same pointer
-  mutex_ptr mtx2 = cvcapp.mutex(mutex_name);
+  mutex_ptr mtx2 = ctx.mutex(mutex_name);
   EXPECT_EQ(mtx, mtx2);
 }
 
-TEST(AppTest, MutexInfo) {
+TEST_F(AppTest, MutexInfo) {
   std::string mutex_name = "test.mutex.info";
   std::string info = "Test mutex information";
 
-  cvcapp.mutexInfo(mutex_name, info);
-  std::string retrieved = cvcapp.mutexInfo(mutex_name);
+  ctx.mutexInfo(mutex_name, info);
+  std::string retrieved = ctx.mutexInfo(mutex_name);
 
   EXPECT_EQ(retrieved, info);
 }
@@ -361,60 +370,60 @@ TEST(AppTest, MutexInfo) {
 // Data Type Registration Tests
 // ===========================
 
-TEST(AppTest, DataTypeEnumRegistration) {
+TEST_F(AppTest, DataTypeEnumRegistration) {
   // Test that basic types are registered correctly
   int test_int = 42;
-  cvcapp.data("test.enum.int", test_int);
+  ctx.data("test.enum.int", test_int);
 
-  data_type dt = cvcapp.dataType("test.enum.int");
+  data_type dt = ctx.dataType("test.enum.int");
   EXPECT_EQ(dt, Int);
 
   // Clean up
-  cvcapp.data("test.enum.int", boost::any());
+  ctx.data("test.enum.int", boost::any());
 }
 
 // ===========================
 // Additional Property Map Tests
 // ===========================
 
-TEST(AppTest, PropertyMapOperations) {
+TEST_F(AppTest, PropertyMapOperations) {
   property_map test_map;
   test_map["prop1"] = "value1";
   test_map["prop2"] = "value2";
   test_map["prop3"] = "value3";
 
-  cvcapp.properties(test_map);
+  ctx.properties(test_map);
 
-  EXPECT_EQ(cvcapp.properties("prop1"), "value1");
-  EXPECT_EQ(cvcapp.properties("prop2"), "value2");
-  EXPECT_EQ(cvcapp.properties("prop3"), "value3");
+  EXPECT_EQ(ctx.properties("prop1"), "value1");
+  EXPECT_EQ(ctx.properties("prop2"), "value2");
+  EXPECT_EQ(ctx.properties("prop3"), "value3");
 
   // Clean up
-  cvcapp.properties("prop1", "");
-  cvcapp.properties("prop2", "");
-  cvcapp.properties("prop3", "");
+  ctx.properties("prop1", "");
+  ctx.properties("prop2", "");
+  ctx.properties("prop3", "");
 }
 
-TEST(AppTest, AddProperties) {
+TEST_F(AppTest, AddProperties) {
   property_map test_map;
   test_map["addprop1"] = "addvalue1";
   test_map["addprop2"] = "addvalue2";
 
-  cvcapp.addProperties(test_map);
+  ctx.addProperties(test_map);
 
-  EXPECT_TRUE(cvcapp.hasProperty("addprop1"));
-  EXPECT_TRUE(cvcapp.hasProperty("addprop2"));
-  EXPECT_EQ(cvcapp.properties("addprop1"), "addvalue1");
+  EXPECT_TRUE(ctx.hasProperty("addprop1"));
+  EXPECT_TRUE(ctx.hasProperty("addprop2"));
+  EXPECT_EQ(ctx.properties("addprop1"), "addvalue1");
 
   // Clean up
-  cvcapp.properties("addprop1", "");
-  cvcapp.properties("addprop2", "");
+  ctx.properties("addprop1", "");
+  ctx.properties("addprop2", "");
 }
 
-TEST(AppTest, PropertyListOperations) {
+TEST_F(AppTest, PropertyListOperations) {
   // Test comma-separated list property
-  cvcapp.properties("test.list", "item1,item2,item3");
-  std::vector<std::string> items = cvcapp.listProperty("test.list");
+  ctx.properties("test.list", "item1,item2,item3");
+  std::vector<std::string> items = ctx.listProperty("test.list");
 
   ASSERT_EQ(items.size(), 3);
   EXPECT_EQ(items[0], "item1");
@@ -422,127 +431,127 @@ TEST(AppTest, PropertyListOperations) {
   EXPECT_EQ(items[2], "item3");
 
   // Clean up
-  cvcapp.properties("test.list", "");
+  ctx.properties("test.list", "");
 }
 
-TEST(AppTest, PropertyListUniqueElements) {
-  cvcapp.properties("test.list.unique", "a,b,a,c,b,d");
-  std::vector<std::string> items = cvcapp.listProperty("test.list.unique", true);
+TEST_F(AppTest, PropertyListUniqueElements) {
+  ctx.properties("test.list.unique", "a,b,a,c,b,d");
+  std::vector<std::string> items = ctx.listProperty("test.list.unique", true);
 
   // Should only contain unique elements
   EXPECT_EQ(items.size(), 4);
 
   // Clean up
-  cvcapp.properties("test.list.unique", "");
+  ctx.properties("test.list.unique", "");
 }
 
-TEST(AppTest, ListPropertyAppendRemove) {
-  cvcapp.properties("test.list.modify", "alpha,beta");
+TEST_F(AppTest, ListPropertyAppendRemove) {
+  ctx.properties("test.list.modify", "alpha,beta");
 
-  cvcapp.listPropertyAppend("test.list.modify", "gamma");
-  std::vector<std::string> items = cvcapp.listProperty("test.list.modify");
+  ctx.listPropertyAppend("test.list.modify", "gamma");
+  std::vector<std::string> items = ctx.listProperty("test.list.modify");
   EXPECT_EQ(items.size(), 3);
   EXPECT_EQ(items[2], "gamma");
 
-  cvcapp.listPropertyRemove("test.list.modify", "beta");
-  items = cvcapp.listProperty("test.list.modify");
+  ctx.listPropertyRemove("test.list.modify", "beta");
+  items = ctx.listProperty("test.list.modify");
   EXPECT_EQ(items.size(), 2);
 
   // Clean up
-  cvcapp.properties("test.list.modify", "");
+  ctx.properties("test.list.modify", "");
 }
 
-TEST(AppTest, PropertyTypedAccess) {
-  cvcapp.properties("test.int.prop", 12345);
-  int val = cvcapp.properties<int>("test.int.prop");
+TEST_F(AppTest, PropertyTypedAccess) {
+  ctx.properties("test.int.prop", 12345);
+  int val = ctx.properties<int>("test.int.prop");
   EXPECT_EQ(val, 12345);
 
-  cvcapp.properties("test.double.prop", 3.14159);
-  double dval = cvcapp.properties<double>("test.double.prop");
+  ctx.properties("test.double.prop", 3.14159);
+  double dval = ctx.properties<double>("test.double.prop");
   EXPECT_NEAR(dval, 3.14159, 0.00001);
 
   // Clean up
-  cvcapp.properties("test.int.prop", "");
-  cvcapp.properties("test.double.prop", "");
+  ctx.properties("test.int.prop", "");
+  ctx.properties("test.double.prop", "");
 }
 
 // ===========================
 // Data Map Bulk Operations
 // ===========================
 
-TEST(AppTest, DataMapBulkOperations) {
+TEST_F(AppTest, DataMapBulkOperations) {
   data_map test_data;
   test_data["bulk1"] = std::string("value1");
   test_data["bulk2"] = int(42);
   test_data["bulk3"] = double(3.14);
 
-  cvcapp.data(test_data);
+  ctx.data(test_data);
 
-  EXPECT_TRUE(cvcapp.isData<std::string>("bulk1"));
-  EXPECT_TRUE(cvcapp.isData<int>("bulk2"));
-  EXPECT_TRUE(cvcapp.isData<double>("bulk3"));
+  EXPECT_TRUE(ctx.isData<std::string>("bulk1"));
+  EXPECT_TRUE(ctx.isData<int>("bulk2"));
+  EXPECT_TRUE(ctx.isData<double>("bulk3"));
 
-  data_map retrieved = cvcapp.data();
+  data_map retrieved = ctx.data();
   EXPECT_TRUE(retrieved.find("bulk1") != retrieved.end());
   EXPECT_TRUE(retrieved.find("bulk2") != retrieved.end());
 
   // Clean up
-  cvcapp.data("bulk1", boost::any());
-  cvcapp.data("bulk2", boost::any());
-  cvcapp.data("bulk3", boost::any());
+  ctx.data("bulk1", boost::any());
+  ctx.data("bulk2", boost::any());
+  ctx.data("bulk3", boost::any());
 }
 
-TEST(AppTest, DataVectorOperations) {
+TEST_F(AppTest, DataVectorOperations) {
   std::vector<std::string> keys = {"vec1", "vec2", "vec3"};
   std::vector<int> values = {10, 20, 30};
 
-  cvcapp.data(keys, values);
+  ctx.data(keys, values);
 
-  EXPECT_EQ(cvcapp.data<int>("vec1"), 10);
-  EXPECT_EQ(cvcapp.data<int>("vec2"), 20);
-  EXPECT_EQ(cvcapp.data<int>("vec3"), 30);
+  EXPECT_EQ(ctx.data<int>("vec1"), 10);
+  EXPECT_EQ(ctx.data<int>("vec2"), 20);
+  EXPECT_EQ(ctx.data<int>("vec3"), 30);
 
   // Test retrieving as vector
-  std::vector<int> retrieved = cvcapp.data<int>(keys);
+  std::vector<int> retrieved = ctx.data<int>(keys);
   ASSERT_EQ(retrieved.size(), 3);
   EXPECT_EQ(retrieved[0], 10);
   EXPECT_EQ(retrieved[1], 20);
   EXPECT_EQ(retrieved[2], 30);
 
   // Clean up
-  cvcapp.data("vec1", boost::any());
-  cvcapp.data("vec2", boost::any());
-  cvcapp.data("vec3", boost::any());
+  ctx.data("vec1", boost::any());
+  ctx.data("vec2", boost::any());
+  ctx.data("vec3", boost::any());
 }
 
-TEST(AppTest, DataTypesByType) {
+TEST_F(AppTest, DataTypesByType) {
   // Store several strings
-  cvcapp.data("str1", std::string("test1"));
-  cvcapp.data("str2", std::string("test2"));
-  cvcapp.data("int1", int(42));
+  ctx.data("str1", std::string("test1"));
+  ctx.data("str2", std::string("test2"));
+  ctx.data("int1", int(42));
 
   // Get all string keys
-  std::vector<std::string> str_keys = cvcapp.data<std::string>();
+  std::vector<std::string> str_keys = ctx.data<std::string>();
   EXPECT_GE(str_keys.size(), 2);
 
   // Clean up
-  cvcapp.data("str1", boost::any());
-  cvcapp.data("str2", boost::any());
-  cvcapp.data("int1", boost::any());
+  ctx.data("str1", boost::any());
+  ctx.data("str2", boost::any());
+  ctx.data("int1", boost::any());
 }
 
-TEST(AppTest, DataTypeNameFromAny) {
+TEST_F(AppTest, DataTypeNameFromAny) {
   boost::any any_val = std::string("test");
-  std::string type_name = cvcapp.dataTypeName(any_val);
+  std::string type_name = ctx.dataTypeName(any_val);
   EXPECT_FALSE(type_name.empty());
 }
 
-TEST(AppTest, DataTypeTemplate) {
+TEST_F(AppTest, DataTypeTemplate) {
   // Test template version
-  std::string type_name = cvcapp.dataTypeName<std::string>();
+  std::string type_name = ctx.dataTypeName<std::string>();
   EXPECT_FALSE(type_name.empty());
 
-  std::string type_name2 = cvcapp.dataTypeName<int>();
+  std::string type_name2 = ctx.dataTypeName<int>();
   EXPECT_FALSE(type_name2.empty());
 }
 
@@ -550,72 +559,72 @@ TEST(AppTest, DataTypeTemplate) {
 // Thread Progress and Info Tests
 // ===========================
 
-TEST(AppTest, ThreadProgressBasic) {
+TEST_F(AppTest, ThreadProgressBasic) {
   std::string thread_key = "test.thread.progress";
 
   // Simulate thread registration
-  cvcapp.threads(thread_key, thread_ptr(new boost::thread([]() {})));
+  ctx.threads(thread_key, thread_ptr(new boost::thread([]() {})));
 
-  cvcapp.threadProgress(thread_key, 0.5);
-  double progress = cvcapp.threadProgress(thread_key);
+  ctx.threadProgress(thread_key, 0.5);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 0.5, 0.01);
 
-  cvcapp.threadProgress(thread_key, 1.0);
-  progress = cvcapp.threadProgress(thread_key);
+  ctx.threadProgress(thread_key, 1.0);
+  progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01);
 
   // Clean up
-  cvcapp.threads(thread_key, thread_ptr());
+  ctx.threads(thread_key, thread_ptr());
 }
 
-TEST(AppTest, ThreadInfoOperations) {
+TEST_F(AppTest, ThreadInfoOperations) {
   std::string thread_key = "test.thread.info";
   std::string info = "Processing data...";
 
-  cvcapp.threads(thread_key, thread_ptr(new boost::thread([]() {})));
+  ctx.threads(thread_key, thread_ptr(new boost::thread([]() {})));
 
-  cvcapp.threadInfo(thread_key, info);
-  std::string retrieved = cvcapp.threadInfo(thread_key);
+  ctx.threadInfo(thread_key, info);
+  std::string retrieved = ctx.threadInfo(thread_key);
   EXPECT_EQ(retrieved, info);
 
   // Clean up
-  cvcapp.threads(thread_key, thread_ptr());
+  ctx.threads(thread_key, thread_ptr());
 }
 
-TEST(AppTest, HasThread) {
+TEST_F(AppTest, HasThread) {
   std::string thread_key = "test.thread.exists";
 
-  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+  EXPECT_FALSE(ctx.hasThread(thread_key));
 
-  cvcapp.threads(thread_key, thread_ptr(new boost::thread([]() {})));
-  EXPECT_TRUE(cvcapp.hasThread(thread_key));
+  ctx.threads(thread_key, thread_ptr(new boost::thread([]() {})));
+  EXPECT_TRUE(ctx.hasThread(thread_key));
 
-  cvcapp.threads(thread_key, thread_ptr());
-  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+  ctx.threads(thread_key, thread_ptr());
+  EXPECT_FALSE(ctx.hasThread(thread_key));
 }
 
-TEST(AppTest, UniqueThreadKey) {
+TEST_F(AppTest, UniqueThreadKey) {
   // Register a thread with first key
-  std::string key1 = cvcapp.uniqueThreadKey("test");
-  cvcapp.threads(key1, thread_ptr(new boost::thread([]() {})));
+  std::string key1 = ctx.uniqueThreadKey("test");
+  ctx.threads(key1, thread_ptr(new boost::thread([]() {})));
 
   // Should get a different unique key
-  std::string key2 = cvcapp.uniqueThreadKey("test");
+  std::string key2 = ctx.uniqueThreadKey("test");
 
   // Keys should be unique
   EXPECT_NE(key1, key2);
 
   // Clean up
-  cvcapp.threads(key1, thread_ptr());
+  ctx.threads(key1, thread_ptr());
 }
 
 // ===========================
 // Listify Tests
 // ===========================
 
-TEST(AppTest, ListifyString) {
+TEST_F(AppTest, ListifyString) {
   std::string list = "a,b,c";
-  std::vector<std::string> vec = cvcapp.listify(list);
+  std::vector<std::string> vec = ctx.listify(list);
 
   ASSERT_EQ(vec.size(), 3);
   EXPECT_EQ(vec[0], "a");
@@ -623,9 +632,9 @@ TEST(AppTest, ListifyString) {
   EXPECT_EQ(vec[2], "c");
 }
 
-TEST(AppTest, ListifyVector) {
+TEST_F(AppTest, ListifyVector) {
   std::vector<std::string> vec = {"x", "y", "z"};
-  std::string list = cvcapp.listify(vec);
+  std::string list = ctx.listify(vec);
 
   EXPECT_FALSE(list.empty());
   EXPECT_NE(list.find("x"), std::string::npos);
@@ -637,83 +646,83 @@ TEST(AppTest, ListifyVector) {
 // Data Reader Tests
 // ===========================
 
-TEST(AppTest, DataReaderCollection) {
-  data_reader_collection readers = cvcapp.dataReaders();
+TEST_F(AppTest, DataReaderCollection) {
+  data_reader_collection readers = ctx.dataReaders();
 
   // Add a test reader
   data_reader test_reader = [](const std::string &path) -> bool { return path == "test.dat"; };
 
-  cvcapp.dataReader(test_reader);
+  ctx.dataReader(test_reader);
 
-  data_reader_collection updated = cvcapp.dataReaders();
+  data_reader_collection updated = ctx.dataReaders();
   EXPECT_GE(updated.size(), readers.size());
 }
 
-TEST(AppTest, ReadDataWithReaders) {
+TEST_F(AppTest, ReadDataWithReaders) {
   // Add a reader that handles .test files
-  data_reader test_reader = [](const std::string &path) -> bool {
+  data_reader test_reader = [this](const std::string &path) -> bool {
     if (path.find(".test") != std::string::npos) {
-      cvcapp.data("test.read.result", std::string("success"));
+      ctx.data("test.read.result", std::string("success"));
       return true;
     }
     return false;
   };
 
-  cvcapp.dataReader(test_reader);
+  ctx.dataReader(test_reader);
 
   // Try to read a .test file
-  bool result = cvcapp.readData("example.test");
+  bool result = ctx.readData("example.test");
   EXPECT_TRUE(result);
-  EXPECT_EQ(cvcapp.data<std::string>("test.read.result"), "success");
+  EXPECT_EQ(ctx.data<std::string>("test.read.result"), "success");
 
   // Try to read an unsupported file
-  bool result2 = cvcapp.readData("example.unsupported");
+  bool result2 = ctx.readData("example.unsupported");
   EXPECT_FALSE(result2);
 
   // Clean up
-  cvcapp.data("test.read.result", boost::any());
+  ctx.data("test.read.result", boost::any());
 }
 
 // ===========================
 // Property Map File I/O Tests
 // ===========================
 
-TEST(AppTest, PropertyMapSaveLoad) {
+TEST_F(AppTest, PropertyMapSaveLoad) {
   std::string temp_file =
       (std::filesystem::temp_directory_path() / "test_property_map.info").string();
 
   // Set up some properties
-  cvcapp.properties("io.test.prop1", "value1");
-  cvcapp.properties("io.test.prop2", "value2");
-  cvcapp.properties("io.test.number", 42);
+  ctx.properties("io.test.prop1", "value1");
+  ctx.properties("io.test.prop2", "value2");
+  ctx.properties("io.test.number", 42);
 
   // Save property map
-  cvcapp.writePropertyMap(temp_file);
+  ctx.writePropertyMap(temp_file);
 
   // Clear properties
-  cvcapp.properties("io.test.prop1", "");
-  cvcapp.properties("io.test.prop2", "");
-  cvcapp.properties("io.test.number", "");
+  ctx.properties("io.test.prop1", "");
+  ctx.properties("io.test.prop2", "");
+  ctx.properties("io.test.number", "");
 
   // Restore from file
-  cvcapp.readPropertyMap(temp_file);
+  ctx.readPropertyMap(temp_file);
 
   // Verify restored
-  EXPECT_EQ(cvcapp.properties("io.test.prop1"), "value1");
-  EXPECT_EQ(cvcapp.properties("io.test.prop2"), "value2");
+  EXPECT_EQ(ctx.properties("io.test.prop1"), "value1");
+  EXPECT_EQ(ctx.properties("io.test.prop2"), "value2");
 
   // Clean up
   std::remove(temp_file.c_str());
-  cvcapp.properties("io.test.prop1", "");
-  cvcapp.properties("io.test.prop2", "");
-  cvcapp.properties("io.test.number", "");
+  ctx.properties("io.test.prop1", "");
+  ctx.properties("io.test.prop2", "");
+  ctx.properties("io.test.number", "");
 }
 
 // ===========================
 // Thread Map Bulk Operations
 // ===========================
 
-TEST(AppTest, ThreadMapBulkSet) {
+TEST_F(AppTest, ThreadMapBulkSet) {
   thread_map test_map;
 
   // Create threads
@@ -724,30 +733,30 @@ TEST(AppTest, ThreadMapBulkSet) {
   test_map["bulk.thread2"] = t2;
 
   // Set the entire map
-  cvcapp.threads(test_map);
+  ctx.threads(test_map);
 
   // Verify
-  EXPECT_TRUE(cvcapp.hasThread("bulk.thread1"));
-  EXPECT_TRUE(cvcapp.hasThread("bulk.thread2"));
+  EXPECT_TRUE(ctx.hasThread("bulk.thread1"));
+  EXPECT_TRUE(ctx.hasThread("bulk.thread2"));
 
   // Clean up
-  cvcapp.threads("bulk.thread1", thread_ptr());
-  cvcapp.threads("bulk.thread2", thread_ptr());
+  ctx.threads("bulk.thread1", thread_ptr());
+  ctx.threads("bulk.thread2", thread_ptr());
 }
 
-TEST(AppTest, RemoveThread) {
+TEST_F(AppTest, RemoveThread) {
   std::string thread_key = "test.remove.thread";
 
-  cvcapp.threads(thread_key, thread_ptr(new boost::thread([]() {})));
-  EXPECT_TRUE(cvcapp.hasThread(thread_key));
+  ctx.threads(thread_key, thread_ptr(new boost::thread([]() {})));
+  EXPECT_TRUE(ctx.hasThread(thread_key));
 
-  cvcapp.removeThread(thread_key);
-  EXPECT_FALSE(cvcapp.hasThread(thread_key));
+  ctx.removeThread(thread_key);
+  EXPECT_FALSE(ctx.hasThread(thread_key));
 }
 
-TEST(AppTest, ThreadKeyLookup) {
+TEST_F(AppTest, ThreadKeyLookup) {
   // Get thread key for current thread (should return "unknown" or valid key)
-  std::string key = cvcapp.threadKey();
+  std::string key = ctx.threadKey();
   EXPECT_FALSE(key.empty());
 }
 
@@ -755,9 +764,9 @@ TEST(AppTest, ThreadKeyLookup) {
 // Sleep Function Test
 // ===========================
 
-TEST(AppTest, SleepFunction) {
+TEST_F(AppTest, SleepFunction) {
   auto start = boost::posix_time::microsec_clock::universal_time();
-  cvcapp.sleep(10.0); // Sleep for 10 milliseconds
+  ctx.sleep(10.0); // Sleep for 10 milliseconds
   auto end = boost::posix_time::microsec_clock::universal_time();
 
   auto duration = end - start;
@@ -768,17 +777,17 @@ TEST(AppTest, SleepFunction) {
 // Property Data Tests
 // ===========================
 
-TEST(AppTest, PropertyDataLookup) {
+TEST_F(AppTest, PropertyDataLookup) {
   // Store some int data
-  cvcapp.data("pd.obj1", 100);
-  cvcapp.data("pd.obj2", 200);
-  cvcapp.data("pd.obj3", 300);
+  ctx.data("pd.obj1", 100);
+  ctx.data("pd.obj2", 200);
+  ctx.data("pd.obj3", 300);
 
   // Create property with list of keys
-  cvcapp.properties("pd.list", "pd.obj1,pd.obj2,pd.obj3");
+  ctx.properties("pd.list", "pd.obj1,pd.obj2,pd.obj3");
 
   // Get property data
-  std::vector<int> data = cvcapp.propertyData<int>("pd.list");
+  std::vector<int> data = ctx.propertyData<int>("pd.list");
 
   ASSERT_EQ(data.size(), 3);
   EXPECT_EQ(data[0], 100);
@@ -786,20 +795,20 @@ TEST(AppTest, PropertyDataLookup) {
   EXPECT_EQ(data[2], 300);
 
   // Clean up
-  cvcapp.properties("pd.list", "");
-  cvcapp.data("pd.obj1", boost::any());
-  cvcapp.data("pd.obj2", boost::any());
-  cvcapp.data("pd.obj3", boost::any());
+  ctx.properties("pd.list", "");
+  ctx.data("pd.obj1", boost::any());
+  ctx.data("pd.obj2", boost::any());
+  ctx.data("pd.obj3", boost::any());
 }
 
-TEST(AppTest, ListDataFunction) {
+TEST_F(AppTest, ListDataFunction) {
   // Store data
-  cvcapp.data("ld.a", 10);
-  cvcapp.data("ld.b", 20);
-  cvcapp.data("ld.c", 30);
+  ctx.data("ld.a", 10);
+  ctx.data("ld.b", 20);
+  ctx.data("ld.c", 30);
 
   // Use listData to get data from comma-separated list
-  std::vector<int> data = cvcapp.listData<int>("ld.a,ld.b,ld.c");
+  std::vector<int> data = ctx.listData<int>("ld.a,ld.b,ld.c");
 
   ASSERT_EQ(data.size(), 3);
   EXPECT_EQ(data[0], 10);
@@ -807,24 +816,24 @@ TEST(AppTest, ListDataFunction) {
   EXPECT_EQ(data[2], 30);
 
   // Clean up
-  cvcapp.data("ld.a", boost::any());
-  cvcapp.data("ld.b", boost::any());
-  cvcapp.data("ld.c", boost::any());
+  ctx.data("ld.a", boost::any());
+  ctx.data("ld.b", boost::any());
+  ctx.data("ld.c", boost::any());
 }
 
 // ===========================
 // Data Type Enum Tests
 // ===========================
 
-TEST(AppTest, DataTypeEnumTemplateMethod) {
+TEST_F(AppTest, DataTypeEnumTemplateMethod) {
   // Test template version of dataType
-  data_type dt_int = cvcapp.dataType<int>();
+  data_type dt_int = ctx.dataType<int>();
   EXPECT_EQ(dt_int, Int);
 
-  data_type dt_double = cvcapp.dataType<double>();
+  data_type dt_double = ctx.dataType<double>();
   EXPECT_EQ(dt_double, Double);
 
-  data_type dt_float = cvcapp.dataType<float>();
+  data_type dt_float = ctx.dataType<float>();
   EXPECT_EQ(dt_float, Float);
 }
 
@@ -832,19 +841,19 @@ TEST(AppTest, DataTypeEnumTemplateMethod) {
 // Scoped Lock Tests
 // ===========================
 
-TEST(AppTest, ScopedLockUsage) {
+TEST_F(AppTest, ScopedLockUsage) {
   std::string mutex_name = "test.scoped.mutex";
 
   {
-    scoped_lock lock(mutex_name, "test lock info");
+    scoped_lock lock(ctx, mutex_name, "test lock info");
 
     // Mutex should be locked and info set (may include thread info)
-    std::string info = cvcapp.mutexInfo(mutex_name);
+    std::string info = ctx.mutexInfo(mutex_name);
     EXPECT_NE(info.find("test lock info"), std::string::npos);
   }
 
   // After scope, info should be cleared or reset
-  std::string info = cvcapp.mutexInfo(mutex_name);
+  std::string info = ctx.mutexInfo(mutex_name);
   // Info may persist or be cleared depending on implementation
   EXPECT_TRUE(true); // Just verify no crash
 }
@@ -853,15 +862,15 @@ TEST(AppTest, ScopedLockUsage) {
 // Thread Pool Tests
 // ===========================
 
-TEST(AppTest, ThreadPoolBasicExecution) {
+TEST_F(AppTest, ThreadPoolBasicExecution) {
   std::atomic<bool> task_executed(false);
 
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_basic_test", [&task_executed]() { task_executed = true; }, PRIORITY_NORMAL, true);
 
   // Wait for task to complete
-  if (cvcapp.hasThread("pool_basic_test")) {
-    thread_ptr tptr = cvcapp.threads("pool_basic_test");
+  if (ctx.hasThread("pool_basic_test")) {
+    thread_ptr tptr = ctx.threads("pool_basic_test");
     if (tptr)
       tptr->join();
   }
@@ -869,7 +878,7 @@ TEST(AppTest, ThreadPoolBasicExecution) {
   EXPECT_TRUE(task_executed.load());
 }
 
-TEST(AppTest, ThreadPoolMultipleTasks) {
+TEST_F(AppTest, ThreadPoolMultipleTasks) {
   std::atomic<int> counter(0);
   std::vector<std::string> keys;
   const int num_tasks = 5;
@@ -877,7 +886,7 @@ TEST(AppTest, ThreadPoolMultipleTasks) {
   for (int i = 0; i < num_tasks; i++) {
     std::string key = "pool_multi_" + std::to_string(i);
     keys.push_back(key);
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
         [&counter]() {
           counter++;
@@ -888,8 +897,8 @@ TEST(AppTest, ThreadPoolMultipleTasks) {
 
   // Wait for all tasks
   for (const auto &key : keys) {
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr)
         tptr->join();
     }
@@ -898,19 +907,19 @@ TEST(AppTest, ThreadPoolMultipleTasks) {
   EXPECT_EQ(counter.load(), num_tasks);
 }
 
-TEST(AppTest, ThreadPoolPriority) {
+TEST_F(AppTest, ThreadPoolPriority) {
   std::atomic<int> execution_order(0);
   std::vector<int> order;
   boost::mutex order_mutex;
 
   // Set small pool size to force queuing
-  unsigned int original_size = cvcapp.getThreadPoolSize();
-  cvcapp.setThreadPoolSize(1);
+  unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(1);
 
   // Start a blocking task to fill the pool
   std::atomic<bool> blocker_done(false);
   std::atomic<bool> blocker_running(true);
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_priority_blocker",
       [&]() {
         while (blocker_running.load()) {
@@ -926,7 +935,7 @@ TEST(AppTest, ThreadPoolPriority) {
 
   // Now submit tasks with unique keys that will queue (blocker is running)
   // Submit in reverse priority order - high, normal, critical
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_priority_high",
       [&]() {
         boost::mutex::scoped_lock lock(order_mutex);
@@ -935,7 +944,7 @@ TEST(AppTest, ThreadPoolPriority) {
       },
       PRIORITY_HIGH, false); // unique key
 
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_priority_normal",
       [&]() {
         boost::mutex::scoped_lock lock(order_mutex);
@@ -944,7 +953,7 @@ TEST(AppTest, ThreadPoolPriority) {
       },
       PRIORITY_NORMAL, false); // unique key
 
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_priority_critical",
       [&]() {
         boost::mutex::scoped_lock lock(order_mutex);
@@ -978,36 +987,36 @@ TEST(AppTest, ThreadPoolPriority) {
     EXPECT_EQ(order[2], 0); // normal last
   }
 
-  cvcapp.setThreadPoolSize(original_size);
+  ctx.setThreadPoolSize(original_size);
 }
 
-TEST(AppTest, ThreadPoolSizeConfiguration) {
-  unsigned int original_size = cvcapp.getThreadPoolSize();
+TEST_F(AppTest, ThreadPoolSizeConfiguration) {
+  unsigned int original_size = ctx.getThreadPoolSize();
 
   // Test setting pool size
-  cvcapp.setThreadPoolSize(2);
-  EXPECT_EQ(cvcapp.getThreadPoolSize(), 2u);
+  ctx.setThreadPoolSize(2);
+  EXPECT_EQ(ctx.getThreadPoolSize(), 2u);
 
-  cvcapp.setThreadPoolSize(4);
-  EXPECT_EQ(cvcapp.getThreadPoolSize(), 4u);
+  ctx.setThreadPoolSize(4);
+  EXPECT_EQ(ctx.getThreadPoolSize(), 4u);
 
   // Restore original
-  cvcapp.setThreadPoolSize(original_size);
-  EXPECT_EQ(cvcapp.getThreadPoolSize(), original_size);
+  ctx.setThreadPoolSize(original_size);
+  EXPECT_EQ(ctx.getThreadPoolSize(), original_size);
 }
 
-TEST(AppTest, ThreadPoolActiveCount) {
+TEST_F(AppTest, ThreadPoolActiveCount) {
   std::atomic<bool> keep_running(true);
   std::vector<std::string> keys;
 
-  unsigned int original_size = cvcapp.getThreadPoolSize();
-  cvcapp.setThreadPoolSize(2);
+  unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(2);
 
   // Start 2 long-running tasks
   for (int i = 0; i < 2; i++) {
     std::string key = "pool_active_" + std::to_string(i);
     keys.push_back(key);
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
         [&keep_running]() {
           while (keep_running.load()) {
@@ -1021,7 +1030,7 @@ TEST(AppTest, ThreadPoolActiveCount) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // Should have 2 active workers
-  unsigned int active = cvcapp.getActiveThreadCount();
+  unsigned int active = ctx.getActiveThreadCount();
   EXPECT_GE(active, 1u); // At least one should be running
   EXPECT_LE(active, 2u); // Should not exceed pool size
 
@@ -1029,21 +1038,21 @@ TEST(AppTest, ThreadPoolActiveCount) {
   keep_running = false;
 
   for (const auto &key : keys) {
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr)
         tptr->join();
     }
   }
 
-  cvcapp.setThreadPoolSize(original_size);
+  ctx.setThreadPoolSize(original_size);
 }
 
-TEST(AppTest, ThreadPoolInterruption) {
+TEST_F(AppTest, ThreadPoolInterruption) {
   std::atomic<bool> task_started(false);
   std::atomic<bool> task_interrupted(false);
 
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_interrupt_test",
       [&]() {
         task_started = true;
@@ -1065,8 +1074,8 @@ TEST(AppTest, ThreadPoolInterruption) {
   EXPECT_TRUE(task_started.load());
 
   // Interrupt the thread
-  if (cvcapp.hasThread("pool_interrupt_test")) {
-    thread_ptr tptr = cvcapp.threads("pool_interrupt_test");
+  if (ctx.hasThread("pool_interrupt_test")) {
+    thread_ptr tptr = ctx.threads("pool_interrupt_test");
     if (tptr) {
       tptr->interrupt();
       try {
@@ -1083,12 +1092,12 @@ TEST(AppTest, ThreadPoolInterruption) {
   EXPECT_TRUE(task_interrupted.load());
 }
 
-TEST(AppTest, ThreadPoolReplaceRunningTask) {
+TEST_F(AppTest, ThreadPoolReplaceRunningTask) {
   std::atomic<int> task_count(0);
   std::atomic<bool> first_task_running(true);
 
   // Start first task with wait=true (uses key "replace_test")
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_replace_test",
       [&]() {
         task_count++;
@@ -1105,11 +1114,11 @@ TEST(AppTest, ThreadPoolReplaceRunningTask) {
 
   // Start second task with same key and wait=true
   // This should interrupt the first task and start a new one
-  cvcapp.startThreadPooled("pool_replace_test", [&]() { task_count++; }, PRIORITY_NORMAL, true);
+  ctx.startThreadPooled("pool_replace_test", [&]() { task_count++; }, PRIORITY_NORMAL, true);
 
   // Wait for new task
-  if (cvcapp.hasThread("pool_replace_test")) {
-    thread_ptr tptr = cvcapp.threads("pool_replace_test");
+  if (ctx.hasThread("pool_replace_test")) {
+    thread_ptr tptr = ctx.threads("pool_replace_test");
     if (tptr)
       tptr->join();
   }
@@ -1119,15 +1128,15 @@ TEST(AppTest, ThreadPoolReplaceRunningTask) {
   first_task_running = false;
 }
 
-TEST(AppTest, ThreadPoolExceptionHandling) {
+TEST_F(AppTest, ThreadPoolExceptionHandling) {
   std::atomic<bool> task_ran(false);
   std::atomic<bool> cleanup_ran(false);
 
   // Check initial state
-  unsigned int initial_active = cvcapp.getActiveThreadCount();
-  bool had_exception_thread_before = cvcapp.hasThread("pool_exception_test");
+  unsigned int initial_active = ctx.getActiveThreadCount();
+  bool had_exception_thread_before = ctx.hasThread("pool_exception_test");
 
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_exception_test",
       [&]() {
         task_ran = true;
@@ -1142,16 +1151,16 @@ TEST(AppTest, ThreadPoolExceptionHandling) {
 
   // Verify thread pool state after exception
   // The thread should have exited and active worker count should return to normal
-  unsigned int active_after_exception = cvcapp.getActiveThreadCount();
+  unsigned int active_after_exception = ctx.getActiveThreadCount();
   EXPECT_EQ(active_after_exception, initial_active)
       << "Active worker count should return to initial state";
 
   // Pool should continue to work after exception
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       "pool_after_exception", [&]() { cleanup_ran = true; }, PRIORITY_NORMAL, true);
 
-  if (cvcapp.hasThread("pool_after_exception")) {
-    thread_ptr tptr = cvcapp.threads("pool_after_exception");
+  if (ctx.hasThread("pool_after_exception")) {
+    thread_ptr tptr = ctx.threads("pool_after_exception");
     if (tptr)
       tptr->join();
   }
@@ -1159,10 +1168,10 @@ TEST(AppTest, ThreadPoolExceptionHandling) {
   EXPECT_TRUE(cleanup_ran.load());
 }
 
-TEST(AppTest, ThreadPoolStateConsistency) {
+TEST_F(AppTest, ThreadPoolStateConsistency) {
   // Test that thread map stays clean after multiple operations
-  unsigned int original_size = cvcapp.getThreadPoolSize();
-  cvcapp.setThreadPoolSize(2);
+  unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(2);
 
   std::atomic<int> completed(0);
   std::vector<std::string> keys;
@@ -1172,7 +1181,7 @@ TEST(AppTest, ThreadPoolStateConsistency) {
     std::string key = "pool_state_" + std::to_string(i);
     keys.push_back(key);
 
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
         [&, i]() {
           if (i == 2) {
@@ -1192,28 +1201,28 @@ TEST(AppTest, ThreadPoolStateConsistency) {
   EXPECT_EQ(completed.load(), 4);
 
   // Active worker count should be back to 0 or minimal
-  unsigned int active = cvcapp.getActiveThreadCount();
+  unsigned int active = ctx.getActiveThreadCount();
   EXPECT_EQ(active, 0u) << "No workers should be active after all tasks complete";
 
-  cvcapp.setThreadPoolSize(original_size);
+  ctx.setThreadPoolSize(original_size);
 }
 
-TEST(AppTest, ThreadPoolConcurrencyLimit) {
+TEST_F(AppTest, ThreadPoolConcurrencyLimit) {
   std::atomic<int> concurrent_count(0);
   std::atomic<int> max_concurrent(0);
   std::vector<std::string> keys;
   boost::mutex counter_mutex;
 
-  unsigned int original_size = cvcapp.getThreadPoolSize();
+  unsigned int original_size = ctx.getThreadPoolSize();
   const int pool_size = 2;
-  cvcapp.setThreadPoolSize(pool_size);
+  ctx.setThreadPoolSize(pool_size);
 
   // Submit more tasks than pool size
   for (int i = 0; i < 5; i++) {
     std::string key = "pool_concurrency_" + std::to_string(i);
     keys.push_back(key);
 
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
         [&]() {
           // Track concurrent execution
@@ -1240,8 +1249,8 @@ TEST(AppTest, ThreadPoolConcurrencyLimit) {
 
   // Wait for all tasks
   for (const auto &key : keys) {
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr)
         tptr->join();
     }
@@ -1251,21 +1260,21 @@ TEST(AppTest, ThreadPoolConcurrencyLimit) {
   EXPECT_LE(max_concurrent.load(), pool_size);
   EXPECT_GE(max_concurrent.load(), 1); // At least one should have run
 
-  cvcapp.setThreadPoolSize(original_size);
+  ctx.setThreadPoolSize(original_size);
 }
 
-TEST(AppTest, ThreadPoolTaskChaining) {
+TEST_F(AppTest, ThreadPoolTaskChaining) {
   std::atomic<int> execution_order(0);
   std::vector<int> order;
   boost::mutex order_mutex;
 
-  unsigned int original_size = cvcapp.getThreadPoolSize();
-  cvcapp.setThreadPoolSize(1); // Force serial execution
+  unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(1); // Force serial execution
 
   // Submit multiple tasks that will chain
   for (int i = 0; i < 3; i++) {
     std::string key = "pool_chain_" + std::to_string(i);
-    cvcapp.startThreadPooled(
+    ctx.startThreadPooled(
         key,
         [&, i]() {
           boost::mutex::scoped_lock lock(order_mutex);
@@ -1278,8 +1287,8 @@ TEST(AppTest, ThreadPoolTaskChaining) {
   // Wait for all
   for (int i = 0; i < 3; i++) {
     std::string key = "pool_chain_" + std::to_string(i);
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr)
         tptr->join();
     }
@@ -1288,38 +1297,38 @@ TEST(AppTest, ThreadPoolTaskChaining) {
   EXPECT_EQ(execution_order.load(), 3);
   EXPECT_EQ(order.size(), 3);
 
-  cvcapp.setThreadPoolSize(original_size);
+  ctx.setThreadPoolSize(original_size);
 }
 
-TEST(AppTest, ThreadInfoAndProgressTracking) {
+TEST_F(AppTest, ThreadInfoAndProgressTracking) {
   std::string thread_key = "test.progress.tracking";
   std::atomic<bool> thread_started(false);
   std::atomic<bool> continue_running(true);
 
   // Start a thread that updates its info and progress
-  cvcapp.startThreadPooled(
+  ctx.startThreadPooled(
       thread_key,
       [&]() {
         thread_started = true;
 
         // Set initial thread info
-        cvcapp.threadInfo(thread_key, "Starting processing");
-        cvcapp.threadProgress(thread_key, 0.0);
+        ctx.threadInfo(thread_key, "Starting processing");
+        ctx.threadProgress(thread_key, 0.0);
         boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
         // Update to 25% progress
-        cvcapp.threadInfo(thread_key, "Processing step 1");
-        cvcapp.threadProgress(thread_key, 0.25);
+        ctx.threadInfo(thread_key, "Processing step 1");
+        ctx.threadProgress(thread_key, 0.25);
         boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
         // Update to 50% progress
-        cvcapp.threadInfo(thread_key, "Processing step 2");
-        cvcapp.threadProgress(thread_key, 0.50);
+        ctx.threadInfo(thread_key, "Processing step 2");
+        ctx.threadProgress(thread_key, 0.50);
         boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
         // Update to 75% progress
-        cvcapp.threadInfo(thread_key, "Processing step 3");
-        cvcapp.threadProgress(thread_key, 0.75);
+        ctx.threadInfo(thread_key, "Processing step 3");
+        ctx.threadProgress(thread_key, 0.75);
         boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
         // Wait until we're told to finish
@@ -1329,8 +1338,8 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
         }
 
         // Complete
-        cvcapp.threadInfo(thread_key, "Finished");
-        cvcapp.threadProgress(thread_key, 1.0);
+        ctx.threadInfo(thread_key, "Finished");
+        ctx.threadProgress(thread_key, 1.0);
 
         // Small delay to ensure final state is written
         boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
@@ -1347,21 +1356,21 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
   // Use polling to wait for each checkpoint instead of fixed sleeps
 
   // Wait for 25% progress
-  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.24; i++)
+  for (int i = 0; i < 200 && ctx.threadProgress(thread_key) < 0.24; i++)
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
-  double progress1 = cvcapp.threadProgress(thread_key);
+  double progress1 = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress1, 0.25, 0.01);
 
   // Wait for 50% progress
-  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.49; i++)
+  for (int i = 0; i < 200 && ctx.threadProgress(thread_key) < 0.49; i++)
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
-  double progress2 = cvcapp.threadProgress(thread_key);
+  double progress2 = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress2, 0.50, 0.01);
 
   // Wait for 75% progress
-  for (int i = 0; i < 200 && cvcapp.threadProgress(thread_key) < 0.74; i++)
+  for (int i = 0; i < 200 && ctx.threadProgress(thread_key) < 0.74; i++)
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
-  double progress3 = cvcapp.threadProgress(thread_key);
+  double progress3 = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress3, 0.75, 0.01);
 
   // Verify progress is increasing
@@ -1372,8 +1381,8 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
   continue_running = false;
 
   // Join the thread to clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr)
       tptr->join();
   }
@@ -1386,14 +1395,14 @@ TEST(AppTest, ThreadInfoAndProgressTracking) {
 // Persistent Progress Tests
 // ===========================
 
-TEST(AppTest, ThreadProgressPersistsAfterCompletion) {
+TEST_F(AppTest, ThreadProgressPersistsAfterCompletion) {
   std::string thread_key = "test.persistent.progress";
   std::atomic<bool> thread_finished(false);
 
   // Start a thread that sets progress and completes quickly
-  cvcapp.startThread(thread_key, [&]() {
-    cvc::app::thread_feedback feedback(thread_key);
-    cvcapp.threadProgress(thread_key, 0.5);
+  ctx.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(ctx, thread_key);
+    ctx.threadProgress(thread_key, 0.5);
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
     thread_finished = true;
     // thread_feedback destructor will set progress to 100%
@@ -1409,19 +1418,19 @@ TEST(AppTest, ThreadProgressPersistsAfterCompletion) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // CRITICAL: Progress should be readable even after thread exits
-  double progress = cvcapp.threadProgress(thread_key);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01)
       << "Progress should be 100% after thread completion (thread_feedback sets it)";
 
   // Clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr && tptr->joinable())
       tptr->join();
   }
 }
 
-TEST(AppTest, ThreadProgressPersistenceWithMultipleThreads) {
+TEST_F(AppTest, ThreadProgressPersistenceWithMultipleThreads) {
   std::vector<std::string> thread_keys = {"test.multi.thread1", "test.multi.thread2",
                                           "test.multi.thread3"};
   std::atomic<int> completed_count(0);
@@ -1429,9 +1438,9 @@ TEST(AppTest, ThreadProgressPersistenceWithMultipleThreads) {
   // Start multiple threads with different progress values
   for (size_t i = 0; i < thread_keys.size(); i++) {
     double target_progress = (i + 1) * 0.25; // 0.25, 0.5, 0.75
-    cvcapp.startThread(thread_keys[i], [&, i, target_progress]() {
-      cvc::app::thread_feedback feedback(thread_keys[i]);
-      cvcapp.threadProgress(thread_keys[i], target_progress);
+    ctx.startThread(thread_keys[i], [&, i, target_progress]() {
+      cvc::app::thread_feedback feedback(ctx, thread_keys[i]);
+      ctx.threadProgress(thread_keys[i], target_progress);
       boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
       completed_count++;
       // thread_feedback destructor sets to 100%
@@ -1449,21 +1458,21 @@ TEST(AppTest, ThreadProgressPersistenceWithMultipleThreads) {
 
   // All threads should show 100% progress after completion
   for (const auto &key : thread_keys) {
-    double progress = cvcapp.threadProgress(key);
+    double progress = ctx.threadProgress(key);
     EXPECT_NEAR(progress, 1.0, 0.01) << "Thread " << key << " should show 100% after completion";
   }
 
   // Clean up
   for (const auto &key : thread_keys) {
-    if (cvcapp.hasThread(key)) {
-      thread_ptr tptr = cvcapp.threads(key);
+    if (ctx.hasThread(key)) {
+      thread_ptr tptr = ctx.threads(key);
       if (tptr && tptr->joinable())
         tptr->join();
     }
   }
 }
 
-TEST(AppTest, ThreadProgressZeroToOneHundred) {
+TEST_F(AppTest, ThreadProgressZeroToOneHundred) {
   std::string thread_key = "test.zero.to.hundred";
   std::atomic<bool> at_zero(false);
   std::atomic<bool> at_fifty(false);
@@ -1475,15 +1484,15 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   std::atomic<bool> zero_observed(false);
   std::atomic<bool> fifty_observed(false);
 
-  cvcapp.startThread(thread_key, [&]() {
-    cvc::app::thread_feedback feedback(thread_key);
+  ctx.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(ctx, thread_key);
     // thread_feedback constructor sets to 0%
     at_zero = true;
     while (!zero_observed.load()) {
       boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
     }
 
-    cvcapp.threadProgress(thread_key, 0.5);
+    ctx.threadProgress(thread_key, 0.5);
     at_fifty = true;
     while (!fifty_observed.load()) {
       boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
@@ -1499,7 +1508,7 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   }
   ASSERT_TRUE(at_zero.load());
   {
-    double progress = cvcapp.threadProgress(thread_key);
+    double progress = ctx.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.0, 0.01) << "Progress should be 0% at start";
   }
   zero_observed = true;
@@ -1510,7 +1519,7 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   }
   ASSERT_TRUE(at_fifty.load());
   {
-    double progress = cvcapp.threadProgress(thread_key);
+    double progress = ctx.threadProgress(thread_key);
     EXPECT_NEAR(progress, 0.5, 0.01) << "Progress should be 50% midway";
   }
   fifty_observed = true;
@@ -1525,26 +1534,26 @@ TEST(AppTest, ThreadProgressZeroToOneHundred) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // Check final progress persists at 100%
-  double final_progress = cvcapp.threadProgress(thread_key);
+  double final_progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(final_progress, 1.0, 0.01) << "Progress should persist at 100% after thread exits";
 
   // Clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr && tptr->joinable())
       tptr->join();
   }
 }
 
-TEST(AppTest, ThreadProgressQueryAfterThreadDestruction) {
+TEST_F(AppTest, ThreadProgressQueryAfterThreadDestruction) {
   std::string thread_key = "test.progress.after.destroy";
 
   {
     // Start thread in inner scope
     std::atomic<bool> done(false);
-    cvcapp.startThread(thread_key, [&]() {
-      cvc::app::thread_feedback feedback(thread_key);
-      cvcapp.threadProgress(thread_key, 0.75);
+    ctx.startThread(thread_key, [&]() {
+      cvc::app::thread_feedback feedback(ctx, thread_key);
+      ctx.threadProgress(thread_key, 0.75);
       boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
       done = true;
     });
@@ -1555,8 +1564,8 @@ TEST(AppTest, ThreadProgressQueryAfterThreadDestruction) {
     }
 
     // Join thread
-    if (cvcapp.hasThread(thread_key)) {
-      thread_ptr tptr = cvcapp.threads(thread_key);
+    if (ctx.hasThread(thread_key)) {
+      thread_ptr tptr = ctx.threads(thread_key);
       if (tptr && tptr->joinable())
         tptr->join();
     }
@@ -1565,19 +1574,19 @@ TEST(AppTest, ThreadProgressQueryAfterThreadDestruction) {
   // Thread object has been destroyed, but progress should still be queryable
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
-  double progress = cvcapp.threadProgress(thread_key);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01)
       << "Progress should be queryable at 100% even after thread object destroyed";
 }
 
-TEST(AppTest, ThreadFeedbackExceptionSafety) {
+TEST_F(AppTest, ThreadFeedbackExceptionSafety) {
   std::string thread_key = "test.feedback.exception";
   std::atomic<bool> exception_thrown(false);
 
-  cvcapp.startThread(thread_key, [&]() {
+  ctx.startThread(thread_key, [&]() {
     try {
-      cvc::app::thread_feedback feedback(thread_key);
-      cvcapp.threadProgress(thread_key, 0.3);
+      cvc::app::thread_feedback feedback(ctx, thread_key);
+      ctx.threadProgress(thread_key, 0.3);
 
       // Simulate an exception during processing
       exception_thrown = true;
@@ -1598,28 +1607,28 @@ TEST(AppTest, ThreadFeedbackExceptionSafety) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
 
   // Progress should still be set to 100% by thread_feedback destructor
-  double progress = cvcapp.threadProgress(thread_key);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01)
       << "Progress should be 100% even when exception occurs (RAII cleanup)";
 
   // Clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr && tptr->joinable())
       tptr->join();
   }
 }
 
-TEST(AppTest, ThreadProgressWithThreadInterruption) {
+TEST_F(AppTest, ThreadProgressWithThreadInterruption) {
   std::string thread_key = "test.progress.interruption";
   std::atomic<bool> started(false);
   std::atomic<bool> interrupted(false);
 
-  cvcapp.startThread(thread_key, [&]() {
+  ctx.startThread(thread_key, [&]() {
     try {
-      cvc::app::thread_feedback feedback(thread_key);
+      cvc::app::thread_feedback feedback(ctx, thread_key);
       started = true;
-      cvcapp.threadProgress(thread_key, 0.2);
+      ctx.threadProgress(thread_key, 0.2);
 
       // Sleep with interruption point
       for (int i = 0; i < 100; i++) {
@@ -1639,8 +1648,8 @@ TEST(AppTest, ThreadProgressWithThreadInterruption) {
   ASSERT_TRUE(started.load());
 
   // Interrupt the thread
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr)
       tptr->interrupt();
   }
@@ -1654,26 +1663,26 @@ TEST(AppTest, ThreadProgressWithThreadInterruption) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // Even with interruption, thread_feedback destructor should set progress
-  double progress = cvcapp.threadProgress(thread_key);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01)
       << "Progress should be 100% even after thread interruption (RAII cleanup)";
 
   // Clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr && tptr->joinable())
       tptr->join();
   }
 }
 
-TEST(AppTest, ThreadStatusShowsCompleted) {
+TEST_F(AppTest, ThreadStatusShowsCompleted) {
   std::string thread_key = "test.status.completed";
   std::atomic<bool> finished(false);
 
-  cvcapp.startThread(thread_key, [&]() {
-    cvc::app::thread_feedback feedback(thread_key);
-    cvcapp.threadInfo(thread_key, "processing");
-    cvcapp.threadProgress(thread_key, 0.5);
+  ctx.startThread(thread_key, [&]() {
+    cvc::app::thread_feedback feedback(ctx, thread_key);
+    ctx.threadInfo(thread_key, "processing");
+    ctx.threadProgress(thread_key, 0.5);
     boost::this_thread::sleep_for(boost::chrono::milliseconds(20));
     finished = true;
     // thread_feedback destructor sets status to "completed" and progress to 100%
@@ -1689,16 +1698,16 @@ TEST(AppTest, ThreadStatusShowsCompleted) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // Verify status is "completed" after thread exits
-  std::string status = cvcapp.threadInfo(thread_key);
+  std::string status = ctx.threadInfo(thread_key);
   EXPECT_EQ(status, "completed") << "Thread status should be 'completed' after thread exits";
 
   // Verify progress is 100%
-  double progress = cvcapp.threadProgress(thread_key);
+  double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01) << "Progress should be 100% when status is completed";
 
   // Clean up
-  if (cvcapp.hasThread(thread_key)) {
-    thread_ptr tptr = cvcapp.threads(thread_key);
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
     if (tptr && tptr->joinable())
       tptr->join();
   }
