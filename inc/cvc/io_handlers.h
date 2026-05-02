@@ -27,6 +27,18 @@ void register_hdf5_io(app &ctx);
 void register_bunny_io(app &ctx);
 void register_off_io(app &ctx);
 void register_cvcraw_io(app &ctx);
+
+// No-app overloads of the geometry registrations. The geometry handlers
+// register themselves into a global handler map and do not depend on
+// any cvc::app state.
+void register_bunny_io();
+void register_off_io();
+void register_cvcraw_io();
+
+// Convenience entry point that calls each register_*_io() above. Used
+// by geometry_file_io::get_handlers() to populate the handler map on
+// first access without requiring a cvc::app instance to exist.
+void register_default_geometry_handlers();
 } // namespace CVC_NAMESPACE
 
 #endif
