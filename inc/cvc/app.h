@@ -380,9 +380,6 @@ public:
       }
     }
 
-    // Legacy: uses app::instance()
-    thread_info(const std::string &info = "running") : thread_info(app::instance(), info) {}
-
     ~thread_info() {
       try {
         _app.thisThreadInfo(_origInfo);
@@ -416,9 +413,6 @@ public:
         // Swallow exceptions during construction (thread may be interrupted)
       }
     }
-
-    // Legacy: uses app::instance()
-    thread_feedback(const std::string &key = "") : thread_feedback(app::instance(), key) {}
 
     ~thread_feedback() {
       // CRITICAL: Must catch exceptions in destructor to prevent std::terminate()
@@ -489,12 +483,6 @@ public:
         : _ctx(ctx), _scopedLock(*ctx.mutex(name)), _name(name) {
       // prepend the thread key
       _ctx.mutexInfo(name, _ctx.threadKey() + ": " + info);
-    }
-    // Legacy: uses app::instance()
-    scoped_lock(const std::string &name, const std::string &info = std::string())
-        : _ctx(app::instance()), _scopedLock(*app::instance().mutex(name)), _name(name) {
-      // prepend the thread key
-      app::instance().mutexInfo(name, app::instance().threadKey() + ": " + info);
     }
     ~scoped_lock() { _ctx.mutexInfo(_name, ""); }
 
