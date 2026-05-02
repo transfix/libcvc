@@ -171,7 +171,7 @@ void client(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   std::string method_name = args[1];
   vector<string> rpc_args = args;
   rpc_args.erase(rpc_args.begin(), rpc_args.begin() + 2);
-  string result = rpc(host_and_port, method_name, rpc_args);
+  string result = rpc(ctx, host_and_port, method_name, rpc_args);
   if (!result.empty())
     cout << result << endl;
 }
