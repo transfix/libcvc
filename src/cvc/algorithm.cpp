@@ -737,7 +737,6 @@ volume sdf(app &ctx, const geometry &geom, const dimension &dim, const bounding_
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
 geometry iso(const volume &vol, double isovalue, extraction_method method, int improve_iterations,
              normal_type normals, boost::optional<const volume &> propertyVol) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["isovalue"] = float(isovalue);
   args["improve_iterations"] = improve_iterations;
@@ -763,7 +762,6 @@ geometry iso(const volume &vol, double isovalue, extraction_method method, int i
 geometry tetrahedralize(const volume &vol, double isovalue, extraction_method method,
                         improvement_method improve_method, normal_type normals,
                         int improve_iterations, boost::optional<const volume &> propertyVol) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["isovalue"] = float(isovalue);
   args["improve_iterations"] = improve_iterations;
@@ -790,7 +788,6 @@ geometry tetrahedralize(const volume &vol, double isovalue, extraction_method me
 geometry hexahedralize(const volume &vol, double isovalue, extraction_method method,
                        improvement_method improve_method, normal_type normals,
                        int improve_iterations, boost::optional<const volume &> propertyVol) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["isovalue"] = float(isovalue);
   args["improve_iterations"] = improve_iterations;
@@ -816,7 +813,6 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method method,
                          improvement_method improve_method, normal_type normals,
                          int improve_iterations) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["isovalue"] = float(isovalue);
   args["improve_iterations"] = improve_iterations;
@@ -831,7 +827,6 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
 geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isovalue_inner,
                          extraction_method method, improvement_method improve_method,
                          normal_type normals, int improve_iterations) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["isovalue"] = float(isovalue_outer);
   args["isovalue_in"] = float(isovalue_inner); // Set the inner isovalue for interval meshing
@@ -853,7 +848,6 @@ geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isoval
 // 01/10/2014 -- Joe R. -- Creation.
 // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
 geometry &geometry::quality_improve(int iterations, improvement_method method) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   Arguments args;
   args["improve_iterations"] = iterations;
   args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(method);
@@ -1167,7 +1161,6 @@ geometry::quads_t encode_quads_from_hexs(const geometry::hexs_t &hexs) {
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 1).
 geometry extract_surface(const geometry &geom) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
   geometry surface;
 
   // Copy vertex data
@@ -1218,7 +1211,6 @@ geometry extract_surface(const geometry &geom) {
 std::array<double, 4> tet_barycentric(const geometry::point_t &p, const geometry::point_t &v0,
                                       const geometry::point_t &v1, const geometry::point_t &v2,
                                       const geometry::point_t &v3) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Helper lambda to compute signed volume of tetrahedron
   auto tet_volume = [](const geometry::point_t &a, const geometry::point_t &b,
@@ -1268,7 +1260,6 @@ std::array<double, 4> tet_barycentric(const geometry::point_t &p, const geometry
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 2).
 std::array<double, 8> hex_trilinear(const geometry::point_t &p,
                                     const geometry::point_t vertices[8]) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Shape functions for hexahedron in parametric space (r,s,t) in [-1,1]^3
   // Standard ordering: vertices 0-3 bottom face, 4-7 top face
@@ -1350,7 +1341,6 @@ std::array<double, 8> hex_trilinear(const geometry::point_t &p,
 double interpolate_in_tet(const geometry::point_t &p, const geometry::tet_t &tet,
                           const geometry::points_t &vertices,
                           const std::vector<double> &vertex_properties) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Get barycentric coordinates
   auto weights =
@@ -1376,7 +1366,6 @@ double interpolate_in_tet(const geometry::point_t &p, const geometry::tet_t &tet
 double interpolate_in_hex(const geometry::point_t &p, const geometry::hex_t &hex,
                           const geometry::points_t &vertices,
                           const std::vector<double> &vertex_properties) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Get vertices of hex
   geometry::point_t hex_verts[8];
@@ -1414,7 +1403,6 @@ double interpolate_in_hex(const geometry::point_t &p, const geometry::hex_t &hex
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double tet_volume(const geometry::point_t &v0, const geometry::point_t &v1,
                   const geometry::point_t &v2, const geometry::point_t &v3) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Compute edges from v0
   double v0v1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
@@ -1441,7 +1429,6 @@ double tet_volume(const geometry::point_t &v0, const geometry::point_t &v1,
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double tet_aspect_ratio(const geometry::point_t &v0, const geometry::point_t &v1,
                         const geometry::point_t &v2, const geometry::point_t &v3) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Compute all 6 edge lengths
   auto edge_length = [](const geometry::point_t &a, const geometry::point_t &b) {
@@ -1493,7 +1480,6 @@ double tet_aspect_ratio(const geometry::point_t &v0, const geometry::point_t &v1
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double tet_min_dihedral_angle(const geometry::point_t &v0, const geometry::point_t &v1,
                               const geometry::point_t &v2, const geometry::point_t &v3) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Helper to compute face normal
   auto face_normal = [](const geometry::point_t &a, const geometry::point_t &b,
@@ -1545,7 +1531,6 @@ double tet_min_dihedral_angle(const geometry::point_t &v0, const geometry::point
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double hex_volume(const geometry::point_t vertices[8]) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Decompose hex into 5 tets
   // Using center decomposition for better accuracy
@@ -1597,7 +1582,6 @@ double hex_volume(const geometry::point_t vertices[8]) {
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double hex_jacobian(const geometry::point_t vertices[8]) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Evaluate at parametric center (r=s=t=0)
   // Shape function derivatives at center
@@ -1640,7 +1624,6 @@ double hex_jacobian(const geometry::point_t vertices[8]) {
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 double hex_scaled_jacobian(const geometry::point_t vertices[8]) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   // Compute Jacobian at center
   double jac = hex_jacobian(vertices);
@@ -1671,7 +1654,6 @@ double hex_scaled_jacobian(const geometry::point_t vertices[8]) {
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 quality_stats compute_tet_quality_stats(const geometry::tets_t &tets,
                                         const geometry::points_t &vertices, quality_metric metric) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   if (tets.empty()) {
     return {0.0, 0.0, 0.0, 0.0};
@@ -1726,7 +1708,6 @@ quality_stats compute_tet_quality_stats(const geometry::tets_t &tets,
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
 quality_stats compute_hex_quality_stats(const geometry::hexs_t &hexs,
                                         const geometry::points_t &vertices, quality_metric metric) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   if (hexs.empty()) {
     return {0.0, 0.0, 0.0, 0.0};
@@ -1793,7 +1774,6 @@ quality_stats compute_hex_quality_stats(const geometry::hexs_t &hexs,
 std::vector<size_t> find_tets_containing_point(const geometry::point_t &p,
                                                const geometry::tets_t &tets,
                                                const geometry::points_t &vertices) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   std::vector<size_t> result;
 
@@ -1965,7 +1945,6 @@ std::vector<size_t> find_tets_containing_point(const geometry::point_t &p,
 std::vector<size_t> find_hexs_containing_point(const geometry::point_t &p,
                                                const geometry::hexs_t &hexs,
                                                const geometry::points_t &vertices) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   std::vector<size_t> result;
 
@@ -2139,7 +2118,6 @@ std::vector<size_t> find_hexs_containing_point(const geometry::point_t &p,
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 4).
 std::array<double, 6> compute_mesh_bounds(const geometry &geom) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   if (geom.points().empty()) {
     return {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
@@ -2174,7 +2152,6 @@ std::array<double, 6> compute_mesh_bounds(const geometry &geom) {
 std::vector<size_t> filter_tets_by_quality(const geometry::tets_t &tets,
                                            const geometry::points_t &vertices, double threshold,
                                            quality_metric metric) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   std::vector<size_t> result;
 
@@ -2228,7 +2205,6 @@ std::vector<size_t> filter_tets_by_quality(const geometry::tets_t &tets,
 std::vector<size_t> filter_hexs_by_quality(const geometry::hexs_t &hexs,
                                            const geometry::points_t &vertices, double threshold,
                                            quality_metric metric) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   std::vector<size_t> result;
 
@@ -2281,7 +2257,6 @@ std::vector<size_t> filter_hexs_by_quality(const geometry::hexs_t &hexs,
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 4).
 geometry extract_quality_elements(const geometry &geom, double threshold, quality_metric metric) {
-  thread_info ti(BOOST_CURRENT_FUNCTION);
 
   geometry result;
 
