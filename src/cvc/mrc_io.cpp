@@ -490,7 +490,7 @@ struct mrc_io : public volume_file_io {
     if (subvoldim.isNull())
       throw index_out_of_bounds("Specified subvolume dimension is null.");
 
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
 
     if ((off_x + subvoldim[0] - 1 >= vfi.XDim()) || (off_y + subvoldim[1] - 1 >= vfi.YDim()) ||
         (off_z + subvoldim[2] - 1 >= vfi.ZDim())) {
@@ -803,7 +803,7 @@ struct mrc_io : public volume_file_io {
 
     // check if the file exists and we can write the specified subvolume to it
     try {
-      volinfo.read(filename);
+      volinfo.read(ctx, filename);
       // if(!(dimension(off_x+vol.XDim(),off_y+vol.YDim(),off_z+vol.ZDim()) <=
       // volinfo.voxel_dimensions()))
       if (off_x + vol.XDim() > volinfo.voxel_dimensions()[0] &&
@@ -829,7 +829,7 @@ struct mrc_io : public volume_file_io {
 
       CVC_NAMESPACE::createVolumeFile(ctx, filename, box, dim,
                                       std::vector<data_type>(1, vol.voxelType()), 1, 1, 0.0, 0.0);
-      volinfo.read(filename);
+      volinfo.read(ctx, filename);
 
       if (var >= volinfo.numVariables()) {
         std::string errStr =
@@ -1126,7 +1126,7 @@ struct imod_mrc_io : public mrc_io {
     if (subvoldim.isNull())
       throw index_out_of_bounds("Specified subvolume dimension is null.");
 
-    volume_file_info vfi(filename);
+    volume_file_info vfi(ctx, filename);
 
     if ((off_x + subvoldim[0] - 1 >= vfi.XDim()) || (off_y + subvoldim[1] - 1 >= vfi.YDim()) ||
         (off_z + subvoldim[2] - 1 >= vfi.ZDim()))

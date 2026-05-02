@@ -41,13 +41,6 @@ namespace CVC_NAMESPACE {
 // 12/28/2009 -- Joe R. -- Collecting exception error strings
 // 09/08/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
-void volume_file_info::read(const std::string &filename) {
-  // Legacy overload: delegate to the ctx-aware overload using the
-  // process-wide singleton. New code should call the (app&, filename)
-  // overload directly.
-  read(app::instance(), filename);
-}
-
 void volume_file_info::read(app &ctx, const std::string &filename) {
   _ctx = &ctx;
   std::string errors;
@@ -80,7 +73,11 @@ void volume_file_info::read(app &ctx, const std::string &filename) {
 }
 
 void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const {
-  app &ctx = _ctx ? *_ctx : app::instance();
+  if (!_ctx)
+    throw std::runtime_error(
+        "volume_file_info::calcMinMax called on instance without an associated cvc::app; "
+        "construct via volume_file_info(app&, filename) or call read(app&, filename) first.");
+  app &ctx = *_ctx;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   volume vol(ctx);

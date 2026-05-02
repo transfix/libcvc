@@ -41,15 +41,6 @@ public:
         _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
         _tmin(_data._tmin), _tmax(_data._tmax), _ctx(nullptr) {}
 
-  volume_file_info(const std::string &file)
-      : _dimension(_data._dimension), _boundingBox(_data._boundingBox), _minIsSet(_data._minIsSet),
-        _min(_data._min), _maxIsSet(_data._maxIsSet), _max(_data._max),
-        _numVariables(_data._numVariables), _numTimesteps(_data._numTimesteps),
-        _voxelTypes(_data._voxelTypes), _filename(_data._filename), _names(_data._names),
-        _tmin(_data._tmin), _tmax(_data._tmax), _ctx(nullptr) {
-    read(file);
-  }
-
   volume_file_info(app &ctx, const std::string &file)
       : _dimension(_data._dimension), _boundingBox(_data._boundingBox), _minIsSet(_data._minIsSet),
         _min(_data._min), _maxIsSet(_data._maxIsSet), _max(_data._max),
@@ -79,7 +70,6 @@ public:
     call volume_file_info::read() to fill out this object from
     the info in the supplied file header.
   */
-  void read(const std::string &filename);
   void read(app &ctx, const std::string &filename);
 
   /***** Volume info accessors *****/
