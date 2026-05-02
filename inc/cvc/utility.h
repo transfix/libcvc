@@ -193,18 +193,18 @@ const int XMLRPC_DEFAULT_PORT = 23196;
 
 // 01/13/2014 - Joe R. - Creation.  Implementation is in xmlrpc_client.cpp
 XmlRpc::XmlRpcValue
-rpc_call(const std::string &host, int port, const std::string &method_name,
+rpc_call(app &ctx, const std::string &host, int port, const std::string &method_name,
          const XmlRpc::XmlRpcValue &params, bool sync = true,
          boost::posix_time::ptime mod_time = boost::posix_time::microsec_clock::universal_time());
 
 XmlRpc::XmlRpcValue
-rpc_call(const std::string &host, int port, const std::string &method_name,
+rpc_call(app &ctx, const std::string &host, int port, const std::string &method_name,
          const std::vector<std::string> &params, bool sync = true,
          boost::posix_time::ptime mod_time = boost::posix_time::microsec_clock::universal_time());
 
 XmlRpc::XmlRpcValue
-rpc(const std::string &url, const std::string &method_name, const std::vector<std::string> &params,
-    bool sync = true,
+rpc(app &ctx, const std::string &url, const std::string &method_name,
+    const std::vector<std::string> &params, bool sync = true,
     boost::posix_time::ptime mod_time = boost::posix_time::microsec_clock::universal_time());
 
 // Splits a string of the form <host>:<port>
