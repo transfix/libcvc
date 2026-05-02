@@ -48,14 +48,14 @@ int GraphicsNodeTest::testCounter = 0;
 
 // Test basic GeometryNode creation (GraphicsNode is abstract)
 TEST_F(GraphicsNodeTest, Creation) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   EXPECT_EQ(node.getName(), "test_node");
   EXPECT_FALSE(node.hasGeometry());
 }
 
 // Test setting geometry
 TEST_F(GraphicsNodeTest, SetGeometry) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   EXPECT_TRUE(node.hasGeometry());
@@ -66,7 +66,7 @@ TEST_F(GraphicsNodeTest, SetGeometry) {
 
 // Test geometry storage in node
 TEST_F(GraphicsNodeTest, GeometryRetrieval) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   const cvc::geometry *geom = node.getGeometry();
@@ -81,7 +81,7 @@ TEST_F(GraphicsNodeTest, GeometryRetrieval) {
 
 // Test default transform is identity
 TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   vtkMatrix4x4 *transform = node.getTransform();
 
   ASSERT_NE(transform, nullptr);
@@ -100,7 +100,7 @@ TEST_F(GraphicsNodeTest, DefaultTransformIsIdentity) {
 
 // Test setting position
 TEST_F(GraphicsNodeTest, SetPosition) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setPosition(1.0, 2.0, 3.0);
 
   vtkMatrix4x4 *transform = node.getTransform();
@@ -111,7 +111,7 @@ TEST_F(GraphicsNodeTest, SetPosition) {
 
 // Test setting scale
 TEST_F(GraphicsNodeTest, SetScale) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setScale(2.0, 3.0, 4.0);
 
   vtkMatrix4x4 *transform = node.getTransform();
@@ -122,7 +122,7 @@ TEST_F(GraphicsNodeTest, SetScale) {
 
 // Test reset transform
 TEST_F(GraphicsNodeTest, ResetTransform) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setPosition(1.0, 2.0, 3.0);
   node.resetTransform();
 
@@ -142,7 +142,7 @@ TEST_F(GraphicsNodeTest, ResetTransform) {
 
 // Test metadata storage and retrieval
 TEST_F(GraphicsNodeTest, MetadataStorage) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setMetadata("test_string", std::string("hello"));
   node.setMetadata("test_int", 42);
@@ -164,14 +164,14 @@ TEST_F(GraphicsNodeTest, MetadataStorage) {
 
 // Test default visible metadata
 TEST_F(GraphicsNodeTest, DefaultVisibleMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   EXPECT_TRUE(node.isVisible());
 }
 
 // Test setVisible updates metadata
 TEST_F(GraphicsNodeTest, SetVisibleUpdatesMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setVisible(false);
   EXPECT_FALSE(node.isVisible());
@@ -182,7 +182,7 @@ TEST_F(GraphicsNodeTest, SetVisibleUpdatesMetadata) {
 
 // Test type metadata for geometry
 TEST_F(GraphicsNodeTest, TypeMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setMetadata("type", std::string("geometry"));
 
   EXPECT_TRUE(node.hasMetadata("type"));
@@ -191,9 +191,9 @@ TEST_F(GraphicsNodeTest, TypeMetadata) {
 
 // Test hierarchical structure - adding children
 TEST_F(GraphicsNodeTest, AddChild) {
-  auto parent = std::make_shared<GeometryNode>("test", "parent");
-  auto child1 = std::make_shared<GeometryNode>("test", "child1");
-  auto child2 = std::make_shared<GeometryNode>("test", "child2");
+  auto parent = std::make_shared<GeometryNode>(ctx, "test", "parent");
+  auto child1 = std::make_shared<GeometryNode>(ctx, "test", "child1");
+  auto child2 = std::make_shared<GeometryNode>(ctx, "test", "child2");
 
   parent->addGraphicsChild(child1);
   parent->addGraphicsChild(child2);
@@ -203,9 +203,9 @@ TEST_F(GraphicsNodeTest, AddChild) {
 
 // Test finding child by name
 TEST_F(GraphicsNodeTest, FindChildByName) {
-  auto parent = std::make_shared<GeometryNode>("test", "parent");
-  auto child1 = std::make_shared<GeometryNode>("test", "child1");
-  auto child2 = std::make_shared<GeometryNode>("test", "child2");
+  auto parent = std::make_shared<GeometryNode>(ctx, "test", "parent");
+  auto child1 = std::make_shared<GeometryNode>(ctx, "test", "child1");
+  auto child2 = std::make_shared<GeometryNode>(ctx, "test", "child2");
 
   parent->addGraphicsChild(child1);
   parent->addGraphicsChild(child2);
@@ -220,9 +220,9 @@ TEST_F(GraphicsNodeTest, FindChildByName) {
 
 // Test removing children
 TEST_F(GraphicsNodeTest, RemoveChild) {
-  auto parent = std::make_shared<GeometryNode>("test", "parent");
-  auto child1 = std::make_shared<GeometryNode>("test", "child1");
-  auto child2 = std::make_shared<GeometryNode>("test", "child2");
+  auto parent = std::make_shared<GeometryNode>(ctx, "test", "parent");
+  auto child1 = std::make_shared<GeometryNode>(ctx, "test", "child1");
+  auto child2 = std::make_shared<GeometryNode>(ctx, "test", "child2");
 
   parent->addGraphicsChild(child1);
   parent->addGraphicsChild(child2);
@@ -293,7 +293,7 @@ TEST_F(GraphicsNodeTest, SceneGraphGraphicsRoot) {
 TEST_F(GraphicsNodeTest, SceneGraphRegisterGraphics) {
   SceneGraph sceneGraph(m_statePrefix);
 
-  auto customNode = std::make_shared<GeometryNode>("test", "custom");
+  auto customNode = std::make_shared<GeometryNode>(ctx, "test", "custom");
   sceneGraph.registerGraphics("custom", customNode);
 
   auto retrieved = sceneGraph.getGraphics("custom");
@@ -338,8 +338,8 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsEmpty) {
 
 // Test world transform calculation for nested nodes
 TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
-  auto parent = std::make_shared<GeometryNode>("test.parent", "parent");
-  auto child = std::make_shared<GeometryNode>("test.child", "child");
+  auto parent = std::make_shared<GeometryNode>(ctx, "test.parent", "parent");
+  auto child = std::make_shared<GeometryNode>(ctx, "test.child", "child");
 
   // Set parent position
   parent->setPosition(10.0, 0.0, 0.0);
@@ -359,7 +359,7 @@ TEST_F(GraphicsNodeTest, WorldTransformHierarchy) {
 
 // Test that metadata is computed from geometry
 TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   // Check that basic stats are computed
@@ -380,7 +380,7 @@ TEST_F(GraphicsNodeTest, MetadataFromGeometry) {
 
 // Test that bounding box metadata is computed
 TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   // Check bounding box metadata exists
@@ -405,7 +405,7 @@ TEST_F(GraphicsNodeTest, BoundingBoxMetadata) {
 
 // Test that extent metadata is computed
 TEST_F(GraphicsNodeTest, ExtentMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   // Check extent metadata exists
@@ -425,7 +425,7 @@ TEST_F(GraphicsNodeTest, ExtentMetadata) {
 
 // Test that center metadata is computed
 TEST_F(GraphicsNodeTest, CenterMetadata) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   // Check center metadata exists
@@ -446,7 +446,7 @@ TEST_F(GraphicsNodeTest, CenterMetadata) {
 TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
   // Test triangle mesh
   {
-    GeometryNode node("test", "tri_mesh");
+    GeometryNode node(ctx, "test", "tri_mesh");
     cvc::geometry triGeom;
     triGeom.points().push_back({0.0, 0.0, 0.0});
     triGeom.points().push_back({1.0, 0.0, 0.0});
@@ -460,7 +460,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
 
   // Test quad mesh
   {
-    GeometryNode node("test", "quad_mesh");
+    GeometryNode node(ctx, "test", "quad_mesh");
     cvc::geometry quadGeom;
     quadGeom.points().push_back({0.0, 0.0, 0.0});
     quadGeom.points().push_back({1.0, 0.0, 0.0});
@@ -475,7 +475,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
 
   // Test mixed mesh
   {
-    GeometryNode node("test", "mixed_mesh");
+    GeometryNode node(ctx, "test", "mixed_mesh");
     cvc::geometry mixedGeom;
     mixedGeom.points().push_back({0.0, 0.0, 0.0});
     mixedGeom.points().push_back({1.0, 0.0, 0.0});
@@ -492,7 +492,7 @@ TEST_F(GraphicsNodeTest, GeometryTypeDetection) {
 
 // Test metadata updates when geometry changes
 TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   // Set initial geometry
   node.setGeometry(testGeom);
@@ -519,7 +519,7 @@ TEST_F(GraphicsNodeTest, MetadataUpdatesOnGeometryChange) {
 
 // Test that empty geometry produces zero metadata
 TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
-  GeometryNode node("test", "empty_node");
+  GeometryNode node(ctx, "test", "empty_node");
 
   cvc::geometry emptyGeom;
   node.setGeometry(emptyGeom);
@@ -537,7 +537,7 @@ TEST_F(GraphicsNodeTest, EmptyGeometryMetadata) {
 
 // Test geometry with normals and colors preserves metadata
 TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
-  GeometryNode node("test", "colored_node");
+  GeometryNode node(ctx, "test", "colored_node");
 
   cvc::geometry coloredGeom;
   coloredGeom.points().push_back({0.0, 0.0, 0.0});
@@ -566,7 +566,7 @@ TEST_F(GraphicsNodeTest, GeometryWithNormalsAndColors) {
 // ============================================================================
 
 TEST_F(GraphicsNodeTest, LabelDefaultState) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   // Label should be off by default
   EXPECT_FALSE(node.getShowLabel());
@@ -583,7 +583,7 @@ TEST_F(GraphicsNodeTest, LabelDefaultState) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelText) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setLabelText("Custom Label");
   EXPECT_EQ(node.getLabelText(), "Custom Label");
@@ -593,7 +593,7 @@ TEST_F(GraphicsNodeTest, SetLabelText) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelSize) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setLabelSize(20);
   EXPECT_EQ(node.getLabelSize(), 20);
@@ -607,7 +607,7 @@ TEST_F(GraphicsNodeTest, SetLabelSize) {
 }
 
 TEST_F(GraphicsNodeTest, SetLabelColor) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setLabelColor(0.5, 0.75, 1.0);
 
@@ -619,7 +619,7 @@ TEST_F(GraphicsNodeTest, SetLabelColor) {
 }
 
 TEST_F(GraphicsNodeTest, SetShowLabel) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   EXPECT_FALSE(node.getShowLabel());
 
@@ -634,14 +634,14 @@ TEST_F(GraphicsNodeTest, SetShowLabel) {
 // ============================================================================
 
 TEST_F(GraphicsNodeTest, BBoxDefaultState) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   // BBox should be off by default for regular nodes
   EXPECT_FALSE(node.getShowBBox());
 }
 
 TEST_F(GraphicsNodeTest, SetShowBBox) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   node.setShowBBox(true);
   EXPECT_TRUE(node.getShowBBox());
@@ -650,7 +650,7 @@ TEST_F(GraphicsNodeTest, SetShowBBox) {
   EXPECT_FALSE(node.getShowBBox());
 }
 TEST_F(GraphicsNodeTest, BBoxColor) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
 
   // Set bbox color
   node.setBBoxColor(1.0, 0.0, 0.0);
@@ -664,7 +664,7 @@ TEST_F(GraphicsNodeTest, BBoxColor) {
 }
 
 TEST_F(GraphicsNodeTest, BBoxBounds) {
-  GeometryNode node("test", "test_node");
+  GeometryNode node(ctx, "test", "test_node");
   node.setGeometry(testGeom);
 
   cvc::bounding_box bbox = node.getBoundingBox();
@@ -851,7 +851,7 @@ TEST_F(GraphicsNodeTest, SceneGraphComputeBoundsHierarchical) {
   geom2.points().push_back({1.0, 1.0, 1.0});
 
   auto parent = sceneGraph.addGraphics("parent", geom1);
-  auto child = std::make_shared<GeometryNode>("test", "child");
+  auto child = std::make_shared<GeometryNode>(ctx, "test", "child");
   child->setGeometry(geom2);
 
   // Parent at [10,0,0]
@@ -1005,7 +1005,7 @@ TEST_F(GraphicsNodeTest, ChildrenClipped) {
   childGeom.points().push_back({15.0, 15.0, 15.0});
 
   auto parent = sceneGraph.addGraphics("cliptest.children", parentGeom);
-  auto child = std::make_shared<GeometryNode>("cliptest.children.child", "child");
+  auto child = std::make_shared<GeometryNode>(ctx, "cliptest.children.child", "child");
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
 
@@ -1033,7 +1033,7 @@ TEST_F(GraphicsNodeTest, ClippingDisabled) {
   childGeom.points().push_back({5.0, 5.0, 5.0});
 
   auto parent = sceneGraph.addGraphics("cliptest.disabled", parentGeom);
-  auto child = std::make_shared<GeometryNode>("cliptest.disabled.child", "child");
+  auto child = std::make_shared<GeometryNode>(ctx, "cliptest.disabled.child", "child");
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
 

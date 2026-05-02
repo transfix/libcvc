@@ -35,7 +35,8 @@ class state;
  */
 class VolumeNode : public GraphicsNode {
 public:
-  VolumeNode(const std::string &statePath, const std::string &name = "volume");
+  VolumeNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+             const std::string &name = "volume");
   ~VolumeNode() override;
 
   // Generic setData for template compatibility

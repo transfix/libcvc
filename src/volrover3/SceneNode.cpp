@@ -54,8 +54,8 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   func();
 }
 
-SceneNode::SceneNode(const std::string &statePath)
-    : state_object<SceneNode>(statePath), m_visible(true), m_renderer(nullptr),
+SceneNode::SceneNode(cvc::app &ctx, const std::string &statePath)
+    : state_object<SceneNode>(ctx, statePath), m_visible(true), m_renderer(nullptr),
       m_sceneGraph(nullptr) {
   // Disable threading for this instance during construction
   // Will be enabled when SceneGraph reference is set

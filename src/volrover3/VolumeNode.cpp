@@ -19,8 +19,8 @@
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
-VolumeNode::VolumeNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name), m_hasVolume(false),
+VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+    : GraphicsNode(ctx, statePath, name), m_hasVolume(false),
       m_vtkVolume(vtkSmartPointer<vtkVolume>::New()),
       m_mapper(vtkSmartPointer<vtkSmartVolumeMapper>::New()),
       m_imageData(vtkSmartPointer<vtkImageData>::New()),

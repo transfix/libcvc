@@ -9,7 +9,7 @@ class vtkAxesActor;
 
 class AxisNode : public GraphicsNode {
 public:
-  AxisNode(const std::string &statePath, const std::string &name = "axis");
+  AxisNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "axis");
   ~AxisNode() override;
 
   void setAxisLength(double length);

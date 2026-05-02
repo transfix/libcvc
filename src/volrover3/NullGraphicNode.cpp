@@ -8,8 +8,9 @@
 #include <volrover3/NullGraphicNode.h>
 #include <vtkActor.h>
 
-NullGraphicNode::NullGraphicNode(const std::string &statePath, const std::string &name)
-    : GraphicsNode(statePath, name),
+NullGraphicNode::NullGraphicNode(cvc::app &ctx, const std::string &statePath,
+                                 const std::string &name)
+    : GraphicsNode(ctx, statePath, name),
       m_bounds(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5) // Default 1x1x1 box centered at origin
       ,
       m_dummyActor(vtkSmartPointer<vtkActor>::New()),

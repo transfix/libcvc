@@ -1,3 +1,4 @@
+#include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/state.h>
 #include <cvc/volume.h>
@@ -7,6 +8,7 @@
 
 class BoundingBoxSemanticsTest : public ::testing::Test {
 protected:
+  cvc::app ctx;
   void SetUp() override { m_statePrefix = "test_bbox_semantics_" + std::to_string(testCounter++); }
 
   // Helper to create geometry with specific bounds
@@ -31,7 +33,7 @@ int BoundingBoxSemanticsTest::testCounter = 0;
 
 // Test parent node's own bounding box
 TEST_F(BoundingBoxSemanticsTest, ParentOwnBoundingBox) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto geom = createGeometry(0, 0, 0, 10, 10, 10);
   parent->setGeometry(geom);
 
@@ -47,7 +49,7 @@ TEST_F(BoundingBoxSemanticsTest, ParentOwnBoundingBox) {
 
 // Test combined bounding box with no children equals own bounding box
 TEST_F(BoundingBoxSemanticsTest, CombinedBBoxNoChildren) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto geom = createGeometry(5, 5, 5, 15, 15, 15);
   parent->setGeometry(geom);
 
@@ -65,11 +67,11 @@ TEST_F(BoundingBoxSemanticsTest, CombinedBBoxNoChildren) {
 
 // Test combined bounding box includes child
 TEST_F(BoundingBoxSemanticsTest, CombinedBBoxIncludesChild) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(0, 0, 0, 10, 10, 10);
   parent->setGeometry(parentGeom);
 
-  auto child = std::make_shared<GeometryNode>("child");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   auto childGeom = createGeometry(15, 15, 15, 25, 25, 25);
   child->setGeometry(childGeom);
 
@@ -92,16 +94,16 @@ TEST_F(BoundingBoxSemanticsTest, CombinedBBoxIncludesChild) {
 
 // Test combined bounding box with multiple children
 TEST_F(BoundingBoxSemanticsTest, CombinedBBoxMultipleChildren) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(10, 10, 10, 20, 20, 20);
   parent->setGeometry(parentGeom);
 
-  auto child1 = std::make_shared<GeometryNode>("child1");
+  auto child1 = std::make_shared<GeometryNode>(ctx, "child1");
   auto child1Geom = createGeometry(0, 0, 0, 5, 5, 5);
   child1->setGeometry(child1Geom);
   parent->addGraphicsChild(child1);
 
-  auto child2 = std::make_shared<GeometryNode>("child2");
+  auto child2 = std::make_shared<GeometryNode>(ctx, "child2");
   auto child2Geom = createGeometry(30, 30, 30, 40, 40, 40);
   child2->setGeometry(child2Geom);
   parent->addGraphicsChild(child2);
@@ -123,16 +125,16 @@ TEST_F(BoundingBoxSemanticsTest, CombinedBBoxMultipleChildren) {
 
 // Test combined bounding box with nested children (grandchildren)
 TEST_F(BoundingBoxSemanticsTest, CombinedBBoxNestedChildren) {
-  auto grandparent = std::make_shared<GeometryNode>("grandparent");
+  auto grandparent = std::make_shared<GeometryNode>(ctx, "grandparent");
   auto grandparentGeom = createGeometry(50, 50, 50, 60, 60, 60);
   grandparent->setGeometry(grandparentGeom);
 
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(0, 0, 0, 10, 10, 10);
   parent->setGeometry(parentGeom);
   grandparent->addGraphicsChild(parent);
 
-  auto child = std::make_shared<GeometryNode>("child");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   auto childGeom = createGeometry(100, 100, 100, 110, 110, 110);
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
@@ -155,10 +157,10 @@ TEST_F(BoundingBoxSemanticsTest, CombinedBBoxNestedChildren) {
 
 // Test parent with no geometry but has children
 TEST_F(BoundingBoxSemanticsTest, ParentNoGeometryHasChildren) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   // No geometry set on parent
 
-  auto child = std::make_shared<GeometryNode>("child");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   auto childGeom = createGeometry(10, 20, 30, 40, 50, 60);
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
@@ -185,11 +187,11 @@ TEST_F(BoundingBoxSemanticsTest, ParentNoGeometryHasChildren) {
 
 // Test child removed updates combined bbox
 TEST_F(BoundingBoxSemanticsTest, ChildRemovedUpdatesCombinedBBox) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(10, 10, 10, 20, 20, 20);
   parent->setGeometry(parentGeom);
 
-  auto child = std::make_shared<GeometryNode>("child");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   auto childGeom = createGeometry(50, 50, 50, 100, 100, 100);
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
@@ -211,16 +213,16 @@ TEST_F(BoundingBoxSemanticsTest, ChildRemovedUpdatesCombinedBBox) {
 
 // Test non-overlapping children
 TEST_F(BoundingBoxSemanticsTest, NonOverlappingChildren) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(0, 0, 0, 1, 1, 1);
   parent->setGeometry(parentGeom);
 
-  auto child1 = std::make_shared<GeometryNode>("child1");
+  auto child1 = std::make_shared<GeometryNode>(ctx, "child1");
   auto child1Geom = createGeometry(-100, -100, -100, -90, -90, -90);
   child1->setGeometry(child1Geom);
   parent->addGraphicsChild(child1);
 
-  auto child2 = std::make_shared<GeometryNode>("child2");
+  auto child2 = std::make_shared<GeometryNode>(ctx, "child2");
   auto child2Geom = createGeometry(200, 200, 200, 210, 210, 210);
   child2->setGeometry(child2Geom);
   parent->addGraphicsChild(child2);
@@ -237,11 +239,11 @@ TEST_F(BoundingBoxSemanticsTest, NonOverlappingChildren) {
 
 // Test negative coordinates
 TEST_F(BoundingBoxSemanticsTest, NegativeCoordinates) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   auto parentGeom = createGeometry(-50, -60, -70, -10, -20, -30);
   parent->setGeometry(parentGeom);
 
-  auto child = std::make_shared<GeometryNode>("child");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   auto childGeom = createGeometry(-200, -150, -100, -180, -130, -80);
   child->setGeometry(childGeom);
   parent->addGraphicsChild(child);
@@ -263,8 +265,8 @@ TEST_F(BoundingBoxSemanticsTest, NegativeCoordinates) {
 
 // Test empty parent with empty child
 TEST_F(BoundingBoxSemanticsTest, EmptyParentEmptyChild) {
-  auto parent = std::make_shared<GeometryNode>("parent");
-  auto child = std::make_shared<GeometryNode>("child");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
+  auto child = std::make_shared<GeometryNode>(ctx, "child");
   parent->addGraphicsChild(child);
 
   // Both should have default/empty bboxes
@@ -278,7 +280,7 @@ TEST_F(BoundingBoxSemanticsTest, EmptyParentEmptyChild) {
 
 // Test single point geometry
 TEST_F(BoundingBoxSemanticsTest, SinglePointGeometry) {
-  auto parent = std::make_shared<GeometryNode>("parent");
+  auto parent = std::make_shared<GeometryNode>(ctx, "parent");
   cvc::geometry geom;
   geom.points().resize(1);
   geom.points()[0][0] = 5.5;

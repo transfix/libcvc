@@ -5,6 +5,7 @@
 #include <volrover3/CameraController.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/VTKRenderWidget.h>
+#include <volrover3/volrover3_app.h>
 #include <vtkCamera.h>
 #include <vtkCornerAnnotation.h>
 #include <vtkGenericOpenGLRenderWindow.h>
@@ -16,7 +17,7 @@ VTKRenderWidget::VTKRenderWidget(QWidget *parent)
     : QVTK_WIDGET_BASE(parent),
       m_renderWindow(vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New()),
       m_renderer(vtkSmartPointer<vtkRenderer>::New()),
-      m_cameraController(std::make_unique<CameraController>()),
+      m_cameraController(std::make_unique<CameraController>(volrover3::app())),
       m_fpsAnnotation(vtkSmartPointer<vtkCornerAnnotation>::New()), m_showFPS(false) {
   initializeVTK();
 
