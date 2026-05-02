@@ -425,7 +425,7 @@ private:
         lock.unlock();
         std::string threadKey = stateName(childState) + "_stateChanged";
         _ctx.startThread(threadKey, [this, childState, threadKey]() {
-          cvc::app::thread_feedback feedback(threadKey);
+          cvc::app::thread_feedback feedback(_ctx, threadKey);
           this->handleStateChanged(childState);
         });
       } else {
