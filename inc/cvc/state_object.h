@@ -213,10 +213,6 @@ private:
 template <class This> // This should be the type of the inheriting class
 class state_object {
 public:
-  // Legacy constructor - uses app::instance() singleton
-  state_object(const std::string state_path = std::string())
-      : state_object(app::instance(), state_path) {}
-
   // Constructor with explicit app context
   state_object(app &ctx, const std::string state_path = std::string())
       : _ctx(ctx), _batchDepth(0), _initDepth(0), _hasInstanceThreading(false),
