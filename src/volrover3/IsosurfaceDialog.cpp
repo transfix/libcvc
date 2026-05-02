@@ -233,7 +233,7 @@ void IsosurfaceDialog::onVolumeSelected(int index) {
 }
 
 void IsosurfaceDialog::onComputeClicked() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   if (m_computing) {
     // Cancel ongoing computation
@@ -306,7 +306,7 @@ void IsosurfaceDialog::onComputeClicked() {
   volrover3::app().startThread(
       m_activeThreadKey,
       [this, vol, isovalue, method, improveIterations, normalType, volumeName, volumeNode]() {
-        cvc::thread_info ti("Isosurface Extraction");
+        cvc::thread_info ti(volrover3::app(), "Isosurface Extraction");
 
         try {
           // Extract isosurface (thread-safe)
@@ -319,7 +319,7 @@ void IsosurfaceDialog::onComputeClicked() {
 
           // Post all SceneGraph/VTK operations to main thread via SceneGraph event queue
           m_sceneGraph->postEvent([this, isoGeom, volumeName, isovalue, volumeNode]() {
-            cvc::thread_info ti("Add Isosurface");
+            cvc::thread_info ti(volrover3::app(), "Add Isosurface");
 
             try {
               // Sanitize the name to ensure it's a valid C identifier

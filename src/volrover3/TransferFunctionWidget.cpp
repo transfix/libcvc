@@ -532,7 +532,7 @@ void TransferFunctionWidget::loadTransferFunctionFromVolume(std::shared_ptr<Volu
 }
 
 void TransferFunctionWidget::applyPreset(const QString &presetName) {
-  cvc::thread_info ti("Applying transfer function preset");
+  cvc::thread_info ti(volrover3::app(), "Applying transfer function preset");
 
   m_colorPoints.clear();
   // Don't clear opacity points - keep them independent!

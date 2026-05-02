@@ -304,7 +304,7 @@ void SDFDialog::onGeometrySelected(int index) {
 }
 
 void SDFDialog::onComputeClicked() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   if (m_computing) {
     // Cancel ongoing computation
@@ -378,7 +378,7 @@ void SDFDialog::onComputeClicked() {
       m_activeThreadKey,
       [this, geom, dim, bbox, algorithm, flipNormals, geomName, activeKey = m_activeThreadKey]() {
         // Use thread_feedback for proper progress tracking (must be at thread entry point)
-        cvc::app::thread_feedback feedback(activeKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), activeKey);
 
         try {
           // Update progress to indicate we've started

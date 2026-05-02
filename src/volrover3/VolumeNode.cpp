@@ -192,7 +192,7 @@ void VolumeNode::addToRenderer(vtkRenderer *renderer) {
 }
 
 void VolumeNode::setVolume(const cvc::volume &vol) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   volrover3::app().log(0, "\n=== VolumeNode::setVolume[" + getName() + "] ===");
 
