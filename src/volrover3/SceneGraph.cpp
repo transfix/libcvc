@@ -281,7 +281,7 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
 // Multi-object graphics management
 std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
                                                       const cvc::geometry &geom) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
@@ -314,7 +314,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
@@ -350,7 +350,7 @@ bool SceneGraph::hasGraphics(const std::string &name) const {
 }
 
 void SceneGraph::removeGraphics(const std::string &name) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   auto it = m_graphicsNodes.find(name);
   if (it == m_graphicsNodes.end()) {
@@ -400,7 +400,7 @@ void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<Graph
 // Volume graphics management
 std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
                                                     const cvc::volume &vol) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {

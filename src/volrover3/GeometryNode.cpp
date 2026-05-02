@@ -6,6 +6,7 @@
 #include <sstream>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/NullGraphicNode.h>
+#include <volrover3/volrover3_app.h>
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkFloatArray.h>
@@ -290,7 +291,7 @@ void GeometryNode::setUseSingleColor(bool useSingleColor) {
 vtkProp *GeometryNode::getProp() { return m_actor; }
 
 void GeometryNode::setGeometry(const cvc::geometry &geom) {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // CRITICAL: Entire method must run on main thread to avoid Qt threading errors
   // Even creating std::shared_ptr or setting member variables can trigger VTK

@@ -333,7 +333,7 @@ void MainWindow::setupConnections() {
 }
 
 void MainWindow::openFile() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // First, show parent selection dialog
   GraphicsParentDialog parentDialog(m_sceneGraph, this);
@@ -572,14 +572,14 @@ void MainWindow::toggleAxis() {
 }
 
 void MainWindow::editBoundingBox() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   BoundingBoxDialog dialog(m_sceneGraph, this);
   dialog.exec();
 }
 
 void MainWindow::editCameraSettings() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   CameraController *camCtrl = m_renderWidget->getCameraController();
   if (!camCtrl)
@@ -659,7 +659,7 @@ void MainWindow::editCameraSettings() {
 }
 
 void MainWindow::showGridOptions() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   if (!m_gridOptionsDialog) {
     m_gridOptionsDialog = new GridOptionsDialog(m_sceneGraph->getGridNode());
@@ -677,7 +677,7 @@ void MainWindow::showGridOptions() {
 }
 
 void MainWindow::showViewerOptions() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   if (!m_viewerOptionsDialog) {
     m_viewerOptionsDialog = new ViewerOptionsDialog(m_renderWidget, m_sceneGraph);
@@ -752,7 +752,7 @@ void MainWindow::showStateTree() {
 }
 
 void MainWindow::showSDF() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Create SDF dialog as a separate window if not already created
   if (!m_sdfDialog) {
@@ -771,7 +771,7 @@ void MainWindow::showSDF() {
 }
 
 void MainWindow::showIsosurface() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Create Isosurface dialog as a separate window if not already created
   if (!m_isosurfaceDialog) {
@@ -790,7 +790,7 @@ void MainWindow::showIsosurface() {
 }
 
 void MainWindow::showGeometry() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Create Geometry dialog as a separate window if not already created
   if (!m_geometryDialog) {
@@ -809,7 +809,7 @@ void MainWindow::showGeometry() {
 }
 
 void MainWindow::showVolume() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   // Create Volume dialog as a separate window if not already created
   if (!m_volumeDialog) {
@@ -854,7 +854,7 @@ void MainWindow::resetCamera() {
 }
 
 void MainWindow::generateStanfordBunny() {
-  cvc::thread_info ti(BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(volrover3::app(), BOOST_CURRENT_FUNCTION);
 
   try {
     // Load the built-in Stanford Bunny using the .bunny extension

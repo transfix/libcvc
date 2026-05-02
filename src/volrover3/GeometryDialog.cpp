@@ -1076,7 +1076,7 @@ void GeometryDialog::onInvertNormalsClicked() {
       threadKey,
       [this, geom, geomName, threadKey]() mutable {
         // Use thread_feedback for proper progress tracking
-        cvc::app::thread_feedback feedback(threadKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), threadKey);
 
         try {
           volrover3::app().threadProgress(threadKey, 0.1);
@@ -1150,7 +1150,7 @@ void GeometryDialog::onReorientClicked() {
   volrover3::app().startThread(
       threadKey,
       [this, geom, geomName, threadKey]() mutable {
-        cvc::app::thread_feedback feedback(threadKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), threadKey);
 
         try {
           volrover3::app().threadProgress(threadKey, 0.1);
@@ -1235,7 +1235,7 @@ void GeometryDialog::onProjectClicked() {
   volrover3::app().startThread(
       threadKey,
       [this, geom, targetGeom, geomName, threadKey]() mutable {
-        cvc::app::thread_feedback feedback(threadKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), threadKey);
 
         try {
           volrover3::app().threadProgress(threadKey, 0.1);
@@ -1311,7 +1311,7 @@ void GeometryDialog::onSmoothingClicked() {
       threadKey,
       [this, geom, delta, fixBoundary, perturb1, geoFlow, smoothingEnabled, perturb2, geomName,
        threadKey]() mutable {
-        cvc::app::thread_feedback feedback(threadKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), threadKey);
 
         try {
           volrover3::app().threadProgress(threadKey, 0.1);
@@ -1383,7 +1383,7 @@ void GeometryDialog::onQualityImproveClicked() {
   volrover3::app().startThread(
       threadKey,
       [this, geom, iterations, method, geomName, threadKey]() mutable {
-        cvc::app::thread_feedback feedback(threadKey);
+        cvc::app::thread_feedback feedback(volrover3::app(), threadKey);
 
         try {
           volrover3::app().threadProgress(threadKey, 0.1);
