@@ -31,6 +31,14 @@ using namespace CVC_NAMESPACE;
 // Global flag to control stress/performance tests
 bool enable_stress_tests = false;
 
+// Fixture for tests that exercise the cvc::app data store. Each test
+// gets a fresh, fixture-local cvc::app instance instead of relying on
+// the deprecated cvcapp singleton (see cvc-singleton-removal-plan.md).
+class StateDataFixture : public ::testing::Test {
+protected:
+  cvc::app ctx;
+};
+
 // ===========================
 // Basic Singleton Tests
 // ===========================
@@ -569,16 +577,16 @@ TEST(StateTest, JsonConversion) {
 // ValueData Tests
 // ===========================
 
-TEST(StateTest, ValueData) {
+TEST_F(StateDataFixture, ValueData) {
   // Set up some data objects referenced by a list
-  cvcapp.data("test.vd.obj1", 100);
-  cvcapp.data("test.vd.obj2", 200);
-  cvcapp.data("test.vd.obj3", 300);
+  ctx.data("test.vd.obj1", 100);
+  ctx.data("test.vd.obj2", 200);
+  ctx.data("test.vd.obj3", 300);
 
   // Verify data was stored
-  EXPECT_TRUE(cvcapp.isData<int>("test.vd.obj1"));
-  EXPECT_TRUE(cvcapp.isData<int>("test.vd.obj2"));
-  EXPECT_TRUE(cvcapp.isData<int>("test.vd.obj3"));
+  EXPECT_TRUE(ctx.isData<int>("test.vd.obj1"));
+  EXPECT_TRUE(ctx.isData<int>("test.vd.obj2"));
+  EXPECT_TRUE(ctx.isData<int>("test.vd.obj3"));
 
   // Create states that the valueData method will look for
   cvcstate("test.vd.obj1").data(100);
@@ -598,9 +606,9 @@ TEST(StateTest, ValueData) {
 
   // Clean up
   cvcstate("test").reset();
-  cvcapp.data("test.vd.obj1", boost::any());
-  cvcapp.data("test.vd.obj2", boost::any());
-  cvcapp.data("test.vd.obj3", boost::any());
+  ctx.data("test.vd.obj1", boost::any());
+  ctx.data("test.vd.obj2", boost::any());
+  ctx.data("test.vd.obj3", boost::any());
 }
 
 // ===========================
@@ -4052,30 +4060,29 @@ TEST(StateTest, SanitizeResultIsValid) {
 // Data Type Registration Tests
 // ===========================
 
-TEST(StateTest, RegisteredDataTypeNames) {
+TEST_F(StateDataFixture, RegisteredDataTypeNames) {
   // Test that core CVC types are registered with human-readable names
 
   // Create instances of each type
-  cvc::app &ctx = cvc::app::instance();
   cvc::geometry geom;
   cvc::voxels vox(ctx, cvc::dimension(10, 10, 10), cvc::UChar);
   cvc::volume vol(ctx, cvc::dimension(10, 10, 10), cvc::UChar);
   cvc::bounding_box bbox(0, 0, 0, 1, 1, 1);
   cvc::dimension dim(10, 10, 10);
 
-  // Store them in cvcapp data map
-  cvcapp.data("test.geometry", geom);
-  cvcapp.data("test.voxels", vox);
-  cvcapp.data("test.volume", vol);
-  cvcapp.data("test.bbox", bbox);
-  cvcapp.data("test.dimension", dim);
+  // Store them in the fixture-local app's data map
+  ctx.data("test.geometry", geom);
+  ctx.data("test.voxels", vox);
+  ctx.data("test.volume", vol);
+  ctx.data("test.bbox", bbox);
+  ctx.data("test.dimension", dim);
 
   // Verify the type names are human-readable, not mangled C++ names
-  std::string geom_type = cvcapp.dataTypeName(std::string("test.geometry"));
-  std::string vox_type = cvcapp.dataTypeName(std::string("test.voxels"));
-  std::string vol_type = cvcapp.dataTypeName(std::string("test.volume"));
-  std::string bbox_type = cvcapp.dataTypeName(std::string("test.bbox"));
-  std::string dim_type = cvcapp.dataTypeName(std::string("test.dimension"));
+  std::string geom_type = ctx.dataTypeName(std::string("test.geometry"));
+  std::string vox_type = ctx.dataTypeName(std::string("test.voxels"));
+  std::string vol_type = ctx.dataTypeName(std::string("test.volume"));
+  std::string bbox_type = ctx.dataTypeName(std::string("test.bbox"));
+  std::string dim_type = ctx.dataTypeName(std::string("test.dimension"));
 
   EXPECT_EQ(geom_type, "cvc::geometry") << "Geometry type should be registered";
   EXPECT_EQ(vox_type, "cvc::voxels") << "Voxels type should be registered";
@@ -4084,29 +4091,29 @@ TEST(StateTest, RegisteredDataTypeNames) {
   EXPECT_EQ(dim_type, "cvc::dimension") << "Dimension type should be registered";
 
   // Clean up
-  cvcapp.data("test.geometry", boost::any());
-  cvcapp.data("test.voxels", boost::any());
-  cvcapp.data("test.volume", boost::any());
-  cvcapp.data("test.bbox", boost::any());
-  cvcapp.data("test.dimension", boost::any());
+  ctx.data("test.geometry", boost::any());
+  ctx.data("test.voxels", boost::any());
+  ctx.data("test.volume", boost::any());
+  ctx.data("test.bbox", boost::any());
+  ctx.data("test.dimension", boost::any());
 }
 
-TEST(StateTest, RegisteredSharedPtrDataTypeNames) {
+TEST_F(StateDataFixture, RegisteredSharedPtrDataTypeNames) {
   // Test that shared_ptr variants are also registered
 
   boost::shared_ptr<cvc::geometry> geom_ptr(new cvc::geometry());
   boost::shared_ptr<cvc::voxels> vox_ptr(
-      new cvc::voxels(cvcapp, cvc::dimension(10, 10, 10), cvc::UChar));
+      new cvc::voxels(ctx, cvc::dimension(10, 10, 10), cvc::UChar));
   boost::shared_ptr<cvc::volume> vol_ptr(
-      new cvc::volume(cvcapp, cvc::dimension(10, 10, 10), cvc::UChar));
+      new cvc::volume(ctx, cvc::dimension(10, 10, 10), cvc::UChar));
 
-  cvcapp.data("test.geometry_ptr", geom_ptr);
-  cvcapp.data("test.voxels_ptr", vox_ptr);
-  cvcapp.data("test.volume_ptr", vol_ptr);
+  ctx.data("test.geometry_ptr", geom_ptr);
+  ctx.data("test.voxels_ptr", vox_ptr);
+  ctx.data("test.volume_ptr", vol_ptr);
 
-  std::string geom_ptr_type = cvcapp.dataTypeName(std::string("test.geometry_ptr"));
-  std::string vox_ptr_type = cvcapp.dataTypeName(std::string("test.voxels_ptr"));
-  std::string vol_ptr_type = cvcapp.dataTypeName(std::string("test.volume_ptr"));
+  std::string geom_ptr_type = ctx.dataTypeName(std::string("test.geometry_ptr"));
+  std::string vox_ptr_type = ctx.dataTypeName(std::string("test.voxels_ptr"));
+  std::string vol_ptr_type = ctx.dataTypeName(std::string("test.volume_ptr"));
 
   EXPECT_EQ(geom_ptr_type, "boost::shared_ptr<cvc::geometry>")
       << "Geometry shared_ptr type should be registered";
@@ -4116,19 +4123,19 @@ TEST(StateTest, RegisteredSharedPtrDataTypeNames) {
       << "Volume shared_ptr type should be registered";
 
   // Clean up
-  cvcapp.data("test.geometry_ptr", boost::any());
-  cvcapp.data("test.voxels_ptr", boost::any());
-  cvcapp.data("test.volume_ptr", boost::any());
+  ctx.data("test.geometry_ptr", boost::any());
+  ctx.data("test.voxels_ptr", boost::any());
+  ctx.data("test.volume_ptr", boost::any());
 }
 
-TEST(StateTest, DataTypeNameTemplate) {
+TEST_F(StateDataFixture, DataTypeNameTemplate) {
   // Test the template version of dataTypeName<T>()
 
-  std::string geom_type = cvcapp.dataTypeName<cvc::geometry>();
-  std::string vox_type = cvcapp.dataTypeName<cvc::voxels>();
-  std::string vol_type = cvcapp.dataTypeName<cvc::volume>();
-  std::string bbox_type = cvcapp.dataTypeName<cvc::bounding_box>();
-  std::string dim_type = cvcapp.dataTypeName<cvc::dimension>();
+  std::string geom_type = ctx.dataTypeName<cvc::geometry>();
+  std::string vox_type = ctx.dataTypeName<cvc::voxels>();
+  std::string vol_type = ctx.dataTypeName<cvc::volume>();
+  std::string bbox_type = ctx.dataTypeName<cvc::bounding_box>();
+  std::string dim_type = ctx.dataTypeName<cvc::dimension>();
 
   EXPECT_EQ(geom_type, "cvc::geometry");
   EXPECT_EQ(vox_type, "cvc::voxels");
@@ -4137,32 +4144,32 @@ TEST(StateTest, DataTypeNameTemplate) {
   EXPECT_EQ(dim_type, "cvc::dimension");
 
   // Test shared_ptr versions
-  std::string geom_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::geometry>>();
-  std::string vox_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::voxels>>();
-  std::string vol_ptr_type = cvcapp.dataTypeName<boost::shared_ptr<cvc::volume>>();
+  std::string geom_ptr_type = ctx.dataTypeName<boost::shared_ptr<cvc::geometry>>();
+  std::string vox_ptr_type = ctx.dataTypeName<boost::shared_ptr<cvc::voxels>>();
+  std::string vol_ptr_type = ctx.dataTypeName<boost::shared_ptr<cvc::volume>>();
 
   EXPECT_EQ(geom_ptr_type, "boost::shared_ptr<cvc::geometry>");
   EXPECT_EQ(vox_ptr_type, "boost::shared_ptr<cvc::voxels>");
   EXPECT_EQ(vol_ptr_type, "boost::shared_ptr<cvc::volume>");
 }
 
-TEST(StateTest, DataTypeNameFromAny) {
+TEST_F(StateDataFixture, DataTypeNameFromAny) {
   // Test the dataTypeName(boost::any) overload
 
   boost::any geom_any = cvc::geometry();
-  boost::any vox_any = cvc::voxels(cvcapp, cvc::dimension(10, 10, 10), cvc::UChar);
-  boost::any vol_any = cvc::volume(cvcapp, cvc::dimension(10, 10, 10), cvc::UChar);
+  boost::any vox_any = cvc::voxels(ctx, cvc::dimension(10, 10, 10), cvc::UChar);
+  boost::any vol_any = cvc::volume(ctx, cvc::dimension(10, 10, 10), cvc::UChar);
 
-  std::string geom_type = cvcapp.dataTypeName(geom_any);
-  std::string vox_type = cvcapp.dataTypeName(vox_any);
-  std::string vol_type = cvcapp.dataTypeName(vol_any);
+  std::string geom_type = ctx.dataTypeName(geom_any);
+  std::string vox_type = ctx.dataTypeName(vox_any);
+  std::string vol_type = ctx.dataTypeName(vol_any);
 
   EXPECT_EQ(geom_type, "cvc::geometry");
   EXPECT_EQ(vox_type, "cvc::voxels");
   EXPECT_EQ(vol_type, "cvc::volume");
 }
 
-TEST(StateTest, UnregisteredTypeReturnsMangled) {
+TEST_F(StateDataFixture, UnregisteredTypeReturnsMangled) {
   // Test that unregistered types return the mangled C++ name
 
   struct UnregisteredType {
@@ -4170,9 +4177,9 @@ TEST(StateTest, UnregisteredTypeReturnsMangled) {
   };
 
   UnregisteredType custom;
-  cvcapp.data("test.unregistered", custom);
+  ctx.data("test.unregistered", custom);
 
-  std::string type_name = cvcapp.dataTypeName(std::string("test.unregistered"));
+  std::string type_name = ctx.dataTypeName(std::string("test.unregistered"));
 
   // The type name should be a mangled C++ name, not a nice name
   // It will contain something like "UnregisteredType" but might be mangled
@@ -4182,7 +4189,7 @@ TEST(StateTest, UnregisteredTypeReturnsMangled) {
       << "Unregistered type should return raw/mangled name: " << type_name;
 
   // Clean up
-  cvcapp.data("test.unregistered", boost::any());
+  ctx.data("test.unregistered", boost::any());
 }
 
 // ===========================
