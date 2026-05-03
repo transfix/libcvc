@@ -544,7 +544,7 @@ void state::traverse(traversal_unary_func func, const std::string &re) {
   func(fullName());
   std::vector<std::string> ch = children(re);
   BOOST_FOREACH (std::string c, ch)
-    cvcstate(c).traverse(func, re);
+    instance(_ctx)(c).traverse(func, re);
   traverseExit();
 }
 

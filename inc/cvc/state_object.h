@@ -261,8 +261,11 @@ public:
   }
 
   // Shortcut for accessing the state corresponding to an instance of this
-  // class or it's children.
-  state &getState(const std::string &s = std::string()) const { return cvcstate(stateName(s)); }
+  // class or it's children. Uses this object's bound app context rather
+  // than the global cvcstate singleton.
+  state &getState(const std::string &s = std::string()) const {
+    return CVC_NAMESPACE::state::instance(_ctx)(stateName(s));
+  }
 
   // Begin batching state changes - handlers are queued instead of spawned
   void beginBatch() {

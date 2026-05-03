@@ -254,7 +254,7 @@ TEST_F(CameraControllerTest, StateTreeCameraPosition) {
   controller->setCameraState(testPos, testDir, testUp, testFov);
 
   // Verify state tree contains the values using controller's state path
-  auto &stateTree = cvc::state::instance()(controller->stateName());
+  auto &stateTree = cvc::state::instance(ctx)(controller->stateName());
   EXPECT_NEAR(stateTree("position.x").value<double>(), 10.0, 0.01);
   EXPECT_NEAR(stateTree("position.y").value<double>(), 20.0, 0.01);
   EXPECT_NEAR(stateTree("position.z").value<double>(), 30.0, 0.01);
@@ -268,7 +268,7 @@ TEST_F(CameraControllerTest, StateTreeCameraUpdate) {
   controller->setKeyBindings(Qt::Key_W, Qt::Key_S, Qt::Key_A, Qt::Key_D, Qt::Key_E, Qt::Key_Q);
 
   // Get initial position from state tree using controller's state path
-  auto &stateTree = cvc::state::instance()(controller->stateName());
+  auto &stateTree = cvc::state::instance(ctx)(controller->stateName());
   double initialX = stateTree("position.x").value<double>();
   double initialY = stateTree("position.y").value<double>();
   double initialZ = stateTree("position.z").value<double>();
@@ -297,7 +297,7 @@ TEST_F(CameraControllerTest, CameraChangeCallback) {
   controller->setCameraState(testPos, testDir, testUp, testFov);
 
   // Verify state tree was updated
-  auto &stateTree = cvc::state::instance()(controller->stateName());
+  auto &stateTree = cvc::state::instance(ctx)(controller->stateName());
   EXPECT_NEAR(stateTree("position.x").value<double>(), 5.0, 0.01);
   EXPECT_NEAR(stateTree("fov").value<double>(), 45.0, 0.01);
 }
@@ -322,7 +322,7 @@ TEST_F(CameraControllerTest, CameraStateSymmetry) {
   EXPECT_NEAR(setFov, getFov, 0.01);
 
   // Also verify state tree has correct values
-  auto &stateTree = cvc::state::instance()(controller->stateName());
+  auto &stateTree = cvc::state::instance(ctx)(controller->stateName());
   EXPECT_NEAR(stateTree("position.x").value<double>(), 7.0, 0.01);
   EXPECT_NEAR(stateTree("position.y").value<double>(), 8.0, 0.01);
   EXPECT_NEAR(stateTree("position.z").value<double>(), 9.0, 0.01);
