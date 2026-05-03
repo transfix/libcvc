@@ -15,9 +15,12 @@ CVC_DEF_EXCEPTION(xmlrpc_server_terminate);
 #define XMLRPC_METHOD_PROTOTYPE(name, description)                                                 \
   class name : public XmlRpc::XmlRpcServerMethod {                                                 \
   public:                                                                                          \
-    name(XmlRpc::XmlRpcServer *s) : XmlRpc::XmlRpcServerMethod(#name, s) {}                        \
+    name(app &ctx, XmlRpc::XmlRpcServer *s) : XmlRpc::XmlRpcServerMethod(#name, s), _app(&ctx) {}  \
     void execute(XmlRpc::XmlRpcValue &params, XmlRpc::XmlRpcValue &result);                        \
     std::string help() { return std::string(description); }                                        \
+                                                                                                   \
+  private:                                                                                         \
+    app *_app;                                                                                     \
   };
 
 #define XMLRPC_METHOD_DEFINITION(name)                                                             \
@@ -37,13 +40,13 @@ CVC_DEF_EXCEPTION(xmlrpc_server_terminate);
 // 01/13/2014 -- Joe R. -- No more process_notify_xmlrpc_threads.
 class xmlrpc_server_thread {
 public:
-  xmlrpc_server_thread() {}
+  explicit xmlrpc_server_thread(app &ctx) : _app(&ctx) {}
 
   void operator()() const {
-    CVC_NAMESPACE::thread_feedback feedback;
+    CVC_NAMESPACE::thread_feedback feedback(*_app);
 
     // document the tree regarding the xmlrpc server
-    cvcstate("__system.xmlrpc.port").comment("The port used by the xmlrpc server.");
+    state::instance (*_app)("__system.xmlrpc.port").comment("The port used by the xmlrpc server.");
 
     try {
       using namespace boost;
@@ -51,10 +54,10 @@ public:
       std::string ipaddr = CVC_NAMESPACE::get_local_ip_address();
 
       // Useful info to have
-      cvcstate("__system.xmlrpc.hostname")
+      state::instance (*_app)("__system.xmlrpc.hostname")
           .value(host)
           .comment("The hostname of the host running the xmlrpc server thread.");
-      cvcstate("__system.xmlrpc.ipaddr")
+      state::instance (*_app)("__system.xmlrpc.ipaddr")
           .value(ipaddr)
           .comment("The ip address bound by the xmlrpc server.");
 
@@ -63,33 +66,33 @@ public:
       int port = -1;
       while (1) {
         try {
-          port = cvcstate("__system.xmlrpc.port").value<int>();
+          port = state::instance(*_app)("__system.xmlrpc.port").value<int>();
         } catch (bad_lexical_cast &) {
           // throw xmlrpc_server_error("invalid port");
 
           // use the default
           port = XMLRPC_DEFAULT_PORT;
-          cvcstate("__system.xmlrpc.port").value(XMLRPC_DEFAULT_PORT);
+          state::instance (*_app)("__system.xmlrpc.port").value(XMLRPC_DEFAULT_PORT);
         }
-        std::string portstr = cvcstate("__system.xmlrpc.port");
+        std::string portstr = state::instance(*_app)("__system.xmlrpc.port");
 
         try {
           // instantiate the server and its methods.
           XmlRpc::XmlRpcServer s;
-          cvcstate_set_value set_value(&s);
-          cvcstate_get_value get_value(&s);
-          cvcstate_get_children get_children(&s);
-          cvcstate_get_num_children get_num_children(&s);
-          cvcstate_get_json get_json(&s);
-          cvcstate_set_json set_json(&s);
-          cvcstate_get_lastmod lastmod(&s);
-          cvcstate_touch touch(&s);
-          cvcstate_reset reset(&s);
-          cvcstate_terminate terminate(&s);
+          cvcstate_set_value set_value(*_app, &s);
+          cvcstate_get_value get_value(*_app, &s);
+          cvcstate_get_children get_children(*_app, &s);
+          cvcstate_get_num_children get_num_children(*_app, &s);
+          cvcstate_get_json get_json(*_app, &s);
+          cvcstate_set_json set_json(*_app, &s);
+          cvcstate_get_lastmod lastmod(*_app, &s);
+          cvcstate_touch touch(*_app, &s);
+          cvcstate_reset reset(*_app, &s);
+          cvcstate_terminate terminate(*_app, &s);
 
           // Start the server, and run it indefinitely.
           // For some reason, time_from_string and boost_regex creashes if the main thread is
-          // waiting in atexit(). So, make sure main() has a cvcapp.wait_for_threads() call at the
+          // waiting in atexit(). So, make sure main() has a wait_for_threads() call at the
           // end.
           XmlRpc::setVerbosity(0);
           if (!s.bindAndListen(port))
@@ -98,8 +101,8 @@ public:
           s.enableIntrospection(true);
           // s.work(-1.0);
 
-          cvcapp.log(1, str(boost::format("%s :: \n%s\n") % BOOST_CURRENT_FUNCTION %
-                            cvcstate("__system").json()));
+          _app->log(1, str(boost::format("%s :: \n%s\n") % BOOST_CURRENT_FUNCTION %
+                           state::instance(*_app)("__system").json()));
 
           // loop with interruption points so we can gracefully terminate
           while (1) {
@@ -108,28 +111,30 @@ public:
           }
         } catch (xmlrpc_server_error_listen &) {
           port++;
-          cvcstate("__system.xmlrpc.port").value(port);
+          state::instance (*_app)("__system.xmlrpc.port").value(port);
         } catch (std::exception &e) {
           using namespace boost;
-          cvcapp.log(1, str(boost::format(
-                                "%s :: restarting server on xmlrpc_server_thread exception: %s\n") %
-                            BOOST_CURRENT_FUNCTION % e.what()));
+          _app->log(1, str(boost::format(
+                               "%s :: restarting server on xmlrpc_server_thread exception: %s\n") %
+                           BOOST_CURRENT_FUNCTION % e.what()));
         }
       }
     } catch (boost::thread_interrupted &) {
       using namespace boost;
-      cvcapp.log(1, str(boost::format("%s :: xmlrpc_server_thread interrupted, shutting down\n") %
-                        BOOST_CURRENT_FUNCTION));
+      _app->log(1, str(boost::format("%s :: xmlrpc_server_thread interrupted, shutting down\n") %
+                       BOOST_CURRENT_FUNCTION));
     }
   }
 
-  static void shutdown() {
-    cvcapp.sleep(5000.0);
-    cvcstate("__system.xmlrpc").value(int(0));
-    cvcapp.log(3, boost::str(boost::format("%s :: shutting down\n") % BOOST_CURRENT_FUNCTION));
+  static void shutdown(app &ctx) {
+    ctx.sleep(5000.0);
+    state::instance(ctx)("__system.xmlrpc").value(int(0));
+    ctx.log(3, boost::str(boost::format("%s :: shutting down\n") % BOOST_CURRENT_FUNCTION));
   }
 
 private:
+  app *_app;
+
   // our exported methods
   XMLRPC_METHOD_PROTOTYPE(cvcstate_set_value, "Sets a state object's value.");
   XMLRPC_METHOD_PROTOTYPE(cvcstate_get_value, "Gets a state object's value.");
@@ -147,57 +152,61 @@ private:
   XMLRPC_METHOD_PROTOTYPE(cvcstate_terminate, "Quits the server.");
 };
 
-XMLRPC_METHOD_DEFINITION(cvcstate_set_value) { cvcstate(params[0]).value(std::string(params[1])); }
+XMLRPC_METHOD_DEFINITION(cvcstate_set_value) {
+  state::instance (*_app)(params[0]).value(std::string(params[1]));
+}
 
-XMLRPC_METHOD_DEFINITION(cvcstate_get_value) { result = cvcstate(params[0]).value(); }
+XMLRPC_METHOD_DEFINITION(cvcstate_get_value) { result = state::instance(*_app)(params[0]).value(); }
 
 XMLRPC_METHOD_DEFINITION(cvcstate_get_children) {
   using namespace std;
-  vector<string> ret = cvcstate().children(params[0]);
+  vector<string> ret = state::instance(*_app).children(params[0]);
   for (size_t i = 0; i < ret.size(); i++)
     result[i] = ret[i];
 }
 
 XMLRPC_METHOD_DEFINITION(cvcstate_get_num_children) {
-  result = int(cvcstate(params[0]).numChildren());
+  result = int(state::instance(*_app)(params[0]).numChildren());
 }
 
-XMLRPC_METHOD_DEFINITION(cvcstate_get_json) { result = cvcstate(params[0]).json(); }
+XMLRPC_METHOD_DEFINITION(cvcstate_get_json) { result = state::instance(*_app)(params[0]).json(); }
 
-XMLRPC_METHOD_DEFINITION(cvcstate_set_json) { cvcstate(params[0]).json(params[1]); }
+XMLRPC_METHOD_DEFINITION(cvcstate_set_json) { state::instance (*_app)(params[0]).json(params[1]); }
 
 XMLRPC_METHOD_DEFINITION(cvcstate_get_lastmod) {
-  result = boost::posix_time::to_simple_string(cvcstate(params[0]).lastMod());
+  result = boost::posix_time::to_simple_string(state::instance(*_app)(params[0]).lastMod());
 }
 
-XMLRPC_METHOD_DEFINITION(cvcstate_touch) { cvcstate(params[0]).touch(); }
+XMLRPC_METHOD_DEFINITION(cvcstate_touch) { state::instance (*_app)(params[0]).touch(); }
 
-XMLRPC_METHOD_DEFINITION(cvcstate_reset) { cvcstate(params[0]).reset(); }
+XMLRPC_METHOD_DEFINITION(cvcstate_reset) { state::instance (*_app)(params[0]).reset(); }
 
 XMLRPC_METHOD_DEFINITION(cvcstate_terminate) {
-  cvcapp.startThread("xmlrpc_server_thread_shutdown", shutdown);
+  app *a = _app;
+  _app->startThread("xmlrpc_server_thread_shutdown", [a]() { xmlrpc_server_thread::shutdown(*a); });
 }
 } // namespace CVC_NAMESPACE
 
 namespace {
 class xmlrpc_server_thread_init {
 public:
-  static void monitor() {
+  static void monitor(CVC_NAMESPACE::app &ctx) {
     try {
-      if (!cvcstate("__system.xmlrpc").value().empty() &&
-          boost::lexical_cast<int>(cvcstate("__system.xmlrpc").value())) {
+      if (!CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").value().empty() &&
+          boost::lexical_cast<int>(
+              CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").value())) {
         // Create a new XMLRPC thread to handle IPC
-        if (cvcapp.hasThread("xmlrpc_server_thread"))
-          cvcapp.threads("xmlrpc_server_thread")->interrupt();
-        cvcapp.startThread("xmlrpc_server_thread", CVC_NAMESPACE::xmlrpc_server_thread(), false);
+        if (ctx.hasThread("xmlrpc_server_thread"))
+          ctx.threads("xmlrpc_server_thread")->interrupt();
+        ctx.startThread("xmlrpc_server_thread", CVC_NAMESPACE::xmlrpc_server_thread(ctx), false);
       } else {
-        if (cvcapp.hasThread("xmlrpc_server_thread")) {
-          cvcapp.threads("xmlrpc_server_thread")->interrupt();
+        if (ctx.hasThread("xmlrpc_server_thread")) {
+          ctx.threads("xmlrpc_server_thread")->interrupt();
         }
       }
     } catch (boost::bad_lexical_cast &) {
-      cvcapp.log(3, boost::str(boost::format("%s :: error parsing __system.xmlrpc\n") %
-                               BOOST_CURRENT_FUNCTION));
+      ctx.log(3, boost::str(boost::format("%s :: error parsing __system.xmlrpc\n") %
+                            BOOST_CURRENT_FUNCTION));
     }
   }
 
@@ -205,8 +214,14 @@ public:
   // If it is set to anything that evaluates to true, the xmlrpc server thread will be started.
   // If it is set to false, the running xmlrpc server will be terminated.
   static void init() {
-    cvcstate("__system.xmlrpc").valueChanged.connect(monitor);
-    monitor();
+    // The init callback is invoked from state::instancePtr's startup hook,
+    // which only runs in the context of app::instance(). Capture it once
+    // here and pass it explicitly through the monitor chain.
+    CVC_NAMESPACE::app &ctx = CVC_NAMESPACE::app::instance();
+    CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() {
+      monitor(ctx);
+    });
+    monitor(ctx);
   }
 
   xmlrpc_server_thread_init() { CVC_NAMESPACE::state::on_startup(init); }
