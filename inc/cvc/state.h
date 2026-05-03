@@ -168,6 +168,11 @@ public:
   // Use instance() to grab a reference to the singleton application object.
   static state &instance();
 
+  // Per-app root state. Lazily creates and caches a root state on the
+  // given app's data map, decoupling state ownership from app::instance().
+  // Fires registered _startup callbacks the first time a root is created.
+  static state &instance(app &ctx);
+
   const std::string &name() const { return _name; }
   const state *parent() const { return _parent; }
 
@@ -422,8 +427,11 @@ protected:
   boost::condition_variable _dataCondition;
 
   static state_ptr instancePtr();
+  static state_ptr instancePtr(app &ctx);
   static state_ptr _instance;
   static boost::mutex _instanceMutex;
+  static boost::mutex _startupMutex;
+  static bool _startupFired;
 
 private:
   state(const state &);

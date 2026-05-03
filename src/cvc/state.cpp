@@ -46,6 +46,8 @@ namespace CVC_NAMESPACE {
 state::init_func_vec state::_startup;
 state::state_ptr state::_instance;
 boost::mutex state::_instanceMutex;
+boost::mutex state::_startupMutex;
+bool state::_startupFired = false;
 
 // ------------
 // state::state
@@ -87,18 +89,45 @@ state::~state() { destroyed(); }
 // 02/18/2012 -- Joe R. -- Creation.
 // 01/12/2014 -- Joe R. -- Added startup function calls to do initialization based on cvcstate.
 //                         Also moved xmlrpc server thread start elsewhere.
-state::state_ptr state::instancePtr() {
+state::state_ptr state::instancePtr() { return instancePtr(app::instance()); }
+
+// ------------------
+// state::instancePtr
+// ------------------
+// Purpose:
+//   Returns a pointer to the root state object for the given app.
+//   Stores it on the app's data map under "__state". Fires registered
+//   _startup callbacks once per process the first time any root is
+//   created.
+// ---- Change History ----
+// 05/03/2026 -- Joe R. -- Per-app overload, decoupling state root from
+//                         app::instance().
+state::state_ptr state::instancePtr(app &ctx) {
   bool do_startup = false;
+  state_ptr ptr;
   {
     boost::mutex::scoped_lock lock(_instanceMutex);
+    const std::string statekey("__state");
+    try {
+      ptr = ctx.data<state_ptr>(statekey);
+    } catch (std::exception &) {
+      // not yet present
+    }
+    if (!ptr) {
+      ptr.reset(new state(ctx));
+      ctx.data(statekey, ptr);
+      // Cache root of app::instance() for the legacy zero-arg path
+      // so existing callers continue to share the same object.
+      if (&ctx == &app::instance()) {
+        _instance = ptr;
+      }
+    }
+  }
 
-    if (!_instance) {
-      // Keep our static instance in the data map!
-      const std::string statekey("__state");
-      state_ptr ptr(new state(app::instance()));
-      app::instance().data(statekey, ptr);
-
-      _instance = app::instance().data<state_ptr>(statekey);
+  {
+    boost::mutex::scoped_lock lock(_startupMutex);
+    if (!_startupFired) {
+      _startupFired = true;
       do_startup = true;
     }
   }
@@ -109,8 +138,15 @@ state::state_ptr state::instancePtr() {
     }
   }
 
-  return _instance;
+  return ptr;
 }
+
+// ---------------
+// state::instance
+// ---------------
+// Purpose:
+//   Returns a reference to the root state object for the given app.
+state &state::instance(app &ctx) { return *instancePtr(ctx); }
 
 // ---------------
 // state::instance
