@@ -2430,8 +2430,8 @@ TEST_F(StateObjectFixture, StateObjectExternalAccess) {
   // Get the state path
   std::string widthPath = config.stateName("width");
 
-  // Access via global state
-  cvcstate(widthPath).value(3840);
+  // Access via the same per-app state root the state_object is bound to
+  cvc::state::instance(ctx)(widthPath).value(3840);
 
   // Wait for handlers to complete
   config.waitForHandlers();
