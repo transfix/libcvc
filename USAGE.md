@@ -8,18 +8,18 @@ directory. No system installation, no `LD_LIBRARY_PATH` games.
 
 ```bash
 # Linux / macOS
-tar xf libcvc-3.0.0-linux-x86_64-release.tar.gz   # → ./libcvc-3.0.0/
+tar xf libcvc-3.1.0-linux-x86_64-release.tar.gz   # → ./libcvc-3.1.0/
 # or
-unzip libcvc-3.0.0-macos-arm64-release.zip        # → ./libcvc-3.0.0/
+unzip libcvc-3.1.0-macos-arm64-release.zip        # → ./libcvc-3.1.0/
 
 # Windows (PowerShell)
-Expand-Archive libcvc-3.0.0-windows-x86_64-release.zip
+Expand-Archive libcvc-3.1.0-windows-x86_64-release.zip
 ```
 
 The archive lays out the standard GNU install tree:
 
 ```
-libcvc-3.0.0/
+libcvc-3.1.0/
 ├── bin/                   # libcvc.dll (Windows only)
 ├── include/cvc/           # Public headers
 ├── lib/
@@ -38,13 +38,13 @@ libcvc-3.0.0/
 The most portable way is `CMAKE_PREFIX_PATH`:
 
 ```bash
-cmake -B build -DCMAKE_PREFIX_PATH=/path/to/libcvc-3.0.0
+cmake -B build -DCMAKE_PREFIX_PATH=/path/to/libcvc-3.1.0
 ```
 
 You can also set `cvc_DIR` directly:
 
 ```bash
-cmake -B build -Dcvc_DIR=/path/to/libcvc-3.0.0/lib/cmake/cvc
+cmake -B build -Dcvc_DIR=/path/to/libcvc-3.1.0/lib/cmake/cvc
 ```
 
 ## 3. Use it from your `CMakeLists.txt`
@@ -85,7 +85,7 @@ int main() {
 ```
 
 ```bash
-cmake -B build -DCMAKE_PREFIX_PATH=/path/to/libcvc-3.0.0
+cmake -B build -DCMAKE_PREFIX_PATH=/path/to/libcvc-3.1.0
 cmake --build build
 ./build/my_app
 ```
