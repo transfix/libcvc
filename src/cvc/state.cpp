@@ -44,6 +44,7 @@ namespace CVC_NAMESPACE {
 // explicit __declspec(dllexport), since WINDOWS_EXPORT_ALL_SYMBOLS only
 // covers function symbols, not data members.
 state::init_func_vec state::_startup;
+state::app_init_func_vec state::_appStartup;
 state::state_ptr state::_instance;
 boost::mutex state::_instanceMutex;
 boost::mutex state::_startupMutex;
@@ -104,6 +105,7 @@ state::state_ptr state::instancePtr() { return instancePtr(app::instance()); }
 //                         app::instance().
 state::state_ptr state::instancePtr(app &ctx) {
   bool do_startup = false;
+  bool fire_app_startup = false;
   state_ptr ptr;
   {
     boost::mutex::scoped_lock lock(_instanceMutex);
@@ -116,6 +118,7 @@ state::state_ptr state::instancePtr(app &ctx) {
     if (!ptr) {
       ptr.reset(new state(ctx));
       ctx.data(statekey, ptr);
+      fire_app_startup = true;
       // Cache root of app::instance() for the legacy zero-arg path
       // so existing callers continue to share the same object.
       if (&ctx == &app::instance()) {
@@ -135,6 +138,19 @@ state::state_ptr state::instancePtr(app &ctx) {
   if (do_startup) {
     BOOST_FOREACH (nullary_func &init_func, _startup) {
       init_func();
+    }
+  }
+
+  if (fire_app_startup) {
+    // Snapshot the per-app init list under the startup mutex to be
+    // safe against concurrent on_startup() registrations.
+    app_init_func_vec snapshot;
+    {
+      boost::mutex::scoped_lock lock(_startupMutex);
+      snapshot = _appStartup;
+    }
+    BOOST_FOREACH (app_init_func &init_func, snapshot) {
+      init_func(ctx);
     }
   }
 
@@ -720,6 +736,8 @@ size_t state::numChildren() {
 // 01/12/2014 -- Joe R. -- Creation.
 void state::on_startup(const nullary_func &init_func) { _startup.push_back(init_func); }
 
+void state::on_startup(const app_init_func &init_func) { _appStartup.push_back(init_func); }
+
 // -------------------
 // state::notifyParent
 // -------------------
@@ -823,11 +841,12 @@ namespace {
 // 01/13/2014 -- Joe R. -- Creation.
 class system_init {
 public:
-  static void init() {
+  static void init(CVC_NAMESPACE::app &ctx) {
     using namespace boost::posix_time;
-    cvcstate("__system.start").value(to_simple_string(microsec_clock::universal_time()));
+    CVC_NAMESPACE::state::instance(ctx)("__system.start")
+        .value(to_simple_string(microsec_clock::universal_time()));
   }
 
-  system_init() { CVC_NAMESPACE::state::on_startup(init); }
+  system_init() { CVC_NAMESPACE::state::on_startup(CVC_NAMESPACE::state::app_init_func(init)); }
 } static_init;
 } // namespace

@@ -151,7 +151,9 @@ public:
   typedef std::map<std::string, state_ptr> child_map;
   typedef boost::function<void(std::string)> traversal_unary_func;
   typedef boost::function<void()> nullary_func;
+  typedef boost::function<void(app &)> app_init_func;
   typedef std::vector<nullary_func> init_func_vec;
+  typedef std::vector<app_init_func> app_init_func_vec;
 
   // Inline variable so every TU using this header gets its own
   // definition. Avoids needing per-symbol __declspec(dllexport) on
@@ -160,6 +162,7 @@ public:
   // have no DLL export and downstream test TUs would fail to link.
   inline static const std::string SEPARATOR{"."};
   static init_func_vec _startup;
+  static app_init_func_vec _appStartup;
 
   virtual ~state();
 
@@ -398,7 +401,14 @@ public:
   static bool isValidStateName(const std::string &name);
   static std::string sanitizeStateName(const std::string &name);
 
+  // Register a callback fired exactly once per process when the
+  // first state root is created (legacy global-singleton form).
   static void on_startup(const nullary_func &init_func);
+
+  // Register a callback fired once for every distinct app whose
+  // root state is lazily created. Prefer this form for per-app
+  // bootstrap logic so that secondary apps get the same defaults.
+  static void on_startup(const app_init_func &init_func);
 
 protected:
   state(app &ctx, const std::string &n = std::string(), const state *p = NULL);
