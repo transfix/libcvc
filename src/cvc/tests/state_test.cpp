@@ -69,6 +69,21 @@ TEST(StateTest, SingletonInstance) {
   EXPECT_EQ(&state1, &state2);
 }
 
+TEST(StateTest, AppRootShorthand) {
+  // app::root() must return the same per-app root as
+  // cvc::state::instance(app); both spellings are interchangeable.
+  EXPECT_EQ(&test_ctx.root(), &cvc::state::instance(test_ctx));
+
+  // Independent apps must have independent roots.
+  cvc::app other;
+  EXPECT_NE(&test_ctx.root(), &other.root());
+
+  // Round-trip a value through the shorthand.
+  test_ctx.root()("test.app_root_shorthand").value(7);
+  EXPECT_EQ(cvc::state::instance(test_ctx)("test.app_root_shorthand").value<int>(), 7);
+  test_ctx.root()("test.app_root_shorthand").reset();
+}
+
 // ===========================
 // Value Management Tests
 // ===========================

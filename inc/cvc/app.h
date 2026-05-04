@@ -98,6 +98,10 @@ namespace CVC_NAMESPACE {
 // Useful for test contexts or lightweight usage.
 struct no_init_t {};
 
+// Forward declaration so that app::root() can return a state reference
+// without pulling in <cvc/state.h> (which itself includes <cvc/app.h>).
+class state;
+
 class app {
 public:
   typedef boost::shared_ptr<app> app_ptr;
@@ -496,6 +500,12 @@ public:
   map_change_signal mutexesChanged;
 
   void wait() { wait_for_threads(); } // non-static for convenience
+
+  // Returns this app's root state node. Lazily creates the root on
+  // first access. Equivalent to (and implemented in terms of)
+  // cvc::state::instance(*this); use whichever reads better at the
+  // call site.
+  state &root();
 
   void sleep(double ms);
 

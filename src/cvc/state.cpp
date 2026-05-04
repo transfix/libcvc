@@ -151,6 +151,15 @@ state::state_ptr state::instancePtr(app &ctx) {
 //   Returns a reference to the root state object for the given app.
 state &state::instance(app &ctx) { return *instancePtr(ctx); }
 
+// ----------
+// app::root
+// ----------
+// Purpose:
+//   Defined here (not in app.cpp) because returning a state& requires
+//   the full state definition. Routes through state::instance(app&)
+//   so both spellings produce the same per-app root.
+state &app::root() { return state::instance(*this); }
+
 // --------------
 // state::lastMod
 // --------------

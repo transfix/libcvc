@@ -77,7 +77,7 @@ GraphicsNode node("my_mesh");
 node.setGeometry(initialGeometry);
 
 // Sync to state tree
-cvc::state& graphics = cvc::state::instance(app)("graphics");
+cvc::state& graphics = app.root()("graphics");
 node.syncToState(graphics);
 
 // Connect to state data changes
