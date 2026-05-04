@@ -631,18 +631,22 @@ g2.copy(g1, true);  // Creates new shared_ptr instances
 
 ### 1. Isolation
 
-Each test is independent and cleans up after itself:
+Each test is independent and cleans up after itself. The examples
+below use `app` as a `cvc::app` instance owned by the test (typically
+a fixture member or a file-scope test object):
 
 ```cpp
 TEST(StateTest, ValueSetAndGet) {
+  cvc::app app;
+
   // Arrange
-  cvcstate("test.value").value("test");
+  state::instance(app)("test.value").value("test");
   
   // Act & Assert
-  EXPECT_EQ(cvcstate("test.value").value(), "test");
+  EXPECT_EQ(state::instance(app)("test.value").value(), "test");
   
   // Cleanup
-  cvcstate("test").reset();
+  state::instance(app)("test").reset();
 }
 ```
 
@@ -695,7 +699,7 @@ TEST(TestSuiteName, TestName) {
   EXPECT_DOUBLE_EQ(value, 5.0);
   
   // Cleanup (if needed)
-  cvcstate("test").reset();
+  state::instance(app)("test").reset();
 }
 ```
 
@@ -726,9 +730,9 @@ ctest --output-on-failure
 
 ```cpp
 TEST(StateTest, TypeConversionError) {
-  cvcstate("test").value(42);
+  state::instance(app)("test").value(42);
   EXPECT_THROW({
-    cvcstate("test").data<std::vector<int>>();
+    state::instance(app)("test").data<std::vector<int>>();
   }, cvc::type_conversion_error);
 }
 ```
@@ -785,7 +789,7 @@ INSTANTIATE_TEST_SUITE_P(
 
 ```cpp
 TEST(StateTest, ConcurrentValueReads) {
-  cvcstate("test.concurrent").value("initial");
+  state::instance(app)("test.concurrent").value("initial");
   
   std::atomic<int> success_count(0);
   std::vector<boost::thread> threads;
@@ -793,7 +797,7 @@ TEST(StateTest, ConcurrentValueReads) {
   for (int i = 0; i < 10; ++i) {
     threads.emplace_back([&success_count]() {
       for (int j = 0; j < 100; ++j) {
-        std::string val = cvcstate("test.concurrent").value();
+        std::string val = state::instance(app)("test.concurrent").value();
         if (!val.empty()) success_count++;
       }
     });
@@ -802,7 +806,7 @@ TEST(StateTest, ConcurrentValueReads) {
   for (auto& t : threads) t.join();
   
   EXPECT_EQ(success_count.load(), 1000);
-  cvcstate("test").reset();
+  state::instance(app)("test").reset();
 }
 ```
 
@@ -956,10 +960,10 @@ Async programming patterns with the futures API:
 TEST(StateTest, WaitForValue) {
   boost::thread writer([]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-    cvcstate("test.future.wait").value(12345);
+    state::instance(app)("test.future.wait").value(12345);
   });
   
-  int val = cvcstate("test.future.wait").wait_for_value<int>();
+  int val = state::instance(app)("test.future.wait").wait_for_value<int>();
   EXPECT_EQ(val, 12345);
   
   writer.join();
@@ -979,7 +983,7 @@ CRTP-based state object pattern for automatic state management:
 - Data processing (status tracking, error counting)
 - Renderer state (camera, render mode)
 - Application settings (theme, language)
-- External state access via global `cvcstate()`
+- External state access via per-app `cvc::state::instance(app)`
 - Nested state paths
 - Multiple instances with unique state paths
 - Boost::any data storage

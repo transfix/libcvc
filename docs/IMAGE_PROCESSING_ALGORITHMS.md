@@ -94,7 +94,7 @@ volume.anisotropicDiffusion(20);
 ### Performance Notes
 - In-place modification with one temporary buffer
 - Boundary voxels use zero-gradient assumption
-- Thread-safe with progress reporting via `cvcapp.threadProgress()`
+- Thread-safe with progress reporting via `app.threadProgress()`
 
 ---
 
@@ -367,7 +367,7 @@ Each slice undergoes 8 directional passes:
 
 **Progress Reporting:**
 - Total steps: 3 × depth (bottom-up + top-down + stretching)
-- Progress reported via `cvcapp.threadProgress()`
+- Progress reported via `app.threadProgress()`
 
 **Computational Complexity:**
 - Time: O(depth × width × height × passes)
@@ -664,7 +664,7 @@ volume.gdtvFilter(1.8, 0.7, 2, 0);  // Minimal smoothing at edges
 All algorithms use `thread_info` for context management and are thread-safe at the algorithm level. However, simultaneous operations on the same voxels object are not safe.
 
 ### Progress Reporting
-All algorithms report progress through `cvcapp.threadProgress()`:
+All algorithms report progress through `app.threadProgress()`:
 - Values range from 0.0 to 1.0
 - Called periodically during processing
 - Can be used to update progress bars or cancel operations

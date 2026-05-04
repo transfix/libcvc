@@ -61,15 +61,13 @@ cvc::app app;          // default-constructed: registers libcvc's built-in types
 cvc::app bare(cvc::no_init_t{});
 ```
 
-> **Migration note.** Earlier versions of libcvc exposed `cvc::app`
-> as a process-wide singleton accessed via `app::instance()` and the
-> `cvcapp` macro. Both are still present so existing code keeps
-> compiling, but they are now deprecated transitional shims that
-> simply forward to a hidden default instance and will be removed in
-> a future release. New code — and any code being touched — should
-> construct an `app` explicitly and pass it as `cvc::app& ctx`. The
-> RAII helpers `thread_info`, `thread_feedback`, and `scoped_lock`
-> all accept a leading `app& ctx` parameter for this reason.
+> **History.** Earlier versions of libcvc exposed `cvc::app` as a
+> process-wide singleton accessed via `app::instance()` and the
+> `cvcapp` macro. Both have been removed; `cvc::app` is now
+> exclusively constructed by callers and passed as `cvc::app& ctx`.
+> The RAII helpers `thread_info`, `thread_feedback`, and
+> `scoped_lock` all take a leading `app& ctx` parameter for this
+> reason.
 
 **Key characteristics:**
 - Thread-safe with fine-grained locking
@@ -163,18 +161,6 @@ don't want the global IO handlers fired up.
 `cvc::app` is move-only-ish (the copy constructor is private).
 Construct one at the scope that owns it (`main`, a test fixture, a
 cluster-node `cvcsrv` instance) and pass references downward.
-
-### Deprecated: `app::instance()` / `cvcapp`
-
-```cpp
-// Still compiles; do not use in new code.
-cvc::app& legacy = cvc::app::instance();
-cvcapp.data("key", value);              // macro form
-```
-
-Both forms forward to a single hidden process-wide instance and
-exist only to keep older callers compiling while they migrate. They
-will be removed in a future release; treat them as legacy shims.
 
 ## Data Management
 
@@ -739,10 +725,7 @@ app.thisThreadInfo("Initializing...");
 ```cpp
 class thread_feedback {
 public:
-    // Preferred: bind to a specific app context.
     thread_feedback(app& ctx, const std::string& key = "");
-    // Legacy: routes through app::instance() — deprecated.
-    thread_feedback(const std::string& key = "");
     ~thread_feedback();
 };
 ```
@@ -771,10 +754,7 @@ app.startThread("worker", [&app]{ workerThread(app); });
 ```cpp
 class thread_info {
 public:
-    // Preferred: bind to a specific app context.
     thread_info(app& ctx, const std::string& info = "running");
-    // Legacy: routes through app::instance() — deprecated.
-    thread_info(const std::string& info = "running");
     ~thread_info();
 };
 ```
@@ -897,12 +877,8 @@ writeToFile("output.dat", data);
 ```cpp
 class scoped_lock {
 public:
-    // Preferred: bind to a specific app context.
     scoped_lock(app& ctx,
                 const std::string& name,
-                const std::string& info = std::string());
-    // Legacy: routes through app::instance() — deprecated.
-    scoped_lock(const std::string& name,
                 const std::string& info = std::string());
     ~scoped_lock();
 };

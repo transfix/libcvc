@@ -34,7 +34,7 @@ For the full per-method reference, see
 
 // Submit work to the pool. Returns immediately; the task runs when a
 // worker slot is available.
-cvcapp.startThreadPooled("compute_sdf",
+app.startThreadPooled("compute_sdf",
                          []() { compute_sdf(); },
                          cvc::PRIORITY_NORMAL,
                          /*wait=*/true);
@@ -45,14 +45,14 @@ cvcapp.startThreadPooled("compute_sdf",
 ### Parallel batch with bounded concurrency
 
 ```cpp
-unsigned int saved = cvcapp.getThreadPoolSize();
-cvcapp.setThreadPoolSize(4);            // at most 4 concurrent
+unsigned int saved = app.getThreadPoolSize();
+app.setThreadPoolSize(4);            // at most 4 concurrent
 
 std::vector<std::string> keys;
 for (int i = 0; i < 100; ++i) {
   std::string key = "batch_" + std::to_string(i);
   keys.push_back(key);
-  cvcapp.startThreadPooled(key,
+  app.startThreadPooled(key,
                            [i]() { process_item(i); },
                            cvc::PRIORITY_NORMAL,
                            true);
@@ -60,24 +60,24 @@ for (int i = 0; i < 100; ++i) {
 
 // Wait for completion via the standard thread map.
 for (const auto& key : keys) {
-  if (cvcapp.hasThread(key)) {
-    if (auto t = cvcapp.threads(key)) t->join();
+  if (app.hasThread(key)) {
+    if (auto t = app.threads(key)) t->join();
   }
 }
 
-cvcapp.setThreadPoolSize(saved);
+app.setThreadPoolSize(saved);
 ```
 
 ### Mixing priorities
 
 ```cpp
 // A long-running background scan.
-cvcapp.startThreadPooled("background_scan",
+app.startThreadPooled("background_scan",
                          []() { scan_dataset(); },
                          cvc::PRIORITY_LOW, true);
 
 // User-initiated work jumps the queue.
-cvcapp.startThreadPooled("user_request",
+app.startThreadPooled("user_request",
                          []() { handle_user_request(); },
                          cvc::PRIORITY_HIGH, true);
 ```
@@ -85,11 +85,11 @@ cvcapp.startThreadPooled("user_request",
 ### Reporting progress and respecting interruption
 
 ```cpp
-cvcapp.startThreadPooled("import", []() {
-  cvc::thread_feedback feedback("Importing volume...");
+app.startThreadPooled("import", [&app]() {
+  cvc::thread_feedback feedback(app, "Importing volume...");
   for (int i = 0; i < 100; ++i) {
     boost::this_thread::interruption_point();
-    cvcapp.threadProgress(i / 100.0);
+    app.threadProgress(i / 100.0);
     do_step(i);
   }
 }, cvc::PRIORITY_NORMAL, true);
@@ -98,9 +98,9 @@ cvcapp.startThreadPooled("import", []() {
 ### Inspecting the pool
 
 ```cpp
-unsigned int max_concurrent = cvcapp.getThreadPoolSize();
-unsigned int running        = cvcapp.getActiveThreadCount();
-unsigned int queued         = cvcapp.getPendingThreadCount();
+unsigned int max_concurrent = app.getThreadPoolSize();
+unsigned int running        = app.getActiveThreadCount();
+unsigned int queued         = app.getPendingThreadCount();
 ```
 
 ## When to Use the Pool vs. `startThread`
