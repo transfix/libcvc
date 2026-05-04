@@ -359,8 +359,8 @@ public:
     vector<T> ret_data;
     BOOST_FOREACH (string dkey, vals) {
       trim(dkey);
-      if (CVC_NAMESPACE::state::instance()(dkey).isData<T>())
-        ret_data.push_back(CVC_NAMESPACE::state::instance()(dkey).data<T>());
+      if (CVC_NAMESPACE::state::instance(_ctx)(dkey).isData<T>())
+        ret_data.push_back(CVC_NAMESPACE::state::instance(_ctx)(dkey).data<T>());
     }
     return ret_data;
   }
