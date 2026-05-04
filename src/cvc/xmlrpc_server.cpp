@@ -213,17 +213,15 @@ public:
   // sets a monitor function to observe the value of __system.xmlrpc.
   // If it is set to anything that evaluates to true, the xmlrpc server thread will be started.
   // If it is set to false, the running xmlrpc server will be terminated.
-  static void init() {
-    // The init callback is invoked from state::instancePtr's startup hook,
-    // which only runs in the context of app::instance(). Capture it once
-    // here and pass it explicitly through the monitor chain.
-    CVC_NAMESPACE::app &ctx = CVC_NAMESPACE::app::instance();
+  static void init(CVC_NAMESPACE::app &ctx) {
     CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() {
       monitor(ctx);
     });
     monitor(ctx);
   }
 
-  xmlrpc_server_thread_init() { CVC_NAMESPACE::state::on_startup(init); }
+  xmlrpc_server_thread_init() {
+    CVC_NAMESPACE::state::on_startup(CVC_NAMESPACE::state::app_init_func(init));
+  }
 } static_init;
 } // namespace

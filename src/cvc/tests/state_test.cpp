@@ -1273,7 +1273,7 @@ TEST(StateTest, FullNameConstruction) {
 TEST(StateTest, OnStartupRegistration) {
   bool startup_called = false;
 
-  state::on_startup([&startup_called]() { startup_called = true; });
+  state::on_startup(state::nullary_func([&startup_called]() { startup_called = true; }));
 
   // Startup functions are called on first instance creation
   // We can't easily test this without restarting, but we can verify registration
