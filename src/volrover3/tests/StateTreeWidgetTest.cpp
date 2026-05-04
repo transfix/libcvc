@@ -3,12 +3,13 @@
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
 #include <volrover3/StateTreeWidget.h>
+#include <volrover3/volrover3_app.h>
 
 class StateTreeWidgetTest : public ::testing::Test {
 protected:
   void SetUp() override {
     // Create a temporary state tree for testing
-    testState = &cvc::state::instance()("test_widget");
+    testState = &cvc::state::instance(volrover3::app())("test_widget");
 
     // Create some test states
     testState->operator()("child1").value("value1");

@@ -44,10 +44,11 @@ SDFDialog::SDFDialog(std::shared_ptr<SceneGraph> sceneGraph, QWidget *parent)
     std::string graphicsRootPath = statePrefix + ".graphics.root.children";
 
     m_graphicsChildrenConnection =
-        cvc::state::instance()(graphicsRootPath).childChanged.connect([this](const std::string &) {
-          // Post to Qt event loop to ensure thread safety
-          QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
-        });
+        cvc::state::instance(volrover3::app())(graphicsRootPath)
+            .childChanged.connect([this](const std::string &) {
+              // Post to Qt event loop to ensure thread safety
+              QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+            });
   }
 }
 

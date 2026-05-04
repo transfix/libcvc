@@ -728,7 +728,7 @@ void MainWindow::showStateTree() {
     m_stateTreeWidget->resize(600, 500);
 
     // Set root state to the global state singleton
-    m_stateTreeWidget->setRootState(&cvc::state::instance());
+    m_stateTreeWidget->setRootState(&cvc::state::instance(volrover3::app()));
 
     // Clean up pointer when window is closed
     connect(m_stateTreeWidget, &QObject::destroyed, [this]() { m_stateTreeWidget = nullptr; });

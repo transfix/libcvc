@@ -5,6 +5,7 @@
 #include <volrover3/AppState.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/VolumeNode.h>
+#include <volrover3/volrover3_app.h>
 
 // Need QApplication for Qt widgets
 class TransferFunctionTest : public ::testing::Test {
@@ -316,7 +317,7 @@ TEST_F(TransferFunctionTest, TransferFunctionStateStorage) {
     appState->setTransferFunctionOpacityTable(opacityTable);
 
     // Verify state tree has the data
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = cvc::state::instance(volrover3::app())("volrover3");
     EXPECT_TRUE(stateTree("transfer_function_color").initialized());
     EXPECT_TRUE(stateTree("transfer_function_opacity").initialized());
 
@@ -337,7 +338,7 @@ TEST_F(TransferFunctionTest, TransferFunctionCallback) {
     });
 
     // Clear transfer_function_changed flag
-    auto& stateTree = cvc::state::instance()("volrover3");
+    auto& stateTree = cvc::state::instance(volrover3::app())("volrover3");
     stateTree("transfer_function_changed").value(false);
 
     // Change transfer function via AppState (simulating MainWindow)
