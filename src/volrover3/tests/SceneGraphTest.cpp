@@ -13,6 +13,7 @@
 #include <volrover3/GridNode.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/VolumeNode.h>
+#include <volrover3/volrover3_app.h>
 
 class SceneGraphTest : public ::testing::Test {
 protected:
@@ -172,7 +173,7 @@ TEST_F(SceneGraphTest, WorldBoundsUpdate) {
   sceneGraph->updateGrid(bounds);
 
   // Verify state tree has the bounds
-  auto &stateTree = cvc::state::instance()("volrover3");
+  auto &stateTree = cvc::state::instance(volrover3::app())("volrover3");
   auto values = stateTree("world_bounds").values();
   ASSERT_EQ(values.size(), size_t(6));
 

@@ -9,6 +9,7 @@
 #include <volrover3/GeometryDialog.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/SceneGraph.h>
+#include <volrover3/volrover3_app.h>
 
 class GeometryDialogTest : public ::testing::Test {
 protected:
@@ -313,7 +314,7 @@ TEST_F(GeometryDialogTest, SafeGeometryDeletion) {
   // State tree should still be accessible without crashes (even if nodes remain)
   std::string statePrefix = sceneGraph->getStatePrefix();
   EXPECT_NO_THROW({
-    auto &state = cvc::state::instance()(statePrefix + ".graphics.root.children");
+    auto &state = cvc::state::instance(volrover3::app())(statePrefix + ".graphics.root.children");
     // State tree nodes may persist, but accessing them shouldn't crash
     size_t childCount = state.numChildren();
     EXPECT_GE(childCount, 0); // Just verify we can read without crashing
@@ -337,7 +338,7 @@ TEST_F(GeometryDialogTest, MultipleAddRemoveCycles) {
   // State tree should still be valid
   std::string statePrefix = sceneGraph->getStatePrefix();
   EXPECT_NO_THROW({
-    auto &state = cvc::state::instance()(statePrefix + ".graphics.root");
+    auto &state = cvc::state::instance(volrover3::app())(statePrefix + ".graphics.root");
     EXPECT_TRUE(true); // Just verify no crash accessing state
   });
 }

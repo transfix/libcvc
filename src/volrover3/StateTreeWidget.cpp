@@ -684,7 +684,7 @@ void StateTreeWidget::onAddStateClicked() {
 
   try {
     // Access the state using the full path from the global state singleton
-    cvc::state &newState = cvc::state::instance()(path.toStdString());
+    cvc::state &newState = cvc::state::instance(volrover3::app())(path.toStdString());
     newState.value(value.toStdString());
 
     // Refresh the tree to show the new state

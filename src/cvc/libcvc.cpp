@@ -153,9 +153,9 @@ void server(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   int port = XMLRPC_DEFAULT_PORT;
   if (!args.empty())
     port = lexical_cast<int>(args[0]);
-  cvcstate("__system.xmlrpc.port").value(port);
-  cvcstate("__system.xmlrpc").value(int(1)); // start the server
-  ctx.wait();                                // wait for the server thread to quit
+  cvc::state::instance(ctx)("__system.xmlrpc.port").value(port);
+  cvc::state::instance(ctx)("__system.xmlrpc").value(int(1)); // start the server
+  ctx.wait();                                                 // wait for the server thread to quit
 }
 
 void client(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {

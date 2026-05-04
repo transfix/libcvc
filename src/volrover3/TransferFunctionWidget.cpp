@@ -337,10 +337,11 @@ void TransferFunctionWidget::setSceneGraph(SceneGraph *sceneGraph) {
     std::string graphicsRootPath = statePrefix + ".graphics.root.children";
 
     m_graphicsChildrenConnection =
-        cvc::state::instance()(graphicsRootPath).childChanged.connect([this](const std::string &) {
-          // Post to Qt event loop to ensure thread safety
-          QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
-        });
+        cvc::state::instance(volrover3::app())(graphicsRootPath)
+            .childChanged.connect([this](const std::string &) {
+              // Post to Qt event loop to ensure thread safety
+              QMetaObject::invokeMethod(this, "onGraphicsChildrenChanged", Qt::QueuedConnection);
+            });
   }
 }
 
@@ -663,19 +664,21 @@ void TransferFunctionWidget::connectToVolumeState(std::shared_ptr<VolumeNode> vo
 
   // Use DirectConnection instead of QueuedConnection to ensure m_updatingFromState flag works
   // correctly
-  m_colorTFConnection = cvc::state::instance()(colorTFPath).valueChanged.connect([this]() {
-    // Only reload if we're not currently updating state from widget
-    if (m_updatingFromState == 0) {
-      onVolumeTransferFunctionChanged();
-    }
-  });
+  m_colorTFConnection =
+      cvc::state::instance(volrover3::app())(colorTFPath).valueChanged.connect([this]() {
+        // Only reload if we're not currently updating state from widget
+        if (m_updatingFromState == 0) {
+          onVolumeTransferFunctionChanged();
+        }
+      });
 
-  m_opacityTFConnection = cvc::state::instance()(opacityTFPath).valueChanged.connect([this]() {
-    // Only reload if we're not currently updating state from widget
-    if (m_updatingFromState == 0) {
-      onVolumeTransferFunctionChanged();
-    }
-  });
+  m_opacityTFConnection =
+      cvc::state::instance(volrover3::app())(opacityTFPath).valueChanged.connect([this]() {
+        // Only reload if we're not currently updating state from widget
+        if (m_updatingFromState == 0) {
+          onVolumeTransferFunctionChanged();
+        }
+      });
 }
 
 void TransferFunctionWidget::disconnectFromVolumeState() {
