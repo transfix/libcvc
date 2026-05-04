@@ -42,6 +42,23 @@ The `cvc::state` class provides a thread-safe, hierarchical key-value store with
 - **Thread safety**: All operations protected by mutex locks
 - **Serialization**: JSON import/export for persistence
 
+### Per-app state roots
+
+Each `cvc::app` owns its own state tree. The root is obtained
+through `cvc::state::instance(app&)`:
+
+```cpp
+cvc::app app;
+cvc::state& root = cvc::state::instance(app);
+root("app.window.width").value(1920);
+```
+
+The examples in this document assume `cvc::app app;` is in scope
+and use `state::instance(app)` as the root accessor. Earlier
+versions of libcvc exposed the root through a global `cvcstate`
+macro / `state::instance()` zero-arg singleton; those have been
+removed — every caller must now pass the owning `app&` explicitly.
+
 ## Core Concepts
 
 ### State Tree
@@ -70,7 +87,7 @@ root
 State nodes emit signals when values/data change, enabling reactive programming:
 
 ```cpp
-cvcstate("sensor.temperature").valueChanged.connect([](std::string val) {
+state::instance(app)("sensor.temperature").valueChanged.connect([](std::string val) {
     std::cout << "Temperature: " << val << std::endl;
 });
 ```
@@ -81,10 +98,10 @@ cvcstate("sensor.temperature").valueChanged.connect([](std::string val) {
 
 ```cpp
 // Dot notation creates parent nodes automatically
-cvcstate("level1.level2.level3.key");
+state::instance(app)("level1.level2.level3.key");
 
 // Equivalent to:
-//   cvcstate("level1")
+//   state::instance(app)("level1")
 //     .child("level2")
 //     .child("level3")
 //     .child("key")
@@ -94,7 +111,7 @@ cvcstate("level1.level2.level3.key");
 
 ```cpp
 // Setting a deep path creates all intermediate nodes
-cvcstate("new.path.to.value").value(42);
+state::instance(app)("new.path.to.value").value(42);
 
 // Creates hierarchy:
 //   root -> new -> path -> to -> value
@@ -108,13 +125,13 @@ cvcstate("new.path.to.value").value(42);
 #include <cvc/state.h>
 
 // Global convenience function creates/accesses nodes
-state s1 = cvcstate("app.window.width");
+state s1 = state::instance(app)("app.window.width");
 
 // Direct construction
 state s2("app.window.height");
 
 // Access via parent
-state parent = cvcstate("app.window");
+state parent = state::instance(app)("app.window");
 state child = parent.child("title");
 ```
 
@@ -122,22 +139,22 @@ state child = parent.child("title");
 
 ```cpp
 // Set value (converted to string internally)
-cvcstate("count").value(42);
-cvcstate("ratio").value(3.14159);
-cvcstate("name").value(std::string("libcvc"));
+state::instance(app)("count").value(42);
+state::instance(app)("ratio").value(3.14159);
+state::instance(app)("name").value(std::string("libcvc"));
 
 // Get value with type conversion
-int count = cvcstate("count").value<int>();
-double ratio = cvcstate("ratio").value<double>();
-std::string name = cvcstate("name").value<std::string>();
+int count = state::instance(app)("count").value<int>();
+double ratio = state::instance(app)("ratio").value<double>();
+std::string name = state::instance(app)("name").value<std::string>();
 
 // Check if value exists
-if (cvcstate("optional.key").initialized()) {
-    int val = cvcstate("optional.key").value<int>();
+if (state::instance(app)("optional.key").initialized()) {
+    int val = state::instance(app)("optional.key").value<int>();
 }
 
 // Get raw string value
-std::string raw = cvcstate("count").value();  // "42"
+std::string raw = state::instance(app)("count").value();  // "42"
 ```
 
 ### Data Operations
@@ -150,18 +167,18 @@ struct Config {
 };
 
 Config cfg{1920, 1080, "dark"};
-cvcstate("app.config").data(cfg);
+state::instance(app)("app.config").data(cfg);
 
 // Retrieve with exact type match
 try {
-    Config loaded = cvcstate("app.config").data<Config>();
+    Config loaded = state::instance(app)("app.config").data<Config>();
 } catch (const cvc::type_conversion_error& e) {
     std::cerr << "Type mismatch: " << e.what() << std::endl;
 }
 
 // Check if data exists
-if (cvcstate("app.config").has_data()) {
-    Config cfg = cvcstate("app.config").data<Config>();
+if (state::instance(app)("app.config").has_data()) {
+    Config cfg = state::instance(app)("app.config").data<Config>();
 }
 ```
 
@@ -169,20 +186,20 @@ if (cvcstate("app.config").has_data()) {
 
 ```cpp
 // Set property (metadata for state node)
-cvcstate("value").property("units", "meters");
-cvcstate("value").property("min", "0.0");
-cvcstate("value").property("max", "100.0");
+state::instance(app)("value").property("units", "meters");
+state::instance(app)("value").property("min", "0.0");
+state::instance(app)("value").property("max", "100.0");
 
 // Get property
-std::string units = cvcstate("value").property("units");
+std::string units = state::instance(app)("value").property("units");
 
 // Check if property exists
-if (cvcstate("value").has_property("units")) {
+if (state::instance(app)("value").has_property("units")) {
     // Property exists
 }
 
 // Get all property keys
-std::vector<std::string> keys = cvcstate("value").property_keys();
+std::vector<std::string> keys = state::instance(app)("value").property_keys();
 ```
 
 ## Advanced Features
@@ -202,26 +219,26 @@ The futures API enables async/await-style programming with state values, providi
 
 ```cpp
 // Wait indefinitely for a value to be set
-int result = cvcstate("computation.result").wait_for_value<int>();
+int result = state::instance(app)("computation.result").wait_for_value<int>();
 
 // Wait with timeout (throws timeout_error on timeout)
-double value = cvcstate("sensor.reading")
+double value = state::instance(app)("sensor.reading")
     .wait_for_value<double>(boost::chrono::seconds(5));
 
 // Wait for data object
-MyStruct data = cvcstate("queue.item").wait_for_data<MyStruct>();
+MyStruct data = state::instance(app)("queue.item").wait_for_data<MyStruct>();
 ```
 
 #### Value Callbacks
 
 ```cpp
 // Register callback that fires when value changes
-int current = cvcstate("counter").value<int>([](int newValue) {
+int current = state::instance(app)("counter").value<int>([](int newValue) {
     std::cout << "Counter changed to: " << newValue << std::endl;
 });
 
 // Callback fires asynchronously whenever counter is updated
-cvcstate("counter").value(current + 1);  // Triggers callback
+state::instance(app)("counter").value(current + 1);  // Triggers callback
 ```
 
 #### Future Objects
@@ -230,7 +247,7 @@ The `value_future<T>()` method returns a `state_future<T>` object for advanced c
 
 ```cpp
 // Get a future object for advanced control
-auto future = cvcstate("async.result").value_future<std::string>();
+auto future = state::instance(app)("async.result").value_future<std::string>();
 
 // Non-blocking check
 if (future.is_ready()) {
@@ -257,14 +274,14 @@ std::string val = future.get();
 // Consumer thread waits for producer
 boost::thread consumer([]() {
     // Blocks until producer sets the value
-    int result = cvcstate("work.result").wait_for_value<int>();
+    int result = state::instance(app)("work.result").wait_for_value<int>();
     std::cout << "Got result: " << result << std::endl;
 });
 
 // Producer thread does work and sets result
 boost::thread producer([]() {
     int result = do_expensive_computation();
-    cvcstate("work.result").value(result);
+    state::instance(app)("work.result").value(result);
 });
 
 consumer.join();
@@ -280,14 +297,14 @@ std::vector<boost::thread> consumers;
 for (int i = 0; i < 5; ++i) {
     consumers.emplace_back([i]() {
         // All threads will be notified when value is set
-        int value = cvcstate("broadcast.value").wait_for_value<int>();
+        int value = state::instance(app)("broadcast.value").wait_for_value<int>();
         std::cout << "Consumer " << i << " got: " << value << std::endl;
     });
 }
 
 // Producer sets value once - all consumers wake up
 boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-cvcstate("broadcast.value").value(42);
+state::instance(app)("broadcast.value").value(42);
 
 for (auto& t : consumers) {
     t.join();
@@ -299,16 +316,16 @@ for (auto& t : consumers) {
 **Before (inefficient polling):**
 ```cpp
 // Inefficient busy-wait polling
-while (!cvcstate("key").initialized()) {
+while (!state::instance(app)("key").initialized()) {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
 }
-int val = cvcstate("key").value<int>();
+int val = state::instance(app)("key").value<int>();
 ```
 
 **After (efficient futures):**
 ```cpp
 // Efficient blocking wait with condition variables
-int val = cvcstate("key").wait_for_value<int>();
+int val = state::instance(app)("key").wait_for_value<int>();
 ```
 
 #### Futures Implementation Details
@@ -337,19 +354,19 @@ State nodes emit signals when values/data/properties change:
 
 ```cpp
 // Connect to value change signal
-cvcstate("config.theme").valueChanged.connect([](std::string newTheme) {
+state::instance(app)("config.theme").valueChanged.connect([](std::string newTheme) {
     applyTheme(newTheme);
 });
 
 // Connect to data change signal
-cvcstate("mesh.data").dataChanged.connect([]() {
+state::instance(app)("mesh.data").dataChanged.connect([]() {
     // Data changed - reload mesh
-    cvc::geometry mesh = cvcstate("mesh.data").data<cvc::geometry>();
+    cvc::geometry mesh = state::instance(app)("mesh.data").data<cvc::geometry>();
     renderMesh(mesh);
 });
 
 // Connect to property change signal
-cvcstate("slider").propertyChanged.connect([](std::string key, std::string value) {
+state::instance(app)("slider").propertyChanged.connect([](std::string key, std::string value) {
     std::cout << "Property '" << key << "' = " << value << std::endl;
 });
 
@@ -368,15 +385,15 @@ Two states that listen to each other create an infinite loop:
 
 ```cpp
 // ❌ DANGEROUS: Infinite loop
-auto connA = cvcstate("nodeA").valueChanged.connect([]() {
-    cvcstate("nodeB").value("trigger");  // Triggers nodeB's callback
+auto connA = state::instance(app)("nodeA").valueChanged.connect([]() {
+    state::instance(app)("nodeB").value("trigger");  // Triggers nodeB's callback
 });
 
-auto connB = cvcstate("nodeB").valueChanged.connect([]() {
-    cvcstate("nodeA").value("trigger");  // Triggers nodeA's callback → LOOP!
+auto connB = state::instance(app)("nodeB").valueChanged.connect([]() {
+    state::instance(app)("nodeA").value("trigger");  // Triggers nodeA's callback → LOOP!
 });
 
-cvcstate("nodeA").value("start");  // Stack overflow or hang!
+state::instance(app)("nodeA").value("start");  // Stack overflow or hang!
 ```
 
 **2. Deep Callback Chains**
@@ -389,8 +406,8 @@ for (int i = 0; i < 1000; ++i) {
     std::string current = "node" + std::to_string(i);
     std::string next = "node" + std::to_string(i + 1);
     
-    cvcstate(current).valueChanged.connect([next, i]() {
-        cvcstate(next).value(i);  // Each callback triggers the next
+    state::instance(app)(current).valueChanged.connect([next, i]() {
+        state::instance(app)(next).value(i);  // Each callback triggers the next
     });
 }
 ```
@@ -401,9 +418,9 @@ Exponential fan-out can cause performance issues:
 
 ```cpp
 // ⚠️ RISKY: Exponential callback explosion
-cvcstate("parent").valueChanged.connect([]() {
+state::instance(app)("parent").valueChanged.connect([]() {
     for (int i = 0; i < 100; ++i) {
-        cvcstate("child" + std::to_string(i)).value(i);
+        state::instance(app)("child" + std::to_string(i)).value(i);
         // If each child also triggers more callbacks...
     }
 });
@@ -421,17 +438,17 @@ std::atomic<int> nodeA_count(0);
 std::atomic<int> nodeB_count(0);
 const int MAX_ITERATIONS = 10;
 
-auto connA = cvcstate("nodeA").valueChanged.connect([&nodeA_count]() {
+auto connA = state::instance(app)("nodeA").valueChanged.connect([&nodeA_count]() {
     int count = nodeA_count.fetch_add(1);
     if (count < MAX_ITERATIONS) {
-        cvcstate("nodeB").value(count);
+        state::instance(app)("nodeB").value(count);
     }
 });
 
-auto connB = cvcstate("nodeB").valueChanged.connect([&nodeB_count]() {
+auto connB = state::instance(app)("nodeB").valueChanged.connect([&nodeB_count]() {
     int count = nodeB_count.fetch_add(1);
     if (count < MAX_ITERATIONS) {
-        cvcstate("nodeA").value(count);
+        state::instance(app)("nodeA").value(count);
     }
 });
 ```
@@ -452,14 +469,14 @@ struct GuardedCallback {
             return;  // Already processing, skip to prevent loop
         }
         
-        cvcstate(trigger_key).value("update");
+        state::instance(app)(trigger_key).value("update");
         processing.store(false);
     }
 };
 
 GuardedCallback guardA, guardB;
-cvcstate("nodeA").valueChanged.connect([&guardA]() { guardA("nodeB"); });
-cvcstate("nodeB").valueChanged.connect([&guardB]() { guardB("nodeA"); });
+state::instance(app)("nodeA").valueChanged.connect([&guardA]() { guardA("nodeB"); });
+state::instance(app)("nodeB").valueChanged.connect([&guardB]() { guardB("nodeA"); });
 ```
 
 **Pattern 3: Change Detection Guard**
@@ -481,10 +498,10 @@ struct ChangeDetector {
 };
 
 ChangeDetector detector;
-cvcstate("watched").valueChanged.connect([&detector]() {
-    std::string value = cvcstate("watched").value();
+state::instance(app)("watched").valueChanged.connect([&detector]() {
+    std::string value = state::instance(app)("watched").value();
     if (detector.hasChanged(value)) {
-        cvcstate("dependent").value(value);
+        state::instance(app)("dependent").value(value);
     }
 });
 ```
@@ -513,7 +530,7 @@ struct DepthGuard {
     }
 };
 
-cvcstate("node").valueChanged.connect([]() {
+state::instance(app)("node").valueChanged.connect([]() {
     DepthGuard guard;
     if (guard.exceeded) {
         std::cerr << "Warning: Max callback depth exceeded!\n";
@@ -529,9 +546,9 @@ Break recursion using thread pools:
 
 ```cpp
 // ✅ SAFE: Async breaks the call stack
-cvcstate("nodeA").valueChanged.connect([]() {
-    cvcapp.thread("worker", []() {
-        cvcstate("nodeB").value("update");
+state::instance(app)("nodeA").valueChanged.connect([]() {
+    app.thread("worker", []() {
+        state::instance(app)("nodeB").value("update");
     });
 });
 ```
@@ -565,35 +582,35 @@ public:
     void setup() {
         // Step 1: Input → Validation (with re-entry guard)
         connections.push_back(
-            cvcstate("pipeline.input").valueChanged.connect([this]() {
+            state::instance(app)("pipeline.input").valueChanged.connect([this]() {
                 bool expected = false;
                 if (!validating.compare_exchange_strong(expected, true)) {
                     return;  // Already validating
                 }
                 
-                std::string input = cvcstate("pipeline.input").value();
+                std::string input = state::instance(app)("pipeline.input").value();
                 bool valid = validateInput(input);
-                cvcstate("pipeline.valid").value(valid);
+                state::instance(app)("pipeline.valid").value(valid);
                 validating.store(false);
             })
         );
         
         // Step 2: Validation → Processing (conditional, no loop back)
         connections.push_back(
-            cvcstate("pipeline.valid").valueChanged.connect([]() {
-                bool valid = cvcstate("pipeline.valid").value<bool>();
+            state::instance(app)("pipeline.valid").valueChanged.connect([]() {
+                bool valid = state::instance(app)("pipeline.valid").value<bool>();
                 if (valid) {
-                    std::string input = cvcstate("pipeline.input").value();
+                    std::string input = state::instance(app)("pipeline.input").value();
                     std::string processed = processInput(input);
-                    cvcstate("pipeline.output").value(processed);
+                    state::instance(app)("pipeline.output").value(processed);
                 }
             })
         );
         
         // Step 3: Output → UI Update (terminal, no further callbacks)
         connections.push_back(
-            cvcstate("pipeline.output").valueChanged.connect([]() {
-                std::string output = cvcstate("pipeline.output").value();
+            state::instance(app)("pipeline.output").valueChanged.connect([]() {
+                std::string output = state::instance(app)("pipeline.output").value();
                 updateUI(output);  // Terminal: no further state changes
             })
         );
@@ -617,18 +634,18 @@ All `cvc::state` operations are thread-safe via mutex protection:
 
 ```cpp
 // Multiple threads can safely access the same state
-boost::thread t1([](){ cvcstate("shared").value(1); });
-boost::thread t2([](){ cvcstate("shared").value(2); });
-boost::thread t3([](){ int v = cvcstate("shared").value<int>(); });
+boost::thread t1([](){ state::instance(app)("shared").value(1); });
+boost::thread t2([](){ state::instance(app)("shared").value(2); });
+boost::thread t3([](){ int v = state::instance(app)("shared").value<int>(); });
 
 t1.join(); t2.join(); t3.join();
 
 // Futures enable producer-consumer patterns
 boost::thread producer([](){ 
-    cvcstate("result").value(compute()); 
+    state::instance(app)("result").value(compute()); 
 });
 boost::thread consumer([](){ 
-    int result = cvcstate("result").wait_for_value<int>(); 
+    int result = state::instance(app)("result").wait_for_value<int>(); 
 });
 ```
 
@@ -651,7 +668,7 @@ However, before December 2025, there was a race condition where `_valueTypeName`
 template <class T> state& value(const T& v) {
   {
     boost::mutex::scoped_lock lock(_mutex);
-    _valueTypeName = cvcapp.dataTypeName<T>();
+    _valueTypeName = app.dataTypeName<T>();
   }  // Lock released here - RACE WINDOW!
   return value(boost::lexical_cast<std::string>(v), false);
 }
@@ -676,7 +693,7 @@ template <class T> state& value(const T& v) {
     boost::mutex::scoped_lock lock(_mutex);
     if(_value == str_value) return *this; // Early return if unchanged
     
-    _valueTypeName = cvcapp.dataTypeName<T>();
+    _valueTypeName = app.dataTypeName<T>();
     _value = str_value;
     _lastMod = boost::posix_time::microsec_clock::universal_time();
     _initialized = true;
@@ -710,7 +727,7 @@ protected:
                 processValue(value);
             } catch (const boost::bad_lexical_cast& e) {
                 // Log and handle gracefully
-                cvcapp.log(1, "Warning: Failed to convert counter value");
+                app.log(1, "Warning: Failed to convert counter value");
             }
         }
     }
@@ -753,10 +770,10 @@ This test rapidly changes integer values, which previously would cause `bad_lexi
 
 ```cpp
 // Export state tree to JSON string
-std::string json = cvcstate.dump();
+std::string json = state::instance(app).dump();
 
 // Import from JSON (merges with existing state)
-cvcstate.read(json_string);
+state::instance(app).read(json_string);
 
 // Serialization preserves:
 // - Value data (as strings)
@@ -775,7 +792,7 @@ The `cvc::state_object<T>` template class provides a convenient base class for o
 - **Change notifications**: `handleStateChanged()` callback fires when any child state changes
 - **Thread-safe updates**: State changes trigger async handlers in separate threads
 - **Easy access**: Convenient `getState()` and `stateName()` helper methods
-- **Type registration**: Automatically registers the class type with `cvcapp`
+- **Type registration**: Automatically registers the class type with the bound `cvc::app`
 
 #### Basic Usage
 
@@ -826,7 +843,7 @@ config->getState("width").value(2560);  // Triggers handleStateChanged()
 
 // Or access globally if you know the path
 std::string path = config->stateName("width");
-cvcstate(path).value(2560);  // Same effect
+state::instance(app)(path).value(2560);  // Same effect
 ```
 
 #### Monitoring Object State
@@ -865,7 +882,7 @@ public:
 protected:
     virtual void handleStateChanged(const std::string& childState) override {
         // Log all state changes
-        cvcapp.log(2, str(boost::format("DataProcessor: %s = %s") 
+        app.log(2, str(boost::format("DataProcessor: %s = %s") 
             % childState 
             % getState(childState).value()));
             
@@ -873,7 +890,7 @@ protected:
         if (childState == "error_count") {
             int errors = getState("error_count").value<int>();
             if (errors > 10) {
-                cvcapp.log(0, "Too many errors, halting processing");
+                app.log(0, "Too many errors, halting processing");
                 // Take corrective action
             }
         }
@@ -982,7 +999,7 @@ protected:
 The `state_object<T>` template provides these methods:
 
 **Constructor:**
-- Registers the type with `cvcapp`
+- Registers the type with the bound `cvc::app`
 - Sets up automatic state change monitoring
 - Each instance gets a unique state path: `<TypeName>/<InstanceAddress>`
 
@@ -1502,10 +1519,14 @@ TEST(StateTest, LockWithWait) {
 ### Construction and Access
 
 ```cpp
-// Global access function
-state cvcstate(const std::string& name);
+// Per-app root accessor
+namespace cvc {
+  state& state::instance(app& ctx);
+}
+// Then use the functor form for child paths:
+cvc::state::instance(app)("level1.level2.key");
 
-// Constructor
+// Direct construction
 state(const std::string& name = std::string());
 
 // Copy semantics (shallow copy - same node)
@@ -1632,28 +1653,28 @@ void read(const std::string& json);
 ```cpp
 void loadConfig() {
     // Set default configuration
-    cvcstate("app.window.width").value(1920);
-    cvcstate("app.window.height").value(1080);
-    cvcstate("app.theme").value("dark");
+    state::instance(app)("app.window.width").value(1920);
+    state::instance(app)("app.window.height").value(1080);
+    state::instance(app)("app.theme").value("dark");
     
     // Add metadata
-    cvcstate("app.window.width").property("min", "640");
-    cvcstate("app.window.width").property("max", "3840");
+    state::instance(app)("app.window.width").property("min", "640");
+    state::instance(app)("app.window.width").property("max", "3840");
     
     // Monitor changes
-    cvcstate("app.theme").valueChanged.connect([](std::string theme) {
+    state::instance(app)("app.theme").valueChanged.connect([](std::string theme) {
         applyTheme(theme);
     });
 }
 
 void saveConfig() {
-    std::string json = cvcstate("app").dump();
+    std::string json = state::instance(app)("app").dump();
     writeFile("config.json", json);
 }
 
 void restoreConfig() {
     std::string json = readFile("config.json");
-    cvcstate("app").read(json);
+    state::instance(app)("app").read(json);
 }
 ```
 
@@ -1663,25 +1684,25 @@ void restoreConfig() {
 // Stage 1: Load data
 void loadStage() {
     cvc::volume vol("input.rawiv");
-    cvcstate("pipeline.input").data(vol);
+    state::instance(app)("pipeline.input").data(vol);
 }
 
 // Stage 2: Process (waits for stage 1)
 void processStage() {
-    cvc::volume input = cvcstate("pipeline.input")
+    cvc::volume input = state::instance(app)("pipeline.input")
         .wait_for_data<cvc::volume>(boost::chrono::seconds(30));
     
     input.bilateral_filter(5.0, 0.1);
-    cvcstate("pipeline.filtered").data(input);
+    state::instance(app)("pipeline.filtered").data(input);
 }
 
 // Stage 3: Output (waits for stage 2)
 void outputStage() {
-    cvc::volume result = cvcstate("pipeline.filtered")
+    cvc::volume result = state::instance(app)("pipeline.filtered")
         .wait_for_data<cvc::volume>(boost::chrono::seconds(30));
     
     result.write("output.rawiv");
-    cvcstate("pipeline.complete").value(true);
+    state::instance(app)("pipeline.complete").value(true);
 }
 ```
 
@@ -1695,10 +1716,10 @@ class TemperatureMonitor {
 public:
     TemperatureMonitor() {
         // Set up monitoring with callback
-        cvcstate("sensor.temperature").value<double>([this](double temp) {
+        state::instance(app)("sensor.temperature").value<double>([this](double temp) {
             if (temp > 100.0) {
                 std::cerr << "ALERT: High temperature: " << temp << std::endl;
-                cvcstate("alarm.triggered").value(true);
+                state::instance(app)("alarm.triggered").value(true);
             }
         });
         
@@ -1707,11 +1728,11 @@ public:
             while (running_) {
                 try {
                     // Wait for temperature reading
-                    double temp = cvcstate("sensor.reading")
+                    double temp = state::instance(app)("sensor.reading")
                         .wait_for_value<double>(boost::chrono::seconds(1));
                     
                     // Update display
-                    cvcstate("sensor.temperature").value(temp);
+                    state::instance(app)("sensor.temperature").value(temp);
                     
                 } catch (const cvc::timeout_error&) {
                     // No reading yet, keep waiting
@@ -1740,12 +1761,12 @@ public:
             while (running_) {
                 try {
                     // Wait for request
-                    std::string request = cvcstate("server.request")
+                    std::string request = state::instance(app)("server.request")
                         .wait_for_value<std::string>(boost::chrono::seconds(1));
                     
                     // Process and respond
                     std::string response = processRequest(request);
-                    cvcstate("server.response").value(response);
+                    state::instance(app)("server.response").value(response);
                     
                 } catch (const cvc::timeout_error&) {
                     // No request, keep waiting
@@ -1755,8 +1776,8 @@ public:
     }
     
     std::string makeRequest(const std::string& req) {
-        cvcstate("server.request").value(req);
-        return cvcstate("server.response")
+        state::instance(app)("server.request").value(req);
+        return state::instance(app)("server.response")
             .wait_for_value<std::string>(boost::chrono::seconds(10));
     }
 };
@@ -1768,12 +1789,12 @@ public:
 
 ```cpp
 // Setting an int value
-cvcstate("number").value(42);
+state::instance(app)("number").value(42);
 
 // Attempting wrong type conversion throws type_conversion_error
 try {
     // This will throw because "42" cannot be cast to Config
-    Config cfg = cvcstate("number").data<Config>();
+    Config cfg = state::instance(app)("number").data<Config>();
 } catch (const cvc::type_conversion_error& e) {
     std::cerr << "Conversion failed: " << e.what() << std::endl;
     // Output: "Conversion failed: cvc::type_conversion_error exception: 
@@ -1786,7 +1807,7 @@ try {
 ```cpp
 // Wait with timeout
 try {
-    int value = cvcstate("slow.computation")
+    int value = state::instance(app)("slow.computation")
         .wait_for_value<int>(boost::chrono::milliseconds(100));
 } catch (const cvc::timeout_error& e) {
     std::cerr << "Timeout: " << e.what() << std::endl;
@@ -1821,7 +1842,7 @@ cvc::exception (inherits from boost::exception)
 - For expensive operations, trigger async work instead:
 
 ```cpp
-cvcstate("trigger").valueChanged.connect([](std::string val) {
+state::instance(app)("trigger").valueChanged.connect([](std::string val) {
     // Launch async processing instead of blocking
     boost::thread([val]() {
         expensiveOperation(val);
@@ -1846,7 +1867,7 @@ cvcstate("trigger").valueChanged.connect([](std::string val) {
 struct VolumeRef {
     boost::shared_ptr<cvc::volume> vol;
 };
-cvcstate("volume").data(VolumeRef{vol_ptr});
+state::instance(app)("volume").data(VolumeRef{vol_ptr});
 ```
 
 ## Testing
@@ -1879,8 +1900,8 @@ TEST(StateTest, ConcurrentAccess) {
     std::vector<boost::thread> threads;
     for (int i = 0; i < 10; i++) {
         threads.emplace_back([i]() {
-            cvcstate("concurrent.value").value(i);
-            int val = cvcstate("concurrent.value").value<int>();
+            state::instance(app)("concurrent.value").value(i);
+            int val = state::instance(app)("concurrent.value").value<int>();
         });
     }
     for (auto& t : threads) t.join();
@@ -1890,19 +1911,19 @@ TEST(StateTest, ConcurrentAccess) {
 TEST(StateTest, FuturesBlocking) {
     boost::thread producer([]() {
         boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-        cvcstate("future.value").value(42);
+        state::instance(app)("future.value").value(42);
     });
     
-    int result = cvcstate("future.value").wait_for_value<int>();
+    int result = state::instance(app)("future.value").wait_for_value<int>();
     EXPECT_EQ(42, result);
     producer.join();
 }
 
 // Type conversion error test
 TEST(StateTest, TypeConversionError) {
-    cvcstate("test").value(42);
+    state::instance(app)("test").value(42);
     EXPECT_THROW(
-        cvcstate("test").data<std::vector<int>>(),
+        state::instance(app)("test").data<std::vector<int>>(),
         cvc::type_conversion_error
     );
 }

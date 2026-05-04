@@ -417,7 +417,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 ### API Documentation
 
 - **[docs/APP_API.md](docs/APP_API.md)** - Complete application framework API
-  - Singleton application object (`cvcapp`)
+  - Per-app context object (`cvc::app`) — explicit instances, no singleton
   - Data management with `boost::any` type-safe storage
   - Property system for configuration
   - Thread management with progress tracking

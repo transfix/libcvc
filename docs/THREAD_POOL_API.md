@@ -2,7 +2,12 @@
 
 ## Overview
 
-The CVC application class now includes a priority-based thread pool to manage concurrent task execution. This allows you to limit the number of simultaneously running heavy computations and prioritize critical tasks.
+The `cvc::app` class includes a priority-based thread pool to manage concurrent task execution. This allows you to limit the number of simultaneously running heavy computations and prioritize critical tasks.
+
+The examples below assume `cvc::app app;` is in scope and use it as
+the explicit context (a fixture member, `main()`-scoped object, etc.).
+The previously documented `cvcapp` macro has been removed; every
+caller now passes its own `cvc::app&`.
 
 ## Basic Usage
 
@@ -14,20 +19,22 @@ The CVC application class now includes a priority-based thread pool to manage co
 // Define your task
 class MyTask {
 public:
+  cvc::app& app;
+  explicit MyTask(cvc::app& a) : app(a) {}
   void operator()() {
     // Your computation here
-    thread_feedback feedback("Processing data...");
-    
+    cvc::thread_feedback feedback(app, "Processing data...");
+
     for (int i = 0; i < 100; i++) {
       boost::this_thread::interruption_point();
-      cvcapp.threadProgress(i / 100.0);
+      app.threadProgress(i / 100.0);
       // Do work...
     }
   }
 };
 
 // Submit to thread pool with normal priority
-cvcapp.startThreadPooled("myTask", MyTask(), PRIORITY_NORMAL);
+app.startThreadPooled("myTask", MyTask(app), PRIORITY_NORMAL);
 ```
 
 ### Priority Levels
@@ -45,14 +52,14 @@ Higher priority tasks are scheduled before lower priority ones when the pool is 
 
 ```cpp
 // Set maximum concurrent threads (default: hardware_concurrency or 4)
-cvcapp.setThreadPoolSize(8);
+app.setThreadPoolSize(8);
 
 // Get current pool size
-unsigned int poolSize = cvcapp.getThreadPoolSize();
+unsigned int poolSize = app.getThreadPoolSize();
 
 // Check active and pending threads
-unsigned int active = cvcapp.getActiveThreadCount();
-unsigned int pending = cvcapp.getPendingThreadCount();
+unsigned int active = app.getActiveThreadCount();
+unsigned int pending = app.getPendingThreadCount();
 ```
 
 ## Comparison: startThread vs startThreadPooled
@@ -73,7 +80,7 @@ unsigned int pending = cvcapp.getPendingThreadCount();
 
 ```cpp
 // Configure pool for 4 concurrent threads
-cvcapp.setThreadPoolSize(4);
+app.setThreadPoolSize(4);
 
 // Submit 100 tasks - only 4 run concurrently
 for (int i = 0; i < 100; i++) {
@@ -82,7 +89,7 @@ for (int i = 0; i < 100; i++) {
   // Critical tasks processed first
   thread_priority priority = (i < 10) ? PRIORITY_CRITICAL : PRIORITY_NORMAL;
   
-  cvcapp.startThreadPooled(key, [i]() {
+  app.startThreadPooled(key, [i]() {
     thread_feedback feedback("Processing batch " + std::to_string(i));
     // Do work...
   }, priority, false); // false = don't wait, use unique key
@@ -95,7 +102,7 @@ for (int i = 0; i < 100; i++) {
 2. **Worker Allocation**: Workers start when pool has capacity
 3. **Execution**: Highest priority task is executed next
 4. **Completion**: Worker processes next task or terminates if queue is empty
-5. **Thread Tracking**: Running tasks appear in `cvcapp.threads()` map with their keys
+5. **Thread Tracking**: Running tasks appear in `app.threads()` map with their keys
 
 ## Notes
 
