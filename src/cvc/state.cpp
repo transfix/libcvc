@@ -45,7 +45,6 @@ namespace CVC_NAMESPACE {
 // covers function symbols, not data members.
 state::init_func_vec state::_startup;
 state::app_init_func_vec state::_appStartup;
-state::state_ptr state::_instance;
 boost::mutex state::_instanceMutex;
 boost::mutex state::_startupMutex;
 bool state::_startupFired = false;
@@ -82,16 +81,6 @@ state::~state() { destroyed(); }
 // ------------------
 // state::instancePtr
 // ------------------
-// Purpose:
-//   Returns a pointer to the root state object singleton. Currently
-//   stores the root state object on the cvcapp datamap, though this
-//   might not always be the case.
-// ---- Change History ----
-// 02/18/2012 -- Joe R. -- Creation.
-// 01/12/2014 -- Joe R. -- Added startup function calls to do initialization based on cvcstate.
-//                         Also moved xmlrpc server thread start elsewhere.
-state::state_ptr state::instancePtr() { return instancePtr(app::instance()); }
-
 // ------------------
 // state::instancePtr
 // ------------------
@@ -101,8 +90,11 @@ state::state_ptr state::instancePtr() { return instancePtr(app::instance()); }
 //   _startup callbacks once per process the first time any root is
 //   created.
 // ---- Change History ----
+// 02/18/2012 -- Joe R. -- Creation.
+// 01/12/2014 -- Joe R. -- Added startup function calls to do initialization based on cvcstate.
+//                         Also moved xmlrpc server thread start elsewhere.
 // 05/03/2026 -- Joe R. -- Per-app overload, decoupling state root from
-//                         app::instance().
+//                         app::instance(). Legacy zero-arg form removed.
 state::state_ptr state::instancePtr(app &ctx) {
   bool do_startup = false;
   bool fire_app_startup = false;
@@ -119,11 +111,6 @@ state::state_ptr state::instancePtr(app &ctx) {
       ptr.reset(new state(ctx));
       ctx.data(statekey, ptr);
       fire_app_startup = true;
-      // Cache root of app::instance() for the legacy zero-arg path
-      // so existing callers continue to share the same object.
-      if (&ctx == &app::instance()) {
-        _instance = ptr;
-      }
     }
   }
 
@@ -163,15 +150,6 @@ state::state_ptr state::instancePtr(app &ctx) {
 // Purpose:
 //   Returns a reference to the root state object for the given app.
 state &state::instance(app &ctx) { return *instancePtr(ctx); }
-
-// ---------------
-// state::instance
-// ---------------
-// Purpose:
-//   Returns a reference to the singleton root object.
-// ---- Change History ----
-// 02/18/2012 -- Joe R. -- Creation.
-state &state::instance() { return *instancePtr(); }
 
 // --------------
 // state::lastMod

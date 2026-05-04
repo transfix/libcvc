@@ -168,9 +168,6 @@ public:
 
   // ***** Main API
 
-  // Use instance() to grab a reference to the singleton application object.
-  static state &instance();
-
   // Per-app root state. Lazily creates and caches a root state on the
   // given app's data map, decoupling state ownership from app::instance().
   // Fires registered _startup callbacks the first time a root is created.
@@ -436,9 +433,7 @@ protected:
   boost::condition_variable _valueCondition;
   boost::condition_variable _dataCondition;
 
-  static state_ptr instancePtr();
   static state_ptr instancePtr(app &ctx);
-  static state_ptr _instance;
   static boost::mutex _instanceMutex;
   static boost::mutex _startupMutex;
   static bool _startupFired;
@@ -461,9 +456,6 @@ state_future<T>::state_future(state *s) : _state(s), _ready(false), _has_value(f
 
 template <typename T> T state_future<T>::getValue() { return _state->template value<T>(); }
 } // namespace CVC_NAMESPACE
-
-// Shorthand to access the cvc::state object from anywhere
-#define cvcstate CVC_NAMESPACE::state::instance()
 
 // PascalCase aliases for consumer compat shims bypassed on case-insensitive
 // filesystems (macOS).
