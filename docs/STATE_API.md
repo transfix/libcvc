@@ -44,20 +44,25 @@ The `cvc::state` class provides a thread-safe, hierarchical key-value store with
 
 ### Per-app state roots
 
-Each `cvc::app` owns its own state tree. The root is obtained
-through `cvc::state::instance(app&)`:
+Each `cvc::app` owns its own state tree. Get the root with the
+`app::root()` shorthand:
 
 ```cpp
 cvc::app app;
-cvc::state& root = cvc::state::instance(app);
+cvc::state& root = app.root();
 root("app.window.width").value(1920);
 ```
 
+`app.root()` is exactly equivalent to `cvc::state::instance(app)` —
+the second spelling is also fine if it reads better in your
+context, e.g. inside templates that already accept an `app&`.
+
 The examples in this document assume `cvc::app app;` is in scope
-and use `state::instance(app)` as the root accessor. Earlier
-versions of libcvc exposed the root through a global `cvcstate`
-macro / `state::instance()` zero-arg singleton; those have been
-removed — every caller must now pass the owning `app&` explicitly.
+and use either `app.root()` or `cvc::state::instance(app)` as the
+root accessor. Earlier versions of libcvc exposed the root through
+a global `cvcstate` macro / `state::instance()` zero-arg singleton;
+those have been removed — every caller must now reach the root
+through its owning `app`.
 
 ## Core Concepts
 
@@ -1519,11 +1524,13 @@ TEST(StateTest, LockWithWait) {
 ### Construction and Access
 
 ```cpp
-// Per-app root accessor
+// Per-app root accessor (preferred call-site spelling)
 namespace cvc {
-  state& state::instance(app& ctx);
+  state& app::root();                     // member shorthand
+  state& state::instance(app& ctx);       // free-form equivalent
 }
 // Then use the functor form for child paths:
+app.root()("level1.level2.key");
 cvc::state::instance(app)("level1.level2.key");
 
 // Direct construction
