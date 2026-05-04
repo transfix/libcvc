@@ -184,11 +184,6 @@ void app::wait_for_threads() {
   }
 }
 
-app &app::instance() {
-  app &app = *instancePtr();
-  return app;
-}
-
 app::app()
     : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency()
                                                              : 4),

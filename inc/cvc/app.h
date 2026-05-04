@@ -113,9 +113,6 @@ public:
 
   // ***** Main API
 
-  // Use instance() to grab a reference to the singleton application object.
-  static app &instance();
-
   // Regular data access
   data_map data();
   boost::any data(const std::string &key);
@@ -601,11 +598,6 @@ template <class T> data_type dataType();
 // Returns a human-readable name for the data_type enum, or empty string.
 std::string dataTypeName(data_type dt);
 } // namespace CVC_NAMESPACE
-
-// Shorthand to access the app object from anywhere.
-// DEPRECATED: retained only while migrating callers to explicit app& params.
-// TODO: remove once all cvcapp usage has been migrated.
-#define cvcapp CVC_NAMESPACE::app::instance()
 
 // Guarded PascalCase aliases for case-insensitive filesystems (macOS) where
 // consumer compat shims are bypassed.
