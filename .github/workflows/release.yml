@@ -220,9 +220,15 @@ jobs:
                         --desktop-file AppDir/volrover3.desktop \
                         --icon-file    AppDir/volrover_logo.png
           # linuxdeploy emits "VolumeRover3-x86_64.AppImage" by default if
-          # Name= matches; rename to our STEM for consistency.
+          # Name= matches; rename to our STEM for consistency. Skip files
+          # that are already named correctly (otherwise `mv` fails with
+          # "are the same file" because OUTPUT was set to ${STEM}.AppImage).
           for f in *.AppImage; do
-            case "$f" in linuxdeploy*) ;; *) mv "$f" "${STEM}.AppImage" ;; esac
+            case "$f" in
+              linuxdeploy*) ;;
+              "${STEM}.AppImage") ;;
+              *) mv "$f" "${STEM}.AppImage" ;;
+            esac
           done
           ls -la *.AppImage
 
