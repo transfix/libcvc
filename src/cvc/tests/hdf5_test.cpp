@@ -250,10 +250,12 @@ TEST_F(HDF5Test, UnlinkDataSet) {
     hsize_t dims[1] = {10};
     H5::DataSpace dataspace(1, dims);
     file->createDataSet("data_to_remove", H5::PredType::NATIVE_DOUBLE, dataspace);
+    file->flush(H5F_SCOPE_GLOBAL);
     EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "data_to_remove"));
 
     // Unlink it
     hdf5_utils::unlink(*file, "data_to_remove");
+    file->flush(H5F_SCOPE_GLOBAL);
     EXPECT_FALSE(hdf5_utils::objectExists(ctx, filepath, "data_to_remove"));
   }
 }
@@ -265,15 +267,24 @@ TEST_F(HDF5Test, UnlinkNestedObject) {
     boost::shared_ptr<H5::H5File> file = hdf5_utils::getH5File(filepath, true);
 
     // Create nested groups and dataset
-    boost::shared_ptr<H5::Group> grp = hdf5_utils::getGroup(*file, "group/subgroup", true);
+    {
+      boost::shared_ptr<H5::Group> grp = hdf5_utils::getGroup(*file, "group/subgroup", true);
 
-    hsize_t dims[1] = {10};
-    H5::DataSpace dataspace(1, dims);
-    grp->createDataSet("data", H5::PredType::NATIVE_DOUBLE, dataspace);
+      hsize_t dims[1] = {10};
+      H5::DataSpace dataspace(1, dims);
+      grp->createDataSet("data", H5::PredType::NATIVE_DOUBLE, dataspace);
+    }
+    // Flush so the secondary file handle opened by objectExists() observes
+    // the freshly-created dataset metadata. On macOS Release the H5 library
+    // is otherwise free to defer the flush past the inner-handle release,
+    // which makes objectExists() race against the still-buffered group
+    // state and report a missing object.
+    file->flush(H5F_SCOPE_GLOBAL);
     EXPECT_TRUE(hdf5_utils::objectExists(ctx, filepath, "group/subgroup/data"));
 
     // Unlink it
     hdf5_utils::unlink(*file, "group/subgroup/data");
+    file->flush(H5F_SCOPE_GLOBAL);
     EXPECT_FALSE(hdf5_utils::objectExists(ctx, filepath, "group/subgroup/data"));
   }
 }
