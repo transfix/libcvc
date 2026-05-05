@@ -531,6 +531,7 @@ jobs:
           $qtPrefix = $prefixes -join ';'
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=OFF `
