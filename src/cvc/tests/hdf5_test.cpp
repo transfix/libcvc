@@ -10,7 +10,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <atomic>
 #include <boost/format.hpp>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/app.h>
@@ -26,6 +28,14 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#define CVC_GETPID() ::_getpid()
+#else
+#include <unistd.h>
+#define CVC_GETPID() ::getpid()
+#endif
+
 using namespace CVC_NAMESPACE;
 
 // ===========================
@@ -40,16 +50,24 @@ protected:
   app ctx;
 
   virtual void SetUp() {
-    // Create a unique directory for this test process. std::filesystem +
-    // std::this_thread::get_id() is portable across POSIX and Windows
-    // (the previous getpid() / mkdir(mode) usage is POSIX-only).
+    // Create a unique directory for this test instance. We need to be unique
+    // both across parallel ctest *processes* (so we include the pid) and across
+    // tests within the same process (so we include a per-process atomic
+    // counter and high-resolution clock). std::this_thread::get_id() alone
+    // collides across freshly-spawned processes on macOS, where the main
+    // thread id is often reused, which lets parallel ctest workers stomp on
+    // each other's HDF5 files and surface as flaky
+    // "objectExists() == false" / "unknown file: Failure" failures.
     namespace fs = std::filesystem;
+    static std::atomic<unsigned> counter{0};
     std::ostringstream oss;
-    oss << std::this_thread::get_id();
+    oss << "hdf5_test_" << CVC_GETPID() << "_" << std::this_thread::get_id() << "_"
+        << counter.fetch_add(1, std::memory_order_relaxed) << "_"
+        << std::chrono::steady_clock::now().time_since_epoch().count();
     fs::path base = std::getenv("CMAKE_CURRENT_BINARY_DIR")
                         ? fs::path(std::getenv("CMAKE_CURRENT_BINARY_DIR"))
                         : fs::current_path();
-    fs::path dir = base / ("hdf5_test_" + oss.str());
+    fs::path dir = base / oss.str();
     fs::create_directories(dir);
     test_dir = dir.string();
   }
