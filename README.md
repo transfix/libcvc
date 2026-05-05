@@ -493,6 +493,18 @@ libcvc/
 
 ## Version History
 
+- **3.1.0** (2026) - **Singleton-less API release**
+  - Removed the global `cvcapp` / `cvcstate` macros and the
+    `cvc::app::instance()` / `cvc::state::instance()` zero-arg
+    singletons; every caller now reaches the application context
+    and state tree through an explicit `cvc::app&`.
+  - Added `cvc::app::root()` member shorthand, equivalent to
+    `cvc::state::instance(app)`, for ergonomic per-app state access.
+  - Per-app state caching keyed on the owning `cvc::app` instance.
+  - Documentation refresh across `README.md`, `docs/APP_API.md`,
+    `docs/STATE_API.md`, `docs/TESTING.md`, `docs/THREAD_POOL*.md`,
+    `docs/IMAGE_PROCESSING_ALGORITHMS.md`, and
+    `docs/GRAPHICS_DATA_DRIVEN_UPDATES.md`.
 - **3.0.0** (2026) - **Production-grade packaging & CI/CD release**
   - Cross-platform release artifacts: Linux (.tar.gz, .deb, AppImage),
     macOS (.zip, .dmg with VolumeRover3.app bundle), Windows (.zip,
