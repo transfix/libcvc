@@ -375,7 +375,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v5
+          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v6
           restore-keys: |
             vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-
 
@@ -453,9 +453,12 @@ jobs:
           )
           if ('${{ matrix.kind }}' -eq 'volrover3') {
             # qt6-base intentionally omitted — handled by install-qt-action above.
-            # vtk[qt,opengl] enables GUISupportQt (QVTKOpenGLNativeWidget.h)
-            # plus all OpenGL-rendering modules that volrover3 includes.
-            $packages += @('vtk[qt,opengl]','cgal')
+            # vtk[qt,opengl] also omitted: the qt feature pulled qt6-base/
+            # qt5compat/qttools/qtdeclarative as transitive build deps,
+            # rebuilding all of Qt6 from source on every cold-cache run.
+            # We build VTK 9.5 from source against aqtinstall's prebuilt
+            # Qt6 in a separate cached step below (mirrors Ubuntu).
+            $packages += @('cgal')
           }
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
@@ -473,18 +476,59 @@ jobs:
             Start-Sleep -Seconds $sleep
           }
 
+      # ── VTK 9.5 built from source against aqt Qt6, cached ──
+      # Mirrors the Ubuntu strategy. Cache key includes build_type
+      # because MSVC Debug and Release VTK DLLs are not interchangeable.
+      - name: Restore VTK (Qt6) cache (Windows)
+        if: matrix.kind == 'volrover3'
+        id: vtk-cache-windows
+        uses: actions/cache/restore@v4
+        with:
+          path: D:\vtk-qt6
+          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
+
+      - name: Build VTK 9.5 from source against Qt6 (Windows)
+        if: matrix.kind == 'volrover3' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz -OutFile vtk.tar.gz
+          tar xzf vtk.tar.gz
+          cmake -S VTK-9.5.0 -B D:\vtk-build `
+            -DCMAKE_INSTALL_PREFIX=D:\vtk-qt6 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DBUILD_SHARED_LIBS=ON `
+            -DVTK_GROUP_ENABLE_Qt=YES `
+            -DVTK_QT_VERSION=6 `
+            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO `
+            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO `
+            -DVTK_BUILD_TESTING=OFF `
+            -DVTK_BUILD_EXAMPLES=OFF `
+            -DVTK_BUILD_DOCUMENTATION=OFF `
+            -DVTK_LEGACY_REMOVE=ON
+          cmake --build D:\vtk-build --config ${{ matrix.build_type }} --parallel --target install
+          Remove-Item -Recurse -Force D:\vtk-build
+          Remove-Item -Recurse -Force VTK-9.5.0
+          Remove-Item -Force vtk.tar.gz
+
+      - name: Save VTK (Qt6) cache (Windows)
+        if: matrix.kind == 'volrover3' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: D:\vtk-qt6
+          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
+
       - name: Configure
         shell: pwsh
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
-          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) so CMake
-          # picks aqtinstall's complete Qt over vcpkg's qt6-base (which
-          # vtk[qt] pulls in transitively). The vcpkg qt6-base port is
-          # missing translations/Qt6/catalogs.json and (in Debug)
-          # Qt6OpenGLWidgetsd.dll, breaking windeployqt at install time.
-          # Empty fallback for libcvc-only jobs (no Qt env exported).
-          $qtPrefix = if ($env:QT_ROOT_DIR) { $env:QT_ROOT_DIR } else { '' }
+          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) and add
+          # the from-source VTK install tree alongside it. CMAKE_PREFIX_PATH
+          # is a semicolon-separated list on Windows.
+          $prefixes = @()
+          if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
+          if ('${{ matrix.kind }}' -eq 'volrover3') { $prefixes += 'D:\vtk-qt6' }
+          $qtPrefix = $prefixes -join ';'
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
