@@ -31,10 +31,11 @@ using namespace CVC_NAMESPACE;
 // Global flag to control stress/performance tests
 bool enable_stress_tests = false;
 
-// Fixture for tests that exercise the cvc::app data store. Each test
-// gets a fresh, fixture-local cvc::app instance instead of relying on
-// the deprecated cvcapp singleton (see cvc-singleton-removal-plan.md).
-class StateDataFixture : public ::testing::Test {
+// Fixture for the broad TEST_F(StateTestFixture, ...) cases. Each
+// test gets its own fresh cvc::app, so its per-app state root is
+// isolated from every other test. Replaces the previous file-scope
+// `static cvc::app test_ctx;` shared-root crutch.
+class StateTestFixture : public ::testing::Test {
 protected:
   cvc::app ctx;
 };
@@ -48,92 +49,84 @@ protected:
   cvc::app ctx;
 };
 
-// File-scope cvc::app used by the broad TEST(StateTest, ...) cases.
-// Replaces the deprecated `cvc::state::instance(test_ctx)` macro / `cvc::state::instance()`
-// global singleton. Routing all TEST(StateTest) cases through this
-// shared app preserves the existing "shared root" semantics those
-// tests were written against, while keeping the global cvc::app
-// singleton out of the picture.
-static cvc::app test_ctx;
-
 // ===========================
 // Basic Singleton Tests
 // ===========================
 
-TEST(StateTest, SingletonInstance) {
+TEST_F(StateTestFixture, SingletonInstance) {
   // Test that instance() returns a valid reference
-  state &state1 = cvc::state::instance(test_ctx);
-  state &state2 = cvc::state::instance(test_ctx);
+  state &state1 = cvc::state::instance(ctx);
+  state &state2 = cvc::state::instance(ctx);
 
   // Both references should point to the same singleton
   EXPECT_EQ(&state1, &state2);
 }
 
-TEST(StateTest, AppRootShorthand) {
+TEST_F(StateTestFixture, AppRootShorthand) {
   // app::root() must return the same per-app root as
   // cvc::state::instance(app); both spellings are interchangeable.
-  EXPECT_EQ(&test_ctx.root(), &cvc::state::instance(test_ctx));
+  EXPECT_EQ(&ctx.root(), &cvc::state::instance(ctx));
 
   // Independent apps must have independent roots.
   cvc::app other;
-  EXPECT_NE(&test_ctx.root(), &other.root());
+  EXPECT_NE(&ctx.root(), &other.root());
 
   // Round-trip a value through the shorthand.
-  test_ctx.root()("test.app_root_shorthand").value(7);
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.app_root_shorthand").value<int>(), 7);
-  test_ctx.root()("test.app_root_shorthand").reset();
+  ctx.root()("test.app_root_shorthand").value(7);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.app_root_shorthand").value<int>(), 7);
+  ctx.root()("test.app_root_shorthand").reset();
 }
 
 // ===========================
 // Value Management Tests
 // ===========================
 
-TEST(StateTest, ValueSetAndGet) {
+TEST_F(StateTestFixture, ValueSetAndGet) {
   std::string test_value = "test_string_value";
-  cvc::state::instance(test_ctx)("test.value.simple").value(test_value);
+  cvc::state::instance(ctx)("test.value.simple").value(test_value);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.value.simple").value(), test_value);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.value.simple").initialized());
+  EXPECT_EQ(cvc::state::instance(ctx)("test.value.simple").value(), test_value);
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.value.simple").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.simple").reset();
+  cvc::state::instance(ctx)("test.value.simple").reset();
 }
 
-TEST(StateTest, ValueTypeInt) {
+TEST_F(StateTestFixture, ValueTypeInt) {
   int test_value = 42;
-  cvc::state::instance(test_ctx)("test.value.int").value(test_value);
+  cvc::state::instance(ctx)("test.value.int").value(test_value);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.value.int").value<int>(), test_value);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.value.int").value<int>(), test_value);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.int").reset();
+  cvc::state::instance(ctx)("test.value.int").reset();
 }
 
-TEST(StateTest, ValueTypeDouble) {
+TEST_F(StateTestFixture, ValueTypeDouble) {
   double test_value = 3.14159;
-  cvc::state::instance(test_ctx)("test.value.double").value(test_value);
+  cvc::state::instance(ctx)("test.value.double").value(test_value);
 
-  EXPECT_DOUBLE_EQ(cvc::state::instance(test_ctx)("test.value.double").value<double>(), test_value);
+  EXPECT_DOUBLE_EQ(cvc::state::instance(ctx)("test.value.double").value<double>(), test_value);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.double").reset();
+  cvc::state::instance(ctx)("test.value.double").reset();
 }
 
-TEST(StateTest, ValueTypeBool) {
+TEST_F(StateTestFixture, ValueTypeBool) {
   bool test_value = true;
-  cvc::state::instance(test_ctx)("test.value.bool").value(test_value);
+  cvc::state::instance(ctx)("test.value.bool").value(test_value);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.value.bool").value<bool>(), test_value);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.value.bool").value<bool>(), test_value);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.bool").reset();
+  cvc::state::instance(ctx)("test.value.bool").reset();
 }
 
-TEST(StateTest, ValueCommaList) {
+TEST_F(StateTestFixture, ValueCommaList) {
   std::string list_value = "item1,item2,item3";
-  cvc::state::instance(test_ctx)("test.value.list").value(list_value);
+  cvc::state::instance(ctx)("test.value.list").value(list_value);
 
-  std::vector<std::string> values = cvc::state::instance(test_ctx)("test.value.list").values();
+  std::vector<std::string> values = cvc::state::instance(ctx)("test.value.list").values();
 
   ASSERT_EQ(values.size(), 3);
   EXPECT_EQ(values[0], "item1");
@@ -141,15 +134,14 @@ TEST(StateTest, ValueCommaList) {
   EXPECT_EQ(values[2], "item3");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.list").reset();
+  cvc::state::instance(ctx)("test.value.list").reset();
 }
 
-TEST(StateTest, ValueCommaListWithSpaces) {
+TEST_F(StateTestFixture, ValueCommaListWithSpaces) {
   std::string list_value = "item1 , item2 , item3";
-  cvc::state::instance(test_ctx)("test.value.list.spaces").value(list_value);
+  cvc::state::instance(ctx)("test.value.list.spaces").value(list_value);
 
-  std::vector<std::string> values =
-      cvc::state::instance(test_ctx)("test.value.list.spaces").values();
+  std::vector<std::string> values = cvc::state::instance(ctx)("test.value.list.spaces").values();
 
   ASSERT_EQ(values.size(), 3);
   EXPECT_EQ(values[0], "item1");
@@ -157,335 +149,331 @@ TEST(StateTest, ValueCommaListWithSpaces) {
   EXPECT_EQ(values[2], "item3");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.list.spaces").reset();
+  cvc::state::instance(ctx)("test.value.list.spaces").reset();
 }
 
-TEST(StateTest, ValueListUnique) {
+TEST_F(StateTestFixture, ValueListUnique) {
   std::string list_value = "item1,item2,item1,item3,item2";
-  cvc::state::instance(test_ctx)("test.value.list.unique").value(list_value);
+  cvc::state::instance(ctx)("test.value.list.unique").value(list_value);
 
   std::vector<std::string> values =
-      cvc::state::instance(test_ctx)("test.value.list.unique").values(true);
+      cvc::state::instance(ctx)("test.value.list.unique").values(true);
 
   // Should have only unique items
   EXPECT_EQ(values.size(), 3);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.list.unique").reset();
+  cvc::state::instance(ctx)("test.value.list.unique").reset();
 }
 
-TEST(StateTest, ValueConversion) {
+TEST_F(StateTestFixture, ValueConversion) {
   // Test conversion to std::string
   std::string test_value = "conversion_test";
-  cvc::state::instance(test_ctx)("test.value.conversion").value(test_value);
+  cvc::state::instance(ctx)("test.value.conversion").value(test_value);
 
-  std::string converted = cvc::state::instance(test_ctx)("test.value.conversion");
+  std::string converted = cvc::state::instance(ctx)("test.value.conversion");
   EXPECT_EQ(converted, test_value);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.value.conversion").reset();
+  cvc::state::instance(ctx)("test.value.conversion").reset();
 }
 
 // ===========================
 // Data Management Tests
 // ===========================
 
-TEST(StateTest, DataSetAndGet) {
+TEST_F(StateTestFixture, DataSetAndGet) {
   std::string test_data = "test_data_string";
-  cvc::state::instance(test_ctx)("test.data.simple").data(test_data);
+  cvc::state::instance(ctx)("test.data.simple").data(test_data);
 
-  ASSERT_TRUE(cvc::state::instance(test_ctx)("test.data.simple").isData<std::string>());
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.data.simple").data<std::string>(), test_data);
+  ASSERT_TRUE(cvc::state::instance(ctx)("test.data.simple").isData<std::string>());
+  EXPECT_EQ(cvc::state::instance(ctx)("test.data.simple").data<std::string>(), test_data);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.data.simple").reset();
+  cvc::state::instance(ctx)("test.data.simple").reset();
 }
 
-TEST(StateTest, DataTypeInt) {
+TEST_F(StateTestFixture, DataTypeInt) {
   int test_data = 123;
-  cvc::state::instance(test_ctx)("test.data.int").data(test_data);
+  cvc::state::instance(ctx)("test.data.int").data(test_data);
 
-  ASSERT_TRUE(cvc::state::instance(test_ctx)("test.data.int").isData<int>());
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.data.int").data<int>(), test_data);
+  ASSERT_TRUE(cvc::state::instance(ctx)("test.data.int").isData<int>());
+  EXPECT_EQ(cvc::state::instance(ctx)("test.data.int").data<int>(), test_data);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.data.int").reset();
+  cvc::state::instance(ctx)("test.data.int").reset();
 }
 
-TEST(StateTest, DataTypeDouble) {
+TEST_F(StateTestFixture, DataTypeDouble) {
   double test_data = 2.71828;
-  cvc::state::instance(test_ctx)("test.data.double").data(test_data);
+  cvc::state::instance(ctx)("test.data.double").data(test_data);
 
-  ASSERT_TRUE(cvc::state::instance(test_ctx)("test.data.double").isData<double>());
-  EXPECT_DOUBLE_EQ(cvc::state::instance(test_ctx)("test.data.double").data<double>(), test_data);
+  ASSERT_TRUE(cvc::state::instance(ctx)("test.data.double").isData<double>());
+  EXPECT_DOUBLE_EQ(cvc::state::instance(ctx)("test.data.double").data<double>(), test_data);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.data.double").reset();
+  cvc::state::instance(ctx)("test.data.double").reset();
 }
 
 // ===========================
 // Hierarchy and Navigation Tests
 // ===========================
 
-TEST(StateTest, ChildCreation) {
+TEST_F(StateTestFixture, ChildCreation) {
   // Create a child state
-  cvc::state::instance(test_ctx)("parent.child").value("child_value");
+  cvc::state::instance(ctx)("parent.child").value("child_value");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("parent.child").value(), "child_value");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("parent.child").name(), "child");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("parent").name(), "parent");
-
-  // Clean up
-  cvc::state::instance(test_ctx)("parent").reset();
-}
-
-TEST(StateTest, FullName) {
-  cvc::state::instance(test_ctx)("level1.level2.level3").value("deep");
-
-  EXPECT_EQ(cvc::state::instance(test_ctx)("level1.level2.level3").fullName(),
-            "level1.level2.level3");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("level1.level2.level3").name(), "level3");
+  EXPECT_EQ(cvc::state::instance(ctx)("parent.child").value(), "child_value");
+  EXPECT_EQ(cvc::state::instance(ctx)("parent.child").name(), "child");
+  EXPECT_EQ(cvc::state::instance(ctx)("parent").name(), "parent");
 
   // Clean up
-  cvc::state::instance(test_ctx)("level1").reset();
+  cvc::state::instance(ctx)("parent").reset();
 }
 
-TEST(StateTest, ParentName) {
-  cvc::state::instance(test_ctx)("parent.child.grandchild").value("test");
+TEST_F(StateTestFixture, FullName) {
+  cvc::state::instance(ctx)("level1.level2.level3").value("deep");
 
-  std::string parent_name = cvc::state::instance(test_ctx)("parent.child.grandchild").parentName();
+  EXPECT_EQ(cvc::state::instance(ctx)("level1.level2.level3").fullName(), "level1.level2.level3");
+  EXPECT_EQ(cvc::state::instance(ctx)("level1.level2.level3").name(), "level3");
+
+  // Clean up
+  cvc::state::instance(ctx)("level1").reset();
+}
+
+TEST_F(StateTestFixture, ParentName) {
+  cvc::state::instance(ctx)("parent.child.grandchild").value("test");
+
+  std::string parent_name = cvc::state::instance(ctx)("parent.child.grandchild").parentName();
   EXPECT_EQ(parent_name, "parent.child");
 
   // Clean up
-  cvc::state::instance(test_ctx)("parent").reset();
+  cvc::state::instance(ctx)("parent").reset();
 }
 
-TEST(StateTest, ChildrenListing) {
+TEST_F(StateTestFixture, ChildrenListing) {
   // Create multiple children
-  cvc::state::instance(test_ctx)("test.children.child1").value("value1");
-  cvc::state::instance(test_ctx)("test.children.child2").value("value2");
-  cvc::state::instance(test_ctx)("test.children.child3").value("value3");
+  cvc::state::instance(ctx)("test.children.child1").value("value1");
+  cvc::state::instance(ctx)("test.children.child2").value("value2");
+  cvc::state::instance(ctx)("test.children.child3").value("value3");
 
-  std::vector<std::string> children = cvc::state::instance(test_ctx)("test.children").children();
+  std::vector<std::string> children = cvc::state::instance(ctx)("test.children").children();
 
   EXPECT_GE(children.size(), 3);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, NumChildren) {
+TEST_F(StateTestFixture, NumChildren) {
   // Create children
-  cvc::state::instance(test_ctx)("test.count.child1").value("1");
-  cvc::state::instance(test_ctx)("test.count.child2").value("2");
+  cvc::state::instance(ctx)("test.count.child1").value("1");
+  cvc::state::instance(ctx)("test.count.child2").value("2");
 
-  size_t count = cvc::state::instance(test_ctx)("test.count").numChildren();
+  size_t count = cvc::state::instance(ctx)("test.count").numChildren();
   EXPECT_EQ(count, 2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildrenWithRegex) {
+TEST_F(StateTestFixture, ChildrenWithRegex) {
   // Create children with different names
-  cvc::state::instance(test_ctx)("test.regex.foo1").value("1");
-  cvc::state::instance(test_ctx)("test.regex.foo2").value("2");
-  cvc::state::instance(test_ctx)("test.regex.bar1").value("3");
+  cvc::state::instance(ctx)("test.regex.foo1").value("1");
+  cvc::state::instance(ctx)("test.regex.foo2").value("2");
+  cvc::state::instance(ctx)("test.regex.bar1").value("3");
 
   // Search for children matching pattern
   std::vector<std::string> foo_children =
-      cvc::state::instance(test_ctx)("test.regex").children(".*foo.*");
+      cvc::state::instance(ctx)("test.regex").children(".*foo.*");
 
   EXPECT_GE(foo_children.size(), 2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // State Metadata Tests
 // ===========================
 
-TEST(StateTest, CommentSetAndGet) {
+TEST_F(StateTestFixture, CommentSetAndGet) {
   std::string comment = "This is a test comment";
-  cvc::state::instance(test_ctx)("test.comment").comment(comment);
+  cvc::state::instance(ctx)("test.comment").comment(comment);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.comment").comment(), comment);
-
-  // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
-}
-
-TEST(StateTest, HiddenFlag) {
-  cvc::state::instance(test_ctx)("test.hidden").hidden(true);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.hidden").hidden());
-
-  cvc::state::instance(test_ctx)("test.hidden").hidden(false);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.hidden").hidden());
+  EXPECT_EQ(cvc::state::instance(ctx)("test.comment").comment(), comment);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyFlag) {
+TEST_F(StateTestFixture, HiddenFlag) {
+  cvc::state::instance(ctx)("test.hidden").hidden(true);
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.hidden").hidden());
+
+  cvc::state::instance(ctx)("test.hidden").hidden(false);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.hidden").hidden());
+
+  // Clean up
+  cvc::state::instance(ctx)("test").reset();
+}
+
+TEST_F(StateTestFixture, ReadOnlyFlag) {
   // Test setting and getting read-only flag
-  cvc::state::instance(test_ctx)("test.readonly").readOnly(true);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.readonly").readOnly());
+  cvc::state::instance(ctx)("test.readonly").readOnly(true);
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.readonly").readOnly());
 
-  cvc::state::instance(test_ctx)("test.readonly").readOnly(false);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.readonly").readOnly());
+  cvc::state::instance(ctx)("test.readonly").readOnly(false);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.readonly").readOnly());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyBlocksValueModification) {
+TEST_F(StateTestFixture, ReadOnlyBlocksValueModification) {
   // Set initial value
-  cvc::state::instance(test_ctx)("test.readonly_value").value("initial");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_value").value(), "initial");
+  cvc::state::instance(ctx)("test.readonly_value").value("initial");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_value").value(), "initial");
 
   // Mark as read-only
-  cvc::state::instance(test_ctx)("test.readonly_value").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_value").readOnly(true);
 
   // Attempt to modify should throw
   EXPECT_THROW(
-      { cvc::state::instance(test_ctx)("test.readonly_value").value("modified"); },
-      read_only_error);
+      { cvc::state::instance(ctx)("test.readonly_value").value("modified"); }, read_only_error);
 
   // Value should remain unchanged
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_value").value(), "initial");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_value").value(), "initial");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyBlocksDataModification) {
+TEST_F(StateTestFixture, ReadOnlyBlocksDataModification) {
   // Set initial data
-  cvc::state::instance(test_ctx)("test.readonly_data").data(42);
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_data").data<int>(), 42);
+  cvc::state::instance(ctx)("test.readonly_data").data(42);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_data").data<int>(), 42);
 
   // Mark as read-only
-  cvc::state::instance(test_ctx)("test.readonly_data").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_data").readOnly(true);
 
   // Attempt to modify should throw
-  EXPECT_THROW(
-      { cvc::state::instance(test_ctx)("test.readonly_data").data(100); }, read_only_error);
+  EXPECT_THROW({ cvc::state::instance(ctx)("test.readonly_data").data(100); }, read_only_error);
 
   // Data should remain unchanged
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_data").data<int>(), 42);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_data").data<int>(), 42);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyAllowsReadOperations) {
+TEST_F(StateTestFixture, ReadOnlyAllowsReadOperations) {
   // Set value and mark read-only
-  cvc::state::instance(test_ctx)("test.readonly_read").value("readable");
-  cvc::state::instance(test_ctx)("test.readonly_read").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_read").value("readable");
+  cvc::state::instance(ctx)("test.readonly_read").readOnly(true);
 
   // Reading should still work
   EXPECT_NO_THROW({
-    std::string val = cvc::state::instance(test_ctx)("test.readonly_read").value();
+    std::string val = cvc::state::instance(ctx)("test.readonly_read").value();
     EXPECT_EQ(val, "readable");
   });
 
   // Getting read-only status should work
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.readonly_read").readOnly());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.readonly_read").readOnly());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyCanBeUnset) {
+TEST_F(StateTestFixture, ReadOnlyCanBeUnset) {
   // Set value and mark read-only
-  cvc::state::instance(test_ctx)("test.readonly_unset").value("initial");
-  cvc::state::instance(test_ctx)("test.readonly_unset").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_unset").value("initial");
+  cvc::state::instance(ctx)("test.readonly_unset").readOnly(true);
 
   // Verify it's read-only
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.readonly_unset").readOnly());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.readonly_unset").readOnly());
   EXPECT_THROW(
-      { cvc::state::instance(test_ctx)("test.readonly_unset").value("should_fail"); },
-      read_only_error);
+      { cvc::state::instance(ctx)("test.readonly_unset").value("should_fail"); }, read_only_error);
 
   // Unset read-only
-  cvc::state::instance(test_ctx)("test.readonly_unset").readOnly(false);
+  cvc::state::instance(ctx)("test.readonly_unset").readOnly(false);
 
   // Now modification should work
-  EXPECT_NO_THROW({ cvc::state::instance(test_ctx)("test.readonly_unset").value("modified"); });
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_unset").value(), "modified");
+  EXPECT_NO_THROW({ cvc::state::instance(ctx)("test.readonly_unset").value("modified"); });
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_unset").value(), "modified");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlySignalEmission) {
+TEST_F(StateTestFixture, ReadOnlySignalEmission) {
   bool signal_received = false;
 
   // Connect to readOnlyChanged signal
-  auto connection = cvc::state::instance(test_ctx)("test.readonly_signal")
+  auto connection = cvc::state::instance(ctx)("test.readonly_signal")
                         .readOnlyChanged.connect([&signal_received]() { signal_received = true; });
 
   // Setting read-only should trigger signal
-  cvc::state::instance(test_ctx)("test.readonly_signal").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_signal").readOnly(true);
   EXPECT_TRUE(signal_received);
 
   // Reset flag and test again
   signal_received = false;
-  cvc::state::instance(test_ctx)("test.readonly_signal").readOnly(false);
+  cvc::state::instance(ctx)("test.readonly_signal").readOnly(false);
   EXPECT_TRUE(signal_received);
 
   // Setting to same value should not trigger signal
   signal_received = false;
-  cvc::state::instance(test_ctx)("test.readonly_signal").readOnly(false);
+  cvc::state::instance(ctx)("test.readonly_signal").readOnly(false);
   EXPECT_FALSE(signal_received);
 
   // Clean up
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyInitializesFlag) {
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.readonly").initialized());
+TEST_F(StateTestFixture, ReadOnlyInitializesFlag) {
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.readonly").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.readonly").readOnly(true);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.init.readonly").initialized());
+  cvc::state::instance(ctx)("test.init.readonly").readOnly(true);
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.init.readonly").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyWithTemplateValue) {
+TEST_F(StateTestFixture, ReadOnlyWithTemplateValue) {
   // Test with int
-  cvc::state::instance(test_ctx)("test.readonly_template_int").value<int>(42);
-  cvc::state::instance(test_ctx)("test.readonly_template_int").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_template_int").value<int>(42);
+  cvc::state::instance(ctx)("test.readonly_template_int").readOnly(true);
 
   EXPECT_THROW(
-      { cvc::state::instance(test_ctx)("test.readonly_template_int").value<int>(100); },
+      { cvc::state::instance(ctx)("test.readonly_template_int").value<int>(100); },
       read_only_error);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.readonly_template_int").value<int>(), 42);
+  EXPECT_EQ(cvc::state::instance(ctx)("test.readonly_template_int").value<int>(), 42);
 
   // Test with double
-  cvc::state::instance(test_ctx)("test.readonly_template_double").value<double>(3.14);
-  cvc::state::instance(test_ctx)("test.readonly_template_double").readOnly(true);
+  cvc::state::instance(ctx)("test.readonly_template_double").value<double>(3.14);
+  cvc::state::instance(ctx)("test.readonly_template_double").readOnly(true);
 
   EXPECT_THROW(
-      { cvc::state::instance(test_ctx)("test.readonly_template_double").value<double>(2.71); },
+      { cvc::state::instance(ctx)("test.readonly_template_double").value<double>(2.71); },
       read_only_error);
 
-  EXPECT_DOUBLE_EQ(cvc::state::instance(test_ctx)("test.readonly_template_double").value<double>(),
+  EXPECT_DOUBLE_EQ(cvc::state::instance(ctx)("test.readonly_template_double").value<double>(),
                    3.14);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ReadOnlyExceptionMessage) {
-  cvc::state::instance(test_ctx)("test.readonly_exception").value("test");
-  cvc::state::instance(test_ctx)("test.readonly_exception").readOnly(true);
+TEST_F(StateTestFixture, ReadOnlyExceptionMessage) {
+  cvc::state::instance(ctx)("test.readonly_exception").value("test");
+  cvc::state::instance(ctx)("test.readonly_exception").readOnly(true);
 
   try {
-    cvc::state::instance(test_ctx)("test.readonly_exception").value("modified");
+    cvc::state::instance(ctx)("test.readonly_exception").value("modified");
     FAIL() << "Expected read_only_error to be thrown";
   } catch (const read_only_error &e) {
     // Verify exception contains useful information
@@ -498,131 +486,131 @@ TEST(StateTest, ReadOnlyExceptionMessage) {
   }
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, InitializedFlag) {
+TEST_F(StateTestFixture, InitializedFlag) {
   // Before setting anything, should not be initialized
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.uninitialized").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.uninitialized").initialized());
 
   // After setting a value, should be initialized
-  cvc::state::instance(test_ctx)("test.initialized").value("test");
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.initialized").initialized());
+  cvc::state::instance(ctx)("test.initialized").value("test");
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.initialized").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, LastModification) {
+TEST_F(StateTestFixture, LastModification) {
   using namespace boost::posix_time;
 
   ptime before = microsec_clock::universal_time();
-  cvc::state::instance(test_ctx)("test.lastmod").value("test");
+  cvc::state::instance(ctx)("test.lastmod").value("test");
   ptime after = microsec_clock::universal_time();
 
-  ptime lastMod = cvc::state::instance(test_ctx)("test.lastmod").lastMod();
+  ptime lastMod = cvc::state::instance(ctx)("test.lastmod").lastMod();
 
   EXPECT_GE(lastMod, before);
   EXPECT_LE(lastMod, after);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // State Manipulation Tests
 // ===========================
 
-TEST(StateTest, Touch) {
+TEST_F(StateTestFixture, Touch) {
   using namespace boost::posix_time;
 
-  cvc::state::instance(test_ctx)("test.touch").value("initial");
-  ptime first_mod = cvc::state::instance(test_ctx)("test.touch").lastMod();
+  cvc::state::instance(ctx)("test.touch").value("initial");
+  ptime first_mod = cvc::state::instance(ctx)("test.touch").lastMod();
 
   // Sleep briefly to ensure time difference
   boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
 
-  cvc::state::instance(test_ctx)("test.touch").touch();
-  ptime second_mod = cvc::state::instance(test_ctx)("test.touch").lastMod();
+  cvc::state::instance(ctx)("test.touch").touch();
+  ptime second_mod = cvc::state::instance(ctx)("test.touch").lastMod();
 
   EXPECT_GT(second_mod, first_mod);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, Reset) {
-  cvc::state::instance(test_ctx)("test.reset").value("value");
-  cvc::state::instance(test_ctx)("test.reset").data(123);
-  cvc::state::instance(test_ctx)("test.reset").comment("comment");
-  cvc::state::instance(test_ctx)("test.reset").hidden(true);
+TEST_F(StateTestFixture, Reset) {
+  cvc::state::instance(ctx)("test.reset").value("value");
+  cvc::state::instance(ctx)("test.reset").data(123);
+  cvc::state::instance(ctx)("test.reset").comment("comment");
+  cvc::state::instance(ctx)("test.reset").hidden(true);
 
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset").initialized());
 
-  cvc::state::instance(test_ctx)("test.reset").reset();
+  cvc::state::instance(ctx)("test.reset").reset();
 
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset").initialized());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset").value().empty());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset").comment().empty());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset").hidden());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset").value().empty());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset").comment().empty());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset").hidden());
 }
 
 // ===========================
 // Property Tree Tests
 // ===========================
 
-TEST(StateTest, PropertyTreeConversion) {
-  cvc::state::instance(test_ctx)("test.ptree.item1").value("value1");
-  cvc::state::instance(test_ctx)("test.ptree.item2").value("value2");
-  cvc::state::instance(test_ctx)("test.ptree.nested.item3").value("value3");
+TEST_F(StateTestFixture, PropertyTreeConversion) {
+  cvc::state::instance(ctx)("test.ptree.item1").value("value1");
+  cvc::state::instance(ctx)("test.ptree.item2").value("value2");
+  cvc::state::instance(ctx)("test.ptree.nested.item3").value("value3");
 
-  boost::property_tree::ptree pt = cvc::state::instance(test_ctx)("test.ptree").ptree();
+  boost::property_tree::ptree pt = cvc::state::instance(ctx)("test.ptree").ptree();
 
   EXPECT_FALSE(pt.empty());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, PropertyTreeRoundTrip) {
-  cvc::state::instance(test_ctx)("test.roundtrip.a").value("alpha");
-  cvc::state::instance(test_ctx)("test.roundtrip.b").value("beta");
-  cvc::state::instance(test_ctx)("test.roundtrip.c").value("gamma");
+TEST_F(StateTestFixture, PropertyTreeRoundTrip) {
+  cvc::state::instance(ctx)("test.roundtrip.a").value("alpha");
+  cvc::state::instance(ctx)("test.roundtrip.b").value("beta");
+  cvc::state::instance(ctx)("test.roundtrip.c").value("gamma");
 
-  boost::property_tree::ptree pt = cvc::state::instance(test_ctx)("test.roundtrip").ptree();
+  boost::property_tree::ptree pt = cvc::state::instance(ctx)("test.roundtrip").ptree();
 
   // Verify property tree contains the values
   EXPECT_FALSE(pt.empty());
 
   // Reset the state
-  cvc::state::instance(test_ctx)("test.roundtrip").reset();
+  cvc::state::instance(ctx)("test.roundtrip").reset();
 
   // Note: The ptree() method returns only the values, not a full tree structure
   // for restoration. This is a limitation of the current implementation.
   // For now, we verify that the property tree was created successfully.
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, JsonConversion) {
-  cvc::state::instance(test_ctx)("test.json.x").value("10");
-  cvc::state::instance(test_ctx)("test.json.y").value("20");
+TEST_F(StateTestFixture, JsonConversion) {
+  cvc::state::instance(ctx)("test.json.x").value("10");
+  cvc::state::instance(ctx)("test.json.y").value("20");
 
-  std::string json = cvc::state::instance(test_ctx)("test.json").json();
+  std::string json = cvc::state::instance(ctx)("test.json").json();
 
   EXPECT_FALSE(json.empty());
   EXPECT_TRUE(json.find("test.json.x") != std::string::npos || json.find("x") != std::string::npos);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // ValueData Tests
 // ===========================
 
-TEST_F(StateDataFixture, ValueData) {
+TEST_F(StateTestFixture, ValueData) {
   // Set up some data objects referenced by a list
   ctx.data("test.vd.obj1", 100);
   ctx.data("test.vd.obj2", 200);
@@ -660,104 +648,104 @@ TEST_F(StateDataFixture, ValueData) {
 // Traversal Tests
 // ===========================
 
-TEST(StateTest, Traverse) {
+TEST_F(StateTestFixture, Traverse) {
   // Create a tree structure
-  cvc::state::instance(test_ctx)("test.traverse.a").value("1");
-  cvc::state::instance(test_ctx)("test.traverse.b").value("2");
-  cvc::state::instance(test_ctx)("test.traverse.c.d").value("3");
+  cvc::state::instance(ctx)("test.traverse.a").value("1");
+  cvc::state::instance(ctx)("test.traverse.b").value("2");
+  cvc::state::instance(ctx)("test.traverse.c.d").value("3");
 
   // Count how many states are visited
   int visit_count = 0;
   state::traversal_unary_func counter = [&visit_count](std::string) { visit_count++; };
 
-  cvc::state::instance(test_ctx)("test.traverse").traverse(counter);
+  cvc::state::instance(ctx)("test.traverse").traverse(counter);
 
   EXPECT_GT(visit_count, 0);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, TraverseWithRegex) {
+TEST_F(StateTestFixture, TraverseWithRegex) {
   // Create mixed structure
-  cvc::state::instance(test_ctx)("test.regex.match1").value("a");
-  cvc::state::instance(test_ctx)("test.regex.match2").value("b");
-  cvc::state::instance(test_ctx)("test.regex.other").value("c");
+  cvc::state::instance(ctx)("test.regex.match1").value("a");
+  cvc::state::instance(ctx)("test.regex.match2").value("b");
+  cvc::state::instance(ctx)("test.regex.other").value("c");
 
   std::vector<std::string> visited;
   state::traversal_unary_func collector = [&visited](std::string name) { visited.push_back(name); };
 
   // Traverse with regex filter
-  cvc::state::instance(test_ctx)("test.regex").traverse(collector, ".*match.*");
+  cvc::state::instance(ctx)("test.regex").traverse(collector, ".*match.*");
 
   EXPECT_GT(visited.size(), 0);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Property Tree Tests
 // ===========================
 
-TEST(StateTest, PropertyTreeRoundtrip) {
+TEST_F(StateTestFixture, PropertyTreeRoundtrip) {
   // Set up a state tree
-  cvc::state::instance(test_ctx)("test.ptree2.value1").value("first");
-  cvc::state::instance(test_ctx)("test.ptree2.value2").value("second");
+  cvc::state::instance(ctx)("test.ptree2.value1").value("first");
+  cvc::state::instance(ctx)("test.ptree2.value2").value("second");
 
   // Convert to property tree
-  boost::property_tree::ptree pt = cvc::state::instance(test_ctx)("test.ptree2").ptree();
+  boost::property_tree::ptree pt = cvc::state::instance(ctx)("test.ptree2").ptree();
   EXPECT_FALSE(pt.empty());
 
   // Property tree can be created
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, PropertyTreeImplicitConversion) {
-  cvc::state::instance(test_ctx)("test.pt.a").value("alpha");
-  cvc::state::instance(test_ctx)("test.pt.b").value("beta");
+TEST_F(StateTestFixture, PropertyTreeImplicitConversion) {
+  cvc::state::instance(ctx)("test.pt.a").value("alpha");
+  cvc::state::instance(ctx)("test.pt.b").value("beta");
 
   // Test implicit conversion operator
-  boost::property_tree::ptree pt = cvc::state::instance(test_ctx)("test.pt");
+  boost::property_tree::ptree pt = cvc::state::instance(ctx)("test.pt");
   EXPECT_FALSE(pt.empty());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // JSON Tests
 // ===========================
 
-TEST(StateTest, JSONRoundtrip) {
+TEST_F(StateTestFixture, JSONRoundtrip) {
   // Set up state
-  cvc::state::instance(test_ctx)("test.json2.field1").value("json_value1");
-  cvc::state::instance(test_ctx)("test.json2.field2").value("json_value2");
+  cvc::state::instance(ctx)("test.json2.field1").value("json_value1");
+  cvc::state::instance(ctx)("test.json2.field2").value("json_value2");
 
   // Convert to JSON
-  std::string json_str = cvc::state::instance(test_ctx)("test.json2").json();
+  std::string json_str = cvc::state::instance(ctx)("test.json2").json();
   EXPECT_FALSE(json_str.empty());
 
   // JSON conversion works
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // File I/O Tests
 // ===========================
 
-TEST(StateTest, SaveAndRestore) {
+TEST_F(StateTestFixture, SaveAndRestore) {
   std::string temp_file =
       (std::filesystem::temp_directory_path() / "test_state_save.json").string();
 
   // Create state
-  cvc::state::instance(test_ctx)("test.file2.x").value("saved_x");
-  cvc::state::instance(test_ctx)("test.file2.y").value("saved_y");
+  cvc::state::instance(ctx)("test.file2.x").value("saved_x");
+  cvc::state::instance(ctx)("test.file2.y").value("saved_y");
 
   // Save to file
-  cvc::state::instance(test_ctx)("test.file2").save(temp_file);
+  cvc::state::instance(ctx)("test.file2").save(temp_file);
 
   // File should be created
   std::ifstream check(temp_file);
@@ -765,7 +753,7 @@ TEST(StateTest, SaveAndRestore) {
   check.close();
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
   std::remove(temp_file.c_str());
 }
 
@@ -773,283 +761,282 @@ TEST(StateTest, SaveAndRestore) {
 // LastMod and Touch Tests
 // ===========================
 
-TEST(StateTest, LastModTracking) {
+TEST_F(StateTestFixture, LastModTracking) {
   boost::posix_time::ptime before = boost::posix_time::microsec_clock::universal_time();
 
-  cvc::state::instance(test_ctx)("test.lastmod").value("trigger_mod");
+  cvc::state::instance(ctx)("test.lastmod").value("trigger_mod");
 
   boost::posix_time::ptime after = boost::posix_time::microsec_clock::universal_time();
-  boost::posix_time::ptime mod_time = cvc::state::instance(test_ctx)("test.lastmod").lastMod();
+  boost::posix_time::ptime mod_time = cvc::state::instance(ctx)("test.lastmod").lastMod();
 
   EXPECT_GE(mod_time, before);
   EXPECT_LE(mod_time, after);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, TouchTriggersSignals) {
-  cvc::state::instance(test_ctx)("test.touch").value("initial");
+TEST_F(StateTestFixture, TouchTriggersSignals) {
+  cvc::state::instance(ctx)("test.touch").value("initial");
 
   // Touch should update lastMod even without value change
-  boost::posix_time::ptime before = cvc::state::instance(test_ctx)("test.touch").lastMod();
+  boost::posix_time::ptime before = cvc::state::instance(ctx)("test.touch").lastMod();
 
   // Small delay to ensure time difference
   boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
 
-  cvc::state::instance(test_ctx)("test.touch").touch();
+  cvc::state::instance(ctx)("test.touch").touch();
 
-  boost::posix_time::ptime after = cvc::state::instance(test_ctx)("test.touch").lastMod();
+  boost::posix_time::ptime after = cvc::state::instance(ctx)("test.touch").lastMod();
   EXPECT_GT(after, before);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Parent/Child Relationship Tests
 // ===========================
 
-TEST(StateTest, ParentChildRelationship) {
-  cvc::state::instance(test_ctx)("test.parent.child").value("child_value");
+TEST_F(StateTestFixture, ParentChildRelationship) {
+  cvc::state::instance(ctx)("test.parent.child").value("child_value");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.parent.child").name(), "child");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.parent.child").parentName(), "test.parent");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.parent.child").fullName(), "test.parent.child");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.parent.child").name(), "child");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.parent.child").parentName(), "test.parent");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.parent.child").fullName(), "test.parent.child");
 
-  const state *parent = cvc::state::instance(test_ctx)("test.parent.child").parent();
+  const state *parent = cvc::state::instance(ctx)("test.parent.child").parent();
   ASSERT_NE(parent, nullptr);
   EXPECT_EQ(parent->name(), "parent");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildrenListingMultiple) {
-  cvc::state::instance(test_ctx)("test.children.a").value("1");
-  cvc::state::instance(test_ctx)("test.children.b").value("2");
-  cvc::state::instance(test_ctx)("test.children.c").value("3");
+TEST_F(StateTestFixture, ChildrenListingMultiple) {
+  cvc::state::instance(ctx)("test.children.a").value("1");
+  cvc::state::instance(ctx)("test.children.b").value("2");
+  cvc::state::instance(ctx)("test.children.c").value("3");
 
-  std::vector<std::string> children = cvc::state::instance(test_ctx)("test.children").children();
+  std::vector<std::string> children = cvc::state::instance(ctx)("test.children").children();
 
   EXPECT_GE(children.size(), 3);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, NumChildrenCount) {
-  cvc::state::instance(test_ctx)("test.numch.x").value("1");
-  cvc::state::instance(test_ctx)("test.numch.y").value("2");
+TEST_F(StateTestFixture, NumChildrenCount) {
+  cvc::state::instance(ctx)("test.numch.x").value("1");
+  cvc::state::instance(ctx)("test.numch.y").value("2");
 
-  size_t num = cvc::state::instance(test_ctx)("test.numch").numChildren();
+  size_t num = cvc::state::instance(ctx)("test.numch").numChildren();
   EXPECT_GE(num, 2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildrenFilterByRegex) {
-  cvc::state::instance(test_ctx)("test.chre.apple").value("1");
-  cvc::state::instance(test_ctx)("test.chre.apricot").value("2");
-  cvc::state::instance(test_ctx)("test.chre.banana").value("3");
+TEST_F(StateTestFixture, ChildrenFilterByRegex) {
+  cvc::state::instance(ctx)("test.chre.apple").value("1");
+  cvc::state::instance(ctx)("test.chre.apricot").value("2");
+  cvc::state::instance(ctx)("test.chre.banana").value("3");
 
   // Get all children first
-  std::vector<std::string> children = cvc::state::instance(test_ctx)("test.chre").children();
+  std::vector<std::string> children = cvc::state::instance(ctx)("test.chre").children();
   EXPECT_GE(children.size(), 3);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // ValueTypeName Tests
 // ===========================
 
-TEST(StateTest, ValueTypeNameTracking) {
-  cvc::state::instance(test_ctx)("test.typename.int").value(42);
-  std::string type_name = cvc::state::instance(test_ctx)("test.typename.int").valueTypeName();
+TEST_F(StateTestFixture, ValueTypeNameTracking) {
+  cvc::state::instance(ctx)("test.typename.int").value(42);
+  std::string type_name = cvc::state::instance(ctx)("test.typename.int").valueTypeName();
 
   EXPECT_FALSE(type_name.empty());
 
-  cvc::state::instance(test_ctx)("test.typename.string").value("text");
-  type_name = cvc::state::instance(test_ctx)("test.typename.string").valueTypeName();
+  cvc::state::instance(ctx)("test.typename.string").value("text");
+  type_name = cvc::state::instance(ctx)("test.typename.string").valueTypeName();
 
   EXPECT_FALSE(type_name.empty());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // DataTypeName Tests
 // ===========================
 
-TEST(StateTest, DataTypeNameRetrieval) {
+TEST_F(StateTestFixture, DataTypeNameRetrieval) {
   int test_data = 999;
-  cvc::state::instance(test_ctx)("test.datatypename").data(test_data);
+  cvc::state::instance(ctx)("test.datatypename").data(test_data);
 
-  std::string type_name = cvc::state::instance(test_ctx)("test.datatypename").dataTypeName();
+  std::string type_name = cvc::state::instance(ctx)("test.datatypename").dataTypeName();
   EXPECT_FALSE(type_name.empty());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // String Conversion Tests
 // ===========================
 
-TEST(StateTest, StringConversionOperator) {
+TEST_F(StateTestFixture, StringConversionOperator) {
   std::string test_val = "conversion_test";
-  cvc::state::instance(test_ctx)("test.conversion").value(test_val);
+  cvc::state::instance(ctx)("test.conversion").value(test_val);
 
-  std::string converted = cvc::state::instance(test_ctx)("test.conversion");
+  std::string converted = cvc::state::instance(ctx)("test.conversion");
   EXPECT_EQ(converted, test_val);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Chaining Operations Tests
 // ===========================
 
-TEST(StateTest, OperationChaining) {
+TEST_F(StateTestFixture, OperationChaining) {
   // Test that value() returns reference for chaining
-  cvc::state::instance(test_ctx)("test.chain").value("step1").comment("Test comment").hidden(false);
+  cvc::state::instance(ctx)("test.chain").value("step1").comment("Test comment").hidden(false);
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.chain").value(), "step1");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.chain").comment(), "Test comment");
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.chain").hidden());
+  EXPECT_EQ(cvc::state::instance(ctx)("test.chain").value(), "step1");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.chain").comment(), "Test comment");
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.chain").hidden());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Edge Cases and Error Handling
 // ===========================
 
-TEST(StateTest, EmptyValueHandling) {
+TEST_F(StateTestFixture, EmptyValueHandling) {
   // Set a non-empty value first
-  cvc::state::instance(test_ctx)("test.empty").value("nonempty");
+  cvc::state::instance(ctx)("test.empty").value("nonempty");
   // Then set to empty
-  cvc::state::instance(test_ctx)("test.empty").value("");
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.empty").value().empty());
+  cvc::state::instance(ctx)("test.empty").value("");
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.empty").value().empty());
   // Since we changed from non-empty to empty, initialized should be true
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.empty").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.empty").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, NestedPathCreation) {
+TEST_F(StateTestFixture, NestedPathCreation) {
   // Deep nesting should create intermediate nodes
-  cvc::state::instance(test_ctx)("test.very.deep.nested.path.value").value("deep");
+  cvc::state::instance(ctx)("test.very.deep.nested.path.value").value("deep");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.very.deep.nested.path.value").value(), "deep");
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.very.deep.nested.path.value").name(), "value");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.very.deep.nested.path.value").value(), "deep");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.very.deep.nested.path.value").name(), "value");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, RepeatedValueSetting) {
+TEST_F(StateTestFixture, RepeatedValueSetting) {
   // Setting same value multiple times
-  cvc::state::instance(test_ctx)("test.repeated").value("same");
-  boost::posix_time::ptime first = cvc::state::instance(test_ctx)("test.repeated").lastMod();
+  cvc::state::instance(ctx)("test.repeated").value("same");
+  boost::posix_time::ptime first = cvc::state::instance(ctx)("test.repeated").lastMod();
 
   // Setting same value shouldn't update lastMod
-  cvc::state::instance(test_ctx)("test.repeated").value("same");
-  boost::posix_time::ptime second = cvc::state::instance(test_ctx)("test.repeated").lastMod();
+  cvc::state::instance(ctx)("test.repeated").value("same");
+  boost::posix_time::ptime second = cvc::state::instance(ctx)("test.repeated").lastMod();
 
   EXPECT_EQ(first, second);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ValuesUniqueFlag) {
-  cvc::state::instance(test_ctx)("test.values.unique").value("a,b,a,c,b,d");
+TEST_F(StateTestFixture, ValuesUniqueFlag) {
+  cvc::state::instance(ctx)("test.values.unique").value("a,b,a,c,b,d");
 
   std::vector<std::string> unique_vals =
-      cvc::state::instance(test_ctx)("test.values.unique").values(true);
-  std::vector<std::string> all_vals =
-      cvc::state::instance(test_ctx)("test.values.unique").values(false);
+      cvc::state::instance(ctx)("test.values.unique").values(true);
+  std::vector<std::string> all_vals = cvc::state::instance(ctx)("test.values.unique").values(false);
 
   EXPECT_EQ(unique_vals.size(), 4); // a,b,c,d
   EXPECT_EQ(all_vals.size(), 6);    // a,b,a,c,b,d
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Signal Connection Tests
 // ===========================
 
-TEST(StateTest, ValueChangedSignal) {
+TEST_F(StateTestFixture, ValueChangedSignal) {
   bool signal_fired = false;
 
   auto connection =
-      cvc::state::instance(test_ctx)("test.signal.value").valueChanged.connect([&signal_fired]() {
+      cvc::state::instance(ctx)("test.signal.value").valueChanged.connect([&signal_fired]() {
         signal_fired = true;
       });
 
-  cvc::state::instance(test_ctx)("test.signal.value").value("trigger");
+  cvc::state::instance(ctx)("test.signal.value").value("trigger");
 
   EXPECT_TRUE(signal_fired);
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, DataChangedSignal) {
+TEST_F(StateTestFixture, DataChangedSignal) {
   bool signal_fired = false;
 
   auto connection =
-      cvc::state::instance(test_ctx)("test.signal.data").dataChanged.connect([&signal_fired]() {
+      cvc::state::instance(ctx)("test.signal.data").dataChanged.connect([&signal_fired]() {
         signal_fired = true;
       });
 
-  cvc::state::instance(test_ctx)("test.signal.data").data(42);
+  cvc::state::instance(ctx)("test.signal.data").data(42);
 
   EXPECT_TRUE(signal_fired);
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildChangedSignal) {
+TEST_F(StateTestFixture, ChildChangedSignal) {
   int signal_count = 0;
 
   auto connection =
-      cvc::state::instance(test_ctx)("test.signal.parent")
+      cvc::state::instance(ctx)("test.signal.parent")
           .childChanged.connect([&signal_count](const std::string &) { signal_count++; });
 
   // Create child state - should trigger parent's childChanged
-  cvc::state::instance(test_ctx)("test.signal.parent.child1").value("value1");
-  cvc::state::instance(test_ctx)("test.signal.parent.child2").value("value2");
+  cvc::state::instance(ctx)("test.signal.parent.child1").value("value1");
+  cvc::state::instance(ctx)("test.signal.parent.child2").value("value2");
 
   EXPECT_GT(signal_count, 0);
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildChangedSignalUsesRelativeName) {
+TEST_F(StateTestFixture, ChildChangedSignalUsesRelativeName) {
   // Regression test: childChanged signal should send relative name (e.g., "child"),
   // not full path (e.g., "test.parent.child")
   std::vector<std::string> received_names;
 
-  auto connection = cvc::state::instance(test_ctx)("test.parent")
+  auto connection = cvc::state::instance(ctx)("test.parent")
                         .childChanged.connect([&received_names](const std::string &childState) {
                           received_names.push_back(childState);
                         });
 
   // Modify child state - parent should receive just "child", not "test.parent.child"
-  cvc::state::instance(test_ctx)("test.parent.child").value("test_value");
+  cvc::state::instance(ctx)("test.parent.child").value("test_value");
 
   // Give signal time to fire
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
@@ -1062,260 +1049,259 @@ TEST(StateTest, ChildChangedSignalUsesRelativeName) {
       << "Expected relative name 'child', but got: '" << received_names[0] << "'";
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Deep Hierarchy Tests
 // ===========================
 
-TEST(StateTest, DeepHierarchyNavigation) {
+TEST_F(StateTestFixture, DeepHierarchyNavigation) {
   // Create deep nested structure
   std::string deep_path = "level1.level2.level3.level4.level5";
-  cvc::state::instance(test_ctx)(deep_path).value("deep_value");
+  cvc::state::instance(ctx)(deep_path).value("deep_value");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)(deep_path).value(), "deep_value");
-  EXPECT_EQ(cvc::state::instance(test_ctx)(deep_path).name(), "level5");
+  EXPECT_EQ(cvc::state::instance(ctx)(deep_path).value(), "deep_value");
+  EXPECT_EQ(cvc::state::instance(ctx)(deep_path).name(), "level5");
 
   // Test parent navigation
-  const state *level4 = cvc::state::instance(test_ctx)(deep_path).parent();
+  const state *level4 = cvc::state::instance(ctx)(deep_path).parent();
   ASSERT_NE(level4, nullptr);
   EXPECT_EQ(level4->name(), "level4");
 
   // Clean up
-  cvc::state::instance(test_ctx)("level1").reset();
+  cvc::state::instance(ctx)("level1").reset();
 }
 
-TEST(StateTest, OperatorChaining) {
+TEST_F(StateTestFixture, OperatorChaining) {
   // Test deep path traversal using operator()
-  cvc::state::instance(test_ctx)("chain")("a")("b")("c").value("chained");
+  cvc::state::instance(ctx)("chain")("a")("b")("c").value("chained");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("chain.a.b.c").value(), "chained");
+  EXPECT_EQ(cvc::state::instance(ctx)("chain.a.b.c").value(), "chained");
 
   // Clean up
-  cvc::state::instance(test_ctx)("chain").reset();
+  cvc::state::instance(ctx)("chain").reset();
 }
 
 // ===========================
 // Edge Case Path Tests
 // ===========================
 
-TEST(StateTest, EmptyKeyHandling) {
+TEST_F(StateTestFixture, EmptyKeyHandling) {
   // operator() with empty string should return self
-  state &self1 = cvc::state::instance(test_ctx)("test.empty.key");
-  state &self2 = cvc::state::instance(test_ctx)("test.empty.key")("");
+  state &self1 = cvc::state::instance(ctx)("test.empty.key");
+  state &self2 = cvc::state::instance(ctx)("test.empty.key")("");
 
   EXPECT_EQ(&self1, &self2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, SeparatorInPath) {
+TEST_F(StateTestFixture, SeparatorInPath) {
   // Test paths with multiple separators
-  cvc::state::instance(test_ctx)("test...multi...sep").value("multi_sep_value");
+  cvc::state::instance(ctx)("test...multi...sep").value("multi_sep_value");
 
-  EXPECT_EQ(cvc::state::instance(test_ctx)("test.multi.sep").value(), "multi_sep_value");
+  EXPECT_EQ(cvc::state::instance(ctx)("test.multi.sep").value(), "multi_sep_value");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Initialization Tests
 // ===========================
 
-TEST(StateTest, InitializedFlagBehavior) {
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.new").initialized());
+TEST_F(StateTestFixture, InitializedFlagBehavior) {
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.new").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.new").value("now_initialized");
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.init.new").initialized());
+  cvc::state::instance(ctx)("test.init.new").value("now_initialized");
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.init.new").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.new").reset();
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.new").initialized());
+  cvc::state::instance(ctx)("test.init.new").reset();
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.new").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, DataInitializesFlag) {
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.data").initialized());
+TEST_F(StateTestFixture, DataInitializesFlag) {
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.data").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.data").data(std::string("data_init"));
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.init.data").initialized());
+  cvc::state::instance(ctx)("test.init.data").data(std::string("data_init"));
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.init.data").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, CommentInitializesFlag) {
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.comment").initialized());
+TEST_F(StateTestFixture, CommentInitializesFlag) {
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.comment").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.comment").comment("test comment");
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.init.comment").initialized());
+  cvc::state::instance(ctx)("test.init.comment").comment("test comment");
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.init.comment").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, HiddenInitializesFlag) {
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.init.hidden").initialized());
+TEST_F(StateTestFixture, HiddenInitializesFlag) {
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.init.hidden").initialized());
 
-  cvc::state::instance(test_ctx)("test.init.hidden").hidden(true);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.init.hidden").initialized());
+  cvc::state::instance(ctx)("test.init.hidden").hidden(true);
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.init.hidden").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Children Recursion Tests
 // ===========================
 
-TEST(StateTest, ChildrenRecursiveListing) {
+TEST_F(StateTestFixture, ChildrenRecursiveListing) {
   // Create nested structure
-  cvc::state::instance(test_ctx)("test.recursive.a.a1").value("1");
-  cvc::state::instance(test_ctx)("test.recursive.a.a2").value("2");
-  cvc::state::instance(test_ctx)("test.recursive.b.b1").value("3");
-  cvc::state::instance(test_ctx)("test.recursive.b.b2.deep").value("4");
+  cvc::state::instance(ctx)("test.recursive.a.a1").value("1");
+  cvc::state::instance(ctx)("test.recursive.a.a2").value("2");
+  cvc::state::instance(ctx)("test.recursive.b.b1").value("3");
+  cvc::state::instance(ctx)("test.recursive.b.b2.deep").value("4");
 
   // Get all children recursively
-  std::vector<std::string> all_children =
-      cvc::state::instance(test_ctx)("test.recursive").children();
+  std::vector<std::string> all_children = cvc::state::instance(ctx)("test.recursive").children();
 
   // Should include nested children
   EXPECT_GT(all_children.size(), 2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Regex Children Filtering Tests
 // ===========================
 
-TEST(StateTest, ChildrenRegexMatching) {
-  cvc::state::instance(test_ctx)("test.regex2.alpha").value("a");
-  cvc::state::instance(test_ctx)("test.regex2.beta").value("b");
-  cvc::state::instance(test_ctx)("test.regex2.gamma").value("c");
-  cvc::state::instance(test_ctx)("test.regex2.delta").value("d");
+TEST_F(StateTestFixture, ChildrenRegexMatching) {
+  cvc::state::instance(ctx)("test.regex2.alpha").value("a");
+  cvc::state::instance(ctx)("test.regex2.beta").value("b");
+  cvc::state::instance(ctx)("test.regex2.gamma").value("c");
+  cvc::state::instance(ctx)("test.regex2.delta").value("d");
 
   // Try to get children with regex (may not work depending on implementation)
-  std::vector<std::string> all = cvc::state::instance(test_ctx)("test.regex2").children();
+  std::vector<std::string> all = cvc::state::instance(ctx)("test.regex2").children();
   EXPECT_GE(all.size(), 4);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, ChildrenEmptyRegex) {
-  cvc::state::instance(test_ctx)("test.noreg.x").value("1");
-  cvc::state::instance(test_ctx)("test.noreg.y").value("2");
+TEST_F(StateTestFixture, ChildrenEmptyRegex) {
+  cvc::state::instance(ctx)("test.noreg.x").value("1");
+  cvc::state::instance(ctx)("test.noreg.y").value("2");
 
   // Empty regex should return all children
-  std::vector<std::string> children = cvc::state::instance(test_ctx)("test.noreg").children("");
+  std::vector<std::string> children = cvc::state::instance(ctx)("test.noreg").children("");
   EXPECT_GE(children.size(), 2);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Value Type Tests
 // ===========================
 
-TEST(StateTest, ValueTypeLexicalCast) {
+TEST_F(StateTestFixture, ValueTypeLexicalCast) {
   // Test lexical cast for value retrieval
-  cvc::state::instance(test_ctx)("test.lexical.int").value(12345);
-  int val = cvc::state::instance(test_ctx)("test.lexical.int").value<int>();
+  cvc::state::instance(ctx)("test.lexical.int").value(12345);
+  int val = cvc::state::instance(ctx)("test.lexical.int").value<int>();
   EXPECT_EQ(val, 12345);
 
-  cvc::state::instance(test_ctx)("test.lexical.double").value(3.14159);
-  double dval = cvc::state::instance(test_ctx)("test.lexical.double").value<double>();
+  cvc::state::instance(ctx)("test.lexical.double").value(3.14159);
+  double dval = cvc::state::instance(ctx)("test.lexical.double").value<double>();
   EXPECT_NEAR(dval, 3.14159, 0.0001);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Reset Recursive Tests
 // ===========================
 
-TEST(StateTest, ResetRecursive) {
+TEST_F(StateTestFixture, ResetRecursive) {
   // Create hierarchy with values
-  cvc::state::instance(test_ctx)("test.reset.parent").value("parent_value");
-  cvc::state::instance(test_ctx)("test.reset.parent.child1").value("child1_value");
-  cvc::state::instance(test_ctx)("test.reset.parent.child2").value("child2_value");
-  cvc::state::instance(test_ctx)("test.reset.parent.child1").data(100);
+  cvc::state::instance(ctx)("test.reset.parent").value("parent_value");
+  cvc::state::instance(ctx)("test.reset.parent.child1").value("child1_value");
+  cvc::state::instance(ctx)("test.reset.parent.child2").value("child2_value");
+  cvc::state::instance(ctx)("test.reset.parent.child1").data(100);
 
   // Reset parent (should reset children too)
-  cvc::state::instance(test_ctx)("test.reset.parent").reset();
+  cvc::state::instance(ctx)("test.reset.parent").reset();
 
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset.parent").value().empty());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset.parent.child1").value().empty());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset.parent.child2").value().empty());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset.parent").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset.parent.child1").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset.parent").value().empty());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset.parent.child1").value().empty());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset.parent.child2").value().empty());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset.parent").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset.parent.child1").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Traversal Signal Tests
 // ===========================
 
-TEST(StateTest, TraversalEnterExitSignals) {
+TEST_F(StateTestFixture, TraversalEnterExitSignals) {
   int enter_count = 0;
   int exit_count = 0;
 
   auto enter_conn =
-      cvc::state::instance(test_ctx)("test.trav.signals").traverseEnter.connect([&enter_count]() {
+      cvc::state::instance(ctx)("test.trav.signals").traverseEnter.connect([&enter_count]() {
         enter_count++;
       });
 
   auto exit_conn =
-      cvc::state::instance(test_ctx)("test.trav.signals").traverseExit.connect([&exit_count]() {
+      cvc::state::instance(ctx)("test.trav.signals").traverseExit.connect([&exit_count]() {
         exit_count++;
       });
 
-  cvc::state::instance(test_ctx)("test.trav.signals.a").value("1");
-  cvc::state::instance(test_ctx)("test.trav.signals.b").value("2");
+  cvc::state::instance(ctx)("test.trav.signals.a").value("1");
+  cvc::state::instance(ctx)("test.trav.signals.b").value("2");
 
   state::traversal_unary_func noop = [](std::string) {};
-  cvc::state::instance(test_ctx)("test.trav.signals").traverse(noop);
+  cvc::state::instance(ctx)("test.trav.signals").traverse(noop);
 
   EXPECT_GT(enter_count, 0);
   EXPECT_GT(exit_count, 0);
 
   enter_conn.disconnect();
   exit_conn.disconnect();
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Full Name Tests
 // ===========================
 
-TEST(StateTest, FullNameConstruction) {
-  cvc::state::instance(test_ctx)("fullname.test.deep.path").value("test");
+TEST_F(StateTestFixture, FullNameConstruction) {
+  cvc::state::instance(ctx)("fullname.test.deep.path").value("test");
 
-  std::string full = cvc::state::instance(test_ctx)("fullname.test.deep.path").fullName();
+  std::string full = cvc::state::instance(ctx)("fullname.test.deep.path").fullName();
   EXPECT_EQ(full, "fullname.test.deep.path");
 
-  std::string parent_full = cvc::state::instance(test_ctx)("fullname.test.deep").fullName();
+  std::string parent_full = cvc::state::instance(ctx)("fullname.test.deep").fullName();
   EXPECT_EQ(parent_full, "fullname.test.deep");
 
   // Clean up
-  cvc::state::instance(test_ctx)("fullname").reset();
+  cvc::state::instance(ctx)("fullname").reset();
 }
 
 // ===========================
 // On Startup Tests
 // ===========================
 
-TEST(StateTest, OnStartupRegistration) {
+TEST_F(StateTestFixture, OnStartupRegistration) {
   bool startup_called = false;
 
   state::on_startup(state::nullary_func([&startup_called]() { startup_called = true; }));
@@ -1330,34 +1316,34 @@ TEST(StateTest, OnStartupRegistration) {
 // IsData Template Tests
 // ===========================
 
-TEST(StateTest, IsDataTemplateMethod) {
-  cvc::state::instance(test_ctx)("test.isdata.int").data(42);
+TEST_F(StateTestFixture, IsDataTemplateMethod) {
+  cvc::state::instance(ctx)("test.isdata.int").data(42);
 
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.isdata.int").isData<int>());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.isdata.int").isData<std::string>());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.isdata.int").isData<double>());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.isdata.int").isData<int>());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.isdata.int").isData<std::string>());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.isdata.int").isData<double>());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
-TEST(StateTest, IsDataWithException) {
+TEST_F(StateTestFixture, IsDataWithException) {
   // State with no data
-  cvc::state::instance(test_ctx)("test.nodata").value("just_a_value");
+  cvc::state::instance(ctx)("test.nodata").value("just_a_value");
 
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.nodata").isData<int>());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.nodata").isData<int>());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test").reset();
+  cvc::state::instance(ctx)("test").reset();
 }
 
 // ===========================
 // Multithreaded Tests
 // ===========================
 
-TEST(StateTest, ConcurrentValueReads) {
+TEST_F(StateTestFixture, ConcurrentValueReads) {
   // Set up initial state
-  cvc::state::instance(test_ctx)("test.concurrent.reads").value("initial_value");
+  cvc::state::instance(ctx)("test.concurrent.reads").value("initial_value");
 
   const int num_threads = 10;
   const int reads_per_thread = 100;
@@ -1366,10 +1352,10 @@ TEST(StateTest, ConcurrentValueReads) {
 
   // Launch multiple threads that read the same state
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&successful_reads, reads_per_thread]() {
+    threads.emplace_back([&successful_reads, reads_per_thread, this]() {
       for (int j = 0; j < reads_per_thread; ++j) {
         try {
-          std::string val = cvc::state::instance(test_ctx)("test.concurrent.reads").value();
+          std::string val = cvc::state::instance(ctx)("test.concurrent.reads").value();
           if (!val.empty()) {
             successful_reads++;
           }
@@ -1390,10 +1376,10 @@ TEST(StateTest, ConcurrentValueReads) {
   EXPECT_EQ(successful_reads.load(), num_threads * reads_per_thread);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentValueWrites) {
+TEST_F(StateTestFixture, ConcurrentValueWrites) {
   // Multiple threads writing to different state nodes
   const int num_threads = 10;
   const int writes_per_thread = 50;
@@ -1402,12 +1388,12 @@ TEST(StateTest, ConcurrentValueWrites) {
 
   // Each thread writes to its own state node
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([i, &successful_writes, writes_per_thread]() {
+    threads.emplace_back([i, &successful_writes, writes_per_thread, this]() {
       std::string key = "test.concurrent.writes.thread" + boost::lexical_cast<std::string>(i);
       for (int j = 0; j < writes_per_thread; ++j) {
         try {
           std::string val = "value_" + boost::lexical_cast<std::string>(j);
-          cvc::state::instance(test_ctx)(key).value(val);
+          cvc::state::instance(ctx)(key).value(val);
           successful_writes++;
         } catch (...) {
           FAIL() << "Exception during concurrent write";
@@ -1427,30 +1413,30 @@ TEST(StateTest, ConcurrentValueWrites) {
   for (int i = 0; i < num_threads; ++i) {
     std::string key = "test.concurrent.writes.thread" + boost::lexical_cast<std::string>(i);
     std::string expected = "value_" + boost::lexical_cast<std::string>(writes_per_thread - 1);
-    EXPECT_EQ(cvc::state::instance(test_ctx)(key).value(), expected);
+    EXPECT_EQ(cvc::state::instance(ctx)(key).value(), expected);
   }
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentWritesToSameNode) {
+TEST_F(StateTestFixture, ConcurrentWritesToSameNode) {
   // Multiple threads writing to the SAME state node (high contention)
   const int num_threads = 20;
   const int writes_per_thread = 100;
   std::atomic<int> total_writes(0);
   std::vector<boost::thread> threads;
 
-  cvc::state::instance(test_ctx)("test.concurrent.contention").value("initial");
+  cvc::state::instance(ctx)("test.concurrent.contention").value("initial");
 
   // All threads write to the same node
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([i, &total_writes, writes_per_thread]() {
+    threads.emplace_back([i, &total_writes, writes_per_thread, this]() {
       for (int j = 0; j < writes_per_thread; ++j) {
         try {
           std::string val = "thread" + boost::lexical_cast<std::string>(i) + "_write" +
                             boost::lexical_cast<std::string>(j);
-          cvc::state::instance(test_ctx)("test.concurrent.contention").value(val);
+          cvc::state::instance(ctx)("test.concurrent.contention").value(val);
           total_writes++;
         } catch (...) {
           FAIL() << "Exception during high-contention write";
@@ -1467,15 +1453,15 @@ TEST(StateTest, ConcurrentWritesToSameNode) {
   EXPECT_EQ(total_writes.load(), num_threads * writes_per_thread);
 
   // The final value should be from one of the threads
-  std::string final_value = cvc::state::instance(test_ctx)("test.concurrent.contention").value();
+  std::string final_value = cvc::state::instance(ctx)("test.concurrent.contention").value();
   EXPECT_FALSE(final_value.empty());
   EXPECT_NE(final_value, "initial");
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentDataOperations) {
+TEST_F(StateTestFixture, ConcurrentDataOperations) {
   // Test concurrent data() reads and writes
   const int num_threads = 8;
   std::vector<boost::thread> threads;
@@ -1486,11 +1472,11 @@ TEST(StateTest, ConcurrentDataOperations) {
   for (int i = 0; i < num_threads; ++i) {
     if (i % 2 == 0) {
       // Writer thread
-      threads.emplace_back([i, &data_set_count]() {
+      threads.emplace_back([i, &data_set_count, this]() {
         std::string key = "test.concurrent.data.writer" + boost::lexical_cast<std::string>(i);
         for (int j = 0; j < 50; ++j) {
           try {
-            cvc::state::instance(test_ctx)(key).data(j * 100 + i);
+            cvc::state::instance(ctx)(key).data(j * 100 + i);
             data_set_count++;
           } catch (...) {
             FAIL() << "Exception during concurrent data write";
@@ -1499,13 +1485,13 @@ TEST(StateTest, ConcurrentDataOperations) {
       });
     } else {
       // Reader thread
-      threads.emplace_back([i, &data_read_count]() {
+      threads.emplace_back([i, &data_read_count, this]() {
         std::string key = "test.concurrent.data.writer" + boost::lexical_cast<std::string>(i - 1);
         for (int j = 0; j < 50; ++j) {
           try {
             // May or may not have data yet, but shouldn't crash
-            if (cvc::state::instance(test_ctx)(key).isData<int>()) {
-              int val = cvc::state::instance(test_ctx)(key).data<int>();
+            if (cvc::state::instance(ctx)(key).isData<int>()) {
+              int val = cvc::state::instance(ctx)(key).data<int>();
               (void)val; // Suppress unused warning
               data_read_count++;
             }
@@ -1526,17 +1512,17 @@ TEST(StateTest, ConcurrentDataOperations) {
   EXPECT_GT(data_read_count.load(), 0);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentSignalHandling) {
+TEST_F(StateTestFixture, ConcurrentSignalHandling) {
   // Test that signals fire correctly under concurrent modifications
   std::atomic<int> signal_count(0);
   boost::mutex signal_mutex;
   std::vector<std::string> signal_paths;
 
   // Connect to childChanged signal
-  auto connection = cvc::state::instance(test_ctx)("test.concurrent.signals")
+  auto connection = cvc::state::instance(ctx)("test.concurrent.signals")
                         .childChanged.connect(
                             [&signal_count, &signal_mutex, &signal_paths](const std::string &path) {
                               signal_count++;
@@ -1550,11 +1536,11 @@ TEST(StateTest, ConcurrentSignalHandling) {
 
   // Multiple threads creating children
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([i, ops_per_thread]() {
+    threads.emplace_back([i, ops_per_thread, this]() {
       for (int j = 0; j < ops_per_thread; ++j) {
         std::string key = "test.concurrent.signals.child" + boost::lexical_cast<std::string>(i) +
                           "." + boost::lexical_cast<std::string>(j);
-        cvc::state::instance(test_ctx)(key).value("signal_test");
+        cvc::state::instance(ctx)(key).value("signal_test");
       }
     });
   }
@@ -1570,10 +1556,10 @@ TEST(StateTest, ConcurrentSignalHandling) {
   EXPECT_GT(signal_count.load(), 0);
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentHierarchyCreation) {
+TEST_F(StateTestFixture, ConcurrentHierarchyCreation) {
   // Test concurrent creation of deep hierarchies
   const int num_threads = 8;
   const int depth = 5;
@@ -1581,15 +1567,14 @@ TEST(StateTest, ConcurrentHierarchyCreation) {
   std::vector<boost::thread> threads;
 
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([i, depth, &nodes_created]() {
+    threads.emplace_back([i, depth, &nodes_created, this]() {
       std::string base = "test.concurrent.hierarchy.branch" + boost::lexical_cast<std::string>(i);
       std::string path = base;
 
       for (int d = 0; d < depth; ++d) {
         path += ".level" + boost::lexical_cast<std::string>(d);
         try {
-          cvc::state::instance(test_ctx)(path).value("depth_" +
-                                                     boost::lexical_cast<std::string>(d));
+          cvc::state::instance(ctx)(path).value("depth_" + boost::lexical_cast<std::string>(d));
           nodes_created++;
         } catch (...) {
           FAIL() << "Exception during hierarchy creation";
@@ -1607,20 +1592,20 @@ TEST(StateTest, ConcurrentHierarchyCreation) {
   // Verify hierarchies exist
   for (int i = 0; i < num_threads; ++i) {
     std::string base = "test.concurrent.hierarchy.branch" + boost::lexical_cast<std::string>(i);
-    size_t children = cvc::state::instance(test_ctx)(base).numChildren();
+    size_t children = cvc::state::instance(ctx)(base).numChildren();
     EXPECT_GE(children, 1);
   }
 
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentTraversal) {
+TEST_F(StateTestFixture, ConcurrentTraversal) {
   // Set up a tree structure
   for (int i = 0; i < 5; ++i) {
     for (int j = 0; j < 3; ++j) {
       std::string key = "test.concurrent.traversal.parent" + boost::lexical_cast<std::string>(i) +
                         ".child" + boost::lexical_cast<std::string>(j);
-      cvc::state::instance(test_ctx)(key).value("traverse_me");
+      cvc::state::instance(ctx)(key).value("traverse_me");
     }
   }
 
@@ -1631,10 +1616,10 @@ TEST(StateTest, ConcurrentTraversal) {
 
   // Traversal threads
   for (int i = 0; i < 4; ++i) {
-    threads.emplace_back([&traverse_count, &stop_flag]() {
+    threads.emplace_back([&traverse_count, &stop_flag, this]() {
       while (!stop_flag.load()) {
         try {
-          cvc::state::instance(test_ctx)("test.concurrent.traversal")
+          cvc::state::instance(ctx)("test.concurrent.traversal")
               .traverse([&traverse_count](std::string) { traverse_count++; });
         } catch (...) {
           FAIL() << "Exception during concurrent traversal";
@@ -1645,10 +1630,10 @@ TEST(StateTest, ConcurrentTraversal) {
   }
 
   // Modifier thread
-  threads.emplace_back([&stop_flag]() {
+  threads.emplace_back([&stop_flag, this]() {
     for (int i = 0; i < 10; ++i) {
       std::string key = "test.concurrent.traversal.newnode" + boost::lexical_cast<std::string>(i);
-      cvc::state::instance(test_ctx)(key).value("new");
+      cvc::state::instance(ctx)(key).value("new");
       boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
     }
     stop_flag.store(true);
@@ -1660,10 +1645,10 @@ TEST(StateTest, ConcurrentTraversal) {
 
   EXPECT_GT(traverse_count.load(), 0);
 
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentResetOperations) {
+TEST_F(StateTestFixture, ConcurrentResetOperations) {
   // Test reset() under concurrent access
   const int num_threads = 6;
   std::vector<boost::thread> threads;
@@ -1671,8 +1656,7 @@ TEST(StateTest, ConcurrentResetOperations) {
 
   // Populate initial state
   for (int i = 0; i < 20; ++i) {
-    cvc::state::instance(test_ctx)("test.concurrent.reset.item" +
-                                   boost::lexical_cast<std::string>(i))
+    cvc::state::instance(ctx)("test.concurrent.reset.item" + boost::lexical_cast<std::string>(i))
         .value("data");
   }
 
@@ -1680,10 +1664,10 @@ TEST(StateTest, ConcurrentResetOperations) {
   for (int i = 0; i < num_threads; ++i) {
     if (i % 3 == 0) {
       // Reset thread
-      threads.emplace_back([&reset_count]() {
+      threads.emplace_back([&reset_count, this]() {
         for (int j = 0; j < 5; ++j) {
           try {
-            cvc::state::instance(test_ctx)("test.concurrent.reset").reset();
+            cvc::state::instance(ctx)("test.concurrent.reset").reset();
             reset_count++;
             boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
           } catch (...) {
@@ -1693,13 +1677,12 @@ TEST(StateTest, ConcurrentResetOperations) {
       });
     } else {
       // Read/Write thread
-      threads.emplace_back([i]() {
+      threads.emplace_back([i, this]() {
         for (int j = 0; j < 20; ++j) {
           try {
             std::string key = "test.concurrent.reset.item" + boost::lexical_cast<std::string>(j);
-            cvc::state::instance(test_ctx)(key).value("updated_" +
-                                                      boost::lexical_cast<std::string>(i));
-            std::string val = cvc::state::instance(test_ctx)(key).value();
+            cvc::state::instance(ctx)(key).value("updated_" + boost::lexical_cast<std::string>(i));
+            std::string val = cvc::state::instance(ctx)(key).value();
             (void)val;
           } catch (...) {
             // May fail if reset happens - that's okay
@@ -1716,10 +1699,10 @@ TEST(StateTest, ConcurrentResetOperations) {
 
   EXPECT_GT(reset_count.load(), 0);
 
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, ConcurrentPropertyTreeOperations) {
+TEST_F(StateTestFixture, ConcurrentPropertyTreeOperations) {
   // Test ptree() and json() operations under concurrent modifications
   std::atomic<int> ptree_ops(0);
   std::atomic<int> json_ops(0);
@@ -1727,8 +1710,7 @@ TEST(StateTest, ConcurrentPropertyTreeOperations) {
 
   // Set up initial state
   for (int i = 0; i < 10; ++i) {
-    cvc::state::instance(test_ctx)("test.concurrent.ptree.item" +
-                                   boost::lexical_cast<std::string>(i))
+    cvc::state::instance(ctx)("test.concurrent.ptree.item" + boost::lexical_cast<std::string>(i))
         .value("value" + boost::lexical_cast<std::string>(i));
   }
 
@@ -1737,13 +1719,13 @@ TEST(StateTest, ConcurrentPropertyTreeOperations) {
   for (int i = 0; i < num_threads; ++i) {
     if (i % 2 == 0) {
       // Serialize threads
-      threads.emplace_back([&ptree_ops, &json_ops]() {
+      threads.emplace_back([&ptree_ops, &json_ops, this]() {
         for (int j = 0; j < 10; ++j) {
           try {
-            auto pt = cvc::state::instance(test_ctx)("test.concurrent.ptree").ptree();
+            auto pt = cvc::state::instance(ctx)("test.concurrent.ptree").ptree();
             ptree_ops++;
 
-            std::string json_str = cvc::state::instance(test_ctx)("test.concurrent.ptree").json();
+            std::string json_str = cvc::state::instance(ctx)("test.concurrent.ptree").json();
             if (!json_str.empty()) {
               json_ops++;
             }
@@ -1755,14 +1737,13 @@ TEST(StateTest, ConcurrentPropertyTreeOperations) {
       });
     } else {
       // Modification threads
-      threads.emplace_back([i]() {
+      threads.emplace_back([i, this]() {
         for (int j = 0; j < 20; ++j) {
           try {
             std::string key =
                 "test.concurrent.ptree.item" + boost::lexical_cast<std::string>(j % 10);
-            cvc::state::instance(test_ctx)(key).value("thread" +
-                                                      boost::lexical_cast<std::string>(i) + "_" +
-                                                      boost::lexical_cast<std::string>(j));
+            cvc::state::instance(ctx)(key).value("thread" + boost::lexical_cast<std::string>(i) +
+                                                 "_" + boost::lexical_cast<std::string>(j));
           } catch (...) {
             FAIL() << "Exception during modification";
           }
@@ -1779,33 +1760,32 @@ TEST(StateTest, ConcurrentPropertyTreeOperations) {
   EXPECT_GT(ptree_ops.load(), 0);
   EXPECT_GT(json_ops.load(), 0);
 
-  cvc::state::instance(test_ctx)("test.concurrent").reset();
+  cvc::state::instance(ctx)("test.concurrent").reset();
 }
 
-TEST(StateTest, DeadlockDetectionValueAndSignal) {
+TEST_F(StateTestFixture, DeadlockDetectionValueAndSignal) {
   // Test for potential deadlock between value changes and signal handlers
   std::atomic<int> signal_fires(0);
   std::atomic<bool> deadlock_detected(false);
   boost::mutex test_mutex;
 
-  auto connection =
-      cvc::state::instance(test_ctx)("test.deadlock.node").valueChanged.connect([&]() {
-        signal_fires++;
-        // Try to access state from within signal handler
-        try {
-          std::string val = cvc::state::instance(test_ctx)("test.deadlock.node").value();
-          boost::mutex::scoped_lock lock(test_mutex);
-          cvc::state::instance(test_ctx)("test.deadlock.counter")
-              .value(boost::lexical_cast<std::string>(signal_fires.load()));
-        } catch (...) {
-          deadlock_detected.store(true);
-        }
-      });
+  auto connection = cvc::state::instance(ctx)("test.deadlock.node").valueChanged.connect([&]() {
+    signal_fires++;
+    // Try to access state from within signal handler
+    try {
+      std::string val = cvc::state::instance(ctx)("test.deadlock.node").value();
+      boost::mutex::scoped_lock lock(test_mutex);
+      cvc::state::instance(ctx)("test.deadlock.counter")
+          .value(boost::lexical_cast<std::string>(signal_fires.load()));
+    } catch (...) {
+      deadlock_detected.store(true);
+    }
+  });
 
   // Rapidly change value
-  boost::thread writer([&deadlock_detected]() {
+  boost::thread writer([&deadlock_detected, this]() {
     for (int i = 0; i < 50 && !deadlock_detected.load(); ++i) {
-      cvc::state::instance(test_ctx)("test.deadlock.node")
+      cvc::state::instance(ctx)("test.deadlock.node")
           .value("iteration_" + boost::lexical_cast<std::string>(i));
       boost::this_thread::sleep_for(boost::chrono::milliseconds(2));
     }
@@ -1824,7 +1804,7 @@ TEST(StateTest, DeadlockDetectionValueAndSignal) {
   EXPECT_GT(signal_fires.load(), 0);
 
   connection.disconnect();
-  cvc::state::instance(test_ctx)("test.deadlock").reset();
+  cvc::state::instance(ctx)("test.deadlock").reset();
 }
 
 // ===========================
@@ -2628,7 +2608,7 @@ TEST_F(StateObjectFixture, StateObjectAsyncHandlers) {
   EXPECT_GT(finalCount, initialCount);
 }
 
-TEST(StateTest, StressTestCombinedOperations) {
+TEST_F(StateTestFixture, StressTestCombinedOperations) {
   // Stress test combining multiple operations
   const int duration_ms = 1000; // Run for 1 second
   std::atomic<bool> stop_flag(false);
@@ -2637,15 +2617,15 @@ TEST(StateTest, StressTestCombinedOperations) {
 
   // Writer threads
   for (int i = 0; i < 3; ++i) {
-    threads.emplace_back([i, &stop_flag, &total_ops]() {
+    threads.emplace_back([i, &stop_flag, &total_ops, this]() {
       int ops = 0;
       while (!stop_flag.load()) {
         try {
           std::string key = "test.stress.writer" + boost::lexical_cast<std::string>(i);
-          cvc::state::instance(test_ctx)(key).value("val_" + boost::lexical_cast<std::string>(ops));
-          cvc::state::instance(test_ctx)(key).data(ops);
-          cvc::state::instance(test_ctx)(key).comment("comment_" +
-                                                      boost::lexical_cast<std::string>(ops));
+          cvc::state::instance(ctx)(key).value("val_" + boost::lexical_cast<std::string>(ops));
+          cvc::state::instance(ctx)(key).data(ops);
+          cvc::state::instance(ctx)(key).comment("comment_" +
+                                                 boost::lexical_cast<std::string>(ops));
           ops++;
         } catch (...) {
           FAIL() << "Exception in writer thread";
@@ -2657,14 +2637,14 @@ TEST(StateTest, StressTestCombinedOperations) {
 
   // Reader threads
   for (int i = 0; i < 3; ++i) {
-    threads.emplace_back([i, &stop_flag, &total_ops]() {
+    threads.emplace_back([i, &stop_flag, &total_ops, this]() {
       int ops = 0;
       while (!stop_flag.load()) {
         try {
           std::string key = "test.stress.writer" + boost::lexical_cast<std::string>(i % 3);
-          std::string val = cvc::state::instance(test_ctx)(key).value();
-          if (cvc::state::instance(test_ctx)(key).isData<int>()) {
-            int data = cvc::state::instance(test_ctx)(key).data<int>();
+          std::string val = cvc::state::instance(ctx)(key).value();
+          if (cvc::state::instance(ctx)(key).isData<int>()) {
+            int data = cvc::state::instance(ctx)(key).data<int>();
             (void)data;
           }
           ops++;
@@ -2677,11 +2657,11 @@ TEST(StateTest, StressTestCombinedOperations) {
   }
 
   // Traversal thread
-  threads.emplace_back([&stop_flag, &total_ops]() {
+  threads.emplace_back([this, &stop_flag, &total_ops]() {
     int ops = 0;
     while (!stop_flag.load()) {
       try {
-        cvc::state::instance(test_ctx)("test.stress").traverse([](std::string) {});
+        cvc::state::instance(ctx)("test.stress").traverse([this](std::string) {});
         ops++;
       } catch (...) {
         FAIL() << "Exception in traversal thread";
@@ -2703,10 +2683,10 @@ TEST(StateTest, StressTestCombinedOperations) {
   EXPECT_GT(total_ops.load(), 0);
   std::cout << "Stress test completed " << total_ops.load() << " operations without deadlock\n";
 
-  cvc::state::instance(test_ctx)("test.stress").reset();
+  cvc::state::instance(ctx)("test.stress").reset();
 }
 
-TEST(StateTest, StressTestHierarchyRaceConditions) {
+TEST_F(StateTestFixture, StressTestHierarchyRaceConditions) {
   // Aggressive stress test to expose race conditions in hierarchy management
   // Tests concurrent creation, deletion, modification of parent/child relationships
   const int duration_ms = 2000; // Run for 2 seconds
@@ -2726,13 +2706,13 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
       try {
         for (int p = 0; p < num_parents; ++p) {
           std::string parent = "test.hierarchy.parent" + boost::lexical_cast<std::string>(p);
-          cvc::state::instance(test_ctx)(parent).value("parent_value");
+          cvc::state::instance(ctx)(parent).value("parent_value");
 
           for (int c = 0; c < children_per_parent; ++c) {
             std::string child = parent + ".child" + boost::lexical_cast<std::string>(c);
-            cvc::state::instance(test_ctx)(child).value("child_value_" +
-                                                        boost::lexical_cast<std::string>(ops));
-            cvc::state::instance(test_ctx)(child).data(ops);
+            cvc::state::instance(ctx)(child).value("child_value_" +
+                                                   boost::lexical_cast<std::string>(ops));
+            cvc::state::instance(ctx)(child).data(ops);
             ops++;
           }
         }
@@ -2750,7 +2730,7 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
       try {
         for (int p = 0; p < num_parents; ++p) {
           std::string parent = "test.hierarchy.parent" + boost::lexical_cast<std::string>(p);
-          cvc::state::instance(test_ctx)(parent).reset(); // Should clean up all children
+          cvc::state::instance(ctx)(parent).reset(); // Should clean up all children
           ops++;
         }
         boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
@@ -2766,9 +2746,9 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
     int ops = 0;
     while (!stop_flag.load()) {
       try {
-        cvc::state::instance(test_ctx)("test.hierarchy").traverse([](std::string key) {
+        cvc::state::instance(ctx)("test.hierarchy").traverse([this](std::string key) {
           // Try to access each node during traversal
-          cvc::state::instance(test_ctx)(key).value();
+          cvc::state::instance(ctx)(key).value();
         });
         ops++;
       } catch (...) {
@@ -2790,14 +2770,13 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
                             ".child" + boost::lexical_cast<std::string>(c);
 
         // Write
-        cvc::state::instance(test_ctx)(child).value("updated_" +
-                                                    boost::lexical_cast<std::string>(ops));
-        cvc::state::instance(test_ctx)(child).data(ops * 2);
+        cvc::state::instance(ctx)(child).value("updated_" + boost::lexical_cast<std::string>(ops));
+        cvc::state::instance(ctx)(child).data(ops * 2);
 
         // Read back
-        std::string val = cvc::state::instance(test_ctx)(child).value();
-        if (cvc::state::instance(test_ctx)(child).isData<int>()) {
-          int data = cvc::state::instance(test_ctx)(child).data<int>();
+        std::string val = cvc::state::instance(ctx)(child).value();
+        if (cvc::state::instance(ctx)(child).isData<int>()) {
+          int data = cvc::state::instance(ctx)(child).data<int>();
           (void)data;
         }
         ops++;
@@ -2818,11 +2797,11 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
         // Create hierarchy
         for (int i = 0; i < 5; ++i) {
           std::string path = base + ".level1.level2.node" + boost::lexical_cast<std::string>(i);
-          cvc::state::instance(test_ctx)(path).value("deep_value");
+          cvc::state::instance(ctx)(path).value("deep_value");
         }
 
         // Destroy it
-        cvc::state::instance(test_ctx)(base).reset();
+        cvc::state::instance(ctx)(base).reset();
         ops++;
       } catch (...) {
         hierarchy_errors++;
@@ -2841,13 +2820,13 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
           std::string parent = "test.hierarchy.parent" + boost::lexical_cast<std::string>(p);
 
           // Get children list
-          std::vector<std::string> children = cvc::state::instance(test_ctx)(parent).children();
+          std::vector<std::string> children = cvc::state::instance(ctx)(parent).children();
 
           // Verify we can access each child
           for (const auto &child : children) {
             try {
-              std::string fullName = cvc::state::instance(test_ctx)(child).fullName();
-              std::string parentName = cvc::state::instance(test_ctx)(child).parentName();
+              std::string fullName = cvc::state::instance(ctx)(child).fullName();
+              std::string parentName = cvc::state::instance(ctx)(child).parentName();
 
               // Check parent/child relationship
               if (parentName != parent) {
@@ -2875,11 +2854,11 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
       try {
         for (int p = 0; p < num_parents; ++p) {
           std::string parent = "test.hierarchy.parent" + boost::lexical_cast<std::string>(p);
-          cvc::state::instance(test_ctx)(parent).value("modified_" +
-                                                       boost::lexical_cast<std::string>(ops));
-          cvc::state::instance(test_ctx)(parent).comment("comment_" +
-                                                         boost::lexical_cast<std::string>(ops));
-          cvc::state::instance(test_ctx)(parent).data(ops);
+          cvc::state::instance(ctx)(parent).value("modified_" +
+                                                  boost::lexical_cast<std::string>(ops));
+          cvc::state::instance(ctx)(parent).comment("comment_" +
+                                                    boost::lexical_cast<std::string>(ops));
+          cvc::state::instance(ctx)(parent).data(ops);
           ops++;
         }
       } catch (...) {
@@ -2904,8 +2883,8 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
                 std::string path = root + ".l1_" + boost::lexical_cast<std::string>(l1) + ".l2_" +
                                    boost::lexical_cast<std::string>(l2) + ".l3_" +
                                    boost::lexical_cast<std::string>(l3);
-                cvc::state::instance(test_ctx)(path).value("deep_" +
-                                                           boost::lexical_cast<std::string>(ops));
+                cvc::state::instance(ctx)(path).value("deep_" +
+                                                      boost::lexical_cast<std::string>(ops));
                 ops++;
               }
             }
@@ -2913,7 +2892,7 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
 
           // Reset entire hierarchy
           if (ops % 20 == 0) {
-            cvc::state::instance(test_ctx)(root).reset();
+            cvc::state::instance(ctx)(root).reset();
           }
         }
       } catch (...) {
@@ -2929,16 +2908,16 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
     while (!stop_flag.load()) {
       try {
         // Check that all accessible children have valid parents
-        cvc::state::instance(test_ctx)("test.hierarchy").traverse([&](std::string key) {
+        cvc::state::instance(ctx)("test.hierarchy").traverse([&](std::string key) {
           try {
-            std::string parent = cvc::state::instance(test_ctx)(key).parentName();
+            std::string parent = cvc::state::instance(ctx)(key).parentName();
             if (!parent.empty() && parent != "test.hierarchy") {
               // Parent should be accessible
-              std::string parent_value = cvc::state::instance(test_ctx)(parent).value();
+              std::string parent_value = cvc::state::instance(ctx)(parent).value();
               (void)parent_value;
 
               // This node should be in parent's children list
-              std::vector<std::string> siblings = cvc::state::instance(test_ctx)(parent).children();
+              std::vector<std::string> siblings = cvc::state::instance(ctx)(parent).children();
               bool found = false;
               for (const auto &sibling : siblings) {
                 if (sibling == key) {
@@ -2977,18 +2956,16 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
         std::string childB = parentB + "." + child_name;
 
         // Create under parent A
-        cvc::state::instance(test_ctx)(childA).value("under_A_" +
-                                                     boost::lexical_cast<std::string>(ops));
-        cvc::state::instance(test_ctx)(childA).data(ops);
+        cvc::state::instance(ctx)(childA).value("under_A_" + boost::lexical_cast<std::string>(ops));
+        cvc::state::instance(ctx)(childA).data(ops);
 
         // Try to create same-named child under parent B
-        cvc::state::instance(test_ctx)(childB).value("under_B_" +
-                                                     boost::lexical_cast<std::string>(ops));
-        cvc::state::instance(test_ctx)(childB).data(ops + 1000);
+        cvc::state::instance(ctx)(childB).value("under_B_" + boost::lexical_cast<std::string>(ops));
+        cvc::state::instance(ctx)(childB).data(ops + 1000);
 
         // Verify both exist independently
-        std::string valA = cvc::state::instance(test_ctx)(childA).value();
-        std::string valB = cvc::state::instance(test_ctx)(childB).value();
+        std::string valA = cvc::state::instance(ctx)(childA).value();
+        std::string valB = cvc::state::instance(ctx)(childB).value();
         (void)valA;
         (void)valB;
 
@@ -3024,14 +3001,14 @@ TEST(StateTest, StressTestHierarchyRaceConditions) {
             << (orphan_errors.load() == 0 ? "PERFECT" : "ACCEPTABLE (concurrent modifications)")
             << "\n";
 
-  cvc::state::instance(test_ctx)("test.hierarchy").reset();
+  cvc::state::instance(ctx)("test.hierarchy").reset();
 }
 
 // ===========================
 // Performance Tests
 // ===========================
 
-TEST(StateTest, PerformanceHierarchyBenchmark) {
+TEST_F(StateTestFixture, PerformanceHierarchyBenchmark) {
   if (!enable_stress_tests) {
     GTEST_SKIP() << "Stress test disabled. Use --enable-stress-tests to run.";
   }
@@ -3067,7 +3044,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
     std::string key = "perf.test.L" + boost::lexical_cast<std::string>(level) + ".B" +
                       boost::lexical_cast<std::string>(branch) + ".item" +
                       boost::lexical_cast<std::string>(i);
-    cvc::state::instance(test_ctx)(key).value(i);
+    cvc::state::instance(ctx)(key).value(i);
     total_data_size += sizeof(int);
     operations_completed++;
 
@@ -3096,7 +3073,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
     std::string key = "perf.test.L" + boost::lexical_cast<std::string>(level) + ".B" +
                       boost::lexical_cast<std::string>(branch) + ".item" +
                       boost::lexical_cast<std::string>(i);
-    int val = cvc::state::instance(test_ctx)(key).value<int>();
+    int val = cvc::state::instance(ctx)(key).value<int>();
     ASSERT_EQ(val, i);
     operations_completed++;
 
@@ -3122,7 +3099,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
     std::string key = "perf.strings.item" + boost::lexical_cast<std::string>(i);
     std::string value = "String_" + boost::lexical_cast<std::string>(i) + "_" +
                         std::string(i % 100, 'x'); // Variable length
-    cvc::state::instance(test_ctx)(key).value(value);
+    cvc::state::instance(ctx)(key).value(value);
     total_data_size += value.size();
     operations_completed++;
 
@@ -3148,7 +3125,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
     std::string key = "perf.strings.item" + boost::lexical_cast<std::string>(i);
     std::string expected =
         "String_" + boost::lexical_cast<std::string>(i) + "_" + std::string(i % 100, 'x');
-    std::string val = cvc::state::instance(test_ctx)(key).value();
+    std::string val = cvc::state::instance(ctx)(key).value();
     ASSERT_EQ(val, expected);
     operations_completed++;
 
@@ -3178,7 +3155,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
         list_value += ",";
       list_value += boost::lexical_cast<std::string>(i * 10 + j);
     }
-    cvc::state::instance(test_ctx)(key).value(list_value);
+    cvc::state::instance(ctx)(key).value(list_value);
     total_data_size += list_value.size();
     operations_completed++;
 
@@ -3202,7 +3179,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
   std::cout << "Test 6: Reading and parsing 100k lists...\n";
   for (int i = 0; i < 100000; ++i) {
     std::string key = "perf.lists.item" + boost::lexical_cast<std::string>(i);
-    std::string list_str = cvc::state::instance(test_ctx)(key).value();
+    std::string list_str = cvc::state::instance(ctx)(key).value();
 
     // Parse comma-separated values
     std::vector<int> values;
@@ -3250,7 +3227,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
       array[j] = static_cast<unsigned char>((i + j) % 256);
     }
 
-    cvc::state::instance(test_ctx)(key).data(array);
+    cvc::state::instance(ctx)(key).data(array);
     total_data_size += ARRAY_SIZE;
     operations_completed++;
 
@@ -3276,7 +3253,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
   for (int i = 0; i < 10000; ++i) {
     std::string key = "perf.arrays.item" + boost::lexical_cast<std::string>(i);
     std::vector<unsigned char> array =
-        cvc::state::instance(test_ctx)(key).data<std::vector<unsigned char>>();
+        cvc::state::instance(ctx)(key).data<std::vector<unsigned char>>();
 
     ASSERT_EQ(array.size(), ARRAY_SIZE);
 
@@ -3310,12 +3287,12 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
 
     if (i % 2 == 0) {
       // Write integer using data()
-      cvc::state::instance(test_ctx)(key).data(i);
+      cvc::state::instance(ctx)(key).data(i);
     } else {
       // Read back if exists and is int type
       try {
-        if (cvc::state::instance(test_ctx)(key).isData<int>()) {
-          int val = cvc::state::instance(test_ctx)(key).data<int>();
+        if (cvc::state::instance(ctx)(key).isData<int>()) {
+          int val = cvc::state::instance(ctx)(key).data<int>();
           (void)val;
         }
       } catch (...) {
@@ -3343,7 +3320,7 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
   // Test 10: Hierarchy traversal
   std::cout << "Test 10: Traversing entire hierarchy (100k items)...\n";
   std::atomic<int> traverse_count(0);
-  cvc::state::instance(test_ctx)("perf").traverse([&](std::string key) {
+  cvc::state::instance(ctx)("perf").traverse([&](std::string key) {
     traverse_count++;
     operations_completed++;
   });
@@ -3393,10 +3370,10 @@ TEST(StateTest, PerformanceHierarchyBenchmark) {
             << " ops/sec\n";
 
   // Cleanup
-  cvc::state::instance(test_ctx)("perf").reset();
+  cvc::state::instance(ctx)("perf").reset();
 }
 
-TEST(StateTest, PerformanceCallbackChains) {
+TEST_F(StateTestFixture, PerformanceCallbackChains) {
   // Performance test for cascading callbacks
   // Tests callback chains that trigger other state changes
   // Ensures no stack overflow with deep callback chains
@@ -3422,8 +3399,8 @@ TEST(StateTest, PerformanceCallbackChains) {
     std::string current = "perf.chain.linear." + boost::lexical_cast<std::string>(i);
     std::string next = "perf.chain.linear." + boost::lexical_cast<std::string>(i + 1);
 
-    auto conn = cvc::state::instance(test_ctx)(current).valueChanged.connect(
-        [&total_callbacks, next, i, &chain_depth, &max_depth_reached]() {
+    auto conn = cvc::state::instance(ctx)(current).valueChanged.connect(
+        [&total_callbacks, next, i, &chain_depth, &max_depth_reached, this]() {
           total_callbacks++;
           int current_depth = chain_depth.fetch_add(1) + 1;
 
@@ -3435,7 +3412,7 @@ TEST(StateTest, PerformanceCallbackChains) {
           }
 
           // Trigger next in chain
-          cvc::state::instance(test_ctx)(next).value(i + 1);
+          cvc::state::instance(ctx)(next).value(i + 1);
 
           chain_depth.fetch_sub(1);
         });
@@ -3445,14 +3422,14 @@ TEST(StateTest, PerformanceCallbackChains) {
   // Initialize all nodes first
   for (int i = 0; i < MAX_CHAIN_DEPTH; ++i) {
     std::string key = "perf.chain.linear." + boost::lexical_cast<std::string>(i);
-    cvc::state::instance(test_ctx)(key).value(0);
+    cvc::state::instance(ctx)(key).value(0);
   }
 
   // Trigger the chain
   total_callbacks.store(0);
   chain_depth.store(0);
   max_depth_reached.store(0);
-  cvc::state::instance(test_ctx)("perf.chain.linear.0").value(1);
+  cvc::state::instance(ctx)("perf.chain.linear.0").value(1);
 
   // Wait for chain to complete (small delay)
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
@@ -3482,13 +3459,13 @@ TEST(StateTest, PerformanceCallbackChains) {
   std::atomic<int> child_callbacks(0);
 
   // Parent callback triggers writes to all children
-  auto parent_conn = cvc::state::instance(test_ctx)("perf.chain.fanout.parent")
-                         .valueChanged.connect([&fanout_callbacks, FAN_OUT_COUNT]() {
+  auto parent_conn = cvc::state::instance(ctx)("perf.chain.fanout.parent")
+                         .valueChanged.connect([&fanout_callbacks, FAN_OUT_COUNT, this]() {
                            fanout_callbacks++;
                            for (int i = 0; i < FAN_OUT_COUNT; ++i) {
                              std::string child =
                                  "perf.chain.fanout.child." + boost::lexical_cast<std::string>(i);
-                             cvc::state::instance(test_ctx)(child).value(i);
+                             cvc::state::instance(ctx)(child).value(i);
                            }
                          });
 
@@ -3496,7 +3473,7 @@ TEST(StateTest, PerformanceCallbackChains) {
   std::vector<boost::signals2::connection> child_conns;
   for (int i = 0; i < FAN_OUT_COUNT; ++i) {
     std::string child = "perf.chain.fanout.child." + boost::lexical_cast<std::string>(i);
-    auto conn = cvc::state::instance(test_ctx)(child).valueChanged.connect(
+    auto conn = cvc::state::instance(ctx)(child).valueChanged.connect(
         [&child_callbacks]() { child_callbacks++; });
     child_conns.push_back(conn);
   }
@@ -3504,7 +3481,7 @@ TEST(StateTest, PerformanceCallbackChains) {
   // Trigger fan-out
   fanout_callbacks.store(0);
   child_callbacks.store(0);
-  cvc::state::instance(test_ctx)("perf.chain.fanout.parent").value(42);
+  cvc::state::instance(ctx)("perf.chain.fanout.parent").value(42);
 
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
@@ -3533,31 +3510,31 @@ TEST(StateTest, PerformanceCallbackChains) {
   const int MAX_ITERATIONS = 10; // Safety limit
 
   // Node A triggers B (with iteration limit)
-  auto connA = cvc::state::instance(test_ctx)("perf.chain.loop.A")
-                   .valueChanged.connect([&nodeA_callbacks, MAX_ITERATIONS]() {
+  auto connA = cvc::state::instance(ctx)("perf.chain.loop.A")
+                   .valueChanged.connect([&nodeA_callbacks, MAX_ITERATIONS, this]() {
                      int count = nodeA_callbacks.fetch_add(1);
                      if (count < MAX_ITERATIONS) {
-                       cvc::state::instance(test_ctx)("perf.chain.loop.B").value(count);
+                       cvc::state::instance(ctx)("perf.chain.loop.B").value(count);
                      }
                    });
 
   // Node B triggers A (with iteration limit)
-  auto connB = cvc::state::instance(test_ctx)("perf.chain.loop.B")
-                   .valueChanged.connect([&nodeB_callbacks, MAX_ITERATIONS]() {
+  auto connB = cvc::state::instance(ctx)("perf.chain.loop.B")
+                   .valueChanged.connect([&nodeB_callbacks, MAX_ITERATIONS, this]() {
                      int count = nodeB_callbacks.fetch_add(1);
                      if (count < MAX_ITERATIONS) {
-                       cvc::state::instance(test_ctx)("perf.chain.loop.A").value(count);
+                       cvc::state::instance(ctx)("perf.chain.loop.A").value(count);
                      }
                    });
 
   // Initialize
-  cvc::state::instance(test_ctx)("perf.chain.loop.A").value(0);
-  cvc::state::instance(test_ctx)("perf.chain.loop.B").value(0);
+  cvc::state::instance(ctx)("perf.chain.loop.A").value(0);
+  cvc::state::instance(ctx)("perf.chain.loop.B").value(0);
 
   // Trigger potential loop
   nodeA_callbacks.store(0);
   nodeB_callbacks.store(0);
-  cvc::state::instance(test_ctx)("perf.chain.loop.A").value(1);
+  cvc::state::instance(ctx)("perf.chain.loop.A").value(1);
 
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
 
@@ -3582,8 +3559,11 @@ TEST(StateTest, PerformanceCallbackChains) {
   std::cout << "\nTest 4: State-based loop prevention (processing flag)...\n";
 
   struct GuardedCallback {
+    cvc::app &ctx;
     std::atomic<bool> processing{false};
     std::atomic<int> callback_count{0};
+
+    explicit GuardedCallback(cvc::app &c) : ctx(c) {}
 
     void operator()(const std::string &trigger_key) {
       // Try to acquire processing flag
@@ -3597,7 +3577,7 @@ TEST(StateTest, PerformanceCallbackChains) {
 
       // Do work (trigger another state)
       if (trigger_key != "self") {
-        cvc::state::instance(test_ctx)(trigger_key).value(callback_count.load());
+        cvc::state::instance(ctx)(trigger_key).value(callback_count.load());
       }
 
       // Release flag
@@ -3605,28 +3585,26 @@ TEST(StateTest, PerformanceCallbackChains) {
     }
   };
 
-  GuardedCallback guardC;
-  GuardedCallback guardD;
+  GuardedCallback guardC(ctx);
+  GuardedCallback guardD(ctx);
 
   // C triggers D, D triggers C - but guards prevent infinite loop
-  auto connC =
-      cvc::state::instance(test_ctx)("perf.chain.guard.C").valueChanged.connect([&guardC]() {
-        guardC("perf.chain.guard.D");
-      });
+  auto connC = cvc::state::instance(ctx)("perf.chain.guard.C").valueChanged.connect([&guardC]() {
+    guardC("perf.chain.guard.D");
+  });
 
-  auto connD =
-      cvc::state::instance(test_ctx)("perf.chain.guard.D").valueChanged.connect([&guardD]() {
-        guardD("perf.chain.guard.C");
-      });
+  auto connD = cvc::state::instance(ctx)("perf.chain.guard.D").valueChanged.connect([&guardD]() {
+    guardD("perf.chain.guard.C");
+  });
 
   // Initialize
-  cvc::state::instance(test_ctx)("perf.chain.guard.C").value(0);
-  cvc::state::instance(test_ctx)("perf.chain.guard.D").value(0);
+  cvc::state::instance(ctx)("perf.chain.guard.C").value(0);
+  cvc::state::instance(ctx)("perf.chain.guard.D").value(0);
 
   // Trigger
   guardC.callback_count.store(0);
   guardD.callback_count.store(0);
-  cvc::state::instance(test_ctx)("perf.chain.guard.C").value(1);
+  cvc::state::instance(ctx)("perf.chain.guard.C").value(1);
 
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
 
@@ -3658,30 +3636,30 @@ TEST(StateTest, PerformanceCallbackChains) {
     std::string current = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level);
     std::string next = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level + 1);
 
-    auto conn = cvc::state::instance(test_ctx)(current).valueChanged.connect(
-        [&hierarchy_callbacks, next, level]() {
+    auto conn = cvc::state::instance(ctx)(current).valueChanged.connect(
+        [&hierarchy_callbacks, next, level, this]() {
           hierarchy_callbacks++;
           // Update next level with incremented value
-          cvc::state::instance(test_ctx)(next).value(level + 2);
+          cvc::state::instance(ctx)(next).value(level + 2);
         });
     hier_conns.push_back(conn);
   }
 
   // Last level just counts
-  auto last_conn = cvc::state::instance(test_ctx)("perf.chain.hier.level" +
-                                                  boost::lexical_cast<std::string>(HIER_LEVELS - 1))
+  auto last_conn = cvc::state::instance(ctx)("perf.chain.hier.level" +
+                                             boost::lexical_cast<std::string>(HIER_LEVELS - 1))
                        .valueChanged.connect([&hierarchy_callbacks]() { hierarchy_callbacks++; });
   hier_conns.push_back(last_conn);
 
   // Initialize all levels
   for (int level = 0; level < HIER_LEVELS; ++level) {
     std::string key = "perf.chain.hier.level" + boost::lexical_cast<std::string>(level);
-    cvc::state::instance(test_ctx)(key).value(0);
+    cvc::state::instance(ctx)(key).value(0);
   }
 
   // Trigger from root level
   hierarchy_callbacks.store(0);
-  cvc::state::instance(test_ctx)("perf.chain.hier.level0").value(1);
+  cvc::state::instance(ctx)("perf.chain.hier.level0").value(1);
 
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
 
@@ -3710,7 +3688,7 @@ TEST(StateTest, PerformanceCallbackChains) {
   for (int i = 0; i < CONCURRENT_NODES; ++i) {
     std::string key = "perf.chain.concurrent." + boost::lexical_cast<std::string>(i);
 
-    auto conn = cvc::state::instance(test_ctx)(key).valueChanged.connect([&concurrent_callbacks]() {
+    auto conn = cvc::state::instance(ctx)(key).valueChanged.connect([&concurrent_callbacks]() {
       concurrent_callbacks++;
       // Simulate some work
       volatile int dummy = 0;
@@ -3722,14 +3700,14 @@ TEST(StateTest, PerformanceCallbackChains) {
     concurrent_conns.push_back(conn);
 
     // Initialize with -1 so any value >= 0 will trigger change
-    cvc::state::instance(test_ctx)(key).value(-1);
+    cvc::state::instance(ctx)(key).value(-1);
   }
 
   // Trigger all simultaneously
   concurrent_callbacks.store(0);
   for (int i = 0; i < CONCURRENT_NODES; ++i) {
     std::string key = "perf.chain.concurrent." + boost::lexical_cast<std::string>(i);
-    cvc::state::instance(test_ctx)(key).value(i);
+    cvc::state::instance(ctx)(key).value(i);
   }
 
   boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
@@ -3771,14 +3749,14 @@ TEST(StateTest, PerformanceCallbackChains) {
       << "Callback tests should complete quickly";
 
   // Cleanup
-  cvc::state::instance(test_ctx)("perf.chain").reset();
+  cvc::state::instance(ctx)("perf.chain").reset();
 }
 
 // ===========================
 // Futures API Tests
 // ===========================
 
-TEST(StateTest, ValueWithCallback) {
+TEST_F(StateTestFixture, ValueWithCallback) {
   // Test value retrieval with callback
   std::atomic<int> callback_count(0);
   std::atomic<int> last_value(0);
@@ -3790,13 +3768,13 @@ TEST(StateTest, ValueWithCallback) {
   };
 
   // Connect and get initial value
-  cvc::state::instance(test_ctx)("test.future.callback").value(42);
-  int initial = cvc::state::instance(test_ctx)("test.future.callback").value<int>(callback);
+  cvc::state::instance(ctx)("test.future.callback").value(42);
+  int initial = cvc::state::instance(ctx)("test.future.callback").value<int>(callback);
   EXPECT_EQ(initial, 42);
 
   // Change value several times
   for (int i = 0; i < 5; ++i) {
-    cvc::state::instance(test_ctx)("test.future.callback").value(100 + i);
+    cvc::state::instance(ctx)("test.future.callback").value(100 + i);
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
 
@@ -3804,32 +3782,32 @@ TEST(StateTest, ValueWithCallback) {
   EXPECT_GT(callback_count.load(), 0);
   EXPECT_EQ(last_value.load(), 104);
 
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, WaitForValue) {
+TEST_F(StateTestFixture, WaitForValue) {
   // Test blocking wait for value
 
   // Thread that sets value after delay
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-    cvc::state::instance(test_ctx)("test.future.wait").value(12345);
+    cvc::state::instance(ctx)("test.future.wait").value(12345);
   });
 
   // Wait for value to be set
-  int val = cvc::state::instance(test_ctx)("test.future.wait").wait_for_value<int>();
+  int val = cvc::state::instance(ctx)("test.future.wait").wait_for_value<int>();
 
   EXPECT_EQ(val, 12345);
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.future.wait").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.future.wait").initialized());
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, WaitForValueWithTimeout) {
+TEST_F(StateTestFixture, WaitForValueWithTimeout) {
   // Test wait with timeout - should timeout
   try {
-    cvc::state::instance(test_ctx)("test.future.timeout")
+    cvc::state::instance(ctx)("test.future.timeout")
         .wait_for_value<int>(boost::chrono::milliseconds(50));
     FAIL() << "Should have thrown timeout exception";
   } catch (const cvc::timeout_error &e) {
@@ -3837,27 +3815,27 @@ TEST(StateTest, WaitForValueWithTimeout) {
   }
 
   // Test wait with timeout - should succeed
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-    cvc::state::instance(test_ctx)("test.future.timeout2").value(999);
+    cvc::state::instance(ctx)("test.future.timeout2").value(999);
   });
 
-  int val = cvc::state::instance(test_ctx)("test.future.timeout2")
+  int val = cvc::state::instance(ctx)("test.future.timeout2")
                 .wait_for_value<int>(boost::chrono::milliseconds(200));
   EXPECT_EQ(val, 999);
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, ValueFutureGet) {
+TEST_F(StateTestFixture, ValueFutureGet) {
   // Test state_future blocking get
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-    cvc::state::instance(test_ctx)("test.future.get").value("future_value");
+    cvc::state::instance(ctx)("test.future.get").value("future_value");
   });
 
-  auto future = cvc::state::instance(test_ctx)("test.future.get").value_future<std::string>();
+  auto future = cvc::state::instance(ctx)("test.future.get").value_future<std::string>();
 
   EXPECT_FALSE(future.is_ready());
 
@@ -3867,31 +3845,31 @@ TEST(StateTest, ValueFutureGet) {
   EXPECT_EQ(val, "future_value");
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, ValueFutureWaitFor) {
+TEST_F(StateTestFixture, ValueFutureWaitFor) {
   // Test state_future with timeout
-  auto future = cvc::state::instance(test_ctx)("test.future.waitfor").value_future<int>();
+  auto future = cvc::state::instance(ctx)("test.future.waitfor").value_future<int>();
 
   // Should timeout
   EXPECT_FALSE(future.wait_for(boost::chrono::milliseconds(50)));
   EXPECT_FALSE(future.is_ready());
 
   // Set value
-  cvc::state::instance(test_ctx)("test.future.waitfor").value(777);
+  cvc::state::instance(ctx)("test.future.waitfor").value(777);
 
   // Should succeed immediately
   EXPECT_TRUE(future.wait_for(boost::chrono::milliseconds(10)));
   EXPECT_TRUE(future.is_ready());
   EXPECT_EQ(future.get(), 777);
 
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, ValueFutureGetFor) {
+TEST_F(StateTestFixture, ValueFutureGetFor) {
   // Test state_future get with timeout
-  auto future = cvc::state::instance(test_ctx)("test.future.getfor").value_future<double>();
+  auto future = cvc::state::instance(ctx)("test.future.getfor").value_future<double>();
 
   // Should timeout
   try {
@@ -3902,9 +3880,9 @@ TEST(StateTest, ValueFutureGetFor) {
   }
 
   // Start writer thread
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-    cvc::state::instance(test_ctx)("test.future.getfor").value(3.14159);
+    cvc::state::instance(ctx)("test.future.getfor").value(3.14159);
   });
 
   // Should succeed with longer timeout
@@ -3912,10 +3890,10 @@ TEST(StateTest, ValueFutureGetFor) {
   EXPECT_DOUBLE_EQ(val, 3.14159);
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, DataWithCallback) {
+TEST_F(StateTestFixture, DataWithCallback) {
   // Test data retrieval with callback
   std::atomic<int> callback_count(0);
   std::string last_data;
@@ -3928,42 +3906,41 @@ TEST(StateTest, DataWithCallback) {
   };
 
   // Set initial data and connect callback
-  cvc::state::instance(test_ctx)("test.future.datacb").data(std::string("initial"));
-  std::string initial =
-      cvc::state::instance(test_ctx)("test.future.datacb").data<std::string>(callback);
+  cvc::state::instance(ctx)("test.future.datacb").data(std::string("initial"));
+  std::string initial = cvc::state::instance(ctx)("test.future.datacb").data<std::string>(callback);
   EXPECT_EQ(initial, "initial");
 
   // Change data several times
   for (int i = 0; i < 5; ++i) {
-    cvc::state::instance(test_ctx)("test.future.datacb")
+    cvc::state::instance(ctx)("test.future.datacb")
         .data(std::string("data_") + boost::lexical_cast<std::string>(i));
     boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
   }
 
   EXPECT_GT(callback_count.load(), 0);
 
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, WaitForData) {
+TEST_F(StateTestFixture, WaitForData) {
   // Test blocking wait for data
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-    cvc::state::instance(test_ctx)("test.future.waitdata").data(42);
+    cvc::state::instance(ctx)("test.future.waitdata").data(42);
   });
 
-  int val = cvc::state::instance(test_ctx)("test.future.waitdata").wait_for_data<int>();
+  int val = cvc::state::instance(ctx)("test.future.waitdata").wait_for_data<int>();
 
   EXPECT_EQ(val, 42);
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, WaitForDataWithTimeout) {
+TEST_F(StateTestFixture, WaitForDataWithTimeout) {
   // Test data wait with timeout - should timeout
   try {
-    cvc::state::instance(test_ctx)("test.future.datatimeout")
+    cvc::state::instance(ctx)("test.future.datatimeout")
         .wait_for_data<int>(boost::chrono::milliseconds(50));
     FAIL() << "Should have thrown timeout exception";
   } catch (const cvc::timeout_error &e) {
@@ -3971,29 +3948,29 @@ TEST(StateTest, WaitForDataWithTimeout) {
   }
 
   // Test wait with timeout - should succeed
-  boost::thread writer([]() {
+  boost::thread writer([this]() {
     boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-    cvc::state::instance(test_ctx)("test.future.datatimeout2").data(std::string("success"));
+    cvc::state::instance(ctx)("test.future.datatimeout2").data(std::string("success"));
   });
 
-  std::string val = cvc::state::instance(test_ctx)("test.future.datatimeout2")
+  std::string val = cvc::state::instance(ctx)("test.future.datatimeout2")
                         .wait_for_data<std::string>(boost::chrono::milliseconds(200));
   EXPECT_EQ(val, "success");
 
   writer.join();
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, MultipleFuturesOnSameState) {
+TEST_F(StateTestFixture, MultipleFuturesOnSameState) {
   // Test multiple futures waiting on the same state
   const int num_futures = 5;
   std::vector<boost::thread> threads;
   std::atomic<int> success_count(0);
 
   for (int i = 0; i < num_futures; ++i) {
-    threads.emplace_back([&success_count]() {
+    threads.emplace_back([&success_count, this]() {
       try {
-        auto future = cvc::state::instance(test_ctx)("test.future.multiple").value_future<int>();
+        auto future = cvc::state::instance(ctx)("test.future.multiple").value_future<int>();
         int val = future.get_for(boost::chrono::milliseconds(500));
         if (val == 888) {
           success_count++;
@@ -4008,7 +3985,7 @@ TEST(StateTest, MultipleFuturesOnSameState) {
   boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
 
   // Set value - all futures should be notified
-  cvc::state::instance(test_ctx)("test.future.multiple").value(888);
+  cvc::state::instance(ctx)("test.future.multiple").value(888);
 
   for (auto &t : threads) {
     t.join();
@@ -4016,31 +3993,31 @@ TEST(StateTest, MultipleFuturesOnSameState) {
 
   EXPECT_EQ(success_count.load(), num_futures);
 
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
-TEST(StateTest, FutureProducerConsumerPattern) {
+TEST_F(StateTestFixture, FutureProducerConsumerPattern) {
   // Test classic producer-consumer with futures
   const int num_items = 10;
   std::atomic<int> consumed(0);
 
   // Consumer thread waits for each item
-  boost::thread consumer([&consumed, num_items]() {
+  boost::thread consumer([this, &consumed, num_items]() {
     for (int i = 0; i < num_items; ++i) {
       std::string key = "test.future.queue.item" + boost::lexical_cast<std::string>(i);
-      int val = cvc::state::instance(test_ctx)(key).wait_for_value<int>(
-          boost::chrono::milliseconds(1000));
+      int val =
+          cvc::state::instance(ctx)(key).wait_for_value<int>(boost::chrono::milliseconds(1000));
       EXPECT_EQ(val, i * 10);
       consumed++;
     }
   });
 
   // Producer thread generates items
-  boost::thread producer([num_items]() {
+  boost::thread producer([this, num_items]() {
     for (int i = 0; i < num_items; ++i) {
       boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
       std::string key = "test.future.queue.item" + boost::lexical_cast<std::string>(i);
-      cvc::state::instance(test_ctx)(key).value(i * 10);
+      cvc::state::instance(ctx)(key).value(i * 10);
     }
   });
 
@@ -4049,14 +4026,14 @@ TEST(StateTest, FutureProducerConsumerPattern) {
 
   EXPECT_EQ(consumed.load(), num_items);
 
-  cvc::state::instance(test_ctx)("test.future").reset();
+  cvc::state::instance(ctx)("test.future").reset();
 }
 
 // ===========================
 // State Name Validation Tests
 // ===========================
 
-TEST(StateTest, ValidStateNames) {
+TEST_F(StateTestFixture, ValidStateNames) {
   // Valid names - should pass validation
   EXPECT_TRUE(cvc::state::isValidStateName("validName"));
   EXPECT_TRUE(cvc::state::isValidStateName("_private"));
@@ -4068,7 +4045,7 @@ TEST(StateTest, ValidStateNames) {
   EXPECT_TRUE(cvc::state::isValidStateName("_123"));
 }
 
-TEST(StateTest, InvalidStateNames) {
+TEST_F(StateTestFixture, InvalidStateNames) {
   // Invalid names - should fail validation
   EXPECT_FALSE(cvc::state::isValidStateName(""));                // Empty
   EXPECT_FALSE(cvc::state::isValidStateName("123start"));        // Starts with digit
@@ -4080,38 +4057,38 @@ TEST(StateTest, InvalidStateNames) {
   EXPECT_FALSE(cvc::state::isValidStateName("name#hash"));       // Contains #
 }
 
-TEST(StateTest, SanitizeEmptyName) {
+TEST_F(StateTestFixture, SanitizeEmptyName) {
   std::string result = cvc::state::sanitizeStateName("");
   EXPECT_EQ(result, "unnamed");
 }
 
-TEST(StateTest, SanitizeValidName) {
+TEST_F(StateTestFixture, SanitizeValidName) {
   // Already valid names should pass through unchanged
   EXPECT_EQ(cvc::state::sanitizeStateName("validName"), "validName");
   EXPECT_EQ(cvc::state::sanitizeStateName("_private"), "_private");
   EXPECT_EQ(cvc::state::sanitizeStateName("name123"), "name123");
 }
 
-TEST(StateTest, SanitizeNameWithDashes) {
+TEST_F(StateTestFixture, SanitizeNameWithDashes) {
   // Dashes should be converted to underscores
   EXPECT_EQ(cvc::state::sanitizeStateName("name-with-dashes"), "name_with_dashes");
   EXPECT_EQ(cvc::state::sanitizeStateName("multi-part-name"), "multi_part_name");
   EXPECT_EQ(cvc::state::sanitizeStateName("-starts-with-dash"), "_starts_with_dash");
 }
 
-TEST(StateTest, SanitizeNameWithSpaces) {
+TEST_F(StateTestFixture, SanitizeNameWithSpaces) {
   // Spaces should be converted to underscores
   EXPECT_EQ(cvc::state::sanitizeStateName("name with spaces"), "name_with_spaces");
   EXPECT_EQ(cvc::state::sanitizeStateName("multiple   spaces"), "multiple___spaces");
 }
 
-TEST(StateTest, SanitizeNameStartingWithDigit) {
+TEST_F(StateTestFixture, SanitizeNameStartingWithDigit) {
   // Names starting with digits should get underscore prefix
   EXPECT_EQ(cvc::state::sanitizeStateName("123name"), "_123name");
   EXPECT_EQ(cvc::state::sanitizeStateName("4test"), "_4test");
 }
 
-TEST(StateTest, SanitizeNameWithSpecialChars) {
+TEST_F(StateTestFixture, SanitizeNameWithSpecialChars) {
   // Special characters should be converted to underscores
   EXPECT_EQ(cvc::state::sanitizeStateName("name@symbol"), "name_symbol");
   EXPECT_EQ(cvc::state::sanitizeStateName("file$name"), "file_name");
@@ -4119,7 +4096,7 @@ TEST(StateTest, SanitizeNameWithSpecialChars) {
   EXPECT_EQ(cvc::state::sanitizeStateName("name.with.dots"), "name_with_dots");
 }
 
-TEST(StateTest, SanitizeComplexFilename) {
+TEST_F(StateTestFixture, SanitizeComplexFilename) {
   // Real-world filename examples
   EXPECT_EQ(cvc::state::sanitizeStateName("my-mesh-file"), "my_mesh_file");
   EXPECT_EQ(cvc::state::sanitizeStateName("bunny.obj"), "bunny_obj");
@@ -4127,13 +4104,13 @@ TEST(StateTest, SanitizeComplexFilename) {
   EXPECT_EQ(cvc::state::sanitizeStateName("2024-12-30_data"), "_2024_12_30_data");
 }
 
-TEST(StateTest, SanitizePreservesUnderscores) {
+TEST_F(StateTestFixture, SanitizePreservesUnderscores) {
   // Underscores should be preserved
   EXPECT_EQ(cvc::state::sanitizeStateName("name_with_underscores"), "name_with_underscores");
   EXPECT_EQ(cvc::state::sanitizeStateName("__double__underscore__"), "__double__underscore__");
 }
 
-TEST(StateTest, SanitizeResultIsValid) {
+TEST_F(StateTestFixture, SanitizeResultIsValid) {
   // All sanitized names should pass validation
   std::vector<std::string> testNames = {"123start",          "name-with-dash", "name with space",
                                         "special@char#name", "file.name.ext",  ""};
@@ -4149,7 +4126,7 @@ TEST(StateTest, SanitizeResultIsValid) {
 // Data Type Registration Tests
 // ===========================
 
-TEST_F(StateDataFixture, RegisteredDataTypeNames) {
+TEST_F(StateTestFixture, RegisteredDataTypeNames) {
   // Test that core CVC types are registered with human-readable names
 
   // Create instances of each type
@@ -4187,7 +4164,7 @@ TEST_F(StateDataFixture, RegisteredDataTypeNames) {
   ctx.data("test.dimension", boost::any());
 }
 
-TEST_F(StateDataFixture, RegisteredSharedPtrDataTypeNames) {
+TEST_F(StateTestFixture, RegisteredSharedPtrDataTypeNames) {
   // Test that shared_ptr variants are also registered
 
   boost::shared_ptr<cvc::geometry> geom_ptr(new cvc::geometry());
@@ -4217,7 +4194,7 @@ TEST_F(StateDataFixture, RegisteredSharedPtrDataTypeNames) {
   ctx.data("test.volume_ptr", boost::any());
 }
 
-TEST_F(StateDataFixture, DataTypeNameTemplate) {
+TEST_F(StateTestFixture, DataTypeNameTemplate) {
   // Test the template version of dataTypeName<T>()
 
   std::string geom_type = ctx.dataTypeName<cvc::geometry>();
@@ -4242,7 +4219,7 @@ TEST_F(StateDataFixture, DataTypeNameTemplate) {
   EXPECT_EQ(vol_ptr_type, "boost::shared_ptr<cvc::volume>");
 }
 
-TEST_F(StateDataFixture, DataTypeNameFromAny) {
+TEST_F(StateTestFixture, DataTypeNameFromAny) {
   // Test the dataTypeName(boost::any) overload
 
   boost::any geom_any = cvc::geometry();
@@ -4258,7 +4235,7 @@ TEST_F(StateDataFixture, DataTypeNameFromAny) {
   EXPECT_EQ(vol_type, "cvc::volume");
 }
 
-TEST_F(StateDataFixture, UnregisteredTypeReturnsMangled) {
+TEST_F(StateTestFixture, UnregisteredTypeReturnsMangled) {
   // Test that unregistered types return the mangled C++ name
 
   struct UnregisteredType {
@@ -4285,168 +4262,174 @@ TEST_F(StateDataFixture, UnregisteredTypeReturnsMangled) {
 // Reset with Parameters Tests
 // ===========================
 
-TEST(StateTest, ResetWithoutChildren) {
+TEST_F(StateTestFixture, ResetWithoutChildren) {
   // Create a state hierarchy
-  cvc::state::instance(test_ctx)("test.reset_params.parent").value("parent_value");
-  cvc::state::instance(test_ctx)("test.reset_params.parent.child1").value("child1_value");
-  cvc::state::instance(test_ctx)("test.reset_params.parent.child2").value("child2_value");
+  cvc::state::instance(ctx)("test.reset_params.parent").value("parent_value");
+  cvc::state::instance(ctx)("test.reset_params.parent.child1").value("child1_value");
+  cvc::state::instance(ctx)("test.reset_params.parent.child2").value("child2_value");
 
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_params.parent").initialized());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_params.parent.child1").initialized());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_params.parent.child2").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_params.parent").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_params.parent.child1").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_params.parent.child2").initialized());
 
   // Reset parent without resetting children
-  cvc::state::instance(test_ctx)("test.reset_params.parent").reset(false, true);
+  cvc::state::instance(ctx)("test.reset_params.parent").reset(false, true);
 
   // Parent should be reset
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_params.parent").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_params.parent").initialized());
 
   // Children are detached - accessing them via parent path creates new states
   // The old children exist as shared_ptrs elsewhere but are no longer accessible via parent
   // This is the expected behavior of reset(false, ...)
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_params.parent.child1").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_params.parent.child2").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_params.parent.child1").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_params.parent.child2").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.reset_params").reset();
+  cvc::state::instance(ctx)("test.reset_params").reset();
 }
 
-TEST(StateTest, ResetWithChildren) {
+TEST_F(StateTestFixture, ResetWithChildren) {
   // Create a state hierarchy
-  cvc::state::instance(test_ctx)("test.reset_children.parent").value("parent_value");
-  cvc::state::instance(test_ctx)("test.reset_children.parent.child1").value("child1_value");
-  cvc::state::instance(test_ctx)("test.reset_children.parent.child2").value("child2_value");
-  cvc::state::instance(test_ctx)("test.reset_children.parent.child2.grandchild")
+  cvc::state::instance(ctx)("test.reset_children.parent").value("parent_value");
+  cvc::state::instance(ctx)("test.reset_children.parent.child1").value("child1_value");
+  cvc::state::instance(ctx)("test.reset_children.parent.child2").value("child2_value");
+  cvc::state::instance(ctx)("test.reset_children.parent.child2.grandchild")
       .value("grandchild_value");
 
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_children.parent").initialized());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_children.parent.child1").initialized());
-  EXPECT_TRUE(cvc::state::instance(test_ctx)("test.reset_children.parent.child2").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_children.parent").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_children.parent.child1").initialized());
+  EXPECT_TRUE(cvc::state::instance(ctx)("test.reset_children.parent.child2").initialized());
   EXPECT_TRUE(
-      cvc::state::instance(test_ctx)("test.reset_children.parent.child2.grandchild").initialized());
+      cvc::state::instance(ctx)("test.reset_children.parent.child2.grandchild").initialized());
 
   // Reset parent with children (default behavior)
-  cvc::state::instance(test_ctx)("test.reset_children.parent").reset(true, true);
+  cvc::state::instance(ctx)("test.reset_children.parent").reset(true, true);
 
   // Parent and all children should be reset
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_children.parent").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_children.parent.child1").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_children.parent.child2").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_children.parent").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_children.parent.child1").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_children.parent.child2").initialized());
   EXPECT_FALSE(
-      cvc::state::instance(test_ctx)("test.reset_children.parent.child2.grandchild").initialized());
+      cvc::state::instance(ctx)("test.reset_children.parent.child2.grandchild").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.reset_children").reset();
+  cvc::state::instance(ctx)("test.reset_children").reset();
 }
 
-TEST(StateTest, ResetWithoutCallbacks) {
+TEST_F(StateTestFixture, ResetWithoutCallbacks) {
   // Track callback invocations
   std::atomic<int> callbackCount(0);
 
-  auto conn = cvc::state::instance(test_ctx)("test.reset_callbacks.watched")
+  auto conn = cvc::state::instance(ctx)("test.reset_callbacks.watched")
                   .valueChanged.connect([&callbackCount]() { callbackCount++; });
 
-  cvc::state::instance(test_ctx)("test.reset_callbacks.watched").value("initial_value");
+  cvc::state::instance(ctx)("test.reset_callbacks.watched").value("initial_value");
   int initialCount = callbackCount.load();
   EXPECT_GT(initialCount, 0);
 
   // Reset without firing callbacks
-  cvc::state::instance(test_ctx)("test.reset_callbacks.watched").reset(true, false);
+  cvc::state::instance(ctx)("test.reset_callbacks.watched").reset(true, false);
 
   // Callback should not have been triggered by reset
   EXPECT_EQ(callbackCount.load(), initialCount);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_callbacks.watched").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_callbacks.watched").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.reset_callbacks").reset();
+  cvc::state::instance(ctx)("test.reset_callbacks").reset();
 }
 
-TEST(StateTest, ResetWithCallbacks) {
+TEST_F(StateTestFixture, ResetWithCallbacks) {
   // Track callback invocations
   std::atomic<int> callbackCount(0);
 
-  auto conn = cvc::state::instance(test_ctx)("test.reset_with_callbacks.watched")
+  auto conn = cvc::state::instance(ctx)("test.reset_with_callbacks.watched")
                   .valueChanged.connect([&callbackCount]() { callbackCount++; });
 
-  cvc::state::instance(test_ctx)("test.reset_with_callbacks.watched").value("initial_value");
+  cvc::state::instance(ctx)("test.reset_with_callbacks.watched").value("initial_value");
   callbackCount.store(0); // Reset counter after initialization
 
   // Reset with firing callbacks (default behavior)
-  cvc::state::instance(test_ctx)("test.reset_with_callbacks.watched").reset(true, true);
+  cvc::state::instance(ctx)("test.reset_with_callbacks.watched").reset(true, true);
 
   // Callback should have been triggered by reset
   EXPECT_GT(callbackCount.load(), 0);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.reset_with_callbacks.watched").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.reset_with_callbacks.watched").initialized());
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.reset_with_callbacks").reset();
+  cvc::state::instance(ctx)("test.reset_with_callbacks").reset();
 }
 
-TEST(StateTest, ResetParameterCombinations) {
+TEST_F(StateTestFixture, ResetParameterCombinations) {
   // Test all four combinations of resetChildren and fireCallbacks
 
   // Setup 1: reset(false, false) - no children, no callbacks
-  cvc::state::instance(test_ctx)("test.combinations.case1.parent").value("value");
-  cvc::state::instance(test_ctx)("test.combinations.case1.parent.child").value("child_value");
+  cvc::state::instance(ctx)("test.combinations.case1.parent").value("value");
+  cvc::state::instance(ctx)("test.combinations.case1.parent.child").value("child_value");
 
   std::atomic<int> count1(0);
-  auto conn1 = cvc::state::instance(test_ctx)("test.combinations.case1.parent")
-                   .valueChanged.connect([&count1]() { count1++; });
+  auto conn1 =
+      cvc::state::instance(ctx)("test.combinations.case1.parent").valueChanged.connect([&count1]() {
+        count1++;
+      });
   count1.store(0);
 
-  cvc::state::instance(test_ctx)("test.combinations.case1.parent").reset(false, false);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case1.parent").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case1.parent.child")
-                   .initialized()); // Detached
+  cvc::state::instance(ctx)("test.combinations.case1.parent").reset(false, false);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case1.parent").initialized());
+  EXPECT_FALSE(
+      cvc::state::instance(ctx)("test.combinations.case1.parent.child").initialized()); // Detached
   EXPECT_EQ(count1.load(), 0);
 
   // Setup 2: reset(false, true) - no children, yes callbacks
-  cvc::state::instance(test_ctx)("test.combinations.case2.parent").value("value");
-  cvc::state::instance(test_ctx)("test.combinations.case2.parent.child").value("child_value");
+  cvc::state::instance(ctx)("test.combinations.case2.parent").value("value");
+  cvc::state::instance(ctx)("test.combinations.case2.parent.child").value("child_value");
 
   std::atomic<int> count2(0);
-  auto conn2 = cvc::state::instance(test_ctx)("test.combinations.case2.parent")
-                   .valueChanged.connect([&count2]() { count2++; });
+  auto conn2 =
+      cvc::state::instance(ctx)("test.combinations.case2.parent").valueChanged.connect([&count2]() {
+        count2++;
+      });
   count2.store(0);
 
-  cvc::state::instance(test_ctx)("test.combinations.case2.parent").reset(false, true);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case2.parent").initialized());
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case2.parent.child")
-                   .initialized()); // Detached
+  cvc::state::instance(ctx)("test.combinations.case2.parent").reset(false, true);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case2.parent").initialized());
+  EXPECT_FALSE(
+      cvc::state::instance(ctx)("test.combinations.case2.parent.child").initialized()); // Detached
   EXPECT_GT(count2.load(), 0);
 
   // Setup 3: reset(true, false) - yes children, no callbacks
-  cvc::state::instance(test_ctx)("test.combinations.case3.parent").value("value");
-  cvc::state::instance(test_ctx)("test.combinations.case3.parent.child").value("child_value");
+  cvc::state::instance(ctx)("test.combinations.case3.parent").value("value");
+  cvc::state::instance(ctx)("test.combinations.case3.parent.child").value("child_value");
 
   std::atomic<int> count3(0);
-  auto conn3 = cvc::state::instance(test_ctx)("test.combinations.case3.parent")
-                   .valueChanged.connect([&count3]() { count3++; });
+  auto conn3 =
+      cvc::state::instance(ctx)("test.combinations.case3.parent").valueChanged.connect([&count3]() {
+        count3++;
+      });
   count3.store(0);
 
-  cvc::state::instance(test_ctx)("test.combinations.case3.parent").reset(true, false);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case3.parent").initialized());
-  EXPECT_FALSE(
-      cvc::state::instance(test_ctx)("test.combinations.case3.parent.child").initialized());
+  cvc::state::instance(ctx)("test.combinations.case3.parent").reset(true, false);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case3.parent").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case3.parent.child").initialized());
   EXPECT_EQ(count3.load(), 0);
 
   // Setup 4: reset(true, true) - yes children, yes callbacks (default)
-  cvc::state::instance(test_ctx)("test.combinations.case4.parent").value("value");
-  cvc::state::instance(test_ctx)("test.combinations.case4.parent.child").value("child_value");
+  cvc::state::instance(ctx)("test.combinations.case4.parent").value("value");
+  cvc::state::instance(ctx)("test.combinations.case4.parent.child").value("child_value");
 
   std::atomic<int> count4(0);
-  auto conn4 = cvc::state::instance(test_ctx)("test.combinations.case4.parent")
-                   .valueChanged.connect([&count4]() { count4++; });
+  auto conn4 =
+      cvc::state::instance(ctx)("test.combinations.case4.parent").valueChanged.connect([&count4]() {
+        count4++;
+      });
   count4.store(0);
 
-  cvc::state::instance(test_ctx)("test.combinations.case4.parent").reset(true, true);
-  EXPECT_FALSE(cvc::state::instance(test_ctx)("test.combinations.case4.parent").initialized());
-  EXPECT_FALSE(
-      cvc::state::instance(test_ctx)("test.combinations.case4.parent.child").initialized());
+  cvc::state::instance(ctx)("test.combinations.case4.parent").reset(true, true);
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case4.parent").initialized());
+  EXPECT_FALSE(cvc::state::instance(ctx)("test.combinations.case4.parent.child").initialized());
   EXPECT_GT(count4.load(), 0);
 
   // Clean up
-  cvc::state::instance(test_ctx)("test.combinations").reset();
+  cvc::state::instance(ctx)("test.combinations").reset();
 }
 
 // ===========================
