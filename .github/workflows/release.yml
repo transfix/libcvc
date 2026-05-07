@@ -586,6 +586,31 @@ jobs:
           Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
           Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
 
+      - name: Activate MSVC dev shell (for dumpbin)
+        if: matrix.kind == 'volrover3'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Refuse to ship a release artifact that would fail to launch on
+      # a vanilla Windows machine due to a missing DLL (cudart, fftw3,
+      # libomp140.x86_64, zlib, ...). dumpbin walks the EXE's PE imports
+      # transitively and the verification script asserts every non-system
+      # dependency is present in the same directory.
+      - name: Verify Windows DLL dependencies (volrover3)
+        if: matrix.kind == 'volrover3'
+        shell: pwsh
+        run: |
+          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-windows-${{ steps.meta.outputs.arch }}"
+          $extract = "$env:GITHUB_WORKSPACE\verify-bin"
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Expand-Archive -Path "$env:GITHUB_WORKSPACE\$stem.zip" -DestinationPath $extract
+          $bin = Get-ChildItem -Path $extract -Recurse -Filter volrover3.exe -File | Select-Object -First 1
+          if (-not $bin) { throw "volrover3.exe not found in extracted zip" }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\verify-windows-deps.ps1" `
+              -BinDir $bin.Directory.FullName `
+              -Binaries volrover3.exe
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:

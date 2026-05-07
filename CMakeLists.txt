@@ -285,6 +285,16 @@ endif()
 
 # ************* CPack configuration *************
 include(GNUInstallDirs)
+
+# Ship Microsoft's MSVC CRT redist AND the LLVM OpenMP runtime
+# (libomp140.x86_64.dll) alongside our binaries. Without
+# CMAKE_INSTALL_OPENMP_LIBRARIES the OpenMP DLL is not bundled and
+# volrover3.exe / cvc.dll fail to launch on a vanilla Windows machine
+# with "libomp140.x86_64.dll was not found".
+set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
+# InstallRequiredSystemLibraries installs into bin/ by default, which
+# is what we want next to volrover3.exe.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT volrover3)
 include(InstallRequiredSystemLibraries)
 
 # Compute architecture tag for archive file names.

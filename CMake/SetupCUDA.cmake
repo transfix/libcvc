@@ -31,14 +31,35 @@ function(SetupCUDA TargetName)
   
   # Find and link CUDA toolkit libraries
   find_package(CUDAToolkit REQUIRED)
-  
-  # Link CUDA runtime
-  if(TARGET CUDA::cudart)
-    target_link_libraries(${TargetName} PUBLIC CUDA::cudart)
+
+  # Link CUDA runtime.
+  #
+  # CMake exposes BOTH CUDA::cudart (the *shared* runtime) and
+  # CUDA::cudart_static, regardless of CMAKE_CUDA_RUNTIME_LIBRARY.
+  # That global variable only affects how nvcc-compiled translation
+  # units pull in the runtime; an explicit target_link_libraries on
+  # CUDA::cudart still drags in cudart64_12X.dll and forces end users
+  # to install the CUDA toolkit just to launch the binary.
+  #
+  # For redistribution we want the static cudart so the only thing the
+  # end user needs is the NVIDIA driver. Honor CMAKE_CUDA_RUNTIME_LIBRARY
+  # when set, otherwise default to Static.
+  if(NOT DEFINED CMAKE_CUDA_RUNTIME_LIBRARY OR CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
+    if(TARGET CUDA::cudart_static)
+      target_link_libraries(${TargetName} PUBLIC CUDA::cudart_static)
+    elseif(TARGET CUDA::cudart)
+      target_link_libraries(${TargetName} PUBLIC CUDA::cudart)
+    else()
+      target_link_libraries(${TargetName} PUBLIC ${CUDA_LIBRARIES})
+      target_include_directories(${TargetName} PRIVATE ${CUDA_INCLUDE_DIRS})
+    endif()
   else()
-    # Fallback for older CMake/CUDA versions
-    target_link_libraries(${TargetName} PUBLIC ${CUDA_LIBRARIES})
-    target_include_directories(${TargetName} PRIVATE ${CUDA_INCLUDE_DIRS})
+    if(TARGET CUDA::cudart)
+      target_link_libraries(${TargetName} PUBLIC CUDA::cudart)
+    else()
+      target_link_libraries(${TargetName} PUBLIC ${CUDA_LIBRARIES})
+      target_include_directories(${TargetName} PRIVATE ${CUDA_INCLUDE_DIRS})
+    endif()
   endif()
   
   # Optional: Link additional CUDA libraries as needed
