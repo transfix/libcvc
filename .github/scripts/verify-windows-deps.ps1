@@ -73,6 +73,18 @@ function Test-IsSystemDll([string]$name) {
   foreach ($pat in $systemDllPatterns) {
     if ($name -imatch $pat) { return $true }
   }
+  # Anything that lives in %windir%\System32 (or SysWOW64) is, by
+  # definition, a Windows system DLL we don't ship. Checking the
+  # filesystem is more robust than maintaining an exhaustive regex
+  # list — Microsoft adds new system DLLs (bcp47mrm, TextShaping,
+  # logoncli, ...) faster than we can enumerate them.
+  $sysDirs = @(
+    (Join-Path $env:windir 'System32'),
+    (Join-Path $env:windir 'SysWOW64')
+  )
+  foreach ($d in $sysDirs) {
+    if (Test-Path (Join-Path $d $name)) { return $true }
+  }
   return $false
 }
 
