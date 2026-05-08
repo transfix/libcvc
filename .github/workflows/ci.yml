@@ -1016,6 +1016,34 @@ jobs:
           Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
           Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
 
+      # Setup MSVC dev shell so dumpbin.exe is on PATH for the
+      # dependency verification step below.
+      - name: Activate MSVC dev shell (for dumpbin)
+        if: matrix.kind == 'volrover3'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Verify that the staged volrover3.exe and every DLL it transitively
+      # depends on are present alongside the binary. Fails CI on any
+      # missing non-system DLL (cudart64_*.dll, fftw3.dll, libomp140*.dll,
+      # zlib1.dll, etc.) so we never ship a Windows artifact that crashes
+      # at launch with a "DLL not found" error.
+      - name: Verify Windows DLL dependencies (volrover3)
+        if: matrix.kind == 'volrover3'
+        shell: pwsh
+        run: |
+          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          $extract = "$env:GITHUB_WORKSPACE\verify-bin"
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Expand-Archive -Path "$env:GITHUB_WORKSPACE\$stem.zip" -DestinationPath $extract
+          # CPack ZIP layout: <stem>/bin/volrover3.exe (CMAKE_INSTALL_BINDIR=bin)
+          $bin = Get-ChildItem -Path $extract -Recurse -Filter volrover3.exe -File | Select-Object -First 1
+          if (-not $bin) { throw "volrover3.exe not found in extracted zip" }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\verify-windows-deps.ps1" `
+              -BinDir $bin.Directory.FullName `
+              -Binaries volrover3.exe
+
       - name: Upload Windows libcvc zip
         if: matrix.kind == 'libcvc'
         uses: actions/upload-artifact@v4

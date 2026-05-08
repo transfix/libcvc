@@ -214,6 +214,78 @@ if(WIN32)
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     COMPONENT volrover3)
 
+  # ── Belt-and-suspenders runtime-dependency walker ──
+  #
+  # $<TARGET_RUNTIME_DLLS:volrover3> only resolves DLLs that arrived
+  # via CMake imported targets with IMPORTED_LOCATION set (e.g. modern
+  # Qt6, vcpkg-built cgal, vtk). It silently misses:
+  #   - fftw3.dll  : found via legacy CMake/FindFFTW.cmake which only
+  #                  sets variables, no imported target.
+  #   - zlib1.dll, libpng16.dll, etc. : transitive deps pulled in via
+  #                                     hdf5/imagemagick that don't
+  #                                     propagate through cvc's
+  #                                     interface link libraries.
+  #   - cudart64_*.dll : if a future change accidentally re-introduces
+  #                      a dynamic CUDA::cudart link.
+  #
+  # file(GET_RUNTIME_DEPENDENCIES) is CMake's PE-import walker. We run
+  # it at install time over the staged volrover3.exe and cvc.dll, then
+  # copy every non-system DLL it finds into bin/. Search dirs include
+  # the build tree, CMAKE_PREFIX_PATH (vcpkg + Qt + VTK) and
+  # CUDAToolkit_BIN_DIR (in case dynamic cudart slips in).
+  #
+  # We pre-compute the search-dir list at configure time and store it
+  # as a quoted CMake list so paths with spaces survive the install
+  # script generation intact.
+  set(_cvc_runtime_search_dirs
+    "${CMAKE_BINARY_DIR}/bin"
+    "${CMAKE_BINARY_DIR}/lib"
+  )
+  foreach(_p IN LISTS CMAKE_PREFIX_PATH)
+    list(APPEND _cvc_runtime_search_dirs "${_p}/bin")
+  endforeach()
+  if(DEFINED CUDAToolkit_BIN_DIR)
+    list(APPEND _cvc_runtime_search_dirs "${CUDAToolkit_BIN_DIR}")
+  endif()
+
+  install(CODE "
+    set(_search_dirs \"${_cvc_runtime_search_dirs}\")
+    list(PREPEND _search_dirs \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
+    if(DEFINED ENV{QT_ROOT_DIR})
+      list(APPEND _search_dirs \"\$ENV{QT_ROOT_DIR}/bin\")
+    endif()
+    if(DEFINED ENV{VCPKG_INSTALLATION_ROOT})
+      list(APPEND _search_dirs \"\$ENV{VCPKG_INSTALLATION_ROOT}/installed/x64-windows/bin\")
+    endif()
+
+    file(GET_RUNTIME_DEPENDENCIES
+      EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/volrover3.exe\"
+      LIBRARIES   \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/cvc.dll\"
+      RESOLVED_DEPENDENCIES_VAR _resolved
+      UNRESOLVED_DEPENDENCIES_VAR _unresolved
+      CONFLICTING_DEPENDENCIES_PREFIX _conflicting
+      DIRECTORIES \${_search_dirs}
+      PRE_EXCLUDE_REGEXES
+        [[api-ms-.*]]
+        [[ext-ms-.*]]
+      POST_EXCLUDE_REGEXES
+        [[.*/system32/.*\\.dll]]
+        [[.*/SysWOW64/.*\\.dll]]
+        [[.*/[Ww]indows/.*\\.dll]]
+    )
+
+    foreach(_dll IN LISTS _resolved)
+      message(STATUS \"Bundling runtime dep: \${_dll}\")
+      file(INSTALL \"\${_dll}\"
+        DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
+        FOLLOW_SYMLINK_CHAIN)
+    endforeach()
+
+    if(_unresolved)
+      message(STATUS \"Unresolved runtime deps (assumed system): \${_unresolved}\")
+    endif()
+  " COMPONENT volrover3)
+
   if(QT_VERSION_MAJOR EQUAL 6)
     set(_qt_bin_hint "${Qt6_DIR}/../../../bin")
   else()
