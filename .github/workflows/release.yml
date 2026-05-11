@@ -130,7 +130,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev
+            libmagick++-dev libcgal-dev
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -222,10 +222,10 @@ jobs:
             -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -451,7 +451,7 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
@@ -482,10 +482,10 @@ jobs:
             -DCVC_BUILD_TESTS=OFF \
             -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -725,15 +725,15 @@ jobs:
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
             'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
           )
-          if ('${{ matrix.kind }}' -eq 'volrover3') {
-            # qt6-base intentionally omitted — handled by install-qt-action above.
-            # vtk[qt,opengl] also omitted: the qt feature pulled qt6-base/
-            # qt5compat/qttools/qtdeclarative as transitive build deps,
-            # rebuilding all of Qt6 from source on every cold-cache run.
-            # We build VTK 9.5 from source against aqtinstall's prebuilt
-            # Qt6 in a separate cached step below (mirrors Ubuntu).
-            $packages += @('cgal')
-          }
+          # cgal is required by libcvc's SDF/Mesher features and by
+          # volrover3. qt6-base is intentionally omitted on volrover3 —
+          # handled by install-qt-action above. vtk[qt,opengl] is also
+          # omitted: the qt feature pulled qt6-base/qt5compat/qttools/
+          # qtdeclarative as transitive build deps, rebuilding all of
+          # Qt6 from source on every cold-cache run. We build VTK 9.5
+          # from source against aqtinstall's prebuilt Qt6 in a separate
+          # cached step below (mirrors Ubuntu).
+          $packages += @('cgal')
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
             # --clean-after-build deletes each port's buildtree/packages
@@ -806,7 +806,8 @@ jobs:
         shell: pwsh
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
-          $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          # CGAL/SDF/Mesher are always built; only volrover3 toggles
+          # the GUI app and its extra deps.
           $xmlrpc = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           # link=shared → BUILD_SHARED_LIBS=ON + x64-windows triplet (DLLs)
           # link=static → BUILD_SHARED_LIBS=OFF + x64-windows-static triplet
@@ -838,10 +839,10 @@ jobs:
             -DCVC_USING_XMLRPC=$xmlrpc `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
-            -DDISABLE_CGAL=$cgal `
+            -DDISABLE_CGAL=OFF `
             -DCVC_BUILD_VOLROVER3=$vol `
-            -DCVC_ENABLE_MESHER=$vol `
-            -DCVC_ENABLE_SDF=$vol
+            -DCVC_ENABLE_MESHER=ON `
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
