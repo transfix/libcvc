@@ -232,14 +232,21 @@ jobs:
           done
           ls -la *.AppImage
 
+      # Explicit prefixes (libcvc-, volrover3-, VolumeRover3-) instead of
+      # bare *.deb / *.tar.gz / *.AppImage globs. The Jimver/cuda-toolkit
+      # action drops cuda_keyring.deb into $GITHUB_WORKSPACE while
+      # installing the toolkit, and a permissive *.deb glob sweeps that
+      # stray NVIDIA apt-keyring package into the release. See v3.1.1
+      # release where cuda_keyring.deb had to be manually removed.
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.name }}
           path: |
-            *.tar.gz
-            *.deb
-            *.AppImage
+            libcvc-*.tar.gz
+            volrover3-*.tar.gz
+            volrover3-*.deb
+            VolumeRover3-*.AppImage
           if-no-files-found: error
 
   # ──────────────────────────── macOS ────────────────────────────
@@ -337,8 +344,9 @@ jobs:
         with:
           name: macos-${{ matrix.name }}
           path: |
-            *.zip
-            *.dmg
+            libcvc-*.zip
+            VolumeRover3-*.zip
+            VolumeRover3-*.dmg
           if-no-files-found: error
 
   # ──────────────────────────── Windows ────────────────────────────
@@ -616,8 +624,9 @@ jobs:
         with:
           name: windows-${{ matrix.name }}
           path: |
-            *.zip
-            *.exe
+            libcvc-*.zip
+            VolumeRover3-*.zip
+            VolumeRover3-*-setup.exe
           if-no-files-found: error
 
   # ──────────────────────────── Release ────────────────────────────
@@ -647,10 +656,15 @@ jobs:
           # an artifact-only fix) will not clobber hand-written release
           # notes.
           generate_release_notes: false
+          # Explicit prefixes so stray files from third-party actions
+          # (e.g. cuda_keyring.deb from Jimver/cuda-toolkit) can never
+          # ride along into a release attachment list.
           files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-            artifacts/*.deb
-            artifacts/*.dmg
-            artifacts/*.exe
-            artifacts/*.AppImage
+            artifacts/libcvc-*.tar.gz
+            artifacts/libcvc-*.zip
+            artifacts/volrover3-*.tar.gz
+            artifacts/volrover3-*.deb
+            artifacts/VolumeRover3-*.zip
+            artifacts/VolumeRover3-*.dmg
+            artifacts/VolumeRover3-*-setup.exe
+            artifacts/VolumeRover3-*.AppImage
