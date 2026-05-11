@@ -1,10 +1,10 @@
 # libcvc
 
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
-[![C++](https://img.shields.io/badge/C++-17%2B-orange.svg)](https://isocpp.org/)
-[![License](https://img.shields.io/badge/license-Check%20LICENSE-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-577%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-64.6%25%20lines%20%7C%2068.1%25%20functions-yellow.svg)](docs/TESTING.md)
+[![C++](https://img.shields.io/badge/C++-20-orange.svg)](https://isocpp.org/)
+[![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-546%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-38.0%25%20lines%20%7C%2049.0%25%20functions-yellow.svg)](docs/TESTING.md)
 
 ## Table of Contents
 
