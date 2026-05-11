@@ -108,204 +108,6 @@ jobs:
           echo "$out"
           exit 1
 
-  # ──────────────────────────── Tests ────────────────────────────
-  #
-  # Runs the libcvc test suite across the OS / build_type matrix and
-  # generates a coverage report on Linux Debug. This job intentionally
-  # does NOT produce release artifacts; the package-* jobs below
-  # handle that and run in parallel.
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            build_type: Debug
-            coverage: true
-          - os: ubuntu-latest
-            build_type: Release
-            coverage: false
-          - os: macos-latest
-            build_type: Debug
-            coverage: false
-          - os: macos-latest
-            build_type: Release
-            coverage: false
-          - os: windows-latest
-            build_type: Debug
-            coverage: false
-          - os: windows-latest
-            build_type: Release
-            coverage: false
-
-    runs-on: ${{ matrix.os }}
-    name: test / ${{ matrix.os }} / ${{ matrix.build_type }}
-    # Cheap job: cancel previous in-progress runs on new pushes.
-    concurrency:
-      group: ci-${{ github.ref }}-test-${{ matrix.os }}-${{ matrix.build_type }}
-      cancel-in-progress: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
-            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev
-          if [ "${{ matrix.coverage }}" = "true" ]; then
-            sudo apt-get install -y --no-install-recommends lcov
-          fi
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick
-          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
-
-      # vcpkg builds Boost from source by downloading per-library tarballs
-      # from github.com/boostorg/*. github.com periodically returns 502s
-      # for raw tarball requests, breaking CI. Mitigations:
-      #   1) Filesystem binary cache persisted via actions/cache. Once a
-      #      successful run populates the cache, subsequent runs reuse the
-      #      pre-built binaries and skip source downloads entirely.
-      #   2) Outer retry loop with backoff for transient 502s on cold caches.
-      # Cache key intentionally excludes hashFiles(workflow) — editing
-      # this file should not blow away the warm vcpkg cache.
-      - name: Cache vcpkg installed packages (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
-            ~\AppData\Local\vcpkg\archives
-          key: vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-v6
-          restore-keys: |
-            vcpkg-test-${{ runner.os }}-${{ matrix.build_type }}-
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
-          # repackaged from the upstream Inno Setup installer; see
-          # vcpkg-overlay/ports/imagemagick/portfile.cmake).
-          VCPKG_OVERLAY_PORTS: ${{ github.workspace }}\vcpkg-overlay\ports
-        run: |
-          $packages = @(
-            'boost-thread','boost-date-time','boost-regex','boost-filesystem',
-            'boost-system','boost-chrono','boost-program-options','boost-signals2',
-            'boost-format','boost-property-tree','boost-algorithm','boost-asio',
-            'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
-            'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
-            'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
-          )
-          for ($i = 1; $i -le 5; $i++) {
-            Write-Host "vcpkg install attempt $i / 5"
-            vcpkg install @packages --triplet x64-windows
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 5) { exit $LASTEXITCODE }
-            $sleep = [Math]::Min(60 * $i, 180)
-            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
-            Start-Sleep -Seconds $sleep
-          }
-
-      - name: Configure (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cmake_args=(
-            -B build
-            -G Ninja
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-            -DCVC_BUILD_TESTS=ON
-            -DCVC_ENABLE_CUDA=OFF
-            -DDISABLE_CGAL=ON
-            -DCVC_BUILD_VOLROVER3=OFF
-          )
-          if [ "${{ matrix.coverage }}" = "true" ]; then
-            cmake_args+=(-DCVC_ENABLE_COVERAGE=ON)
-          fi
-          cmake "${cmake_args[@]}"
-
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cmake -B build `
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DCVC_BUILD_TESTS=ON `
-            -DCVC_ENABLE_CUDA=OFF `
-            -DDISABLE_CGAL=ON `
-            -DCVC_BUILD_VOLROVER3=OFF
-
-      - name: Build
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel
-
-      # Stress / convergence / benchmark / perf-hierarchy tests can run
-      # for many minutes and are only meaningful on trunk. Run the full
-      # suite on push to main/master, exclude heavyweights on PRs.
-      # --repeat until-pass:3 absorbs timing-sensitive flakes on macOS
-      # CI runners (where short sleep_for() waits occasionally miss
-      # boundaries under load).
-      - name: Run tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "push event (${{ github.ref }}): full suite including stress tests"
-            ctest --test-dir build \
-                  --build-config ${{ matrix.build_type }} \
-                  --output-on-failure --parallel \
-                  --repeat until-pass:3 --timeout 3600
-          else
-            echo "pull_request event: excluding ${STRESS_REGEX}"
-            ctest --test-dir build \
-                  --build-config ${{ matrix.build_type }} \
-                  --output-on-failure --parallel \
-                  --repeat until-pass:3 --timeout 300 \
-                  -E "${STRESS_REGEX}"
-          fi
-
-      - name: Generate coverage report
-        if: matrix.coverage
-        run: |
-          lcov --directory build --capture --output-file build/coverage.info --ignore-errors mismatch
-          lcov --remove build/coverage.info \
-            '/usr/*' '*/test/*' '*/tests/*' '*/_deps/*' '*/googletest/*' \
-            --output-file build/coverage_filtered.info \
-            --ignore-errors unused
-          genhtml build/coverage_filtered.info \
-            --output-directory build/coverage_html \
-            --title "libcvc Code Coverage" \
-            --legend --demangle-cpp --ignore-errors source
-
-      - name: Upload coverage report
-        if: matrix.coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: build/coverage_html/
-          retention-days: 30
-
-      - name: Upload coverage to Codecov
-        if: matrix.coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: build/coverage_filtered.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
@@ -361,7 +163,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev
+            libmagick++-dev libcgal-dev liblog4cplus-dev
+          if [ "${{ matrix.build_type }}" = "Debug" ]; then
+            sudo apt-get install -y --no-install-recommends lcov
+          fi
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -453,19 +258,84 @@ jobs:
           if [ "${{ matrix.kind }}" = "volrover3" ]; then
             extra_prefix="$HOME/vtk-qt6"
           fi
+          # libcvc-kind builds enable tests so the same artifacts we
+          # ship get exercised by ctest. volrover3 builds keep tests
+          # off (its install component has no test targets).
+          tests=OFF
+          coverage=OFF
+          if [ "${{ matrix.kind }}" = "libcvc" ]; then
+            tests=ON
+            if [ "${{ matrix.build_type }}" = "Debug" ]; then
+              coverage=ON
+            fi
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
-            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_BUILD_TESTS=$tests \
+            -DCVC_ENABLE_COVERAGE=$coverage \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
+
+      # Run the test suite against the exact artifacts we are about to
+      # package. Stress / convergence / benchmark / perf-hierarchy tests
+      # can take many minutes and are only meaningful on trunk; exclude
+      # them on PRs.
+      - name: Run tests
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 3600
+          else
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 300 \
+                  -E "${STRESS_REGEX}"
+          fi
+
+      - name: Generate coverage report
+        if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
+        run: |
+          lcov --directory build --capture --output-file build/coverage.info --ignore-errors mismatch
+          lcov --remove build/coverage.info \
+            '/usr/*' '*/test/*' '*/tests/*' '*/_deps/*' '*/googletest/*' \
+            --output-file build/coverage_filtered.info \
+            --ignore-errors unused
+          genhtml build/coverage_filtered.info \
+            --output-directory build/coverage_html \
+            --title "libcvc Code Coverage" \
+            --legend --demangle-cpp --ignore-errors source
+
+      - name: Upload coverage report
+        if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage_html/
+          retention-days: 30
+
+      - name: Upload coverage to Codecov
+        if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
+        uses: codecov/codecov-action@v4
+        with:
+          files: build/coverage_filtered.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Pack libcvc tarball
         if: matrix.kind == 'libcvc'
@@ -618,7 +488,7 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
@@ -632,17 +502,34 @@ jobs:
 
       - name: Configure
         run: |
+          tests=OFF
+          [ "${{ matrix.kind }}" = "libcvc" ] && tests=ON
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_BUILD_TESTS=$tests \
             -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
+
+      - name: Run tests
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+          else
+            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
+                  -E "${STRESS_REGEX}"
+          fi
 
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'
@@ -865,18 +752,10 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick','log4cplus','cgal'
           )
-          if ('${{ matrix.kind }}' -eq 'volrover3') {
-            # qt6-base intentionally omitted — handled by install-qt-action above.
-            # vtk[qt,opengl] also intentionally omitted: vcpkg's vtk[qt]
-            # feature pulls qt6-base, qt5compat, qttools, and qtdeclarative
-            # as transitive build deps, rebuilding the entirety of Qt6
-            # from source on every cold-cache run (~25 min). We instead
-            # build VTK 9.5 from source against aqtinstall's prebuilt Qt6
-            # in a separate cached step below (mirrors Ubuntu).
-            $packages += @('cgal')
-          }
+          # qt6-base/vtk are NOT pulled via vcpkg — see install-qt-action
+          # above and the from-source VTK build below.
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
             # --clean-after-build deletes each port's buildtree/packages
@@ -956,10 +835,7 @@ jobs:
         shell: pwsh
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
-          $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
-          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) and add
-          # the from-source VTK install tree alongside it. CMAKE_PREFIX_PATH
-          # is a semicolon-separated list on Windows.
+          $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $prefixes = @()
           if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
           if ('${{ matrix.kind }}' -eq 'volrover3') { $prefixes += 'D:\vtk-qt6' }
@@ -969,16 +845,31 @@ jobs:
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
-            -DCVC_BUILD_TESTS=OFF `
+            -DCVC_BUILD_TESTS=$tests `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
-            -DDISABLE_CGAL=$cgal `
+            -DDISABLE_CGAL=OFF `
             -DCVC_BUILD_VOLROVER3=$vol `
-            -DCVC_ENABLE_MESHER=$vol `
-            -DCVC_ENABLE_SDF=$vol
+            -DCVC_ENABLE_MESHER=ON `
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Run tests
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+          else
+            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
+                  -E "${STRESS_REGEX}"
+          fi
 
       - name: Install NSIS
         if: matrix.kind == 'volrover3'
