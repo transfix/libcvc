@@ -311,7 +311,7 @@ jobs:
           # (F2Dock, MolSurf, volrover) brings its own VTK if needed.
 
           tar czf "$STEM.tar.gz" "$STEM"
-          cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
+          # Archive already lives in $GITHUB_WORKSPACE ($PWD); no copy needed.
           du -sh "$DIST" "$STEM.tar.gz" || true
 
       # ── volrover3 portable tarball + .deb + AppImage ────────────
@@ -537,7 +537,7 @@ jobs:
           # Intentionally not bundled — see Linux section for rationale.
 
           ditto -c -k --sequesterRsrc --keepParent "$DIST" "$STEM.zip"
-          cp "$STEM.zip" "$GITHUB_WORKSPACE/"
+          # Archive already lives in $GITHUB_WORKSPACE ($PWD); no copy needed.
           du -sh "$DIST" "$STEM.zip" || true
 
       - name: Pack volrover3 (.dmg + .zip)
