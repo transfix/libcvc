@@ -12,15 +12,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
-#include <sstream>
-#include <thread>
-
 #include <cvc/app.h>
 #include <cvc/volume.h>
 #include <cvc/volume_file_info.h>
-
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <sstream>
+#include <thread>
 
 #if defined(_WIN32)
 #include <process.h>

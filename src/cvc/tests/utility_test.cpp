@@ -10,22 +10,19 @@
 */
 
 #include <atomic>
+#include <boost/any.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <chrono>
-#include <filesystem>
-#include <sstream>
-#include <thread>
-#include <vector>
-
 #include <cvc/app.h>
 #include <cvc/geometry.h>
 #include <cvc/utility.h>
 #include <cvc/volume.h>
 #include <cvc/volume_file_info.h>
-
-#include <boost/any.hpp>
-#include <boost/property_tree/ptree.hpp>
-
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <sstream>
+#include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <process.h>
@@ -211,8 +208,7 @@ TEST_F(UtilityTest, LoadUnknownExtensionThrows) {
 // ---------------------------------------------------------------------------
 
 TEST_F(UtilityTest, SubVolumeExtract) {
-  volume src(ctx, dimension(8, 8, 8), Float,
-             bounding_box(0.0, 0.0, 0.0, 7.0, 7.0, 7.0));
+  volume src(ctx, dimension(8, 8, 8), Float, bounding_box(0.0, 0.0, 0.0, 7.0, 7.0, 7.0));
   for (unsigned int k = 0; k < 8; ++k)
     for (unsigned int j = 0; j < 8; ++j)
       for (unsigned int i = 0; i < 8; ++i)
@@ -240,8 +236,7 @@ TEST_F(UtilityTest, SubVolumeOutOfBoundsThrows) {
 
 TEST_F(UtilityTest, CalcGradient) {
   // Build a simple linear ramp along X so gradient X should be nonzero, Y/Z zero.
-  volume v(ctx, dimension(8, 8, 8), Float,
-           bounding_box(0.0, 0.0, 0.0, 7.0, 7.0, 7.0));
+  volume v(ctx, dimension(8, 8, 8), Float, bounding_box(0.0, 0.0, 0.0, 7.0, 7.0, 7.0));
   for (unsigned int k = 0; k < 8; ++k)
     for (unsigned int j = 0; j < 8; ++j)
       for (unsigned int i = 0; i < 8; ++i)
