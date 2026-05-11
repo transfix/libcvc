@@ -1603,17 +1603,23 @@ TEST_F(AppTest, ThreadFeedbackExceptionSafety) {
   }
   ASSERT_TRUE(exception_thrown.load());
 
-  // Join the thread BEFORE checking progress: thread_feedback's destructor
-  // runs as the catch block unwinds, and we need a happens-before edge
-  // between that destructor and our progress read. A fixed sleep is racy
-  // under CI load (the original 200 ms was occasionally insufficient on
-  // GitHub-hosted Linux runners), but join() is a hard synchronization
-  // point that guarantees the destructor has completed.
-  ASSERT_TRUE(ctx.hasThread(thread_key));
-  thread_ptr tptr = ctx.threads(thread_key);
-  ASSERT_TRUE(tptr);
-  if (tptr->joinable())
-    tptr->join();
+  // Synchronize with the worker BEFORE checking progress: thread_feedback's
+  // destructor runs as the catch block unwinds, and we need a happens-before
+  // edge between that destructor and our progress read. A fixed sleep was
+  // racy under CI load. Two cases, both safe:
+  //   (a) The worker has not yet finished — hasThread() returns true, we
+  //       grab the thread handle and join(). join() is a hard sync point
+  //       that guarantees the destructor (and finishThreadProgress) ran.
+  //   (b) The worker has already finished — hasThread() returns false
+  //       because thread_feedback's destructor called finishThreadProgress,
+  //       which erases _threads[key] and writes _threadProgressByKey[key]
+  //       = 1.0 atomically under _threadsMutex. Subsequent threadProgress
+  //       reads happen-after that write through the same mutex.
+  if (ctx.hasThread(thread_key)) {
+    thread_ptr tptr = ctx.threads(thread_key);
+    if (tptr && tptr->joinable())
+      tptr->join();
+  }
 
   // Progress should now be 100% — set by thread_feedback's destructor
   // during stack unwinding.
