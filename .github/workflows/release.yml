@@ -311,7 +311,7 @@ jobs:
           # (F2Dock, MolSurf, volrover) brings its own VTK if needed.
 
           tar czf "$STEM.tar.gz" "$STEM"
-          cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
+          # Archive already lives in $GITHUB_WORKSPACE ($PWD); no copy needed.
           du -sh "$DIST" "$STEM.tar.gz" || true
 
       # ── volrover3 portable tarball + .deb + AppImage ────────────
@@ -537,7 +537,7 @@ jobs:
           # Intentionally not bundled — see Linux section for rationale.
 
           ditto -c -k --sequesterRsrc --keepParent "$DIST" "$STEM.zip"
-          cp "$STEM.zip" "$GITHUB_WORKSPACE/"
+          # Archive already lives in $GITHUB_WORKSPACE ($PWD); no copy needed.
           du -sh "$DIST" "$STEM.zip" || true
 
       - name: Pack volrover3 (.dmg + .zip)
@@ -683,6 +683,20 @@ jobs:
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append $env:GITHUB_ENV
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
+      # Persist vcpkg's source-tarball download cache across runs so a
+      # transient upstream timeout (e.g. gmplib.org) does not poison
+      # subsequent attempts. Save runs even if a later step fails so
+      # partial progress is captured. Downloads are triplet-agnostic,
+      # so all matrix jobs share a single cache.
+      - name: Restore vcpkg downloads cache (Windows)
+        id: vcpkg-downloads-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: D:\vcpkg-downloads
+          key: vcpkg-downloads-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            vcpkg-downloads-
+
       # CUDA toolkit so the shipped Windows artifacts can offload to
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
       # is linked statically (CMAKE_CUDA_RUNTIME_LIBRARY=Static below)
@@ -731,10 +745,21 @@ jobs:
               --x-packages-root=D:\vcpkg-packages
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq 5) { exit $LASTEXITCODE }
+            # Clear half-finished buildtrees/packages so the retry does
+            # not trip over stale state from the previous attempt.
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue D:\vcpkg-buildtrees\*
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue D:\vcpkg-packages\*
             $sleep = [Math]::Min(60 * $i, 180)
             Write-Host "Retrying after transient failure (sleeping $sleep s)..."
             Start-Sleep -Seconds $sleep
           }
+
+      - name: Save vcpkg downloads cache (Windows)
+        if: always() && steps.vcpkg-downloads-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: D:\vcpkg-downloads
+          key: vcpkg-downloads-${{ hashFiles('.github/workflows/release.yml') }}
 
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
