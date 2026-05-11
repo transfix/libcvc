@@ -58,10 +58,10 @@ void expect_volume_equal(const volume &a, const volume &b, double tol = 1e-3) {
   // the (XDim-1, YDim-1, ZDim-1) corner because some libcvc volume formats
   // exhibit boundary-plane quantization on a full vertex-vs-cell round-trip;
   // the file I/O code paths are still fully exercised by the write/read above.
-  const std::vector<std::array<unsigned int, 3>> samples = {
-      {0u, 0u, 0u},           {a.XDim() / 2, a.YDim() / 2, a.ZDim() / 2},
-      {1u, 1u, 1u},           {a.XDim() / 2, 0u, 0u},
-      {0u, a.YDim() / 2, 0u}, {0u, 0u, a.ZDim() / 2},
+  const std::vector<std::array<uint64_t, 3>> samples = {
+      {0ull, 0ull, 0ull},         {a.XDim() / 2, a.YDim() / 2, a.ZDim() / 2},
+      {1ull, 1ull, 1ull},         {a.XDim() / 2, 0ull, 0ull},
+      {0ull, a.YDim() / 2, 0ull}, {0ull, 0ull, a.ZDim() / 2},
   };
   for (auto &s : samples)
     EXPECT_NEAR(a(s[0], s[1], s[2]), b(s[0], s[1], s[2]), tol)
