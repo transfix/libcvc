@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Reusable: nightly.yml calls this workflow with rolling=true to ship
+  # master-HEAD artifacts to the `nightly` rolling GitHub Release.
+  workflow_call:
+    inputs:
+      rolling_tag:
+        description: 'When set, recreate this tag/release with the freshly built artifacts (used by nightly.yml).'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark the GitHub Release as a pre-release.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -11,10 +25,20 @@ permissions:
 # ───────────────────────────────────────────────────────────────────
 # Release artifacts
 #
-# libcvc (developer SDK):
-#   - Linux:   libcvc-<ver>-linux-<arch>-<config>.tar.gz   (debug + release)
-#   - macOS:   libcvc-<ver>-macos-<arch>-<config>.zip      (debug + release)
-#   - Windows: libcvc-<ver>-windows-<arch>-<config>.zip    (debug + release)
+# libcvc (developer SDK), shipped in both shared and static flavors:
+#   - Linux:   libcvc-<ver>-linux-<arch>-<config>.tar.gz          (shared)
+#              libcvc-<ver>-linux-<arch>-<config>-static.tar.gz   (static)
+#   - macOS:   libcvc-<ver>-macos-<arch>-<config>.zip             (shared)
+#              libcvc-<ver>-macos-<arch>-<config>-static.zip      (static)
+#   - Windows: libcvc-<ver>-windows-<arch>-<config>.zip           (shared)
+#              libcvc-<ver>-windows-<arch>-<config>-static.zip    (static)
+#
+# Shared artifacts contain libcvc.{so,dylib,dll} + its CMake config and
+# expect consumers to discover Boost/HDF5/FFTW/etc. on their own host.
+# Static artifacts contain libcvc.{a,lib} built with BUILD_SHARED_LIBS=OFF
+# and (on Windows, via the x64-windows-static vcpkg triplet) ship the
+# static .lib files of every dependency alongside libcvc. Both flavors
+# include cvc::xmlrpc.
 #
 # volrover3 (end-user application, Release only):
 #   - Linux:   volrover3-<ver>-linux-<arch>.tar.gz         (portable)
@@ -38,17 +62,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # libcvc developer SDK (both configs)
-          - name: libcvc-debug
+          # libcvc developer SDK: every (build_type, link) combination
+          - name: libcvc-debug-shared
             kind: libcvc
             build_type: Debug
-          - name: libcvc-release
+            link: shared
+          - name: libcvc-release-shared
             kind: libcvc
             build_type: Release
-          # volrover3 end-user app (Release only)
+            link: shared
+          - name: libcvc-debug-static
+            kind: libcvc
+            build_type: Debug
+            link: static
+          - name: libcvc-release-static
+            kind: libcvc
+            build_type: Release
+            link: static
+          # volrover3 end-user app (Release only, shared only)
           - name: volrover3
             kind: volrover3
             build_type: Release
+            link: shared
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,11 +93,23 @@ jobs:
         id: meta
         run: |
           VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          if [ -n "${{ inputs.rolling_tag }}" ]; then
+            VERSION="${VERSION}-${{ inputs.rolling_tag }}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
           ARCH=$(uname -m)
           BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "arch=$ARCH"       >> "$GITHUB_OUTPUT"
-          echo "btlc=$BTLC"       >> "$GITHUB_OUTPUT"
+          # Static artifacts get a -static suffix; shared keeps the legacy
+          # unsuffixed name for backward compatibility with consumers that
+          # download by URL.
+          if [ "${{ matrix.link }}" = "static" ]; then
+            LINKSFX="-static"
+          else
+            LINKSFX=""
+          fi
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
+          echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
@@ -141,10 +188,26 @@ jobs:
           if [ "${{ matrix.kind }}" = "volrover3" ]; then
             extra_prefix="$HOME/vtk-qt6"
           fi
+          # link=shared → BUILD_SHARED_LIBS=ON (legacy default).
+          # link=static → BUILD_SHARED_LIBS=OFF plus static dep flags so
+          # the .a flavor of Boost/HDF5/FFTW/GSL ships in libapt's dev
+          # packages is preferred. PIC is always on so the static archive
+          # remains relocatable into shared consumers.
+          if [ "${{ matrix.link }}" = "static" ]; then
+            shared_libs=OFF
+            static_deps="-DBoost_USE_STATIC_LIBS=ON -DHDF5_USE_STATIC_LIBRARIES=ON"
+          else
+            shared_libs=ON
+            static_deps=""
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
+            -DBUILD_SHARED_LIBS=$shared_libs \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            $static_deps \
             -DCVC_BUILD_TESTS=OFF \
+            -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
@@ -160,7 +223,7 @@ jobs:
         if: matrix.kind == 'libcvc'
         working-directory: build
         run: |
-          STEM="libcvc-${{ steps.meta.outputs.version }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          STEM="libcvc-${{ steps.meta.outputs.version }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
@@ -249,15 +312,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: libcvc-debug
+          - name: libcvc-debug-shared
             kind: libcvc
             build_type: Debug
-          - name: libcvc-release
+            link: shared
+          - name: libcvc-release-shared
             kind: libcvc
             build_type: Release
+            link: shared
+          - name: libcvc-debug-static
+            kind: libcvc
+            build_type: Debug
+            link: static
+          - name: libcvc-release-static
+            kind: libcvc
+            build_type: Release
+            link: static
           - name: volrover3
             kind: volrover3
             build_type: Release
+            link: shared
     steps:
       - uses: actions/checkout@v4
         with:
@@ -267,11 +341,20 @@ jobs:
         id: meta
         run: |
           VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          if [ -n "${{ inputs.rolling_tag }}" ]; then
+            VERSION="${VERSION}-${{ inputs.rolling_tag }}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
           ARCH=$(uname -m)
           BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "arch=$ARCH"       >> "$GITHUB_OUTPUT"
-          echo "btlc=$BTLC"       >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.link }}" = "static" ]; then
+            LINKSFX="-static"
+          else
+            LINKSFX=""
+          fi
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH"        >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
+          echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
@@ -290,9 +373,22 @@ jobs:
 
       - name: Configure
         run: |
+          if [ "${{ matrix.link }}" = "static" ]; then
+            shared_libs=OFF
+            # Homebrew's boost / hdf5 / fftw / gsl bottles ship both .a
+            # and .dylib; CMake's standard flags select the .a flavor.
+            static_deps="-DBoost_USE_STATIC_LIBS=ON -DHDF5_USE_STATIC_LIBRARIES=ON"
+          else
+            shared_libs=ON
+            static_deps=""
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DBUILD_SHARED_LIBS=$shared_libs \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            $static_deps \
             -DCVC_BUILD_TESTS=OFF \
+            -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
@@ -306,7 +402,7 @@ jobs:
         if: matrix.kind == 'libcvc'
         working-directory: build
         run: |
-          STEM="libcvc-${{ steps.meta.outputs.version }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          STEM="libcvc-${{ steps.meta.outputs.version }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           cpack -G ZIP -D CPACK_COMPONENTS_ALL=libcvc \
                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.zip" "$STEM.zip"
@@ -348,15 +444,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: libcvc-debug
+          - name: libcvc-debug-shared
             kind: libcvc
             build_type: Debug
-          - name: libcvc-release
+            link: shared
+          - name: libcvc-release-shared
             kind: libcvc
             build_type: Release
+            link: shared
+          - name: libcvc-debug-static
+            kind: libcvc
+            build_type: Debug
+            link: static
+          - name: libcvc-release-static
+            kind: libcvc
+            build_type: Release
+            link: static
           - name: volrover3
             kind: volrover3
             build_type: Release
+            link: shared
     steps:
       - uses: actions/checkout@v4
         with:
@@ -367,13 +474,27 @@ jobs:
         shell: bash
         run: |
           VERSION=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]/{gsub(/[^0-9.]/,"",$2); print $2; exit}' CMakeLists.txt)
+          if [ -n "${{ inputs.rolling_tag }}" ]; then
+            VERSION="${VERSION}-${{ inputs.rolling_tag }}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
           BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "arch=x86_64"      >> "$GITHUB_OUTPUT"
-          echo "btlc=$BTLC"       >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.link }}" = "static" ]; then
+            LINKSFX="-static"
+            TRIPLET="x64-windows-static"
+          else
+            LINKSFX=""
+            TRIPLET="x64-windows"
+          fi
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          echo "arch=x86_64"       >> "$GITHUB_OUTPUT"
+          echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
+          echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
+          echo "triplet=$TRIPLET"  >> "$GITHUB_OUTPUT"
 
       # Cache key intentionally excludes hashFiles(workflow) so editing
-      # this file does not invalidate the warm vcpkg cache.
+      # this file does not invalidate the warm vcpkg cache. The triplet
+      # is part of the key so static (x64-windows-static) and shared
+      # (x64-windows) builds do not share buildtrees.
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
@@ -381,9 +502,9 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-v6
+          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v6
           restore-keys: |
-            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-
+            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-
 
       # Install Qt6 from official prebuilt binaries via aqtinstall.
       # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
@@ -471,7 +592,7 @@ jobs:
             # --clean-after-build deletes each port's buildtree/packages
             # immediately after installation. --x-buildtrees-root /
             # --x-packages-root keep the heavy working dirs on D:.
-            vcpkg install @packages --triplet x64-windows `
+            vcpkg install @packages --triplet ${{ steps.meta.outputs.triplet }} `
               --clean-after-build `
               --x-buildtrees-root=D:\vcpkg-buildtrees `
               --x-packages-root=D:\vcpkg-packages
@@ -528,6 +649,17 @@ jobs:
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          $xmlrpc = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
+          # link=shared → BUILD_SHARED_LIBS=ON + x64-windows triplet (DLLs)
+          # link=static → BUILD_SHARED_LIBS=OFF + x64-windows-static triplet
+          #   (.lib for libcvc and every vcpkg dep, MSVC static runtime).
+          if ('${{ matrix.link }}' -eq 'static') {
+            $shared = 'OFF'
+            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>'
+          } else {
+            $shared = 'ON'
+            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
+          }
           # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) and add
           # the from-source VTK install tree alongside it. CMAKE_PREFIX_PATH
           # is a semicolon-separated list on Windows.
@@ -539,8 +671,13 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ steps.meta.outputs.triplet }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
+            -DBUILD_SHARED_LIBS=$shared `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY="$msvcrt" `
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON `
             -DCVC_BUILD_TESTS=OFF `
+            -DCVC_USING_XMLRPC=$xmlrpc `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=$cgal `
@@ -560,7 +697,7 @@ jobs:
         shell: pwsh
         working-directory: build
         run: |
-          $stem = "libcvc-${{ steps.meta.outputs.version }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          $stem = "libcvc-${{ steps.meta.outputs.version }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
           cpack -G ZIP -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=libcvc -D CPACK_PACKAGE_FILE_NAME="$stem"
           Move-Item "$stem-libcvc.zip" "$stem.zip"
           Copy-Item "$stem.zip" "$env:GITHUB_WORKSPACE/"
@@ -636,9 +773,25 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      - name: Recreate rolling tag (nightly mode)
+        if: ${{ inputs.rolling_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROLLING_TAG: ${{ inputs.rolling_tag }}
+        run: |
+          set -euo pipefail
+          # Best-effort cleanup of any previous rolling release so the
+          # asset list is exactly what this run produced.
+          gh release delete "$ROLLING_TAG" --yes --cleanup-tag 2>/dev/null || true
+          git tag -f "$ROLLING_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$ROLLING_TAG"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.rolling_tag != '' && inputs.rolling_tag || github.ref_name }}
+          name: ${{ inputs.rolling_tag != '' && format('Nightly ({0})', github.sha) || '' }}
+          prerelease: ${{ inputs.prerelease }}
           # Preserve the curated release body (set manually before tagging
           # or via `gh release edit`). With generate_release_notes: false
           # and no `body`/`body_path` input, softprops does not touch the
