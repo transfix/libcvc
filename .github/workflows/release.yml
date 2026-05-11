@@ -130,7 +130,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev libcgal-dev
+            libmagick++-dev libcgal-dev liblog4cplus-dev
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -272,9 +272,10 @@ jobs:
           copy_libs 'libfftw3'
           copy_libs 'libgsl'
           copy_libs 'libgslcblas'
+          copy_libs 'liblog4cplus'
 
           # Headers
-          for src in /usr/include/boost /usr/include/gsl; do
+          for src in /usr/include/boost /usr/include/gsl /usr/include/log4cplus; do
             [ -d "$src" ] && cp -R "$src" "$DIST/include/"
           done
           # HDF5 headers live under /usr/include/hdf5/serial on Ubuntu.
@@ -451,7 +452,7 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
@@ -502,7 +503,7 @@ jobs:
 
           # Headers are always needed for downstream `find_package`
           # consumers; copy them from Homebrew prefixes.
-          for pkg in boost hdf5 fftw gsl; do
+          for pkg in boost hdf5 fftw gsl log4cplus; do
             P=$(brew --prefix "$pkg" 2>/dev/null || true)
             if [ -n "$P" ] && [ -d "$P/include" ]; then
               cp -R "$P/include/." "$DIST/include/" 2>/dev/null || true
@@ -524,7 +525,7 @@ jobs:
           else
             # Static flavour: just copy the .a archives. No install_name
             # fixup needed — static linkage embeds object code directly.
-            for pkg in boost hdf5 fftw gsl; do
+            for pkg in boost hdf5 fftw gsl log4cplus; do
               P=$(brew --prefix "$pkg" 2>/dev/null || true)
               if [ -n "$P" ] && [ -d "$P/lib" ]; then
                 find "$P/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
@@ -723,7 +724,7 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick','log4cplus'
           )
           # cgal is required by libcvc's SDF/Mesher features and by
           # volrover3. qt6-base is intentionally omitted on volrover3 —
