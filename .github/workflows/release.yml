@@ -130,7 +130,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev
+            libmagick++-dev libcgal-dev liblog4cplus-dev
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -222,10 +222,10 @@ jobs:
             -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -272,9 +272,10 @@ jobs:
           copy_libs 'libfftw3'
           copy_libs 'libgsl'
           copy_libs 'libgslcblas'
+          copy_libs 'liblog4cplus'
 
           # Headers
-          for src in /usr/include/boost /usr/include/gsl; do
+          for src in /usr/include/boost /usr/include/gsl /usr/include/log4cplus; do
             [ -d "$src" ] && cp -R "$src" "$DIST/include/"
           done
           # HDF5 headers live under /usr/include/hdf5/serial on Ubuntu.
@@ -451,7 +452,7 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
@@ -482,10 +483,10 @@ jobs:
             -DCVC_BUILD_TESTS=OFF \
             -DCVC_USING_XMLRPC=${{ matrix.kind == 'libcvc' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=${{ matrix.kind == 'volrover3' && 'OFF' || 'ON' }} \
+            -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_MESHER=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
-            -DCVC_ENABLE_SDF=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }}
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -502,7 +503,7 @@ jobs:
 
           # Headers are always needed for downstream `find_package`
           # consumers; copy them from Homebrew prefixes.
-          for pkg in boost hdf5 fftw gsl; do
+          for pkg in boost hdf5 fftw gsl log4cplus; do
             P=$(brew --prefix "$pkg" 2>/dev/null || true)
             if [ -n "$P" ] && [ -d "$P/include" ]; then
               cp -R "$P/include/." "$DIST/include/" 2>/dev/null || true
@@ -524,7 +525,7 @@ jobs:
           else
             # Static flavour: just copy the .a archives. No install_name
             # fixup needed — static linkage embeds object code directly.
-            for pkg in boost hdf5 fftw gsl; do
+            for pkg in boost hdf5 fftw gsl log4cplus; do
               P=$(brew --prefix "$pkg" 2>/dev/null || true)
               if [ -n "$P" ] && [ -d "$P/lib" ]; then
                 find "$P/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
@@ -723,17 +724,17 @@ jobs:
             'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
             'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
             'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick'
+            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick','log4cplus'
           )
-          if ('${{ matrix.kind }}' -eq 'volrover3') {
-            # qt6-base intentionally omitted — handled by install-qt-action above.
-            # vtk[qt,opengl] also omitted: the qt feature pulled qt6-base/
-            # qt5compat/qttools/qtdeclarative as transitive build deps,
-            # rebuilding all of Qt6 from source on every cold-cache run.
-            # We build VTK 9.5 from source against aqtinstall's prebuilt
-            # Qt6 in a separate cached step below (mirrors Ubuntu).
-            $packages += @('cgal')
-          }
+          # cgal is required by libcvc's SDF/Mesher features and by
+          # volrover3. qt6-base is intentionally omitted on volrover3 —
+          # handled by install-qt-action above. vtk[qt,opengl] is also
+          # omitted: the qt feature pulled qt6-base/qt5compat/qttools/
+          # qtdeclarative as transitive build deps, rebuilding all of
+          # Qt6 from source on every cold-cache run. We build VTK 9.5
+          # from source against aqtinstall's prebuilt Qt6 in a separate
+          # cached step below (mirrors Ubuntu).
+          $packages += @('cgal')
           for ($i = 1; $i -le 5; $i++) {
             Write-Host "vcpkg install attempt $i / 5"
             # --clean-after-build deletes each port's buildtree/packages
@@ -806,7 +807,8 @@ jobs:
         shell: pwsh
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
-          $cgal = if ('${{ matrix.kind }}' -eq 'volrover3') { 'OFF' } else { 'ON' }
+          # CGAL/SDF/Mesher are always built; only volrover3 toggles
+          # the GUI app and its extra deps.
           $xmlrpc = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           # link=shared → BUILD_SHARED_LIBS=ON + x64-windows triplet (DLLs)
           # link=static → BUILD_SHARED_LIBS=OFF + x64-windows-static triplet
@@ -838,10 +840,10 @@ jobs:
             -DCVC_USING_XMLRPC=$xmlrpc `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
-            -DDISABLE_CGAL=$cgal `
+            -DDISABLE_CGAL=OFF `
             -DCVC_BUILD_VOLROVER3=$vol `
-            -DCVC_ENABLE_MESHER=$vol `
-            -DCVC_ENABLE_SDF=$vol
+            -DCVC_ENABLE_MESHER=ON `
+            -DCVC_ENABLE_SDF=ON
 
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
