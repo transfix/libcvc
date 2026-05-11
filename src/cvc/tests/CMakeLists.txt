@@ -33,6 +33,15 @@ else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
 endif()
 
+# algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
+# the Mesher.
+if(CVC_ENABLE_MESHER)
+  add_executable(algorithm_test algorithm_test.cpp)
+  list(APPEND TEST_TARGETS algorithm_test)
+else()
+  message(STATUS "Mesher disabled; skipping algorithm_test")
+endif()
+
 # Link against the CVC library and Google Test
 target_link_libraries(app_test
   PRIVATE
@@ -69,6 +78,16 @@ if(TARGET geometry_test)
       GTest::gtest
       GTest::gtest_main
   )
+endif()
+
+if(TARGET algorithm_test)
+  target_link_libraries(algorithm_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(algorithm_test PRIVATE cxx_std_17)
 endif()
 
 target_link_libraries(procedural_geometry_test
@@ -156,6 +175,9 @@ gtest_discover_tests(voxels_test)
 gtest_discover_tests(volume_test)
 if(TARGET geometry_test)
   gtest_discover_tests(geometry_test)
+endif()
+if(TARGET algorithm_test)
+  gtest_discover_tests(algorithm_test)
 endif()
 gtest_discover_tests(volume_ops_test)
 gtest_discover_tests(volume_io_test)
