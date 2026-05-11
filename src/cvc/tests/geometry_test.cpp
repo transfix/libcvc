@@ -1027,7 +1027,7 @@ TEST_F(GeometryTest, ProjectToTargetSurface) {
   // Vertices should be closer to target now
   // This is a basic sanity check - projection should change vertices
   bool projection_occurred = false;
-  for (size_t i = 0; i < std::min(source.num_points(), size_t(100)); i++) {
+  for (size_t i = 0; i < std::min<size_t>(source.num_points(), 100); i++) {
     double dist = 0.0;
     for (int j = 0; j < 3; j++) {
       double diff = source.points()[i][j] - target.points()[i][j];
