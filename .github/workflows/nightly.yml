@@ -1,0 +1,32 @@
+name: Nightly
+
+# Produces the same full artifact matrix as `release.yml` (libcvc SDK in
+# debug+release × shared+static for Linux/macOS/Windows, plus the
+# volrover3 app) from the current tip of `master` and publishes them to
+# a rolling `nightly` GitHub Release. The rolling tag is force-recreated
+# on the latest master commit at the start of each publish so consumers
+# can pin against either `nightly` or the underlying SHA.
+#
+# Runs daily at 03:00 UTC and on manual `workflow_dispatch` clicks.
+# Uses release.yml as a reusable workflow (workflow_call) to keep the
+# build matrix definition single-sourced.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build_and_publish:
+    uses: ./.github/workflows/release.yml
+    with:
+      rolling_tag: nightly
+      prerelease: true
+    secrets: inherit
