@@ -40,12 +40,13 @@ permissions:
 # the extracted archive without needing apt / Homebrew / vcpkg on the
 # host. Shared archives ship .so/.dylib/.dll (with rpath fixups on
 # Linux+macOS) plus their import .lib on Windows; static archives ship
-# .a/.lib only. Both flavors include cvc::xmlrpc plus a Qt-free build
-# of VTK 9.5 (libvtk*.so/.dylib/.dll/.a/.lib + headers + CMake config)
-# so consumers don't have to rebuild VTK separately.
+# .a/.lib only. Both flavors include cvc::xmlrpc. VTK is intentionally
+# NOT bundled — downstream consumers (F2Dock, MolSurf, volrover) bring
+# their own VTK with the configuration they need (e.g. Qt-enabled for
+# volrover).
 #
 # Debug archives on Windows also include MSVC .pdb files for libcvc
-# itself, every vcpkg-built dependency, and VTK, so symbolicated stack
+# itself and every vcpkg-built dependency, so symbolicated stack
 # traces work out of the box.
 #
 # System libraries (glibc, libstdc++, libm, Windows UCRT) are
@@ -160,45 +161,6 @@ jobs:
             libxrender-dev libxcursor-dev libxinerama-dev libxi-dev \
             libcgal-dev \
             libfuse2 file desktop-file-utils
-
-      # ── VTK 9.5 (Qt-free) for libcvc archives ──
-      # Built per (build_type, link) so debug-shared, release-shared,
-      # debug-static, release-static each get a matching VTK install
-      # tree to bundle. Qt is intentionally disabled: libcvc itself
-      # has no Qt dependency, and bundling Qt6 would balloon the
-      # libcvc archive by hundreds of MB. The volrover3 row keeps its
-      # own ~/vtk-qt6 build (with Qt) cached separately below.
-      - name: Cache VTK (no Qt) install tree
-        if: matrix.kind == 'libcvc'
-        id: vtk-nq-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/vtk-nq
-          key: vtk-nq-9.5.0-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.link }}-v1
-
-      - name: Build VTK 9.5 (no Qt) from source
-        if: matrix.kind == 'libcvc' && steps.vtk-nq-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.link }}" = "static" ]; then
-            vtk_shared=OFF
-          else
-            vtk_shared=ON
-          fi
-          curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B vtk-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_INSTALL_PREFIX=$HOME/vtk-nq \
-            -DBUILD_SHARED_LIBS=$vtk_shared \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DVTK_GROUP_ENABLE_Qt=NO \
-            -DVTK_BUILD_TESTING=OFF \
-            -DVTK_BUILD_EXAMPLES=OFF \
-            -DVTK_BUILD_DOCUMENTATION=OFF \
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build vtk-build --parallel --target install
-          rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
 
       # ── VTK 9.5 built against Qt6, cached ──
       # Cache key matches ci.yml so the build is shared across both
@@ -344,34 +306,9 @@ jobs:
           fi
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
-          if [ -d "$HOME/vtk-nq" ]; then
-            mkdir -p "$DIST/lib/cmake" "$DIST/include"
-            # Copy VTK install tree alongside libcvc's own files.
-            # Include trees may not overlap; if they do, VTK headers
-            # land under include/vtk-9.5/ which doesn't collide.
-            for src in "$HOME/vtk-nq/include"/*; do
-              [ -e "$src" ] && cp -R "$src" "$DIST/include/" 2>/dev/null || true
-            done
-            if [ -d "$HOME/vtk-nq/lib" ]; then
-              # Preserve symlinks for shared lib SONAMEs.
-              find "$HOME/vtk-nq/lib" -maxdepth 1 \( -name '*.so*' -o -name '*.a' \) -print0 \
-                | xargs -0 -r cp -P -t "$DIST/lib/" 2>/dev/null || true
-              # CMake config bundle.
-              if [ -d "$HOME/vtk-nq/lib/cmake" ]; then
-                cp -R "$HOME/vtk-nq/lib/cmake/." "$DIST/lib/cmake/" 2>/dev/null || true
-              fi
-            fi
-            # Re-stamp RUNPATH on any VTK .so we just dropped in so it
-            # finds its peers via $ORIGIN as well.
-            if [ "${{ matrix.link }}" = "shared" ]; then
-              for so in "$DIST"/lib/libvtk*.so*; do
-                [ -e "$so" ] || continue
-                [ -L "$so" ] && continue
-                patchelf --remove-rpath "$so" 2>/dev/null || true
-                patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
-              done
-            fi
-          fi
+          # Intentionally not bundled: libcvc's CMake config does not
+          # require VTK at consumer time. Each downstream project
+          # (F2Dock, MolSurf, volrover) brings its own VTK if needed.
 
           tar czf "$STEM.tar.gz" "$STEM"
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
@@ -511,38 +448,6 @@ jobs:
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
-      - name: Cache VTK (no Qt) install tree
-        if: matrix.kind == 'libcvc'
-        id: vtk-nq-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/vtk-nq
-          key: vtk-nq-9.5.0-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.link }}-v1
-
-      - name: Build VTK 9.5 (no Qt) from source
-        if: matrix.kind == 'libcvc' && steps.vtk-nq-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.link }}" = "static" ]; then
-            vtk_shared=OFF
-          else
-            vtk_shared=ON
-          fi
-          curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B vtk-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_INSTALL_PREFIX=$HOME/vtk-nq \
-            -DBUILD_SHARED_LIBS=$vtk_shared \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DVTK_GROUP_ENABLE_Qt=NO \
-            -DVTK_BUILD_TESTING=OFF \
-            -DVTK_BUILD_EXAMPLES=OFF \
-            -DVTK_BUILD_DOCUMENTATION=OFF \
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build vtk-build --parallel --target install
-          rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
-
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
@@ -622,44 +527,7 @@ jobs:
           fi
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
-          if [ -d "$HOME/vtk-nq" ]; then
-            mkdir -p "$DIST/lib/cmake" "$DIST/include"
-            for src in "$HOME/vtk-nq/include"/*; do
-              [ -e "$src" ] && cp -R "$src" "$DIST/include/" 2>/dev/null || true
-            done
-            if [ -d "$HOME/vtk-nq/lib" ]; then
-              find "$HOME/vtk-nq/lib" -maxdepth 1 \( -name '*.dylib' -o -name '*.a' \) -print0 \
-                | xargs -0 -I {} cp -RP {} "$DIST/lib/" 2>/dev/null || true
-              if [ -d "$HOME/vtk-nq/lib/cmake" ]; then
-                cp -R "$HOME/vtk-nq/lib/cmake/." "$DIST/lib/cmake/" 2>/dev/null || true
-              fi
-            fi
-            # Rewrite install_names on bundled VTK dylibs so they
-            # resolve siblings via @loader_path/ (i.e. find each
-            # other inside the archive's lib/ directory).
-            if [ "${{ matrix.link }}" = "shared" ]; then
-              for dy in "$DIST"/lib/libvtk*.dylib; do
-                [ -e "$dy" ] || continue
-                [ -L "$dy" ] && continue
-                # Set the dylib's own LC_ID_DYLIB to @rpath/<name>.
-                base=$(basename "$dy")
-                install_name_tool -id "@rpath/$base" "$dy" 2>/dev/null || true
-                # Rewrite every load command that references another
-                # absolute path under /usr/local/Cellar/vtk/... to a
-                # @loader_path-relative form, then add an rpath of
-                # @loader_path so siblings resolve.
-                otool -L "$dy" | awk 'NR>1 {print $1}' | while read -r dep; do
-                  case "$dep" in
-                    /usr/local/*|/opt/homebrew/*|@rpath/*)
-                      depbase=$(basename "$dep")
-                      install_name_tool -change "$dep" "@loader_path/$depbase" "$dy" 2>/dev/null || true
-                      ;;
-                  esac
-                done
-                install_name_tool -add_rpath '@loader_path/' "$dy" 2>/dev/null || true
-              done
-            fi
-          fi
+          # Intentionally not bundled — see Linux section for rationale.
 
           ditto -c -k --sequesterRsrc --keepParent "$DIST" "$STEM.zip"
           cp "$STEM.zip" "$GITHUB_WORKSPACE/"
@@ -860,62 +728,6 @@ jobs:
             Start-Sleep -Seconds $sleep
           }
 
-      # ── VTK 9.5 (Qt-free) for libcvc archives on Windows ──
-      # Built per (build_type, link); installs into D:\vtk-nq with
-      # PDB files preserved for Debug builds. Bundled into the libcvc
-      # archive in the Pack step further down.
-      - name: Restore VTK (no Qt) cache (Windows)
-        if: matrix.kind == 'libcvc'
-        id: vtk-nq-cache-windows
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\vtk-nq
-          key: vtk-nq-9.5.0-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.link }}-v1
-
-      - name: Build VTK 9.5 (no Qt) from source (Windows)
-        if: matrix.kind == 'libcvc' && steps.vtk-nq-cache-windows.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vtkShared = if ('${{ matrix.link }}' -eq 'static') { 'OFF' } else { 'ON' }
-          $msvcrt = if ('${{ matrix.link }}' -eq 'static') {
-            'MultiThreaded$<$<CONFIG:Debug>:Debug>'
-          } else {
-            'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
-          }
-          Invoke-WebRequest -Uri https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz -OutFile vtk.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B D:\vtk-nq-build `
-            -DCMAKE_INSTALL_PREFIX=D:\vtk-nq `
-            -DBUILD_SHARED_LIBS=$vtkShared `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY="$msvcrt" `
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON `
-            -DVTK_GROUP_ENABLE_Qt=NO `
-            -DVTK_BUILD_TESTING=OFF `
-            -DVTK_BUILD_EXAMPLES=OFF `
-            -DVTK_BUILD_DOCUMENTATION=OFF `
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build D:\vtk-nq-build --config ${{ matrix.build_type }} --parallel --target install
-          # Stash PDB files alongside the install tree for Debug builds.
-          # CMake's install rules typically skip per-target .pdb files
-          # for static .lib targets, so we copy them out of the build
-          # tree manually before the build dir is removed.
-          if ('${{ matrix.build_type }}' -eq 'Debug') {
-            New-Item -ItemType Directory -Force -Path D:\vtk-nq\pdb | Out-Null
-            Get-ChildItem -Path D:\vtk-nq-build -Recurse -Include *.pdb -File `
-              | Copy-Item -Destination D:\vtk-nq\pdb -Force
-          }
-          Remove-Item -Recurse -Force D:\vtk-nq-build
-          Remove-Item -Recurse -Force VTK-9.5.0
-          Remove-Item -Force vtk.tar.gz
-
-      - name: Save VTK (no Qt) cache (Windows)
-        if: matrix.kind == 'libcvc' && steps.vtk-nq-cache-windows.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: D:\vtk-nq
-          key: vtk-nq-9.5.0-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.link }}-v1
-
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
       # because MSVC Debug and Release VTK DLLs are not interchangeable.
@@ -1074,34 +886,7 @@ jobs:
           }
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
-          if (Test-Path D:\vtk-nq) {
-            if (Test-Path D:\vtk-nq\include) {
-              Copy-Item -Recurse -Force D:\vtk-nq\include\* "$dist/include/"
-            }
-            if (Test-Path D:\vtk-nq\lib) {
-              Get-ChildItem -Path D:\vtk-nq\lib -Filter '*.lib' -File `
-                | Copy-Item -Destination "$dist/lib/" -Force
-              if (Test-Path D:\vtk-nq\lib\cmake) {
-                New-Item -ItemType Directory -Force -Path "$dist/lib/cmake" | Out-Null
-                Copy-Item -Recurse -Force D:\vtk-nq\lib\cmake\* "$dist/lib/cmake/"
-              }
-            }
-            if ('${{ matrix.link }}' -eq 'shared' -and (Test-Path D:\vtk-nq\bin)) {
-              Get-ChildItem -Path D:\vtk-nq\bin -Filter '*.dll' -File `
-                | Copy-Item -Destination "$dist/bin/" -Force
-            }
-            if ($isDebug -and (Test-Path D:\vtk-nq\pdb)) {
-              # Drop VTK's PDB files alongside their .dll (shared) or
-              # .lib (static). For simplicity place all .pdb under both
-              # bin/ and lib/; the debugger searches both.
-              New-Item -ItemType Directory -Force -Path "$dist/bin","$dist/lib" | Out-Null
-              Get-ChildItem -Path D:\vtk-nq\pdb -Filter '*.pdb' -File `
-                | ForEach-Object {
-                    Copy-Item $_.FullName -Destination "$dist/bin/" -Force -ErrorAction SilentlyContinue
-                    Copy-Item $_.FullName -Destination "$dist/lib/" -Force -ErrorAction SilentlyContinue
-                  }
-            }
-          }
+          # Intentionally not bundled — see Linux section for rationale.
 
           Compress-Archive -Path "$dist/*" -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "$stem.zip") -Force
           "$stem staged at $dist" | Write-Host
