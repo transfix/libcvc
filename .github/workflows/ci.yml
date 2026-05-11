@@ -200,6 +200,22 @@ jobs:
             libcgal-dev \
             libfuse2 file desktop-file-utils
 
+      # ── Optional: pull VTK from a libcvc-deps release bundle ──
+      # When a matching libcvc-deps release archive exists for this
+      # platform, downloading it is far cheaper than a cold-cache VTK
+      # source build (~25-40 min). On hit, the cache restore + source
+      # build are both skipped and CMAKE_PREFIX_PATH picks up VTK from
+      # the extracted libcvc-deps tree. On miss, the action emits an
+      # empty `path` output and we fall back to the previous
+      # cache-then-build path.
+      - name: Fetch libcvc-deps (optional speedup)
+        if: matrix.kind == 'volrover3'
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
       # ── VTK 9.5 built against Qt6, cached ──
       #
       # Ubuntu's prebuilt libvtk9-qt-dev is Qt5-only. We build VTK
@@ -213,7 +229,7 @@ jobs:
       # than as a post-job step that never runs when the workflow is
       # cancelled mid-flight.
       - name: Restore VTK (Qt6) cache
-        if: matrix.kind == 'volrover3'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == ''
         id: vtk-cache
         uses: actions/cache/restore@v4
         with:
@@ -221,7 +237,7 @@ jobs:
           key: vtk-9.5.0-qt6-${{ runner.os }}-v2
 
       - name: Build VTK 9.5 from source (Qt6)
-        if: matrix.kind == 'volrover3' && steps.vtk-cache.outputs.cache-hit != 'true'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == '' && steps.vtk-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
@@ -246,7 +262,7 @@ jobs:
       # the job (which may take another 5-15 min) has any chance of
       # being cancelled.
       - name: Save VTK (Qt6) cache
-        if: matrix.kind == 'volrover3' && steps.vtk-cache.outputs.cache-hit != 'true'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == '' && steps.vtk-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/vtk-qt6
@@ -256,7 +272,13 @@ jobs:
         run: |
           extra_prefix=""
           if [ "${{ matrix.kind }}" = "volrover3" ]; then
-            extra_prefix="$HOME/vtk-qt6"
+            # Prefer libcvc-deps when the speedup hit; else fall back
+            # to the from-source VTK install under ~/vtk-qt6.
+            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+            else
+              extra_prefix="$HOME/vtk-qt6"
+            fi
           fi
           # libcvc-kind builds enable tests so the same artifacts we
           # ship get exercised by ctest. volrover3 builds keep tests
@@ -387,8 +409,16 @@ jobs:
           # resolves them by name; libcvc.so.3 lives under
           # AppDir/usr/lib/x86_64-linux-gnu/ (Debian's GNUInstallDirs
           # default) which is not on the default search path. VTK 9.5
-          # was built into $HOME/vtk-qt6/lib (cached, off-system).
-          export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:$HOME/vtk-qt6/lib:${LD_LIBRARY_PATH:-}"
+          # was built into $HOME/vtk-qt6/lib (cached, off-system) or,
+          # when the libcvc-deps speedup hit, lives under the extracted
+          # libcvc-deps root.
+          vtk_lib_path=""
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            vtk_lib_path="${{ steps.libcvc-deps.outputs.path }}/lib"
+          else
+            vtk_lib_path="$HOME/vtk-qt6/lib"
+          fi
+          export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:$vtk_lib_path:${LD_LIBRARY_PATH:-}"
           ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
                         --desktop-file AppDir/volrover3.desktop \
                         --icon-file    AppDir/volrover_logo.png || \
@@ -788,13 +818,22 @@ jobs:
             ~\AppData\Local\vcpkg\archives
           key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
 
+      # ── Optional: pull VTK from a libcvc-deps release bundle ──
+      - name: Fetch libcvc-deps (optional speedup)
+        if: matrix.kind == 'volrover3'
+        id: libcvc-deps-windows
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
       # because MSVC Debug and Release VTK DLLs are not interchangeable.
       # Uses Visual Studio generator (windows-latest default) so we
       # don't need a separate MSVC env activation step.
       - name: Restore VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
         id: vtk-cache-windows
         uses: actions/cache/restore@v4
         with:
@@ -802,7 +841,7 @@ jobs:
           key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
 
       - name: Build VTK 9.5 from source against Qt6 (Windows)
-        if: matrix.kind == 'volrover3' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz -OutFile vtk.tar.gz
@@ -825,7 +864,7 @@ jobs:
           Remove-Item -Force vtk.tar.gz
 
       - name: Save VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: D:\vtk-qt6
@@ -838,7 +877,14 @@ jobs:
           $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $prefixes = @()
           if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
-          if ('${{ matrix.kind }}' -eq 'volrover3') { $prefixes += 'D:\vtk-qt6' }
+          if ('${{ matrix.kind }}' -eq 'volrover3') {
+            $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
+            if ($depsPath) {
+              $prefixes += $depsPath
+            } else {
+              $prefixes += 'D:\vtk-qt6'
+            }
+          }
           $qtPrefix = $prefixes -join ';'
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
