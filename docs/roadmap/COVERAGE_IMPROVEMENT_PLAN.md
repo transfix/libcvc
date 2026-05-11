@@ -154,4 +154,52 @@ A reasonable cadence: M1 in the v3.2.x line, M2 with v3.3.0, M3/M4 cleanup in v3
 
 ---
 
-*Generated from lcov index pages of CI run 25683072391; numbers will drift slightly with each master push.*
+## Phase 1 + 2 Results (PR #60, CI run 25695376166)
+
+**Measured:** Linux GCC Debug, lcov on `package-linux libcvc-debug`.
+
+| Metric | Baseline (master) | After Phase 1+2 | Delta |
+|---|---|---|---|
+| **Lines** | 12,085 / 31,826 = 38.0 % | 14,091 / 32,358 = **43.5 %** | **+5.5 pp**, +2,006 lines covered |
+| **Functions** | 1,302 / 2,658 = 49.0 % | 1,471 / 2,686 = **54.8 %** | **+5.8 pp**, +169 functions covered |
+
+### Per-directory deltas
+
+| Directory | Lines % before | Lines % after | Δ |
+|---|---|---|---|
+| `src/cvc/` (top-level, volume I/O + utilities) | 44.6 % | **61.1 %** | **+16.5 pp**, +1,573 lines |
+| `src/cvc/cvc-mesher/LBIE/` | 50.3 % | 50.4 % | +0.1 pp |
+| `src/cvc/cvc-mesher/FastContouring/` | 48.7 % | 48.7 % | — |
+| `src/cvc/cvc-mesher/contour/` | 19.7 % | 19.7 % | — (untouched, Phase 3 target) |
+| `src/cvc/SDF/SignDistanceFunction_v2/` | 43.9 % | 43.9 % | — (Phase 3 target) |
+| `src/cvc/libiimod/` | 0.0 % | 0.0 % | — (Phase 3 / scope-out) |
+
+### What landed
+
+**Phase 1 — Volume I/O & utilities** (`tests/volume_io_test.cpp`, `tests/utility_test.cpp`)
+- Round-trip coverage for `mrc_io`, `rawiv_io`, `rawv_io`, `cvcraw_io`, `volume_file_info`, `volume_file_io`
+- Negative tests for unimplemented `vtk_io` (asserts `write_error` / `read_error`)
+- `spider_io` instantiation and dispatch through `volume_file_io`
+- 20-test sweep of `cvc/utility.h`: power-of-two/string helpers, JSON round-trip, XML-RPC host/port parse, filename-extension classifiers, sub-volume extract, gradient, format conversion, `CreateVolumeFileFromVolume`
+
+**Phase 2 — Algorithm wrappers** (`tests/algorithm_test.cpp`, gated on `CVC_ENABLE_MESHER`)
+- `cvc::iso` with all mesher backends: DualLib, FastContouring, LibIsocontour
+- Central-difference and B-spline normal modes; property-volume colouring
+- `cvc::tetrahedralize` basic + improvement quality flag
+- `cvc::hexahedralize` basic
+- `cvc::tetrahedralize2` smoke (non-throw; empty mesh permitted on synthetic SDF)
+
+### Key learnings folded back into the plan
+
+1. **Boundary-plane I/O quirk.** RAWIV/MRC/RAWV reads zero out the last X/Y/Z slabs after a round-trip (vertex-vs-cell convention). Tests now spot-check 6 interior samples instead of full equality; investigating whether this is a libcvc bug is tracked as a Phase 3 follow-up.
+2. **VTK I/O is stubs only.** Both reader and writer throw — covered as negative tests, full implementation deferred.
+3. **`tetrahedralize2`** on a synthetic spherical SDF currently returns an empty mesh. Likely needs richer test inputs (real `.rawiv` from `tests/data/`); revisit in Phase 3.
+4. **Cross-platform fixture pattern** (per-test tmpdir under `CMAKE_CURRENT_BINARY_DIR` with pid + tid + atomic counter) ships in `volume_io_test`; reuse for any future I/O tests.
+
+### Remaining gap to next milestone
+
+Phase 3 needs to add **~3,400 covered lines** to reach the 50 %-line / 60 %-function target. Highest-leverage targets unchanged: `cvc-mesher/LBIE/octree.cpp` (1,431 missing), `cvc-mesher/contour/contour.cpp` (446), `hdf5_io.cpp` (396), `SDF_v2/mtxlib.cpp` (377).
+
+---
+
+*Generated from lcov index pages of CI run 25683072391 (baseline) and 25695376166 (Phase 1+2); numbers will drift slightly with each master push.*
