@@ -33,12 +33,16 @@ permissions:
 #   - Windows: libcvc-<ver>-windows-<arch>-<config>.zip           (shared)
 #              libcvc-<ver>-windows-<arch>-<config>-static.zip    (static)
 #
-# Shared artifacts contain libcvc.{so,dylib,dll} + its CMake config and
-# expect consumers to discover Boost/HDF5/FFTW/etc. on their own host.
-# Static artifacts contain libcvc.{a,lib} built with BUILD_SHARED_LIBS=OFF
-# and (on Windows, via the x64-windows-static vcpkg triplet) ship the
-# static .lib files of every dependency alongside libcvc. Both flavors
-# include cvc::xmlrpc.
+# Shared and static archives are both fully self-contained: every
+# project-level dependency (Boost, HDF5, FFTW, GSL on all platforms;
+# plus ImageMagick + CGAL/GMP/MPFR on Windows via vcpkg) is bundled
+# alongside libcvc, so consumers can `find_package(cvc CONFIG)` from
+# the extracted archive without needing apt / Homebrew / vcpkg on the
+# host. Shared archives ship .so/.dylib/.dll (with rpath fixups on
+# Linux+macOS) plus their import .lib on Windows; static archives ship
+# .a/.lib only. Both flavors include cvc::xmlrpc. System libraries
+# (glibc, libstdc++, libm, Windows UCRT) are intentionally left to the
+# host.
 #
 # volrover3 (end-user application, Release only):
 #   - Linux:   volrover3-<ver>-linux-<arch>.tar.gz         (portable)
@@ -218,16 +222,77 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      # ── libcvc developer tarball ────────────────────────────────
-      - name: Pack libcvc tarball
+      # ── libcvc developer tarball (self-contained) ───────────────
+      # Stage libcvc's install tree, then copy the libraries and
+      # headers of every project-level dependency (Boost, HDF5, FFTW,
+      # GSL) into the same tree so the archive is fully self-contained
+      # — consumers should be able to find_package(cvc CONFIG) without
+      # needing apt-installed dev packages on the host. System glibc /
+      # libstdc++ / libm are intentionally left to the host.
+      - name: Stage libcvc + bundle deps
         if: matrix.kind == 'libcvc'
-        working-directory: build
         run: |
+          set -euo pipefail
           STEM="libcvc-${{ steps.meta.outputs.version }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
-          cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
-                      -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          DIST="$PWD/$STEM"
+          rm -rf "$DIST"
+          cmake --install build --prefix "$DIST" --component libcvc
+          mkdir -p "$DIST/lib" "$DIST/include"
+
+          # Suffix pattern decides whether to grab dynamic or archive
+          # flavours of each dep. Both flavours are present in apt's
+          # libfoo-dev packages on Ubuntu.
+          if [ "${{ matrix.link }}" = "static" ]; then
+            patterns=( '*.a' )
+          else
+            patterns=( '*.so' '*.so.*' )
+          fi
+
+          LIBDIRS=( /usr/lib/x86_64-linux-gnu /usr/lib )
+          copy_libs() {
+            local prefix="$1"
+            for d in "${LIBDIRS[@]}"; do
+              for pat in "${patterns[@]}"; do
+                # -P preserves symlinks (libfoo.so → libfoo.so.1 → libfoo.so.1.2)
+                find "$d" -maxdepth 1 -name "${prefix}${pat}" -print0 2>/dev/null \
+                  | xargs -0 -r cp -P -t "$DIST/lib/" 2>/dev/null || true
+              done
+            done
+          }
+          copy_libs 'libboost_'
+          copy_libs 'libhdf5'
+          copy_libs 'libfftw3'
+          copy_libs 'libgsl'
+          copy_libs 'libgslcblas'
+
+          # Headers
+          for src in /usr/include/boost /usr/include/gsl; do
+            [ -d "$src" ] && cp -R "$src" "$DIST/include/"
+          done
+          # HDF5 headers live under /usr/include/hdf5/serial on Ubuntu.
+          if [ -d /usr/include/hdf5/serial ]; then
+            mkdir -p "$DIST/include/hdf5"
+            cp -R /usr/include/hdf5/serial/. "$DIST/include/hdf5/"
+          fi
+          for f in /usr/include/fftw3.h /usr/include/fftw3.f /usr/include/fftw3l.h /usr/include/fftw3q.h; do
+            [ -f "$f" ] && cp "$f" "$DIST/include/"
+          done
+
+          # For the shared flavour, rewrite libcvc.so's RUNPATH to
+          # $ORIGIN so it loads bundled .so files when the archive is
+          # extracted anywhere.
+          if [ "${{ matrix.link }}" = "shared" ]; then
+            sudo apt-get install -y --no-install-recommends patchelf
+            for so in "$DIST"/lib/libcvc*.so*; do
+              [ -e "$so" ] || continue
+              [ -L "$so" ] && continue
+              patchelf --set-rpath '$ORIGIN' "$so" || true
+            done
+          fi
+
+          tar czf "$STEM.tar.gz" "$STEM"
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
+          du -sh "$DIST" "$STEM.tar.gz" || true
 
       # ── volrover3 portable tarball + .deb + AppImage ────────────
       - name: Pack volrover3 (tarball + .deb)
@@ -398,15 +463,52 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Pack libcvc zip
+      - name: Stage libcvc + bundle deps
         if: matrix.kind == 'libcvc'
-        working-directory: build
         run: |
+          set -euo pipefail
           STEM="libcvc-${{ steps.meta.outputs.version }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
-          cpack -G ZIP -D CPACK_COMPONENTS_ALL=libcvc \
-                      -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          mv "$STEM-libcvc.zip" "$STEM.zip"
+          DIST="$PWD/$STEM"
+          rm -rf "$DIST"
+          cmake --install build --prefix "$DIST" --component libcvc
+          mkdir -p "$DIST/lib" "$DIST/include"
+
+          # Headers are always needed for downstream `find_package`
+          # consumers; copy them from Homebrew prefixes.
+          for pkg in boost hdf5 fftw gsl; do
+            P=$(brew --prefix "$pkg" 2>/dev/null || true)
+            if [ -n "$P" ] && [ -d "$P/include" ]; then
+              cp -R "$P/include/." "$DIST/include/" 2>/dev/null || true
+            fi
+          done
+
+          if [ "${{ matrix.link }}" = "shared" ]; then
+            # dylibbundler walks libcvc.dylib's transitive deps, copies
+            # any missing dylibs alongside, and rewrites all install_names
+            # to @rpath/<dylib> with rpath @loader_path. Far more reliable
+            # than hand-rolled install_name_tool plumbing across the deep
+            # Boost/HDF5 dependency graph.
+            brew install dylibbundler
+            for dy in "$DIST"/lib/libcvc*.dylib; do
+              [ -e "$dy" ] || continue
+              [ -L "$dy" ] && continue
+              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd || true
+            done
+          else
+            # Static flavour: just copy the .a archives. No install_name
+            # fixup needed — static linkage embeds object code directly.
+            for pkg in boost hdf5 fftw gsl; do
+              P=$(brew --prefix "$pkg" 2>/dev/null || true)
+              if [ -n "$P" ] && [ -d "$P/lib" ]; then
+                find "$P/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
+                  | xargs -0 -I {} cp -RP {} "$DIST/lib/" 2>/dev/null || true
+              fi
+            done
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent "$DIST" "$STEM.zip"
           cp "$STEM.zip" "$GITHUB_WORKSPACE/"
+          du -sh "$DIST" "$STEM.zip" || true
 
       - name: Pack volrover3 (.dmg + .zip)
         if: matrix.kind == 'volrover3'
@@ -692,15 +794,54 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: choco install nsis -y
 
-      - name: Pack libcvc zip
+      - name: Stage libcvc + bundle deps
         if: matrix.kind == 'libcvc'
         shell: pwsh
-        working-directory: build
         run: |
+          $ErrorActionPreference = 'Stop'
           $stem = "libcvc-${{ steps.meta.outputs.version }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}${{ steps.meta.outputs.linksfx }}"
-          cpack -G ZIP -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=libcvc -D CPACK_PACKAGE_FILE_NAME="$stem"
-          Move-Item "$stem-libcvc.zip" "$stem.zip"
-          Copy-Item "$stem.zip" "$env:GITHUB_WORKSPACE/"
+          $dist = Join-Path $env:GITHUB_WORKSPACE $stem
+          if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+          cmake --install build --prefix $dist --config ${{ matrix.build_type }} --component libcvc
+
+          # vcpkg's installed tree is the single source of truth for
+          # every transitive dependency we pulled in (Boost, HDF5,
+          # FFTW, GSL, ImageMagick, ...). For the x64-windows triplet
+          # that's DLLs + import .libs; for x64-windows-static it's
+          # static .libs only. We mirror the entire tree so consumers
+          # can find_package(cvc CONFIG) without their own vcpkg.
+          $triplet = '${{ steps.meta.outputs.triplet }}'
+          $vcRoot  = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/$triplet"
+          if (-not (Test-Path $vcRoot)) {
+            throw "vcpkg installed tree not found at $vcRoot"
+          }
+
+          # Layout differs slightly between Debug and Release:
+          #   <triplet>/{bin,lib,include}        — release
+          #   <triplet>/debug/{bin,lib}          — debug (headers shared)
+          $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
+          $libSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/lib' } else { Join-Path $vcRoot 'lib' }
+          $binSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/bin' } else { Join-Path $vcRoot 'bin' }
+
+          New-Item -ItemType Directory -Force -Path "$dist/lib","$dist/include" | Out-Null
+          if (Test-Path "$vcRoot/include") {
+            Copy-Item -Recurse -Force "$vcRoot/include/*" "$dist/include/"
+          }
+          if (Test-Path $libSrc) {
+            Get-ChildItem -Path $libSrc -Filter '*.lib' -File `
+              | Copy-Item -Destination "$dist/lib/" -Force
+          }
+          if ('${{ matrix.link }}' -eq 'shared') {
+            New-Item -ItemType Directory -Force -Path "$dist/bin" | Out-Null
+            if (Test-Path $binSrc) {
+              Get-ChildItem -Path $binSrc -Filter '*.dll' -File `
+                | Copy-Item -Destination "$dist/bin/" -Force
+            }
+          }
+
+          Compress-Archive -Path "$dist/*" -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "$stem.zip") -Force
+          "$stem staged at $dist" | Write-Host
+          Get-ChildItem "$env:GITHUB_WORKSPACE/$stem.zip" | Format-List Name,Length
 
       - name: Pack volrover3 (zip + NSIS)
         if: matrix.kind == 'volrover3'
