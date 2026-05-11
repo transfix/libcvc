@@ -1603,20 +1603,23 @@ TEST_F(AppTest, ThreadFeedbackExceptionSafety) {
   }
   ASSERT_TRUE(exception_thrown.load());
 
-  // Give thread time to exit
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  // Join the thread BEFORE checking progress: thread_feedback's destructor
+  // runs as the catch block unwinds, and we need a happens-before edge
+  // between that destructor and our progress read. A fixed sleep is racy
+  // under CI load (the original 200 ms was occasionally insufficient on
+  // GitHub-hosted Linux runners), but join() is a hard synchronization
+  // point that guarantees the destructor has completed.
+  ASSERT_TRUE(ctx.hasThread(thread_key));
+  thread_ptr tptr = ctx.threads(thread_key);
+  ASSERT_TRUE(tptr);
+  if (tptr->joinable())
+    tptr->join();
 
-  // Progress should still be set to 100% by thread_feedback destructor
+  // Progress should now be 100% — set by thread_feedback's destructor
+  // during stack unwinding.
   double progress = ctx.threadProgress(thread_key);
   EXPECT_NEAR(progress, 1.0, 0.01)
       << "Progress should be 100% even when exception occurs (RAII cleanup)";
-
-  // Clean up
-  if (ctx.hasThread(thread_key)) {
-    thread_ptr tptr = ctx.threads(thread_key);
-    if (tptr && tptr->joinable())
-      tptr->join();
-  }
 }
 
 TEST_F(AppTest, ThreadProgressWithThreadInterruption) {
