@@ -8,6 +8,8 @@ add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
+add_executable(volume_io_test volume_io_test.cpp)
+add_executable(utility_test utility_test.cpp)
 
 # Track all test targets so we can conditionally add HDF5 tests
 set(TEST_TARGETS
@@ -17,6 +19,8 @@ set(TEST_TARGETS
   volume_test
   procedural_geometry_test
   volume_ops_test
+  volume_io_test
+  utility_test
 )
 
 # geometry_test exercises sdf(), iso(), tetrahedralize(), and
@@ -27,6 +31,15 @@ if(CVC_ENABLE_SDF AND CVC_ENABLE_MESHER)
   list(APPEND TEST_TARGETS geometry_test)
 else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
+endif()
+
+# algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
+# the Mesher.
+if(CVC_ENABLE_MESHER)
+  add_executable(algorithm_test algorithm_test.cpp)
+  list(APPEND TEST_TARGETS algorithm_test)
+else()
+  message(STATUS "Mesher disabled; skipping algorithm_test")
 endif()
 
 # Link against the CVC library and Google Test
@@ -67,12 +80,36 @@ if(TARGET geometry_test)
   )
 endif()
 
+if(TARGET algorithm_test)
+  target_link_libraries(algorithm_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(algorithm_test PRIVATE cxx_std_17)
+endif()
+
 target_link_libraries(procedural_geometry_test
   PRIVATE
     cvc
 )
 
 target_link_libraries(volume_ops_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(volume_io_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(utility_test
   PRIVATE
     cvc
     GTest::gtest
@@ -89,6 +126,8 @@ if(TARGET geometry_test)
 endif()
 target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
 target_compile_features(volume_ops_test PRIVATE cxx_std_14)
+target_compile_features(volume_io_test PRIVATE cxx_std_17)
+target_compile_features(utility_test PRIVATE cxx_std_17)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -137,7 +176,12 @@ gtest_discover_tests(volume_test)
 if(TARGET geometry_test)
   gtest_discover_tests(geometry_test)
 endif()
+if(TARGET algorithm_test)
+  gtest_discover_tests(algorithm_test)
+endif()
 gtest_discover_tests(volume_ops_test)
+gtest_discover_tests(volume_io_test)
+gtest_discover_tests(utility_test)
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)
