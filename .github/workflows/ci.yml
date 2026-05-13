@@ -200,16 +200,14 @@ jobs:
             libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      # When a matching libcvc-deps release archive exists for this
-      # platform, downloading it is far cheaper than a cold-cache VTK
-      # source build (~25-40 min). On hit, the cache restore + source
-      # build are both skipped and CMAKE_PREFIX_PATH picks up VTK from
-      # the extracted libcvc-deps tree. On miss, the action emits an
-      # empty `path` output and we fall back to the previous
-      # cache-then-build path.
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
+      # ── Pull dep bundle from libcvc-deps release ──
+      # For volrover3 builds this lets us skip the slow VTK-from-source
+      # build (~25-40 min). For libcvc-kind builds the bundle provides
+      # the `libiimod` CMake package (no longer vendored in this tree).
+      # On miss the action emits an empty `path` output; libcvc-kind
+      # will then fail at find_package(libiimod), while volrover3 falls
+      # back to the cache-then-build path below.
+      - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
@@ -279,6 +277,9 @@ jobs:
             else
               extra_prefix="$HOME/vtk-qt6"
             fi
+          elif [ "${{ matrix.kind }}" = "libcvc" ]; then
+            # libcvc-kind needs libiimod from the libcvc-deps bundle.
+            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
           fi
           # libcvc-kind builds enable tests so the same artifacts we
           # ship get exercised by ctest. volrover3 builds keep tests
@@ -530,10 +531,26 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
+      # ── Pull dep bundle from libcvc-deps release ──
+      # Provides the libiimod CMake package (no longer vendored).
+      - name: Fetch libcvc-deps
+        id: libcvc-deps-macos
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
       - name: Configure
         run: |
           tests=OFF
           [ "${{ matrix.kind }}" = "libcvc" ] && tests=ON
+          # Append libcvc-deps to CMAKE_PREFIX_PATH so find_package
+          # (libiimod) resolves. brew prefixes from the prior step
+          # remain via $CMAKE_PREFIX_PATH (env var).
+          deps_path="${{ steps.libcvc-deps-macos.outputs.path }}"
+          if [ -n "$deps_path" ]; then
+            export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:+$CMAKE_PREFIX_PATH:}$deps_path"
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCVC_BUILD_TESTS=$tests \
@@ -818,9 +835,11 @@ jobs:
             ~\AppData\Local\vcpkg\archives
           key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
 
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
+      # ── Pull dep bundle from libcvc-deps release ──
+      # volrover3 uses this to skip the slow VTK-from-source build;
+      # libcvc-kind uses it for the libiimod CMake package (no longer
+      # vendored in this tree).
+      - name: Fetch libcvc-deps
         id: libcvc-deps-windows
         uses: ./.github/actions/fetch-libcvc-deps
         with:
@@ -877,13 +896,16 @@ jobs:
           $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $prefixes = @()
           if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           if ('${{ matrix.kind }}' -eq 'volrover3') {
-            $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
             if ($depsPath) {
               $prefixes += $depsPath
             } else {
               $prefixes += 'D:\vtk-qt6'
             }
+          } elseif ('${{ matrix.kind }}' -eq 'libcvc' -and $depsPath) {
+            # libcvc-kind needs libiimod from the libcvc-deps bundle.
+            $prefixes += $depsPath
           }
           $qtPrefix = $prefixes -join ';'
           cmake -B build `
