@@ -24,7 +24,7 @@ inputs:
   version:
     description: 'libcvc-deps release version (without leading v).'
     required: false
-    default: '1.0.0'
+    default: '1.0.1'
   os:
     description: 'linux | macos | windows. Defaults to runner.os.'
     required: false
