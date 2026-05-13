@@ -83,17 +83,38 @@ endif()
 # the vcpkg include root. CMake's FindImageMagick recognises this layout.
 file(COPY "${APP_DIR}/include/" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
 
+# Determine which configurations vcpkg expects from this port. When the
+# triplet sets VCPKG_BUILD_TYPE to "release" or "debug", vcpkg's policy
+# checks reject the opposite tree existing, so we must skip populating
+# it. Default (unset) means both.
+set(_im_want_release TRUE)
+set(_im_want_debug   TRUE)
+if(DEFINED VCPKG_BUILD_TYPE)
+  if(VCPKG_BUILD_TYPE STREQUAL "release")
+    set(_im_want_debug FALSE)
+  elseif(VCPKG_BUILD_TYPE STREQUAL "debug")
+    set(_im_want_release FALSE)
+  endif()
+endif()
+
 # Import libraries.
 file(GLOB IM_LIBS "${APP_DIR}/lib/CORE_RL_*.lib")
 if(NOT IM_LIBS)
   message(FATAL_ERROR "No CORE_RL_*.lib files found under ${APP_DIR}/lib")
 endif()
-file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/lib")
-file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
-file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
-# Upstream ships only one (release) build; alias it for Debug so
-# vcpkg's debug-config also resolves.
-file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+set(_im_lib_dirs)
+if(_im_want_release)
+  file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/lib")
+  file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/lib")
+  list(APPEND _im_lib_dirs "${CURRENT_PACKAGES_DIR}/lib")
+endif()
+if(_im_want_debug)
+  file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/lib")
+  # Upstream ships only one (release) build; alias it for Debug so
+  # vcpkg's debug-config also resolves.
+  file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
+  list(APPEND _im_lib_dirs "${CURRENT_PACKAGES_DIR}/debug/lib")
+endif()
 
 # CMake's FindImageMagick.cmake searches for Magick++/MagickCore/
 # MagickWand/MagickWand-7.Q16HDRI/etc. and also CORE_RL_Magick++_,
@@ -103,8 +124,7 @@ file(COPY ${IM_LIBS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/lib")
 # 'CORE_RL_<component>_.lib', so create canonical-named hardlinks/
 # copies (Magick++.lib, MagickCore.lib, MagickWand.lib) to make
 # find_library() succeed regardless of FindImageMagick vintage.
-foreach(_im_lib_dir
-    "${CURRENT_PACKAGES_DIR}/lib" "${CURRENT_PACKAGES_DIR}/debug/lib")
+foreach(_im_lib_dir IN LISTS _im_lib_dirs)
   foreach(_im_component Magick++ MagickCore MagickWand)
     set(_src "${_im_lib_dir}/CORE_RL_${_im_component}_.lib")
     set(_dst "${_im_lib_dir}/${_im_component}.lib")
@@ -121,11 +141,15 @@ file(GLOB IM_DLLS
   "${APP_DIR}/IM_MOD_RL_*.dll"
   "${APP_DIR}/FILTER_*.dll"
 )
-file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/bin")
-file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/bin")
 if(IM_DLLS)
-  file(COPY ${IM_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/bin")
-  file(COPY ${IM_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/bin")
+  if(_im_want_release)
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/bin")
+    file(COPY ${IM_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/bin")
+  endif()
+  if(_im_want_debug)
+    file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/bin")
+    file(COPY ${IM_DLLS} DESTINATION "${CURRENT_PACKAGES_DIR}/debug/bin")
+  endif()
 endif()
 
 # License.

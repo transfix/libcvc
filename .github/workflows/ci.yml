@@ -719,12 +719,52 @@ jobs:
           "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
+          # Restrict vcpkg to building only the matrix.build_type
+          # configuration of each port (instead of the upstream default
+          # which always builds both Debug+Release). The overlay triplet
+          # at vcpkg-overlay/triplets/x64-windows.cmake reads
+          # VCPKG_FORCE_BUILD_TYPE and applies it as VCPKG_BUILD_TYPE.
+          $btlc = '${{ matrix.build_type }}'.ToLower()
+          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
           $cAfter = (Get-PSDrive C).Free / 1GB
           $dAfter = (Get-PSDrive D).Free / 1GB
           Write-Host ("Free space on C: {0:N1} GB -> {1:N1} GB" -f $cBefore, $cAfter)
           Write-Host ("Free space on D: {0:N1} GB -> {1:N1} GB" -f $dBefore, $dAfter)
 
+      # Configure vcpkg to build only the matrix.build_type config for
+      # libcvc Windows jobs (the volrover3-gated disk-routing step
+      # above already exports VCPKG_FORCE_BUILD_TYPE for volrover3).
+      - name: Configure vcpkg overlay triplet (libcvc Windows)
+        if: matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $btlc = '${{ matrix.build_type }}'.ToLower()
+          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      # ── Optional: pull all third-party deps from a libcvc-deps bundle ──
+      # When a matching libcvc-deps release archive exists for this
+      # platform + matrix.build_type, downloading it (~minutes) is far
+      # cheaper than letting vcpkg compile Boost/HDF5/FFTW/GSL/log4cplus/
+      # CGAL/ImageMagick from source AND building VTK separately
+      # (~25-40 min cold). On hit, we skip:
+      #   * vcpkg restore + install + save
+      #   * install-qt-action (Qt6 is in the bundle)
+      #   * VTK cache restore + from-source build (volrover3 only)
+      # On miss (e.g. libcvc-deps release not yet published, network
+      # blip), the action emits an empty `path` output and we fall back
+      # to the previous vcpkg / aqtinstall / VTK-from-source path.
+      - name: Fetch libcvc-deps (Windows speedup)
+        id: libcvc-deps-windows
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: ${{ matrix.build_type }}
+          link: shared
+
       - name: Restore vcpkg cache
+        if: steps.libcvc-deps-windows.outputs.path == ''
         id: vcpkg-cache
         uses: actions/cache/restore@v4
         with:
@@ -732,18 +772,19 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
           restore-keys: |
-            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-
+            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7-
 
       # Install Qt6 from official prebuilt binaries via aqtinstall.
       # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
       # we route Qt around vcpkg entirely; VTK and CGAL still come from
       # vcpkg (they are smaller and don't have a comparable prebuilt).
       # install-qt-action prepends Qt's bin/ to PATH and exports
-      # Qt6_DIR + QT_ROOT_DIR for CMake to find.
+      # Qt6_DIR + QT_ROOT_DIR for CMake to find. Skipped on libcvc-deps
+      # hit (Qt6 ships inside the bundle).
       - name: Install Qt6 (volrover3)
-        if: matrix.kind == 'volrover3'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.7.*'
@@ -768,6 +809,7 @@ jobs:
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
       - name: Install dependencies
+        if: steps.libcvc-deps-windows.outputs.path == ''
         shell: pwsh
         env:
           # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
@@ -809,23 +851,14 @@ jobs:
       # Persist vcpkg state as soon as install completes successfully so
       # later cancellations don't strand a 20+ minute build.
       - name: Save vcpkg cache
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.libcvc-deps-windows.outputs.path == '' && steps.vcpkg-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
-
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
-        id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
-        with:
-          build_type: Release
-          link: shared
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
 
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
@@ -875,15 +908,16 @@ jobs:
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           $prefixes = @()
+          # libcvc-deps (when present) ships Boost/HDF5/FFTW/GSL/log4cplus/
+          # CGAL/ImageMagick + Qt6 + VTK for BOTH kinds, so prefer it.
+          if ($depsPath) {
+            $prefixes += $depsPath
+          }
           if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
-          if ('${{ matrix.kind }}' -eq 'volrover3') {
-            $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-            if ($depsPath) {
-              $prefixes += $depsPath
-            } else {
-              $prefixes += 'D:\vtk-qt6'
-            }
+          if ('${{ matrix.kind }}' -eq 'volrover3' -and -not $depsPath) {
+            $prefixes += 'D:\vtk-qt6'
           }
           $qtPrefix = $prefixes -join ';'
           cmake -B build `
