@@ -666,9 +666,9 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v6
+          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v7
           restore-keys: |
-            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-
+            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v7-
 
       # Install Qt6 from official prebuilt binaries via aqtinstall.
       # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
@@ -712,6 +712,16 @@ jobs:
           "VCPKG_DOWNLOADS=D:\vcpkg-downloads"   | Out-File -Append $env:GITHUB_ENV
           "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append $env:GITHUB_ENV
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append $env:GITHUB_ENV
+
+          # Restrict vcpkg to building only the matrix.build_type
+          # configuration of each port (instead of building both
+          # Debug+Release upstream-default). The overlay triplet at
+          # vcpkg-overlay/triplets/x64-windows{,-static}.cmake reads
+          # VCPKG_FORCE_BUILD_TYPE and applies it as VCPKG_BUILD_TYPE.
+          $btlc = '${{ matrix.build_type }}'.ToLower()
+          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append $env:GITHUB_ENV
+          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append $env:GITHUB_ENV
+
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
       # Persist vcpkg's source-tarball download cache across runs so a

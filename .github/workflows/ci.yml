@@ -719,10 +719,30 @@ jobs:
           "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
+          # Restrict vcpkg to building only the matrix.build_type
+          # configuration of each port (instead of the upstream default
+          # which always builds both Debug+Release). The overlay triplet
+          # at vcpkg-overlay/triplets/x64-windows.cmake reads
+          # VCPKG_FORCE_BUILD_TYPE and applies it as VCPKG_BUILD_TYPE.
+          $btlc = '${{ matrix.build_type }}'.ToLower()
+          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
           $cAfter = (Get-PSDrive C).Free / 1GB
           $dAfter = (Get-PSDrive D).Free / 1GB
           Write-Host ("Free space on C: {0:N1} GB -> {1:N1} GB" -f $cBefore, $cAfter)
           Write-Host ("Free space on D: {0:N1} GB -> {1:N1} GB" -f $dBefore, $dAfter)
+
+      # Configure vcpkg to build only the matrix.build_type config for
+      # libcvc Windows jobs (the volrover3-gated disk-routing step
+      # above already exports VCPKG_FORCE_BUILD_TYPE for volrover3).
+      - name: Configure vcpkg overlay triplet (libcvc Windows)
+        if: matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $btlc = '${{ matrix.build_type }}'.ToLower()
+          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: Restore vcpkg cache
         id: vcpkg-cache
@@ -732,9 +752,9 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
           restore-keys: |
-            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-
+            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7-
 
       # Install Qt6 from official prebuilt binaries via aqtinstall.
       # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
@@ -816,7 +836,7 @@ jobs:
             ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
             ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
             ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v6
+          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
 
       # ── Optional: pull VTK from a libcvc-deps release bundle ──
       - name: Fetch libcvc-deps (optional speedup)
