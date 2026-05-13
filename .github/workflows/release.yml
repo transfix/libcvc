@@ -655,11 +655,31 @@ jobs:
           echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
           echo "triplet=$TRIPLET"  >> "$GITHUB_OUTPUT"
 
+      # ── Optional: pull all third-party deps from a libcvc-deps bundle ──
+      # libcvc-deps ships Boost/HDF5/FFTW/GSL/log4cplus/CGAL/ImageMagick
+      # + Qt 6 + VTK 9.5 as a self-contained CMake prefix. When a
+      # matching archive is available we skip vcpkg + aqtinstall + VTK
+      # build entirely (~tens of minutes saved on cold cache).
+      #
+      # NOTE: the Windows libcvc-deps archive is shared-only (no
+      # -static flavor). Static matrix entries also consume the shared
+      # archive: libcvc itself stays static (BUILD_SHARED_LIBS=OFF) but
+      # third-party deps are linked as DLLs. The Configure step below
+      # then switches the MSVC runtime to /MD so libcvc objects can
+      # safely cross API boundaries with the shared-CRT-built deps.
+      - name: Fetch libcvc-deps (Windows speedup)
+        id: libcvc-deps-windows
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: ${{ matrix.build_type }}
+          link: shared
+
       # Cache key intentionally excludes hashFiles(workflow) so editing
       # this file does not invalidate the warm vcpkg cache. The triplet
       # is part of the key so static (x64-windows-static) and shared
       # (x64-windows) builds do not share buildtrees.
       - name: Cache vcpkg installed packages
+        if: steps.libcvc-deps-windows.outputs.path == ''
         uses: actions/cache@v4
         with:
           path: |
@@ -674,9 +694,10 @@ jobs:
       # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
       # we route Qt around vcpkg entirely; VTK and CGAL still come from
       # vcpkg. install-qt-action prepends Qt's bin/ to PATH and exports
-      # Qt6_DIR + QT_ROOT_DIR for CMake to find.
+      # Qt6_DIR + QT_ROOT_DIR for CMake to find. Skipped on libcvc-deps
+      # hit (Qt6 ships inside the bundle).
       - name: Install Qt6 (volrover3)
-        if: matrix.kind == 'volrover3'
+        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.7.*'
@@ -750,6 +771,7 @@ jobs:
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
       - name: Install dependencies
+        if: steps.libcvc-deps-windows.outputs.path == ''
         shell: pwsh
         env:
           # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
@@ -796,22 +818,11 @@ jobs:
           }
 
       - name: Save vcpkg downloads cache (Windows)
-        if: always() && steps.vcpkg-downloads-cache.outputs.cache-hit != 'true'
+        if: always() && steps.libcvc-deps-windows.outputs.path == '' && steps.vcpkg-downloads-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: D:\vcpkg-downloads
           key: vcpkg-downloads-${{ hashFiles('.github/workflows/release.yml') }}
-
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      # Same speedup as on Linux; saves ~15-20 min of from-source VTK
-      # build when a matching libcvc-deps archive is available.
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
-        id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
-        with:
-          build_type: Release    # volrover3 jobs are Release-only
-          link: shared
 
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
@@ -861,12 +872,20 @@ jobs:
           # CGAL/SDF/Mesher are always built; only volrover3 toggles
           # the GUI app and its extra deps.
           $xmlrpc = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           # link=shared → BUILD_SHARED_LIBS=ON + x64-windows triplet (DLLs)
           # link=static → BUILD_SHARED_LIBS=OFF + x64-windows-static triplet
           #   (.lib for libcvc and every vcpkg dep, MSVC static runtime).
-          if ('${{ matrix.link }}' -eq 'static') {
+          # libcvc-deps Windows is shared-only: when it hits on a static
+          # matrix entry, force /MD (DLL CRT) so libcvc objects can
+          # cross API boundaries with the /MD-built libcvc-deps DLLs
+          # without heap mismatches. libcvc itself stays static.
+          if ('${{ matrix.link }}' -eq 'static' -and -not $depsPath) {
             $shared = 'OFF'
             $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>'
+          } elseif ('${{ matrix.link }}' -eq 'static') {
+            $shared = 'OFF'
+            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
           } else {
             $shared = 'ON'
             $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
@@ -876,14 +895,12 @@ jobs:
           # libcvc-deps tree, when the speedup hit). CMAKE_PREFIX_PATH
           # is a semicolon-separated list on Windows.
           $prefixes = @()
+          # libcvc-deps (when present) ships Boost/HDF5/FFTW/GSL/log4cplus/
+          # CGAL/ImageMagick + Qt6 + VTK for BOTH kinds, so prefer it.
+          if ($depsPath) { $prefixes += $depsPath }
           if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
-          if ('${{ matrix.kind }}' -eq 'volrover3') {
-            $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-            if ($depsPath) {
-              $prefixes += $depsPath
-            } else {
-              $prefixes += 'D:\vtk-qt6'
-            }
+          if ('${{ matrix.kind }}' -eq 'volrover3' -and -not $depsPath) {
+            $prefixes += 'D:\vtk-qt6'
           }
           $qtPrefix = $prefixes -join ';'
           cmake -B build `
@@ -942,36 +959,56 @@ jobs:
                 }
           }
 
-          # ── vcpkg deps (entire installed/<triplet> tree) ────────
-          $triplet = '${{ steps.meta.outputs.triplet }}'
-          $vcRoot  = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/$triplet"
-          if (-not (Test-Path $vcRoot)) {
-            throw "vcpkg installed tree not found at $vcRoot"
-          }
+          # ── third-party deps: from vcpkg installed/ OR libcvc-deps ──
+          # On libcvc-deps hit (steps.libcvc-deps-windows.outputs.path
+          # non-empty) the dep tree is laid out flat under $depsPath
+          # with include/, lib/, bin/ at the root (shared build, no
+          # debug/ subtree). On miss, deps come from vcpkg's
+          # installed/<triplet>/{bin,lib,include}{,/debug}.
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
+          if ($depsPath) {
+            $libSrc = Join-Path $depsPath 'lib'
+            $binSrc = Join-Path $depsPath 'bin'
+            $incSrc = Join-Path $depsPath 'include'
+            $havePdbs = $isDebug   # libcvc-deps debug bundles ship .pdb
+          } else {
+            $triplet = '${{ steps.meta.outputs.triplet }}'
+            $vcRoot  = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/$triplet"
+            if (-not (Test-Path $vcRoot)) {
+              throw "vcpkg installed tree not found at $vcRoot"
+            }
 
-          # Layout per triplet:
-          #   <triplet>/{bin,lib,include}        — release
-          #   <triplet>/debug/{bin,lib}          — debug (headers shared)
-          # Debug subtrees also carry .pdb files alongside their .dll /
-          # .lib outputs (vcpkg builds with /Zi /DEBUG by default).
-          $libSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/lib' } else { Join-Path $vcRoot 'lib' }
-          $binSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/bin' } else { Join-Path $vcRoot 'bin' }
+            # Layout per triplet:
+            #   <triplet>/{bin,lib,include}        — release
+            #   <triplet>/debug/{bin,lib}          — debug (headers shared)
+            # Debug subtrees also carry .pdb files alongside their .dll /
+            # .lib outputs (vcpkg builds with /Zi /DEBUG by default).
+            $libSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/lib' } else { Join-Path $vcRoot 'lib' }
+            $binSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/bin' } else { Join-Path $vcRoot 'bin' }
+            $incSrc  = Join-Path $vcRoot 'include'
+            $havePdbs = $isDebug
+          }
 
           New-Item -ItemType Directory -Force -Path "$dist/lib","$dist/include" | Out-Null
-          if (Test-Path "$vcRoot/include") {
-            Copy-Item -Recurse -Force "$vcRoot/include/*" "$dist/include/"
+          if (Test-Path $incSrc) {
+            Copy-Item -Recurse -Force "$incSrc/*" "$dist/include/"
           }
           if (Test-Path $libSrc) {
-            $patterns = if ($isDebug) { @('*.lib','*.pdb') } else { @('*.lib') }
+            $patterns = if ($havePdbs) { @('*.lib','*.pdb') } else { @('*.lib') }
             foreach ($p in $patterns) {
               Get-ChildItem -Path $libSrc -Filter $p -File `
                 | Copy-Item -Destination "$dist/lib/" -Force
             }
           }
-          if ('${{ matrix.link }}' -eq 'shared') {
+          # On libcvc-deps hit, third-party DLLs need to ship even for
+          # static matrix entries because libcvc-deps is shared-only on
+          # Windows (libcvc itself is still .lib; consumers load the
+          # shipped DLLs at runtime).
+          $shipBin = ('${{ matrix.link }}' -eq 'shared') -or [bool]$depsPath
+          if ($shipBin) {
             New-Item -ItemType Directory -Force -Path "$dist/bin" | Out-Null
             if (Test-Path $binSrc) {
-              $patterns = if ($isDebug) { @('*.dll','*.pdb') } else { @('*.dll') }
+              $patterns = if ($havePdbs) { @('*.dll','*.pdb') } else { @('*.dll') }
               foreach ($p in $patterns) {
                 Get-ChildItem -Path $binSrc -Filter $p -File `
                   | Copy-Item -Destination "$dist/bin/" -Force
