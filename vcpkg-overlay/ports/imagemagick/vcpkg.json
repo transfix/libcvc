@@ -1,6 +1,6 @@
 {
   "name": "imagemagick",
-  "version": "7.1.2-21",
+  "version": "7.1.2-22",
   "port-version": 0,
   "description": "ImageMagick Q16-HDRI development files for Windows, repackaged from the official upstream Inno Setup installer.",
   "homepage": "https://imagemagick.org/",

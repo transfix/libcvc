@@ -26,15 +26,25 @@ if(NOT VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
   message(FATAL_ERROR "imagemagick overlay port supports x64 only.")
 endif()
 
-set(IM_VERSION "7.1.2-21")
+set(IM_VERSION "7.1.2-22")
 
+# Mirror order matters: GitHub Releases is the canonical permanent home for
+# every published ImageMagick installer (assets are immutable once a tag
+# ships), so we try it first. imagemagick.org/archive/binaries/ only keeps
+# the *latest* point release live -- once a new -NN drops, the previous URL
+# returns 404 -- so it is best-effort fallback in case GitHub is unreachable.
+# vcpkg also resolves cached downloads (e.g. populated by a libcvc-deps
+# prefetch step) by SHA512 in $VCPKG_ROOT/downloads regardless of URL, so
+# this list never has to enumerate every conceivable mirror.
 vcpkg_download_distfile(IM_INSTALLER
-  URLS "https://imagemagick.org/archive/binaries/ImageMagick-${IM_VERSION}-Q16-HDRI-x64-dll.exe"
+  URLS
+    "https://github.com/ImageMagick/ImageMagick/releases/download/${IM_VERSION}/ImageMagick-${IM_VERSION}-Q16-HDRI-x64-dll.exe"
+    "https://imagemagick.org/archive/binaries/ImageMagick-${IM_VERSION}-Q16-HDRI-x64-dll.exe"
   FILENAME "ImageMagick-${IM_VERSION}-Q16-HDRI-x64-dll.exe"
-  SHA512 107455499f3f95e1a3e9b6ec32feb541cdf58a54237f96a6ac8390a1d55c00110bea188d0542234ba8c9ff1cab2ec436957820938109e2f4ac8abd468eb27a0c
+  SHA512 c3576a97380e172d6377a91831441d8f4f6bdf57819b8d6892a061355d80444bf68ef5cf08405396a5ca7cdff18eae65ab195319319d6d92026d9502b5de2fd7
 )
 
-# innoextract 1.9 supports Inno Setup 6.1.0 (the format used by IM 7.1.2-21).
+# innoextract 1.9 supports Inno Setup 6.x (the format used by IM 7.1.2-NN).
 vcpkg_download_distfile(INNOEXTRACT_ZIP
   URLS "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip"
   FILENAME "innoextract-1.9-windows.zip"
