@@ -7,6 +7,14 @@
 
 The headline 38 % is depressed by ~12 k untested lines in three buckets that don't deserve equal-weight treatment (legacy contour/IO + bundled `libiimod` 3rd-party C). Once we exclude unreachable code paths from the gcov filter, the *effective* code coverage already sits closer to 55 %. The plan below splits work into three phases plus an infrastructure track.
 
+> **Status update (Phase 3 — libiimod):** libiimod has been moved out of
+> this repository entirely and is now provided by the libcvc-deps
+> distribution (built from upstream LabShare-Archive/IMOD). The 3,864
+> previously-uncovered lines under `src/cvc/libiimod/` no longer count
+> against libcvc's reported coverage. The numbers below reflect the
+> pre-move baseline; expect the reported `Lines %` to jump by
+> ~10 percentage points on the first run after the move lands.
+
 ---
 
 ## 1. Where the gaps are

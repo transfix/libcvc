@@ -149,39 +149,16 @@ else()
 endif()
 
 # IMOD MRC support
+#
+# libiimod is no longer vendored in this tree.  It is provided by the
+# libcvc-deps distribution (built from the upstream LabShare-Archive/IMOD
+# repository at a pinned SHA) as a static `libiimod::iimod` CMake target
+# that already carries its include directory and the `NOTIFFLIBS`
+# compile definition.  We only need to depend on it.
 if(CVC_USING_IMOD_MRC)
-  add_compile_definitions(NOTIFFLIBS CVC_USING_IMOD_MRC)
-  list(APPEND CVC_INCLUDE_DIRS libiimod)
-  list(APPEND INCLUDE_FILES
-    libiimod/ilist.h
-    libiimod/imodconfig.h
-    libiimod/notiff.h
-    libiimod/iimage.h
-    libiimod/mrcfiles.h
-    libiimod/hvemtypes.h
-    libiimod/sliceproc.h
-    libiimod/mrcc.h
-    libiimod/b3dutil.h
-    libiimod/mrcslice.h
-    libiimod/cfsemshare.h
-    libiimod/notiffio.h
-  )
-  list(APPEND SOURCE_FILES
-    libiimod/b3dutil.c
-    libiimod/diffusion.c
-    libiimod/iilikemrc.c
-    libiimod/iimage.c
-    libiimod/iimrc.c
-    libiimod/iitif.c
-    libiimod/ilist.c
-    libiimod/mrcfiles.c
-    libiimod/mrcsec.c
-    libiimod/mrcslice.c
-    libiimod/plist.c
-    libiimod/tiffstub.c
-    libiimod/islice.c
-    libiimod/parallelwrite.c
-  )
+  find_package(libiimod CONFIG REQUIRED)
+  add_compile_definitions(CVC_USING_IMOD_MRC)
+  list(APPEND CVC_LINK_LIBS libiimod::iimod)
 endif()
 
 # Log4cplus support
