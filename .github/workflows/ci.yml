@@ -877,17 +877,6 @@ jobs:
             ~\AppData\Local\vcpkg\archives
           key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
 
-      # ── Pull dep bundle from libcvc-deps release ──
-      # volrover3 uses this to skip the slow VTK-from-source build;
-      # libcvc-kind uses it for the libiimod CMake package (no longer
-      # vendored in this tree).
-      - name: Fetch libcvc-deps
-        id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
-        with:
-          build_type: Release
-          link: shared
-
       # ── VTK 9.5 built from source against aqt Qt6, cached ──
       # Mirrors the Ubuntu strategy. Cache key includes build_type
       # because MSVC Debug and Release VTK DLLs are not interchangeable.
