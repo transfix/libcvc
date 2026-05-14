@@ -165,3 +165,4 @@ runs:
         echo "libcvc-deps: ready at $root"
         ls "$root" | head -20 || true
         echo "path=$root" >> "$GITHUB_OUTPUT"
+# v1.0.1 fetch action default
