@@ -951,22 +951,57 @@ jobs:
             -DCVC_ENABLE_SDF=ON
 
       - name: Build
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+        shell: pwsh
+        # gtest_discover_tests runs each test executable at build
+        # time (POST_BUILD discovery mode, the GoogleTest module
+        # default) to enumerate test names. On Windows the DLLs
+        # consumed by those exes (libcvc-deps' Boost/HDF5/FFTW/Qt6/
+        # VTK, plus our own cvc.dll) live in $depsPath\bin and
+        # build\bin\<Config>, neither of which is on PATH during
+        # `cmake --build`. Without these directories on PATH the
+        # discovery launch exits with STATUS_DLL_NOT_FOUND
+        # (0xc0000135), and CMake aborts the build with
+        #   CMake Error at .../GoogleTestAddTests.cmake:132 (message):
+        #     Error running test executable. Path: '.../state_test.exe'
+        #     Result: Exit code 0xc0000135
+        # Prepend both directories so the discovery process resolves
+        # every runtime dependency. The build step inherits PATH into
+        # MSBuild and the spawned test enumeration child process.
+        run: |
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
+          $buildBin = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
+          $extra = @()
+          if ($depsPath) { $extra += (Join-Path $depsPath 'bin') }
+          if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
+          $extra += $buildBin
+          $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          cmake --build build --config ${{ matrix.build_type }} --parallel
 
       - name: Run tests
         if: matrix.kind == 'libcvc'
-        shell: bash
+        shell: pwsh
+        env:
+          DEPS_PATH: ${{ steps.libcvc-deps-windows.outputs.path }}
         run: |
-          set -euo pipefail
-          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
-          if [ "${{ github.event_name }}" = "push" ]; then
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+          # ctest invokes the test executables, which need the same
+          # DLL search path on PATH as build-time discovery (see the
+          # Build step note above). Without these prepends the tests
+          # themselves abort at process startup with 0xc0000135.
+          $buildBin = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
+          $extra = @()
+          if ($env:DEPS_PATH) { $extra += (Join-Path $env:DEPS_PATH 'bin') }
+          if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
+          $extra += $buildBin
+          $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          $stressRegex = '(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if ('${{ github.event_name }}' -eq 'push') {
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
-          else
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
-                  -E "${STRESS_REGEX}"
-          fi
+          } else {
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
+                  -E "$stressRegex"
+          }
 
       - name: Install NSIS
         if: matrix.kind == 'volrover3'
