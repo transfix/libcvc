@@ -316,7 +316,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          # Tests excluded on PRs (still run on push-to-master with --timeout 3600):
+          #   Stress|Convergence|Benchmark            : long-running suites
+          #   Performance                              : perf benchmarks (>200s in Debug)
+          #   BunnySDF_IsoRoundtrip|QualityImproveAllMethods : heavy Debug-only
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if [ "${{ github.event_name }}" = "push" ]; then
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
@@ -568,7 +572,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          # See linux ctest step for rationale.
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if [ "${{ github.event_name }}" = "push" ]; then
             ctest --test-dir build --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
@@ -1029,7 +1034,8 @@ jobs:
           if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
           $extra += $buildBin
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
-          $stressRegex = '(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          # See linux ctest step for rationale.
+          $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if ('${{ github.event_name }}' -eq 'push') {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
