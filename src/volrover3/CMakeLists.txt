@@ -305,9 +305,17 @@ if(WIN32)
     # CPack runs `cmake --install` per-component before invoking the
     # archive / NSIS generator, so this install(CODE) script is the right
     # hook to materialize Qt's platform plugins into the staged tree.
+    #
+    # Pass --debug / --release matching the install config so windeployqt
+    # walks the correctly-suffixed Qt6 modules (Qt6Cored.dll vs
+    # Qt6Core.dll). Without this it always asks for the release modules,
+    # which emits "module Qt6*d could not be found" warnings on Debug
+    # installs and silently ships the wrong-config DLLs (the bundled
+    # volrover3.exe is linked against Qt6*d.dll, so the Debug package
+    # then fails to launch on a clean machine).
     install(CODE "
       execute_process(COMMAND \"${WINDEPLOYQT_EXECUTABLE}\"
-        --release
+        $<IF:$<CONFIG:Debug>,--debug,--release>
         --no-translations
         --no-system-d3d-compiler
         --no-opengl-sw
