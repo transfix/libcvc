@@ -511,7 +511,7 @@ jobs:
 
       - name: Configure
         run: |
-          # Prepend the libcvc-deps tree (libiimod + bundled deps) to
+          # Append the libcvc-deps tree (libiimod + bundled deps) to
           # the CMAKE_PREFIX_PATH env var that brew set earlier. We do
           # NOT pass -DCMAKE_PREFIX_PATH on the cmake command line:
           #   * The env-var form is `:`-separated on Unix (CMake reads
@@ -519,9 +519,16 @@ jobs:
           #   * The -D form is a CMake list and is `;`-separated.
           # Mixing `:`-joined paths into -DCMAKE_PREFIX_PATH would
           # collapse everything into a single path and break find_package.
+          #
+          # Order matters: we APPEND (not prepend) so that brew's
+          # working HDF5 / Boost / Qt configs win over any incomplete
+          # cmake configs in the libcvc-deps bundle (e.g. the macOS
+          # bundle's hdf5-config.cmake references a libhdf5.a that is
+          # not shipped). libcvc-deps is only consulted as a fallback
+          # for packages brew doesn't provide (libiimod).
           if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
             if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
-              export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}:$CMAKE_PREFIX_PATH"
+              export CMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH:${{ steps.libcvc-deps.outputs.path }}"
             else
               export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}"
             fi
