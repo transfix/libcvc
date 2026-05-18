@@ -584,10 +584,25 @@ jobs:
             # than hand-rolled install_name_tool plumbing across the deep
             # Boost/HDF5 dependency graph.
             brew install dylibbundler
+            # Build an explicit search-path list of every brewed dep
+            # plus the standard Homebrew lib roots. Without this,
+            # dylibbundler hits transitive deps it cannot resolve
+            # (e.g. libgmp.10.dylib pulled in via CGAL → gmpxx → gmp)
+            # and drops into an interactive "Try again" prompt; with
+            # no TTY in CI, that prompt loops forever and burns the
+            # job until it times out. -s adds search paths, and we
+            # also close stdin so any unresolved dep aborts cleanly
+            # instead of looping.
+            BUNDLER_SEARCH=()
+            for pkg in boost hdf5 fftw gsl log4cplus cgal gmp mpfr imagemagick libomp libaec libheif libtiff webp x265 aom libde265 zstd libvmaf openexr little-cms2 jpeg-xl xz; do
+              P=$(brew --prefix "$pkg" 2>/dev/null || true)
+              [ -n "$P" ] && [ -d "$P/lib" ] && BUNDLER_SEARCH+=( -s "$P/lib" )
+            done
+            BUNDLER_SEARCH+=( -s /opt/homebrew/lib -s /usr/local/lib )
             for dy in "$DIST"/lib/libcvc*.dylib; do
               [ -e "$dy" ] || continue
               [ -L "$dy" ] && continue
-              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd || true
+              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
             done
           else
             # Static flavour: just copy the .a archives. No install_name
