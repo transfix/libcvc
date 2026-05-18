@@ -24,7 +24,7 @@ inputs:
   version:
     description: 'libcvc-deps release version (without leading v).'
     required: false
-    default: '1.0.1'
+    default: '1.0.2'
   os:
     description: 'linux | macos | windows. Defaults to runner.os.'
     required: false
@@ -165,3 +165,4 @@ runs:
         echo "libcvc-deps: ready at $root"
         ls "$root" | head -20 || true
         echo "path=$root" >> "$GITHUB_OUTPUT"
+# v1.0.2 fetch action default

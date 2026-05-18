@@ -484,7 +484,6 @@ libcvc/
 │   └── xmlrpc/            # XMLRPC headers
 ├── src/                    # Implementation
 │   ├── cvc/               # Main library
-│   │   ├── libiimod/      # MRC file support
 │   │   ├── cvc-mesher/    # Meshing algorithms
 │   │   └── SDF/           # Distance functions
 │   └── xmlrpc/            # XMLRPC implementation

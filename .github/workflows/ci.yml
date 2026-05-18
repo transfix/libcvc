@@ -200,16 +200,14 @@ jobs:
             libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      # When a matching libcvc-deps release archive exists for this
-      # platform, downloading it is far cheaper than a cold-cache VTK
-      # source build (~25-40 min). On hit, the cache restore + source
-      # build are both skipped and CMAKE_PREFIX_PATH picks up VTK from
-      # the extracted libcvc-deps tree. On miss, the action emits an
-      # empty `path` output and we fall back to the previous
-      # cache-then-build path.
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
+      # ── Pull dep bundle from libcvc-deps release ──
+      # For volrover3 builds this lets us skip the slow VTK-from-source
+      # build (~25-40 min). For libcvc-kind builds the bundle provides
+      # the `libiimod` CMake package (no longer vendored in this tree).
+      # On miss the action emits an empty `path` output; libcvc-kind
+      # will then fail at find_package(libiimod), while volrover3 falls
+      # back to the cache-then-build path below.
+      - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
@@ -279,6 +277,9 @@ jobs:
             else
               extra_prefix="$HOME/vtk-qt6"
             fi
+          elif [ "${{ matrix.kind }}" = "libcvc" ]; then
+            # libcvc-kind needs libiimod from the libcvc-deps bundle.
+            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
           fi
           # libcvc-kind builds enable tests so the same artifacts we
           # ship get exercised by ctest. volrover3 builds keep tests
@@ -530,10 +531,26 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
+      # ── Pull dep bundle from libcvc-deps release ──
+      # Provides the libiimod CMake package (no longer vendored).
+      - name: Fetch libcvc-deps
+        id: libcvc-deps-macos
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
       - name: Configure
         run: |
           tests=OFF
           [ "${{ matrix.kind }}" = "libcvc" ] && tests=ON
+          # Append libcvc-deps to CMAKE_PREFIX_PATH so find_package
+          # (libiimod) resolves. brew prefixes from the prior step
+          # remain via $CMAKE_PREFIX_PATH (env var).
+          deps_path="${{ steps.libcvc-deps-macos.outputs.path }}"
+          if [ -n "$deps_path" ]; then
+            export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:+$CMAKE_PREFIX_PATH:}$deps_path"
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCVC_BUILD_TESTS=$tests \
@@ -934,22 +951,93 @@ jobs:
             -DCVC_ENABLE_SDF=ON
 
       - name: Build
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+        shell: pwsh
+        # gtest_discover_tests runs each test executable at build
+        # time (POST_BUILD discovery mode, the GoogleTest module
+        # default) to enumerate test names. On Windows the DLLs
+        # consumed by those exes (libcvc-deps' Boost/HDF5/FFTW/Qt6/
+        # VTK, plus our own cvc.dll) live in $depsPath\bin (release)
+        # or $depsPath\debug\bin (debug) and build\bin\<Config>,
+        # neither of which is on PATH during `cmake --build`. Without
+        # these directories on PATH the discovery launch exits with
+        # STATUS_DLL_NOT_FOUND (0xc0000135), and CMake aborts the
+        # build with
+        #   CMake Error at .../GoogleTestAddTests.cmake:132 (message):
+        #     Error running test executable. Path: '.../state_test.exe'
+        #     Result: Exit code 0xc0000135
+        #
+        # CRITICAL: vcpkg ships Debug DLLs at debug/bin/ with the
+        # SAME filename as their Release counterparts at bin/ (e.g.
+        # both directories contain hdf5.dll, boost_thread-vc143-mt*).
+        # Putting bin/ on PATH first under a Debug build causes the
+        # consumer to load Release DLLs against a Debug import lib,
+        # producing CRT/iterator-debug-level mismatches that surface
+        # as SEH access violations (0xc0000005) and "unknown C++
+        # exception" failures inside HDF5/Boost APIs.
+        #
+        # libcvc-deps, however, ships Qt6 only at top-level bin/
+        # (Qt6Core.dll AND Qt6Cored.dll co-located there because Qt
+        # uses a 'd' suffix for Debug). So a Debug build still needs
+        # bin/ on PATH to resolve Qt6Cored.dll, otherwise Qt-based
+        # tests (GraphicsNodeTest, VolumeNodeTest, etc.) exit with
+        # STATUS_DLL_NOT_FOUND (0xc0000135). Put debug/bin FIRST so
+        # vcpkg-style same-named ports load their debug variant, and
+        # bin/ second so Qt6's debug-suffixed DLLs still resolve.
+        run: |
+          $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
+          $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
+          $buildBin = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
+          $extra = @()
+          if ($depsPath) {
+            if ($isDebug) {
+              $depDbgBin = Join-Path $depsPath 'debug\bin'
+              if (Test-Path $depDbgBin) { $extra += $depDbgBin }
+              $extra += (Join-Path $depsPath 'bin')
+            } else {
+              $extra += (Join-Path $depsPath 'bin')
+            }
+          }
+          if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
+          $extra += $buildBin
+          $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          cmake --build build --config ${{ matrix.build_type }} --parallel
 
       - name: Run tests
         if: matrix.kind == 'libcvc'
-        shell: bash
+        shell: pwsh
+        env:
+          DEPS_PATH: ${{ steps.libcvc-deps-windows.outputs.path }}
         run: |
-          set -euo pipefail
-          STRESS_REGEX='(Stress|Convergence|Benchmark|PerformanceHierarchy)'
-          if [ "${{ github.event_name }}" = "push" ]; then
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+          # ctest invokes the test executables, which need the same
+          # DLL search path on PATH as build-time discovery (see the
+          # Build step note above). Mirror the Debug/Release split
+          # so Debug tests load Debug DLLs (CRT-compatible) and
+          # Release tests load Release DLLs, with bin/ retained on
+          # the Debug path so Qt6's debug-suffixed DLLs resolve.
+          $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
+          $buildBin = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
+          $extra = @()
+          if ($env:DEPS_PATH) {
+            if ($isDebug) {
+              $depDbgBin = Join-Path $env:DEPS_PATH 'debug\bin'
+              if (Test-Path $depDbgBin) { $extra += $depDbgBin }
+              $extra += (Join-Path $env:DEPS_PATH 'bin')
+            } else {
+              $extra += (Join-Path $env:DEPS_PATH 'bin')
+            }
+          }
+          if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
+          $extra += $buildBin
+          $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          $stressRegex = '(Stress|Convergence|Benchmark|PerformanceHierarchy)'
+          if ('${{ github.event_name }}' -eq 'push') {
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
-          else
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
-                  -E "${STRESS_REGEX}"
-          fi
+          } else {
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
+                  -E "$stressRegex"
+          }
 
       - name: Install NSIS
         if: matrix.kind == 'volrover3'
