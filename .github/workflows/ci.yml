@@ -973,9 +973,16 @@ jobs:
         # consumer to load Release DLLs against a Debug import lib,
         # producing CRT/iterator-debug-level mismatches that surface
         # as SEH access violations (0xc0000005) and "unknown C++
-        # exception" failures inside HDF5/Boost APIs. Select the
-        # debug/bin tree for Debug builds and the bin tree for
-        # Release builds, never both.
+        # exception" failures inside HDF5/Boost APIs.
+        #
+        # libcvc-deps, however, ships Qt6 only at top-level bin/
+        # (Qt6Core.dll AND Qt6Cored.dll co-located there because Qt
+        # uses a 'd' suffix for Debug). So a Debug build still needs
+        # bin/ on PATH to resolve Qt6Cored.dll, otherwise Qt-based
+        # tests (GraphicsNodeTest, VolumeNodeTest, etc.) exit with
+        # STATUS_DLL_NOT_FOUND (0xc0000135). Put debug/bin FIRST so
+        # vcpkg-style same-named ports load their debug variant, and
+        # bin/ second so Qt6's debug-suffixed DLLs still resolve.
         run: |
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
@@ -985,6 +992,7 @@ jobs:
             if ($isDebug) {
               $depDbgBin = Join-Path $depsPath 'debug\bin'
               if (Test-Path $depDbgBin) { $extra += $depDbgBin }
+              $extra += (Join-Path $depsPath 'bin')
             } else {
               $extra += (Join-Path $depsPath 'bin')
             }
@@ -1004,7 +1012,8 @@ jobs:
           # DLL search path on PATH as build-time discovery (see the
           # Build step note above). Mirror the Debug/Release split
           # so Debug tests load Debug DLLs (CRT-compatible) and
-          # Release tests load Release DLLs.
+          # Release tests load Release DLLs, with bin/ retained on
+          # the Debug path so Qt6's debug-suffixed DLLs resolve.
           $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
           $buildBin = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
           $extra = @()
@@ -1012,6 +1021,7 @@ jobs:
             if ($isDebug) {
               $depDbgBin = Join-Path $env:DEPS_PATH 'debug\bin'
               if (Test-Path $depDbgBin) { $extra += $depDbgBin }
+              $extra += (Join-Path $env:DEPS_PATH 'bin')
             } else {
               $extra += (Join-Path $env:DEPS_PATH 'bin')
             }
