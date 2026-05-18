@@ -162,20 +162,24 @@ jobs:
             libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      # When a matching libcvc-deps release archive exists for this
-      # platform, downloading it (~500 MB) is far cheaper than a
-      # cold-cache VTK source build (~15-20 min). On hit, the
-      # subsequent VTK source build is skipped and CMAKE_PREFIX_PATH
-      # picks up VTK from the extracted libcvc-deps tree. On miss,
-      # the action emits an empty `path` output and we fall back to
-      # the previous from-source build.
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
+      # ── Pull deps from a libcvc-deps release bundle ──
+      # libcvc kind: required for libiimod (no longer vendored, see
+      #   PR #63), in addition to providing Boost/HDF5/FFTW/GSL/CGAL/
+      #   log4cplus/ImageMagick prebuilt.
+      # volrover3 kind: also speedup vs. cold-cache VTK source build
+      #   (~15-20 min). On hit, the subsequent VTK source build is
+      #   skipped and CMAKE_PREFIX_PATH picks up VTK from the deps tree.
+      # On miss the action emits an empty `path` output; libcvc kind
+      # will then fail Configure (libiimod is required), which is the
+      # correct signal.
+      - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          build_type: Release    # volrover3 jobs are Release-only
+          # libcvc-deps Linux ships per-build_type archives; libcvc
+          # jobs pull the matching debug/release flavor, volrover3
+          # is Release-only.
+          build_type: ${{ matrix.kind == 'volrover3' && 'Release' || matrix.build_type }}
           link: shared
 
       # ── VTK 9.5 built against Qt6, cached ──
@@ -213,14 +217,14 @@ jobs:
       - name: Configure
         run: |
           extra_prefix=""
-          if [ "${{ matrix.kind }}" = "volrover3" ]; then
-            # Prefer the libcvc-deps tree when available, else fall
-            # back to the from-source VTK install under ~/vtk-qt6.
-            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-            else
-              extra_prefix="$HOME/vtk-qt6"
-            fi
+          # libcvc-deps (when present) carries libiimod for libcvc and
+          # VTK for volrover3 alongside the rest of the third-party
+          # tree. Prefer it for both kinds.
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+          elif [ "${{ matrix.kind }}" = "volrover3" ]; then
+            # Fall back to from-source VTK install under ~/vtk-qt6.
+            extra_prefix="$HOME/vtk-qt6"
           fi
           # link=shared → BUILD_SHARED_LIBS=ON (legacy default).
           # link=static → BUILD_SHARED_LIBS=OFF plus static dep flags so
@@ -494,8 +498,41 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
+      # ── Pull libiimod (and other prebuilt deps) from libcvc-deps ──
+      # libcvc no longer vendors libiimod (PR #63); the macOS bundle
+      # ships libiimodConfig.cmake under share/cmake/libiimod and the
+      # dylibs alongside.
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: ${{ matrix.kind == 'volrover3' && 'Release' || matrix.build_type }}
+          link: shared
+
       - name: Configure
         run: |
+          # Append the libcvc-deps tree (libiimod + bundled deps) to
+          # the CMAKE_PREFIX_PATH env var that brew set earlier. We do
+          # NOT pass -DCMAKE_PREFIX_PATH on the cmake command line:
+          #   * The env-var form is `:`-separated on Unix (CMake reads
+          #     it natively).
+          #   * The -D form is a CMake list and is `;`-separated.
+          # Mixing `:`-joined paths into -DCMAKE_PREFIX_PATH would
+          # collapse everything into a single path and break find_package.
+          #
+          # Order matters: we APPEND (not prepend) so that brew's
+          # working HDF5 / Boost / Qt configs win over any incomplete
+          # cmake configs in the libcvc-deps bundle (e.g. the macOS
+          # bundle's hdf5-config.cmake references a libhdf5.a that is
+          # not shipped). libcvc-deps is only consulted as a fallback
+          # for packages brew doesn't provide (libiimod).
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+              export CMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH:${{ steps.libcvc-deps.outputs.path }}"
+            else
+              export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}"
+            fi
+          fi
           if [ "${{ matrix.link }}" = "static" ]; then
             shared_libs=OFF
             # Homebrew's boost / hdf5 / fftw / gsl bottles ship both .a
@@ -547,10 +584,25 @@ jobs:
             # than hand-rolled install_name_tool plumbing across the deep
             # Boost/HDF5 dependency graph.
             brew install dylibbundler
+            # Build an explicit search-path list of every brewed dep
+            # plus the standard Homebrew lib roots. Without this,
+            # dylibbundler hits transitive deps it cannot resolve
+            # (e.g. libgmp.10.dylib pulled in via CGAL → gmpxx → gmp)
+            # and drops into an interactive "Try again" prompt; with
+            # no TTY in CI, that prompt loops forever and burns the
+            # job until it times out. -s adds search paths, and we
+            # also close stdin so any unresolved dep aborts cleanly
+            # instead of looping.
+            BUNDLER_SEARCH=()
+            for pkg in boost hdf5 fftw gsl log4cplus cgal gmp mpfr imagemagick libomp libaec libheif libtiff webp x265 aom libde265 zstd libvmaf openexr little-cms2 jpeg-xl xz; do
+              P=$(brew --prefix "$pkg" 2>/dev/null || true)
+              [ -n "$P" ] && [ -d "$P/lib" ] && BUNDLER_SEARCH+=( -s "$P/lib" )
+            done
+            BUNDLER_SEARCH+=( -s /opt/homebrew/lib -s /usr/local/lib )
             for dy in "$DIST"/lib/libcvc*.dylib; do
               [ -e "$dy" ] || continue
               [ -L "$dy" ] && continue
-              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd || true
+              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
             done
           else
             # Static flavour: just copy the .a archives. No install_name
