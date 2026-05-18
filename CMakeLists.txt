@@ -12,7 +12,7 @@ endif()
 
 # First declare project with C and CXX to initialize CMake properly
 project(libcvc
-  VERSION 3.2.1
+  VERSION 3.2.0
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
 )
@@ -49,6 +49,9 @@ if(MSVC)
     _CRT_SECURE_NO_WARNINGS
     _CRT_NONSTDC_NO_WARNINGS
     _CRT_NONSTDC_NO_DEPRECATE
+    # Silence Boost.Asio/WinAPI "Please define _WIN32_WINNT" notice.
+    # 0x0601 = Windows 7, matching Boost's own auto-assumed default.
+    _WIN32_WINNT=0x0601
   )
   # Force-include the compatibility shim in every translation unit so that
   # third-party headers (Boost.Core, Boost.Asio) see `std::snprintf` rather
