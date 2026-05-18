@@ -162,20 +162,24 @@ jobs:
             libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Optional: pull VTK from a libcvc-deps release bundle ──
-      # When a matching libcvc-deps release archive exists for this
-      # platform, downloading it (~500 MB) is far cheaper than a
-      # cold-cache VTK source build (~15-20 min). On hit, the
-      # subsequent VTK source build is skipped and CMAKE_PREFIX_PATH
-      # picks up VTK from the extracted libcvc-deps tree. On miss,
-      # the action emits an empty `path` output and we fall back to
-      # the previous from-source build.
-      - name: Fetch libcvc-deps (optional speedup)
-        if: matrix.kind == 'volrover3'
+      # ── Pull deps from a libcvc-deps release bundle ──
+      # libcvc kind: required for libiimod (no longer vendored, see
+      #   PR #63), in addition to providing Boost/HDF5/FFTW/GSL/CGAL/
+      #   log4cplus/ImageMagick prebuilt.
+      # volrover3 kind: also speedup vs. cold-cache VTK source build
+      #   (~15-20 min). On hit, the subsequent VTK source build is
+      #   skipped and CMAKE_PREFIX_PATH picks up VTK from the deps tree.
+      # On miss the action emits an empty `path` output; libcvc kind
+      # will then fail Configure (libiimod is required), which is the
+      # correct signal.
+      - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          build_type: Release    # volrover3 jobs are Release-only
+          # libcvc-deps Linux ships per-build_type archives; libcvc
+          # jobs pull the matching debug/release flavor, volrover3
+          # is Release-only.
+          build_type: ${{ matrix.kind == 'volrover3' && 'Release' || matrix.build_type }}
           link: shared
 
       # ── VTK 9.5 built against Qt6, cached ──
@@ -213,14 +217,14 @@ jobs:
       - name: Configure
         run: |
           extra_prefix=""
-          if [ "${{ matrix.kind }}" = "volrover3" ]; then
-            # Prefer the libcvc-deps tree when available, else fall
-            # back to the from-source VTK install under ~/vtk-qt6.
-            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-            else
-              extra_prefix="$HOME/vtk-qt6"
-            fi
+          # libcvc-deps (when present) carries libiimod for libcvc and
+          # VTK for volrover3 alongside the rest of the third-party
+          # tree. Prefer it for both kinds.
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+          elif [ "${{ matrix.kind }}" = "volrover3" ]; then
+            # Fall back to from-source VTK install under ~/vtk-qt6.
+            extra_prefix="$HOME/vtk-qt6"
           fi
           # link=shared → BUILD_SHARED_LIBS=ON (legacy default).
           # link=static → BUILD_SHARED_LIBS=OFF plus static dep flags so
@@ -494,8 +498,31 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
 
+      # ── Pull libiimod (and other prebuilt deps) from libcvc-deps ──
+      # libcvc no longer vendors libiimod (PR #63); the macOS bundle
+      # ships libiimodConfig.cmake under share/cmake/libiimod and the
+      # dylibs alongside.
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: ${{ matrix.kind == 'volrover3' && 'Release' || matrix.build_type }}
+          link: shared
+
       - name: Configure
         run: |
+          # Merge the libcvc-deps prefix (libiimod + bundled deps) with
+          # the brew prefixes already set via $GITHUB_ENV. Setting
+          # -DCMAKE_PREFIX_PATH on the command line otherwise overrides
+          # the env-set value.
+          prefix_path="${CMAKE_PREFIX_PATH:-}"
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            if [ -n "$prefix_path" ]; then
+              prefix_path="${{ steps.libcvc-deps.outputs.path }}:$prefix_path"
+            else
+              prefix_path="${{ steps.libcvc-deps.outputs.path }}"
+            fi
+          fi
           if [ "${{ matrix.link }}" = "static" ]; then
             shared_libs=OFF
             # Homebrew's boost / hdf5 / fftw / gsl bottles ship both .a
@@ -507,6 +534,7 @@ jobs:
           fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_PREFIX_PATH="$prefix_path" \
             -DBUILD_SHARED_LIBS=$shared_libs \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             $static_deps \
