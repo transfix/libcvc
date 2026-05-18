@@ -511,16 +511,19 @@ jobs:
 
       - name: Configure
         run: |
-          # Merge the libcvc-deps prefix (libiimod + bundled deps) with
-          # the brew prefixes already set via $GITHUB_ENV. Setting
-          # -DCMAKE_PREFIX_PATH on the command line otherwise overrides
-          # the env-set value.
-          prefix_path="${CMAKE_PREFIX_PATH:-}"
+          # Prepend the libcvc-deps tree (libiimod + bundled deps) to
+          # the CMAKE_PREFIX_PATH env var that brew set earlier. We do
+          # NOT pass -DCMAKE_PREFIX_PATH on the cmake command line:
+          #   * The env-var form is `:`-separated on Unix (CMake reads
+          #     it natively).
+          #   * The -D form is a CMake list and is `;`-separated.
+          # Mixing `:`-joined paths into -DCMAKE_PREFIX_PATH would
+          # collapse everything into a single path and break find_package.
           if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-            if [ -n "$prefix_path" ]; then
-              prefix_path="${{ steps.libcvc-deps.outputs.path }}:$prefix_path"
+            if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+              export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}:$CMAKE_PREFIX_PATH"
             else
-              prefix_path="${{ steps.libcvc-deps.outputs.path }}"
+              export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}"
             fi
           fi
           if [ "${{ matrix.link }}" = "static" ]; then
@@ -534,7 +537,6 @@ jobs:
           fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_PREFIX_PATH="$prefix_path" \
             -DBUILD_SHARED_LIBS=$shared_libs \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             $static_deps \
