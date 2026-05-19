@@ -27,6 +27,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_sync_adapter.h
   ../../inc/cvc/state_blob_store.h
   ../../inc/cvc/state_codec_registry.h
+  ../../inc/cvc/state_replica.h
+  ../../inc/cvc/state_authority_map.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -61,6 +63,8 @@ set(SOURCE_FILES
   state_sync_adapter.cpp
   state_blob_store.cpp
   state_codec_registry.cpp
+  state_replica.cpp
+  state_authority_map.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
