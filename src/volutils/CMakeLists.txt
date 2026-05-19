@@ -48,9 +48,14 @@ if(CVC_ENABLE_IMAGEMAGICK)
   target_compile_definitions(volutils PRIVATE
     MAGICKCORE_QUANTUM_DEPTH=16
     MAGICKCORE_HDRI_ENABLE=0)
-  # Also add to cvc library for volume_ops.cpp
+  # Also add to cvc library for volume_ops.cpp. Wrap each include dir
+  # in $<BUILD_INTERFACE:...> so a bundled toolchain doesn't leak a
+  # build-dir path into the installed cvc target's
+  # INTERFACE_INCLUDE_DIRECTORIES.
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_IMAGEMAGICK)
-  target_include_directories(cvc PUBLIC ${ImageMagick_INCLUDE_DIRS})
+  foreach(_im_inc IN LISTS ImageMagick_INCLUDE_DIRS)
+    target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_im_inc}>")
+  endforeach()
   target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
 endif()
 
@@ -59,7 +64,9 @@ if(CVC_ENABLE_FFTW)
   target_include_directories(volutils PRIVATE ${FFTW3_INCLUDE_DIRS})
   target_link_libraries(volutils PRIVATE ${FFTW3_LIBRARIES})
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
-  target_include_directories(cvc PUBLIC ${FFTW3_INCLUDE_DIRS})
+  foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
+    target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
+  endforeach()
   target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
 endif()
 

@@ -26,8 +26,13 @@ function(SetupBoost TargetName)
     message(STATUS "Boost include dirs: ${Boost_INCLUDE_DIRS}")
     message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
     
-    # Use modern target-based approach
-    target_include_directories(${TargetName} PUBLIC ${Boost_INCLUDE_DIRS})
+    # Use modern target-based approach. Wrap each include dir in
+    # $<BUILD_INTERFACE:...> so a bundled toolchain (e.g. libcvc-deps
+    # under a parent project's build tree) doesn't leak a build-dir path
+    # into the installed cvc target's INTERFACE_INCLUDE_DIRECTORIES.
+    foreach(_boost_inc IN LISTS Boost_INCLUDE_DIRS)
+      target_include_directories(${TargetName} PUBLIC "$<BUILD_INTERFACE:${_boost_inc}>")
+    endforeach()
     target_link_libraries(${TargetName} PUBLIC ${Boost_LIBRARIES})
     
     # Platform-specific definitions
