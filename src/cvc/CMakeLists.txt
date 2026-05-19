@@ -22,6 +22,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/voxels.h
   ../../inc/cvc/geometry.h
   ../../inc/cvc/state.h
+  ../../inc/cvc/state_change_journal.h
+  ../../inc/cvc/state_subscription_router.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -51,6 +53,8 @@ set(SOURCE_FILES
   smoothing.cpp
   spider_io.cpp
   state.cpp
+  state_change_journal.cpp
+  state_subscription_router.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
