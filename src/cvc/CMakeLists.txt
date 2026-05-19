@@ -29,6 +29,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_codec_registry.h
   ../../inc/cvc/state_replica.h
   ../../inc/cvc/state_authority_map.h
+  ../../inc/cvc/state_cluster_shard.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -65,6 +66,7 @@ set(SOURCE_FILES
   state_codec_registry.cpp
   state_replica.cpp
   state_authority_map.cpp
+  state_cluster_shard.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
