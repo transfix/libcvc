@@ -7,6 +7,8 @@ add_executable(state_test state_test.cpp)
 add_executable(state_change_journal_test state_change_journal_test.cpp)
 add_executable(state_subscription_router_test state_subscription_router_test.cpp)
 add_executable(state_sync_adapter_test state_sync_adapter_test.cpp)
+add_executable(state_blob_store_test state_blob_store_test.cpp)
+add_executable(state_codec_registry_test state_codec_registry_test.cpp)
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
@@ -21,6 +23,8 @@ set(TEST_TARGETS
   state_change_journal_test
   state_subscription_router_test
   state_sync_adapter_test
+  state_blob_store_test
+  state_codec_registry_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -143,6 +147,20 @@ target_link_libraries(state_sync_adapter_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_blob_store_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_codec_registry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -158,6 +176,8 @@ target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_test PRIVATE cxx_std_17)
+target_compile_features(state_blob_store_test PRIVATE cxx_std_17)
+target_compile_features(state_codec_registry_test PRIVATE cxx_std_17)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -215,6 +235,8 @@ gtest_discover_tests(utility_test)
 gtest_discover_tests(state_change_journal_test)
 gtest_discover_tests(state_subscription_router_test)
 gtest_discover_tests(state_sync_adapter_test)
+gtest_discover_tests(state_blob_store_test)
+gtest_discover_tests(state_codec_registry_test)
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)
