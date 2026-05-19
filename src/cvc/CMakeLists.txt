@@ -24,6 +24,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state.h
   ../../inc/cvc/state_change_journal.h
   ../../inc/cvc/state_subscription_router.h
+  ../../inc/cvc/state_sync_adapter.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -55,6 +56,7 @@ set(SOURCE_FILES
   state.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
+  state_sync_adapter.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
