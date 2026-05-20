@@ -1,6 +1,6 @@
 # Distributed State Synchronization Roadmap
 
-Date: May 19, 2026
+Date: May 20, 2026
 
 ## Purpose
 
@@ -21,6 +21,7 @@ The current state API is a per-`cvc::app` tree of dot-separated paths. Nodes sto
 - Allow subtrees to be delegated to another cluster or authority, similar to DNS subdelegation.
 - Make the feature optional in CMake and keep libcvc usable with no networking dependencies.
 - Provide security primitives suitable for multi-machine clusters: TLS, authentication, authorization, and path-level write policy.
+- Provide an out-of-band node-to-node messaging channel that does not mutate state, with TTL-bounded propagation across the state tree and across the cluster.
 
 ## Non-Goals For The First Version
 
@@ -32,7 +33,7 @@ The current state API is a per-`cvc::app` tree of dot-separated paths. Nodes sto
 
 ## Recommended Direction
 
-Use gRPC for control-plane and mutation-stream communication, protobuf for compact typed mutation envelopes, and a separate chunked/blob transport for large object payloads. Keep the distributed layer beside `cvc::state` as an attachable service rather than embedding networking directly in every setter. The hot path should be an already-open bidirectional stream carrying compact mutation envelopes; setup, discovery, snapshots, and blob transfers should not block small state updates.
+Use gRPC (provided by libcvc-deps v1.1.0) for cross-host control-plane and mutation-stream communication, protobuf for compact typed mutation envelopes, and a separate chunked/blob transport for large object payloads. For same-host work, prefer a faster transport (in-process for tests and embedded multi-shard, fast IPC for cross-process). Keep the distributed layer beside `cvc::state` as an attachable service rather than embedding networking directly in every setter. The hot path should be an already-open bidirectional stream carrying compact mutation envelopes; setup, discovery, snapshots, and blob transfers should not block small state updates.
 
 Application code should continue to write through `app.root()(path).value(...)` and `data(...)`. A `distributed_state_session` subscribes to local state signals, converts local mutations into replicated operations, applies remote operations back to the local tree under a guarded apply scope, and emits normal local signals so existing `state_object` handlers continue to work.
 
@@ -58,9 +59,9 @@ Application code should continue to write through `app.root()(path).value(...)` 
 
    Partitions authority and fanout responsibility across a cluster. A cluster may have one authority for a small deployment, but the architecture should allow multiple shard leaders keyed by path prefix or hash ranges so many-node clusters do not bottleneck on a single process.
 
-6. `state_transport_grpc`
+6. `state_transport` (interface) plus concrete transports
 
-   Implements bidirectional streaming RPCs for peer sync, snapshots, membership, leases, and delegation referrals.
+   Pluggable peer-to-peer carrier for mutation envelopes, snapshots, control messages, and out-of-band messages. See "Transport Tier Design" below.
 
 7. `state_blob_store`
 
@@ -73,6 +74,32 @@ Application code should continue to write through `app.root()(path).value(...)` 
 9. `state_authority_map`
 
    Tracks which cluster has write authority for each subtree, how referrals are resolved, and how leases are acquired/renewed.
+
+10. `state_message_bus`
+
+    Out-of-band notification channel. Dispatches non-state messages to per-node signals and propagates them along the tree (and optionally to peers via the transport) under a TTL.
+
+## Transport Tier Design
+
+Transports are pluggable behind a small `state_transport` interface so the cluster shard, replica, and message bus do not depend on any specific wire format. Three concrete transports are planned:
+
+- `state_transport_inproc` — pure in-memory delivery between shards in the same process. Used for unit tests, integration tests across many simulated peers, and any embedded scenario where a single process hosts multiple state trees that should appear as a cluster.
+- `state_transport_ipc` — fast same-host cross-process transport. First implementation uses a UNIX domain socket with length-prefixed framing; a later variant can use a shared-memory ring buffer if benchmarks justify it.
+- `state_transport_grpc` — bidirectional streaming gRPC over TCP/TLS, used cross-host or cross-host-equivalent (containers on a virtual network). Built on the gRPC and protobuf shipped in libcvc-deps v1.1.0; gated behind a CMake flag so libcvc still builds without networking.
+
+The interface carries a small set of operations: `register_shard`, `unregister_shard`, `send_mutation(cluster_id, mutation)`, `send_message(cluster_id, message)`, `flush()`. Implementations are free to batch or coalesce on the wire as long as observable per-shard ordering and loop-detection metadata are preserved.
+
+### gRPC Overhead And When To Bypass It
+
+Order-of-magnitude latency on a modern Linux box:
+
+- gRPC over loopback TCP: ~30–100 μs per RPC; bidirectional streaming amortizes well so steady-state per-message cost is the lower end of that range.
+- UNIX domain sockets with simple length-prefixed framing: ~5–20 μs.
+- Shared-memory ring buffer with a futex/eventfd wakeup: typically <1 μs.
+
+For cross-host traffic, gRPC dominates anything we'd realistically build ourselves and is the right default. For same-host clusters with high-frequency scalar updates (renderers, simulation visualizers, brick-streamers) the difference is large enough to matter, so a same-host transport is worth implementing.
+
+The plan: ship gRPC first for any non-trivial deployment, ship `state_transport_inproc` alongside it for tests, and add `state_transport_ipc` once we have benchmark numbers showing same-host RPC cost is a real bottleneck. The `state_transport` interface is designed so swapping transports is configuration, not source change.
 
 ## Latency And Scale Requirements
 
@@ -117,6 +144,21 @@ Routing rules:
 - The target cluster exports a subtree root that maps to the delegated path; internally it may store it as its own root or under a mount path.
 - Referrals should be followed automatically by the session and exposed through diagnostics.
 
+## Out-Of-Band Messaging
+
+Some application traffic is not a state mutation. Examples include "render this frame", "user clicked", "begin recording", or progress pings. These should not be encoded as state writes (every write would persist in the journal, fan out to subscribers, and contribute to vector clocks). The system needs a separate notification path that rides on the same transports.
+
+Design:
+
+- Each `cvc::state` node exposes a `messageReceived(const state_message&)` Boost.Signals2 signal.
+- A `state_message` carries: a target path (the node it is delivered to), an opaque payload (`std::string` of bytes; codec is the application's choice), a `max_depth` (TTL, hop count from the original target), an origin node id, a message id, and a timestamp.
+- `app.root()(path).sendMessage(payload, max_depth)` (or an equivalent free function) dispatches a message to the target node.
+- On receipt at any node, the node fires `messageReceived` with depth equal to the hops already taken. If `max_depth > 0` after the local fire, the node forwards a copy with `max_depth - 1` to all immediate children. Nodes track recently-seen `(origin, message_id)` pairs to suppress duplicates.
+- Cluster-wide propagation is opt-in: the message bus offers the message to the local `state_transport`, which delivers it to peers with the same TTL semantics. Peers re-enter the propagation algorithm at the target path. The same `(origin, message_id)` deduplication prevents loops across peers.
+- Messages do not write to the journal and do not advance vector clocks. Delivery is best-effort under backpressure: bounded per-peer queues, drop on overflow, with a counter under `__system.distributed.messages.*`.
+
+This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: scope is bounded by `max_depth`, loops are bounded by the dedup set, and the path namespace gives natural addressing without an extra topic system.
+
 ## Implementation Phases
 
 ### Phase 0: Design Spike
@@ -128,47 +170,72 @@ Routing rules:
 - Choose canonical codecs for `cvc::volume` and `cvc::geometry`.
 - Decide whether snapshots should include `boost::any` data immediately or begin with value/metadata plus selected codecs.
 
-### Phase 1: Local Mutation Journal
+### Phase 1: Local Mutation Journal (done)
 
 - Add internal mutation structs and a journal with unit tests.
 - Add `state_sync_adapter` that observes local state changes and records mutations.
 - Add path-prefix subscription indexes and latest-value coalescing locally, before networking.
 - Add remote-apply guard to prevent echo loops.
 - Add tests for value, data, metadata, reset, touch, child creation, and callback firing.
-- No networking yet.
 
-### Phase 2: Codec Registry And Blob Store
+### Phase 2: Codec Registry And Blob Store (done)
 
 - Add `state_codec_registry` with built-in scalar/string codecs.
-- Add file-backed content-addressed blob store.
+- Add file/memory-backed content-addressed blob store.
 - Add codecs for `cvc::geometry` and `cvc::volume` using existing I/O handlers or HDF5 where available.
 - Add chunk manifests, hash verification, resume support, and tests using generated large payloads without committing large files.
 
-### Phase 3: Single-Machine gRPC Sync
+### Phase 3a: Replica And Authority Map (done)
 
-- Add protobuf schema and generated C++ integration.
-- Implement bidirectional mutation stream between two processes on localhost.
-- Support initial snapshot, incremental mutations, acknowledgments, reconnect, and replay from journal.
-- Measure latency for scalar mutations and callback delivery; fail tests or benchmarks when regressions exceed chosen budgets.
-- Add integration tests that launch two libcvc test processes and verify values/data stay synchronized.
+- Add per-peer vector-clock metadata, last-applied tracking, and a "seen set" for echo suppression.
+- Add longest-prefix authority/delegation lookup with tests.
 
-### Phase 4: Multi-Node Cluster Semantics
+### Phase 3b: Cluster Shard Binding (done)
+
+- Per-tree shard struct binding journal + router + adapter + replica + authority map + blob store + codec registry, with unit tests and stress/perf gates.
+
+### Phase 3c: Transport Layer (current)
+
+- Define the `state_transport` interface and an inproc concrete `state_transport_inproc` for tests and embedded multi-shard scenarios.
+- Wire `state_cluster_shard` so it can publish local mutations through a transport and ingest remote ones via the existing remote-apply path on the adapter.
+- Tests: 2-shard convergence (set on A → B observes), loop suppression on round trip, fan-out across N shards, vector-clock equality after quiescence, opt-in stress and perf gates.
+
+### Phase 3d: Same-Host Fast IPC Transport
+
+- `state_transport_ipc` over UNIX domain sockets with length-prefixed framing.
+- Benchmark against gRPC loopback.
+- Optional shared-memory ring buffer variant if numbers justify the complexity.
+
+### Phase 3e: gRPC Transport
+
+- Add protobuf schema and generated C++ integration (using gRPC and protobuf from libcvc-deps v1.1.0).
+- `state_transport_grpc` with bidirectional streaming for mutations, snapshots, control, and out-of-band messages.
+- Reconnect, replay from journal, initial snapshot on join, latency benchmarks gated behind CMake flag.
+
+### Phase 4: Out-Of-Band Messaging
+
+- Add `state_message`, `state_message_bus`, and the `messageReceived` signal on `cvc::state`.
+- Add `sendMessage` API and TTL-bounded local tree propagation with `(origin, id)` dedup.
+- Extend each transport (`inproc`, `ipc`, `grpc`) to carry messages alongside mutations with the same dedup metadata so messages can cross peer boundaries.
+- Tests: local propagation depth, dedup across multi-path delivery, cross-peer propagation, drop-under-backpressure counters, message does not appear in journal and does not advance clocks.
+
+### Phase 5: Multi-Node Cluster Semantics
 
 - Add membership, node identity, TLS, auth tokens/certs, and per-path write policy.
 - Add subscription routing and path-prefix fanout so many-node clusters do not rely on all-to-all broadcast.
 - Add shard ownership for path prefixes or hash ranges, with resharding hooks for later operations tooling.
 - Add conflict detection, deterministic conflict resolution, backpressure, and observability under `__system.distributed.*`.
 
-### Phase 5: Subtree Delegation
+### Phase 6: Subtree Delegation
 
-- Add authority map and longest-prefix routing.
+- Add authority map and longest-prefix routing wired into the live transport (already-implemented map gets driven by real referrals).
 - Implement `ResolvePath`, delegation records, lease acquisition, lease renewal, and referral following.
 - Add tests for root cluster delegating a subtree to a second cluster and clients receiving the right updates.
 - Add failure-mode tests for expired delegation, unreachable delegated cluster, and authority transfer.
 
-### Phase 6: Performance And Production Hardening
+### Phase 7: Performance And Production Hardening
 
-- Benchmark scalar update fanout, callback latency, snapshot size, blob throughput, and reconnect recovery.
+- Benchmark scalar update fanout, callback latency, snapshot size, blob throughput, reconnect recovery, and message propagation depth/latency.
 - Benchmark large-tree routing with millions of paths and many delegated prefixes.
 - Benchmark many-node fanout with selective subscriptions and slow-peer isolation.
 - Add delta/chunk updates for volumes and geometry arrays.
@@ -182,23 +249,24 @@ Every production unit added for this feature must have unit tests in the same ch
 
 Required layers:
 
-- Unit tests for mutation construction, journal replay, subscription routing, echo suppression, codecs, blob chunking, lease logic, and route resolution.
-- Multi-process integration tests once transport exists. These should launch separate libcvc test helpers, communicate over localhost, verify bidirectional sync, verify callback delivery, and exercise reconnect/replay.
+- Unit tests for mutation construction, journal replay, subscription routing, echo suppression, codecs, blob chunking, lease logic, route resolution, transport delivery, and message TTL.
+- Multi-process integration tests once a cross-process transport exists. These should launch separate libcvc test helpers, communicate over IPC or gRPC localhost, verify bidirectional sync, verify callback delivery, and exercise reconnect/replay.
 - Large-object integration tests using generated volumes/geometry and a temporary blob store.
-- Many-node simulation tests with selective subscriptions, shard routing, slow-peer backpressure, and resync from snapshots.
+- Many-node simulation tests with selective subscriptions, shard routing, slow-peer backpressure, and resync from snapshots — runnable purely in-process via `state_transport_inproc`.
 - Large tree-network tests with many delegated prefixes and referral-cache invalidation.
 - Stress tests gated by an explicit option or environment variable so normal CI remains fast, but nightly/opt-in runs can push path counts, mutation rates, and node counts.
-- Performance tests that record scalar enqueue latency, remote delivery latency, callback latency, routing cost, blob throughput, snapshot time, and reconnect recovery time. These tests should start as reporting benchmarks, then gain thresholds once baseline data is stable.
+- Performance tests that record scalar enqueue latency, remote delivery latency, callback latency, routing cost, blob throughput, snapshot time, reconnect recovery time, and message propagation latency. These tests should start as reporting benchmarks, then gain thresholds once baseline data is stable.
 - Failure tests for duplicate mutations, out-of-order delivery, partial blob transfers, stale leases, split authority, slow peers, and transport interruption.
 
-## First Milestone
+## First Networking Milestone
 
-Build a prototype that synchronizes string values and metadata between two local processes over gRPC, with the adapter/journal architecture already in place and the hot path shaped for low latency. Do not start with large objects or delegation in code, but do include subscription routing and latency measurement so the prototype can grow toward many nodes instead of being rewritten.
+Build a prototype that synchronizes string values and metadata between two local processes over gRPC, with the adapter/journal architecture already in place and the hot path shaped for low latency. Do not start with large objects or delegation in code, but do include subscription routing, latency measurement, and a basic `state_transport_inproc` so the same shard logic can run in unit tests and over the network unchanged.
 
-The first merged milestone should include:
+The first merged networking milestone should include:
 
-- new optional CMake flag and generated protobuf build;
-- `distributed_state_session::join()` for localhost peer sync;
+- new optional CMake flag and generated protobuf build using libcvc-deps v1.1.0 gRPC/protobuf;
+- `state_transport` interface and `state_transport_inproc` concrete implementation;
+- `distributed_state_session::join()` for localhost peer sync over gRPC;
 - scalar value and metadata replication;
 - persistent bidirectional streams with no per-mutation connection setup;
 - path-prefix subscription routing, even if the first test has only two processes;
