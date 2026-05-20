@@ -32,6 +32,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_cluster_shard.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
+  ../../inc/cvc/state_transport_ipc.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -70,6 +71,7 @@ set(SOURCE_FILES
   state_authority_map.cpp
   state_cluster_shard.cpp
   state_transport_inproc.cpp
+  state_transport_ipc.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
