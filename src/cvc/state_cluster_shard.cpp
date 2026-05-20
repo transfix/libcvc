@@ -109,6 +109,11 @@ state_cluster_shard::drain_local(std::size_t max_count) {
   for (auto &m : pending) {
     if (m.origin_node_id != _local_node_id)
       continue;
+    // Stamp the shard's cluster identity. The adapter/journal does
+    // not know about clusters; that's a shard-level fact carried on
+    // the wire so peers can route by cluster_id.
+    if (m.cluster_id.empty())
+      m.cluster_id = _cluster_id;
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
       break;

@@ -12,6 +12,7 @@ add_executable(state_codec_registry_test state_codec_registry_test.cpp)
 add_executable(state_replica_test state_replica_test.cpp)
 add_executable(state_authority_map_test state_authority_map_test.cpp)
 add_executable(state_cluster_shard_test state_cluster_shard_test.cpp)
+add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
@@ -31,6 +32,7 @@ set(TEST_TARGETS
   state_replica_test
   state_authority_map_test
   state_cluster_shard_test
+  state_transport_inproc_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -188,6 +190,13 @@ target_link_libraries(state_cluster_shard_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_transport_inproc_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -208,6 +217,7 @@ target_compile_features(state_codec_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_replica_test PRIVATE cxx_std_17)
 target_compile_features(state_authority_map_test PRIVATE cxx_std_17)
 target_compile_features(state_cluster_shard_test PRIVATE cxx_std_17)
+target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -270,6 +280,7 @@ gtest_discover_tests(state_codec_registry_test)
 gtest_discover_tests(state_replica_test)
 gtest_discover_tests(state_authority_map_test)
 gtest_discover_tests(state_cluster_shard_test)
+gtest_discover_tests(state_transport_inproc_test)
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)
