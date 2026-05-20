@@ -11,7 +11,9 @@ function(SetupGSL TargetName)
     message(STATUS "GSL libraries: ${GSL_LIBRARIES}")
     
     # Use modern target-based approach
-    target_include_directories(${TargetName} PUBLIC ${GSL_INCLUDE_DIRS})
+    foreach(_gsl_inc IN LISTS GSL_INCLUDE_DIRS)
+      target_include_directories(${TargetName} PUBLIC "$<BUILD_INTERFACE:${_gsl_inc}>")
+    endforeach()
     target_link_libraries(${TargetName} PUBLIC ${GSL_LIBRARIES})
     
     if(CMAKE_GSL_CXX_FLAGS)
