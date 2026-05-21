@@ -494,8 +494,16 @@ public:
               const std::string &content_type = std::string("text/plain"),
               std::size_t hop_budget = 64);
 
-  // Register a callback fired exactly once per process when the
-  // first state root is created (legacy global-singleton form).
+  // Register a callback fired exactly once per app the first time
+  // that app's root state is created. This is the legacy nullary
+  // form: it does not receive the owning app, so callers that
+  // need it should prefer the app_init_func overload below.
+  //
+  // Semantics: "once per app", NOT "once per process". Each
+  // distinct app whose root is lazily constructed will fire the
+  // registered callbacks exactly once. The previous global
+  // "first app wins" behavior was a singleton assumption and has
+  // been removed.
   static void on_startup(const nullary_func &init_func);
 
   // Register a callback fired once for every distinct app whose
@@ -533,9 +541,6 @@ protected:
   boost::condition_variable _dataCondition;
 
   static state_ptr instancePtr(app &ctx);
-  static boost::mutex _instanceMutex;
-  static boost::mutex _startupMutex;
-  static bool _startupFired;
 
 private:
   state(const state &);

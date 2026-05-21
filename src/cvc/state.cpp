@@ -21,6 +21,8 @@
 */
 
 #include <algorithm>
+#include <map>
+#include <memory>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -48,9 +50,43 @@ namespace CVC_NAMESPACE {
 // covers function symbols, not data members.
 state::init_func_vec state::_startup;
 state::app_init_func_vec state::_appStartup;
-boost::mutex state::_instanceMutex;
-boost::mutex state::_startupMutex;
-bool state::_startupFired = false;
+
+namespace {
+
+// Guards the two on_startup() registries (_startup, _appStartup)
+// against concurrent registration and snapshot. Lives in this TU
+// rather than as a static class member so it does not look like
+// a singleton-of-state. The registries themselves are global
+// configuration tables (see state::on_startup()).
+boost::mutex &startup_registry_mutex() {
+  static boost::mutex m;
+  return m;
+}
+
+// Per-app mutex keyed by &app, used as a brief check-then-create
+// critical section around the lazy root creation in instancePtr().
+// Replaces the previous process-wide _instanceMutex so two
+// independent apps no longer contend on each other's first-root
+// creation.
+boost::mutex &instance_registry_mutex() {
+  static boost::mutex m;
+  return m;
+}
+
+boost::mutex &mutex_for_app(app &ctx) {
+  static std::map<const app *, std::shared_ptr<boost::mutex>> per_app;
+  std::shared_ptr<boost::mutex> m;
+  {
+    boost::mutex::scoped_lock lock(instance_registry_mutex());
+    auto &slot = per_app[&ctx];
+    if (!slot)
+      slot = std::make_shared<boost::mutex>();
+    m = slot;
+  }
+  return *m;
+}
+
+} // namespace
 
 // ------------
 // state::state
@@ -89,21 +125,27 @@ state::~state() { destroyed(); }
 // ------------------
 // Purpose:
 //   Returns a pointer to the root state object for the given app.
-//   Stores it on the app's data map under "__state". Fires registered
-//   _startup callbacks once per process the first time any root is
-//   created.
+//   Stores it on the app's data map under "__state". Fires every
+//   registered startup callback (nullary and per-app) exactly
+//   once for this app the first time its root is created.
 // ---- Change History ----
 // 02/18/2012 -- Joe R. -- Creation.
 // 01/12/2014 -- Joe R. -- Added startup function calls to do initialization based on cvcstate.
 //                         Also moved xmlrpc server thread start elsewhere.
 // 05/03/2026 -- Joe R. -- Per-app overload, decoupling state root from
 //                         app::instance(). Legacy zero-arg form removed.
+// 05/21/2026 -- Joe R. -- Removed singleton-flavored statics: process-wide
+//                         _instanceMutex is now a per-app mutex via
+//                         mutex_for_app(), and the once-per-process
+//                         _startupFired flag is replaced by once-per-app
+//                         firing keyed off the app data map.
 state::state_ptr state::instancePtr(app &ctx) {
-  bool do_startup = false;
-  bool fire_app_startup = false;
+  bool fire_startup = false;
   state_ptr ptr;
   {
-    boost::mutex::scoped_lock lock(_instanceMutex);
+    // Per-app critical section around check-then-create on the
+    // app's data map. Two distinct apps do not contend here.
+    boost::mutex::scoped_lock lock(mutex_for_app(ctx));
     const std::string statekey("__state");
     try {
       ptr = ctx.data<state_ptr>(statekey);
@@ -113,33 +155,25 @@ state::state_ptr state::instancePtr(app &ctx) {
     if (!ptr) {
       ptr.reset(new state(ctx));
       ctx.data(statekey, ptr);
-      fire_app_startup = true;
+      fire_startup = true;
     }
   }
 
-  {
-    boost::mutex::scoped_lock lock(_startupMutex);
-    if (!_startupFired) {
-      _startupFired = true;
-      do_startup = true;
+  if (fire_startup) {
+    // Snapshot both registries under the registry guard so we do
+    // not hold it while user callbacks run. Callbacks fire once
+    // per app (not once per process) — see state.h.
+    init_func_vec nullary_snapshot;
+    app_init_func_vec app_snapshot;
+    {
+      boost::mutex::scoped_lock lock(startup_registry_mutex());
+      nullary_snapshot = _startup;
+      app_snapshot = _appStartup;
     }
-  }
-
-  if (do_startup) {
-    BOOST_FOREACH (nullary_func &init_func, _startup) {
+    BOOST_FOREACH (nullary_func &init_func, nullary_snapshot) {
       init_func();
     }
-  }
-
-  if (fire_app_startup) {
-    // Snapshot the per-app init list under the startup mutex to be
-    // safe against concurrent on_startup() registrations.
-    app_init_func_vec snapshot;
-    {
-      boost::mutex::scoped_lock lock(_startupMutex);
-      snapshot = _appStartup;
-    }
-    BOOST_FOREACH (app_init_func &init_func, snapshot) {
+    BOOST_FOREACH (app_init_func &init_func, app_snapshot) {
       init_func(ctx);
     }
   }
@@ -974,9 +1008,15 @@ size_t state::numChildren() {
 //   Add to the list of functions to call when first initializing cvcstate.
 // ---- Change History ----
 // 01/12/2014 -- Joe R. -- Creation.
-void state::on_startup(const nullary_func &init_func) { _startup.push_back(init_func); }
+void state::on_startup(const nullary_func &init_func) {
+  boost::mutex::scoped_lock lock(startup_registry_mutex());
+  _startup.push_back(init_func);
+}
 
-void state::on_startup(const app_init_func &init_func) { _appStartup.push_back(init_func); }
+void state::on_startup(const app_init_func &init_func) {
+  boost::mutex::scoped_lock lock(startup_registry_mutex());
+  _appStartup.push_back(init_func);
+}
 
 // -------------------
 // state::notifyParent
