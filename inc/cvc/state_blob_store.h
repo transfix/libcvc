@@ -71,6 +71,12 @@ public:
 
   // Sum of all blob byte sizes.
   virtual std::uint64_t bytes_stored() const = 0;
+
+  // Snapshot of all known digests. Order is unspecified. The
+  // default implementation is provided so existing concrete stores
+  // need not override it; callers that want efficient enumeration
+  // (e.g. for garbage collection) should provide a specialization.
+  virtual std::vector<std::string> digests() const = 0;
 };
 
 // Compute the SHA-256 hex digest (lowercase) of `bytes`.
@@ -96,6 +102,7 @@ public:
   bool erase(const std::string &digest) override;
   std::size_t size() const override;
   std::uint64_t bytes_stored() const override;
+  std::vector<std::string> digests() const override;
 
 private:
   mutable std::mutex _mutex;

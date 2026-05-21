@@ -196,4 +196,13 @@ std::uint64_t memory_state_blob_store::bytes_stored() const {
   return _bytes_stored;
 }
 
+std::vector<std::string> memory_state_blob_store::digests() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  std::vector<std::string> out;
+  out.reserve(_blobs.size());
+  for (const auto &kv : _blobs)
+    out.push_back(kv.first);
+  return out;
+}
+
 } // namespace CVC_NAMESPACE
