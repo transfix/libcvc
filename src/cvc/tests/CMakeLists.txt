@@ -25,6 +25,7 @@ add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
 add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
+add_executable(state_blob_transport_integration_test state_blob_transport_integration_test.cpp)
 if(CVC_ENABLE_GRPC)
   add_executable(state_transport_grpc_test state_transport_grpc_test.cpp)
 endif()
@@ -52,6 +53,7 @@ set(TEST_TARGETS
   state_message_bus_test
   state_transport_inproc_test
   state_transport_ipc_test
+  state_blob_transport_integration_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -300,6 +302,13 @@ target_link_libraries(state_transport_ipc_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_blob_transport_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 if(TARGET state_transport_grpc_test)
   target_link_libraries(state_transport_grpc_test
     PRIVATE
@@ -344,6 +353,7 @@ target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
+target_compile_features(state_blob_transport_integration_test PRIVATE cxx_std_17)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -419,6 +429,7 @@ gtest_discover_tests(state_message_test)
 gtest_discover_tests(state_bounded_queue_test)
 gtest_discover_tests(state_transport_inproc_test)
 gtest_discover_tests(state_transport_ipc_test)
+gtest_discover_tests(state_blob_transport_integration_test)
 if(TARGET state_transport_grpc_test)
   gtest_discover_tests(state_transport_grpc_test)
 endif()
