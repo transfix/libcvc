@@ -914,6 +914,11 @@ TEST(StateTransportInprocOutbox, ConcurrentProducerConsumer) {
       t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i++), "x"));
     }
   });
+  // Wait until the producer has actually published at least once; on slow CI
+  // runners thread startup can otherwise lose to the drain loop below and
+  // leave pub == 0.
+  while ((t.total_outbox_admitted() + t.total_outbox_dropped_oldest()) == 0)
+    std::this_thread::yield();
   // Drain in parallel.
   for (int spin = 0; spin < 200; ++spin)
     t.deliver_message_outbox(&sB, 8);
