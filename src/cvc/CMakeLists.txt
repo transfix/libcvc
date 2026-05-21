@@ -794,14 +794,24 @@ if(CVC_ENABLE_IMAGEMAGICK)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_IMAGEMAGICK
     MAGICKCORE_QUANTUM_DEPTH=${CVC_IMAGEMAGICK_QUANTUM_DEPTH}
     MAGICKCORE_HDRI_ENABLE=${CVC_IMAGEMAGICK_HDRI_ENABLE})
-  target_include_directories(cvc PUBLIC ${ImageMagick_INCLUDE_DIRS})
+  # Wrap each external include dir in its own BUILD_INTERFACE genex so a
+  # bundled toolchain (e.g. libcvc-deps living under a parent project's
+  # build tree) does not leak a build-dir path into the installed cvc
+  # target's INTERFACE_INCLUDE_DIRECTORIES (CMake rejects that with
+  # "path is prefixed in the build directory").
+  foreach(_im_inc IN LISTS ImageMagick_INCLUDE_DIRS)
+    target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_im_inc}>")
+  endforeach()
   target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
 endif()
 
 # FFTW linking
 if(CVC_ENABLE_FFTW)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
-  target_include_directories(cvc PUBLIC ${FFTW3_INCLUDE_DIRS})
+  # Same BUILD_INTERFACE wrapping rationale as the ImageMagick block above.
+  foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
+    target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
+  endforeach()
   target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
 endif()
 
