@@ -17,6 +17,7 @@
 
 #include <cvc/app.h>
 #include <cvc/state.h>
+#include <cvc/state_distributed_admin.h>
 
 #include <thread>
 #include <unordered_set>
@@ -96,6 +97,47 @@ std::uint64_t state_sync_adapter::local_mutation_count() const noexcept {
 
 std::uint64_t state_sync_adapter::remote_mutation_count() const noexcept {
   return _remote_count.load(std::memory_order_relaxed);
+}
+
+std::uint64_t
+state_sync_adapter::forwarded_through_link_count() const noexcept {
+  return _forwarded_through_link_count.load(std::memory_order_relaxed);
+}
+
+std::vector<state_subscription>
+state_sync_adapter::subscriptions_for_path(const std::string &path) const {
+  std::vector<state_subscription> direct = _router.subscriptions_for(path);
+
+  // Expand `path` through every transparent link in the app's state
+  // tree. For each link-side alias, also pull subscriptions covering
+  // the aliased path. Dedupe by id so a subscription matching both
+  // directly and via an alias is reported once.
+  state &root = state::instance(_ctx);
+  std::vector<std::string> aliases =
+      state_distributed_admin::transparent_link_aliases(root, path);
+  if (aliases.empty())
+    return direct;
+
+  std::vector<state_subscription> merged = std::move(direct);
+  std::unordered_set<state_subscription_id> seen;
+  seen.reserve(merged.size() + aliases.size());
+  for (const auto &s : merged)
+    seen.insert(s.id);
+
+  std::uint64_t forwarded_added = 0;
+  for (const std::string &alias : aliases) {
+    auto extras = _router.subscriptions_for(alias);
+    for (auto &s : extras) {
+      if (seen.insert(s.id).second) {
+        merged.push_back(std::move(s));
+        ++forwarded_added;
+      }
+    }
+  }
+  if (forwarded_added > 0)
+    _forwarded_through_link_count.fetch_add(forwarded_added,
+                                            std::memory_order_relaxed);
+  return merged;
 }
 
 bool state_sync_adapter::current_thread_suppressed() const noexcept {
@@ -230,8 +272,10 @@ void state_sync_adapter::attach_node(state &s,
 }
 
 void state_sync_adapter::dispatch_local(const state_mutation &m) {
-  // Notify subscribers via the router.
-  std::vector<state_subscription> subs = _router.subscriptions_for(m.path);
+  // Notify subscribers via the router, expanding through any
+  // transparent-link aliases so target-side mutations also match
+  // subscriptions registered at link-side paths (Phase 8 slice 4d).
+  std::vector<state_subscription> subs = subscriptions_for_path(m.path);
   // Fire the callback if set. Pull the function under lock then
   // invoke outside to avoid holding the mutex during user code.
   on_local_mutation_func cb;

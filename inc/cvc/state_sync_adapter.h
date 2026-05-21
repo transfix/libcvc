@@ -118,6 +118,20 @@ public:
   std::uint64_t local_mutation_count() const noexcept;
   std::uint64_t remote_mutation_count() const noexcept;
 
+  // Phase 8 slice 4d: subscription forwarding through transparent
+  // links. Returns subscriptions whose path_prefix covers `path`,
+  // PLUS subscriptions registered at any link-side path that
+  // transparently shadows `path` (or an ancestor of `path`).
+  // Results are deduplicated by id. When no transparent link
+  // aliases `path`, this is equivalent to router().subscriptions_for(path).
+  std::vector<state_subscription>
+  subscriptions_for_path(const std::string &path) const;
+
+  // Count of subscriptions that were matched only via a
+  // transparent-link alias (i.e., not by direct router lookup).
+  // Cumulative across all dispatch_local / subscriptions_for_path calls.
+  std::uint64_t forwarded_through_link_count() const noexcept;
+
   // Suppression guard: while held on a given thread, local state
   // changes on that thread are NOT journaled. Useful for bulk loads
   // and tests. Re-entrant.
@@ -168,6 +182,7 @@ private:
 
   std::atomic<std::uint64_t> _local_count;
   std::atomic<std::uint64_t> _remote_count;
+  mutable std::atomic<std::uint64_t> _forwarded_through_link_count{0};
 };
 
 } // namespace CVC_NAMESPACE

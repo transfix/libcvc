@@ -1,0 +1,198 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// Phase 8 slice 4d: subscription forwarding through transparent links.
+//
+// Verifies state_sync_adapter::subscriptions_for_path() expands a
+// target-side path through every transparent link in the tree so
+// that subscriptions registered at link-side paths also match
+// target-side mutations. Opaque links must NOT contribute aliasing.
+
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_sync_adapter.h>
+#include <cvc/state_subscription_router.h>
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+using cvc::state;
+using cvc::state_subscription;
+using cvc::state_subscription_id;
+using cvc::state_sync_adapter;
+
+namespace {
+
+bool has_id(const std::vector<state_subscription> &subs,
+            state_subscription_id id) {
+  return std::any_of(subs.begin(), subs.end(),
+                     [id](const state_subscription &s) { return s.id == id; });
+}
+
+} // namespace
+
+TEST(StateSyncAdapterLinkForwarding, NoLinkBehavesLikeRouterLookup) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+
+  state_sync_adapter adapter(a, "", "node-a");
+  auto id = adapter.router().subscribe("data.world", true);
+
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  ASSERT_EQ(subs.size(), 1u);
+  EXPECT_TRUE(has_id(subs, id));
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     TransparentLinkSideSubscriptionCatchesTargetMutation) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  root("scene")
+      .linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  auto id = adapter.router().subscribe("scene.geometry", true);
+
+  // Target-side mutation path must match the link-side subscription
+  // via transparent alias expansion.
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  ASSERT_EQ(subs.size(), 1u);
+  EXPECT_TRUE(has_id(subs, id));
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 1u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     OpaqueLinkDoesNotContributeAlias) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  root("scene").linkTo("data.world"); // default opaque
+
+  state_sync_adapter adapter(a, "", "node-a");
+  adapter.router().subscribe("scene.geometry", true);
+
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  EXPECT_EQ(subs.size(), 0u);
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     SubscriptionAtDeepLinkPathMatchesTargetSubtreeMutation) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world").value(std::string("v"));
+  root("scene").linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  auto id = adapter.router().subscribe("scene.geometry.mesh", true);
+
+  auto subs =
+      adapter.subscriptions_for_path("data.world.geometry.mesh");
+  ASSERT_EQ(subs.size(), 1u);
+  EXPECT_TRUE(has_id(subs, id));
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     DedupBetweenDirectAndAliasedMatch) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  root("scene")
+      .linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  // Same subscription_id at a prefix covering both sides (root).
+  auto id = adapter.router().subscribe("", true);
+
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  ASSERT_EQ(subs.size(), 1u);
+  EXPECT_TRUE(has_id(subs, id));
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     MultipleTransparentLinksAllContributeSubscriptions) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  root("scene.a")
+      .linkTo("data.world", state::link_mode::transparent);
+  root("scene.b")
+      .linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  auto id_a = adapter.router().subscribe("scene.a.geometry", true);
+  auto id_b = adapter.router().subscribe("scene.b.geometry", true);
+
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  ASSERT_EQ(subs.size(), 2u);
+  EXPECT_TRUE(has_id(subs, id_a));
+  EXPECT_TRUE(has_id(subs, id_b));
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 2u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     DotBoundaryPreventsSpoofedAlias) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("scene").value(std::string("v"));
+  root("alias").linkTo("scene", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  adapter.router().subscribe("alias", true);
+
+  // "scenery" must NOT alias to "alias" (no shared dot-segment).
+  auto subs = adapter.subscriptions_for_path("scenery");
+  EXPECT_EQ(subs.size(), 0u);
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     ForwardedCounterIsCumulativeAcrossCalls) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  root("scene")
+      .linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  adapter.router().subscribe("scene.geometry", true);
+
+  auto subs1 = adapter.subscriptions_for_path("data.world.geometry");
+  auto subs2 = adapter.subscriptions_for_path("data.world.geometry");
+  EXPECT_EQ(subs1.size(), 1u);
+  EXPECT_EQ(subs2.size(), 1u);
+  EXPECT_EQ(adapter.forwarded_through_link_count(), 2u);
+}
+
+TEST(StateSyncAdapterLinkForwarding,
+     ChangingLinkModeToOpaqueRemovesForwarding) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.world.geometry").value(std::string("v"));
+  auto &link = root("scene")
+                   .linkTo("data.world", state::link_mode::transparent);
+
+  state_sync_adapter adapter(a, "", "node-a");
+  adapter.router().subscribe("scene.geometry", true);
+
+  auto subs = adapter.subscriptions_for_path("data.world.geometry");
+  EXPECT_EQ(subs.size(), 1u);
+
+  link.setLinkMode(state::link_mode::opaque);
+  auto subs_after = adapter.subscriptions_for_path("data.world.geometry");
+  EXPECT_EQ(subs_after.size(), 0u);
+}
