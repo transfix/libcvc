@@ -206,6 +206,31 @@ public:
     return _ctr_delegation_expired.load();
   }
 
+  // Phase 6: publish a delegation as a control-plane mutation. The
+  // delegation is applied to this shard's local delegation manager
+  // immediately, then journaled with op=delegate_subtree so the
+  // next drain_local() emits it for peers. Receivers that ingest
+  // this mutation install the same delegation in their own
+  // delegation manager. `lease_duration_ns == 0` means infinite
+  // lease.
+  void publish_delegation(const std::string &path_prefix,
+                          const std::string &cluster_id,
+                          const std::string &endpoint = std::string(),
+                          std::uint64_t lease_duration_ns = 0);
+
+  // Phase 6: publish a revocation. Removes the delegation locally
+  // and journals an op=revoke_delegation mutation so peers do the
+  // same.
+  void publish_revocation(const std::string &path_prefix);
+
+  // Phase 6: control-plane counters.
+  std::uint64_t total_delegations_applied() const noexcept {
+    return _ctr_delegations_applied.load();
+  }
+  std::uint64_t total_revocations_applied() const noexcept {
+    return _ctr_revocations_applied.load();
+  }
+
 private:
   std::string _cluster_id;
   std::string _local_node_id;
@@ -233,6 +258,8 @@ private:
   std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
   std::atomic<std::uint64_t> _ctr_delegation_routed{0};
   std::atomic<std::uint64_t> _ctr_delegation_expired{0};
+  std::atomic<std::uint64_t> _ctr_delegations_applied{0};
+  std::atomic<std::uint64_t> _ctr_revocations_applied{0};
 };
 
 } // namespace CVC_NAMESPACE

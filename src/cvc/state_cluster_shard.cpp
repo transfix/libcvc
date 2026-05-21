@@ -12,9 +12,50 @@
 
 #include <cvc/app.h>
 
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <utility>
 
 namespace CVC_NAMESPACE {
+
+namespace {
+
+// Wire format for op=delegate_subtree / revoke_delegation:
+//   path         = path_prefix
+//   string_value = target cluster_id    (empty for revoke)
+//   type_name    = endpoint hint        (empty when not used)
+//   payload      = inline 8-byte LE u64 lease_duration_ns
+//                  (absent or zero-length = infinite lease;
+//                   irrelevant for revoke)
+//
+// The receiver applies lease_duration_ns relative to its own
+// clock so per-node skew does not corrupt the lease horizon.
+
+std::vector<unsigned char> encode_lease_duration(std::uint64_t ns) {
+  std::vector<unsigned char> out(sizeof(std::uint64_t));
+  for (std::size_t i = 0; i < sizeof(std::uint64_t); ++i) {
+    out[i] = static_cast<unsigned char>((ns >> (i * 8)) & 0xff);
+  }
+  return out;
+}
+
+std::uint64_t decode_lease_duration(const std::vector<unsigned char> &bytes) {
+  if (bytes.size() < sizeof(std::uint64_t))
+    return 0;
+  std::uint64_t ns = 0;
+  for (std::size_t i = 0; i < sizeof(std::uint64_t); ++i) {
+    ns |= static_cast<std::uint64_t>(bytes[i]) << (i * 8);
+  }
+  return ns;
+}
+
+bool is_delegation_op(state_mutation_op op) {
+  return op == state_mutation_op::delegate_subtree ||
+         op == state_mutation_op::revoke_delegation;
+}
+
+} // namespace
 
 state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
                                          std::string local_node_id,
@@ -99,6 +140,27 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   if (_replica->seen(m.origin_node_id, m.sequence, /*record*/ false)) {
     r.duplicate = true;
     _ctr_remote_duplicates.fetch_add(1, std::memory_order_relaxed);
+    return r;
+  }
+
+  // Phase 6 control-plane fast path. Delegation mutations are
+  // metadata about the delegation system itself; they bypass the
+  // authority/delegation/write-policy/conflict gates that govern
+  // ordinary value writes. Loop detection still applies.
+  if (is_delegation_op(m.op)) {
+    (void)_replica->seen(m.origin_node_id, m.sequence, /*record*/ true);
+    _replica->observe_remote(m.origin_node_id, m.sequence);
+    if (m.op == state_mutation_op::delegate_subtree) {
+      _delegation->delegate(m.path, m.string_value, m.type_name,
+                            decode_lease_duration(m.payload.inline_bytes));
+      _ctr_delegations_applied.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      (void)_delegation->revoke(m.path);
+      _ctr_revocations_applied.fetch_add(1, std::memory_order_relaxed);
+    }
+    _replica->set_last_applied(m.origin_node_id, m.sequence);
+    _ctr_remote_applied.fetch_add(1, std::memory_order_relaxed);
+    r.applied = true;
     return r;
   }
 
@@ -241,6 +303,49 @@ std::uint64_t state_cluster_shard::published_cursor() const {
 void state_cluster_shard::rewind_publish_cursor(std::uint64_t sequence) {
   std::lock_guard<std::mutex> lk(_mutex);
   _publish_cursor = sequence;
+}
+
+void state_cluster_shard::publish_delegation(
+    const std::string &path_prefix, const std::string &cluster_id,
+    const std::string &endpoint, std::uint64_t lease_duration_ns) {
+  // Apply locally first so the local view is consistent before any
+  // peer sees it.
+  _delegation->delegate(path_prefix, cluster_id, endpoint, lease_duration_ns);
+  _ctr_delegations_applied.fetch_add(1, std::memory_order_relaxed);
+
+  // Journal the control-plane mutation so drain_local picks it up
+  // for the transport. Stamp origin/cluster so the journal does
+  // not default-fill them with the adapter's local-node label.
+  state_mutation m;
+  m.cluster_id = _cluster_id;
+  m.origin_node_id = _local_node_id;
+  m.path = path_prefix;
+  m.op = state_mutation_op::delegate_subtree;
+  m.string_value = cluster_id;
+  m.type_name = endpoint;
+  m.payload =
+      state_payload::inline_data(encode_lease_duration(lease_duration_ns));
+  auto stored = _adapter->journal().append(m);
+  // Mark as seen on this shard so a round-trip through the
+  // transport cannot re-apply our own delegation.
+  (void)_replica->seen(stored.origin_node_id, stored.sequence,
+                       /*record*/ true);
+  _replica->observe_local(stored.sequence);
+}
+
+void state_cluster_shard::publish_revocation(const std::string &path_prefix) {
+  (void)_delegation->revoke(path_prefix);
+  _ctr_revocations_applied.fetch_add(1, std::memory_order_relaxed);
+
+  state_mutation m;
+  m.cluster_id = _cluster_id;
+  m.origin_node_id = _local_node_id;
+  m.path = path_prefix;
+  m.op = state_mutation_op::revoke_delegation;
+  auto stored = _adapter->journal().append(m);
+  (void)_replica->seen(stored.origin_node_id, stored.sequence,
+                       /*record*/ true);
+  _replica->observe_local(stored.sequence);
 }
 
 } // namespace CVC_NAMESPACE
