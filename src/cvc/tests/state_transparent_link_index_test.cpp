@@ -200,3 +200,61 @@ TEST(StateTransparentLinkAliases, MismatchedSiblingPrefixNotEmitted) {
       state_distributed_admin::transparent_link_aliases(root, "other.scene");
   EXPECT_EQ(aliases.size(), 0u);
 }
+
+TEST(StateTransparentLinkAliases, ChainOfTransparentLinksAllAliasesEmitted) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.geom").value(std::string("v"));
+  // Chain: a -> b -> c -> data.geom, all transparent.
+  root("c").linkTo("data.geom", state::link_mode::transparent);
+  root("b").linkTo("c", state::link_mode::transparent);
+  root("a").linkTo("b", state::link_mode::transparent);
+
+  auto aliases =
+      state_distributed_admin::transparent_link_aliases(root, "data.geom");
+  // Expect "a", "b", "c" all reachable as aliases.
+  ASSERT_EQ(aliases.size(), 3u);
+  EXPECT_TRUE(contains(aliases, "a"));
+  EXPECT_TRUE(contains(aliases, "b"));
+  EXPECT_TRUE(contains(aliases, "c"));
+}
+
+TEST(StateTransparentLinkAliases, CycleOfTransparentLinksTerminates) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  // a -> b, b -> a (both transparent): a cycle.
+  root("a").linkTo("b", state::link_mode::transparent);
+  root("b").linkTo("a", state::link_mode::transparent);
+
+  // Query "a": one alias hop yields "b"; expanding "b" yields back
+  // "a" which is the query origin (suppressed). Must terminate.
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "a");
+  ASSERT_EQ(aliases.size(), 1u);
+  EXPECT_EQ(aliases[0], "b");
+}
+
+TEST(StateTransparentLinkAliases, HopBudgetZeroEmitsNothing) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.geom").value(std::string("v"));
+  root("scene").linkTo("data.geom", state::link_mode::transparent);
+
+  auto aliases =
+      state_distributed_admin::transparent_link_aliases(root, "data.geom", 0);
+  EXPECT_EQ(aliases.size(), 0u);
+}
+
+TEST(StateTransparentLinkAliases, HopBudgetOneEmitsOnlyFirstHop) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("data.geom").value(std::string("v"));
+  root("c").linkTo("data.geom", state::link_mode::transparent);
+  root("b").linkTo("c", state::link_mode::transparent);
+  root("a").linkTo("b", state::link_mode::transparent);
+
+  // hop_budget=1: only direct aliases of "data.geom" emitted ("c").
+  auto aliases =
+      state_distributed_admin::transparent_link_aliases(root, "data.geom", 1);
+  ASSERT_EQ(aliases.size(), 1u);
+  EXPECT_EQ(aliases[0], "c");
+}

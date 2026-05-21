@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -390,34 +391,70 @@ state_distributed_admin::transparent_link_index(state &root) {
 
 std::vector<std::string>
 state_distributed_admin::transparent_link_aliases(state &root,
-                                                  const std::string &path) {
-  std::vector<std::string> out;
+                                                  const std::string &path,
+                                                  std::size_t hop_budget) {
+  // BFS over the transparent-link graph: starting from `path`, at
+  // each hop expand the current frontier through every transparent
+  // link whose target equals or is a dot-segment-aware prefix of
+  // some frontier path. Stop when no new aliases appear or the hop
+  // budget is exhausted. Cycles terminate naturally because already-
+  // seen paths are not re-enqueued.
   auto idx = transparent_link_index(root);
-  for (const auto &tl : idx.links) {
-    if (tl.link_path == path)
-      continue; // skip trivial self-aliases on the link node itself
-    std::string suffix;
-    if (tl.target_path.empty()) {
-      // Link targets the root: every path aliases to link_path + "." + path.
-      suffix = path;
-    } else if (path == tl.target_path) {
-      suffix.clear();
-    } else if (path.size() > tl.target_path.size() &&
-               path.compare(0, tl.target_path.size(), tl.target_path) == 0 &&
-               path[tl.target_path.size()] == '.') {
-      suffix = path.substr(tl.target_path.size() + 1);
-    } else {
-      continue; // no prefix match
+
+  std::unordered_set<std::string> seen;
+  seen.insert(path);
+  std::vector<std::string> frontier = {path};
+  std::vector<std::string> out;
+
+  std::size_t hops = 0;
+  while (!frontier.empty() && hops < hop_budget) {
+    std::vector<std::string> next;
+    for (const std::string &cur : frontier) {
+      for (const auto &tl : idx.links) {
+        // Don't traverse the same link twice. If cur is at or under
+        // tl.link_path then we've already passed through tl in
+        // producing cur (or applying tl now would just produce a
+        // deeper redundant nesting under link_path). This is the
+        // key termination guard for root-targeted transparent
+        // links, where tl.target_path is empty and would otherwise
+        // match every frontier path on every hop.
+        if (cur.size() >= tl.link_path.size() &&
+            cur.compare(0, tl.link_path.size(), tl.link_path) == 0 &&
+            (cur.size() == tl.link_path.size() ||
+             cur[tl.link_path.size()] == '.'))
+          continue;
+        std::string suffix;
+        if (tl.target_path.empty()) {
+          // Root-targeted link: every path aliases under link_path.
+          suffix = cur;
+        } else if (cur == tl.target_path) {
+          suffix.clear();
+        } else if (cur.size() > tl.target_path.size() &&
+                   cur.compare(0, tl.target_path.size(), tl.target_path) ==
+                       0 &&
+                   cur[tl.target_path.size()] == '.') {
+          suffix = cur.substr(tl.target_path.size() + 1);
+        } else {
+          continue; // no prefix match
+        }
+        std::string aliased = tl.link_path;
+        if (!suffix.empty()) {
+          if (!aliased.empty())
+            aliased += '.';
+          aliased += suffix;
+        }
+        if (aliased == path)
+          continue;
+        if (seen.insert(aliased).second) {
+          out.push_back(aliased);
+          next.push_back(std::move(aliased));
+        }
+      }
     }
-    std::string aliased = tl.link_path;
-    if (!suffix.empty()) {
-      if (!aliased.empty())
-        aliased += '.';
-      aliased += suffix;
-    }
-    if (aliased != path)
-      out.push_back(std::move(aliased));
+    frontier = std::move(next);
+    ++hops;
   }
+
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
   return out;

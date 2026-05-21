@@ -210,15 +210,18 @@ public:
   // `path` or `path` starts with target_path + ".", emits
   // `link_path` concatenated with the relative remainder.
   //
-  // This is one hop of aliasing. Callers that need to follow
-  // chains of transparent links should iterate to a fixed point.
+  // Chains of transparent links (a -> b -> c, both transparent)
+  // are followed to a fixed point up to `hop_budget` hops, so a
+  // query on path "c" returns both "b" and "a". Cycles terminate
+  // naturally because already-emitted aliases are not re-expanded.
   // Self-aliases (where the link node sits at its own target
   // path) are NOT emitted to avoid trivial redundancy.
   //
   // Used by slice 4d to fan out target-side mutations to
   // link-side subscribers via the existing subscription router.
   static std::vector<std::string>
-  transparent_link_aliases(state &root, const std::string &path);
+  transparent_link_aliases(state &root, const std::string &path,
+                           std::size_t hop_budget = 64);
 
 private:
   state_cluster_shard *_shard = nullptr;
