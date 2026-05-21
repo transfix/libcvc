@@ -10,6 +10,7 @@
 
 #include <cvc/state_distributed_admin.h>
 
+#include <cvc/state.h>
 #include <cvc/state_authority_map.h>
 #include <cvc/state_blob_store.h>
 #include <cvc/state_cluster_shard.h>
@@ -17,7 +18,9 @@
 #include <cvc/state_message_bus.h>
 #include <cvc/state_peer_registry.h>
 
+#include <algorithm>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -193,6 +196,152 @@ state_distributed_admin::gc_result state_distributed_admin::gc_blobs(
     }
   }
   return g;
+}
+
+// ---------------------------------------------------------------------------
+// link_cycles: Tarjan SCC over the link graph rooted at `root`.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct tarjan_ctx {
+  std::vector<std::vector<int>> adj;          // adj[u] -> successors
+  std::vector<int> index_of;                  // -1 == unvisited
+  std::vector<int> lowlink;
+  std::vector<bool> on_stack;
+  std::vector<int> stack;
+  int next_index = 0;
+  std::vector<std::vector<int>> sccs;
+
+  void strongconnect(int v) {
+    index_of[v] = next_index;
+    lowlink[v] = next_index;
+    ++next_index;
+    stack.push_back(v);
+    on_stack[v] = true;
+
+    for (int w : adj[v]) {
+      if (index_of[w] < 0) {
+        strongconnect(w);
+        lowlink[v] = std::min(lowlink[v], lowlink[w]);
+      } else if (on_stack[w]) {
+        lowlink[v] = std::min(lowlink[v], index_of[w]);
+      }
+    }
+
+    if (lowlink[v] == index_of[v]) {
+      std::vector<int> comp;
+      while (true) {
+        int w = stack.back();
+        stack.pop_back();
+        on_stack[w] = false;
+        comp.push_back(w);
+        if (w == v)
+          break;
+      }
+      sccs.push_back(std::move(comp));
+    }
+  }
+};
+
+} // namespace
+
+state_distributed_admin::link_cycles_result
+state_distributed_admin::link_cycles(state &root) {
+  link_cycles_result result;
+
+  // Step 1: enumerate every node in the subtree (root + descendants).
+  std::vector<std::string> all_paths = root.children();
+  // children() does not include the root itself; include it so a
+  // root that is itself a link is analyzed too.
+  all_paths.insert(all_paths.begin(), root.fullName());
+
+  // Step 2: collect link nodes and assign integer ids to each one's
+  // absolute path. Non-link nodes are ignored: they cannot
+  // participate in a cycle of links.
+  std::unordered_map<std::string, int> id_of;
+  std::vector<std::string> paths; // paths[id] -> absolute path
+  std::vector<std::string> targets_raw; // targets[id] -> linkTarget()
+  for (const std::string &p : all_paths) {
+    state *n = (p == root.fullName()) ? &root : root.findDescendant(p);
+    if (n == nullptr || !n->isLink())
+      continue;
+    int id = static_cast<int>(paths.size());
+    id_of.emplace(p, id);
+    paths.push_back(p);
+    targets_raw.push_back(n->linkTarget());
+  }
+  result.link_nodes_scanned = paths.size();
+
+  if (paths.empty())
+    return result;
+
+  // Step 3: build adjacency. Edge l -> t exists iff `t` is the
+  // normalized linkTarget of `l` AND `t` is itself a link node in
+  // the same tree. linkTarget() is stored already normalized.
+  tarjan_ctx tc;
+  tc.adj.assign(paths.size(), {});
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    const auto it = id_of.find(targets_raw[i]);
+    if (it != id_of.end())
+      tc.adj[i].push_back(it->second);
+  }
+
+  // Step 4: run Tarjan SCC.
+  tc.index_of.assign(paths.size(), -1);
+  tc.lowlink.assign(paths.size(), 0);
+  tc.on_stack.assign(paths.size(), false);
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    if (tc.index_of[i] < 0)
+      tc.strongconnect(static_cast<int>(i));
+  }
+
+  // Step 5: report SCCs that form a cycle. Singletons are cycles
+  // only when they have a self-loop.
+  for (auto &comp : tc.sccs) {
+    bool is_cycle = comp.size() > 1;
+    if (!is_cycle && comp.size() == 1) {
+      int v = comp[0];
+      for (int w : tc.adj[v]) {
+        if (w == v) {
+          is_cycle = true;
+          break;
+        }
+      }
+    }
+    if (!is_cycle)
+      continue;
+
+    std::vector<std::string> cyc;
+    cyc.reserve(comp.size());
+    // Each link node has out-degree <= 1 (a single linkTarget),
+    // so any SCC of size >= 1 with a cycle is a simple directed
+    // cycle. Reconstruct traversal order starting at the
+    // lexicographically smallest path for stability.
+    int start = comp[0];
+    for (int v : comp)
+      if (paths[v] < paths[start])
+        start = v;
+    int cur = start;
+    do {
+      cyc.push_back(paths[cur]);
+      // out-degree is at most 1; follow it.
+      if (tc.adj[cur].empty())
+        break; // defensive: should not happen for an SCC member.
+      cur = tc.adj[cur][0];
+    } while (cur != start && cyc.size() <= comp.size());
+    result.cycles.push_back(std::move(cyc));
+  }
+
+  // Sort cycles themselves by their first element for stability
+  // across runs.
+  std::sort(result.cycles.begin(), result.cycles.end(),
+            [](const std::vector<std::string> &a,
+               const std::vector<std::string> &b) {
+              return a.front() < b.front();
+            });
+
+  return result;
 }
 
 } // namespace CVC_NAMESPACE

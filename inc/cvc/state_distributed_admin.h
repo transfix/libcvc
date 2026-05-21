@@ -20,6 +20,7 @@
 
 namespace CVC_NAMESPACE {
 
+class state;
 class state_blob_store;
 class state_cluster_shard;
 class state_message_bus;
@@ -154,6 +155,29 @@ public:
   // immediately after creation. Callers that need stronger
   // guarantees should quiesce writers first.
   gc_result gc_blobs(const std::unordered_set<std::string> &live_digests);
+
+  // Phase 8 slice 3: link-graph static analyzer.
+  //
+  // Walk the subtree rooted at `root` and enumerate every closed
+  // cycle in the link graph. The link graph contains one vertex
+  // per link node (identified by its absolute path) and one edge
+  // per (source -> normalized linkTarget) when the target is also
+  // a link node in the same tree. Links pointing to non-link
+  // terminal nodes or to missing paths are ignored — they cannot
+  // close a cycle on their own.
+  //
+  // A self-loop (link node whose target normalizes to its own
+  // absolute path) is reported as a single-element cycle. Other
+  // cycles are reported as the SCC's vertices ordered to start at
+  // the lexicographically smallest path for stability.
+  //
+  // This is a pure read-only analysis: no nodes are created and
+  // no traversal mutates the tree.
+  struct link_cycles_result {
+    std::vector<std::vector<std::string>> cycles;
+    std::size_t link_nodes_scanned = 0;
+  };
+  static link_cycles_result link_cycles(state &root);
 
 private:
   state_cluster_shard *_shard = nullptr;
