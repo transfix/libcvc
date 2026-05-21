@@ -34,6 +34,8 @@
 #include <cvc/app.h>
 #include <cvc/exception.h>
 #include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_message.h>
 #include <cvc/utility.h>
 #include <set>
 #include <sstream>
@@ -816,6 +818,85 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
     result.visited.push_back(next_path);
     cur = next;
   }
+}
+
+// ---------------
+// state::sendMessage
+// ---------------
+// Purpose:
+//   Cluster-agnostic out-of-band send. Follows any link chain
+//   to its terminal node, looks up the default shard for this
+//   state's app context, and delegates to
+//   state_cluster_shard::send_message(). The developer API never
+//   names a cluster_id: routing is the shard's responsibility.
+// -------------------
+state::send_message_result state::sendMessage(const std::string &payload,
+                                              const std::string &content_type,
+                                              std::size_t hop_budget) {
+  send_message_result r;
+
+  // 1. Resolve through any link chain.
+  state *target = this;
+  if (isLink()) {
+    auto lr = resolveLink(hop_budget);
+    switch (lr.kind) {
+    case link_resolution_kind::resolved:
+    case link_resolution_kind::none:
+      target = lr.target;
+      break;
+    case link_resolution_kind::broken:
+      r.status = send_message_result::status_kind::broken_link;
+      if (!lr.visited.empty())
+        r.resolved_path = lr.visited.back();
+      return r;
+    case link_resolution_kind::cycle_detected:
+      r.status = send_message_result::status_kind::cycle_detected;
+      if (!lr.visited.empty())
+        r.resolved_path = lr.visited.back();
+      return r;
+    case link_resolution_kind::budget_exhausted:
+      r.status = send_message_result::status_kind::budget_exhausted;
+      if (!lr.visited.empty())
+        r.resolved_path = lr.visited.back();
+      return r;
+    }
+  }
+  r.resolved_path = target->fullName();
+
+  // 2. Find the default shard for this app context. With no
+  // shard registered (common in unit tests of pure-state code)
+  // the call is a structured no-op rather than an error.
+  state_cluster_shard *shard = state_cluster_shard::default_for(_ctx);
+  if (shard == nullptr) {
+    r.status = send_message_result::status_kind::no_shard;
+    return r;
+  }
+
+  // 3. Build the message and hand off. The shard fills in
+  // cluster_id from its authority map; we never name it here.
+  state_message m;
+  m.path = r.resolved_path;
+  m.content_type = content_type;
+  m.string_value = payload;
+
+  auto sr = shard->send_message(std::move(m));
+  r.owner_cluster_id = sr.owner_cluster_id;
+  r.owner_is_local = sr.owner_is_local;
+  r.local_admitted = sr.local_admitted;
+  r.peers_delivered = sr.peers_delivered;
+  r.peers_targeted = sr.peers_targeted;
+  switch (sr.status) {
+  case state_cluster_shard::send_message_result::status_kind::delivered:
+    r.status = send_message_result::status_kind::delivered;
+    break;
+  case state_cluster_shard::send_message_result::status_kind::duplicate_local:
+    r.status = send_message_result::status_kind::duplicate_local;
+    break;
+  case state_cluster_shard::send_message_result::status_kind::no_transport:
+    r.status = send_message_result::status_kind::no_transport;
+    break;
+  }
+  return r;
 }
 
 // ---------------

@@ -11,10 +11,13 @@
 #include <cvc/state_cluster_shard.h>
 
 #include <cvc/app.h>
+#include <cvc/state_transport.h>
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 
 namespace CVC_NAMESPACE {
@@ -55,6 +58,19 @@ bool is_delegation_op(state_mutation_op op) {
          op == state_mutation_op::revoke_delegation;
 }
 
+// Per-app default-shard registry for Phase 8 slice 2. Keyed by
+// app pointer; value is the shard most recently installed as the
+// default for that app. Cleared on uninstall_as_default().
+std::mutex &default_registry_mutex() {
+  static std::mutex m;
+  return m;
+}
+
+std::unordered_map<const app *, state_cluster_shard *> &default_registry() {
+  static std::unordered_map<const app *, state_cluster_shard *> r;
+  return r;
+}
+
 } // namespace
 
 state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
@@ -62,7 +78,8 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
                                          std::string root_path)
     : _cluster_id(std::move(cluster_id)),
       _local_node_id(std::move(local_node_id)),
-      _root_path(std::move(root_path)) {
+      _root_path(std::move(root_path)),
+      _app_ctx(&ctx) {
   _adapter = std::make_unique<state_sync_adapter>(ctx, _root_path,
                                                   _local_node_id);
   _replica = std::make_unique<state_replica>(_local_node_id);
@@ -74,13 +91,20 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
 }
 
 state_cluster_shard::~state_cluster_shard() {
+  uninstall_as_default();
   if (_adapter && _adapter->is_attached())
     _adapter->detach();
 }
 
-void state_cluster_shard::attach() { _adapter->attach(); }
+void state_cluster_shard::attach() {
+  _adapter->attach();
+  install_as_default();
+}
 
-void state_cluster_shard::detach() { _adapter->detach(); }
+void state_cluster_shard::detach() {
+  uninstall_as_default();
+  _adapter->detach();
+}
 
 bool state_cluster_shard::is_attached() const noexcept {
   return _adapter->is_attached();
@@ -346,6 +370,96 @@ void state_cluster_shard::publish_revocation(const std::string &path_prefix) {
   (void)_replica->seen(stored.origin_node_id, stored.sequence,
                        /*record*/ true);
   _replica->observe_local(stored.sequence);
+}
+
+void state_cluster_shard::set_transport(state_transport *t) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _transport = t;
+}
+
+state_transport *state_cluster_shard::transport() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _transport;
+}
+
+state_cluster_shard *
+state_cluster_shard::default_for(const app &ctx) noexcept {
+  std::lock_guard<std::mutex> lk(default_registry_mutex());
+  auto it = default_registry().find(&ctx);
+  if (it == default_registry().end())
+    return nullptr;
+  return it->second;
+}
+
+void state_cluster_shard::install_as_default() {
+  if (_app_ctx == nullptr)
+    return;
+  std::lock_guard<std::mutex> lk(default_registry_mutex());
+  auto &slot = default_registry()[_app_ctx];
+  // First-writer wins: do not displace an existing default.
+  if (slot == nullptr)
+    slot = this;
+}
+
+void state_cluster_shard::uninstall_as_default() {
+  if (_app_ctx == nullptr)
+    return;
+  std::lock_guard<std::mutex> lk(default_registry_mutex());
+  auto it = default_registry().find(_app_ctx);
+  if (it != default_registry().end() && it->second == this)
+    default_registry().erase(it);
+}
+
+state_cluster_shard::send_message_result
+state_cluster_shard::send_message(state_message m) {
+  send_message_result r;
+
+  // Resolve the owning cluster from the authority map. The
+  // caller's m.cluster_id (if any) is ignored on purpose: this
+  // method is the cluster-agnostic entry point.
+  auto auth = _delegation->authority().resolve(m.path);
+  if (auth.valid && !auth.cluster_id.empty()) {
+    r.owner_cluster_id = auth.cluster_id;
+  } else {
+    r.owner_cluster_id = _cluster_id;
+  }
+  r.owner_is_local = (r.owner_cluster_id == _cluster_id);
+
+  // Stamp the message.
+  m.cluster_id = r.owner_cluster_id;
+  if (m.origin_node_id.empty())
+    m.origin_node_id = _local_node_id;
+
+  // Local delivery: only when we own the path. Cross-cluster
+  // messages must not be admitted into our own local bus; they
+  // belong to a foreign cluster's subscribers.
+  if (r.owner_is_local) {
+    bool admitted = _message_bus->admit(m);
+    if (admitted) {
+      r.local_admitted = 1;
+    } else {
+      // m.origin_node_id+m.message_id pair was seen before.
+      r.status = send_message_result::status_kind::duplicate_local;
+    }
+  }
+
+  // Wire fan-out: hand to the configured transport. The
+  // transport is responsible for routing to peer shards (same
+  // cluster on inproc) or across cluster boundaries (grpc).
+  state_transport *t;
+  {
+    std::lock_guard<std::mutex> lk(_mutex);
+    t = _transport;
+  }
+  if (t == nullptr) {
+    if (!r.owner_is_local)
+      r.status = send_message_result::status_kind::no_transport;
+    return r;
+  }
+  auto ps = t->publish_message(m);
+  r.peers_delivered = ps.delivered;
+  r.peers_targeted = ps.peers;
+  return r;
 }
 
 } // namespace CVC_NAMESPACE

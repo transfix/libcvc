@@ -33,6 +33,7 @@
 namespace CVC_NAMESPACE {
 
 class app;
+class state_transport;
 
 // ----------------
 // cvc::state_cluster_shard
@@ -231,6 +232,57 @@ public:
     return _ctr_revocations_applied.load();
   }
 
+  // -------- Phase 8 slice 2: cluster-agnostic message routing --------
+  //
+  // The shard owns the bridge from "I want to send a message at
+  // path P" to "the right cluster, the local bus, and the wire".
+  // Callers (notably cvc::state::sendMessage) never name a
+  // cluster_id: the shard derives the owning cluster from its
+  // authority map (longest-prefix) and falls back to this shard's
+  // own cluster_id when there is no entry.
+  //
+  // Threading: thread-safe.
+
+  struct send_message_result {
+    enum class status_kind {
+      delivered,        // routing succeeded; see counts for fan-out
+      no_transport,     // owner is remote but no transport is set
+      duplicate_local,  // local bus reported a dedup hit
+    };
+    status_kind status = status_kind::delivered;
+    std::string owner_cluster_id;      // resolved owner of the path
+    bool owner_is_local = true;        // owner matches this shard
+    std::size_t local_admitted = 0;    // 1 if local bus admitted it
+    std::size_t peers_delivered = 0;   // peer shards that admitted
+    std::size_t peers_targeted = 0;    // peer streams attempted
+  };
+
+  // Send an out-of-band message. The caller does NOT need to
+  // stamp m.cluster_id; this method does so based on the
+  // authority map. If m.origin_node_id is empty, the shard's
+  // local_node_id is used. A non-empty m.message_id is left
+  // untouched; an empty one stays empty (dedup-bypass).
+  send_message_result send_message(state_message m);
+
+  // Optional back-pointer to the transport used for cross-shard
+  // fan-out. When unset, send_message() still delivers to the
+  // local message bus but cannot reach peers.
+  void set_transport(state_transport *t) noexcept;
+  state_transport *transport() const noexcept;
+
+  // Per-app default shard registry. attach() installs this shard
+  // as the default for its app context if no default is already
+  // installed; detach() removes it iff it is the current default.
+  // This is the lookup cvc::state::sendMessage uses to find a
+  // shard without the caller naming a cluster.
+  static state_cluster_shard *default_for(const app &ctx) noexcept;
+
+  // Explicit install/uninstall in addition to attach()/detach().
+  // Useful for tests that need to swap the default shard for an
+  // app context without going through attach/detach plumbing.
+  void install_as_default();
+  void uninstall_as_default();
+
 private:
   std::string _cluster_id;
   std::string _local_node_id;
@@ -260,6 +312,10 @@ private:
   std::atomic<std::uint64_t> _ctr_delegation_expired{0};
   std::atomic<std::uint64_t> _ctr_delegations_applied{0};
   std::atomic<std::uint64_t> _ctr_revocations_applied{0};
+
+  // Phase 8 slice 2.
+  state_transport *_transport = nullptr;
+  app *_app_ctx = nullptr; // captured at construction for default_for()
 };
 
 } // namespace CVC_NAMESPACE
