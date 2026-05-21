@@ -431,27 +431,6 @@ jobs:
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
-      - name: Pack volrover3 tarball + .deb
-        if: matrix.kind == 'volrover3'
-        working-directory: build
-        run: |
-          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          # Override CPACK_COMPONENT_VOLROVER3_DEPENDS so cpack does not
-          # try to package the libcvc component as well — with
-          # CPACK_ARCHIVE_COMPONENT_INSTALL=ON / CPACK_DEB_COMPONENT_INSTALL=ON,
-          # cpack iterates dependencies and aborts when no libcvc
-          # install tree exists for this volrover3-only build.
-          cpack -G TGZ -D CPACK_COMPONENTS_ALL=volrover3 \
-                       -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
-                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          mv "$STEM-volrover3.tar.gz" "$STEM.tar.gz"
-          cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
-          cpack -G DEB -D CPACK_COMPONENTS_ALL=volrover3 \
-                       -D CPACK_COMPONENT_VOLROVER3_DEPENDS= \
-                       -D CPACK_DEBIAN_PACKAGE_SHLIBDEPS=OFF \
-                       -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          for f in volrover3*.deb; do [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/$STEM.deb"; done
-
       - name: Build AppImage
         if: matrix.kind == 'volrover3'
         run: |
@@ -497,6 +476,43 @@ jobs:
               *) mv "$f" "${STEM}.AppImage" ;;
             esac
           done
+
+      - name: Pack volrover3 tarball + .deb
+        if: matrix.kind == 'volrover3'
+        run: |
+          set -euo pipefail
+          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
+          # AppDir was populated by linuxdeploy in the previous step and
+          # contains libcvc.so, Qt6, VTK, and all transitive deps. Pack
+          # that tree (not the bare cpack volrover3 component, which is
+          # ~700 KB and useless without the bundled runtime).
+          tar czf "$STEM.tar.gz" --transform 's|^AppDir|volrover3|' AppDir
+
+          pkg=pkg-deb
+          rm -rf "$pkg"
+          mkdir -p "$pkg/opt/volrover3" "$pkg/usr/local/bin" \
+                   "$pkg/usr/share/applications" "$pkg/DEBIAN"
+          cp -a AppDir/. "$pkg/opt/volrover3/"
+          ln -sf /opt/volrover3/AppRun "$pkg/usr/local/bin/volrover3"
+          if [ -f AppDir/volrover3.desktop ]; then
+            cp AppDir/volrover3.desktop "$pkg/usr/share/applications/"
+          fi
+          arch_deb=$(dpkg --print-architecture)
+          inst_kb=$(du -sk "$pkg/opt" "$pkg/usr" | awk '{s+=$1} END {print s}')
+          cat > "$pkg/DEBIAN/control" <<EOF
+          Package: volrover3
+          Version: ${{ steps.meta.outputs.version }}
+          Section: science
+          Priority: optional
+          Architecture: $arch_deb
+          Installed-Size: $inst_kb
+          Maintainer: CVC <noreply@github.com>
+          Description: VolumeRover3 - volumetric visualization application
+           Self-contained build with bundled Qt6, VTK, and libcvc.
+          EOF
+          # dpkg expects column-1 fields; strip the heredoc indent.
+          sed -i 's/^          //' "$pkg/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$pkg" "$STEM.deb"
 
       # One artifact per file so each shows its real extension on GitHub.
       - name: Upload Linux libcvc tarball

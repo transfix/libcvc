@@ -11,8 +11,10 @@
 #include <cvc/state_chunked_blob.h>
 
 #include <cstdint>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -188,4 +190,198 @@ TEST(StateChunkedBlobTest, ChunkSizeLargerThanPayloadEmitsOneChunk) {
   std::vector<unsigned char> out;
   ASSERT_TRUE(cvc::state_chunked_blob_reader(store).get(ref.digest, out));
   EXPECT_EQ(out, payload);
+}
+
+TEST(StateChunkedBlobTest, ManifestPreservesCodecField) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 64);
+  auto payload = make_payload(100, 11);
+  auto ref = w.put(payload, "zstd-3");
+  EXPECT_EQ(ref.codec, "zstd-3");
+
+  cvc::state_chunk_manifest m;
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
+                                                                  m));
+  EXPECT_EQ(m.codec, "zstd-3");
+}
+
+TEST(StateChunkedBlobTest, ManifestRejectsTruncatedBytes) {
+  cvc::state_chunk_manifest m;
+  m.chunk_size = 4;
+  m.total_size = 8;
+  m.chunks = {"d1", "d2"};
+  m.chunk_bytes = {4, 4};
+  auto bytes = m.serialize();
+  for (std::size_t cut = 4; cut < bytes.size(); ++cut) {
+    std::vector<unsigned char> partial(bytes.begin(), bytes.begin() + cut);
+    cvc::state_chunk_manifest out;
+    EXPECT_FALSE(cvc::state_chunk_manifest::parse(partial, out))
+        << "cut=" << cut;
+  }
+}
+
+TEST(StateChunkedBlobTest, ManifestRejectsWrongVersion) {
+  // Build a manifest with version 2 manually.
+  std::vector<unsigned char> bytes;
+  bytes.insert(bytes.end(), {'C', 'V', 'C', 'M'});
+  // version=2 LE
+  bytes.insert(bytes.end(), {2, 0, 0, 0});
+  // chunk_size=0
+  bytes.insert(bytes.end(), {0, 0, 0, 0});
+  // total_size=0 (8 bytes)
+  bytes.insert(bytes.end(), 8, 0);
+  // codec_len=0, content_digest_len=0, count=0
+  bytes.insert(bytes.end(), 12, 0);
+
+  cvc::state_chunk_manifest out;
+  EXPECT_FALSE(cvc::state_chunk_manifest::parse(bytes, out));
+}
+
+TEST(StateChunkedBlobTest, ZeroChunkSizeNormalizedToOne) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 0);
+  EXPECT_EQ(w.chunk_size(), 1u);
+  auto payload = make_payload(3, 13);
+  auto ref = w.put(payload);
+  cvc::state_chunk_manifest m;
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
+                                                                  m));
+  EXPECT_EQ(m.chunks.size(), 3u);
+  EXPECT_EQ(m.chunk_size, 1u);
+}
+
+TEST(StateChunkedBlobTest, ReaderHandlesMissingManifest) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_reader r(store);
+  cvc::state_chunk_manifest m;
+  EXPECT_FALSE(r.load_manifest("deadbeef", m));
+  EXPECT_TRUE(r.missing_chunks("deadbeef").empty());
+  std::vector<unsigned char> out;
+  EXPECT_FALSE(r.get("deadbeef", out));
+}
+
+TEST(StateChunkedBlobTest, ReaderHandlesMalformedManifestBlob) {
+  // Inject random bytes under a digest as if it were a manifest.
+  cvc::memory_state_blob_store store;
+  std::vector<unsigned char> garbage = {'n', 'o', 'p', 'e', 1, 2, 3, 4};
+  auto ref = store.put(garbage);
+  cvc::state_chunked_blob_reader r(store);
+  cvc::state_chunk_manifest m;
+  EXPECT_FALSE(r.load_manifest(ref.digest, m));
+  std::vector<unsigned char> out;
+  EXPECT_FALSE(r.get(ref.digest, out));
+}
+
+TEST(StateChunkedBlobTest, RewriteSamePayloadDedupsAllChunks) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 64);
+  auto payload = make_payload(192, 17); // 3 chunks
+  w.put(payload);
+  EXPECT_EQ(w.total_chunks_written(), 3u);
+  EXPECT_EQ(w.total_chunks_dedup(), 0u);
+
+  // Same payload again: every chunk dedups, manifest dedups too.
+  const auto bytes_before = w.total_bytes_written();
+  const auto store_size_before = store.size();
+  w.put(payload);
+  EXPECT_EQ(w.total_chunks_written(), 3u); // unchanged
+  EXPECT_EQ(w.total_chunks_dedup(), 3u);
+  EXPECT_EQ(w.total_bytes_written(), bytes_before);
+  EXPECT_EQ(store.size(), store_size_before); // manifest already there
+}
+
+TEST(StateChunkedBlobTest, OverlappingPayloadsShareChunks) {
+  // Two payloads that share a 64-byte prefix should share at least
+  // one chunk in the store.
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 64);
+
+  std::vector<unsigned char> base = make_payload(64, 19);
+  std::vector<unsigned char> p1 = base;
+  std::vector<unsigned char> p2 = base;
+  // Append divergent suffixes.
+  for (int i = 0; i < 64; ++i) p1.push_back(static_cast<unsigned char>(i));
+  for (int i = 0; i < 64; ++i) p2.push_back(static_cast<unsigned char>(0xff - i));
+
+  w.put(p1);
+  const auto written_after_first = w.total_chunks_written();
+  w.put(p2);
+  // Second put: shared first chunk dedups, suffix is new.
+  EXPECT_EQ(w.total_chunks_dedup(), 1u);
+  EXPECT_EQ(w.total_chunks_written(), written_after_first + 1u);
+}
+
+TEST(StateChunkedBlobTest, ManifestRoundTripWithEmptyCodec) {
+  cvc::state_chunk_manifest m;
+  m.codec = "";
+  m.content_digest = "";
+  auto bytes = m.serialize();
+  cvc::state_chunk_manifest out;
+  ASSERT_TRUE(cvc::state_chunk_manifest::parse(bytes, out));
+  EXPECT_TRUE(out.codec.empty());
+  EXPECT_TRUE(out.content_digest.empty());
+}
+
+TEST(StateChunkedBlobTest, ManifestRoundTripWithNoChunks) {
+  cvc::state_chunk_manifest m;
+  m.chunk_size = 1024;
+  m.total_size = 0;
+  auto bytes = m.serialize();
+  cvc::state_chunk_manifest out;
+  ASSERT_TRUE(cvc::state_chunk_manifest::parse(bytes, out));
+  EXPECT_EQ(out.chunks.size(), 0u);
+  EXPECT_EQ(out.chunk_size, 1024u);
+}
+
+TEST(StateChunkedBlobTest, GetReturnsFalseOnMissingChunkAfterEvict) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 64);
+  auto payload = make_payload(192, 23);
+  auto ref = w.put(payload);
+  cvc::state_chunk_manifest m;
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
+                                                                  m));
+  ASSERT_EQ(m.chunks.size(), 3u);
+
+  // Erase the middle chunk to simulate a partial loss.
+  EXPECT_TRUE(store.erase(m.chunks[1]));
+
+  cvc::state_chunked_blob_reader r(store);
+  std::vector<unsigned char> out;
+  EXPECT_FALSE(r.get(ref.digest, out));
+  auto missing = r.missing_chunks(ref.digest);
+  ASSERT_EQ(missing.size(), 1u);
+  EXPECT_EQ(missing[0], m.chunks[1]);
+}
+
+TEST(StateChunkedBlobTest, ConcurrentWritersAreSafe) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 128);
+
+  constexpr int kThreads = 4;
+  constexpr int kPerThread = 16;
+  std::vector<std::thread> ts;
+  std::vector<std::string> all_digests(kThreads * kPerThread);
+  std::mutex out_mutex;
+  for (int t = 0; t < kThreads; ++t) {
+    ts.emplace_back([&, t]() {
+      for (int i = 0; i < kPerThread; ++i) {
+        auto p = make_payload(300, static_cast<std::uint32_t>(t * 100 + i));
+        auto ref = w.put(p);
+        std::lock_guard<std::mutex> lk(out_mutex);
+        all_digests[t * kPerThread + i] = ref.digest;
+      }
+    });
+  }
+  for (auto &th : ts) th.join();
+
+  cvc::state_chunked_blob_reader r(store);
+  for (const auto &d : all_digests) {
+    ASSERT_FALSE(d.empty());
+    cvc::state_chunk_manifest m;
+    EXPECT_TRUE(r.load_manifest(d, m));
+    std::vector<unsigned char> out;
+    EXPECT_TRUE(r.get(d, out));
+    EXPECT_EQ(out.size(), 300u);
+  }
 }
