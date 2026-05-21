@@ -1,6 +1,17 @@
 # Distributed State Synchronization Roadmap
 
-Date: May 20, 2026
+Date: May 21, 2026
+
+## Status Snapshot
+
+- Phases 1, 2, 3a, 3b, 3c, 3d, 3e, 4, 5, 6 are landed on `master` (mutation journal + adapter, codec registry + chunked blob store, replica/authority map, cluster shard, transport interface + inproc/ipc/gRPC, OOB messaging, multi-node cluster semantics with TLS + write policy, subtree delegation with leases, admin facade, per-codec compression, per-peer bounded outbox).
+- Phase 8 (link nodes) is in flight on `feature/distributed-state-sync` (PR #78) and has shipped slices 4a–4e:
+  - 4a: inbound interest filter on subscription routing.
+  - 4b: `link_mode` (transparent/opaque) on link nodes plus `resolvedValue` with hop budget.
+  - 4c: `state_distributed_admin::transparent_link_index` and `transparent_link_aliases`.
+  - 4d: `state_sync_adapter::subscriptions_for_path` expands subscriptions through transparent aliases with a cumulative forwarded-through-link counter.
+  - 4e: alias resolver follows transparent-link chains BFS-style to a fixed point with a `hop_budget` (default 64), root-target guard, and cycle termination.
+- Phase 7 (perf + production hardening) and Phase 9 (network analytics) are not started.
 
 ## Purpose
 
@@ -196,44 +207,45 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 
 - Per-tree shard struct binding journal + router + adapter + replica + authority map + blob store + codec registry, with unit tests and stress/perf gates.
 
-### Phase 3c: Transport Layer (current)
+### Phase 3c: Transport Layer (done)
 
 - Define the `state_transport` interface and an inproc concrete `state_transport_inproc` for tests and embedded multi-shard scenarios.
 - Wire `state_cluster_shard` so it can publish local mutations through a transport and ingest remote ones via the existing remote-apply path on the adapter.
 - Tests: 2-shard convergence (set on A → B observes), loop suppression on round trip, fan-out across N shards, vector-clock equality after quiescence, opt-in stress and perf gates.
 
-### Phase 3d: Same-Host Fast IPC Transport
+### Phase 3d: Same-Host Fast IPC Transport (done)
 
 - `state_transport_ipc` over UNIX domain sockets with length-prefixed framing.
 - Benchmark against gRPC loopback.
-- Optional shared-memory ring buffer variant if numbers justify the complexity.
+- Optional shared-memory ring buffer variant if numbers justify the complexity. (deferred to Phase 7.)
 
-### Phase 3e: gRPC Transport
+### Phase 3e: gRPC Transport (done)
 
 - Add protobuf schema and generated C++ integration (using gRPC and protobuf from libcvc-deps v1.1.0).
 - `state_transport_grpc` with bidirectional streaming for mutations, snapshots, control, and out-of-band messages.
 - Reconnect, replay from journal, initial snapshot on join, latency benchmarks gated behind CMake flag.
 
-### Phase 4: Out-Of-Band Messaging
+### Phase 4: Out-Of-Band Messaging (done)
 
 - Add `state_message`, `state_message_bus`, and the `messageReceived` signal on `cvc::state`.
 - Add `sendMessage` API and TTL-bounded local tree propagation with `(origin, id)` dedup.
 - Extend each transport (`inproc`, `ipc`, `grpc`) to carry messages alongside mutations with the same dedup metadata so messages can cross peer boundaries.
 - Tests: local propagation depth, dedup across multi-path delivery, cross-peer propagation, drop-under-backpressure counters, message does not appear in journal and does not advance clocks.
 
-### Phase 5: Multi-Node Cluster Semantics
+### Phase 5: Multi-Node Cluster Semantics (done)
 
 - Add membership, node identity, TLS, auth tokens/certs, and per-path write policy.
 - Add subscription routing and path-prefix fanout so many-node clusters do not rely on all-to-all broadcast.
 - Add shard ownership for path prefixes or hash ranges, with resharding hooks for later operations tooling.
 - Add conflict detection, deterministic conflict resolution, backpressure, and observability under `__system.distributed.*`.
 
-### Phase 6: Subtree Delegation
+### Phase 6: Subtree Delegation (done)
 
 - Add authority map and longest-prefix routing wired into the live transport (already-implemented map gets driven by real referrals).
 - Implement `ResolvePath`, delegation records, lease acquisition, lease renewal, and referral following.
 - Add tests for root cluster delegating a subtree to a second cluster and clients receiving the right updates.
 - Add failure-mode tests for expired delegation, unreachable delegated cluster, and authority transfer.
+- Phase-6 follow-ons that also landed alongside: admin facade (`state_distributed_admin`), blob GC, typed message payloads + bounded-queue backpressure, per-peer outbox, chunked blob writer/reader with manifest + resume, per-codec compression options.
 
 ### Phase 7: Performance And Production Hardening
 
@@ -245,9 +257,26 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 - Add admin tooling for inspection, manual resync, and blob garbage collection.
 - Document operational patterns for small interactive clusters and larger distributed processing clusters.
 
-### Phase 8: Link Nodes (Symbolic References)
+### Phase 8: Link Nodes (Symbolic References) (in progress)
 
 State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
+
+Delivered so far on `feature/distributed-state-sync` (PR #78):
+
+- 4a — inbound interest filter: subscription router exposes `subscriptions_for(path)` with longest-prefix semantics so the adapter can drive interest-based dispatch.
+- 4b — `link_mode` (`transparent`/`opaque`) on link nodes; `state::resolvedValue(path, hop_budget = 64)` follows transparent links to a value with cycle detection.
+- 4c — `state_distributed_admin::transparent_link_index(root)` enumerates `{link_path, target_path}` entries (root target canonicalized to empty); `transparent_link_aliases(root, path, hop_budget)` returns aliases for a given path, dot-segment boundary-aware so prefix spoofing is rejected.
+- 4d — `state_sync_adapter::subscriptions_for_path(path)` returns direct-router subscriptions plus subscriptions installed at every transparent alias, deduped by subscription id; `forwarded_through_link_count()` reports cumulative subscriptions added via alias expansion. The local-dispatch path now uses this expanded lookup.
+- 4e — alias resolver follows chains BFS-style to a fixed point with a `hop_budget` (default 64). A root-target / at-or-under-link guard terminates 2-cycles and prevents nested re-aliasing.
+
+Remaining for Phase 8:
+
+- Slice 5: pull-on-demand resolve of remote link targets composing with delegation + lease expiry (`state::resolveRemote(path)` and adapter integration with `state_authority_map`).
+- Writes through writable links honoring authority map + write policy (the read/subscribe sides land first; write routing through links is next).
+- `state_distributed_admin::link_cycles()` static cycle enumerator and tooling exposure.
+- Cross-cluster link tests: link target moves between clusters mid-test, lease expiry invalidates the link, `sendMessage` over a link routes via the right transport peer without the caller naming a `cluster_id`.
+- Subscription-collapse test for an N-link cycle registering one logical subscriber rather than N copies.
+- Bench: 1M-path tree with 10k links and a few cycles; assert resolver/subscription latency stays bounded.
 
 - Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
   - target `path` (absolute, may be the empty path meaning the tree root) — this is the **only** required field for the developer-facing API,
