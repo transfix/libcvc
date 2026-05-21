@@ -102,6 +102,12 @@ set(SOURCE_FILES
   vtk_io.cpp
 )
 
+# state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
+# header itself is portable but the implementation is not. Drop it on Windows.
+if(WIN32)
+  list(REMOVE_ITEM SOURCE_FILES state_transport_ipc.cpp)
+endif()
+
 # Configuration
 set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
