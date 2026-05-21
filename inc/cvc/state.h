@@ -463,6 +463,18 @@ public:
   link_mode linkMode() const;
   state &setLinkMode(link_mode mode);
 
+  // Writable transparent links (Phase 8): when a node is a transparent
+  // link AND linkWritable() is true, writes to this node (state::value())
+  // are routed to the resolved target with the same cycle/budget
+  // semantics as resolvedValue(). The default is false, in which case
+  // writes land on the link node's own _value (the historical behavior).
+  // Opaque links ignore this flag entirely — writes always land on the
+  // link node itself. clearLink() resets the flag to false. Changing
+  // the flag fires linkChanged() and the parent's childChanged()
+  // identically to changing the mode.
+  bool linkWritable() const;
+  state &setLinkWritable(bool writable);
+
   // Read this node's value, following the link chain when the
   // node is a transparent link. Returns the terminal node's
   // value when resolution succeeds; on broken / cycle /
@@ -611,6 +623,7 @@ protected:
   // Phase 8: empty when this node is not a link.
   std::string _linkTarget;
   link_mode _linkMode = link_mode::opaque;
+  bool _linkWritable = false;
 
   // Expiring state: not_a_date_time when no expiry is set.
   boost::posix_time::ptime _expiryTime;

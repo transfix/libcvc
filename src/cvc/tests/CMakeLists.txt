@@ -36,6 +36,7 @@ add_executable(state_link_cycles_test state_link_cycles_test.cpp)
 add_executable(state_expiry_test state_expiry_test.cpp)
 add_executable(state_interest_filter_test state_interest_filter_test.cpp)
 add_executable(state_link_mode_test state_link_mode_test.cpp)
+add_executable(state_writable_link_test state_writable_link_test.cpp)
 add_executable(state_transparent_link_index_test state_transparent_link_index_test.cpp)
 add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_forwarding_test.cpp)
 if(CVC_ENABLE_GRPC)
@@ -72,6 +73,7 @@ set(TEST_TARGETS
   state_expiry_test
   state_interest_filter_test
   state_link_mode_test
+  state_writable_link_test
   state_transparent_link_index_test
   state_sync_adapter_link_forwarding_test
   voxels_test
@@ -380,6 +382,13 @@ target_link_libraries(state_link_mode_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_writable_link_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_transparent_link_index_test
   PRIVATE
     cvc
@@ -448,6 +457,7 @@ target_compile_features(state_link_cycles_test PRIVATE cxx_std_17)
 target_compile_features(state_expiry_test PRIVATE cxx_std_17)
 target_compile_features(state_interest_filter_test PRIVATE cxx_std_17)
 target_compile_features(state_link_mode_test PRIVATE cxx_std_17)
+target_compile_features(state_writable_link_test PRIVATE cxx_std_17)
 target_compile_features(state_transparent_link_index_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_link_forwarding_test PRIVATE cxx_std_17)
 
@@ -535,6 +545,7 @@ gtest_discover_tests(state_link_cycles_test)
 gtest_discover_tests(state_expiry_test)
 gtest_discover_tests(state_interest_filter_test)
 gtest_discover_tests(state_link_mode_test)
+gtest_discover_tests(state_writable_link_test)
 gtest_discover_tests(state_transparent_link_index_test)
 gtest_discover_tests(state_sync_adapter_link_forwarding_test)
 if(TARGET state_transport_grpc_test)
