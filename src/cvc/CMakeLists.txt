@@ -33,6 +33,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
   ../../inc/cvc/state_transport_ipc.h
+  ../../inc/cvc/state_transport_grpc.h
   ../../inc/cvc/bunny.h
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
@@ -105,6 +106,7 @@ option(CVC_GEOMETRY_ENABLE_BUNNY "Enable built-in bunny geometry test tri mesh" 
 option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rather than 0" OFF)
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
+option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 
 # XMLRPC support
 if(CVC_USING_XMLRPC)
@@ -579,6 +581,74 @@ if(CVC_ENABLE_FFTW)
   endif()
 endif()
 
+# gRPC-backed state transport (Phase 3e). Generates protobuf and
+# gRPC C++ stubs from libcvc/proto/state_transport.proto and links
+# the cvc target against gRPC::grpc++ + protobuf::libprotobuf.
+if(CVC_ENABLE_GRPC)
+  find_package(Protobuf CONFIG QUIET)
+  if(NOT Protobuf_FOUND)
+    find_package(Protobuf REQUIRED)
+  endif()
+  find_package(gRPC CONFIG REQUIRED)
+
+  # Locate grpc_cpp_plugin executable.
+  if(TARGET gRPC::grpc_cpp_plugin)
+    set(_grpc_cpp_plugin_target gRPC::grpc_cpp_plugin)
+    get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+      IMPORTED_LOCATION_RELEASE)
+    if(NOT _grpc_cpp_plugin_path)
+      get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+        IMPORTED_LOCATION)
+    endif()
+  endif()
+  if(NOT _grpc_cpp_plugin_path)
+    find_program(_grpc_cpp_plugin_path grpc_cpp_plugin)
+    if(NOT _grpc_cpp_plugin_path)
+      message(FATAL_ERROR "CVC_ENABLE_GRPC: grpc_cpp_plugin not found")
+    endif()
+  endif()
+
+  # Locate protoc.
+  if(TARGET protobuf::protoc)
+    set(_protoc_target protobuf::protoc)
+  else()
+    find_program(_protoc_path protoc REQUIRED)
+  endif()
+
+  set(_proto_src "${CMAKE_SOURCE_DIR}/proto/state_transport.proto")
+  set(_proto_out_dir "${CMAKE_CURRENT_BINARY_DIR}/proto")
+  file(MAKE_DIRECTORY "${_proto_out_dir}")
+  set(_proto_pb_cc   "${_proto_out_dir}/state_transport.pb.cc")
+  set(_proto_pb_h    "${_proto_out_dir}/state_transport.pb.h")
+  set(_proto_grpc_cc "${_proto_out_dir}/state_transport.grpc.pb.cc")
+  set(_proto_grpc_h  "${_proto_out_dir}/state_transport.grpc.pb.h")
+
+  if(_protoc_target)
+    set(_protoc_cmd $<TARGET_FILE:${_protoc_target}>)
+  else()
+    set(_protoc_cmd "${_protoc_path}")
+  endif()
+
+  add_custom_command(
+    OUTPUT ${_proto_pb_cc} ${_proto_pb_h} ${_proto_grpc_cc} ${_proto_grpc_h}
+    COMMAND ${_protoc_cmd}
+      --proto_path=${CMAKE_SOURCE_DIR}/proto
+      --cpp_out=${_proto_out_dir}
+      --grpc_out=${_proto_out_dir}
+      --plugin=protoc-gen-grpc=${_grpc_cpp_plugin_path}
+      ${_proto_src}
+    DEPENDS ${_proto_src}
+    COMMENT "Generating protobuf/gRPC C++ stubs for state_transport.proto"
+    VERBATIM
+  )
+
+  list(APPEND SOURCE_FILES
+    state_transport_grpc.cpp
+    ${_proto_pb_cc}
+    ${_proto_grpc_cc}
+  )
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -663,6 +733,11 @@ if(CVC_ENABLE_MESHER)
 endif()
 if(CVC_ENABLE_SDF)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_SDF)
+endif()
+if(CVC_ENABLE_GRPC)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
+  target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
 endif()
 
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes

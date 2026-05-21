@@ -14,6 +14,9 @@ add_executable(state_authority_map_test state_authority_map_test.cpp)
 add_executable(state_cluster_shard_test state_cluster_shard_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
 add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
+if(CVC_ENABLE_GRPC)
+  add_executable(state_transport_grpc_test state_transport_grpc_test.cpp)
+endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
@@ -206,6 +209,17 @@ target_link_libraries(state_transport_ipc_test
     GTest::gtest_main
 )
 
+if(TARGET state_transport_grpc_test)
+  target_link_libraries(state_transport_grpc_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(state_transport_grpc_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS state_transport_grpc_test)
+endif()
+
 # Set C++ standard to match the library
 target_compile_features(app_test PRIVATE cxx_std_14)
 target_compile_features(state_test PRIVATE cxx_std_14)
@@ -292,6 +306,9 @@ gtest_discover_tests(state_authority_map_test)
 gtest_discover_tests(state_cluster_shard_test)
 gtest_discover_tests(state_transport_inproc_test)
 gtest_discover_tests(state_transport_ipc_test)
+if(TARGET state_transport_grpc_test)
+  gtest_discover_tests(state_transport_grpc_test)
+endif()
 # Note: procedural_geometry_test uses plain main(), not gtest
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)
