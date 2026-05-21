@@ -42,6 +42,7 @@ void state_transport_inproc::unregister_shard(state_cluster_shard *shard) {
   std::lock_guard<std::mutex> lock(_mutex);
   _shards.erase(std::remove(_shards.begin(), _shards.end(), shard),
                 _shards.end());
+  _slow_peers.erase(shard);
   auto it = _outboxes.find(shard);
   if (it != _outboxes.end()) {
     if (it->second && it->second->queue) {
@@ -67,6 +68,7 @@ state_transport_inproc::publish(const state_mutation &m) {
   // (ingest_remote may take the shard's own mutex; we don't want
   // to hold the transport mutex across it).
   std::vector<state_cluster_shard *> peers;
+  std::uint64_t quarantined_skipped = 0;
   {
     std::lock_guard<std::mutex> lock(_mutex);
     peers.reserve(_shards.size());
@@ -81,10 +83,18 @@ state_transport_inproc::publish(const state_mutation &m) {
         // Skip the originator: origin_node_id matches that shard's id.
         continue;
       }
+      if (_slow_peers.count(s) != 0) {
+        ++quarantined_skipped;
+        continue;
+      }
       peers.push_back(s);
     }
   }
 
+  if (quarantined_skipped != 0) {
+    _quarantined_mutations.fetch_add(quarantined_skipped,
+                                     std::memory_order_relaxed);
+  }
   _published.fetch_add(1, std::memory_order_relaxed);
 
   for (auto *peer : peers) {
@@ -117,6 +127,7 @@ state_transport_inproc::publish_message(const state_message &m) {
     state_bounded_queue<state_message> *queue; // null = synchronous
   };
   std::vector<peer_dest> peers;
+  std::uint64_t quarantined_skipped = 0;
   {
     std::lock_guard<std::mutex> lock(_mutex);
     peers.reserve(_shards.size());
@@ -127,11 +138,19 @@ state_transport_inproc::publish_message(const state_message &m) {
         continue;
       if (s->local_node_id() == m.origin_node_id)
         continue;
+      if (_slow_peers.count(s) != 0) {
+        ++quarantined_skipped;
+        continue;
+      }
       auto *ob = find_outbox_locked(s);
       peers.push_back({s, ob ? ob->queue.get() : nullptr});
     }
   }
 
+  if (quarantined_skipped != 0) {
+    _quarantined_messages.fetch_add(quarantined_skipped,
+                                    std::memory_order_relaxed);
+  }
   _msg_published.fetch_add(1, std::memory_order_relaxed);
 
   for (auto &dest : peers) {
@@ -161,6 +180,23 @@ state_transport_inproc::publish_message(const state_message &m) {
         ++stats.delivered; // queued counts as in-flight delivered
       } else {
         ++stats.duplicates; // overflow drop, surface as non-delivered
+      }
+      // Auto-isolation: if the cumulative drops have reached the
+      // configured threshold, mark this peer slow so subsequent
+      // publishes skip it. We do this here (after admit/drop) so
+      // that the threshold reflects observed pressure, not just
+      // configured capacity.
+      const std::uint64_t threshold =
+          _auto_isolation_threshold.load(std::memory_order_relaxed);
+      if (threshold != 0 && (after_dn + after_do) >= threshold) {
+        bool newly_slow = false;
+        {
+          std::lock_guard<std::mutex> lock(_mutex);
+          newly_slow = _slow_peers.insert(peer).second;
+        }
+        if (newly_slow) {
+          _auto_isolations.fetch_add(1, std::memory_order_relaxed);
+        }
       }
       continue;
     }
@@ -288,6 +324,39 @@ void state_transport_inproc::flush() {
 std::size_t state_transport_inproc::shard_count() const {
   std::lock_guard<std::mutex> lock(_mutex);
   return _shards.size();
+}
+
+void state_transport_inproc::mark_peer_slow(state_cluster_shard *peer) {
+  if (peer == nullptr)
+    return;
+  std::lock_guard<std::mutex> lock(_mutex);
+  _slow_peers.insert(peer);
+}
+
+void state_transport_inproc::clear_peer_slow(state_cluster_shard *peer) {
+  if (peer == nullptr)
+    return;
+  std::lock_guard<std::mutex> lock(_mutex);
+  _slow_peers.erase(peer);
+}
+
+bool state_transport_inproc::is_peer_slow(state_cluster_shard *peer) const {
+  if (peer == nullptr)
+    return false;
+  std::lock_guard<std::mutex> lock(_mutex);
+  return _slow_peers.count(peer) != 0;
+}
+
+std::vector<state_cluster_shard *>
+state_transport_inproc::slow_peers() const {
+  std::lock_guard<std::mutex> lock(_mutex);
+  return std::vector<state_cluster_shard *>(_slow_peers.begin(),
+                                            _slow_peers.end());
+}
+
+void state_transport_inproc::set_auto_isolation_drop_threshold(
+    std::uint64_t threshold) noexcept {
+  _auto_isolation_threshold.store(threshold, std::memory_order_relaxed);
 }
 
 } // namespace CVC_NAMESPACE

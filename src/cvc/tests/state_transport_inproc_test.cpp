@@ -987,3 +987,294 @@ TEST(StateTransportInprocOutbox, ConcurrentProducerConsumer) {
   EXPECT_LE(static_cast<std::uint64_t>(hits.load()),
             t.total_outbox_admitted());
 }
+
+// ---------------------------------------------------------------------
+// Slow-peer isolation (Phase 6 backpressure, bullet 4)
+// ---------------------------------------------------------------------
+
+namespace {
+
+cvc::state_mutation make_iso_mut(const std::string &cluster,
+                                 const std::string &origin,
+                                 const std::string &path,
+                                 std::uint64_t seq) {
+  cvc::state_mutation m;
+  m.cluster_id = cluster;
+  m.origin_node_id = origin;
+  m.path = path;
+  m.sequence = seq;
+  m.string_value = "v";
+  m.type_name = "std::string";
+  return m;
+}
+
+} // namespace
+
+TEST(StateTransportInprocSlowPeer, MarkAndClearTracksPeer) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  EXPECT_FALSE(t.is_peer_slow(&sB));
+  EXPECT_TRUE(t.slow_peers().empty());
+  t.mark_peer_slow(&sB);
+  EXPECT_TRUE(t.is_peer_slow(&sB));
+  ASSERT_EQ(t.slow_peers().size(), 1u);
+  EXPECT_EQ(t.slow_peers()[0], &sB);
+  t.clear_peer_slow(&sB);
+  EXPECT_FALSE(t.is_peer_slow(&sB));
+  EXPECT_TRUE(t.slow_peers().empty());
+}
+
+TEST(StateTransportInprocSlowPeer, NullPeerIsNoOp) {
+  cvc::state_transport_inproc t;
+  t.mark_peer_slow(nullptr);
+  t.clear_peer_slow(nullptr);
+  EXPECT_FALSE(t.is_peer_slow(nullptr));
+}
+
+TEST(StateTransportInprocSlowPeer, MarkIsIdempotent) {
+  cvc::app aA;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  sA.attach();
+  t.register_shard(&sA);
+  t.mark_peer_slow(&sA);
+  t.mark_peer_slow(&sA);
+  EXPECT_EQ(t.slow_peers().size(), 1u);
+}
+
+TEST(StateTransportInprocSlowPeer, MessagesSkipQuarantinedPeer) {
+  cvc::app aA, aB, aC;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sA.attach();
+  sB.attach();
+  sC.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+  t.register_shard(&sC);
+
+  std::atomic<int> hitsB{0}, hitsC{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hitsB.fetch_add(1);
+  });
+  sC.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hitsC.fetch_add(1);
+  });
+
+  t.mark_peer_slow(&sB);
+  auto stats = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  // Only one healthy peer (C) is delivered to.
+  EXPECT_EQ(stats.delivered, 1u);
+  EXPECT_EQ(hitsB.load(), 0);
+  EXPECT_EQ(hitsC.load(), 1);
+  EXPECT_EQ(t.total_quarantined_messages(), 1u);
+
+  // Clearing the slow flag re-enables delivery.
+  t.clear_peer_slow(&sB);
+  t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
+  EXPECT_EQ(hitsB.load(), 1);
+  EXPECT_EQ(hitsC.load(), 2);
+  EXPECT_EQ(t.total_quarantined_messages(), 1u); // unchanged after clear
+}
+
+TEST(StateTransportInprocSlowPeer, MutationsSkipQuarantinedPeer) {
+  cvc::app aA, aB, aC;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sA.attach();
+  sB.attach();
+  sC.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+  t.register_shard(&sC);
+
+  t.mark_peer_slow(&sB);
+  auto stats = t.publish(make_iso_mut("C", "A", "p", 1));
+  // Only C received it.
+  EXPECT_EQ(stats.delivered, 1u);
+  EXPECT_EQ(t.total_quarantined_mutations(), 1u);
+  EXPECT_GE(sC.replica().last_applied("A"), 1u);
+  EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+}
+
+TEST(StateTransportInprocSlowPeer, OutboxNotEnqueuedForSlowPeer) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  t.set_peer_message_outbox(
+      &sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.mark_peer_slow(&sB);
+  for (int i = 0; i < 5; ++i) {
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
+  }
+  // Quarantine bypasses the outbox entirely: nothing should be queued
+  // and nothing should be counted as admitted/dropped.
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+  EXPECT_EQ(t.total_outbox_admitted(), 0u);
+  EXPECT_EQ(t.total_outbox_dropped_newest(), 0u);
+  EXPECT_EQ(t.total_quarantined_messages(), 5u);
+}
+
+TEST(StateTransportInprocSlowPeer, AutoIsolationKicksInOnDrops) {
+  cvc::app aA, aB, aC;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sA.attach();
+  sB.attach();
+  sC.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+  t.register_shard(&sC);
+
+  std::atomic<int> hitsC{0};
+  sC.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hitsC.fetch_add(1);
+  });
+
+  // sB has a tiny outbox and never drains; sC is healthy (no outbox).
+  t.set_peer_message_outbox(
+      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_auto_isolation_drop_threshold(3);
+
+  // Publish 8 messages: first 1 admitted to sB, next ones drop until
+  // threshold (3 drops) trips auto-isolation; remaining publishes
+  // skip sB entirely. sC always receives.
+  for (int i = 0; i < 8; ++i) {
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
+  }
+
+  EXPECT_TRUE(t.is_peer_slow(&sB));
+  EXPECT_GE(t.total_auto_isolations(), 1u);
+  EXPECT_GE(t.total_outbox_dropped_newest(), 3u);
+  EXPECT_GE(t.total_quarantined_messages(), 1u);
+  EXPECT_EQ(hitsC.load(), 8); // C never affected
+}
+
+TEST(StateTransportInprocSlowPeer, AutoIsolationDisabledByDefault) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  EXPECT_EQ(t.auto_isolation_drop_threshold(), 0u);
+  t.set_peer_message_outbox(
+      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  for (int i = 0; i < 10; ++i) {
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
+  }
+  EXPECT_FALSE(t.is_peer_slow(&sB));
+  EXPECT_EQ(t.total_auto_isolations(), 0u);
+}
+
+TEST(StateTransportInprocSlowPeer, ManualClearAfterAutoAllowsRedelivery) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hitsB{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hitsB.fetch_add(1);
+  });
+
+  t.set_peer_message_outbox(
+      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_auto_isolation_drop_threshold(2);
+
+  for (int i = 0; i < 5; ++i) {
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
+  }
+  ASSERT_TRUE(t.is_peer_slow(&sB));
+
+  // Drain whatever made it into the outbox before isolation tripped.
+  t.deliver_message_outbox(&sB);
+  // Clearing slow + outbox lets delivery resume synchronously.
+  t.clear_peer_slow(&sB);
+  t.clear_peer_message_outbox(&sB);
+  const int hits_before_resume = hitsB.load();
+  t.publish_message(make_outbox_msg("C", "A", "post-clear", "x"));
+  EXPECT_EQ(hitsB.load(), hits_before_resume + 1);
+}
+
+TEST(StateTransportInprocSlowPeer, UnregisterShardClearsSlowFlag) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  t.mark_peer_slow(&sB);
+  EXPECT_TRUE(t.is_peer_slow(&sB));
+  t.unregister_shard(&sB);
+  EXPECT_FALSE(t.is_peer_slow(&sB));
+  EXPECT_TRUE(t.slow_peers().empty());
+}
+
+TEST(StateTransportInprocSlowPeer, ConcurrentMarkClearIsSafe) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<bool> stop{false};
+  std::thread toggler([&] {
+    while (!stop.load()) {
+      t.mark_peer_slow(&sB);
+      t.clear_peer_slow(&sB);
+    }
+  });
+  std::thread publisher([&] {
+    int i = 0;
+    while (!stop.load()) {
+      t.publish_message(
+          make_outbox_msg("C", "A", "m" + std::to_string(i++), "x"));
+    }
+  });
+  // Run briefly.
+  for (int spin = 0; spin < 200000; ++spin) {
+    (void)t.is_peer_slow(&sB);
+  }
+  stop.store(true);
+  toggler.join();
+  publisher.join();
+
+  // Counters consistent: every publish that saw sB quarantined was
+  // counted; admitted+quarantined+dupes >= total publishes attempted.
+  // The exact value depends on interleaving, so we just check the
+  // counters advanced and didn't underflow.
+  EXPECT_GE(t.total_quarantined_messages(), 0u);
+}

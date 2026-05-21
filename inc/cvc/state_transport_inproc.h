@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -102,6 +103,46 @@ public:
     return _outbox_blocked_timeouts.load();
   }
 
+  // ----------------
+  // Slow-peer isolation (Phase 6 backpressure, bullet 4)
+  // ----------------
+  // Mark `peer` as slow: subsequent publish()/publish_message()
+  // calls skip this peer entirely (no outbox enqueue, no
+  // synchronous ingest) so a stalled consumer cannot back up
+  // healthy peers. Skipped deliveries are counted under
+  // total_quarantined_*. The peer remains skipped until
+  // clear_peer_slow() is called or the auto-isolation threshold
+  // releases it (it does not, by design — release is manual).
+  //
+  // Quarantined peers continue to accept replays via
+  // deliver_message_outbox(); operators are expected to drain or
+  // discard the outbox before clearing the slow flag.
+  void mark_peer_slow(state_cluster_shard *peer);
+  void clear_peer_slow(state_cluster_shard *peer);
+  bool is_peer_slow(state_cluster_shard *peer) const;
+  std::vector<state_cluster_shard *> slow_peers() const;
+
+  // When > 0, an outbox whose cumulative drops (drop_newest +
+  // drop_oldest, since outbox install) reach this value is
+  // auto-marked slow on the publish_message() call that caused
+  // the threshold to be crossed. Default 0 = disabled (manual
+  // mark only). Setting to 0 disables auto-isolation but does not
+  // clear peers already marked slow.
+  void set_auto_isolation_drop_threshold(std::uint64_t threshold) noexcept;
+  std::uint64_t auto_isolation_drop_threshold() const noexcept {
+    return _auto_isolation_threshold.load();
+  }
+
+  std::uint64_t total_quarantined_messages() const noexcept {
+    return _quarantined_messages.load();
+  }
+  std::uint64_t total_quarantined_mutations() const noexcept {
+    return _quarantined_mutations.load();
+  }
+  std::uint64_t total_auto_isolations() const noexcept {
+    return _auto_isolations.load();
+  }
+
   // Diagnostics.
   std::size_t shard_count() const;
   std::uint64_t total_published() const noexcept { return _published.load(); }
@@ -127,6 +168,7 @@ private:
   std::vector<state_cluster_shard *> _shards;
   std::unordered_map<state_cluster_shard *, std::unique_ptr<peer_outbox>>
       _outboxes;
+  std::unordered_set<state_cluster_shard *> _slow_peers;
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _delivered{0};
   std::atomic<std::uint64_t> _msg_published{0};
@@ -135,6 +177,10 @@ private:
   std::atomic<std::uint64_t> _outbox_dropped_newest{0};
   std::atomic<std::uint64_t> _outbox_dropped_oldest{0};
   std::atomic<std::uint64_t> _outbox_blocked_timeouts{0};
+  std::atomic<std::uint64_t> _quarantined_messages{0};
+  std::atomic<std::uint64_t> _quarantined_mutations{0};
+  std::atomic<std::uint64_t> _auto_isolations{0};
+  std::atomic<std::uint64_t> _auto_isolation_threshold{0};
 };
 
 } // namespace CVC_NAMESPACE
