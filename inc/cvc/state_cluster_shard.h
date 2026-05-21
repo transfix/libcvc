@@ -14,6 +14,7 @@
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
 #include <cvc/state_change_journal.h>
+#include <cvc/state_delegation_manager.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_codec_registry.h>
@@ -95,7 +96,10 @@ public:
     return _adapter->router();
   }
   state_replica &replica() noexcept { return *_replica; }
-  state_authority_map &authority() noexcept { return *_authority; }
+  state_authority_map &authority() noexcept {
+    return _delegation->authority();
+  }
+  state_delegation_manager &delegation() noexcept { return *_delegation; }
   state_codec_registry &codecs() noexcept { return *_codecs; }
   state_message_bus &message_bus() noexcept { return *_message_bus; }
   state_write_policy &write_policy() noexcept { return *_write_policy; }
@@ -177,6 +181,31 @@ public:
     return _ctr_conflicts_lost.load();
   }
 
+  // Phase 6: subtree delegation. When true, ingest_remote consults
+  // the delegation manager. A mutation whose path resolves to a
+  // foreign cluster is rejected with reason "path delegated to
+  // cluster <id>"; an expired lease is rejected with reason
+  // "delegation lease expired ...". Default false.
+  void set_enforce_delegation(bool enforce) noexcept;
+  bool enforce_delegation() const noexcept;
+
+  // Phase 6: classify a path against the delegation manager. This
+  // is a thin wrapper around delegation().route(path) and is the
+  // preferred entry point for clients that want to know whether a
+  // local write should be applied here, forwarded, or held until a
+  // lease is renewed.
+  state_delegation_manager::route_decision
+  route_path(const std::string &path) const {
+    return _delegation->route(path);
+  }
+
+  std::uint64_t total_delegation_routed() const noexcept {
+    return _ctr_delegation_routed.load();
+  }
+  std::uint64_t total_delegation_expired() const noexcept {
+    return _ctr_delegation_expired.load();
+  }
+
 private:
   std::string _cluster_id;
   std::string _local_node_id;
@@ -184,7 +213,7 @@ private:
 
   std::unique_ptr<state_sync_adapter> _adapter;
   std::unique_ptr<state_replica> _replica;
-  std::unique_ptr<state_authority_map> _authority;
+  std::unique_ptr<state_delegation_manager> _delegation;
   std::unique_ptr<state_codec_registry> _codecs;
   std::unique_ptr<state_message_bus> _message_bus;
   std::unique_ptr<state_write_policy> _write_policy;
@@ -193,6 +222,7 @@ private:
   std::uint64_t _publish_cursor = 0; // last drained local sequence
   bool _enforce_authority = false;
   bool _enforce_write_policy = false;
+  bool _enforce_delegation = false;
   bool _resolve_conflicts = false;
   std::unordered_map<std::string, state_mutation> _last_path_mutation;
 
@@ -201,6 +231,8 @@ private:
   std::atomic<std::uint64_t> _ctr_remote_rejected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_detected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
+  std::atomic<std::uint64_t> _ctr_delegation_routed{0};
+  std::atomic<std::uint64_t> _ctr_delegation_expired{0};
 };
 
 } // namespace CVC_NAMESPACE

@@ -354,3 +354,140 @@ TEST(StateClusterShardTest, MetricsCountersAdvance) {
   sh.ingest_remote(m);
   EXPECT_EQ(1u, sh.total_remote_duplicates());
 }
+
+// ---- Phase 6: subtree delegation routing ----
+
+TEST(StateClusterShardTest, DelegationEnforcementRejectsForeignWrites) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.delegation().delegate("simulation", "cluster-B", "grpc://h:1");
+  sh.set_enforce_delegation(true);
+
+  auto m = make_set_value("nodeC", 1, "simulation.volume", "v");
+  auto r = sh.ingest_remote(m);
+  EXPECT_FALSE(r.applied);
+  EXPECT_TRUE(r.rejected);
+  EXPECT_NE(r.reject_reason.find("delegated to cluster 'cluster-B'"),
+            std::string::npos)
+      << r.reject_reason;
+  EXPECT_EQ(1u, sh.total_remote_rejected());
+  EXPECT_EQ(1u, sh.total_delegation_routed());
+  EXPECT_EQ(0u, sh.total_delegation_expired());
+}
+
+TEST(StateClusterShardTest, DelegationEnforcementAllowsLocalCluster) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  // Delegation that maps to the local cluster: NOT a foreign route.
+  sh.delegation().delegate("ours", "cluster-A");
+  sh.set_enforce_delegation(true);
+
+  auto m = make_set_value("nodeB", 1, "ours.x", "v");
+  EXPECT_TRUE(sh.ingest_remote(m).applied);
+  EXPECT_EQ(0u, sh.total_delegation_routed());
+}
+
+TEST(StateClusterShardTest, DelegationEnforcementAllowsUncoveredPaths) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.delegation().delegate("simulation", "cluster-B");
+  sh.set_enforce_delegation(true);
+
+  // Path outside any delegation prefix: stays local.
+  auto m = make_set_value("nodeB", 1, "controls.knob", "v");
+  EXPECT_TRUE(sh.ingest_remote(m).applied);
+}
+
+TEST(StateClusterShardTest, DelegationEnforcementRejectsOnExpiredLease) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  // Inject a controllable clock.
+  std::uint64_t now = 1000;
+  sh.delegation().set_clock([&now]() { return now; });
+  sh.delegation().delegate("simulation", "cluster-B", "", /*lease=*/500);
+  sh.set_enforce_delegation(true);
+
+  // Before expiry: rejected as foreign-routed.
+  now = 1499;
+  auto r1 = sh.ingest_remote(
+      make_set_value("nodeC", 1, "simulation.x", "v"));
+  EXPECT_TRUE(r1.rejected);
+  EXPECT_EQ(1u, sh.total_delegation_routed());
+
+  // After expiry: rejected as expired.
+  now = 1600;
+  auto r2 = sh.ingest_remote(
+      make_set_value("nodeC", 2, "simulation.x", "v"));
+  EXPECT_TRUE(r2.rejected);
+  EXPECT_NE(r2.reject_reason.find("expired"), std::string::npos)
+      << r2.reject_reason;
+  EXPECT_EQ(1u, sh.total_delegation_expired());
+}
+
+TEST(StateClusterShardTest, DelegationDisabledDoesNotReject) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.delegation().delegate("simulation", "cluster-B");
+  // enforce_delegation defaults to false.
+
+  auto m = make_set_value("nodeC", 1, "simulation.x", "v");
+  EXPECT_TRUE(sh.ingest_remote(m).applied);
+  EXPECT_EQ(0u, sh.total_delegation_routed());
+}
+
+TEST(StateClusterShardTest, RoutePathClassifiesPaths) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.delegation().delegate("simulation", "cluster-B");
+
+  auto loc = sh.route_path("controls.x");
+  EXPECT_EQ(loc.kind, cvc::state_delegation_manager::route_kind::local);
+
+  auto rem = sh.route_path("simulation.volume");
+  EXPECT_EQ(rem.kind, cvc::state_delegation_manager::route_kind::remote);
+  EXPECT_EQ(rem.cluster_id, "cluster-B");
+}
+
+TEST(StateClusterShardTest, AuthorityTransferUpdatesRouting) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.delegation().delegate("p", "cluster-B");
+  sh.set_enforce_delegation(true);
+
+  auto r1 = sh.ingest_remote(make_set_value("nodeC", 1, "p.x", "v"));
+  EXPECT_TRUE(r1.rejected);
+  EXPECT_NE(r1.reject_reason.find("cluster-B"), std::string::npos);
+
+  // Transfer authority.
+  sh.delegation().delegate("p", "cluster-C");
+  auto r2 = sh.ingest_remote(make_set_value("nodeC", 2, "p.x", "v"));
+  EXPECT_TRUE(r2.rejected);
+  EXPECT_NE(r2.reject_reason.find("cluster-C"), std::string::npos);
+
+  // Transfer back to local.
+  sh.delegation().delegate("p", "cluster-A");
+  auto r3 = sh.ingest_remote(make_set_value("nodeC", 3, "p.x", "v"));
+  EXPECT_TRUE(r3.applied);
+}
+
+TEST(StateClusterShardTest, DelegationRevocationRestoresLocal) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.delegation().delegate("simulation", "cluster-B");
+  sh.set_enforce_delegation(true);
+
+  EXPECT_TRUE(sh.ingest_remote(
+                  make_set_value("nodeC", 1, "simulation.x", "v"))
+                  .rejected);
+  EXPECT_TRUE(sh.delegation().revoke("simulation"));
+  EXPECT_TRUE(sh.ingest_remote(
+                  make_set_value("nodeC", 2, "simulation.x", "v"))
+                  .applied);
+}

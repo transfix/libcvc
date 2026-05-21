@@ -16,6 +16,7 @@ add_executable(state_message_bus_test state_message_bus_test.cpp)
 add_executable(state_peer_registry_test state_peer_registry_test.cpp)
 add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
+add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
 add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
 if(CVC_ENABLE_GRPC)
@@ -228,6 +229,13 @@ target_link_libraries(state_distributed_metrics_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_delegation_manager_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_transport_inproc_test
   PRIVATE
     cvc
@@ -277,6 +285,7 @@ target_compile_features(state_message_bus_test PRIVATE cxx_std_17)
 target_compile_features(state_peer_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
+target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
 
@@ -345,6 +354,7 @@ gtest_discover_tests(state_message_bus_test)
 gtest_discover_tests(state_peer_registry_test)
 gtest_discover_tests(state_write_policy_test)
 gtest_discover_tests(state_distributed_metrics_test)
+gtest_discover_tests(state_delegation_manager_test)
 gtest_discover_tests(state_transport_inproc_test)
 gtest_discover_tests(state_transport_ipc_test)
 if(TARGET state_transport_grpc_test)

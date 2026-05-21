@@ -25,7 +25,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _adapter = std::make_unique<state_sync_adapter>(ctx, _root_path,
                                                   _local_node_id);
   _replica = std::make_unique<state_replica>(_local_node_id);
-  _authority = std::make_unique<state_authority_map>();
+  _delegation = std::make_unique<state_delegation_manager>(_cluster_id);
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
   _message_bus = std::make_unique<state_message_bus>();
@@ -75,6 +75,16 @@ bool state_cluster_shard::resolve_conflicts() const noexcept {
   return _resolve_conflicts;
 }
 
+void state_cluster_shard::set_enforce_delegation(bool enforce) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _enforce_delegation = enforce;
+}
+
+bool state_cluster_shard::enforce_delegation() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _enforce_delegation;
+}
+
 bool state_cluster_shard::ingest_remote_message(const state_message &m) {
   if (!m.cluster_id.empty() && m.cluster_id != _cluster_id)
     return false;
@@ -97,21 +107,44 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   // cluster_id is rejected.
   bool enforce_auth;
   bool enforce_policy;
+  bool enforce_deleg;
   bool resolve_conf;
   {
     std::lock_guard<std::mutex> lk(_mutex);
     enforce_auth = _enforce_authority;
     enforce_policy = _enforce_write_policy;
+    enforce_deleg = _enforce_delegation;
     resolve_conf = _resolve_conflicts;
   }
   if (enforce_auth) {
-    auto auth = _authority->resolve(m.path);
+    auto auth = _delegation->authority().resolve(m.path);
     if (auth.valid && !auth.cluster_id.empty() &&
         auth.cluster_id != _cluster_id) {
       r.rejected = true;
       r.reject_reason = "path '" + m.path + "' is owned by cluster '" +
                         auth.cluster_id + "', not '" + _cluster_id + "'";
       _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
+      return r;
+    }
+  }
+  if (enforce_deleg) {
+    auto rd = _delegation->route(m.path);
+    if (rd.kind == state_delegation_manager::route_kind::remote) {
+      r.rejected = true;
+      r.reject_reason = "path '" + m.path + "' delegated to cluster '" +
+                        rd.cluster_id + "' (prefix '" + rd.matched_prefix +
+                        "')";
+      _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
+      _ctr_delegation_routed.fetch_add(1, std::memory_order_relaxed);
+      return r;
+    }
+    if (rd.kind == state_delegation_manager::route_kind::expired) {
+      r.rejected = true;
+      r.reject_reason = "delegation lease expired for prefix '" +
+                        rd.matched_prefix + "' (cluster '" + rd.cluster_id +
+                        "')";
+      _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
+      _ctr_delegation_expired.fetch_add(1, std::memory_order_relaxed);
       return r;
     }
   }

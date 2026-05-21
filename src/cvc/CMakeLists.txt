@@ -35,6 +35,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_peer_registry.h
   ../../inc/cvc/state_write_policy.h
   ../../inc/cvc/state_distributed_metrics.h
+  ../../inc/cvc/state_delegation_manager.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
   ../../inc/cvc/state_transport_ipc.h
@@ -82,6 +83,7 @@ set(SOURCE_FILES
   state_peer_registry.cpp
   state_write_policy.cpp
   state_distributed_metrics.cpp
+  state_delegation_manager.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
