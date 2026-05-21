@@ -37,6 +37,7 @@
 #include <cvc/utility.h>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 
 namespace CVC_NAMESPACE {
 // SEPARATOR is now an inline variable defined in state.h (C++17).
@@ -654,6 +655,166 @@ state &state::operator()(const std::string &childname) {
       _initialized = true;
       return (*_children[nearest])(join(keys, SEPARATOR));
     }
+  }
+}
+
+// ----------------
+// state::linkTo / clearLink / isLink / linkTarget / resolveLink
+// ----------------
+// Purpose:
+//   Phase 8 link-node operations. linkTo() marks this node as a
+//   reference to another absolute path; resolveLink() walks the
+//   chain with cycle detection and a hop budget.
+// ----------------
+
+namespace {
+
+// Normalize a state path: trim, drop leading/trailing/duplicate
+// SEPARATORs, return the canonical dot-separated form. Empty
+// string means "the root".
+std::string normalize_state_path(const std::string &p) {
+  using namespace boost::algorithm;
+  std::string s = p;
+  trim(s);
+  std::vector<std::string> keys;
+  split(keys, s, is_any_of(state::SEPARATOR));
+  std::vector<std::string> kept;
+  kept.reserve(keys.size());
+  for (auto &k : keys) {
+    trim(k);
+    if (!k.empty())
+      kept.push_back(k);
+  }
+  return join(kept, state::SEPARATOR);
+}
+
+} // namespace
+
+state &state::linkTo(const std::string &target_path) {
+  std::string normalized = normalize_state_path(target_path);
+  bool changed = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkTarget != normalized) {
+      _linkTarget = normalized;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      _initialized = true;
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkChanged();
+    if (parent())
+      parent()->childChanged(name());
+  }
+  return *this;
+}
+
+bool state::clearLink() {
+  bool was_link = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    was_link = !_linkTarget.empty();
+    if (was_link) {
+      _linkTarget.clear();
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+    }
+  }
+  if (was_link) {
+    linkChanged();
+    if (parent())
+      parent()->childChanged(name());
+  }
+  return was_link;
+}
+
+bool state::isLink() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return !_linkTarget.empty();
+}
+
+std::string state::linkTarget() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return _linkTarget;
+}
+
+state *state::findDescendant(const std::string &path) {
+  using namespace boost::algorithm;
+  std::string normalized = normalize_state_path(path);
+  if (normalized.empty())
+    return this;
+  std::vector<std::string> keys;
+  split(keys, normalized, is_any_of(SEPARATOR));
+  state *cur = this;
+  for (auto &k : keys) {
+    trim(k);
+    if (k.empty())
+      continue;
+    boost::mutex::scoped_lock lock(cur->_mutex);
+    auto it = cur->_children.find(k);
+    if (it == cur->_children.end() || !it->second) {
+      return nullptr;
+    }
+    cur = it->second.get();
+  }
+  return cur;
+}
+
+state::link_resolution state::resolveLink(std::size_t hop_budget) {
+  link_resolution result;
+
+  // The root for absolute target lookup is the per-app root.
+  state &root = state::instance(_ctx);
+
+  // Visited-set keyed by absolute path. Single-tree for now;
+  // when multi-tree lands the key extends to (tree_id, path).
+  std::unordered_set<std::string> seen;
+
+  state *cur = this;
+  // Record the starting node's path so cycles that loop back to
+  // the start (including a self-link) are detected as cycles
+  // rather than mistakenly classified as "resolved".
+  seen.insert(cur->fullName());
+  result.visited.push_back(cur->fullName());
+
+  while (true) {
+    std::string target;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      target = cur->_linkTarget;
+    }
+    if (target.empty()) {
+      // Terminal node: not a link.
+      result.kind = (cur == this) ? link_resolution_kind::none
+                                  : link_resolution_kind::resolved;
+      result.target = cur;
+      return result;
+    }
+
+    if (result.hops >= hop_budget) {
+      result.kind = link_resolution_kind::budget_exhausted;
+      result.target = nullptr;
+      return result;
+    }
+
+    state *next = root.findDescendant(target);
+    if (next == nullptr) {
+      result.kind = link_resolution_kind::broken;
+      result.target = nullptr;
+      result.visited.push_back(target);
+      return result;
+    }
+    ++result.hops;
+
+    std::string next_path = next->fullName();
+    if (!seen.insert(next_path).second) {
+      result.kind = link_resolution_kind::cycle_detected;
+      result.target = nullptr;
+      result.visited.push_back(next_path);
+      return result;
+    }
+    result.visited.push_back(next_path);
+    cur = next;
   }
 }
 

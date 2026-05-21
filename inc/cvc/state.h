@@ -338,7 +338,6 @@ public:
   std::vector<std::string> children(const std::string &re = std::string());
   size_t numChildren();
   map_change_signal childChanged;
-
   operator std::string() { return value(); }
 
   signal destroyed;
@@ -398,6 +397,62 @@ public:
   static bool isValidStateName(const std::string &name);
   static std::string sanitizeStateName(const std::string &name);
 
+  // -------- Phase 8: link nodes --------
+  //
+  // A link node holds an absolute path (relative to the app root)
+  // pointing to another node. linkTo() makes this node a link;
+  // clearLink() removes the link mark. A node may simultaneously
+  // be a link and hold a value/children — resolveLink() ignores
+  // the latter and follows the link target instead.
+  //
+  // The owning cluster_id is intentionally NOT part of the link
+  // record. Cluster ownership of a path is a runtime property
+  // resolved against state_authority_map; storing it here would
+  // make link records stale every time delegation moved.
+
+  enum class link_resolution_kind {
+    resolved,         // chain ended at a non-link node
+    cycle_detected,   // a path was revisited within the hop budget
+    budget_exhausted, // hop budget hit before cycle or terminal node
+    broken,           // a link target does not exist in this tree
+    none              // start node was not a link (alias for resolved)
+  };
+
+  struct link_resolution {
+    link_resolution_kind kind = link_resolution_kind::resolved;
+    state *target = nullptr;
+    std::vector<std::string> visited; // ordered absolute paths
+    std::size_t hops = 0;
+  };
+
+  // Mark this node as a link to `target_path`. `target_path` is
+  // interpreted relative to the app root (leading SEPARATORs are
+  // ignored, empty means root).
+  state &linkTo(const std::string &target_path);
+
+  // Remove the link mark. The node's children/value are
+  // preserved. Returns true if the node was a link.
+  bool clearLink();
+
+  // True if this node currently has a link target.
+  bool isLink() const;
+
+  // The current link target path (empty if not a link).
+  std::string linkTarget() const;
+
+  signal linkChanged;
+
+  // Walk the link chain starting from this node. Stops at the
+  // first non-link node, on a revisit, on hop budget exhaustion,
+  // or on a missing target. Does not create nodes along the way:
+  // a target that does not exist returns kind=broken.
+  link_resolution resolveLink(std::size_t hop_budget = 64);
+
+  // Resolve a path relative to the app root WITHOUT creating any
+  // missing nodes. Returns nullptr when any segment is absent.
+  // Useful for link resolution and any other read-only navigation.
+  state *findDescendant(const std::string &path);
+
   // Register a callback fired exactly once per process when the
   // first state root is created (legacy global-singleton form).
   static void on_startup(const nullary_func &init_func);
@@ -426,6 +481,9 @@ protected:
   bool _hidden;
   bool _readOnly;
   child_map _children;
+
+  // Phase 8: empty when this node is not a link.
+  std::string _linkTarget;
 
   bool _initialized;
 
