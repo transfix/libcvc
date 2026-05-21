@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -999,6 +1001,99 @@ size_t state::numChildren() {
   boost::this_thread::interruption_point();
   boost::mutex::scoped_lock lock(_mutex);
   return _children.size();
+}
+
+// -------- Expiring state --------
+
+state &state::expireAt(boost::posix_time::ptime when) {
+  // Root cannot be expired \u2014 there is nobody to detach it from.
+  if (_parent == NULL)
+    return *this;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    _expiryTime = when;
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+  }
+  return *this;
+}
+
+state &state::expireAfter(boost::posix_time::time_duration d) {
+  return expireAt(boost::posix_time::microsec_clock::universal_time() + d);
+}
+
+state &state::clearExpiry() {
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    _expiryTime = boost::posix_time::ptime();  // not_a_date_time
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+  }
+  return *this;
+}
+
+bool state::hasExpiry() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return !_expiryTime.is_not_a_date_time();
+}
+
+boost::posix_time::ptime state::expiryTime() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return _expiryTime;
+}
+
+bool state::isExpired() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  if (_expiryTime.is_not_a_date_time())
+    return false;
+  return boost::posix_time::microsec_clock::universal_time() >= _expiryTime;
+}
+
+std::size_t state::sweepExpired() {
+  boost::this_thread::interruption_point();
+
+  // Snapshot direct children under our mutex so recursion happens
+  // without holding the parent lock (avoids deadlock if subscribers
+  // re-enter via signals).
+  std::vector<state_ptr> snapshot;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    snapshot.reserve(_children.size());
+    BOOST_FOREACH (child_map::value_type &val, _children) {
+      snapshot.push_back(val.second);
+    }
+  }
+
+  std::size_t removed = 0;
+  BOOST_FOREACH (state_ptr &c, snapshot) {
+    removed += c->sweepExpired();
+  }
+
+  // Now collect direct children that are themselves expired and
+  // erase them from our child map. Holding shared_ptrs in
+  // to_remove keeps them alive long enough to fire `expiring`.
+  std::vector<std::pair<std::string, state_ptr>> to_remove;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    for (child_map::iterator it = _children.begin(); it != _children.end();) {
+      if (it->second->isExpired()) {
+        to_remove.push_back(std::make_pair(it->first, it->second));
+        _children.erase(it++);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  // Fire `expiring` while the node is still alive, then drop our
+  // reference so the dtor (and `destroyed`) fires next, then
+  // notify our own parent chain that our child set changed.
+  for (std::size_t i = 0; i < to_remove.size(); ++i) {
+    to_remove[i].second->expiring();
+    childChanged(to_remove[i].first);
+    to_remove[i].second.reset();
+    ++removed;
+  }
+
+  return removed;
 }
 
 // -----------------

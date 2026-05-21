@@ -494,6 +494,50 @@ public:
               const std::string &content_type = std::string("text/plain"),
               std::size_t hop_budget = 64);
 
+  // -------- Expiring state --------
+  //
+  // Mark this node to be deleted at a future absolute UTC time.
+  // Expiry is lazy: nothing happens until something walks the
+  // tree (sweepExpired() on this node or any ancestor). On
+  // expiry the `expiring` signal fires — with the node still
+  // attached and still readable — and then the node (and its
+  // entire subtree) is erased from its parent's child map,
+  // which fires `destroyed` via the dtor.
+  //
+  // The root state cannot be expired; calling expireAt on a
+  // node with no parent is a no-op and returns *this.
+  state &expireAt(boost::posix_time::ptime when);
+
+  // Convenience: expireAt(microsec_clock::universal_time() + d).
+  state &expireAfter(boost::posix_time::time_duration d);
+
+  // Remove the expiry mark.
+  state &clearExpiry();
+
+  // True if an expiry time has been set on this node.
+  bool hasExpiry() const;
+
+  // The configured expiry instant, or not_a_date_time when
+  // hasExpiry() is false.
+  boost::posix_time::ptime expiryTime() const;
+
+  // True iff hasExpiry() && now >= expiryTime().
+  bool isExpired() const;
+
+  // Walk this subtree (post-order) and remove every expired
+  // descendant. For each removed node, fires `expiring` first
+  // (subscribers may detach, snapshot, log, etc.), then erases
+  // it from its parent's child map (which fires `destroyed`).
+  // Returns the number of nodes removed. Safe to call
+  // concurrently with normal traffic.
+  std::size_t sweepExpired();
+
+  // Fired when a node is about to be detached due to expiry.
+  // Subscribers see the node still attached and readable.
+  // Always followed by `destroyed` once the parent erases the
+  // last shared_ptr.
+  signal expiring;
+
   // Register a callback fired exactly once per app the first time
   // that app's root state is created. This is the legacy nullary
   // form: it does not receive the owning app, so callers that
@@ -533,6 +577,9 @@ protected:
 
   // Phase 8: empty when this node is not a link.
   std::string _linkTarget;
+
+  // Expiring state: not_a_date_time when no expiry is set.
+  boost::posix_time::ptime _expiryTime;
 
   bool _initialized;
 
