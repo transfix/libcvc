@@ -1,0 +1,88 @@
+// Copyright 2026 The University of Texas at Austin
+//
+// This file is part of libcvc.
+//
+// libcvc is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License version 2.1 as published by the Free Software Foundation.
+
+syntax = "proto3";
+
+package cvc.transport.v1;
+
+enum MutationOp {
+  MUTATION_OP_UNSPECIFIED = 0;
+  MUTATION_OP_SET_VALUE = 1;
+  MUTATION_OP_SET_DATA = 2;
+  MUTATION_OP_SET_COMMENT = 3;
+  MUTATION_OP_SET_HIDDEN = 4;
+  MUTATION_OP_SET_READ_ONLY = 5;
+  MUTATION_OP_TOUCH = 6;
+  MUTATION_OP_RESET_NODE = 7;
+  MUTATION_OP_DELETE_SUBTREE = 8;
+  MUTATION_OP_DELEGATE_SUBTREE = 9;
+  MUTATION_OP_REVOKE_DELEGATION = 10;
+}
+
+message BlobRef {
+  string digest = 1;
+  uint64 size_bytes = 2;
+  string codec = 3;
+}
+
+message Payload {
+  oneof kind {
+    bool none = 1; // sentinel for state_payload_kind::none
+    bytes inline_bytes = 2;
+    BlobRef blob = 3;
+  }
+}
+
+message Mutation {
+  string cluster_id = 1;
+  string tree_id = 2;
+  string origin_node_id = 3;
+  uint64 sequence = 4;
+  string mutation_id = 5;
+  string path = 6;
+  MutationOp op = 7;
+  string type_name = 8;
+  string string_value = 9;
+  Payload payload = 10;
+  bool latest_value_only = 11;
+}
+
+message Hello {
+  string node_id = 1;
+  string cluster_id = 2;
+}
+
+// Out-of-band message that does NOT modify state. Carried alongside
+// mutations on the same bidi stream; receiving peers admit via
+// state_message_bus dedup, never touch journals or vector clocks.
+message Message {
+  string cluster_id = 1;
+  string origin_node_id = 2;
+  string message_id = 3;
+  string path = 4;
+  uint32 ttl_hops = 5;
+  string content_type = 6;
+  string string_value = 7;
+  bytes bytes_payload = 8;
+}
+
+// Single bidirectional frame envelope. Both client and server write
+// frames; same-cluster routing happens above this layer.
+message Frame {
+  oneof kind {
+    Hello hello = 1;
+    Mutation mutation = 2;
+    Message message = 3;
+  }
+}
+
+// Symmetric bidirectional channel. Each peer pair establishes one
+// long-lived stream; mutation traffic flows both ways. The first
+// frame each side sends is a Hello so the remote can record the
+// peer's node_id / cluster_id for diagnostics.
+service StateTransport { rpc Channel(stream Frame) returns (stream Frame); }

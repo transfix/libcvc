@@ -338,7 +338,6 @@ public:
   std::vector<std::string> children(const std::string &re = std::string());
   size_t numChildren();
   map_change_signal childChanged;
-
   operator std::string() { return value(); }
 
   signal destroyed;
@@ -398,8 +397,190 @@ public:
   static bool isValidStateName(const std::string &name);
   static std::string sanitizeStateName(const std::string &name);
 
-  // Register a callback fired exactly once per process when the
-  // first state root is created (legacy global-singleton form).
+  // -------- Phase 8: link nodes --------
+  //
+  // A link node holds an absolute path (relative to the app root)
+  // pointing to another node. linkTo() makes this node a link;
+  // clearLink() removes the link mark. A node may simultaneously
+  // be a link and hold a value/children — resolveLink() ignores
+  // the latter and follows the link target instead.
+  //
+  // The owning cluster_id is intentionally NOT part of the link
+  // record. Cluster ownership of a path is a runtime property
+  // resolved against state_authority_map; storing it here would
+  // make link records stale every time delegation moved.
+
+  enum class link_resolution_kind {
+    resolved,         // chain ended at a non-link node
+    cycle_detected,   // a path was revisited within the hop budget
+    budget_exhausted, // hop budget hit before cycle or terminal node
+    broken,           // a link target does not exist in this tree
+    none              // start node was not a link (alias for resolved)
+  };
+
+  struct link_resolution {
+    link_resolution_kind kind = link_resolution_kind::resolved;
+    state *target = nullptr;
+    std::vector<std::string> visited; // ordered absolute paths
+    std::size_t hops = 0;
+  };
+
+  // Mark this node as a link to `target_path`. `target_path` is
+  // interpreted relative to the app root (leading SEPARATORs are
+  // ignored, empty means root).
+  //
+  // Linking to the root is a valid operation. Pass "." (DNS-style)
+  // or any separator-only string to express it; the canonical
+  // stored form is ".". A genuinely empty or whitespace-only
+  // input is treated as "clear" (stores ""), equivalent to
+  // clearLink(). _linkTarget.empty() therefore still means "not
+  // a link"; "." means "link to root".
+  state &linkTo(const std::string &target_path);
+
+  // Link visibility mode (Phase 8 slice 4b):
+  //   * opaque (default): callers see a link node. Reading value()
+  //     returns this node's own _value; resolvedValue() also
+  //     returns the link's own value. The only way to reach the
+  //     target is the explicit resolveLink() walker.
+  //   * transparent: callers see through to the target's value.
+  //     resolvedValue() walks the link chain (with the same
+  //     cycle/budget guarantees as resolveLink) and returns the
+  //     terminal node's value. value() still returns this node's
+  //     own _value for backwards compatibility; callers that
+  //     want pass-through reads must use resolvedValue().
+  //
+  // The mode is per-link record. clearLink() resets the mode to
+  // opaque. Changing the mode fires linkChanged() and the parent
+  // childChanged() the same way changing the target does.
+  enum class link_mode { opaque, transparent };
+
+  // Overload that records the link target AND its mode in one
+  // call. Equivalent to linkTo(target_path) followed by
+  // setLinkMode(mode), but emits one linkChanged() not two.
+  state &linkTo(const std::string &target_path, link_mode mode);
+
+  // Read/write the mode without changing the target.
+  link_mode linkMode() const;
+  state &setLinkMode(link_mode mode);
+
+  // Read this node's value, following the link chain when the
+  // node is a transparent link. Returns the terminal node's
+  // value when resolution succeeds; on broken / cycle /
+  // budget_exhausted resolutions, falls back to this node's own
+  // value() for backwards compatibility. For opaque links and
+  // non-links, returns this node's own value().
+  std::string resolvedValue(std::size_t hop_budget = 64);
+
+  // Remove the link mark. The node's children/value are
+  // preserved. Returns true if the node was a link.
+  bool clearLink();
+
+  // True if this node currently has a link target.
+  bool isLink() const;
+
+  // The current link target path (empty if not a link).
+  std::string linkTarget() const;
+
+  signal linkChanged;
+
+  // Walk the link chain starting from this node. Stops at the
+  // first non-link node, on a revisit, on hop budget exhaustion,
+  // or on a missing target. Does not create nodes along the way:
+  // a target that does not exist returns kind=broken.
+  link_resolution resolveLink(std::size_t hop_budget = 64);
+
+  // Resolve a path relative to the app root WITHOUT creating any
+  // missing nodes. Returns nullptr when any segment is absent.
+  // Useful for link resolution and any other read-only navigation.
+  state *findDescendant(const std::string &path);
+
+  // -------- Phase 8 slice 2: cluster-agnostic out-of-band send --------
+  //
+  // sendMessage() delivers an out-of-band message at this node's
+  // path (after following any link chain) without the caller
+  // naming a cluster_id. The shard registered as the default for
+  // this state's app context (see state_cluster_shard::
+  // default_for) looks up the owning cluster via its authority
+  // map and routes accordingly. With no shard installed the call
+  // is a structured no-op (status=no_shard).
+
+  struct send_message_result {
+    enum class status_kind {
+      delivered,        // routing succeeded
+      no_shard,         // no default shard registered for app ctx
+      broken_link,      // a link in the chain points nowhere
+      cycle_detected,   // link chain looped
+      budget_exhausted, // hop budget hit while resolving link
+      duplicate_local,  // local bus reported a dedup hit
+      no_transport,     // owner is remote but no transport set
+    };
+    status_kind status = status_kind::delivered;
+    std::string resolved_path;      // path actually addressed
+    std::string owner_cluster_id;   // resolved owner of that path
+    bool owner_is_local = true;     // owner matches default shard
+    std::size_t local_admitted = 0; // 1 if local bus admitted
+    std::size_t peers_delivered = 0;
+    std::size_t peers_targeted = 0;
+  };
+
+  send_message_result sendMessage(const std::string &payload,
+                                  const std::string &content_type = std::string("text/plain"),
+                                  std::size_t hop_budget = 64);
+
+  // -------- Expiring state --------
+  //
+  // Mark this node to be deleted at a future absolute UTC time.
+  // Expiry is lazy: nothing happens until something walks the
+  // tree (sweepExpired() on this node or any ancestor). On
+  // expiry the `expiring` signal fires — with the node still
+  // attached and still readable — and then the node (and its
+  // entire subtree) is erased from its parent's child map,
+  // which fires `destroyed` via the dtor.
+  //
+  // The root state cannot be expired; calling expireAt on a
+  // node with no parent is a no-op and returns *this.
+  state &expireAt(boost::posix_time::ptime when);
+
+  // Convenience: expireAt(microsec_clock::universal_time() + d).
+  state &expireAfter(boost::posix_time::time_duration d);
+
+  // Remove the expiry mark.
+  state &clearExpiry();
+
+  // True if an expiry time has been set on this node.
+  bool hasExpiry() const;
+
+  // The configured expiry instant, or not_a_date_time when
+  // hasExpiry() is false.
+  boost::posix_time::ptime expiryTime() const;
+
+  // True iff hasExpiry() && now >= expiryTime().
+  bool isExpired() const;
+
+  // Walk this subtree (post-order) and remove every expired
+  // descendant. For each removed node, fires `expiring` first
+  // (subscribers may detach, snapshot, log, etc.), then erases
+  // it from its parent's child map (which fires `destroyed`).
+  // Returns the number of nodes removed. Safe to call
+  // concurrently with normal traffic.
+  std::size_t sweepExpired();
+
+  // Fired when a node is about to be detached due to expiry.
+  // Subscribers see the node still attached and readable.
+  // Always followed by `destroyed` once the parent erases the
+  // last shared_ptr.
+  signal expiring;
+
+  // Register a callback fired exactly once per app the first time
+  // that app's root state is created. This is the legacy nullary
+  // form: it does not receive the owning app, so callers that
+  // need it should prefer the app_init_func overload below.
+  //
+  // Semantics: "once per app", NOT "once per process". Each
+  // distinct app whose root is lazily constructed will fire the
+  // registered callbacks exactly once. The previous global
+  // "first app wins" behavior was a singleton assumption and has
+  // been removed.
   static void on_startup(const nullary_func &init_func);
 
   // Register a callback fired once for every distinct app whose
@@ -427,6 +608,13 @@ protected:
   bool _readOnly;
   child_map _children;
 
+  // Phase 8: empty when this node is not a link.
+  std::string _linkTarget;
+  link_mode _linkMode = link_mode::opaque;
+
+  // Expiring state: not_a_date_time when no expiry is set.
+  boost::posix_time::ptime _expiryTime;
+
   bool _initialized;
 
   // Condition variables for futures/blocking operations
@@ -434,9 +622,6 @@ protected:
   boost::condition_variable _dataCondition;
 
   static state_ptr instancePtr(app &ctx);
-  static boost::mutex _instanceMutex;
-  static boost::mutex _startupMutex;
-  static bool _startupFired;
 
 private:
   state(const state &);
