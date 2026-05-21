@@ -8,15 +8,13 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_replica.h>
-
 #include <algorithm>
+#include <cvc/state_replica.h>
 #include <utility>
 
 namespace CVC_NAMESPACE {
 
-state_replica::state_replica(std::string local_node_id)
-    : _local_node_id(std::move(local_node_id)) {
+state_replica::state_replica(std::string local_node_id) : _local_node_id(std::move(local_node_id)) {
   // Local node always counts as a peer of itself, alive.
   peer_info self;
   self.node_id = _local_node_id;
@@ -72,8 +70,7 @@ std::size_t state_replica::peer_count() const {
   return _peers.size();
 }
 
-std::uint64_t state_replica::set_last_applied(const std::string &node_id,
-                                              std::uint64_t sequence) {
+std::uint64_t state_replica::set_last_applied(const std::string &node_id, std::uint64_t sequence) {
   std::lock_guard<std::mutex> lk(_mutex);
   auto it = _peers.find(node_id);
   if (it == _peers.end()) {
@@ -103,30 +100,27 @@ void state_replica::observe_local(std::uint64_t local_sequence) {
     slot = local_sequence;
 }
 
-void state_replica::observe_remote(const std::string &node_id,
-                                   std::uint64_t sequence) {
+void state_replica::observe_remote(const std::string &node_id, std::uint64_t sequence) {
   std::lock_guard<std::mutex> lk(_mutex);
   auto &slot = _clock[node_id];
   if (sequence > slot)
     slot = sequence;
 }
 
-std::unordered_map<std::string, std::uint64_t>
-state_replica::clock_snapshot() const {
+std::unordered_map<std::string, std::uint64_t> state_replica::clock_snapshot() const {
   std::lock_guard<std::mutex> lk(_mutex);
   return _clock;
 }
 
-std::uint64_t
-state_replica::clock_component(const std::string &node_id) const {
+std::uint64_t state_replica::clock_component(const std::string &node_id) const {
   std::lock_guard<std::mutex> lk(_mutex);
   auto it = _clock.find(node_id);
   return (it == _clock.end()) ? 0u : it->second;
 }
 
-state_replica::clock_compare state_replica::compare_clocks(
-    const std::unordered_map<std::string, std::uint64_t> &a,
-    const std::unordered_map<std::string, std::uint64_t> &b) {
+state_replica::clock_compare
+state_replica::compare_clocks(const std::unordered_map<std::string, std::uint64_t> &a,
+                              const std::unordered_map<std::string, std::uint64_t> &b) {
   bool a_lt = false;
   bool b_lt = false;
   // Walk the union of node_ids.
@@ -156,8 +150,7 @@ state_replica::clock_compare state_replica::compare_clocks(
   return clock_compare::concurrent;
 }
 
-bool state_replica::should_replace(const state_mutation &current,
-                                   const state_mutation &incoming) {
+bool state_replica::should_replace(const state_mutation &current, const state_mutation &incoming) {
   if (incoming.origin_node_id == current.origin_node_id)
     return incoming.sequence > current.sequence;
   // Different origins: lexicographic origin then sequence.
@@ -166,9 +159,7 @@ bool state_replica::should_replace(const state_mutation &current,
   return incoming.sequence > current.sequence;
 }
 
-bool state_replica::seen(const std::string &origin_node_id,
-                         std::uint64_t sequence,
-                         bool record) {
+bool state_replica::seen(const std::string &origin_node_id, std::uint64_t sequence, bool record) {
   std::lock_guard<std::mutex> lk(_mutex);
   auto &vec = _seen[origin_node_id];
   auto it = std::lower_bound(vec.begin(), vec.end(), sequence);

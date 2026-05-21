@@ -21,13 +21,11 @@
 //     terminal nodes;
 //   - produce stable, deterministic ordering across runs.
 
+#include <algorithm>
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_distributed_admin.h>
-
 #include <gtest/gtest.h>
-
-#include <algorithm>
 
 using cvc::state;
 using cvc::state_distributed_admin;

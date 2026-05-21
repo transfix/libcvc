@@ -8,18 +8,16 @@
   2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_sync_adapter.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_sync_adapter.h>
+#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -164,8 +162,7 @@ TEST(StateSyncAdapterTest, OnRemoteAppliedCallbackFires) {
 
   cvc::state_sync_adapter adapter(a, root, "nodeA");
   std::atomic<int> fired{0};
-  adapter.set_on_remote_applied(
-      [&](const cvc::state_mutation &) { fired.fetch_add(1); });
+  adapter.set_on_remote_applied([&](const cvc::state_mutation &) { fired.fetch_add(1); });
   adapter.attach();
 
   cvc::state_mutation m;
@@ -210,8 +207,7 @@ TEST(StateSyncAdapterStressTest, OptionalHighChurnStress) {
   for (int t = 0; t < kThreads; ++t) {
     threads.emplace_back([&, t]() {
       for (int i = 0; i < kPerThread; ++i) {
-        std::string path = root + ".w" + std::to_string(t) + "." +
-                           std::to_string(i % 32);
+        std::string path = root + ".w" + std::to_string(t) + "." + std::to_string(i % 32);
         cvc::state::instance(a)(path).value(std::to_string(i));
       }
     });
@@ -235,17 +231,12 @@ TEST(StateSyncAdapterPerformanceTest, OptionalLocalChangeThroughputSmoke) {
   const int kIters = 20000;
   auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kIters; ++i) {
-    cvc::state::instance(a)(root + ".k" + std::to_string(i % 64))
-        .value(std::to_string(i));
+    cvc::state::instance(a)(root + ".k" + std::to_string(i % 64)).value(std::to_string(i));
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
   double rate = kIters / secs;
-  std::cerr << "[adapter perf] " << kIters << " local sets in " << secs
-            << "s (" << rate << "/s)\n";
-  EXPECT_GE(adapter.local_mutation_count(),
-            static_cast<std::uint64_t>(kIters - 64));
+  std::cerr << "[adapter perf] " << kIters << " local sets in " << secs << "s (" << rate << "/s)\n";
+  EXPECT_GE(adapter.local_mutation_count(), static_cast<std::uint64_t>(kIters - 64));
   EXPECT_LT(secs, 10.0);
 }

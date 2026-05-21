@@ -11,12 +11,11 @@
 #ifndef __CVC_STATE_MESSAGE_BUS_H__
 #define __CVC_STATE_MESSAGE_BUS_H__
 
-#include <cvc/namespace.h>
-#include <cvc/state_message.h>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/namespace.h>
+#include <cvc/state_message.h>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -99,8 +98,7 @@ public:
   // Test helper: returns true iff prefix matches path under the
   // dot-segment rule (exposed so tests can pin the matching
   // semantics).
-  static bool prefix_matches(const std::string &prefix,
-                             const std::string &path) noexcept;
+  static bool prefix_matches(const std::string &prefix, const std::string &path) noexcept;
 
 private:
   struct subscriber {

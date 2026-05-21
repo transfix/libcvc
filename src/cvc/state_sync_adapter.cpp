@@ -13,12 +13,10 @@
   Lesser General Public License for more details.
 */
 
-#include <cvc/state_sync_adapter.h>
-
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_distributed_admin.h>
-
+#include <cvc/state_sync_adapter.h>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -43,8 +41,7 @@ struct thread_suppression_guard {
 
 // ---------------- suppression_scope ----------------
 
-state_sync_adapter::suppression_scope::suppression_scope(state_sync_adapter &a)
-    : _adapter(a) {
+state_sync_adapter::suppression_scope::suppression_scope(state_sync_adapter &a) : _adapter(a) {
   ++t_suppression_depth;
 }
 
@@ -55,21 +52,11 @@ state_sync_adapter::suppression_scope::~suppression_scope() {
 
 // ---------------- state_sync_adapter ----------------
 
-state_sync_adapter::state_sync_adapter(app &ctx,
-                                       std::string root_path,
-                                       std::string local_node_id)
-    : _ctx(ctx),
-      _root_path(std::move(root_path)),
-      _local_node_id(std::move(local_node_id)),
-      _journal(_local_node_id),
-      _router(),
-      _attached(false),
-      _local_count(0),
-      _remote_count(0) {}
+state_sync_adapter::state_sync_adapter(app &ctx, std::string root_path, std::string local_node_id)
+    : _ctx(ctx), _root_path(std::move(root_path)), _local_node_id(std::move(local_node_id)),
+      _journal(_local_node_id), _router(), _attached(false), _local_count(0), _remote_count(0) {}
 
-state_sync_adapter::~state_sync_adapter() {
-  detach();
-}
+state_sync_adapter::~state_sync_adapter() { detach(); }
 
 bool state_sync_adapter::is_attached() const noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
@@ -99,8 +86,7 @@ std::uint64_t state_sync_adapter::remote_mutation_count() const noexcept {
   return _remote_count.load(std::memory_order_relaxed);
 }
 
-std::uint64_t
-state_sync_adapter::forwarded_through_link_count() const noexcept {
+std::uint64_t state_sync_adapter::forwarded_through_link_count() const noexcept {
   return _forwarded_through_link_count.load(std::memory_order_relaxed);
 }
 
@@ -113,8 +99,7 @@ state_sync_adapter::subscriptions_for_path(const std::string &path) const {
   // the aliased path. Dedupe by id so a subscription matching both
   // directly and via an alias is reported once.
   state &root = state::instance(_ctx);
-  std::vector<std::string> aliases =
-      state_distributed_admin::transparent_link_aliases(root, path);
+  std::vector<std::string> aliases = state_distributed_admin::transparent_link_aliases(root, path);
   if (aliases.empty())
     return direct;
 
@@ -135,8 +120,7 @@ state_sync_adapter::subscriptions_for_path(const std::string &path) const {
     }
   }
   if (forwarded_added > 0)
-    _forwarded_through_link_count.fetch_add(forwarded_added,
-                                            std::memory_order_relaxed);
+    _forwarded_through_link_count.fetch_add(forwarded_added, std::memory_order_relaxed);
   return merged;
 }
 
@@ -144,8 +128,7 @@ bool state_sync_adapter::current_thread_suppressed() const noexcept {
   return t_suppression_depth > 0;
 }
 
-std::string state_sync_adapter::join_path(const std::string &parent,
-                                          const std::string &child) {
+std::string state_sync_adapter::join_path(const std::string &parent, const std::string &child) {
   if (parent.empty())
     return child;
   if (child.empty())
@@ -159,9 +142,7 @@ void state_sync_adapter::attach() {
     return;
   _attached = true;
 
-  state &root = (_root_path.empty())
-                    ? state::instance(_ctx)
-                    : state::instance(_ctx)(_root_path);
+  state &root = (_root_path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(_root_path);
   // attach_node will recurse over existing children; new children
   // are caught lazily via the childChanged hook installed on each
   // observed node.
@@ -188,8 +169,7 @@ void state_sync_adapter::detach() {
   }
 }
 
-void state_sync_adapter::attach_node(state &s,
-                                     const std::string &full_path) {
+void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
   // Skip if we've already attached to this path.
   if (_connections.find(full_path) != _connections.end())
     return;
@@ -199,9 +179,7 @@ void state_sync_adapter::attach_node(state &s,
   cs.value_changed = s.valueChanged.connect([this, path_copy]() {
     if (!_attached || current_thread_suppressed())
       return;
-    state &node = (path_copy.empty())
-                      ? state::instance(_ctx)
-                      : state::instance(_ctx)(path_copy);
+    state &node = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
     state_mutation m;
     m.path = path_copy;
     m.op = state_mutation_op::set_value;
@@ -214,19 +192,18 @@ void state_sync_adapter::attach_node(state &s,
 
   // childChanged fires on the PARENT with the child's local name
   // (not full name). Resolve to full path and attach lazily.
-  cs.child_changed = s.childChanged.connect(
-      [this, path_copy](const std::string &child_name) {
-        if (!_attached)
-          return;
-        std::string child_full = join_path(path_copy, child_name);
-        std::lock_guard<std::mutex> lk(_mutex);
-        if (!_attached)
-          return;
-        if (_connections.find(child_full) != _connections.end())
-          return;
-        state &child = state::instance(_ctx)(child_full);
-        attach_node(child, child_full);
-      });
+  cs.child_changed = s.childChanged.connect([this, path_copy](const std::string &child_name) {
+    if (!_attached)
+      return;
+    std::string child_full = join_path(path_copy, child_name);
+    std::lock_guard<std::mutex> lk(_mutex);
+    if (!_attached)
+      return;
+    if (_connections.find(child_full) != _connections.end())
+      return;
+    state &child = state::instance(_ctx)(child_full);
+    attach_node(child, child_full);
+  });
 
   _connections.emplace(full_path, std::move(cs));
 
@@ -254,19 +231,18 @@ void state_sync_adapter::attach_node(state &s,
       _local_count.fetch_add(1, std::memory_order_relaxed);
       dispatch_local(appended);
     });
-    ccs.child_changed = child.childChanged.connect(
-        [this, cpath](const std::string &child_name) {
-          if (!_attached)
-            return;
-          std::string nf = join_path(cpath, child_name);
-          std::lock_guard<std::mutex> lk(_mutex);
-          if (!_attached)
-            return;
-          if (_connections.find(nf) != _connections.end())
-            return;
-          state &nc = state::instance(_ctx)(nf);
-          attach_node(nc, nf);
-        });
+    ccs.child_changed = child.childChanged.connect([this, cpath](const std::string &child_name) {
+      if (!_attached)
+        return;
+      std::string nf = join_path(cpath, child_name);
+      std::lock_guard<std::mutex> lk(_mutex);
+      if (!_attached)
+        return;
+      if (_connections.find(nf) != _connections.end())
+        return;
+      state &nc = state::instance(_ctx)(nf);
+      attach_node(nc, nf);
+    });
     _connections.emplace(child_full, std::move(ccs));
   }
 }
@@ -294,9 +270,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
   // signal does not feed back into the journal.
   thread_suppression_guard guard;
 
-  state &node = (m.path.empty())
-                    ? state::instance(_ctx)
-                    : state::instance(_ctx)(m.path);
+  state &node = (m.path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(m.path);
   switch (m.op) {
   case state_mutation_op::set_value:
     node.value(m.string_value);

@@ -8,9 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_authority_map.h>
-
 #include <algorithm>
+#include <cvc/state_authority_map.h>
 #include <sstream>
 
 namespace CVC_NAMESPACE {
@@ -24,8 +23,7 @@ std::string state_authority_map::normalize_path(const std::string &path) {
   return s;
 }
 
-std::vector<std::string>
-state_authority_map::split_path(const std::string &path) {
+std::vector<std::string> state_authority_map::split_path(const std::string &path) {
   std::vector<std::string> out;
   std::string norm = normalize_path(path);
   if (norm.empty())
@@ -65,8 +63,7 @@ state_authority_map::find_or_create_node(const std::string &path_prefix) {
   return *cur;
 }
 
-state_authority_map::trie_node *
-state_authority_map::find_node(const std::string &path_prefix) {
+state_authority_map::trie_node *state_authority_map::find_node(const std::string &path_prefix) {
   trie_node *cur = &_root;
   for (const std::string &seg : split_path(path_prefix)) {
     auto it = cur->children.find(seg);
@@ -77,10 +74,8 @@ state_authority_map::find_node(const std::string &path_prefix) {
   return cur;
 }
 
-void state_authority_map::delegate(const std::string &path_prefix,
-                                   const std::string &cluster_id,
-                                   const std::string &endpoint,
-                                   std::uint64_t expires_at_ns) {
+void state_authority_map::delegate(const std::string &path_prefix, const std::string &cluster_id,
+                                   const std::string &endpoint, std::uint64_t expires_at_ns) {
   std::lock_guard<std::mutex> lk(_mutex);
   trie_node &node = find_or_create_node(path_prefix);
   if (!node.has_authority)
@@ -103,8 +98,7 @@ bool state_authority_map::revoke(const std::string &path_prefix) {
   return true;
 }
 
-state_authority_map::authority
-state_authority_map::resolve(const std::string &path) const {
+state_authority_map::authority state_authority_map::resolve(const std::string &path) const {
   std::lock_guard<std::mutex> lk(_mutex);
   authority best;
   // Always check root first; then walk segments and track deepest
@@ -149,14 +143,11 @@ void state_authority_map::clear() {
   _count = 0;
 }
 
-namespace {
-
-} // namespace
+namespace {} // namespace
 
 void state_authority_map::collect_snapshot(
     const state_authority_map::trie_node &node, std::string path,
-    std::vector<std::pair<std::string, state_authority_map::authority>>
-        &out) {
+    std::vector<std::pair<std::string, state_authority_map::authority>> &out) {
   if (node.has_authority)
     out.emplace_back(path, node.auth);
   for (const auto &kv : node.children) {
@@ -170,13 +161,12 @@ state_authority_map::snapshot() const {
   std::lock_guard<std::mutex> lk(_mutex);
   std::vector<std::pair<std::string, authority>> out;
   collect_snapshot(_root, std::string(), out);
-  std::sort(out.begin(), out.end(),
-            [](const auto &a, const auto &b) {
-              // Most specific (longest) first; lex as tie-breaker.
-              if (a.first.size() != b.first.size())
-                return a.first.size() > b.first.size();
-              return a.first < b.first;
-            });
+  std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+    // Most specific (longest) first; lex as tie-breaker.
+    if (a.first.size() != b.first.size())
+      return a.first.size() > b.first.size();
+    return a.first < b.first;
+  });
   return out;
 }
 

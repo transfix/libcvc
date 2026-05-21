@@ -8,9 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_delegation_manager.h>
-
 #include <chrono>
+#include <cvc/state_delegation_manager.h>
 #include <utility>
 
 namespace CVC_NAMESPACE {
@@ -18,16 +17,14 @@ namespace CVC_NAMESPACE {
 namespace {
 
 std::uint64_t default_steady_now_ns() {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
 }
 
 } // namespace
 
-state_delegation_manager::state_delegation_manager(
-    std::string local_cluster_id, clock_fn clock)
+state_delegation_manager::state_delegation_manager(std::string local_cluster_id, clock_fn clock)
     : _local_cluster_id(std::move(local_cluster_id)),
       _clock(clock ? std::move(clock) : &default_steady_now_ns) {}
 
@@ -46,11 +43,9 @@ std::uint64_t state_delegation_manager::now_ns() const {
 }
 
 void state_delegation_manager::delegate(const std::string &path_prefix,
-                                        const std::string &cluster_id,
-                                        const std::string &endpoint,
+                                        const std::string &cluster_id, const std::string &endpoint,
                                         std::uint64_t lease_duration_ns) {
-  const std::uint64_t expires_at =
-      lease_duration_ns == 0 ? 0u : now_ns() + lease_duration_ns;
+  const std::uint64_t expires_at = lease_duration_ns == 0 ? 0u : now_ns() + lease_duration_ns;
   _authority.delegate(path_prefix, cluster_id, endpoint, expires_at);
 }
 
@@ -67,8 +62,7 @@ bool state_delegation_manager::renew(const std::string &path_prefix,
   if (!cur.valid) {
     return false;
   }
-  const std::uint64_t expires_at =
-      lease_duration_ns == 0 ? 0u : now_ns() + lease_duration_ns;
+  const std::uint64_t expires_at = lease_duration_ns == 0 ? 0u : now_ns() + lease_duration_ns;
   _authority.delegate(path_prefix, cur.cluster_id, cur.endpoint, expires_at);
   return true;
 }
@@ -101,8 +95,7 @@ state_delegation_manager::route(const std::string &path) const {
       break;
     }
     if (path == p ||
-        (path.size() > p.size() && path.compare(0, p.size(), p) == 0 &&
-         path[p.size()] == '.')) {
+        (path.size() > p.size() && path.compare(0, p.size(), p) == 0 && path[p.size()] == '.')) {
       out.matched_prefix = p;
       break;
     }

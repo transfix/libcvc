@@ -13,12 +13,11 @@
 // expireAt / expireAfter / clearExpiry / hasExpiry / expiryTime /
 // isExpired / sweepExpired and the `expiring` signal.
 
-#include <cvc/app.h>
-#include <cvc/state.h>
-
 #include <atomic>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <chrono>
+#include <cvc/app.h>
+#include <cvc/state.h>
 #include <gtest/gtest.h>
 #include <thread>
 

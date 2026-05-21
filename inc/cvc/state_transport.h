@@ -11,13 +11,12 @@
 #ifndef __CVC_STATE_TRANSPORT_H__
 #define __CVC_STATE_TRANSPORT_H__
 
+#include <cstddef>
+#include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
 #include <cvc/state_message.h>
 #include <cvc/state_peer_registry.h>
-
-#include <cstddef>
-#include <cstdint>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -51,16 +50,16 @@ class state_cluster_shard;
 class state_transport {
 public:
   struct publish_stats {
-    std::size_t delivered = 0;     // peer shards that accepted (applied or duplicate)
-    std::size_t duplicates = 0;    // peer shards that reported duplicate
-    std::size_t rejected = 0;      // peer shards that rejected (authority)
+    std::size_t delivered = 0;  // peer shards that accepted (applied or duplicate)
+    std::size_t duplicates = 0; // peer shards that reported duplicate
+    std::size_t rejected = 0;   // peer shards that rejected (authority)
   };
 
   // Statistics returned by publish_message().
   struct publish_message_stats {
-    std::size_t delivered = 0;   // local shards that admitted the message
-    std::size_t duplicates = 0;  // local shards that reported duplicate
-    std::size_t peers = 0;       // remote peer streams the message was sent on
+    std::size_t delivered = 0;  // local shards that admitted the message
+    std::size_t duplicates = 0; // local shards that reported duplicate
+    std::size_t peers = 0;      // remote peer streams the message was sent on
   };
 
   virtual ~state_transport() = default;

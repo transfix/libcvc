@@ -13,7 +13,6 @@
 
 #include <cvc/app.h>
 #include <cvc/state.h>
-
 #include <gtest/gtest.h>
 
 TEST(StateLinkModeTest, DefaultsToOpaque) {
@@ -67,7 +66,7 @@ TEST(StateLinkModeTest, ResolvedValueOnOpaqueLinkReturnsOwnValue) {
   cvc::state::instance(a)("target").value(std::string("target-val"));
   auto &n = cvc::state::instance(a)("alpha");
   n.value(std::string("own"));
-  n.linkTo("target");  // opaque by default
+  n.linkTo("target"); // opaque by default
   EXPECT_EQ(n.resolvedValue(), "own");
 }
 
@@ -83,10 +82,8 @@ TEST(StateLinkModeTest, ResolvedValueOnTransparentLinkFollowsTarget) {
 TEST(StateLinkModeTest, ResolvedValueFollowsChainOfTransparentLinks) {
   cvc::app a;
   cvc::state::instance(a)("c").value(std::string("c-val"));
-  cvc::state::instance(a)("b").linkTo("c",
-                                       cvc::state::link_mode::transparent);
-  cvc::state::instance(a)("a").linkTo("b",
-                                       cvc::state::link_mode::transparent);
+  cvc::state::instance(a)("b").linkTo("c", cvc::state::link_mode::transparent);
+  cvc::state::instance(a)("a").linkTo("b", cvc::state::link_mode::transparent);
   EXPECT_EQ(cvc::state::instance(a)("a").resolvedValue(), "c-val");
 }
 
@@ -109,14 +106,11 @@ TEST(StateLinkModeTest, ResolvedValueOnSelfCycleFallsBackToOwnValue) {
 TEST(StateLinkModeTest, ResolvedValueRespectsHopBudget) {
   cvc::app a;
   cvc::state::instance(a)("c").value(std::string("c-val"));
-  cvc::state::instance(a)("b").linkTo("c",
-                                       cvc::state::link_mode::transparent);
-  cvc::state::instance(a)("a").linkTo("b",
-                                       cvc::state::link_mode::transparent);
+  cvc::state::instance(a)("b").linkTo("c", cvc::state::link_mode::transparent);
+  cvc::state::instance(a)("a").linkTo("b", cvc::state::link_mode::transparent);
   cvc::state::instance(a)("a").value(std::string("own"));
   // Budget exhausted before terminal -> fall back to own value.
-  EXPECT_EQ(cvc::state::instance(a)("a").resolvedValue(/*hop_budget=*/0),
-            "own");
+  EXPECT_EQ(cvc::state::instance(a)("a").resolvedValue(/*hop_budget=*/0), "own");
 }
 
 TEST(StateLinkModeTest, ChangingTargetWithLinkToOverloadFiresOnce) {

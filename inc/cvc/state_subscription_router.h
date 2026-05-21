@@ -1,8 +1,8 @@
 #ifndef __CVC_STATE_SUBSCRIPTION_ROUTER_H__
 #define __CVC_STATE_SUBSCRIPTION_ROUTER_H__
 
-#include <cvc/namespace.h>
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -24,8 +24,7 @@ class state_subscription_router {
 public:
   state_subscription_router();
 
-  state_subscription_id subscribe(const std::string &path_prefix,
-                                  bool include_descendants = true);
+  state_subscription_id subscribe(const std::string &path_prefix, bool include_descendants = true);
   bool unsubscribe(state_subscription_id id);
   std::vector<state_subscription> subscriptions_for(const std::string &path) const;
   void clear();

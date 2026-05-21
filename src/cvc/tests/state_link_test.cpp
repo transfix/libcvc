@@ -18,7 +18,6 @@
 
 #include <cvc/app.h>
 #include <cvc/state.h>
-
 #include <gtest/gtest.h>
 
 namespace {

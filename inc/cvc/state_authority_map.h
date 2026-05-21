@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_AUTHORITY_MAP_H__
 #define __CVC_STATE_AUTHORITY_MAP_H__
 
-#include <cvc/namespace.h>
-
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -57,10 +56,8 @@ public:
 
   // Add or replace a delegation for `path_prefix`. An empty prefix
   // means root.
-  void delegate(const std::string &path_prefix,
-                const std::string &cluster_id,
-                const std::string &endpoint = std::string(),
-                std::uint64_t expires_at_ns = 0);
+  void delegate(const std::string &path_prefix, const std::string &cluster_id,
+                const std::string &endpoint = std::string(), std::uint64_t expires_at_ns = 0);
 
   // Remove the exact delegation at `path_prefix`. Returns true if
   // an entry existed.
@@ -93,9 +90,8 @@ private:
 
   trie_node &find_or_create_node(const std::string &path_prefix);
   trie_node *find_node(const std::string &path_prefix);
-  static void collect_snapshot(
-      const trie_node &node, std::string path,
-      std::vector<std::pair<std::string, authority>> &out);
+  static void collect_snapshot(const trie_node &node, std::string path,
+                               std::vector<std::pair<std::string, authority>> &out);
 
   mutable std::mutex _mutex;
   trie_node _root;

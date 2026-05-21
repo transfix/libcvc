@@ -8,18 +8,16 @@
   2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_codec_registry.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/state_codec_registry.h>
+#include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -41,8 +39,7 @@ TEST(StateCodecRegistryTest, BuiltinCodecsCoverScalars) {
   cvc::state_codec_registry reg;
   reg.register_builtin_codecs();
   for (const char *t :
-       {"bool", "int32_t", "int64_t", "uint32_t", "uint64_t", "float",
-        "double", "std::string"}) {
+       {"bool", "int32_t", "int64_t", "uint32_t", "uint64_t", "float", "double", "std::string"}) {
     EXPECT_TRUE(reg.has(t)) << "missing codec for " << t;
   }
   EXPECT_GE(reg.size(), 8u);
@@ -141,10 +138,8 @@ TEST(StateCodecRegistryStressTest, OptionalConcurrentLookupStress) {
   for (int t = 0; t < kThreads; ++t) {
     threads.emplace_back([&]() {
       for (int i = 0; i < kPerThread; ++i) {
-        auto bytes = reg.encode("int64_t",
-                                boost::any(static_cast<std::int64_t>(i)));
-        std::int64_t v =
-            boost::any_cast<std::int64_t>(reg.decode("int64_t", bytes));
+        auto bytes = reg.encode("int64_t", boost::any(static_cast<std::int64_t>(i)));
+        std::int64_t v = boost::any_cast<std::int64_t>(reg.decode("int64_t", bytes));
         if (v != static_cast<std::int64_t>(i))
           errors.fetch_add(1);
       }
@@ -155,8 +150,7 @@ TEST(StateCodecRegistryStressTest, OptionalConcurrentLookupStress) {
   EXPECT_EQ(errors.load(), 0);
 }
 
-TEST(StateCodecRegistryPerformanceTest,
-     OptionalEncodeDecodeThroughputSmoke) {
+TEST(StateCodecRegistryPerformanceTest, OptionalEncodeDecodeThroughputSmoke) {
   if (!env_flag("CVC_DISTRIBUTED_STATE_PERF")) {
     GTEST_SKIP() << "Set CVC_DISTRIBUTED_STATE_PERF=1 to run codec registry "
                     "performance smoke tests";
@@ -167,17 +161,13 @@ TEST(StateCodecRegistryPerformanceTest,
   auto start = std::chrono::steady_clock::now();
   std::int64_t acc = 0;
   for (int i = 0; i < kIters; ++i) {
-    auto bytes =
-        reg.encode("int64_t", boost::any(static_cast<std::int64_t>(i)));
+    auto bytes = reg.encode("int64_t", boost::any(static_cast<std::int64_t>(i)));
     acc += boost::any_cast<std::int64_t>(reg.decode("int64_t", bytes));
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
-  std::cerr << "[codec perf] " << kIters << " encode+decode in " << secs
-            << "s (" << (kIters / secs) << "/s)\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[codec perf] " << kIters << " encode+decode in " << secs << "s (" << (kIters / secs)
+            << "/s)\n";
   EXPECT_LT(secs, 10.0);
-  EXPECT_EQ(acc,
-            static_cast<std::int64_t>(kIters) * (kIters - 1) / 2);
+  EXPECT_EQ(acc, static_cast<std::int64_t>(kIters) * (kIters - 1) / 2);
 }

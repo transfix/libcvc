@@ -14,16 +14,14 @@
 // context derives the owning cluster from its authority map and
 // routes accordingly.
 
+#include <atomic>
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_transport_inproc.h>
-
 #include <gtest/gtest.h>
-
-#include <atomic>
 #include <string>
 #include <vector>
 
@@ -94,8 +92,7 @@ TEST(StateSendMessage, BrokenLinkIsReported) {
   auto &n = cvc::state::instance(a)("scene.geometry");
   n.linkTo("nowhere.in.tree");
   auto r = n.sendMessage("x");
-  EXPECT_EQ(r.status,
-            cvc::state::send_message_result::status_kind::broken_link);
+  EXPECT_EQ(r.status, cvc::state::send_message_result::status_kind::broken_link);
   EXPECT_EQ(r.local_admitted, 0u);
 }
 
@@ -107,8 +104,7 @@ TEST(StateSendMessage, CycleIsReported) {
   root("p").linkTo("q");
   root("q").linkTo("p");
   auto r = root("p").sendMessage("x");
-  EXPECT_EQ(r.status,
-            cvc::state::send_message_result::status_kind::cycle_detected);
+  EXPECT_EQ(r.status, cvc::state::send_message_result::status_kind::cycle_detected);
   EXPECT_EQ(r.local_admitted, 0u);
 }
 
@@ -118,8 +114,8 @@ TEST(StateSendMessage, CallerNeverNamesClusterId_ApiCompileCheck) {
   // parameter the caller could pass. This test exists so a future
   // refactor that re-introduces cluster_id into the signature
   // fails the build here.
-  using FnPtr = cvc::state::send_message_result (cvc::state::*)(
-      const std::string &, const std::string &, std::size_t);
+  using FnPtr = cvc::state::send_message_result (cvc::state::*)(const std::string &,
+                                                                const std::string &, std::size_t);
   FnPtr p = &cvc::state::sendMessage;
   (void)p;
   SUCCEED();
@@ -137,8 +133,7 @@ TEST(StateSendMessage, AuthorityMapStampsOwnerClusterId) {
   collected local_sink;
   shard.message_bus().subscribe("scene", std::ref(local_sink));
 
-  auto r =
-      cvc::state::instance(a)("scene.geometry").sendMessage("payload");
+  auto r = cvc::state::instance(a)("scene.geometry").sendMessage("payload");
   // Owner is beta, not alpha; we still report "delivered" because
   // there is no transport configured (publish_message no-op),
   // but the local bus must NOT admit foreign-cluster messages.
@@ -149,8 +144,7 @@ TEST(StateSendMessage, AuthorityMapStampsOwnerClusterId) {
   // Without a transport, the structured no_transport status is
   // returned so callers can distinguish "delivered nowhere" from
   // "delivered locally".
-  EXPECT_EQ(r.status,
-            cvc::state::send_message_result::status_kind::no_transport);
+  EXPECT_EQ(r.status, cvc::state::send_message_result::status_kind::no_transport);
 }
 
 TEST(StateSendMessage, CrossClusterDeliversViaTransport) {

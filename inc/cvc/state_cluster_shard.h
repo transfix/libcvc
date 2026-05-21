@@ -11,19 +11,18 @@
 #ifndef __CVC_STATE_CLUSTER_SHARD_H__
 #define __CVC_STATE_CLUSTER_SHARD_H__
 
+#include <atomic>
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
 #include <cvc/state_change_journal.h>
+#include <cvc/state_codec_registry.h>
 #include <cvc/state_delegation_manager.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
-#include <cvc/state_codec_registry.h>
 #include <cvc/state_replica.h>
 #include <cvc/state_subscription_router.h>
 #include <cvc/state_sync_adapter.h>
 #include <cvc/state_write_policy.h>
-
-#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,13 +69,12 @@ class state_cluster_shard {
 public:
   struct ingest_result {
     bool applied = false;
-    bool duplicate = false;     // already in replica seen-set
-    bool rejected = false;      // failed authority check
-    std::string reject_reason;  // populated when rejected
+    bool duplicate = false;    // already in replica seen-set
+    bool rejected = false;     // failed authority check
+    std::string reject_reason; // populated when rejected
   };
 
-  state_cluster_shard(app &ctx, std::string cluster_id,
-                      std::string local_node_id,
+  state_cluster_shard(app &ctx, std::string cluster_id, std::string local_node_id,
                       std::string root_path = std::string());
 
   ~state_cluster_shard();
@@ -85,21 +83,15 @@ public:
   state_cluster_shard &operator=(const state_cluster_shard &) = delete;
 
   const std::string &cluster_id() const noexcept { return _cluster_id; }
-  const std::string &local_node_id() const noexcept {
-    return _local_node_id;
-  }
+  const std::string &local_node_id() const noexcept { return _local_node_id; }
   const std::string &root_path() const noexcept { return _root_path; }
 
   // Component accessors. The shard owns all of these for its lifetime.
   state_sync_adapter &adapter() noexcept { return *_adapter; }
   state_change_journal &journal() noexcept { return _adapter->journal(); }
-  state_subscription_router &router() noexcept {
-    return _adapter->router();
-  }
+  state_subscription_router &router() noexcept { return _adapter->router(); }
   state_replica &replica() noexcept { return *_replica; }
-  state_authority_map &authority() noexcept {
-    return _delegation->authority();
-  }
+  state_authority_map &authority() noexcept { return _delegation->authority(); }
   state_delegation_manager &delegation() noexcept { return *_delegation; }
   state_codec_registry &codecs() noexcept { return *_codecs; }
   state_message_bus &message_bus() noexcept { return *_message_bus; }
@@ -166,21 +158,11 @@ public:
   // Phase 5: counters for distributed observability. These are
   // cumulative since the shard was constructed; readers see the
   // current value at point of call.
-  std::uint64_t total_remote_applied() const noexcept {
-    return _ctr_remote_applied.load();
-  }
-  std::uint64_t total_remote_duplicates() const noexcept {
-    return _ctr_remote_duplicates.load();
-  }
-  std::uint64_t total_remote_rejected() const noexcept {
-    return _ctr_remote_rejected.load();
-  }
-  std::uint64_t total_conflicts_detected() const noexcept {
-    return _ctr_conflicts_detected.load();
-  }
-  std::uint64_t total_conflicts_lost() const noexcept {
-    return _ctr_conflicts_lost.load();
-  }
+  std::uint64_t total_remote_applied() const noexcept { return _ctr_remote_applied.load(); }
+  std::uint64_t total_remote_duplicates() const noexcept { return _ctr_remote_duplicates.load(); }
+  std::uint64_t total_remote_rejected() const noexcept { return _ctr_remote_rejected.load(); }
+  std::uint64_t total_conflicts_detected() const noexcept { return _ctr_conflicts_detected.load(); }
+  std::uint64_t total_conflicts_lost() const noexcept { return _ctr_conflicts_lost.load(); }
 
   // Phase 6: subtree delegation. When true, ingest_remote consults
   // the delegation manager. A mutation whose path resolves to a
@@ -195,17 +177,12 @@ public:
   // preferred entry point for clients that want to know whether a
   // local write should be applied here, forwarded, or held until a
   // lease is renewed.
-  state_delegation_manager::route_decision
-  route_path(const std::string &path) const {
+  state_delegation_manager::route_decision route_path(const std::string &path) const {
     return _delegation->route(path);
   }
 
-  std::uint64_t total_delegation_routed() const noexcept {
-    return _ctr_delegation_routed.load();
-  }
-  std::uint64_t total_delegation_expired() const noexcept {
-    return _ctr_delegation_expired.load();
-  }
+  std::uint64_t total_delegation_routed() const noexcept { return _ctr_delegation_routed.load(); }
+  std::uint64_t total_delegation_expired() const noexcept { return _ctr_delegation_expired.load(); }
 
   // Phase 6: publish a delegation as a control-plane mutation. The
   // delegation is applied to this shard's local delegation manager
@@ -214,8 +191,7 @@ public:
   // this mutation install the same delegation in their own
   // delegation manager. `lease_duration_ns == 0` means infinite
   // lease.
-  void publish_delegation(const std::string &path_prefix,
-                          const std::string &cluster_id,
+  void publish_delegation(const std::string &path_prefix, const std::string &cluster_id,
                           const std::string &endpoint = std::string(),
                           std::uint64_t lease_duration_ns = 0);
 
@@ -284,16 +260,16 @@ public:
 
   struct send_message_result {
     enum class status_kind {
-      delivered,        // routing succeeded; see counts for fan-out
-      no_transport,     // owner is remote but no transport is set
-      duplicate_local,  // local bus reported a dedup hit
+      delivered,       // routing succeeded; see counts for fan-out
+      no_transport,    // owner is remote but no transport is set
+      duplicate_local, // local bus reported a dedup hit
     };
     status_kind status = status_kind::delivered;
-    std::string owner_cluster_id;      // resolved owner of the path
-    bool owner_is_local = true;        // owner matches this shard
-    std::size_t local_admitted = 0;    // 1 if local bus admitted it
-    std::size_t peers_delivered = 0;   // peer shards that admitted
-    std::size_t peers_targeted = 0;    // peer streams attempted
+    std::string owner_cluster_id;    // resolved owner of the path
+    bool owner_is_local = true;      // owner matches this shard
+    std::size_t local_admitted = 0;  // 1 if local bus admitted it
+    std::size_t peers_delivered = 0; // peer shards that admitted
+    std::size_t peers_targeted = 0;  // peer streams attempted
   };
 
   // Send an out-of-band message. The caller does NOT need to

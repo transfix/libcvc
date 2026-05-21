@@ -16,19 +16,17 @@
 #ifndef __CVC_STATE_SYNC_ADAPTER_H__
 #define __CVC_STATE_SYNC_ADAPTER_H__
 
+#include <atomic>
+#include <boost/signals2/connection.hpp>
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
 #include <cvc/state_subscription_router.h>
-
-#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/signals2/connection.hpp>
 
 namespace CVC_NAMESPACE {
 
@@ -63,21 +61,17 @@ public:
   // Callback invoked when a local mutation is observed and journaled.
   // Receives a const reference to the freshly appended mutation. The
   // adapter holds no lock when this fires.
-  using on_local_mutation_func =
-      std::function<void(const state_mutation &)>;
+  using on_local_mutation_func = std::function<void(const state_mutation &)>;
 
   // Callback invoked when a remote mutation has been applied to the
   // local tree (used for fanning out to other peers / logging).
-  using on_remote_applied_func =
-      std::function<void(const state_mutation &)>;
+  using on_remote_applied_func = std::function<void(const state_mutation &)>;
 
   // Construct an adapter rooted at `root_path` in the state tree of
   // app `ctx`. An empty `root_path` means the entire tree. The
   // adapter does NOT take ownership of the app/state; the caller
   // must outlive the adapter.
-  state_sync_adapter(app &ctx,
-                     std::string root_path,
-                     std::string local_node_id);
+  state_sync_adapter(app &ctx, std::string root_path, std::string local_node_id);
 
   ~state_sync_adapter();
 
@@ -124,8 +118,7 @@ public:
   // transparently shadows `path` (or an ancestor of `path`).
   // Results are deduplicated by id. When no transparent link
   // aliases `path`, this is equivalent to router().subscriptions_for(path).
-  std::vector<state_subscription>
-  subscriptions_for_path(const std::string &path) const;
+  std::vector<state_subscription> subscriptions_for_path(const std::string &path) const;
 
   // Count of subscriptions that were matched only via a
   // transparent-link alias (i.e., not by direct router lookup).
@@ -156,8 +149,7 @@ private:
   void attach_node(state &s, const std::string &full_path);
 
   // Compose a full dot-path for a given child of `parent_full_path`.
-  static std::string join_path(const std::string &parent_full_path,
-                               const std::string &child);
+  static std::string join_path(const std::string &parent_full_path, const std::string &child);
 
   // Fire on_local_mutation_func and router dispatch outside any lock.
   void dispatch_local(const state_mutation &m);

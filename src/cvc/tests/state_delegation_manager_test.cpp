@@ -8,9 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_delegation_manager.h>
-
 #include <cstdint>
+#include <cvc/state_delegation_manager.h>
 #include <gtest/gtest.h>
 
 using cvc::state_delegation_manager;
@@ -75,8 +74,7 @@ TEST(StateDelegationManager, DotBoundaryRequiredForPrefixMatch) {
   state_delegation_manager m("self");
   m.delegate("sim", "other");
   // "simulation" must NOT match "sim".
-  EXPECT_EQ(m.route("simulation.x").kind,
-            state_delegation_manager::route_kind::local);
+  EXPECT_EQ(m.route("simulation.x").kind, state_delegation_manager::route_kind::local);
   // exact match still routes
   EXPECT_EQ(m.route("sim").kind, state_delegation_manager::route_kind::remote);
 }
@@ -89,8 +87,7 @@ TEST(StateDelegationManager, LeaseExpiresAndIsClassifiedExpired) {
 
   // Just before expiry.
   clk.now = 1499;
-  EXPECT_EQ(m.route("simulation.v").kind,
-            state_delegation_manager::route_kind::remote);
+  EXPECT_EQ(m.route("simulation.v").kind, state_delegation_manager::route_kind::remote);
 
   // Past expiry.
   clk.now = 1501;
@@ -105,14 +102,12 @@ TEST(StateDelegationManager, RenewExtendsLease) {
   state_delegation_manager m("self", clk.fn());
   m.delegate("p", "other", "", 500);
   clk.now = 1600; // expired
-  EXPECT_EQ(m.route("p.x").kind,
-            state_delegation_manager::route_kind::expired);
+  EXPECT_EQ(m.route("p.x").kind, state_delegation_manager::route_kind::expired);
   // Renew at clk=1600 for another 500ns.
   ASSERT_TRUE(m.renew("p", 500));
   EXPECT_EQ(m.route("p.x").kind, state_delegation_manager::route_kind::remote);
   clk.now = 2200;
-  EXPECT_EQ(m.route("p.x").kind,
-            state_delegation_manager::route_kind::expired);
+  EXPECT_EQ(m.route("p.x").kind, state_delegation_manager::route_kind::expired);
 }
 
 TEST(StateDelegationManager, RenewFailsWhenNoEntry) {

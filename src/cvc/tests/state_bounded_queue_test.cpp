@@ -2,12 +2,10 @@
 // Tests for cvc::state_bounded_queue (Phase 6 backpressure /
 // bounded-queue policy on transports).
 
-#include <cvc/state_bounded_queue.h>
-
-#include <gtest/gtest.h>
-
 #include <atomic>
 #include <chrono>
+#include <cvc/state_bounded_queue.h>
+#include <gtest/gtest.h>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -61,8 +59,8 @@ TEST(StateBoundedQueue, DropOldestEvictsFront) {
   EXPECT_TRUE(q.push(1));
   EXPECT_TRUE(q.push(2));
   EXPECT_TRUE(q.push(3));
-  EXPECT_TRUE(q.push(4));  // evicts 1
-  EXPECT_TRUE(q.push(5));  // evicts 2
+  EXPECT_TRUE(q.push(4)); // evicts 1
+  EXPECT_TRUE(q.push(5)); // evicts 2
   EXPECT_EQ(q.size(), 3u);
   EXPECT_EQ(q.total_dropped_oldest(), 2u);
   EXPECT_EQ(q.total_dropped_newest(), 0u);
@@ -183,8 +181,7 @@ TEST(StateBoundedQueue, ConcurrentProducerConsumerDropNewest) {
   // Every popped + dropped item must equal N (no duplication, no
   // loss outside the policy).
   EXPECT_EQ(pops.load() + (long long)q.total_dropped_newest(), (long long)N);
-  EXPECT_EQ((long long)q.total_admitted() + (long long)q.total_dropped_newest(),
-            (long long)N);
+  EXPECT_EQ((long long)q.total_admitted() + (long long)q.total_dropped_newest(), (long long)N);
 }
 
 TEST(StateBoundedQueue, ConcurrentProducerConsumerDropOldest) {

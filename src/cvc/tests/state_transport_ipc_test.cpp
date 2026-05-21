@@ -8,22 +8,19 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_transport_ipc.h>
-
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_transport_ipc.h>
 #include <filesystem>
+#include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -34,11 +31,10 @@ bool env_flag(const char *name) {
 
 std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
-  auto now =
-      std::chrono::steady_clock::now().time_since_epoch().count();
+  auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   auto dir = std::filesystem::temp_directory_path();
-  auto p = dir / ("cvc_ipc_" + std::to_string(pid) + "_" +
-                  std::to_string(now) + "_" + label + ".sock");
+  auto p =
+      dir / ("cvc_ipc_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label + ".sock");
   return p.string();
 }
 
@@ -308,15 +304,13 @@ TEST(StateTransportIpcStressTest, OptionalConcurrentPublishStress) {
   std::thread wA([&]() {
     for (int i = 0; i < kPerWriter; ++i) {
       cvc::state::instance(aA)("stress.A").value(std::string("v0"));
-      cvc::state::instance(aA)("stress.A")
-          .value("v" + std::to_string(i));
+      cvc::state::instance(aA)("stress.A").value("v" + std::to_string(i));
     }
   });
   std::thread wB([&]() {
     for (int i = 0; i < kPerWriter; ++i) {
       cvc::state::instance(aB)("stress.B").value(std::string("v0"));
-      cvc::state::instance(aB)("stress.B")
-          .value("v" + std::to_string(i));
+      cvc::state::instance(aB)("stress.B").value("v" + std::to_string(i));
     }
   });
   wA.join();
@@ -375,17 +369,12 @@ TEST(StateTransportIpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
   while (tA.pump_all() > 0) {
   }
   tA.flush();
-  tB.wait_for_received(static_cast<std::uint64_t>(kIters / 64),
-                       std::chrono::milliseconds(5000));
+  tB.wait_for_received(static_cast<std::uint64_t>(kIters / 64), std::chrono::milliseconds(5000));
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(
-                    elapsed)
-                    .count();
-  std::cerr << "[transport_ipc perf] " << kIters
-            << " mutations across UDS in " << secs << "s ("
-            << (kIters / secs) << " mut/s, sent="
-            << tA.total_sent_frames() << ", recv="
-            << tB.total_received_frames() << ")\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[transport_ipc perf] " << kIters << " mutations across UDS in " << secs << "s ("
+            << (kIters / secs) << " mut/s, sent=" << tA.total_sent_frames()
+            << ", recv=" << tB.total_received_frames() << ")\n";
   EXPECT_LT(secs, 30.0);
   tA.stop();
   tB.stop();
@@ -400,10 +389,8 @@ TEST(StateTransportIpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
 
 namespace {
 
-cvc::state_message make_oob_ipc(const std::string &cluster,
-                                const std::string &origin,
-                                const std::string &id,
-                                const std::string &path,
+cvc::state_message make_oob_ipc(const std::string &cluster, const std::string &origin,
+                                const std::string &id, const std::string &path,
                                 const std::string &str = {}) {
   cvc::state_message m;
   m.cluster_id = cluster;
@@ -472,9 +459,7 @@ TEST(StateTransportIpcTest, MessageDedupAcrossMultiPath) {
   tB.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   auto m = make_oob_ipc("C", "A", "m1", "x", "v");
   tA.publish_message(m);
@@ -508,9 +493,7 @@ TEST(StateTransportIpcTest, MessageCrossClusterIsolation) {
   tB.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   tA.publish_message(make_oob_ipc("C1", "A", "m1", "x", "v"));
   std::this_thread::sleep_for(std::chrono::milliseconds(200));

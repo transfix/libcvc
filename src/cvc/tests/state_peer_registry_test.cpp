@@ -4,7 +4,6 @@
 */
 
 #include <cvc/state_peer_registry.h>
-
 #include <gtest/gtest.h>
 
 using cvc::state_peer_registry;

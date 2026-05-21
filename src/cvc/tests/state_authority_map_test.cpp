@@ -8,16 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_authority_map.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/state_authority_map.h>
+#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -133,8 +131,7 @@ TEST(StateAuthorityMapStressTest, OptionalConcurrentDelegateResolve) {
   for (int t = 0; t < kWriters; ++t) {
     threads.emplace_back([&, t]() {
       for (int i = 0; i < kPerThread; ++i) {
-        std::string path = "cluster" + std::to_string(t) + ".node" +
-                           std::to_string(i % 16);
+        std::string path = "cluster" + std::to_string(t) + ".node" + std::to_string(i % 16);
         m.delegate(path, "cluster" + std::to_string(t));
       }
     });
@@ -174,11 +171,9 @@ TEST(StateAuthorityMapPerformanceTest, OptionalResolveThroughputSmoke) {
       ++hits;
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
-  std::cerr << "[authority_map perf] " << kIters << " resolves in " << secs
-            << "s (" << (kIters / secs) << "/s)\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[authority_map perf] " << kIters << " resolves in " << secs << "s ("
+            << (kIters / secs) << "/s)\n";
   EXPECT_EQ(hits, static_cast<std::size_t>(kIters));
   EXPECT_LT(secs, 10.0);
 }

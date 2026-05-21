@@ -11,13 +11,12 @@
 #ifndef __CVC_STATE_BOUNDED_QUEUE_H__
 #define __CVC_STATE_BOUNDED_QUEUE_H__
 
-#include <cvc/namespace.h>
-
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <deque>
 #include <mutex>
 #include <utility>
@@ -69,8 +68,7 @@ public:
   enum class overflow_policy { drop_newest, drop_oldest, block };
 
   explicit state_bounded_queue(std::size_t capacity,
-                               overflow_policy policy =
-                                   overflow_policy::drop_newest)
+                               overflow_policy policy = overflow_policy::drop_newest)
       : _capacity(capacity == 0 ? 1 : capacity), _policy(policy) {}
 
   state_bounded_queue(const state_bounded_queue &) = delete;
@@ -94,9 +92,7 @@ public:
         _dropped_oldest.fetch_add(1, std::memory_order_relaxed);
         break;
       case overflow_policy::block:
-        _not_full.wait(lk, [this]() {
-          return _closed || _q.size() < _capacity;
-        });
+        _not_full.wait(lk, [this]() { return _closed || _q.size() < _capacity; });
         if (_closed) {
           _rejected_closed.fetch_add(1, std::memory_order_relaxed);
           return false;
@@ -114,8 +110,7 @@ public:
   // for the drop_* policies it behaves identically to push() (no
   // wait happens). Returns false on timeout or close.
   template <class Rep, class Period>
-  bool push_for(T value,
-                const std::chrono::duration<Rep, Period> &timeout) {
+  bool push_for(T value, const std::chrono::duration<Rep, Period> &timeout) {
     std::unique_lock<std::mutex> lk(_mu);
     if (_closed) {
       _rejected_closed.fetch_add(1, std::memory_order_relaxed);
@@ -131,9 +126,8 @@ public:
         _dropped_oldest.fetch_add(1, std::memory_order_relaxed);
         break;
       case overflow_policy::block:
-        if (!_not_full.wait_for(lk, timeout, [this]() {
-              return _closed || _q.size() < _capacity;
-            })) {
+        if (!_not_full.wait_for(lk, timeout,
+                                [this]() { return _closed || _q.size() < _capacity; })) {
           _blocked_timeouts.fetch_add(1, std::memory_order_relaxed);
           return false;
         }
@@ -202,9 +196,7 @@ public:
   std::uint64_t total_admitted() const noexcept {
     return _admitted.load(std::memory_order_relaxed);
   }
-  std::uint64_t total_popped() const noexcept {
-    return _popped.load(std::memory_order_relaxed);
-  }
+  std::uint64_t total_popped() const noexcept { return _popped.load(std::memory_order_relaxed); }
   std::uint64_t total_dropped_newest() const noexcept {
     return _dropped_newest.load(std::memory_order_relaxed);
   }

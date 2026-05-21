@@ -14,6 +14,7 @@
 // Isolation" by exercising the full pipeline end-to-end with two or
 // three shards wired through state_transport_inproc.
 
+#include <cstdint>
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_blob_store.h>
@@ -22,26 +23,21 @@
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_compression_registry.h>
 #include <cvc/state_transport_inproc.h>
-
 #include <gtest/gtest.h>
-
-#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr std::size_t kPayloadBytes = 256u * 1024u;     // 256 KiB
-constexpr std::uint32_t kChunkBytes = 16u * 1024u;      // 16 KiB
+constexpr std::size_t kPayloadBytes = 256u * 1024u; // 256 KiB
+constexpr std::uint32_t kChunkBytes = 16u * 1024u;  // 16 KiB
 
 std::vector<unsigned char> runful_payload(std::size_t n, unsigned char b) {
   return std::vector<unsigned char>(n, b);
 }
 
-cvc::state_mutation make_blob_mutation(const std::string &origin,
-                                       std::uint64_t seq,
-                                       const std::string &path,
-                                       const cvc::state_blob_ref &ref) {
+cvc::state_mutation make_blob_mutation(const std::string &origin, std::uint64_t seq,
+                                       const std::string &path, const cvc::state_blob_ref &ref) {
   cvc::state_mutation m;
   m.cluster_id = "C";
   m.origin_node_id = origin;
@@ -81,9 +77,9 @@ TEST(StateBlobTransportIntegration, SharedStoreEndToEndRleRoundTrip) {
   cvc::state_chunk_manifest parsed;
   ASSERT_TRUE(reader.load_manifest(manifest.digest, parsed));
   std::uint64_t stored = 0;
-  for (auto b : parsed.chunk_bytes) stored += b;
-  EXPECT_LT(stored, kPayloadBytes / 10u)
-      << "RLE on a single-byte payload must compress hard";
+  for (auto b : parsed.chunk_bytes)
+    stored += b;
+  EXPECT_LT(stored, kPayloadBytes / 10u) << "RLE on a single-byte payload must compress hard";
   EXPECT_EQ(parsed.total_size, kPayloadBytes);
   EXPECT_EQ(parsed.codec, "rle");
 
@@ -194,7 +190,9 @@ TEST(StateBlobTransportIntegration, SlowPeerIsolationSkipsBlobMutations) {
   cvc::state_cluster_shard sA(aA, "C", "A");
   cvc::state_cluster_shard sB(aB, "C", "B");
   cvc::state_cluster_shard sC(aC, "C", "C");
-  sA.attach(); sB.attach(); sC.attach();
+  sA.attach();
+  sB.attach();
+  sC.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
   t.register_shard(&sC);

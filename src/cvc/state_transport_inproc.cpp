@@ -8,10 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_transport_inproc.h>
-
-#include <algorithm>
 
 namespace CVC_NAMESPACE {
 
@@ -40,8 +39,7 @@ void state_transport_inproc::unregister_shard(state_cluster_shard *shard) {
     return;
   }
   std::lock_guard<std::mutex> lock(_mutex);
-  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard),
-                _shards.end());
+  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard), _shards.end());
   _slow_peers.erase(shard);
   auto it = _outboxes.find(shard);
   if (it != _outboxes.end()) {
@@ -60,8 +58,7 @@ state_transport_inproc::find_outbox_locked(state_cluster_shard *peer) {
   return it->second.get();
 }
 
-state_transport::publish_stats
-state_transport_inproc::publish(const state_mutation &m) {
+state_transport::publish_stats state_transport_inproc::publish(const state_mutation &m) {
   publish_stats stats{};
 
   // Snapshot peers under the lock so ingest happens unlocked
@@ -92,8 +89,7 @@ state_transport_inproc::publish(const state_mutation &m) {
   }
 
   if (quarantined_skipped != 0) {
-    _quarantined_mutations.fetch_add(quarantined_skipped,
-                                     std::memory_order_relaxed);
+    _quarantined_mutations.fetch_add(quarantined_skipped, std::memory_order_relaxed);
   }
   _published.fetch_add(1, std::memory_order_relaxed);
 
@@ -148,8 +144,7 @@ state_transport_inproc::publish_message(const state_message &m) {
   }
 
   if (quarantined_skipped != 0) {
-    _quarantined_messages.fetch_add(quarantined_skipped,
-                                    std::memory_order_relaxed);
+    _quarantined_messages.fetch_add(quarantined_skipped, std::memory_order_relaxed);
   }
   _msg_published.fetch_add(1, std::memory_order_relaxed);
 
@@ -168,12 +163,10 @@ state_transport_inproc::publish_message(const state_message &m) {
       const std::uint64_t after_dn = dest.queue->total_dropped_newest();
       const std::uint64_t after_do = dest.queue->total_dropped_oldest();
       if (after_dn > before_dn) {
-        _outbox_dropped_newest.fetch_add(after_dn - before_dn,
-                                         std::memory_order_relaxed);
+        _outbox_dropped_newest.fetch_add(after_dn - before_dn, std::memory_order_relaxed);
       }
       if (after_do > before_do) {
-        _outbox_dropped_oldest.fetch_add(after_do - before_do,
-                                         std::memory_order_relaxed);
+        _outbox_dropped_oldest.fetch_add(after_do - before_do, std::memory_order_relaxed);
       }
       if (admitted) {
         _outbox_admitted.fetch_add(1, std::memory_order_relaxed);
@@ -186,8 +179,7 @@ state_transport_inproc::publish_message(const state_message &m) {
       // publishes skip it. We do this here (after admit/drop) so
       // that the threshold reflects observed pressure, not just
       // configured capacity.
-      const std::uint64_t threshold =
-          _auto_isolation_threshold.load(std::memory_order_relaxed);
+      const std::uint64_t threshold = _auto_isolation_threshold.load(std::memory_order_relaxed);
       if (threshold != 0 && (after_dn + after_do) >= threshold) {
         bool newly_slow = false;
         {
@@ -211,8 +203,8 @@ state_transport_inproc::publish_message(const state_message &m) {
   return stats;
 }
 
-void state_transport_inproc::set_peer_message_outbox(
-    state_cluster_shard *peer, std::size_t capacity, outbox_policy policy) {
+void state_transport_inproc::set_peer_message_outbox(state_cluster_shard *peer,
+                                                     std::size_t capacity, outbox_policy policy) {
   if (peer == nullptr)
     return;
   std::lock_guard<std::mutex> lock(_mutex);
@@ -227,8 +219,7 @@ void state_transport_inproc::set_peer_message_outbox(
   }
   auto ob = std::make_unique<peer_outbox>();
   ob->policy = policy;
-  ob->queue = std::make_unique<state_bounded_queue<state_message>>(capacity,
-                                                                   policy);
+  ob->queue = std::make_unique<state_bounded_queue<state_message>>(capacity, policy);
   // Replacing an existing outbox: close the old one to release any
   // blocked producers.
   auto &slot = _outboxes[peer];
@@ -237,8 +228,7 @@ void state_transport_inproc::set_peer_message_outbox(
   slot = std::move(ob);
 }
 
-void state_transport_inproc::clear_peer_message_outbox(
-    state_cluster_shard *peer) {
+void state_transport_inproc::clear_peer_message_outbox(state_cluster_shard *peer) {
   if (peer == nullptr)
     return;
   std::lock_guard<std::mutex> lock(_mutex);
@@ -250,8 +240,7 @@ void state_transport_inproc::clear_peer_message_outbox(
   _outboxes.erase(it);
 }
 
-std::size_t state_transport_inproc::peer_message_outbox_size(
-    state_cluster_shard *peer) const {
+std::size_t state_transport_inproc::peer_message_outbox_size(state_cluster_shard *peer) const {
   if (peer == nullptr)
     return 0;
   std::lock_guard<std::mutex> lock(_mutex);
@@ -261,9 +250,8 @@ std::size_t state_transport_inproc::peer_message_outbox_size(
   return it->second->queue->size();
 }
 
-std::size_t
-state_transport_inproc::deliver_message_outbox(state_cluster_shard *peer,
-                                               std::size_t max) {
+std::size_t state_transport_inproc::deliver_message_outbox(state_cluster_shard *peer,
+                                                           std::size_t max) {
   if (peer == nullptr)
     return 0;
   // Pull a snapshot of the queue pointer under the lock; the queue
@@ -347,15 +335,12 @@ bool state_transport_inproc::is_peer_slow(state_cluster_shard *peer) const {
   return _slow_peers.count(peer) != 0;
 }
 
-std::vector<state_cluster_shard *>
-state_transport_inproc::slow_peers() const {
+std::vector<state_cluster_shard *> state_transport_inproc::slow_peers() const {
   std::lock_guard<std::mutex> lock(_mutex);
-  return std::vector<state_cluster_shard *>(_slow_peers.begin(),
-                                            _slow_peers.end());
+  return std::vector<state_cluster_shard *>(_slow_peers.begin(), _slow_peers.end());
 }
 
-void state_transport_inproc::set_auto_isolation_drop_threshold(
-    std::uint64_t threshold) noexcept {
+void state_transport_inproc::set_auto_isolation_drop_threshold(std::uint64_t threshold) noexcept {
   _auto_isolation_threshold.store(threshold, std::memory_order_relaxed);
 }
 

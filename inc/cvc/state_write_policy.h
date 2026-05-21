@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_WRITE_POLICY_H__
 #define __CVC_STATE_WRITE_POLICY_H__
 
-#include <cvc/namespace.h>
-
 #include <cstddef>
+#include <cvc/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,9 +48,9 @@ class state_write_policy {
 public:
   struct decision {
     bool allowed = true;
-    bool had_policy = false;        // an entry covered this path
-    std::string matched_prefix;     // empty if no entry matched
-    std::string reject_reason;      // populated on deny
+    bool had_policy = false;    // an entry covered this path
+    std::string matched_prefix; // empty if no entry matched
+    std::string reject_reason;  // populated on deny
   };
 
   state_write_policy();
@@ -62,8 +61,7 @@ public:
   // Install a policy entry at `path_prefix`. The set of allowed
   // writer node_ids replaces any prior set at that exact prefix.
   // An empty set denies all writers for that subtree.
-  void allow(const std::string &path_prefix,
-             std::vector<std::string> allowed_writers);
+  void allow(const std::string &path_prefix, std::vector<std::string> allowed_writers);
 
   // Remove the exact entry at `path_prefix`. Returns true if an
   // entry existed.
@@ -71,8 +69,7 @@ public:
 
   // Authorize `origin_node_id` to write `path`. The lookup is
   // longest-prefix.
-  decision authorize(const std::string &path,
-                     const std::string &origin_node_id) const;
+  decision authorize(const std::string &path, const std::string &origin_node_id) const;
 
   std::size_t size() const;
   void clear();

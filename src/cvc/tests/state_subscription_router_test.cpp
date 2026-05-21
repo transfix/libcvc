@@ -162,10 +162,11 @@ TEST(StateSubscriptionRouterPerformanceTest, OptionalLookupThroughputSmoke) {
   auto start_time = std::chrono::steady_clock::now();
   std::size_t total_matches = 0;
   for (int lookup_index = 0; lookup_index < lookup_count; ++lookup_index) {
-    total_matches += router.subscriptions_for("tree.branch." +
-                                              std::to_string(lookup_index % subscription_count) +
-                                              ".leaf")
-                         .size();
+    total_matches +=
+        router
+            .subscriptions_for("tree.branch." + std::to_string(lookup_index % subscription_count) +
+                               ".leaf")
+            .size();
   }
   auto end_time = std::chrono::steady_clock::now();
 

@@ -8,23 +8,20 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_transport_grpc.h>
-
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_transport_grpc.h>
 #include <fstream>
+#include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -33,8 +30,7 @@ bool env_flag(const char *name) {
   return v != nullptr && std::string(v) == "1";
 }
 
-bool wait_connected(cvc::state_transport_grpc &a,
-                    cvc::state_transport_grpc &b,
+bool wait_connected(cvc::state_transport_grpc &a, cvc::state_transport_grpc &b,
                     std::chrono::milliseconds to) {
   auto deadline = std::chrono::steady_clock::now() + to;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -59,8 +55,7 @@ TEST(StateTransportGrpcTest, ConnectFailsWhenPeerMissing) {
   cvc::state_transport_grpc t;
   t.start("127.0.0.1:0", "A", "C");
   // Connect to a port that should be unbound.
-  EXPECT_FALSE(t.connect_to_peer("127.0.0.1:1",
-                                 std::chrono::milliseconds(150)));
+  EXPECT_FALSE(t.connect_to_peer("127.0.0.1:1", std::chrono::milliseconds(150)));
   t.stop();
 }
 
@@ -69,8 +64,7 @@ TEST(StateTransportGrpcTest, TwoEndpointConvergence) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -100,8 +94,7 @@ TEST(StateTransportGrpcTest, RoundTripSuppressedByDedup) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -134,8 +127,7 @@ TEST(StateTransportGrpcTest, CrossClusterIsolation) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C1");
   tB.start("127.0.0.1:0", "B", "C2");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C1", "A");
@@ -163,10 +155,8 @@ TEST(StateTransportGrpcTest, ThreeEndpointFanOut) {
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
   tC.start("127.0.0.1:0", "C", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
-  ASSERT_TRUE(tA.connect_to_peer(tC.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tC.listen_address(), std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
   cvc::state_cluster_shard sB(aB, "C", "B");
@@ -197,8 +187,7 @@ TEST(StateTransportGrpcTest, BlobPayloadRoundTrip) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -238,8 +227,7 @@ TEST(StateTransportGrpcTest, DisconnectAfterStop) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
   tA.stop();
   tB.stop();
@@ -255,8 +243,7 @@ TEST(StateTransportGrpcStressTest, OptionalConcurrentPublishStress) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -279,15 +266,13 @@ TEST(StateTransportGrpcStressTest, OptionalConcurrentPublishStress) {
   std::thread wA([&]() {
     for (int i = 0; i < kPerWriter; ++i) {
       cvc::state::instance(aA)("stress.A").value(std::string("v0"));
-      cvc::state::instance(aA)("stress.A")
-          .value("v" + std::to_string(i));
+      cvc::state::instance(aA)("stress.A").value("v" + std::to_string(i));
     }
   });
   std::thread wB([&]() {
     for (int i = 0; i < kPerWriter; ++i) {
       cvc::state::instance(aB)("stress.B").value(std::string("v0"));
-      cvc::state::instance(aB)("stress.B")
-          .value("v" + std::to_string(i));
+      cvc::state::instance(aB)("stress.B").value("v" + std::to_string(i));
     }
   });
   wA.join();
@@ -306,8 +291,7 @@ TEST(StateTransportGrpcStressTest, OptionalConcurrentPublishStress) {
   // matches the final writers' values, with a generous timeout.
   std::string lastA = "v" + std::to_string(kPerWriter - 1);
   std::string lastB = "v" + std::to_string(kPerWriter - 1);
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
   while (std::chrono::steady_clock::now() < deadline) {
     if (cvc::state::instance(aB)("stress.A").value() == lastA &&
         cvc::state::instance(aA)("stress.B").value() == lastB)
@@ -332,8 +316,7 @@ TEST(StateTransportGrpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -355,17 +338,12 @@ TEST(StateTransportGrpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
   while (tA.pump_all() > 0) {
   }
   tA.flush();
-  tB.wait_for_received(static_cast<std::uint64_t>(kIters / 64),
-                       std::chrono::milliseconds(5000));
+  tB.wait_for_received(static_cast<std::uint64_t>(kIters / 64), std::chrono::milliseconds(5000));
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(
-                    elapsed)
-                    .count();
-  std::cerr << "[transport_grpc perf] " << kIters
-            << " mutations across gRPC in " << secs << "s ("
-            << (kIters / secs) << " mut/s, sent="
-            << tA.total_sent_frames() << ", recv="
-            << tB.total_received_frames() << ")\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[transport_grpc perf] " << kIters << " mutations across gRPC in " << secs << "s ("
+            << (kIters / secs) << " mut/s, sent=" << tA.total_sent_frames()
+            << ", recv=" << tB.total_received_frames() << ")\n";
   EXPECT_LT(secs, 30.0);
   tA.stop();
   tB.stop();
@@ -380,10 +358,8 @@ TEST(StateTransportGrpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
 
 namespace {
 
-cvc::state_message make_oob_grpc(const std::string &cluster,
-                                 const std::string &origin,
-                                 const std::string &id,
-                                 const std::string &path,
+cvc::state_message make_oob_grpc(const std::string &cluster, const std::string &origin,
+                                 const std::string &id, const std::string &path,
                                  const std::string &str = {}) {
   cvc::state_message m;
   m.cluster_id = cluster;
@@ -402,8 +378,7 @@ TEST(StateTransportGrpcTest, MessageRoundTripCrossPeer) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -435,8 +410,7 @@ TEST(StateTransportGrpcTest, MessageDedupAcrossRedundantPublish) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -447,9 +421,7 @@ TEST(StateTransportGrpcTest, MessageDedupAcrossRedundantPublish) {
   tB.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   auto m = make_oob_grpc("C", "A", "m1", "x", "v");
   tA.publish_message(m);
@@ -469,8 +441,7 @@ TEST(StateTransportGrpcTest, MessageCrossClusterIsolation) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C1");
   tB.start("127.0.0.1:0", "B", "C2");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C1", "A");
@@ -481,9 +452,7 @@ TEST(StateTransportGrpcTest, MessageCrossClusterIsolation) {
   tB.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   tA.publish_message(make_oob_grpc("C1", "A", "m1", "x", "v"));
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -498,8 +467,7 @@ TEST(StateTransportGrpcTest, MessageDoesNotAdvanceJournalOrClock) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");
   tB.start("127.0.0.1:0", "B", "C");
-  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(),
-                                 std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
   cvc::state_cluster_shard sA(aA, "C", "A");
@@ -613,17 +581,19 @@ bool tls_tests_enabled() {
 
 bool generate_self_signed(std::string &cert_pem, std::string &key_pem) {
   char tmpl[] = "/tmp/cvc_tls_XXXXXX";
-  if (!mkdtemp(tmpl)) return false;
+  if (!mkdtemp(tmpl))
+    return false;
   std::string dir = tmpl;
-  std::string cmd =
-      "openssl req -x509 -newkey rsa:2048 -keyout " + dir + "/k.pem -out " +
-      dir + "/c.pem -days 1 -nodes -subj '/CN=localhost' "
-            "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' "
-            ">/dev/null 2>&1";
-  if (std::system(cmd.c_str()) != 0) return false;
+  std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + dir + "/k.pem -out " + dir +
+                    "/c.pem -days 1 -nodes -subj '/CN=localhost' "
+                    "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' "
+                    ">/dev/null 2>&1";
+  if (std::system(cmd.c_str()) != 0)
+    return false;
   auto slurp = [](const std::string &p, std::string &out) -> bool {
     std::ifstream f(p);
-    if (!f) return false;
+    if (!f)
+      return false;
     std::stringstream ss;
     ss << f.rdbuf();
     out = ss.str();
@@ -649,7 +619,7 @@ TEST(StateTransportGrpcPhase5, TlsHandshakeRoundTrip) {
   cvc::state_transport_grpc::tls_config tls;
   tls.server_cert_pem = cert;
   tls.server_key_pem = key;
-  tls.root_ca_pem = cert;  // self-signed: cert == its own CA
+  tls.root_ca_pem = cert; // self-signed: cert == its own CA
   tls.require_client_auth = false;
 
   tA.set_tls_config(tls);

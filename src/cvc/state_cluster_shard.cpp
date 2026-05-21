@@ -8,14 +8,12 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_cluster_shard.h>
-
-#include <cvc/app.h>
-#include <cvc/state_transport.h>
-
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cvc/app.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_transport.h>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -54,8 +52,7 @@ std::uint64_t decode_lease_duration(const std::vector<unsigned char> &bytes) {
 }
 
 bool is_delegation_op(state_mutation_op op) {
-  return op == state_mutation_op::delegate_subtree ||
-         op == state_mutation_op::revoke_delegation;
+  return op == state_mutation_op::delegate_subtree || op == state_mutation_op::revoke_delegation;
 }
 
 // Per-app default-shard registry for Phase 8 slice 2. Keyed by
@@ -74,14 +71,10 @@ std::unordered_map<const app *, state_cluster_shard *> &default_registry() {
 } // namespace
 
 state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
-                                         std::string local_node_id,
-                                         std::string root_path)
-    : _cluster_id(std::move(cluster_id)),
-      _local_node_id(std::move(local_node_id)),
-      _root_path(std::move(root_path)),
-      _app_ctx(&ctx) {
-  _adapter = std::make_unique<state_sync_adapter>(ctx, _root_path,
-                                                  _local_node_id);
+                                         std::string local_node_id, std::string root_path)
+    : _cluster_id(std::move(cluster_id)), _local_node_id(std::move(local_node_id)),
+      _root_path(std::move(root_path)), _app_ctx(&ctx) {
+  _adapter = std::make_unique<state_sync_adapter>(ctx, _root_path, _local_node_id);
   _replica = std::make_unique<state_replica>(_local_node_id);
   _delegation = std::make_unique<state_delegation_manager>(_cluster_id);
   _codecs = std::make_unique<state_codec_registry>();
@@ -106,9 +99,7 @@ void state_cluster_shard::detach() {
   _adapter->detach();
 }
 
-bool state_cluster_shard::is_attached() const noexcept {
-  return _adapter->is_attached();
-}
+bool state_cluster_shard::is_attached() const noexcept { return _adapter->is_attached(); }
 
 void state_cluster_shard::set_enforce_authority(bool enforce) noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
@@ -160,8 +151,7 @@ bool state_cluster_shard::ingest_remote_message(const state_message &m) {
   return _message_bus->admit(m);
 }
 
-state_cluster_shard::ingest_result
-state_cluster_shard::ingest_remote(const state_mutation &m) {
+state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const state_mutation &m) {
   ingest_result r;
 
   // Loop detection: have we already applied this exact (origin,seq)?
@@ -219,11 +209,10 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   }
   if (enforce_auth) {
     auto auth = _delegation->authority().resolve(m.path);
-    if (auth.valid && !auth.cluster_id.empty() &&
-        auth.cluster_id != _cluster_id) {
+    if (auth.valid && !auth.cluster_id.empty() && auth.cluster_id != _cluster_id) {
       r.rejected = true;
-      r.reject_reason = "path '" + m.path + "' is owned by cluster '" +
-                        auth.cluster_id + "', not '" + _cluster_id + "'";
+      r.reject_reason = "path '" + m.path + "' is owned by cluster '" + auth.cluster_id +
+                        "', not '" + _cluster_id + "'";
       _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
       return r;
     }
@@ -232,18 +221,16 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
     auto rd = _delegation->route(m.path);
     if (rd.kind == state_delegation_manager::route_kind::remote) {
       r.rejected = true;
-      r.reject_reason = "path '" + m.path + "' delegated to cluster '" +
-                        rd.cluster_id + "' (prefix '" + rd.matched_prefix +
-                        "')";
+      r.reject_reason = "path '" + m.path + "' delegated to cluster '" + rd.cluster_id +
+                        "' (prefix '" + rd.matched_prefix + "')";
       _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
       _ctr_delegation_routed.fetch_add(1, std::memory_order_relaxed);
       return r;
     }
     if (rd.kind == state_delegation_manager::route_kind::expired) {
       r.rejected = true;
-      r.reject_reason = "delegation lease expired for prefix '" +
-                        rd.matched_prefix + "' (cluster '" + rd.cluster_id +
-                        "')";
+      r.reject_reason = "delegation lease expired for prefix '" + rd.matched_prefix +
+                        "' (cluster '" + rd.cluster_id + "')";
       _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
       _ctr_delegation_expired.fetch_add(1, std::memory_order_relaxed);
       return r;
@@ -267,8 +254,7 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   if (resolve_conf) {
     std::lock_guard<std::mutex> lk(_mutex);
     auto it = _last_path_mutation.find(m.path);
-    if (it != _last_path_mutation.end() &&
-        it->second.origin_node_id != m.origin_node_id) {
+    if (it != _last_path_mutation.end() && it->second.origin_node_id != m.origin_node_id) {
       _ctr_conflicts_detected.fetch_add(1, std::memory_order_relaxed);
       if (!state_replica::should_replace(it->second, m)) {
         conflict_lost = true;
@@ -301,8 +287,7 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   return r;
 }
 
-std::vector<state_mutation>
-state_cluster_shard::drain_local(std::size_t max_count) {
+std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_count) {
   std::uint64_t cursor;
   {
     std::lock_guard<std::mutex> lk(_mutex);
@@ -344,9 +329,10 @@ void state_cluster_shard::rewind_publish_cursor(std::uint64_t sequence) {
   _publish_cursor = sequence;
 }
 
-void state_cluster_shard::publish_delegation(
-    const std::string &path_prefix, const std::string &cluster_id,
-    const std::string &endpoint, std::uint64_t lease_duration_ns) {
+void state_cluster_shard::publish_delegation(const std::string &path_prefix,
+                                             const std::string &cluster_id,
+                                             const std::string &endpoint,
+                                             std::uint64_t lease_duration_ns) {
   // Apply locally first so the local view is consistent before any
   // peer sees it.
   _delegation->delegate(path_prefix, cluster_id, endpoint, lease_duration_ns);
@@ -362,8 +348,7 @@ void state_cluster_shard::publish_delegation(
   m.op = state_mutation_op::delegate_subtree;
   m.string_value = cluster_id;
   m.type_name = endpoint;
-  m.payload =
-      state_payload::inline_data(encode_lease_duration(lease_duration_ns));
+  m.payload = state_payload::inline_data(encode_lease_duration(lease_duration_ns));
   auto stored = _adapter->journal().append(m);
   // Mark as seen on this shard so a round-trip through the
   // transport cannot re-apply our own delegation.
@@ -476,8 +461,7 @@ state_transport *state_cluster_shard::transport() const noexcept {
   return _transport;
 }
 
-state_cluster_shard *
-state_cluster_shard::default_for(const app &ctx) noexcept {
+state_cluster_shard *state_cluster_shard::default_for(const app &ctx) noexcept {
   std::lock_guard<std::mutex> lk(default_registry_mutex());
   auto it = default_registry().find(&ctx);
   if (it == default_registry().end())
@@ -504,8 +488,7 @@ void state_cluster_shard::uninstall_as_default() {
     default_registry().erase(it);
 }
 
-state_cluster_shard::send_message_result
-state_cluster_shard::send_message(state_message m) {
+state_cluster_shard::send_message_result state_cluster_shard::send_message(state_message m) {
   send_message_result r;
 
   // Resolve the owning cluster from the authority map. The

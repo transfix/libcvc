@@ -11,10 +11,9 @@
 #ifndef __CVC_STATE_REPLICA_H__
 #define __CVC_STATE_REPLICA_H__
 
+#include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
-
-#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -77,8 +76,7 @@ public:
 
   // ---- Per-peer last applied sequence ----
   // Returns the previous value.
-  std::uint64_t set_last_applied(const std::string &node_id,
-                                 std::uint64_t sequence);
+  std::uint64_t set_last_applied(const std::string &node_id, std::uint64_t sequence);
   std::uint64_t last_applied(const std::string &node_id) const;
 
   // ---- Vector clock ----
@@ -87,25 +85,21 @@ public:
   std::unordered_map<std::string, std::uint64_t> clock_snapshot() const;
   std::uint64_t clock_component(const std::string &node_id) const;
 
-  static clock_compare
-  compare_clocks(const std::unordered_map<std::string, std::uint64_t> &a,
-                 const std::unordered_map<std::string, std::uint64_t> &b);
+  static clock_compare compare_clocks(const std::unordered_map<std::string, std::uint64_t> &a,
+                                      const std::unordered_map<std::string, std::uint64_t> &b);
 
   // ---- Conflict resolution ----
   // Returns true if `incoming` should win over `current` for the
   // same path. The tie-breaker is (origin_node_id, sequence)
   // lexicographic on origin_node_id then numeric on sequence.
-  static bool should_replace(const state_mutation &current,
-                             const state_mutation &incoming);
+  static bool should_replace(const state_mutation &current, const state_mutation &incoming);
 
   // ---- Loop detection ----
   // Returns true if a mutation with the given (origin_node_id,
   // sequence) has already been observed by this replica (either
   // because we originated it or because we already applied it from
   // a peer). Updates the internal seen-set when `record` is true.
-  bool seen(const std::string &origin_node_id,
-            std::uint64_t sequence,
-            bool record);
+  bool seen(const std::string &origin_node_id, std::uint64_t sequence, bool record);
 
   // Number of distinct (origin, seq) pairs currently tracked in the
   // seen-set.

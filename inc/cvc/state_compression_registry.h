@@ -12,7 +12,6 @@
 #define __CVC_STATE_COMPRESSION_REGISTRY_H__
 
 #include <cvc/namespace.h>
-
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,8 +43,7 @@ class state_compression_codec {
 public:
   virtual ~state_compression_codec() = default;
   virtual std::string id() const = 0;
-  virtual std::vector<unsigned char>
-  encode(const std::vector<unsigned char> &in) const = 0;
+  virtual std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const = 0;
   // Returns true on success; on failure `out` is cleared.
   virtual bool decode(const std::vector<unsigned char> &in,
                       std::vector<unsigned char> &out) const = 0;
@@ -70,8 +68,7 @@ public:
   void register_codec(std::shared_ptr<state_compression_codec> codec);
 
   // Look up by id. Returns nullptr if absent.
-  std::shared_ptr<state_compression_codec>
-  get(const std::string &id) const;
+  std::shared_ptr<state_compression_codec> get(const std::string &id) const;
 
   bool has(const std::string &id) const;
 
@@ -83,13 +80,10 @@ public:
   // Convenience: encode/decode by id. encode returns the input
   // unchanged for unknown ids when `strict` is false; throws
   // std::runtime_error when `strict` is true. decode mirrors this.
-  std::vector<unsigned char>
-  encode(const std::string &id, const std::vector<unsigned char> &in,
-         bool strict = true) const;
-  bool decode(const std::string &id,
-              const std::vector<unsigned char> &in,
-              std::vector<unsigned char> &out,
-              bool strict = true) const;
+  std::vector<unsigned char> encode(const std::string &id, const std::vector<unsigned char> &in,
+                                    bool strict = true) const;
+  bool decode(const std::string &id, const std::vector<unsigned char> &in,
+              std::vector<unsigned char> &out, bool strict = true) const;
 
   // Process-wide default registry (lazily initialized with the
   // built-ins). Tests and library callers that want a shared
@@ -99,16 +93,14 @@ public:
 
 private:
   mutable std::mutex _mutex;
-  std::unordered_map<std::string, std::shared_ptr<state_compression_codec>>
-      _codecs;
+  std::unordered_map<std::string, std::shared_ptr<state_compression_codec>> _codecs;
 };
 
 // Built-in codecs (exposed for direct use).
 class state_raw_compression_codec : public state_compression_codec {
 public:
   std::string id() const override { return "raw"; }
-  std::vector<unsigned char>
-  encode(const std::vector<unsigned char> &in) const override {
+  std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override {
     return in;
   }
   bool decode(const std::vector<unsigned char> &in,
@@ -125,10 +117,8 @@ public:
 class state_rle_compression_codec : public state_compression_codec {
 public:
   std::string id() const override { return "rle"; }
-  std::vector<unsigned char>
-  encode(const std::vector<unsigned char> &in) const override;
-  bool decode(const std::vector<unsigned char> &in,
-              std::vector<unsigned char> &out) const override;
+  std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override;
+  bool decode(const std::vector<unsigned char> &in, std::vector<unsigned char> &out) const override;
 };
 
 } // namespace CVC_NAMESPACE

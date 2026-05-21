@@ -8,17 +8,15 @@
   2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_blob_store.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/state_blob_store.h>
+#include <gtest/gtest.h>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -44,16 +42,13 @@ TEST(Sha256Test, KnownVectorAbc) {
 }
 
 TEST(Sha256Test, KnownVectorLongerString) {
-  EXPECT_EQ(
-      cvc::sha256_hex(bytes_from(
-          "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
-      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  EXPECT_EQ(cvc::sha256_hex(bytes_from("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
 }
 
 TEST(Sha256Test, KnownVectorOneMillionA) {
   std::vector<unsigned char> a(1000000, 'a');
-  EXPECT_EQ(cvc::sha256_hex(a),
-            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  EXPECT_EQ(cvc::sha256_hex(a), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
 }
 
 TEST(MemoryBlobStoreTest, PutGetRoundtrip) {
@@ -147,8 +142,7 @@ TEST(MemoryBlobStoreStressTest, OptionalConcurrentPutGetStress) {
   for (auto &th : threads)
     th.join();
   EXPECT_EQ(errors.load(), 0);
-  EXPECT_EQ(store.size(),
-            static_cast<std::size_t>(kThreads * kPerThread));
+  EXPECT_EQ(store.size(), static_cast<std::size_t>(kThreads * kPerThread));
 }
 
 TEST(MemoryBlobStorePerformanceTest, OptionalPutThroughputSmoke) {
@@ -168,12 +162,10 @@ TEST(MemoryBlobStorePerformanceTest, OptionalPutThroughputSmoke) {
     store.put(payload);
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
   double mibps = (kCount * kSize) / (1024.0 * 1024.0) / secs;
-  std::cerr << "[blob perf] " << kCount << " x " << kSize << "B put in "
-            << secs << "s (" << mibps << " MiB/s)\n";
+  std::cerr << "[blob perf] " << kCount << " x " << kSize << "B put in " << secs << "s (" << mibps
+            << " MiB/s)\n";
   EXPECT_LT(secs, 10.0);
   EXPECT_EQ(store.size(), static_cast<std::size_t>(kCount));
 }

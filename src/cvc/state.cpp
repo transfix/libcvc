@@ -21,10 +21,6 @@
 */
 
 #include <algorithm>
-#include <map>
-#include <memory>
-#include <utility>
-#include <vector>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -41,9 +37,13 @@
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_message.h>
 #include <cvc/utility.h>
+#include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace CVC_NAMESPACE {
 // SEPARATOR is now an inline variable defined in state.h (C++17).
@@ -835,8 +835,7 @@ std::string state::resolvedValue(std::size_t hop_budget) {
       return _value;
   }
   link_resolution r = resolveLink(hop_budget);
-  if (r.kind == link_resolution_kind::resolved && r.target != nullptr &&
-      r.target != this)
+  if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this)
     return r.target->value();
   // Broken / cycle / budget exhausted: fall back to own value.
   return value();
@@ -899,8 +898,7 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
     }
     if (target.empty()) {
       // Terminal node: not a link.
-      result.kind = (cur == this) ? link_resolution_kind::none
-                                  : link_resolution_kind::resolved;
+      result.kind = (cur == this) ? link_resolution_kind::none : link_resolution_kind::resolved;
       result.target = cur;
       return result;
     }
@@ -1089,7 +1087,7 @@ state &state::expireAfter(boost::posix_time::time_duration d) {
 state &state::clearExpiry() {
   {
     boost::mutex::scoped_lock lock(_mutex);
-    _expiryTime = boost::posix_time::ptime();  // not_a_date_time
+    _expiryTime = boost::posix_time::ptime(); // not_a_date_time
     _lastMod = boost::posix_time::microsec_clock::universal_time();
   }
   return *this;

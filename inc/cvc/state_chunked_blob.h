@@ -11,12 +11,11 @@
 #ifndef __CVC_STATE_CHUNKED_BLOB_H__
 #define __CVC_STATE_CHUNKED_BLOB_H__
 
+#include <atomic>
+#include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_blob_store.h>
 #include <cvc/state_compression_registry.h>
-
-#include <atomic>
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -48,13 +47,12 @@ struct state_chunk_manifest {
   std::uint32_t chunk_size = 0;
   std::uint64_t total_size = 0;
   std::string codec;
-  std::string content_digest;          // sha256 hex of full payload
-  std::vector<std::string> chunks;     // per-chunk sha256 hex
+  std::string content_digest;      // sha256 hex of full payload
+  std::vector<std::string> chunks; // per-chunk sha256 hex
   std::vector<std::uint32_t> chunk_bytes;
 
   std::vector<unsigned char> serialize() const;
-  static bool parse(const std::vector<unsigned char> &bytes,
-                    state_chunk_manifest &out);
+  static bool parse(const std::vector<unsigned char> &bytes, state_chunk_manifest &out);
 };
 
 // ----------------
@@ -77,13 +75,11 @@ public:
   // Default chunk size: 1 MiB. `compression` is the registry
   // consulted when put() is called with a non-empty codec id; if
   // null, only the empty / "raw" codec is honored.
-  explicit state_chunked_blob_writer(
-      state_blob_store &store, std::uint32_t chunk_size = 1u << 20,
-      const state_compression_registry *compression = nullptr);
+  explicit state_chunked_blob_writer(state_blob_store &store, std::uint32_t chunk_size = 1u << 20,
+                                     const state_compression_registry *compression = nullptr);
 
   state_chunked_blob_writer(const state_chunked_blob_writer &) = delete;
-  state_chunked_blob_writer &
-  operator=(const state_chunked_blob_writer &) = delete;
+  state_chunked_blob_writer &operator=(const state_chunked_blob_writer &) = delete;
 
   // Write `bytes` as N chunks into the underlying store, then write
   // the serialized manifest as a blob. Each chunk is compressed
@@ -99,9 +95,7 @@ public:
   std::uint64_t total_chunks_written() const {
     return _chunks_written.load(std::memory_order_relaxed);
   }
-  std::uint64_t total_chunks_dedup() const {
-    return _chunks_dedup.load(std::memory_order_relaxed);
-  }
+  std::uint64_t total_chunks_dedup() const { return _chunks_dedup.load(std::memory_order_relaxed); }
   std::uint64_t total_bytes_written() const {
     return _bytes_written.load(std::memory_order_relaxed);
   }
@@ -130,29 +124,23 @@ private:
 //
 class state_chunked_blob_reader {
 public:
-  explicit state_chunked_blob_reader(
-      state_blob_store &store,
-      const state_compression_registry *compression = nullptr);
+  explicit state_chunked_blob_reader(state_blob_store &store,
+                                     const state_compression_registry *compression = nullptr);
 
   // Load+parse a manifest by digest. Returns false on missing or
   // malformed manifest.
-  bool load_manifest(const std::string &manifest_digest,
-                     state_chunk_manifest &out) const;
+  bool load_manifest(const std::string &manifest_digest, state_chunk_manifest &out) const;
 
   // Return digests of chunks not present locally, in manifest
   // order.
-  std::vector<std::string>
-  missing_chunks(const state_chunk_manifest &manifest) const;
-  std::vector<std::string>
-  missing_chunks(const std::string &manifest_digest) const;
+  std::vector<std::string> missing_chunks(const state_chunk_manifest &manifest) const;
+  std::vector<std::string> missing_chunks(const std::string &manifest_digest) const;
 
   // Reassemble the full payload referenced by `manifest`. Returns
   // false if any chunk is missing (use missing_chunks to plan a
   // resume). Verifies the reassembled content_digest if non-empty.
-  bool get(const state_chunk_manifest &manifest,
-           std::vector<unsigned char> &out) const;
-  bool get(const std::string &manifest_digest,
-           std::vector<unsigned char> &out) const;
+  bool get(const state_chunk_manifest &manifest, std::vector<unsigned char> &out) const;
+  bool get(const std::string &manifest_digest, std::vector<unsigned char> &out) const;
 
   state_blob_store &store() { return _store; }
 

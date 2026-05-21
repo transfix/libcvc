@@ -8,16 +8,14 @@
   2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_replica.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/state_replica.h>
+#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -180,10 +178,8 @@ TEST(StateReplicaStressTest, OptionalConcurrentObserveStress) {
     th.join();
   for (int t = 0; t < kThreads; ++t) {
     std::string nid = "node" + std::to_string(t);
-    EXPECT_EQ(r.last_applied(nid),
-              static_cast<std::uint64_t>(kPerThread - 1));
-    EXPECT_EQ(r.clock_component(nid),
-              static_cast<std::uint64_t>(kPerThread - 1));
+    EXPECT_EQ(r.last_applied(nid), static_cast<std::uint64_t>(kPerThread - 1));
+    EXPECT_EQ(r.clock_component(nid), static_cast<std::uint64_t>(kPerThread - 1));
   }
 }
 
@@ -198,11 +194,9 @@ TEST(StateReplicaPerformanceTest, OptionalSeenInsertThroughputSmoke) {
   for (int i = 0; i < kIters; ++i)
     r.seen("nodeA", static_cast<std::uint64_t>(i), true);
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
-  std::cerr << "[replica perf] " << kIters << " seen-record in " << secs
-            << "s (" << (kIters / secs) << "/s)\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[replica perf] " << kIters << " seen-record in " << secs << "s (" << (kIters / secs)
+            << "/s)\n";
   EXPECT_LT(secs, 10.0);
   EXPECT_EQ(r.seen_size(), static_cast<std::size_t>(kIters));
 }

@@ -3,13 +3,11 @@
   Phase 5 — state_distributed_metrics tests.
 */
 
-#include <cvc/state_distributed_metrics.h>
-
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_cluster_shard.h>
+#include <cvc/state_distributed_metrics.h>
 #include <cvc/state_transport_inproc.h>
-
 #include <gtest/gtest.h>
 
 using cvc::app;
@@ -22,8 +20,7 @@ using cvc::state_transport_inproc;
 TEST(StateDistributedMetrics, WriteU64Persists) {
   app ctx;
   state_distributed_metrics::write_u64(ctx, "cluster_x", "alpha", 42);
-  std::string v = state::instance(ctx)("__system.distributed.cluster_x.alpha")
-                      .value();
+  std::string v = state::instance(ctx)("__system.distributed.cluster_x.alpha").value();
   EXPECT_EQ("42", v);
 }
 
@@ -31,20 +28,14 @@ TEST(StateDistributedMetrics, ClusterIsolation) {
   app ctx;
   state_distributed_metrics::write_u64(ctx, "c1", "k", 1);
   state_distributed_metrics::write_u64(ctx, "c2", "k", 2);
-  EXPECT_EQ("1",
-            state::instance(ctx)("__system.distributed.c1.k").value());
-  EXPECT_EQ("2",
-            state::instance(ctx)("__system.distributed.c2.k").value());
+  EXPECT_EQ("1", state::instance(ctx)("__system.distributed.c1.k").value());
+  EXPECT_EQ("2", state::instance(ctx)("__system.distributed.c2.k").value());
 }
 
 TEST(StateDistributedMetrics, PublishShardWritesAllKeys) {
   app sender, receiver;
-  auto src =
-      std::make_unique<state_cluster_shard>(sender, "metrics_cluster",
-                                            "src_node", "data");
-  auto dst =
-      std::make_unique<state_cluster_shard>(receiver, "metrics_cluster",
-                                            "dst_node", "data");
+  auto src = std::make_unique<state_cluster_shard>(sender, "metrics_cluster", "src_node", "data");
+  auto dst = std::make_unique<state_cluster_shard>(receiver, "metrics_cluster", "dst_node", "data");
   src->attach();
   dst->attach();
   dst->set_enforce_authority(false);
@@ -65,12 +56,12 @@ TEST(StateDistributedMetrics, PublishShardWritesAllKeys) {
   std::size_t n = state_distributed_metrics::publish_shard(metrics_ctx, *dst);
   EXPECT_EQ(5u, n);
 
-  EXPECT_EQ("1", state::instance(metrics_ctx)(
-                     "__system.distributed.metrics_cluster.remote.applied")
-                     .value());
-  EXPECT_EQ("1", state::instance(metrics_ctx)(
-                     "__system.distributed.metrics_cluster.remote.duplicates")
-                     .value());
+  EXPECT_EQ(
+      "1",
+      state::instance(metrics_ctx)("__system.distributed.metrics_cluster.remote.applied").value());
+  EXPECT_EQ("1",
+            state::instance(metrics_ctx)("__system.distributed.metrics_cluster.remote.duplicates")
+                .value());
 
   src->detach();
   dst->detach();

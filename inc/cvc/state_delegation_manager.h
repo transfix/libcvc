@@ -11,10 +11,9 @@
 #ifndef __CVC_STATE_DELEGATION_MANAGER_H__
 #define __CVC_STATE_DELEGATION_MANAGER_H__
 
+#include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
-
-#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -67,12 +66,9 @@ public:
   // clock_fn must return a steady-clock-like nanosecond timestamp.
   using clock_fn = std::function<std::uint64_t()>;
 
-  explicit state_delegation_manager(std::string local_cluster_id,
-                                    clock_fn clock = nullptr);
+  explicit state_delegation_manager(std::string local_cluster_id, clock_fn clock = nullptr);
 
-  const std::string &local_cluster_id() const noexcept {
-    return _local_cluster_id;
-  }
+  const std::string &local_cluster_id() const noexcept { return _local_cluster_id; }
 
   // Replace the underlying clock. Useful for deterministic tests.
   void set_clock(clock_fn clock);
@@ -84,16 +80,13 @@ public:
   // Add or replace a delegation. `lease_duration_ns == 0` means no
   // expiry (infinite lease). Otherwise expires_at_ns = now() +
   // lease_duration_ns.
-  void delegate(const std::string &path_prefix,
-                const std::string &cluster_id,
-                const std::string &endpoint = std::string(),
-                std::uint64_t lease_duration_ns = 0);
+  void delegate(const std::string &path_prefix, const std::string &cluster_id,
+                const std::string &endpoint = std::string(), std::uint64_t lease_duration_ns = 0);
 
   // Bump the lease for an existing delegation. Returns false if no
   // entry exists at `path_prefix`. `lease_duration_ns == 0` makes
   // the lease infinite.
-  bool renew(const std::string &path_prefix,
-             std::uint64_t lease_duration_ns);
+  bool renew(const std::string &path_prefix, std::uint64_t lease_duration_ns);
 
   // Remove the exact delegation. Returns true if an entry existed.
   bool revoke(const std::string &path_prefix);
@@ -103,9 +96,7 @@ public:
   route_decision route(const std::string &path) const;
 
   // Convenience: returns true iff route(path).kind == local.
-  bool is_local(const std::string &path) const {
-    return route(path).kind == route_kind::local;
-  }
+  bool is_local(const std::string &path) const { return route(path).kind == route_kind::local; }
 
 private:
   std::uint64_t now_ns() const;

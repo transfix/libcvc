@@ -4,7 +4,6 @@
 */
 
 #include <cvc/state_write_policy.h>
-
 #include <gtest/gtest.h>
 
 using cvc::state_write_policy;

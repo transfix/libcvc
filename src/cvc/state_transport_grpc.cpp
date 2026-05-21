@@ -8,20 +8,18 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_transport_grpc.h>
-
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_message_bus.h>
+#include <cvc/state_transport_grpc.h>
 #include <functional>
+#include <grpcpp/grpcpp.h>
 #include <stdexcept>
 #include <utility>
-
-#include <grpcpp/grpcpp.h>
 
 namespace CVC_NAMESPACE {
 
@@ -31,33 +29,54 @@ namespace pb = ::cvc::transport::v1;
 
 pb::MutationOp encode_op(state_mutation_op op) {
   switch (op) {
-  case state_mutation_op::set_value:         return pb::MUTATION_OP_SET_VALUE;
-  case state_mutation_op::set_data:          return pb::MUTATION_OP_SET_DATA;
-  case state_mutation_op::set_comment:       return pb::MUTATION_OP_SET_COMMENT;
-  case state_mutation_op::set_hidden:        return pb::MUTATION_OP_SET_HIDDEN;
-  case state_mutation_op::set_read_only:     return pb::MUTATION_OP_SET_READ_ONLY;
-  case state_mutation_op::touch:             return pb::MUTATION_OP_TOUCH;
-  case state_mutation_op::reset_node:        return pb::MUTATION_OP_RESET_NODE;
-  case state_mutation_op::delete_subtree:    return pb::MUTATION_OP_DELETE_SUBTREE;
-  case state_mutation_op::delegate_subtree:  return pb::MUTATION_OP_DELEGATE_SUBTREE;
-  case state_mutation_op::revoke_delegation: return pb::MUTATION_OP_REVOKE_DELEGATION;
+  case state_mutation_op::set_value:
+    return pb::MUTATION_OP_SET_VALUE;
+  case state_mutation_op::set_data:
+    return pb::MUTATION_OP_SET_DATA;
+  case state_mutation_op::set_comment:
+    return pb::MUTATION_OP_SET_COMMENT;
+  case state_mutation_op::set_hidden:
+    return pb::MUTATION_OP_SET_HIDDEN;
+  case state_mutation_op::set_read_only:
+    return pb::MUTATION_OP_SET_READ_ONLY;
+  case state_mutation_op::touch:
+    return pb::MUTATION_OP_TOUCH;
+  case state_mutation_op::reset_node:
+    return pb::MUTATION_OP_RESET_NODE;
+  case state_mutation_op::delete_subtree:
+    return pb::MUTATION_OP_DELETE_SUBTREE;
+  case state_mutation_op::delegate_subtree:
+    return pb::MUTATION_OP_DELEGATE_SUBTREE;
+  case state_mutation_op::revoke_delegation:
+    return pb::MUTATION_OP_REVOKE_DELEGATION;
   }
   return pb::MUTATION_OP_UNSPECIFIED;
 }
 
 state_mutation_op decode_op(pb::MutationOp op) {
   switch (op) {
-  case pb::MUTATION_OP_SET_VALUE:         return state_mutation_op::set_value;
-  case pb::MUTATION_OP_SET_DATA:          return state_mutation_op::set_data;
-  case pb::MUTATION_OP_SET_COMMENT:       return state_mutation_op::set_comment;
-  case pb::MUTATION_OP_SET_HIDDEN:        return state_mutation_op::set_hidden;
-  case pb::MUTATION_OP_SET_READ_ONLY:     return state_mutation_op::set_read_only;
-  case pb::MUTATION_OP_TOUCH:             return state_mutation_op::touch;
-  case pb::MUTATION_OP_RESET_NODE:        return state_mutation_op::reset_node;
-  case pb::MUTATION_OP_DELETE_SUBTREE:    return state_mutation_op::delete_subtree;
-  case pb::MUTATION_OP_DELEGATE_SUBTREE:  return state_mutation_op::delegate_subtree;
-  case pb::MUTATION_OP_REVOKE_DELEGATION: return state_mutation_op::revoke_delegation;
-  default:                                return state_mutation_op::set_value;
+  case pb::MUTATION_OP_SET_VALUE:
+    return state_mutation_op::set_value;
+  case pb::MUTATION_OP_SET_DATA:
+    return state_mutation_op::set_data;
+  case pb::MUTATION_OP_SET_COMMENT:
+    return state_mutation_op::set_comment;
+  case pb::MUTATION_OP_SET_HIDDEN:
+    return state_mutation_op::set_hidden;
+  case pb::MUTATION_OP_SET_READ_ONLY:
+    return state_mutation_op::set_read_only;
+  case pb::MUTATION_OP_TOUCH:
+    return state_mutation_op::touch;
+  case pb::MUTATION_OP_RESET_NODE:
+    return state_mutation_op::reset_node;
+  case pb::MUTATION_OP_DELETE_SUBTREE:
+    return state_mutation_op::delete_subtree;
+  case pb::MUTATION_OP_DELEGATE_SUBTREE:
+    return state_mutation_op::delegate_subtree;
+  case pb::MUTATION_OP_REVOKE_DELEGATION:
+    return state_mutation_op::revoke_delegation;
+  default:
+    return state_mutation_op::set_value;
   }
 }
 
@@ -79,8 +98,7 @@ void encode_mutation(const state_mutation &m, pb::Mutation *out) {
     p->set_none(true);
     break;
   case state_payload_kind::inline_bytes:
-    p->set_inline_bytes(std::string(m.payload.inline_bytes.begin(),
-                                    m.payload.inline_bytes.end()));
+    p->set_inline_bytes(std::string(m.payload.inline_bytes.begin(), m.payload.inline_bytes.end()));
     break;
   case state_payload_kind::blob: {
     auto *b = p->mutable_blob();
@@ -180,15 +198,12 @@ public:
 
 namespace {
 
-class StateTransportServiceImpl final
-    : public pb::StateTransport::Service {
+class StateTransportServiceImpl final : public pb::StateTransport::Service {
 public:
-  explicit StateTransportServiceImpl(state_transport_grpc *owner)
-      : _owner(owner) {}
+  explicit StateTransportServiceImpl(state_transport_grpc *owner) : _owner(owner) {}
 
-  grpc::Status Channel(
-      grpc::ServerContext *ctx,
-      grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
+  grpc::Status Channel(grpc::ServerContext *ctx,
+                       grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
     // Phase 5: bearer-token check.
     const std::string &expected = _owner->auth().expected_token;
     if (!expected.empty()) {
@@ -198,11 +213,11 @@ public:
       if (it != md.end()) {
         std::string got(it->second.data(), it->second.size());
         std::string want = "Bearer " + expected;
-        if (got == want) ok = true;
+        if (got == want)
+          ok = true;
       }
       if (!ok)
-        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
-                            "missing or invalid bearer token");
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing or invalid bearer token");
     }
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
@@ -211,9 +226,11 @@ public:
     std::weak_ptr<state_transport_grpc::connection> wconn = conn;
     conn->write_fn = [raw_stream, write_mu, wconn](const pb::Frame &f) -> bool {
       auto sc = wconn.lock();
-      if (!sc) return false;
+      if (!sc)
+        return false;
       std::lock_guard<std::mutex> lk(*write_mu);
-      if (!sc->alive.load()) return false;
+      if (!sc->alive.load())
+        return false;
       return raw_stream->Write(f);
     };
 
@@ -266,21 +283,18 @@ state_transport_grpc::~state_transport_grpc() { stop(); }
 
 void state_transport_grpc::set_tls_config(tls_config cfg) {
   if (_running.load())
-    throw std::runtime_error(
-        "state_transport_grpc::set_tls_config: already running");
+    throw std::runtime_error("state_transport_grpc::set_tls_config: already running");
   _tls = std::move(cfg);
   _tls_set = true;
 }
 
 void state_transport_grpc::set_auth_config(auth_config cfg) {
   if (_running.load())
-    throw std::runtime_error(
-        "state_transport_grpc::set_auth_config: already running");
+    throw std::runtime_error("state_transport_grpc::set_auth_config: already running");
   _auth = std::move(cfg);
 }
 
-void state_transport_grpc::start(const std::string &listen_addr,
-                                 const std::string &node_id,
+void state_transport_grpc::start(const std::string &listen_addr, const std::string &node_id,
                                  const std::string &cluster_id) {
   if (_running.load())
     throw std::runtime_error("state_transport_grpc::start: already running");
@@ -293,14 +307,12 @@ void state_transport_grpc::start(const std::string &listen_addr,
   grpc::ServerBuilder builder;
   int bound_port = 0;
   std::shared_ptr<grpc::ServerCredentials> server_creds;
-  if (_tls_set && !_tls.server_cert_pem.empty() &&
-      !_tls.server_key_pem.empty()) {
+  if (_tls_set && !_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty()) {
     grpc::SslServerCredentialsOptions opts(
-        _tls.require_client_auth
-            ? GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY
-            : GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE);
-    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{
-        _tls.server_key_pem, _tls.server_cert_pem};
+        _tls.require_client_auth ? GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY
+                                 : GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE);
+    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{_tls.server_key_pem,
+                                                           _tls.server_cert_pem};
     opts.pem_key_cert_pairs.push_back(pkcp);
     if (!_tls.root_ca_pem.empty())
       opts.pem_root_certs = _tls.root_ca_pem;
@@ -315,9 +327,7 @@ void state_transport_grpc::start(const std::string &listen_addr,
     throw std::runtime_error("state_transport_grpc::start: BuildAndStart failed");
 
   auto colon = listen_addr.find_last_of(':');
-  std::string host = (colon == std::string::npos)
-                         ? listen_addr
-                         : listen_addr.substr(0, colon);
+  std::string host = (colon == std::string::npos) ? listen_addr : listen_addr.substr(0, colon);
   if (bound_port > 0)
     _impl->listen_addr_resolved = host + ":" + std::to_string(bound_port);
   else
@@ -339,8 +349,7 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   if (_tls_set && !_tls.root_ca_pem.empty()) {
     grpc::SslCredentialsOptions opts;
     opts.pem_root_certs = _tls.root_ca_pem;
-    if (!_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty() &&
-        _tls.require_client_auth) {
+    if (!_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty() && _tls.require_client_auth) {
       opts.pem_cert_chain = _tls.server_cert_pem;
       opts.pem_private_key = _tls.server_key_pem;
     }
@@ -372,9 +381,11 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   std::weak_ptr<connection> wconn = conn;
   conn->write_fn = [stream, write_mu, wconn](const pb::Frame &f) -> bool {
     auto sc = wconn.lock();
-    if (!sc) return false;
+    if (!sc)
+      return false;
     std::lock_guard<std::mutex> lk(*write_mu);
-    if (!sc->alive.load()) return false;
+    if (!sc->alive.load())
+      return false;
     return stream->Write(f);
   };
 
@@ -443,21 +454,21 @@ void state_transport_grpc::stop() {
 }
 
 void state_transport_grpc::register_shard(state_cluster_shard *shard) {
-  if (shard == nullptr) return;
+  if (shard == nullptr)
+    return;
   std::lock_guard<std::mutex> lk(_shards_mu);
   if (std::find(_shards.begin(), _shards.end(), shard) == _shards.end())
     _shards.push_back(shard);
 }
 
 void state_transport_grpc::unregister_shard(state_cluster_shard *shard) {
-  if (shard == nullptr) return;
+  if (shard == nullptr)
+    return;
   std::lock_guard<std::mutex> lk(_shards_mu);
-  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard),
-                _shards.end());
+  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard), _shards.end());
 }
 
-state_transport::publish_stats
-state_transport_grpc::publish(const state_mutation &m) {
+state_transport::publish_stats state_transport_grpc::publish(const state_mutation &m) {
   publish_stats stats{};
 
   std::vector<state_cluster_shard *> local_peers;
@@ -465,9 +476,12 @@ state_transport_grpc::publish(const state_mutation &m) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     local_peers.reserve(_shards.size());
     for (auto *s : _shards) {
-      if (!s) continue;
-      if (s->cluster_id() != m.cluster_id) continue;
-      if (s->local_node_id() == m.origin_node_id) continue;
+      if (!s)
+        continue;
+      if (s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
       local_peers.push_back(s);
     }
   }
@@ -498,9 +512,9 @@ state_transport_grpc::publish(const state_mutation &m) {
     conns = _conns;
   }
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn) continue;
-    if (!c->remote_node_id.empty() &&
-        !_peers.should_deliver(c->remote_node_id, m.path)) {
+    if (!c || !c->alive.load() || !c->write_fn)
+      continue;
+    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
@@ -531,7 +545,8 @@ std::size_t state_transport_grpc::pump_all() {
   }
   std::size_t total = 0;
   for (auto *s : snap)
-    if (s) total += pump_shard(*s);
+    if (s)
+      total += pump_shard(*s);
   return total;
 }
 
@@ -542,7 +557,8 @@ void state_transport_grpc::flush() {
     conns = _conns;
   }
   for (auto &c : conns) {
-    if (!c) continue;
+    if (!c)
+      continue;
     std::lock_guard<std::mutex> wlk(c->write_mu);
     (void)wlk;
   }
@@ -557,9 +573,12 @@ state_transport_grpc::publish_message(const state_message &m) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     local_peers.reserve(_shards.size());
     for (auto *s : _shards) {
-      if (!s) continue;
-      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id) continue;
-      if (s->local_node_id() == m.origin_node_id) continue;
+      if (!s)
+        continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
       local_peers.push_back(s);
     }
   }
@@ -584,9 +603,9 @@ state_transport_grpc::publish_message(const state_message &m) {
     conns = _conns;
   }
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn) continue;
-    if (!c->remote_node_id.empty() &&
-        !_peers.should_deliver(c->remote_node_id, m.path)) {
+    if (!c || !c->alive.load() || !c->write_fn)
+      continue;
+    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
@@ -606,9 +625,12 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     peers.reserve(_shards.size());
     for (auto *s : _shards) {
-      if (!s) continue;
-      if (s->cluster_id() != m.cluster_id) continue;
-      if (s->local_node_id() == m.origin_node_id) continue;
+      if (!s)
+        continue;
+      if (s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
       peers.push_back(s);
     }
   }
@@ -625,9 +647,12 @@ void state_transport_grpc::on_inbound_message(const state_message &m) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     peers.reserve(_shards.size());
     for (auto *s : _shards) {
-      if (!s) continue;
-      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id) continue;
-      if (s->local_node_id() == m.origin_node_id) continue;
+      if (!s)
+        continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
       peers.push_back(s);
     }
   }
@@ -642,11 +667,10 @@ void state_transport_grpc::register_connection(std::shared_ptr<connection> conn)
 
 void state_transport_grpc::unregister_connection(connection *conn) {
   std::lock_guard<std::mutex> lk(_conns_mu);
-  _conns.erase(std::remove_if(_conns.begin(), _conns.end(),
-                              [conn](const std::shared_ptr<connection> &c) {
-                                return c.get() == conn;
-                              }),
-               _conns.end());
+  _conns.erase(
+      std::remove_if(_conns.begin(), _conns.end(),
+                     [conn](const std::shared_ptr<connection> &c) { return c.get() == conn; }),
+      _conns.end());
 }
 
 std::size_t state_transport_grpc::shard_count() const {
@@ -658,25 +682,28 @@ std::size_t state_transport_grpc::connection_count() const {
   std::lock_guard<std::mutex> lk(_conns_mu);
   std::size_t n = 0;
   for (auto &c : _conns)
-    if (c && c->alive.load()) ++n;
+    if (c && c->alive.load())
+      ++n;
   return n;
 }
 
-std::uint64_t state_transport_grpc::wait_for_received(
-    std::uint64_t target, std::chrono::milliseconds timeout) {
+std::uint64_t state_transport_grpc::wait_for_received(std::uint64_t target,
+                                                      std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (_recv_mutations.load() < target) {
-    if (std::chrono::steady_clock::now() >= deadline) break;
+    if (std::chrono::steady_clock::now() >= deadline)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_mutations.load();
 }
 
-std::uint64_t state_transport_grpc::wait_for_received_messages(
-    std::uint64_t target, std::chrono::milliseconds timeout) {
+std::uint64_t state_transport_grpc::wait_for_received_messages(std::uint64_t target,
+                                                               std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (_recv_messages.load() < target) {
-    if (std::chrono::steady_clock::now() >= deadline) break;
+    if (std::chrono::steady_clock::now() >= deadline)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_messages.load();

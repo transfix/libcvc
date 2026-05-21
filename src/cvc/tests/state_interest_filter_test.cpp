@@ -15,24 +15,19 @@
 // covered by a registered interest prefix, while preserving the
 // previous "mirror everything" behavior when the filter is off.
 
-#include <cvc/state_cluster_shard.h>
-
+#include <atomic>
 #include <cvc/app.h>
 #include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
-
-#include <atomic>
-#include <string>
-
 #include <gtest/gtest.h>
+#include <string>
 
 namespace {
 
-cvc::state_mutation make_set_value(const std::string &origin,
-                                   std::uint64_t seq,
-                                   const std::string &path,
-                                   const std::string &val) {
+cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
+                                   const std::string &path, const std::string &val) {
   cvc::state_mutation m;
   m.cluster_id = "test-cluster";
   m.tree_id = "default";
@@ -104,8 +99,7 @@ TEST(StateInterestFilterTest, SiblingPathIsRejected) {
   sh.set_enforce_interest(true);
   sh.add_interest("scene.lights");
 
-  auto r = sh.ingest_remote(
-      make_set_value("nodeB", 1, "scene.cameras", "cam"));
+  auto r = sh.ingest_remote(make_set_value("nodeB", 1, "scene.cameras", "cam"));
   EXPECT_FALSE(r.applied);
   EXPECT_TRUE(r.rejected);
   EXPECT_EQ(sh.total_remote_filtered_out(), 1u);
@@ -120,8 +114,7 @@ TEST(StateInterestFilterTest, DotBoundaryPreventsScenerySpoof) {
   sh.set_enforce_interest(true);
   sh.add_interest("scene");
 
-  auto r = sh.ingest_remote(
-      make_set_value("nodeB", 1, "scenery.path", "x"));
+  auto r = sh.ingest_remote(make_set_value("nodeB", 1, "scenery.path", "x"));
   EXPECT_FALSE(r.applied);
   EXPECT_TRUE(r.rejected);
   EXPECT_EQ(sh.total_remote_filtered_out(), 1u);
@@ -194,7 +187,7 @@ TEST(StateInterestFilterTest, AddInterestIsIdempotent) {
   cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
   sh.add_interest("scene");
   sh.add_interest("scene");
-  sh.add_interest(".scene.");  // gets normalized
+  sh.add_interest(".scene."); // gets normalized
   auto v = sh.interests();
   ASSERT_EQ(v.size(), 1u);
   EXPECT_EQ(v[0], "scene");
@@ -208,9 +201,7 @@ TEST(StateInterestFilterTest, IngestRemoteMessageRespectsFilter) {
   sh.add_interest("scene");
 
   std::atomic<int> hits{0};
-  sh.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sh.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   cvc::state_message in_msg;
   in_msg.cluster_id = "cluster-A";
@@ -234,7 +225,7 @@ TEST(StateInterestFilterTest, DelegationOpsBypassInterestFilter) {
   cvc::app a;
   cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
   sh.attach();
-  sh.set_enforce_interest(true);  // no interests => block all data
+  sh.set_enforce_interest(true); // no interests => block all data
 
   cvc::state_mutation d;
   d.cluster_id = "cluster-A";
@@ -244,7 +235,7 @@ TEST(StateInterestFilterTest, DelegationOpsBypassInterestFilter) {
   d.mutation_id = "nodeB:1";
   d.path = "off.limits";
   d.op = cvc::state_mutation_op::delegate_subtree;
-  d.string_value = "cluster-B";  // owner cluster
+  d.string_value = "cluster-B"; // owner cluster
   auto r = sh.ingest_remote(d);
   EXPECT_TRUE(r.applied) << r.reject_reason;
   EXPECT_EQ(sh.total_remote_filtered_out(), 0u);

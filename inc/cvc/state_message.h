@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_MESSAGE_H__
 #define __CVC_STATE_MESSAGE_H__
 
-#include <cvc/namespace.h>
-
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <string>
 #include <vector>
 
@@ -81,23 +80,20 @@ struct state_message {
   // Plain-text payload. The resulting message has
   // content_type="text/plain" (or `mime` if specified), the text
   // in `string_value`, and an empty `bytes`.
-  static state_message make_text(std::string path, std::string text,
-                                 std::string mime = MIME_TEXT);
+  static state_message make_text(std::string path, std::string text, std::string mime = MIME_TEXT);
 
   // Untyped binary payload. The resulting message has
   // content_type="application/octet-stream", bytes set, and an
   // empty string_value.
-  static state_message make_bytes(std::string path,
-                                  std::vector<unsigned char> bytes);
+  static state_message make_bytes(std::string path, std::vector<unsigned char> bytes);
 
   // Typed binary payload. Caller supplies an explicit media type;
   // both bytes and a sidecar string_value are settable so the
   // helper can build messages whose application-defined codec
   // wants both fields (e.g. JSON envelope + binary attachment).
-  static state_message
-  make_typed(std::string path, std::string content_type,
-             std::vector<unsigned char> bytes,
-             std::string string_value = std::string());
+  static state_message make_typed(std::string path, std::string content_type,
+                                  std::vector<unsigned char> bytes,
+                                  std::string string_value = std::string());
 };
 
 } // namespace CVC_NAMESPACE

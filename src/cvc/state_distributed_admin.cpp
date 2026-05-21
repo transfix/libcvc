@@ -8,17 +8,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_distributed_admin.h>
-
+#include <algorithm>
 #include <cvc/state.h>
 #include <cvc/state_authority_map.h>
 #include <cvc/state_blob_store.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_delegation_manager.h>
+#include <cvc/state_distributed_admin.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_peer_registry.h>
-
-#include <algorithm>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,25 +24,17 @@
 
 namespace CVC_NAMESPACE {
 
-void state_distributed_admin::attach_shard(
-    state_cluster_shard *shard) noexcept {
-  _shard = shard;
-}
+void state_distributed_admin::attach_shard(state_cluster_shard *shard) noexcept { _shard = shard; }
 
-void state_distributed_admin::attach_peer_registry(
-    state_peer_registry *peers) noexcept {
+void state_distributed_admin::attach_peer_registry(state_peer_registry *peers) noexcept {
   _peers = peers;
 }
 
-void state_distributed_admin::attach_blob_store(
-    state_blob_store *blobs) noexcept {
+void state_distributed_admin::attach_blob_store(state_blob_store *blobs) noexcept {
   _blobs = blobs;
 }
 
-void state_distributed_admin::attach_message_bus(
-    state_message_bus *bus) noexcept {
-  _bus = bus;
-}
+void state_distributed_admin::attach_message_bus(state_message_bus *bus) noexcept { _bus = bus; }
 
 state_distributed_admin::report state_distributed_admin::snapshot() const {
   report r;
@@ -119,38 +109,30 @@ std::string state_distributed_admin::to_text(const report &r) {
   } else {
     os << "  cluster_id=" << r.shard.cluster_id << "\n"
        << "  node_id=" << r.shard.node_id << "\n"
-       << "  enforce_authority=" << (r.shard.enforce_authority ? 1 : 0)
-       << "\n"
-       << "  enforce_write_policy=" << (r.shard.enforce_write_policy ? 1 : 0)
-       << "\n"
-       << "  enforce_delegation=" << (r.shard.enforce_delegation ? 1 : 0)
-       << "\n"
-       << "  resolve_conflicts=" << (r.shard.resolve_conflicts ? 1 : 0)
-       << "\n"
+       << "  enforce_authority=" << (r.shard.enforce_authority ? 1 : 0) << "\n"
+       << "  enforce_write_policy=" << (r.shard.enforce_write_policy ? 1 : 0) << "\n"
+       << "  enforce_delegation=" << (r.shard.enforce_delegation ? 1 : 0) << "\n"
+       << "  resolve_conflicts=" << (r.shard.resolve_conflicts ? 1 : 0) << "\n"
        << "  remote_applied=" << r.shard.total_remote_applied << "\n"
        << "  remote_duplicates=" << r.shard.total_remote_duplicates << "\n"
        << "  remote_rejected=" << r.shard.total_remote_rejected << "\n"
        << "  conflicts_detected=" << r.shard.total_conflicts_detected << "\n"
        << "  conflicts_lost=" << r.shard.total_conflicts_lost << "\n"
        << "  delegation_routed=" << r.shard.total_delegation_routed << "\n"
-       << "  delegation_expired=" << r.shard.total_delegation_expired
-       << "\n";
+       << "  delegation_expired=" << r.shard.total_delegation_expired << "\n";
   }
 
   os << "[delegations] count=" << r.delegations.size() << "\n";
   for (auto &d : r.delegations) {
-    os << "  prefix='" << d.prefix << "' cluster=" << d.cluster_id
-       << " endpoint=" << d.endpoint << " expires_at_ns=" << d.expires_at_ns
-       << "\n";
+    os << "  prefix='" << d.prefix << "' cluster=" << d.cluster_id << " endpoint=" << d.endpoint
+       << " expires_at_ns=" << d.expires_at_ns << "\n";
   }
 
   os << "[peers] count=" << r.peers.size() << "\n";
   for (auto &p : r.peers) {
-    os << "  node=" << p.node_id << " cluster=" << p.cluster_id
-       << " endpoint=" << p.endpoint << " subs=" << p.subscriptions.size()
-       << " last_seen_ns=" << p.last_seen_ns
-       << " mut_delivered=" << p.mutations_delivered
-       << " msg_delivered=" << p.messages_delivered
+    os << "  node=" << p.node_id << " cluster=" << p.cluster_id << " endpoint=" << p.endpoint
+       << " subs=" << p.subscriptions.size() << " last_seen_ns=" << p.last_seen_ns
+       << " mut_delivered=" << p.mutations_delivered << " msg_delivered=" << p.messages_delivered
        << " filtered=" << p.deliveries_filtered << "\n";
   }
 
@@ -175,8 +157,8 @@ std::string state_distributed_admin::to_text(const report &r) {
   return os.str();
 }
 
-state_distributed_admin::gc_result state_distributed_admin::gc_blobs(
-    const std::unordered_set<std::string> &live_digests) {
+state_distributed_admin::gc_result
+state_distributed_admin::gc_blobs(const std::unordered_set<std::string> &live_digests) {
   gc_result g;
   if (!_blobs)
     return g;
@@ -206,8 +188,8 @@ state_distributed_admin::gc_result state_distributed_admin::gc_blobs(
 namespace {
 
 struct tarjan_ctx {
-  std::vector<std::vector<int>> adj;          // adj[u] -> successors
-  std::vector<int> index_of;                  // -1 == unvisited
+  std::vector<std::vector<int>> adj; // adj[u] -> successors
+  std::vector<int> index_of;         // -1 == unvisited
   std::vector<int> lowlink;
   std::vector<bool> on_stack;
   std::vector<int> stack;
@@ -247,8 +229,7 @@ struct tarjan_ctx {
 
 } // namespace
 
-state_distributed_admin::link_cycles_result
-state_distributed_admin::link_cycles(state &root) {
+state_distributed_admin::link_cycles_result state_distributed_admin::link_cycles(state &root) {
   link_cycles_result result;
 
   // Step 1: enumerate every node in the subtree (root + descendants).
@@ -261,7 +242,7 @@ state_distributed_admin::link_cycles(state &root) {
   // absolute path. Non-link nodes are ignored: they cannot
   // participate in a cycle of links.
   std::unordered_map<std::string, int> id_of;
-  std::vector<std::string> paths; // paths[id] -> absolute path
+  std::vector<std::string> paths;       // paths[id] -> absolute path
   std::vector<std::string> targets_raw; // targets[id] -> linkTarget()
   for (const std::string &p : all_paths) {
     state *n = (p == root.fullName()) ? &root : root.findDescendant(p);
@@ -341,8 +322,7 @@ state_distributed_admin::link_cycles(state &root) {
   // Sort cycles themselves by their first element for stability
   // across runs.
   std::sort(result.cycles.begin(), result.cycles.end(),
-            [](const std::vector<std::string> &a,
-               const std::vector<std::string> &b) {
+            [](const std::vector<std::string> &a, const std::vector<std::string> &b) {
               return a.front() < b.front();
             });
 
@@ -389,10 +369,9 @@ state_distributed_admin::transparent_link_index(state &root) {
   return result;
 }
 
-std::vector<std::string>
-state_distributed_admin::transparent_link_aliases(state &root,
-                                                  const std::string &path,
-                                                  std::size_t hop_budget) {
+std::vector<std::string> state_distributed_admin::transparent_link_aliases(state &root,
+                                                                           const std::string &path,
+                                                                           std::size_t hop_budget) {
   // BFS over the transparent-link graph: starting from `path`, at
   // each hop expand the current frontier through every transparent
   // link whose target equals or is a dot-segment-aware prefix of
@@ -420,8 +399,7 @@ state_distributed_admin::transparent_link_aliases(state &root,
         // match every frontier path on every hop.
         if (cur.size() >= tl.link_path.size() &&
             cur.compare(0, tl.link_path.size(), tl.link_path) == 0 &&
-            (cur.size() == tl.link_path.size() ||
-             cur[tl.link_path.size()] == '.'))
+            (cur.size() == tl.link_path.size() || cur[tl.link_path.size()] == '.'))
           continue;
         std::string suffix;
         if (tl.target_path.empty()) {
@@ -430,8 +408,7 @@ state_distributed_admin::transparent_link_aliases(state &root,
         } else if (cur == tl.target_path) {
           suffix.clear();
         } else if (cur.size() > tl.target_path.size() &&
-                   cur.compare(0, tl.target_path.size(), tl.target_path) ==
-                       0 &&
+                   cur.compare(0, tl.target_path.size(), tl.target_path) == 0 &&
                    cur[tl.target_path.size()] == '.') {
           suffix = cur.substr(tl.target_path.size() + 1);
         } else {

@@ -23,7 +23,6 @@ state_mutation make_value_mutation(const std::string &path, const std::string &v
   return mutation;
 }
 
-
 bool opt_in_enabled(const char *name) {
   const char *value = std::getenv(name);
   return value != nullptr && std::string(value) == "1";
@@ -140,9 +139,8 @@ TEST(StateChangeJournalTest, ConcurrentAppendProducesUniqueOrderedSequences) {
   for (int thread_index = 0; thread_index < thread_count; ++thread_index) {
     threads.emplace_back([&journal, &stored_mutations, &stored_mutex, thread_index]() {
       for (int mutation_index = 0; mutation_index < mutations_per_thread; ++mutation_index) {
-        state_mutation mutation =
-            make_value_mutation("thread." + std::to_string(thread_index),
-                                std::to_string(mutation_index));
+        state_mutation mutation = make_value_mutation("thread." + std::to_string(thread_index),
+                                                      std::to_string(mutation_index));
         state_mutation stored = journal.append(mutation);
         std::lock_guard<std::mutex> lock(stored_mutex);
         stored_mutations.push_back(stored);

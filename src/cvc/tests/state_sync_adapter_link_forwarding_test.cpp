@@ -15,14 +15,12 @@
 // that subscriptions registered at link-side paths also match
 // target-side mutations. Opaque links must NOT contribute aliasing.
 
+#include <algorithm>
 #include <cvc/app.h>
 #include <cvc/state.h>
-#include <cvc/state_sync_adapter.h>
 #include <cvc/state_subscription_router.h>
-
+#include <cvc/state_sync_adapter.h>
 #include <gtest/gtest.h>
-
-#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -33,8 +31,7 @@ using cvc::state_sync_adapter;
 
 namespace {
 
-bool has_id(const std::vector<state_subscription> &subs,
-            state_subscription_id id) {
+bool has_id(const std::vector<state_subscription> &subs, state_subscription_id id) {
   return std::any_of(subs.begin(), subs.end(),
                      [id](const state_subscription &s) { return s.id == id; });
 }
@@ -55,13 +52,11 @@ TEST(StateSyncAdapterLinkForwarding, NoLinkBehavesLikeRouterLookup) {
   EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     TransparentLinkSideSubscriptionCatchesTargetMutation) {
+TEST(StateSyncAdapterLinkForwarding, TransparentLinkSideSubscriptionCatchesTargetMutation) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene")
-      .linkTo("data.world", state::link_mode::transparent);
+  root("scene").linkTo("data.world", state::link_mode::transparent);
 
   state_sync_adapter adapter(a, "", "node-a");
   auto id = adapter.router().subscribe("scene.geometry", true);
@@ -74,8 +69,7 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 1u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     OpaqueLinkDoesNotContributeAlias) {
+TEST(StateSyncAdapterLinkForwarding, OpaqueLinkDoesNotContributeAlias) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
@@ -89,8 +83,7 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     SubscriptionAtDeepLinkPathMatchesTargetSubtreeMutation) {
+TEST(StateSyncAdapterLinkForwarding, SubscriptionAtDeepLinkPathMatchesTargetSubtreeMutation) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world").value(std::string("v"));
@@ -99,19 +92,16 @@ TEST(StateSyncAdapterLinkForwarding,
   state_sync_adapter adapter(a, "", "node-a");
   auto id = adapter.router().subscribe("scene.geometry.mesh", true);
 
-  auto subs =
-      adapter.subscriptions_for_path("data.world.geometry.mesh");
+  auto subs = adapter.subscriptions_for_path("data.world.geometry.mesh");
   ASSERT_EQ(subs.size(), 1u);
   EXPECT_TRUE(has_id(subs, id));
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     DedupBetweenDirectAndAliasedMatch) {
+TEST(StateSyncAdapterLinkForwarding, DedupBetweenDirectAndAliasedMatch) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene")
-      .linkTo("data.world", state::link_mode::transparent);
+  root("scene").linkTo("data.world", state::link_mode::transparent);
 
   state_sync_adapter adapter(a, "", "node-a");
   // Same subscription_id at a prefix covering both sides (root).
@@ -123,15 +113,12 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     MultipleTransparentLinksAllContributeSubscriptions) {
+TEST(StateSyncAdapterLinkForwarding, MultipleTransparentLinksAllContributeSubscriptions) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene.a")
-      .linkTo("data.world", state::link_mode::transparent);
-  root("scene.b")
-      .linkTo("data.world", state::link_mode::transparent);
+  root("scene.a").linkTo("data.world", state::link_mode::transparent);
+  root("scene.b").linkTo("data.world", state::link_mode::transparent);
 
   state_sync_adapter adapter(a, "", "node-a");
   auto id_a = adapter.router().subscribe("scene.a.geometry", true);
@@ -144,8 +131,7 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 2u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     DotBoundaryPreventsSpoofedAlias) {
+TEST(StateSyncAdapterLinkForwarding, DotBoundaryPreventsSpoofedAlias) {
   cvc::app a;
   auto &root = state::instance(a);
   root("scene").value(std::string("v"));
@@ -160,13 +146,11 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 0u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     ForwardedCounterIsCumulativeAcrossCalls) {
+TEST(StateSyncAdapterLinkForwarding, ForwardedCounterIsCumulativeAcrossCalls) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene")
-      .linkTo("data.world", state::link_mode::transparent);
+  root("scene").linkTo("data.world", state::link_mode::transparent);
 
   state_sync_adapter adapter(a, "", "node-a");
   adapter.router().subscribe("scene.geometry", true);
@@ -178,13 +162,11 @@ TEST(StateSyncAdapterLinkForwarding,
   EXPECT_EQ(adapter.forwarded_through_link_count(), 2u);
 }
 
-TEST(StateSyncAdapterLinkForwarding,
-     ChangingLinkModeToOpaqueRemovesForwarding) {
+TEST(StateSyncAdapterLinkForwarding, ChangingLinkModeToOpaqueRemovesForwarding) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  auto &link = root("scene")
-                   .linkTo("data.world", state::link_mode::transparent);
+  auto &link = root("scene").linkTo("data.world", state::link_mode::transparent);
 
   state_sync_adapter adapter(a, "", "node-a");
   adapter.router().subscribe("scene.geometry", true);

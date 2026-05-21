@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_DISTRIBUTED_METRICS_H__
 #define __CVC_STATE_DISTRIBUTED_METRICS_H__
 
-#include <cvc/namespace.h>
-
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <string>
 
 namespace CVC_NAMESPACE {
@@ -53,23 +52,18 @@ struct state_distributed_metrics {
   // Snapshot the current shard counters and write them under
   //   __system.distributed.<cluster_id>.<key>
   // Returns the number of distinct keys written (5 on success).
-  static std::size_t publish_shard(app &ctx,
-                                   const state_cluster_shard &shard);
+  static std::size_t publish_shard(app &ctx, const state_cluster_shard &shard);
 
   // Snapshot the current transport counters and write them under
   //   __system.distributed.<cluster_id>.transport.<key>
   // The transport's peer registry is also queried for total peers.
-  static std::size_t publish_transport_inproc(app &ctx,
-                                              const std::string &cluster_id,
-                                              const state_transport &t,
-                                              std::uint64_t published,
+  static std::size_t publish_transport_inproc(app &ctx, const std::string &cluster_id,
+                                              const state_transport &t, std::uint64_t published,
                                               std::uint64_t delivered);
 
   // Generic helper: write a single uint64 under
   //   __system.distributed.<cluster_id>.<key>
-  static void write_u64(app &ctx,
-                        const std::string &cluster_id,
-                        const std::string &key,
+  static void write_u64(app &ctx, const std::string &cluster_id, const std::string &key,
                         std::uint64_t value);
 };
 

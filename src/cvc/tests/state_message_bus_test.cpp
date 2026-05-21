@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1
 // Tests for cvc::state_message_bus (Phase 4 OOB messaging).
 
+#include <atomic>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
-
 #include <gtest/gtest.h>
-
-#include <atomic>
 #include <string>
 #include <vector>
 
@@ -15,9 +13,7 @@ using cvc::state_message_bus;
 
 namespace {
 
-state_message make_msg(const std::string &origin,
-                       const std::string &id,
-                       const std::string &path,
+state_message make_msg(const std::string &origin, const std::string &id, const std::string &path,
                        const std::string &str = {}) {
   state_message m;
   m.origin_node_id = origin;
@@ -28,7 +24,7 @@ state_message make_msg(const std::string &origin,
   return m;
 }
 
-}  // namespace
+} // namespace
 
 TEST(StateMessageBus, PrefixMatches) {
   EXPECT_TRUE(state_message_bus::prefix_matches("", "anything"));
@@ -69,8 +65,8 @@ TEST(StateMessageBus, MultipleSubscribersFireOncePerAdmit) {
   EXPECT_TRUE(bus.admit(make_msg("A", "3", "q")));
 
   EXPECT_EQ(a.load(), 3);
-  EXPECT_EQ(b.load(), 2);  // p.x and p.y
-  EXPECT_EQ(c.load(), 1);  // p.x only
+  EXPECT_EQ(b.load(), 2); // p.x and p.y
+  EXPECT_EQ(c.load(), 1); // p.x only
   EXPECT_EQ(bus.total_dispatched(), 6u);
 }
 
@@ -111,7 +107,7 @@ TEST(StateMessageBus, DedupCapacityEviction) {
 
   EXPECT_TRUE(bus.admit(make_msg("A", "1", "x")));
   EXPECT_TRUE(bus.admit(make_msg("A", "2", "x")));
-  EXPECT_TRUE(bus.admit(make_msg("A", "3", "x")));  // evicts (A,1)
+  EXPECT_TRUE(bus.admit(make_msg("A", "3", "x"))); // evicts (A,1)
 
   // (A,1) was evicted; should be admitted again.
   EXPECT_TRUE(bus.admit(make_msg("A", "1", "x")));

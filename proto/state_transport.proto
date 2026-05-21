@@ -32,7 +32,7 @@ message BlobRef {
 
 message Payload {
   oneof kind {
-    bool none = 1;            // sentinel for state_payload_kind::none
+    bool none = 1; // sentinel for state_payload_kind::none
     bytes inline_bytes = 2;
     BlobRef blob = 3;
   }
@@ -85,6 +85,4 @@ message Frame {
 // long-lived stream; mutation traffic flows both ways. The first
 // frame each side sends is a Hello so the remote can record the
 // peer's node_id / cluster_id for diagnostics.
-service StateTransport {
-  rpc Channel(stream Frame) returns (stream Frame);
-}
+service StateTransport { rpc Channel(stream Frame) returns (stream Frame); }

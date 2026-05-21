@@ -11,11 +11,10 @@
 #ifndef __CVC_STATE_TRANSPORT_INPROC_H__
 #define __CVC_STATE_TRANSPORT_INPROC_H__
 
+#include <atomic>
 #include <cvc/namespace.h>
 #include <cvc/state_bounded_queue.h>
 #include <cvc/state_transport.h>
-
-#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,8 +69,7 @@ public:
   // overflow behavior. Replaces any prior configuration. Pass
   // capacity=0 (or call clear_peer_message_outbox) to revert to
   // synchronous delivery.
-  void set_peer_message_outbox(state_cluster_shard *peer,
-                               std::size_t capacity,
+  void set_peer_message_outbox(state_cluster_shard *peer, std::size_t capacity,
                                outbox_policy policy = outbox_policy::drop_newest);
 
   // Remove an installed outbox; subsequent publish_message() calls
@@ -86,13 +84,10 @@ public:
   // ingest_remote_message on the peer. Returns the number of
   // messages actually delivered (excludes ones the peer treated as
   // duplicates or filtered). max=0 means "drain until empty".
-  std::size_t deliver_message_outbox(state_cluster_shard *peer,
-                                     std::size_t max = 0);
+  std::size_t deliver_message_outbox(state_cluster_shard *peer, std::size_t max = 0);
 
   // Aggregated outbox counters across all installed outboxes.
-  std::uint64_t total_outbox_admitted() const noexcept {
-    return _outbox_admitted.load();
-  }
+  std::uint64_t total_outbox_admitted() const noexcept { return _outbox_admitted.load(); }
   std::uint64_t total_outbox_dropped_newest() const noexcept {
     return _outbox_dropped_newest.load();
   }
@@ -133,26 +128,18 @@ public:
     return _auto_isolation_threshold.load();
   }
 
-  std::uint64_t total_quarantined_messages() const noexcept {
-    return _quarantined_messages.load();
-  }
+  std::uint64_t total_quarantined_messages() const noexcept { return _quarantined_messages.load(); }
   std::uint64_t total_quarantined_mutations() const noexcept {
     return _quarantined_mutations.load();
   }
-  std::uint64_t total_auto_isolations() const noexcept {
-    return _auto_isolations.load();
-  }
+  std::uint64_t total_auto_isolations() const noexcept { return _auto_isolations.load(); }
 
   // Diagnostics.
   std::size_t shard_count() const;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
-  std::uint64_t total_messages_published() const noexcept {
-    return _msg_published.load();
-  }
-  std::uint64_t total_messages_delivered() const noexcept {
-    return _msg_delivered.load();
-  }
+  std::uint64_t total_messages_published() const noexcept { return _msg_published.load(); }
+  std::uint64_t total_messages_delivered() const noexcept { return _msg_delivered.load(); }
 
 private:
   struct peer_outbox {
@@ -166,8 +153,7 @@ private:
 
   mutable std::mutex _mutex;
   std::vector<state_cluster_shard *> _shards;
-  std::unordered_map<state_cluster_shard *, std::unique_ptr<peer_outbox>>
-      _outboxes;
+  std::unordered_map<state_cluster_shard *, std::unique_ptr<peer_outbox>> _outboxes;
   std::unordered_set<state_cluster_shard *> _slow_peers;
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _delivered{0};

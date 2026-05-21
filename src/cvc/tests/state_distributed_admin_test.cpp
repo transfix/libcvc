@@ -8,28 +8,24 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_distributed_admin.h>
-
+#include <cstdint>
 #include <cvc/app.h>
 #include <cvc/state_blob_store.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_delegation_manager.h>
+#include <cvc/state_distributed_admin.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_peer_registry.h>
-
 #include <gtest/gtest.h>
-
-#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace {
 
-cvc::state_mutation make_set_value(const std::string &origin,
-                                   std::uint64_t seq, const std::string &path,
-                                   const std::string &val) {
+cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
+                                   const std::string &path, const std::string &val) {
   cvc::state_mutation m;
   m.cluster_id = "cA";
   m.tree_id = "default";
@@ -84,10 +80,8 @@ TEST(StateDistributedAdmin, ShardSnapshotMirrorsLiveCounters) {
   EXPECT_EQ(r0.delegations[0].cluster_id, "cB");
 
   // One foreign reject + one local apply.
-  EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 1, "foreign.x", "v"))
-                  .rejected);
-  EXPECT_TRUE(
-      sh.ingest_remote(make_set_value("nodeC", 2, "ours.x", "v")).applied);
+  EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 1, "foreign.x", "v")).rejected);
+  EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 2, "ours.x", "v")).applied);
 
   auto r1 = admin.snapshot();
   EXPECT_EQ(r1.shard.total_remote_applied, 1u);

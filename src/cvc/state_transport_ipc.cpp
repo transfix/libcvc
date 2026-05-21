@@ -8,19 +8,17 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_transport_ipc.h>
-
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <stdexcept>
-#include <string>
-
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_message_bus.h>
+#include <cvc/state_transport_ipc.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdexcept>
+#include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -37,9 +35,7 @@ constexpr std::uint16_t kMsgMutation = 2;
 constexpr std::uint16_t kMsgOob = 3;
 constexpr std::size_t kMaxFrameBytes = 64u * 1024u * 1024u;
 
-void put_u8(std::vector<unsigned char> &out, std::uint8_t v) {
-  out.push_back(v);
-}
+void put_u8(std::vector<unsigned char> &out, std::uint8_t v) { out.push_back(v); }
 
 void put_u16(std::vector<unsigned char> &out, std::uint16_t v) {
   out.push_back(static_cast<unsigned char>(v & 0xff));
@@ -61,8 +57,7 @@ void put_string(std::vector<unsigned char> &out, const std::string &s) {
   out.insert(out.end(), s.begin(), s.end());
 }
 
-void put_bytes(std::vector<unsigned char> &out,
-               const std::vector<unsigned char> &b) {
+void put_bytes(std::vector<unsigned char> &out, const std::vector<unsigned char> &b) {
   put_u32(out, static_cast<std::uint32_t>(b.size()));
   out.insert(out.end(), b.begin(), b.end());
 }
@@ -72,9 +67,7 @@ public:
   reader(const unsigned char *p, std::size_t n) : _p(p), _end(p + n) {}
 
   bool ok() const { return _p <= _end; }
-  std::size_t remaining() const {
-    return static_cast<std::size_t>(_end - _p);
-  }
+  std::size_t remaining() const { return static_cast<std::size_t>(_end - _p); }
 
   std::uint8_t u8() {
     if (remaining() < 1) {
@@ -88,8 +81,7 @@ public:
       _p = _end + 1;
       return 0;
     }
-    std::uint16_t v = static_cast<std::uint16_t>(_p[0]) |
-                      (static_cast<std::uint16_t>(_p[1]) << 8);
+    std::uint16_t v = static_cast<std::uint16_t>(_p[0]) | (static_cast<std::uint16_t>(_p[1]) << 8);
     _p += 2;
     return v;
   }
@@ -170,8 +162,7 @@ std::vector<unsigned char> encode_mutation(const state_mutation &m) {
   return out;
 }
 
-bool decode_mutation(const std::vector<unsigned char> &bytes,
-                     state_mutation &out) {
+bool decode_mutation(const std::vector<unsigned char> &bytes, state_mutation &out) {
   reader r(bytes.data(), bytes.size());
   out.cluster_id = r.str();
   out.tree_id = r.str();
@@ -217,8 +208,7 @@ std::vector<unsigned char> encode_message(const state_message &m) {
   return out;
 }
 
-bool decode_message(const std::vector<unsigned char> &bytes,
-                    state_message &out) {
+bool decode_message(const std::vector<unsigned char> &bytes, state_message &out) {
   reader r(bytes.data(), bytes.size());
   out.cluster_id = r.str();
   out.origin_node_id = r.str();
@@ -247,8 +237,7 @@ bool write_all(int fd, const unsigned char *data, std::size_t n) {
   return true;
 }
 
-bool read_all(int fd, unsigned char *data, std::size_t n,
-              const std::atomic<bool> &running) {
+bool read_all(int fd, unsigned char *data, std::size_t n, const std::atomic<bool> &running) {
   while (n > 0) {
     if (!running.load(std::memory_order_acquire))
       return false;
@@ -300,8 +289,7 @@ state_transport_ipc::state_transport_ipc() = default;
 
 state_transport_ipc::~state_transport_ipc() { stop(); }
 
-void state_transport_ipc::start(const std::string &path,
-                                const std::string &node_id,
+void state_transport_ipc::start(const std::string &path, const std::string &node_id,
                                 const std::string &cluster_id) {
   if (_running.load())
     throw std::runtime_error("state_transport_ipc::start: already running");
@@ -410,8 +398,7 @@ void state_transport_ipc::accept_loop() {
       _conns.push_back(conn);
     }
     send_hello(*conn);
-    conn->reader_thread =
-        std::thread([this, conn]() { reader_loop(conn); });
+    conn->reader_thread = std::thread([this, conn]() { reader_loop(conn); });
   }
 }
 
@@ -460,9 +447,8 @@ void state_transport_ipc::send_hello(connection &c) {
   write_frame_locked(c, kMsgHello, body);
 }
 
-bool state_transport_ipc::write_frame_locked(
-    connection &c, std::uint16_t msg_type,
-    const std::vector<unsigned char> &payload) {
+bool state_transport_ipc::write_frame_locked(connection &c, std::uint16_t msg_type,
+                                             const std::vector<unsigned char> &payload) {
   if (c.fd < 0 || !c.alive.load())
     return false;
   std::vector<unsigned char> hdr;
@@ -544,12 +530,10 @@ void state_transport_ipc::unregister_shard(state_cluster_shard *shard) {
   if (shard == nullptr)
     return;
   std::lock_guard<std::mutex> lk(_shards_mu);
-  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard),
-                _shards.end());
+  _shards.erase(std::remove(_shards.begin(), _shards.end(), shard), _shards.end());
 }
 
-state_transport::publish_stats
-state_transport_ipc::publish(const state_mutation &m) {
+state_transport::publish_stats state_transport_ipc::publish(const state_mutation &m) {
   publish_stats stats{};
 
   // Local in-process delivery first (matches inproc semantics for
@@ -596,8 +580,7 @@ state_transport_ipc::publish(const state_mutation &m) {
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
-    if (!c->remote_node_id.empty() &&
-        !_peers.should_deliver(c->remote_node_id, m.path)) {
+    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
@@ -692,8 +675,7 @@ state_transport_ipc::publish_message(const state_message &m) {
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
-    if (!c->remote_node_id.empty() &&
-        !_peers.should_deliver(c->remote_node_id, m.path)) {
+    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
@@ -744,8 +726,8 @@ std::size_t state_transport_ipc::connection_count() const {
   return n;
 }
 
-std::uint64_t state_transport_ipc::wait_for_received(
-    std::uint64_t target, std::chrono::milliseconds timeout) {
+std::uint64_t state_transport_ipc::wait_for_received(std::uint64_t target,
+                                                     std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (_recv_mutations.load() < target) {
     if (std::chrono::steady_clock::now() >= deadline)
@@ -755,8 +737,8 @@ std::uint64_t state_transport_ipc::wait_for_received(
   return _recv_mutations.load();
 }
 
-std::uint64_t state_transport_ipc::wait_for_received_messages(
-    std::uint64_t target, std::chrono::milliseconds timeout) {
+std::uint64_t state_transport_ipc::wait_for_received_messages(std::uint64_t target,
+                                                              std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (_recv_messages.load() < target) {
     if (std::chrono::steady_clock::now() >= deadline)

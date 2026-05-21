@@ -8,16 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_chunked_blob.h>
-
 #include <cstdint>
+#include <cvc/state_chunked_blob.h>
+#include <gtest/gtest.h>
 #include <mutex>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -165,8 +163,7 @@ TEST(StateChunkedBlobTest, ContentDigestDetectsCorruption) {
   auto ref = w.put(payload);
 
   cvc::state_chunk_manifest m;
-  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
-                                                                  m));
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest, m));
   // Corrupt the manifest's recorded content digest, re-parse via a
   // hand-built manifest and verify get() rejects.
   m.content_digest = std::string(64, 'f');
@@ -182,8 +179,7 @@ TEST(StateChunkedBlobTest, ChunkSizeLargerThanPayloadEmitsOneChunk) {
   auto ref = w.put(payload);
 
   cvc::state_chunk_manifest m;
-  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
-                                                                  m));
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest, m));
   ASSERT_EQ(m.chunks.size(), 1u);
   EXPECT_EQ(m.chunk_bytes[0], 50u);
 
@@ -200,8 +196,7 @@ TEST(StateChunkedBlobTest, ManifestPreservesCodecField) {
   EXPECT_EQ(ref.codec, "zstd-3");
 
   cvc::state_chunk_manifest m;
-  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
-                                                                  m));
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest, m));
   EXPECT_EQ(m.codec, "zstd-3");
 }
 
@@ -215,8 +210,7 @@ TEST(StateChunkedBlobTest, ManifestRejectsTruncatedBytes) {
   for (std::size_t cut = 4; cut < bytes.size(); ++cut) {
     std::vector<unsigned char> partial(bytes.begin(), bytes.begin() + cut);
     cvc::state_chunk_manifest out;
-    EXPECT_FALSE(cvc::state_chunk_manifest::parse(partial, out))
-        << "cut=" << cut;
+    EXPECT_FALSE(cvc::state_chunk_manifest::parse(partial, out)) << "cut=" << cut;
   }
 }
 
@@ -244,8 +238,7 @@ TEST(StateChunkedBlobTest, ZeroChunkSizeNormalizedToOne) {
   auto payload = make_payload(3, 13);
   auto ref = w.put(payload);
   cvc::state_chunk_manifest m;
-  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
-                                                                  m));
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest, m));
   EXPECT_EQ(m.chunks.size(), 3u);
   EXPECT_EQ(m.chunk_size, 1u);
 }
@@ -300,8 +293,10 @@ TEST(StateChunkedBlobTest, OverlappingPayloadsShareChunks) {
   std::vector<unsigned char> p1 = base;
   std::vector<unsigned char> p2 = base;
   // Append divergent suffixes.
-  for (int i = 0; i < 64; ++i) p1.push_back(static_cast<unsigned char>(i));
-  for (int i = 0; i < 64; ++i) p2.push_back(static_cast<unsigned char>(0xff - i));
+  for (int i = 0; i < 64; ++i)
+    p1.push_back(static_cast<unsigned char>(i));
+  for (int i = 0; i < 64; ++i)
+    p2.push_back(static_cast<unsigned char>(0xff - i));
 
   w.put(p1);
   const auto written_after_first = w.total_chunks_written();
@@ -339,8 +334,7 @@ TEST(StateChunkedBlobTest, GetReturnsFalseOnMissingChunkAfterEvict) {
   auto payload = make_payload(192, 23);
   auto ref = w.put(payload);
   cvc::state_chunk_manifest m;
-  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest,
-                                                                  m));
+  ASSERT_TRUE(cvc::state_chunked_blob_reader(store).load_manifest(ref.digest, m));
   ASSERT_EQ(m.chunks.size(), 3u);
 
   // Erase the middle chunk to simulate a partial loss.
@@ -373,7 +367,8 @@ TEST(StateChunkedBlobTest, ConcurrentWritersAreSafe) {
       }
     });
   }
-  for (auto &th : ts) th.join();
+  for (auto &th : ts)
+    th.join();
 
   cvc::state_chunked_blob_reader r(store);
   for (const auto &d : all_digests) {
@@ -411,7 +406,8 @@ TEST(StateChunkedBlobTest, CompressionShrinksRunfulPayload) {
   ASSERT_EQ(m.chunks.size(), 8u);
   ASSERT_EQ(m.chunk_bytes.size(), 8u);
   std::uint64_t total_stored = 0;
-  for (auto cb : m.chunk_bytes) total_stored += cb;
+  for (auto cb : m.chunk_bytes)
+    total_stored += cb;
   EXPECT_LT(total_stored, payload.size());
   EXPECT_EQ(total_stored, 8u * 6u);
 
@@ -458,7 +454,8 @@ TEST(StateChunkedBlobTest, CompressionRawCodecIsIdentity) {
   ASSERT_TRUE(r.load_manifest(ref.digest, m));
   EXPECT_EQ(m.codec, "raw");
   std::uint64_t total_stored = 0;
-  for (auto cb : m.chunk_bytes) total_stored += cb;
+  for (auto cb : m.chunk_bytes)
+    total_stored += cb;
   EXPECT_EQ(total_stored, payload.size());
   std::vector<unsigned char> out;
   ASSERT_TRUE(r.get(ref.digest, out));
@@ -504,8 +501,9 @@ TEST(StateChunkedBlobTest, CompressionReaderUnknownCodecFails) {
   // codec that always fails decode.
   struct broken : public cvc::state_compression_codec {
     std::string id() const override { return "rle"; }
-    std::vector<unsigned char>
-    encode(const std::vector<unsigned char> &in) const override { return in; }
+    std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override {
+      return in;
+    }
     bool decode(const std::vector<unsigned char> &,
                 std::vector<unsigned char> &out) const override {
       out.clear();

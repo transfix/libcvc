@@ -8,20 +8,17 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_transport_inproc.h>
-
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_transport_inproc.h>
+#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -261,8 +258,7 @@ TEST(StateTransportInprocStressTest, OptionalConcurrentPublishStress) {
   auto writer = [&](cvc::app &app_ref, const std::string &tag) {
     for (int i = 0; i < kPerWriter; ++i) {
       cvc::state::instance(app_ref)("stress." + tag).value(std::string("v0"));
-      cvc::state::instance(app_ref)("stress." + tag)
-          .value("v" + std::to_string(i));
+      cvc::state::instance(app_ref)("stress." + tag).value("v" + std::to_string(i));
     }
   };
   std::thread wA([&]() { writer(aA, "A"); });
@@ -303,33 +299,29 @@ TEST(StateTransportInprocPerformanceTest, OptionalFanoutThroughputSmoke) {
   cvc::state_transport_inproc t;
   for (int i = 0; i < kPeers; ++i) {
     apps.emplace_back(std::make_unique<cvc::app>());
-    shards.emplace_back(std::make_unique<cvc::state_cluster_shard>(
-        *apps.back(), "C", "N" + std::to_string(i)));
+    shards.emplace_back(
+        std::make_unique<cvc::state_cluster_shard>(*apps.back(), "C", "N" + std::to_string(i)));
     shards.back()->attach();
     t.register_shard(shards.back().get());
   }
 
   // Prime the path so subsequent value() sets are journaled.
-  cvc::state::instance(*apps[0])("perf.k").value(std::string("seed"));
+  cvc::state::instance (*apps[0])("perf.k").value(std::string("seed"));
 
   const int kIters = 2000;
   auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kIters; ++i) {
-    cvc::state::instance(*apps[0])("perf.k").value("v" + std::to_string(i));
+    cvc::state::instance (*apps[0])("perf.k").value("v" + std::to_string(i));
     if ((i & 0x3F) == 0)
       t.pump_all();
   }
   while (t.pump_all() > 0) {
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
-  std::cerr << "[transport_inproc perf] " << kIters << " mutations across "
-            << kPeers << " peers in " << secs << "s ("
-            << (kIters / secs) << " mut/s, "
-            << (static_cast<double>(t.total_delivered()) / secs)
-            << " deliveries/s)\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[transport_inproc perf] " << kIters << " mutations across " << kPeers
+            << " peers in " << secs << "s (" << (kIters / secs) << " mut/s, "
+            << (static_cast<double>(t.total_delivered()) / secs) << " deliveries/s)\n";
   EXPECT_LT(secs, 30.0);
 }
 
@@ -342,10 +334,8 @@ TEST(StateTransportInprocPerformanceTest, OptionalFanoutThroughputSmoke) {
 
 namespace {
 
-cvc::state_message make_oob(const std::string &cluster,
-                            const std::string &origin,
-                            const std::string &id,
-                            const std::string &path,
+cvc::state_message make_oob(const std::string &cluster, const std::string &origin,
+                            const std::string &id, const std::string &path,
                             const std::string &str = {}) {
   cvc::state_message m;
   m.cluster_id = cluster;
@@ -394,9 +384,7 @@ TEST(StateTransportInprocTest, MessageDedupOnRedundantPublish) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   auto msg = make_oob("C", "A", "m1", "x");
   auto s1 = t.publish_message(msg);
@@ -452,9 +440,7 @@ TEST(StateTransportInprocTest, MessageCrossClusterIsolation) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   auto stats = t.publish_message(make_oob("C1", "A", "m1", "x"));
   EXPECT_EQ(stats.delivered, 0u);
@@ -474,7 +460,8 @@ TEST(StateTransportInprocTest, MessageMultiSubscriberFanOut) {
   std::atomic<int> all{0}, lobby{0}, sports{0};
   sB.message_bus().subscribe("", [&](const cvc::state_message &) { all.fetch_add(1); });
   sB.message_bus().subscribe("chat.lobby", [&](const cvc::state_message &) { lobby.fetch_add(1); });
-  sB.message_bus().subscribe("chat.sports", [&](const cvc::state_message &) { sports.fetch_add(1); });
+  sB.message_bus().subscribe("chat.sports",
+                             [&](const cvc::state_message &) { sports.fetch_add(1); });
 
   t.publish_message(make_oob("C", "A", "m1", "chat.lobby"));
   t.publish_message(make_oob("C", "A", "m2", "chat.sports"));
@@ -487,8 +474,7 @@ TEST(StateTransportInprocTest, MessageMultiSubscriberFanOut) {
 // ---- Phase 5: subscription-prefix routing ----
 
 namespace {
-cvc::state_mutation make_mut(const std::string &origin,
-                             const std::string &cluster,
+cvc::state_mutation make_mut(const std::string &origin, const std::string &cluster,
                              std::uint64_t seq, const std::string &path) {
   cvc::state_mutation m;
   m.cluster_id = cluster;
@@ -556,10 +542,8 @@ TEST(StateTransportInprocPhase5, UnregisteredPeerDeliversAll) {
 
 namespace {
 
-cvc::state_message make_outbox_msg(const std::string &cluster,
-                                   const std::string &origin,
-                                   const std::string &id,
-                                   const std::string &path) {
+cvc::state_message make_outbox_msg(const std::string &cluster, const std::string &origin,
+                                   const std::string &id, const std::string &path) {
   cvc::state_message m;
   m.cluster_id = cluster;
   m.origin_node_id = origin;
@@ -583,9 +567,7 @@ TEST(StateTransportInprocOutbox, NoOutboxIsSynchronous) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
   auto stats = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
@@ -605,12 +587,9 @@ TEST(StateTransportInprocOutbox, DropNewestRejectsWhenFull) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 2,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 2, cvc::state_transport_inproc::outbox_policy::drop_newest);
 
   // Three publishes; capacity 2; third must be rejected.
   auto s1 = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
@@ -645,12 +624,10 @@ TEST(StateTransportInprocOutbox, DropOldestEvictsFront) {
   t.register_shard(&sB);
 
   std::vector<std::string> received;
-  sB.message_bus().subscribe("", [&](const cvc::state_message &m) {
-    received.push_back(m.message_id);
-  });
+  sB.message_bus().subscribe(
+      "", [&](const cvc::state_message &m) { received.push_back(m.message_id); });
 
-  t.set_peer_message_outbox(&sB, 2,
-                            cvc::state_transport_inproc::outbox_policy::drop_oldest);
+  t.set_peer_message_outbox(&sB, 2, cvc::state_transport_inproc::outbox_policy::drop_oldest);
 
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
@@ -678,15 +655,11 @@ TEST(StateTransportInprocOutbox, DeliverMaxRespectsBudget) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 8,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 8, cvc::state_transport_inproc::outbox_policy::drop_newest);
   for (int i = 0; i < 5; ++i)
-    t.publish_message(make_outbox_msg("C", "A",
-                                      "m" + std::to_string(i), "x"));
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 5u);
 
   EXPECT_EQ(t.deliver_message_outbox(&sB, 2), 2u);
@@ -709,12 +682,9 @@ TEST(StateTransportInprocOutbox, ClearOutboxRevertsToSync) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   EXPECT_EQ(hits.load(), 0);
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 1u);
@@ -740,8 +710,7 @@ TEST(StateTransportInprocOutbox, UnregisterShardClearsOutbox) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  t.set_peer_message_outbox(&sB, 2,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 2, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 1u);
 
@@ -760,15 +729,11 @@ TEST(StateTransportInprocOutbox, ZeroCapacityRemovesOutbox) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
   // Capacity 0 should clear it.
-  t.set_peer_message_outbox(&sB, 0,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 0, cvc::state_transport_inproc::outbox_policy::drop_newest);
 
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   EXPECT_EQ(hits.load(), 1);
@@ -791,20 +756,15 @@ TEST(StateTransportInprocOutbox, MixedPeersOutboxAndSync) {
   t.register_shard(&sC);
 
   std::atomic<int> hitsB{0}, hitsC{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsB.fetch_add(1);
-  });
-  sC.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsC.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hitsB.fetch_add(1); });
+  sC.message_bus().subscribe("", [&](const cvc::state_message &) { hitsC.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
 
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
-  EXPECT_EQ(hitsB.load(), 0);     // staged
-  EXPECT_EQ(hitsC.load(), 2);     // synchronous
+  EXPECT_EQ(hitsB.load(), 0); // staged
+  EXPECT_EQ(hitsC.load(), 2); // synchronous
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 2u);
   EXPECT_EQ(t.peer_message_outbox_size(&sC), 0u);
 
@@ -823,8 +783,7 @@ TEST(StateTransportInprocOutbox, OriginPeerNeverReceivesOwnMessage) {
   t.register_shard(&sB);
 
   // Outbox installed on the origin shouldn't even see the message.
-  t.set_peer_message_outbox(&sA, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sA, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
 
   t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
   EXPECT_EQ(t.peer_message_outbox_size(&sA), 0u);
@@ -841,8 +800,7 @@ TEST(StateTransportInprocOutbox, ClusterFilterAppliesBeforeOutbox) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  t.set_peer_message_outbox(&sB, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
 
   // Origin cluster C1; B is in C2 and must not be staged.
   t.publish_message(make_outbox_msg("C1", "A", "m1", "x"));
@@ -861,21 +819,16 @@ TEST(StateTransportInprocOutbox, ReplacingOutboxClosesOldQueue) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 8,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 8, cvc::state_transport_inproc::outbox_policy::drop_newest);
   for (int i = 0; i < 5; ++i)
-    t.publish_message(make_outbox_msg("C", "A",
-                                      "m" + std::to_string(i), "x"));
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 5u);
 
   // Re-install: pending messages are dropped (queue closed), new
   // queue starts empty.
-  t.set_peer_message_outbox(&sB, 2,
-                            cvc::state_transport_inproc::outbox_policy::drop_oldest);
+  t.set_peer_message_outbox(&sB, 2, cvc::state_transport_inproc::outbox_policy::drop_oldest);
   EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
   EXPECT_EQ(hits.load(), 0);
 
@@ -897,8 +850,7 @@ TEST(StateTransportInprocOutbox, DeliverEmptyReturnsZero) {
   EXPECT_EQ(t.deliver_message_outbox(&sB), 0u);
 
   // Outbox installed but empty -> still 0.
-  t.set_peer_message_outbox(&sB, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
   EXPECT_EQ(t.deliver_message_outbox(&sB), 0u);
   EXPECT_EQ(t.deliver_message_outbox(&sB, 100), 0u);
 }
@@ -906,8 +858,7 @@ TEST(StateTransportInprocOutbox, DeliverEmptyReturnsZero) {
 TEST(StateTransportInprocOutbox, NullPeerIsSafe) {
   cvc::state_transport_inproc t;
   // None of these should crash or change counters.
-  t.set_peer_message_outbox(nullptr, 4,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(nullptr, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.clear_peer_message_outbox(nullptr);
   EXPECT_EQ(t.peer_message_outbox_size(nullptr), 0u);
   EXPECT_EQ(t.deliver_message_outbox(nullptr), 0u);
@@ -926,20 +877,17 @@ TEST(StateTransportInprocOutbox, AggregateCountersAcrossPeers) {
   t.register_shard(&sB);
   t.register_shard(&sC);
 
-  t.set_peer_message_outbox(&sB, 1,
-                            cvc::state_transport_inproc::outbox_policy::drop_newest);
-  t.set_peer_message_outbox(&sC, 1,
-                            cvc::state_transport_inproc::outbox_policy::drop_oldest);
+  t.set_peer_message_outbox(&sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sC, 1, cvc::state_transport_inproc::outbox_policy::drop_oldest);
 
   // Each publish hits both peers (origin = A, cluster matches).
   // First: B accepts, C accepts.
   // Second: B drops_newest (full), C drops_oldest then accepts.
   // Third: same as second.
   for (int i = 0; i < 3; ++i)
-    t.publish_message(make_outbox_msg("C", "A",
-                                      "m" + std::to_string(i), "x"));
+    t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
 
-  EXPECT_EQ(t.total_outbox_admitted(), 1u + 3u); // B:1, C:3
+  EXPECT_EQ(t.total_outbox_admitted(), 1u + 3u);  // B:1, C:3
   EXPECT_EQ(t.total_outbox_dropped_newest(), 2u); // B drops 2nd & 3rd
   EXPECT_EQ(t.total_outbox_dropped_oldest(), 2u); // C evicts twice
 }
@@ -955,19 +903,15 @@ TEST(StateTransportInprocOutbox, ConcurrentProducerConsumer) {
   t.register_shard(&sB);
 
   std::atomic<int> hits{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hits.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
-  t.set_peer_message_outbox(&sB, 32,
-                            cvc::state_transport_inproc::outbox_policy::drop_oldest);
+  t.set_peer_message_outbox(&sB, 32, cvc::state_transport_inproc::outbox_policy::drop_oldest);
 
   std::atomic<bool> stop{false};
   std::thread producer([&] {
     int i = 0;
     while (!stop.load(std::memory_order_relaxed)) {
-      t.publish_message(make_outbox_msg("C", "A",
-                                        "m" + std::to_string(i++), "x"));
+      t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i++), "x"));
     }
   });
   // Drain in parallel.
@@ -984,8 +928,7 @@ TEST(StateTransportInprocOutbox, ConcurrentProducerConsumer) {
   EXPECT_GT(pub, 0u);
   // hits is bounded by admitted (some queue messages may still be
   // in flight when test ends, but we final-drained).
-  EXPECT_LE(static_cast<std::uint64_t>(hits.load()),
-            t.total_outbox_admitted());
+  EXPECT_LE(static_cast<std::uint64_t>(hits.load()), t.total_outbox_admitted());
 }
 
 // ---------------------------------------------------------------------
@@ -994,10 +937,8 @@ TEST(StateTransportInprocOutbox, ConcurrentProducerConsumer) {
 
 namespace {
 
-cvc::state_mutation make_iso_mut(const std::string &cluster,
-                                 const std::string &origin,
-                                 const std::string &path,
-                                 std::uint64_t seq) {
+cvc::state_mutation make_iso_mut(const std::string &cluster, const std::string &origin,
+                                 const std::string &path, std::uint64_t seq) {
   cvc::state_mutation m;
   m.cluster_id = cluster;
   m.origin_node_id = origin;
@@ -1063,12 +1004,8 @@ TEST(StateTransportInprocSlowPeer, MessagesSkipQuarantinedPeer) {
   t.register_shard(&sC);
 
   std::atomic<int> hitsB{0}, hitsC{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsB.fetch_add(1);
-  });
-  sC.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsC.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hitsB.fetch_add(1); });
+  sC.message_bus().subscribe("", [&](const cvc::state_message &) { hitsC.fetch_add(1); });
 
   t.mark_peer_slow(&sB);
   auto stats = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
@@ -1118,8 +1055,7 @@ TEST(StateTransportInprocSlowPeer, OutboxNotEnqueuedForSlowPeer) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  t.set_peer_message_outbox(
-      &sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 4, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.mark_peer_slow(&sB);
   for (int i = 0; i < 5; ++i) {
     t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
@@ -1146,13 +1082,10 @@ TEST(StateTransportInprocSlowPeer, AutoIsolationKicksInOnDrops) {
   t.register_shard(&sC);
 
   std::atomic<int> hitsC{0};
-  sC.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsC.fetch_add(1);
-  });
+  sC.message_bus().subscribe("", [&](const cvc::state_message &) { hitsC.fetch_add(1); });
 
   // sB has a tiny outbox and never drains; sC is healthy (no outbox).
-  t.set_peer_message_outbox(
-      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.set_auto_isolation_drop_threshold(3);
 
   // Publish 8 messages: first 1 admitted to sB, next ones drop until
@@ -1180,8 +1113,7 @@ TEST(StateTransportInprocSlowPeer, AutoIsolationDisabledByDefault) {
   t.register_shard(&sB);
 
   EXPECT_EQ(t.auto_isolation_drop_threshold(), 0u);
-  t.set_peer_message_outbox(
-      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
   for (int i = 0; i < 10; ++i) {
     t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i), "x"));
   }
@@ -1200,12 +1132,9 @@ TEST(StateTransportInprocSlowPeer, ManualClearAfterAutoAllowsRedelivery) {
   t.register_shard(&sB);
 
   std::atomic<int> hitsB{0};
-  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
-    hitsB.fetch_add(1);
-  });
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { hitsB.fetch_add(1); });
 
-  t.set_peer_message_outbox(
-      &sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.set_peer_message_outbox(&sB, 1, cvc::state_transport_inproc::outbox_policy::drop_newest);
   t.set_auto_isolation_drop_threshold(2);
 
   for (int i = 0; i < 5; ++i) {
@@ -1260,8 +1189,7 @@ TEST(StateTransportInprocSlowPeer, ConcurrentMarkClearIsSafe) {
   std::thread publisher([&] {
     int i = 0;
     while (!stop.load()) {
-      t.publish_message(
-          make_outbox_msg("C", "A", "m" + std::to_string(i++), "x"));
+      t.publish_message(make_outbox_msg("C", "A", "m" + std::to_string(i++), "x"));
     }
   });
   // Run briefly.

@@ -8,22 +8,19 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_codec_registry.h>
-
+#include <boost/any.hpp>
 #include <cstdint>
 #include <cstring>
+#include <cvc/state_codec_registry.h>
 #include <stdexcept>
 #include <string>
-
-#include <boost/any.hpp>
 
 namespace CVC_NAMESPACE {
 
 namespace {
 
 // Little-endian helpers.
-template <typename T>
-std::vector<unsigned char> encode_pod(T value) {
+template <typename T> std::vector<unsigned char> encode_pod(T value) {
   static_assert(std::is_trivially_copyable<T>::value, "POD only");
   std::vector<unsigned char> out(sizeof(T));
   unsigned char *p = reinterpret_cast<unsigned char *>(&value);
@@ -40,8 +37,7 @@ std::vector<unsigned char> encode_pod(T value) {
   return out;
 }
 
-template <typename T>
-T decode_pod(const std::vector<unsigned char> &bytes) {
+template <typename T> T decode_pod(const std::vector<unsigned char> &bytes) {
   if (bytes.size() < sizeof(T))
     throw std::runtime_error("codec: insufficient bytes for POD decode");
   T value{};
@@ -61,10 +57,8 @@ T decode_pod(const std::vector<unsigned char> &bytes) {
 
 state_codec_registry::state_codec_registry() = default;
 
-void state_codec_registry::register_codec(const std::string &type_name,
-                                          encode_func encode,
-                                          decode_func decode,
-                                          const std::string &codec_id) {
+void state_codec_registry::register_codec(const std::string &type_name, encode_func encode,
+                                          decode_func decode, const std::string &codec_id) {
   std::lock_guard<std::mutex> lk(_mutex);
   codec_entry e;
   e.codec_id = codec_id.empty() ? type_name : codec_id;
@@ -78,38 +72,33 @@ bool state_codec_registry::has(const std::string &type_name) const {
   return _codecs.find(type_name) != _codecs.end();
 }
 
-std::vector<unsigned char>
-state_codec_registry::encode(const std::string &type_name,
-                             const boost::any &value) const {
+std::vector<unsigned char> state_codec_registry::encode(const std::string &type_name,
+                                                        const boost::any &value) const {
   encode_func fn;
   {
     std::lock_guard<std::mutex> lk(_mutex);
     auto it = _codecs.find(type_name);
     if (it == _codecs.end())
-      throw std::runtime_error("state_codec_registry::encode: no codec for '" +
-                               type_name + "'");
+      throw std::runtime_error("state_codec_registry::encode: no codec for '" + type_name + "'");
     fn = it->second.encode;
   }
   return fn(value);
 }
 
-boost::any
-state_codec_registry::decode(const std::string &type_name,
-                             const std::vector<unsigned char> &bytes) const {
+boost::any state_codec_registry::decode(const std::string &type_name,
+                                        const std::vector<unsigned char> &bytes) const {
   decode_func fn;
   {
     std::lock_guard<std::mutex> lk(_mutex);
     auto it = _codecs.find(type_name);
     if (it == _codecs.end())
-      throw std::runtime_error("state_codec_registry::decode: no codec for '" +
-                               type_name + "'");
+      throw std::runtime_error("state_codec_registry::decode: no codec for '" + type_name + "'");
     fn = it->second.decode;
   }
   return fn(bytes);
 }
 
-std::string
-state_codec_registry::codec_id_for(const std::string &type_name) const {
+std::string state_codec_registry::codec_id_for(const std::string &type_name) const {
   std::lock_guard<std::mutex> lk(_mutex);
   auto it = _codecs.find(type_name);
   if (it == _codecs.end())
@@ -177,20 +166,14 @@ void state_codec_registry::register_builtin_codecs() {
       "cvc.u64.v1");
 
   register_codec(
-      "float",
-      [](const boost::any &v) {
-        return encode_pod<float>(boost::any_cast<float>(v));
-      },
+      "float", [](const boost::any &v) { return encode_pod<float>(boost::any_cast<float>(v)); },
       [](const std::vector<unsigned char> &b) -> boost::any {
         return boost::any(decode_pod<float>(b));
       },
       "cvc.f32.v1");
 
   register_codec(
-      "double",
-      [](const boost::any &v) {
-        return encode_pod<double>(boost::any_cast<double>(v));
-      },
+      "double", [](const boost::any &v) { return encode_pod<double>(boost::any_cast<double>(v)); },
       [](const std::vector<unsigned char> &b) -> boost::any {
         return boost::any(decode_pod<double>(b));
       },

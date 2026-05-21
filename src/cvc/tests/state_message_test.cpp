@@ -4,9 +4,7 @@
 
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
-
 #include <gtest/gtest.h>
-
 #include <string>
 #include <vector>
 
@@ -19,7 +17,7 @@ std::vector<unsigned char> bytes_of(const char *s) {
   return std::vector<unsigned char>(s, s + std::char_traits<char>::length(s));
 }
 
-}  // namespace
+} // namespace
 
 TEST(StateMessage, MimeConstantsAreStandard) {
   EXPECT_STREQ(state_message::MIME_TEXT, "text/plain");
@@ -55,8 +53,7 @@ TEST(StateMessage, MakeTextDefault) {
 }
 
 TEST(StateMessage, MakeTextCustomMime) {
-  auto m = state_message::make_text("ui.event", R"({"a":1})",
-                                    state_message::MIME_JSON);
+  auto m = state_message::make_text("ui.event", R"({"a":1})", state_message::MIME_JSON);
   EXPECT_EQ(m.content_type, "application/json");
   EXPECT_EQ(m.string_value, R"({"a":1})");
 }
@@ -71,18 +68,15 @@ TEST(StateMessage, MakeBytesDefaultsToOctetStream) {
 }
 
 TEST(StateMessage, MakeTypedAllowsArbitraryMimeAndDualPayload) {
-  auto m = state_message::make_typed("geom.update",
-                                     "application/x-cvc-mesh+protobuf",
-                                     bytes_of("MESHBYTES"),
-                                     "envelope-v1");
+  auto m = state_message::make_typed("geom.update", "application/x-cvc-mesh+protobuf",
+                                     bytes_of("MESHBYTES"), "envelope-v1");
   EXPECT_EQ(m.content_type, "application/x-cvc-mesh+protobuf");
   EXPECT_EQ(m.string_value, "envelope-v1");
   EXPECT_EQ(m.bytes.size(), 9u);
 }
 
 TEST(StateMessage, MakeTypedEmptyContentTypeStillFallsBackByEffective) {
-  auto m = state_message::make_typed("geom.update", "",
-                                     bytes_of("\xff\xfe"));
+  auto m = state_message::make_typed("geom.update", "", bytes_of("\xff\xfe"));
   EXPECT_TRUE(m.content_type.empty());
   EXPECT_EQ(m.effective_content_type(), state_message::MIME_OCTET);
 }
@@ -112,9 +106,8 @@ TEST(StateMessage, BusDeliversOctetStreamWithDefaultMime) {
   state_message captured;
   bus.subscribe("blob", [&](const state_message &m) { captured = m; });
 
-  auto m = state_message::make_bytes(
-      "blob.payload",
-      std::vector<unsigned char>{0x00, 0x01, 0x02, 0xff});
+  auto m =
+      state_message::make_bytes("blob.payload", std::vector<unsigned char>{0x00, 0x01, 0x02, 0xff});
   m.origin_node_id = "node-b";
   m.message_id = "1";
   EXPECT_TRUE(bus.admit(m));
@@ -128,10 +121,8 @@ TEST(StateMessage, BusPreservesArbitraryTypedObject) {
   state_message captured;
   bus.subscribe("geom", [&](const state_message &m) { captured = m; });
 
-  auto m = state_message::make_typed("geom.mesh",
-                                     "application/x-cvc-mesh+protobuf",
-                                     bytes_of("\x42\x43\x44"),
-                                     "v=1");
+  auto m = state_message::make_typed("geom.mesh", "application/x-cvc-mesh+protobuf",
+                                     bytes_of("\x42\x43\x44"), "v=1");
   m.origin_node_id = "node-c";
   m.message_id = "1";
   EXPECT_TRUE(bus.admit(m));
@@ -146,15 +137,13 @@ TEST(StateMessage, BusDedupHonoredAcrossTypedPayloads) {
   std::size_t hits = 0;
   bus.subscribe("", [&](const state_message &) { ++hits; });
 
-  auto a = state_message::make_typed("p", "application/x-foo",
-                                     bytes_of("AAA"));
+  auto a = state_message::make_typed("p", "application/x-foo", bytes_of("AAA"));
   a.origin_node_id = "n";
   a.message_id = "id-1";
   EXPECT_TRUE(bus.admit(a));
 
   // Same (origin, message_id) but different payload: dedup wins.
-  auto b = state_message::make_typed("p", "application/x-bar",
-                                     bytes_of("BBB"));
+  auto b = state_message::make_typed("p", "application/x-bar", bytes_of("BBB"));
   b.origin_node_id = "n";
   b.message_id = "id-1";
   EXPECT_FALSE(bus.admit(b));

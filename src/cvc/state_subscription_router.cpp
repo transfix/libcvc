@@ -1,5 +1,5 @@
-#include <cvc/state_subscription_router.h>
 #include <algorithm>
+#include <cvc/state_subscription_router.h>
 
 namespace CVC_NAMESPACE {
 
@@ -28,10 +28,9 @@ bool state_subscription_router::unsubscribe(state_subscription_id id) {
 
   trie_node *node = find_node(subscription_iter->second.path_prefix);
   if (node != nullptr) {
-    auto new_end = std::remove_if(node->subscriptions.begin(), node->subscriptions.end(),
-                                  [id](const state_subscription &subscription) {
-                                    return subscription.id == id;
-                                  });
+    auto new_end = std::remove_if(
+        node->subscriptions.begin(), node->subscriptions.end(),
+        [id](const state_subscription &subscription) { return subscription.id == id; });
     node->subscriptions.erase(new_end, node->subscriptions.end());
   }
   _subscriptions.erase(subscription_iter);
@@ -127,8 +126,8 @@ state_subscription_router::find_or_create_node(const std::string &path_prefix) {
 
 state_subscription_router::trie_node *
 state_subscription_router::find_node(const std::string &path_prefix) {
-  return const_cast<trie_node *>(static_cast<const state_subscription_router *>(this)->find_node(
-      path_prefix));
+  return const_cast<trie_node *>(
+      static_cast<const state_subscription_router *>(this)->find_node(path_prefix));
 }
 
 const state_subscription_router::trie_node *

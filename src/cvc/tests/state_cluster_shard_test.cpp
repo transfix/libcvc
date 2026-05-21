@@ -8,19 +8,16 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_cluster_shard.h>
-
-#include <cvc/app.h>
-#include <cvc/state.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
+#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -29,10 +26,8 @@ bool env_flag(const char *name) {
   return v != nullptr && std::string(v) == "1";
 }
 
-cvc::state_mutation make_set_value(const std::string &origin,
-                                   std::uint64_t seq,
-                                   const std::string &path,
-                                   const std::string &val) {
+cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
+                                   const std::string &path, const std::string &val) {
   cvc::state_mutation m;
   m.cluster_id = "test-cluster";
   m.tree_id = "default";
@@ -229,10 +224,8 @@ TEST(StateClusterShardStressTest, OptionalConcurrentIngestStress) {
     threads.emplace_back([&, t]() {
       std::string origin = "peer" + std::to_string(t);
       for (int i = 0; i < kPerThread; ++i) {
-        auto m =
-            make_set_value(origin, static_cast<std::uint64_t>(i + 1),
-                           "ns." + origin + ".k" + std::to_string(i),
-                           "v" + std::to_string(i));
+        auto m = make_set_value(origin, static_cast<std::uint64_t>(i + 1),
+                                "ns." + origin + ".k" + std::to_string(i), "v" + std::to_string(i));
         sh.ingest_remote(m);
         // And ingest the same mutation again to exercise dedup.
         sh.ingest_remote(m);
@@ -244,8 +237,7 @@ TEST(StateClusterShardStressTest, OptionalConcurrentIngestStress) {
 
   for (int t = 0; t < kThreads; ++t) {
     std::string origin = "peer" + std::to_string(t);
-    EXPECT_EQ(sh.replica().last_applied(origin),
-              static_cast<std::uint64_t>(kPerThread));
+    EXPECT_EQ(sh.replica().last_applied(origin), static_cast<std::uint64_t>(kPerThread));
   }
 }
 
@@ -262,16 +254,13 @@ TEST(StateClusterShardPerformanceTest, OptionalIngestThroughputSmoke) {
   auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kIters; ++i) {
     auto m = make_set_value("peerX", static_cast<std::uint64_t>(i + 1),
-                            "perf.k" + std::to_string(i % 64),
-                            "v" + std::to_string(i));
+                            "perf.k" + std::to_string(i % 64), "v" + std::to_string(i));
     sh.ingest_remote(m);
   }
   auto elapsed = std::chrono::steady_clock::now() - start;
-  double secs =
-      std::chrono::duration_cast<std::chrono::duration<double>>(elapsed)
-          .count();
-  std::cerr << "[cluster_shard perf] " << kIters << " ingest in " << secs
-            << "s (" << (kIters / secs) << "/s)\n";
+  double secs = std::chrono::duration_cast<std::chrono::duration<double>>(elapsed).count();
+  std::cerr << "[cluster_shard perf] " << kIters << " ingest in " << secs << "s ("
+            << (kIters / secs) << "/s)\n";
   EXPECT_LT(secs, 30.0);
 }
 
@@ -368,8 +357,7 @@ TEST(StateClusterShardTest, DelegationEnforcementRejectsForeignWrites) {
   auto r = sh.ingest_remote(m);
   EXPECT_FALSE(r.applied);
   EXPECT_TRUE(r.rejected);
-  EXPECT_NE(r.reject_reason.find("delegated to cluster 'cluster-B'"),
-            std::string::npos)
+  EXPECT_NE(r.reject_reason.find("delegated to cluster 'cluster-B'"), std::string::npos)
       << r.reject_reason;
   EXPECT_EQ(1u, sh.total_remote_rejected());
   EXPECT_EQ(1u, sh.total_delegation_routed());
@@ -413,18 +401,15 @@ TEST(StateClusterShardTest, DelegationEnforcementRejectsOnExpiredLease) {
 
   // Before expiry: rejected as foreign-routed.
   now = 1499;
-  auto r1 = sh.ingest_remote(
-      make_set_value("nodeC", 1, "simulation.x", "v"));
+  auto r1 = sh.ingest_remote(make_set_value("nodeC", 1, "simulation.x", "v"));
   EXPECT_TRUE(r1.rejected);
   EXPECT_EQ(1u, sh.total_delegation_routed());
 
   // After expiry: rejected as expired.
   now = 1600;
-  auto r2 = sh.ingest_remote(
-      make_set_value("nodeC", 2, "simulation.x", "v"));
+  auto r2 = sh.ingest_remote(make_set_value("nodeC", 2, "simulation.x", "v"));
   EXPECT_TRUE(r2.rejected);
-  EXPECT_NE(r2.reject_reason.find("expired"), std::string::npos)
-      << r2.reject_reason;
+  EXPECT_NE(r2.reject_reason.find("expired"), std::string::npos) << r2.reject_reason;
   EXPECT_EQ(1u, sh.total_delegation_expired());
 }
 
@@ -483,11 +468,7 @@ TEST(StateClusterShardTest, DelegationRevocationRestoresLocal) {
   sh.delegation().delegate("simulation", "cluster-B");
   sh.set_enforce_delegation(true);
 
-  EXPECT_TRUE(sh.ingest_remote(
-                  make_set_value("nodeC", 1, "simulation.x", "v"))
-                  .rejected);
+  EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 1, "simulation.x", "v")).rejected);
   EXPECT_TRUE(sh.delegation().revoke("simulation"));
-  EXPECT_TRUE(sh.ingest_remote(
-                  make_set_value("nodeC", 2, "simulation.x", "v"))
-                  .applied);
+  EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 2, "simulation.x", "v")).applied);
 }

@@ -8,16 +8,14 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_compression_registry.h>
-
 #include <atomic>
+#include <cvc/state_compression_registry.h>
+#include <gtest/gtest.h>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 namespace {
 
@@ -108,8 +106,7 @@ TEST(StateCompressionRegistry, RleRoundTripsEmpty) {
 TEST(StateCompressionRegistry, RegisterCustomCodec) {
   struct xor_codec : public cvc::state_compression_codec {
     std::string id() const override { return "xor55"; }
-    std::vector<unsigned char>
-    encode(const std::vector<unsigned char> &in) const override {
+    std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override {
       auto out = in;
       for (auto &b : out)
         b ^= 0x55;

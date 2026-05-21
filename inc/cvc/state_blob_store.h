@@ -11,10 +11,9 @@
 #ifndef __CVC_STATE_BLOB_STORE_H__
 #define __CVC_STATE_BLOB_STORE_H__
 
+#include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
-
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -57,8 +56,7 @@ public:
 
   // Retrieve the bytes for `digest`. Returns true on success and
   // writes the bytes to `out`. Returns false if not present.
-  virtual bool get(const std::string &digest,
-                   std::vector<unsigned char> &out) const = 0;
+  virtual bool get(const std::string &digest, std::vector<unsigned char> &out) const = 0;
 
   // True if the digest is known.
   virtual bool has(const std::string &digest) const = 0;
@@ -96,8 +94,7 @@ public:
 
   state_blob_ref put(const std::vector<unsigned char> &bytes,
                      const std::string &codec = std::string()) override;
-  bool get(const std::string &digest,
-           std::vector<unsigned char> &out) const override;
+  bool get(const std::string &digest, std::vector<unsigned char> &out) const override;
   bool has(const std::string &digest) const override;
   bool erase(const std::string &digest) override;
   std::size_t size() const override;

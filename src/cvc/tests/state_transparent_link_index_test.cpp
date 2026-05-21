@@ -24,13 +24,11 @@
 //   - skip self-aliases at the link node itself;
 //   - handle a link whose target is the application root ("").
 
+#include <algorithm>
 #include <cvc/app.h>
 #include <cvc/state.h>
 #include <cvc/state_distributed_admin.h>
-
 #include <gtest/gtest.h>
-
-#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -68,8 +66,7 @@ TEST(StateTransparentLinkIndex, TransparentLinkIsIndexed) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene.geometry")
-      .linkTo("data.world.geometry", state::link_mode::transparent);
+  root("scene.geometry").linkTo("data.world.geometry", state::link_mode::transparent);
 
   auto r = state_distributed_admin::transparent_link_index(root);
   ASSERT_EQ(r.links.size(), 1u);
@@ -108,9 +105,7 @@ TEST(StateTransparentLinkAliases, NoTransparentLinkYieldsEmpty) {
   cvc::app a;
   auto &root = state::instance(a);
   root("scene.geometry").linkTo("data.world.geometry"); // opaque
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root,
-                                                       "data.world.geometry");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.world.geometry");
   EXPECT_EQ(aliases.size(), 0u);
 }
 
@@ -118,11 +113,9 @@ TEST(StateTransparentLinkAliases, ExactTargetMatchEmitsLinkPath) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene.geometry")
-      .linkTo("data.world.geometry", state::link_mode::transparent);
+  root("scene.geometry").linkTo("data.world.geometry", state::link_mode::transparent);
 
-  auto aliases = state_distributed_admin::transparent_link_aliases(
-      root, "data.world.geometry");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.world.geometry");
   ASSERT_EQ(aliases.size(), 1u);
   EXPECT_EQ(aliases[0], "scene.geometry");
 }
@@ -133,8 +126,8 @@ TEST(StateTransparentLinkAliases, DescendantPathPreservesSuffix) {
   root("data.world").value(std::string("v"));
   root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  auto aliases = state_distributed_admin::transparent_link_aliases(
-      root, "data.world.geometry.mesh");
+  auto aliases =
+      state_distributed_admin::transparent_link_aliases(root, "data.world.geometry.mesh");
   ASSERT_EQ(aliases.size(), 1u);
   EXPECT_EQ(aliases[0], "scene.geometry.mesh");
 }
@@ -146,8 +139,7 @@ TEST(StateTransparentLinkAliases, DotBoundaryPreventsSpoof) {
   root("alias").linkTo("scene", state::link_mode::transparent);
 
   // "scenery" must not match link target "scene".
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root, "scenery");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "scenery");
   EXPECT_EQ(aliases.size(), 0u);
 }
 
@@ -155,13 +147,10 @@ TEST(StateTransparentLinkAliases, MultipleLinksAllEmit) {
   cvc::app a;
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
-  root("scene.a")
-      .linkTo("data.world.geometry", state::link_mode::transparent);
-  root("scene.b")
-      .linkTo("data.world.geometry", state::link_mode::transparent);
+  root("scene.a").linkTo("data.world.geometry", state::link_mode::transparent);
+  root("scene.b").linkTo("data.world.geometry", state::link_mode::transparent);
 
-  auto aliases = state_distributed_admin::transparent_link_aliases(
-      root, "data.world.geometry");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.world.geometry");
   ASSERT_EQ(aliases.size(), 2u);
   EXPECT_TRUE(contains(aliases, "scene.a"));
   EXPECT_TRUE(contains(aliases, "scene.b"));
@@ -173,8 +162,7 @@ TEST(StateTransparentLinkAliases, SelfAliasIsSkipped) {
   auto &n = root("scene.geometry");
   n.linkTo("scene.geometry", state::link_mode::transparent); // self-loop
 
-  auto aliases = state_distributed_admin::transparent_link_aliases(
-      root, "scene.geometry");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "scene.geometry");
   // Path equals link_path: the trivial self-alias must be skipped.
   EXPECT_EQ(aliases.size(), 0u);
 }
@@ -184,8 +172,7 @@ TEST(StateTransparentLinkAliases, RootTargetAliasesEveryPath) {
   auto &root = state::instance(a);
   root("scene.alias").linkTo(".", state::link_mode::transparent);
 
-  auto aliases = state_distributed_admin::transparent_link_aliases(
-      root, "data.world.geometry");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.world.geometry");
   ASSERT_EQ(aliases.size(), 1u);
   EXPECT_EQ(aliases[0], "scene.alias.data.world.geometry");
 }
@@ -196,8 +183,7 @@ TEST(StateTransparentLinkAliases, MismatchedSiblingPrefixNotEmitted) {
   root("scene").value(std::string("v"));
   root("alias").linkTo("scene", state::link_mode::transparent);
 
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root, "other.scene");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "other.scene");
   EXPECT_EQ(aliases.size(), 0u);
 }
 
@@ -210,8 +196,7 @@ TEST(StateTransparentLinkAliases, ChainOfTransparentLinksAllAliasesEmitted) {
   root("b").linkTo("c", state::link_mode::transparent);
   root("a").linkTo("b", state::link_mode::transparent);
 
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root, "data.geom");
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.geom");
   // Expect "a", "b", "c" all reachable as aliases.
   ASSERT_EQ(aliases.size(), 3u);
   EXPECT_TRUE(contains(aliases, "a"));
@@ -239,8 +224,7 @@ TEST(StateTransparentLinkAliases, HopBudgetZeroEmitsNothing) {
   root("data.geom").value(std::string("v"));
   root("scene").linkTo("data.geom", state::link_mode::transparent);
 
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root, "data.geom", 0);
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.geom", 0);
   EXPECT_EQ(aliases.size(), 0u);
 }
 
@@ -253,8 +237,7 @@ TEST(StateTransparentLinkAliases, HopBudgetOneEmitsOnlyFirstHop) {
   root("a").linkTo("b", state::link_mode::transparent);
 
   // hop_budget=1: only direct aliases of "data.geom" emitted ("c").
-  auto aliases =
-      state_distributed_admin::transparent_link_aliases(root, "data.geom", 1);
+  auto aliases = state_distributed_admin::transparent_link_aliases(root, "data.geom", 1);
   ASSERT_EQ(aliases.size(), 1u);
   EXPECT_EQ(aliases[0], "c");
 }

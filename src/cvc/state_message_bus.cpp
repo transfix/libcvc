@@ -8,18 +8,17 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_message_bus.h>
-
 #include <algorithm>
 #include <cstring>
+#include <cvc/state_message_bus.h>
 #include <utility>
 
 namespace CVC_NAMESPACE {
 
 state_message_bus::state_message_bus() = default;
 
-state_message_bus::subscription_id
-state_message_bus::subscribe(std::string path_prefix, subscriber_fn cb) {
+state_message_bus::subscription_id state_message_bus::subscribe(std::string path_prefix,
+                                                                subscriber_fn cb) {
   if (!cb)
     return 0;
   std::lock_guard<std::mutex> lk(_mu);
@@ -30,8 +29,8 @@ state_message_bus::subscribe(std::string path_prefix, subscriber_fn cb) {
 
 bool state_message_bus::unsubscribe(subscription_id id) {
   std::lock_guard<std::mutex> lk(_mu);
-  auto it = std::remove_if(_subs.begin(), _subs.end(),
-                           [id](const subscriber &s) { return s.id == id; });
+  auto it =
+      std::remove_if(_subs.begin(), _subs.end(), [id](const subscriber &s) { return s.id == id; });
   if (it == _subs.end())
     return false;
   _subs.erase(it, _subs.end());
@@ -97,9 +96,7 @@ bool state_message_bus::admit(const state_message &m) {
   return true;
 }
 
-void state_message_bus::note_dropped() {
-  _dropped.fetch_add(1, std::memory_order_relaxed);
-}
+void state_message_bus::note_dropped() { _dropped.fetch_add(1, std::memory_order_relaxed); }
 
 void state_message_bus::set_dedup_capacity(std::size_t cap) {
   std::lock_guard<std::mutex> lk(_mu);

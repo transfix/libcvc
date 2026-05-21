@@ -11,16 +11,14 @@
 #ifndef __CVC_STATE_CODEC_REGISTRY_H__
 #define __CVC_STATE_CODEC_REGISTRY_H__
 
-#include <cvc/namespace.h>
-
+#include <boost/any.hpp>
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/any.hpp>
 
 namespace CVC_NAMESPACE {
 
@@ -52,10 +50,8 @@ namespace CVC_NAMESPACE {
 //
 class state_codec_registry {
 public:
-  using encode_func =
-      std::function<std::vector<unsigned char>(const boost::any &)>;
-  using decode_func =
-      std::function<boost::any(const std::vector<unsigned char> &)>;
+  using encode_func = std::function<std::vector<unsigned char>(const boost::any &)>;
+  using decode_func = std::function<boost::any(const std::vector<unsigned char> &)>;
 
   struct codec_entry {
     std::string codec_id;
@@ -68,9 +64,7 @@ public:
   // Register a codec keyed by `type_name`. `codec_id` is the
   // string that goes onto the wire; if empty, defaults to
   // `type_name`. Replaces any prior registration.
-  void register_codec(const std::string &type_name,
-                      encode_func encode,
-                      decode_func decode,
+  void register_codec(const std::string &type_name, encode_func encode, decode_func decode,
                       const std::string &codec_id = std::string());
 
   // Returns true if a codec is registered for `type_name`.
@@ -78,13 +72,11 @@ public:
 
   // Encode `value` using the codec registered for `type_name`.
   // Throws std::runtime_error if no codec is registered.
-  std::vector<unsigned char> encode(const std::string &type_name,
-                                    const boost::any &value) const;
+  std::vector<unsigned char> encode(const std::string &type_name, const boost::any &value) const;
 
   // Decode `bytes` using the codec registered for `type_name`.
   // Throws std::runtime_error if no codec is registered.
-  boost::any decode(const std::string &type_name,
-                    const std::vector<unsigned char> &bytes) const;
+  boost::any decode(const std::string &type_name, const std::vector<unsigned char> &bytes) const;
 
   // Look up the codec_id string for a given type. Returns empty if
   // not registered.

@@ -9,7 +9,6 @@
 */
 
 #include <cvc/state_message.h>
-
 #include <utility>
 
 namespace CVC_NAMESPACE {
@@ -22,8 +21,7 @@ std::string state_message::effective_content_type() const noexcept {
   return MIME_TEXT;
 }
 
-state_message state_message::make_text(std::string path, std::string text,
-                                       std::string mime) {
+state_message state_message::make_text(std::string path, std::string text, std::string mime) {
   state_message m;
   m.path = std::move(path);
   m.content_type = std::move(mime);
@@ -31,8 +29,7 @@ state_message state_message::make_text(std::string path, std::string text,
   return m;
 }
 
-state_message state_message::make_bytes(std::string path,
-                                        std::vector<unsigned char> bytes) {
+state_message state_message::make_bytes(std::string path, std::vector<unsigned char> bytes) {
   state_message m;
   m.path = std::move(path);
   m.content_type = MIME_OCTET;
@@ -40,8 +37,7 @@ state_message state_message::make_bytes(std::string path,
   return m;
 }
 
-state_message state_message::make_typed(std::string path,
-                                        std::string content_type,
+state_message state_message::make_typed(std::string path, std::string content_type,
                                         std::vector<unsigned char> bytes,
                                         std::string string_value) {
   state_message m;

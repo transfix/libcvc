@@ -11,11 +11,10 @@
 #ifndef __CVC_STATE_TRANSPORT_GRPC_H__
 #define __CVC_STATE_TRANSPORT_GRPC_H__
 
-#include <cvc/namespace.h>
-#include <cvc/state_transport.h>
-
 #include <atomic>
 #include <chrono>
+#include <cvc/namespace.h>
+#include <cvc/state_transport.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -99,8 +98,7 @@ public:
   // ephemeral port. Throws std::runtime_error on failure. node_id /
   // cluster_id populate the Hello frame sent on each new stream and
   // are advisory.
-  void start(const std::string &listen_addr,
-             const std::string &node_id = std::string(),
+  void start(const std::string &listen_addr, const std::string &node_id = std::string(),
              const std::string &cluster_id = std::string());
 
   // The actual listen address, with the bound port resolved (useful
@@ -111,8 +109,7 @@ public:
   // Sends Hello on success. Returns true on success; spawns a
   // client-side reader thread.
   bool connect_to_peer(const std::string &target,
-                       std::chrono::milliseconds timeout =
-                           std::chrono::milliseconds(2000));
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
 
   // Shut down server, cancel all client streams, join reader threads.
   void stop();
@@ -131,26 +128,18 @@ public:
   std::size_t connection_count() const;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_sent_frames() const noexcept { return _sent_frames.load(); }
-  std::uint64_t total_received_frames() const noexcept {
-    return _recv_frames.load();
-  }
-  std::uint64_t total_received_mutations() const noexcept {
-    return _recv_mutations.load();
-  }
-  std::uint64_t total_received_messages() const noexcept {
-    return _recv_messages.load();
-  }
+  std::uint64_t total_received_frames() const noexcept { return _recv_frames.load(); }
+  std::uint64_t total_received_mutations() const noexcept { return _recv_mutations.load(); }
+  std::uint64_t total_received_messages() const noexcept { return _recv_messages.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
   // (Hello frames are not counted) or `timeout` elapses.
-  std::uint64_t wait_for_received(std::uint64_t target,
-                                  std::chrono::milliseconds timeout);
+  std::uint64_t wait_for_received(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Wait until at least `target` OOB message frames have been
   // received or `timeout` elapses.
-  std::uint64_t wait_for_received_messages(
-      std::uint64_t target, std::chrono::milliseconds timeout);
+  std::uint64_t wait_for_received_messages(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Internal API used by the server-side RPC handler and the client
   // reader thread. Public so the impl translation unit (which is the
@@ -164,9 +153,7 @@ public:
   void on_inbound_message(const state_message &m);
   void register_connection(std::shared_ptr<connection> conn);
   void unregister_connection(connection *conn);
-  void increment_recv_frames() noexcept {
-    _recv_frames.fetch_add(1, std::memory_order_relaxed);
-  }
+  void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
   void increment_recv_mutations() noexcept {
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
   }

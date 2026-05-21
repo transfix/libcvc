@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_DISTRIBUTED_ADMIN_H__
 #define __CVC_STATE_DISTRIBUTED_ADMIN_H__
 
-#include <cvc/namespace.h>
-
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -108,8 +107,8 @@ public:
   };
 
   struct gc_result {
-    std::size_t scanned = 0;     // candidates considered
-    std::size_t removed = 0;     // blobs erased
+    std::size_t scanned = 0; // candidates considered
+    std::size_t removed = 0; // blobs erased
     std::uint64_t bytes_freed = 0;
   };
 
@@ -219,9 +218,8 @@ public:
   //
   // Used by slice 4d to fan out target-side mutations to
   // link-side subscribers via the existing subscription router.
-  static std::vector<std::string>
-  transparent_link_aliases(state &root, const std::string &path,
-                           std::size_t hop_budget = 64);
+  static std::vector<std::string> transparent_link_aliases(state &root, const std::string &path,
+                                                           std::size_t hop_budget = 64);
 
 private:
   state_cluster_shard *_shard = nullptr;

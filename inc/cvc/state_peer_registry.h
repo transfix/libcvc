@@ -11,9 +11,8 @@
 #ifndef __CVC_STATE_PEER_REGISTRY_H__
 #define __CVC_STATE_PEER_REGISTRY_H__
 
-#include <cvc/namespace.h>
-
 #include <cstdint>
+#include <cvc/namespace.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -66,9 +65,7 @@ public:
   // Insert or replace a peer entry. The cluster_id and endpoint
   // overwrite prior values; the subscription set replaces prior
   // subscriptions.
-  void add_peer(std::string node_id,
-                std::string cluster_id,
-                std::string endpoint = std::string(),
+  void add_peer(std::string node_id, std::string cluster_id, std::string endpoint = std::string(),
                 std::vector<std::string> subscriptions = {});
 
   // Remove a peer. Returns true if the peer existed.
@@ -76,8 +73,7 @@ public:
 
   // Replace the subscription set for an existing peer. Returns
   // false if the peer is unknown.
-  bool set_subscriptions(const std::string &node_id,
-                         std::vector<std::string> subscriptions);
+  bool set_subscriptions(const std::string &node_id, std::vector<std::string> subscriptions);
 
   // Returns true if the registry knows this peer.
   bool has_peer(const std::string &node_id) const;
@@ -86,8 +82,7 @@ public:
   // the subscription filter. Unknown peers return true (a transport
   // that has not registered subscriptions for an active connection
   // should still deliver — this is the back-compat default).
-  bool should_deliver(const std::string &node_id,
-                      const std::string &path) const;
+  bool should_deliver(const std::string &node_id, const std::string &path) const;
 
   // Heartbeat: update last_seen_ns to `now_ns` (caller-provided
   // steady_clock-relative timestamp).
@@ -105,8 +100,7 @@ public:
   // Match a single path against a set of dot-segmented prefixes.
   // Empty prefix matches any path. Otherwise prefix matches when
   // path == prefix or path starts with prefix + '.'.
-  static bool prefix_matches(const std::string &prefix,
-                             const std::string &path) noexcept;
+  static bool prefix_matches(const std::string &prefix, const std::string &path) noexcept;
 
   // True if any element of `prefixes` matches `path` under
   // prefix_matches(). An empty prefix list returns true (match-all).

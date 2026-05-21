@@ -506,27 +506,26 @@ public:
 
   struct send_message_result {
     enum class status_kind {
-      delivered,         // routing succeeded
-      no_shard,          // no default shard registered for app ctx
-      broken_link,       // a link in the chain points nowhere
-      cycle_detected,    // link chain looped
-      budget_exhausted,  // hop budget hit while resolving link
-      duplicate_local,   // local bus reported a dedup hit
-      no_transport,      // owner is remote but no transport set
+      delivered,        // routing succeeded
+      no_shard,         // no default shard registered for app ctx
+      broken_link,      // a link in the chain points nowhere
+      cycle_detected,   // link chain looped
+      budget_exhausted, // hop budget hit while resolving link
+      duplicate_local,  // local bus reported a dedup hit
+      no_transport,     // owner is remote but no transport set
     };
     status_kind status = status_kind::delivered;
-    std::string resolved_path;       // path actually addressed
-    std::string owner_cluster_id;    // resolved owner of that path
-    bool owner_is_local = true;      // owner matches default shard
-    std::size_t local_admitted = 0;  // 1 if local bus admitted
+    std::string resolved_path;      // path actually addressed
+    std::string owner_cluster_id;   // resolved owner of that path
+    bool owner_is_local = true;     // owner matches default shard
+    std::size_t local_admitted = 0; // 1 if local bus admitted
     std::size_t peers_delivered = 0;
     std::size_t peers_targeted = 0;
   };
 
-  send_message_result
-  sendMessage(const std::string &payload,
-              const std::string &content_type = std::string("text/plain"),
-              std::size_t hop_budget = 64);
+  send_message_result sendMessage(const std::string &payload,
+                                  const std::string &content_type = std::string("text/plain"),
+                                  std::size_t hop_budget = 64);
 
   // -------- Expiring state --------
   //

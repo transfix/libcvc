@@ -9,15 +9,14 @@
 */
 
 #include <cvc/state_compression_registry.h>
-
 #include <stdexcept>
 
 namespace CVC_NAMESPACE {
 
 // ---------- state_rle_compression_codec ----------
 
-std::vector<unsigned char> state_rle_compression_codec::encode(
-    const std::vector<unsigned char> &in) const {
+std::vector<unsigned char>
+state_rle_compression_codec::encode(const std::vector<unsigned char> &in) const {
   std::vector<unsigned char> out;
   out.reserve(in.size());
   std::size_t i = 0;
@@ -34,9 +33,8 @@ std::vector<unsigned char> state_rle_compression_codec::encode(
   return out;
 }
 
-bool state_rle_compression_codec::decode(
-    const std::vector<unsigned char> &in,
-    std::vector<unsigned char> &out) const {
+bool state_rle_compression_codec::decode(const std::vector<unsigned char> &in,
+                                         std::vector<unsigned char> &out) const {
   out.clear();
   if (in.size() % 2 != 0) {
     return false;
@@ -60,8 +58,7 @@ state_compression_registry::state_compression_registry() {
   register_codec(std::make_shared<state_rle_compression_codec>());
 }
 
-void state_compression_registry::register_codec(
-    std::shared_ptr<state_compression_codec> codec) {
+void state_compression_registry::register_codec(std::shared_ptr<state_compression_codec> codec) {
   if (!codec) {
     return;
   }
@@ -99,9 +96,9 @@ std::size_t state_compression_registry::size() const {
   return _codecs.size();
 }
 
-std::vector<unsigned char> state_compression_registry::encode(
-    const std::string &id, const std::vector<unsigned char> &in,
-    bool strict) const {
+std::vector<unsigned char> state_compression_registry::encode(const std::string &id,
+                                                              const std::vector<unsigned char> &in,
+                                                              bool strict) const {
   // Empty id is treated as "no codec" -> identity.
   if (id.empty()) {
     return in;
@@ -109,17 +106,15 @@ std::vector<unsigned char> state_compression_registry::encode(
   auto codec = get(id);
   if (!codec) {
     if (strict) {
-      throw std::runtime_error(
-          "state_compression_registry: unknown codec id: " + id);
+      throw std::runtime_error("state_compression_registry: unknown codec id: " + id);
     }
     return in;
   }
   return codec->encode(in);
 }
 
-bool state_compression_registry::decode(
-    const std::string &id, const std::vector<unsigned char> &in,
-    std::vector<unsigned char> &out, bool strict) const {
+bool state_compression_registry::decode(const std::string &id, const std::vector<unsigned char> &in,
+                                        std::vector<unsigned char> &out, bool strict) const {
   if (id.empty()) {
     out = in;
     return true;
@@ -127,8 +122,7 @@ bool state_compression_registry::decode(
   auto codec = get(id);
   if (!codec) {
     if (strict) {
-      throw std::runtime_error(
-          "state_compression_registry: unknown codec id: " + id);
+      throw std::runtime_error("state_compression_registry: unknown codec id: " + id);
     }
     out = in;
     return true;

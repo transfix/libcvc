@@ -8,9 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_chunked_blob.h>
-
 #include <cstring>
+#include <cvc/state_chunked_blob.h>
 
 namespace CVC_NAMESPACE {
 
@@ -35,20 +34,17 @@ void append_str(std::vector<unsigned char> &out, const std::string &s) {
   out.insert(out.end(), s.begin(), s.end());
 }
 
-bool read_u32(const std::vector<unsigned char> &b, std::size_t &pos,
-              std::uint32_t &out) {
+bool read_u32(const std::vector<unsigned char> &b, std::size_t &pos, std::uint32_t &out) {
   if (pos + 4 > b.size())
     return false;
-  out = static_cast<std::uint32_t>(b[pos]) |
-        (static_cast<std::uint32_t>(b[pos + 1]) << 8) |
+  out = static_cast<std::uint32_t>(b[pos]) | (static_cast<std::uint32_t>(b[pos + 1]) << 8) |
         (static_cast<std::uint32_t>(b[pos + 2]) << 16) |
         (static_cast<std::uint32_t>(b[pos + 3]) << 24);
   pos += 4;
   return true;
 }
 
-bool read_u64(const std::vector<unsigned char> &b, std::size_t &pos,
-              std::uint64_t &out) {
+bool read_u64(const std::vector<unsigned char> &b, std::size_t &pos, std::uint64_t &out) {
   if (pos + 8 > b.size())
     return false;
   out = 0;
@@ -58,8 +54,7 @@ bool read_u64(const std::vector<unsigned char> &b, std::size_t &pos,
   return true;
 }
 
-bool read_str(const std::vector<unsigned char> &b, std::size_t &pos,
-              std::string &out) {
+bool read_str(const std::vector<unsigned char> &b, std::size_t &pos, std::string &out) {
   std::uint32_t n = 0;
   if (!read_u32(b, pos, n))
     return false;
@@ -130,15 +125,13 @@ bool state_chunk_manifest::parse(const std::vector<unsigned char> &bytes,
 
 // ---------- state_chunked_blob_writer ----------
 
-state_chunked_blob_writer::state_chunked_blob_writer(
-    state_blob_store &store, std::uint32_t chunk_size,
-    const state_compression_registry *compression)
-    : _store(store), _chunk_size(chunk_size == 0 ? 1u : chunk_size),
-      _compression(compression) {}
+state_chunked_blob_writer::state_chunked_blob_writer(state_blob_store &store,
+                                                     std::uint32_t chunk_size,
+                                                     const state_compression_registry *compression)
+    : _store(store), _chunk_size(chunk_size == 0 ? 1u : chunk_size), _compression(compression) {}
 
-state_blob_ref
-state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
-                               const std::string &codec) {
+state_blob_ref state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
+                                              const std::string &codec) {
   state_chunk_manifest m;
   m.version = 1;
   m.chunk_size = _chunk_size;
@@ -152,8 +145,7 @@ state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
   if (!codec.empty() && codec != "raw" && _compression != nullptr) {
     compressor = _compression->get(codec);
     if (!compressor) {
-      throw std::runtime_error(
-          "state_chunked_blob_writer: unknown compression codec: " + codec);
+      throw std::runtime_error("state_chunked_blob_writer: unknown compression codec: " + codec);
     }
   }
 
@@ -191,20 +183,20 @@ state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
 
 // ---------- state_chunked_blob_reader ----------
 
-state_chunked_blob_reader::state_chunked_blob_reader(
-    state_blob_store &store, const state_compression_registry *compression)
+state_chunked_blob_reader::state_chunked_blob_reader(state_blob_store &store,
+                                                     const state_compression_registry *compression)
     : _store(store), _compression(compression) {}
 
-bool state_chunked_blob_reader::load_manifest(
-    const std::string &manifest_digest, state_chunk_manifest &out) const {
+bool state_chunked_blob_reader::load_manifest(const std::string &manifest_digest,
+                                              state_chunk_manifest &out) const {
   std::vector<unsigned char> bytes;
   if (!_store.get(manifest_digest, bytes))
     return false;
   return state_chunk_manifest::parse(bytes, out);
 }
 
-std::vector<std::string> state_chunked_blob_reader::missing_chunks(
-    const state_chunk_manifest &manifest) const {
+std::vector<std::string>
+state_chunked_blob_reader::missing_chunks(const state_chunk_manifest &manifest) const {
   std::vector<std::string> missing;
   for (const auto &d : manifest.chunks) {
     if (!_store.has(d))
@@ -213,8 +205,8 @@ std::vector<std::string> state_chunked_blob_reader::missing_chunks(
   return missing;
 }
 
-std::vector<std::string> state_chunked_blob_reader::missing_chunks(
-    const std::string &manifest_digest) const {
+std::vector<std::string>
+state_chunked_blob_reader::missing_chunks(const std::string &manifest_digest) const {
   state_chunk_manifest m;
   if (!load_manifest(manifest_digest, m))
     return {};
@@ -252,8 +244,7 @@ bool state_chunked_blob_reader::get(const state_chunk_manifest &manifest,
       out.insert(out.end(), stored.begin(), stored.end());
     }
   }
-  if (!manifest.content_digest.empty() &&
-      sha256_hex(out) != manifest.content_digest) {
+  if (!manifest.content_digest.empty() && sha256_hex(out) != manifest.content_digest) {
     out.clear();
     return false;
   }

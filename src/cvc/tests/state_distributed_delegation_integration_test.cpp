@@ -15,15 +15,13 @@
 // ingest_remote) end-to-end. Closes the survey gap "delegation
 // metadata travels over the wire, not just inside one shard".
 
+#include <atomic>
+#include <cstdint>
 #include <cvc/app.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_delegation_manager.h>
 #include <cvc/state_transport_inproc.h>
-
 #include <gtest/gtest.h>
-
-#include <atomic>
-#include <cstdint>
 #include <string>
 
 namespace {
@@ -32,15 +30,12 @@ namespace {
 // a pointer the test can advance freely; the captured shared_ptr
 // keeps the storage alive for the whole shard lifetime.
 struct manual_clock {
-  std::shared_ptr<std::atomic<std::uint64_t>> now =
-      std::make_shared<std::atomic<std::uint64_t>>(0);
+  std::shared_ptr<std::atomic<std::uint64_t>> now = std::make_shared<std::atomic<std::uint64_t>>(0);
   cvc::state_delegation_manager::clock_fn fn() {
     auto h = now;
     return [h]() { return h->load(std::memory_order_relaxed); };
   }
-  void advance(std::uint64_t ns) {
-    now->fetch_add(ns, std::memory_order_relaxed);
-  }
+  void advance(std::uint64_t ns) { now->fetch_add(ns, std::memory_order_relaxed); }
   void set(std::uint64_t ns) { now->store(ns, std::memory_order_relaxed); }
 };
 
@@ -56,7 +51,9 @@ TEST(StateDistributedDelegationIntegration, DelegationPropagatesViaTransport) {
   cvc::state_cluster_shard sA(aA, "A", "A");
   cvc::state_cluster_shard sB(aB, "A", "B");
   cvc::state_cluster_shard sC(aC, "A", "C");
-  sA.attach(); sB.attach(); sC.attach();
+  sA.attach();
+  sB.attach();
+  sC.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
   t.register_shard(&sC);
@@ -102,7 +99,8 @@ TEST(StateDistributedDelegationIntegration, RevocationPropagates) {
   cvc::state_transport_inproc t;
   cvc::state_cluster_shard sA(aA, "A", "A");
   cvc::state_cluster_shard sB(aB, "A", "B");
-  sA.attach(); sB.attach();
+  sA.attach();
+  sB.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
 
@@ -131,7 +129,8 @@ TEST(StateDistributedDelegationIntegration, LeaseExpiryIsDeterministic) {
   cvc::state_transport_inproc t;
   cvc::state_cluster_shard sA(aA, "A", "A");
   cvc::state_cluster_shard sB(aB, "A", "B");
-  sA.attach(); sB.attach();
+  sA.attach();
+  sB.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
 
@@ -168,14 +167,14 @@ TEST(StateDistributedDelegationIntegration, AuthorityTransfer) {
   cvc::state_transport_inproc t;
   cvc::state_cluster_shard sA(aA, "A", "A");
   cvc::state_cluster_shard sB(aB, "A", "B");
-  sA.attach(); sB.attach();
+  sA.attach();
+  sB.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
 
   sA.publish_delegation("data.world.geometry", "render-cluster", "", 0);
   EXPECT_GE(t.pump_shard(sA), 1u);
-  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id,
-            "render-cluster");
+  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "render-cluster");
 
   sA.publish_revocation("data.world.geometry");
   EXPECT_GE(t.pump_shard(sA), 1u);
@@ -183,8 +182,7 @@ TEST(StateDistributedDelegationIntegration, AuthorityTransfer) {
 
   sA.publish_delegation("data.world.geometry", "physics-cluster", "", 0);
   EXPECT_GE(t.pump_shard(sA), 1u);
-  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id,
-            "physics-cluster");
+  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "physics-cluster");
 }
 
 // ----------------
@@ -197,7 +195,8 @@ TEST(StateDistributedDelegationIntegration, EnforcementInteraction) {
   cvc::state_transport_inproc t;
   cvc::state_cluster_shard sA(aA, "A", "A");
   cvc::state_cluster_shard sB(aB, "A", "B");
-  sA.attach(); sB.attach();
+  sA.attach();
+  sB.attach();
   t.register_shard(&sA);
   t.register_shard(&sB);
 

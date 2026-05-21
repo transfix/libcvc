@@ -11,11 +11,10 @@
 #ifndef __CVC_STATE_TRANSPORT_IPC_H__
 #define __CVC_STATE_TRANSPORT_IPC_H__
 
-#include <cvc/namespace.h>
-#include <cvc/state_transport.h>
-
 #include <atomic>
 #include <chrono>
+#include <cvc/namespace.h>
+#include <cvc/state_transport.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -81,15 +80,13 @@ public:
   // failure. `node_id` and `cluster_id` populate the HELLO frame
   // sent to peers on connect; they are advisory and used only for
   // diagnostics. Empty values are allowed.
-  void start(const std::string &path,
-             const std::string &node_id = std::string(),
+  void start(const std::string &path, const std::string &node_id = std::string(),
              const std::string &cluster_id = std::string());
 
   // Connect to a peer's listening UDS. Sends HELLO. Returns true on
   // success. Spawns a reader thread for the connection.
   bool connect_to_peer(const std::string &path,
-                       std::chrono::milliseconds timeout =
-                           std::chrono::milliseconds(2000));
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
 
   // Stop the acceptor, close all connections, join threads, and
   // unlink the listener path.
@@ -109,28 +106,20 @@ public:
   std::size_t connection_count() const;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_sent_frames() const noexcept { return _sent_frames.load(); }
-  std::uint64_t total_received_frames() const noexcept {
-    return _recv_frames.load();
-  }
-  std::uint64_t total_received_mutations() const noexcept {
-    return _recv_mutations.load();
-  }
-  std::uint64_t total_received_messages() const noexcept {
-    return _recv_messages.load();
-  }
+  std::uint64_t total_received_frames() const noexcept { return _recv_frames.load(); }
+  std::uint64_t total_received_mutations() const noexcept { return _recv_mutations.load(); }
+  std::uint64_t total_received_messages() const noexcept { return _recv_messages.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
   // (HELLO frames are not counted) or `timeout` elapses. Used by
   // tests to bridge the asynchronous receive path. Returns the
   // current total_received_mutations() value.
-  std::uint64_t wait_for_received(std::uint64_t target,
-                                  std::chrono::milliseconds timeout);
+  std::uint64_t wait_for_received(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Wait until at least `target` OOB MESSAGE frames have been
   // received or `timeout` elapses.
-  std::uint64_t wait_for_received_messages(
-      std::uint64_t target, std::chrono::milliseconds timeout);
+  std::uint64_t wait_for_received_messages(std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Test hook: called from reader threads when a MUTATION is
   // dispatched. Only used internally by connection::reader_loop.

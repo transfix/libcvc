@@ -25,17 +25,15 @@
 //     prior runs;
 //   - catch order-of-magnitude regressions when run manually.
 
-#include <cvc/app.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
-
-#include <gtest/gtest.h>
-
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/app.h>
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_message.h>
+#include <cvc/state_message_bus.h>
+#include <gtest/gtest.h>
 #include <string>
 
 namespace {
@@ -45,9 +43,8 @@ bool bench_enabled() {
   return v && std::string(v) == "1";
 }
 
-cvc::state_mutation make_set_value(const std::string &origin,
-                                   std::uint64_t seq, const std::string &path,
-                                   const std::string &val) {
+cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
+                                   const std::string &path, const std::string &val) {
   cvc::state_mutation m;
   m.cluster_id = "cA";
   m.tree_id = "default";
@@ -64,10 +61,8 @@ cvc::state_mutation make_set_value(const std::string &origin,
 
 void report(const char *name, std::size_t n, std::uint64_t wall_ns) {
   std::uint64_t per = (n == 0) ? 0u : wall_ns / n;
-  std::printf("BENCH %s N=%zu wall_ns_total=%llu wall_ns_per_op=%llu\n", name,
-              n,
-              static_cast<unsigned long long>(wall_ns),
-              static_cast<unsigned long long>(per));
+  std::printf("BENCH %s N=%zu wall_ns_total=%llu wall_ns_per_op=%llu\n", name, n,
+              static_cast<unsigned long long>(wall_ns), static_cast<unsigned long long>(per));
 }
 
 } // namespace
@@ -86,8 +81,8 @@ TEST(StateDistributedBench, IngestRemoteUniquePaths) {
   std::vector<cvc::state_mutation> ms;
   ms.reserve(N);
   for (std::size_t i = 0; i < N; ++i) {
-    ms.push_back(make_set_value("nodeB", static_cast<std::uint64_t>(i + 1),
-                                "p." + std::to_string(i), "v"));
+    ms.push_back(
+        make_set_value("nodeB", static_cast<std::uint64_t>(i + 1), "p." + std::to_string(i), "v"));
   }
 
   auto t0 = std::chrono::steady_clock::now();
@@ -98,10 +93,8 @@ TEST(StateDistributedBench, IngestRemoteUniquePaths) {
   }
   auto t1 = std::chrono::steady_clock::now();
   EXPECT_EQ(applied, N);
-  std::uint64_t wall_ns =
-      static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
-              .count());
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   report("ingest_remote_unique_paths", N, wall_ns);
 }
 
@@ -117,21 +110,17 @@ TEST(StateDistributedBench, IngestRemoteDuplicateDedup) {
   // First wave: prime the dedup state.
   constexpr std::size_t N = 10000;
   for (std::size_t i = 0; i < N; ++i) {
-    sh.ingest_remote(make_set_value(
-        "nodeB", static_cast<std::uint64_t>(i + 1), "p.x", "v"));
+    sh.ingest_remote(make_set_value("nodeB", static_cast<std::uint64_t>(i + 1), "p.x", "v"));
   }
 
   auto t0 = std::chrono::steady_clock::now();
   for (std::size_t i = 0; i < N; ++i) {
     // Re-ingest the same (origin, lc): dedup hot path.
-    sh.ingest_remote(make_set_value(
-        "nodeB", static_cast<std::uint64_t>(i + 1), "p.x", "v"));
+    sh.ingest_remote(make_set_value("nodeB", static_cast<std::uint64_t>(i + 1), "p.x", "v"));
   }
   auto t1 = std::chrono::steady_clock::now();
-  std::uint64_t wall_ns =
-      static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
-              .count());
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   EXPECT_GE(sh.total_remote_duplicates(), N);
   report("ingest_remote_dedup", N, wall_ns);
 }
@@ -161,10 +150,8 @@ TEST(StateDistributedBench, MessageBusAdmit) {
   for (auto &m : msgs)
     (void)bus.admit(m);
   auto t1 = std::chrono::steady_clock::now();
-  std::uint64_t wall_ns =
-      static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
-              .count());
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   EXPECT_EQ(bus.total_admitted(), N);
   report("message_bus_admit", N, wall_ns);
 }
@@ -173,22 +160,19 @@ TEST(StateDistributedBench, MessageBusAdmit) {
 // Large-tree routing benchmarks + correctness (Phase 6 bullet 5)
 // ---------------------------------------------------------------------
 
+#include <atomic>
 #include <cvc/state_peer_registry.h>
 #include <cvc/state_transport_inproc.h>
-
-#include <atomic>
 #include <memory>
 #include <random>
 #include <vector>
 
 namespace {
 
-std::vector<std::string> generate_paths(std::size_t n,
-                                        std::uint32_t seed = 1) {
+std::vector<std::string> generate_paths(std::size_t n, std::uint32_t seed = 1) {
   // Deep paths with limited branching so prefix matching has work
   // to do but the same prefixes recur across many leaves.
-  static const char *roots[] = {"vol", "geom", "mesh", "cam",
-                                "scene", "ui", "fx", "net"};
+  static const char *roots[] = {"vol", "geom", "mesh", "cam", "scene", "ui", "fx", "net"};
   static const char *mid[] = {"a", "b", "c", "d", "e"};
   std::mt19937 rng(seed);
   std::vector<std::string> out;
@@ -208,16 +192,13 @@ std::vector<std::string> generate_paths(std::size_t n,
   return out;
 }
 
-std::string node_name(std::size_t i) {
-  return "n" + std::to_string(i);
-}
+std::string node_name(std::size_t i) { return "n" + std::to_string(i); }
 
 std::vector<std::string> peer_subscription(std::size_t i) {
   // Half the peers subscribe to a narrow root prefix; the other
   // half are match-all. This mirrors a realistic pane / panel
   // layout where each viewer cares about one subtree.
-  static const char *roots[] = {"vol", "geom", "mesh", "cam",
-                                "scene", "ui", "fx", "net"};
+  static const char *roots[] = {"vol", "geom", "mesh", "cam", "scene", "ui", "fx", "net"};
   if (i % 2 == 0)
     return {std::string(roots[i % 8])};
   return {}; // match-all
@@ -230,9 +211,8 @@ TEST(StateDistributedBench, AnyPrefixMatchesScales) {
     SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
     return;
   }
-  std::vector<std::string> prefixes = {
-      "vol", "geom.a", "mesh.b.c", "cam.d.node5", "scene.e",
-      "ui.a", "fx.b",   "net.c.d.e"};
+  std::vector<std::string> prefixes = {"vol",     "geom.a", "mesh.b.c", "cam.d.node5",
+                                       "scene.e", "ui.a",   "fx.b",     "net.c.d.e"};
   auto paths = generate_paths(20000, 7);
 
   auto t0 = std::chrono::steady_clock::now();
@@ -257,8 +237,7 @@ TEST(StateDistributedBench, RegistryShouldDeliverScales) {
   cvc::state_peer_registry reg;
   constexpr std::size_t kPeers = 256;
   for (std::size_t i = 0; i < kPeers; ++i) {
-    reg.add_peer(node_name(i), "cA", std::string(),
-                 peer_subscription(i));
+    reg.add_peer(node_name(i), "cA", std::string(), peer_subscription(i));
   }
   auto paths = generate_paths(2000, 11);
 
@@ -275,8 +254,7 @@ TEST(StateDistributedBench, RegistryShouldDeliverScales) {
       std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   EXPECT_GT(deliveries, 0u);
   // Per-call cost in ns:
-  report("should_deliver_256peers_2000paths",
-         paths.size() * kPeers, wall_ns);
+  report("should_deliver_256peers_2000paths", paths.size() * kPeers, wall_ns);
 }
 
 TEST(StateDistributedBench, PublishMessageFanout) {
@@ -292,12 +270,10 @@ TEST(StateDistributedBench, PublishMessageFanout) {
   shards.reserve(kPeers);
   for (std::size_t i = 0; i < kPeers; ++i) {
     apps.push_back(std::make_unique<cvc::app>());
-    shards.push_back(std::make_unique<cvc::state_cluster_shard>(
-        *apps.back(), "cA", node_name(i)));
+    shards.push_back(std::make_unique<cvc::state_cluster_shard>(*apps.back(), "cA", node_name(i)));
     shards.back()->attach();
     t.register_shard(shards.back().get());
-    t.peers().add_peer(node_name(i), "cA", std::string(),
-                       peer_subscription(i));
+    t.peers().add_peer(node_name(i), "cA", std::string(), peer_subscription(i));
   }
 
   auto paths = generate_paths(2000, 19);
@@ -334,21 +310,18 @@ TEST(StateDistributedBench, PublishMutationFanout) {
   shards.reserve(kPeers);
   for (std::size_t i = 0; i < kPeers; ++i) {
     apps.push_back(std::make_unique<cvc::app>());
-    shards.push_back(std::make_unique<cvc::state_cluster_shard>(
-        *apps.back(), "cA", node_name(i)));
+    shards.push_back(std::make_unique<cvc::state_cluster_shard>(*apps.back(), "cA", node_name(i)));
     shards.back()->attach();
     t.register_shard(shards.back().get());
-    t.peers().add_peer(node_name(i), "cA", std::string(),
-                       peer_subscription(i));
+    t.peers().add_peer(node_name(i), "cA", std::string(), peer_subscription(i));
   }
 
   auto paths = generate_paths(1000, 23);
   auto t0 = std::chrono::steady_clock::now();
   std::uint64_t delivered = 0;
   for (std::size_t i = 0; i < paths.size(); ++i) {
-    auto s = t.publish(make_set_value(node_name(0),
-                                      static_cast<std::uint64_t>(i + 1),
-                                      paths[i], "v"));
+    auto s =
+        t.publish(make_set_value(node_name(0), static_cast<std::uint64_t>(i + 1), paths[i], "v"));
     delivered += s.delivered;
   }
   auto t1 = std::chrono::steady_clock::now();
@@ -412,17 +385,13 @@ TEST(StateDistributedRoutingScale, TransportSkipsFilteredPeers) {
 
   for (std::size_t i = 0; i < kPeers; ++i) {
     apps.push_back(std::make_unique<cvc::app>());
-    shards.push_back(std::make_unique<cvc::state_cluster_shard>(
-        *apps.back(), "cA", node_name(i)));
+    shards.push_back(std::make_unique<cvc::state_cluster_shard>(*apps.back(), "cA", node_name(i)));
     shards.back()->attach();
     t.register_shard(shards.back().get());
-    t.peers().add_peer(node_name(i), "cA", std::string(),
-                       peer_subscription(i));
+    t.peers().add_peer(node_name(i), "cA", std::string(), peer_subscription(i));
     auto *hp = &hits[i];
-    shards.back()->message_bus().subscribe(
-        "", [hp](const cvc::state_message &) {
-          hp->fetch_add(1);
-        });
+    shards.back()->message_bus().subscribe("",
+                                           [hp](const cvc::state_message &) { hp->fetch_add(1); });
   }
 
   cvc::state_message m;
@@ -449,8 +418,7 @@ TEST(StateDistributedRoutingScale, TransportSkipsFilteredPeers) {
     auto subs = peer_subscription(i);
     bool should = subs.empty() || subs[0] == "vol";
     EXPECT_EQ(hits[i].load(), should ? 1 : 0)
-        << "peer " << i << " subs="
-        << (subs.empty() ? std::string("*") : subs[0]);
+        << "peer " << i << " subs=" << (subs.empty() ? std::string("*") : subs[0]);
     actual_hits += static_cast<std::size_t>(hits[i].load());
   }
   EXPECT_EQ(actual_hits, expected_hits);

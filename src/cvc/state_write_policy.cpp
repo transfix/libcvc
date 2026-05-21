@@ -9,7 +9,6 @@
 */
 
 #include <cvc/state_write_policy.h>
-
 #include <memory>
 #include <utility>
 
@@ -17,14 +16,15 @@ namespace CVC_NAMESPACE {
 
 state_write_policy::state_write_policy() = default;
 
-std::vector<std::string>
-state_write_policy::split_path(const std::string &path) {
+std::vector<std::string> state_write_policy::split_path(const std::string &path) {
   std::vector<std::string> out;
-  if (path.empty()) return out;
+  if (path.empty())
+    return out;
   std::size_t start = 0;
   for (std::size_t i = 0; i <= path.size(); ++i) {
     if (i == path.size() || path[i] == '.') {
-      if (i > start) out.emplace_back(path.substr(start, i - start));
+      if (i > start)
+        out.emplace_back(path.substr(start, i - start));
       start = i + 1;
     }
   }
@@ -36,7 +36,8 @@ state_write_policy::find_or_create_node(const std::string &path_prefix) {
   trie_node *node = &_root;
   for (const auto &seg : split_path(path_prefix)) {
     auto &child = node->children[seg];
-    if (!child) child = std::make_unique<trie_node>();
+    if (!child)
+      child = std::make_unique<trie_node>();
     node = child.get();
   }
   return *node;
@@ -51,7 +52,8 @@ void state_write_policy::allow(const std::string &path_prefix,
     ++_count;
   }
   node.allowed.clear();
-  for (auto &w : allowed_writers) node.allowed.insert(std::move(w));
+  for (auto &w : allowed_writers)
+    node.allowed.insert(std::move(w));
 }
 
 bool state_write_policy::revoke(const std::string &path_prefix) {
@@ -59,19 +61,21 @@ bool state_write_policy::revoke(const std::string &path_prefix) {
   trie_node *node = &_root;
   for (const auto &seg : split_path(path_prefix)) {
     auto it = node->children.find(seg);
-    if (it == node->children.end()) return false;
+    if (it == node->children.end())
+      return false;
     node = it->second.get();
   }
-  if (!node->has_policy) return false;
+  if (!node->has_policy)
+    return false;
   node->has_policy = false;
   node->allowed.clear();
-  if (_count > 0) --_count;
+  if (_count > 0)
+    --_count;
   return true;
 }
 
 state_write_policy::decision
-state_write_policy::authorize(const std::string &path,
-                              const std::string &origin_node_id) const {
+state_write_policy::authorize(const std::string &path, const std::string &origin_node_id) const {
   std::lock_guard<std::mutex> lk(_mu);
   decision result;
   const trie_node *node = &_root;
@@ -85,9 +89,11 @@ state_write_policy::authorize(const std::string &path,
   std::string current;
   for (const auto &seg : split_path(path)) {
     auto it = node->children.find(seg);
-    if (it == node->children.end()) break;
+    if (it == node->children.end())
+      break;
     node = it->second.get();
-    if (!current.empty()) current.push_back('.');
+    if (!current.empty())
+      current.push_back('.');
     current += seg;
     if (node->has_policy) {
       best = node;
@@ -106,8 +112,7 @@ state_write_policy::authorize(const std::string &path,
   } else {
     result.allowed = false;
     result.reject_reason =
-        "write policy denies node " + origin_node_id +
-        " for prefix '" + best_prefix + "'";
+        "write policy denies node " + origin_node_id + " for prefix '" + best_prefix + "'";
   }
   return result;
 }
