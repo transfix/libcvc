@@ -232,6 +232,45 @@ public:
     return _ctr_revocations_applied.load();
   }
 
+  // -------- Inbound interest filter (lazy-load enforcement) --------
+  //
+  // A cluster may carry more state than any single client can
+  // afford to mirror. This filter is the receiver-side guard that
+  // turns "client mirrors everything pushed at it" into "client
+  // only materializes paths it has explicitly registered interest
+  // in".
+  //
+  // Semantics:
+  //   * add_interest(prefix) installs a path-prefix the local node
+  //     is willing to receive. Prefix matching is dot-segment
+  //     aware: "scene" matches "scene" and "scene.foo" but NOT
+  //     "scenery". Empty prefix ("") matches everything.
+  //   * When enforce_interest() is true, ingest_remote and
+  //     ingest_remote_message reject mutations / messages whose
+  //     path is not covered by any registered prefix. The
+  //     mutation is recorded as filtered_out, the seen-set is
+  //     NOT advanced (so a later interest-add can replay).
+  //   * Default: enforce=false, interests empty. This preserves
+  //     the previous "mirror everything" behavior so existing
+  //     deployments are unaffected until they opt in.
+  //   * Enabling enforce_interest with an empty interest set
+  //     means "reject all inbound" \u2014 safe-by-default for
+  //     deployments that want to whitelist explicitly.
+  //
+  // Threading: thread-safe.
+  void add_interest(std::string path_prefix);
+  bool remove_interest(const std::string &path_prefix);
+  void clear_interests();
+  std::vector<std::string> interests() const;
+  bool path_is_of_interest(const std::string &path) const;
+
+  void set_enforce_interest(bool enforce) noexcept;
+  bool enforce_interest() const noexcept;
+
+  std::uint64_t total_remote_filtered_out() const noexcept {
+    return _ctr_remote_filtered_out.load();
+  }
+
   // -------- Phase 8 slice 2: cluster-agnostic message routing --------
   //
   // The shard owns the bridge from "I want to send a message at
@@ -312,6 +351,11 @@ private:
   std::atomic<std::uint64_t> _ctr_delegation_expired{0};
   std::atomic<std::uint64_t> _ctr_delegations_applied{0};
   std::atomic<std::uint64_t> _ctr_revocations_applied{0};
+  std::atomic<std::uint64_t> _ctr_remote_filtered_out{0};
+
+  // Inbound interest filter.
+  std::vector<std::string> _interests;
+  bool _enforce_interest = false;
 
   // Phase 8 slice 2.
   state_transport *_transport = nullptr;

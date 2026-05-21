@@ -153,6 +153,10 @@ bool state_cluster_shard::enforce_delegation() const noexcept {
 bool state_cluster_shard::ingest_remote_message(const state_message &m) {
   if (!m.cluster_id.empty() && m.cluster_id != _cluster_id)
     return false;
+  if (!path_is_of_interest(m.path)) {
+    _ctr_remote_filtered_out.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   return _message_bus->admit(m);
 }
 
@@ -185,6 +189,17 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
     _replica->set_last_applied(m.origin_node_id, m.sequence);
     _ctr_remote_applied.fetch_add(1, std::memory_order_relaxed);
     r.applied = true;
+    return r;
+  }
+
+  // Inbound interest filter: when enabled, drop any mutation whose
+  // path is not covered by a registered interest prefix. The
+  // seen-set is intentionally NOT advanced so that adding the
+  // interest later allows a re-publish to land.
+  if (!path_is_of_interest(m.path)) {
+    r.rejected = true;
+    r.reject_reason = "path '" + m.path + "' outside local interest set";
+    _ctr_remote_filtered_out.fetch_add(1, std::memory_order_relaxed);
     return r;
   }
 
@@ -370,6 +385,85 @@ void state_cluster_shard::publish_revocation(const std::string &path_prefix) {
   (void)_replica->seen(stored.origin_node_id, stored.sequence,
                        /*record*/ true);
   _replica->observe_local(stored.sequence);
+}
+
+// ---- Inbound interest filter ----
+
+namespace {
+
+// Normalize a path-prefix: trim leading/trailing dots. Empty stays empty.
+std::string normalize_interest_prefix(std::string p) {
+  while (!p.empty() && p.front() == '.')
+    p.erase(p.begin());
+  while (!p.empty() && p.back() == '.')
+    p.pop_back();
+  return p;
+}
+
+// Dot-segment-aware prefix match. Empty prefix matches every path.
+bool path_matches_prefix(const std::string &path, const std::string &pref) {
+  if (pref.empty())
+    return true;
+  if (path.size() < pref.size())
+    return false;
+  if (path.compare(0, pref.size(), pref) != 0)
+    return false;
+  return path.size() == pref.size() || path[pref.size()] == '.';
+}
+
+} // namespace
+
+void state_cluster_shard::add_interest(std::string path_prefix) {
+  std::string p = normalize_interest_prefix(std::move(path_prefix));
+  std::lock_guard<std::mutex> lk(_mutex);
+  for (const auto &existing : _interests) {
+    if (existing == p)
+      return;
+  }
+  _interests.push_back(std::move(p));
+}
+
+bool state_cluster_shard::remove_interest(const std::string &path_prefix) {
+  std::string p = normalize_interest_prefix(path_prefix);
+  std::lock_guard<std::mutex> lk(_mutex);
+  for (auto it = _interests.begin(); it != _interests.end(); ++it) {
+    if (*it == p) {
+      _interests.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+void state_cluster_shard::clear_interests() {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _interests.clear();
+}
+
+std::vector<std::string> state_cluster_shard::interests() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _interests;
+}
+
+bool state_cluster_shard::path_is_of_interest(const std::string &path) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  if (!_enforce_interest)
+    return true;
+  for (const auto &pref : _interests) {
+    if (path_matches_prefix(path, pref))
+      return true;
+  }
+  return false;
+}
+
+void state_cluster_shard::set_enforce_interest(bool enforce) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _enforce_interest = enforce;
+}
+
+bool state_cluster_shard::enforce_interest() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _enforce_interest;
 }
 
 void state_cluster_shard::set_transport(state_transport *t) noexcept {
