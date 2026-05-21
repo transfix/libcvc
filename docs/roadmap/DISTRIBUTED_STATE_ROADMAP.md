@@ -261,21 +261,21 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 
 State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
 
-Delivered so far on `feature/distributed-state-sync` (PR #78):
+Delivered so far on `feature/distributed-state-sync` (PR #78) and follow-on work on `feature/phase8-slice5`:
 
 - 4a — inbound interest filter: subscription router exposes `subscriptions_for(path)` with longest-prefix semantics so the adapter can drive interest-based dispatch.
 - 4b — `link_mode` (`transparent`/`opaque`) on link nodes; `state::resolvedValue(path, hop_budget = 64)` follows transparent links to a value with cycle detection.
 - 4c — `state_distributed_admin::transparent_link_index(root)` enumerates `{link_path, target_path}` entries (root target canonicalized to empty); `transparent_link_aliases(root, path, hop_budget)` returns aliases for a given path, dot-segment boundary-aware so prefix spoofing is rejected.
 - 4d — `state_sync_adapter::subscriptions_for_path(path)` returns direct-router subscriptions plus subscriptions installed at every transparent alias, deduped by subscription id; `forwarded_through_link_count()` reports cumulative subscriptions added via alias expansion. The local-dispatch path now uses this expanded lookup.
 - 4e — alias resolver follows chains BFS-style to a fixed point with a `hop_budget` (default 64). A root-target / at-or-under-link guard terminates 2-cycles and prevents nested re-aliasing.
+- Writable transparent links: `state::linkWritable()` / `setLinkWritable(bool)` opt a transparent link into write-through. When enabled, `state::value(v)` routes the write to the resolved terminal target with the same cycle/budget semantics as `resolvedValue()`; broken/cyclic resolves raise `read_only_error`. Default is `false`, preserving existing semantics where writes land on the link node. Covered by `StateWritableLinkTest` (11 cases).
+- Subscription-collapse over N-link cycles: `StateSyncAdapterLinkForwardingTest` covers two-link cycle, self-loop, N-link chain-with-cycle, and resolver termination under `hop_budget`, asserting a single logical subscription per cycle.
+- `state_distributed_admin::link_cycles()` static cycle enumerator exposed for tooling.
 
 Remaining for Phase 8:
 
 - Slice 5: pull-on-demand resolve of remote link targets composing with delegation + lease expiry (`state::resolveRemote(path)` and adapter integration with `state_authority_map`).
-- Writes through writable links honoring authority map + write policy (the read/subscribe sides land first; write routing through links is next).
-- `state_distributed_admin::link_cycles()` static cycle enumerator and tooling exposure.
 - Cross-cluster link tests: link target moves between clusters mid-test, lease expiry invalidates the link, `sendMessage` over a link routes via the right transport peer without the caller naming a `cluster_id`.
-- Subscription-collapse test for an N-link cycle registering one logical subscriber rather than N copies.
 - Bench: 1M-path tree with 10k links and a few cycles; assert resolver/subscription latency stays bounded.
 
 - Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
