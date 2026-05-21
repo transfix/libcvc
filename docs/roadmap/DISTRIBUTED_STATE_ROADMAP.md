@@ -250,26 +250,31 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
 
 - Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
-  - target `cluster_id` (empty for "this cluster"),
-  - target `tree_id` (empty for "this tree"),
-  - target `path` (absolute, may be the empty path meaning the tree root),
+  - target `path` (absolute, may be the empty path meaning the tree root) — this is the **only** required field for the developer-facing API,
+  - optional `tree_id` override (defaults to "the tree the resolver determines owns `path`"),
   - optional pinned `lease_id` for cross-cluster links so authority changes invalidate the link cleanly,
   - optional `mode` flags: `read_only`, `transparent` (clients see through it as the target's contents) vs `opaque` (clients see a link node and resolve it explicitly).
+  - The owning `cluster_id` is **never** part of the developer API. It is derived at resolve time from the authority map (`state_authority_map::owner_for(path)`) and cached on the link record as an opportunistic hint; an authority change invalidates the cache and the next resolve recomputes it.
+- Developer-facing API (cluster-agnostic):
+  - `app.root()("scene.geometry").linkTo("data.world.geometry")` is sufficient. The developer never names `cluster_id`; the resolver locates the owning cluster via longest-prefix lookup on the authority map (the same machinery Phase 6 already added).
+  - `app.root()("scene.geometry").sendMessage(payload, max_depth)` on a link node forwards through the link to `data.world.geometry`. The OOB bus consults `state_authority_map::owner_for(resolved_path)` to pick the transport peer; if the resolved path is local the message is delivered in-process, otherwise it rides the inproc/ipc/grpc transport to the owning cluster with the same TTL/dedup semantics. Callers never pass `cluster_id`.
+  - Read, write, and subscribe APIs behave the same: every entry point takes a path (or a node handle) and resolves the owner internally. Cross-cluster routing is an implementation detail of `state_subscription_router` + `state_authority_map`, not part of the surface area.
 - Resolution:
   - Reads through a transparent link follow the link in the resolver and return the target's value, with a depth budget enforced.
   - Subscriptions placed under a transparent link translate into subscriptions at the target path, and target-side mutations fan out to link-side subscribers via the existing subscription router.
   - Writes through a read-only link fail; writes through a writable link route through the authority map exactly like a write at the target path would.
 - Loop support and detection:
   - Loops are *legal* by design — a link may eventually reach itself (including a link back to the tree root). The resolver must terminate.
-  - Each resolution carries a hop budget (default 64) and a visited-set keyed by `(cluster_id, tree_id, path)`. On revisit or budget exhaustion the resolver returns a structured `cycle_detected` result naming the cycle path, instead of recursing.
+  - Each resolution carries a hop budget (default 64) and a visited-set keyed by the *resolved* `(tree_id, path)` pair (cluster identity is recovered from the authority map and folded into the key only to disambiguate identically-named paths in independent trees). On revisit or budget exhaustion the resolver returns a structured `cycle_detected` result naming the cycle path, instead of recursing.
   - A static analyzer enumerates link nodes and reports any closed cycle through the link graph, exposed via `state_distributed_admin::link_cycles()` for tooling.
   - Subscription installation through a chain of links collapses repeats so an N-link cycle does not register N copies of the same callback.
-- Cross-cluster links reuse the existing referral / lease machinery: a link with a foreign `cluster_id` resolves through the authority map and follows referrals, with lease renewal driving link freshness.
+- Cross-cluster links reuse the existing referral / lease machinery transparently: when the resolver determines the target path is owned by a remote cluster, it follows referrals and renews leases without the caller naming a `cluster_id`. Link freshness rides on lease renewal.
 - Tests:
   - Local link resolution, transparent vs opaque mode, read-through and write-through, hop budget exhaustion.
   - Self-referential link, two-link cycle, link-to-root cycle: each must produce a deterministic `cycle_detected` outcome rather than infinite recursion or stack overflow.
   - Subscription fan-in across a transparent link including dedup with the cycle resolver.
   - Cross-cluster link with a real second cluster shard, with lease expiry invalidating the link.
+  - Cluster-agnostic API: `linkTo("data.world.geometry")` and `sendMessage(...)` on the link node must succeed when authority for `data.world.geometry` is local, when it has been delegated to a second cluster mid-test, and after authority moves back — the test never names a `cluster_id`. A regression that requires the caller to know the owning cluster fails this test.
   - Bench: 1M-path tree with 10k links, including a few cycles, and assert resolver/subscription latency stays bounded.
 
 ### Phase 9: Network Analytics And Live Telemetry
