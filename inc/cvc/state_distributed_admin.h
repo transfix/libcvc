@@ -179,6 +179,47 @@ public:
   };
   static link_cycles_result link_cycles(state &root);
 
+  // -------- Phase 8 slice 4c: transparent link index --------
+  //
+  // Walk the subtree rooted at `root` and enumerate every link
+  // node whose mode is transparent. The resulting index pairs
+  // (link_path, target_path) so callers can compute equivalent
+  // paths under transparent aliasing. Opaque links are NOT
+  // indexed: by definition they do not shadow their target's
+  // contents and a subscriber under an opaque link wants the
+  // link itself, not the target.
+  //
+  // This is a pure read-only analysis: no nodes are created and
+  // no traversal mutates the tree.
+  struct transparent_link {
+    std::string link_path;   // absolute path of the link node
+    std::string target_path; // canonical link target (empty == root)
+  };
+
+  struct transparent_link_index_result {
+    std::vector<transparent_link> links;
+    std::size_t link_nodes_scanned = 0;
+  };
+
+  static transparent_link_index_result transparent_link_index(state &root);
+
+  // Given a path that just changed on the target side, return the
+  // equivalent link-side paths via every transparent link in the
+  // subtree rooted at `root`. For each transparent link
+  // (link_path, target_path) such that `target_path` equals
+  // `path` or `path` starts with target_path + ".", emits
+  // `link_path` concatenated with the relative remainder.
+  //
+  // This is one hop of aliasing. Callers that need to follow
+  // chains of transparent links should iterate to a fixed point.
+  // Self-aliases (where the link node sits at its own target
+  // path) are NOT emitted to avoid trivial redundancy.
+  //
+  // Used by slice 4d to fan out target-side mutations to
+  // link-side subscribers via the existing subscription router.
+  static std::vector<std::string>
+  transparent_link_aliases(state &root, const std::string &path);
+
 private:
   state_cluster_shard *_shard = nullptr;
   state_peer_registry *_peers = nullptr;

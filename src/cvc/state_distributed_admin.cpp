@@ -348,4 +348,79 @@ state_distributed_admin::link_cycles(state &root) {
   return result;
 }
 
+// ---- Slice 4c: transparent link index ----
+
+namespace {
+
+// Canonical form of a link target: "." (root marker) becomes "".
+std::string canonical_target(const std::string &raw) {
+  return (raw == state::SEPARATOR) ? std::string() : raw;
+}
+
+} // namespace
+
+state_distributed_admin::transparent_link_index_result
+state_distributed_admin::transparent_link_index(state &root) {
+  transparent_link_index_result result;
+
+  std::vector<std::string> all_paths = root.children();
+  all_paths.insert(all_paths.begin(), root.fullName());
+
+  for (const std::string &p : all_paths) {
+    state *n = (p == root.fullName()) ? &root : root.findDescendant(p);
+    if (n == nullptr || !n->isLink())
+      continue;
+    ++result.link_nodes_scanned;
+    if (n->linkMode() != state::link_mode::transparent)
+      continue;
+    transparent_link tl;
+    tl.link_path = p;
+    tl.target_path = canonical_target(n->linkTarget());
+    result.links.push_back(std::move(tl));
+  }
+
+  std::sort(result.links.begin(), result.links.end(),
+            [](const transparent_link &a, const transparent_link &b) {
+              if (a.link_path != b.link_path)
+                return a.link_path < b.link_path;
+              return a.target_path < b.target_path;
+            });
+  return result;
+}
+
+std::vector<std::string>
+state_distributed_admin::transparent_link_aliases(state &root,
+                                                  const std::string &path) {
+  std::vector<std::string> out;
+  auto idx = transparent_link_index(root);
+  for (const auto &tl : idx.links) {
+    if (tl.link_path == path)
+      continue; // skip trivial self-aliases on the link node itself
+    std::string suffix;
+    if (tl.target_path.empty()) {
+      // Link targets the root: every path aliases to link_path + "." + path.
+      suffix = path;
+    } else if (path == tl.target_path) {
+      suffix.clear();
+    } else if (path.size() > tl.target_path.size() &&
+               path.compare(0, tl.target_path.size(), tl.target_path) == 0 &&
+               path[tl.target_path.size()] == '.') {
+      suffix = path.substr(tl.target_path.size() + 1);
+    } else {
+      continue; // no prefix match
+    }
+    std::string aliased = tl.link_path;
+    if (!suffix.empty()) {
+      if (!aliased.empty())
+        aliased += '.';
+      aliased += suffix;
+    }
+    if (aliased != path)
+      out.push_back(std::move(aliased));
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
 } // namespace CVC_NAMESPACE
