@@ -95,15 +95,18 @@ runs:
           linksfx="-static"
         fi
 
-        # Linux ships .tar.gz; macOS and Windows ship .zip.
+        # Linux ships .tar.gz; macOS ships .zip; Windows ships .7z
+        # (v1.1.0+) or .zip (v1.0.x). We probe candidate extensions in
+        # order of preference and use the first one that exists.
         if [ "$os" = "linux" ]; then
-          ext="tar.gz"
+          exts="tar.gz"
+        elif [ "$os" = "macos" ]; then
+          exts="zip"
         else
-          ext="zip"
+          exts="7z zip"
         fi
 
         stem="libcvc-deps-${LCD_VERSION}-${os}-${arch}-${btlc}${linksfx}"
-        url="https://github.com/transfix/libcvc-deps/releases/download/v${LCD_VERSION}/${stem}.${ext}"
 
         prefix="${LCD_PREFIX}"
         if [ -z "$prefix" ]; then
@@ -115,10 +118,22 @@ runs:
         fi
         mkdir -p "$prefix"
 
-        echo "libcvc-deps: trying $url"
         tmp="$(mktemp -d)"
-        archive="$tmp/${stem}.${ext}"
-        if ! curl -fL -o "$archive" "$url"; then
+        archive=""
+        ext=""
+        for try_ext in $exts; do
+          try_url="https://github.com/transfix/libcvc-deps/releases/download/v${LCD_VERSION}/${stem}.${try_ext}"
+          try_archive="$tmp/${stem}.${try_ext}"
+          echo "libcvc-deps: trying $try_url"
+          if curl -fL -o "$try_archive" "$try_url"; then
+            archive="$try_archive"
+            ext="$try_ext"
+            break
+          fi
+          rm -f "$try_archive"
+        done
+
+        if [ -z "$archive" ]; then
           echo "libcvc-deps: archive not available (HTTP error); falling back."
           echo "path=" >> "$GITHUB_OUTPUT"
           exit 0
@@ -138,6 +153,12 @@ runs:
           zip)
             # unzip is preinstalled on all GH runners (incl. Git Bash on Windows).
             unzip -q "$archive" -d "$prefix"
+            ;;
+          7z)
+            # 7z is preinstalled on GH Windows runners (`7z` on PATH).
+            # On Linux/macOS we'd need apt/brew install; not expected
+            # to hit this branch outside Windows.
+            7z x -y -o"$prefix" "$archive" >/dev/null
             ;;
         esac
 
