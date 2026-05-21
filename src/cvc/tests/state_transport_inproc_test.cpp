@@ -549,3 +549,228 @@ TEST(StateTransportInprocPhase5, UnregisteredPeerDeliversAll) {
   t.unregister_shard(&sA);
   t.unregister_shard(&sB);
 }
+
+// ---------------------------------------------------------------------
+// Per-peer message outbox (Phase 6 backpressure on transports)
+// ---------------------------------------------------------------------
+
+namespace {
+
+cvc::state_message make_outbox_msg(const std::string &cluster,
+                                   const std::string &origin,
+                                   const std::string &id,
+                                   const std::string &path) {
+  cvc::state_message m;
+  m.cluster_id = cluster;
+  m.origin_node_id = origin;
+  m.message_id = id;
+  m.path = path;
+  m.string_value = "payload-" + id;
+  m.content_type = cvc::state_message::MIME_TEXT;
+  return m;
+}
+
+} // namespace
+
+TEST(StateTransportInprocOutbox, NoOutboxIsSynchronous) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+  auto stats = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  EXPECT_GE(stats.delivered, 1u);
+  EXPECT_EQ(hits.load(), 1);
+  EXPECT_EQ(t.total_outbox_admitted(), 0u);
+}
+
+TEST(StateTransportInprocOutbox, DropNewestRejectsWhenFull) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  t.set_peer_message_outbox(&sB, 2,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+
+  // Three publishes; capacity 2; third must be rejected.
+  auto s1 = t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  auto s2 = t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
+  auto s3 = t.publish_message(make_outbox_msg("C", "A", "m3", "x"));
+  EXPECT_EQ(s1.delivered, 1u);
+  EXPECT_EQ(s2.delivered, 1u);
+  EXPECT_EQ(s3.delivered, 0u);
+  EXPECT_GE(s3.duplicates, 1u); // overflow surfaces as non-delivered
+
+  // Nothing has reached the subscriber yet — outbox is staged.
+  EXPECT_EQ(hits.load(), 0);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 2u);
+  EXPECT_EQ(t.total_outbox_admitted(), 2u);
+  EXPECT_EQ(t.total_outbox_dropped_newest(), 1u);
+  EXPECT_EQ(t.total_outbox_dropped_oldest(), 0u);
+
+  std::size_t delivered = t.deliver_message_outbox(&sB);
+  EXPECT_EQ(delivered, 2u);
+  EXPECT_EQ(hits.load(), 2);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+}
+
+TEST(StateTransportInprocOutbox, DropOldestEvictsFront) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::vector<std::string> received;
+  sB.message_bus().subscribe("", [&](const cvc::state_message &m) {
+    received.push_back(m.message_id);
+  });
+
+  t.set_peer_message_outbox(&sB, 2,
+                            cvc::state_transport_inproc::outbox_policy::drop_oldest);
+
+  t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
+  t.publish_message(make_outbox_msg("C", "A", "m3", "x")); // evicts m1
+  t.publish_message(make_outbox_msg("C", "A", "m4", "x")); // evicts m2
+
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 2u);
+  EXPECT_EQ(t.total_outbox_dropped_oldest(), 2u);
+  EXPECT_EQ(t.total_outbox_admitted(), 4u);
+
+  t.deliver_message_outbox(&sB);
+  ASSERT_EQ(received.size(), 2u);
+  EXPECT_EQ(received[0], "m3");
+  EXPECT_EQ(received[1], "m4");
+}
+
+TEST(StateTransportInprocOutbox, DeliverMaxRespectsBudget) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  t.set_peer_message_outbox(&sB, 8,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  for (int i = 0; i < 5; ++i)
+    t.publish_message(make_outbox_msg("C", "A",
+                                      "m" + std::to_string(i), "x"));
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 5u);
+
+  EXPECT_EQ(t.deliver_message_outbox(&sB, 2), 2u);
+  EXPECT_EQ(hits.load(), 2);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 3u);
+
+  EXPECT_EQ(t.deliver_message_outbox(&sB, 0), 3u);
+  EXPECT_EQ(hits.load(), 5);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+}
+
+TEST(StateTransportInprocOutbox, ClearOutboxRevertsToSync) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  t.set_peer_message_outbox(&sB, 4,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  EXPECT_EQ(hits.load(), 0);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 1u);
+
+  // Drain then clear.
+  t.deliver_message_outbox(&sB);
+  EXPECT_EQ(hits.load(), 1);
+  t.clear_peer_message_outbox(&sB);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+
+  // Now publish goes synchronously.
+  t.publish_message(make_outbox_msg("C", "A", "m2", "x"));
+  EXPECT_EQ(hits.load(), 2);
+}
+
+TEST(StateTransportInprocOutbox, UnregisterShardClearsOutbox) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  t.set_peer_message_outbox(&sB, 2,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 1u);
+
+  t.unregister_shard(&sB);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+}
+
+TEST(StateTransportInprocOutbox, ZeroCapacityRemovesOutbox) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  t.set_peer_message_outbox(&sB, 4,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+  // Capacity 0 should clear it.
+  t.set_peer_message_outbox(&sB, 0,
+                            cvc::state_transport_inproc::outbox_policy::drop_newest);
+
+  t.publish_message(make_outbox_msg("C", "A", "m1", "x"));
+  EXPECT_EQ(hits.load(), 1);
+  EXPECT_EQ(t.peer_message_outbox_size(&sB), 0u);
+}

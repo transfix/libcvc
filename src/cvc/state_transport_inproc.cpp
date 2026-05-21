@@ -15,6 +15,16 @@
 
 namespace CVC_NAMESPACE {
 
+state_transport_inproc::~state_transport_inproc() {
+  // Close any installed outbox queues so blocked publishers wake.
+  std::lock_guard<std::mutex> lock(_mutex);
+  for (auto &kv : _outboxes) {
+    if (kv.second && kv.second->queue) {
+      kv.second->queue->close();
+    }
+  }
+}
+
 void state_transport_inproc::register_shard(state_cluster_shard *shard) {
   if (shard == nullptr) {
     return;
@@ -32,6 +42,21 @@ void state_transport_inproc::unregister_shard(state_cluster_shard *shard) {
   std::lock_guard<std::mutex> lock(_mutex);
   _shards.erase(std::remove(_shards.begin(), _shards.end(), shard),
                 _shards.end());
+  auto it = _outboxes.find(shard);
+  if (it != _outboxes.end()) {
+    if (it->second && it->second->queue) {
+      it->second->queue->close();
+    }
+    _outboxes.erase(it);
+  }
+}
+
+state_transport_inproc::peer_outbox *
+state_transport_inproc::find_outbox_locked(state_cluster_shard *peer) {
+  auto it = _outboxes.find(peer);
+  if (it == _outboxes.end() || !it->second)
+    return nullptr;
+  return it->second.get();
 }
 
 state_transport::publish_stats
@@ -86,7 +111,12 @@ state_transport_inproc::publish(const state_mutation &m) {
 state_transport::publish_message_stats
 state_transport_inproc::publish_message(const state_message &m) {
   publish_message_stats stats{};
-  std::vector<state_cluster_shard *> peers;
+  // Snapshot peers and per-peer outbox decisions under the lock.
+  struct peer_dest {
+    state_cluster_shard *peer;
+    state_bounded_queue<state_message> *queue; // null = synchronous
+  };
+  std::vector<peer_dest> peers;
   {
     std::lock_guard<std::mutex> lock(_mutex);
     peers.reserve(_shards.size());
@@ -97,15 +127,41 @@ state_transport_inproc::publish_message(const state_message &m) {
         continue;
       if (s->local_node_id() == m.origin_node_id)
         continue;
-      peers.push_back(s);
+      auto *ob = find_outbox_locked(s);
+      peers.push_back({s, ob ? ob->queue.get() : nullptr});
     }
   }
 
   _msg_published.fetch_add(1, std::memory_order_relaxed);
 
-  for (auto *peer : peers) {
+  for (auto &dest : peers) {
+    auto *peer = dest.peer;
     if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
       _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
+    if (dest.queue != nullptr) {
+      // Outbox path: stage; do not invoke ingest_remote_message
+      // here. Drop_oldest evicts silently; drop_newest rejects.
+      const std::uint64_t before_dn = dest.queue->total_dropped_newest();
+      const std::uint64_t before_do = dest.queue->total_dropped_oldest();
+      bool admitted = dest.queue->push(m);
+      const std::uint64_t after_dn = dest.queue->total_dropped_newest();
+      const std::uint64_t after_do = dest.queue->total_dropped_oldest();
+      if (after_dn > before_dn) {
+        _outbox_dropped_newest.fetch_add(after_dn - before_dn,
+                                         std::memory_order_relaxed);
+      }
+      if (after_do > before_do) {
+        _outbox_dropped_oldest.fetch_add(after_do - before_do,
+                                         std::memory_order_relaxed);
+      }
+      if (admitted) {
+        _outbox_admitted.fetch_add(1, std::memory_order_relaxed);
+        ++stats.delivered; // queued counts as in-flight delivered
+      } else {
+        ++stats.duplicates; // overflow drop, surface as non-delivered
+      }
       continue;
     }
     if (peer->ingest_remote_message(m)) {
@@ -117,6 +173,89 @@ state_transport_inproc::publish_message(const state_message &m) {
     }
   }
   return stats;
+}
+
+void state_transport_inproc::set_peer_message_outbox(
+    state_cluster_shard *peer, std::size_t capacity, outbox_policy policy) {
+  if (peer == nullptr)
+    return;
+  std::lock_guard<std::mutex> lock(_mutex);
+  if (capacity == 0) {
+    auto it = _outboxes.find(peer);
+    if (it != _outboxes.end()) {
+      if (it->second && it->second->queue)
+        it->second->queue->close();
+      _outboxes.erase(it);
+    }
+    return;
+  }
+  auto ob = std::make_unique<peer_outbox>();
+  ob->policy = policy;
+  ob->queue = std::make_unique<state_bounded_queue<state_message>>(capacity,
+                                                                   policy);
+  // Replacing an existing outbox: close the old one to release any
+  // blocked producers.
+  auto &slot = _outboxes[peer];
+  if (slot && slot->queue)
+    slot->queue->close();
+  slot = std::move(ob);
+}
+
+void state_transport_inproc::clear_peer_message_outbox(
+    state_cluster_shard *peer) {
+  if (peer == nullptr)
+    return;
+  std::lock_guard<std::mutex> lock(_mutex);
+  auto it = _outboxes.find(peer);
+  if (it == _outboxes.end())
+    return;
+  if (it->second && it->second->queue)
+    it->second->queue->close();
+  _outboxes.erase(it);
+}
+
+std::size_t state_transport_inproc::peer_message_outbox_size(
+    state_cluster_shard *peer) const {
+  if (peer == nullptr)
+    return 0;
+  std::lock_guard<std::mutex> lock(_mutex);
+  auto it = _outboxes.find(peer);
+  if (it == _outboxes.end() || !it->second || !it->second->queue)
+    return 0;
+  return it->second->queue->size();
+}
+
+std::size_t
+state_transport_inproc::deliver_message_outbox(state_cluster_shard *peer,
+                                               std::size_t max) {
+  if (peer == nullptr)
+    return 0;
+  // Pull a snapshot of the queue pointer under the lock; the queue
+  // itself is internally synchronized.
+  state_bounded_queue<state_message> *q = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _outboxes.find(peer);
+    if (it == _outboxes.end() || !it->second || !it->second->queue)
+      return 0;
+    q = it->second->queue.get();
+  }
+  std::size_t delivered = 0;
+  std::size_t budget = (max == 0) ? std::size_t(-1) : max;
+  state_message m;
+  while (budget > 0 && q->try_pop(m)) {
+    --budget;
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
+    if (peer->ingest_remote_message(m)) {
+      ++delivered;
+      _msg_delivered.fetch_add(1, std::memory_order_relaxed);
+      _peers.note_message_delivered(peer->local_node_id());
+    }
+  }
+  return delivered;
 }
 
 std::size_t state_transport_inproc::pump_shard(state_cluster_shard &shard) {
