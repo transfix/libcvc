@@ -108,6 +108,62 @@ jobs:
           echo "$out"
           exit 1
 
+  # ────────────────────── Distributed-state gRPC tests ──────────────────────
+  #
+  # Builds libcvc with -DCVC_ENABLE_GRPC=ON and runs the distributed
+  # state test suite (state_*, including peer registry, write policy,
+  # cluster shard, and all transport tests). The TLS round-trip test
+  # is gated behind CVC_DISTRIBUTED_STATE_TLS_TESTS=1 so we set it
+  # here to exercise the gRPC TLS path on every PR.
+  #
+  # CUDA, IMOD MRC, VTK/Qt6, and the volrover3 application are all
+  # disabled to keep this job fast and self-contained: only the apt
+  # packages listed below are needed.
+  distributed-state-tests:
+    name: distributed-state (gRPC + TLS)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-distributed-state-tests
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build openssl ca-certificates \
+            libboost-all-dev libfftw3-dev libgsl-dev \
+            libmagick++-dev libcgal-dev liblog4cplus-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
+            protobuf-compiler
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_BUILD_VOLROVER3=OFF \
+            -DCVC_USING_IMOD_MRC=OFF \
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_ENABLE_GRPC=ON \
+            -DDISABLE_CGAL=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run distributed-state tests (with TLS)
+        env:
+          CVC_DISTRIBUTED_STATE_TLS_TESTS: "1"
+        run: |
+          set -euo pipefail
+          ctest --test-dir build \
+                --output-on-failure --parallel \
+                --timeout 300 \
+                -R '^State'
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
