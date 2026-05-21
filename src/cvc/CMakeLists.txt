@@ -30,6 +30,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_replica.h
   ../../inc/cvc/state_authority_map.h
   ../../inc/cvc/state_cluster_shard.h
+  ../../inc/cvc/state_bounded_queue.h
   ../../inc/cvc/state_message.h
   ../../inc/cvc/state_message_bus.h
   ../../inc/cvc/state_peer_registry.h
@@ -86,6 +87,7 @@ set(SOURCE_FILES
   state_distributed_metrics.cpp
   state_delegation_manager.cpp
   state_distributed_admin.cpp
+  state_message.cpp
   utility.cpp
   cuda_utils.cpp
   voxels.cpp
