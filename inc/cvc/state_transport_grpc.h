@@ -60,11 +60,39 @@ namespace CVC_NAMESPACE {
 //
 class state_transport_grpc final : public state_transport {
 public:
+  // Phase 5: optional transport-level TLS configuration. When set
+  // before start() / connect_to_peer(), the server uses
+  // SslServerCredentials and the client uses SslCredentials. PEM
+  // bytes are passed verbatim to gRPC. An empty server_cert_pem +
+  // server_key_pem disables server-side TLS even if the struct is
+  // installed. require_client_auth=true switches the server to
+  // mutual TLS (client certificate must chain to root_ca_pem).
+  struct tls_config {
+    std::string server_cert_pem;
+    std::string server_key_pem;
+    std::string root_ca_pem;
+    bool require_client_auth = false;
+  };
+
+  // Phase 5: optional bearer-token authentication. When
+  // expected_token is set, the server rejects any incoming
+  // Channel() RPC whose "authorization" metadata does not equal
+  // "Bearer <expected_token>". When outbound_token is set, the
+  // client stamps the same metadata on its ClientContext.
+  struct auth_config {
+    std::string expected_token;
+    std::string outbound_token;
+  };
+
   state_transport_grpc();
   ~state_transport_grpc() override;
 
   state_transport_grpc(const state_transport_grpc &) = delete;
   state_transport_grpc &operator=(const state_transport_grpc &) = delete;
+
+  // Phase 5: must be called BEFORE start() / connect_to_peer().
+  void set_tls_config(tls_config cfg);
+  void set_auth_config(auth_config cfg);
 
   // Bind a gRPC server listening at `listen_addr`. The address is in
   // gRPC's URI form ("host:port"), e.g. "127.0.0.1:0" for an
@@ -131,6 +159,7 @@ public:
   class connection;
   const std::string &local_node_id() const noexcept { return _node_id; }
   const std::string &local_cluster_id() const noexcept { return _cluster_id; }
+  const auth_config &auth() const noexcept { return _auth; }
   void on_inbound_mutation(const state_mutation &m);
   void on_inbound_message(const state_message &m);
   void register_connection(std::shared_ptr<connection> conn);
@@ -152,6 +181,10 @@ private:
   std::string _node_id;
   std::string _cluster_id;
   std::atomic<bool> _running{false};
+
+  tls_config _tls;
+  bool _tls_set = false;
+  auth_config _auth;
 
   mutable std::mutex _shards_mu;
   std::vector<state_cluster_shard *> _shards;

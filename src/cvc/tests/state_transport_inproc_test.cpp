@@ -483,3 +483,69 @@ TEST(StateTransportInprocTest, MessageMultiSubscriberFanOut) {
   EXPECT_EQ(lobby.load(), 1);
   EXPECT_EQ(sports.load(), 1);
 }
+
+// ---- Phase 5: subscription-prefix routing ----
+
+namespace {
+cvc::state_mutation make_mut(const std::string &origin,
+                             const std::string &cluster,
+                             std::uint64_t seq, const std::string &path) {
+  cvc::state_mutation m;
+  m.cluster_id = cluster;
+  m.origin_node_id = origin;
+  m.sequence = seq;
+  m.path = path;
+  m.string_value = "v";
+  m.type_name = "std::string";
+  return m;
+}
+} // namespace
+
+TEST(StateTransportInprocPhase5, PeerSubscriptionsFilterDelivery) {
+  cvc::app appA, appB;
+  cvc::state_cluster_shard sA(appA, "c", "A");
+  cvc::state_cluster_shard sB(appB, "c", "B");
+  sA.attach();
+  sB.attach();
+
+  cvc::state_transport_inproc t;
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  // B only subscribes to "alpha". "beta" should be filtered.
+  t.peers().add_peer("B", "c", "", {"alpha"});
+
+  t.publish(make_mut("A", "c", 1, "alpha.x"));
+  t.publish(make_mut("A", "c", 2, "beta.y"));
+
+  EXPECT_EQ(1u, sB.total_remote_applied());
+  // The filtered delivery is recorded on the peer entry.
+  auto snap = t.peers().snapshot();
+  ASSERT_EQ(1u, snap.size());
+  EXPECT_EQ(1u, snap[0].mutations_delivered);
+  EXPECT_EQ(1u, snap[0].deliveries_filtered);
+
+  t.unregister_shard(&sA);
+  t.unregister_shard(&sB);
+}
+
+TEST(StateTransportInprocPhase5, UnregisteredPeerDeliversAll) {
+  cvc::app appA, appB;
+  cvc::state_cluster_shard sA(appA, "c", "A");
+  cvc::state_cluster_shard sB(appB, "c", "B");
+  sA.attach();
+  sB.attach();
+
+  cvc::state_transport_inproc t;
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  // Do not register B in the peer registry: back-compat = match-all.
+  t.publish(make_mut("A", "c", 1, "anything"));
+  t.publish(make_mut("A", "c", 2, "else"));
+
+  EXPECT_EQ(2u, sB.total_remote_applied());
+
+  t.unregister_shard(&sA);
+  t.unregister_shard(&sB);
+}

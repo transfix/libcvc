@@ -29,6 +29,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
   _message_bus = std::make_unique<state_message_bus>();
+  _write_policy = std::make_unique<state_write_policy>();
 }
 
 state_cluster_shard::~state_cluster_shard() {
@@ -54,6 +55,26 @@ bool state_cluster_shard::enforce_authority() const noexcept {
   return _enforce_authority;
 }
 
+void state_cluster_shard::set_enforce_write_policy(bool enforce) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _enforce_write_policy = enforce;
+}
+
+bool state_cluster_shard::enforce_write_policy() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _enforce_write_policy;
+}
+
+void state_cluster_shard::set_resolve_conflicts(bool resolve) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _resolve_conflicts = resolve;
+}
+
+bool state_cluster_shard::resolve_conflicts() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _resolve_conflicts;
+}
+
 bool state_cluster_shard::ingest_remote_message(const state_message &m) {
   if (!m.cluster_id.empty() && m.cluster_id != _cluster_id)
     return false;
@@ -67,25 +88,57 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   // Loop detection: have we already applied this exact (origin,seq)?
   if (_replica->seen(m.origin_node_id, m.sequence, /*record*/ false)) {
     r.duplicate = true;
+    _ctr_remote_duplicates.fetch_add(1, std::memory_order_relaxed);
     return r;
   }
 
   // Optional authority enforcement: a path that resolves to an
   // authority entry whose cluster_id differs from this shard's
   // cluster_id is rejected.
-  bool enforce;
+  bool enforce_auth;
+  bool enforce_policy;
+  bool resolve_conf;
   {
     std::lock_guard<std::mutex> lk(_mutex);
-    enforce = _enforce_authority;
+    enforce_auth = _enforce_authority;
+    enforce_policy = _enforce_write_policy;
+    resolve_conf = _resolve_conflicts;
   }
-  if (enforce) {
+  if (enforce_auth) {
     auto auth = _authority->resolve(m.path);
     if (auth.valid && !auth.cluster_id.empty() &&
         auth.cluster_id != _cluster_id) {
       r.rejected = true;
       r.reject_reason = "path '" + m.path + "' is owned by cluster '" +
                         auth.cluster_id + "', not '" + _cluster_id + "'";
+      _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
       return r;
+    }
+  }
+  if (enforce_policy) {
+    auto d = _write_policy->authorize(m.path, m.origin_node_id);
+    if (!d.allowed) {
+      r.rejected = true;
+      r.reject_reason = d.reject_reason;
+      _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
+      return r;
+    }
+  }
+
+  // Conflict resolution: when enabled, compare against the last
+  // mutation applied at this path. If incoming loses the
+  // deterministic tie-breaker we still record it as seen so we
+  // never reprocess it, but skip the apply.
+  bool conflict_lost = false;
+  if (resolve_conf) {
+    std::lock_guard<std::mutex> lk(_mutex);
+    auto it = _last_path_mutation.find(m.path);
+    if (it != _last_path_mutation.end() &&
+        it->second.origin_node_id != m.origin_node_id) {
+      _ctr_conflicts_detected.fetch_add(1, std::memory_order_relaxed);
+      if (!state_replica::should_replace(it->second, m)) {
+        conflict_lost = true;
+      }
     }
   }
 
@@ -93,12 +146,24 @@ state_cluster_shard::ingest_remote(const state_mutation &m) {
   (void)_replica->seen(m.origin_node_id, m.sequence, /*record*/ true);
   _replica->observe_remote(m.origin_node_id, m.sequence);
 
+  if (conflict_lost) {
+    _ctr_conflicts_lost.fetch_add(1, std::memory_order_relaxed);
+    // Mark as seen but do not apply.
+    return r;
+  }
+
   // Apply. apply_remote marks the calling thread as remote so the
   // resulting state signals do not loop back into the journal.
   bool ok = _adapter->apply_remote(m);
   r.applied = ok;
-  if (ok)
+  if (ok) {
     _replica->set_last_applied(m.origin_node_id, m.sequence);
+    _ctr_remote_applied.fetch_add(1, std::memory_order_relaxed);
+    if (resolve_conf) {
+      std::lock_guard<std::mutex> lk(_mutex);
+      _last_path_mutation[m.path] = m;
+    }
+  }
   return r;
 }
 

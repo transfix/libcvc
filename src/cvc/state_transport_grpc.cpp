@@ -189,6 +189,22 @@ public:
   grpc::Status Channel(
       grpc::ServerContext *ctx,
       grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
+    // Phase 5: bearer-token check.
+    const std::string &expected = _owner->auth().expected_token;
+    if (!expected.empty()) {
+      const auto &md = ctx->client_metadata();
+      auto it = md.find("authorization");
+      bool ok = false;
+      if (it != md.end()) {
+        std::string got(it->second.data(), it->second.size());
+        std::string want = "Bearer " + expected;
+        if (got == want) ok = true;
+      }
+      if (!ok)
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
+                            "missing or invalid bearer token");
+    }
+
     auto conn = std::make_shared<state_transport_grpc::connection>();
     auto *raw_stream = stream;
     auto *write_mu = &conn->write_mu;
@@ -248,6 +264,21 @@ state_transport_grpc::state_transport_grpc() : _impl(new impl()) {}
 
 state_transport_grpc::~state_transport_grpc() { stop(); }
 
+void state_transport_grpc::set_tls_config(tls_config cfg) {
+  if (_running.load())
+    throw std::runtime_error(
+        "state_transport_grpc::set_tls_config: already running");
+  _tls = std::move(cfg);
+  _tls_set = true;
+}
+
+void state_transport_grpc::set_auth_config(auth_config cfg) {
+  if (_running.load())
+    throw std::runtime_error(
+        "state_transport_grpc::set_auth_config: already running");
+  _auth = std::move(cfg);
+}
+
 void state_transport_grpc::start(const std::string &listen_addr,
                                  const std::string &node_id,
                                  const std::string &cluster_id) {
@@ -261,8 +292,23 @@ void state_transport_grpc::start(const std::string &listen_addr,
 
   grpc::ServerBuilder builder;
   int bound_port = 0;
-  builder.AddListeningPort(listen_addr, grpc::InsecureServerCredentials(),
-                           &bound_port);
+  std::shared_ptr<grpc::ServerCredentials> server_creds;
+  if (_tls_set && !_tls.server_cert_pem.empty() &&
+      !_tls.server_key_pem.empty()) {
+    grpc::SslServerCredentialsOptions opts(
+        _tls.require_client_auth
+            ? GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY
+            : GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE);
+    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{
+        _tls.server_key_pem, _tls.server_cert_pem};
+    opts.pem_key_cert_pairs.push_back(pkcp);
+    if (!_tls.root_ca_pem.empty())
+      opts.pem_root_certs = _tls.root_ca_pem;
+    server_creds = grpc::SslServerCredentials(opts);
+  } else {
+    server_creds = grpc::InsecureServerCredentials();
+  }
+  builder.AddListeningPort(listen_addr, server_creds, &bound_port);
   builder.RegisterService(_impl->service.get());
   _impl->server = builder.BuildAndStart();
   if (!_impl->server)
@@ -289,13 +335,28 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   if (!_running.load())
     return false;
 
-  auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+  std::shared_ptr<grpc::ChannelCredentials> chan_creds;
+  if (_tls_set && !_tls.root_ca_pem.empty()) {
+    grpc::SslCredentialsOptions opts;
+    opts.pem_root_certs = _tls.root_ca_pem;
+    if (!_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty() &&
+        _tls.require_client_auth) {
+      opts.pem_cert_chain = _tls.server_cert_pem;
+      opts.pem_private_key = _tls.server_key_pem;
+    }
+    chan_creds = grpc::SslCredentials(opts);
+  } else {
+    chan_creds = grpc::InsecureChannelCredentials();
+  }
+  auto channel = grpc::CreateChannel(target, chan_creds);
   auto deadline = std::chrono::system_clock::now() + timeout;
   if (!channel->WaitForConnected(deadline))
     return false;
 
   auto stub = pb::StateTransport::NewStub(channel);
   auto ctx = std::make_shared<grpc::ClientContext>();
+  if (!_auth.outbound_token.empty())
+    ctx->AddMetadata("authorization", "Bearer " + _auth.outbound_token);
   std::shared_ptr<grpc::ClientReaderWriter<pb::Frame, pb::Frame>> stream(
       stub->Channel(ctx.get()).release());
   if (!stream)
@@ -411,10 +472,15 @@ state_transport_grpc::publish(const state_mutation &m) {
     }
   }
   for (auto *peer : local_peers) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
     auto r = peer->ingest_remote(m);
     if (r.applied) {
       ++stats.delivered;
       _delivered.fetch_add(1, std::memory_order_relaxed);
+      _peers.note_mutation_delivered(peer->local_node_id());
     } else if (r.duplicate) {
       ++stats.delivered;
       ++stats.duplicates;
@@ -433,9 +499,16 @@ state_transport_grpc::publish(const state_mutation &m) {
   }
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->write_fn) continue;
+    if (!c->remote_node_id.empty() &&
+        !_peers.should_deliver(c->remote_node_id, m.path)) {
+      _peers.note_delivery_filtered(c->remote_node_id);
+      continue;
+    }
     if (c->write_fn(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
+      if (!c->remote_node_id.empty())
+        _peers.note_mutation_delivered(c->remote_node_id);
     }
   }
 
@@ -491,9 +564,14 @@ state_transport_grpc::publish_message(const state_message &m) {
     }
   }
   for (auto *peer : local_peers) {
-    if (peer->ingest_remote_message(m))
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
+    if (peer->ingest_remote_message(m)) {
       ++stats.delivered;
-    else
+      _peers.note_message_delivered(peer->local_node_id());
+    } else
       ++stats.duplicates;
   }
 
@@ -507,9 +585,16 @@ state_transport_grpc::publish_message(const state_message &m) {
   }
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->write_fn) continue;
+    if (!c->remote_node_id.empty() &&
+        !_peers.should_deliver(c->remote_node_id, m.path)) {
+      _peers.note_delivery_filtered(c->remote_node_id);
+      continue;
+    }
     if (c->write_fn(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
+      if (!c->remote_node_id.empty())
+        _peers.note_message_delivered(c->remote_node_id);
     }
   }
   return stats;

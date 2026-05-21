@@ -20,10 +20,13 @@
 #include <cvc/state_replica.h>
 #include <cvc/state_subscription_router.h>
 #include <cvc/state_sync_adapter.h>
+#include <cvc/state_write_policy.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -95,6 +98,7 @@ public:
   state_authority_map &authority() noexcept { return *_authority; }
   state_codec_registry &codecs() noexcept { return *_codecs; }
   state_message_bus &message_bus() noexcept { return *_message_bus; }
+  state_write_policy &write_policy() noexcept { return *_write_policy; }
 
   // Wire up adapter observers and start journaling local changes.
   void attach();
@@ -138,6 +142,41 @@ public:
   void set_enforce_authority(bool enforce) noexcept;
   bool enforce_authority() const noexcept;
 
+  // Phase 5: write-policy enforcement. When true, ingest_remote
+  // consults this shard's write_policy(). A mutation whose
+  // origin_node_id is not permitted to write the path is rejected
+  // with reason "write policy ...". Default false.
+  void set_enforce_write_policy(bool enforce) noexcept;
+  bool enforce_write_policy() const noexcept;
+
+  // Phase 5: deterministic last-writer-wins conflict resolution.
+  // When true, ingest_remote tracks the most recently applied
+  // mutation per path. If a new mutation is concurrent with the
+  // current one and loses the (origin_node_id, sequence)
+  // tie-breaker, the apply is skipped and counted as a conflict
+  // loss. Default false.
+  void set_resolve_conflicts(bool resolve) noexcept;
+  bool resolve_conflicts() const noexcept;
+
+  // Phase 5: counters for distributed observability. These are
+  // cumulative since the shard was constructed; readers see the
+  // current value at point of call.
+  std::uint64_t total_remote_applied() const noexcept {
+    return _ctr_remote_applied.load();
+  }
+  std::uint64_t total_remote_duplicates() const noexcept {
+    return _ctr_remote_duplicates.load();
+  }
+  std::uint64_t total_remote_rejected() const noexcept {
+    return _ctr_remote_rejected.load();
+  }
+  std::uint64_t total_conflicts_detected() const noexcept {
+    return _ctr_conflicts_detected.load();
+  }
+  std::uint64_t total_conflicts_lost() const noexcept {
+    return _ctr_conflicts_lost.load();
+  }
+
 private:
   std::string _cluster_id;
   std::string _local_node_id;
@@ -148,10 +187,20 @@ private:
   std::unique_ptr<state_authority_map> _authority;
   std::unique_ptr<state_codec_registry> _codecs;
   std::unique_ptr<state_message_bus> _message_bus;
+  std::unique_ptr<state_write_policy> _write_policy;
 
   mutable std::mutex _mutex;
   std::uint64_t _publish_cursor = 0; // last drained local sequence
   bool _enforce_authority = false;
+  bool _enforce_write_policy = false;
+  bool _resolve_conflicts = false;
+  std::unordered_map<std::string, state_mutation> _last_path_mutation;
+
+  std::atomic<std::uint64_t> _ctr_remote_applied{0};
+  std::atomic<std::uint64_t> _ctr_remote_duplicates{0};
+  std::atomic<std::uint64_t> _ctr_remote_rejected{0};
+  std::atomic<std::uint64_t> _ctr_conflicts_detected{0};
+  std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
 };
 
 } // namespace CVC_NAMESPACE

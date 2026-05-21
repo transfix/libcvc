@@ -569,10 +569,15 @@ state_transport_ipc::publish(const state_mutation &m) {
     }
   }
   for (auto *peer : local_peers) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
     auto r = peer->ingest_remote(m);
     if (r.applied) {
       ++stats.delivered;
       _delivered.fetch_add(1, std::memory_order_relaxed);
+      _peers.note_mutation_delivered(peer->local_node_id());
     } else if (r.duplicate) {
       ++stats.delivered;
       ++stats.duplicates;
@@ -591,9 +596,17 @@ state_transport_ipc::publish(const state_mutation &m) {
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
+    if (!c->remote_node_id.empty() &&
+        !_peers.should_deliver(c->remote_node_id, m.path)) {
+      _peers.note_delivery_filtered(c->remote_node_id);
+      continue;
+    }
     std::lock_guard<std::mutex> wlk(c->write_mu);
-    if (write_frame_locked(*c, kMsgMutation, body))
+    if (write_frame_locked(*c, kMsgMutation, body)) {
       ++stats.delivered;
+      if (!c->remote_node_id.empty())
+        _peers.note_mutation_delivered(c->remote_node_id);
+    }
   }
 
   _published.fetch_add(1, std::memory_order_relaxed);
@@ -658,9 +671,14 @@ state_transport_ipc::publish_message(const state_message &m) {
     }
   }
   for (auto *peer : local_peers) {
-    if (peer->ingest_remote_message(m))
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
+    if (peer->ingest_remote_message(m)) {
       ++stats.delivered;
-    else
+      _peers.note_message_delivered(peer->local_node_id());
+    } else
       ++stats.duplicates;
   }
 
@@ -674,9 +692,17 @@ state_transport_ipc::publish_message(const state_message &m) {
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
+    if (!c->remote_node_id.empty() &&
+        !_peers.should_deliver(c->remote_node_id, m.path)) {
+      _peers.note_delivery_filtered(c->remote_node_id);
+      continue;
+    }
     std::lock_guard<std::mutex> wlk(c->write_mu);
-    if (write_frame_locked(*c, kMsgOob, body))
+    if (write_frame_locked(*c, kMsgOob, body)) {
       ++stats.peers;
+      if (!c->remote_node_id.empty())
+        _peers.note_message_delivered(c->remote_node_id);
+    }
   }
 
   return stats;

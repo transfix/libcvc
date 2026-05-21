@@ -17,8 +17,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -517,6 +519,169 @@ TEST(StateTransportGrpcTest, MessageDoesNotAdvanceJournalOrClock) {
   EXPECT_EQ(sA.journal().size(), a_jb);
   EXPECT_EQ(sB.journal().size(), b_jb);
   EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+// ---- Phase 5: bearer-token authentication ----
+
+TEST(StateTransportGrpcPhase5, BearerTokenAcceptsValidPeer) {
+  cvc::state_transport_grpc tA, tB;
+  cvc::state_transport_grpc::auth_config auth;
+  auth.expected_token = "secret-123";
+  auth.outbound_token = "secret-123";
+  tA.set_auth_config(auth);
+  tB.set_auth_config(auth);
+
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address()));
+
+  cvc::app aA, aB;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state_mutation m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.sequence = 1;
+  m.path = "k";
+  m.string_value = "v";
+  m.type_name = "std::string";
+  tB.publish(m);
+  EXPECT_TRUE(tA.wait_for_received(1, std::chrono::milliseconds(2000)));
+  tA.stop();
+  tB.stop();
+}
+
+TEST(StateTransportGrpcPhase5, BearerTokenRejectsMissingMetadata) {
+  cvc::state_transport_grpc tA, tB;
+  cvc::state_transport_grpc::auth_config server_auth;
+  server_auth.expected_token = "secret-456";
+  tA.set_auth_config(server_auth);
+  // tB has no outbound_token; server should reject.
+
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  // Connect may succeed at the channel layer; the bidi RPC will be
+  // rejected. We don't strictly need to assert connect_to_peer's
+  // return — the receive count must stay at zero.
+  (void)tB.connect_to_peer(tA.listen_address());
+
+  cvc::app aA, aB;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state_mutation m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.sequence = 1;
+  m.path = "k";
+  m.string_value = "v";
+  m.type_name = "std::string";
+  tB.publish(m);
+
+  // Give the server a brief chance to (not) deliver.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(0u, tA.total_received_mutations());
+
+  tA.stop();
+  tB.stop();
+}
+
+// ---- Phase 5: TLS handshake (opt-in) ----
+//
+// Generates a self-signed certificate at runtime via /usr/bin/openssl.
+// Skipped unless CVC_DISTRIBUTED_STATE_TLS_TESTS=1 and openssl is
+// available.
+
+namespace {
+
+bool tls_tests_enabled() {
+  const char *e = std::getenv("CVC_DISTRIBUTED_STATE_TLS_TESTS");
+  return e != nullptr && std::string(e) == "1";
+}
+
+bool generate_self_signed(std::string &cert_pem, std::string &key_pem) {
+  char tmpl[] = "/tmp/cvc_tls_XXXXXX";
+  if (!mkdtemp(tmpl)) return false;
+  std::string dir = tmpl;
+  std::string cmd =
+      "openssl req -x509 -newkey rsa:2048 -keyout " + dir + "/k.pem -out " +
+      dir + "/c.pem -days 1 -nodes -subj '/CN=localhost' "
+            "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' "
+            ">/dev/null 2>&1";
+  if (std::system(cmd.c_str()) != 0) return false;
+  auto slurp = [](const std::string &p, std::string &out) -> bool {
+    std::ifstream f(p);
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return !out.empty();
+  };
+  bool ok = slurp(dir + "/c.pem", cert_pem) && slurp(dir + "/k.pem", key_pem);
+  std::system(("rm -rf " + dir).c_str());
+  return ok;
+}
+
+} // namespace
+
+TEST(StateTransportGrpcPhase5, TlsHandshakeRoundTrip) {
+  if (!tls_tests_enabled()) {
+    GTEST_SKIP() << "Set CVC_DISTRIBUTED_STATE_TLS_TESTS=1 to run TLS tests";
+  }
+  std::string cert, key;
+  if (!generate_self_signed(cert, key)) {
+    GTEST_SKIP() << "openssl not available; cannot generate self-signed cert";
+  }
+
+  cvc::state_transport_grpc tA, tB;
+  cvc::state_transport_grpc::tls_config tls;
+  tls.server_cert_pem = cert;
+  tls.server_key_pem = key;
+  tls.root_ca_pem = cert;  // self-signed: cert == its own CA
+  tls.require_client_auth = false;
+
+  tA.set_tls_config(tls);
+  tB.set_tls_config(tls);
+
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  // gRPC TLS validates the server name against the certificate. Our
+  // SAN includes localhost; gRPC parses host:port from the target.
+  std::string target = tA.listen_address();
+  // Replace 127.0.0.1 with localhost so SAN check matches.
+  auto colon = target.find_last_of(':');
+  std::string port = target.substr(colon + 1);
+  ASSERT_TRUE(tB.connect_to_peer("localhost:" + port));
+
+  cvc::app aA, aB;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state_mutation m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.sequence = 1;
+  m.path = "k.tls";
+  m.string_value = "v";
+  m.type_name = "std::string";
+  tB.publish(m);
+  EXPECT_TRUE(tA.wait_for_received(1, std::chrono::milliseconds(3000)));
 
   tA.stop();
   tB.stop();

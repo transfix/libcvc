@@ -274,3 +274,83 @@ TEST(StateClusterShardPerformanceTest, OptionalIngestThroughputSmoke) {
             << "s (" << (kIters / secs) << "/s)\n";
   EXPECT_LT(secs, 30.0);
 }
+
+// ---- Phase 5 tests ----
+
+TEST(StateClusterShardTest, WritePolicyDeniesUnauthorizedOrigin) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.write_policy().allow("locked", {"trusted"});
+  sh.set_enforce_write_policy(true);
+
+  auto m_ok = make_set_value("trusted", 1, "locked.x", "v");
+  auto r_ok = sh.ingest_remote(m_ok);
+  EXPECT_TRUE(r_ok.applied);
+
+  auto m_deny = make_set_value("intruder", 2, "locked.y", "v");
+  auto r_deny = sh.ingest_remote(m_deny);
+  EXPECT_FALSE(r_deny.applied);
+  EXPECT_TRUE(r_deny.rejected);
+  EXPECT_FALSE(r_deny.reject_reason.empty());
+  EXPECT_EQ(1u, sh.total_remote_rejected());
+}
+
+TEST(StateClusterShardTest, WritePolicyAllowsUncoveredPaths) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.write_policy().allow("only.this", {"trusted"});
+  sh.set_enforce_write_policy(true);
+
+  auto m = make_set_value("anyone", 1, "elsewhere.k", "v");
+  auto r = sh.ingest_remote(m);
+  EXPECT_TRUE(r.applied);
+  EXPECT_FALSE(r.rejected);
+}
+
+TEST(StateClusterShardTest, ConflictResolutionDropsLoser) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  sh.set_resolve_conflicts(true);
+
+  // Both mutations write the same path with the same sequence
+  // (concurrent). The deterministic winner is the greater
+  // (origin_node_id, sequence) pair.
+  auto m_low = make_set_value("aaa", 1, "k", "low");
+  auto m_high = make_set_value("zzz", 1, "k", "high");
+
+  // Apply zzz first, then aaa loses.
+  EXPECT_TRUE(sh.ingest_remote(m_high).applied);
+  auto r = sh.ingest_remote(m_low);
+  EXPECT_FALSE(r.applied);
+  EXPECT_FALSE(r.rejected);
+  EXPECT_EQ(1u, sh.total_conflicts_detected());
+  EXPECT_EQ(1u, sh.total_conflicts_lost());
+}
+
+TEST(StateClusterShardTest, ConflictResolutionDisabledAlwaysApplies) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  // Default: not enabled.
+  auto m_high = make_set_value("zzz", 1, "k", "high");
+  auto m_low = make_set_value("aaa", 2, "k", "low");
+  EXPECT_TRUE(sh.ingest_remote(m_high).applied);
+  EXPECT_TRUE(sh.ingest_remote(m_low).applied);
+  EXPECT_EQ(0u, sh.total_conflicts_detected());
+}
+
+TEST(StateClusterShardTest, MetricsCountersAdvance) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  sh.attach();
+  EXPECT_EQ(0u, sh.total_remote_applied());
+  auto m = make_set_value("nodeB", 1, "p", "v");
+  sh.ingest_remote(m);
+  EXPECT_EQ(1u, sh.total_remote_applied());
+  // duplicate
+  sh.ingest_remote(m);
+  EXPECT_EQ(1u, sh.total_remote_duplicates());
+}

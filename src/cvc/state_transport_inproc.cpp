@@ -63,10 +63,15 @@ state_transport_inproc::publish(const state_mutation &m) {
   _published.fetch_add(1, std::memory_order_relaxed);
 
   for (auto *peer : peers) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
     auto r = peer->ingest_remote(m);
     if (r.applied) {
       ++stats.delivered;
       _delivered.fetch_add(1, std::memory_order_relaxed);
+      _peers.note_mutation_delivered(peer->local_node_id());
     } else if (r.duplicate) {
       ++stats.delivered;
       ++stats.duplicates;
@@ -99,9 +104,14 @@ state_transport_inproc::publish_message(const state_message &m) {
   _msg_published.fetch_add(1, std::memory_order_relaxed);
 
   for (auto *peer : peers) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+      _peers.note_delivery_filtered(peer->local_node_id());
+      continue;
+    }
     if (peer->ingest_remote_message(m)) {
       ++stats.delivered;
       _msg_delivered.fetch_add(1, std::memory_order_relaxed);
+      _peers.note_message_delivered(peer->local_node_id());
     } else {
       ++stats.duplicates;
     }

@@ -14,6 +14,7 @@
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
 #include <cvc/state_message.h>
+#include <cvc/state_peer_registry.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -95,6 +96,20 @@ public:
   // Block until any in-flight asynchronous deliveries complete.
   // No-op for synchronous transports.
   virtual void flush() = 0;
+
+  // Phase 5: per-peer subscription routing. Each concrete transport
+  // consults this registry before fanning out a publish() or
+  // publish_message() to a peer; if the peer is registered with a
+  // non-empty subscription set and the path is not covered, the
+  // delivery is filtered (counted via
+  // state_peer_registry::note_delivery_filtered).
+  // Peers not present in the registry receive everything
+  // (back-compat default).
+  state_peer_registry &peers() noexcept { return _peers; }
+  const state_peer_registry &peers() const noexcept { return _peers; }
+
+protected:
+  state_peer_registry _peers;
 };
 
 } // namespace CVC_NAMESPACE
