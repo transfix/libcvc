@@ -768,6 +768,7 @@ bool state::clearLink() {
       _linkTarget.clear();
       _lastMod = boost::posix_time::microsec_clock::universal_time();
     }
+    _linkMode = link_mode::opaque;
   }
   if (was_link) {
     linkChanged();
@@ -775,6 +776,70 @@ bool state::clearLink() {
       parent()->childChanged(name());
   }
   return was_link;
+}
+
+state &state::linkTo(const std::string &target_path, link_mode mode) {
+  std::string normalized = normalize_state_path(target_path);
+  {
+    std::string trimmed = boost::algorithm::trim_copy(target_path);
+    if (normalized.empty() && !trimmed.empty())
+      normalized = state::SEPARATOR;
+  }
+  bool changed = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkTarget != normalized || _linkMode != mode) {
+      _linkTarget = normalized;
+      _linkMode = mode;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      _initialized = true;
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkChanged();
+    if (parent())
+      parent()->childChanged(name());
+  }
+  return *this;
+}
+
+state::link_mode state::linkMode() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return _linkMode;
+}
+
+state &state::setLinkMode(link_mode mode) {
+  bool changed = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkMode != mode) {
+      _linkMode = mode;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkChanged();
+    if (parent())
+      parent()->childChanged(name());
+  }
+  return *this;
+}
+
+std::string state::resolvedValue(std::size_t hop_budget) {
+  // Cheap fast path: not a link, or opaque link, return own value.
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkTarget.empty() || _linkMode != link_mode::transparent)
+      return _value;
+  }
+  link_resolution r = resolveLink(hop_budget);
+  if (r.kind == link_resolution_kind::resolved && r.target != nullptr &&
+      r.target != this)
+    return r.target->value();
+  // Broken / cycle / budget exhausted: fall back to own value.
+  return value();
 }
 
 bool state::isLink() const {

@@ -437,6 +437,40 @@ public:
   // a link"; "." means "link to root".
   state &linkTo(const std::string &target_path);
 
+  // Link visibility mode (Phase 8 slice 4b):
+  //   * opaque (default): callers see a link node. Reading value()
+  //     returns this node's own _value; resolvedValue() also
+  //     returns the link's own value. The only way to reach the
+  //     target is the explicit resolveLink() walker.
+  //   * transparent: callers see through to the target's value.
+  //     resolvedValue() walks the link chain (with the same
+  //     cycle/budget guarantees as resolveLink) and returns the
+  //     terminal node's value. value() still returns this node's
+  //     own _value for backwards compatibility; callers that
+  //     want pass-through reads must use resolvedValue().
+  //
+  // The mode is per-link record. clearLink() resets the mode to
+  // opaque. Changing the mode fires linkChanged() and the parent
+  // childChanged() the same way changing the target does.
+  enum class link_mode { opaque, transparent };
+
+  // Overload that records the link target AND its mode in one
+  // call. Equivalent to linkTo(target_path) followed by
+  // setLinkMode(mode), but emits one linkChanged() not two.
+  state &linkTo(const std::string &target_path, link_mode mode);
+
+  // Read/write the mode without changing the target.
+  link_mode linkMode() const;
+  state &setLinkMode(link_mode mode);
+
+  // Read this node's value, following the link chain when the
+  // node is a transparent link. Returns the terminal node's
+  // value when resolution succeeds; on broken / cycle /
+  // budget_exhausted resolutions, falls back to this node's own
+  // value() for backwards compatibility. For opaque links and
+  // non-links, returns this node's own value().
+  std::string resolvedValue(std::size_t hop_budget = 64);
+
   // Remove the link mark. The node's children/value are
   // preserved. Returns true if the node was a link.
   bool clearLink();
@@ -577,6 +611,7 @@ protected:
 
   // Phase 8: empty when this node is not a link.
   std::string _linkTarget;
+  link_mode _linkMode = link_mode::opaque;
 
   // Expiring state: not_a_date_time when no expiry is set.
   boost::posix_time::ptime _expiryTime;
