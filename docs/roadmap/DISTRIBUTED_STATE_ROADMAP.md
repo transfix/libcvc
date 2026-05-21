@@ -22,6 +22,8 @@ The current state API is a per-`cvc::app` tree of dot-separated paths. Nodes sto
 - Make the feature optional in CMake and keep libcvc usable with no networking dependencies.
 - Provide security primitives suitable for multi-machine clusters: TLS, authentication, authorization, and path-level write policy.
 - Provide an out-of-band node-to-node messaging channel that does not mutate state, with TTL-bounded propagation across the state tree and across the cluster.
+- Support symbolic *link* nodes that reference another path (in the same tree, another tree, or another cluster), including link-to-root and other cycles, with deterministic cycle detection.
+- Provide live network analytics — bandwidth, latency, cluster/tree size, per-node footprint — distributed via the OOB messaging channel so any node can render a real-time picture of the cluster.
 
 ## Non-Goals For The First Version
 
@@ -242,6 +244,60 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 - Add compression options per codec and per network link.
 - Add admin tooling for inspection, manual resync, and blob garbage collection.
 - Document operational patterns for small interactive clusters and larger distributed processing clusters.
+
+### Phase 8: Link Nodes (Symbolic References)
+
+State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
+
+- Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
+  - target `cluster_id` (empty for "this cluster"),
+  - target `tree_id` (empty for "this tree"),
+  - target `path` (absolute, may be the empty path meaning the tree root),
+  - optional pinned `lease_id` for cross-cluster links so authority changes invalidate the link cleanly,
+  - optional `mode` flags: `read_only`, `transparent` (clients see through it as the target's contents) vs `opaque` (clients see a link node and resolve it explicitly).
+- Resolution:
+  - Reads through a transparent link follow the link in the resolver and return the target's value, with a depth budget enforced.
+  - Subscriptions placed under a transparent link translate into subscriptions at the target path, and target-side mutations fan out to link-side subscribers via the existing subscription router.
+  - Writes through a read-only link fail; writes through a writable link route through the authority map exactly like a write at the target path would.
+- Loop support and detection:
+  - Loops are *legal* by design — a link may eventually reach itself (including a link back to the tree root). The resolver must terminate.
+  - Each resolution carries a hop budget (default 64) and a visited-set keyed by `(cluster_id, tree_id, path)`. On revisit or budget exhaustion the resolver returns a structured `cycle_detected` result naming the cycle path, instead of recursing.
+  - A static analyzer enumerates link nodes and reports any closed cycle through the link graph, exposed via `state_distributed_admin::link_cycles()` for tooling.
+  - Subscription installation through a chain of links collapses repeats so an N-link cycle does not register N copies of the same callback.
+- Cross-cluster links reuse the existing referral / lease machinery: a link with a foreign `cluster_id` resolves through the authority map and follows referrals, with lease renewal driving link freshness.
+- Tests:
+  - Local link resolution, transparent vs opaque mode, read-through and write-through, hop budget exhaustion.
+  - Self-referential link, two-link cycle, link-to-root cycle: each must produce a deterministic `cycle_detected` outcome rather than infinite recursion or stack overflow.
+  - Subscription fan-in across a transparent link including dedup with the cycle resolver.
+  - Cross-cluster link with a real second cluster shard, with lease expiry invalidating the link.
+  - Bench: 1M-path tree with 10k links, including a few cycles, and assert resolver/subscription latency stays bounded.
+
+### Phase 9: Network Analytics And Live Telemetry
+
+Each node needs a live picture of the cluster's health and shape so operators (and the system itself, for routing decisions) can answer questions like "how big is this tree, how fast can I move a blob to peer X, how many nodes are in cluster Y" without per-query polling. Analytics piggyback on the OOB messaging bus and the existing `state_distributed_metrics` module so they cost no extra connections.
+
+- Per-node sampler (`state_node_telemetry`):
+  - Counters and rolling EWMAs for: bytes-sent / bytes-received per peer and per transport; mutation publish rate; message admit/dedup/drop rates; bounded-queue depths and overflow events; blob bytes uploaded/downloaded with throughput EWMA.
+  - Latency histograms for: local enqueue, replica apply, remote delivery, callback dispatch, blob round-trip, message propagation. Use t-digest or HDR-style buckets so percentiles (p50/p90/p99) are stable.
+  - Tree-shape stats: total path count, owned/local path count, total bytes-on-disk, bytes-in-memory, blob-store residency, link-node count, cycle count.
+  - Cluster-shape stats: cluster member count, server-role count vs client-role count, delegated subtree count, peer reachability bitmap, last-ack age per peer.
+- Live distribution:
+  - A dedicated message family `__telemetry.<topic>` rides the OOB bus with `content_type=application/x-cvc-telemetry+cbor` (or json for debug). Subscribers can listen on a prefix and aggregate.
+  - Each node periodically (configurable, default 1 s) publishes a *delta* report; on join or on demand it publishes a *full* report. Deltas are coalesced under the latest-value-only path policy so slow consumers always see the freshest snapshot.
+  - Cluster-level rollups are computed by any subscribing node: a `state_telemetry_aggregator` consumes telemetry messages and exposes a derived view (cluster bandwidth, total nodes, total tree bytes, etc.). Multiple aggregators may run; results are eventually consistent.
+  - Sensitive numbers (per-peer connection counts, queue depths) are tagged with the originating node id so aggregators can deduplicate when a node multi-homes.
+- Routing feedback:
+  - Slow-peer isolation and per-codec compression decisions read the same telemetry: a peer whose EWMA latency or queue depth crosses a threshold is automatically isolated, and a transfer to a high-RTT peer can flip on stronger compression.
+- API surface:
+  - `state_node_telemetry::snapshot()` returns a typed report (struct of structs of counters/EWMAs/histograms) for in-process consumers.
+  - `state_distributed_admin::telemetry()` mirrors the local snapshot plus the latest aggregator view of every known peer.
+  - `state_distributed_admin::to_text()` gains a `[telemetry]` section for human-readable dumps.
+- Tests:
+  - Counters increment monotonically under load; EWMAs converge.
+  - Histogram percentiles stable under synthetic latency mix.
+  - Telemetry messages round-trip through the bus with dedup and TTL respected; aggregator produces correct cluster totals.
+  - Failure mode: an aggregator stops receiving from a peer for > 3× publish interval and marks the peer `stale`.
+  - Bench: 100-node simulated cluster, 1 Hz telemetry, assert per-node CPU overhead is < 1% and aggregator memory is bounded.
 
 ## Testing Requirements
 
