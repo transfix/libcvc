@@ -14,6 +14,8 @@
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
 #include <cvc/state_change_journal.h>
+#include <cvc/state_message.h>
+#include <cvc/state_message_bus.h>
 #include <cvc/state_codec_registry.h>
 #include <cvc/state_replica.h>
 #include <cvc/state_subscription_router.h>
@@ -92,6 +94,7 @@ public:
   state_replica &replica() noexcept { return *_replica; }
   state_authority_map &authority() noexcept { return *_authority; }
   state_codec_registry &codecs() noexcept { return *_codecs; }
+  state_message_bus &message_bus() noexcept { return *_message_bus; }
 
   // Wire up adapter observers and start journaling local changes.
   void attach();
@@ -107,6 +110,14 @@ public:
   // advances the vector clock for origin_node_id, applies via the
   // adapter, and updates the peer's last_applied_sequence.
   ingest_result ingest_remote(const state_mutation &m);
+
+  // Admit a remote-origin out-of-band message into this shard's
+  // local message bus. Performs (origin_node_id, message_id) dedup;
+  // returns true if newly admitted (subscribers were invoked),
+  // false if duplicate or if the cluster_id does not match this
+  // shard. Messages are NOT journaled and do NOT advance any
+  // vector clock or replica seen-set.
+  bool ingest_remote_message(const state_message &m);
 
   // Return local-origin mutations (origin_node_id == local) that
   // have been journaled but not yet published to peers, advancing
@@ -136,6 +147,7 @@ private:
   std::unique_ptr<state_replica> _replica;
   std::unique_ptr<state_authority_map> _authority;
   std::unique_ptr<state_codec_registry> _codecs;
+  std::unique_ptr<state_message_bus> _message_bus;
 
   mutable std::mutex _mutex;
   std::uint64_t _publish_cursor = 0; // last drained local sequence

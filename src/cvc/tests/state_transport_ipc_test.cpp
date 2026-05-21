@@ -390,3 +390,164 @@ TEST(StateTransportIpcPerformanceTest, OptionalRoundTripThroughputSmoke) {
   tA.stop();
   tB.stop();
 }
+
+// ----------------------------------------------------------------------------
+// Phase 4: out-of-band messaging tests.
+// ----------------------------------------------------------------------------
+
+#include <cvc/state_message.h>
+#include <cvc/state_message_bus.h>
+
+namespace {
+
+cvc::state_message make_oob_ipc(const std::string &cluster,
+                                const std::string &origin,
+                                const std::string &id,
+                                const std::string &path,
+                                const std::string &str = {}) {
+  cvc::state_message m;
+  m.cluster_id = cluster;
+  m.origin_node_id = origin;
+  m.message_id = id;
+  m.path = path;
+  m.string_value = str;
+  m.content_type = "text/plain";
+  return m;
+}
+
+} // namespace
+
+TEST(StateTransportIpcTest, MessageRoundTripCrossPeer) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_msg");
+  auto pB = make_socket_path("B_msg");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  std::string payload;
+  sB.message_bus().subscribe("chat", [&](const cvc::state_message &m) {
+    payload = m.string_value;
+    hits.fetch_add(1);
+  });
+
+  auto stats = tA.publish_message(make_oob_ipc("C", "A", "m1", "chat.lobby", "hi"));
+  (void)stats;
+  EXPECT_TRUE(tB.wait_for_received_messages(1, std::chrono::milliseconds(2000)));
+  EXPECT_EQ(hits.load(), 1);
+  EXPECT_EQ(payload, "hi");
+
+  // Journal not advanced; clocks not advanced.
+  EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+TEST(StateTransportIpcTest, MessageDedupAcrossMultiPath) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_dup");
+  auto pB = make_socket_path("B_dup");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  auto m = make_oob_ipc("C", "A", "m1", "x", "v");
+  tA.publish_message(m);
+  tA.publish_message(m);
+  tA.publish_message(m);
+
+  EXPECT_TRUE(tB.wait_for_received_messages(1, std::chrono::milliseconds(2000)));
+  // Allow a short settling window for any duplicate frames in flight.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_EQ(hits.load(), 1);
+
+  tA.stop();
+  tB.stop();
+}
+
+TEST(StateTransportIpcTest, MessageCrossClusterIsolation) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_iso");
+  auto pB = make_socket_path("B_iso");
+  tA.start(pA, "A", "C1");
+  tB.start(pB, "B", "C2");
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C1", "A");
+  cvc::state_cluster_shard sB(aB, "C2", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  tA.publish_message(make_oob_ipc("C1", "A", "m1", "x", "v"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(hits.load(), 0);
+
+  tA.stop();
+  tB.stop();
+}
+
+TEST(StateTransportIpcTest, MessageDoesNotAdvanceJournalOrClock) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_noj");
+  auto pB = make_socket_path("B_noj");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  auto a_jb = sA.journal().size();
+  auto b_jb = sB.journal().size();
+
+  tA.publish_message(make_oob_ipc("C", "A", "m1", "x", "v"));
+  tA.publish_message(make_oob_ipc("C", "A", "m2", "y", "w"));
+  EXPECT_TRUE(tB.wait_for_received_messages(2, std::chrono::milliseconds(2000)));
+
+  EXPECT_EQ(sA.journal().size(), a_jb);
+  EXPECT_EQ(sB.journal().size(), b_jb);
+  EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+
+  tA.stop();
+  tB.stop();
+}

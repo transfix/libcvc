@@ -93,6 +93,7 @@ public:
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
   publish_stats publish(const state_mutation &m) override;
+  publish_message_stats publish_message(const state_message &m) override;
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
@@ -108,12 +109,20 @@ public:
   std::uint64_t total_received_mutations() const noexcept {
     return _recv_mutations.load();
   }
+  std::uint64_t total_received_messages() const noexcept {
+    return _recv_messages.load();
+  }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
   // (Hello frames are not counted) or `timeout` elapses.
   std::uint64_t wait_for_received(std::uint64_t target,
                                   std::chrono::milliseconds timeout);
+
+  // Wait until at least `target` OOB message frames have been
+  // received or `timeout` elapses.
+  std::uint64_t wait_for_received_messages(
+      std::uint64_t target, std::chrono::milliseconds timeout);
 
   // Internal API used by the server-side RPC handler and the client
   // reader thread. Public so the impl translation unit (which is the
@@ -123,6 +132,7 @@ public:
   const std::string &local_node_id() const noexcept { return _node_id; }
   const std::string &local_cluster_id() const noexcept { return _cluster_id; }
   void on_inbound_mutation(const state_mutation &m);
+  void on_inbound_message(const state_message &m);
   void register_connection(std::shared_ptr<connection> conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept {
@@ -130,6 +140,9 @@ public:
   }
   void increment_recv_mutations() noexcept {
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
+  }
+  void increment_recv_messages() noexcept {
+    _recv_messages.fetch_add(1, std::memory_order_relaxed);
   }
 
 private:
@@ -150,6 +163,7 @@ private:
   std::atomic<std::uint64_t> _sent_frames{0};
   std::atomic<std::uint64_t> _recv_frames{0};
   std::atomic<std::uint64_t> _recv_mutations{0};
+  std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
 };
 

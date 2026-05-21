@@ -57,12 +57,27 @@ message Hello {
   string cluster_id = 2;
 }
 
+// Out-of-band message that does NOT modify state. Carried alongside
+// mutations on the same bidi stream; receiving peers admit via
+// state_message_bus dedup, never touch journals or vector clocks.
+message Message {
+  string cluster_id = 1;
+  string origin_node_id = 2;
+  string message_id = 3;
+  string path = 4;
+  uint32 ttl_hops = 5;
+  string content_type = 6;
+  string string_value = 7;
+  bytes bytes_payload = 8;
+}
+
 // Single bidirectional frame envelope. Both client and server write
 // frames; same-cluster routing happens above this layer.
 message Frame {
   oneof kind {
     Hello hello = 1;
     Mutation mutation = 2;
+    Message message = 3;
   }
 }
 

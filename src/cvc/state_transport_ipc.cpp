@@ -9,6 +9,7 @@
 */
 
 #include <cvc/state_cluster_shard.h>
+#include <cvc/state_message_bus.h>
 #include <cvc/state_transport_ipc.h>
 
 #include <algorithm>
@@ -33,6 +34,7 @@ constexpr std::uint32_t kMagic = 0x43564354u; // 'CVCT'
 constexpr std::uint16_t kVersion = 1;
 constexpr std::uint16_t kMsgHello = 1;
 constexpr std::uint16_t kMsgMutation = 2;
+constexpr std::uint16_t kMsgOob = 3;
 constexpr std::size_t kMaxFrameBytes = 64u * 1024u * 1024u;
 
 void put_u8(std::vector<unsigned char> &out, std::uint8_t v) {
@@ -198,6 +200,34 @@ bool decode_mutation(const std::vector<unsigned char> &bytes,
     return false;
   }
   out.latest_value_only = r.u8() != 0;
+  return r.ok();
+}
+
+std::vector<unsigned char> encode_message(const state_message &m) {
+  std::vector<unsigned char> out;
+  out.reserve(128 + m.bytes.size());
+  put_string(out, m.cluster_id);
+  put_string(out, m.origin_node_id);
+  put_string(out, m.message_id);
+  put_string(out, m.path);
+  put_u32(out, m.ttl_hops);
+  put_string(out, m.content_type);
+  put_string(out, m.string_value);
+  put_bytes(out, m.bytes);
+  return out;
+}
+
+bool decode_message(const std::vector<unsigned char> &bytes,
+                    state_message &out) {
+  reader r(bytes.data(), bytes.size());
+  out.cluster_id = r.str();
+  out.origin_node_id = r.str();
+  out.message_id = r.str();
+  out.path = r.str();
+  out.ttl_hops = r.u32();
+  out.content_type = r.str();
+  out.string_value = r.str();
+  out.bytes = r.bytes();
   return r.ok();
 }
 
@@ -484,6 +514,14 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       }
       continue;
     }
+    if (mtype == kMsgOob) {
+      state_message m;
+      if (decode_message(body, m)) {
+        _recv_messages.fetch_add(1, std::memory_order_relaxed);
+        dispatch_inbound_message(m);
+      }
+      continue;
+    }
     // Unknown frame: skip silently.
   }
 
@@ -600,6 +638,50 @@ void state_transport_ipc::flush() {
   }
 }
 
+state_transport::publish_message_stats
+state_transport_ipc::publish_message(const state_message &m) {
+  publish_message_stats stats{};
+
+  // Local in-process delivery.
+  std::vector<state_cluster_shard *> local_peers;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    local_peers.reserve(_shards.size());
+    for (auto *s : _shards) {
+      if (s == nullptr)
+        continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
+      local_peers.push_back(s);
+    }
+  }
+  for (auto *peer : local_peers) {
+    if (peer->ingest_remote_message(m))
+      ++stats.delivered;
+    else
+      ++stats.duplicates;
+  }
+
+  // Remote delivery.
+  std::vector<unsigned char> body = encode_message(m);
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  for (auto &c : conns) {
+    if (!c || !c->alive.load())
+      continue;
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    if (write_frame_locked(*c, kMsgOob, body))
+      ++stats.peers;
+  }
+
+  return stats;
+}
+
 void state_transport_ipc::dispatch_inbound(const state_mutation &m) {
   std::vector<state_cluster_shard *> peers;
   {
@@ -645,6 +727,36 @@ std::uint64_t state_transport_ipc::wait_for_received(
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_mutations.load();
+}
+
+std::uint64_t state_transport_ipc::wait_for_received_messages(
+    std::uint64_t target, std::chrono::milliseconds timeout) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (_recv_messages.load() < target) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return _recv_messages.load();
+}
+
+void state_transport_ipc::dispatch_inbound_message(const state_message &m) {
+  std::vector<state_cluster_shard *> peers;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    peers.reserve(_shards.size());
+    for (auto *s : _shards) {
+      if (s == nullptr)
+        continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id)
+        continue;
+      if (s->local_node_id() == m.origin_node_id)
+        continue;
+      peers.push_back(s);
+    }
+  }
+  for (auto *peer : peers)
+    (void)peer->ingest_remote_message(m);
 }
 
 } // namespace CVC_NAMESPACE

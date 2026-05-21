@@ -12,6 +12,7 @@ add_executable(state_codec_registry_test state_codec_registry_test.cpp)
 add_executable(state_replica_test state_replica_test.cpp)
 add_executable(state_authority_map_test state_authority_map_test.cpp)
 add_executable(state_cluster_shard_test state_cluster_shard_test.cpp)
+add_executable(state_message_bus_test state_message_bus_test.cpp)
 add_executable(state_transport_inproc_test state_transport_inproc_test.cpp)
 add_executable(state_transport_ipc_test state_transport_ipc_test.cpp)
 if(CVC_ENABLE_GRPC)
@@ -36,6 +37,7 @@ set(TEST_TARGETS
   state_replica_test
   state_authority_map_test
   state_cluster_shard_test
+  state_message_bus_test
   state_transport_inproc_test
   state_transport_ipc_test
   voxels_test
@@ -195,6 +197,13 @@ target_link_libraries(state_cluster_shard_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_message_bus_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_transport_inproc_test
   PRIVATE
     cvc
@@ -240,6 +249,7 @@ target_compile_features(state_codec_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_replica_test PRIVATE cxx_std_17)
 target_compile_features(state_authority_map_test PRIVATE cxx_std_17)
 target_compile_features(state_cluster_shard_test PRIVATE cxx_std_17)
+target_compile_features(state_message_bus_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_inproc_test PRIVATE cxx_std_17)
 target_compile_features(state_transport_ipc_test PRIVATE cxx_std_17)
 
@@ -304,6 +314,7 @@ gtest_discover_tests(state_codec_registry_test)
 gtest_discover_tests(state_replica_test)
 gtest_discover_tests(state_authority_map_test)
 gtest_discover_tests(state_cluster_shard_test)
+gtest_discover_tests(state_message_bus_test)
 gtest_discover_tests(state_transport_inproc_test)
 gtest_discover_tests(state_transport_ipc_test)
 if(TARGET state_transport_grpc_test)

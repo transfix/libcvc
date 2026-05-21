@@ -9,6 +9,7 @@
 */
 
 #include <cvc/state_cluster_shard.h>
+#include <cvc/state_message_bus.h>
 #include <cvc/state_transport_grpc.h>
 
 #include "proto/state_transport.grpc.pb.h"
@@ -129,6 +130,31 @@ state_mutation decode_mutation(const pb::Mutation &in) {
   return m;
 }
 
+void encode_message(const state_message &m, pb::Message *out) {
+  out->set_cluster_id(m.cluster_id);
+  out->set_origin_node_id(m.origin_node_id);
+  out->set_message_id(m.message_id);
+  out->set_path(m.path);
+  out->set_ttl_hops(m.ttl_hops);
+  out->set_content_type(m.content_type);
+  out->set_string_value(m.string_value);
+  out->set_bytes_payload(std::string(m.bytes.begin(), m.bytes.end()));
+}
+
+state_message decode_message(const pb::Message &in) {
+  state_message m;
+  m.cluster_id = in.cluster_id();
+  m.origin_node_id = in.origin_node_id();
+  m.message_id = in.message_id();
+  m.path = in.path();
+  m.ttl_hops = in.ttl_hops();
+  m.content_type = in.content_type();
+  m.string_value = in.string_value();
+  const std::string &b = in.bytes_payload();
+  m.bytes.assign(b.begin(), b.end());
+  return m;
+}
+
 } // namespace
 
 // Connection abstracts a single bidirectional stream. Server-side
@@ -195,6 +221,9 @@ public:
       } else if (in.has_mutation()) {
         _owner->on_inbound_mutation(decode_mutation(in.mutation()));
         _owner->increment_recv_mutations();
+      } else if (in.has_message()) {
+        _owner->on_inbound_message(decode_message(in.message()));
+        _owner->increment_recv_messages();
       }
     }
 
@@ -308,6 +337,9 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       } else if (in.has_mutation()) {
         on_inbound_mutation(decode_mutation(in.mutation()));
         increment_recv_mutations();
+      } else if (in.has_message()) {
+        on_inbound_message(decode_message(in.message()));
+        increment_recv_messages();
       }
     }
     conn->alive.store(false);
@@ -443,6 +475,46 @@ void state_transport_grpc::flush() {
   }
 }
 
+state_transport::publish_message_stats
+state_transport_grpc::publish_message(const state_message &m) {
+  publish_message_stats stats{};
+
+  std::vector<state_cluster_shard *> local_peers;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    local_peers.reserve(_shards.size());
+    for (auto *s : _shards) {
+      if (!s) continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id) continue;
+      if (s->local_node_id() == m.origin_node_id) continue;
+      local_peers.push_back(s);
+    }
+  }
+  for (auto *peer : local_peers) {
+    if (peer->ingest_remote_message(m))
+      ++stats.delivered;
+    else
+      ++stats.duplicates;
+  }
+
+  pb::Frame frame;
+  encode_message(m, frame.mutable_message());
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->write_fn) continue;
+    if (c->write_fn(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++stats.peers;
+    }
+  }
+  return stats;
+}
+
 void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
   std::vector<state_cluster_shard *> peers;
   {
@@ -460,6 +532,22 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+}
+
+void state_transport_grpc::on_inbound_message(const state_message &m) {
+  std::vector<state_cluster_shard *> peers;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    peers.reserve(_shards.size());
+    for (auto *s : _shards) {
+      if (!s) continue;
+      if (!m.cluster_id.empty() && s->cluster_id() != m.cluster_id) continue;
+      if (s->local_node_id() == m.origin_node_id) continue;
+      peers.push_back(s);
+    }
+  }
+  for (auto *peer : peers)
+    (void)peer->ingest_remote_message(m);
 }
 
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {
@@ -497,6 +585,16 @@ std::uint64_t state_transport_grpc::wait_for_received(
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_mutations.load();
+}
+
+std::uint64_t state_transport_grpc::wait_for_received_messages(
+    std::uint64_t target, std::chrono::milliseconds timeout) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (_recv_messages.load() < target) {
+    if (std::chrono::steady_clock::now() >= deadline) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return _recv_messages.load();
 }
 
 } // namespace CVC_NAMESPACE

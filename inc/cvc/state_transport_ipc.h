@@ -99,6 +99,7 @@ public:
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
   publish_stats publish(const state_mutation &m) override;
+  publish_message_stats publish_message(const state_message &m) override;
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
@@ -114,6 +115,9 @@ public:
   std::uint64_t total_received_mutations() const noexcept {
     return _recv_mutations.load();
   }
+  std::uint64_t total_received_messages() const noexcept {
+    return _recv_messages.load();
+  }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
@@ -123,9 +127,18 @@ public:
   std::uint64_t wait_for_received(std::uint64_t target,
                                   std::chrono::milliseconds timeout);
 
+  // Wait until at least `target` OOB MESSAGE frames have been
+  // received or `timeout` elapses.
+  std::uint64_t wait_for_received_messages(
+      std::uint64_t target, std::chrono::milliseconds timeout);
+
   // Test hook: called from reader threads when a MUTATION is
   // dispatched. Only used internally by connection::reader_loop.
   void dispatch_inbound(const state_mutation &m);
+
+  // Test hook: called from reader threads when an OOB message is
+  // dispatched.
+  void dispatch_inbound_message(const state_message &m);
 
 private:
   void accept_loop();
@@ -151,6 +164,7 @@ private:
   std::atomic<std::uint64_t> _sent_frames{0};
   std::atomic<std::uint64_t> _recv_frames{0};
   std::atomic<std::uint64_t> _recv_mutations{0};
+  std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
 };
 

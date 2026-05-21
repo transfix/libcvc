@@ -28,6 +28,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _authority = std::make_unique<state_authority_map>();
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
+  _message_bus = std::make_unique<state_message_bus>();
 }
 
 state_cluster_shard::~state_cluster_shard() {
@@ -51,6 +52,12 @@ void state_cluster_shard::set_enforce_authority(bool enforce) noexcept {
 bool state_cluster_shard::enforce_authority() const noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   return _enforce_authority;
+}
+
+bool state_cluster_shard::ingest_remote_message(const state_message &m) {
+  if (!m.cluster_id.empty() && m.cluster_id != _cluster_id)
+    return false;
+  return _message_bus->admit(m);
 }
 
 state_cluster_shard::ingest_result

@@ -13,6 +13,7 @@
 
 #include <cvc/namespace.h>
 #include <cvc/state_change_journal.h>
+#include <cvc/state_message.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +55,13 @@ public:
     std::size_t rejected = 0;      // peer shards that rejected (authority)
   };
 
+  // Statistics returned by publish_message().
+  struct publish_message_stats {
+    std::size_t delivered = 0;   // local shards that admitted the message
+    std::size_t duplicates = 0;  // local shards that reported duplicate
+    std::size_t peers = 0;       // remote peer streams the message was sent on
+  };
+
   virtual ~state_transport() = default;
 
   // Register a shard so it can both publish and receive.
@@ -64,6 +72,17 @@ public:
 
   // Best-effort publish to other shards in the same cluster_id.
   virtual publish_stats publish(const state_mutation &m) = 0;
+
+  // Best-effort publish of an out-of-band message. Default is a
+  // no-op so transports that have not yet implemented the message
+  // path remain compilable; concrete transports should override.
+  // The same loop-suppression convention as publish() applies:
+  // origin shards are skipped on local fan-out, and the receiving
+  // shard's message bus dedups by (origin_node_id, message_id).
+  virtual publish_message_stats publish_message(const state_message &m) {
+    (void)m;
+    return {};
+  }
 
   // Convenience: drain the shard's local-origin journal entries and
   // publish each one. Returns the number of mutations published.

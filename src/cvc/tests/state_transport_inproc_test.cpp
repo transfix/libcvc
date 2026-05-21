@@ -332,3 +332,154 @@ TEST(StateTransportInprocPerformanceTest, OptionalFanoutThroughputSmoke) {
             << " deliveries/s)\n";
   EXPECT_LT(secs, 30.0);
 }
+
+// ----------------------------------------------------------------------------
+// Phase 4: out-of-band messaging tests.
+// ----------------------------------------------------------------------------
+
+#include <cvc/state_message.h>
+#include <cvc/state_message_bus.h>
+
+namespace {
+
+cvc::state_message make_oob(const std::string &cluster,
+                            const std::string &origin,
+                            const std::string &id,
+                            const std::string &path,
+                            const std::string &str = {}) {
+  cvc::state_message m;
+  m.cluster_id = cluster;
+  m.origin_node_id = origin;
+  m.message_id = id;
+  m.path = path;
+  m.string_value = str;
+  m.content_type = "text/plain";
+  return m;
+}
+
+} // namespace
+
+TEST(StateTransportInprocTest, MessageRoundTrip) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  std::string received_payload;
+  sB.message_bus().subscribe("chat", [&](const cvc::state_message &m) {
+    received_payload = m.string_value;
+    hits.fetch_add(1);
+  });
+
+  auto msg = make_oob("C", "A", "m1", "chat.lobby", "hello");
+  auto stats = t.publish_message(msg);
+  EXPECT_GE(stats.delivered, 1u);
+  EXPECT_EQ(hits.load(), 1);
+  EXPECT_EQ(received_payload, "hello");
+}
+
+TEST(StateTransportInprocTest, MessageDedupOnRedundantPublish) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  auto msg = make_oob("C", "A", "m1", "x");
+  auto s1 = t.publish_message(msg);
+  auto s2 = t.publish_message(msg);
+  EXPECT_GE(s1.delivered, 1u);
+  EXPECT_EQ(s2.delivered, 0u);
+  EXPECT_GE(s2.duplicates, 1u);
+  EXPECT_EQ(hits.load(), 1);
+}
+
+TEST(StateTransportInprocTest, MessageDoesNotAdvanceClock) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  // Only message traffic.
+  t.publish_message(make_oob("C", "A", "m1", "x", "v"));
+  t.publish_message(make_oob("C", "A", "m2", "y", "w"));
+
+  EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+}
+
+TEST(StateTransportInprocTest, MessageNotInJournal) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  auto a_before = sA.journal().size();
+  auto b_before = sB.journal().size();
+  t.publish_message(make_oob("C", "A", "m1", "x", "v"));
+  EXPECT_EQ(sA.journal().size(), a_before);
+  EXPECT_EQ(sB.journal().size(), b_before);
+}
+
+TEST(StateTransportInprocTest, MessageCrossClusterIsolation) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C1", "A");
+  cvc::state_cluster_shard sB(aB, "C2", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> hits{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) {
+    hits.fetch_add(1);
+  });
+
+  auto stats = t.publish_message(make_oob("C1", "A", "m1", "x"));
+  EXPECT_EQ(stats.delivered, 0u);
+  EXPECT_EQ(hits.load(), 0);
+}
+
+TEST(StateTransportInprocTest, MessageMultiSubscriberFanOut) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  std::atomic<int> all{0}, lobby{0}, sports{0};
+  sB.message_bus().subscribe("", [&](const cvc::state_message &) { all.fetch_add(1); });
+  sB.message_bus().subscribe("chat.lobby", [&](const cvc::state_message &) { lobby.fetch_add(1); });
+  sB.message_bus().subscribe("chat.sports", [&](const cvc::state_message &) { sports.fetch_add(1); });
+
+  t.publish_message(make_oob("C", "A", "m1", "chat.lobby"));
+  t.publish_message(make_oob("C", "A", "m2", "chat.sports"));
+
+  EXPECT_EQ(all.load(), 2);
+  EXPECT_EQ(lobby.load(), 1);
+  EXPECT_EQ(sports.load(), 1);
+}

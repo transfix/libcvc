@@ -40,6 +40,7 @@ public:
   void unregister_shard(state_cluster_shard *shard) override;
 
   publish_stats publish(const state_mutation &m) override;
+  publish_message_stats publish_message(const state_message &m) override;
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
@@ -48,12 +49,20 @@ public:
   std::size_t shard_count() const;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
+  std::uint64_t total_messages_published() const noexcept {
+    return _msg_published.load();
+  }
+  std::uint64_t total_messages_delivered() const noexcept {
+    return _msg_delivered.load();
+  }
 
 private:
   mutable std::mutex _mutex;
   std::vector<state_cluster_shard *> _shards;
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _delivered{0};
+  std::atomic<std::uint64_t> _msg_published{0};
+  std::atomic<std::uint64_t> _msg_delivered{0};
 };
 
 } // namespace CVC_NAMESPACE
