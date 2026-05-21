@@ -1,0 +1,188 @@
+name: 'Fetch libcvc'
+description: |
+  Downloads a pinned libcvc release archive matching the current
+  platform / build config and extracts it to a known prefix. The
+  extracted root contains a self-contained CMake install prefix
+  (lib/cmake/cvc/cvcConfig.cmake + lib/libcvc.so + include/cvc/...)
+  so consumer workflows can `find_package(cvc CONFIG REQUIRED)`
+  instead of rebuilding libcvc from source via FetchContent.
+
+  Mirrors the fetch-libcvc-deps action's behaviour for consistency:
+    * Computes the URL from inputs (defaults match libcvc's
+      release.yml stem naming).
+    * curl -fL the archive into a temp file; on any HTTP error
+      emits an empty `path` output and exits 0 so callers can fall
+      back to a from-source FetchContent build.
+    * On success extracts to <prefix>/libcvc-<...> and emits that
+      path as the `path` output. Caller should add it to
+      CMAKE_PREFIX_PATH (or set libcvc_DIR=<path>/lib/cmake/cvc).
+
+inputs:
+  version:
+    description: 'libcvc release version (without leading v), used to construct the URL.'
+    required: true
+  os:
+    description: 'linux | macos | windows. Defaults to runner.os.'
+    required: false
+    default: ''
+  arch:
+    description: 'CPU arch (x86_64, arm64). Defaults to runner host arch.'
+    required: false
+    default: ''
+  build_type:
+    description: 'Debug or Release. Used to pick the matching archive flavor.'
+    required: true
+  link:
+    description: 'shared or static. Picks the -static suffix if static.'
+    required: false
+    default: 'shared'
+  prefix:
+    description: 'Directory under which to extract the archive.'
+    required: false
+    default: ''
+  cmake_project_version:
+    description: |
+      libcvc CMake project() version (e.g. "3.2.1") used in the release
+      artifact stem. Defaults to the input `version` if not provided.
+      Override when the release tag (e.g. v3.2.2) differs from the
+      project() version baked into the artifact name.
+    required: false
+    default: ''
+
+outputs:
+  path:
+    description: 'Absolute path to the extracted libcvc root, or empty string if no matching archive was available.'
+    value: ${{ steps.extract.outputs.path }}
+  cmake_dir:
+    description: 'Path to the cvcConfig.cmake directory (suitable for -Dcvc_DIR=...).'
+    value: ${{ steps.extract.outputs.cmake_dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'libcvc: try fetch + extract'
+      id: extract
+      shell: bash
+      env:
+        LCV_VERSION:    ${{ inputs.version }}
+        LCV_PROJ_VER:   ${{ inputs.cmake_project_version }}
+        LCV_OS:         ${{ inputs.os }}
+        LCV_ARCH:       ${{ inputs.arch }}
+        LCV_BUILD_TYPE: ${{ inputs.build_type }}
+        LCV_LINK:       ${{ inputs.link }}
+        LCV_PREFIX:     ${{ inputs.prefix }}
+        RUNNER_OS:      ${{ runner.os }}
+      run: |
+        set -euo pipefail
+
+        os="${LCV_OS}"
+        if [ -z "$os" ]; then
+          case "$RUNNER_OS" in
+            Linux)   os=linux ;;
+            macOS)   os=macos ;;
+            Windows) os=windows ;;
+            *)       os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]') ;;
+          esac
+        fi
+
+        arch="${LCV_ARCH}"
+        if [ -z "$arch" ]; then
+          if [ "$os" = "windows" ]; then
+            arch="x86_64"
+          else
+            arch=$(uname -m)
+          fi
+        fi
+
+        btlc=$(echo "${LCV_BUILD_TYPE}" | tr '[:upper:]' '[:lower:]')
+
+        linksfx=""
+        if [ "${LCV_LINK}" = "static" ]; then
+          linksfx="-static"
+        fi
+
+        # Artifact stem uses libcvc's CMake project() version, not the
+        # release tag. They can differ (e.g. tag v3.2.2 ships
+        # libcvc-3.2.1-*.tar.gz). Caller may override via
+        # cmake_project_version; default to the tag version.
+        proj_ver="${LCV_PROJ_VER:-$LCV_VERSION}"
+
+        if [ "$os" = "linux" ]; then
+          exts="tar.gz"
+        else
+          exts="zip"
+        fi
+
+        stem="libcvc-${proj_ver}-${os}-${arch}-${btlc}${linksfx}"
+
+        prefix="${LCV_PREFIX}"
+        if [ -z "$prefix" ]; then
+          if [ "$os" = "windows" ]; then
+            prefix="D:/libcvc"
+          else
+            prefix="$HOME/libcvc"
+          fi
+        fi
+        mkdir -p "$prefix"
+
+        tmp="$(mktemp -d)"
+        archive=""
+        ext=""
+        for try_ext in $exts; do
+          try_url="https://github.com/transfix/libcvc/releases/download/v${LCV_VERSION}/${stem}.${try_ext}"
+          try_archive="$tmp/${stem}.${try_ext}"
+          echo "libcvc: trying $try_url"
+          if curl -fL -o "$try_archive" "$try_url"; then
+            archive="$try_archive"
+            ext="$try_ext"
+            break
+          fi
+          rm -f "$try_archive"
+        done
+
+        if [ -z "$archive" ]; then
+          echo "libcvc: archive not available (HTTP error); falling back."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          echo "cmake_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ ! -s "$archive" ]; then
+          echo "libcvc: archive is empty; ignoring."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          echo "cmake_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        case "$ext" in
+          tar.gz) tar -xzf "$archive" -C "$prefix" ;;
+          zip)    unzip -q "$archive" -d "$prefix" ;;
+        esac
+
+        if [ -d "$prefix/$stem" ]; then
+          root="$prefix/$stem"
+        elif [ -d "$prefix/lib/cmake/cvc" ]; then
+          root="$prefix"
+        else
+          root="$(find "$prefix" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+        fi
+
+        if [ -z "$root" ] || [ ! -d "$root" ]; then
+          echo "libcvc: extraction did not yield a usable root; falling back."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          echo "cmake_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        cmake_dir="$root/lib/cmake/cvc"
+        if [ ! -f "$cmake_dir/cvcConfig.cmake" ]; then
+          echo "libcvc: cvcConfig.cmake not found under $cmake_dir; falling back."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          echo "cmake_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "libcvc: ready at $root"
+        ls "$root" | head -20 || true
+        echo "path=$root" >> "$GITHUB_OUTPUT"
+        echo "cmake_dir=$cmake_dir" >> "$GITHUB_OUTPUT"
