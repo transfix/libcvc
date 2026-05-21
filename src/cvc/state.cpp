@@ -694,6 +694,17 @@ std::string normalize_state_path(const std::string &p) {
 
 state &state::linkTo(const std::string &target_path) {
   std::string normalized = normalize_state_path(target_path);
+  // Canonical root-link marker: any separator-only input (".",
+  // "..", "  .  ", etc.) is interpreted as "link to the app
+  // root" and stored as "." (DNS-style). A genuinely empty or
+  // whitespace-only input still maps to "" and acts like
+  // clearLink(). _linkTarget.empty() therefore continues to mean
+  // "not a link"; "." means "link to root".
+  {
+    std::string trimmed = boost::algorithm::trim_copy(target_path);
+    if (normalized.empty() && !trimmed.empty())
+      normalized = state::SEPARATOR;
+  }
   bool changed = false;
   {
     boost::mutex::scoped_lock lock(_mutex);

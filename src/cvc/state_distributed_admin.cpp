@@ -279,10 +279,14 @@ state_distributed_admin::link_cycles(state &root) {
   // Step 3: build adjacency. Edge l -> t exists iff `t` is the
   // normalized linkTarget of `l` AND `t` is itself a link node in
   // the same tree. linkTarget() is stored already normalized.
+  // The single canonical exception is the DNS-style root marker
+  // ".": it represents the root path, whose fullName() is "".
   tarjan_ctx tc;
   tc.adj.assign(paths.size(), {});
   for (std::size_t i = 0; i < paths.size(); ++i) {
-    const auto it = id_of.find(targets_raw[i]);
+    const std::string &raw = targets_raw[i];
+    const std::string key = (raw == state::SEPARATOR) ? std::string() : raw;
+    const auto it = id_of.find(key);
     if (it != id_of.end())
       tc.adj[i].push_back(it->second);
   }

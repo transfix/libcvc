@@ -428,6 +428,13 @@ public:
   // Mark this node as a link to `target_path`. `target_path` is
   // interpreted relative to the app root (leading SEPARATORs are
   // ignored, empty means root).
+  //
+  // Linking to the root is a valid operation. Pass "." (DNS-style)
+  // or any separator-only string to express it; the canonical
+  // stored form is ".". A genuinely empty or whitespace-only
+  // input is treated as "clear" (stores ""), equivalent to
+  // clearLink(). _linkTarget.empty() therefore still means "not
+  // a link"; "." means "link to root".
   state &linkTo(const std::string &target_path);
 
   // Remove the link mark. The node's children/value are

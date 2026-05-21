@@ -202,3 +202,32 @@ TEST(StateLinkCycles, TailLinkIntoCycleIsNotItselfACycleMember) {
   EXPECT_TRUE(contains_cycle(r, {"ring.a", "ring.b"}));
   EXPECT_EQ(r.link_nodes_scanned, 3u);
 }
+
+TEST(StateLinkCycles, RootSelfLinkIsReportedAsSingleElementCycle) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root.linkTo(".");
+
+  auto r = state_distributed_admin::link_cycles(root);
+  ASSERT_EQ(r.cycles.size(), 1u);
+  ASSERT_EQ(r.cycles[0].size(), 1u);
+  EXPECT_EQ(r.cycles[0][0], root.fullName());
+  EXPECT_EQ(r.link_nodes_scanned, 1u);
+}
+
+TEST(StateLinkCycles, CycleThroughRootIsDetected) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  // root -> scene.a -> root
+  root.linkTo("scene.a");
+  root("scene.a").linkTo(".");
+
+  auto r = state_distributed_admin::link_cycles(root);
+  ASSERT_EQ(r.cycles.size(), 1u);
+  ASSERT_EQ(r.cycles[0].size(), 2u);
+  // Rotated to start at lex-smallest; root.fullName() is "" which
+  // sorts before "scene.a", so root path comes first.
+  EXPECT_EQ(r.cycles[0][0], root.fullName());
+  EXPECT_EQ(r.cycles[0][1], "scene.a");
+  EXPECT_EQ(r.link_nodes_scanned, 2u);
+}

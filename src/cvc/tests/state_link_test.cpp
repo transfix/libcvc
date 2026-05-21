@@ -191,3 +191,76 @@ TEST(StateLink, FindDescendantHandlesEmptyAndRoot) {
   EXPECT_EQ(root.findDescendant("."), &root);
   EXPECT_EQ(root.findDescendant("missing.path"), nullptr);
 }
+
+TEST(StateLink, LinkToRootViaDotMarker) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  auto &n = root("scene.geometry");
+  n.linkTo(".");
+  EXPECT_TRUE(n.isLink());
+  EXPECT_EQ(n.linkTarget(), ".");
+
+  auto r = n.resolveLink();
+  EXPECT_EQ(r.kind, kind_t::resolved);
+  EXPECT_EQ(r.target, &root);
+  EXPECT_EQ(r.hops, 1u);
+  ASSERT_GE(r.visited.size(), 2u);
+  EXPECT_EQ(r.visited.front(), "scene.geometry");
+  EXPECT_EQ(r.visited.back(), root.fullName()); // typically ""
+}
+
+TEST(StateLink, LinkToRootSeparatorOnlyVariantsNormalizeToDot) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  auto &n = root("scene.geometry");
+
+  // All separator-only inputs canonicalize to ".".
+  n.linkTo("..");
+  EXPECT_EQ(n.linkTarget(), ".");
+  n.linkTo("  .  ");
+  EXPECT_EQ(n.linkTarget(), ".");
+  n.linkTo("...");
+  EXPECT_EQ(n.linkTarget(), ".");
+}
+
+TEST(StateLink, LinkToEmptyStringStillClears) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  auto &n = root("scene.geometry");
+  n.linkTo("data.target");
+  ASSERT_TRUE(n.isLink());
+
+  // Empty / whitespace-only input is "clear", not "link to root".
+  n.linkTo("");
+  EXPECT_FALSE(n.isLink());
+  EXPECT_TRUE(n.linkTarget().empty());
+
+  n.linkTo("data.target");
+  ASSERT_TRUE(n.isLink());
+  n.linkTo("   ");
+  EXPECT_FALSE(n.isLink());
+}
+
+TEST(StateLink, RootLinkChainResolvesThroughRoot) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  // a -> root -> (root is not a link, terminal)
+  auto &an = root("scene.a");
+  an.linkTo(".");
+
+  auto r = an.resolveLink();
+  EXPECT_EQ(r.kind, kind_t::resolved);
+  EXPECT_EQ(r.target, &root);
+}
+
+TEST(StateLink, RootSelfLinkIsCycle) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  // Make root itself a link pointing at root.
+  root.linkTo(".");
+  ASSERT_TRUE(root.isLink());
+
+  auto r = root.resolveLink();
+  EXPECT_EQ(r.kind, kind_t::cycle_detected);
+  EXPECT_EQ(r.target, nullptr);
+}
