@@ -9,6 +9,7 @@ add_executable(state_subscription_router_test state_subscription_router_test.cpp
 add_executable(state_sync_adapter_test state_sync_adapter_test.cpp)
 add_executable(state_blob_store_test state_blob_store_test.cpp)
 add_executable(state_chunked_blob_test state_chunked_blob_test.cpp)
+add_executable(state_compression_registry_test state_compression_registry_test.cpp)
 add_executable(state_codec_registry_test state_codec_registry_test.cpp)
 add_executable(state_replica_test state_replica_test.cpp)
 add_executable(state_authority_map_test state_authority_map_test.cpp)
@@ -43,6 +44,7 @@ set(TEST_TARGETS
   state_sync_adapter_test
   state_blob_store_test
   state_chunked_blob_test
+  state_compression_registry_test
   state_codec_registry_test
   state_replica_test
   state_authority_map_test
@@ -186,6 +188,13 @@ target_link_libraries(state_chunked_blob_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_compression_registry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_codec_registry_test
   PRIVATE
     cvc
@@ -319,6 +328,7 @@ target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_test PRIVATE cxx_std_17)
 target_compile_features(state_blob_store_test PRIVATE cxx_std_17)
 target_compile_features(state_chunked_blob_test PRIVATE cxx_std_17)
+target_compile_features(state_compression_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_codec_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_replica_test PRIVATE cxx_std_17)
 target_compile_features(state_authority_map_test PRIVATE cxx_std_17)
@@ -393,6 +403,7 @@ gtest_discover_tests(state_subscription_router_test)
 gtest_discover_tests(state_sync_adapter_test)
 gtest_discover_tests(state_blob_store_test)
 gtest_discover_tests(state_chunked_blob_test)
+gtest_discover_tests(state_compression_registry_test)
 gtest_discover_tests(state_codec_registry_test)
 gtest_discover_tests(state_replica_test)
 gtest_discover_tests(state_authority_map_test)

@@ -130,9 +130,11 @@ bool state_chunk_manifest::parse(const std::vector<unsigned char> &bytes,
 
 // ---------- state_chunked_blob_writer ----------
 
-state_chunked_blob_writer::state_chunked_blob_writer(state_blob_store &store,
-                                                     std::uint32_t chunk_size)
-    : _store(store), _chunk_size(chunk_size == 0 ? 1u : chunk_size) {}
+state_chunked_blob_writer::state_chunked_blob_writer(
+    state_blob_store &store, std::uint32_t chunk_size,
+    const state_compression_registry *compression)
+    : _store(store), _chunk_size(chunk_size == 0 ? 1u : chunk_size),
+      _compression(compression) {}
 
 state_blob_ref
 state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
@@ -144,22 +146,39 @@ state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
   m.codec = codec;
   m.content_digest = sha256_hex(bytes);
 
+  // Resolve codec once. Empty / "raw" / unknown-with-no-registry
+  // means identity.
+  std::shared_ptr<state_compression_codec> compressor;
+  if (!codec.empty() && codec != "raw" && _compression != nullptr) {
+    compressor = _compression->get(codec);
+    if (!compressor) {
+      throw std::runtime_error(
+          "state_chunked_blob_writer: unknown compression codec: " + codec);
+    }
+  }
+
   const std::size_t total = bytes.size();
   std::size_t off = 0;
   std::vector<unsigned char> chunk;
+  std::vector<unsigned char> stored;
   while (off < total) {
     const std::size_t n = std::min<std::size_t>(_chunk_size, total - off);
     chunk.assign(bytes.begin() + off, bytes.begin() + off + n);
-    const bool already = _store.has(sha256_hex(chunk));
-    state_blob_ref ref = _store.put(chunk);
+    if (compressor) {
+      stored = compressor->encode(chunk);
+    } else {
+      stored = chunk;
+    }
+    const bool already = _store.has(sha256_hex(stored));
+    state_blob_ref ref = _store.put(stored);
     if (already) {
       _chunks_dedup.fetch_add(1, std::memory_order_relaxed);
     } else {
       _chunks_written.fetch_add(1, std::memory_order_relaxed);
-      _bytes_written.fetch_add(n, std::memory_order_relaxed);
+      _bytes_written.fetch_add(stored.size(), std::memory_order_relaxed);
     }
     m.chunks.push_back(ref.digest);
-    m.chunk_bytes.push_back(static_cast<std::uint32_t>(n));
+    m.chunk_bytes.push_back(static_cast<std::uint32_t>(stored.size()));
     off += n;
   }
   // Empty payloads still produce a valid (zero-chunk) manifest.
@@ -172,8 +191,9 @@ state_chunked_blob_writer::put(const std::vector<unsigned char> &bytes,
 
 // ---------- state_chunked_blob_reader ----------
 
-state_chunked_blob_reader::state_chunked_blob_reader(state_blob_store &store)
-    : _store(store) {}
+state_chunked_blob_reader::state_chunked_blob_reader(
+    state_blob_store &store, const state_compression_registry *compression)
+    : _store(store), _compression(compression) {}
 
 bool state_chunked_blob_reader::load_manifest(
     const std::string &manifest_digest, state_chunk_manifest &out) const {
@@ -205,11 +225,32 @@ bool state_chunked_blob_reader::get(const state_chunk_manifest &manifest,
                                     std::vector<unsigned char> &out) const {
   out.clear();
   out.reserve(static_cast<std::size_t>(manifest.total_size));
-  std::vector<unsigned char> chunk;
-  for (const auto &d : manifest.chunks) {
-    if (!_store.get(d, chunk))
+
+  std::shared_ptr<state_compression_codec> compressor;
+  if (!manifest.codec.empty() && manifest.codec != "raw") {
+    if (_compression == nullptr) {
       return false;
-    out.insert(out.end(), chunk.begin(), chunk.end());
+    }
+    compressor = _compression->get(manifest.codec);
+    if (!compressor) {
+      return false;
+    }
+  }
+
+  std::vector<unsigned char> stored;
+  std::vector<unsigned char> decoded;
+  for (const auto &d : manifest.chunks) {
+    if (!_store.get(d, stored))
+      return false;
+    if (compressor) {
+      if (!compressor->decode(stored, decoded)) {
+        out.clear();
+        return false;
+      }
+      out.insert(out.end(), decoded.begin(), decoded.end());
+    } else {
+      out.insert(out.end(), stored.begin(), stored.end());
+    }
   }
   if (!manifest.content_digest.empty() &&
       sha256_hex(out) != manifest.content_digest) {

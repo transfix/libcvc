@@ -13,6 +13,7 @@
 
 #include <cvc/namespace.h>
 #include <cvc/state_blob_store.h>
+#include <cvc/state_compression_registry.h>
 
 #include <atomic>
 #include <cstdint>
@@ -62,9 +63,10 @@ struct state_chunk_manifest {
 // Purpose:
 //   Splits a payload into fixed-size chunks, writes each chunk into
 //   the blob store (content-addressed dedup), and returns a manifest
-//   blob_ref that names the whole payload. Codec is recorded on the
-//   manifest only; chunks are stored as raw bytes for now (per-codec
-//   compression is Phase 6 bullet 3).
+//   blob_ref that names the whole payload. If a compression codec
+//   is supplied via put(), each chunk is run through the codec
+//   before being stored, and the codec id is recorded on the
+//   manifest so the reader can decode on the way out.
 //
 // Threading:
 //   Methods are safe to call from multiple threads against a
@@ -72,17 +74,21 @@ struct state_chunk_manifest {
 //
 class state_chunked_blob_writer {
 public:
-  // Default chunk size: 1 MiB.
-  explicit state_chunked_blob_writer(state_blob_store &store,
-                                     std::uint32_t chunk_size = 1u << 20);
+  // Default chunk size: 1 MiB. `compression` is the registry
+  // consulted when put() is called with a non-empty codec id; if
+  // null, only the empty / "raw" codec is honored.
+  explicit state_chunked_blob_writer(
+      state_blob_store &store, std::uint32_t chunk_size = 1u << 20,
+      const state_compression_registry *compression = nullptr);
 
   state_chunked_blob_writer(const state_chunked_blob_writer &) = delete;
   state_chunked_blob_writer &
   operator=(const state_chunked_blob_writer &) = delete;
 
   // Write `bytes` as N chunks into the underlying store, then write
-  // the serialized manifest as a blob. The returned blob_ref names
-  // the manifest blob; codec is stored on the ref for transport.
+  // the serialized manifest as a blob. Each chunk is compressed
+  // with the codec named by `codec` (empty / "raw" = identity).
+  // The manifest records `codec` so the reader can decode.
   state_blob_ref put(const std::vector<unsigned char> &bytes,
                      const std::string &codec = std::string());
 
@@ -106,6 +112,7 @@ public:
 private:
   state_blob_store &_store;
   std::uint32_t _chunk_size;
+  const state_compression_registry *_compression;
   std::atomic<std::uint64_t> _chunks_written{0};
   std::atomic<std::uint64_t> _chunks_dedup{0};
   std::atomic<std::uint64_t> _bytes_written{0};
@@ -123,7 +130,9 @@ private:
 //
 class state_chunked_blob_reader {
 public:
-  explicit state_chunked_blob_reader(state_blob_store &store);
+  explicit state_chunked_blob_reader(
+      state_blob_store &store,
+      const state_compression_registry *compression = nullptr);
 
   // Load+parse a manifest by digest. Returns false on missing or
   // malformed manifest.
@@ -149,6 +158,7 @@ public:
 
 private:
   state_blob_store &_store;
+  const state_compression_registry *_compression;
 };
 
 } // namespace CVC_NAMESPACE

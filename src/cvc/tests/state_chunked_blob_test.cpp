@@ -385,3 +385,164 @@ TEST(StateChunkedBlobTest, ConcurrentWritersAreSafe) {
     EXPECT_EQ(out.size(), 300u);
   }
 }
+
+// ----------------
+// Compression integration tests (Phase 6 bullet 3)
+// ----------------
+
+#include <cvc/state_compression_registry.h>
+
+TEST(StateChunkedBlobTest, CompressionShrinksRunfulPayload) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 512, &reg);
+
+  std::vector<unsigned char> payload(4096, 0xAA);
+  auto ref = w.put(payload, "rle");
+
+  cvc::state_chunked_blob_reader r(store, &reg);
+  cvc::state_chunk_manifest m;
+  ASSERT_TRUE(r.load_manifest(ref.digest, m));
+  EXPECT_EQ(m.codec, "rle");
+  EXPECT_EQ(m.total_size, 4096u);
+
+  // 8 chunks of 512 bytes; each compresses 512 0xAA bytes into
+  // ceil(512/255)=3 pairs * 2 = 6 stored bytes per chunk.
+  ASSERT_EQ(m.chunks.size(), 8u);
+  ASSERT_EQ(m.chunk_bytes.size(), 8u);
+  std::uint64_t total_stored = 0;
+  for (auto cb : m.chunk_bytes) total_stored += cb;
+  EXPECT_LT(total_stored, payload.size());
+  EXPECT_EQ(total_stored, 8u * 6u);
+
+  std::vector<unsigned char> out;
+  ASSERT_TRUE(r.get(ref.digest, out));
+  EXPECT_EQ(out, payload);
+}
+
+TEST(StateChunkedBlobTest, CompressionRoundTripsRandomPayload) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 256, &reg);
+
+  auto payload = make_payload(2000, 42);
+  auto ref = w.put(payload, "rle");
+
+  cvc::state_chunked_blob_reader r(store, &reg);
+  std::vector<unsigned char> out;
+  ASSERT_TRUE(r.get(ref.digest, out));
+  EXPECT_EQ(out, payload);
+}
+
+TEST(StateChunkedBlobTest, CompressionEmptyCodecBackCompat) {
+  cvc::memory_state_blob_store store;
+  cvc::state_chunked_blob_writer w(store, 128); // no registry
+  auto payload = make_payload(500, 7);
+  auto ref = w.put(payload, ""); // empty codec = identity
+
+  cvc::state_chunked_blob_reader r(store);
+  std::vector<unsigned char> out;
+  ASSERT_TRUE(r.get(ref.digest, out));
+  EXPECT_EQ(out, payload);
+}
+
+TEST(StateChunkedBlobTest, CompressionRawCodecIsIdentity) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 128, &reg);
+  auto payload = make_payload(500, 11);
+  auto ref = w.put(payload, "raw");
+
+  cvc::state_chunked_blob_reader r(store, &reg);
+  cvc::state_chunk_manifest m;
+  ASSERT_TRUE(r.load_manifest(ref.digest, m));
+  EXPECT_EQ(m.codec, "raw");
+  std::uint64_t total_stored = 0;
+  for (auto cb : m.chunk_bytes) total_stored += cb;
+  EXPECT_EQ(total_stored, payload.size());
+  std::vector<unsigned char> out;
+  ASSERT_TRUE(r.get(ref.digest, out));
+  EXPECT_EQ(out, payload);
+}
+
+TEST(StateChunkedBlobTest, CompressionUnknownCodecAtWriteThrows) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 128, &reg);
+  auto payload = make_payload(100, 1);
+  EXPECT_THROW(w.put(payload, "no_such_codec"), std::runtime_error);
+}
+
+TEST(StateChunkedBlobTest, CompressionReaderWithoutRegistryFails) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 128, &reg);
+  std::vector<unsigned char> payload(256, 0xFF);
+  auto ref = w.put(payload, "rle");
+
+  // Reader has no registry and codec is non-trivial -> get must fail.
+  cvc::state_chunked_blob_reader r(store);
+  std::vector<unsigned char> out;
+  EXPECT_FALSE(r.get(ref.digest, out));
+  EXPECT_TRUE(out.empty());
+}
+
+TEST(StateChunkedBlobTest, CompressionReaderUnknownCodecFails) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg_w;
+  cvc::state_chunked_blob_writer w(store, 128, &reg_w);
+  std::vector<unsigned char> payload(256, 0xFF);
+  auto ref = w.put(payload, "rle");
+
+  // Reader has a registry but rle has been stripped from it.
+  cvc::state_compression_registry reg_r;
+  // shadow the rle codec by re-registering only raw
+  // (we cannot remove, so use a separate empty-ish registry)
+  struct empty_reg : public cvc::state_compression_registry {};
+  // Simpler: build an alternative registry minus rle by leveraging
+  // the public API: construct a fresh one and overwrite rle with a
+  // codec that always fails decode.
+  struct broken : public cvc::state_compression_codec {
+    std::string id() const override { return "rle"; }
+    std::vector<unsigned char>
+    encode(const std::vector<unsigned char> &in) const override { return in; }
+    bool decode(const std::vector<unsigned char> &,
+                std::vector<unsigned char> &out) const override {
+      out.clear();
+      return false;
+    }
+  };
+  reg_r.register_codec(std::make_shared<broken>());
+
+  cvc::state_chunked_blob_reader r(store, &reg_r);
+  std::vector<unsigned char> out;
+  EXPECT_FALSE(r.get(ref.digest, out));
+  EXPECT_TRUE(out.empty());
+}
+
+TEST(StateChunkedBlobTest, CompressionDedupAcrossPayloadsAtCompressedLevel) {
+  cvc::memory_state_blob_store store;
+  cvc::state_compression_registry reg;
+  cvc::state_chunked_blob_writer w(store, 256, &reg);
+
+  // Two different payloads that contain the same all-0xCC chunk.
+  std::vector<unsigned char> p1(256, 0xCC);
+  p1.insert(p1.end(), 256, 0x01);
+  std::vector<unsigned char> p2(256, 0xCC);
+  p2.insert(p2.end(), 256, 0x02);
+
+  auto r1 = w.put(p1, "rle");
+  auto r2 = w.put(p2, "rle");
+  EXPECT_NE(r1.digest, r2.digest);
+
+  // Both manifests should reference the same digest for the
+  // first chunk (since the compressed bytes for 256x0xCC are
+  // identical).
+  cvc::state_chunked_blob_reader rd(store, &reg);
+  cvc::state_chunk_manifest m1, m2;
+  ASSERT_TRUE(rd.load_manifest(r1.digest, m1));
+  ASSERT_TRUE(rd.load_manifest(r2.digest, m2));
+  ASSERT_GE(m1.chunks.size(), 1u);
+  ASSERT_GE(m2.chunks.size(), 1u);
+  EXPECT_EQ(m1.chunks[0], m2.chunks[0]);
+}
