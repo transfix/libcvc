@@ -17,6 +17,7 @@
 #include <cvc/state_distributed_admin.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_peer_registry.h>
+#include <cvc/state_telemetry_aggregator.h>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,6 +36,18 @@ void state_distributed_admin::attach_blob_store(state_blob_store *blobs) noexcep
 }
 
 void state_distributed_admin::attach_message_bus(state_message_bus *bus) noexcept { _bus = bus; }
+
+void state_distributed_admin::attach_telemetry(state_telemetry_aggregator *tel) noexcept {
+  _tel = tel;
+}
+
+std::string state_distributed_admin::to_text() const {
+  std::string result = to_text(snapshot());
+  if (_tel) {
+    result += _tel->to_text();
+  }
+  return result;
+}
 
 state_distributed_admin::report state_distributed_admin::snapshot() const {
   report r;
