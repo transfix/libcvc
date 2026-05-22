@@ -33,6 +33,10 @@ constexpr std::uint16_t kVersion = 1;
 constexpr std::uint16_t kMsgHello = 1;
 constexpr std::uint16_t kMsgMutation = 2;
 constexpr std::uint16_t kMsgOob = 3;
+constexpr std::uint16_t kMsgChunkReq = 4;
+constexpr std::uint16_t kMsgChunkRsp = 5;
+constexpr std::uint16_t kMsgSnapReq = 6;
+constexpr std::uint16_t kMsgSnapRsp = 7;
 constexpr std::size_t kMaxFrameBytes = 64u * 1024u * 1024u;
 
 void put_u8(std::vector<unsigned char> &out, std::uint8_t v) { out.push_back(v); }
@@ -159,6 +163,7 @@ std::vector<unsigned char> encode_mutation(const state_mutation &m) {
     break;
   }
   put_u8(out, m.latest_value_only ? 1 : 0);
+  put_u64(out, m.hlc_time);
   return out;
 }
 
@@ -191,6 +196,9 @@ bool decode_mutation(const std::vector<unsigned char> &bytes, state_mutation &ou
     return false;
   }
   out.latest_value_only = r.u8() != 0;
+  // hlc_time was added later; tolerate its absence for backward compat.
+  if (r.ok() && r.remaining() >= 8)
+    out.hlc_time = r.u64();
   return r.ok();
 }
 
@@ -508,6 +516,120 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       }
       continue;
     }
+    if (mtype == kMsgChunkReq) {
+      // Serve chunk from local blob store.
+      reader br(body.data(), body.size());
+      std::string digest = br.str();
+      std::uint64_t req_id = br.u64();
+      std::vector<unsigned char> rsp;
+      put_string(rsp, digest);
+      put_u64(rsp, req_id);
+      if (_blob_store) {
+        std::vector<unsigned char> chunk;
+        if (_blob_store->get(digest, chunk)) {
+          put_u8(rsp, 1); // found
+          put_bytes(rsp, chunk);
+        } else {
+          put_u8(rsp, 0);
+          put_u32(rsp, 0); // empty bytes
+        }
+      } else {
+        put_u8(rsp, 0);
+        put_u32(rsp, 0);
+      }
+      std::lock_guard<std::mutex> wlk(conn->write_mu);
+      write_frame_locked(*conn, kMsgChunkRsp, rsp);
+      continue;
+    }
+    if (mtype == kMsgChunkRsp) {
+      reader br(body.data(), body.size());
+      std::string digest = br.str();
+      std::uint64_t req_id = br.u64();
+      bool found = br.u8() != 0;
+      std::vector<unsigned char> data = br.bytes();
+      {
+        std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+        auto it = _chunk_waiters.find(req_id);
+        if (it != _chunk_waiters.end()) {
+          it->second->found = found;
+          it->second->data = std::move(data);
+          it->second->done = true;
+        }
+      }
+      _chunk_waiters_cv.notify_all();
+      continue;
+    }
+    if (mtype == kMsgSnapReq) {
+      // Serve a snapshot request from a peer.
+      reader br(body.data(), body.size());
+      std::string cid = br.str();
+      std::string prefix = br.str();
+      std::uint64_t req_id = br.u64();
+
+      // Walk registered shards, gather state entries.
+      std::vector<unsigned char> rsp;
+      put_u64(rsp, req_id);
+      std::uint32_t entry_count = 0;
+      std::size_t count_offset = rsp.size();
+      put_u32(rsp, 0); // placeholder
+
+      {
+        std::lock_guard<std::mutex> slk(_shards_mu);
+        for (auto *shard : _shards) {
+          if (shard->cluster_id() != cid)
+            continue;
+          auto snap = shard->snapshot(prefix);
+          for (const auto &e : snap) {
+            put_string(rsp, e.path);
+            put_string(rsp, e.string_value);
+            put_string(rsp, e.comment);
+            put_u8(rsp, e.hidden ? 1 : 0);
+            put_u8(rsp, e.read_only ? 1 : 0);
+            put_string(rsp, e.type_name);
+            put_string(rsp, e.origin_node_id);
+            put_u64(rsp, e.sequence);
+            ++entry_count;
+          }
+        }
+      }
+      // Patch entry count.
+      for (int i = 0; i < 4; ++i)
+        rsp[count_offset + i] =
+            static_cast<unsigned char>((entry_count >> (8 * i)) & 0xFF);
+
+      std::lock_guard<std::mutex> wlk(conn->write_mu);
+      write_frame_locked(*conn, kMsgSnapRsp, rsp);
+      continue;
+    }
+    if (mtype == kMsgSnapRsp) {
+      reader br(body.data(), body.size());
+      std::uint64_t req_id = br.u64();
+      std::uint32_t count = br.u32();
+      std::vector<state_transport::snapshot_entry> entries;
+      entries.reserve(count);
+      for (std::uint32_t i = 0; i < count && br.ok(); ++i) {
+        snapshot_entry e;
+        e.path = br.str();
+        e.string_value = br.str();
+        e.comment = br.str();
+        e.hidden = br.u8() != 0;
+        e.read_only = br.u8() != 0;
+        e.type_name = br.str();
+        e.origin_node_id = br.str();
+        e.sequence = br.u64();
+        entries.push_back(std::move(e));
+      }
+      {
+        std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+        auto it = _snap_waiters.find(req_id);
+        if (it != _snap_waiters.end()) {
+          it->second->entries = std::move(entries);
+          it->second->done = true;
+        }
+      }
+      _snap_waiters_cv.notify_all();
+      continue;
+    }
     // Unknown frame: skip silently.
   }
 
@@ -765,6 +887,118 @@ void state_transport_ipc::dispatch_inbound_message(const state_message &m) {
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
+}
+
+bool state_transport_ipc::fetch_chunk(const std::string &digest, chunk_callback on_chunk) {
+  if (digest.empty())
+    return false;
+
+  // Try local blob store first.
+  if (_blob_store) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(digest, bytes)) {
+      if (on_chunk)
+        on_chunk(digest, bytes);
+      return true;
+    }
+  }
+
+  // Ask connected peers.
+  std::uint64_t req_id = _next_chunk_req_id.fetch_add(1, std::memory_order_relaxed);
+  auto waiter = std::make_shared<chunk_waiter>();
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters[req_id] = waiter;
+  }
+
+  // Build and send request to all live connections.
+  std::vector<unsigned char> req_body;
+  put_string(req_body, digest);
+  put_u64(req_body, req_id);
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t sent = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load())
+      continue;
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    if (write_frame_locked(*c, kMsgChunkReq, req_body))
+      ++sent;
+  }
+
+  bool result = false;
+  if (sent > 0) {
+    // Wait for the first response (up to 10 seconds).
+    std::unique_lock<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters_cv.wait_for(lk, std::chrono::seconds(10),
+                               [&]() { return waiter->done; });
+    if (waiter->done && waiter->found) {
+      if (on_chunk)
+        on_chunk(digest, waiter->data);
+      result = true;
+    }
+  }
+
+  // Clean up waiter.
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters.erase(req_id);
+  }
+
+  return result;
+}
+
+bool state_transport_ipc::request_snapshot(const std::string &cluster_id,
+                                           const std::string &path_prefix,
+                                           snapshot_callback on_entries) {
+  std::uint64_t req_id = _next_snap_req_id.fetch_add(1, std::memory_order_relaxed);
+  auto waiter = std::make_shared<snap_waiter>();
+  {
+    std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters[req_id] = waiter;
+  }
+
+  // Build request frame.
+  std::vector<unsigned char> req_body;
+  put_string(req_body, cluster_id);
+  put_string(req_body, path_prefix);
+  put_u64(req_body, req_id);
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t sent = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load())
+      continue;
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    if (write_frame_locked(*c, kMsgSnapReq, req_body))
+      ++sent;
+  }
+
+  bool result = false;
+  if (sent > 0) {
+    std::unique_lock<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(10),
+                              [&]() { return waiter->done; });
+    if (waiter->done) {
+      if (on_entries)
+        on_entries(waiter->entries, /*final=*/true);
+      result = true;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters.erase(req_id);
+  }
+  return result;
 }
 
 } // namespace CVC_NAMESPACE

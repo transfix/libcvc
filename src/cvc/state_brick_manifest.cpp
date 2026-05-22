@@ -205,6 +205,35 @@ state_brick_manifest::bricks_in_region(std::uint64_t lo_x, std::uint64_t lo_y, s
   return result;
 }
 
+std::vector<std::size_t>
+state_brick_manifest::bricks_in_frustum(const plane planes[6]) const {
+  std::vector<std::size_t> result;
+  for (std::size_t i = 0; i < extents.size(); ++i) {
+    const brick_extent &ext = extents[i];
+    double lo_x = static_cast<double>(ext.origin_x);
+    double lo_y = static_cast<double>(ext.origin_y);
+    double lo_z = static_cast<double>(ext.origin_z);
+    double hi_x = lo_x + static_cast<double>(ext.size_x);
+    double hi_y = lo_y + static_cast<double>(ext.size_y);
+    double hi_z = lo_z + static_cast<double>(ext.size_z);
+
+    bool outside = false;
+    for (int p = 0; p < 6 && !outside; ++p) {
+      // Find the AABB corner most aligned with the plane normal
+      // (the "positive vertex"). If that corner is outside the
+      // plane, the entire AABB is outside this half-space.
+      double px = (planes[p].a >= 0) ? hi_x : lo_x;
+      double py = (planes[p].b >= 0) ? hi_y : lo_y;
+      double pz = (planes[p].c >= 0) ? hi_z : lo_z;
+      if (planes[p].a * px + planes[p].b * py + planes[p].c * pz + planes[p].d < 0)
+        outside = true;
+    }
+    if (!outside)
+      result.push_back(i);
+  }
+  return result;
+}
+
 // ---------- state_brick_writer ----------
 
 state_brick_writer::state_brick_writer(state_blob_store &store, std::uint32_t brick_dim,

@@ -91,6 +91,7 @@ void encode_mutation(const state_mutation &m, pb::Mutation *out) {
   out->set_type_name(m.type_name);
   out->set_string_value(m.string_value);
   out->set_latest_value_only(m.latest_value_only);
+  out->set_hlc_time(m.hlc_time);
 
   pb::Payload *p = out->mutable_payload();
   switch (m.payload.kind) {
@@ -122,6 +123,7 @@ state_mutation decode_mutation(const pb::Mutation &in) {
   m.type_name = in.type_name();
   m.string_value = in.string_value();
   m.latest_value_only = in.latest_value_only();
+  m.hlc_time = in.hlc_time();
   if (in.has_payload()) {
     const auto &p = in.payload();
     switch (p.kind_case()) {
@@ -257,6 +259,14 @@ public:
       } else if (in.has_message()) {
         _owner->on_inbound_message(decode_message(in.message()));
         _owner->increment_recv_messages();
+      } else if (in.has_chunk_request()) {
+        _owner->on_inbound_chunk_request(
+            conn.get(), in.chunk_request().digest(), in.chunk_request().request_id());
+      } else if (in.has_chunk_response()) {
+        const auto &cr = in.chunk_response();
+        std::string data_str = cr.data();
+        std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
+        _owner->on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
       }
     }
 
@@ -412,6 +422,14 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       } else if (in.has_message()) {
         on_inbound_message(decode_message(in.message()));
         increment_recv_messages();
+      } else if (in.has_chunk_request()) {
+        on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
+                                 in.chunk_request().request_id());
+      } else if (in.has_chunk_response()) {
+        const auto &cr = in.chunk_response();
+        std::string data_str = cr.data();
+        std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
+        on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
       }
     }
     conn->alive.store(false);
@@ -707,6 +725,103 @@ std::uint64_t state_transport_grpc::wait_for_received_messages(std::uint64_t tar
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_messages.load();
+}
+
+void state_transport_grpc::on_inbound_chunk_request(connection *conn, const std::string &digest,
+                                                    std::uint64_t request_id) {
+  pb::Frame f;
+  auto *rsp = f.mutable_chunk_response();
+  rsp->set_digest(digest);
+  rsp->set_request_id(request_id);
+  if (_blob_store) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(digest, bytes)) {
+      rsp->set_found(true);
+      rsp->set_data(std::string(bytes.begin(), bytes.end()));
+    } else {
+      rsp->set_found(false);
+    }
+  } else {
+    rsp->set_found(false);
+  }
+  if (conn && conn->alive.load() && conn->write_fn) {
+    conn->write_fn(f);
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void state_transport_grpc::on_inbound_chunk_response(std::uint64_t request_id, bool found,
+                                                     std::vector<unsigned char> data) {
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    auto it = _chunk_waiters.find(request_id);
+    if (it != _chunk_waiters.end()) {
+      it->second->found = found;
+      it->second->data = std::move(data);
+      it->second->done = true;
+    }
+  }
+  _chunk_waiters_cv.notify_all();
+}
+
+bool state_transport_grpc::fetch_chunk(const std::string &digest, chunk_callback on_chunk) {
+  if (digest.empty())
+    return false;
+
+  // Try local blob store first.
+  if (_blob_store) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(digest, bytes)) {
+      if (on_chunk)
+        on_chunk(digest, bytes);
+      return true;
+    }
+  }
+
+  // Ask connected peers.
+  std::uint64_t req_id = _next_chunk_req_id.fetch_add(1, std::memory_order_relaxed);
+  auto waiter = std::make_shared<chunk_waiter>();
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters[req_id] = waiter;
+  }
+
+  pb::Frame frame;
+  auto *req = frame.mutable_chunk_request();
+  req->set_digest(digest);
+  req->set_request_id(req_id);
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t sent = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->write_fn)
+      continue;
+    if (c->write_fn(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++sent;
+    }
+  }
+
+  bool result = false;
+  if (sent > 0) {
+    std::unique_lock<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters_cv.wait_for(lk, std::chrono::seconds(10), [&]() { return waiter->done; });
+    if (waiter->done && waiter->found) {
+      if (on_chunk)
+        on_chunk(digest, waiter->data);
+      result = true;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters.erase(req_id);
+  }
+  return result;
 }
 
 } // namespace CVC_NAMESPACE

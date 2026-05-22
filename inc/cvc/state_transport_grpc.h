@@ -13,12 +13,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cvc/namespace.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_transport.h>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -114,6 +117,11 @@ public:
   // Shut down server, cancel all client streams, join reader threads.
   void stop();
 
+  // Blob store for servicing inbound chunk requests and for local
+  // lookup before sending outbound requests.
+  void set_blob_store(state_blob_store *store) noexcept { _blob_store = store; }
+  state_blob_store *blob_store() const noexcept { return _blob_store; }
+
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
@@ -122,6 +130,7 @@ public:
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
+  bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) override;
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -151,6 +160,12 @@ public:
   const auth_config &auth() const noexcept { return _auth; }
   void on_inbound_mutation(const state_mutation &m);
   void on_inbound_message(const state_message &m);
+  // Chunk fetch request/response dispatch (called from connection
+  // reader threads when a ChunkRequest/ChunkResponse frame arrives).
+  void on_inbound_chunk_request(connection *conn, const std::string &digest,
+                                std::uint64_t request_id);
+  void on_inbound_chunk_response(std::uint64_t request_id, bool found,
+                                 std::vector<unsigned char> data);
   void register_connection(std::shared_ptr<connection> conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
@@ -185,6 +200,19 @@ private:
   std::atomic<std::uint64_t> _recv_mutations{0};
   std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
+
+  state_blob_store *_blob_store = nullptr;
+
+  // Chunk fetch waiter infrastructure.
+  std::atomic<std::uint64_t> _next_chunk_req_id{1};
+  mutable std::mutex _chunk_waiters_mu;
+  std::condition_variable _chunk_waiters_cv;
+  struct chunk_waiter {
+    bool done = false;
+    bool found = false;
+    std::vector<unsigned char> data;
+  };
+  std::unordered_map<std::uint64_t, std::shared_ptr<chunk_waiter>> _chunk_waiters;
 };
 
 } // namespace CVC_NAMESPACE

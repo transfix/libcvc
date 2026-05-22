@@ -140,6 +140,21 @@ bool state_cluster_shard::resolve_conflicts() const noexcept {
   return _resolve_conflicts;
 }
 
+std::vector<state_cluster_shard::conflict_entry>
+state_cluster_shard::recent_conflicts(std::size_t max_entries) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  std::size_t n = std::min(max_entries, _conflict_ring.size());
+  std::vector<conflict_entry> out;
+  out.reserve(n);
+  // Walk backwards from the write cursor to get most-recent-first.
+  for (std::size_t i = 0; i < n; ++i) {
+    std::size_t idx =
+        (_conflict_ring_pos + _conflict_ring.size() - 1 - i) % _conflict_ring.size();
+    out.push_back(_conflict_ring[idx]);
+  }
+  return out;
+}
+
 void state_cluster_shard::set_enforce_delegation(bool enforce) noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   _enforce_delegation = enforce;
@@ -267,6 +282,17 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
       _ctr_conflicts_detected.fetch_add(1, std::memory_order_relaxed);
       if (!state_replica::should_replace(it->second, m)) {
         conflict_lost = true;
+        // Record conflict detail in ring buffer.
+        if (_conflict_ring.size() < kMaxConflictRing)
+          _conflict_ring.push_back({});
+        auto &e = _conflict_ring[_conflict_ring_pos % kMaxConflictRing];
+        e.path = m.path;
+        e.winner_node_id = it->second.origin_node_id;
+        e.winner_sequence = it->second.sequence;
+        e.loser_node_id = m.origin_node_id;
+        e.loser_sequence = m.sequence;
+        _conflict_ring_pos =
+            (_conflict_ring_pos + 1) % kMaxConflictRing;
       }
     }
   }
@@ -546,6 +572,27 @@ state_cluster_shard::send_message_result state_cluster_shard::send_message(state
   r.peers_delivered = ps.delivered;
   r.peers_targeted = ps.peers;
   return r;
+}
+
+std::vector<state_cluster_shard::snapshot_entry>
+state_cluster_shard::snapshot(const std::string &path_prefix) const {
+  std::vector<snapshot_entry> result;
+  if (!_app_ctx)
+    return result;
+
+  // Start at root (or prefix).
+  auto &root = state::instance(*_app_ctx)(path_prefix);
+  root.traverse([&](std::string child_path) {
+    auto &node = state::instance(*_app_ctx)(child_path);
+    snapshot_entry e;
+    e.path = child_path;
+    e.string_value = node.value();
+    e.comment = node.comment();
+    e.hidden = node.hidden();
+    e.read_only = node.readOnly();
+    result.push_back(std::move(e));
+  });
+  return result;
 }
 
 } // namespace CVC_NAMESPACE

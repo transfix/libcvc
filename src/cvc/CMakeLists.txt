@@ -44,6 +44,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_volume_codec.h
   ../../inc/cvc/state_brick_manifest.h
   ../../inc/cvc/state_data_hydrator.h
+  ../../inc/cvc/state_hybrid_time.h
+  ../../inc/cvc/state_hash_partition.h
   ../../inc/cvc/distributed_state_session.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
@@ -829,6 +831,25 @@ if(CVC_ENABLE_FFTW)
     target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
   endforeach()
   target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+endif()
+
+# zstd compression (production compressor for distributed state).
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(ZSTD QUIET libzstd)
+endif()
+if(NOT ZSTD_FOUND)
+  find_library(ZSTD_LIBRARIES NAMES zstd)
+  find_path(ZSTD_INCLUDE_DIRS NAMES zstd.h)
+  if(ZSTD_LIBRARIES AND ZSTD_INCLUDE_DIRS)
+    set(ZSTD_FOUND TRUE)
+  endif()
+endif()
+if(ZSTD_FOUND)
+  target_include_directories(cvc PRIVATE ${ZSTD_INCLUDE_DIRS})
+  target_link_libraries(cvc PRIVATE ${ZSTD_LIBRARIES})
+else()
+  message(WARNING "libzstd not found; zstd compression codec will not link")
 endif()
 
 # Link libraries

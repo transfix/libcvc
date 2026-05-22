@@ -50,6 +50,7 @@ message Mutation {
   string string_value = 9;
   Payload payload = 10;
   bool latest_value_only = 11;
+  uint64 hlc_time = 12; // packed hybrid logical clock (0 = not set)
 }
 
 message Hello {
@@ -71,6 +72,54 @@ message Message {
   bytes bytes_payload = 8;
 }
 
+// Chunk fetch request: ask a peer for a blob chunk by digest.
+message ChunkRequest {
+  string digest = 1;        // SHA-256 hex digest
+  uint64 request_id = 2;    // caller-assigned; echoed in response
+}
+
+// Chunk fetch response: carries the blob chunk bytes.
+message ChunkResponse {
+  string digest = 1;        // echoed from request
+  uint64 request_id = 2;    // echoed from request
+  bool found = 3;           // false if the peer does not have the chunk
+  bytes data = 4;           // raw chunk bytes (empty if !found)
+}
+
+// Snapshot request: ask a peer for the current state tree.
+message SnapshotRequest {
+  string cluster_id = 1;
+  string path_prefix = 2;   // "" = entire tree
+  uint64 request_id = 3;
+}
+
+// Snapshot chunk: one node's state within a snapshot.
+message SnapshotEntry {
+  string path = 1;
+  string string_value = 2;
+  string comment = 3;
+  bool hidden = 4;
+  bool read_only = 5;
+  string type_name = 6;
+  string origin_node_id = 7;
+  uint64 sequence = 8;
+}
+
+// Snapshot response: sent in response to SnapshotRequest.
+message SnapshotResponse {
+  uint64 request_id = 1;
+  bool final = 2;           // true on the last chunk
+  repeated SnapshotEntry entries = 3;
+}
+
+// Heartbeat for cluster membership. Sent periodically; receiving
+// peers call note_seen() on their peer registry.
+message Heartbeat {
+  string node_id = 1;
+  string cluster_id = 2;
+  uint64 timestamp_ns = 3;  // sender's wall-clock ns (observability)
+}
+
 // Single bidirectional frame envelope. Both client and server write
 // frames; same-cluster routing happens above this layer.
 message Frame {
@@ -78,6 +127,11 @@ message Frame {
     Hello hello = 1;
     Mutation mutation = 2;
     Message message = 3;
+    ChunkRequest chunk_request = 4;
+    ChunkResponse chunk_response = 5;
+    SnapshotRequest snapshot_request = 6;
+    SnapshotResponse snapshot_response = 7;
+    Heartbeat heartbeat = 8;
   }
 }
 

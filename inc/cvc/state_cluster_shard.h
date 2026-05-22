@@ -164,6 +164,19 @@ public:
   std::uint64_t total_conflicts_detected() const noexcept { return _ctr_conflicts_detected.load(); }
   std::uint64_t total_conflicts_lost() const noexcept { return _ctr_conflicts_lost.load(); }
 
+  // Per-path conflict detail record.
+  struct conflict_entry {
+    std::string path;
+    std::string winner_node_id;
+    std::uint64_t winner_sequence = 0;
+    std::string loser_node_id;
+    std::uint64_t loser_sequence = 0;
+  };
+
+  // Return the most recent conflicts (up to `max_entries`, default 64).
+  // The ring buffer is only populated when resolve_conflicts is true.
+  std::vector<conflict_entry> recent_conflicts(std::size_t max_entries = 64) const;
+
   // Phase 6: subtree delegation. When true, ingest_remote consults
   // the delegation manager. A mutation whose path resolves to a
   // foreign cluster is rejected with reason "path delegated to
@@ -247,6 +260,20 @@ public:
     return _ctr_remote_filtered_out.load();
   }
 
+  // Snapshot: walk the local state tree under `path_prefix` and
+  // return a vector of entries suitable for initial-sync.
+  struct snapshot_entry {
+    std::string path;
+    std::string string_value;
+    std::string comment;
+    bool hidden = false;
+    bool read_only = false;
+    std::string type_name;
+    std::string origin_node_id;
+    std::uint64_t sequence = 0;
+  };
+  std::vector<snapshot_entry> snapshot(const std::string &path_prefix = std::string()) const;
+
   // -------- Phase 8 slice 2: cluster-agnostic message routing --------
   //
   // The shard owns the bridge from "I want to send a message at
@@ -323,6 +350,11 @@ private:
   std::atomic<std::uint64_t> _ctr_remote_rejected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_detected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
+
+  // Ring buffer of recent conflict entries.
+  static constexpr std::size_t kMaxConflictRing = 128;
+  std::vector<conflict_entry> _conflict_ring;
+  std::size_t _conflict_ring_pos = 0;
   std::atomic<std::uint64_t> _ctr_delegation_routed{0};
   std::atomic<std::uint64_t> _ctr_delegation_expired{0};
   std::atomic<std::uint64_t> _ctr_delegations_applied{0};

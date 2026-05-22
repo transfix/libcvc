@@ -34,8 +34,8 @@ TEST(StateCompressionRegistry, BuiltInCodecsRegistered) {
   cvc::state_compression_registry r;
   EXPECT_TRUE(r.has("raw"));
   EXPECT_TRUE(r.has("rle"));
-  EXPECT_FALSE(r.has("zstd"));
-  EXPECT_GE(r.size(), 2u);
+  EXPECT_TRUE(r.has("zstd"));
+  EXPECT_GE(r.size(), 3u);
 }
 
 TEST(StateCompressionRegistry, RawIsIdentity) {
@@ -140,7 +140,7 @@ TEST(StateCompressionRegistry, RegisterIsIdempotentReplace) {
   r.register_codec(std::make_shared<cvc::state_raw_compression_codec>());
   auto raw_b = r.get("raw");
   EXPECT_NE(raw_a.get(), raw_b.get()); // replaced, not duplicated
-  EXPECT_EQ(r.size(), 2u);             // still raw + rle
+  EXPECT_EQ(r.size(), 3u);             // still raw + rle + zstd
 }
 
 TEST(StateCompressionRegistry, RegisterNullIsNoOp) {
@@ -180,9 +180,10 @@ TEST(StateCompressionRegistry, IdsListReflectsRegistered) {
   cvc::state_compression_registry r;
   auto ids = r.ids();
   std::sort(ids.begin(), ids.end());
-  ASSERT_EQ(ids.size(), 2u);
+  ASSERT_EQ(ids.size(), 3u);
   EXPECT_EQ(ids[0], "raw");
   EXPECT_EQ(ids[1], "rle");
+  EXPECT_EQ(ids[2], "zstd");
 }
 
 TEST(StateCompressionRegistry, SharedSingletonHasBuiltins) {

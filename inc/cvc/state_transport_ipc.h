@@ -13,10 +13,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cvc/namespace.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_transport.h>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -92,6 +95,10 @@ public:
   // unlink the listener path.
   void stop();
 
+  // Blob store for chunk fetch servicing.
+  void set_blob_store(state_blob_store *store) noexcept { _blob_store = store; }
+  state_blob_store *blob_store() const noexcept { return _blob_store; }
+
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
@@ -100,6 +107,9 @@ public:
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
+  bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) override;
+  bool request_snapshot(const std::string &cluster_id, const std::string &path_prefix,
+                        snapshot_callback on_entries) override;
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -149,12 +159,35 @@ private:
   mutable std::mutex _conns_mu;
   std::vector<std::shared_ptr<connection>> _conns;
 
+  state_blob_store *_blob_store = nullptr;
+
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};
   std::atomic<std::uint64_t> _recv_frames{0};
   std::atomic<std::uint64_t> _recv_mutations{0};
   std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
+
+  // Chunk fetch request/response tracking.
+  std::atomic<std::uint64_t> _next_chunk_req_id{1};
+  mutable std::mutex _chunk_waiters_mu;
+  std::condition_variable _chunk_waiters_cv;
+  struct chunk_waiter {
+    bool done = false;
+    bool found = false;
+    std::vector<unsigned char> data;
+  };
+  std::unordered_map<std::uint64_t, std::shared_ptr<chunk_waiter>> _chunk_waiters;
+
+  // Snapshot request/response tracking.
+  std::atomic<std::uint64_t> _next_snap_req_id{1};
+  mutable std::mutex _snap_waiters_mu;
+  std::condition_variable _snap_waiters_cv;
+  struct snap_waiter {
+    bool done = false;
+    std::vector<snapshot_entry> entries;
+  };
+  std::unordered_map<std::uint64_t, std::shared_ptr<snap_waiter>> _snap_waiters;
 };
 
 } // namespace CVC_NAMESPACE
