@@ -44,6 +44,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_volume_codec.h
   ../../inc/cvc/state_brick_manifest.h
   ../../inc/cvc/state_data_hydrator.h
+  ../../inc/cvc/distributed_state_session.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
   ../../inc/cvc/state_transport_ipc.h
@@ -99,6 +100,7 @@ set(SOURCE_FILES
   state_volume_codec.cpp
   state_brick_manifest.cpp
   state_data_hydrator.cpp
+  distributed_state_session.cpp
   state_message.cpp
   utility.cpp
   cuda_utils.cpp
