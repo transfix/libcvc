@@ -43,7 +43,7 @@ TEST(StateSyncAdapterLinkForwarding, NoLinkBehavesLikeRouterLookup) {
   auto &root = state::instance(a);
   root("data.world.geometry").value(std::string("v"));
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id = adapter.router().subscribe("data.world", true);
 
   auto subs = adapter.subscriptions_for_path("data.world.geometry");
@@ -58,7 +58,7 @@ TEST(StateSyncAdapterLinkForwarding, TransparentLinkSideSubscriptionCatchesTarge
   root("data.world.geometry").value(std::string("v"));
   root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id = adapter.router().subscribe("scene.geometry", true);
 
   // Target-side mutation path must match the link-side subscription
@@ -75,7 +75,7 @@ TEST(StateSyncAdapterLinkForwarding, OpaqueLinkDoesNotContributeAlias) {
   root("data.world.geometry").value(std::string("v"));
   root("scene").linkTo("data.world"); // default opaque
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   adapter.router().subscribe("scene.geometry", true);
 
   auto subs = adapter.subscriptions_for_path("data.world.geometry");
@@ -89,7 +89,7 @@ TEST(StateSyncAdapterLinkForwarding, SubscriptionAtDeepLinkPathMatchesTargetSubt
   root("data.world").value(std::string("v"));
   root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id = adapter.router().subscribe("scene.geometry.mesh", true);
 
   auto subs = adapter.subscriptions_for_path("data.world.geometry.mesh");
@@ -103,7 +103,7 @@ TEST(StateSyncAdapterLinkForwarding, DedupBetweenDirectAndAliasedMatch) {
   root("data.world.geometry").value(std::string("v"));
   root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   // Same subscription_id at a prefix covering both sides (root).
   auto id = adapter.router().subscribe("", true);
 
@@ -120,7 +120,7 @@ TEST(StateSyncAdapterLinkForwarding, MultipleTransparentLinksAllContributeSubscr
   root("scene.a").linkTo("data.world", state::link_mode::transparent);
   root("scene.b").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id_a = adapter.router().subscribe("scene.a.geometry", true);
   auto id_b = adapter.router().subscribe("scene.b.geometry", true);
 
@@ -137,7 +137,7 @@ TEST(StateSyncAdapterLinkForwarding, DotBoundaryPreventsSpoofedAlias) {
   root("scene").value(std::string("v"));
   root("alias").linkTo("scene", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   adapter.router().subscribe("alias", true);
 
   // "scenery" must NOT alias to "alias" (no shared dot-segment).
@@ -152,7 +152,7 @@ TEST(StateSyncAdapterLinkForwarding, ForwardedCounterIsCumulativeAcrossCalls) {
   root("data.world.geometry").value(std::string("v"));
   root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   adapter.router().subscribe("scene.geometry", true);
 
   auto subs1 = adapter.subscriptions_for_path("data.world.geometry");
@@ -168,7 +168,7 @@ TEST(StateSyncAdapterLinkForwarding, ChangingLinkModeToOpaqueRemovesForwarding) 
   root("data.world.geometry").value(std::string("v"));
   auto &link = root("scene").linkTo("data.world", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   adapter.router().subscribe("scene.geometry", true);
 
   auto subs = adapter.subscriptions_for_path("data.world.geometry");
@@ -196,7 +196,7 @@ TEST(StateSyncAdapterLinkForwarding, TwoLinkCycleCollapsesSubscriber) {
   // by adding a second link b2 -> a and a2 -> b that close.
   root("a2").linkTo("b", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id = adapter.router().subscribe("b.x", true);
 
   // Mutation at the real target: subscriber must appear exactly once.
@@ -211,7 +211,7 @@ TEST(StateSyncAdapterLinkForwarding, SelfLoopLinkDoesNotInfiniteLoop) {
   root("loop").linkTo("loop", state::link_mode::transparent);
   root("data.x").value(std::string("v"));
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   // Subscription unrelated to the self-loop — query must terminate
   // promptly with the expected (empty) alias set for the loop and the
   // direct router match for data.x.
@@ -240,7 +240,7 @@ TEST(StateSyncAdapterLinkForwarding, NLinkChainWithCycleCollapsesToSingleAlias) 
   root("c1").linkTo("c2", state::link_mode::transparent);
   root("c2").linkTo("c0", state::link_mode::transparent); // 3-cycle
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   std::vector<state_subscription_id> ids;
   for (int i = 1; i <= 7; ++i)
     ids.push_back(adapter.router().subscribe("a" + std::to_string(i) + ".x", true));
@@ -285,7 +285,7 @@ TEST(StateSyncAdapterLinkForwarding, CycleResolverTerminatesUnderHopBudget) {
   root("Lring1").linkTo("Lring2", state::link_mode::transparent);
   root("Lring2").linkTo("Lring0", state::link_mode::transparent);
 
-  state_sync_adapter adapter(a, "", "node-a");
+  state_sync_adapter adapter(a, "", "node_a");
   auto id = adapter.router().subscribe("L63.x", true);
 
   auto subs = adapter.subscriptions_for_path("t.x");

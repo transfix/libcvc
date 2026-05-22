@@ -28,6 +28,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_blob_store.h
   ../../inc/cvc/state_chunked_blob.h
   ../../inc/cvc/state_compression_registry.h
+  ../../inc/cvc/state_delta_codec.h
   ../../inc/cvc/state_codec_registry.h
   ../../inc/cvc/state_replica.h
   ../../inc/cvc/state_authority_map.h
@@ -79,6 +80,7 @@ set(SOURCE_FILES
   state_blob_store.cpp
   state_chunked_blob.cpp
   state_compression_registry.cpp
+  state_delta_codec.cpp
   state_codec_registry.cpp
   state_replica.cpp
   state_authority_map.cpp

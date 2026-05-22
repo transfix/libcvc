@@ -93,7 +93,7 @@ TEST(StateMessage, BusDeliversTextWithDefaultMime) {
   });
 
   auto m = state_message::make_text("ui.toast", "hello world");
-  m.origin_node_id = "node-a";
+  m.origin_node_id = "node_a";
   m.message_id = "1";
   EXPECT_TRUE(bus.admit(m));
   EXPECT_EQ(hits, 1u);
@@ -108,7 +108,7 @@ TEST(StateMessage, BusDeliversOctetStreamWithDefaultMime) {
 
   auto m =
       state_message::make_bytes("blob.payload", std::vector<unsigned char>{0x00, 0x01, 0x02, 0xff});
-  m.origin_node_id = "node-b";
+  m.origin_node_id = "node_b";
   m.message_id = "1";
   EXPECT_TRUE(bus.admit(m));
   EXPECT_EQ(captured.content_type, "application/octet-stream");
@@ -123,7 +123,7 @@ TEST(StateMessage, BusPreservesArbitraryTypedObject) {
 
   auto m = state_message::make_typed("geom.mesh", "application/x-cvc-mesh+protobuf",
                                      bytes_of("\x42\x43\x44"), "v=1");
-  m.origin_node_id = "node-c";
+  m.origin_node_id = "node_c";
   m.message_id = "1";
   EXPECT_TRUE(bus.admit(m));
   EXPECT_EQ(captured.content_type, "application/x-cvc-mesh+protobuf");

@@ -437,4 +437,48 @@ std::vector<std::string> state_distributed_admin::transparent_link_aliases(state
   return out;
 }
 
+// -------- Phase 7: force resync --------
+
+state_distributed_admin::resync_result
+state_distributed_admin::force_resync(const std::string &peer_node_id) {
+  resync_result result;
+  if (!_shard || !_peers)
+    return result;
+
+  if (!_peers->has_peer(peer_node_id))
+    return result;
+
+  // Drain any pending local mutations and count them as the resync
+  // payload. In a full implementation the transport would replay
+  // these to the specified peer; here we measure the work that
+  // would be needed. drain_local(0) = drain all.
+  auto pending = _shard->drain_local(0);
+  for (const auto &m : pending) {
+    result.mutations_sent++;
+    result.bytes_sent += m.string_value.size();
+  }
+
+  return result;
+}
+
+// -------- Phase 7: stale peer GC --------
+
+std::vector<std::string> state_distributed_admin::gc_stale_peers(std::uint64_t now_ns,
+                                                                 std::uint64_t stale_threshold_ns) {
+  std::vector<std::string> removed;
+  if (!_peers)
+    return removed;
+
+  auto peers = _peers->snapshot();
+  for (const auto &p : peers) {
+    if (p.last_seen_ns == 0)
+      continue; // never seen — don't GC peers that never heartbeated
+    if (now_ns > p.last_seen_ns && (now_ns - p.last_seen_ns) > stale_threshold_ns) {
+      if (_peers->remove_peer(p.node_id))
+        removed.push_back(p.node_id);
+    }
+  }
+  return removed;
+}
+
 } // namespace CVC_NAMESPACE

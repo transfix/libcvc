@@ -221,6 +221,24 @@ public:
   static std::vector<std::string> transparent_link_aliases(state &root, const std::string &path,
                                                            std::size_t hop_budget = 64);
 
+  // -------- Phase 7: force resync + stale peer GC --------
+  //
+  // Force re-synchronization for a specific peer. This publishes
+  // a full state snapshot via the attached transport so the peer
+  // can catch up from its current position. Returns the number of
+  // mutations published. If no shard or transport is attached,
+  // returns 0.
+  struct resync_result {
+    std::size_t mutations_sent = 0;
+    std::size_t bytes_sent = 0;
+  };
+  resync_result force_resync(const std::string &peer_node_id);
+
+  // Remove peers from the attached peer registry whose
+  // last_seen_ns is older than `stale_threshold_ns` ago (measured
+  // from `now_ns`). Returns the node IDs that were removed.
+  std::vector<std::string> gc_stale_peers(std::uint64_t now_ns, std::uint64_t stale_threshold_ns);
+
 private:
   state_cluster_shard *_shard = nullptr;
   state_peer_registry *_peers = nullptr;

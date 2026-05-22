@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/app.h>
+#include <cvc/state.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
@@ -139,7 +140,7 @@ TEST(StateDistributedBench, MessageBusAdmit) {
     cvc::state_message m;
     m.cluster_id = "cA";
     m.origin_node_id = "nodeB";
-    m.message_id = "msg-" + std::to_string(i);
+    m.message_id = "msg_" + std::to_string(i);
     m.path = "p." + std::to_string(i);
     m.content_type = "text/plain";
     m.string_value = "v";
@@ -422,4 +423,183 @@ TEST(StateDistributedRoutingScale, TransportSkipsFilteredPeers) {
     actual_hits += static_cast<std::size_t>(hits[i].load());
   }
   EXPECT_EQ(actual_hits, expected_hits);
+}
+
+// ---- Phase 7: Production benchmarks ----
+
+#include <cvc/state_blob_store.h>
+#include <cvc/state_delta_codec.h>
+#include <cvc/state_distributed_admin.h>
+
+TEST(StateDistributedBench, BlobStorePutGet) {
+  if (!bench_enabled()) {
+    SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
+    return;
+  }
+  cvc::memory_state_blob_store store;
+  constexpr std::size_t N = 5000;
+  constexpr std::size_t BLOB_SIZE = 4096;
+
+  std::vector<std::vector<unsigned char>> blobs(N);
+  std::vector<std::string> digests(N);
+  for (std::size_t i = 0; i < N; ++i) {
+    blobs[i].resize(BLOB_SIZE);
+    for (std::size_t j = 0; j < BLOB_SIZE; ++j)
+      blobs[i][j] = static_cast<unsigned char>((i * 7 + j * 3) & 0xFF);
+  }
+
+  // PUT
+  auto t0 = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < N; ++i) {
+    auto ref = store.put(blobs[i]);
+    digests[i] = ref.digest;
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  std::uint64_t put_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  report("blob_store_put_5000x4KB", N, put_ns);
+
+  // GET
+  t0 = std::chrono::steady_clock::now();
+  std::vector<unsigned char> out;
+  for (std::size_t i = 0; i < N; ++i) {
+    ASSERT_TRUE(store.get(digests[i], out));
+  }
+  t1 = std::chrono::steady_clock::now();
+  std::uint64_t get_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  report("blob_store_get_5000x4KB", N, get_ns);
+  EXPECT_EQ(store.size(), N);
+}
+
+TEST(StateDistributedBench, CallbackLatency) {
+  if (!bench_enabled()) {
+    SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
+    return;
+  }
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cA", "nodeA");
+  sh.attach();
+
+  constexpr std::size_t N = 10000;
+  std::uint64_t cb_count = 0;
+  a.root()("bench_cb").valueChanged.connect([&]() { ++cb_count; });
+
+  auto t0 = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < N; ++i) {
+    sh.ingest_remote(make_set_value("nodeB", static_cast<std::uint64_t>(i + 1), "bench_cb",
+                                    "v" + std::to_string(i)));
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  EXPECT_EQ(cb_count, N);
+  report("callback_latency_10000", N, wall_ns);
+}
+
+TEST(StateDistributedBench, AdminSnapshotOverhead) {
+  if (!bench_enabled()) {
+    SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
+    return;
+  }
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cA", "nodeA");
+  sh.attach();
+  cvc::state_peer_registry reg;
+  cvc::state_message_bus bus;
+  cvc::memory_state_blob_store blobs;
+
+  for (std::size_t i = 0; i < 128; ++i)
+    reg.add_peer(node_name(i), "cA");
+
+  cvc::state_distributed_admin admin;
+  admin.attach_shard(&sh);
+  admin.attach_peer_registry(&reg);
+  admin.attach_message_bus(&bus);
+  admin.attach_blob_store(&blobs);
+
+  constexpr std::size_t N = 5000;
+  auto t0 = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < N; ++i) {
+    auto snap = admin.snapshot();
+    auto text = admin.to_text(snap);
+    ASSERT_FALSE(text.empty());
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  report("admin_snapshot_128peers", N, wall_ns);
+}
+
+TEST(StateDistributedBench, SlowPeerIsolation) {
+  if (!bench_enabled()) {
+    SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
+    return;
+  }
+  constexpr std::size_t kPeers = 32;
+  cvc::state_transport_inproc t;
+  std::vector<std::unique_ptr<cvc::app>> apps;
+  std::vector<std::unique_ptr<cvc::state_cluster_shard>> shards;
+  apps.reserve(kPeers);
+  shards.reserve(kPeers);
+  for (std::size_t i = 0; i < kPeers; ++i) {
+    apps.push_back(std::make_unique<cvc::app>());
+    shards.push_back(std::make_unique<cvc::state_cluster_shard>(*apps.back(), "cA", node_name(i)));
+    shards.back()->attach();
+    t.register_shard(shards.back().get());
+    t.peers().add_peer(node_name(i), "cA");
+  }
+
+  // Mark half the peers slow.
+  for (std::size_t i = 0; i < kPeers / 2; ++i)
+    t.mark_peer_slow(shards[i].get());
+
+  auto paths = generate_paths(2000, 31);
+  auto t0 = std::chrono::steady_clock::now();
+  std::uint64_t delivered = 0;
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    auto s = t.publish(
+        make_set_value(node_name(kPeers - 1), static_cast<std::uint64_t>(i + 1), paths[i], "v"));
+    delivered += s.delivered;
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  EXPECT_GT(delivered, 0u);
+  EXPECT_GT(t.total_quarantined_mutations(), 0u);
+  report("slow_peer_isolation_32peers_half_slow", paths.size(), wall_ns);
+}
+
+TEST(StateDistributedBench, DeltaCodecThroughput) {
+  if (!bench_enabled()) {
+    SUCCEED() << "set CVC_DISTRIBUTED_STATE_BENCH=1 to run";
+    return;
+  }
+  cvc::state_delta_codec encoder;
+  cvc::state_delta_codec decoder;
+
+  constexpr std::size_t kBlobSize = 65536; // 64 KB volume slice
+  constexpr std::size_t N = 1000;
+
+  // Build a series of "volume slices" where each iteration changes
+  // a small number of voxels.
+  std::vector<unsigned char> current(kBlobSize, 0);
+  std::mt19937 rng(42);
+
+  auto t0 = std::chrono::steady_clock::now();
+  for (std::size_t i = 0; i < N; ++i) {
+    // Mutate 16 random bytes.
+    for (int j = 0; j < 16; ++j)
+      current[rng() % kBlobSize] = static_cast<unsigned char>(rng() & 0xFF);
+
+    auto encoded = encoder.encode("vol.slice", current);
+    std::vector<unsigned char> decoded;
+    bool ok = decoder.decode("vol.slice", encoded, decoded);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(decoded, current);
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  std::uint64_t wall_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  report("delta_codec_64KB_1000iters", N, wall_ns);
 }

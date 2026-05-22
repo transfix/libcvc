@@ -51,7 +51,7 @@ struct collected {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteLocalTerminal) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto &root = cvc::state::instance(a);
@@ -73,7 +73,7 @@ TEST(StateCrossClusterLink, ResolveRemoteLocalTerminal) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteNonLinkIsNone) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto r = cvc::state::instance(a)("plain").resolveRemote();
@@ -86,7 +86,7 @@ TEST(StateCrossClusterLink, ResolveRemoteNonLinkIsNone) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteBrokenWithNoDelegation) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto &root = cvc::state::instance(a);
@@ -102,7 +102,7 @@ TEST(StateCrossClusterLink, ResolveRemoteBrokenWithNoDelegation) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteDetectsRemoteTarget) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   // Delegate "data.world" to a different cluster.
@@ -126,7 +126,7 @@ TEST(StateCrossClusterLink, ResolveRemoteDetectsRemoteTarget) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteChainEndsAtRemote) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   shard.publish_delegation("remote.data", "gamma", "inproc://gamma", 0);
@@ -149,7 +149,7 @@ TEST(StateCrossClusterLink, ResolveRemoteChainEndsAtRemote) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteExpiredLease) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   manual_clock ck;
@@ -184,7 +184,7 @@ TEST(StateCrossClusterLink, ResolveRemoteExpiredLease) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteCycleDetection) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto &root = cvc::state::instance(a);
@@ -201,7 +201,7 @@ TEST(StateCrossClusterLink, ResolveRemoteCycleDetection) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, ResolveRemoteBudgetExhausted) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto &root = cvc::state::instance(a);
@@ -234,7 +234,7 @@ TEST(StateCrossClusterLink, ResolveRemoteNoShardFallsToBroken) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, LinkTargetMovesBetweenClusters) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   auto &root = cvc::state::instance(a);
@@ -322,7 +322,7 @@ TEST(StateCrossClusterLink, SendMessageAfterAuthorityMoves) {
   // Step 1: initially local — sendMessage succeeds locally.
   {
     cvc::app a;
-    cvc::state_cluster_shard shard(a, "alpha", "node-1");
+    cvc::state_cluster_shard shard(a, "alpha", "node_1");
     shard.attach();
 
     auto &root = cvc::state::instance(a);
@@ -340,7 +340,7 @@ TEST(StateCrossClusterLink, SendMessageAfterAuthorityMoves) {
   // Step 2: delegate to a foreign cluster without a transport.
   {
     cvc::app a;
-    cvc::state_cluster_shard shard(a, "alpha", "node-1");
+    cvc::state_cluster_shard shard(a, "alpha", "node_1");
     shard.attach();
 
     auto &root = cvc::state::instance(a);
@@ -357,7 +357,7 @@ TEST(StateCrossClusterLink, SendMessageAfterAuthorityMoves) {
   // Step 3: authority revoked — message is local again.
   {
     cvc::app a;
-    cvc::state_cluster_shard shard(a, "alpha", "node-1");
+    cvc::state_cluster_shard shard(a, "alpha", "node_1");
     shard.attach();
 
     auto &root = cvc::state::instance(a);
@@ -395,7 +395,7 @@ TEST(StateCrossClusterLink, ResolveRemoteApiCompileCheck) {
 // ----------------------------------------------------------------
 TEST(StateCrossClusterLink, LeaseExpiryInvalidatesSendMessage) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
 
   manual_clock ck;
