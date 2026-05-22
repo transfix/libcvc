@@ -20,6 +20,7 @@ add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_distributed_admin_test state_distributed_admin_test.cpp)
+add_executable(state_cluster_membership_test state_cluster_membership_test.cpp)
 add_executable(state_distributed_bench_test state_distributed_bench_test.cpp)
 add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
@@ -88,6 +89,7 @@ set(TEST_TARGETS
   state_volume_codec_test
   state_brick_manifest_test
   state_data_hydrator_test
+  state_cluster_membership_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -301,6 +303,13 @@ target_link_libraries(state_distributed_admin_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_cluster_membership_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_distributed_bench_test
   PRIVATE
     cvc
@@ -496,6 +505,7 @@ target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_admin_test PRIVATE cxx_std_17)
+target_compile_features(state_cluster_membership_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
@@ -590,6 +600,7 @@ gtest_discover_tests(state_write_policy_test)
 gtest_discover_tests(state_distributed_metrics_test)
 gtest_discover_tests(state_delegation_manager_test)
 gtest_discover_tests(state_distributed_admin_test)
+gtest_discover_tests(state_cluster_membership_test)
 gtest_discover_tests(state_distributed_bench_test)
 gtest_discover_tests(state_message_test)
 gtest_discover_tests(state_bounded_queue_test)
