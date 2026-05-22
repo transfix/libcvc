@@ -322,6 +322,7 @@ jobs:
           #   BunnySDF_IsoRoundtrip|QualityImproveAllMethods : heavy Debug-only
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if [ "${{ github.event_name }}" = "push" ]; then
+            CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel \
@@ -591,6 +592,7 @@ jobs:
           # See linux ctest step for rationale.
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if [ "${{ github.event_name }}" = "push" ]; then
+            CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
           else
@@ -1053,6 +1055,7 @@ jobs:
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
           if ('${{ github.event_name }}' -eq 'push') {
+            $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
           } else {
