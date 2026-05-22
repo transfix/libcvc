@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cvc/namespace.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_bounded_queue.h>
 #include <cvc/state_transport.h>
 #include <memory>
@@ -63,6 +64,13 @@ public:
   std::size_t pump_shard(state_cluster_shard &shard) override;
   std::size_t pump_all() override;
   void flush() override;
+
+  // Chunk fetch: look for the digest in each registered shard's
+  // associated blob store (if the shard exposes one). For inproc,
+  // this is a synchronous local lookup.
+  bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) override;
+  std::size_t fetch_chunks(const std::vector<std::string> &digests,
+                           chunk_callback on_chunk) override;
 
   // Install a bounded message outbox for `peer`. `capacity` is the
   // maximum number of pending messages; `policy` selects the
@@ -141,6 +149,12 @@ public:
   std::uint64_t total_messages_published() const noexcept { return _msg_published.load(); }
   std::uint64_t total_messages_delivered() const noexcept { return _msg_delivered.load(); }
 
+  // Set a blob store that fetch_chunk() searches when looking for
+  // chunks requested by peers. Without this, fetch_chunk returns
+  // false (no blobs available).
+  void set_blob_store(state_blob_store *store) noexcept { _blob_store = store; }
+  state_blob_store *blob_store() const noexcept { return _blob_store; }
+
 private:
   struct peer_outbox {
     std::unique_ptr<state_bounded_queue<state_message>> queue;
@@ -167,6 +181,7 @@ private:
   std::atomic<std::uint64_t> _quarantined_mutations{0};
   std::atomic<std::uint64_t> _auto_isolations{0};
   std::atomic<std::uint64_t> _auto_isolation_threshold{0};
+  state_blob_store *_blob_store = nullptr;
 };
 
 } // namespace CVC_NAMESPACE

@@ -15,6 +15,7 @@
 #include <cvc/state.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_transport.h>
+#include <cvc/state_volume_codec.h>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -86,6 +87,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _delegation = std::make_unique<state_delegation_manager>(_cluster_id);
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
+  register_volume_geometry_codecs(*_codecs);
   _message_bus = std::make_unique<state_message_bus>();
   _write_policy = std::make_unique<state_write_policy>();
 }

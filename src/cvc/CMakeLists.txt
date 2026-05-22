@@ -41,6 +41,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_distributed_metrics.h
   ../../inc/cvc/state_delegation_manager.h
   ../../inc/cvc/state_distributed_admin.h
+  ../../inc/cvc/state_volume_codec.h
+  ../../inc/cvc/state_brick_manifest.h
+  ../../inc/cvc/state_data_hydrator.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
   ../../inc/cvc/state_transport_ipc.h
@@ -93,6 +96,9 @@ set(SOURCE_FILES
   state_distributed_metrics.cpp
   state_delegation_manager.cpp
   state_distributed_admin.cpp
+  state_volume_codec.cpp
+  state_brick_manifest.cpp
+  state_data_hydrator.cpp
   state_message.cpp
   utility.cpp
   cuda_utils.cpp

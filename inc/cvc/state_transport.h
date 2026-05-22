@@ -17,6 +17,8 @@
 #include <cvc/state_change_journal.h>
 #include <cvc/state_message.h>
 #include <cvc/state_peer_registry.h>
+#include <functional>
+#include <string>
 #include <vector>
 
 namespace CVC_NAMESPACE {
@@ -106,6 +108,40 @@ public:
   // (back-compat default).
   state_peer_registry &peers() noexcept { return _peers; }
   const state_peer_registry &peers() const noexcept { return _peers; }
+
+  // -------- Chunk fetch (volume/geometry streaming) --------
+  //
+  // Callback-based chunk retrieval from remote peers. The
+  // transport asks registered remote peers for the chunk; the
+  // first peer that has it delivers the bytes to `on_chunk`.
+  //
+  // The default implementation is a no-op (returns false) so
+  // existing transports continue to compile until they implement
+  // the path. Concrete transports that support multi-host blob
+  // transfer override this.
+  //
+  // `on_chunk(digest, bytes)` is called at most once; if no peer
+  // has the chunk the call returns false.
+  using chunk_callback =
+      std::function<void(const std::string &digest, const std::vector<unsigned char> &bytes)>;
+
+  virtual bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) {
+    (void)digest;
+    (void)on_chunk;
+    return false;
+  }
+
+  // Batch variant: fetch all chunks whose digests are in
+  // `digests`. `on_chunk` is called once per successfully
+  // fetched chunk. Returns the number of chunks fetched.
+  virtual std::size_t fetch_chunks(const std::vector<std::string> &digests,
+                                   chunk_callback on_chunk) {
+    std::size_t n = 0;
+    for (const auto &d : digests)
+      if (fetch_chunk(d, on_chunk))
+        ++n;
+    return n;
+  }
 
 protected:
   state_peer_registry _peers;
