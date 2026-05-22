@@ -40,6 +40,7 @@ add_executable(state_writable_link_test state_writable_link_test.cpp)
 add_executable(state_transparent_link_index_test state_transparent_link_index_test.cpp)
 add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_forwarding_test.cpp)
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
+add_executable(state_link_bench_test state_link_bench_test.cpp)
 if(CVC_ENABLE_GRPC)
   add_executable(state_transport_grpc_test state_transport_grpc_test.cpp)
 endif()
@@ -78,6 +79,7 @@ set(TEST_TARGETS
   state_transparent_link_index_test
   state_sync_adapter_link_forwarding_test
   state_cross_cluster_link_test
+  state_link_bench_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -412,6 +414,13 @@ target_link_libraries(state_cross_cluster_link_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_link_bench_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 if(TARGET state_transport_grpc_test)
   target_link_libraries(state_transport_grpc_test
     PRIVATE
@@ -470,6 +479,7 @@ target_compile_features(state_writable_link_test PRIVATE cxx_std_17)
 target_compile_features(state_transparent_link_index_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_link_forwarding_test PRIVATE cxx_std_17)
 target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
+target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -559,6 +569,7 @@ gtest_discover_tests(state_writable_link_test)
 gtest_discover_tests(state_transparent_link_index_test)
 gtest_discover_tests(state_sync_adapter_link_forwarding_test)
 gtest_discover_tests(state_cross_cluster_link_test)
+gtest_discover_tests(state_link_bench_test)
 if(TARGET state_transport_grpc_test)
   gtest_discover_tests(state_transport_grpc_test)
 endif()
