@@ -109,7 +109,7 @@ TEST(LatencyHistogramTest, ResetClearsAll) {
 
 TEST(TelemetrySnapshotTest, JsonRoundTrip) {
   telemetry_snapshot orig;
-  orig.node_id = "node-1";
+  orig.node_id = "node1";
   orig.cluster_id = "alpha";
   orig.timestamp_ns = 123456789;
   orig.mutations_published = 100;
@@ -130,11 +130,11 @@ TEST(TelemetrySnapshotTest, JsonRoundTrip) {
 
   std::string json = state_node_telemetry::serialize_json(orig);
   EXPECT_FALSE(json.empty());
-  EXPECT_NE(json.find("node-1"), std::string::npos);
+  EXPECT_NE(json.find("node1"), std::string::npos);
 
   telemetry_snapshot parsed;
   EXPECT_TRUE(state_node_telemetry::deserialize_json(json, parsed));
-  EXPECT_EQ(parsed.node_id, "node-1");
+  EXPECT_EQ(parsed.node_id, "node1");
   EXPECT_EQ(parsed.cluster_id, "alpha");
   EXPECT_EQ(parsed.timestamp_ns, 123456789u);
   EXPECT_EQ(parsed.mutations_published, 100u);
@@ -157,28 +157,28 @@ TEST(TelemetrySnapshotTest, DeserializeRejectsEmpty) {
 
 TEST(StateNodeTelemetryTest, SampleWithShard) {
   app a;
-  state_cluster_shard shard(a, "alpha", "node-1");
+  state_cluster_shard shard(a, "alpha", "node1");
   shard.attach();
 
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.attach_shard(&shard);
 
   tel.sample();
   auto snap = tel.snapshot();
-  EXPECT_EQ(snap.node_id, "node-1");
+  EXPECT_EQ(snap.node_id, "node1");
   EXPECT_EQ(snap.cluster_id, "alpha");
   EXPECT_GT(snap.timestamp_ns, 0u);
 }
 
 TEST(StateNodeTelemetryTest, SampleWithTransport) {
   app a;
-  state_cluster_shard shard(a, "alpha", "node-1");
+  state_cluster_shard shard(a, "alpha", "node1");
   shard.attach();
 
   state_transport_inproc transport;
   transport.register_shard(&shard);
 
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.attach_shard(&shard);
   tel.attach_transport(&transport);
 
@@ -191,7 +191,7 @@ TEST(StateNodeTelemetryTest, SampleWithBus) {
   app a;
   state_message_bus bus;
 
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.attach_message_bus(&bus);
 
   // Admit a message to bump the counter.
@@ -207,7 +207,7 @@ TEST(StateNodeTelemetryTest, SampleWithBus) {
 
 TEST(StateNodeTelemetryTest, RecordLatency) {
   app a;
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
 
   for (int i = 0; i < 100; ++i) {
     tel.record_enqueue_latency(5000);   // 5 µs
@@ -222,13 +222,13 @@ TEST(StateNodeTelemetryTest, RecordLatency) {
 
 TEST(StateNodeTelemetryTest, RateComputation) {
   app a;
-  state_cluster_shard shard(a, "alpha", "node-1");
+  state_cluster_shard shard(a, "alpha", "node1");
   shard.attach();
 
   state_transport_inproc transport;
   transport.register_shard(&shard);
 
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.attach_shard(&shard);
   tel.attach_transport(&transport);
 
@@ -249,7 +249,7 @@ TEST(StateNodeTelemetryTest, PublishSnapshot) {
   app a;
   state_message_bus bus;
 
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.attach_message_bus(&bus);
 
   // Subscribe to catch the telemetry message.
@@ -268,13 +268,13 @@ TEST(StateNodeTelemetryTest, PublishSnapshot) {
   // Parse the received JSON.
   telemetry_snapshot parsed;
   EXPECT_TRUE(state_node_telemetry::deserialize_json(received_json, parsed));
-  EXPECT_EQ(parsed.node_id, "node-1");
+  EXPECT_EQ(parsed.node_id, "node1");
   EXPECT_EQ(parsed.cluster_id, "alpha");
 }
 
 TEST(StateNodeTelemetryTest, PublishWithoutBusReturnsFalse) {
   app a;
-  state_node_telemetry tel(a, "node-1", "alpha");
+  state_node_telemetry tel(a, "node1", "alpha");
   tel.sample();
   EXPECT_FALSE(tel.publish_snapshot());
 }

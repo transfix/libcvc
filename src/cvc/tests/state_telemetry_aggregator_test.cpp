@@ -27,7 +27,7 @@ TEST(TelemetryAggregatorTest, IngestAndSummarize) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s1;
-  s1.node_id = "node-1";
+  s1.node_id = "node1";
   s1.cluster_id = "alpha";
   s1.timestamp_ns = 1'000'000'000;
   s1.mutations_published = 100;
@@ -35,7 +35,7 @@ TEST(TelemetryAggregatorTest, IngestAndSummarize) {
   s1.bytes_sent = 5000;
 
   telemetry_snapshot s2;
-  s2.node_id = "node-2";
+  s2.node_id = "node2";
   s2.cluster_id = "alpha";
   s2.timestamp_ns = 1'000'000'000;
   s2.mutations_published = 200;
@@ -75,13 +75,13 @@ TEST(TelemetryAggregatorTest, RemovePeer) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s;
-  s.node_id = "node-1";
+  s.node_id = "node1";
   s.cluster_id = "alpha";
   s.timestamp_ns = 1'000'000'000;
   agg.ingest(s);
 
   EXPECT_EQ(agg.peer_count(), 1u);
-  EXPECT_TRUE(agg.remove_peer("node-1"));
+  EXPECT_TRUE(agg.remove_peer("node1"));
   EXPECT_EQ(agg.peer_count(), 0u);
   EXPECT_FALSE(agg.remove_peer("nonexistent"));
 }
@@ -90,7 +90,7 @@ TEST(TelemetryAggregatorTest, Clear) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s;
-  s.node_id = "node-1";
+  s.node_id = "node1";
   s.cluster_id = "alpha";
   s.timestamp_ns = 1'000'000'000;
   agg.ingest(s);
@@ -103,7 +103,7 @@ TEST(TelemetryAggregatorTest, PeerSnapshots) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s;
-  s.node_id = "node-1";
+  s.node_id = "node1";
   s.cluster_id = "alpha";
   s.timestamp_ns = 1'000'000'000;
   s.mutations_published = 42;
@@ -111,7 +111,7 @@ TEST(TelemetryAggregatorTest, PeerSnapshots) {
 
   auto peers = agg.peer_snapshots();
   EXPECT_EQ(peers.size(), 1u);
-  EXPECT_EQ(peers["node-1"].mutations_published, 42u);
+  EXPECT_EQ(peers["node1"].mutations_published, 42u);
 }
 
 TEST(TelemetryAggregatorTest, AttachBusAndReceiveMessage) {
@@ -121,21 +121,21 @@ TEST(TelemetryAggregatorTest, AttachBusAndReceiveMessage) {
 
   // Publish a telemetry message on the bus.
   telemetry_snapshot snap;
-  snap.node_id = "node-1";
+  snap.node_id = "node1";
   snap.cluster_id = "alpha";
   snap.timestamp_ns = 1'000'000'000;
   snap.mutations_published = 77;
 
   std::string json = state_node_telemetry::serialize_json(snap);
-  auto msg = state_message::make_text("__telemetry.alpha.node-1", json,
+  auto msg = state_message::make_text("__telemetry.alpha.node1", json,
                                       state_node_telemetry::MIME_TELEMETRY);
-  msg.origin_node_id = "node-1";
+  msg.origin_node_id = "node1";
   msg.message_id = "tel-1";
   bus.admit(msg);
 
   EXPECT_EQ(agg.peer_count(), 1u);
   auto peers = agg.peer_snapshots();
-  EXPECT_EQ(peers["node-1"].mutations_published, 77u);
+  EXPECT_EQ(peers["node1"].mutations_published, 77u);
 
   agg.detach_bus();
 }
@@ -144,7 +144,7 @@ TEST(TelemetryAggregatorTest, ToText) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s;
-  s.node_id = "node-1";
+  s.node_id = "node1";
   s.cluster_id = "alpha";
   s.timestamp_ns = 1'000'000'000;
   s.mutations_published = 100;
@@ -154,21 +154,21 @@ TEST(TelemetryAggregatorTest, ToText) {
   EXPECT_NE(text.find("[telemetry]"), std::string::npos);
   EXPECT_NE(text.find("cluster_id: alpha"), std::string::npos);
   EXPECT_NE(text.find("nodes: 1"), std::string::npos);
-  EXPECT_NE(text.find("[peer node-1]"), std::string::npos);
+  EXPECT_NE(text.find("[peer node1]"), std::string::npos);
 }
 
 TEST(TelemetryAggregatorTest, MaxLatencyAcrossNodes) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s1;
-  s1.node_id = "node-1";
+  s1.node_id = "node1";
   s1.cluster_id = "alpha";
   s1.timestamp_ns = 1'000'000'000;
   s1.enqueue_p99 = 5000;
   s1.delivery_p99 = 10000;
 
   telemetry_snapshot s2;
-  s2.node_id = "node-2";
+  s2.node_id = "node2";
   s2.cluster_id = "alpha";
   s2.timestamp_ns = 1'000'000'000;
   s2.enqueue_p99 = 8000;
@@ -272,7 +272,7 @@ TEST(AdminTelemetryTest, ToTextIncludesTelemetry) {
   state_telemetry_aggregator agg("alpha");
 
   telemetry_snapshot s;
-  s.node_id = "node-1";
+  s.node_id = "node1";
   s.cluster_id = "alpha";
   s.timestamp_ns = 1'000'000'000;
   s.mutations_published = 42;
