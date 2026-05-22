@@ -506,6 +506,41 @@ public:
   // Useful for link resolution and any other read-only navigation.
   state *findDescendant(const std::string &path);
 
+  // -------- Phase 8 slice 6: pull-on-demand remote link resolution --------
+  //
+  // resolveRemote() extends resolveLink() by consulting the
+  // default shard's delegation/authority map when a link target
+  // does not exist locally. If the target path is delegated to a
+  // remote cluster with a valid lease, the resolution reports
+  // `resolved_remote` with the owning cluster's id and endpoint
+  // so the caller (or the adapter) can pull the value on demand.
+  // If the lease has expired, `lease_expired` is returned. When
+  // there is no shard registered or the path is not delegated,
+  // the behavior matches resolveLink (broken → broken).
+
+  enum class remote_resolution_kind {
+    resolved_local,   // chain ended at a local non-link node
+    resolved_remote,  // target path is owned by a remote cluster
+    cycle_detected,   // a path was revisited within the hop budget
+    budget_exhausted, // hop budget hit before terminal
+    broken,           // target absent locally and not delegated
+    lease_expired,    // target is delegated but lease has expired
+    none              // start node was not a link
+  };
+
+  struct remote_link_resolution {
+    remote_resolution_kind kind = remote_resolution_kind::none;
+    state *target = nullptr;            // non-null for resolved_local
+    std::string resolved_path;          // final path in the chain
+    std::string owner_cluster_id;       // cluster owning resolved_path
+    std::string endpoint;               // transport hint (remote only)
+    bool owner_is_local = true;
+    std::vector<std::string> visited;   // ordered absolute paths
+    std::size_t hops = 0;
+  };
+
+  remote_link_resolution resolveRemote(std::size_t hop_budget = 64);
+
   // -------- Phase 8 slice 2: cluster-agnostic out-of-band send --------
   //
   // sendMessage() delivers an out-of-band message at this node's

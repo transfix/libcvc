@@ -979,6 +979,103 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
 }
 
 // ---------------
+// state::resolveRemote
+// ---------------
+// Purpose:
+//   Extends resolveLink() with authority-map awareness. When a
+//   link target is not found locally, consults the default shard's
+//   delegation manager to determine whether the target path is
+//   owned by a remote cluster (resolved_remote), has an expired
+//   lease (lease_expired), or is genuinely absent (broken).
+// -------------------
+state::remote_link_resolution state::resolveRemote(std::size_t hop_budget) {
+  remote_link_resolution result;
+
+  state &root = state::instance(_ctx);
+  std::unordered_set<std::string> seen;
+  state *cur = this;
+  seen.insert(cur->fullName());
+  result.visited.push_back(cur->fullName());
+
+  while (true) {
+    std::string target;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      target = cur->_linkTarget;
+    }
+    if (target.empty()) {
+      // Terminal node: not a link.
+      result.kind = (cur == this) ? remote_resolution_kind::none
+                                  : remote_resolution_kind::resolved_local;
+      result.target = cur;
+      result.resolved_path = cur->fullName();
+      result.owner_is_local = true;
+      // If a default shard exists, report its cluster_id.
+      state_cluster_shard *shard = state_cluster_shard::default_for(_ctx);
+      if (shard != nullptr)
+        result.owner_cluster_id = shard->cluster_id();
+      return result;
+    }
+
+    if (result.hops >= hop_budget) {
+      result.kind = remote_resolution_kind::budget_exhausted;
+      result.target = nullptr;
+      return result;
+    }
+
+    state *next = root.findDescendant(target);
+    if (next == nullptr) {
+      // Target does not exist locally. Consult the authority map
+      // via the default shard's delegation manager.
+      state_cluster_shard *shard = state_cluster_shard::default_for(_ctx);
+      if (shard != nullptr) {
+        auto decision = shard->delegation().route(target);
+        if (decision.kind == state_delegation_manager::route_kind::remote) {
+          result.kind = remote_resolution_kind::resolved_remote;
+          result.target = nullptr;
+          result.resolved_path = target;
+          result.owner_cluster_id = decision.cluster_id;
+          result.endpoint = decision.endpoint;
+          result.owner_is_local = false;
+          result.visited.push_back(target);
+          ++result.hops;
+          return result;
+        }
+        if (decision.kind == state_delegation_manager::route_kind::expired) {
+          result.kind = remote_resolution_kind::lease_expired;
+          result.target = nullptr;
+          result.resolved_path = target;
+          result.owner_cluster_id = decision.cluster_id;
+          result.endpoint = decision.endpoint;
+          result.owner_is_local = false;
+          result.visited.push_back(target);
+          ++result.hops;
+          return result;
+        }
+      }
+      // No shard, or delegation says local but node absent: broken.
+      result.kind = remote_resolution_kind::broken;
+      result.target = nullptr;
+      result.resolved_path = target;
+      result.visited.push_back(target);
+      return result;
+    }
+    ++result.hops;
+
+    std::string next_path = next->fullName();
+    if (!seen.insert(next_path).second) {
+      result.kind = remote_resolution_kind::cycle_detected;
+      result.target = nullptr;
+      result.resolved_path = next_path;
+      result.visited.push_back(next_path);
+      return result;
+    }
+    result.visited.push_back(next_path);
+    cur = next;
+  }
+}
+
+// ---------------
 // state::sendMessage
 // ---------------
 // Purpose:
