@@ -402,6 +402,30 @@ state &state::value(const std::string &v, bool setValueType) {
   // Get fullName before locking
   std::string full_name = fullName();
 
+  // Phase 8: writes through a writable transparent link route to the
+  // resolved target. Opaque links and non-writable transparent links
+  // accept writes on the link node itself (the historical default).
+  {
+    link_mode mode_snapshot;
+    bool writable_snapshot;
+    bool is_link_snapshot;
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      is_link_snapshot = !_linkTarget.empty();
+      mode_snapshot = _linkMode;
+      writable_snapshot = _linkWritable;
+    }
+    if (is_link_snapshot && mode_snapshot == link_mode::transparent && writable_snapshot) {
+      link_resolution r = resolveLink();
+      if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
+        r.target->value(v, setValueType);
+        return *this;
+      }
+      throw read_only_error(boost::str(
+          boost::format("Cannot write through unresolvable transparent link: %1%") % full_name));
+    }
+  }
+
   // Check if this state is read-only
   {
     boost::mutex::scoped_lock lock(_mutex);
@@ -769,6 +793,7 @@ bool state::clearLink() {
       _lastMod = boost::posix_time::microsec_clock::universal_time();
     }
     _linkMode = link_mode::opaque;
+    _linkWritable = false;
   }
   if (was_link) {
     linkChanged();
@@ -815,6 +840,29 @@ state &state::setLinkMode(link_mode mode) {
     boost::mutex::scoped_lock lock(_mutex);
     if (_linkMode != mode) {
       _linkMode = mode;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkChanged();
+    if (parent())
+      parent()->childChanged(name());
+  }
+  return *this;
+}
+
+bool state::linkWritable() const {
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_mutex));
+  return _linkWritable;
+}
+
+state &state::setLinkWritable(bool writable) {
+  bool changed = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    if (_linkWritable != writable) {
+      _linkWritable = writable;
       _lastMod = boost::posix_time::microsec_clock::universal_time();
       changed = true;
     }
