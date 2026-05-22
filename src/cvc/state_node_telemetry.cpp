@@ -18,6 +18,10 @@
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_node_telemetry.h>
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 #include <cvc/state_peer_registry.h>
 #include <cvc/state_transport.h>
 #include <cvc/state_transport_inproc.h>
@@ -70,11 +74,15 @@ void ewma::reset() noexcept {
 std::size_t latency_histogram::bucket_index(std::uint64_t ns) noexcept {
   if (ns < 1024)
     return 0;
-  // __builtin_clzll gives the number of leading zeros for a 64-bit
-  // unsigned. For ns >= 1024 (2^10), the bucket index is
-  // floor(log2(ns)) - 9, clamped to BUCKET_COUNT - 1.
+    // floor(log2(ns)) - 9, clamped to BUCKET_COUNT - 1.
+#ifdef _MSC_VER
+  unsigned long idx_msb = 0;
+  _BitScanReverse64(&idx_msb, ns);
+  unsigned log2_floor = static_cast<unsigned>(idx_msb);
+#else
   unsigned leading = static_cast<unsigned>(__builtin_clzll(ns));
   unsigned log2_floor = 63u - leading;
+#endif
   std::size_t idx = static_cast<std::size_t>(log2_floor - 9);
   return idx < BUCKET_COUNT - 1 ? idx : BUCKET_COUNT - 1;
 }
