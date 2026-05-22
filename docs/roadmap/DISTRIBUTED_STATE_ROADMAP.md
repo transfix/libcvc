@@ -1,16 +1,20 @@
 # Distributed State Synchronization Roadmap
 
-Date: May 21, 2026
+Date: May 22, 2026
 
 ## Status Snapshot
 
 - Phases 1, 2, 3a, 3b, 3c, 3d, 3e, 4, 5, 6 are landed on `master` (mutation journal + adapter, codec registry + chunked blob store, replica/authority map, cluster shard, transport interface + inproc/ipc/gRPC, OOB messaging, multi-node cluster semantics with TLS + write policy, subtree delegation with leases, admin facade, per-codec compression, per-peer bounded outbox).
-- Phase 8 (link nodes) is in flight on `feature/distributed-state-sync` (PR #78) and has shipped slices 4a–4e:
+- Phase 8 (link nodes) slices 4a–4e landed via PR #78; writable transparent links and cycle-collapse tests landed via PR #79. Slice 6 (resolveRemote + cross-cluster link tests) in flight on `feature/phase8-slice6-resolve-remote`:
   - 4a: inbound interest filter on subscription routing.
   - 4b: `link_mode` (transparent/opaque) on link nodes plus `resolvedValue` with hop budget.
   - 4c: `state_distributed_admin::transparent_link_index` and `transparent_link_aliases`.
   - 4d: `state_sync_adapter::subscriptions_for_path` expands subscriptions through transparent aliases with a cumulative forwarded-through-link counter.
   - 4e: alias resolver follows transparent-link chains BFS-style to a fixed point with a `hop_budget` (default 64), root-target guard, and cycle termination.
+  - Writable transparent links: `state::linkWritable()` / `setLinkWritable(bool)` opt a transparent link into write-through; covered by `StateWritableLinkTest` (11 cases).
+  - Subscription-collapse over N-link cycles: covered by `StateSyncAdapterLinkForwardingTest`.
+  - `state_distributed_admin::link_cycles()` static cycle enumerator.
+  - Slice 6: `state::resolveRemote(hop_budget)` — pull-on-demand remote link resolution composing with delegation + lease expiry. Cross-cluster link tests covering authority transfer, lease expiry invalidation, and sendMessage routing over transparent links without the caller naming a cluster_id.
 - Phase 7 (perf + production hardening) and Phase 9 (network analytics) are not started.
 
 ## Purpose
@@ -261,7 +265,7 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 
 State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
 
-Delivered so far on `feature/distributed-state-sync` (PR #78) and follow-on work on `feature/phase8-slice5`:
+Delivered so far on `feature/distributed-state-sync` (PR #78), PR #79, and `feature/phase8-slice6-resolve-remote`:
 
 - 4a — inbound interest filter: subscription router exposes `subscriptions_for(path)` with longest-prefix semantics so the adapter can drive interest-based dispatch.
 - 4b — `link_mode` (`transparent`/`opaque`) on link nodes; `state::resolvedValue(path, hop_budget = 64)` follows transparent links to a value with cycle detection.
@@ -271,11 +275,10 @@ Delivered so far on `feature/distributed-state-sync` (PR #78) and follow-on work
 - Writable transparent links: `state::linkWritable()` / `setLinkWritable(bool)` opt a transparent link into write-through. When enabled, `state::value(v)` routes the write to the resolved terminal target with the same cycle/budget semantics as `resolvedValue()`; broken/cyclic resolves raise `read_only_error`. Default is `false`, preserving existing semantics where writes land on the link node. Covered by `StateWritableLinkTest` (11 cases).
 - Subscription-collapse over N-link cycles: `StateSyncAdapterLinkForwardingTest` covers two-link cycle, self-loop, N-link chain-with-cycle, and resolver termination under `hop_budget`, asserting a single logical subscription per cycle.
 - `state_distributed_admin::link_cycles()` static cycle enumerator exposed for tooling.
+- Slice 6 — `state::resolveRemote(hop_budget)`: extends `resolveLink()` with authority-map awareness. When a link target is absent locally, consults the default shard's `state_delegation_manager` to classify the target as `resolved_remote` (active delegation), `lease_expired`, or `broken`. Cross-cluster link tests in `state_cross_cluster_link_test` cover: authority transfer mid-test, lease expiry invalidation, `sendMessage` over transparent links without naming a `cluster_id`, two-shard delegation propagation, and compile-time API checks.
 
 Remaining for Phase 8:
 
-- Slice 5: pull-on-demand resolve of remote link targets composing with delegation + lease expiry (`state::resolveRemote(path)` and adapter integration with `state_authority_map`).
-- Cross-cluster link tests: link target moves between clusters mid-test, lease expiry invalidates the link, `sendMessage` over a link routes via the right transport peer without the caller naming a `cluster_id`.
 - Bench: 1M-path tree with 10k links and a few cycles; assert resolver/subscription latency stays bounded.
 
 - Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
