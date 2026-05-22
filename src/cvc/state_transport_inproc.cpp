@@ -344,4 +344,33 @@ void state_transport_inproc::set_auto_isolation_drop_threshold(std::uint64_t thr
   _auto_isolation_threshold.store(threshold, std::memory_order_relaxed);
 }
 
+// ---------- chunk fetch ----------
+
+bool state_transport_inproc::fetch_chunk(const std::string &digest, chunk_callback on_chunk) {
+  if (!_blob_store || digest.empty())
+    return false;
+  std::vector<unsigned char> bytes;
+  if (!_blob_store->get(digest, bytes))
+    return false;
+  if (on_chunk)
+    on_chunk(digest, bytes);
+  return true;
+}
+
+std::size_t state_transport_inproc::fetch_chunks(const std::vector<std::string> &digests,
+                                                 chunk_callback on_chunk) {
+  if (!_blob_store)
+    return 0;
+  std::size_t n = 0;
+  for (const auto &d : digests) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(d, bytes)) {
+      if (on_chunk)
+        on_chunk(d, bytes);
+      ++n;
+    }
+  }
+  return n;
+}
+
 } // namespace CVC_NAMESPACE
