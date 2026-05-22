@@ -1005,8 +1005,8 @@ state::remote_link_resolution state::resolveRemote(std::size_t hop_budget) {
     }
     if (target.empty()) {
       // Terminal node: not a link.
-      result.kind = (cur == this) ? remote_resolution_kind::none
-                                  : remote_resolution_kind::resolved_local;
+      result.kind =
+          (cur == this) ? remote_resolution_kind::none : remote_resolution_kind::resolved_local;
       result.target = cur;
       result.resolved_path = cur->fullName();
       result.owner_is_local = true;

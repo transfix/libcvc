@@ -30,8 +30,7 @@ namespace {
 
 // Inject a hand-cranked clock into a delegation manager.
 struct manual_clock {
-  std::shared_ptr<std::atomic<std::uint64_t>> now =
-      std::make_shared<std::atomic<std::uint64_t>>(0);
+  std::shared_ptr<std::atomic<std::uint64_t>> now = std::make_shared<std::atomic<std::uint64_t>>(0);
   cvc::state_delegation_manager::clock_fn fn() {
     auto h = now;
     return [h]() { return h->load(std::memory_order_relaxed); };

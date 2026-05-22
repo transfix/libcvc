@@ -530,12 +530,12 @@ public:
 
   struct remote_link_resolution {
     remote_resolution_kind kind = remote_resolution_kind::none;
-    state *target = nullptr;            // non-null for resolved_local
-    std::string resolved_path;          // final path in the chain
-    std::string owner_cluster_id;       // cluster owning resolved_path
-    std::string endpoint;               // transport hint (remote only)
+    state *target = nullptr;      // non-null for resolved_local
+    std::string resolved_path;    // final path in the chain
+    std::string owner_cluster_id; // cluster owning resolved_path
+    std::string endpoint;         // transport hint (remote only)
     bool owner_is_local = true;
-    std::vector<std::string> visited;   // ordered absolute paths
+    std::vector<std::string> visited; // ordered absolute paths
     std::size_t hops = 0;
   };
 
