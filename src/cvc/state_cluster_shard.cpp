@@ -12,9 +12,11 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/app.h>
+#include <cvc/state.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_transport.h>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -74,6 +76,11 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
                                          std::string local_node_id, std::string root_path)
     : _cluster_id(std::move(cluster_id)), _local_node_id(std::move(local_node_id)),
       _root_path(std::move(root_path)), _app_ctx(&ctx) {
+  if (!state::isValidStateName(_cluster_id))
+    throw std::invalid_argument("cluster_id '" + _cluster_id + "' violates C identifier rules");
+  if (!state::isValidStateName(_local_node_id))
+    throw std::invalid_argument("local_node_id '" + _local_node_id +
+                                "' violates C identifier rules");
   _adapter = std::make_unique<state_sync_adapter>(ctx, _root_path, _local_node_id);
   _replica = std::make_unique<state_replica>(_local_node_id);
   _delegation = std::make_unique<state_delegation_manager>(_cluster_id);

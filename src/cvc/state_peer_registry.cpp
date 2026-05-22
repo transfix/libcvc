@@ -8,7 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cvc/state.h>
 #include <cvc/state_peer_registry.h>
+#include <stdexcept>
 #include <utility>
 
 namespace CVC_NAMESPACE {
@@ -41,6 +43,10 @@ bool state_peer_registry::any_prefix_matches(const std::vector<std::string> &pre
 
 void state_peer_registry::add_peer(std::string node_id, std::string cluster_id,
                                    std::string endpoint, std::vector<std::string> subscriptions) {
+  if (!state::isValidStateName(node_id))
+    throw std::invalid_argument("node_id '" + node_id + "' violates C identifier rules");
+  if (!cluster_id.empty() && !state::isValidStateName(cluster_id))
+    throw std::invalid_argument("cluster_id '" + cluster_id + "' violates C identifier rules");
   std::lock_guard<std::mutex> lk(_mu);
   auto &p = _peers[node_id];
   p.node_id = std::move(node_id);

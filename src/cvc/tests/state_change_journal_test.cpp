@@ -14,8 +14,8 @@ namespace {
 
 state_mutation make_value_mutation(const std::string &path, const std::string &value) {
   state_mutation mutation;
-  mutation.cluster_id = "cluster-a";
-  mutation.tree_id = "tree-main";
+  mutation.cluster_id = "cluster_a";
+  mutation.tree_id = "tree_main";
   mutation.path = path;
   mutation.op = state_mutation_op::set_value;
   mutation.type_name = "std::string";
@@ -31,13 +31,13 @@ bool opt_in_enabled(const char *name) {
 } // namespace
 
 TEST(StateChangeJournalTest, AppendsLocalSequenceAndMutationId) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
 
   state_mutation stored = journal.append(make_value_mutation("scene.camera.x", "1.25"));
 
   EXPECT_EQ(stored.sequence, 1u);
-  EXPECT_EQ(stored.origin_node_id, "node-a");
-  EXPECT_EQ(stored.mutation_id, "node-a:1");
+  EXPECT_EQ(stored.origin_node_id, "node_a");
+  EXPECT_EQ(stored.mutation_id, "node_a:1");
   EXPECT_EQ(stored.path, "scene.camera.x");
   EXPECT_EQ(stored.string_value, "1.25");
   EXPECT_EQ(journal.size(), 1u);
@@ -45,20 +45,20 @@ TEST(StateChangeJournalTest, AppendsLocalSequenceAndMutationId) {
 }
 
 TEST(StateChangeJournalTest, PreservesExplicitOriginAndMutationId) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
   state_mutation mutation = make_value_mutation("scene.camera.y", "2.5");
-  mutation.origin_node_id = "node-b";
-  mutation.mutation_id = "external-id";
+  mutation.origin_node_id = "node_b";
+  mutation.mutation_id = "external_id";
 
   state_mutation stored = journal.append(mutation);
 
   EXPECT_EQ(stored.sequence, 1u);
-  EXPECT_EQ(stored.origin_node_id, "node-b");
-  EXPECT_EQ(stored.mutation_id, "external-id");
+  EXPECT_EQ(stored.origin_node_id, "node_b");
+  EXPECT_EQ(stored.mutation_id, "external_id");
 }
 
 TEST(StateChangeJournalTest, SnapshotReturnsIndependentCopy) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
   journal.append(make_value_mutation("a", "1"));
   journal.append(make_value_mutation("b", "2"));
 
@@ -72,7 +72,7 @@ TEST(StateChangeJournalTest, SnapshotReturnsIndependentCopy) {
 }
 
 TEST(StateChangeJournalTest, ReplaysMutationsAfterSequence) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
   journal.append(make_value_mutation("a", "1"));
   journal.append(make_value_mutation("b", "2"));
   journal.append(make_value_mutation("c", "3"));
@@ -87,7 +87,7 @@ TEST(StateChangeJournalTest, ReplaysMutationsAfterSequence) {
 }
 
 TEST(StateChangeJournalTest, ClearDropsMutationsButKeepsMonotonicSequence) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
   journal.append(make_value_mutation("a", "1"));
   journal.append(make_value_mutation("b", "2"));
 
@@ -105,7 +105,7 @@ TEST(StateChangeJournalTest, PayloadHelpersRepresentInlineAndBlobData) {
   state_blob_ref blob_ref;
   blob_ref.digest = "sha256:abc";
   blob_ref.size_bytes = 1024;
-  blob_ref.codec = "test-codec-v1";
+  blob_ref.codec = "test_codec_v1";
   state_payload blob_payload = state_payload::blob_ref(blob_ref);
 
   EXPECT_FALSE(inline_payload.empty());
@@ -116,7 +116,7 @@ TEST(StateChangeJournalTest, PayloadHelpersRepresentInlineAndBlobData) {
   EXPECT_EQ(blob_payload.kind, state_payload_kind::blob);
   EXPECT_EQ(blob_payload.blob.digest, "sha256:abc");
   EXPECT_EQ(blob_payload.blob.size_bytes, 1024u);
-  EXPECT_EQ(blob_payload.blob.codec, "test-codec-v1");
+  EXPECT_EQ(blob_payload.blob.codec, "test_codec_v1");
 
   EXPECT_TRUE(state_payload::none().empty());
 }
@@ -129,7 +129,7 @@ TEST(StateChangeJournalTest, OperationNamesAreStable) {
 }
 
 TEST(StateChangeJournalTest, ConcurrentAppendProducesUniqueOrderedSequences) {
-  state_change_journal journal("node-a");
+  state_change_journal journal("node_a");
   std::vector<state_mutation> stored_mutations;
   std::mutex stored_mutex;
   const int thread_count = 8;
@@ -174,7 +174,7 @@ TEST(StateChangeJournalStressTest, OptionalHighVolumeAppendStress) {
     GTEST_SKIP() << "Set CVC_DISTRIBUTED_STATE_STRESS=1 to run journal stress tests";
   }
 
-  state_change_journal journal("stress-node");
+  state_change_journal journal("stress_node");
   const int mutation_count = 100000;
   for (int mutation_index = 0; mutation_index < mutation_count; ++mutation_index) {
     journal.append(make_value_mutation("stress.path", std::to_string(mutation_index)));
@@ -190,7 +190,7 @@ TEST(StateChangeJournalPerformanceTest, OptionalAppendThroughputSmoke) {
     GTEST_SKIP() << "Set CVC_DISTRIBUTED_STATE_PERF=1 to run journal performance smoke tests";
   }
 
-  state_change_journal journal("perf-node");
+  state_change_journal journal("perf_node");
   const int mutation_count = 50000;
   auto start_time = std::chrono::steady_clock::now();
   for (int mutation_index = 0; mutation_index < mutation_count; ++mutation_index) {

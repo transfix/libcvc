@@ -46,7 +46,7 @@ TEST(StateSendMessage, NoDefaultShardYieldsStructuredNoOp) {
 
 TEST(StateSendMessage, DeliversToLocalSubscriberOnDefaultShard) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   collected sink;
   shard.message_bus().subscribe("scene", std::ref(sink));
@@ -63,12 +63,12 @@ TEST(StateSendMessage, DeliversToLocalSubscriberOnDefaultShard) {
   EXPECT_EQ(sink.messages[0].path, "scene.geometry");
   EXPECT_EQ(sink.messages[0].string_value, "hello");
   EXPECT_EQ(sink.messages[0].cluster_id, "alpha");
-  EXPECT_EQ(sink.messages[0].origin_node_id, "node-1");
+  EXPECT_EQ(sink.messages[0].origin_node_id, "node_1");
 }
 
 TEST(StateSendMessage, FollowsLinkChainBeforeAddressing) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   collected sink;
   shard.message_bus().subscribe("data", std::ref(sink));
@@ -87,7 +87,7 @@ TEST(StateSendMessage, FollowsLinkChainBeforeAddressing) {
 
 TEST(StateSendMessage, BrokenLinkIsReported) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   auto &n = cvc::state::instance(a)("scene.geometry");
   n.linkTo("nowhere.in.tree");
@@ -98,7 +98,7 @@ TEST(StateSendMessage, BrokenLinkIsReported) {
 
 TEST(StateSendMessage, CycleIsReported) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   auto &root = cvc::state::instance(a);
   root("p").linkTo("q");
@@ -123,7 +123,7 @@ TEST(StateSendMessage, CallerNeverNamesClusterId_ApiCompileCheck) {
 
 TEST(StateSendMessage, AuthorityMapStampsOwnerClusterId) {
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   // Delegate scene.* to a foreign cluster. The caller-side
   // sendMessage MUST stamp that as the owner cluster_id even
