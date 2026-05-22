@@ -223,6 +223,7 @@ TEST(DistributedStateSession, AdminAttached) {
 
 // ---- IPC transport selection ----
 
+#ifndef _WIN32
 TEST(DistributedStateSession, IpcTransportCreation) {
   app a;
   distributed_state_config cfg;
@@ -239,3 +240,4 @@ TEST(DistributedStateSession, IpcTransportCreation) {
   // Clean up socket.
   ::unlink(cfg.listen_address.c_str());
 }
+#endif // !_WIN32
