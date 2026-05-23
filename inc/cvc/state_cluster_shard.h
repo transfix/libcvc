@@ -14,9 +14,12 @@
 #include <atomic>
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_change_journal.h>
 #include <cvc/state_codec_registry.h>
 #include <cvc/state_delegation_manager.h>
+#include <cvc/state_hash_partition.h>
+#include <cvc/state_hybrid_time.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_replica.h>
@@ -96,6 +99,22 @@ public:
   state_codec_registry &codecs() noexcept { return *_codecs; }
   state_message_bus &message_bus() noexcept { return *_message_bus; }
   state_write_policy &write_policy() noexcept { return *_write_policy; }
+  hybrid_clock &clock() noexcept { return _clock; }
+  state_hash_partition &partition() noexcept { return _partition; }
+  const state_hash_partition &partition() const noexcept { return _partition; }
+
+  // Blob store and inline payload threshold. When both are set,
+  // drain_local() offloads mutation values larger than the threshold
+  // to the blob store and replaces the payload with a blob_ref.
+  void set_blob_store(state_blob_store *store) noexcept;
+  state_blob_store *blob_store() const noexcept;
+  void set_max_inline_payload_bytes(std::uint32_t bytes) noexcept;
+  std::uint32_t max_inline_payload_bytes() const noexcept;
+
+  // When true and the partition map is non-empty, ingest_remote()
+  // rejects mutations whose path hashes to a different node_id.
+  void set_enforce_partition(bool enforce) noexcept;
+  bool enforce_partition() const noexcept;
 
   // Wire up adapter observers and start journaling local changes.
   void attach();
@@ -163,6 +182,19 @@ public:
   std::uint64_t total_remote_rejected() const noexcept { return _ctr_remote_rejected.load(); }
   std::uint64_t total_conflicts_detected() const noexcept { return _ctr_conflicts_detected.load(); }
   std::uint64_t total_conflicts_lost() const noexcept { return _ctr_conflicts_lost.load(); }
+
+  // Per-path conflict detail record.
+  struct conflict_entry {
+    std::string path;
+    std::string winner_node_id;
+    std::uint64_t winner_sequence = 0;
+    std::string loser_node_id;
+    std::uint64_t loser_sequence = 0;
+  };
+
+  // Return the most recent conflicts (up to `max_entries`, default 64).
+  // The ring buffer is only populated when resolve_conflicts is true.
+  std::vector<conflict_entry> recent_conflicts(std::size_t max_entries = 64) const;
 
   // Phase 6: subtree delegation. When true, ingest_remote consults
   // the delegation manager. A mutation whose path resolves to a
@@ -247,6 +279,20 @@ public:
     return _ctr_remote_filtered_out.load();
   }
 
+  // Snapshot: walk the local state tree under `path_prefix` and
+  // return a vector of entries suitable for initial-sync.
+  struct snapshot_entry {
+    std::string path;
+    std::string string_value;
+    std::string comment;
+    bool hidden = false;
+    bool read_only = false;
+    std::string type_name;
+    std::string origin_node_id;
+    std::uint64_t sequence = 0;
+  };
+  std::vector<snapshot_entry> snapshot(const std::string &path_prefix = std::string()) const;
+
   // -------- Phase 8 slice 2: cluster-agnostic message routing --------
   //
   // The shard owns the bridge from "I want to send a message at
@@ -323,11 +369,17 @@ private:
   std::atomic<std::uint64_t> _ctr_remote_rejected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_detected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
+
+  // Ring buffer of recent conflict entries.
+  static constexpr std::size_t kMaxConflictRing = 128;
+  std::vector<conflict_entry> _conflict_ring;
+  std::size_t _conflict_ring_pos = 0;
   std::atomic<std::uint64_t> _ctr_delegation_routed{0};
   std::atomic<std::uint64_t> _ctr_delegation_expired{0};
   std::atomic<std::uint64_t> _ctr_delegations_applied{0};
   std::atomic<std::uint64_t> _ctr_revocations_applied{0};
   std::atomic<std::uint64_t> _ctr_remote_filtered_out{0};
+  std::atomic<std::uint64_t> _ctr_partition_rejected{0};
 
   // Inbound interest filter.
   std::vector<std::string> _interests;
@@ -336,6 +388,12 @@ private:
   // Phase 8 slice 2.
   state_transport *_transport = nullptr;
   app *_app_ctx = nullptr; // captured at construction for default_for()
+  hybrid_clock _clock;
+  state_hash_partition _partition;
+  bool _enforce_partition = false;
+
+  state_blob_store *_blob_store = nullptr;
+  std::uint32_t _max_inline_payload_bytes = 0; // 0 = disabled
 };
 
 } // namespace CVC_NAMESPACE

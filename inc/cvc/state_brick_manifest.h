@@ -107,6 +107,16 @@ struct state_brick_manifest {
   std::vector<std::size_t> bricks_in_region(std::uint64_t lo_x, std::uint64_t lo_y,
                                             std::uint64_t lo_z, std::uint64_t hi_x,
                                             std::uint64_t hi_y, std::uint64_t hi_z) const;
+
+  // A half-space plane Ax+By+Cz+D >= 0.
+  struct plane {
+    double a, b, c, d;
+  };
+
+  // Query: return indices of chunks whose AABB is NOT completely
+  // outside all 6 frustum planes (conservative — false positives
+  // are possible). Each plane's positive half-space is "inside".
+  std::vector<std::size_t> bricks_in_frustum(const plane planes[6]) const;
 };
 
 // ----------------
