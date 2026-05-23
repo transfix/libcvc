@@ -97,7 +97,7 @@ struct distributed_state_config {
 
   // Tuning.
   std::uint32_t max_inline_payload_bytes = 65536;
-  std::string blob_store_path; // empty = memory-only blob store
+  std::string blob_store_path;   // empty = memory-only blob store
   bool snapshot_on_join = false; // request full snapshot from first seed on join
 
   std::uint32_t pump_interval_ms = 10; // background pump loop interval (0 = no pump thread)

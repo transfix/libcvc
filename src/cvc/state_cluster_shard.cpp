@@ -148,8 +148,7 @@ state_cluster_shard::recent_conflicts(std::size_t max_entries) const {
   out.reserve(n);
   // Walk backwards from the write cursor to get most-recent-first.
   for (std::size_t i = 0; i < n; ++i) {
-    std::size_t idx =
-        (_conflict_ring_pos + _conflict_ring.size() - 1 - i) % _conflict_ring.size();
+    std::size_t idx = (_conflict_ring_pos + _conflict_ring.size() - 1 - i) % _conflict_ring.size();
     out.push_back(_conflict_ring[idx]);
   }
   return out;
@@ -310,8 +309,7 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
         e.winner_sequence = it->second.sequence;
         e.loser_node_id = m.origin_node_id;
         e.loser_sequence = m.sequence;
-        _conflict_ring_pos =
-            (_conflict_ring_pos + 1) % kMaxConflictRing;
+        _conflict_ring_pos = (_conflict_ring_pos + 1) % kMaxConflictRing;
       }
     }
   }
@@ -369,8 +367,7 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     if (m.hlc_time == 0)
       m.hlc_time = _clock.now().packed();
     // Offload large values to the blob store when a threshold is set.
-    if (_blob_store && _max_inline_payload_bytes > 0 &&
-        m.op == state_mutation_op::set_value &&
+    if (_blob_store && _max_inline_payload_bytes > 0 && m.op == state_mutation_op::set_value &&
         m.payload.kind == state_payload_kind::none &&
         m.string_value.size() > _max_inline_payload_bytes) {
       std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
@@ -539,9 +536,7 @@ void state_cluster_shard::set_blob_store(state_blob_store *store) noexcept {
   _blob_store = store;
 }
 
-state_blob_store *state_cluster_shard::blob_store() const noexcept {
-  return _blob_store;
-}
+state_blob_store *state_cluster_shard::blob_store() const noexcept { return _blob_store; }
 
 void state_cluster_shard::set_max_inline_payload_bytes(std::uint32_t bytes) noexcept {
   _max_inline_payload_bytes = bytes;

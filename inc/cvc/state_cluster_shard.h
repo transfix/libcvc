@@ -14,10 +14,10 @@
 #include <atomic>
 #include <cvc/namespace.h>
 #include <cvc/state_authority_map.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_change_journal.h>
 #include <cvc/state_codec_registry.h>
 #include <cvc/state_delegation_manager.h>
-#include <cvc/state_blob_store.h>
 #include <cvc/state_hash_partition.h>
 #include <cvc/state_hybrid_time.h>
 #include <cvc/state_message.h>

@@ -19,9 +19,9 @@
 #include <cvc/state_transport.h>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace CVC_NAMESPACE {

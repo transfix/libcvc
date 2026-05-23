@@ -54,8 +54,10 @@ TEST_F(StateSnapshotProtocolTest, SnapshotFromLocalShard) {
 
   bool found_b = false, found_c = false;
   for (const auto &e : snap) {
-    if (e.path == "a.b" && e.string_value == "hello") found_b = true;
-    if (e.path == "a.c" && e.string_value == "world") found_c = true;
+    if (e.path == "a.b" && e.string_value == "hello")
+      found_b = true;
+    if (e.path == "a.c" && e.string_value == "world")
+      found_c = true;
   }
   EXPECT_TRUE(found_b) << "a.b not in snapshot";
   EXPECT_TRUE(found_c) << "a.c not in snapshot";
@@ -74,8 +76,10 @@ TEST_F(StateSnapshotProtocolTest, SnapshotWithPrefixFilter) {
   auto snap = shard.snapshot("foo");
   bool found_foo = false, found_bar = false;
   for (const auto &e : snap) {
-    if (e.path.find("foo") == 0) found_foo = true;
-    if (e.path.find("bar") == 0) found_bar = true;
+    if (e.path.find("foo") == 0)
+      found_foo = true;
+    if (e.path.find("bar") == 0)
+      found_bar = true;
   }
   EXPECT_TRUE(found_foo);
   EXPECT_FALSE(found_bar);
@@ -118,8 +122,7 @@ TEST_F(StateSnapshotProtocolTest, IpcSnapshotRequestResponse) {
   // Request snapshot.
   std::vector<cvc::state_transport::snapshot_entry> entries;
   bool got_snapshot = client.request_snapshot(
-      "clust", "",
-      [&](const std::vector<cvc::state_transport::snapshot_entry> &e, bool /*final*/) {
+      "clust", "", [&](const std::vector<cvc::state_transport::snapshot_entry> &e, bool /*final*/) {
         entries = e;
       });
 
@@ -128,8 +131,10 @@ TEST_F(StateSnapshotProtocolTest, IpcSnapshotRequestResponse) {
 
   bool found_x = false, found_y = false;
   for (const auto &e : entries) {
-    if (e.path == "data.x" && e.string_value == "42") found_x = true;
-    if (e.path == "data.y" && e.string_value == "99") found_y = true;
+    if (e.path == "data.x" && e.string_value == "42")
+      found_x = true;
+    if (e.path == "data.y" && e.string_value == "99")
+      found_y = true;
   }
   EXPECT_TRUE(found_x);
   EXPECT_TRUE(found_y);

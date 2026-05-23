@@ -77,8 +77,7 @@ TEST_F(StateSessionStatusTest, SessionStopIsIdempotent) {
 TEST_F(StateSessionStatusTest, WaitForDataTimeoutReturns) {
   auto session = make_session();
   // Wait for a non-existent path — should return after timeout.
-  auto result = session->wait_for_data("nonexistent.path",
-                                        std::chrono::milliseconds(50));
+  auto result = session->wait_for_data("nonexistent.path", std::chrono::milliseconds(50));
   // We just verify it returns without hanging. The status value
   // depends on whether the hydrator has seen this path.
   (void)result;

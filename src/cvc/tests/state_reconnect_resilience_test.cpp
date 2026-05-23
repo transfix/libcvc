@@ -31,8 +31,8 @@ std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   auto dir = std::filesystem::temp_directory_path();
-  return (dir / ("cvc_res_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label +
-                 ".sock"))
+  return (dir /
+          ("cvc_res_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label + ".sock"))
       .string();
 }
 

@@ -64,8 +64,7 @@ state_zstd_compression_codec::encode(const std::vector<unsigned char> &in) const
     return {};
   std::size_t bound = ZSTD_compressBound(in.size());
   std::vector<unsigned char> out(bound);
-  std::size_t result =
-      ZSTD_compress(out.data(), out.size(), in.data(), in.size(), _level);
+  std::size_t result = ZSTD_compress(out.data(), out.size(), in.data(), in.size(), _level);
   if (ZSTD_isError(result))
     return in; // fall back to uncompressed on error
   out.resize(result);

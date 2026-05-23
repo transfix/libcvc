@@ -30,7 +30,7 @@ namespace {
 
 constexpr std::uint32_t kMagic = 0x43564354u; // 'CVCT'
 constexpr std::uint16_t kVersion = 1;
-constexpr std::uint16_t kMaxVersion = 1;  // highest version we understand
+constexpr std::uint16_t kMaxVersion = 1; // highest version we understand
 constexpr std::uint16_t kMsgHello = 1;
 constexpr std::uint16_t kMsgMutation = 2;
 constexpr std::uint16_t kMsgOob = 3;
@@ -601,8 +601,7 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       }
       // Patch entry count.
       for (int i = 0; i < 4; ++i)
-        rsp[count_offset + i] =
-            static_cast<unsigned char>((entry_count >> (8 * i)) & 0xFF);
+        rsp[count_offset + i] = static_cast<unsigned char>((entry_count >> (8 * i)) & 0xFF);
 
       std::lock_guard<std::mutex> wlk(conn->write_mu);
       write_frame_locked(*conn, kMsgSnapRsp, rsp);
@@ -941,8 +940,7 @@ bool state_transport_ipc::fetch_chunk(const std::string &digest, chunk_callback 
   if (sent > 0) {
     // Wait for the first response (up to 10 seconds).
     std::unique_lock<std::mutex> lk(_chunk_waiters_mu);
-    _chunk_waiters_cv.wait_for(lk, std::chrono::seconds(10),
-                               [&]() { return waiter->done; });
+    _chunk_waiters_cv.wait_for(lk, std::chrono::seconds(10), [&]() { return waiter->done; });
     if (waiter->done && waiter->found) {
       if (on_chunk)
         on_chunk(digest, waiter->data);
@@ -992,8 +990,7 @@ bool state_transport_ipc::request_snapshot(const std::string &cluster_id,
   bool result = false;
   if (sent > 0) {
     std::unique_lock<std::mutex> lk(_snap_waiters_mu);
-    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(10),
-                              [&]() { return waiter->done; });
+    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(10), [&]() { return waiter->done; });
     if (waiter->done) {
       if (on_entries)
         on_entries(waiter->entries, /*final=*/true);

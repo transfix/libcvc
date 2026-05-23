@@ -260,8 +260,8 @@ public:
         _owner->on_inbound_message(decode_message(in.message()));
         _owner->increment_recv_messages();
       } else if (in.has_chunk_request()) {
-        _owner->on_inbound_chunk_request(
-            conn.get(), in.chunk_request().digest(), in.chunk_request().request_id());
+        _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
+                                         in.chunk_request().request_id());
       } else if (in.has_chunk_response()) {
         const auto &cr = in.chunk_response();
         std::string data_str = cr.data();
@@ -939,8 +939,9 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
   }
 }
 
-void state_transport_grpc::on_inbound_snapshot_response(
-    std::uint64_t request_id, const std::vector<snapshot_entry> &entries, bool final) {
+void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id,
+                                                        const std::vector<snapshot_entry> &entries,
+                                                        bool final) {
   {
     std::lock_guard<std::mutex> lk(_snap_waiters_mu);
     auto it = _snap_waiters.find(request_id);
@@ -957,7 +958,9 @@ void state_transport_grpc::on_inbound_snapshot_response(
 
 void state_transport_grpc::on_inbound_heartbeat(const std::string &node_id,
                                                 const std::string & /*cluster_id*/) {
-  _peers.note_seen(node_id);
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  _peers.note_seen(node_id, static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()));
 }
 
 bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
@@ -996,8 +999,7 @@ bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
   bool result = false;
   if (sent > 0) {
     std::unique_lock<std::mutex> lk(_snap_waiters_mu);
-    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(30),
-                              [&]() { return waiter->done; });
+    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(30), [&]() { return waiter->done; });
     if (waiter->done) {
       if (on_entries)
         on_entries(waiter->entries, true);
@@ -1025,10 +1027,9 @@ void state_transport_grpc::heartbeat_loop() {
     hb->set_node_id(_node_id);
     hb->set_cluster_id(_cluster_id);
     hb->set_timestamp_ns(
-        static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count()));
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count()));
 
     std::vector<std::shared_ptr<connection>> conns;
     {

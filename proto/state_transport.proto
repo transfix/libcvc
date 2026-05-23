@@ -74,22 +74,22 @@ message Message {
 
 // Chunk fetch request: ask a peer for a blob chunk by digest.
 message ChunkRequest {
-  string digest = 1;        // SHA-256 hex digest
-  uint64 request_id = 2;    // caller-assigned; echoed in response
+  string digest = 1;     // SHA-256 hex digest
+  uint64 request_id = 2; // caller-assigned; echoed in response
 }
 
 // Chunk fetch response: carries the blob chunk bytes.
 message ChunkResponse {
-  string digest = 1;        // echoed from request
-  uint64 request_id = 2;    // echoed from request
-  bool found = 3;           // false if the peer does not have the chunk
-  bytes data = 4;           // raw chunk bytes (empty if !found)
+  string digest = 1;     // echoed from request
+  uint64 request_id = 2; // echoed from request
+  bool found = 3;        // false if the peer does not have the chunk
+  bytes data = 4;        // raw chunk bytes (empty if !found)
 }
 
 // Snapshot request: ask a peer for the current state tree.
 message SnapshotRequest {
   string cluster_id = 1;
-  string path_prefix = 2;   // "" = entire tree
+  string path_prefix = 2; // "" = entire tree
   uint64 request_id = 3;
 }
 
@@ -108,7 +108,7 @@ message SnapshotEntry {
 // Snapshot response: sent in response to SnapshotRequest.
 message SnapshotResponse {
   uint64 request_id = 1;
-  bool final = 2;           // true on the last chunk
+  bool final = 2; // true on the last chunk
   repeated SnapshotEntry entries = 3;
 }
 
@@ -117,7 +117,7 @@ message SnapshotResponse {
 message Heartbeat {
   string node_id = 1;
   string cluster_id = 2;
-  uint64 timestamp_ns = 3;  // sender's wall-clock ns (observability)
+  uint64 timestamp_ns = 3; // sender's wall-clock ns (observability)
 }
 
 // Single bidirectional frame envelope. Both client and server write

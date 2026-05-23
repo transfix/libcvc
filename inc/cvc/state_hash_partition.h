@@ -63,8 +63,8 @@ public:
     std::uint64_t slice = total / node_ids.size();
     std::uint32_t lo = 0;
     for (std::size_t i = 0; i < node_ids.size(); ++i) {
-      std::uint32_t hi = (i + 1 == node_ids.size()) ? UINT32_MAX
-                                                     : static_cast<std::uint32_t>(lo + slice - 1);
+      std::uint32_t hi =
+          (i + 1 == node_ids.size()) ? UINT32_MAX : static_cast<std::uint32_t>(lo + slice - 1);
       _ranges.push_back({node_ids[i], lo, hi + 1});
       lo = hi + 1;
     }

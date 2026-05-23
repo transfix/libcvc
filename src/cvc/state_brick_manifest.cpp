@@ -205,8 +205,7 @@ state_brick_manifest::bricks_in_region(std::uint64_t lo_x, std::uint64_t lo_y, s
   return result;
 }
 
-std::vector<std::size_t>
-state_brick_manifest::bricks_in_frustum(const plane planes[6]) const {
+std::vector<std::size_t> state_brick_manifest::bricks_in_frustum(const plane planes[6]) const {
   std::vector<std::size_t> result;
   for (std::size_t i = 0; i < extents.size(); ++i) {
     const brick_extent &ext = extents[i];

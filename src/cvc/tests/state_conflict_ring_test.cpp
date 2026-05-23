@@ -44,8 +44,8 @@ protected:
     transport.unregister_shard(&shard_b);
   }
 
-  state_mutation make_mutation(const std::string &node, std::uint64_t seq,
-                               const std::string &path, const std::string &value) {
+  state_mutation make_mutation(const std::string &node, std::uint64_t seq, const std::string &path,
+                               const std::string &value) {
     state_mutation m;
     m.cluster_id = "cluster";
     m.origin_node_id = node;
@@ -90,12 +90,12 @@ TEST_F(StateConflictRingTest, ConflictsRingWrapsAround) {
   // Use alphabetically lower node ids to guarantee loss.
   for (int i = 0; i < 200; ++i) {
     // Winner: node_C > node_B lexicographically.
-    auto ma = make_mutation("node_C", static_cast<uint64_t>(i + 1),
-                            "path." + std::to_string(i), "c");
+    auto ma =
+        make_mutation("node_C", static_cast<uint64_t>(i + 1), "path." + std::to_string(i), "c");
     shard_a.ingest_remote(ma);
     // Loser: node_B < node_C, same path, so should_replace returns false.
-    auto mc = make_mutation("node_B", static_cast<uint64_t>(i + 1),
-                            "path." + std::to_string(i), "b");
+    auto mc =
+        make_mutation("node_B", static_cast<uint64_t>(i + 1), "path." + std::to_string(i), "b");
     shard_a.ingest_remote(mc);
   }
 
@@ -108,12 +108,10 @@ TEST_F(StateConflictRingTest, ConflictsRingWrapsAround) {
 TEST_F(StateConflictRingTest, RecentConflictsMaxEntries) {
   for (int i = 0; i < 10; ++i) {
     // Winner first (higher node id).
-    auto ma = make_mutation("node_C", static_cast<uint64_t>(i + 1),
-                            "p." + std::to_string(i), "c");
+    auto ma = make_mutation("node_C", static_cast<uint64_t>(i + 1), "p." + std::to_string(i), "c");
     shard_a.ingest_remote(ma);
     // Loser: node_B < node_C for the same path.
-    auto mc = make_mutation("node_B", static_cast<uint64_t>(i + 1),
-                            "p." + std::to_string(i), "b");
+    auto mc = make_mutation("node_B", static_cast<uint64_t>(i + 1), "p." + std::to_string(i), "b");
     shard_a.ingest_remote(mc);
   }
 

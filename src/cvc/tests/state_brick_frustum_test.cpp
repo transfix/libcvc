@@ -41,12 +41,12 @@ TEST_F(StateBrickFrustumTest, AllPlanesPassingReturnsAll) {
   // Planes that encompass everything: each plane's positive half-space
   // includes the origin and extends far. Use a giant box frustum.
   state_brick_manifest::plane planes[6] = {
-      {1, 0, 0, 100},   // x >= -100
-      {-1, 0, 0, 100},  // -x >= -100 i.e. x <= 100
-      {0, 1, 0, 100},   // y >= -100
-      {0, -1, 0, 100},  // y <= 100
-      {0, 0, 1, 100},   // z >= -100
-      {0, 0, -1, 100},  // z <= 100
+      {1, 0, 0, 100},  // x >= -100
+      {-1, 0, 0, 100}, // -x >= -100 i.e. x <= 100
+      {0, 1, 0, 100},  // y >= -100
+      {0, -1, 0, 100}, // y <= 100
+      {0, 0, 1, 100},  // z >= -100
+      {0, 0, -1, 100}, // z <= 100
   };
   auto result = manifest.bricks_in_frustum(planes);
   EXPECT_EQ(result.size(), 9u);
@@ -55,12 +55,12 @@ TEST_F(StateBrickFrustumTest, AllPlanesPassingReturnsAll) {
 TEST_F(StateBrickFrustumTest, TightFrustumSelectsSubset) {
   // Planes that only include the first brick (0..10, 0..10, 0..10).
   state_brick_manifest::plane planes[6] = {
-      {1, 0, 0, 0},      // x >= 0
-      {-1, 0, 0, 10},    // x <= 10
-      {0, 1, 0, 0},      // y >= 0
-      {0, -1, 0, 10},    // y <= 10
-      {0, 0, 1, 0},      // z >= 0
-      {0, 0, -1, 10},    // z <= 10
+      {1, 0, 0, 0},   // x >= 0
+      {-1, 0, 0, 10}, // x <= 10
+      {0, 1, 0, 0},   // y >= 0
+      {0, -1, 0, 10}, // y <= 10
+      {0, 0, 1, 0},   // z >= 0
+      {0, 0, -1, 10}, // z <= 10
   };
   auto result = manifest.bricks_in_frustum(planes);
   // At least the first brick should be included.
@@ -73,12 +73,12 @@ TEST_F(StateBrickFrustumTest, TightFrustumSelectsSubset) {
 TEST_F(StateBrickFrustumTest, FrustumFarAwayReturnsEmpty) {
   // Planes that are far from any brick (everything at x > 1000).
   state_brick_manifest::plane planes[6] = {
-      {1, 0, 0, -1000},   // x >= 1000
-      {-1, 0, 0, 2000},   // x <= 2000
-      {0, 1, 0, -1000},   // y >= 1000
-      {0, -1, 0, 2000},   // y <= 2000
-      {0, 0, 1, -1000},   // z >= 1000
-      {0, 0, -1, 2000},   // z <= 2000
+      {1, 0, 0, -1000}, // x >= 1000
+      {-1, 0, 0, 2000}, // x <= 2000
+      {0, 1, 0, -1000}, // y >= 1000
+      {0, -1, 0, 2000}, // y <= 2000
+      {0, 0, 1, -1000}, // z >= 1000
+      {0, 0, -1, 2000}, // z <= 2000
   };
   auto result = manifest.bricks_in_frustum(planes);
   EXPECT_EQ(result.size(), 0u);
@@ -87,8 +87,8 @@ TEST_F(StateBrickFrustumTest, FrustumFarAwayReturnsEmpty) {
 TEST_F(StateBrickFrustumTest, EmptyManifestReturnsEmpty) {
   state_brick_manifest empty;
   state_brick_manifest::plane planes[6] = {
-      {1, 0, 0, 100}, {-1, 0, 0, 100}, {0, 1, 0, 100},
-      {0, -1, 0, 100}, {0, 0, 1, 100}, {0, 0, -1, 100},
+      {1, 0, 0, 100},  {-1, 0, 0, 100}, {0, 1, 0, 100},
+      {0, -1, 0, 100}, {0, 0, 1, 100},  {0, 0, -1, 100},
   };
   auto result = empty.bricks_in_frustum(planes);
   EXPECT_EQ(result.size(), 0u);

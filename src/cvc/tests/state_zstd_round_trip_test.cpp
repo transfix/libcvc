@@ -25,7 +25,8 @@ TEST_F(StateZstdRoundTripTest, ZstdIsRegistered) {
   auto ids = registry.ids();
   bool has_zstd = false;
   for (const auto &id : ids)
-    if (id == "zstd") has_zstd = true;
+    if (id == "zstd")
+      has_zstd = true;
   EXPECT_TRUE(has_zstd) << "zstd codec not found in registry";
 }
 
@@ -84,6 +85,7 @@ TEST_F(StateZstdRoundTripTest, SharedRegistryHasZstd) {
   auto ids = shared.ids();
   bool has_zstd = false;
   for (const auto &id : ids)
-    if (id == "zstd") has_zstd = true;
+    if (id == "zstd")
+      has_zstd = true;
   EXPECT_TRUE(has_zstd);
 }

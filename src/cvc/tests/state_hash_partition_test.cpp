@@ -36,8 +36,7 @@ TEST_F(StateHashPartitionTest, AssignAndLookup) {
   for (int i = 0; i < 50; ++i) {
     std::string path = "test.path." + std::to_string(i);
     std::string owner = part.owner_of(path);
-    EXPECT_TRUE(owner == "node-1" || owner == "node-2")
-        << "path=" << path << " owner=" << owner;
+    EXPECT_TRUE(owner == "node-1" || owner == "node-2") << "path=" << path << " owner=" << owner;
   }
 }
 
