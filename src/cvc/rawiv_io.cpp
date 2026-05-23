@@ -26,7 +26,6 @@
 #include <cvc/endians.h>
 #include <cvc/volmagick.h>
 #include <errno.h>
-#include <format>
 #include <fstream>
 #include <iostream>
 #include <math.h>
@@ -532,12 +531,12 @@ struct rawiv_io : public volume_file_io {
     if (dimension.isNull())
       throw invalid_bounding_box("Dimension must not be null");
     if (numVariables > 1) {
-      throw invalid_rawiv_header(
-          std::format("RawIV format only supports 1 variable ({} requested)", numVariables));
+      throw invalid_rawiv_header("RawIV format only supports 1 variable (" +
+                                 std::to_string(numVariables) + " requested)");
     }
     if (numTimesteps > 1) {
-      throw invalid_rawiv_header(
-          std::format("RawIV format only supports 1 timestep ({} requested)", numTimesteps));
+      throw invalid_rawiv_header("RawIV format only supports 1 timestep (" +
+                                 std::to_string(numTimesteps) + " requested)");
     }
     if (voxelTypes.size() > 1)
       throw invalid_rawiv_header(

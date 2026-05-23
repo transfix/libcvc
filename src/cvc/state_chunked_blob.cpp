@@ -10,6 +10,7 @@
 
 #include <cstring>
 #include <cvc/state_chunked_blob.h>
+#include <stdexcept>
 
 namespace CVC_NAMESPACE {
 

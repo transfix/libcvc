@@ -37,7 +37,6 @@
 #include <cvc/endians.h>
 #include <cvc/volmagick.h>
 #include <errno.h>
-#include <format>
 
 #ifdef __WINDOWS__
 #define SNPRINTF _snprintf
@@ -268,15 +267,27 @@ void writevtk(const char *filename, const DataInfo &di, const FLOAT *dataPtr,
   }
   unsigned long nMem = di.n[0] * di.n[1] * di.n[2];
   fputs("# vtk DataFile Version 3.0\n", fd);
-  fputs(std::format("created by levelSet (Ojaswa Sharma). Zero level: {:f}\n", value_increment)
-            .c_str(),
-        fd);
+  {
+    char _buf[128];
+    SNPRINTF(_buf, sizeof(_buf), "created by levelSet (Ojaswa Sharma). Zero level: %f\n",
+             value_increment);
+    fputs(_buf, fd);
+  }
   fputs("BINARY\n", fd);
   fputs("DATASET STRUCTURED_POINTS\n", fd);
-  fputs(std::format("DIMENSIONS {} {} {}\n", di.n[0], di.n[1], di.n[2]).c_str(), fd);
+  {
+    char _buf[128];
+    SNPRINTF(_buf, sizeof(_buf), "DIMENSIONS %lu %lu %lu\n", (unsigned long)di.n[0],
+             (unsigned long)di.n[1], (unsigned long)di.n[2]);
+    fputs(_buf, fd);
+  }
   fputs("ORIGIN 0.000000 0.000000 0.000000\n", fd);
   fputs("SPACING 1.000000 1.000000 1.000000\n", fd);
-  fputs(std::format("POINT_DATA {}\n", nMem).c_str(), fd);
+  {
+    char _buf[64];
+    SNPRINTF(_buf, sizeof(_buf), "POINT_DATA %lu\n", (unsigned long)nMem);
+    fputs(_buf, fd);
+  }
   fputs("SCALARS image_data unsigned_short\n", fd);
   fputs("LOOKUP_TABLE default\n", fd);
   unsigned short dataval;
