@@ -107,6 +107,56 @@ private:
   std::uint64_t _bytes_stored;
 };
 
+// ----------------
+// cvc::file_state_blob_store
+// ----------------
+// Purpose:
+//   Filesystem-backed content-addressed blob store. Blobs are stored
+//   as individual files under a root directory using a git-style
+//   two-character prefix layout:
+//
+//     <root>/ab/cdef0123456789...
+//
+//   The file name is the full SHA-256 hex digest. The first two
+//   characters form a subdirectory to avoid very large directories.
+//
+//   On construction the store scans the root directory and populates
+//   an in-memory index of known digests and sizes. All I/O is
+//   synchronous; gets read from disk on every call (no in-memory
+//   cache beyond the index). Callers that need a read cache should
+//   layer a memory_state_blob_store in front.
+//
+// Threading:
+//   Thread-safe. All public methods may be called concurrently.
+//
+class file_state_blob_store : public state_blob_store {
+public:
+  // Construct with `root_dir` as the storage directory. Creates it
+  // (and parents) if it does not exist.
+  explicit file_state_blob_store(const std::string &root_dir);
+  ~file_state_blob_store() override;
+
+  state_blob_ref put(const std::vector<unsigned char> &bytes,
+                     const std::string &codec = std::string()) override;
+  bool get(const std::string &digest, std::vector<unsigned char> &out) const override;
+  bool has(const std::string &digest) const override;
+  bool erase(const std::string &digest) override;
+  std::size_t size() const override;
+  std::uint64_t bytes_stored() const override;
+  std::vector<std::string> digests() const override;
+
+  const std::string &root_dir() const noexcept { return _root_dir; }
+
+private:
+  std::string blob_path(const std::string &digest) const;
+  void scan_directory();
+
+  std::string _root_dir;
+  mutable std::mutex _mutex;
+  std::unordered_map<std::string, std::uint64_t> _index; // digest -> size
+  std::uint64_t _bytes_stored;
+};
+
 } // namespace CVC_NAMESPACE
 
 #endif // __CVC_STATE_BLOB_STORE_H__

@@ -46,6 +46,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_data_hydrator.h
   ../../inc/cvc/state_node_telemetry.h
   ../../inc/cvc/state_telemetry_aggregator.h
+  ../../inc/cvc/state_cluster_membership.h
   ../../inc/cvc/state_hybrid_time.h
   ../../inc/cvc/state_hash_partition.h
   ../../inc/cvc/distributed_state_session.h
@@ -106,6 +107,7 @@ set(SOURCE_FILES
   state_data_hydrator.cpp
   state_node_telemetry.cpp
   state_telemetry_aggregator.cpp
+  state_cluster_membership.cpp
   distributed_state_session.cpp
   state_message.cpp
   utility.cpp

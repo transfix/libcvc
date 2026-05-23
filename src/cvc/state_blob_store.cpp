@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/state_blob_store.h>
+#include <filesystem>
+#include <fstream>
 
 namespace CVC_NAMESPACE {
 
@@ -190,6 +192,132 @@ std::vector<std::string> memory_state_blob_store::digests() const {
   std::vector<std::string> out;
   out.reserve(_blobs.size());
   for (const auto &kv : _blobs)
+    out.push_back(kv.first);
+  return out;
+}
+
+// ---------------- file_state_blob_store ----------------
+
+file_state_blob_store::file_state_blob_store(const std::string &root_dir)
+    : _root_dir(root_dir), _bytes_stored(0) {
+  namespace fs = std::filesystem;
+  fs::create_directories(_root_dir);
+  scan_directory();
+}
+
+file_state_blob_store::~file_state_blob_store() = default;
+
+std::string file_state_blob_store::blob_path(const std::string &digest) const {
+  // git-style two-character prefix: <root>/ab/cdef0123...
+  if (digest.size() < 3)
+    return _root_dir + "/" + digest;
+  return _root_dir + "/" + digest.substr(0, 2) + "/" + digest.substr(2);
+}
+
+void file_state_blob_store::scan_directory() {
+  namespace fs = std::filesystem;
+  if (!fs::exists(_root_dir))
+    return;
+  for (auto &prefix_entry : fs::directory_iterator(_root_dir)) {
+    if (!prefix_entry.is_directory())
+      continue;
+    auto prefix = prefix_entry.path().filename().string();
+    if (prefix.size() != 2)
+      continue;
+    for (auto &blob_entry : fs::directory_iterator(prefix_entry.path())) {
+      if (!blob_entry.is_regular_file())
+        continue;
+      auto suffix = blob_entry.path().filename().string();
+      auto digest = prefix + suffix;
+      auto sz = static_cast<std::uint64_t>(blob_entry.file_size());
+      _index.emplace(digest, sz);
+      _bytes_stored += sz;
+    }
+  }
+}
+
+state_blob_ref file_state_blob_store::put(const std::vector<unsigned char> &bytes,
+                                          const std::string &codec) {
+  namespace fs = std::filesystem;
+  std::string digest = sha256_hex(bytes);
+
+  std::lock_guard<std::mutex> lk(_mutex);
+  if (_index.find(digest) == _index.end()) {
+    auto path = blob_path(digest);
+    fs::create_directories(fs::path(path).parent_path());
+
+    // Write to a temp file first, then rename for atomicity.
+    auto tmp = path + ".tmp";
+    {
+      std::ofstream out(tmp, std::ios::binary);
+      if (!out)
+        throw std::runtime_error("file_state_blob_store: cannot write " + tmp);
+      out.write(reinterpret_cast<const char *>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    fs::rename(tmp, path);
+
+    _index.emplace(digest, bytes.size());
+    _bytes_stored += bytes.size();
+  }
+
+  state_blob_ref ref;
+  ref.digest = digest;
+  ref.size_bytes = bytes.size();
+  ref.codec = codec;
+  return ref;
+}
+
+bool file_state_blob_store::get(const std::string &digest, std::vector<unsigned char> &out) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  if (_index.find(digest) == _index.end())
+    return false;
+
+  auto path = blob_path(digest);
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in)
+    return false;
+  auto sz = static_cast<std::size_t>(in.tellg());
+  in.seekg(0);
+  out.resize(sz);
+  in.read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(sz));
+  return true;
+}
+
+bool file_state_blob_store::has(const std::string &digest) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _index.find(digest) != _index.end();
+}
+
+bool file_state_blob_store::erase(const std::string &digest) {
+  namespace fs = std::filesystem;
+  std::lock_guard<std::mutex> lk(_mutex);
+  auto it = _index.find(digest);
+  if (it == _index.end())
+    return false;
+  _bytes_stored -= it->second;
+  _index.erase(it);
+  auto path = blob_path(digest);
+  std::error_code ec;
+  fs::remove(path, ec);
+  return true;
+}
+
+std::size_t file_state_blob_store::size() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _index.size();
+}
+
+std::uint64_t file_state_blob_store::bytes_stored() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _bytes_stored;
+}
+
+std::vector<std::string> file_state_blob_store::digests() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  std::vector<std::string> out;
+  out.reserve(_index.size());
+  for (const auto &kv : _index)
     out.push_back(kv.first);
   return out;
 }

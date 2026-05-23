@@ -20,6 +20,7 @@ add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_distributed_admin_test state_distributed_admin_test.cpp)
+add_executable(state_cluster_membership_test state_cluster_membership_test.cpp)
 add_executable(state_distributed_bench_test state_distributed_bench_test.cpp)
 add_executable(state_message_test state_message_test.cpp)
 add_executable(state_bounded_queue_test state_bounded_queue_test.cpp)
@@ -48,6 +49,7 @@ add_executable(state_brick_manifest_test state_brick_manifest_test.cpp)
 add_executable(state_data_hydrator_test state_data_hydrator_test.cpp)
 add_executable(state_node_telemetry_test state_node_telemetry_test.cpp)
 add_executable(state_telemetry_aggregator_test state_telemetry_aggregator_test.cpp)
+add_executable(file_state_blob_store_test file_state_blob_store_test.cpp)
 add_executable(distributed_state_session_test distributed_state_session_test.cpp)
 add_executable(state_large_tree_bench_test state_large_tree_bench_test.cpp)
 add_executable(state_hash_partition_test state_hash_partition_test.cpp)
@@ -57,6 +59,7 @@ add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
 add_executable(state_zstd_round_trip_test state_zstd_round_trip_test.cpp)
 add_executable(state_session_status_test state_session_status_test.cpp)
 if(NOT WIN32)
+  add_executable(state_multiprocess_ipc_test state_multiprocess_ipc_test.cpp)
   add_executable(state_snapshot_protocol_test state_snapshot_protocol_test.cpp)
 endif()
 if(CVC_ENABLE_GRPC)
@@ -104,6 +107,8 @@ set(TEST_TARGETS
   state_data_hydrator_test
   state_node_telemetry_test
   state_telemetry_aggregator_test
+  state_cluster_membership_test
+  file_state_blob_store_test
   distributed_state_session_test
   voxels_test
   volume_test
@@ -318,6 +323,13 @@ target_link_libraries(state_distributed_admin_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_cluster_membership_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_distributed_bench_test
   PRIVATE
     cvc
@@ -494,6 +506,13 @@ target_link_libraries(state_delta_codec_test
     GTest::gtest_main
 )
 
+target_link_libraries(file_state_blob_store_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(distributed_state_session_test
   PRIVATE
     cvc
@@ -551,6 +570,12 @@ target_link_libraries(state_session_status_test
 )
 
 if(NOT WIN32)
+  target_link_libraries(state_multiprocess_ipc_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
   target_link_libraries(state_snapshot_protocol_test
     PRIVATE
       cvc
@@ -598,6 +623,7 @@ target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_admin_test PRIVATE cxx_std_17)
+target_compile_features(state_cluster_membership_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_message_test PRIVATE cxx_std_17)
 target_compile_features(state_bounded_queue_test PRIVATE cxx_std_17)
@@ -625,6 +651,7 @@ target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
 target_compile_features(state_data_hydrator_test PRIVATE cxx_std_17)
 target_compile_features(state_node_telemetry_test PRIVATE cxx_std_17)
 target_compile_features(state_telemetry_aggregator_test PRIVATE cxx_std_17)
+target_compile_features(file_state_blob_store_test PRIVATE cxx_std_17)
 target_compile_features(distributed_state_session_test PRIVATE cxx_std_17)
 target_compile_features(state_large_tree_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_hash_partition_test PRIVATE cxx_std_17)
@@ -634,6 +661,7 @@ target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
 target_compile_features(state_zstd_round_trip_test PRIVATE cxx_std_17)
 target_compile_features(state_session_status_test PRIVATE cxx_std_17)
 if(NOT WIN32)
+  target_compile_features(state_multiprocess_ipc_test PRIVATE cxx_std_17)
   target_compile_features(state_snapshot_protocol_test PRIVATE cxx_std_17)
 endif()
 
@@ -706,6 +734,7 @@ gtest_discover_tests(state_write_policy_test)
 gtest_discover_tests(state_distributed_metrics_test)
 gtest_discover_tests(state_delegation_manager_test)
 gtest_discover_tests(state_distributed_admin_test)
+gtest_discover_tests(state_cluster_membership_test)
 gtest_discover_tests(state_distributed_bench_test)
 gtest_discover_tests(state_message_test)
 gtest_discover_tests(state_bounded_queue_test)
@@ -733,6 +762,7 @@ gtest_discover_tests(state_brick_manifest_test)
 gtest_discover_tests(state_data_hydrator_test)
 gtest_discover_tests(state_node_telemetry_test)
 gtest_discover_tests(state_telemetry_aggregator_test)
+gtest_discover_tests(file_state_blob_store_test)
 gtest_discover_tests(distributed_state_session_test)
 gtest_discover_tests(state_large_tree_bench_test)
 gtest_discover_tests(state_hash_partition_test)
@@ -742,6 +772,7 @@ gtest_discover_tests(state_conflict_ring_test)
 gtest_discover_tests(state_zstd_round_trip_test)
 gtest_discover_tests(state_session_status_test)
 if(NOT WIN32)
+  gtest_discover_tests(state_multiprocess_ipc_test)
   gtest_discover_tests(state_snapshot_protocol_test)
 endif()
 if(TARGET state_transport_grpc_test)
