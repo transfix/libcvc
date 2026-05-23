@@ -91,11 +91,14 @@ struct distributed_state_config {
   std::string tls_server_key_pem;
   std::string tls_root_ca_pem;
   bool tls_require_client_auth = false;
+  bool require_tls = false; // when true, session throws if TLS certs are missing
   std::string auth_expected_token;
   std::string auth_outbound_token;
 
   // Tuning.
   std::uint32_t max_inline_payload_bytes = 65536;
+  std::string blob_store_path; // empty = memory-only blob store
+  bool snapshot_on_join = false; // request full snapshot from first seed on join
 
   std::uint32_t pump_interval_ms = 10; // background pump loop interval (0 = no pump thread)
 };

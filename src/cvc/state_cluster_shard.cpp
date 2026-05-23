@@ -217,6 +217,25 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
     return r;
   }
 
+  // Hash-partition enforcement: when enabled, reject mutations
+  // whose path hashes to a node other than this one. This
+  // prevents a shard from accumulating data it should not own.
+  bool enforce_part;
+  {
+    std::lock_guard<std::mutex> lk(_mutex);
+    enforce_part = _enforce_partition;
+  }
+  if (enforce_part && _partition.size() > 0) {
+    std::string owner = _partition.owner_of(m.path);
+    if (!owner.empty() && owner != _local_node_id) {
+      r.rejected = true;
+      r.reject_reason =
+          "path '" + m.path + "' partitioned to node '" + owner + "', not '" + _local_node_id + "'";
+      _ctr_partition_rejected.fetch_add(1, std::memory_order_relaxed);
+      return r;
+    }
+  }
+
   // Optional authority enforcement: a path that resolves to an
   // authority entry whose cluster_id differs from this shard's
   // cluster_id is rejected.
@@ -301,6 +320,11 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
   (void)_replica->seen(m.origin_node_id, m.sequence, /*record*/ true);
   _replica->observe_remote(m.origin_node_id, m.sequence);
 
+  // Merge the remote HLC timestamp into our local clock so our
+  // next outbound mutation will be causally after this one.
+  if (m.hlc_time != 0)
+    _clock.update(hybrid_time::from_packed(m.hlc_time));
+
   if (conflict_lost) {
     _ctr_conflicts_lost.fetch_add(1, std::memory_order_relaxed);
     // Mark as seen but do not apply.
@@ -340,6 +364,10 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     // the wire so peers can route by cluster_id.
     if (m.cluster_id.empty())
       m.cluster_id = _cluster_id;
+    // Stamp HLC time on outbound mutations so receivers can merge
+    // causal ordering via their own hybrid_clock::update().
+    if (m.hlc_time == 0)
+      m.hlc_time = _clock.now().packed();
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
       break;
@@ -484,6 +512,16 @@ void state_cluster_shard::set_enforce_interest(bool enforce) noexcept {
 bool state_cluster_shard::enforce_interest() const noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   return _enforce_interest;
+}
+
+void state_cluster_shard::set_enforce_partition(bool enforce) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _enforce_partition = enforce;
+}
+
+bool state_cluster_shard::enforce_partition() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _enforce_partition;
 }
 
 void state_cluster_shard::set_transport(state_transport *t) noexcept {

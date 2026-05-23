@@ -125,6 +125,10 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
+          - name: libcvc-debug-grpc
+            kind: libcvc
+            build_type: Debug
+            enable_grpc: true
           - name: volrover3-debug
             kind: volrover3
             build_type: Debug
@@ -166,6 +170,10 @@ jobs:
             libmagick++-dev libcgal-dev liblog4cplus-dev
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
             sudo apt-get install -y --no-install-recommends lcov
+          fi
+          if [ "${{ matrix.enable_grpc }}" = "true" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
           fi
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
@@ -292,6 +300,10 @@ jobs:
               coverage=ON
             fi
           fi
+          grpc=OFF
+          if [ "${{ matrix.enable_grpc }}" = "true" ]; then
+            grpc=ON
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
@@ -302,7 +314,8 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_ENABLE_GRPC=$grpc
 
       - name: Build
         run: cmake --build build --parallel

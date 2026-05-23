@@ -117,6 +117,12 @@ public:
   // Shut down server, cancel all client streams, join reader threads.
   void stop();
 
+  // Heartbeat interval. When non-zero, a background thread sends
+  // Heartbeat frames to all connections at this cadence. Default 0
+  // (disabled).
+  void set_heartbeat_interval(std::chrono::milliseconds interval) noexcept;
+  std::chrono::milliseconds heartbeat_interval() const noexcept;
+
   // Blob store for servicing inbound chunk requests and for local
   // lookup before sending outbound requests.
   void set_blob_store(state_blob_store *store) noexcept { _blob_store = store; }
@@ -131,6 +137,8 @@ public:
   std::size_t pump_all() override;
   void flush() override;
   bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) override;
+  bool request_snapshot(const std::string &cluster_id, const std::string &path_prefix,
+                        snapshot_callback on_entries) override;
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -166,6 +174,11 @@ public:
                                 std::uint64_t request_id);
   void on_inbound_chunk_response(std::uint64_t request_id, bool found,
                                  std::vector<unsigned char> data);
+  void on_inbound_snapshot_request(connection *conn, const std::string &cluster_id,
+                                   const std::string &path_prefix, std::uint64_t request_id);
+  void on_inbound_snapshot_response(std::uint64_t request_id,
+                                    const std::vector<snapshot_entry> &entries, bool final);
+  void on_inbound_heartbeat(const std::string &node_id, const std::string &cluster_id);
   void register_connection(std::shared_ptr<connection> conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
@@ -213,6 +226,21 @@ private:
     std::vector<unsigned char> data;
   };
   std::unordered_map<std::uint64_t, std::shared_ptr<chunk_waiter>> _chunk_waiters;
+
+  // Snapshot request/response tracking.
+  std::atomic<std::uint64_t> _next_snap_req_id{1};
+  mutable std::mutex _snap_waiters_mu;
+  std::condition_variable _snap_waiters_cv;
+  struct snap_waiter {
+    bool done = false;
+    std::vector<snapshot_entry> entries;
+  };
+  std::unordered_map<std::uint64_t, std::shared_ptr<snap_waiter>> _snap_waiters;
+
+  // Heartbeat sender.
+  std::chrono::milliseconds _heartbeat_interval{0};
+  std::thread _heartbeat_thread;
+  void heartbeat_loop();
 };
 
 } // namespace CVC_NAMESPACE

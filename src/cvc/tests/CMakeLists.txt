@@ -48,6 +48,15 @@ add_executable(state_brick_manifest_test state_brick_manifest_test.cpp)
 add_executable(state_data_hydrator_test state_data_hydrator_test.cpp)
 add_executable(distributed_state_session_test distributed_state_session_test.cpp)
 add_executable(state_large_tree_bench_test state_large_tree_bench_test.cpp)
+add_executable(state_hash_partition_test state_hash_partition_test.cpp)
+add_executable(state_hybrid_time_test state_hybrid_time_test.cpp)
+add_executable(state_brick_frustum_test state_brick_frustum_test.cpp)
+add_executable(state_conflict_ring_test state_conflict_ring_test.cpp)
+add_executable(state_zstd_round_trip_test state_zstd_round_trip_test.cpp)
+add_executable(state_session_status_test state_session_status_test.cpp)
+if(NOT WIN32)
+  add_executable(state_snapshot_protocol_test state_snapshot_protocol_test.cpp)
+endif()
 if(CVC_ENABLE_GRPC)
   add_executable(state_transport_grpc_test state_transport_grpc_test.cpp)
 endif()
@@ -481,6 +490,57 @@ target_link_libraries(state_large_tree_bench_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_hash_partition_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_hybrid_time_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_brick_frustum_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_conflict_ring_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_zstd_round_trip_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_session_status_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+if(NOT WIN32)
+  target_link_libraries(state_snapshot_protocol_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
+
 if(TARGET state_transport_grpc_test)
   target_link_libraries(state_transport_grpc_test
     PRIVATE
@@ -547,6 +607,15 @@ target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
 target_compile_features(state_data_hydrator_test PRIVATE cxx_std_17)
 target_compile_features(distributed_state_session_test PRIVATE cxx_std_17)
 target_compile_features(state_large_tree_bench_test PRIVATE cxx_std_17)
+target_compile_features(state_hash_partition_test PRIVATE cxx_std_17)
+target_compile_features(state_hybrid_time_test PRIVATE cxx_std_17)
+target_compile_features(state_brick_frustum_test PRIVATE cxx_std_17)
+target_compile_features(state_conflict_ring_test PRIVATE cxx_std_17)
+target_compile_features(state_zstd_round_trip_test PRIVATE cxx_std_17)
+target_compile_features(state_session_status_test PRIVATE cxx_std_17)
+if(NOT WIN32)
+  target_compile_features(state_snapshot_protocol_test PRIVATE cxx_std_17)
+endif()
 
 # Only build HDF5-dependent tests when HDF5 support is enabled
 if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
@@ -644,6 +713,15 @@ gtest_discover_tests(state_brick_manifest_test)
 gtest_discover_tests(state_data_hydrator_test)
 gtest_discover_tests(distributed_state_session_test)
 gtest_discover_tests(state_large_tree_bench_test)
+gtest_discover_tests(state_hash_partition_test)
+gtest_discover_tests(state_hybrid_time_test)
+gtest_discover_tests(state_brick_frustum_test)
+gtest_discover_tests(state_conflict_ring_test)
+gtest_discover_tests(state_zstd_round_trip_test)
+gtest_discover_tests(state_session_status_test)
+if(NOT WIN32)
+  gtest_discover_tests(state_snapshot_protocol_test)
+endif()
 if(TARGET state_transport_grpc_test)
   gtest_discover_tests(state_transport_grpc_test)
 endif()

@@ -17,6 +17,8 @@
 #include <cvc/state_change_journal.h>
 #include <cvc/state_codec_registry.h>
 #include <cvc/state_delegation_manager.h>
+#include <cvc/state_hash_partition.h>
+#include <cvc/state_hybrid_time.h>
 #include <cvc/state_message.h>
 #include <cvc/state_message_bus.h>
 #include <cvc/state_replica.h>
@@ -96,6 +98,14 @@ public:
   state_codec_registry &codecs() noexcept { return *_codecs; }
   state_message_bus &message_bus() noexcept { return *_message_bus; }
   state_write_policy &write_policy() noexcept { return *_write_policy; }
+  hybrid_clock &clock() noexcept { return _clock; }
+  state_hash_partition &partition() noexcept { return _partition; }
+  const state_hash_partition &partition() const noexcept { return _partition; }
+
+  // When true and the partition map is non-empty, ingest_remote()
+  // rejects mutations whose path hashes to a different node_id.
+  void set_enforce_partition(bool enforce) noexcept;
+  bool enforce_partition() const noexcept;
 
   // Wire up adapter observers and start journaling local changes.
   void attach();
@@ -360,6 +370,7 @@ private:
   std::atomic<std::uint64_t> _ctr_delegations_applied{0};
   std::atomic<std::uint64_t> _ctr_revocations_applied{0};
   std::atomic<std::uint64_t> _ctr_remote_filtered_out{0};
+  std::atomic<std::uint64_t> _ctr_partition_rejected{0};
 
   // Inbound interest filter.
   std::vector<std::string> _interests;
@@ -368,6 +379,9 @@ private:
   // Phase 8 slice 2.
   state_transport *_transport = nullptr;
   app *_app_ctx = nullptr; // captured at construction for default_for()
+  hybrid_clock _clock;
+  state_hash_partition _partition;
+  bool _enforce_partition = false;
 };
 
 } // namespace CVC_NAMESPACE

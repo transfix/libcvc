@@ -30,6 +30,7 @@ namespace {
 
 constexpr std::uint32_t kMagic = 0x43564354u; // 'CVCT'
 constexpr std::uint16_t kVersion = 1;
+constexpr std::uint16_t kMaxVersion = 1;  // highest version we understand
 constexpr std::uint16_t kMsgHello = 1;
 constexpr std::uint16_t kMsgMutation = 2;
 constexpr std::uint16_t kMsgOob = 3;
@@ -485,7 +486,7 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
     std::uint16_t version = hr.u16();
     std::uint16_t mtype = hr.u16();
     std::uint32_t len = hr.u32();
-    if (magic != kMagic || version != kVersion || len > kMaxFrameBytes)
+    if (magic != kMagic || version > kMaxVersion || len > kMaxFrameBytes)
       break;
 
     std::vector<unsigned char> body(len);
@@ -493,6 +494,12 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       break;
 
     _recv_frames.fetch_add(1, std::memory_order_relaxed);
+
+    // Skip unknown message types instead of disconnecting, so that
+    // older nodes can coexist with newer nodes that send new frame
+    // types.
+    if (mtype > kMsgSnapRsp && mtype != kMsgHello)
+      continue;
 
     if (mtype == kMsgHello) {
       reader br(body.data(), body.size());

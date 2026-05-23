@@ -76,8 +76,16 @@ public:
     std::uint32_t h = hash(path);
     std::lock_guard<std::mutex> lk(_mu);
     for (const auto &r : _ranges) {
-      if (h >= r.range_begin && h < r.range_end)
-        return r.node_id;
+      // range_end == 0 means the range wraps the full 32-bit space
+      // (UINT32_MAX + 1 overflowed to 0). Treat as "covers everything
+      // from range_begin onward".
+      if (r.range_end == 0) {
+        if (h >= r.range_begin)
+          return r.node_id;
+      } else {
+        if (h >= r.range_begin && h < r.range_end)
+          return r.node_id;
+      }
     }
     return {};
   }

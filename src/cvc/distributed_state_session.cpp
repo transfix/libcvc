@@ -55,6 +55,11 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
   }
   case transport_kind::grpc: {
 #ifdef CVC_ENABLE_GRPC
+    if (config.require_tls &&
+        (config.tls_server_cert_pem.empty() || config.tls_server_key_pem.empty())) {
+      throw std::runtime_error(
+          "distributed_state_session: require_tls is true but TLS certificate/key not provided");
+    }
     auto grpc = std::make_unique<state_transport_grpc>();
     // Apply TLS / auth config if provided.
     if (!config.tls_server_cert_pem.empty() || !config.tls_root_ca_pem.empty()) {
@@ -141,6 +146,25 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
   // 10. Attach shard (start observing state changes).
   session->_shard->attach();
   session->_shard->install_as_default();
+
+  // 10b. Request initial snapshot from first seed if configured.
+  if (config.snapshot_on_join && !config.seeds.empty()) {
+    session->_transport->request_snapshot(
+        config.cluster_id, config.root_path,
+        [&session](const std::vector<state_transport::snapshot_entry> &entries, bool /*final*/) {
+          for (const auto &e : entries) {
+            state_mutation m;
+            m.cluster_id = session->_config.cluster_id;
+            m.origin_node_id = e.origin_node_id;
+            m.sequence = e.sequence;
+            m.path = e.path;
+            m.op = state_mutation_op::set_value;
+            m.string_value = e.string_value;
+            m.type_name = e.type_name;
+            session->_shard->ingest_remote(m);
+          }
+        });
+  }
 
   // 11. Start pump thread.
   session->_running.store(true, std::memory_order_release);
