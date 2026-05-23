@@ -196,6 +196,8 @@ private:
   std::unique_ptr<state_distributed_admin> _admin;
   std::unique_ptr<state_data_hydrator> _hydrator;
 
+  app *_app_ctx = nullptr;
+
   std::thread _pump_thread;
   std::atomic<bool> _running{false};
   std::atomic<std::uint64_t> _pump_cycles{0};

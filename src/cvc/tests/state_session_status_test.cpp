@@ -12,6 +12,7 @@
 #include <cvc/app.h>
 #include <cvc/distributed_state_session.h>
 #include <cvc/state.h>
+#include <cvc/state_distributed_metrics.h>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -98,5 +99,57 @@ TEST_F(StateSessionStatusTest, ShardAndTransportAccessible) {
   EXPECT_EQ(shard.cluster_id(), "test_cluster");
   auto &transport = session->transport();
   (void)transport;
+  session->stop();
+}
+
+TEST_F(StateSessionStatusTest, ConflictAutoPublish) {
+  // Create a session with resolve_conflicts enabled.
+  distributed_state_config config;
+  config.cluster_id = "test_cluster";
+  config.node_id = "node_A";
+  config.transport = transport_kind::inproc;
+  config.pump_interval_ms = 1; // fast pump for test
+  config.resolve_conflicts = true;
+  auto session = distributed_state_session::join(ctx, config);
+
+  // Inject two conflicting mutations. Inject winner (higher
+  // lexicographic node_id) first, then the loser. The ring buffer
+  // records the loser arrival.
+  cvc::state_mutation m1;
+  m1.cluster_id = "test_cluster";
+  m1.origin_node_id = "node_Z";
+  m1.sequence = 10;
+  m1.path = "conflict.key";
+  m1.string_value = "winner";
+  m1.type_name = "std::string";
+  m1.op = cvc::state_mutation_op::set_value;
+  session->shard().ingest_remote(m1);
+
+  cvc::state_mutation m2;
+  m2.cluster_id = "test_cluster";
+  m2.origin_node_id = "node_B";
+  m2.sequence = 10;
+  m2.path = "conflict.key";
+  m2.string_value = "loser";
+  m2.type_name = "std::string";
+  m2.op = cvc::state_mutation_op::set_value;
+  session->shard().ingest_remote(m2);
+
+  EXPECT_GT(session->shard().total_conflicts_detected(), 0u);
+
+  // Let pump run enough cycles for auto-publish (every 100 cycles).
+  // At 1ms interval, 100 cycles ≈ 100ms. Wait generously for CI.
+  for (int i = 0; i < 50; ++i) {
+    auto s = session->status();
+    if (s.pump_cycles >= 110)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  // Verify conflict metrics appear in the state tree.
+  std::string prefix = "__system.distributed.test_cluster.conflicts.recent.0.path";
+  std::string val = cvc::state::instance(ctx)(prefix).value();
+  EXPECT_EQ(val, "conflict.key");
+
   session->stop();
 }

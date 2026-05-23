@@ -368,6 +368,16 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     // causal ordering via their own hybrid_clock::update().
     if (m.hlc_time == 0)
       m.hlc_time = _clock.now().packed();
+    // Offload large values to the blob store when a threshold is set.
+    if (_blob_store && _max_inline_payload_bytes > 0 &&
+        m.op == state_mutation_op::set_value &&
+        m.payload.kind == state_payload_kind::none &&
+        m.string_value.size() > _max_inline_payload_bytes) {
+      std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
+      state_blob_ref ref = _blob_store->put(bytes, m.type_name);
+      m.string_value.clear();
+      m.payload = state_payload::blob_ref(ref);
+    }
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
       break;
@@ -522,6 +532,23 @@ void state_cluster_shard::set_enforce_partition(bool enforce) noexcept {
 bool state_cluster_shard::enforce_partition() const noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   return _enforce_partition;
+}
+
+void state_cluster_shard::set_blob_store(state_blob_store *store) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _blob_store = store;
+}
+
+state_blob_store *state_cluster_shard::blob_store() const noexcept {
+  return _blob_store;
+}
+
+void state_cluster_shard::set_max_inline_payload_bytes(std::uint32_t bytes) noexcept {
+  _max_inline_payload_bytes = bytes;
+}
+
+std::uint32_t state_cluster_shard::max_inline_payload_bytes() const noexcept {
+  return _max_inline_payload_bytes;
 }
 
 void state_cluster_shard::set_transport(state_transport *t) noexcept {

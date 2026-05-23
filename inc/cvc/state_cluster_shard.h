@@ -17,6 +17,7 @@
 #include <cvc/state_change_journal.h>
 #include <cvc/state_codec_registry.h>
 #include <cvc/state_delegation_manager.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_hash_partition.h>
 #include <cvc/state_hybrid_time.h>
 #include <cvc/state_message.h>
@@ -101,6 +102,14 @@ public:
   hybrid_clock &clock() noexcept { return _clock; }
   state_hash_partition &partition() noexcept { return _partition; }
   const state_hash_partition &partition() const noexcept { return _partition; }
+
+  // Blob store and inline payload threshold. When both are set,
+  // drain_local() offloads mutation values larger than the threshold
+  // to the blob store and replaces the payload with a blob_ref.
+  void set_blob_store(state_blob_store *store) noexcept;
+  state_blob_store *blob_store() const noexcept;
+  void set_max_inline_payload_bytes(std::uint32_t bytes) noexcept;
+  std::uint32_t max_inline_payload_bytes() const noexcept;
 
   // When true and the partition map is non-empty, ingest_remote()
   // rejects mutations whose path hashes to a different node_id.
@@ -382,6 +391,9 @@ private:
   hybrid_clock _clock;
   state_hash_partition _partition;
   bool _enforce_partition = false;
+
+  state_blob_store *_blob_store = nullptr;
+  std::uint32_t _max_inline_payload_bytes = 0; // 0 = disabled
 };
 
 } // namespace CVC_NAMESPACE

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cvc/distributed_state_session.h>
 #include <cvc/state_data_hydrator.h>
+#include <cvc/state_distributed_metrics.h>
 #include <cvc/state_transport_inproc.h>
 #ifndef _WIN32
 #include <cvc/state_transport_ipc.h>
@@ -110,6 +111,8 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
   session->_shard->set_enforce_delegation(config.enforce_delegation);
   session->_shard->set_resolve_conflicts(config.resolve_conflicts);
   session->_shard->set_enforce_interest(config.enforce_interest);
+  session->_shard->set_blob_store(session->_blob_store.get());
+  session->_shard->set_max_inline_payload_bytes(config.max_inline_payload_bytes);
 
   // 6. Apply mounts.
   for (const auto &mount : config.mounts) {
@@ -167,6 +170,7 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
   }
 
   // 11. Start pump thread.
+  session->_app_ctx = &ctx;
   session->_running.store(true, std::memory_order_release);
   if (config.pump_interval_ms > 0) {
     session->_pump_thread = std::thread([session]() { session->pump_loop(); });
@@ -230,7 +234,11 @@ void distributed_state_session::pump_loop() {
   const auto interval = std::chrono::milliseconds(_config.pump_interval_ms);
   while (_running.load(std::memory_order_acquire)) {
     _transport->pump_all();
-    _pump_cycles.fetch_add(1, std::memory_order_relaxed);
+    auto cycles = _pump_cycles.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Periodically publish conflict metrics to the state tree.
+    if (_config.resolve_conflicts && _app_ctx && (cycles % 100) == 0) {
+      state_distributed_metrics::publish_conflicts(*_app_ctx, *_shard);
+    }
     std::this_thread::sleep_for(interval);
   }
   // Final drain.
