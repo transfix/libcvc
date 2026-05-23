@@ -15,7 +15,8 @@ Date: May 22, 2026
   - Subscription-collapse over N-link cycles: covered by `StateSyncAdapterLinkForwardingTest`.
   - `state_distributed_admin::link_cycles()` static cycle enumerator.
   - Slice 6: `state::resolveRemote(hop_budget)` — pull-on-demand remote link resolution composing with delegation + lease expiry. Cross-cluster link tests covering authority transfer, lease expiry invalidation, and sendMessage routing over transparent links without the caller naming a cluster_id.
-- Phase 7 (perf + production hardening) and Phase 9 (network analytics) are not started.
+- Phase 9 (network analytics & live telemetry) core delivered: `state_node_telemetry` (EWMA, latency histogram, JSON ser/deser, OOB publish), `state_telemetry_aggregator` (cluster rollups, stale detection, routing feedback), admin `to_text()` telemetry section. 31 tests across two new test suites. Remaining: 100-node bench, CBOR encoding, periodic auto-publish timer.
+- Phase 7 (perf + production hardening): admin telemetry integration delivered; production benchmarks, delta encoding, and zstd compression not started.
 
 ## Purpose
 
@@ -310,9 +311,16 @@ Remaining for Phase 8:
   - Cluster-agnostic API: `linkTo("data.world.geometry")` and `sendMessage(...)` on the link node must succeed when authority for `data.world.geometry` is local, when it has been delegated to a second cluster mid-test, and after authority moves back — the test never names a `cluster_id`. A regression that requires the caller to know the owning cluster fails this test.
   - Bench: 1M-path tree with 10k links, including a few cycles, and assert resolver/subscription latency stays bounded.
 
-### Phase 9: Network Analytics And Live Telemetry
+### Phase 9: Network Analytics And Live Telemetry (in progress)
 
 Each node needs a live picture of the cluster's health and shape so operators (and the system itself, for routing decisions) can answer questions like "how big is this tree, how fast can I move a blob to peer X, how many nodes are in cluster Y" without per-query polling. Analytics piggyback on the OOB messaging bus and the existing `state_distributed_metrics` module so they cost no extra connections.
+
+Delivered so far on `feature/phase9-telemetry`:
+
+- `state_node_telemetry` — per-node sampler with EWMA (configurable half-life), power-of-2 latency histogram (22 buckets, O(1) record, p50/p90/p99 queries), `telemetry_snapshot` POD struct (35+ fields covering counters, rates, latency percentiles, tree/cluster shape), `sample()` reads shard/transport/bus counters, `publish_snapshot()` serializes to JSON and publishes via OOB bus on `__telemetry.<cluster>.<node>` topic, JSON round-trip serialize/deserialize with no external dependency.
+- `state_telemetry_aggregator` — cluster-level rollup: subscribes to `__telemetry.<cluster_id>` on the OOB bus, ingests peer snapshots, computes `cluster_telemetry_summary` (aggregated counters, max latencies, summed rates), stale-peer detection (configurable threshold, default 5 s), `evaluate_routing_feedback(policy)` returning isolate/release node lists based on p99 latency and outbox drop thresholds, `to_text()` for human-readable dumps.
+- `state_distributed_admin` extensions — `attach_telemetry(state_telemetry_aggregator*)`, `telemetry()` accessor, `to_text()` now appends a `[telemetry]` section when an aggregator is attached.
+- Tests — 18 test cases in `state_node_telemetry_test` (EWMA, histogram, JSON round-trip, sampling, latency recording, rate computation, bus publish), 13 test cases in `state_telemetry_aggregator_test` (aggregation, stale detection, routing feedback, admin integration). All pass.
 
 - Per-node sampler (`state_node_telemetry`):
   - Counters and rolling EWMAs for: bytes-sent / bytes-received per peer and per transport; mutation publish rate; message admit/dedup/drop rates; bounded-queue depths and overflow events; blob bytes uploaded/downloaded with throughput EWMA.

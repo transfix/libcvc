@@ -24,6 +24,7 @@ class state_blob_store;
 class state_cluster_shard;
 class state_message_bus;
 class state_peer_registry;
+class state_telemetry_aggregator;
 
 // ----------------
 // cvc::state_distributed_admin
@@ -123,11 +124,13 @@ public:
   void attach_peer_registry(state_peer_registry *peers) noexcept;
   void attach_blob_store(state_blob_store *blobs) noexcept;
   void attach_message_bus(state_message_bus *bus) noexcept;
+  void attach_telemetry(state_telemetry_aggregator *tel) noexcept;
 
   state_cluster_shard *shard() const noexcept { return _shard; }
   state_peer_registry *peer_registry() const noexcept { return _peers; }
   state_blob_store *blob_store() const noexcept { return _blobs; }
   state_message_bus *message_bus() const noexcept { return _bus; }
+  state_telemetry_aggregator *telemetry() const noexcept { return _tel; }
 
   // Capture a coherent snapshot of all attached subsystems. Each
   // sub-snapshot is taken independently; callers should not assume
@@ -139,8 +142,9 @@ public:
   // stable. Detached subsystems are listed as "<name>: detached".
   static std::string to_text(const report &r);
 
-  // Convenience: snapshot() + to_text().
-  std::string to_text() const { return to_text(snapshot()); }
+  // Convenience: snapshot() + to_text(). If a telemetry
+  // aggregator is attached, its summary is appended.
+  std::string to_text() const;
 
   // Erase every blob in the attached blob store whose digest is NOT
   // in `live_digests`. Returns counts and bytes freed. If no blob
@@ -244,6 +248,7 @@ private:
   state_peer_registry *_peers = nullptr;
   state_blob_store *_blobs = nullptr;
   state_message_bus *_bus = nullptr;
+  state_telemetry_aggregator *_tel = nullptr;
 };
 
 } // namespace CVC_NAMESPACE
