@@ -46,6 +46,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_data_hydrator.h
   ../../inc/cvc/state_node_telemetry.h
   ../../inc/cvc/state_telemetry_aggregator.h
+  ../../inc/cvc/state_hybrid_time.h
+  ../../inc/cvc/state_hash_partition.h
+  ../../inc/cvc/distributed_state_session.h
   ../../inc/cvc/state_transport.h
   ../../inc/cvc/state_transport_inproc.h
   ../../inc/cvc/state_transport_ipc.h
@@ -103,6 +106,7 @@ set(SOURCE_FILES
   state_data_hydrator.cpp
   state_node_telemetry.cpp
   state_telemetry_aggregator.cpp
+  distributed_state_session.cpp
   state_message.cpp
   utility.cpp
   cuda_utils.cpp
@@ -831,6 +835,29 @@ if(CVC_ENABLE_FFTW)
     target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
   endforeach()
   target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+endif()
+
+# zstd compression (production compressor for distributed state).
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(ZSTD QUIET IMPORTED_TARGET libzstd)
+endif()
+if(NOT ZSTD_FOUND)
+  find_library(ZSTD_LIBRARIES NAMES zstd)
+  find_path(ZSTD_INCLUDE_DIRS NAMES zstd.h)
+  if(ZSTD_LIBRARIES AND ZSTD_INCLUDE_DIRS)
+    set(ZSTD_FOUND TRUE)
+  endif()
+endif()
+if(ZSTD_FOUND)
+  if(TARGET PkgConfig::ZSTD)
+    target_link_libraries(cvc PRIVATE PkgConfig::ZSTD)
+  else()
+    target_include_directories(cvc PRIVATE ${ZSTD_INCLUDE_DIRS})
+    target_link_libraries(cvc PRIVATE ${ZSTD_LIBRARIES})
+  endif()
+else()
+  message(WARNING "libzstd not found; zstd compression codec will not link")
 endif()
 
 # Link libraries

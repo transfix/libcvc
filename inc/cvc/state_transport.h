@@ -143,6 +143,38 @@ public:
     return n;
   }
 
+  // -------- Initial-sync snapshot protocol --------
+  //
+  // A snapshot entry represents one node's state.
+  struct snapshot_entry {
+    std::string path;
+    std::string string_value;
+    std::string comment;
+    bool hidden = false;
+    bool read_only = false;
+    std::string type_name;
+    std::string origin_node_id;
+    std::uint64_t sequence = 0;
+  };
+
+  // Callback invoked with batches of snapshot entries. `final` is
+  // true on the last invocation.
+  using snapshot_callback =
+      std::function<void(const std::vector<snapshot_entry> &entries, bool final)>;
+
+  // Request a snapshot of the remote peer's state tree rooted at
+  // `path_prefix` (empty = whole tree). The entries are delivered
+  // asynchronously via `on_entries`.
+  //
+  // Default returns false (not supported).
+  virtual bool request_snapshot(const std::string &cluster_id, const std::string &path_prefix,
+                                snapshot_callback on_entries) {
+    (void)cluster_id;
+    (void)path_prefix;
+    (void)on_entries;
+    return false;
+  }
+
 protected:
   state_peer_registry _peers;
 };

@@ -10,6 +10,8 @@
 
 #include <cvc/state_compression_registry.h>
 #include <stdexcept>
+#include <zstd.h>
+#include <zstd_errors.h>
 
 namespace CVC_NAMESPACE {
 
@@ -51,11 +53,67 @@ bool state_rle_compression_codec::decode(const std::vector<unsigned char> &in,
   return true;
 }
 
+// ---------- state_zstd_compression_codec ----------
+
+state_zstd_compression_codec::state_zstd_compression_codec(int compression_level)
+    : _level(compression_level) {}
+
+std::vector<unsigned char>
+state_zstd_compression_codec::encode(const std::vector<unsigned char> &in) const {
+  if (in.empty())
+    return {};
+  std::size_t bound = ZSTD_compressBound(in.size());
+  std::vector<unsigned char> out(bound);
+  std::size_t result = ZSTD_compress(out.data(), out.size(), in.data(), in.size(), _level);
+  if (ZSTD_isError(result))
+    return in; // fall back to uncompressed on error
+  out.resize(result);
+  return out;
+}
+
+bool state_zstd_compression_codec::decode(const std::vector<unsigned char> &in,
+                                          std::vector<unsigned char> &out) const {
+  out.clear();
+  if (in.empty())
+    return true;
+  unsigned long long decompressed_size = ZSTD_getFrameContentSize(in.data(), in.size());
+  if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN ||
+      decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+    // Unknown size — use a streaming heuristic: start at 4x compressed size.
+    std::size_t buf_size = in.size() * 4;
+    constexpr std::size_t max_buf = 256 * 1024 * 1024; // 256 MiB safety cap
+    while (buf_size <= max_buf) {
+      out.resize(buf_size);
+      std::size_t result = ZSTD_decompress(out.data(), out.size(), in.data(), in.size());
+      if (!ZSTD_isError(result)) {
+        out.resize(result);
+        return true;
+      }
+      if (ZSTD_getErrorCode(result) != ZSTD_error_dstSize_tooSmall) {
+        out.clear();
+        return false;
+      }
+      buf_size *= 2;
+    }
+    out.clear();
+    return false;
+  }
+  out.resize(static_cast<std::size_t>(decompressed_size));
+  std::size_t result = ZSTD_decompress(out.data(), out.size(), in.data(), in.size());
+  if (ZSTD_isError(result)) {
+    out.clear();
+    return false;
+  }
+  out.resize(result);
+  return true;
+}
+
 // ---------- state_compression_registry ----------
 
 state_compression_registry::state_compression_registry() {
   register_codec(std::make_shared<state_raw_compression_codec>());
   register_codec(std::make_shared<state_rle_compression_codec>());
+  register_codec(std::make_shared<state_zstd_compression_codec>());
 }
 
 void state_compression_registry::register_codec(std::shared_ptr<state_compression_codec> codec) {

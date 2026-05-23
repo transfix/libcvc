@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cvc/app.h>
 #include <cvc/state.h>
+#include <cvc/state_blob_store.h>
 #include <cvc/state_cluster_shard.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -471,4 +472,69 @@ TEST(StateClusterShardTest, DelegationRevocationRestoresLocal) {
   EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 1, "simulation.x", "v")).rejected);
   EXPECT_TRUE(sh.delegation().revoke("simulation"));
   EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 2, "simulation.x", "v")).applied);
+}
+
+TEST(StateClusterShardTest, InlinePayloadOffloadToBlobStore) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+
+  // Set up blob store and threshold.
+  cvc::memory_state_blob_store store;
+  sh.set_blob_store(&store);
+  sh.set_max_inline_payload_bytes(10); // offload values > 10 bytes
+
+  // Write a small value (should stay inline).
+  cvc::state::instance(a)("test.small").value(std::string("hi"));
+  cvc::state::instance(a)("test.small").value(std::string("hello")); // 5 bytes
+  auto drained = sh.drain_local();
+  bool found_small = false;
+  for (auto &m : drained) {
+    if (m.path == "test.small") {
+      found_small = true;
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
+      EXPECT_EQ(m.string_value, "hello");
+    }
+  }
+  EXPECT_TRUE(found_small);
+
+  // Write a large value (should be offloaded to blob store).
+  std::string big_value(200, 'X');
+  cvc::state::instance(a)("test.big").value(std::string("init"));
+  cvc::state::instance(a)("test.big").value(big_value);
+  auto drained2 = sh.drain_local();
+  bool found_big = false;
+  for (auto &m : drained2) {
+    if (m.path == "test.big") {
+      found_big = true;
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::blob);
+      EXPECT_TRUE(m.string_value.empty());
+      EXPECT_FALSE(m.payload.blob.digest.empty());
+      EXPECT_EQ(m.payload.blob.size_bytes, 200u);
+      // Verify we can retrieve the blob from the store.
+      std::vector<unsigned char> retrieved;
+      EXPECT_TRUE(store.get(m.payload.blob.digest, retrieved));
+      EXPECT_EQ(retrieved.size(), 200u);
+      EXPECT_EQ(retrieved, std::vector<unsigned char>(200, 'X'));
+    }
+  }
+  EXPECT_TRUE(found_big);
+}
+
+TEST(StateClusterShardTest, InlinePayloadOffloadDisabledByDefault) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+
+  // No blob store set — large values should stay inline.
+  std::string big_value(200, 'Y');
+  cvc::state::instance(a)("test.noblobstore").value(std::string("init"));
+  cvc::state::instance(a)("test.noblobstore").value(big_value);
+  auto drained = sh.drain_local();
+  for (auto &m : drained) {
+    if (m.path == "test.noblobstore") {
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
+      EXPECT_EQ(m.string_value, big_value);
+    }
+  }
 }
