@@ -130,7 +130,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev libcgal-dev liblog4cplus-dev
+            libmagick++-dev libcgal-dev liblog4cplus-dev libzstd-dev
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -486,14 +486,14 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus zstd
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal zstd
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
@@ -602,7 +602,7 @@ jobs:
             for dy in "$DIST"/lib/libcvc*.dylib; do
               [ -e "$dy" ] || continue
               [ -L "$dy" ] && continue
-              dylibbundler -od -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
+              dylibbundler -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
             done
           else
             # Static flavour: just copy the .a archives. No install_name
