@@ -121,6 +121,19 @@ public:
   bool decode(const std::vector<unsigned char> &in, std::vector<unsigned char> &out) const override;
 };
 
+// zstd compression codec (production-grade). Requires libzstd.
+class state_zstd_compression_codec : public state_compression_codec {
+public:
+  // compression_level: 1 (fastest) to 22 (best ratio); default 3.
+  explicit state_zstd_compression_codec(int compression_level = 3);
+  std::string id() const override { return "zstd"; }
+  std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override;
+  bool decode(const std::vector<unsigned char> &in, std::vector<unsigned char> &out) const override;
+
+private:
+  int _level;
+};
+
 } // namespace CVC_NAMESPACE
 
 #endif // __CVC_STATE_COMPRESSION_REGISTRY_H__

@@ -47,6 +47,7 @@ struct state_mutation {
   std::string tree_id;
   std::string origin_node_id;
   std::uint64_t sequence = 0;
+  std::uint64_t hlc_time = 0; // packed hybrid logical clock (0 = not set)
   std::string mutation_id;
   std::string path;
   state_mutation_op op = state_mutation_op::set_value;

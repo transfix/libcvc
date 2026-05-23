@@ -91,6 +91,7 @@ void encode_mutation(const state_mutation &m, pb::Mutation *out) {
   out->set_type_name(m.type_name);
   out->set_string_value(m.string_value);
   out->set_latest_value_only(m.latest_value_only);
+  out->set_hlc_time(m.hlc_time);
 
   pb::Payload *p = out->mutable_payload();
   switch (m.payload.kind) {
@@ -122,6 +123,7 @@ state_mutation decode_mutation(const pb::Mutation &in) {
   m.type_name = in.type_name();
   m.string_value = in.string_value();
   m.latest_value_only = in.latest_value_only();
+  m.hlc_time = in.hlc_time();
   if (in.has_payload()) {
     const auto &p = in.payload();
     switch (p.kind_case()) {
@@ -257,6 +259,37 @@ public:
       } else if (in.has_message()) {
         _owner->on_inbound_message(decode_message(in.message()));
         _owner->increment_recv_messages();
+      } else if (in.has_chunk_request()) {
+        _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
+                                         in.chunk_request().request_id());
+      } else if (in.has_chunk_response()) {
+        const auto &cr = in.chunk_response();
+        std::string data_str = cr.data();
+        std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
+        _owner->on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
+      } else if (in.has_snapshot_request()) {
+        _owner->on_inbound_snapshot_request(conn.get(), in.snapshot_request().cluster_id(),
+                                            in.snapshot_request().path_prefix(),
+                                            in.snapshot_request().request_id());
+      } else if (in.has_snapshot_response()) {
+        const auto &sr = in.snapshot_response();
+        std::vector<state_transport::snapshot_entry> entries;
+        entries.reserve(sr.entries_size());
+        for (const auto &e : sr.entries()) {
+          state_transport::snapshot_entry se;
+          se.path = e.path();
+          se.string_value = e.string_value();
+          se.comment = e.comment();
+          se.hidden = e.hidden();
+          se.read_only = e.read_only();
+          se.type_name = e.type_name();
+          se.origin_node_id = e.origin_node_id();
+          se.sequence = e.sequence();
+          entries.push_back(std::move(se));
+        }
+        _owner->on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
+      } else if (in.has_heartbeat()) {
+        _owner->on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
 
@@ -334,6 +367,19 @@ void state_transport_grpc::start(const std::string &listen_addr, const std::stri
     _impl->listen_addr_resolved = listen_addr;
 
   _running.store(true);
+
+  // Start heartbeat sender if configured.
+  if (_heartbeat_interval.count() > 0) {
+    _heartbeat_thread = std::thread([this]() { heartbeat_loop(); });
+  }
+}
+
+void state_transport_grpc::set_heartbeat_interval(std::chrono::milliseconds interval) noexcept {
+  _heartbeat_interval = interval;
+}
+
+std::chrono::milliseconds state_transport_grpc::heartbeat_interval() const noexcept {
+  return _heartbeat_interval;
 }
 
 std::string state_transport_grpc::listen_address() const {
@@ -412,6 +458,37 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       } else if (in.has_message()) {
         on_inbound_message(decode_message(in.message()));
         increment_recv_messages();
+      } else if (in.has_chunk_request()) {
+        on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
+                                 in.chunk_request().request_id());
+      } else if (in.has_chunk_response()) {
+        const auto &cr = in.chunk_response();
+        std::string data_str = cr.data();
+        std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
+        on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
+      } else if (in.has_snapshot_request()) {
+        on_inbound_snapshot_request(conn.get(), in.snapshot_request().cluster_id(),
+                                    in.snapshot_request().path_prefix(),
+                                    in.snapshot_request().request_id());
+      } else if (in.has_snapshot_response()) {
+        const auto &sr = in.snapshot_response();
+        std::vector<snapshot_entry> entries;
+        entries.reserve(sr.entries_size());
+        for (const auto &e : sr.entries()) {
+          snapshot_entry se;
+          se.path = e.path();
+          se.string_value = e.string_value();
+          se.comment = e.comment();
+          se.hidden = e.hidden();
+          se.read_only = e.read_only();
+          se.type_name = e.type_name();
+          se.origin_node_id = e.origin_node_id();
+          se.sequence = e.sequence();
+          entries.push_back(std::move(se));
+        }
+        on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
+      } else if (in.has_heartbeat()) {
+        on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
     conn->alive.store(false);
@@ -443,6 +520,9 @@ void state_transport_grpc::stop() {
     _impl->server->Wait();
     _impl->server.reset();
   }
+
+  if (_heartbeat_thread.joinable())
+    _heartbeat_thread.join();
 
   for (auto &c : conns) {
     if (c->client_reader.joinable())
@@ -707,6 +787,262 @@ std::uint64_t state_transport_grpc::wait_for_received_messages(std::uint64_t tar
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return _recv_messages.load();
+}
+
+void state_transport_grpc::on_inbound_chunk_request(connection *conn, const std::string &digest,
+                                                    std::uint64_t request_id) {
+  pb::Frame f;
+  auto *rsp = f.mutable_chunk_response();
+  rsp->set_digest(digest);
+  rsp->set_request_id(request_id);
+  if (_blob_store) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(digest, bytes)) {
+      rsp->set_found(true);
+      rsp->set_data(std::string(bytes.begin(), bytes.end()));
+    } else {
+      rsp->set_found(false);
+    }
+  } else {
+    rsp->set_found(false);
+  }
+  if (conn && conn->alive.load() && conn->write_fn) {
+    conn->write_fn(f);
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void state_transport_grpc::on_inbound_chunk_response(std::uint64_t request_id, bool found,
+                                                     std::vector<unsigned char> data) {
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    auto it = _chunk_waiters.find(request_id);
+    if (it != _chunk_waiters.end()) {
+      it->second->found = found;
+      it->second->data = std::move(data);
+      it->second->done = true;
+    }
+  }
+  _chunk_waiters_cv.notify_all();
+}
+
+bool state_transport_grpc::fetch_chunk(const std::string &digest, chunk_callback on_chunk) {
+  if (digest.empty())
+    return false;
+
+  // Try local blob store first.
+  if (_blob_store) {
+    std::vector<unsigned char> bytes;
+    if (_blob_store->get(digest, bytes)) {
+      if (on_chunk)
+        on_chunk(digest, bytes);
+      return true;
+    }
+  }
+
+  // Ask connected peers.
+  std::uint64_t req_id = _next_chunk_req_id.fetch_add(1, std::memory_order_relaxed);
+  auto waiter = std::make_shared<chunk_waiter>();
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters[req_id] = waiter;
+  }
+
+  pb::Frame frame;
+  auto *req = frame.mutable_chunk_request();
+  req->set_digest(digest);
+  req->set_request_id(req_id);
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t sent = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->write_fn)
+      continue;
+    if (c->write_fn(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++sent;
+    }
+  }
+
+  bool result = false;
+  if (sent > 0) {
+    std::unique_lock<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters_cv.wait_for(lk, std::chrono::seconds(10), [&]() { return waiter->done; });
+    if (waiter->done && waiter->found) {
+      if (on_chunk)
+        on_chunk(digest, waiter->data);
+      result = true;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(_chunk_waiters_mu);
+    _chunk_waiters.erase(req_id);
+  }
+  return result;
+}
+
+void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
+                                                       const std::string &cluster_id,
+                                                       const std::string &path_prefix,
+                                                       std::uint64_t request_id) {
+  // Gather entries from all local shards matching the cluster.
+  std::vector<state_cluster_shard *> peers;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    for (auto *s : _shards)
+      if (s && s->cluster_id() == cluster_id)
+        peers.push_back(s);
+  }
+
+  std::vector<snapshot_entry> all;
+  for (auto *peer : peers) {
+    auto snap = peer->snapshot(path_prefix);
+    for (auto &se : snap) {
+      snapshot_entry te;
+      te.path = std::move(se.path);
+      te.string_value = std::move(se.string_value);
+      te.comment = std::move(se.comment);
+      te.hidden = se.hidden;
+      te.read_only = se.read_only;
+      te.type_name = std::move(se.type_name);
+      te.origin_node_id = std::move(se.origin_node_id);
+      te.sequence = se.sequence;
+      all.push_back(std::move(te));
+    }
+  }
+
+  // Build response frame.
+  pb::Frame f;
+  auto *rsp = f.mutable_snapshot_response();
+  rsp->set_request_id(request_id);
+  rsp->set_final(true);
+  for (const auto &e : all) {
+    auto *pe = rsp->add_entries();
+    pe->set_path(e.path);
+    pe->set_string_value(e.string_value);
+    pe->set_comment(e.comment);
+    pe->set_hidden(e.hidden);
+    pe->set_read_only(e.read_only);
+    pe->set_type_name(e.type_name);
+    pe->set_origin_node_id(e.origin_node_id);
+    pe->set_sequence(e.sequence);
+  }
+
+  if (conn && conn->alive.load() && conn->write_fn) {
+    conn->write_fn(f);
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id,
+                                                        const std::vector<snapshot_entry> &entries,
+                                                        bool final) {
+  {
+    std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+    auto it = _snap_waiters.find(request_id);
+    if (it != _snap_waiters.end()) {
+      for (const auto &e : entries)
+        it->second->entries.push_back(e);
+      if (final)
+        it->second->done = true;
+    }
+  }
+  if (final)
+    _snap_waiters_cv.notify_all();
+}
+
+void state_transport_grpc::on_inbound_heartbeat(const std::string &node_id,
+                                                const std::string & /*cluster_id*/) {
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  _peers.note_seen(node_id, static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()));
+}
+
+bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
+                                            const std::string &path_prefix,
+                                            snapshot_callback on_entries) {
+  std::uint64_t req_id = _next_snap_req_id.fetch_add(1, std::memory_order_relaxed);
+  auto waiter = std::make_shared<snap_waiter>();
+  {
+    std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters[req_id] = waiter;
+  }
+
+  pb::Frame frame;
+  auto *req = frame.mutable_snapshot_request();
+  req->set_cluster_id(cluster_id);
+  req->set_path_prefix(path_prefix);
+  req->set_request_id(req_id);
+
+  // Send to first alive connection.
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t sent = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->write_fn)
+      continue;
+    if (c->write_fn(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++sent;
+      break; // only need one peer
+    }
+  }
+
+  bool result = false;
+  if (sent > 0) {
+    std::unique_lock<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters_cv.wait_for(lk, std::chrono::seconds(30), [&]() { return waiter->done; });
+    if (waiter->done) {
+      if (on_entries)
+        on_entries(waiter->entries, true);
+      result = true;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(_snap_waiters_mu);
+    _snap_waiters.erase(req_id);
+  }
+  return result;
+}
+
+void state_transport_grpc::heartbeat_loop() {
+  while (_running.load()) {
+    auto sleep_end = std::chrono::steady_clock::now() + _heartbeat_interval;
+    while (_running.load() && std::chrono::steady_clock::now() < sleep_end)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!_running.load())
+      break;
+
+    pb::Frame frame;
+    auto *hb = frame.mutable_heartbeat();
+    hb->set_node_id(_node_id);
+    hb->set_cluster_id(_cluster_id);
+    hb->set_timestamp_ns(
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count()));
+
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    for (auto &c : conns) {
+      if (!c || !c->alive.load() || !c->write_fn)
+        continue;
+      if (c->write_fn(frame))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 } // namespace CVC_NAMESPACE

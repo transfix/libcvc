@@ -656,3 +656,112 @@ TEST(StateTransportGrpcPhase5, TlsHandshakeRoundTrip) {
   tA.stop();
   tB.stop();
 }
+
+// ---------------------------------------------------------------
+// Reconnect / resilience tests for the gRPC transport.
+// ---------------------------------------------------------------
+
+TEST(StateTransportGrpcReconnectTest, StopRestartReconnect) {
+  cvc::app aA, aB;
+
+  auto tA = std::make_unique<cvc::state_transport_grpc>();
+  cvc::state_transport_grpc tB;
+  tA->start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  auto addrB = tB.listen_address();
+  ASSERT_TRUE(tA->connect_to_peer(addrB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(*tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA->register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // Phase 1: replicate a value.
+  cvc::state::instance(aA)("k").value(std::string("seed"));
+  cvc::state::instance(aA)("k").value(std::string("v1"));
+  tA->pump_all();
+  tA->flush();
+  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1");
+
+  // Phase 2: stop A's transport (simulate restart).
+  tA->unregister_shard(&sA);
+  tA->stop();
+  tA.reset();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Phase 3: restart A, reconnect to B.
+  tA = std::make_unique<cvc::state_transport_grpc>();
+  tA->start("127.0.0.1:0", "A", "C");
+  ASSERT_TRUE(tA->connect_to_peer(addrB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(*tA, tB, std::chrono::milliseconds(2000)));
+  tA->register_shard(&sA);
+
+  // Phase 4: replicate after reconnect.
+  cvc::state::instance(aA)("k").value(std::string("v2_after_reconnect"));
+  tA->pump_all();
+  tA->flush();
+  tB.wait_for_received(2, std::chrono::milliseconds(2000));
+  EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v2_after_reconnect");
+
+  tA->stop();
+  tB.stop();
+}
+
+TEST(StateTransportGrpcReconnectTest, PeerDisconnectNoHang) {
+  cvc::app aA, aB;
+
+  cvc::state_transport_grpc tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("x").value(std::string("seed"));
+  cvc::state::instance(aA)("x").value(std::string("v1"));
+  tA.pump_all();
+  tA.flush();
+  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_EQ(cvc::state::instance(aB)("x").value(), "v1");
+
+  // B goes away.
+  tB.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // A can still pump without crashing.
+  cvc::state::instance(aA)("x").value(std::string("v2"));
+  EXPECT_NO_THROW(tA.pump_all());
+  EXPECT_NO_THROW(tA.flush());
+
+  tA.stop();
+}
+
+TEST(StateTransportGrpcReconnectTest, ConnectionCountTracking) {
+  cvc::state_transport_grpc tA, tB;
+  EXPECT_EQ(tA.connection_count(), 0u);
+
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  EXPECT_EQ(tA.connection_count(), 0u);
+
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+  EXPECT_GE(tA.connection_count(), 1u);
+  EXPECT_GE(tB.connection_count(), 1u);
+
+  tB.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_NO_THROW(tA.connection_count());
+
+  tA.stop();
+}

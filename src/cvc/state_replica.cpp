@@ -151,6 +151,12 @@ state_replica::compare_clocks(const std::unordered_map<std::string, std::uint64_
 }
 
 bool state_replica::should_replace(const state_mutation &current, const state_mutation &incoming) {
+  // If both carry HLC timestamps, prefer the later one. Break ties
+  // with the existing (origin_node_id, sequence) total order.
+  if (current.hlc_time != 0 && incoming.hlc_time != 0) {
+    if (incoming.hlc_time != current.hlc_time)
+      return incoming.hlc_time > current.hlc_time;
+  }
   if (incoming.origin_node_id == current.origin_node_id)
     return incoming.sequence > current.sequence;
   // Different origins: lexicographic origin then sequence.
