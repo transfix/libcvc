@@ -601,7 +601,7 @@ option(CVC_ENABLE_FFTW "Enable FFTW support for filtered back-projection in volu
 if(CVC_ENABLE_FFTW)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
-    pkg_check_modules(FFTW3 QUIET fftw3)
+    pkg_check_modules(FFTW3 QUIET IMPORTED_TARGET fftw3)
     # pkg_check_modules sets <prefix>_LIBRARIES to bare `-l` names and puts
     # full paths in <prefix>_LINK_LIBRARIES. Prefer the full-path form so
     # the linker doesn't need a separate -L for Homebrew etc.
@@ -826,17 +826,27 @@ if(CVC_ENABLE_IMAGEMAGICK)
   foreach(_im_inc IN LISTS ImageMagick_INCLUDE_DIRS)
     target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_im_inc}>")
   endforeach()
-  target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
+  # Link via imported targets when available (config-mode from libcvc-deps),
+  # otherwise fall back to the raw library paths from FindImageMagick.
+  if(TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore)
+    target_link_libraries(cvc PUBLIC ImageMagick::Magick++ ImageMagick::MagickCore)
+  else()
+    target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
+  endif()
 endif()
 
 # FFTW linking
 if(CVC_ENABLE_FFTW)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_FFTW)
   # Same BUILD_INTERFACE wrapping rationale as the ImageMagick block above.
-  foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
-    target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
-  endforeach()
-  target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+  if(TARGET PkgConfig::FFTW3)
+    target_link_libraries(cvc PUBLIC PkgConfig::FFTW3)
+  else()
+    foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
+      target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
+    endforeach()
+    target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+  endif()
 endif()
 
 # zstd compression (production compressor for distributed state).
