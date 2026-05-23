@@ -140,6 +140,20 @@ bool state_cluster_shard::resolve_conflicts() const noexcept {
   return _resolve_conflicts;
 }
 
+std::vector<state_cluster_shard::conflict_entry>
+state_cluster_shard::recent_conflicts(std::size_t max_entries) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  std::size_t n = std::min(max_entries, _conflict_ring.size());
+  std::vector<conflict_entry> out;
+  out.reserve(n);
+  // Walk backwards from the write cursor to get most-recent-first.
+  for (std::size_t i = 0; i < n; ++i) {
+    std::size_t idx = (_conflict_ring_pos + _conflict_ring.size() - 1 - i) % _conflict_ring.size();
+    out.push_back(_conflict_ring[idx]);
+  }
+  return out;
+}
+
 void state_cluster_shard::set_enforce_delegation(bool enforce) noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   _enforce_delegation = enforce;
@@ -200,6 +214,25 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
     r.reject_reason = "path '" + m.path + "' outside local interest set";
     _ctr_remote_filtered_out.fetch_add(1, std::memory_order_relaxed);
     return r;
+  }
+
+  // Hash-partition enforcement: when enabled, reject mutations
+  // whose path hashes to a node other than this one. This
+  // prevents a shard from accumulating data it should not own.
+  bool enforce_part;
+  {
+    std::lock_guard<std::mutex> lk(_mutex);
+    enforce_part = _enforce_partition;
+  }
+  if (enforce_part && _partition.size() > 0) {
+    std::string owner = _partition.owner_of(m.path);
+    if (!owner.empty() && owner != _local_node_id) {
+      r.rejected = true;
+      r.reject_reason =
+          "path '" + m.path + "' partitioned to node '" + owner + "', not '" + _local_node_id + "'";
+      _ctr_partition_rejected.fetch_add(1, std::memory_order_relaxed);
+      return r;
+    }
   }
 
   // Optional authority enforcement: a path that resolves to an
@@ -267,6 +300,16 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
       _ctr_conflicts_detected.fetch_add(1, std::memory_order_relaxed);
       if (!state_replica::should_replace(it->second, m)) {
         conflict_lost = true;
+        // Record conflict detail in ring buffer.
+        if (_conflict_ring.size() < kMaxConflictRing)
+          _conflict_ring.push_back({});
+        auto &e = _conflict_ring[_conflict_ring_pos % kMaxConflictRing];
+        e.path = m.path;
+        e.winner_node_id = it->second.origin_node_id;
+        e.winner_sequence = it->second.sequence;
+        e.loser_node_id = m.origin_node_id;
+        e.loser_sequence = m.sequence;
+        _conflict_ring_pos = (_conflict_ring_pos + 1) % kMaxConflictRing;
       }
     }
   }
@@ -274,6 +317,11 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
   // Record before applying so a re-entrant signal cannot double-apply.
   (void)_replica->seen(m.origin_node_id, m.sequence, /*record*/ true);
   _replica->observe_remote(m.origin_node_id, m.sequence);
+
+  // Merge the remote HLC timestamp into our local clock so our
+  // next outbound mutation will be causally after this one.
+  if (m.hlc_time != 0)
+    _clock.update(hybrid_time::from_packed(m.hlc_time));
 
   if (conflict_lost) {
     _ctr_conflicts_lost.fetch_add(1, std::memory_order_relaxed);
@@ -314,6 +362,19 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     // the wire so peers can route by cluster_id.
     if (m.cluster_id.empty())
       m.cluster_id = _cluster_id;
+    // Stamp HLC time on outbound mutations so receivers can merge
+    // causal ordering via their own hybrid_clock::update().
+    if (m.hlc_time == 0)
+      m.hlc_time = _clock.now().packed();
+    // Offload large values to the blob store when a threshold is set.
+    if (_blob_store && _max_inline_payload_bytes > 0 && m.op == state_mutation_op::set_value &&
+        m.payload.kind == state_payload_kind::none &&
+        m.string_value.size() > _max_inline_payload_bytes) {
+      std::vector<unsigned char> bytes(m.string_value.begin(), m.string_value.end());
+      state_blob_ref ref = _blob_store->put(bytes, m.type_name);
+      m.string_value.clear();
+      m.payload = state_payload::blob_ref(ref);
+    }
     out.push_back(std::move(m));
     if (max_count != 0 && out.size() >= max_count)
       break;
@@ -460,6 +521,31 @@ bool state_cluster_shard::enforce_interest() const noexcept {
   return _enforce_interest;
 }
 
+void state_cluster_shard::set_enforce_partition(bool enforce) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _enforce_partition = enforce;
+}
+
+bool state_cluster_shard::enforce_partition() const noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _enforce_partition;
+}
+
+void state_cluster_shard::set_blob_store(state_blob_store *store) noexcept {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _blob_store = store;
+}
+
+state_blob_store *state_cluster_shard::blob_store() const noexcept { return _blob_store; }
+
+void state_cluster_shard::set_max_inline_payload_bytes(std::uint32_t bytes) noexcept {
+  _max_inline_payload_bytes = bytes;
+}
+
+std::uint32_t state_cluster_shard::max_inline_payload_bytes() const noexcept {
+  return _max_inline_payload_bytes;
+}
+
 void state_cluster_shard::set_transport(state_transport *t) noexcept {
   std::lock_guard<std::mutex> lk(_mutex);
   _transport = t;
@@ -546,6 +632,27 @@ state_cluster_shard::send_message_result state_cluster_shard::send_message(state
   r.peers_delivered = ps.delivered;
   r.peers_targeted = ps.peers;
   return r;
+}
+
+std::vector<state_cluster_shard::snapshot_entry>
+state_cluster_shard::snapshot(const std::string &path_prefix) const {
+  std::vector<snapshot_entry> result;
+  if (!_app_ctx)
+    return result;
+
+  // Start at root (or prefix).
+  auto &root = state::instance(*_app_ctx)(path_prefix);
+  root.traverse([&](std::string child_path) {
+    auto &node = state::instance(*_app_ctx)(child_path);
+    snapshot_entry e;
+    e.path = child_path;
+    e.string_value = node.value();
+    e.comment = node.comment();
+    e.hidden = node.hidden();
+    e.read_only = node.readOnly();
+    result.push_back(std::move(e));
+  });
+  return result;
 }
 
 } // namespace CVC_NAMESPACE

@@ -65,6 +65,11 @@ struct state_distributed_metrics {
   //   __system.distributed.<cluster_id>.<key>
   static void write_u64(app &ctx, const std::string &cluster_id, const std::string &key,
                         std::uint64_t value);
+
+  // Publish the conflict ring buffer entries under
+  //   __system.distributed.<cluster_id>.conflicts.recent.<index>.*
+  // Returns the number of entries written.
+  static std::size_t publish_conflicts(app &ctx, const state_cluster_shard &shard);
 };
 
 } // namespace CVC_NAMESPACE

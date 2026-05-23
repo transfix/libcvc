@@ -51,4 +51,28 @@ std::size_t state_distributed_metrics::publish_transport_inproc(app &ctx,
   return 3;
 }
 
+std::size_t state_distributed_metrics::publish_conflicts(app &ctx,
+                                                         const state_cluster_shard &shard) {
+  auto entries = shard.recent_conflicts(32);
+  const std::string &cid = shard.cluster_id();
+  std::size_t n = 0;
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    auto prefix = "conflicts.recent." + std::to_string(i);
+    try {
+      std::string base = "__system.distributed.";
+      base += cid.empty() ? "_unset_" : cid;
+      base += '.';
+      base += prefix;
+      state::instance(ctx)(base + ".path").value(entries[i].path);
+      state::instance(ctx)(base + ".winner_node").value(entries[i].winner_node_id);
+      state::instance(ctx)(base + ".winner_seq").value<std::uint64_t>(entries[i].winner_sequence);
+      state::instance(ctx)(base + ".loser_node").value(entries[i].loser_node_id);
+      state::instance(ctx)(base + ".loser_seq").value<std::uint64_t>(entries[i].loser_sequence);
+      ++n;
+    } catch (...) {
+    }
+  }
+  return n;
+}
+
 } // namespace CVC_NAMESPACE

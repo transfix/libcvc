@@ -12,11 +12,13 @@
 #define __CVC_DISTRIBUTED_STATE_SESSION_H__
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cvc/namespace.h>
 #include <cvc/state_blob_store.h>
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_compression_registry.h>
+#include <cvc/state_data_hydrator.h>
 #include <cvc/state_distributed_admin.h>
 #include <cvc/state_transport.h>
 #include <cvc/state_transport_inproc.h>
@@ -84,7 +86,32 @@ struct distributed_state_config {
   bool resolve_conflicts = false;
   bool enforce_interest = false;
 
+  // TLS / auth (gRPC only — ignored for inproc / ipc).
+  std::string tls_server_cert_pem;
+  std::string tls_server_key_pem;
+  std::string tls_root_ca_pem;
+  bool tls_require_client_auth = false;
+  bool require_tls = false; // when true, session throws if TLS certs are missing
+  std::string auth_expected_token;
+  std::string auth_outbound_token;
+
+  // Tuning.
+  std::uint32_t max_inline_payload_bytes = 65536;
+  std::string blob_store_path;   // empty = memory-only blob store
+  bool snapshot_on_join = false; // request full snapshot from first seed on join
+
   std::uint32_t pump_interval_ms = 10; // background pump loop interval (0 = no pump thread)
+};
+
+// ----------------
+// Snapshot of current replica health.
+// ----------------
+struct replica_status {
+  bool running = false;
+  std::size_t peer_count = 0;
+  std::uint64_t local_sequence = 0;
+  std::uint64_t pump_cycles = 0;
+  std::uint64_t pending_hydrations = 0;
 };
 
 // ----------------
@@ -138,6 +165,16 @@ public:
   state_transport &transport() noexcept { return *_transport; }
   state_blob_store &blob_store() noexcept { return *_blob_store; }
   state_distributed_admin &admin() noexcept { return *_admin; }
+  state_data_hydrator &hydrator() noexcept { return *_hydrator; }
+
+  // Wait until the blob at `path` has been hydrated, or timeout
+  // expires. Returns the hydration status.
+  state_data_hydrator::hydration_status
+  wait_for_data(const std::string &path,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
+
+  // Get a snapshot of the replica health.
+  replica_status status() const;
 
   // Diagnostics.
   const std::string &cluster_id() const noexcept { return _config.cluster_id; }
@@ -157,6 +194,9 @@ private:
   std::unique_ptr<state_transport> _transport;
   std::unique_ptr<memory_state_blob_store> _blob_store;
   std::unique_ptr<state_distributed_admin> _admin;
+  std::unique_ptr<state_data_hydrator> _hydrator;
+
+  app *_app_ctx = nullptr;
 
   std::thread _pump_thread;
   std::atomic<bool> _running{false};
