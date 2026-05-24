@@ -70,6 +70,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_exec/async_evaluator.h
   ../../inc/cvc/state_exec/async_stackless_evaluator.h
   ../../inc/cvc/state_exec/state_value_codec.h
+  ../../inc/cvc/state_exec/process.h
+  ../../inc/cvc/state_exec/memory_tracker.h
+  ../../inc/cvc/state_exec/scheduler.h
+  ../../inc/cvc/state_exec/async_scheduler.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
@@ -106,6 +110,10 @@ set(SOURCE_FILES
   state_exec/async_evaluator.cpp
   state_exec/async_stackless_evaluator.cpp
   state_exec/state_value_codec.cpp
+  state_exec/process.cpp
+  state_exec/memory_tracker.cpp
+  state_exec/scheduler.cpp
+  state_exec/async_scheduler.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
   state_sync_adapter.cpp

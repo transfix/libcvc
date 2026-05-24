@@ -50,13 +50,18 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 **Phase 3 test total: 59**
 
-### Phase 4: Scheduler + Resource Limits — NOT STARTED
+### Phase 4: Scheduler + Resource Limits — COMPLETE ✅
 
-- Process abstraction and lifecycle management
-- Per-process memory tracking (`memory_tracker`)
-- Time limit, message limit, step limit enforcement
-- Sync and async schedulers with scheduling policies
-- Process forking (§4.16)
+| Component | Header | Tests |
+|---|---|---|
+| `process` + `process_status` | `process.h` | 5 |
+| `memory_tracker` | `memory_tracker.h` | 11 |
+| `scheduler` (sync) | `scheduler.h` | 55 |
+| `async_scheduler` | `async_scheduler.h` | 18 |
+| Cross-scheduler consistency | — | 2 |
+| Scheduler policy tests | — | 2 |
+
+**Phase 4 test total: 93**
 
 ### Phase 5: State Integration + Intrinsics — NOT STARTED
 

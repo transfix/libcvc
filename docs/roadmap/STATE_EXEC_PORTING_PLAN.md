@@ -2224,20 +2224,31 @@ Map per category:
 
 #### Phase 4: Scheduler + Resource Limits
 
-13. **`process`** struct and `process_status` enum.
-14. **`memory_tracker`** — Per-process memory accounting.  Tracks allocations
-    in `value_t` operations, checks against `max_memory` at step boundaries.
-15. **Time limit enforcement** — `max_time` field on process, elapsed-time
+13. ✅ **`process`** struct and `process_status` enum.  Process struct with
+    PID, name, status, priority, uid/gid, resource limits, evaluator state,
+    timing, signal handlers, message tracking, and fork support.
+    *(5 tests passing)*
+14. ✅ **`memory_tracker`** — Per-process memory accounting.  Tracks writes,
+    deletes, overwrites, ownership transfer, release, and fork.
+    *(11 tests passing)*
+15. ✅ **Time limit enforcement** — `max_time` field on process, elapsed-time
     tracking (paused time excluded), `time_limit_exceeded` kill at step
     boundary.  `set_max_time()` API.
-16. **Message limit enforcement** — `max_messages` field on process,
-    `message_count` incrementing on every outbound message operation,
-    `message_limit_exceeded` kill at step boundary.  `set_max_messages()` API.
-17. **`scheduler`** (sync) — Process management, scheduling policies, signal
-    handling, stepping, memory/time/message limit enforcement, process
-    forking.  Port ~80 scheduler tests + new limit + fork tests.
-18. **`async_scheduler`** — Async variant.  Port ~25 async scheduler tests.
+    *(included in scheduler tests)*
+16. ✅ **Message limit enforcement** — `max_messages` field on process,
+    `message_count` tracking, `message_limit_exceeded` kill at step
+    boundary.  `set_max_messages()` API.
+    *(included in scheduler tests)*
+17. ✅ **`scheduler`** (sync) — Process management, three scheduling policies
+    (round_robin, priority, priority_rr), signal handling (SIGKILL +
+    user signals with save/restore), stepping, resource limit enforcement
+    (max_steps, max_time, max_memory, max_messages), process forking.
+    *(55 tests passing)*
+18. ✅ **`async_scheduler`** — Async variant with coroutine `step()` and
+    `run()`, sync wrappers.  Same semantics as sync scheduler.
+    *(18 tests passing)*
 19. **Scheduler serialization** — To/from state tree and JSON.
+    *(deferred to Phase 5 — requires state integration)*
 
 #### Phase 5: State Integration + Intrinsics + Messaging + Expiry + Stdlib + Data Objects
 
