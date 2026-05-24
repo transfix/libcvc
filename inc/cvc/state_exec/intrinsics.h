@@ -11,7 +11,6 @@
 #define CVC_STATE_EXEC_INTRINSICS_H
 
 #include <cvc/state_exec/types.h>
-
 #include <functional>
 #include <memory>
 #include <string>
@@ -40,14 +39,14 @@ struct process;
 ///     removes it from its map (e.g. after a kill); this prevents
 ///     dangling-pointer bugs on map rehash or process removal.
 struct intrinsics_context {
-    scheduler*                  sched    = nullptr;   // Non-owning; outlives context
-    cvc::state*                 root     = nullptr;   // Non-owning; app-scoped lifetime
-    memory_tracker*             tracker  = nullptr;   // Non-owning; scheduler member
-    std::shared_ptr<process>    proc;                 // Shared with scheduler
-    int                         pid      = -1;        // Current process PID
-    std::string                 uid;                  // Process user identity
-    std::string                 cluster_id;           // Cluster identity
-    std::string                 node_id;              // Node identity
+  scheduler *sched = nullptr;        // Non-owning; outlives context
+  cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
+  memory_tracker *tracker = nullptr; // Non-owning; scheduler member
+  std::shared_ptr<process> proc;     // Shared with scheduler
+  int pid = -1;                      // Current process PID
+  std::string uid;                   // Process user identity
+  std::string cluster_id;            // Cluster identity
+  std::string node_id;               // Node identity
 };
 
 /// Register all DSL intrinsics into an environment.
@@ -55,7 +54,7 @@ struct intrinsics_context {
 /// The context pointer must remain valid for the lifetime of any evaluation
 /// that uses the returned environment.  Typically, the scheduler creates one
 /// context per process and injects intrinsics before execution begins.
-void register_intrinsics(environment_ptr env, intrinsics_context* ctx);
+void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 } // namespace cvc::state_exec
 

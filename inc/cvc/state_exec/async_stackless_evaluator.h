@@ -12,7 +12,6 @@
 
 #include <cvc/state_exec/stackless_evaluator.h>
 #include <cvc/state_exec/task.h>
-
 #include <functional>
 #include <optional>
 #include <string>
@@ -33,41 +32,36 @@ namespace cvc::state_exec {
 ///   - `(await expr)` form adds `await_result` phase
 class async_stackless_evaluator {
 public:
-    explicit async_stackless_evaluator(environment_ptr global_env);
+  explicit async_stackless_evaluator(environment_ptr global_env);
 
-    /// Create a fresh evaluator_state (delegates to inner evaluator).
-    evaluator_state create_state(const value_t& expr,
-                                 environment_ptr env = nullptr);
-    evaluator_state create_state(const std::string& script,
-                                 environment_ptr env = nullptr);
+  /// Create a fresh evaluator_state (delegates to inner evaluator).
+  evaluator_state create_state(const value_t &expr, environment_ptr env = nullptr);
+  evaluator_state create_state(const std::string &script, environment_ptr env = nullptr);
 
-    /// Single step as a coroutine — yields after the step.
-    task<bool> step(evaluator_state& state);
+  /// Single step as a coroutine — yields after the step.
+  task<bool> step(evaluator_state &state);
 
-    /// Run until done/limits as a coroutine — yields between steps.
-    task<value_t> run(evaluator_state& state,
-                      std::optional<uint64_t> max_steps = std::nullopt,
-                      std::optional<double> timeout_sec = std::nullopt,
-                      std::function<void(const value_t&)> on_complete = nullptr);
+  /// Run until done/limits as a coroutine — yields between steps.
+  task<value_t> run(evaluator_state &state, std::optional<uint64_t> max_steps = std::nullopt,
+                    std::optional<double> timeout_sec = std::nullopt,
+                    std::function<void(const value_t &)> on_complete = nullptr);
 
-    /// Blocking convenience wrappers.
-    value_t sync_evaluate(const value_t& expr,
-                          environment_ptr env = nullptr,
-                          std::optional<double> timeout_sec = std::nullopt,
-                          std::function<void(const value_t&)> on_complete = nullptr);
-    value_t sync_evaluate_script(const std::string& script,
-                                 environment_ptr env = nullptr,
-                                 std::optional<double> timeout_sec = std::nullopt,
-                                 std::function<void(const value_t&)> on_complete = nullptr);
+  /// Blocking convenience wrappers.
+  value_t sync_evaluate(const value_t &expr, environment_ptr env = nullptr,
+                        std::optional<double> timeout_sec = std::nullopt,
+                        std::function<void(const value_t &)> on_complete = nullptr);
+  value_t sync_evaluate_script(const std::string &script, environment_ptr env = nullptr,
+                               std::optional<double> timeout_sec = std::nullopt,
+                               std::function<void(const value_t &)> on_complete = nullptr);
 
-    void interrupt();
-    void reset_interrupt();
-    void pause();
-    void resume();
-    bool is_paused() const;
+  void interrupt();
+  void reset_interrupt();
+  void pause();
+  void resume();
+  bool is_paused() const;
 
 private:
-    stackless_evaluator inner_;
+  stackless_evaluator inner_;
 };
 
 } // namespace cvc::state_exec

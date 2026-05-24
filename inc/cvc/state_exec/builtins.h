@@ -11,7 +11,6 @@
 #define CVC_STATE_EXEC_BUILTINS_H
 
 #include <cvc/state_exec/types.h>
-
 #include <string>
 #include <unordered_map>
 
@@ -25,13 +24,11 @@ namespace cvc::state_exec {
 /// for any evaluator variant.
 class builtins {
 public:
-    /// Create the default built-in registry with all standard operators.
-    static environment_ptr make_default_environment();
+  /// Create the default built-in registry with all standard operators.
+  static environment_ptr make_default_environment();
 
-    /// Register a single built-in function by name.
-    static void register_fn(environment_ptr env,
-                            const std::string& name,
-                            native_fn fn);
+  /// Register a single built-in function by name.
+  static void register_fn(environment_ptr env, const std::string &name, native_fn fn);
 };
 
 // --- Individual built-in implementations (for direct use / testing) ---
