@@ -66,6 +66,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_exec/builtins.h
   ../../inc/cvc/state_exec/evaluator.h
   ../../inc/cvc/state_exec/stackless_evaluator.h
+  ../../inc/cvc/state_exec/task.h
+  ../../inc/cvc/state_exec/async_evaluator.h
+  ../../inc/cvc/state_exec/async_stackless_evaluator.h
   ../../inc/cvc/state_exec/state_value_codec.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
@@ -100,6 +103,8 @@ set(SOURCE_FILES
   state_exec/builtins.cpp
   state_exec/evaluator.cpp
   state_exec/stackless_evaluator.cpp
+  state_exec/async_evaluator.cpp
+  state_exec/async_stackless_evaluator.cpp
   state_exec/state_value_codec.cpp
   state_change_journal.cpp
   state_subscription_router.cpp

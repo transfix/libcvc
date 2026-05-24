@@ -39,9 +39,16 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 **Phase 2 test total: 167**
 
-### Phase 3: Async Evaluators — NOT STARTED
+### Phase 3: Async Evaluators — COMPLETE ✅
 
-- C++20 coroutine-based evaluators (async recursive, async stackless)
+| Component | Header | Tests |
+|---|---|---|
+| `task<T>` coroutine type | `task.h` | 6 |
+| `async_evaluator` | `async_evaluator.h` | 32 |
+| `async_stackless_evaluator` | `async_stackless_evaluator.h` | 18 |
+| Cross-evaluator consistency (4 variants) | — | 3 |
+
+**Phase 3 test total: 59**
 
 ### Phase 4: Scheduler + Resource Limits — NOT STARTED
 

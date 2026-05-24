@@ -2208,10 +2208,19 @@ Map per category:
 
 #### Phase 3: Async Evaluators
 
-11. **`async_evaluator`** — C++20 coroutine-based recursive evaluator.  Port
-    ~15 async tests.
-12. **`async_stackless_evaluator`** — Coroutine stackless evaluator.  Port ~10
-    async stackless tests.
+11. ✅ **`async_evaluator`** — C++20 coroutine-based recursive evaluator.
+    Includes `task<T>` coroutine return type with continuation-based symmetric
+    transfer, `suspend_point` cooperative yield, and `sync_wait()` blocking
+    driver.  All special forms implemented as coroutines.  `(await expr)`
+    special form evaluates sub-expression (actual suspension deferred to
+    scheduler in Phase 4).
+    *(38 tests passing — 6 task + 32 async evaluator)*
+12. ✅ **`async_stackless_evaluator`** — Coroutine stackless evaluator wrapping
+    sync `stackless_evaluator`.  Provides `task<bool> step()` and
+    `task<value_t> run()` with cooperative yielding between steps.
+    Cross-evaluator consistency tests verify all four evaluator variants
+    produce identical results.
+    *(21 tests passing — 18 async stackless + 3 cross-evaluator)*
 
 #### Phase 4: Scheduler + Resource Limits
 
