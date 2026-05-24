@@ -2189,13 +2189,22 @@ Map per category:
    with step-by-step execution.  Port ~50 stackless evaluator tests + OOP
    tests.
    *(31 tests passing)*
-8. **`environment`** — Scope chains, closures, environment serialization.
-   Shared by all evaluator variants.
-9. **Evaluator state serialization** — To/from `value_t` and state tree
-   (frame stack, environments, results).  Port serialization tests.
-10. **Evaluator integration tests** — Cross-evaluator consistency checks;
-    verify all four evaluator variants produce identical results on the
-    same programs.
+8. ✅ **`state_value_codec`** — Value, environment, and evaluator-state
+   round-trip through `cvc::state` subtrees.  Uses `findDescendant()` for
+   read-only child lookups; `state_list` for ordered containers.  Known
+   limitation: environment-ptr sharing across frames is not preserved
+   (requires identity-dedup codec, tracked for Phase 3).
+   *(23 tests passing — 19 value, 4 environment)*
+9. ✅ **Evaluator state serialization** — `encode_evaluator_state` /
+   `decode_evaluator_state` covering frame stack, environments, results,
+   macros, and step count.  Pause-resume test verifies pure-arithmetic
+   partial evaluation round-trip.
+   *(4 tests passing)*
+10. ✅ **Cross-evaluator consistency tests** — Sync `evaluator` and
+    `stackless_evaluator` produce identical results on 32 programs
+    (literals, arithmetic, comparison, control flow, closures, recursion,
+    for/while, macros, data structures, Fibonacci).
+    *(32 tests passing)*
 
 #### Phase 3: Async Evaluators
 

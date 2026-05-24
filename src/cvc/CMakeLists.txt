@@ -66,6 +66,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_exec/builtins.h
   ../../inc/cvc/state_exec/evaluator.h
   ../../inc/cvc/state_exec/stackless_evaluator.h
+  ../../inc/cvc/state_exec/state_value_codec.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
@@ -99,6 +100,7 @@ set(SOURCE_FILES
   state_exec/builtins.cpp
   state_exec/evaluator.cpp
   state_exec/stackless_evaluator.cpp
+  state_exec/state_value_codec.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
   state_sync_adapter.cpp

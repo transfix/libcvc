@@ -50,6 +50,7 @@ add_executable(state_exec_parser_test state_exec_parser_test.cpp)
 add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
 add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
 add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
+add_executable(state_exec_codec_test state_exec_codec_test.cpp)
 add_executable(state_delta_codec_test state_delta_codec_test.cpp)
 add_executable(state_volume_codec_test state_volume_codec_test.cpp)
 add_executable(state_brick_manifest_test state_brick_manifest_test.cpp)
@@ -115,6 +116,7 @@ set(TEST_TARGETS
   state_exec_builtins_test
   state_exec_evaluator_test
   state_exec_stackless_evaluator_test
+  state_exec_codec_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
@@ -548,6 +550,13 @@ target_link_libraries(state_exec_stackless_evaluator_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_codec_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_memory_manager_test
   PRIVATE
     cvc
@@ -713,6 +722,7 @@ target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
 target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_list_test PRIVATE cxx_std_17)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
@@ -831,6 +841,7 @@ gtest_discover_tests(state_exec_types_test)
 gtest_discover_tests(state_exec_builtins_test)
 gtest_discover_tests(state_exec_evaluator_test)
 gtest_discover_tests(state_exec_stackless_evaluator_test)
+gtest_discover_tests(state_exec_codec_test)
 gtest_discover_tests(state_memory_manager_test)
 gtest_discover_tests(state_list_test)
 gtest_discover_tests(state_delta_codec_test)

@@ -26,18 +26,18 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 **Total Phase 1 tests: 96**
 
-### Phase 2: Evaluators + Built-ins — IN PROGRESS
+### Phase 2: Evaluators + Built-ins — COMPLETE ✅
 
 | Component | Status | Tests |
 |-----------|--------|-------|
 | `builtins` (35+ operators) | ✅ Done | 38 |
 | `evaluator` (sync recursive) | ✅ Done | 39 |
 | `stackless_evaluator` (sync stackless) | ✅ Done | 31 |
-| Environment serialization | Not started | — |
-| Evaluator state serialization | Not started | — |
-| Cross-evaluator consistency | Not started | — |
+| `state_value_codec` (value/env round-trip) | ✅ Done | 23 |
+| Evaluator state serialization | ✅ Done | 4 |
+| Cross-evaluator consistency | ✅ Done | 32 |
 
-**Phase 2 test total: 108**
+**Phase 2 test total: 167**
 
 ### Phase 3: Async Evaluators — NOT STARTED
 
