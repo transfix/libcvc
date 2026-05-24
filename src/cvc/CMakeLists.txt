@@ -58,6 +58,14 @@ set(INCLUDE_FILES
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
   ../../inc/cvc/state_object.h
+  ../../inc/cvc/state_list.h
+  ../../inc/cvc/state_eviction_store.h
+  ../../inc/cvc/state_memory_manager.h
+  ../../inc/cvc/state_exec/types.h
+  ../../inc/cvc/state_exec/parser.h
+  ../../inc/cvc/state_exec/builtins.h
+  ../../inc/cvc/state_exec/evaluator.h
+  ../../inc/cvc/state_exec/stackless_evaluator.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
@@ -83,6 +91,14 @@ set(SOURCE_FILES
   smoothing.cpp
   spider_io.cpp
   state.cpp
+  state_list.cpp
+  state_eviction_store.cpp
+  state_memory_manager.cpp
+  state_exec/types.cpp
+  state_exec/parser.cpp
+  state_exec/builtins.cpp
+  state_exec/evaluator.cpp
+  state_exec/stackless_evaluator.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
   state_sync_adapter.cpp

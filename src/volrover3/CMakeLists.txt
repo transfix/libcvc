@@ -506,5 +506,24 @@ if(CVC_BUILD_TESTS)
     GTest::gtest
     GTest::gtest_main)
   add_test(NAME VolumeDialogTest COMMAND volrover3_volumedialog_test)
+
+  # All volrover3 tests require a Qt platform plugin; use offscreen when no
+  # display is available (headless CI, SSH, etc.).
+  set_tests_properties(
+    AppStateTest
+    SceneGraphTest
+    TransferFunctionTest
+    CameraControllerTest
+    GridNodeTest
+    StateTreeWidgetTest
+    GraphicsNodeTest
+    VolumeNodeTest
+    BBoxNodeTest
+    NullGraphicNodeTest
+    BoundingBoxSemanticsTest
+    GeometryDialogTest
+    VolumeDialogTest
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+  )
 endif()
 

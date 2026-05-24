@@ -43,6 +43,13 @@ add_executable(state_transparent_link_index_test state_transparent_link_index_te
 add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_forwarding_test.cpp)
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
 add_executable(state_link_bench_test state_link_bench_test.cpp)
+add_executable(state_list_test state_list_test.cpp)
+add_executable(state_memory_manager_test state_memory_manager_test.cpp)
+add_executable(state_exec_types_test state_exec_types_test.cpp)
+add_executable(state_exec_parser_test state_exec_parser_test.cpp)
+add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
+add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
+add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
 add_executable(state_delta_codec_test state_delta_codec_test.cpp)
 add_executable(state_volume_codec_test state_volume_codec_test.cpp)
 add_executable(state_brick_manifest_test state_brick_manifest_test.cpp)
@@ -101,6 +108,13 @@ set(TEST_TARGETS
   state_sync_adapter_link_forwarding_test
   state_cross_cluster_link_test
   state_link_bench_test
+  state_list_test
+  state_memory_manager_test
+  state_exec_types_test
+  state_exec_parser_test
+  state_exec_builtins_test
+  state_exec_evaluator_test
+  state_exec_stackless_evaluator_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
@@ -499,6 +513,55 @@ target_link_libraries(state_telemetry_aggregator_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_parser_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_types_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_builtins_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_evaluator_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_stackless_evaluator_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_memory_manager_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_list_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_delta_codec_test
   PRIVATE
     cvc
@@ -645,6 +708,13 @@ target_compile_features(state_transparent_link_index_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_link_forwarding_test PRIVATE cxx_std_17)
 target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
 target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
+target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
+target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
+target_compile_features(state_list_test PRIVATE cxx_std_17)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_volume_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_brick_manifest_test PRIVATE cxx_std_17)
@@ -756,6 +826,13 @@ gtest_discover_tests(state_transparent_link_index_test)
 gtest_discover_tests(state_sync_adapter_link_forwarding_test)
 gtest_discover_tests(state_cross_cluster_link_test)
 gtest_discover_tests(state_link_bench_test)
+gtest_discover_tests(state_exec_parser_test)
+gtest_discover_tests(state_exec_types_test)
+gtest_discover_tests(state_exec_builtins_test)
+gtest_discover_tests(state_exec_evaluator_test)
+gtest_discover_tests(state_exec_stackless_evaluator_test)
+gtest_discover_tests(state_memory_manager_test)
+gtest_discover_tests(state_list_test)
 gtest_discover_tests(state_delta_codec_test)
 gtest_discover_tests(state_volume_codec_test)
 gtest_discover_tests(state_brick_manifest_test)
