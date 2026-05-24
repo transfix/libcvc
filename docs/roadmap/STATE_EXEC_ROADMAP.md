@@ -63,25 +63,50 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 **Phase 4 test total: 93**
 
-### Phase 5: State Integration + Intrinsics — NOT STARTED
+### Phase 5: State Integration + Intrinsics — COMPLETE ✅
 
-- DSL intrinsics for state tree interaction
-- Expiry, messaging, observation intrinsics
-- Cluster resource policies
-- Standard library (`stdlib_registry`)
-- Data objects and batched state changes
-- State tree ACL (cluster-consensus enforcement)
+| Component | Status | Tests |
+|-----------|--------|-------|
+| State tree intrinsics (get/set/exists/children/delete) | ✅ Done | 28 |
+| Data object intrinsics (data-get/data-set) | ✅ Done | 4 |
+| Expiry intrinsics (expire/expire-at/sweep) | ✅ Done | 12 |
+| Messaging intrinsic (msg-send) | ✅ Done | 4 |
+| Scheduler intrinsics (spawn/fork/ps/inspect/kill/pause/resume) | ✅ Done | 24 |
+| Resource query intrinsics (memory/time/step/message) | ✅ Done | 14 |
+| System identity intrinsics (cluster-id/node-id/scheduler-stats) | ✅ Done | 6 |
+| `resource_policy` + `validate_limits()` | ✅ Done | 8 |
+| `stdlib_registry` (string/math/collections — 41 functions) | ✅ Done | 33 |
 
-### Phase 6: Distributed Execution — NOT STARTED
+**Phase 5 test total: 133**
 
-- Scheduling coordination via `state_message_bus`
-- Process migration across nodes
-- Cross-cluster observation and admin controls
+### Phase 6: Distributed Execution — COMPLETE ✅
 
-### Phase 7: CMake Integration + Polish — NOT STARTED
+| Component | Status | Tests |
+|-----------|--------|-------|
+| `exec_coordinator` leader election (bully protocol) | ✅ Done | 9 |
+| Process submission (local + forwarded) | ✅ Done | 8 |
+| Process migration (pause→serialize→send→resume) | ✅ Done | 6 |
+| Cross-cluster observation (`ps_all`, `cluster_stats`) | ✅ Done | 5 |
+| Admin controls (pause/resume/kill/set_policy/handoff) | ✅ Done | 9 |
+| Serialization round-trip | ✅ Done | 6 |
+| E2E multi-node integration | ✅ Done | 6 |
+| Two-coordinator simulation | ✅ Done | 3 |
+| Own-message filtering | ✅ Done | 3 |
+| Integration tests (ACL, migration, messaging) | ✅ Done | ~40 |
 
-- Feature flags (`CVC_STATE_EXEC`, `CVC_STATE_MEMORY_MANAGER`)
-- Documentation and benchmarks
+**Phase 6 test total: 61 + ~40 integration**
+
+### Phase 7: CMake Integration + Polish — COMPLETE ✅
+
+| Component | Status | Tests |
+|-----------|--------|-------|
+| `CVC_STATE_EXEC` feature flag | ✅ Done | — |
+| `CVC_STATE_MEMORY_MANAGER` feature flag | ✅ Done | — |
+| Doxygen `@file`/`@brief` on all 17 headers | ✅ Done | — |
+| Benchmark tests | ✅ Done | 7 |
+| Developer guide (`STATE_EXEC_DEVELOPER_GUIDE.md`) | ✅ Done | — |
+
+**Phase 7 test total: 7**
 
 ## Architecture
 
