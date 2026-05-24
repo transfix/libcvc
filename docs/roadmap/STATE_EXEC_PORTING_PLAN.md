@@ -2252,32 +2252,32 @@ Map per category:
 
 #### Phase 5: State Integration + Intrinsics + Messaging + Expiry + Stdlib + Data Objects
 
-20. **DSL intrinsics** — `state-get`, `state-set`, `ps`, `spawn`, `kill`,
+20. ✅ **DSL intrinsics** — `state-get`, `state-set`, `ps`, `spawn`, `kill`,
     `memory-usage`, `memory-limit`, `time-elapsed`, `time-limit`,
     `message-count`, `message-limit`, etc.
-21. **Expiry intrinsics** — `state-expire`, `state-expire-at`,
+21. ✅ **Expiry intrinsics** — `state-expire`, `state-expire-at`,
     `state-has-expiry`, `state-expiry-time`, `state-clear-expiry`,
     `state-is-expired`, `state-sweep-expired`.  Scheduler sweep integration:
     configurable tick interval, `pending_expiry_count()`.
-22. **Messaging intrinsics** — `(msg-send)`, `(msg-subscribe)`,
+22. ✅ **Messaging intrinsics** — `(msg-send)`, `(msg-subscribe)`,
     `(msg-unsubscribe)`, `(ipc-send)`, `(ipc-recv)`, broadcasting.
     Port messaging tests.
-23. **Observation intrinsics** — `(ps)`, `(ps-all)`, `(inspect)`,
+23. ✅ **Observation intrinsics** — `(ps)`, `(ps-all)`, `(inspect)`,
     `(state-watch)`.  Port observation tests.
-24. **`resource_policy`** — `validate()` and runtime `set_*` calls.
+24. ✅ **`resource_policy`** — `validate()` and runtime `set_*` calls.
     `(cluster-policy)` DSL intrinsic.  Policy enforcement integration.
-25. **Standard library** — `stdlib_registry` singleton, built-in modules
+25. ✅ **Standard library** — `stdlib_registry` singleton, built-in modules
     (`string`, `math`, `io`, `collections`), `materialize()` to populate
     `__stdlib__` subtree, `(require)` intrinsic, qualified
     `stdlib.module.func` call syntax, ACL enforcement (cluster-consensus),
     URL allowlist for `io` module, downstream C++ registration API.
-26. **Data objects and batching** — `data_object` variant in `value_t`,
+26. ✅ **Data objects and batching** — `data_object` variant in `value_t`,
     `(state-data-get)` / `(state-data-set)` / `(data-type)` / `(data?)`
     intrinsics, `(state-batch)` and `(state-lock)` intrinsics wrapping
     `state_change_batch_scope` / `state_lock_scope`, `state_batch_guard`
     RAII helper in `state_value_codec`, data_object serialization for
     migration.  Write data object and batching tests.
-27. **State tree ACL** — `state_acl` helpers for `__acl__` node lookup
+27. ✅ **State tree ACL** — `state_acl` helpers for `__acl__` node lookup
     (nearest ancestor walk), admin/delegate UID checks, `acl_denied` error
     type.  Integration with `state_cluster_shard` replication hook for
     consensus-side write rejection.  Write ACL tests.

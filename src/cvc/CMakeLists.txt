@@ -74,6 +74,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state_exec/memory_tracker.h
   ../../inc/cvc/state_exec/scheduler.h
   ../../inc/cvc/state_exec/async_scheduler.h
+  ../../inc/cvc/state_exec/intrinsics.h
+  ../../inc/cvc/state_exec/resource_policy.h
+  ../../inc/cvc/state_exec/stdlib.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
@@ -114,6 +117,9 @@ set(SOURCE_FILES
   state_exec/memory_tracker.cpp
   state_exec/scheduler.cpp
   state_exec/async_scheduler.cpp
+  state_exec/intrinsics.cpp
+  state_exec/resource_policy.cpp
+  state_exec/stdlib.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
   state_sync_adapter.cpp
