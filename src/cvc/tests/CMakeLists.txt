@@ -60,6 +60,7 @@ if(CVC_STATE_EXEC)
   add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
   add_executable(state_exec_bench_test state_exec_bench_test.cpp)
   add_executable(state_exec_integration_test state_exec_integration_test.cpp)
+  add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 endif()
 add_executable(state_delta_codec_test state_delta_codec_test.cpp)
 add_executable(state_volume_codec_test state_volume_codec_test.cpp)
@@ -151,6 +152,7 @@ if(CVC_STATE_EXEC)
     state_exec_coordinator_test
     state_exec_bench_test
     state_exec_integration_test
+    state_exec_advanced_integration_test
   )
 endif()
 
@@ -623,6 +625,13 @@ if(CVC_STATE_EXEC)
       GTest::gtest
       GTest::gtest_main
   )
+
+  target_link_libraries(state_exec_advanced_integration_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 endif()
 
 if(CVC_STATE_MEMORY_MANAGER)
@@ -800,6 +809,7 @@ if(CVC_STATE_EXEC)
   target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
   target_compile_features(state_exec_integration_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_advanced_integration_test PRIVATE cxx_std_20)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
@@ -929,6 +939,7 @@ if(CVC_STATE_EXEC)
   gtest_discover_tests(state_exec_coordinator_test)
   gtest_discover_tests(state_exec_bench_test)
   gtest_discover_tests(state_exec_integration_test)
+  gtest_discover_tests(state_exec_advanced_integration_test)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   gtest_discover_tests(state_memory_manager_test)
