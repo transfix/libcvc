@@ -1,3 +1,12 @@
+/**
+ * @file stackless_evaluator.h
+ * @brief Stackless (continuation-based) evaluator for the state_exec DSL.
+ *
+ * Evaluates parsed ASTs without C++ call-stack recursion by maintaining
+ * an explicit continuation stack.  Supports step-limited execution,
+ * pause/resume, timeout, tail-call optimisation, and full state
+ * serialisation for process migration.
+ */
 #ifndef CVC_STATE_EXEC_STACKLESS_EVALUATOR_H
 #define CVC_STATE_EXEC_STACKLESS_EVALUATOR_H
 

@@ -6,6 +6,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+/**
+ * @file exec_coordinator.h
+ * @brief Distributed execution coordinator for multi-node scheduling.
+ *
+ * Manages leader election (bully algorithm), cross-node process submission,
+ * live process migration, cluster-wide observation (ps/stats), and
+ * remote administration (pause/resume/kill/policy broadcast).  Communicates
+ * via cvc::state_message_bus or cvc::state_cluster_shard.
+ */
 #ifndef CVC_STATE_EXEC_EXEC_COORDINATOR_H
 #define CVC_STATE_EXEC_EXEC_COORDINATOR_H
 

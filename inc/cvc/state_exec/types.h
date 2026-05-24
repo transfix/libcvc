@@ -1,3 +1,12 @@
+/**
+ * @file types.h
+ * @brief Core value types and environment model for the state_exec DSL.
+ *
+ * Defines value_t (a tagged union over nil, bool, int64, double, string,
+ * symbol, list, dict, lambda, native_fn, error), along with environment_t
+ * (lexically-scoped variable bindings) and execute_options (per-process
+ * resource limits).
+ */
 #ifndef CVC_STATE_EXEC_TYPES_H
 #define CVC_STATE_EXEC_TYPES_H
 

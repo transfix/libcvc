@@ -1,3 +1,12 @@
+/**
+ * @file task.h
+ * @brief Lazy single-shot coroutine return type with continuation support.
+ *
+ * Provides task<T>, a C++20 coroutine type that suspends immediately on
+ * creation and resumes when awaited.  Supports both void and non-void
+ * return types, exception propagation, and symmetric transfer for
+ * efficient coroutine chaining.
+ */
 #ifndef CVC_STATE_EXEC_TASK_H
 #define CVC_STATE_EXEC_TASK_H
 

@@ -1,3 +1,11 @@
+/**
+ * @file state_value_codec.h
+ * @brief Bidirectional codec between state_exec value_t and cvc::state.
+ *
+ * Serialises DSL values (including lambdas and evaluator state) into a
+ * cvc::state subtree and deserialises them back.  Used for process
+ * checkpointing, migration, and persistent storage of DSL programs.
+ */
 #ifndef CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 #define CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 

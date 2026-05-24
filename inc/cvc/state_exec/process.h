@@ -1,3 +1,11 @@
+/**
+ * @file process.h
+ * @brief Process abstraction for scheduled DSL execution.
+ *
+ * A process wraps a DSL program with its own PID, environment, message
+ * queue, execution state (ready/running/blocked/terminated), and
+ * per-process resource limits (max steps, timeout, max memory).
+ */
 #ifndef CVC_STATE_EXEC_PROCESS_H
 #define CVC_STATE_EXEC_PROCESS_H
 

@@ -1,3 +1,12 @@
+/**
+ * @file async_stackless_evaluator.h
+ * @brief Coroutine-based async stackless evaluator — the primary evaluator
+ *        for scheduler-managed processes.
+ *
+ * Combines the stackless evaluator's continuation-based execution with
+ * task<T> coroutine suspension.  Each step yields a coroutine suspension
+ * point, enabling cooperative multitasking under the scheduler.
+ */
 #ifndef CVC_STATE_EXEC_ASYNC_STACKLESS_EVALUATOR_H
 #define CVC_STATE_EXEC_ASYNC_STACKLESS_EVALUATOR_H
 

@@ -1,3 +1,12 @@
+/**
+ * @file evaluator.h
+ * @brief Recursive tree-walking evaluator for the state_exec DSL.
+ *
+ * Evaluates parsed ASTs using C++ call-stack recursion.  Provides
+ * step-limited execution, timeout support, and serializable evaluator
+ * state for pause/resume.  The evaluator is the reference implementation;
+ * for production use prefer stackless_evaluator or async variants.
+ */
 #ifndef CVC_STATE_EXEC_EVALUATOR_H
 #define CVC_STATE_EXEC_EVALUATOR_H
 

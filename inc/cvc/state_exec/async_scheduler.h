@@ -1,3 +1,11 @@
+/**
+ * @file async_scheduler.h
+ * @brief Coroutine-enabled scheduler using async_stackless_evaluator.
+ *
+ * Extends the synchronous scheduler with task<T> coroutine integration,
+ * enabling cooperative multitasking via co_await.  Each run_one() call
+ * advances a single process by one time slice and returns a task<T>.
+ */
 #ifndef CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 #define CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 

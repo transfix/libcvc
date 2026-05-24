@@ -1,3 +1,12 @@
+/**
+ * @file memory_tracker.h
+ * @brief Per-process memory accounting for state tree objects.
+ *
+ * Tracks which process owns each value written to the state tree and
+ * accumulates byte counts per PID.  The scheduler checks current_bytes()
+ * against a process's max_memory at each step boundary to enforce
+ * memory limits.
+ */
 #ifndef CVC_STATE_EXEC_MEMORY_TRACKER_H
 #define CVC_STATE_EXEC_MEMORY_TRACKER_H
 

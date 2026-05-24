@@ -1,3 +1,11 @@
+/**
+ * @file parser.h
+ * @brief S-expression parser for the state_exec DSL.
+ *
+ * Converts source text into a tree of value_t nodes.  Supports atoms
+ * (integers, floats, strings, symbols), lists, quote/quasiquote/unquote,
+ * and line comments.  Reports parse errors with line/column information.
+ */
 #ifndef CVC_STATE_EXEC_PARSER_H
 #define CVC_STATE_EXEC_PARSER_H
 

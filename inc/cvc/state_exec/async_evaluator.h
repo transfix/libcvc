@@ -1,3 +1,12 @@
+/**
+ * @file async_evaluator.h
+ * @brief Coroutine-based async wrapper around the recursive evaluator.
+ *
+ * Wraps the tree-walking evaluator in a task<T> coroutine interface,
+ * yielding control at each step boundary.  Primarily useful for testing
+ * and simple async scenarios; production code should prefer
+ * async_stackless_evaluator.
+ */
 #ifndef CVC_STATE_EXEC_ASYNC_EVALUATOR_H
 #define CVC_STATE_EXEC_ASYNC_EVALUATOR_H
 

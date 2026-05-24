@@ -44,17 +44,22 @@ add_executable(state_sync_adapter_link_forwarding_test state_sync_adapter_link_f
 add_executable(state_cross_cluster_link_test state_cross_cluster_link_test.cpp)
 add_executable(state_link_bench_test state_link_bench_test.cpp)
 add_executable(state_list_test state_list_test.cpp)
-add_executable(state_memory_manager_test state_memory_manager_test.cpp)
-add_executable(state_exec_types_test state_exec_types_test.cpp)
-add_executable(state_exec_parser_test state_exec_parser_test.cpp)
-add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
-add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
-add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
-add_executable(state_exec_codec_test state_exec_codec_test.cpp)
-add_executable(state_exec_async_test state_exec_async_test.cpp)
-add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
-add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
-add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
+if(CVC_STATE_MEMORY_MANAGER)
+  add_executable(state_memory_manager_test state_memory_manager_test.cpp)
+endif()
+if(CVC_STATE_EXEC)
+  add_executable(state_exec_types_test state_exec_types_test.cpp)
+  add_executable(state_exec_parser_test state_exec_parser_test.cpp)
+  add_executable(state_exec_builtins_test state_exec_builtins_test.cpp)
+  add_executable(state_exec_evaluator_test state_exec_evaluator_test.cpp)
+  add_executable(state_exec_stackless_evaluator_test state_exec_stackless_evaluator_test.cpp)
+  add_executable(state_exec_codec_test state_exec_codec_test.cpp)
+  add_executable(state_exec_async_test state_exec_async_test.cpp)
+  add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
+  add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
+  add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
+  add_executable(state_exec_bench_test state_exec_bench_test.cpp)
+endif()
 add_executable(state_delta_codec_test state_delta_codec_test.cpp)
 add_executable(state_volume_codec_test state_volume_codec_test.cpp)
 add_executable(state_brick_manifest_test state_brick_manifest_test.cpp)
@@ -114,17 +119,6 @@ set(TEST_TARGETS
   state_cross_cluster_link_test
   state_link_bench_test
   state_list_test
-  state_memory_manager_test
-  state_exec_types_test
-  state_exec_parser_test
-  state_exec_builtins_test
-  state_exec_evaluator_test
-  state_exec_stackless_evaluator_test
-  state_exec_codec_test
-  state_exec_async_test
-  state_exec_scheduler_test
-  state_exec_intrinsics_test
-  state_exec_coordinator_test
   state_delta_codec_test
   state_volume_codec_test
   state_brick_manifest_test
@@ -141,6 +135,26 @@ set(TEST_TARGETS
   volume_io_test
   utility_test
 )
+
+if(CVC_STATE_EXEC)
+  list(APPEND TEST_TARGETS
+    state_exec_types_test
+    state_exec_parser_test
+    state_exec_builtins_test
+    state_exec_evaluator_test
+    state_exec_stackless_evaluator_test
+    state_exec_codec_test
+    state_exec_async_test
+    state_exec_scheduler_test
+    state_exec_intrinsics_test
+    state_exec_coordinator_test
+    state_exec_bench_test
+  )
+endif()
+
+if(CVC_STATE_MEMORY_MANAGER)
+  list(APPEND TEST_TARGETS state_memory_manager_test)
+endif()
 
 # geometry_test exercises sdf(), iso(), tetrahedralize(), and
 # geometry::quality_improve(), which are only available when SDF and
@@ -523,82 +537,93 @@ target_link_libraries(state_telemetry_aggregator_test
     GTest::gtest_main
 )
 
-target_link_libraries(state_exec_parser_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+if(CVC_STATE_EXEC)
+  target_link_libraries(state_exec_parser_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_types_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_types_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_builtins_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_builtins_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_evaluator_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_evaluator_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_stackless_evaluator_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_stackless_evaluator_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_codec_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_codec_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_async_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_async_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_scheduler_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_scheduler_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_intrinsics_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_intrinsics_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_exec_coordinator_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_coordinator_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 
-target_link_libraries(state_memory_manager_test
-  PRIVATE
-    cvc
-    GTest::gtest
-    GTest::gtest_main
-)
+  target_link_libraries(state_exec_bench_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
+
+if(CVC_STATE_MEMORY_MANAGER)
+  target_link_libraries(state_memory_manager_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
 
 target_link_libraries(state_list_test
   PRIVATE
@@ -753,17 +778,22 @@ target_compile_features(state_transparent_link_index_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_link_forwarding_test PRIVATE cxx_std_17)
 target_compile_features(state_cross_cluster_link_test PRIVATE cxx_std_17)
 target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
-target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
-target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
-target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
+if(CVC_STATE_EXEC)
+  target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_codec_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
+  target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
+endif()
+if(CVC_STATE_MEMORY_MANAGER)
+  target_compile_features(state_memory_manager_test PRIVATE cxx_std_17)
+endif()
 target_compile_features(state_list_test PRIVATE cxx_std_17)
 target_compile_features(state_delta_codec_test PRIVATE cxx_std_17)
 target_compile_features(state_volume_codec_test PRIVATE cxx_std_17)
@@ -876,17 +906,22 @@ gtest_discover_tests(state_transparent_link_index_test)
 gtest_discover_tests(state_sync_adapter_link_forwarding_test)
 gtest_discover_tests(state_cross_cluster_link_test)
 gtest_discover_tests(state_link_bench_test)
-gtest_discover_tests(state_exec_parser_test)
-gtest_discover_tests(state_exec_types_test)
-gtest_discover_tests(state_exec_builtins_test)
-gtest_discover_tests(state_exec_evaluator_test)
-gtest_discover_tests(state_exec_stackless_evaluator_test)
-gtest_discover_tests(state_exec_codec_test)
-gtest_discover_tests(state_exec_async_test)
-gtest_discover_tests(state_exec_scheduler_test)
-gtest_discover_tests(state_exec_intrinsics_test)
-gtest_discover_tests(state_exec_coordinator_test)
-gtest_discover_tests(state_memory_manager_test)
+if(CVC_STATE_EXEC)
+  gtest_discover_tests(state_exec_parser_test)
+  gtest_discover_tests(state_exec_types_test)
+  gtest_discover_tests(state_exec_builtins_test)
+  gtest_discover_tests(state_exec_evaluator_test)
+  gtest_discover_tests(state_exec_stackless_evaluator_test)
+  gtest_discover_tests(state_exec_codec_test)
+  gtest_discover_tests(state_exec_async_test)
+  gtest_discover_tests(state_exec_scheduler_test)
+  gtest_discover_tests(state_exec_intrinsics_test)
+  gtest_discover_tests(state_exec_coordinator_test)
+  gtest_discover_tests(state_exec_bench_test)
+endif()
+if(CVC_STATE_MEMORY_MANAGER)
+  gtest_discover_tests(state_memory_manager_test)
+endif()
 gtest_discover_tests(state_list_test)
 gtest_discover_tests(state_delta_codec_test)
 gtest_discover_tests(state_volume_codec_test)

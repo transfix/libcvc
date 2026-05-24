@@ -1,3 +1,11 @@
+/**
+ * @file stdlib.h
+ * @brief Standard library modules for the state_exec DSL.
+ *
+ * Provides loadable modules (string, math, collections) containing
+ * native utility functions.  Modules are registered via stdlib_registry
+ * and imported into a DSL program's environment with (import "module").
+ */
 #ifndef CVC_STATE_EXEC_STDLIB_H
 #define CVC_STATE_EXEC_STDLIB_H
 

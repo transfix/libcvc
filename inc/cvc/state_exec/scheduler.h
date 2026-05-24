@@ -1,3 +1,12 @@
+/**
+ * @file scheduler.h
+ * @brief Round-robin process scheduler with resource enforcement.
+ *
+ * Manages a set of processes, executing them in round-robin order with
+ * configurable time-slice granularity.  Enforces per-process step limits,
+ * timeouts, and memory limits.  Supports spawn, fork, kill, pause/resume,
+ * and inter-process messaging.
+ */
 #ifndef CVC_STATE_EXEC_SCHEDULER_H
 #define CVC_STATE_EXEC_SCHEDULER_H
 

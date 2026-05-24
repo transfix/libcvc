@@ -1,3 +1,12 @@
+/**
+ * @file builtins.h
+ * @brief Built-in operator registry for the state_exec DSL.
+ *
+ * Provides make_builtins() which returns an environment containing all
+ * core DSL operators: arithmetic, comparison, logic, string, list, dict,
+ * OOP (class/new/method-call), higher-order (map/filter/reduce/apply),
+ * and control flow (if/cond/begin/let/define/set!/lambda/defmacro).
+ */
 #ifndef CVC_STATE_EXEC_BUILTINS_H
 #define CVC_STATE_EXEC_BUILTINS_H
 

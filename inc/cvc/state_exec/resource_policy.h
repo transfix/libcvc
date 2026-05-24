@@ -1,3 +1,11 @@
+/**
+ * @file resource_policy.h
+ * @brief Cluster-level resource policy for process limits.
+ *
+ * Defines constraints on per-process resource allocations (time, steps,
+ * memory) and the policy for handling out-of-range requests (clamp or
+ * reject).  Applied by the coordinator/scheduler at each execute() call.
+ */
 #ifndef CVC_STATE_EXEC_RESOURCE_POLICY_H
 #define CVC_STATE_EXEC_RESOURCE_POLICY_H
 

@@ -165,6 +165,19 @@ if(WIN32)
   list(REMOVE_ITEM SOURCE_FILES state_transport_ipc.cpp)
 endif()
 
+# state_exec / state_memory_manager feature flags
+option(CVC_STATE_EXEC "Enable state_exec DSL evaluator and process scheduler" ON)
+option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
+
+if(NOT CVC_STATE_EXEC)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX "state_exec/")
+endif()
+
+# state_memory_manager feature flag
+if(NOT CVC_STATE_MEMORY_MANAGER)
+  list(REMOVE_ITEM SOURCE_FILES state_memory_manager.cpp state_eviction_store.cpp)
+endif()
+
 # Configuration
 set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
@@ -189,7 +202,6 @@ option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rat
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
-
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -820,6 +832,12 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+endif()
+if(CVC_STATE_EXEC)
+  target_compile_definitions(cvc PUBLIC CVC_STATE_EXEC)
+endif()
+if(CVC_STATE_MEMORY_MANAGER)
+  target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
 endif()
 
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes

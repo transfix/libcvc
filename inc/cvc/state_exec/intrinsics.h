@@ -1,3 +1,12 @@
+/**
+ * @file intrinsics.h
+ * @brief State-tree and system intrinsic functions for the DSL.
+ *
+ * Provides 35 intrinsic functions that bridge DSL programs to the
+ * cvc::state tree (get/set/delete/exists/keys/subscribe/wait-for),
+ * scheduler operations (spawn/send/recv/self/sleep/yield/exit/ps/kill),
+ * and I/O (print/println/format/error/type-of/to-string/gensym).
+ */
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
 
