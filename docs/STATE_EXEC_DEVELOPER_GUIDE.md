@@ -662,19 +662,142 @@ coord.admin_handoff("node-B");
 
 ### Leader Election
 
-The coordinator uses a bully-style election protocol:
-- Nodes with higher `election_priority` win; ties broken by node ID
-- Single-node clusters auto-elect
-- Dead nodes trigger re-election via membership events
-- Leadership can be explicitly handed off via `admin_handoff()`
+The coordinator uses a **Bully Algorithm** for leader election.  Exactly one
+node per cluster is elected *leader* (the scheduling node).  All `submit()`
+calls are routed through the leader, which decides where processes run.
+
+#### What triggers an election
+
+| Trigger | Description |
+|---------|-------------|
+| Startup (no leader known) | `start()` sees `leader_node_id_` is empty |
+| Leader death/eviction | Membership event with `kind >= 2` for the current leader |
+| Explicit request | Calling `request_election()` programmatically |
+| Receiving `election-start` from a lower-priority node | Responds with `election-alive` and starts own election |
+
+#### Election message format
+
+All messages are JSON, sent to path `__state_exec.<cluster_id>.election`
+with MIME type `application/x-state-exec-election`.
+
+**`election-start`** — candidacy announcement:
+```json
+{
+  "type": "election-start",
+  "node_id": "node-A",
+  "priority": 10,
+  "timestamp": 1716588123456789
+}
+```
+
+**`election-alive`** — bully response ("I outrank you, stand down"):
+```json
+{
+  "type": "election-alive",
+  "node_id": "node-B",
+  "priority": 20
+}
+```
+
+**`election-victory`** — leader declaration:
+```json
+{
+  "type": "election-victory",
+  "node_id": "node-B"
+}
+```
+
+#### Winner determination
+
+The bully comparison is:
+1. **Higher `election_priority`** wins outright.
+2. **Equal priority** → lexicographically greater `node_id` wins.
+
+```cpp
+bool we_win = (our_priority > sender_priority) ||
+              (our_priority == sender_priority && our_node_id > sender_node_id);
+```
+
+#### Protocol flow
+
+```
+Node A starts → no leader known → broadcast "election-start"
+  │
+  ├─ Nodes with HIGHER priority (or same + higher node_id):
+  │    → Reply with "election-alive"
+  │    → Start their own election
+  │    → Node A sees "election-alive" from superior → stands down
+  │
+  └─ If no "election-alive" arrives within election_timeout:
+       → Node A calls declare_victory()
+       → Broadcasts "election-victory"
+       → All other nodes accept Node A as leader
+```
+
+The timeout is checked opportunistically on heartbeat reception.  If no
+superior node responds within `election_timeout` milliseconds, the
+candidate self-declares.
+
+#### State transitions
+
+| State | `is_leader` | `election_in_progress` | `leader_node_id` |
+|-------|:-----------:|:----------------------:|-------------------|
+| Startup | false | false | `""` |
+| Candidate | false | true | `""` (or stale) |
+| Follower | false | false | `"<other_node>"` |
+| Leader | true | false | `"<self>"` |
+
+- `start()` → **Candidate** (starts election if no leader known)
+- Election timeout expires → **Leader** (via `declare_victory()`)
+- Receive `election-alive` from superior → stand down (stay Follower)
+- Receive `election-victory` → **Follower** (accept new leader)
+- Leader dies → **Candidate** (re-election triggered)
+
+#### Heartbeats
+
+The leader periodically broadcasts heartbeat messages to
+`__state_exec.<cluster_id>.heartbeat`:
+
+```json
+{
+  "node_id": "node-B",
+  "is_leader": true,
+  "stats": "<serialized scheduler_stats>"
+}
+```
+
+Heartbeats serve three purposes:
+1. Prove liveness of the leader to followers.
+2. Propagate cluster-wide statistics for observation.
+3. Trigger election-timeout convergence (checked on receipt).
+
+#### Configuration
 
 ```cpp
 exec_coordinator::config cfg;
-cfg.heartbeat_interval = std::chrono::milliseconds(2000);
-cfg.election_timeout   = std::chrono::milliseconds(3000);
+cfg.heartbeat_interval = std::chrono::milliseconds(2000);  // send heartbeat every 2s
+cfg.election_timeout   = std::chrono::milliseconds(3000);  // wait 3s before declaring victory
 cfg.election_priority  = 10;  // higher = more likely to win
 coord.set_config(cfg);
 ```
+
+#### Voluntary leadership transfer
+
+A leader can hand off leadership without a full re-election:
+
+```cpp
+// Current leader voluntarily transfers to node-B
+coord.admin_handoff("node-B");
+// Broadcasts election-victory with node-B's ID
+// All nodes (including self) accept node-B as new leader
+```
+
+#### Single-node clusters
+
+When only one node exists in the cluster, the election completes
+immediately: no `election-alive` arrives within the timeout, so the
+node declares itself leader.  In tests, the `make_leader()` helper
+short-circuits this by directly injecting an `election-victory` message.
 
 ---
 
