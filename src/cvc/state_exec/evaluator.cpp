@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cvc/state_exec/builtins.h>
 #include <cvc/state_exec/evaluator.h>
 #include <cvc/state_exec/parser.h>
@@ -32,27 +33,26 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
       // Run in a background thread with timeout
       value_t bg_result;
       std::exception_ptr ex;
-      std::jthread worker([&](std::stop_token) {
+      std::atomic<bool> done{false};
+      std::thread worker([&] {
         try {
           bg_result = eval_internal(expr, run_env);
         } catch (...) {
           ex = std::current_exception();
         }
+        done.store(true, std::memory_order_release);
       });
-      if (worker.joinable()) {
-        auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::duration<double>(*timeout_sec);
-        // Poll until done or timeout
-        while (worker.joinable()) {
-          if (std::chrono::steady_clock::now() >= deadline) {
-            interrupt();
-            worker.join();
-            reset_interrupt();
-            stats_.mark_complete();
-            throw evaluation_timeout("evaluation exceeded timeout");
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::duration<double>(*timeout_sec);
+      while (!done.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          interrupt();
+          worker.join();
+          reset_interrupt();
+          stats_.mark_complete();
+          throw evaluation_timeout("evaluation exceeded timeout");
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
       worker.join();
       if (ex) {

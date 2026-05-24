@@ -87,13 +87,15 @@ public:
 
   /// Run the coroutine to completion synchronously.
   T sync_wait() {
-    // Set continuation to noop so final_suspend returns to us
     handle_.promise().continuation_ = std::noop_coroutine();
+    handle_.resume();
     while (!handle_.done())
       handle_.resume();
     auto &r = handle_.promise().result_;
     if (r.index() == 2)
       std::rethrow_exception(std::get<2>(r));
+    if (r.index() == 0)
+      throw std::runtime_error("task::sync_wait: coroutine completed without returning a value");
     return std::move(std::get<1>(r));
   }
 

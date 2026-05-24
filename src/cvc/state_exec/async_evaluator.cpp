@@ -43,13 +43,29 @@ task<value_t> async_evaluator::evaluate_script(const std::string &script, enviro
   auto exprs = parse_all(script);
   if (exprs.empty())
     co_return nil_value;
-  if (exprs.size() == 1)
-    co_return co_await evaluate(exprs[0], env);
-  std::vector<value_t> begin_exprs;
-  begin_exprs.reserve(1 + exprs.size());
-  begin_exprs.push_back(value_t{symbol{"begin"}});
-  begin_exprs.insert(begin_exprs.end(), exprs.begin(), exprs.end());
-  co_return co_await evaluate(make_list(std::move(begin_exprs)), env);
+  value_t expr_to_eval;
+  if (exprs.size() == 1) {
+    expr_to_eval = std::move(exprs[0]);
+  } else {
+    std::vector<value_t> begin_exprs;
+    begin_exprs.reserve(1 + exprs.size());
+    begin_exprs.push_back(value_t{symbol{"begin"}});
+    begin_exprs.insert(begin_exprs.end(), exprs.begin(), exprs.end());
+    expr_to_eval = make_list(std::move(begin_exprs));
+  }
+  // Inline the evaluate logic here to avoid an extra coroutine nesting layer.
+  // This prevents MSVC coroutine symmetric-transfer depth issues.
+  auto run_env = env ? env : environment::extend(global_env_);
+  root_expr_ = expr_to_eval;
+  stats_.start();
+  try {
+    value_t result = co_await eval_internal(expr_to_eval, run_env);
+    stats_.mark_complete();
+    co_return result;
+  } catch (...) {
+    stats_.mark_complete();
+    throw;
+  }
 }
 
 // ---------------------------------------------------------------------------
