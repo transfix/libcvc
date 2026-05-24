@@ -48,18 +48,18 @@ protected:
     cvc::app app_ctx;
     scheduler sched;
     memory_tracker tracker;
-    process proc;
+    process_ptr proc = make_process();
     intrinsics_context ictx;
     environment_ptr env;
 
     void SetUp() override {
-        proc.pid = 1;
-        proc.status = process_status::ready;
+        proc->pid = 1;
+        proc->status = process_status::ready;
 
         ictx.sched      = &sched;
         ictx.root        = &cvc::state::instance(app_ctx);
         ictx.tracker     = &tracker;
-        ictx.proc        = &proc;
+        ictx.proc        = proc;
         ictx.pid         = 1;
         ictx.uid         = "test-user";
         ictx.cluster_id  = "cluster-1";
@@ -158,18 +158,18 @@ protected:
     cvc::app app_ctx;
     scheduler sched;
     memory_tracker tracker;
-    process proc;
+    process_ptr proc = make_process();
     intrinsics_context ictx;
     environment_ptr env;
 
     void SetUp() override {
-        proc.pid = 1;
-        proc.status = process_status::running;
+        proc->pid = 1;
+        proc->status = process_status::running;
 
         ictx.sched      = &sched;
         ictx.root        = &cvc::state::instance(app_ctx);
         ictx.tracker     = &tracker;
-        ictx.proc        = &proc;
+        ictx.proc        = proc;
         ictx.pid         = 1;
         ictx.uid         = "admin";
         ictx.cluster_id  = "c1";
@@ -302,22 +302,22 @@ protected:
     cvc::app app_ctx;
     scheduler sched;
     memory_tracker tracker;
-    process proc;
+    process_ptr proc = make_process();
     intrinsics_context ictx;
     environment_ptr env;
 
     void SetUp() override {
-        proc.pid = 1;
-        proc.status = process_status::running;
-        proc.max_memory = 1024 * 1024;
-        proc.max_time = 60;
-        proc.max_messages = 100;
-        proc.message_count = 5;
+        proc->pid = 1;
+        proc->status = process_status::running;
+        proc->max_memory = 1024 * 1024;
+        proc->max_time = 60;
+        proc->max_messages = 100;
+        proc->message_count = 5;
 
         ictx.sched      = &sched;
         ictx.root        = &cvc::state::instance(app_ctx);
         ictx.tracker     = &tracker;
-        ictx.proc        = &proc;
+        ictx.proc        = proc;
         ictx.pid         = 1;
 
         env = builtins::make_default_environment();
@@ -467,18 +467,18 @@ class MsgSendIntrinsicsTest : public ::testing::Test {
 protected:
     cvc::app app_ctx;
     scheduler sched;
-    process proc;
+    process_ptr proc = make_process();
     intrinsics_context ictx;
     environment_ptr env;
 
     void SetUp() override {
-        proc.pid = 1;
-        proc.status = process_status::running;
-        proc.message_count = 0;
+        proc->pid = 1;
+        proc->status = process_status::running;
+        proc->message_count = 0;
 
         ictx.sched      = &sched;
         ictx.root        = &cvc::state::instance(app_ctx);
-        ictx.proc        = &proc;
+        ictx.proc        = proc;
         ictx.pid         = 1;
 
         env = builtins::make_default_environment();
@@ -496,7 +496,7 @@ TEST_F(MsgSendIntrinsicsTest, SendMessage) {
     auto result = call("msg-send", {std::string("msg.target"), std::string("hello")});
     auto* d = std::get_if<dict_ptr>(&result.v);
     ASSERT_NE(d, nullptr);
-    EXPECT_EQ(proc.message_count, 1u);
+    EXPECT_EQ(proc->message_count, 1u);
 }
 
 TEST_F(MsgSendIntrinsicsTest, SendWithContentType) {
@@ -510,7 +510,7 @@ TEST_F(MsgSendIntrinsicsTest, SendIncreasesCount) {
     call("msg-send", {std::string("msg.a"), std::string("1")});
     call("msg-send", {std::string("msg.b"), std::string("2")});
     call("msg-send", {std::string("msg.c"), std::string("3")});
-    EXPECT_EQ(proc.message_count, 3u);
+    EXPECT_EQ(proc->message_count, 3u);
 }
 
 TEST_F(MsgSendIntrinsicsTest, WrongArgCount) {
@@ -1209,19 +1209,19 @@ protected:
     cvc::app app_ctx;
     scheduler sched;
     memory_tracker tracker;
-    process proc;
+    process_ptr proc = make_process();
     intrinsics_context ictx;
     environment_ptr env;
 
     void SetUp() override {
-        proc.pid = 42;
-        proc.status = process_status::running;
-        proc.max_memory = 1024;
+        proc->pid = 42;
+        proc->status = process_status::running;
+        proc->max_memory = 1024;
 
         ictx.sched      = &sched;
         ictx.root        = &cvc::state::instance(app_ctx);
         ictx.tracker     = &tracker;
-        ictx.proc        = &proc;
+        ictx.proc        = proc;
         ictx.pid         = 42;
         ictx.uid         = "eval-user";
         ictx.cluster_id  = "test-cluster";

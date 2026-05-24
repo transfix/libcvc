@@ -95,9 +95,9 @@ private:
     stackless_evaluator evaluator_;
     memory_tracker mem_tracker_;
 
-    std::unordered_map<int, process> processes_;
+    std::unordered_map<int, process_ptr> processes_;
 
-    process* select_process();
+    process_ptr select_process();
     void execute_process_step(process& proc);
     void handle_signal(process& proc);
     void restore_from_signal(process& proc);

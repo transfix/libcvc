@@ -154,10 +154,10 @@ private:
     stackless_evaluator evaluator_;
     memory_tracker mem_tracker_;
 
-    std::unordered_map<int, process> processes_;
+    std::unordered_map<int, process_ptr> processes_;
 
     /// Select the next process to run based on scheduling policy.
-    process* select_process();
+    process_ptr select_process();
 
     /// Execute one step on a specific process and check resource limits.
     void execute_process_step(process& proc);

@@ -38,7 +38,7 @@ int async_scheduler::execute(const std::string& script,
     proc.create_time   = std::chrono::steady_clock::now();
     proc.state         = evaluator_.create_state(script, opts.env);
     proc.state.stats.start();
-    processes_.emplace(pid, std::move(proc));
+    processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
     return pid;
 }
 
@@ -62,7 +62,7 @@ int async_scheduler::execute(const value_t& expr,
     proc.create_time   = std::chrono::steady_clock::now();
     proc.state         = evaluator_.create_state(expr, opts.env);
     proc.state.stats.start();
-    processes_.emplace(pid, std::move(proc));
+    processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
     return pid;
 }
 
@@ -70,12 +70,12 @@ int async_scheduler::execute(const value_t& expr,
 // Process selection (same logic as sync)
 // ---------------------------------------------------------------------------
 
-process* async_scheduler::select_process() {
+process_ptr async_scheduler::select_process() {
     std::vector<process*> runnable;
     for (auto& [pid, proc] : processes_) {
-        if (proc.status == process_status::ready ||
-            proc.status == process_status::running) {
-            runnable.push_back(&proc);
+        if (proc->status == process_status::ready ||
+            proc->status == process_status::running) {
+            runnable.push_back(proc.get());
         }
     }
     if (runnable.empty()) return nullptr;
@@ -90,14 +90,14 @@ process* async_scheduler::select_process() {
             rr_index_ = rr_index_ % static_cast<int>(runnable.size());
             auto* p = runnable[rr_index_];
             rr_index_ = (rr_index_ + 1) % static_cast<int>(runnable.size());
-            return p;
+            return processes_.at(p->pid);
         }
         case scheduling_policy::priority: {
             std::sort(runnable.begin(), runnable.end(),
                       [](const process* a, const process* b) {
                           return a->priority < b->priority;
                       });
-            return runnable[0];
+            return processes_.at(runnable[0]->pid);
         }
         case scheduling_policy::priority_rr: {
             std::sort(runnable.begin(), runnable.end(),
@@ -114,7 +114,7 @@ process* async_scheduler::select_process() {
             rr_index_ = rr_index_ % static_cast<int>(same_prio.size());
             auto* p = same_prio[rr_index_];
             rr_index_ = (rr_index_ + 1) % static_cast<int>(same_prio.size());
-            return p;
+            return processes_.at(p->pid);
         }
     }
     return nullptr;
@@ -161,7 +161,7 @@ void async_scheduler::execute_process_step(process& proc) {
 // ---------------------------------------------------------------------------
 
 task<int> async_scheduler::step() {
-    process* proc = select_process();
+    auto proc = select_process();
     if (!proc) co_return 0;
     execute_process_step(*proc);
     ++total_steps_;
@@ -209,8 +209,8 @@ void async_scheduler::stop() {
 
 bool async_scheduler::has_runnable() const {
     for (const auto& [pid, proc] : processes_) {
-        if (proc.status == process_status::ready ||
-            proc.status == process_status::running) {
+        if (proc->status == process_status::ready ||
+            proc->status == process_status::running) {
             return true;
         }
     }
@@ -258,7 +258,7 @@ void async_scheduler::restore_from_signal(process& proc) {
 bool async_scheduler::send_signal(int pid, const std::string& signal) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    auto& proc = it->second;
+    auto& proc = *it->second;
     if (proc.status == process_status::terminated ||
         proc.status == process_status::killed) return false;
 
@@ -317,7 +317,7 @@ void async_scheduler::kill_process(process& proc, const std::string& reason) {
 bool async_scheduler::pause(int pid) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    auto& proc = it->second;
+    auto& proc = *it->second;
     if (proc.status != process_status::ready &&
         proc.status != process_status::running) return false;
     if (proc.status == process_status::running) {
@@ -332,7 +332,7 @@ bool async_scheduler::pause(int pid) {
 bool async_scheduler::resume(int pid) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    auto& proc = it->second;
+    auto& proc = *it->second;
     if (proc.status != process_status::paused) return false;
     proc.status = process_status::ready;
     return true;
@@ -341,7 +341,7 @@ bool async_scheduler::resume(int pid) {
 bool async_scheduler::kill(int pid) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    auto& proc = it->second;
+    auto& proc = *it->second;
     if (proc.status == process_status::terminated ||
         proc.status == process_status::killed) return false;
     kill_process(proc, "killed_by_user");
@@ -351,41 +351,41 @@ bool async_scheduler::kill(int pid) {
 int async_scheduler::fork(int pid) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return -1;
-    auto& parent = it->second;
+    auto& parent = *it->second;
     if (parent.status != process_status::ready &&
         parent.status != process_status::running) return -1;
 
     int child_pid = next_pid_++;
-    process child;
-    child.pid             = child_pid;
-    child.name            = parent.name + "-fork";
-    child.status          = process_status::ready;
-    child.priority        = parent.priority;
-    child.uid             = parent.uid;
-    child.gid             = parent.gid;
-    child.max_steps       = parent.max_steps;
-    child.max_time        = parent.max_time;
-    child.max_memory      = parent.max_memory;
-    child.max_messages    = parent.max_messages;
-    child.signal_handlers = parent.signal_handlers;
-    child.create_time     = std::chrono::steady_clock::now();
-    child.parent_pid      = pid;
+    auto child = make_process();
+    child->pid             = child_pid;
+    child->name            = parent.name + "-fork";
+    child->status          = process_status::ready;
+    child->priority        = parent.priority;
+    child->uid             = parent.uid;
+    child->gid             = parent.gid;
+    child->max_steps       = parent.max_steps;
+    child->max_time        = parent.max_time;
+    child->max_memory      = parent.max_memory;
+    child->max_messages    = parent.max_messages;
+    child->signal_handlers = parent.signal_handlers;
+    child->create_time     = std::chrono::steady_clock::now();
+    child->parent_pid      = pid;
 
-    child.state.root_expr  = parent.state.root_expr;
-    child.state.result     = parent.state.result;
-    child.state.done       = parent.state.done;
-    child.state.stack      = parent.state.stack;
-    child.state.user_macros = parent.state.user_macros;
+    child->state.root_expr  = parent.state.root_expr;
+    child->state.result     = parent.state.result;
+    child->state.done       = parent.state.done;
+    child->state.stack      = parent.state.stack;
+    child->state.user_macros = parent.state.user_macros;
     auto child_env = std::make_shared<environment>();
     if (parent.state.global_env) {
         child_env->bindings = parent.state.global_env->bindings;
         child_env->outer    = parent.state.global_env->outer;
     }
-    child.state.global_env = child_env;
-    child.state.stats.start();
+    child->state.global_env = child_env;
+    child->state.stats.start();
 
     parent.state.result = value_t(static_cast<int64_t>(child_pid));
-    child.state.result  = value_t(static_cast<int64_t>(0));
+    child->state.result  = value_t(static_cast<int64_t>(0));
 
     processes_.emplace(child_pid, std::move(child));
     return child_pid;
@@ -398,35 +398,35 @@ int async_scheduler::fork(int pid) {
 bool async_scheduler::set_priority(int pid, int priority) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    it->second.priority = priority;
+    it->second->priority = priority;
     return true;
 }
 
 bool async_scheduler::set_max_steps(int pid, uint64_t max_steps) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    it->second.max_steps = max_steps;
+    it->second->max_steps = max_steps;
     return true;
 }
 
 bool async_scheduler::set_max_time(int pid, double seconds) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    it->second.max_time = seconds;
+    it->second->max_time = seconds;
     return true;
 }
 
 bool async_scheduler::set_max_memory(int pid, uint64_t bytes) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    it->second.max_memory = bytes;
+    it->second->max_memory = bytes;
     return true;
 }
 
 bool async_scheduler::set_max_messages(int pid, uint64_t count) {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return false;
-    it->second.max_messages = count;
+    it->second->max_messages = count;
     return true;
 }
 
@@ -458,7 +458,7 @@ std::vector<process_info> async_scheduler::list_processes() const {
     std::vector<process_info> result;
     result.reserve(processes_.size());
     for (const auto& [pid, proc] : processes_) {
-        result.push_back(make_info(proc));
+        result.push_back(make_info(*proc));
     }
     std::sort(result.begin(), result.end(),
               [](const process_info& a, const process_info& b) {
@@ -470,21 +470,21 @@ std::vector<process_info> async_scheduler::list_processes() const {
 std::optional<process_info> async_scheduler::get_process_info(int pid) const {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return std::nullopt;
-    return make_info(it->second);
+    return make_info(*it->second);
 }
 
 std::optional<value_t> async_scheduler::get_result(int pid) const {
     auto it = processes_.find(pid);
     if (it == processes_.end()) return std::nullopt;
-    if (it->second.status != process_status::terminated) return std::nullopt;
-    return it->second.exit_code;
+    if (it->second->status != process_status::terminated) return std::nullopt;
+    return it->second->exit_code;
 }
 
 std::unordered_map<int, value_t> async_scheduler::get_results() const {
     std::unordered_map<int, value_t> results;
     for (const auto& [pid, proc] : processes_) {
-        if (proc.status == process_status::terminated) {
-            results[pid] = proc.exit_code;
+        if (proc->status == process_status::terminated) {
+            results[pid] = proc->exit_code;
         }
     }
     return results;
@@ -495,7 +495,7 @@ scheduler_stats async_scheduler::get_stats() const {
     s.total_processes = static_cast<int>(processes_.size());
     s.total_steps = total_steps_;
     for (const auto& [pid, proc] : processes_) {
-        switch (proc.status) {
+        switch (proc->status) {
             case process_status::running:    ++s.running; break;
             case process_status::ready:      ++s.ready; break;
             case process_status::paused:     ++s.paused; break;

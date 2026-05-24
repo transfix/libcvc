@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <string>
@@ -80,6 +81,12 @@ struct process {
         return state.stats.get_step_count();
     }
 };
+
+/// Shared ownership alias for process.
+using process_ptr = std::shared_ptr<process>;
+
+/// Create a new managed process.
+inline process_ptr make_process() { return std::make_shared<process>(); }
 
 } // namespace cvc::state_exec
 

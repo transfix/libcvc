@@ -4,6 +4,7 @@
 #include <cvc/state_exec/types.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace cvc {
@@ -21,15 +22,23 @@ struct process;
 /// Each process receives an intrinsics_context binding it to the scheduler,
 /// state tree root, and its own process record.  Intrinsics capture a
 /// pointer to this context via closure.
+///
+/// Ownership model:
+///   - sched, root, tracker: non-owning raw pointers to objects whose
+///     lifetime is guaranteed to exceed the context (the scheduler owns
+///     the tracker, and the cvc::app owns the state root).
+///   - proc: shared_ptr so the process survives even if the scheduler
+///     removes it from its map (e.g. after a kill); this prevents
+///     dangling-pointer bugs on map rehash or process removal.
 struct intrinsics_context {
-    scheduler*      sched    = nullptr;   // Owning scheduler
-    cvc::state*     root     = nullptr;   // State tree root
-    memory_tracker* tracker  = nullptr;   // Memory tracker
-    process*        proc     = nullptr;   // Current process
-    int             pid      = -1;        // Current process PID
-    std::string     uid;                  // Process user identity
-    std::string     cluster_id;           // Cluster identity
-    std::string     node_id;              // Node identity
+    scheduler*                  sched    = nullptr;   // Non-owning; outlives context
+    cvc::state*                 root     = nullptr;   // Non-owning; app-scoped lifetime
+    memory_tracker*             tracker  = nullptr;   // Non-owning; scheduler member
+    std::shared_ptr<process>    proc;                 // Shared with scheduler
+    int                         pid      = -1;        // Current process PID
+    std::string                 uid;                  // Process user identity
+    std::string                 cluster_id;           // Cluster identity
+    std::string                 node_id;              // Node identity
 };
 
 /// Register all DSL intrinsics into an environment.
