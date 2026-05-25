@@ -15,6 +15,7 @@ class TransferFunctionWidget;
 class SceneGraph;
 class ThreadMonitorWidget;
 class StateTreeWidget;
+class StateDashboardWidget;
 class GridOptionsDialog;
 class SDFDialog;
 class IsosurfaceDialog;
@@ -40,6 +41,7 @@ private slots:
   void showViewerOptions();
   void showThreadMonitor();
   void showStateTree();
+  void showStateDashboard();
   void showSDF();
   void showIsosurface();
   void showGeometry();
@@ -69,6 +71,7 @@ private:
   std::shared_ptr<SceneGraph> m_sceneGraph;
   ThreadMonitorWidget *m_threadMonitor;
   StateTreeWidget *m_stateTreeWidget;
+  StateDashboardWidget *m_stateDashboardWidget;
   GridOptionsDialog *m_gridOptionsDialog;
   SDFDialog *m_sdfDialog;
   IsosurfaceDialog *m_isosurfaceDialog;
