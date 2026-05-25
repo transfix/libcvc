@@ -313,23 +313,34 @@ void async_scheduler::handle_watch_event(process &proc) {
 
   auto &entry = hit->second;
 
+  // The handler must be a closure
+  auto *cp = std::get_if<closure_ptr>(&entry.handler.v);
+  if (!cp || !*cp)
+    return;
+  auto &cls = *cp;
+
   proc.saved_stack = proc.state.stack;
   proc.saved_result = proc.state.result;
   proc.in_watch_handler = true;
 
-  auto handler_env = environment::extend(proc.state.global_env);
-  handler_env->set("__watch_handler__", entry.handler);
-  handler_env->set("__watch_path__", value_t(entry.path));
-  handler_env->set("__watch_value__", value_t(std::string()));
-
-  std::vector<value_t> call_list;
-  call_list.push_back(value_t(symbol{"__watch_handler__"}));
-  call_list.push_back(value_t(entry.path));
-  call_list.push_back(value_t(std::string()));
-  auto call_expr = make_list(std::move(call_list));
+  // Directly apply the closure: create env extending the closure's
+  // captured env with params bound.
+  auto local = environment::extend(cls->env_snapshot);
+  if (cls->params.size() > 0)
+    local->set(cls->params[0].name, value_t(entry.path));
+  if (cls->params.size() > 1)
+    local->set(cls->params[1].name, value_t(std::string()));
 
   proc.state.stack.clear();
-  proc.state.stack.push_back({.expr = call_expr, .env = handler_env});
+  if (cls->body.size() == 1) {
+    proc.state.stack.push_back({.expr = cls->body[0], .env = local});
+  } else {
+    std::vector<value_t> begin_exprs;
+    begin_exprs.reserve(1 + cls->body.size());
+    begin_exprs.push_back(value_t{symbol{"begin"}});
+    begin_exprs.insert(begin_exprs.end(), cls->body.begin(), cls->body.end());
+    proc.state.stack.push_back({.expr = make_list(std::move(begin_exprs)), .env = local});
+  }
   proc.state.done = false;
 }
 
