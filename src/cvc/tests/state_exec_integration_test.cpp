@@ -1333,3 +1333,203 @@ TEST_F(StateWatchTest, WatchReceivesPathArgument) {
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(std::get<std::string>(result->v), "notify.path");
 }
+
+// ===========================================================================
+// Reactive Example Programs — state-watch based (no polling)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 1. Reactive Producer-Consumer
+//    Producer writes items to "queue.item", consumer reacts via state-watch
+//    and records each value it sees into "consumer.log" by appending.
+//    No polling loop is needed for the consumer logic itself.
+// ---------------------------------------------------------------------------
+TEST_F(StateWatchTest, ReactiveProducerConsumer) {
+  int pid = exec(std::string(R"(
+        (begin
+          ;; Consumer: watch for new items, append each to a log
+          (state-set "consumer.log" "")
+          (state-watch "queue.item"
+            (lambda (path val)
+              (state-set "consumer.log"
+                (str-concat (state-get "consumer.log") (state-get path) ","))))
+
+          ;; Produce 3 items — each triggers the handler reactively
+          (state-set "queue.item" "apple")
+          (state-set "queue.item" "banana")
+          (state-set "queue.item" "cherry")
+
+          ;; Spin to let all handlers dispatch
+          (set tries 0)
+          (while (and (not (= (state-get "consumer.log") "apple,banana,cherry,"))
+                      (< tries 300))
+            (set tries (+ tries 1)))
+
+          (state-get "consumer.log"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "apple,banana,cherry,");
+}
+
+// ---------------------------------------------------------------------------
+// 2. Event Counter (string-based)
+//    Counts changes by appending "|" per event; length = count.
+// ---------------------------------------------------------------------------
+TEST_F(StateWatchTest, EventCounter) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-set "stats.ticks" "")
+          (state-watch "sensor.reading"
+            (lambda (path val)
+              (state-set "stats.ticks"
+                (str-concat (state-get "stats.ticks") "|"))))
+
+          ;; 5 sensor readings
+          (state-set "sensor.reading" "72")
+          (state-set "sensor.reading" "73")
+          (state-set "sensor.reading" "71")
+          (state-set "sensor.reading" "74")
+          (state-set "sensor.reading" "70")
+
+          (set tries 0)
+          (while (and (not (= (state-get "stats.ticks") "|||||"))
+                      (< tries 500))
+            (set tries (+ tries 1)))
+
+          (state-get "stats.ticks"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "|||||");
+}
+
+// ---------------------------------------------------------------------------
+// 3. Cascading Watches (Chain Reaction)
+//    Watch A: on "pipeline.input" change  → write to "pipeline.stage1"
+//    Watch B: on "pipeline.stage1" change → write to "pipeline.stage2"
+//    A single input triggers the whole pipeline.
+// ---------------------------------------------------------------------------
+TEST_F(StateWatchTest, CascadingWatchPipeline) {
+  int pid = exec(std::string(R"(
+        (begin
+          ;; Stage 1: prefix the input value
+          (state-watch "pipeline.input"
+            (lambda (path val)
+              (state-set "pipeline.stage1"
+                (str-concat "processed:" (state-get path)))))
+
+          ;; Stage 2: wrap stage1 output
+          (state-watch "pipeline.stage1"
+            (lambda (path val)
+              (state-set "pipeline.stage2"
+                (str-concat "[" (state-get path) "]"))))
+
+          ;; Kick off the pipeline
+          (state-set "pipeline.input" "hello")
+
+          ;; Wait for full cascade
+          (set tries 0)
+          (while (and (not (state-exists "pipeline.stage2"))
+                      (< tries 500))
+            (set tries (+ tries 1)))
+
+          ;; input="hello" -> stage1="processed:hello" -> stage2="[processed:hello]"
+          (state-get "pipeline.stage2"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "[processed:hello]");
+}
+
+// ---------------------------------------------------------------------------
+// 4. Watch with Unwatch (Subscribe/Unsubscribe pattern)
+//    Handler processes the first 2 events, then unsubscribes itself.
+// ---------------------------------------------------------------------------
+TEST_F(StateWatchTest, WatchFirstNThenUnsubscribe) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-set "sampler.log" "")
+
+          ;; Store the watch ID so the handler can unsubscribe
+          (set wid
+            (state-watch "data.stream"
+              (lambda (path val)
+                (begin
+                  (set current-val (state-get path))
+                  (set current-log (state-get "sampler.log"))
+                  (state-set "sampler.log"
+                    (str-concat current-log current-val ","))
+                  ;; After seeing 2 items (log has 2 commas), unsubscribe
+                  (set updated (state-get "sampler.log"))
+                  (if (= updated (str-concat current-val ","))
+                    nil
+                    (state-unwatch wid))))))
+
+          ;; Produce 4 events — only the first 2 should be processed
+          (state-set "data.stream" "alpha")
+          (state-set "data.stream" "beta")
+          (state-set "data.stream" "gamma")
+          (state-set "data.stream" "delta")
+
+          ;; Wait for handler to finish
+          (set tries 0)
+          (while (and (= (state-get "sampler.log") "")
+                      (< tries 300))
+            (set tries (+ tries 1)))
+
+          ;; Small extra wait so second event can complete
+          (set tries 0)
+          (while (< tries 100) (set tries (+ tries 1)))
+
+          (state-get "sampler.log"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  // Should have exactly "alpha,beta," — gamma and delta ignored after unwatch
+  EXPECT_EQ(std::get<std::string>(result->v), "alpha,beta,");
+}
+
+// ---------------------------------------------------------------------------
+// 5. Two-Process Reactive Coordination
+//    Worker process watches "jobs.request" and writes "jobs.result".
+//    Requester writes the request and waits for the result.
+// ---------------------------------------------------------------------------
+TEST_F(StateWatchTest, TwoProcessReactiveCoordination) {
+  // Worker: watches for requests, responds with uppercased marker
+  int worker = exec(std::string(R"(
+        (begin
+          (state-watch "jobs.request"
+            (lambda (path val)
+              (state-set "jobs.result"
+                (str-concat "DONE:" (state-get path)))))
+          ;; Stay alive to process the request
+          (set i 0)
+          (while (< i 500) (set i (+ i 1)))
+          "worker-done")
+    )"));
+
+  // Requester: posts a request, waits for result
+  int requester = exec(std::string(R"(
+        (begin
+          (state-set "jobs.request" "task-42")
+          (set tries 0)
+          (while (and (not (state-exists "jobs.result"))
+                      (< tries 500))
+            (set tries (+ tries 1)))
+          (state-get "jobs.result"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(requester);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "DONE:task-42");
+}
