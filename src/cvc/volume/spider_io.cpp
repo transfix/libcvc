@@ -746,8 +746,8 @@ struct spider_io : public volume_file_io {
       readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, volinfo.voxel_dimensions());
     } catch (read_error &e) {
       cvc::createVolumeFile(ctx, filename, bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
-                                      wvol.voxel_dimensions(),
-                                      std::vector<data_type>(1, wvol.voxelType()), 0, 0, 0.0, 0.0);
+                            wvol.voxel_dimensions(), std::vector<data_type>(1, wvol.voxelType()), 0,
+                            0, 0.0, 0.0);
       readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, wvol.voxel_dimensions());
     }
 

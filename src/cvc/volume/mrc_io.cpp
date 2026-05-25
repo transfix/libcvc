@@ -827,8 +827,8 @@ struct mrc_io : public volume_file_io {
       dim[1] += off_y;
       dim[2] += off_z;
 
-      cvc::createVolumeFile(ctx, filename, box, dim,
-                                      std::vector<data_type>(1, vol.voxelType()), 1, 1, 0.0, 0.0);
+      cvc::createVolumeFile(ctx, filename, box, dim, std::vector<data_type>(1, vol.voxelType()), 1,
+                            1, 0.0, 0.0);
       volinfo.read(ctx, filename);
 
       if (var >= volinfo.numVariables()) {

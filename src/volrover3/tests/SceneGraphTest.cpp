@@ -1,8 +1,8 @@
 #include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <thread>

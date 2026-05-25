@@ -24,9 +24,9 @@
 #include <boost/thread.hpp>
 #include <chrono>
 #include <cvc/core/app.h>
-#include <cvc/utility/composite_function.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/types.h>
+#include <cvc/utility/composite_function.h>
 #include <cvc/volume/voxels.h>
 #include <gtest/gtest.h>
 #include <iomanip>

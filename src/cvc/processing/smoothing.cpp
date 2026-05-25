@@ -149,9 +149,8 @@ float Distance(float *Pt1, float *Pt2) {
   return Dist_f;
 }
 
-void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta,
-                     bool fix_boundary, bool perturb_1, bool geometric_flow, bool smoothing_enabled,
-                     bool perturb_2) {
+void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_boundary,
+                     bool perturb_1, bool geometric_flow, bool smoothing_enabled, bool perturb_2) {
   using namespace std;
   using namespace boost;
   using namespace cvc;

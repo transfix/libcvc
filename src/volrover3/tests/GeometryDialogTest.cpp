@@ -3,8 +3,8 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QTest>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
 #include <gtest/gtest.h>
 #include <volrover3/GeometryDialog.h>
 #include <volrover3/GeometryNode.h>

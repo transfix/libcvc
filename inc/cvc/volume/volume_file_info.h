@@ -23,9 +23,9 @@
 #ifndef __VOLMAGICK_VOLUMEFILEINFO_H__
 #define __VOLMAGICK_VOLUMEFILEINFO_H__
 
+#include <cvc/core/types.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
-#include <cvc/core/types.h>
 #include <string>
 #include <vector>
 

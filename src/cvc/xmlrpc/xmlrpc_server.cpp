@@ -193,8 +193,7 @@ public:
   static void monitor(cvc::app &ctx) {
     try {
       if (!cvc::state::instance(ctx)("__system.xmlrpc").value().empty() &&
-          boost::lexical_cast<int>(
-              cvc::state::instance(ctx)("__system.xmlrpc").value())) {
+          boost::lexical_cast<int>(cvc::state::instance(ctx)("__system.xmlrpc").value())) {
         // Create a new XMLRPC thread to handle IPC
         if (ctx.hasThread("xmlrpc_server_thread"))
           ctx.threads("xmlrpc_server_thread")->interrupt();
@@ -214,14 +213,10 @@ public:
   // If it is set to anything that evaluates to true, the xmlrpc server thread will be started.
   // If it is set to false, the running xmlrpc server will be terminated.
   static void init(cvc::app &ctx) {
-    cvc::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() {
-      monitor(ctx);
-    });
+    cvc::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() { monitor(ctx); });
     monitor(ctx);
   }
 
-  xmlrpc_server_thread_init() {
-    cvc::state::on_startup(cvc::state::app_init_func(init));
-  }
+  xmlrpc_server_thread_init() { cvc::state::on_startup(cvc::state::app_init_func(init)); }
 } static_init;
 } // namespace

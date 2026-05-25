@@ -1,7 +1,7 @@
-#include <cvc/utility/algorithm.h>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry_file_io.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/volume_file_info.h>
 

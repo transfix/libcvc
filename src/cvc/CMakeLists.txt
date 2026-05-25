@@ -797,6 +797,7 @@ target_include_directories(cvc
     $<INSTALL_INTERFACE:include>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/geometry
     ${_CVC_PRIVATE_INCLUDE_DIRS}
 )
 

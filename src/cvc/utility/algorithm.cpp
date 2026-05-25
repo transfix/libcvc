@@ -20,8 +20,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/utility/algorithm.h>
 #include <cvc/core/app.h>
+#include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 
 // CGAL headers must come before SDF headers due to macro conflicts
@@ -82,8 +82,7 @@ struct TetElement {
   size_t index;
   cvc::bounding_box bbox;
 
-  TetElement(size_t idx, const cvc::geometry::tets_t &t,
-             const cvc::geometry::points_t &v)
+  TetElement(size_t idx, const cvc::geometry::tets_t &t, const cvc::geometry::points_t &v)
       : index(idx) {
     // Compute bbox from 4 tet vertices
     const auto &tet = t[idx];
@@ -107,8 +106,7 @@ struct HexElement {
   size_t index;
   cvc::bounding_box bbox;
 
-  HexElement(size_t idx, const cvc::geometry::hexs_t &h,
-             const cvc::geometry::points_t &v)
+  HexElement(size_t idx, const cvc::geometry::hexs_t &h, const cvc::geometry::points_t &v)
       : index(idx) {
     // Compute bbox from 8 hex vertices
     const auto &hex = h[idx];
@@ -161,9 +159,8 @@ cvc::uint64 next_power_of_2(cvc::uint64 n) {
 // 12/10/2025 -- Joe R. -- Updated to use thread-safe SDFContext API.
 // 12/23/2025 -- Joe R. -- Added power-of-2 rounding for arbitrary dimensions.
 // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
-cvc::volume sdf_library(cvc::app &ctx, const cvc::geometry &geom,
-                                  const cvc::dimension &dim,
-                                  const cvc::bounding_box &bbox, bool flipNormals) {
+cvc::volume sdf_library(cvc::app &ctx, const cvc::geometry &geom, const cvc::dimension &dim,
+                        const cvc::bounding_box &bbox, bool flipNormals) {
   using namespace std;
   using namespace cvc;
   // NOTE: Don't pass flipNormals to SDFLibrary - its "fireworks" normal orientation
@@ -262,9 +259,8 @@ cvc::volume sdf_library(cvc::app &ctx, const cvc::geometry &geom,
 // 12/23/2025 -- Joe R. -- Creation.
 // 12/24/2025 -- Joe R. -- Fixed to respect provided bounding box.
 // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
-cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom,
-                                     const cvc::dimension &dim,
-                                     const cvc::bounding_box &bbox, bool flipNormals) {
+cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom, const cvc::dimension &dim,
+                           const cvc::bounding_box &bbox, bool flipNormals) {
   using namespace std;
   using namespace cvc;
 
@@ -458,8 +454,7 @@ LBIE::geoframe convert(const cvc::geometry &geo) {
   if (has_tets && !has_hexs && !has_tris && !has_quads) {
     // Pure tetrahedral mesh: encode tets as triangles (4 tris per tet)
     ret_geom.mesh_type = LBIE::geoframe::TETRA;
-    cvc::geometry::tris_t encoded =
-        cvc::encode_triangles_from_tets(geo.const_tets());
+    cvc::geometry::tris_t encoded = cvc::encode_triangles_from_tets(geo.const_tets());
     // Convert from geometry's uint64_t to geoframe's unsigned int
     ret_geom.triangles.reserve(encoded.size());
     for (const auto &tri : encoded) {
@@ -474,8 +469,7 @@ LBIE::geoframe convert(const cvc::geometry &geo) {
   } else if (has_hexs && !has_tets && !has_tris && !has_quads) {
     // Pure hexahedral mesh: encode hexs as quads (6 quads per hex)
     ret_geom.mesh_type = LBIE::geoframe::HEXA;
-    cvc::geometry::quads_t encoded =
-        cvc::encode_quads_from_hexs(geo.const_hexs());
+    cvc::geometry::quads_t encoded = cvc::encode_quads_from_hexs(geo.const_hexs());
     // Convert from geometry's uint64_t to geoframe's unsigned int
     ret_geom.quads.reserve(encoded.size());
     for (const auto &quad : encoded) {
@@ -622,8 +616,7 @@ cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
 // ---- Change History ----
 // 01/10/2014 -- Joe R. -- Creation.
 // 12/28/2024 -- Joe R. -- Week 4: Use new geometry-based API.
-cvc::geometry cvc_mesher(cvc::app &ctx, const cvc::geometry &geom,
-                                   Arguments argv) {
+cvc::geometry cvc_mesher(cvc::app &ctx, const cvc::geometry &geom, Arguments argv) {
   using namespace std;
   using namespace cvc;
   int improve_iterations = 1;

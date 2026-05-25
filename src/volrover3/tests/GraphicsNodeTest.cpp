@@ -1,9 +1,9 @@
 #include <chrono>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state.h>
 #include <cvc/core/state_object.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/volume/volmagick.h>
 #include <gtest/gtest.h>
 #include <thread>

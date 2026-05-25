@@ -34,9 +34,9 @@
 #include <boost/scoped_array.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <cmath>
+#include <cvc/utility/utility.h>
 #include <cvc/volume/endians.h>
 #include <cvc/volume/hdf5_utils.h>
-#include <cvc/utility/utility.h>
 #include <cvc/volume/volmagick.h>
 #include <iostream>
 #include <limits>
@@ -64,8 +64,8 @@ namespace {
 // 01/17/2014 -- Joe R. -- using TIME_UTC_
 class build_hierarchy {
 public:
-  build_hierarchy(cvc::app &ctx, const std::string &threadKey,
-                  const std::string &hdf5_filename, const std::string &hdf5_volumeDataSet)
+  build_hierarchy(cvc::app &ctx, const std::string &threadKey, const std::string &hdf5_filename,
+                  const std::string &hdf5_volumeDataSet)
       : _ctx(ctx), _threadKey(threadKey), _hdf5_filename(hdf5_filename),
         _hdf5_volumeDataSet(hdf5_volumeDataSet) {}
 
@@ -82,8 +82,7 @@ public:
   }
 
   // lazy way to count the number of steps
-  cvc::uint64 countNumSteps(const cvc::dimension &fullDim,
-                                      const cvc::bounding_box &bbox) {
+  cvc::uint64 countNumSteps(const cvc::dimension &fullDim, const cvc::bounding_box &bbox) {
     using namespace cvc;
 
     dimension prevDim(fullDim);
@@ -209,8 +208,8 @@ public:
     }
   }
 
-  static void start(cvc::app &ctx, const std::string &threadKey,
-                    const std::string &hdf5_filename, const std::string &hdf5_volumeDataSet) {
+  static void start(cvc::app &ctx, const std::string &threadKey, const std::string &hdf5_filename,
+                    const std::string &hdf5_volumeDataSet) {
     ctx.startThread(threadKey, build_hierarchy(ctx, threadKey, hdf5_filename, hdf5_volumeDataSet));
   }
 

@@ -11,10 +11,10 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
-#include <cvc/utility/algorithm.h>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <cvc/volume/volmagick.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>

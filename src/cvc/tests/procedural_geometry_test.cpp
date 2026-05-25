@@ -22,8 +22,8 @@
 
 #include <cassert>
 #include <cmath>
-#include <cvc/utility/algorithm.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <iostream>
 
 using namespace cvc;

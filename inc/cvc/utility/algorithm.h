@@ -29,9 +29,9 @@
 #include <boost/shared_array.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/volume/volmagick.h>
 
 // Forward declaration to avoid circular dependency

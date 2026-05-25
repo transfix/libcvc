@@ -217,10 +217,9 @@ public:
   state_object(app &ctx, const std::string state_path = std::string())
       : _ctx(ctx), _batchDepth(0), _initDepth(0), _hasInstanceThreading(false),
         _instanceThreading(false),
-        _state_path(state_path.empty()
-                        ? _ctx.dataTypeName<This>() + cvc::state::SEPARATOR +
-                              boost::lexical_cast<std::string>(this)
-                        : state_path) {
+        _state_path(state_path.empty() ? _ctx.dataTypeName<This>() + cvc::state::SEPARATOR +
+                                             boost::lexical_cast<std::string>(this)
+                                       : state_path) {
     // Register the data type - avoid the macro by using template syntax
     _ctx.template registerDataType<This>(_ctx.dataTypeName<This>());
 
@@ -256,8 +255,7 @@ public:
 
   // Use this to easily get the name of either this state object or it's children.
   std::string stateName(const std::string &childState = std::string()) const {
-    return !childState.empty() ? _state_path + cvc::state::SEPARATOR + childState
-                               : _state_path;
+    return !childState.empty() ? _state_path + cvc::state::SEPARATOR + childState : _state_path;
   }
 
   // Shortcut for accessing the state corresponding to an instance of this

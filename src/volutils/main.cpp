@@ -28,9 +28,9 @@
 #include <boost/program_options.hpp>
 #include <cmath>
 #include <cvc/core/app.h>
+#include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
-#include <cvc/core/types.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>

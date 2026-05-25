@@ -39,7 +39,7 @@ public:
 };
 
 #define CVC_DEF_EXCEPTION(name)                                                                    \
-  class name : public cvc::exception {                                                   \
+  class name : public cvc::exception {                                                             \
   public:                                                                                          \
     name() : _msg("cvc::" #name) {}                                                                \
     name(const std::string &msg)                                                                   \

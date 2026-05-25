@@ -11,8 +11,8 @@
 #include <boost/any.hpp>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state_volume_codec.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/volume/volume.h>
 #include <stdexcept>
 

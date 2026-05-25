@@ -332,8 +332,7 @@ public:
       }
     }
 
-    threads(wait ? key : this->uniqueThreadKey(key),
-            cvc::thread_ptr(new boost::thread(t)));
+    threads(wait ? key : this->uniqueThreadKey(key), cvc::thread_ptr(new boost::thread(t)));
   }
 
   // Start a thread with priority using the thread pool

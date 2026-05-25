@@ -15,10 +15,10 @@
 */
 
 #include <cmath>
-#include <cvc/utility/algorithm.h>
 #include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/types.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 

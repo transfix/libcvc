@@ -1,6 +1,6 @@
 #include <cvc/core/app.h>
-#include <cvc/geometry/bunny.h>
 #include <cvc/core/exception.h>
+#include <cvc/geometry/bunny.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/utility/utility.h>
 #include <fstream>

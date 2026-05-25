@@ -2,9 +2,9 @@
 #define APPSTATE_H
 
 #include <boost/signals2/connection.hpp>
-#include <cvc/volume/bounding_box.h>
-#include <cvc/geometry/geometry.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <memory>
 

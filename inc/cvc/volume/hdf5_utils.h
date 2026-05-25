@@ -34,10 +34,10 @@
 #include <boost/tuple/tuple.hpp>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/volume/bounding_box.h>
-#include <cvc/volume/dimension.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/types.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
 #include <iostream>
 #include <list>
 #include <string>
