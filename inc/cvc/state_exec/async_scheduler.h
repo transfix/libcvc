@@ -20,6 +20,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace cvc {
+class state;
+}
+
 namespace cvc::state_exec {
 
 /// Async process scheduler using C++20 coroutines.
@@ -92,6 +96,8 @@ public:
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
   void unregister_watch_handler(int pid, int watch_id);
 
+  void set_watch_root(cvc::state *root) { watch_root_ = root; }
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -102,6 +108,7 @@ private:
 
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
+  cvc::state *watch_root_ = nullptr;
 
   std::unordered_map<int, process_ptr> processes_;
 
@@ -110,6 +117,7 @@ private:
   void handle_signal(process &proc);
   void handle_watch_event(process &proc);
   void restore_from_signal(process &proc);
+  void poll_watches();
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);

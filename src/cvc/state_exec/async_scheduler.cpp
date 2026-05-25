@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cvc/state.h>
 #include <cvc/state_exec/async_scheduler.h>
 #include <cvc/state_exec/builtins.h>
 
@@ -160,6 +161,7 @@ void async_scheduler::execute_process_step(process &proc) {
 // ---------------------------------------------------------------------------
 
 task<int> async_scheduler::step() {
+  poll_watches();
   auto proc = select_process();
   if (!proc)
     co_return 0;
@@ -222,7 +224,13 @@ void async_scheduler::register_watch_handler(int pid, int watch_id, value_t hand
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return;
-  it->second->watch_handlers[watch_id] = {std::move(handler), path};
+  std::string initial;
+  if (watch_root_) {
+    auto *node = watch_root_->findDescendant(path);
+    if (node)
+      initial = node->value();
+  }
+  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial};
 }
 
 void async_scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -269,6 +277,25 @@ void async_scheduler::restore_from_signal(process &proc) {
     proc.saved_stack.clear();
   } else {
     proc.state.done = true;
+  }
+}
+
+void async_scheduler::poll_watches() {
+  if (!watch_root_)
+    return;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::terminated || proc->status == process_status::killed)
+      continue;
+    for (auto &[wid, entry] : proc->watch_handlers) {
+      auto *node = watch_root_->findDescendant(entry.path);
+      if (!node)
+        continue;
+      std::string cur = node->value();
+      if (cur != entry.last_value) {
+        entry.last_value = cur;
+        proc->pending_watch_events.push_back({wid});
+      }
+    }
   }
 }
 

@@ -158,42 +158,27 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   value_t handler = args[1];
 
   // Navigate to the node (create if needed so we can watch it)
-  auto *node = &(*ctx->root)(path);
+  (void)(*ctx->root)(path);
 
   // Allocate a watch ID
   int watch_id = ctx->proc->next_watch_id++;
 
-  // Store the handler AND path on the scheduler's process (not ctx->proc
-  // which may be a separate copy).  This avoids capturing value_t or
-  // std::string in the signal lambda, which can cause ABI issues with
-  // boost::signals2 on some platforms (e.g. macOS / Apple Clang).
-  scheduler *sched = ctx->sched;
-  int pid = ctx->pid;
-  if (sched) {
-    sched->register_watch_handler(pid, watch_id, handler, path);
+  // Register the handler.  The scheduler polls watched paths each step
+  // instead of using boost::signals2 (which segfaults on macOS).
+  if (ctx->sched) {
+    ctx->sched->set_watch_root(ctx->root);
+    ctx->sched->register_watch_handler(ctx->pid, watch_id, handler, path);
   } else {
-    ctx->proc->watch_handlers[watch_id] = {handler, path};
+    // No-scheduler path (unit tests): record handler + initial value.
+    std::string initial;
+    auto *node = ctx->root->findDescendant(path);
+    if (node)
+      initial = node->value();
+    ctx->proc->watch_handlers[watch_id] = {handler, path, initial};
   }
 
-  // Connect to the node's valueChanged signal.
-  // The lambda captures ONLY trivial types (raw pointer + ints) — no
-  // std::string, no value_t, no shared_ptr.
-  boost::signals2::connection conn;
-  if (sched) {
-    conn = node->valueChanged.connect(
-        [sched, pid, watch_id]() { sched->queue_watch_event(pid, {watch_id}); });
-  } else {
-    // No scheduler (unit-test path): push directly onto process.
-    // Use raw pointer; the process outlives the signal connection in
-    // these test scenarios.
-    process *proc_raw = ctx->proc.get();
-    conn = node->valueChanged.connect(
-        [proc_raw, watch_id]() { proc_raw->pending_watch_events.push_back({watch_id}); });
-  }
-
-  // Store the connection for later disconnection
-  auto conn_shared = std::make_shared<boost::signals2::connection>(std::move(conn));
-  ctx->watches[watch_id] = {path, handler, [conn_shared]() { conn_shared->disconnect(); }};
+  // Keep a local registry for unwatch; no signal connection needed.
+  ctx->watches[watch_id] = {path, handler, []() {}};
 
   return value_t(static_cast<int64_t>(watch_id));
 }
@@ -204,7 +189,6 @@ value_t intrinsic_state_unwatch(intrinsics_context *ctx, std::span<const value_t
   auto it = ctx->watches.find(static_cast<int>(watch_id));
   if (it == ctx->watches.end())
     return value_t(false);
-  it->second.disconnect();
   ctx->watches.erase(it);
   // Remove handler from the scheduler's process (or ctx->proc if no scheduler)
   if (ctx->sched)

@@ -78,21 +78,20 @@ struct process {
   std::vector<eval_frame> saved_stack;
   value_t saved_result;
 
-  // State-watch events (queued by intrinsics, dispatched by scheduler).
-  // Only the watch_id is stored; the handler and path are looked up
-  // from watch_handlers so that signal lambdas capture nothing but ints.
+  // State-watch events (queued when a watched path's value changes).
   struct watch_event {
     int watch_id;
   };
   std::vector<watch_event> pending_watch_events;
   int next_watch_id = 1;
 
-  // Watch handler registry: watch_id -> {handler, path}.
-  // Stored here so signal lambdas avoid capturing value_t or std::string
-  // (which can cause ABI issues with boost::signals2 on some platforms).
+  // Watch handler registry: watch_id -> {handler, path, last_value}.
+  // The scheduler polls watched paths each step instead of using
+  // boost::signals2, which avoids ABI issues on macOS / Apple Clang.
   struct watch_handler_entry {
     value_t handler;
     std::string path;
+    std::string last_value; // snapshot for change detection
   };
   std::unordered_map<int, watch_handler_entry> watch_handlers;
 

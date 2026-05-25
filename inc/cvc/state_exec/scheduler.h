@@ -21,6 +21,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace cvc {
+class state;
+}
+
 namespace cvc::state_exec {
 
 /// Scheduling policies for process selection.
@@ -153,8 +157,6 @@ public:
   bool has_runnable() const;
 
   /// Queue a watch event for a process by PID.
-  /// Called from intrinsic signal callbacks to route events to the
-  /// scheduler's own process object (not the intrinsics_context's copy).
   void queue_watch_event(int pid, process::watch_event evt);
 
   /// Register a watch handler with its watched path on the scheduler's process.
@@ -162,6 +164,9 @@ public:
 
   /// Remove a watch handler from the scheduler's process object.
   void unregister_watch_handler(int pid, int watch_id);
+
+  /// Set the state-tree root for watch polling.
+  void set_watch_root(cvc::state *root) { watch_root_ = root; }
 
 private:
   scheduling_policy policy_;
@@ -173,6 +178,7 @@ private:
 
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
+  cvc::state *watch_root_ = nullptr;
 
   std::unordered_map<int, process_ptr> processes_;
 
@@ -190,6 +196,9 @@ private:
 
   /// Restore process state after signal/watch handler completes.
   void restore_from_signal(process &proc);
+
+  /// Poll all watch_handlers entries for value changes, queuing events.
+  void poll_watches();
 
   /// Check resource limits after a step.  May kill the process.
   void check_limits(process &proc);

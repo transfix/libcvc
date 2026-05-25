@@ -1257,6 +1257,8 @@ protected:
     ictx.cluster_id = "cluster-1";
     ictx.node_id = "node-A";
 
+    sched.set_watch_root(ictx.root);
+
     env = builtins::make_default_environment();
     register_intrinsics(env, &ictx);
   }

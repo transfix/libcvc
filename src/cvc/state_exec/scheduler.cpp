@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cvc/state.h>
 #include <cvc/state_exec/builtins.h>
 #include <cvc/state_exec/scheduler.h>
 #include <stdexcept>
@@ -169,6 +170,9 @@ void scheduler::execute_process_step(process &proc) {
 }
 
 int scheduler::step() {
+  // Check for value changes on watched state paths.
+  poll_watches();
+
   auto proc = select_process();
   if (!proc)
     return 0;
@@ -224,7 +228,14 @@ void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return;
-  it->second->watch_handlers[watch_id] = {std::move(handler), path};
+  // Capture current value so the first change can be detected by polling.
+  std::string initial;
+  if (watch_root_) {
+    auto *node = watch_root_->findDescendant(path);
+    if (node)
+      initial = node->value();
+  }
+  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial};
 }
 
 void scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -232,6 +243,29 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
   if (it == processes_.end())
     return;
   it->second->watch_handlers.erase(watch_id);
+}
+
+// ---------------------------------------------------------------------------
+// Watch polling — replaces boost::signals2 for cross-platform reliability
+// ---------------------------------------------------------------------------
+
+void scheduler::poll_watches() {
+  if (!watch_root_)
+    return;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::terminated || proc->status == process_status::killed)
+      continue;
+    for (auto &[wid, entry] : proc->watch_handlers) {
+      auto *node = watch_root_->findDescendant(entry.path);
+      if (!node)
+        continue;
+      std::string cur = node->value();
+      if (cur != entry.last_value) {
+        entry.last_value = cur;
+        proc->pending_watch_events.push_back({wid});
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
