@@ -487,6 +487,142 @@ static int cmd_hexahedralize(int argc, char **argv) {
             << vm["output"].as<std::string>() << "\n";
   return 0;
 }
+
+static int cmd_tetrahedralize2(int argc, char **argv) {
+  po::options_description desc(
+    "cvc tetrahedralize2 - extract dual tetrahedral (tet2) mesh from volume\n\n"
+    "Produces a dual tetrahedral mesh (TETRA2 element type).\n\n"
+    "Improvement methods:\n"
+    "  none          No improvement [default]\n"
+    "  geo-flow      Geometric flow smoothing\n"
+    "  edge-contract Edge contraction\n"
+    "  joe-liu       Joe-Liu method\n"
+    "  minimal-vol   Minimal volume\n"
+    "  optimization  Optimization-based\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("input,i", po::value<std::string>()->required(), "input volume file")
+    ("output,o", po::value<std::string>()->required(), "output geometry file")
+    ("isovalue,v", po::value<double>()->required(), "isovalue")
+    ("method,m", po::value<std::string>()->default_value("duallib"),
+     "extraction method (duallib, fastcontouring, libisocontour)")
+    ("improve", po::value<std::string>()->default_value("none"),
+     "improvement method")
+    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
+     "normal type (bspline-conv, central-diff, bspline-interp)")
+    ("iterations,q", po::value<int>()->default_value(0),
+     "improvement iterations");
+
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  auto &app = cvc_app();
+  cvc::volume vol(app);
+  vol.read(vm["input"].as<std::string>());
+
+  cvc::extraction_method method = cvc::DUALLIB;
+  std::string mstr = vm["method"].as<std::string>();
+  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+
+  cvc::improvement_method improve = cvc::NO_IMPROVE;
+  std::string istr = vm["improve"].as<std::string>();
+  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+
+  cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
+  std::string nstr = vm["normals"].as<std::string>();
+  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+
+  int iters = vm["iterations"].as<int>();
+  double isovalue = vm["isovalue"].as<double>();
+
+  cvc::geometry result = cvc::tetrahedralize2(vol, isovalue, method, improve, normals, iters);
+
+  result.write(vm["output"].as<std::string>());
+  std::cout << "Wrote dual-tet mesh (" << result.num_points() << " verts) to "
+            << vm["output"].as<std::string>() << "\n";
+  return 0;
+}
+
+static int cmd_layer_mesh(int argc, char **argv) {
+  po::options_description desc(
+    "cvc layer-mesh - extract tetrahedral mesh of layer between two isosurfaces\n\n"
+    "Produces a volumetric tet2 mesh of the region between an outer and inner\n"
+    "isovalue. Useful for meshing shells, cortical layers, or material boundaries.\n\n"
+    "Improvement methods:\n"
+    "  none          No improvement [default]\n"
+    "  geo-flow      Geometric flow smoothing\n"
+    "  edge-contract Edge contraction\n"
+    "  joe-liu       Joe-Liu method\n"
+    "  minimal-vol   Minimal volume\n"
+    "  optimization  Optimization-based\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("input,i", po::value<std::string>()->required(), "input volume file")
+    ("output,o", po::value<std::string>()->required(), "output geometry file")
+    ("isovalue-outer", po::value<double>()->required(), "outer isovalue")
+    ("isovalue-inner", po::value<double>()->required(), "inner isovalue")
+    ("method,m", po::value<std::string>()->default_value("duallib"),
+     "extraction method (duallib, fastcontouring, libisocontour)")
+    ("improve", po::value<std::string>()->default_value("none"),
+     "improvement method")
+    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
+     "normal type (bspline-conv, central-diff, bspline-interp)")
+    ("iterations,q", po::value<int>()->default_value(0),
+     "improvement iterations");
+
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  auto &app = cvc_app();
+  cvc::volume vol(app);
+  vol.read(vm["input"].as<std::string>());
+
+  cvc::extraction_method method = cvc::DUALLIB;
+  std::string mstr = vm["method"].as<std::string>();
+  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+
+  cvc::improvement_method improve = cvc::NO_IMPROVE;
+  std::string istr = vm["improve"].as<std::string>();
+  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+
+  cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
+  std::string nstr = vm["normals"].as<std::string>();
+  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+
+  int iters = vm["iterations"].as<int>();
+  double iso_outer = vm["isovalue-outer"].as<double>();
+  double iso_inner = vm["isovalue-inner"].as<double>();
+
+  cvc::geometry result = cvc::tetrahedralize2(vol, iso_outer, iso_inner,
+                                               method, improve, normals, iters);
+
+  result.write(vm["output"].as<std::string>());
+  std::cout << "Wrote layer mesh (" << result.num_points() << " verts) to "
+            << vm["output"].as<std::string>() << "\n";
+  return 0;
+}
 #endif // CVC_ENABLE_MESHER
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1222,8 @@ static const command_entry commands[] = {
   {"iso",            "Geometry",        "extract isosurface from volume",                 cmd_iso},
   {"tetrahedralize", "Geometry",        "extract tetrahedral mesh from volume",           cmd_tetrahedralize},
   {"hexahedralize",  "Geometry",        "extract hexahedral mesh from volume",            cmd_hexahedralize},
+  {"tetrahedralize2","Geometry",        "extract dual-tet (tet2) mesh from volume",       cmd_tetrahedralize2},
+  {"layer-mesh",     "Geometry",        "mesh layer between two isosurfaces",             cmd_layer_mesh},
 #endif
 
   // ── Volume arithmetic ──

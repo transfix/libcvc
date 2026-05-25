@@ -308,6 +308,20 @@ TEST_F(CvcCliTest, HexahedralizeHelp) {
   EXPECT_NE(std::string::npos, r.output.find("--isovalue"));
 }
 
+TEST_F(CvcCliTest, Tetrahedralize2Help) {
+  auto r = cvc("tetrahedralize2 --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--isovalue"));
+  EXPECT_NE(std::string::npos, r.output.find("dual tetrahedral"));
+}
+
+TEST_F(CvcCliTest, LayerMeshHelp) {
+  auto r = cvc("layer-mesh --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--isovalue-outer"));
+  EXPECT_NE(std::string::npos, r.output.find("--isovalue-inner"));
+}
+
 TEST_F(CvcCliTest, ProjectHelp) {
   auto r = cvc("project --help");
   EXPECT_EQ(0, r.exit_code);
@@ -905,4 +919,37 @@ TEST_F(CvcCliTest, Integration_SdfFlipNormals) {
 
   // Both should exist and have the same file size (same grid)
   EXPECT_EQ(fs::file_size(normal_vol), fs::file_size(flipped_vol));
+}
+
+// Dual-tet (tet2) mesh extraction
+TEST_F(CvcCliTest, Integration_Tetrahedralize2) {
+  std::string geo = path("bunny_tet2.off");
+  cvc("bunny -o " + geo);
+
+  std::string sdf_vol = path("bunny_tet2_sdf.rawiv");
+  auto r1 = cvc("sdf -i " + geo + " -o " + sdf_vol + " -d 16,16,16 -a v2");
+  ASSERT_EQ(0, r1.exit_code);
+
+  std::string tet2_out = path("bunny_tet2.off");
+  auto r2 = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + tet2_out + " -v 0.0");
+  EXPECT_EQ(0, r2.exit_code);
+  EXPECT_TRUE(fs::exists(tet2_out));
+  EXPECT_NE(std::string::npos, r2.output.find("Wrote dual-tet mesh"));
+}
+
+// Layer mesh between two isosurfaces
+TEST_F(CvcCliTest, Integration_LayerMesh) {
+  std::string geo = path("bunny_layer.off");
+  cvc("bunny -o " + geo);
+
+  std::string sdf_vol = path("bunny_layer_sdf.rawiv");
+  auto r1 = cvc("sdf -i " + geo + " -o " + sdf_vol + " -d 16,16,16 -a v2");
+  ASSERT_EQ(0, r1.exit_code);
+
+  std::string layer_out = path("bunny_layer.off");
+  auto r2 = cvc("layer-mesh -i " + sdf_vol + " -o " + layer_out
+                + " --isovalue-outer -0.1 --isovalue-inner 0.1");
+  EXPECT_EQ(0, r2.exit_code);
+  EXPECT_TRUE(fs::exists(layer_out));
+  EXPECT_NE(std::string::npos, r2.output.find("Wrote layer mesh"));
 }
