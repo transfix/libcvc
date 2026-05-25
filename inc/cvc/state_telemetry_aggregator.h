@@ -22,7 +22,7 @@
 
 namespace CVC_NAMESPACE {
 
-class state_message;
+struct state_message;
 class state_message_bus;
 
 // ----------------

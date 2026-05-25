@@ -36,7 +36,7 @@ namespace cvc {
 class state;
 class state_cluster_shard;
 class state_cluster_membership;
-class state_message;
+struct state_message;
 class state_message_bus;
 struct membership_event;
 } // namespace cvc
