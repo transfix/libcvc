@@ -1,0 +1,6 @@
+- state value validation
+- state tree search bar
+- add flag to clip children to parent bbox
+- use a URL for data then request it on demand, use this for file read, http downloads, etc.
+
+

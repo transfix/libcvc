@@ -58,6 +58,26 @@ set(INCLUDE_FILES
   ../../inc/cvc/endians.h
   ../../inc/cvc/utility.h
   ../../inc/cvc/state_object.h
+  ../../inc/cvc/state_list.h
+  ../../inc/cvc/state_eviction_store.h
+  ../../inc/cvc/state_memory_manager.h
+  ../../inc/cvc/state_exec/types.h
+  ../../inc/cvc/state_exec/parser.h
+  ../../inc/cvc/state_exec/builtins.h
+  ../../inc/cvc/state_exec/evaluator.h
+  ../../inc/cvc/state_exec/stackless_evaluator.h
+  ../../inc/cvc/state_exec/task.h
+  ../../inc/cvc/state_exec/async_evaluator.h
+  ../../inc/cvc/state_exec/async_stackless_evaluator.h
+  ../../inc/cvc/state_exec/state_value_codec.h
+  ../../inc/cvc/state_exec/process.h
+  ../../inc/cvc/state_exec/memory_tracker.h
+  ../../inc/cvc/state_exec/scheduler.h
+  ../../inc/cvc/state_exec/async_scheduler.h
+  ../../inc/cvc/state_exec/intrinsics.h
+  ../../inc/cvc/state_exec/resource_policy.h
+  ../../inc/cvc/state_exec/stdlib.h
+  ../../inc/cvc/state_exec/exec_coordinator.h
   ../../inc/cvc/app.h
   ../../inc/cvc/volmagick.h
   ../../inc/cvc/geometry_file_io.h
@@ -83,6 +103,25 @@ set(SOURCE_FILES
   smoothing.cpp
   spider_io.cpp
   state.cpp
+  state_list.cpp
+  state_eviction_store.cpp
+  state_memory_manager.cpp
+  state_exec/types.cpp
+  state_exec/parser.cpp
+  state_exec/builtins.cpp
+  state_exec/evaluator.cpp
+  state_exec/stackless_evaluator.cpp
+  state_exec/async_evaluator.cpp
+  state_exec/async_stackless_evaluator.cpp
+  state_exec/state_value_codec.cpp
+  state_exec/process.cpp
+  state_exec/memory_tracker.cpp
+  state_exec/scheduler.cpp
+  state_exec/async_scheduler.cpp
+  state_exec/intrinsics.cpp
+  state_exec/resource_policy.cpp
+  state_exec/stdlib.cpp
+  state_exec/exec_coordinator.cpp
   state_change_journal.cpp
   state_subscription_router.cpp
   state_sync_adapter.cpp
@@ -126,6 +165,19 @@ if(WIN32)
   list(REMOVE_ITEM SOURCE_FILES state_transport_ipc.cpp)
 endif()
 
+# state_exec / state_memory_manager feature flags
+option(CVC_STATE_EXEC "Enable state_exec DSL evaluator and process scheduler" ON)
+option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
+
+if(NOT CVC_STATE_EXEC)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX "state_exec/")
+endif()
+
+# state_memory_manager feature flag
+if(NOT CVC_STATE_MEMORY_MANAGER)
+  list(REMOVE_ITEM SOURCE_FILES state_memory_manager.cpp state_eviction_store.cpp)
+endif()
+
 # Configuration
 set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
 mark_as_advanced(CVC_NAMESPACE)
@@ -150,7 +202,6 @@ option(CVC_GEOMETRY_CORRECT_INDEX_START "Adjust indices if they start from 1 rat
 option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
-
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -781,6 +832,12 @@ if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+endif()
+if(CVC_STATE_EXEC)
+  target_compile_definitions(cvc PUBLIC CVC_STATE_EXEC)
+endif()
+if(CVC_STATE_MEMORY_MANAGER)
+  target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
 endif()
 
 # Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes

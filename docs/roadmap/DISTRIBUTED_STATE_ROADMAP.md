@@ -18,6 +18,13 @@ Date: May 22, 2026
 - Phase 9 (network analytics & live telemetry) core delivered: `state_node_telemetry` (EWMA, latency histogram, JSON ser/deser, OOB publish), `state_telemetry_aggregator` (cluster rollups, stale detection, routing feedback), admin `to_text()` telemetry section. 31 tests across two new test suites. Remaining: 100-node bench, CBOR encoding, periodic auto-publish timer.
 - Phase 7 (perf + production hardening): admin telemetry integration delivered; production benchmarks, delta encoding, and zstd compression not started.
 
+## Related: state_exec DSL Engine
+
+A new `state_exec` module (S-expression DSL engine built on `cvc::state`) is
+under active development.  Phase 1 (foundation) is complete:
+`state_list`, `state_memory_manager`, core types, and parser.
+See [STATE_EXEC_ROADMAP.md](STATE_EXEC_ROADMAP.md) for full status.
+
 ## Purpose
 
 Add an optional distributed synchronization layer for `cvc::state` so multiple libcvc processes, potentially on different machines, can share one logical state tree in near real time. The feature should preserve the current local API while adding explicit cluster membership, conflict handling, large-object transport, subtree delegation, and low-latency fanout across many nodes.
