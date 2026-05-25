@@ -25,10 +25,12 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.priority = opts.priority;
   proc.uid = opts.uid;
   proc.gid = opts.gid;
+  proc.root_path = opts.root_path;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
+  proc.max_message_bytes = opts.max_message_bytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -47,10 +49,12 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.priority = opts.priority;
   proc.uid = opts.uid;
   proc.gid = opts.gid;
+  proc.root_path = opts.root_path;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
+  proc.max_message_bytes = opts.max_message_bytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -115,8 +119,13 @@ process_ptr async_scheduler::select_process() {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::execute_process_step(process &proc) {
-  if (!proc.pending_signals.empty() && !proc.in_signal_handler) {
+  if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
     handle_signal(proc);
+    return;
+  }
+
+  if (!proc.pending_watch_events.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+    handle_watch_event(proc);
     return;
   }
 
@@ -128,7 +137,7 @@ void async_scheduler::execute_process_step(process &proc) {
   auto now = std::chrono::steady_clock::now();
   proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
 
-  if (proc.in_signal_handler && proc.state.done) {
+  if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
     proc.status = process_status::ready;
     check_limits(proc);
@@ -201,6 +210,13 @@ bool async_scheduler::has_runnable() const {
   return false;
 }
 
+void async_scheduler::queue_watch_event(int pid, process::watch_event evt) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return;
+  it->second->pending_watch_events.push_back(std::move(evt));
+}
+
 // ---------------------------------------------------------------------------
 // Signal handling (same as sync)
 // ---------------------------------------------------------------------------
@@ -216,9 +232,8 @@ void async_scheduler::handle_signal(process &proc) {
   if (it == proc.signal_handlers.end())
     return;
 
-  if (!proc.state.stack.empty()) {
-    proc.saved_frame = proc.state.stack.back();
-  }
+  proc.saved_stack = proc.state.stack;
+  proc.saved_result = proc.state.result;
   proc.in_signal_handler = true;
 
   auto handler_env = environment::extend(proc.state.global_env);
@@ -231,14 +246,42 @@ void async_scheduler::handle_signal(process &proc) {
 
 void async_scheduler::restore_from_signal(process &proc) {
   proc.in_signal_handler = false;
-  if (proc.saved_frame) {
-    proc.state.stack.clear();
-    proc.state.stack.push_back(*proc.saved_frame);
+  proc.in_watch_handler = false;
+  if (!proc.saved_stack.empty()) {
+    proc.state.stack = std::move(proc.saved_stack);
+    proc.state.result = std::move(proc.saved_result);
     proc.state.done = false;
-    proc.saved_frame.reset();
+    proc.saved_stack.clear();
   } else {
     proc.state.done = true;
   }
+}
+
+void async_scheduler::handle_watch_event(process &proc) {
+  if (proc.pending_watch_events.empty())
+    return;
+
+  auto evt = std::move(proc.pending_watch_events.front());
+  proc.pending_watch_events.erase(proc.pending_watch_events.begin());
+
+  proc.saved_stack = proc.state.stack;
+  proc.saved_result = proc.state.result;
+  proc.in_watch_handler = true;
+
+  auto handler_env = environment::extend(proc.state.global_env);
+  handler_env->set("__watch_handler__", evt.handler);
+  handler_env->set("__watch_path__", value_t(evt.path));
+  handler_env->set("__watch_value__", value_t(evt.value));
+
+  std::vector<value_t> call_list;
+  call_list.push_back(value_t(symbol{"__watch_handler__"}));
+  call_list.push_back(value_t(evt.path));
+  call_list.push_back(value_t(evt.value));
+  auto call_expr = make_list(std::move(call_list));
+
+  proc.state.stack.clear();
+  proc.state.stack.push_back({.expr = call_expr, .env = handler_env});
+  proc.state.done = false;
 }
 
 bool async_scheduler::send_signal(int pid, const std::string &signal) {
@@ -277,6 +320,10 @@ void async_scheduler::check_limits(process &proc) {
   }
   if (proc.max_messages > 0 && proc.message_count >= proc.max_messages) {
     kill_process(proc, "message_limit_exceeded");
+    return;
+  }
+  if (proc.max_message_bytes > 0 && proc.message_bytes >= proc.max_message_bytes) {
+    kill_process(proc, "message_bytes_exceeded");
     return;
   }
 }
@@ -353,10 +400,12 @@ int async_scheduler::fork(int pid) {
   child->priority = parent.priority;
   child->uid = parent.uid;
   child->gid = parent.gid;
+  child->root_path = parent.root_path;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
   child->max_messages = parent.max_messages;
+  child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;
   child->create_time = std::chrono::steady_clock::now();
   child->parent_pid = pid;
@@ -425,6 +474,14 @@ bool async_scheduler::set_max_messages(int pid, uint64_t count) {
   return true;
 }
 
+bool async_scheduler::set_max_message_bytes(int pid, uint64_t bytes) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  it->second->max_message_bytes = bytes;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Process info / query (same as sync)
 // ---------------------------------------------------------------------------
@@ -445,6 +502,8 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;
   info.max_messages = proc.max_messages;
+  info.message_bytes = proc.message_bytes;
+  info.max_message_bytes = proc.max_message_bytes;
   info.parent_pid = proc.parent_pid;
   return info;
 }

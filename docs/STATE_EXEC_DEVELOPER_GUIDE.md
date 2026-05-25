@@ -485,6 +485,58 @@ Note: For processes to share state, they must be connected to the
 same `cvc::state` root and use `register_intrinsics()` with a context
 pointing to that root.
 
+### Host Receiving DSL Output (Print Pattern)
+
+A C++ host can capture DSL program output by subscribing to a path prefix
+on the message bus. This is the idiomatic way to implement "print"
+statements in the DSL — the program sends messages and the host collects
+them.
+
+**C++ host setup:**
+```cpp
+#include <cvc/state_cluster_shard.h>
+#include <cvc/state_exec/scheduler.h>
+
+cvc::app app_ctx;
+auto& root = cvc::state::instance(app_ctx);
+
+// Create and attach a shard (enables msg-send routing)
+cvc::state_cluster_shard shard(app_ctx, "my-cluster", "my-node");
+shard.attach();
+
+// Subscribe to all "console.*" messages
+std::vector<std::string> output;
+auto sub = shard.message_bus().subscribe("console",
+    [&](const cvc::state_message& m) {
+        output.push_back(m.string_value);
+    });
+
+// Run a DSL program that "prints"
+scheduler sched;
+sched.execute(std::string(R"(
+    (begin
+      (msg-send "console.stdout" "Hello from DSL!")
+      (msg-send "console.stdout" "Computing...")
+      (msg-send "console.stdout" (str-concat "Result: " (str (* 6 7))))
+      (msg-send "console.stderr" "Warning: example only"))
+)"));
+sched.run();
+
+// output now contains: ["Hello from DSL!", "Computing...",
+//                       "Result: 42", "Warning: example only"]
+
+shard.message_bus().unsubscribe(sub);
+shard.detach();
+```
+
+Key points:
+- `subscribe(prefix, callback)` matches any path starting with that prefix
+  (dot-segment boundary matching, so "console" matches "console.stdout"
+  and "console.stderr" but not "consolex")
+- Each `msg-send` from DSL generates a unique message ID automatically
+- The callback fires synchronously inside `admit()` — keep it fast
+- Unsubscribe when done to avoid dangling references
+
 ---
 
 ## 7. Resource Limits & Policies
@@ -495,10 +547,11 @@ Set via `execute_options` at submission time or adjusted at runtime:
 
 ```cpp
 execute_options opts;
-opts.max_steps    = 10000;     // evaluator steps
-opts.max_time     = 5.0;       // wall time in seconds
-opts.max_memory   = 1048576;   // bytes (tracked by memory_tracker)
-opts.max_messages = 100;       // outbound msg-send calls
+opts.max_steps         = 10000;     // evaluator steps
+opts.max_time          = 5.0;       // wall time in seconds
+opts.max_memory        = 1048576;   // bytes (tracked by memory_tracker)
+opts.max_messages      = 100;       // outbound msg-send calls
+opts.max_message_bytes = 65536;     // total outbound payload bytes
 ```
 
 When a limit is exceeded, the process is killed (status becomes `killed`).

@@ -26,10 +26,12 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.priority = opts.priority;
   proc.uid = opts.uid;
   proc.gid = opts.gid;
+  proc.root_path = opts.root_path;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
+  proc.max_message_bytes = opts.max_message_bytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -48,10 +50,12 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.priority = opts.priority;
   proc.uid = opts.uid;
   proc.gid = opts.gid;
+  proc.root_path = opts.root_path;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
+  proc.max_message_bytes = opts.max_message_bytes;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
@@ -120,9 +124,15 @@ process_ptr scheduler::select_process() {
 
 void scheduler::execute_process_step(process &proc) {
   // 1. Handle pending signals first
-  if (!proc.pending_signals.empty() && !proc.in_signal_handler) {
+  if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
     handle_signal(proc);
     return; // Signal setup counts as a step
+  }
+
+  // 1b. Handle pending watch events
+  if (!proc.pending_watch_events.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
+    handle_watch_event(proc);
+    return;
   }
 
   // 2. Mark as running and track timing
@@ -136,8 +146,8 @@ void scheduler::execute_process_step(process &proc) {
   auto now = std::chrono::steady_clock::now();
   proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
 
-  // 5. Check if signal handler just finished
-  if (proc.in_signal_handler && proc.state.done) {
+  // 5. Check if signal/watch handler just finished
+  if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
     // Don't check done — we restored original evaluation
     proc.status = process_status::ready;
@@ -202,6 +212,13 @@ bool scheduler::has_runnable() const {
   return false;
 }
 
+void scheduler::queue_watch_event(int pid, process::watch_event evt) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return;
+  it->second->pending_watch_events.push_back(std::move(evt));
+}
+
 // ---------------------------------------------------------------------------
 // Signal handling
 // ---------------------------------------------------------------------------
@@ -217,10 +234,9 @@ void scheduler::handle_signal(process &proc) {
   if (it == proc.signal_handlers.end())
     return; // No handler — ignored
 
-  // Save current evaluation state
-  if (!proc.state.stack.empty()) {
-    proc.saved_frame = proc.state.stack.back();
-  }
+  // Save current evaluation state (full stack + result)
+  proc.saved_stack = proc.state.stack;
+  proc.saved_result = proc.state.result;
   proc.in_signal_handler = true;
 
   // Set up handler evaluation
@@ -235,14 +251,46 @@ void scheduler::handle_signal(process &proc) {
 
 void scheduler::restore_from_signal(process &proc) {
   proc.in_signal_handler = false;
-  if (proc.saved_frame) {
-    proc.state.stack.clear();
-    proc.state.stack.push_back(*proc.saved_frame);
+  proc.in_watch_handler = false;
+  if (!proc.saved_stack.empty()) {
+    proc.state.stack = std::move(proc.saved_stack);
+    proc.state.result = std::move(proc.saved_result);
     proc.state.done = false;
-    proc.saved_frame.reset();
+    proc.saved_stack.clear();
   } else {
     proc.state.done = true;
   }
+}
+
+void scheduler::handle_watch_event(process &proc) {
+  if (proc.pending_watch_events.empty())
+    return;
+
+  auto evt = std::move(proc.pending_watch_events.front());
+  proc.pending_watch_events.erase(proc.pending_watch_events.begin());
+
+  // Save current evaluation state (full stack + result)
+  proc.saved_stack = proc.state.stack;
+  proc.saved_result = proc.state.result;
+  proc.in_watch_handler = true;
+
+  // Set up handler evaluation: call handler with (path, value)
+  auto handler_env = environment::extend(proc.state.global_env);
+  handler_env->set("__watch_handler__", evt.handler);
+  handler_env->set("__watch_path__", value_t(evt.path));
+  handler_env->set("__watch_value__", value_t(evt.value));
+
+  // Build call expression: (__watch_handler__ path value)
+  // The evaluator requires the head to be a symbol so we bind the closure.
+  std::vector<value_t> call_list;
+  call_list.push_back(value_t(symbol{"__watch_handler__"}));
+  call_list.push_back(value_t(evt.path));
+  call_list.push_back(value_t(evt.value));
+  auto call_expr = make_list(std::move(call_list));
+
+  proc.state.stack.clear();
+  proc.state.stack.push_back({.expr = call_expr, .env = handler_env});
+  proc.state.done = false;
 }
 
 bool scheduler::send_signal(int pid, const std::string &signal) {
@@ -285,6 +333,11 @@ void scheduler::check_limits(process &proc) {
   // max_messages
   if (proc.max_messages > 0 && proc.message_count >= proc.max_messages) {
     kill_process(proc, "message_limit_exceeded");
+    return;
+  }
+  // max_message_bytes
+  if (proc.max_message_bytes > 0 && proc.message_bytes >= proc.max_message_bytes) {
+    kill_process(proc, "message_bytes_exceeded");
     return;
   }
 }
@@ -362,10 +415,12 @@ int scheduler::fork(int pid) {
   child->priority = parent.priority;
   child->uid = parent.uid;
   child->gid = parent.gid;
+  child->root_path = parent.root_path;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
   child->max_messages = parent.max_messages;
+  child->max_message_bytes = parent.max_message_bytes;
   child->signal_handlers = parent.signal_handlers;
   child->create_time = std::chrono::steady_clock::now();
   child->parent_pid = pid;
@@ -438,6 +493,14 @@ bool scheduler::set_max_messages(int pid, uint64_t count) {
   return true;
 }
 
+bool scheduler::set_max_message_bytes(int pid, uint64_t bytes) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  it->second->max_message_bytes = bytes;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Process info / query
 // ---------------------------------------------------------------------------
@@ -458,6 +521,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;
   info.max_messages = proc.max_messages;
+  info.message_bytes = proc.message_bytes;
+  info.max_message_bytes = proc.max_message_bytes;
   info.parent_pid = proc.parent_pid;
   return info;
 }

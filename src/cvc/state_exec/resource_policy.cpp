@@ -40,6 +40,8 @@ process_limits validate_limits(const resource_policy &policy, const process_limi
   result.max_time = apply_default(result.max_time, policy.max_time_default);
   result.max_memory = apply_default(result.max_memory, policy.max_memory_default);
   result.max_messages = apply_default(result.max_messages, policy.max_messages_default);
+  result.max_message_bytes =
+      apply_default(result.max_message_bytes, policy.max_message_bytes_default);
 
   // Clamp/validate each field
   result.max_steps = clamp_limit(result.max_steps, policy.max_steps_min, policy.max_steps_max,
@@ -53,6 +55,10 @@ process_limits validate_limits(const resource_policy &policy, const process_limi
 
   result.max_messages = clamp_limit(result.max_messages, policy.max_messages_min,
                                     policy.max_messages_max, "max_messages", policy.enforce);
+
+  result.max_message_bytes =
+      clamp_limit(result.max_message_bytes, policy.max_message_bytes_min,
+                  policy.max_message_bytes_max, "max_message_bytes", policy.enforce);
 
   return result;
 }

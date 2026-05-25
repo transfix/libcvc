@@ -36,10 +36,12 @@ struct execute_options {
   int priority = 0;
   std::string uid;
   std::string gid;
+  std::string root_path; // Chroot: confine to subtree (empty = full tree)
   uint64_t max_steps = 0;
   double max_time = 0.0;
   uint64_t max_memory = 0;
   uint64_t max_messages = 0;
+  uint64_t max_message_bytes = 0;
   std::unordered_map<std::string, value_t> signal_handlers;
   std::function<void(value_t)> on_complete;
   environment_ptr env;
@@ -61,6 +63,8 @@ struct process_info {
   double max_time;
   uint64_t message_count;
   uint64_t max_messages;
+  uint64_t message_bytes;
+  uint64_t max_message_bytes;
   int parent_pid;
 };
 
@@ -124,6 +128,7 @@ public:
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
   bool set_max_messages(int pid, uint64_t count);
+  bool set_max_message_bytes(int pid, uint64_t bytes);
 
   // --- Signal handling ---
 
@@ -147,6 +152,11 @@ public:
   /// Check if any process is still runnable.
   bool has_runnable() const;
 
+  /// Queue a watch event for a process by PID.
+  /// Called from intrinsic signal callbacks to route events to the
+  /// scheduler's own process object (not the intrinsics_context's copy).
+  void queue_watch_event(int pid, process::watch_event evt);
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -169,7 +179,10 @@ private:
   /// Handle pending signals for a process.
   void handle_signal(process &proc);
 
-  /// Restore process state after signal handler completes.
+  /// Handle pending watch events for a process.
+  void handle_watch_event(process &proc);
+
+  /// Restore process state after signal/watch handler completes.
   void restore_from_signal(process &proc);
 
   /// Check resource limits after a step.  May kill the process.

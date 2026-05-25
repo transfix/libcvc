@@ -66,6 +66,7 @@ public:
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
   bool set_max_messages(int pid, uint64_t count);
+  bool set_max_message_bytes(int pid, uint64_t bytes);
 
   // --- Signal handling ---
 
@@ -86,6 +87,8 @@ public:
   int process_count() const { return static_cast<int>(processes_.size()); }
   bool has_runnable() const;
 
+  void queue_watch_event(int pid, process::watch_event evt);
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
@@ -102,6 +105,7 @@ private:
   process_ptr select_process();
   void execute_process_step(process &proc);
   void handle_signal(process &proc);
+  void handle_watch_event(process &proc);
   void restore_from_signal(process &proc);
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);

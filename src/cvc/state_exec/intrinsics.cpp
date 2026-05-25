@@ -145,6 +145,65 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   return nil_value;
 }
 
+value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "state-root-path");
+  return value_t(ctx->root_path);
+}
+
+value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-watch");
+  require_root(ctx, "state-watch");
+  auto &path = as_string(args[0], "state-watch");
+  // args[1] is the handler expression (lambda or quoted form)
+  value_t handler = args[1];
+
+  // Navigate to the node (create if needed so we can watch it)
+  auto *node = &(*ctx->root)(path);
+
+  // Allocate a watch ID
+  int watch_id = ctx->proc->next_watch_id++;
+
+  // Connect to the node's valueChanged signal.
+  // Route events through the scheduler so they land on the scheduler's
+  // own process object (not the intrinsics_context copy).
+  scheduler *sched = ctx->sched;
+  int pid = ctx->pid;
+  std::string watched_path = path;
+  value_t handler_copy = handler;
+  boost::signals2::connection conn;
+  if (sched) {
+    conn = node->valueChanged.connect([sched, pid, watch_id, watched_path, handler_copy]() {
+      sched->queue_watch_event(pid, {watch_id, watched_path, std::string(), handler_copy});
+    });
+  } else {
+    // No scheduler (unit-test path): push directly onto process
+    auto proc_weak = std::weak_ptr<process>(ctx->proc);
+    conn = node->valueChanged.connect([proc_weak, watch_id, watched_path, handler_copy]() {
+      auto proc = proc_weak.lock();
+      if (!proc)
+        return;
+      proc->pending_watch_events.push_back({watch_id, watched_path, std::string(), handler_copy});
+    });
+  }
+
+  // Store the connection for later disconnection
+  auto conn_shared = std::make_shared<boost::signals2::connection>(std::move(conn));
+  ctx->watches[watch_id] = {path, handler, [conn_shared]() { conn_shared->disconnect(); }};
+
+  return value_t(static_cast<int64_t>(watch_id));
+}
+
+value_t intrinsic_state_unwatch(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "state-unwatch");
+  int64_t watch_id = as_int(args[0], "state-unwatch");
+  auto it = ctx->watches.find(static_cast<int>(watch_id));
+  if (it == ctx->watches.end())
+    return value_t(false);
+  it->second.disconnect();
+  ctx->watches.erase(it);
+  return value_t(true);
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler intrinsics
 // ---------------------------------------------------------------------------
@@ -257,6 +316,8 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   entries.emplace_back("max_time", value_t(info->max_time));
   entries.emplace_back("messages", value_t(static_cast<int64_t>(info->message_count)));
   entries.emplace_back("max_messages", value_t(static_cast<int64_t>(info->max_messages)));
+  entries.emplace_back("message_bytes", value_t(static_cast<int64_t>(info->message_bytes)));
+  entries.emplace_back("max_message_bytes", value_t(static_cast<int64_t>(info->max_message_bytes)));
   entries.emplace_back("parent_pid", value_t(static_cast<int64_t>(info->parent_pid)));
   return make_dict(std::move(entries));
 }
@@ -305,6 +366,20 @@ value_t intrinsic_message_limit(intrinsics_context *ctx, std::span<const value_t
   if (!ctx->proc)
     return value_t(int64_t(0));
   return value_t(static_cast<int64_t>(ctx->proc->max_messages));
+}
+
+value_t intrinsic_message_bytes(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-bytes");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->message_bytes));
+}
+
+value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 0, "message-bytes-limit");
+  if (!ctx->proc)
+    return value_t(int64_t(0));
+  return value_t(static_cast<int64_t>(ctx->proc->max_message_bytes));
 }
 
 value_t intrinsic_step_count(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -436,8 +511,10 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
     node = &(*ctx->root)(path);
   }
   auto result = node->sendMessage(payload, content_type);
-  if (ctx->proc)
+  if (ctx->proc) {
     ctx->proc->message_count++;
+    ctx->proc->message_bytes += payload.size();
+  }
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back(
       "status",
@@ -468,6 +545,9 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("state-delete", intrinsic_state_delete);
   reg("state-data-get", intrinsic_state_data_get);
   reg("state-data-set", intrinsic_state_data_set);
+  reg("state-root-path", intrinsic_state_root_path);
+  reg("state-watch", intrinsic_state_watch);
+  reg("state-unwatch", intrinsic_state_unwatch);
 
   // Scheduler
   reg("spawn", intrinsic_spawn);
@@ -487,6 +567,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("time-limit", intrinsic_time_limit);
   reg("message-count", intrinsic_message_count);
   reg("message-limit", intrinsic_message_limit);
+  reg("message-bytes", intrinsic_message_bytes);
+  reg("message-bytes-limit", intrinsic_message_bytes_limit);
   reg("step-count", intrinsic_step_count);
 
   // System identity
@@ -504,6 +586,17 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
 
   // Messaging
   reg("msg-send", intrinsic_msg_send);
+}
+
+void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {
+  if (root_path.empty()) {
+    ctx.root = &tree_root;
+    ctx.root_path.clear();
+    return;
+  }
+  // Navigate or create the subtree node
+  ctx.root = &tree_root(root_path);
+  ctx.root_path = root_path;
 }
 
 } // namespace cvc::state_exec

@@ -14,6 +14,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace cvc {
 class state;
@@ -47,6 +49,15 @@ struct intrinsics_context {
   std::string uid;                   // Process user identity
   std::string cluster_id;            // Cluster identity
   std::string node_id;               // Node identity
+  std::string root_path;             // Chroot path (empty = full tree)
+
+  // State-watch connection registry (opaque — managed by intrinsics impl)
+  struct watch_entry {
+    std::string path;
+    value_t handler;
+    std::function<void()> disconnect; // Disconnects from boost signal
+  };
+  std::unordered_map<int, watch_entry> watches;
 };
 
 /// Register all DSL intrinsics into an environment.
@@ -55,6 +66,16 @@ struct intrinsics_context {
 /// that uses the returned environment.  Typically, the scheduler creates one
 /// context per process and injects intrinsics before execution begins.
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
+
+/// Resolve `root_path` against `tree_root` and apply chroot to `ctx`.
+///
+/// If `root_path` is non-empty, sets ctx->root to the subtree node at
+/// that path (creating it if needed) and records ctx->root_path.
+/// If `root_path` is empty, ctx->root stays at `tree_root`.
+///
+/// Call this after assigning ctx->root = &tree_root and before
+/// register_intrinsics().
+void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path);
 
 } // namespace cvc::state_exec
 

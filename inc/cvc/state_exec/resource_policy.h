@@ -35,6 +35,11 @@ struct resource_policy {
   uint64_t max_messages_max = 0;
   uint64_t max_messages_default = 0;
 
+  // Per-process message byte limits
+  uint64_t max_message_bytes_min = 0;
+  uint64_t max_message_bytes_max = 0;
+  uint64_t max_message_bytes_default = 0;
+
   // Per-process step limits
   uint64_t max_steps_min = 0;
   uint64_t max_steps_max = 0;
@@ -55,6 +60,7 @@ struct process_limits {
   double max_time = 0.0;
   uint64_t max_memory = 0;
   uint64_t max_messages = 0;
+  uint64_t max_message_bytes = 0;
 };
 
 /// Validate and possibly adjust limits against a policy.

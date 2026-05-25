@@ -9,6 +9,7 @@
 */
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <cvc/app.h>
@@ -18,6 +19,7 @@
 #include <cvc/state_volume_codec.h>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -601,6 +603,10 @@ state_cluster_shard::send_message_result state_cluster_shard::send_message(state
   m.cluster_id = r.owner_cluster_id;
   if (m.origin_node_id.empty())
     m.origin_node_id = _local_node_id;
+  if (m.message_id.empty()) {
+    static std::atomic<std::uint64_t> seq{0};
+    m.message_id = std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+  }
 
   // Local delivery: only when we own the path. Cross-cluster
   // messages must not be admitted into our own local bus; they

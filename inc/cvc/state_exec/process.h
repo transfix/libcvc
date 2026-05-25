@@ -45,15 +45,17 @@ struct process {
   process_status status = process_status::ready;
 
   // Scheduling
-  int priority = 0; // Nice value: -20 (high) to +19 (low)
-  std::string uid;  // User identity
-  std::string gid;  // Group identity
+  int priority = 0;      // Nice value: -20 (high) to +19 (low)
+  std::string uid;       // User identity
+  std::string gid;       // Group identity
+  std::string root_path; // Chroot path (empty = full tree)
 
   // Resource limits (0 = unlimited)
   uint64_t max_steps = 0;
-  double max_time = 0.0;     // Wall-clock seconds
-  uint64_t max_memory = 0;   // Bytes
-  uint64_t max_messages = 0; // Outbound message count
+  double max_time = 0.0;          // Wall-clock seconds
+  uint64_t max_memory = 0;        // Bytes
+  uint64_t max_messages = 0;      // Outbound message count
+  uint64_t max_message_bytes = 0; // Total outbound message bytes
 
   // Evaluator state (stackless — serializable)
   evaluator_state state;
@@ -72,10 +74,23 @@ struct process {
   std::unordered_map<std::string, value_t> signal_handlers;
   std::vector<std::string> pending_signals;
   bool in_signal_handler = false;
-  std::optional<eval_frame> saved_frame;
+  bool in_watch_handler = false;
+  std::vector<eval_frame> saved_stack;
+  value_t saved_result;
+
+  // State-watch events (queued by intrinsics, dispatched by scheduler)
+  struct watch_event {
+    int watch_id;
+    std::string path;
+    std::string value;
+    value_t handler;
+  };
+  std::vector<watch_event> pending_watch_events;
+  int next_watch_id = 1;
 
   // Message tracking
   uint64_t message_count = 0;
+  uint64_t message_bytes = 0;
 
   // Forking
   int parent_pid = -1;

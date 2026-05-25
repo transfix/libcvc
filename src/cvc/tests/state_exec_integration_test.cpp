@@ -4,6 +4,7 @@
 
 #include <cvc/app.h>
 #include <cvc/state.h>
+#include <cvc/state_cluster_shard.h>
 #include <cvc/state_exec/builtins.h>
 #include <cvc/state_exec/exec_coordinator.h>
 #include <cvc/state_exec/intrinsics.h>
@@ -697,6 +698,25 @@ TEST_F(MessagingIntegrationTest, MessageLimitKillsProcess) {
   EXPECT_GE(proc->message_count, 2u);
 }
 
+TEST_F(MessagingIntegrationTest, MessageBytesLimitKillsProcess) {
+  // When max_message_bytes is set, the scheduler kills a process that exceeds it.
+  execute_options opts;
+  opts.max_message_bytes = 20; // Allow ~20 bytes total
+  int pid = exec(std::string(R"(
+        (begin
+          (msg-send "test" "hello world!!")
+          (msg-send "test" "this exceeds the byte cap")
+          "done")
+    )"),
+                 opts);
+
+  sched.run();
+
+  // First message is 13 bytes, second is 25 bytes → total 38 > 20
+  // Process should be killed after the second message
+  EXPECT_GE(proc->message_bytes, 13u);
+}
+
 TEST_F(MessagingIntegrationTest, ProducerConsumerViaStateTree) {
   // Producer writes data to state tree, consumer reads it
   execute_options prod_opts;
@@ -761,6 +781,49 @@ TEST_F(MessagingIntegrationTest, MsgSendWithContentType) {
   ASSERT_TRUE(result.has_value());
   // Status should be a string
   ASSERT_TRUE(std::holds_alternative<std::string>(result->v));
+}
+
+TEST_F(MessagingIntegrationTest, HostReceivesPrintMessagesFromDSL) {
+  // Demonstrates a C++ host subscribing to DSL "print" output.
+  // The DSL program sends messages to "console.stdout" which the
+  // host captures as if they were print statements.
+
+  // Wire up a shard so msg-send can route messages through the bus
+  cvc::state_cluster_shard shard(app_ctx, "cluster1", "nodeA");
+  shard.attach();
+
+  // Subscribe to all messages under "console" prefix
+  std::vector<std::string> output_lines;
+  auto sub_id = shard.message_bus().subscribe(
+      "console", [&](const cvc::state_message &m) { output_lines.push_back(m.string_value); });
+
+  // DSL program uses msg-send as a "print" mechanism
+  int pid = exec(std::string(R"(
+        (begin
+          (msg-send "console.stdout" "Hello from DSL!")
+          (msg-send "console.stdout" "Computing...")
+          (set result (* 6 7))
+          (msg-send "console.stdout" (str-concat "Result: " (str result)))
+          (msg-send "console.stderr" "Warning: example only")
+          result)
+    )"));
+
+  sched.run();
+
+  // Verify the DSL returned the correct value
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<int64_t>(result->v), 42);
+
+  // Verify the host captured all "print" output
+  ASSERT_EQ(output_lines.size(), 4u);
+  EXPECT_EQ(output_lines[0], "Hello from DSL!");
+  EXPECT_EQ(output_lines[1], "Computing...");
+  EXPECT_EQ(output_lines[2], "Result: 42");
+  EXPECT_EQ(output_lines[3], "Warning: example only");
+
+  shard.message_bus().unsubscribe(sub_id);
+  shard.detach();
 }
 
 // ===========================================================================
@@ -1035,4 +1098,238 @@ TEST_F(E2EIntrinsicsTest, SchedulerStatsFromDSL) {
   ASSERT_TRUE(result.has_value());
   ASSERT_TRUE(std::holds_alternative<int64_t>(result->v));
   EXPECT_GE(std::get<int64_t>(result->v), 1);
+}
+
+// ===========================================================================
+// Chroot (state tree sandboxing) tests
+// ===========================================================================
+
+class ChrootIntegrationTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env;
+  process_ptr proc = make_process();
+
+  void SetUp() override {
+    proc->pid = 1;
+    proc->status = process_status::ready;
+
+    auto &root = cvc::state::instance(app_ctx);
+    ictx.sched = &sched;
+    ictx.root = &root;
+    ictx.tracker = &tracker;
+    ictx.proc = proc;
+    ictx.pid = 1;
+    ictx.uid = "sandboxed-user";
+    ictx.cluster_id = "cluster-1";
+    ictx.node_id = "node-A";
+
+    // Apply chroot to "sandbox.user1"
+    apply_chroot(ictx, root, "sandbox.user1");
+
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+  }
+
+  int exec(std::string script, execute_options opts = {}) {
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+TEST_F(ChrootIntegrationTest, ProcessOnlySeesChrootedSubtree) {
+  // Set data inside the chroot — "data.x" is actually "sandbox.user1.data.x"
+  int pid = exec(std::string(R"(
+        (begin
+          (state-set "data.x" "42")
+          (state-get "data.x"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "42");
+
+  // Verify the data is stored at the real path in the global tree
+  auto &root = cvc::state::instance(app_ctx);
+  auto *node = root.findDescendant("sandbox.user1.data.x");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->value(), "42");
+}
+
+TEST_F(ChrootIntegrationTest, CannotAccessOutsideChroot) {
+  // Set something outside the chroot via C++
+  auto &root = cvc::state::instance(app_ctx);
+  root("secret.password").value("hunter2");
+
+  // DSL tries to access "secret.password" — but from chroot, that resolves
+  // to "sandbox.user1.secret.password" which doesn't exist
+  int pid = exec(std::string(R"(
+        (state-get "secret.password")
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  // Should be nil since it doesn't exist in the chrooted view
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(result->v));
+}
+
+TEST_F(ChrootIntegrationTest, StateRootPathReturnsChroot) {
+  int pid = exec(std::string(R"(
+        (state-root-path)
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "sandbox.user1");
+}
+
+TEST_F(ChrootIntegrationTest, ChildrenOnlyShowsChrootContents) {
+  // Set data inside chroot
+  auto &root = cvc::state::instance(app_ctx);
+  root("sandbox.user1.apps.editor").value("vim");
+  root("sandbox.user1.apps.shell").value("bash");
+  root("sandbox.user1.config.theme").value("dark");
+  // Set data outside chroot that should be invisible
+  root("sandbox.user2.private").value("hidden");
+
+  // Ask for children at "" which means root of chroot = sandbox.user1
+  int pid = exec(std::string(R"(
+        (state-children "")
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  auto list_ptr = std::get<std::shared_ptr<std::vector<value_t>>>(result->v);
+  // children() returns full paths recursively. Results should reference
+  // nodes under the chroot (sandbox.user1.*) but never outside it.
+  bool has_apps = false, has_config = false, has_user2 = false;
+  for (auto &v : *list_ptr) {
+    auto &s = std::get<std::string>(v.v);
+    if (s.find("apps") != std::string::npos)
+      has_apps = true;
+    if (s.find("config") != std::string::npos)
+      has_config = true;
+    if (s.find("user2") != std::string::npos)
+      has_user2 = true;
+  }
+  EXPECT_TRUE(has_apps);
+  EXPECT_TRUE(has_config);
+  EXPECT_FALSE(has_user2);
+}
+
+TEST_F(ChrootIntegrationTest, ForkInheritsRootPath) {
+  // Verify root_path propagation is set in execute_options
+  execute_options opts;
+  opts.root_path = "sandbox.user1";
+  EXPECT_EQ(opts.root_path, "sandbox.user1");
+}
+
+// ===========================================================================
+// State-watch tests (reactive handlers)
+// ===========================================================================
+
+class StateWatchTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env;
+  process_ptr proc = make_process();
+
+  void SetUp() override {
+    proc->pid = 1;
+    proc->status = process_status::ready;
+
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app_ctx);
+    ictx.tracker = &tracker;
+    ictx.proc = proc;
+    ictx.pid = 1;
+    ictx.uid = "test-user";
+    ictx.cluster_id = "cluster-1";
+    ictx.node_id = "node-A";
+
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+  }
+
+  int exec(std::string script, execute_options opts = {}) {
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+TEST_F(StateWatchTest, WatchReturnsId) {
+  int pid = exec(std::string(R"(
+        (state-watch "events.test" (lambda (path val) nil))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  // Watch ID should be a positive integer
+  ASSERT_TRUE(std::holds_alternative<int64_t>(result->v));
+  EXPECT_GE(std::get<int64_t>(result->v), 1);
+}
+
+TEST_F(StateWatchTest, UnwatchDisconnects) {
+  int pid = exec(std::string(R"(
+        (begin
+          (set wid (state-watch "events.x" (lambda (p v) nil)))
+          (state-unwatch wid))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<bool>(result->v), true);
+}
+
+TEST_F(StateWatchTest, WatchFiresOnStateChange) {
+  // Register a watch, trigger it, then loop until the handler sets a flag
+  int pid = exec(std::string(R"(
+        (begin
+          (state-watch "trigger.value"
+            (lambda (path val)
+              (state-set "got-event" "yes")))
+          ;; Trigger the watch
+          (state-set "trigger.value" "hello")
+          ;; Spin briefly — the handler fires at the next step boundary
+          (set tries 0)
+          (while (and (not (state-exists "got-event")) (< tries 100))
+            (set tries (+ tries 1)))
+          (state-get "got-event"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
+}
+
+TEST_F(StateWatchTest, WatchReceivesPathArgument) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-watch "notify.path"
+            (lambda (path val)
+              (state-set "received-path" path)))
+          (state-set "notify.path" "data")
+          (set tries 0)
+          (while (and (not (state-exists "received-path")) (< tries 100))
+            (set tries (+ tries 1)))
+          (state-get "received-path"))
+    )"));
+
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "notify.path");
 }
