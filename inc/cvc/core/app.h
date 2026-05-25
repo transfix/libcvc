@@ -34,6 +34,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -50,6 +51,7 @@
 #include <boost/tuple/tuple.hpp>
 #include <boost/utility.hpp>
 #include <map>
+#include <memory>
 #include <queue>
 #include <set>
 #include <string>
@@ -332,7 +334,20 @@ public:
       }
     }
 
-    threads(wait ? key : this->uniqueThreadKey(key), cvc::thread_ptr(new boost::thread(t)));
+    // Gate ensures the thread callable doesn't execute until the handle
+    // is stored in _threads, which is required for keyed progress/info
+    // APIs to locate the thread.  Without this a fast-starting thread
+    // could call threadProgress(key, ...) before _threads[key] exists,
+    // causing the update to be silently dropped.
+    std::string actual_key = wait ? key : this->uniqueThreadKey(key);
+    auto ready = std::make_shared<std::atomic<bool>>(false);
+    T callable(t); // non-const copy of the callable
+    threads(actual_key, cvc::thread_ptr(new boost::thread([ready, callable]() mutable {
+              while (!ready->load(std::memory_order_acquire))
+                boost::this_thread::yield();
+              callable();
+            })));
+    ready->store(true, std::memory_order_release);
   }
 
   // Start a thread with priority using the thread pool

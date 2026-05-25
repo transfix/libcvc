@@ -193,7 +193,7 @@ TEST(StateLinkBenchmark, ResolveRemoteLargeTree) {
   }
 
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   auto &root = cvc::state::instance(a);
   constexpr std::size_t kPaths = 1'000'000;
@@ -304,7 +304,7 @@ TEST(StateLinkBenchmark, SubscriptionsForPathLargeTree) {
   }
 
   cvc::app a;
-  cvc::state_cluster_shard shard(a, "alpha", "node-1");
+  cvc::state_cluster_shard shard(a, "alpha", "node_1");
   shard.attach();
   auto &root = cvc::state::instance(a);
   constexpr std::size_t kPaths = 100'000;
