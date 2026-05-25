@@ -31,6 +31,7 @@
 #include <volrover3/SDFDialog.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/SceneNode.h>
+#include <volrover3/StateDashboardWidget.h>
 #include <volrover3/StateTreeWidget.h>
 #include <volrover3/ThreadMonitorWidget.h>
 #include <volrover3/TransferFunctionWidget.h>
@@ -44,11 +45,12 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), m_renderWidget(nullptr), m_transferFunctionWidget(nullptr),
       m_sceneGraph(nullptr) // Will be created after callback is set
       ,
-      m_threadMonitor(nullptr), m_stateTreeWidget(nullptr), m_gridOptionsDialog(nullptr),
-      m_sdfDialog(nullptr), m_isosurfaceDialog(nullptr), m_geometryDialog(nullptr),
-      m_volumeDialog(nullptr), m_viewerOptionsDialog(nullptr), m_cameraDialog(nullptr),
-      m_mainToolBar(nullptr), m_threadNameLabel(nullptr), m_threadInfoLabel(nullptr),
-      m_threadProgressBar(nullptr), m_gridVisible(true), m_axisVisible(true) {
+      m_threadMonitor(nullptr), m_stateTreeWidget(nullptr), m_stateDashboardWidget(nullptr),
+      m_gridOptionsDialog(nullptr), m_sdfDialog(nullptr), m_isosurfaceDialog(nullptr),
+      m_geometryDialog(nullptr), m_volumeDialog(nullptr), m_viewerOptionsDialog(nullptr),
+      m_cameraDialog(nullptr), m_mainToolBar(nullptr), m_threadNameLabel(nullptr),
+      m_threadInfoLabel(nullptr), m_threadProgressBar(nullptr), m_gridVisible(true),
+      m_axisVisible(true) {
   setWindowTitle("VolRover3 - Volume Rover Version 3");
   resize(1280, 720);
 
@@ -214,6 +216,11 @@ void MainWindow::createMenus() {
   stateTreeAction->setShortcut(tr("Ctrl+Shift+S"));
   connect(stateTreeAction, &QAction::triggered, this, &MainWindow::showStateTree);
   viewMenu->addAction(stateTreeAction);
+
+  QAction *stateDashboardAction = new QAction(tr("State &Dashboard..."), this);
+  stateDashboardAction->setShortcut(tr("Ctrl+Shift+D"));
+  connect(stateDashboardAction, &QAction::triggered, this, &MainWindow::showStateDashboard);
+  viewMenu->addAction(stateDashboardAction);
 
   viewMenu->addSeparator();
 
@@ -749,6 +756,28 @@ void MainWindow::showStateTree() {
   m_stateTreeWidget->show();
   m_stateTreeWidget->raise();
   m_stateTreeWidget->activateWindow();
+}
+
+void MainWindow::showStateDashboard() {
+  if (!m_stateDashboardWidget) {
+    m_stateDashboardWidget = new StateDashboardWidget();
+    m_stateDashboardWidget->setWindowTitle(tr("State Dashboard - VolRover3"));
+    m_stateDashboardWidget->setAttribute(Qt::WA_DeleteOnClose);
+    m_stateDashboardWidget->resize(900, 650);
+    m_stateDashboardWidget->setRootState(&cvc::state::instance(volrover3::app()));
+
+    connect(m_stateDashboardWidget, &QObject::destroyed,
+            [this]() { m_stateDashboardWidget = nullptr; });
+    connect(m_stateDashboardWidget, &StateDashboardWidget::stateChanged, this, [this]() {
+      m_sceneGraph->update();
+      m_renderWidget->render();
+    });
+  }
+
+  m_stateDashboardWidget->refresh();
+  m_stateDashboardWidget->show();
+  m_stateDashboardWidget->raise();
+  m_stateDashboardWidget->activateWindow();
 }
 
 void MainWindow::showSDF() {

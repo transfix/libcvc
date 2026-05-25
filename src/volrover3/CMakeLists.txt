@@ -37,6 +37,7 @@ set(VOLROVER3_SOURCES
   TransferFunctionWidget.cpp
   ThreadMonitorWidget.cpp
   StateTreeWidget.cpp
+  StateDashboardWidget.cpp
   AppState.cpp
   BoundingBoxDialog.cpp
   CameraSettingsDialog.cpp
@@ -66,6 +67,7 @@ set(VOLROVER3_HEADERS
   ${PROJECT_SOURCE_DIR}/inc/volrover3/TransferFunctionWidget.h
   ${PROJECT_SOURCE_DIR}/inc/volrover3/ThreadMonitorWidget.h
   ${PROJECT_SOURCE_DIR}/inc/volrover3/StateTreeWidget.h
+  ${PROJECT_SOURCE_DIR}/inc/volrover3/StateDashboardWidget.h
   ${PROJECT_SOURCE_DIR}/inc/volrover3/AppState.h
   ${PROJECT_SOURCE_DIR}/inc/volrover3/BoundingBoxDialog.h
   ${PROJECT_SOURCE_DIR}/inc/volrover3/CameraSettingsDialog.h
@@ -441,7 +443,15 @@ if(CVC_BUILD_TESTS)
     volrover3_lib
     GTest::gtest)
   add_test(NAME StateTreeWidgetTest COMMAND volrover3_statetree_test)
-  
+
+  # StateDashboardWidget tests
+  add_executable(volrover3_statedashboard_test
+    tests/StateDashboardWidgetTest.cpp)
+  target_link_libraries(volrover3_statedashboard_test
+    volrover3_lib
+    GTest::gtest)
+  add_test(NAME StateDashboardWidgetTest COMMAND volrover3_statedashboard_test)
+
   # GraphicsNode tests
   add_executable(volrover3_graphicsnode_test
     tests/GraphicsNodeTest.cpp)
@@ -516,6 +526,7 @@ if(CVC_BUILD_TESTS)
     CameraControllerTest
     GridNodeTest
     StateTreeWidgetTest
+    StateDashboardWidgetTest
     GraphicsNodeTest
     VolumeNodeTest
     BBoxNodeTest
