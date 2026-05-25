@@ -446,6 +446,10 @@ TEST(StateDistributedBench, BlobStorePutGet) {
     blobs[i].resize(BLOB_SIZE);
     for (std::size_t j = 0; j < BLOB_SIZE; ++j)
       blobs[i][j] = static_cast<unsigned char>((i * 7 + j * 3) & 0xFF);
+    // Stamp the blob index into the first 2 bytes so that blobs
+    // with i differing only above bit 7 are still unique.
+    blobs[i][0] = static_cast<unsigned char>(i & 0xFF);
+    blobs[i][1] = static_cast<unsigned char>((i >> 8) & 0xFF);
   }
 
   // PUT
