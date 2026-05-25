@@ -163,35 +163,32 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   // Allocate a watch ID
   int watch_id = ctx->proc->next_watch_id++;
 
-  // Store the handler on the scheduler's process (not ctx->proc which may
-  // be a separate copy).  This also avoids capturing value_t in the signal
-  // lambda, which can cause ABI issues with boost::signals2 on some
-  // platforms (e.g. macOS).
+  // Store the handler AND path on the scheduler's process (not ctx->proc
+  // which may be a separate copy).  This avoids capturing value_t or
+  // std::string in the signal lambda, which can cause ABI issues with
+  // boost::signals2 on some platforms (e.g. macOS / Apple Clang).
   scheduler *sched = ctx->sched;
   int pid = ctx->pid;
   if (sched) {
-    sched->register_watch_handler(pid, watch_id, handler);
+    sched->register_watch_handler(pid, watch_id, handler, path);
   } else {
-    ctx->proc->watch_handlers[watch_id] = handler;
+    ctx->proc->watch_handlers[watch_id] = {handler, path};
   }
 
   // Connect to the node's valueChanged signal.
-  // The lambda captures only POD/simple types — no value_t.
-  std::string watched_path = path;
+  // The lambda captures ONLY trivial types (raw pointer + ints) — no
+  // std::string, no value_t, no shared_ptr.
   boost::signals2::connection conn;
   if (sched) {
-    conn = node->valueChanged.connect([sched, pid, watch_id, watched_path]() {
-      sched->queue_watch_event(pid, {watch_id, watched_path, std::string()});
-    });
+    conn = node->valueChanged.connect(
+        [sched, pid, watch_id]() { sched->queue_watch_event(pid, {watch_id}); });
   } else {
-    // No scheduler (unit-test path): push directly onto process
-    auto proc_weak = std::weak_ptr<process>(ctx->proc);
-    conn = node->valueChanged.connect([proc_weak, watch_id, watched_path]() {
-      auto proc = proc_weak.lock();
-      if (!proc)
-        return;
-      proc->pending_watch_events.push_back({watch_id, watched_path, std::string()});
-    });
+    // No scheduler (unit-test path): push directly onto process.
+    // Use raw pointer; the process outlives the signal connection in
+    // these test scenarios.
+    process *proc_raw = ctx->proc.get();
+    conn = node->valueChanged.connect(
+        [proc_raw, watch_id]() { proc_raw->pending_watch_events.push_back({watch_id}); });
   }
 
   // Store the connection for later disconnection

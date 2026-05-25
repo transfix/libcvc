@@ -89,7 +89,7 @@ public:
 
   void queue_watch_event(int pid, process::watch_event evt);
 
-  void register_watch_handler(int pid, int watch_id, value_t handler);
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
   void unregister_watch_handler(int pid, int watch_id);
 
 private:

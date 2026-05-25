@@ -219,11 +219,12 @@ void scheduler::queue_watch_event(int pid, process::watch_event evt) {
   it->second->pending_watch_events.push_back(std::move(evt));
 }
 
-void scheduler::register_watch_handler(int pid, int watch_id, value_t handler) {
+void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
+                                       const std::string &path) {
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return;
-  it->second->watch_handlers[watch_id] = std::move(handler);
+  it->second->watch_handlers[watch_id] = {std::move(handler), path};
 }
 
 void scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -283,10 +284,12 @@ void scheduler::handle_watch_event(process &proc) {
   auto evt = std::move(proc.pending_watch_events.front());
   proc.pending_watch_events.erase(proc.pending_watch_events.begin());
 
-  // Look up the handler from the process's watch_handlers map
+  // Look up the handler+path from the process's watch_handlers map
   auto hit = proc.watch_handlers.find(evt.watch_id);
   if (hit == proc.watch_handlers.end())
     return; // Watch was removed; discard stale event
+
+  auto &entry = hit->second;
 
   // Save current evaluation state (full stack + result)
   proc.saved_stack = proc.state.stack;
@@ -295,16 +298,16 @@ void scheduler::handle_watch_event(process &proc) {
 
   // Set up handler evaluation: call handler with (path, value)
   auto handler_env = environment::extend(proc.state.global_env);
-  handler_env->set("__watch_handler__", hit->second);
-  handler_env->set("__watch_path__", value_t(evt.path));
-  handler_env->set("__watch_value__", value_t(evt.value));
+  handler_env->set("__watch_handler__", entry.handler);
+  handler_env->set("__watch_path__", value_t(entry.path));
+  handler_env->set("__watch_value__", value_t(std::string()));
 
   // Build call expression: (__watch_handler__ path value)
   // The evaluator requires the head to be a symbol so we bind the closure.
   std::vector<value_t> call_list;
   call_list.push_back(value_t(symbol{"__watch_handler__"}));
-  call_list.push_back(value_t(evt.path));
-  call_list.push_back(value_t(evt.value));
+  call_list.push_back(value_t(entry.path));
+  call_list.push_back(value_t(std::string()));
   auto call_expr = make_list(std::move(call_list));
 
   proc.state.stack.clear();

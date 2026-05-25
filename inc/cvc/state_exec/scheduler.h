@@ -157,8 +157,8 @@ public:
   /// scheduler's own process object (not the intrinsics_context's copy).
   void queue_watch_event(int pid, process::watch_event evt);
 
-  /// Register a watch handler on the scheduler's process object.
-  void register_watch_handler(int pid, int watch_id, value_t handler);
+  /// Register a watch handler with its watched path on the scheduler's process.
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
 
   /// Remove a watch handler from the scheduler's process object.
   void unregister_watch_handler(int pid, int watch_id);
