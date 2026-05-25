@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/SceneNode.h>
 #include <vtkProp.h>

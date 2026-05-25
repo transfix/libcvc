@@ -42,7 +42,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and
 # force-include a tiny header that undoes UCRT's `snprintf -> _snprintf`
-# macro remap (see inc/cvc/msvc_compat.h for rationale).
+# macro remap (see inc/cvc/utility/msvc_compat.h for rationale).
 if(MSVC)
   add_compile_definitions(
     _USE_MATH_DEFINES
@@ -61,7 +61,7 @@ if(MSVC)
   # because the VS generator silently drops /FI"path-with-spaces" entries
   # supplied via add_compile_options, but respects them via the global
   # flags variable. Keep quoting so paths with spaces work.
-  set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/msvc_compat.h")
+  set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/utility/msvc_compat.h")
   string(APPEND CMAKE_CXX_FLAGS " /FI\"${_CVC_MSVC_FI_HDR}\"")
 endif()
 

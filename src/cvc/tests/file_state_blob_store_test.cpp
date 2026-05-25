@@ -9,7 +9,7 @@
 */
 
 #include <algorithm>
-#include <cvc/state_blob_store.h>
+#include <cvc/core/state_blob_store.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -17,7 +17,7 @@
 #include <thread>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 namespace {
 

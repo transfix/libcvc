@@ -1,7 +1,7 @@
-#include <cvc/app.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
-#include <cvc/state_object.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_object.h>
+#include <cvc/geometry/geometry.h>
 #include <gtest/gtest.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/NullGraphicNode.h>

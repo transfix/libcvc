@@ -11,7 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/state_replica.h>
+#include <cvc/core/state_replica.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

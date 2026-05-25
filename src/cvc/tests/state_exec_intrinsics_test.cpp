@@ -2,17 +2,17 @@
 /// @brief Tests for Phase 5: Intrinsics, Resource Policy, Stdlib.
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/evaluator.h>
-#include <cvc/state_exec/intrinsics.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/resource_policy.h>
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/stackless_evaluator.h>
-#include <cvc/state_exec/stdlib.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/evaluator.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/resource_policy.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/stackless_evaluator.h>
+#include <cvc/core/state_exec/stdlib.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

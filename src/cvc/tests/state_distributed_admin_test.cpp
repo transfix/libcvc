@@ -9,15 +9,15 @@
 */
 
 #include <cstdint>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_delegation_manager.h>
-#include <cvc/state_distributed_admin.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_peer_registry.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_delegation_manager.h>
+#include <cvc/core/state_distributed_admin.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_peer_registry.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <unordered_set>

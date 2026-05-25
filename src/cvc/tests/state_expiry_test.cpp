@@ -16,8 +16,8 @@
 #include <atomic>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <gtest/gtest.h>
 #include <thread>
 

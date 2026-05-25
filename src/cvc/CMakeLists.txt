@@ -7,162 +7,162 @@ endif()
 
 # Header files
 set(INCLUDE_FILES
-  ../../inc/cvc/composite_function.h
-  ../../inc/cvc/types.h
-  ../../inc/cvc/project_verts.h
-  ../../inc/cvc/hdf5_utils.h
-  ../../inc/cvc/volume_file_info.h
-  ../../inc/cvc/exception.h
-  ../../inc/cvc/bounding_box.h
-  ../../inc/cvc/namespace.h
-  ../../inc/cvc/volume_file_io.h
-  ../../inc/cvc/volume.h
-  ../../inc/cvc/algorithm.h
-  ../../inc/cvc/dimension.h
-  ../../inc/cvc/voxels.h
-  ../../inc/cvc/geometry.h
-  ../../inc/cvc/state.h
-  ../../inc/cvc/state_change_journal.h
-  ../../inc/cvc/state_subscription_router.h
-  ../../inc/cvc/state_sync_adapter.h
-  ../../inc/cvc/state_blob_store.h
-  ../../inc/cvc/state_chunked_blob.h
-  ../../inc/cvc/state_compression_registry.h
-  ../../inc/cvc/state_delta_codec.h
-  ../../inc/cvc/state_codec_registry.h
-  ../../inc/cvc/state_replica.h
-  ../../inc/cvc/state_authority_map.h
-  ../../inc/cvc/state_cluster_shard.h
-  ../../inc/cvc/state_bounded_queue.h
-  ../../inc/cvc/state_message.h
-  ../../inc/cvc/state_message_bus.h
-  ../../inc/cvc/state_peer_registry.h
-  ../../inc/cvc/state_write_policy.h
-  ../../inc/cvc/state_distributed_metrics.h
-  ../../inc/cvc/state_delegation_manager.h
-  ../../inc/cvc/state_distributed_admin.h
-  ../../inc/cvc/state_volume_codec.h
-  ../../inc/cvc/state_brick_manifest.h
-  ../../inc/cvc/state_data_hydrator.h
-  ../../inc/cvc/state_node_telemetry.h
-  ../../inc/cvc/state_telemetry_aggregator.h
-  ../../inc/cvc/state_cluster_membership.h
-  ../../inc/cvc/state_hybrid_time.h
-  ../../inc/cvc/state_hash_partition.h
-  ../../inc/cvc/distributed_state_session.h
-  ../../inc/cvc/state_transport.h
-  ../../inc/cvc/state_transport_inproc.h
-  ../../inc/cvc/state_transport_ipc.h
-  ../../inc/cvc/state_transport_grpc.h
-  ../../inc/cvc/bunny.h
-  ../../inc/cvc/endians.h
-  ../../inc/cvc/utility.h
-  ../../inc/cvc/state_object.h
-  ../../inc/cvc/state_list.h
-  ../../inc/cvc/state_eviction_store.h
-  ../../inc/cvc/state_memory_manager.h
-  ../../inc/cvc/state_exec/types.h
-  ../../inc/cvc/state_exec/parser.h
-  ../../inc/cvc/state_exec/builtins.h
-  ../../inc/cvc/state_exec/evaluator.h
-  ../../inc/cvc/state_exec/stackless_evaluator.h
-  ../../inc/cvc/state_exec/task.h
-  ../../inc/cvc/state_exec/async_evaluator.h
-  ../../inc/cvc/state_exec/async_stackless_evaluator.h
-  ../../inc/cvc/state_exec/state_value_codec.h
-  ../../inc/cvc/state_exec/process.h
-  ../../inc/cvc/state_exec/memory_tracker.h
-  ../../inc/cvc/state_exec/scheduler.h
-  ../../inc/cvc/state_exec/async_scheduler.h
-  ../../inc/cvc/state_exec/intrinsics.h
-  ../../inc/cvc/state_exec/resource_policy.h
-  ../../inc/cvc/state_exec/stdlib.h
-  ../../inc/cvc/state_exec/exec_coordinator.h
-  ../../inc/cvc/app.h
-  ../../inc/cvc/volmagick.h
-  ../../inc/cvc/geometry_file_io.h
-  ../../inc/cvc/volume_ops.h
+  ../../inc/cvc/utility/composite_function.h
+  ../../inc/cvc/core/types.h
+  ../../inc/cvc/geometry/project_verts.h
+  ../../inc/cvc/volume/hdf5_utils.h
+  ../../inc/cvc/volume/volume_file_info.h
+  ../../inc/cvc/core/exception.h
+  ../../inc/cvc/volume/bounding_box.h
+  ../../inc/cvc/core/namespace.h
+  ../../inc/cvc/volume/volume_file_io.h
+  ../../inc/cvc/volume/volume.h
+  ../../inc/cvc/utility/algorithm.h
+  ../../inc/cvc/volume/dimension.h
+  ../../inc/cvc/volume/voxels.h
+  ../../inc/cvc/geometry/geometry.h
+  ../../inc/cvc/core/state.h
+  ../../inc/cvc/core/state_change_journal.h
+  ../../inc/cvc/core/state_subscription_router.h
+  ../../inc/cvc/core/state_sync_adapter.h
+  ../../inc/cvc/core/state_blob_store.h
+  ../../inc/cvc/core/state_chunked_blob.h
+  ../../inc/cvc/core/state_compression_registry.h
+  ../../inc/cvc/core/state_delta_codec.h
+  ../../inc/cvc/core/state_codec_registry.h
+  ../../inc/cvc/core/state_replica.h
+  ../../inc/cvc/core/state_authority_map.h
+  ../../inc/cvc/core/state_cluster_shard.h
+  ../../inc/cvc/core/state_bounded_queue.h
+  ../../inc/cvc/core/state_message.h
+  ../../inc/cvc/core/state_message_bus.h
+  ../../inc/cvc/core/state_peer_registry.h
+  ../../inc/cvc/core/state_write_policy.h
+  ../../inc/cvc/core/state_distributed_metrics.h
+  ../../inc/cvc/core/state_delegation_manager.h
+  ../../inc/cvc/core/state_distributed_admin.h
+  ../../inc/cvc/core/state_volume_codec.h
+  ../../inc/cvc/core/state_brick_manifest.h
+  ../../inc/cvc/core/state_data_hydrator.h
+  ../../inc/cvc/core/state_node_telemetry.h
+  ../../inc/cvc/core/state_telemetry_aggregator.h
+  ../../inc/cvc/core/state_cluster_membership.h
+  ../../inc/cvc/core/state_hybrid_time.h
+  ../../inc/cvc/core/state_hash_partition.h
+  ../../inc/cvc/core/distributed_state_session.h
+  ../../inc/cvc/core/state_transport.h
+  ../../inc/cvc/core/state_transport_inproc.h
+  ../../inc/cvc/core/state_transport_ipc.h
+  ../../inc/cvc/core/state_transport_grpc.h
+  ../../inc/cvc/geometry/bunny.h
+  ../../inc/cvc/volume/endians.h
+  ../../inc/cvc/utility/utility.h
+  ../../inc/cvc/core/state_object.h
+  ../../inc/cvc/core/state_list.h
+  ../../inc/cvc/core/state_eviction_store.h
+  ../../inc/cvc/core/state_memory_manager.h
+  ../../inc/cvc/core/state_exec/types.h
+  ../../inc/cvc/core/state_exec/parser.h
+  ../../inc/cvc/core/state_exec/builtins.h
+  ../../inc/cvc/core/state_exec/evaluator.h
+  ../../inc/cvc/core/state_exec/stackless_evaluator.h
+  ../../inc/cvc/core/state_exec/task.h
+  ../../inc/cvc/core/state_exec/async_evaluator.h
+  ../../inc/cvc/core/state_exec/async_stackless_evaluator.h
+  ../../inc/cvc/core/state_exec/state_value_codec.h
+  ../../inc/cvc/core/state_exec/process.h
+  ../../inc/cvc/core/state_exec/memory_tracker.h
+  ../../inc/cvc/core/state_exec/scheduler.h
+  ../../inc/cvc/core/state_exec/async_scheduler.h
+  ../../inc/cvc/core/state_exec/intrinsics.h
+  ../../inc/cvc/core/state_exec/resource_policy.h
+  ../../inc/cvc/core/state_exec/stdlib.h
+  ../../inc/cvc/core/state_exec/exec_coordinator.h
+  ../../inc/cvc/core/app.h
+  ../../inc/cvc/volume/volmagick.h
+  ../../inc/cvc/geometry/geometry_file_io.h
+  ../../inc/cvc/volume/volume_ops.h
 )
 
 # Source files
 set(SOURCE_FILES
-  algorithm.cpp
-  anisotropic_diffusion.cpp
-  app.cpp
-  bilateral_filter.cpp
-  contrast_enhancement.cpp
-  cvcraw_io.cpp
-  gdtv_filter.cpp
-  geometry.cpp
-  geometry_file_io.cpp
-  mrc_io.cpp
-  null_io.cpp
-  off_io.cpp
-  rawiv_io.cpp
-  rawv_io.cpp
-  smoothing.cpp
-  spider_io.cpp
-  state.cpp
-  state_list.cpp
-  state_eviction_store.cpp
-  state_memory_manager.cpp
-  state_exec/types.cpp
-  state_exec/parser.cpp
-  state_exec/builtins.cpp
-  state_exec/evaluator.cpp
-  state_exec/stackless_evaluator.cpp
-  state_exec/async_evaluator.cpp
-  state_exec/async_stackless_evaluator.cpp
-  state_exec/state_value_codec.cpp
-  state_exec/process.cpp
-  state_exec/memory_tracker.cpp
-  state_exec/scheduler.cpp
-  state_exec/async_scheduler.cpp
-  state_exec/intrinsics.cpp
-  state_exec/resource_policy.cpp
-  state_exec/stdlib.cpp
-  state_exec/exec_coordinator.cpp
-  state_change_journal.cpp
-  state_subscription_router.cpp
-  state_sync_adapter.cpp
-  state_blob_store.cpp
-  state_chunked_blob.cpp
-  state_compression_registry.cpp
-  state_delta_codec.cpp
-  state_codec_registry.cpp
-  state_replica.cpp
-  state_authority_map.cpp
-  state_cluster_shard.cpp
-  state_transport_inproc.cpp
-  state_transport_ipc.cpp
-  state_message_bus.cpp
-  state_peer_registry.cpp
-  state_write_policy.cpp
-  state_distributed_metrics.cpp
-  state_delegation_manager.cpp
-  state_distributed_admin.cpp
-  state_volume_codec.cpp
-  state_brick_manifest.cpp
-  state_data_hydrator.cpp
-  state_node_telemetry.cpp
-  state_telemetry_aggregator.cpp
-  state_cluster_membership.cpp
-  distributed_state_session.cpp
-  state_message.cpp
-  utility.cpp
-  cuda_utils.cpp
-  voxels.cpp
-  volume.cpp
-  volume_file_io.cpp
-  volume_file_info.cpp
-  volume_ops.cpp
-  vtk_io.cpp
+  utility/algorithm.cpp
+  processing/anisotropic_diffusion.cpp
+  core/app.cpp
+  processing/bilateral_filter.cpp
+  processing/contrast_enhancement.cpp
+  volume/cvcraw_io.cpp
+  processing/gdtv_filter.cpp
+  geometry/geometry.cpp
+  geometry/geometry_file_io.cpp
+  volume/mrc_io.cpp
+  volume/null_io.cpp
+  geometry/off_io.cpp
+  volume/rawiv_io.cpp
+  volume/rawv_io.cpp
+  processing/smoothing.cpp
+  volume/spider_io.cpp
+  core/state.cpp
+  core/state_list.cpp
+  core/state_eviction_store.cpp
+  core/state_memory_manager.cpp
+  core/state_exec/types.cpp
+  core/state_exec/parser.cpp
+  core/state_exec/builtins.cpp
+  core/state_exec/evaluator.cpp
+  core/state_exec/stackless_evaluator.cpp
+  core/state_exec/async_evaluator.cpp
+  core/state_exec/async_stackless_evaluator.cpp
+  core/state_exec/state_value_codec.cpp
+  core/state_exec/process.cpp
+  core/state_exec/memory_tracker.cpp
+  core/state_exec/scheduler.cpp
+  core/state_exec/async_scheduler.cpp
+  core/state_exec/intrinsics.cpp
+  core/state_exec/resource_policy.cpp
+  core/state_exec/stdlib.cpp
+  core/state_exec/exec_coordinator.cpp
+  core/state_change_journal.cpp
+  core/state_subscription_router.cpp
+  core/state_sync_adapter.cpp
+  core/state_blob_store.cpp
+  core/state_chunked_blob.cpp
+  core/state_compression_registry.cpp
+  core/state_delta_codec.cpp
+  core/state_codec_registry.cpp
+  core/state_replica.cpp
+  core/state_authority_map.cpp
+  core/state_cluster_shard.cpp
+  core/state_transport_inproc.cpp
+  core/state_transport_ipc.cpp
+  core/state_message_bus.cpp
+  core/state_peer_registry.cpp
+  core/state_write_policy.cpp
+  core/state_distributed_metrics.cpp
+  core/state_delegation_manager.cpp
+  core/state_distributed_admin.cpp
+  core/state_volume_codec.cpp
+  core/state_brick_manifest.cpp
+  core/state_data_hydrator.cpp
+  core/state_node_telemetry.cpp
+  core/state_telemetry_aggregator.cpp
+  core/state_cluster_membership.cpp
+  core/distributed_state_session.cpp
+  core/state_message.cpp
+  utility/utility.cpp
+  utility/cuda_utils.cpp
+  volume/voxels.cpp
+  volume/volume.cpp
+  volume/volume_file_io.cpp
+  volume/volume_file_info.cpp
+  volume/volume_ops.cpp
+  volume/vtk_io.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
-  list(REMOVE_ITEM SOURCE_FILES state_transport_ipc.cpp)
+  list(REMOVE_ITEM SOURCE_FILES core/state_transport_ipc.cpp)
 endif()
 
 # state_exec / state_memory_manager feature flags
@@ -170,17 +170,13 @@ option(CVC_STATE_EXEC "Enable state_exec DSL evaluator and process scheduler" ON
 option(CVC_STATE_MEMORY_MANAGER "Enable state memory manager with LRU/LFU eviction" ON)
 
 if(NOT CVC_STATE_EXEC)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX "state_exec/")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX "core/state_exec/")
 endif()
 
 # state_memory_manager feature flag
 if(NOT CVC_STATE_MEMORY_MANAGER)
-  list(REMOVE_ITEM SOURCE_FILES state_memory_manager.cpp state_eviction_store.cpp)
+  list(REMOVE_ITEM SOURCE_FILES core/state_memory_manager.cpp core/state_eviction_store.cpp)
 endif()
-
-# Configuration
-set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
-mark_as_advanced(CVC_NAMESPACE)
 
 # The libcvc version number
 set(CVC_VERSION_MAJOR 3)
@@ -206,8 +202,8 @@ option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
   list(APPEND SOURCE_FILES
-    xmlrpc_client.cpp
-    xmlrpc_server.cpp
+    xmlrpc/xmlrpc_client.cpp
+    xmlrpc/xmlrpc_server.cpp
   )
   add_compile_definitions(USING_XMLRPC)
 endif()
@@ -253,8 +249,8 @@ if(CVC_USING_HDF5)
     message(STATUS "HDF5 found - Enabling *.cvc file support")
 
     add_compile_definitions(CVC_USING_HDF5 ${HDF5_DEFINITIONS})
-    list(APPEND INCLUDE_FILES ../../inc/cvc/hdf5_utils.h)
-    list(APPEND SOURCE_FILES hdf5_io.cpp hdf5_utils.cpp)
+    list(APPEND INCLUDE_FILES ../../inc/cvc/volume/hdf5_utils.h)
+    list(APPEND SOURCE_FILES volume/hdf5_io.cpp volume/hdf5_utils.cpp)
     list(APPEND CVC_INCLUDE_DIRS ${HDF5_INCLUDE_DIRS})
     list(APPEND CVC_LINK_LIBS ${HDF5_LIBRARIES})
   else()
@@ -298,7 +294,7 @@ endif()
 # Bunny geometry
 if(CVC_GEOMETRY_ENABLE_BUNNY)
   add_compile_definitions(CVC_GEOMETRY_ENABLE_BUNNY)
-  list(APPEND SOURCE_FILES bunny_io.cpp)
+  list(APPEND SOURCE_FILES volume/bunny_io.cpp)
 endif()
 
 # CGAL support
@@ -306,7 +302,7 @@ if(NOT DISABLE_CGAL)
   find_package(CGAL CONFIG)
   if(CGAL_FOUND)
     add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
-    list(APPEND INCLUDE_FILES ../../inc/cvc/project_verts.h)
+    list(APPEND INCLUDE_FILES ../../inc/cvc/geometry/project_verts.h)
   endif()
 endif()
 
@@ -325,268 +321,268 @@ if(CVC_ENABLE_MESHER)
     NDEBUG
   )
   list(APPEND CVC_INCLUDE_DIRS
-    cvc-mesher
-    cvc-mesher/contour
-    cvc-mesher/FastContouring
-    #cvc-mesher/VolMagick
-    cvc-mesher/LBIE
-    cvc-mesher/Mesher
+    geometry/cvc-mesher
+    geometry/cvc-mesher/contour
+    geometry/cvc-mesher/FastContouring
+    #geometry/cvc-mesher/VolMagick
+    geometry/cvc-mesher/LBIE
+    geometry/cvc-mesher/Mesher
   )
   set(INCLUDE_FILES
       ${INCLUDE_FILES}
-      cvc-mesher/contour/edgehash.h
-      cvc-mesher/contour/respprop2.h
-      cvc-mesher/contour/hash.h
-      cvc-mesher/contour/conplot2d.h
-      cvc-mesher/contour/cellsearch.h
-      cvc-mesher/contour/data.h
-      cvc-mesher/contour/seedchkr2.h
-      cvc-mesher/contour/dataset.h
-      cvc-mesher/contour/cellqueue.h
-      cvc-mesher/contour/cubes.h
-      cvc-mesher/contour/datasetreg3.h
-      cvc-mesher/contour/dirseeds.h
-      cvc-mesher/contour/seeddirreg3.h
-      cvc-mesher/contour/basic.h
-      cvc-mesher/contour/dataslc.h
-      cvc-mesher/contour/contour.h
-      cvc-mesher/contour/dict.h
-      cvc-mesher/contour/contour2d.h
-      cvc-mesher/contour/seedchkr3.h
-      cvc-mesher/contour/iqueue.h
-      cvc-mesher/contour/segtree.h
-      cvc-mesher/contour/commdata.h
-      cvc-mesher/contour/bin.h
-      cvc-mesher/contour/datasetslc.h
-      cvc-mesher/contour/inttree.h
-      cvc-mesher/contour/datasetvol.h
-      cvc-mesher/contour/ipqueue.h
-      cvc-mesher/contour/seedall.h
-      cvc-mesher/contour/contour3d.h
-      cvc-mesher/contour/regprop.h
-      cvc-mesher/contour/compute.h
-      cvc-mesher/contour/datavol.h
-      cvc-mesher/contour/vtkmarchingcubescases.h
-      cvc-mesher/contour/shelf.h
-      cvc-mesher/contour/range.h
-      cvc-mesher/contour/rangesweep.h
-      cvc-mesher/contour/endian_io.h
-      cvc-mesher/contour/bucketsearch.h
-      cvc-mesher/contour/seedcells.h
-      cvc-mesher/contour/conplotreg2.h
-      cvc-mesher/contour/datareg3.h
-      cvc-mesher/contour/conplot3d.h
-      cvc-mesher/contour/conplot.h
-      cvc-mesher/contour/utilities.h
-      cvc-mesher/contour/datasetreg2.h
-      cvc-mesher/contour/dirseedsreg2.h
-      cvc-mesher/contour/regprop2.h
-      cvc-mesher/contour/queue.h
-      cvc-mesher/contour/conplotreg3.h
-      cvc-mesher/contour/datareg2.h
-      cvc-mesher/contour/squeue.h
-      cvc-mesher/contour/rangeprop.h
-      cvc-mesher/FastContouring/ContourGeometry.h
-      cvc-mesher/FastContouring/cubes.h
-      cvc-mesher/FastContouring/Matrix.h
-      cvc-mesher/FastContouring/FastContouring.h
-      cvc-mesher/FastContouring/Vector.h
-      cvc-mesher/FastContouring/MarchingCubesBuffers.h
-      cvc-mesher/FastContouring/Ray.h
-      cvc-mesher/FastContouring/Quaternion.h
-      cvc-mesher/FastContouring/Tuple.h
-      cvc-mesher/LBIE/cubes.h
-      cvc-mesher/LBIE/pcio.h
-      cvc-mesher/LBIE/LBIE_Mesher.h
-      cvc-mesher/LBIE/normalspline.h
-      cvc-mesher/LBIE/vtkMarchingCubesCases.h
-      cvc-mesher/LBIE/LBIE_geoframe.h
-      cvc-mesher/LBIE/geoframe_adapter.h
-      cvc-mesher/LBIE/e_face.h
-      cvc-mesher/LBIE/endians.h
-      cvc-mesher/LBIE/octree.h
-      cvc-mesher/LBIE/LBIEMesherRenderable.h
-      cvc-mesher/Mesher/mesher.h
+      geometry/cvc-mesher/contour/edgehash.h
+      geometry/cvc-mesher/contour/respprop2.h
+      geometry/cvc-mesher/contour/hash.h
+      geometry/cvc-mesher/contour/conplot2d.h
+      geometry/cvc-mesher/contour/cellsearch.h
+      geometry/cvc-mesher/contour/data.h
+      geometry/cvc-mesher/contour/seedchkr2.h
+      geometry/cvc-mesher/contour/dataset.h
+      geometry/cvc-mesher/contour/cellqueue.h
+      geometry/cvc-mesher/contour/cubes.h
+      geometry/cvc-mesher/contour/datasetreg3.h
+      geometry/cvc-mesher/contour/dirseeds.h
+      geometry/cvc-mesher/contour/seeddirreg3.h
+      geometry/cvc-mesher/contour/basic.h
+      geometry/cvc-mesher/contour/dataslc.h
+      geometry/cvc-mesher/contour/contour.h
+      geometry/cvc-mesher/contour/dict.h
+      geometry/cvc-mesher/contour/contour2d.h
+      geometry/cvc-mesher/contour/seedchkr3.h
+      geometry/cvc-mesher/contour/iqueue.h
+      geometry/cvc-mesher/contour/segtree.h
+      geometry/cvc-mesher/contour/commdata.h
+      geometry/cvc-mesher/contour/bin.h
+      geometry/cvc-mesher/contour/datasetslc.h
+      geometry/cvc-mesher/contour/inttree.h
+      geometry/cvc-mesher/contour/datasetvol.h
+      geometry/cvc-mesher/contour/ipqueue.h
+      geometry/cvc-mesher/contour/seedall.h
+      geometry/cvc-mesher/contour/contour3d.h
+      geometry/cvc-mesher/contour/regprop.h
+      geometry/cvc-mesher/contour/compute.h
+      geometry/cvc-mesher/contour/datavol.h
+      geometry/cvc-mesher/contour/vtkmarchingcubescases.h
+      geometry/cvc-mesher/contour/shelf.h
+      geometry/cvc-mesher/contour/range.h
+      geometry/cvc-mesher/contour/rangesweep.h
+      geometry/cvc-mesher/contour/endian_io.h
+      geometry/cvc-mesher/contour/bucketsearch.h
+      geometry/cvc-mesher/contour/seedcells.h
+      geometry/cvc-mesher/contour/conplotreg2.h
+      geometry/cvc-mesher/contour/datareg3.h
+      geometry/cvc-mesher/contour/conplot3d.h
+      geometry/cvc-mesher/contour/conplot.h
+      geometry/cvc-mesher/contour/utilities.h
+      geometry/cvc-mesher/contour/datasetreg2.h
+      geometry/cvc-mesher/contour/dirseedsreg2.h
+      geometry/cvc-mesher/contour/regprop2.h
+      geometry/cvc-mesher/contour/queue.h
+      geometry/cvc-mesher/contour/conplotreg3.h
+      geometry/cvc-mesher/contour/datareg2.h
+      geometry/cvc-mesher/contour/squeue.h
+      geometry/cvc-mesher/contour/rangeprop.h
+      geometry/cvc-mesher/FastContouring/ContourGeometry.h
+      geometry/cvc-mesher/FastContouring/cubes.h
+      geometry/cvc-mesher/FastContouring/Matrix.h
+      geometry/cvc-mesher/FastContouring/FastContouring.h
+      geometry/cvc-mesher/FastContouring/Vector.h
+      geometry/cvc-mesher/FastContouring/MarchingCubesBuffers.h
+      geometry/cvc-mesher/FastContouring/Ray.h
+      geometry/cvc-mesher/FastContouring/Quaternion.h
+      geometry/cvc-mesher/FastContouring/Tuple.h
+      geometry/cvc-mesher/LBIE/cubes.h
+      geometry/cvc-mesher/LBIE/pcio.h
+      geometry/cvc-mesher/LBIE/LBIE_Mesher.h
+      geometry/cvc-mesher/LBIE/normalspline.h
+      geometry/cvc-mesher/LBIE/vtkMarchingCubesCases.h
+      geometry/cvc-mesher/LBIE/LBIE_geoframe.h
+      geometry/cvc-mesher/LBIE/geoframe_adapter.h
+      geometry/cvc-mesher/LBIE/e_face.h
+      geometry/cvc-mesher/LBIE/endians.h
+      geometry/cvc-mesher/LBIE/octree.h
+      geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
+      geometry/cvc-mesher/Mesher/mesher.h
   )
   set(SOURCE_FILES
       ${SOURCE_FILES}
-      cvc-mesher/contour/squeue.cpp
-      cvc-mesher/contour/rangesweep.cpp
-      cvc-mesher/contour/dirseeds.cpp
-      cvc-mesher/contour/contour.cpp
-      cvc-mesher/contour/seeddirreg3.cpp
-      cvc-mesher/contour/contour3d.cpp
-      cvc-mesher/contour/conplotreg3.cpp
-      cvc-mesher/contour/dict.c
-      cvc-mesher/contour/edgehash.cpp
-      cvc-mesher/contour/regprop2.cpp
-      cvc-mesher/contour/spectrumtest.cpp
-      cvc-mesher/contour/ipqueue.cpp
-      cvc-mesher/contour/seedcells.cpp
-      cvc-mesher/contour/conplot3d.cpp
-      cvc-mesher/contour/dataslc.cpp
-      cvc-mesher/contour/cubes.cpp
-      cvc-mesher/contour/conplot2d.cpp
-      cvc-mesher/contour/shelf.cpp
-      cvc-mesher/contour/iqueue.cpp
-      cvc-mesher/contour/datavol.cpp
-      cvc-mesher/contour/cellqueue.cpp
-      cvc-mesher/contour/bin.cpp
-      cvc-mesher/contour/datareg2.cpp
-      cvc-mesher/contour/bucketsearch.cpp
-      cvc-mesher/contour/seedall.cpp
-      cvc-mesher/contour/range.cpp
-      cvc-mesher/contour/hash.cpp
-      cvc-mesher/contour/conplotreg2.cpp
-      cvc-mesher/contour/data.cpp
-      cvc-mesher/contour/inttree.cpp
-      cvc-mesher/contour/seedchkr3.cpp
-      cvc-mesher/contour/conplot.cpp
-      cvc-mesher/contour/queue.cpp
-      #cvc-mesher/contour/main.cpp
-      cvc-mesher/contour/regprop.cpp
-      cvc-mesher/contour/respprop2.cpp
-      cvc-mesher/contour/rangeprop.cpp
-      cvc-mesher/contour/segtree.cpp
-      cvc-mesher/contour/conplot_p.cpp
-      cvc-mesher/contour/contour2d.cpp
-      cvc-mesher/contour/datareg3.cpp
-      cvc-mesher/contour/dirseedsreg2.cpp
-      cvc-mesher/contour/seedchkr2.cpp
-      cvc-mesher/FastContouring/Ray.cpp
-      cvc-mesher/FastContouring/FastContouring.cpp
-      cvc-mesher/FastContouring/Quaternion.cpp
-      cvc-mesher/FastContouring/Tuple.cpp
-      cvc-mesher/FastContouring/Vector.cpp
-      cvc-mesher/FastContouring/ContourGeometry.cpp
-      cvc-mesher/FastContouring/Matrix.cpp
-      cvc-mesher/FastContouring/MarchingCubesBuffers.cpp
-      cvc-mesher/LBIE/normalspline.cpp
-      cvc-mesher/LBIE/e_face.cpp
-      cvc-mesher/LBIE/pcio.cpp
-      cvc-mesher/LBIE/LBIE_geoframe.cpp
-      cvc-mesher/LBIE/geoframe_adapter.cpp
-      cvc-mesher/LBIE/tetra.cpp
-      cvc-mesher/LBIE/hexa.cpp
-      cvc-mesher/LBIE/LBIE_Mesher.cpp
-      #cvc-mesher/LBIE/test.cpp
-      cvc-mesher/LBIE/octree.cpp
-      #cvc-mesher/Mesher/main.cpp
-      cvc-mesher/Mesher/mesher.cpp
+      geometry/cvc-mesher/contour/squeue.cpp
+      geometry/cvc-mesher/contour/rangesweep.cpp
+      geometry/cvc-mesher/contour/dirseeds.cpp
+      geometry/cvc-mesher/contour/contour.cpp
+      geometry/cvc-mesher/contour/seeddirreg3.cpp
+      geometry/cvc-mesher/contour/contour3d.cpp
+      geometry/cvc-mesher/contour/conplotreg3.cpp
+      geometry/cvc-mesher/contour/dict.c
+      geometry/cvc-mesher/contour/edgehash.cpp
+      geometry/cvc-mesher/contour/regprop2.cpp
+      geometry/cvc-mesher/contour/spectrumtest.cpp
+      geometry/cvc-mesher/contour/ipqueue.cpp
+      geometry/cvc-mesher/contour/seedcells.cpp
+      geometry/cvc-mesher/contour/conplot3d.cpp
+      geometry/cvc-mesher/contour/dataslc.cpp
+      geometry/cvc-mesher/contour/cubes.cpp
+      geometry/cvc-mesher/contour/conplot2d.cpp
+      geometry/cvc-mesher/contour/shelf.cpp
+      geometry/cvc-mesher/contour/iqueue.cpp
+      geometry/cvc-mesher/contour/datavol.cpp
+      geometry/cvc-mesher/contour/cellqueue.cpp
+      geometry/cvc-mesher/contour/bin.cpp
+      geometry/cvc-mesher/contour/datareg2.cpp
+      geometry/cvc-mesher/contour/bucketsearch.cpp
+      geometry/cvc-mesher/contour/seedall.cpp
+      geometry/cvc-mesher/contour/range.cpp
+      geometry/cvc-mesher/contour/hash.cpp
+      geometry/cvc-mesher/contour/conplotreg2.cpp
+      geometry/cvc-mesher/contour/data.cpp
+      geometry/cvc-mesher/contour/inttree.cpp
+      geometry/cvc-mesher/contour/seedchkr3.cpp
+      geometry/cvc-mesher/contour/conplot.cpp
+      geometry/cvc-mesher/contour/queue.cpp
+      #geometry/cvc-mesher/contour/main.cpp
+      geometry/cvc-mesher/contour/regprop.cpp
+      geometry/cvc-mesher/contour/respprop2.cpp
+      geometry/cvc-mesher/contour/rangeprop.cpp
+      geometry/cvc-mesher/contour/segtree.cpp
+      geometry/cvc-mesher/contour/conplot_p.cpp
+      geometry/cvc-mesher/contour/contour2d.cpp
+      geometry/cvc-mesher/contour/datareg3.cpp
+      geometry/cvc-mesher/contour/dirseedsreg2.cpp
+      geometry/cvc-mesher/contour/seedchkr2.cpp
+      geometry/cvc-mesher/FastContouring/Ray.cpp
+      geometry/cvc-mesher/FastContouring/FastContouring.cpp
+      geometry/cvc-mesher/FastContouring/Quaternion.cpp
+      geometry/cvc-mesher/FastContouring/Tuple.cpp
+      geometry/cvc-mesher/FastContouring/Vector.cpp
+      geometry/cvc-mesher/FastContouring/ContourGeometry.cpp
+      geometry/cvc-mesher/FastContouring/Matrix.cpp
+      geometry/cvc-mesher/FastContouring/MarchingCubesBuffers.cpp
+      geometry/cvc-mesher/LBIE/normalspline.cpp
+      geometry/cvc-mesher/LBIE/e_face.cpp
+      geometry/cvc-mesher/LBIE/pcio.cpp
+      geometry/cvc-mesher/LBIE/LBIE_geoframe.cpp
+      geometry/cvc-mesher/LBIE/geoframe_adapter.cpp
+      geometry/cvc-mesher/LBIE/tetra.cpp
+      geometry/cvc-mesher/LBIE/hexa.cpp
+      geometry/cvc-mesher/LBIE/LBIE_Mesher.cpp
+      #geometry/cvc-mesher/LBIE/test.cpp
+      geometry/cvc-mesher/LBIE/octree.cpp
+      #geometry/cvc-mesher/Mesher/main.cpp
+      geometry/cvc-mesher/Mesher/mesher.cpp
   )
 endif(CVC_ENABLE_MESHER)
 
 # Signed distance function support
 if(CVC_ENABLE_SDF)
   list(APPEND CVC_INCLUDE_DIRS
-    SDF/UsefulMath
-    SDF/GeometryFileTypes
-    SDF/ByteOrder
-    SDF/SignDistanceFunction
-    SDF/Geometry
-    SDF/VolumeFileTypes
-    SDF/SDF
-    SDF/SignDistanceFunction_v2
+    geometry/SDF/UsefulMath
+    geometry/SDF/GeometryFileTypes
+    geometry/SDF/ByteOrder
+    geometry/SDF/SignDistanceFunction
+    geometry/SDF/Geometry
+    geometry/SDF/VolumeFileTypes
+    geometry/SDF/SDF
+    geometry/SDF/SignDistanceFunction_v2
   )
   set(INCLUDE_FILES
       ${INCLUDE_FILES}
-      # SDF/UsefulMath/AreaVolumes.h
-      # SDF/UsefulMath/Matrix.h
-      # SDF/UsefulMath/TrilinearGrid.h
-      # SDF/UsefulMath/LinearAlgebra.h
-      # SDF/UsefulMath/Vector.h
-      # SDF/UsefulMath/Ray.h
-      # SDF/UsefulMath/Quaternion.h
-      # SDF/UsefulMath/Tuple.h
-      # SDF/GeometryFileTypes/RawnFile.h
-      # SDF/GeometryFileTypes/RawncFile.h
-      # SDF/GeometryFileTypes/MayaOBJFile.h
-      # SDF/GeometryFileTypes/RawcFile.h
-      # SDF/GeometryFileTypes/RawFile.h
-      # SDF/GeometryFileTypes/GeometryFileType.h
-      # SDF/GeometryFileTypes/GeometryLoader.h
-      #SDF/ByteOrder/ByteSwapping.h
-      SDF/SignDistanceFunction/common.h
-      SDF/SignDistanceFunction/sdfLib.h
-      SDF/SignDistanceFunction/head.h
-      SDF/SignDistanceFunction/SDFContext.h
-      #SDF/Geometry/IntQueue.h
-      #SDF/Geometry/GeometrySceneArray.h
-      #SDF/Geometry/Geometry.h
-      #SDF/Geometry/SceneArrayNode.h
-      #SDF/Geometry/MeshDerivatives.h
-      #SDF/Geometry/GeometryScene.h
-      #SDF/VolumeFileTypes/RawVFile.h
-      #SDF/VolumeFileTypes/RawIVFile.h
-      #SDF/VolumeFileTypes/MRCFile.h
-      #SDF/VolumeFileTypes/SimpleVolumeData.h
-      #SDF/VolumeFileTypes/DXFile.h
-      #SDF/VolumeFileTypes/VolumeLoader.h
-      #SDF/VolumeFileTypes/VolumeFileType.h
-      # SDF/SignDistanceFunction_v2/Geom3DParser.h
-      # SDF/SignDistanceFunction_v2/reg3data.h
-      # SDF/SignDistanceFunction_v2/mtxlib.h
-      # SDF/SignDistanceFunction_v2/bufferedio.h
-      # SDF/SignDistanceFunction_v2/geom.h
-      # SDF/SignDistanceFunction_v2/cubes.h
-      # SDF/SignDistanceFunction_v2/diskio.h
-      # SDF/SignDistanceFunction_v2/FaceVertSet3D.h
-      # SDF/SignDistanceFunction_v2/dynarray.h
-      # SDF/SignDistanceFunction_v2/Reg3Parser.h
-      # SDF/SignDistanceFunction_v2/DistanceTransform.h
-      # SDF/SignDistanceFunction_v2/bio.h
-      # SDF/SignDistanceFunction_v2/RawivParser.h
+      # geometry/SDF/UsefulMath/AreaVolumes.h
+      # geometry/SDF/UsefulMath/Matrix.h
+      # geometry/SDF/UsefulMath/TrilinearGrid.h
+      # geometry/SDF/UsefulMath/LinearAlgebra.h
+      # geometry/SDF/UsefulMath/Vector.h
+      # geometry/SDF/UsefulMath/Ray.h
+      # geometry/SDF/UsefulMath/Quaternion.h
+      # geometry/SDF/UsefulMath/Tuple.h
+      # geometry/SDF/GeometryFileTypes/RawnFile.h
+      # geometry/SDF/GeometryFileTypes/RawncFile.h
+      # geometry/SDF/GeometryFileTypes/MayaOBJFile.h
+      # geometry/SDF/GeometryFileTypes/RawcFile.h
+      # geometry/SDF/GeometryFileTypes/RawFile.h
+      # geometry/SDF/GeometryFileTypes/GeometryFileType.h
+      # geometry/SDF/GeometryFileTypes/GeometryLoader.h
+      #geometry/SDF/ByteOrder/ByteSwapping.h
+      geometry/SDF/SignDistanceFunction/common.h
+      geometry/SDF/SignDistanceFunction/sdfLib.h
+      geometry/SDF/SignDistanceFunction/head.h
+      geometry/SDF/SignDistanceFunction/SDFContext.h
+      #geometry/SDF/Geometry/IntQueue.h
+      #geometry/SDF/Geometry/GeometrySceneArray.h
+      #geometry/SDF/Geometry/Geometry.h
+      #geometry/SDF/Geometry/SceneArrayNode.h
+      #geometry/SDF/Geometry/MeshDerivatives.h
+      #geometry/SDF/Geometry/GeometryScene.h
+      #geometry/SDF/VolumeFileTypes/RawVFile.h
+      #geometry/SDF/VolumeFileTypes/RawIVFile.h
+      #geometry/SDF/VolumeFileTypes/MRCFile.h
+      #geometry/SDF/VolumeFileTypes/SimpleVolumeData.h
+      #geometry/SDF/VolumeFileTypes/DXFile.h
+      #geometry/SDF/VolumeFileTypes/VolumeLoader.h
+      #geometry/SDF/VolumeFileTypes/VolumeFileType.h
+      # geometry/SDF/SignDistanceFunction_v2/Geom3DParser.h
+      # geometry/SDF/SignDistanceFunction_v2/reg3data.h
+      # geometry/SDF/SignDistanceFunction_v2/mtxlib.h
+      # geometry/SDF/SignDistanceFunction_v2/bufferedio.h
+      # geometry/SDF/SignDistanceFunction_v2/geom.h
+      # geometry/SDF/SignDistanceFunction_v2/cubes.h
+      # geometry/SDF/SignDistanceFunction_v2/diskio.h
+      # geometry/SDF/SignDistanceFunction_v2/FaceVertSet3D.h
+      # geometry/SDF/SignDistanceFunction_v2/dynarray.h
+      # geometry/SDF/SignDistanceFunction_v2/Reg3Parser.h
+      # geometry/SDF/SignDistanceFunction_v2/DistanceTransform.h
+      # geometry/SDF/SignDistanceFunction_v2/bio.h
+      # geometry/SDF/SignDistanceFunction_v2/RawivParser.h
   )
   set(SOURCE_FILES
       ${SOURCE_FILES}
-      # SDF/UsefulMath/TrilinearGrid.cpp
-      # SDF/UsefulMath/Ray.cpp
-      # SDF/UsefulMath/Quaternion.cpp
-      # SDF/UsefulMath/Tuple.cpp
-      # SDF/UsefulMath/Vector.cpp
-      # SDF/UsefulMath/Matrix.cpp
-      # SDF/UsefulMath/AreaVolumes.cpp
-      # SDF/UsefulMath/LinearAlgebra.cpp
-      # SDF/GeometryFileTypes/GeometryFileType.cpp
-      # SDF/GeometryFileTypes/RawnFile.cpp
-      # SDF/GeometryFileTypes/MayaOBJFile.cpp
-      # SDF/GeometryFileTypes/RawcFile.cpp
-      # SDF/GeometryFileTypes/GeometryLoader.cpp
-      # SDF/GeometryFileTypes/RawFile.cpp
-      # SDF/GeometryFileTypes/RawncFile.cpp
-      # SDF/ByteOrder/ByteSwapping.cpp
-      # SDF/SignDistanceFunction/init.cpp  # OLD - uses global sdf, all functions moved to SDFContext
-      SDF/SignDistanceFunction/compute.cpp
-      SDF/SignDistanceFunction/propagate.cpp
-      SDF/SignDistanceFunction/head.cpp
-      SDF/SignDistanceFunction/new_adjust.cpp
-      SDF/SignDistanceFunction/main.cpp
-      SDF/SignDistanceFunction/common.cpp
-      SDF/SignDistanceFunction/octree.cpp
-      SDF/SignDistanceFunction/SDFContext.cpp
-      #SDF/Geometry/GeometryScene.cpp
-      #SDF/Geometry/GeometrySceneArray.cpp
-      #SDF/Geometry/Geometry.cpp
-      #SDF/Geometry/SceneArrayNode.cpp
-      #SDF/Geometry/IntQueue.cpp
-      #SDF/Geometry/MeshDerivatives.cpp
-      #SDF/VolumeFileTypes/VolumeLoader.cpp
-      #SDF/VolumeFileTypes/DXFile.cpp
-      #SDF/VolumeFileTypes/RawIVFile.cpp
-      #SDF/VolumeFileTypes/RawVFile.cpp
-      #SDF/VolumeFileTypes/VolumeFileType.cpp
-      #SDF/VolumeFileTypes/MRCFile.cpp
-      #SDF/VolumeFileTypes/SimpleVolumeData.cpp
-      #SDF/Server.cpp
-      #SDF/SDF/main.cpp
-      SDF/SignDistanceFunction_v2/Reg3Parser.cpp
-      SDF/SignDistanceFunction_v2/RawivParser.cpp
-      SDF/SignDistanceFunction_v2/Geom3DParser.cpp
-      SDF/SignDistanceFunction_v2/geom.cpp
-      SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
-      SDF/SignDistanceFunction_v2/DistanceTransform.cpp
-      SDF/SignDistanceFunction_v2/mtxlib.cpp
-      SDF/SignDistanceFunction_v2/bufferedio.cpp
+      # geometry/SDF/UsefulMath/TrilinearGrid.cpp
+      # geometry/SDF/UsefulMath/Ray.cpp
+      # geometry/SDF/UsefulMath/Quaternion.cpp
+      # geometry/SDF/UsefulMath/Tuple.cpp
+      # geometry/SDF/UsefulMath/Vector.cpp
+      # geometry/SDF/UsefulMath/Matrix.cpp
+      # geometry/SDF/UsefulMath/AreaVolumes.cpp
+      # geometry/SDF/UsefulMath/LinearAlgebra.cpp
+      # geometry/SDF/GeometryFileTypes/GeometryFileType.cpp
+      # geometry/SDF/GeometryFileTypes/RawnFile.cpp
+      # geometry/SDF/GeometryFileTypes/MayaOBJFile.cpp
+      # geometry/SDF/GeometryFileTypes/RawcFile.cpp
+      # geometry/SDF/GeometryFileTypes/GeometryLoader.cpp
+      # geometry/SDF/GeometryFileTypes/RawFile.cpp
+      # geometry/SDF/GeometryFileTypes/RawncFile.cpp
+      # geometry/SDF/ByteOrder/ByteSwapping.cpp
+      # geometry/SDF/SignDistanceFunction/init.cpp  # OLD - uses global sdf, all functions moved to SDFContext
+      geometry/SDF/SignDistanceFunction/compute.cpp
+      geometry/SDF/SignDistanceFunction/propagate.cpp
+      geometry/SDF/SignDistanceFunction/head.cpp
+      geometry/SDF/SignDistanceFunction/new_adjust.cpp
+      geometry/SDF/SignDistanceFunction/main.cpp
+      geometry/SDF/SignDistanceFunction/common.cpp
+      geometry/SDF/SignDistanceFunction/octree.cpp
+      geometry/SDF/SignDistanceFunction/SDFContext.cpp
+      #geometry/SDF/Geometry/GeometryScene.cpp
+      #geometry/SDF/Geometry/GeometrySceneArray.cpp
+      #geometry/SDF/Geometry/Geometry.cpp
+      #geometry/SDF/Geometry/SceneArrayNode.cpp
+      #geometry/SDF/Geometry/IntQueue.cpp
+      #geometry/SDF/Geometry/MeshDerivatives.cpp
+      #geometry/SDF/VolumeFileTypes/VolumeLoader.cpp
+      #geometry/SDF/VolumeFileTypes/DXFile.cpp
+      #geometry/SDF/VolumeFileTypes/RawIVFile.cpp
+      #geometry/SDF/VolumeFileTypes/RawVFile.cpp
+      #geometry/SDF/VolumeFileTypes/VolumeFileType.cpp
+      #geometry/SDF/VolumeFileTypes/MRCFile.cpp
+      #geometry/SDF/VolumeFileTypes/SimpleVolumeData.cpp
+      #geometry/SDF/Server.cpp
+      #geometry/SDF/geometry/SDF/main.cpp
+      geometry/SDF/SignDistanceFunction_v2/Reg3Parser.cpp
+      geometry/SDF/SignDistanceFunction_v2/RawivParser.cpp
+      geometry/SDF/SignDistanceFunction_v2/Geom3DParser.cpp
+      geometry/SDF/SignDistanceFunction_v2/geom.cpp
+      geometry/SDF/SignDistanceFunction_v2/FaceVertSet3D.cpp
+      geometry/SDF/SignDistanceFunction_v2/DistanceTransform.cpp
+      geometry/SDF/SignDistanceFunction_v2/mtxlib.cpp
+      geometry/SDF/SignDistanceFunction_v2/bufferedio.cpp
   )
 endif(CVC_ENABLE_SDF)
 
@@ -601,7 +597,7 @@ endif(CVC_ENABLE_SDF)
 
 # Add CUDA source files if enabled
 if(CVC_ENABLE_CUDA)
-  list(APPEND SOURCE_FILES voxels_kernels.cu)
+  list(APPEND SOURCE_FILES volume/voxels_kernels.cu)
   message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
 endif()
 
@@ -737,7 +733,7 @@ if(CVC_ENABLE_GRPC)
   )
 
   list(APPEND SOURCE_FILES
-    state_transport_grpc.cpp
+    core/state_transport_grpc.cpp
     ${_proto_pb_cc}
     ${_proto_grpc_cc}
   )
@@ -801,6 +797,7 @@ target_include_directories(cvc
     $<INSTALL_INTERFACE:include>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/geometry
     ${_CVC_PRIVATE_INCLUDE_DIRS}
 )
 
@@ -815,8 +812,6 @@ endforeach()
 
 # Compile definitions
 target_compile_definitions(cvc
-  PUBLIC
-    CVC_NAMESPACE=${CVC_NAMESPACE}
   PRIVATE
     CVC_VERSION_STRING="${CVC_VERSION}"
 )
@@ -975,8 +970,8 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   FILES_MATCHING PATTERN "*.h"
 )
 
-install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/config.h
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc
+install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc/core
   COMPONENT libcvc
 )
 
@@ -985,8 +980,8 @@ install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/config.h
 # under libcvc's own build tree when consumed via FetchContent/add_subdirectory.
 # Downstream projects can then add ${libcvc_BINARY_DIR}/inc to their include path.
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/config.h.cmake
-  ${PROJECT_BINARY_DIR}/inc/cvc/config.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/core/config.h.cmake
+  ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
 )
 
 # Windows-specific batch file

@@ -22,11 +22,11 @@
 
 #include <cassert>
 #include <cmath>
-#include <cvc/algorithm.h>
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Test sphere generation
 void test_sphere() {

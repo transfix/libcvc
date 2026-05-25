@@ -125,8 +125,8 @@ As of version 2.1, libcvc provides **two independent SDF implementations**:
 ### Basic Usage
 
 ```cpp
-#include <cvc/algorithm.h>
-#include <cvc/geometry.h>
+#include <cvc/utility/algorithm.h>
+#include <cvc/geometry/geometry.h>
 
 // Load a triangle mesh
 cvc::geometry geom = cvc::read_geometry("bunny.off");
@@ -931,7 +931,7 @@ Trade-off: Slightly more complex code but broader hardware support.
 ### Extract Isosurface
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 // Get SDF
 cvc::volume sdf_vol = cvc::sdf(geom, dim, bbox);

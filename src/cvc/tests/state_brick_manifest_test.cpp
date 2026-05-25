@@ -4,13 +4,13 @@
 */
 
 #include <cstring>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_brick_manifest.h>
-#include <cvc/state_compression_registry.h>
-#include <cvc/types.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_brick_manifest.h>
+#include <cvc/core/state_compression_registry.h>
+#include <cvc/core/types.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 class BrickManifestTest : public ::testing::Test {
 protected:

@@ -1,7 +1,7 @@
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/parser.h>
-#include <cvc/state_exec/stackless_evaluator.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/parser.h>
+#include <cvc/core/state_exec/stackless_evaluator.h>
+#include <cvc/core/state_exec/types.h>
 #include <gtest/gtest.h>
 
 using namespace cvc::state_exec;

@@ -49,7 +49,7 @@ where the sum is over 6-connected neighbors (north, south, east, west, up, down)
 
 ### Usage Example
 ```cpp
-#include <cvc/volmagick.h>
+#include <cvc/volume/volmagick.h>
 
 voxels volume = /* load your volume */;
 
@@ -161,7 +161,7 @@ I_filtered(p) = Σ(I(q) × w_total(p,q)) / Σ(w_total(p,q))
 
 ### Usage Example
 ```cpp
-#include <cvc/volmagick.h>
+#include <cvc/volume/volmagick.h>
 
 voxels volume = /* load your volume */;
 
@@ -304,7 +304,7 @@ Else:
 
 ### Usage Example
 ```cpp
-#include <cvc/volmagick.h>
+#include <cvc/volume/volmagick.h>
 
 voxels volume = /* load your volume */;
 
@@ -508,7 +508,7 @@ I_new(p) = Σ(I(n) × weight_normalized_n) + I_original(p) × (λ / total)
 
 ### Usage Example
 ```cpp
-#include <cvc/volmagick.h>
+#include <cvc/volume/volmagick.h>
 
 voxels volume = /* load your volume */;
 

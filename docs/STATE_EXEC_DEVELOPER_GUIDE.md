@@ -35,7 +35,7 @@ you can drop directly into a test or application.
 ### Minimal "Hello World"
 
 ```cpp
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state_exec/scheduler.h>
 #include <iostream>
 
 using namespace cvc::state_exec;
@@ -159,7 +159,7 @@ processes, runs them cooperatively via time-slicing, and provides querying,
 pausing, and resource-limit enforcement.
 
 ```cpp
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state_exec/scheduler.h>
 using namespace cvc::state_exec;
 
 // Choose a scheduling policy
@@ -334,12 +334,12 @@ to the scheduler and state root.  When using `exec_coordinator`,
 this is automatic.  For local-only usage:
 
 ```cpp
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/intrinsics.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 
 using namespace cvc::state_exec;
 
@@ -494,8 +494,8 @@ them.
 
 **C++ host setup:**
 ```cpp
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_exec/scheduler.h>
 
 cvc::app app_ctx;
 auto& root = cvc::state::instance(app_ctx);
@@ -562,7 +562,7 @@ A `resource_policy` defines cluster-wide constraints that apply to all
 processes submitted through an `exec_coordinator`:
 
 ```cpp
-#include <cvc/state_exec/resource_policy.h>
+#include <cvc/core/state_exec/resource_policy.h>
 
 resource_policy policy;
 policy.max_processes     = 50;       // cluster-wide process cap
@@ -612,8 +612,8 @@ a cluster of nodes.  It handles leader election, process submission
 routing, migration, cross-cluster observation, and admin controls.
 
 ```cpp
-#include <cvc/state_exec/exec_coordinator.h>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/state_exec/exec_coordinator.h>
+#include <cvc/core/state_message_bus.h>
 
 using namespace cvc::state_exec;
 
@@ -986,7 +986,7 @@ The `stdlib_registry` provides additional functions organized into modules.
 Import a module into a process's environment to make its functions available:
 
 ```cpp
-#include <cvc/state_exec/stdlib.h>
+#include <cvc/core/state_exec/stdlib.h>
 
 stdlib_registry stdlib;
 

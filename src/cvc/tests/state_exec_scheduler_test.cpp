@@ -3,10 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cvc/state_exec/async_scheduler.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state_exec/async_scheduler.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

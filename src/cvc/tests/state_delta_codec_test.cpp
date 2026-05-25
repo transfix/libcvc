@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_delta_codec.h>
+#include <cvc/core/state_delta_codec.h>
 #include <gtest/gtest.h>
 #include <numeric>
 #include <vector>

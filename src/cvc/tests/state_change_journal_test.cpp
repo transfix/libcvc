@@ -1,14 +1,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/state_change_journal.h>
+#include <cvc/core/state_change_journal.h>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <set>
 #include <thread>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 namespace {
 

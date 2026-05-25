@@ -25,9 +25,9 @@
 //   - handle a link whose target is the application root ("").
 
 #include <algorithm>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_distributed_admin.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_distributed_admin.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

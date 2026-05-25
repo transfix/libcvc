@@ -9,10 +9,10 @@
 */
 
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/distributed_state_session.h>
-#include <cvc/state.h>
-#include <cvc/state_distributed_metrics.h>
+#include <cvc/core/app.h>
+#include <cvc/core/distributed_state_session.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_distributed_metrics.h>
 #include <gtest/gtest.h>
 #include <thread>
 

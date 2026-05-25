@@ -1,7 +1,7 @@
 #ifndef AXISNODE_H
 #define AXISNODE_H
 
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <volrover3/GraphicsNode.h>
 #include <vtkSmartPointer.h>
 
@@ -9,7 +9,7 @@ class vtkAxesActor;
 
 class AxisNode : public GraphicsNode {
 public:
-  AxisNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "axis");
+  AxisNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "axis");
   ~AxisNode() override;
 
   void setAxisLength(double length);

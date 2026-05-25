@@ -16,8 +16,8 @@
 // routing through the authority map and OOB sendMessage land in
 // the next slice.
 
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <gtest/gtest.h>
 
 namespace {

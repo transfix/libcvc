@@ -9,9 +9,9 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <cmath>
-#include <cvc/algorithm.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
+#include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <volrover3/AppState.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/ProceduralGeometryDialog.h>

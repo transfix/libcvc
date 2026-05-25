@@ -11,10 +11,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_cluster_shard.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_cluster_shard.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

@@ -245,7 +245,7 @@ See **[docs/STATE_API.md](docs/STATE_API.md)** for state system and futures API:
 ### Volume Processing
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 
 // Load a volume file
 cvc::volume vol("data.rawiv");
@@ -283,7 +283,7 @@ v3(0, 0, 0, 99.0);        // Modify v3 without affecting v1
 ### Geometry Processing
 
 ```cpp
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
 
 // Load triangle mesh
 cvc::geometry mesh("bunny.off");
@@ -312,8 +312,8 @@ mesh.write("output.raw");
 ### Signed Distance Functions (v2.0)
 
 ```cpp
-#include <cvc/algorithm.h>
-#include <cvc/geometry.h>
+#include <cvc/utility/algorithm.h>
+#include <cvc/geometry/geometry.h>
 
 // Load triangle mesh
 cvc::geometry bunny = cvc::read_geometry("bunny.off");

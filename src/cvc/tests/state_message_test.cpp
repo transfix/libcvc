@@ -2,8 +2,8 @@
 // Tests for cvc::state_message MIME defaults and factory helpers
 // (Phase 6 ergonomics).
 
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

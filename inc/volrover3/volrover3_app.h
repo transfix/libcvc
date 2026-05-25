@@ -1,7 +1,7 @@
 #ifndef VOLROVER3_APP_H
 #define VOLROVER3_APP_H
 
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 
 // --------------------------------------------------------------------
 // volrover3_app()

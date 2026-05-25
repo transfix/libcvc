@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <volrover3/BBoxNode.h>
 #include <volrover3/GraphicsNode.h>
 #include <volrover3/NullGraphicNode.h>

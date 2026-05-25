@@ -1,5 +1,5 @@
-#include <cvc/app.h>
-#include <cvc/state_list.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state_list.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
 

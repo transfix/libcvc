@@ -5,17 +5,17 @@
 */
 
 #include <chrono>
-#include <cvc/state.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/exec_coordinator.h>
-#include <cvc/state_exec/intrinsics.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/resource_policy.h>
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/state_value_codec.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/exec_coordinator.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/resource_policy.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/state_value_codec.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

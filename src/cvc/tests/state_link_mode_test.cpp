@@ -11,8 +11,8 @@
 // Phase 8 slice 4b: link visibility mode (opaque vs transparent)
 // and resolvedValue() read-through helper.
 
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <gtest/gtest.h>
 
 TEST(StateLinkModeTest, DefaultsToOpaque) {

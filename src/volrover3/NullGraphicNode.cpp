@@ -1,6 +1,6 @@
 #include <algorithm>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <limits>
 #include <sstream>
 #include <volrover3/AxisNode.h>

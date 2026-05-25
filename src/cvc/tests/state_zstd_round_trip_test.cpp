@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_compression_registry.h>
+#include <cvc/core/state_compression_registry.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <string>

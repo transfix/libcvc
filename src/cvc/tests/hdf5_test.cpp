@@ -15,11 +15,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/hdf5_utils.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/volume/hdf5_utils.h>
+#include <cvc/volume/volume.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -36,7 +36,7 @@
 #define CVC_GETPID() ::getpid()
 #endif
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ===========================
 // HDF5 Test Fixture

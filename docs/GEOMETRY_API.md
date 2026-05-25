@@ -99,10 +99,10 @@ The `cvc::geometry` class provides a versatile container for 3D triangle meshes,
 ## Quick Start
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Load mesh from file
 geometry mesh = read_geometry("bunny.off");
@@ -1121,7 +1121,7 @@ Improves mesh quality using LBIE (Level set, B-spline, Implicit surface, Extrapo
 - `IMPROVE_OPTIMIZATION`: General optimization
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry poor_quality = read_geometry("poor_mesh.off");
 
@@ -1177,7 +1177,7 @@ Computes the signed distance function for a geometry, creating a volume where ea
 - **Positive values**: Outside the surface
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry bunny = read_geometry("bunny.off");
 
@@ -1333,7 +1333,7 @@ Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This 
 - Multi-material simulations
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry bunny = read_geometry("bunny.off");
 volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
@@ -1372,11 +1372,11 @@ The tet2 interval meshing implementation had several bugs that were fixed in Dec
 ### Complete Volumetric Mesh Example
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/algorithm.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
     // Load input geometry
@@ -1463,9 +1463,9 @@ Interpolates using trilinear basis functions within a hexahedron.
 **Example:**
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Tetrahedral mesh with temperature field
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
@@ -1569,7 +1569,7 @@ geometry::quad_t encode_hex_to_quad(const geometry::hex_t& hex, int face_idx);
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
@@ -1603,7 +1603,7 @@ Creates a new geometry containing only the boundary triangles/quads of a volumet
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Create volumetric mesh
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
@@ -1690,7 +1690,7 @@ double hex_scaled_jacobian(const geometry::point_t hex_verts[8]);
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
@@ -1789,7 +1789,7 @@ geometry extract_quality_elements(const geometry& geom,
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
@@ -1890,7 +1890,7 @@ Returns indices of all elements that contain the query point.
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
@@ -1929,7 +1929,7 @@ Returns `{min_x, min_y, min_z, max_x, max_y, max_z}`.
 **Example:**
 
 ```cpp
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry mesh = tetrahedralize(sdf_vol, 0.0);
 
@@ -1950,11 +1950,11 @@ std::cout << "Dimensions: " << width << " × " << height << " × " << depth << "
 **Complete Workflow Example:**
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/algorithm.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
     // Create volumetric mesh
@@ -2038,7 +2038,7 @@ geometry read_geometry(const std::string& filename);
 ```
 
 ```cpp
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry_file_io.h>
 
 geometry mesh = read_geometry("bunny.off");
 geometry mesh2 = read_geometry("model.raw");
@@ -2361,11 +2361,11 @@ std::cout << "Mean: " << stats.mean << " ± " << stats.std_dev << "\n";
 ### Example 1: Load, Process, and Save
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
     // Load mesh
@@ -2398,12 +2398,12 @@ int main() {
 ### Example 2: Combine Multiple Meshes
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <vector>
 #include <string>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry combine_meshes(const std::vector<std::string>& filenames) {
     geometry combined;
@@ -2447,11 +2447,11 @@ int main() {
 ### Example 3: Extract and Analyze Surface
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <cmath>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Calculate triangle area
 double triangle_area(const point_t& p0, const point_t& p1, const point_t& p2) {
@@ -2529,10 +2529,10 @@ int main() {
 ### Example 4: Generate Procedural Mesh
 
 ```cpp
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
 #include <cmath>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 geometry create_icosahedron() {
     geometry icosa;
@@ -2603,12 +2603,12 @@ int main() {
 ### Example 5: Mesh Quality Analysis and Improvement
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <cmath>
 #include <limits>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Calculate triangle aspect ratio (quality metric)
 double triangle_aspect_ratio(const point_t& p0, 
@@ -2913,7 +2913,7 @@ void render(const geometry& mesh) {
 **Common Exceptions:**
 
 ```cpp
-#include <cvc/exception.h>
+#include <cvc/core/exception.h>
 
 // Unsupported file format
 try {

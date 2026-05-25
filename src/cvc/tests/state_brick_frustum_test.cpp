@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_brick_manifest.h>
+#include <cvc/core/state_brick_manifest.h>
 #include <gtest/gtest.h>
 
 using cvc::brick_extent;

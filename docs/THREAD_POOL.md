@@ -30,7 +30,7 @@ For the full per-method reference, see
 ## Quick Start
 
 ```cpp
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 
 // Submit work to the pool. Returns immediately; the task runs when a
 // worker slot is available.

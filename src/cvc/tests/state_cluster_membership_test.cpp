@@ -10,17 +10,17 @@
 
 #include <atomic>
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/state_cluster_membership.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_peer_registry.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state_cluster_membership.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_peer_registry.h>
+#include <cvc/core/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <thread>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ---------------------------------------------------------------
 // Helpers

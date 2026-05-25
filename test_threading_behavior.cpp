@@ -1,7 +1,7 @@
 // Quick validation test for per-instance threading behavior
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
 #include <iostream>
 #include <thread>
 #include <volrover3/GeometryNode.h>
