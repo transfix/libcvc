@@ -333,7 +333,8 @@ jobs:
           #   Stress|Convergence|Benchmark            : long-running suites
           #   Performance                              : perf benchmarks (>200s in Debug)
           #   BunnySDF_IsoRoundtrip|QualityImproveAllMethods : heavy Debug-only
-          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          #   Integration                              : CLI integration tests (several minutes)
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if [ "${{ github.event_name }}" = "push" ]; then
             CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build \
@@ -603,7 +604,7 @@ jobs:
         run: |
           set -euo pipefail
           # See linux ctest step for rationale.
-          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if [ "${{ github.event_name }}" = "push" ]; then
             CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build --build-config ${{ matrix.build_type }} \

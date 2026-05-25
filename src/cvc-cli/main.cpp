@@ -949,7 +949,9 @@ static int cmd_bunny(int argc, char **argv) {
      "output file (.off for geometry, .rawiv/.mrc for volume)")
     ("volume", "output SDF volume instead of geometry")
     ("dims,d", po::value<unsigned int>()->default_value(64), "volume dimensions (cube)")
-    ("padding,p", po::value<double>()->default_value(0.1), "bounding box padding factor");
+    ("padding,p", po::value<double>()->default_value(0.1), "bounding box padding factor")
+    ("algorithm,a", po::value<std::string>()->default_value("v1"),
+     "SDF algorithm: v1 (octree) or v2 (distance transform)");
 
   po::positional_options_description pos;
   pos.add("output", 1);
@@ -982,7 +984,11 @@ static int cmd_bunny(int argc, char **argv) {
                            cx + half, cy + half, cz + half);
 
 #ifdef CVC_ENABLE_SDF
-    cvc::volume sdf_vol = cvc::sdf(cvc_app(), bunny, cvc::dimension(d, d, d), bbox);
+    cvc::sdf_algorithm algo = cvc::SDF_V1;
+    std::string algo_str = vm["algorithm"].as<std::string>();
+    if (algo_str == "v2" || algo_str == "V2")
+      algo = cvc::SDF_V2;
+    cvc::volume sdf_vol = cvc::sdf(cvc_app(), bunny, cvc::dimension(d, d, d), bbox, algo);
     sdf_vol.write(output);
 #else
     throw std::runtime_error("SDF support not enabled (CVC_ENABLE_SDF=OFF)");
