@@ -83,10 +83,14 @@ struct process {
     int watch_id;
     std::string path;
     std::string value;
-    value_t handler;
   };
   std::vector<watch_event> pending_watch_events;
   int next_watch_id = 1;
+
+  // Watch handler registry: watch_id -> handler expression.
+  // Stored here so signal lambdas avoid capturing value_t (which can
+  // cause ABI issues with boost::signals2 on some platforms).
+  std::unordered_map<int, value_t> watch_handlers;
 
   // Message tracking
   uint64_t message_count = 0;

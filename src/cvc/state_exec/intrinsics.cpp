@@ -163,26 +163,34 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   // Allocate a watch ID
   int watch_id = ctx->proc->next_watch_id++;
 
-  // Connect to the node's valueChanged signal.
-  // Route events through the scheduler so they land on the scheduler's
-  // own process object (not the intrinsics_context copy).
+  // Store the handler on the scheduler's process (not ctx->proc which may
+  // be a separate copy).  This also avoids capturing value_t in the signal
+  // lambda, which can cause ABI issues with boost::signals2 on some
+  // platforms (e.g. macOS).
   scheduler *sched = ctx->sched;
   int pid = ctx->pid;
+  if (sched) {
+    sched->register_watch_handler(pid, watch_id, handler);
+  } else {
+    ctx->proc->watch_handlers[watch_id] = handler;
+  }
+
+  // Connect to the node's valueChanged signal.
+  // The lambda captures only POD/simple types — no value_t.
   std::string watched_path = path;
-  value_t handler_copy = handler;
   boost::signals2::connection conn;
   if (sched) {
-    conn = node->valueChanged.connect([sched, pid, watch_id, watched_path, handler_copy]() {
-      sched->queue_watch_event(pid, {watch_id, watched_path, std::string(), handler_copy});
+    conn = node->valueChanged.connect([sched, pid, watch_id, watched_path]() {
+      sched->queue_watch_event(pid, {watch_id, watched_path, std::string()});
     });
   } else {
     // No scheduler (unit-test path): push directly onto process
     auto proc_weak = std::weak_ptr<process>(ctx->proc);
-    conn = node->valueChanged.connect([proc_weak, watch_id, watched_path, handler_copy]() {
+    conn = node->valueChanged.connect([proc_weak, watch_id, watched_path]() {
       auto proc = proc_weak.lock();
       if (!proc)
         return;
-      proc->pending_watch_events.push_back({watch_id, watched_path, std::string(), handler_copy});
+      proc->pending_watch_events.push_back({watch_id, watched_path, std::string()});
     });
   }
 
@@ -201,6 +209,11 @@ value_t intrinsic_state_unwatch(intrinsics_context *ctx, std::span<const value_t
     return value_t(false);
   it->second.disconnect();
   ctx->watches.erase(it);
+  // Remove handler from the scheduler's process (or ctx->proc if no scheduler)
+  if (ctx->sched)
+    ctx->sched->unregister_watch_handler(ctx->pid, static_cast<int>(watch_id));
+  else
+    ctx->proc->watch_handlers.erase(static_cast<int>(watch_id));
   return value_t(true);
 }
 

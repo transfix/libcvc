@@ -219,6 +219,20 @@ void scheduler::queue_watch_event(int pid, process::watch_event evt) {
   it->second->pending_watch_events.push_back(std::move(evt));
 }
 
+void scheduler::register_watch_handler(int pid, int watch_id, value_t handler) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return;
+  it->second->watch_handlers[watch_id] = std::move(handler);
+}
+
+void scheduler::unregister_watch_handler(int pid, int watch_id) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return;
+  it->second->watch_handlers.erase(watch_id);
+}
+
 // ---------------------------------------------------------------------------
 // Signal handling
 // ---------------------------------------------------------------------------
@@ -269,6 +283,11 @@ void scheduler::handle_watch_event(process &proc) {
   auto evt = std::move(proc.pending_watch_events.front());
   proc.pending_watch_events.erase(proc.pending_watch_events.begin());
 
+  // Look up the handler from the process's watch_handlers map
+  auto hit = proc.watch_handlers.find(evt.watch_id);
+  if (hit == proc.watch_handlers.end())
+    return; // Watch was removed; discard stale event
+
   // Save current evaluation state (full stack + result)
   proc.saved_stack = proc.state.stack;
   proc.saved_result = proc.state.result;
@@ -276,7 +295,7 @@ void scheduler::handle_watch_event(process &proc) {
 
   // Set up handler evaluation: call handler with (path, value)
   auto handler_env = environment::extend(proc.state.global_env);
-  handler_env->set("__watch_handler__", evt.handler);
+  handler_env->set("__watch_handler__", hit->second);
   handler_env->set("__watch_path__", value_t(evt.path));
   handler_env->set("__watch_value__", value_t(evt.value));
 

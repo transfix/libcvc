@@ -89,6 +89,9 @@ public:
 
   void queue_watch_event(int pid, process::watch_event evt);
 
+  void register_watch_handler(int pid, int watch_id, value_t handler);
+  void unregister_watch_handler(int pid, int watch_id);
+
 private:
   scheduling_policy policy_;
   int next_pid_ = 1;
