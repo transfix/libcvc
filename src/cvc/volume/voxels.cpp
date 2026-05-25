@@ -21,10 +21,10 @@
 */
 
 #include <boost/current_function.hpp>
-#include <cvc/app.h>
-#include <cvc/composite_function.h>
-#include <cvc/utility.h>
-#include <cvc/voxels.h>
+#include <cvc/core/app.h>
+#include <cvc/utility/composite_function.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/voxels.h>
 
 namespace cvc {
 voxels::voxels(app &ctx, const dimension &d, data_type vt)

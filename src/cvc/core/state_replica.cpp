@@ -9,7 +9,7 @@
 */
 
 #include <algorithm>
-#include <cvc/state_replica.h>
+#include <cvc/core/state_replica.h>
 #include <utility>
 
 namespace cvc {

@@ -26,9 +26,9 @@
 #include <boost/regex.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
-#include <cvc/exception.h>
-#include <cvc/volume.h>
-#include <cvc/volume_file_info.h>
+#include <cvc/core/exception.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_info.h>
 #include <list>
 #include <map>
 #include <string>

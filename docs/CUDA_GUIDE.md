@@ -99,7 +99,7 @@ endif()
 **cuda/volume_kernels.cu:**
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 #include <cuda_runtime.h>
 
 namespace cvc {

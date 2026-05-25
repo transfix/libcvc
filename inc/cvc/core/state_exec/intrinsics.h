@@ -10,7 +10,7 @@
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
 
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <memory>
 #include <string>

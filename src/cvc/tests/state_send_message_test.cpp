@@ -15,12 +15,12 @@
 // routes accordingly.
 
 #include <atomic>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

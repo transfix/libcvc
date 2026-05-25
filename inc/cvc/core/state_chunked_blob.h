@@ -13,9 +13,9 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_compression_registry.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_compression_registry.h>
 #include <string>
 #include <vector>
 

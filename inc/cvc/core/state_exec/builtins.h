@@ -10,7 +10,7 @@
 #ifndef CVC_STATE_EXEC_BUILTINS_H
 #define CVC_STATE_EXEC_BUILTINS_H
 
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/types.h>
 #include <string>
 #include <unordered_map>
 

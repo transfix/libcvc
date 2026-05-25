@@ -25,7 +25,7 @@
 
 #include <boost/exception/exception.hpp>
 #include <boost/format.hpp>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <string>
 
 namespace cvc {

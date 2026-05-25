@@ -1,7 +1,7 @@
 #ifndef NULLGRAPHICNODE_H
 #define NULLGRAPHICNODE_H
 
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <volrover3/GraphicsNode.h>
 #include <vtkSmartPointer.h>
 

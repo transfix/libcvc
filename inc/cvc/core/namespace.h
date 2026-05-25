@@ -23,7 +23,7 @@
 #ifndef __CVCNAMESPACE_H__
 #define __CVCNAMESPACE_H__
 
-#include <cvc/config.h>
+#include <cvc/core/config.h>
 
 // Backward-compat: many older consumers (F2Dock, volrover, TexMol) reference
 // symbols as `CVC::Foo`. Provide `CVC` as a *real* nested namespace with a

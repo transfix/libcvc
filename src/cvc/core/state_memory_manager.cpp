@@ -1,6 +1,6 @@
 #include <algorithm>
-#include <cvc/state.h>
-#include <cvc/state_memory_manager.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_memory_manager.h>
 #include <sstream>
 #include <stdexcept>
 

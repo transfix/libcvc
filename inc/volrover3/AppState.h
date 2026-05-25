@@ -2,10 +2,10 @@
 #define APPSTATE_H
 
 #include <boost/signals2/connection.hpp>
-#include <cvc/bounding_box.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
-#include <cvc/volume.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/core/state.h>
+#include <cvc/volume/volume.h>
 #include <memory>
 
 // Application state manager using cvc::state for reactive updates

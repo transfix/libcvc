@@ -9,8 +9,8 @@
 #ifndef CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 #define CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 
-#include <cvc/state_exec/stackless_evaluator.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/stackless_evaluator.h>
+#include <cvc/core/state_exec/types.h>
 #include <string>
 
 namespace cvc {

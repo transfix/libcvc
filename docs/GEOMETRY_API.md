@@ -99,8 +99,8 @@ The `cvc::geometry` class provides a versatile container for 3D triangle meshes,
 ## Quick Start
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 
 using namespace cvc;
 
@@ -1121,7 +1121,7 @@ Improves mesh quality using LBIE (Level set, B-spline, Implicit surface, Extrapo
 - `IMPROVE_OPTIMIZATION`: General optimization
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry poor_quality = read_geometry("poor_mesh.off");
 
@@ -1177,7 +1177,7 @@ Computes the signed distance function for a geometry, creating a volume where ea
 - **Positive values**: Outside the surface
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry bunny = read_geometry("bunny.off");
 
@@ -1333,7 +1333,7 @@ Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This 
 - Multi-material simulations
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 geometry bunny = read_geometry("bunny.off");
 volume sdf_vol = sdf(bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
@@ -1372,9 +1372,9 @@ The tet2 interval meshing implementation had several bugs that were fixed in Dec
 ### Complete Volumetric Mesh Example
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/algorithm.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
 
 using namespace cvc;
 
@@ -1463,7 +1463,7 @@ Interpolates using trilinear basis functions within a hexahedron.
 **Example:**
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 using namespace cvc;
 
@@ -1950,9 +1950,9 @@ std::cout << "Dimensions: " << width << " × " << height << " × " << depth << "
 **Complete Workflow Example:**
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/algorithm.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
 
 using namespace cvc;
 
@@ -2038,7 +2038,7 @@ geometry read_geometry(const std::string& filename);
 ```
 
 ```cpp
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry_file_io.h>
 
 geometry mesh = read_geometry("bunny.off");
 geometry mesh2 = read_geometry("model.raw");
@@ -2361,8 +2361,8 @@ std::cout << "Mean: " << stats.mean << " ± " << stats.std_dev << "\n";
 ### Example 1: Load, Process, and Save
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <iostream>
 
 using namespace cvc;
@@ -2398,8 +2398,8 @@ int main() {
 ### Example 2: Combine Multiple Meshes
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <vector>
 #include <string>
 
@@ -2447,8 +2447,8 @@ int main() {
 ### Example 3: Extract and Analyze Surface
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <cmath>
 
 using namespace cvc;
@@ -2529,7 +2529,7 @@ int main() {
 ### Example 4: Generate Procedural Mesh
 
 ```cpp
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
 #include <cmath>
 
 using namespace cvc;
@@ -2603,8 +2603,8 @@ int main() {
 ### Example 5: Mesh Quality Analysis and Improvement
 
 ```cpp
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
 #include <cmath>
 #include <limits>
 
@@ -2913,7 +2913,7 @@ void render(const geometry& mesh) {
 **Common Exceptions:**
 
 ```cpp
-#include <cvc/exception.h>
+#include <cvc/core/exception.h>
 
 // Unsupported file format
 try {

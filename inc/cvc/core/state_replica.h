@@ -12,8 +12,8 @@
 #define __CVC_STATE_REPLICA_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_change_journal.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_change_journal.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>

@@ -4,11 +4,11 @@
 */
 
 #include <boost/any.hpp>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
-#include <cvc/state_codec_registry.h>
-#include <cvc/state_volume_codec.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/core/state_codec_registry.h>
+#include <cvc/core/state_volume_codec.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 
 using namespace cvc;

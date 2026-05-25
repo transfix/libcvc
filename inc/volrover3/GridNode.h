@@ -1,7 +1,7 @@
 #ifndef GRIDNODE_H
 #define GRIDNODE_H
 
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <vector>
 #include <volrover3/GraphicsNode.h>
 #include <vtkSmartPointer.h>

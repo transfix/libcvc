@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_write_policy.h>
+#include <cvc/core/state_write_policy.h>
 #include <memory>
 #include <utility>
 

@@ -5,8 +5,8 @@
 #include <boost/format.hpp>
 #include <boost/scoped_array.hpp>
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
 #include <limits>
 #include <map>
 #include <vector>

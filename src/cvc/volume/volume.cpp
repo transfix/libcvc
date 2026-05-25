@@ -21,9 +21,9 @@
 */
 
 #include <boost/format.hpp>
-#include <cvc/app.h>
-#include <cvc/utility.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volume.h>
 
 namespace cvc {
 volume &volume::copy(const volume &vol) {

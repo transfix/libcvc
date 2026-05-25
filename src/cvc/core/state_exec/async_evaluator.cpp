@@ -8,9 +8,9 @@
   special form suspends the coroutine after evaluating expr.
 */
 
-#include <cvc/state_exec/async_evaluator.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/parser.h>
+#include <cvc/core/state_exec/async_evaluator.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/parser.h>
 #include <thread>
 
 namespace cvc::state_exec {

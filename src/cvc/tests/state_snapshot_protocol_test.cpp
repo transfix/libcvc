@@ -9,10 +9,10 @@
 */
 
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_transport_ipc.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_transport_ipc.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>

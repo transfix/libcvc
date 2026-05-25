@@ -111,7 +111,7 @@ prefer `cvc::sdf` from `<cvc/algorithm.h>`; it wraps the routines
 above and returns a fully populated `cvc::volume`:
 
 ```cpp
-#include <cvc/algorithm.h>
+#include <cvc/utility/algorithm.h>
 
 cvc::volume sdf_vol = cvc::sdf(ctx, mesh, dim, bbox);
 ```

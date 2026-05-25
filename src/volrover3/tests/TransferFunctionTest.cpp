@@ -1,6 +1,6 @@
 #include <QApplication>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
 #include <volrover3/TransferFunctionWidget.h>

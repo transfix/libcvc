@@ -24,9 +24,9 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
 #include <boost/regex.hpp>
-#include <cvc/app.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/utility.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/utility.h>
 #include <sstream>
 
 namespace cvc {

@@ -14,8 +14,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_message.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_message.h>
 #include <deque>
 #include <functional>
 #include <mutex>

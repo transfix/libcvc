@@ -12,8 +12,8 @@
 #define __CVC_STATE_DELTA_CODEC_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_compression_registry.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_compression_registry.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>

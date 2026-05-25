@@ -8,10 +8,10 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_distributed_metrics.h>
-#include <cvc/state_transport.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_distributed_metrics.h>
+#include <cvc/core/state_transport.h>
 #include <exception>
 
 namespace cvc {

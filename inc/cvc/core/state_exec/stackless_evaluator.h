@@ -14,8 +14,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cvc/state_exec/evaluator.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/evaluator.h>
+#include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <mutex>
 #include <optional>

@@ -12,9 +12,9 @@
 #ifndef __VOLMAGICK_COMPAT_H__
 #define __VOLMAGICK_COMPAT_H__
 
-#include <cvc/volmagick.h>
-#include <cvc/volume_file_io.h>
-#include <cvc/exception.h>
+#include <cvc/volume/volmagick.h>
+#include <cvc/volume/volume_file_io.h>
+#include <cvc/core/exception.h>
 
 // Map old VolMagick namespace to CVC types
 namespace VolMagick

@@ -80,7 +80,7 @@ cvc::app bare(cvc::no_init_t{});
 ## Quick Start
 
 ```cpp
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 
 cvc::app app;   // your application's context object
 
@@ -1288,8 +1288,8 @@ function or lambda that uses it should capture it by reference
 ### Example 1: Volume Processing Pipeline
 
 ```cpp
-#include <cvc/app.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volume.h>
 
 void processingPipeline() {
     // Register types

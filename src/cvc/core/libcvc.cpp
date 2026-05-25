@@ -1,9 +1,9 @@
-#include <cvc/algorithm.h>
-#include <cvc/app.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/state.h>
-#include <cvc/utility.h>
-#include <cvc/volume_file_info.h>
+#include <cvc/utility/algorithm.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/core/state.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volume_file_info.h>
 
 // #include <boost/tuple/tuple.hpp>
 #include <boost/current_function.hpp>

@@ -10,9 +10,9 @@
 
 // Phase 8: writable transparent links route writes to the resolved target.
 
-#include <cvc/app.h>
-#include <cvc/exception.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/state.h>
 #include <gtest/gtest.h>
 
 TEST(StateWritableLinkTest, DefaultLinkIsNotWritable) {

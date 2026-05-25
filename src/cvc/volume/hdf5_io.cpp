@@ -34,10 +34,10 @@
 #include <boost/scoped_array.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <cmath>
-#include <cvc/endians.h>
-#include <cvc/hdf5_utils.h>
-#include <cvc/utility.h>
-#include <cvc/volmagick.h>
+#include <cvc/volume/endians.h>
+#include <cvc/volume/hdf5_utils.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volmagick.h>
 #include <iostream>
 #include <limits>
 

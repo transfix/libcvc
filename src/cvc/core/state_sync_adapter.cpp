@@ -13,10 +13,10 @@
   Lesser General Public License for more details.
 */
 
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_distributed_admin.h>
-#include <cvc/state_sync_adapter.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_distributed_admin.h>
+#include <cvc/core/state_sync_adapter.h>
 #include <thread>
 #include <unordered_set>
 #include <utility>

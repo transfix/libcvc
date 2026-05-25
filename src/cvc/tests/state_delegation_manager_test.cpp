@@ -9,7 +9,7 @@
 */
 
 #include <cstdint>
-#include <cvc/state_delegation_manager.h>
+#include <cvc/core/state_delegation_manager.h>
 #include <gtest/gtest.h>
 
 using cvc::state_delegation_manager;

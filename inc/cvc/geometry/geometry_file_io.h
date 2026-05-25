@@ -2,8 +2,8 @@
 #define __CVC_GEOMETRY_FILE_IO__
 
 #include <boost/shared_ptr.hpp>
-#include <cvc/exception.h>
-#include <cvc/geometry.h>
+#include <cvc/core/exception.h>
+#include <cvc/geometry/geometry.h>
 #include <list>
 #include <string>
 #include <vector>

@@ -7,7 +7,7 @@
 #include <QRegularExpression>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <set>
 #include <typeinfo>
 #include <volrover3/StateTreeWidget.h>

@@ -20,11 +20,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_distributed_admin.h>
-#include <cvc/state_sync_adapter.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_distributed_admin.h>
+#include <cvc/core/state_sync_adapter.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <string>

@@ -23,9 +23,9 @@
 #ifndef __CVC_VOLUME_OPS_H__
 #define __CVC_VOLUME_OPS_H__
 
-#include <cvc/bounding_box.h>
-#include <cvc/exception.h>
-#include <cvc/volume.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/core/exception.h>
+#include <cvc/volume/volume.h>
 #include <string>
 #include <vector>
 

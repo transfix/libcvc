@@ -13,9 +13,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/volume.h>
-#include <cvc/volume_file_info.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_info.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <sstream>

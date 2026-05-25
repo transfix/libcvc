@@ -23,14 +23,14 @@
 #ifndef __CVC_VOLMAGICK_H__
 #define __CVC_VOLMAGICK_H__
 
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/exception.h>
-#include <cvc/types.h>
-#include <cvc/utility.h>
-#include <cvc/volume.h>
-#include <cvc/volume_file_info.h>
-#include <cvc/volume_file_io.h>
-#include <cvc/voxels.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/types.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_info.h>
+#include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/voxels.h>
 
 #endif

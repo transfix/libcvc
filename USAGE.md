@@ -76,7 +76,7 @@ performance cost of debug runtime checks.
 
 ```cpp
 // main.cpp
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <iostream>
 int main() {
     cvc::app ctx;
@@ -104,9 +104,9 @@ single config struct.
 ### 6.1 Quick start
 
 ```cpp
-#include <cvc/app.h>
-#include <cvc/distributed_state_session.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/distributed_state_session.h>
+#include <cvc/core/state.h>
 
 int main() {
     cvc::app ctx;

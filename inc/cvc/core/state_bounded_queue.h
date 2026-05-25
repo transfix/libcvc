@@ -16,7 +16,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <deque>
 #include <mutex>
 #include <utility>

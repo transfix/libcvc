@@ -3,9 +3,9 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QTest>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/VolumeDialog.h>

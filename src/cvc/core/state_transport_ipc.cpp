@@ -12,9 +12,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_transport_ipc.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_transport_ipc.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdexcept>

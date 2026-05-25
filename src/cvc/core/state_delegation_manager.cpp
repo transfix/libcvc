@@ -9,7 +9,7 @@
 */
 
 #include <chrono>
-#include <cvc/state_delegation_manager.h>
+#include <cvc/core/state_delegation_manager.h>
 #include <utility>
 
 namespace cvc {

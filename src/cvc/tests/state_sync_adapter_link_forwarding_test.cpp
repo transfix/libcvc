@@ -16,10 +16,10 @@
 // target-side mutations. Opaque links must NOT contribute aliasing.
 
 #include <algorithm>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_subscription_router.h>
-#include <cvc/state_sync_adapter.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_subscription_router.h>
+#include <cvc/core/state_sync_adapter.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

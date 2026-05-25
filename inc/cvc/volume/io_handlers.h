@@ -1,7 +1,7 @@
 #ifndef __CVC_IO_HANDLERS_H__
 #define __CVC_IO_HANDLERS_H__
 
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 
 // Registration functions for I/O handlers.
 // Called by app::registerDefaultHandlers() instead of static_init objects

@@ -12,7 +12,7 @@
 #define __CVC_STATE_DISTRIBUTED_ADMIN_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <string>
 #include <unordered_set>
 #include <vector>

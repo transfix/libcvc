@@ -12,7 +12,7 @@
 #define __CVC_STATE_PEER_REGISTRY_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>

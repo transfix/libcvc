@@ -14,7 +14,7 @@ caller now passes its own `cvc::app&`.
 ### Starting a Pooled Thread
 
 ```cpp
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 
 // Define your task
 class MyTask {

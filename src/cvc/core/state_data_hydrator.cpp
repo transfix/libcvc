@@ -8,8 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state.h>
-#include <cvc/state_data_hydrator.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_data_hydrator.h>
 
 namespace cvc {
 

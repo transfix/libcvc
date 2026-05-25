@@ -13,9 +13,9 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_transport_grpc.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_transport_grpc.h>
 #include <functional>
 #include <grpcpp/grpcpp.h>
 #include <stdexcept>

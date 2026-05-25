@@ -22,9 +22,9 @@
 
 /* $Id: RawV_IO.cpp 4742 2011-10-21 22:09:44Z transfix $ */
 
-#include <cvc/app.h>
-#include <cvc/endians.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/endians.h>
+#include <cvc/volume/volmagick.h>
 #include <errno.h>
 #include <fstream>
 #include <iostream>

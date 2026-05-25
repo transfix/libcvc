@@ -4,14 +4,14 @@
 */
 
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_chunked_blob.h>
-#include <cvc/state_codec_registry.h>
-#include <cvc/state_compression_registry.h>
-#include <cvc/state_data_hydrator.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_chunked_blob.h>
+#include <cvc/core/state_codec_registry.h>
+#include <cvc/core/state_compression_registry.h>
+#include <cvc/core/state_data_hydrator.h>
+#include <cvc/core/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 

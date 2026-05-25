@@ -23,7 +23,7 @@
 #ifndef __CVC_ENDIANS_H__
 #define __CVC_ENDIANS_H__
 
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 
 #define SWAP_64(a)                                                                                 \
   {                                                                                                \

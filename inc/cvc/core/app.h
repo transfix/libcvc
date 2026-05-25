@@ -25,9 +25,9 @@
 #ifndef __CVC_APP_H__
 #define __CVC_APP_H__
 
-#include <cvc/config.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/core/config.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 
 #ifdef WIN32
 // #include <pthread.h> // arand, fix mingw problem

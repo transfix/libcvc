@@ -1,7 +1,7 @@
 #include <atomic>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/evaluator.h>
-#include <cvc/state_exec/parser.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/evaluator.h>
+#include <cvc/core/state_exec/parser.h>
 #include <thread>
 
 namespace cvc::state_exec {

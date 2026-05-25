@@ -11,8 +11,8 @@
 #ifndef __CVC_STATE_VOLUME_CODEC_H__
 #define __CVC_STATE_VOLUME_CODEC_H__
 
-#include <cvc/namespace.h>
-#include <cvc/state_codec_registry.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_codec_registry.h>
 #include <string>
 
 namespace cvc {

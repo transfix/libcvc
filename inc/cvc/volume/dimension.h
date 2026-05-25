@@ -28,8 +28,8 @@
 #include <boost/array.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
-#include <cvc/exception.h>
-#include <cvc/types.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/types.h>
 
 // If your compiler complains the "The class "cvc::Dimension" has no member "xdim"."
 // Add your architecture Q_OS_XXXX flag (see qglobal.h) in this list.

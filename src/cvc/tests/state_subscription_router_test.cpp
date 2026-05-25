@@ -1,6 +1,6 @@
 #include <chrono>
 #include <cstdlib>
-#include <cvc/state_subscription_router.h>
+#include <cvc/core/state_subscription_router.h>
 #include <gtest/gtest.h>
 #include <set>
 #include <string>

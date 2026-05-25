@@ -8,17 +8,17 @@
 
 #include <algorithm>
 #include <cstring>
-#include <cvc/state.h>
-#include <cvc/state_cluster_membership.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/exec_coordinator.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/state_value_codec.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_membership.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/exec_coordinator.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/state_value_codec.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
 #include <sstream>
 #include <stdexcept>
 

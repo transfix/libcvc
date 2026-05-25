@@ -33,10 +33,10 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/thread/condition_variable.hpp>
-#include <cvc/app.h>
-#include <cvc/exception.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 #include <vector>
 
 namespace cvc {

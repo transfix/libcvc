@@ -20,9 +20,9 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/algorithm.h>
-#include <cvc/app.h>
-#include <cvc/utility.h>
+#include <cvc/utility/algorithm.h>
+#include <cvc/core/app.h>
+#include <cvc/utility/utility.h>
 
 // CGAL headers must come before SDF headers due to macro conflicts
 #ifndef DISABLE_CGAL

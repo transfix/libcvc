@@ -26,9 +26,9 @@
 #include <boost/scoped_array.hpp>
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/endians.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/endians.h>
+#include <cvc/volume/volmagick.h>
 #include <math.h>
 #include <sys/stat.h>
 

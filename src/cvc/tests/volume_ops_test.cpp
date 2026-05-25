@@ -3,8 +3,8 @@
 */
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/volume_ops.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volume_ops.h>
 #include <gtest/gtest.h>
 
 using namespace cvc;

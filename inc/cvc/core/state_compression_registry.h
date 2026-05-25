@@ -11,7 +11,7 @@
 #ifndef __CVC_STATE_COMPRESSION_REGISTRY_H__
 #define __CVC_STATE_COMPRESSION_REGISTRY_H__
 
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <memory>
 #include <mutex>
 #include <string>

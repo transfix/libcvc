@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <chrono>
-#include <cvc/state.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/scheduler.h>
 #include <stdexcept>
 
 namespace cvc::state_exec {

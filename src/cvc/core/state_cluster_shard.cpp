@@ -12,11 +12,11 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_transport.h>
-#include <cvc/state_volume_codec.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_transport.h>
+#include <cvc/core/state_volume_codec.h>
 #include <mutex>
 #include <stdexcept>
 #include <string>

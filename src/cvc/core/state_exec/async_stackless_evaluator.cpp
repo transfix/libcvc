@@ -7,8 +7,8 @@
 */
 
 #include <chrono>
-#include <cvc/state_exec/async_stackless_evaluator.h>
-#include <cvc/state_exec/parser.h>
+#include <cvc/core/state_exec/async_stackless_evaluator.h>
+#include <cvc/core/state_exec/parser.h>
 
 namespace cvc::state_exec {
 

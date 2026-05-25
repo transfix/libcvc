@@ -22,9 +22,9 @@
 //   - produce stable, deterministic ordering across runs.
 
 #include <algorithm>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_distributed_admin.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_distributed_admin.h>
 #include <gtest/gtest.h>
 
 using cvc::state;

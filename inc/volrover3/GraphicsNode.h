@@ -4,7 +4,7 @@
 #include <any>
 #include <array>
 #include <boost/signals2.hpp>
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <map>
 #include <string>
 #include <volrover3/SceneNode.h>

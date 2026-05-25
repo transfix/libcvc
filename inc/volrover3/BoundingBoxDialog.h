@@ -8,7 +8,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <memory>
 #include <vector>
 

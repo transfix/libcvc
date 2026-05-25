@@ -12,10 +12,10 @@
 #define __CVC_STATE_TRANSPORT_INPROC_H__
 
 #include <atomic>
-#include <cvc/namespace.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_bounded_queue.h>
-#include <cvc/state_transport.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_bounded_queue.h>
+#include <cvc/core/state_transport.h>
 #include <memory>
 #include <mutex>
 #include <string>

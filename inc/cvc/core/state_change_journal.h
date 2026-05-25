@@ -2,7 +2,7 @@
 #define __CVC_STATE_CHANGE_JOURNAL_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <mutex>
 #include <string>
 #include <vector>

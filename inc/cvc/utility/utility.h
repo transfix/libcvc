@@ -31,9 +31,9 @@
 #include <boost/tuple/tuple.hpp>
 #include <boost/version.hpp>
 #include <cmath>
-#include <cvc/geometry.h>
-#include <cvc/volume_file_info.h>
-#include <cvc/volume_file_io.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/volume_file_info.h>
+#include <cvc/volume/volume_file_io.h>
 #include <xmlrpc/XmlRpc.h>
 
 #if BOOST_VERSION < 105000

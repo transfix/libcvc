@@ -1,4 +1,4 @@
-#include <cvc/state_list.h>
+#include <cvc/core/state_list.h>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>

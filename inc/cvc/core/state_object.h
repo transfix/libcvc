@@ -25,8 +25,8 @@
 #ifndef __CVC_STATE_OBJECT_H__
 #define __CVC_STATE_OBJECT_H__
 
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <set>
 
 namespace cvc {

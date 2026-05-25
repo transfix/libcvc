@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_hash_partition.h>
+#include <cvc/core/state_hash_partition.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

@@ -8,8 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state.h>
-#include <cvc/state_peer_registry.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_peer_registry.h>
 #include <stdexcept>
 #include <utility>
 

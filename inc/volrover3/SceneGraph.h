@@ -2,7 +2,7 @@
 #define SCENEGRAPH_H
 
 #include <boost/signals2.hpp>
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <functional>
 #include <map>
 #include <memory>

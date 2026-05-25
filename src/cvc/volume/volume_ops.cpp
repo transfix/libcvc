@@ -13,7 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cvc/volume_ops.h>
+#include <cvc/volume/volume_ops.h>
 #include <limits>
 #include <numeric>
 #include <stdexcept>

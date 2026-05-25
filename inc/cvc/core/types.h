@@ -30,7 +30,7 @@
 #include <boost/signals2.hpp>
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <map>
 #include <string>
 #include <vector>

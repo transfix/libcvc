@@ -22,9 +22,9 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/endians.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/endians.h>
+#include <cvc/volume/volmagick.h>
 #include <errno.h>
 #include <fstream>
 #include <iostream>

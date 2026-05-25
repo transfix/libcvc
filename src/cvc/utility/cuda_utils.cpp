@@ -20,7 +20,7 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/cuda_utils.h>
+#include <cvc/utility/cuda_utils.h>
 
 #ifdef CVC_USING_CUDA
 #include <algorithm>

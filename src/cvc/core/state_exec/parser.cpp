@@ -1,7 +1,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstring>
-#include <cvc/state_exec/parser.h>
+#include <cvc/core/state_exec/parser.h>
 #include <sstream>
 
 namespace cvc::state_exec {

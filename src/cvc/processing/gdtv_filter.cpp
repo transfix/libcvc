@@ -23,8 +23,8 @@
 /* $Id: GDTVFilter.cpp 4742 2011-10-21 22:09:44Z transfix $ */
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volmagick.h>
 
 using namespace std;
 

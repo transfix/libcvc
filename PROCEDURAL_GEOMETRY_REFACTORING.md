@@ -193,7 +193,7 @@ The architecture supports easy addition of new primitives:
 - `src/cvc/tests/procedural_geometry_test.cpp` - NEW test file
 - `src/cvc/tests/CMakeLists.txt` - Added test target
 - `src/volrover3/ProceduralGeometryDialog.cpp` - Refactored to use algorithm functions
-- `src/volrover3/ProceduralGeometryDialog.h` - Added `#include <cvc/algorithm.h>`
+- `src/volrover3/ProceduralGeometryDialog.h` - Added `#include <cvc/utility/algorithm.h>`
 
 ## Testing
 

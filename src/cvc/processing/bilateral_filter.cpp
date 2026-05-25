@@ -22,8 +22,8 @@
 
 /* $Id: BilateralFilter.cpp 4742 2011-10-21 22:09:44Z transfix $ */
 
-#include <cvc/app.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volmagick.h>
 #include <math.h>
 
 namespace cvc {

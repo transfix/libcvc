@@ -11,9 +11,9 @@
 #define CVC_STATE_EXEC_ASYNC_EVALUATOR_H
 
 #include <atomic>
-#include <cvc/state_exec/evaluator.h>
-#include <cvc/state_exec/task.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/evaluator.h>
+#include <cvc/core/state_exec/task.h>
+#include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <mutex>
 #include <optional>

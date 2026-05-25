@@ -22,10 +22,10 @@
 */
 
 #include <boost/foreach.hpp>
-#include <cvc/app.h>
-#include <cvc/exception.h>
-#include <cvc/utility.h>
-#include <cvc/volume_file_io.h>
+#include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volume_file_io.h>
 
 namespace cvc {
 // 09/05/2011 -- Joe R. -- moved the following 2 const vars from HDF5_IO

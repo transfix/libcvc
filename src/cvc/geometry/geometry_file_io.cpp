@@ -1,7 +1,7 @@
 #include <boost/foreach.hpp>
 #include <boost/regex.hpp>
-#include <cvc/geometry_file_io.h>
-#include <cvc/io_handlers.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/volume/io_handlers.h>
 
 namespace cvc {
 // A regex to extract a filename extension

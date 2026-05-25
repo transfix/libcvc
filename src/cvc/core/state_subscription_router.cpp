@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cvc/state_subscription_router.h>
+#include <cvc/core/state_subscription_router.h>
 
 namespace cvc {
 

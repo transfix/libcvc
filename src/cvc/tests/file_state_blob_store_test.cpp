@@ -9,7 +9,7 @@
 */
 
 #include <algorithm>
-#include <cvc/state_blob_store.h>
+#include <cvc/core/state_blob_store.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>

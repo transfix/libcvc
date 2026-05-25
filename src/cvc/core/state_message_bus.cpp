@@ -10,7 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/state_message_bus.h>
 #include <utility>
 
 namespace cvc {

@@ -23,7 +23,7 @@
 #ifndef __VOLMAGICK_COMPOSITEFUNCTION_H__
 #define __VOLMAGICK_COMPOSITEFUNCTION_H__
 
-#include <cvc/voxels.h>
+#include <cvc/volume/voxels.h>
 
 namespace cvc {
 class composite_function {

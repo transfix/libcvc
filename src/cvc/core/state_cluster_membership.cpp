@@ -10,12 +10,12 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cvc/state_cluster_membership.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message.h>
-#include <cvc/state_peer_registry.h>
-#include <cvc/state_replica.h>
-#include <cvc/state_transport.h>
+#include <cvc/core/state_cluster_membership.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_peer_registry.h>
+#include <cvc/core/state_replica.h>
+#include <cvc/core/state_transport.h>
 #include <sstream>
 
 namespace cvc {

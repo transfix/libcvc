@@ -20,11 +20,11 @@
 
 #include <atomic>
 #include <chrono>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/resource_policy.h>
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/state_value_codec.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/resource_policy.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/state_value_codec.h>
+#include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <mutex>
 #include <optional>

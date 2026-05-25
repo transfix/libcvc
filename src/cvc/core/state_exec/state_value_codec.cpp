@@ -5,10 +5,10 @@
                       cvc::state subtrees.
 */
 
-#include <cvc/state.h>
-#include <cvc/state_exec/parser.h>
-#include <cvc/state_exec/state_value_codec.h>
-#include <cvc/state_list.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_exec/parser.h>
+#include <cvc/core/state_exec/state_value_codec.h>
+#include <cvc/core/state_list.h>
 #include <stdexcept>
 #include <string>
 

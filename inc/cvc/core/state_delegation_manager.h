@@ -12,8 +12,8 @@
 #define __CVC_STATE_DELEGATION_MANAGER_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_authority_map.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_authority_map.h>
 #include <functional>
 #include <mutex>
 #include <string>

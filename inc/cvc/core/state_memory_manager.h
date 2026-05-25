@@ -3,7 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
-#include <cvc/state_eviction_store.h>
+#include <cvc/core/state_eviction_store.h>
 #include <functional>
 #include <list>
 #include <memory>

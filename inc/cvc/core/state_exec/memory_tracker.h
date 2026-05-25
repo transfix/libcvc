@@ -11,7 +11,7 @@
 #define CVC_STATE_EXEC_MEMORY_TRACKER_H
 
 #include <cstddef>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/types.h>
 #include <unordered_map>
 
 namespace cvc::state_exec {

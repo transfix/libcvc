@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <cvc/state_delta_codec.h>
+#include <cvc/core/state_delta_codec.h>
 #include <stdexcept>
 
 namespace cvc {

@@ -2,7 +2,7 @@
 #include <string>
 #include <cstdlib>
 #include <VolMagickCompat.h>
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <mesher.h>
 #include <boost/program_options.hpp>
 #include <stdexcept>

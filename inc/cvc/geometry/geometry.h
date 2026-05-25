@@ -27,9 +27,9 @@
 #include <boost/cstdint.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/shared_ptr.hpp>
-#include <cvc/bounding_box.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 #include <vector>
 
 namespace cvc {

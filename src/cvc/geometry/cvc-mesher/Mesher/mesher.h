@@ -3,7 +3,7 @@
 
 #include <VolMagickCompat.h>
 #include <LBIE_Mesher.h>
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
 #include <boost/optional.hpp>
 
 namespace LBIE

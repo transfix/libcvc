@@ -11,9 +11,9 @@
 #include <QStatusBar>
 #include <QThread>
 #include <QVBoxLayout>
-#include <cvc/app.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/volume_file_io.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/volume/volume_file_io.h>
 #include <volrover3/AppState.h>
 #include <volrover3/BoundingBoxDialog.h>
 #include <volrover3/CameraController.h>

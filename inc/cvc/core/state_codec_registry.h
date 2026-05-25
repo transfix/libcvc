@@ -13,7 +13,7 @@
 
 #include <boost/any.hpp>
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <functional>
 #include <mutex>
 #include <string>

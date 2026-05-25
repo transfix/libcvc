@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_hybrid_time.h>
+#include <cvc/core/state_hybrid_time.h>
 #include <gtest/gtest.h>
 #include <thread>
 #include <vector>

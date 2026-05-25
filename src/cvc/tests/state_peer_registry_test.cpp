@@ -3,7 +3,7 @@
   Phase 5 — state_peer_registry tests.
 */
 
-#include <cvc/state_peer_registry.h>
+#include <cvc/core/state_peer_registry.h>
 #include <gtest/gtest.h>
 
 using cvc::state_peer_registry;

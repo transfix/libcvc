@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cvc/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/memory_tracker.h>
 
 namespace cvc::state_exec {
 

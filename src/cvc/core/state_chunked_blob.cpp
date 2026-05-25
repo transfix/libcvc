@@ -9,7 +9,7 @@
 */
 
 #include <cstring>
-#include <cvc/state_chunked_blob.h>
+#include <cvc/core/state_chunked_blob.h>
 #include <stdexcept>
 
 namespace cvc {

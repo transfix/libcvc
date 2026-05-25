@@ -10,8 +10,8 @@
 #define CVC_STATE_EXEC_PROCESS_H
 
 #include <chrono>
-#include <cvc/state_exec/stackless_evaluator.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/stackless_evaluator.h>
+#include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <memory>
 #include <optional>

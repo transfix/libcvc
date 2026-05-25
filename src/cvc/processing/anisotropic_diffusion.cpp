@@ -20,12 +20,12 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/app.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volmagick.h>
 #include <math.h>
 
 #ifdef CVC_USING_CUDA
-#include <cvc/cuda_utils.h>
+#include <cvc/utility/cuda_utils.h>
 #endif
 
 namespace cvc {

@@ -9,12 +9,12 @@
 #ifndef CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 #define CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 
-#include <cvc/state_exec/async_stackless_evaluator.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/scheduler.h>
-#include <cvc/state_exec/task.h>
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/async_stackless_evaluator.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler.h>
+#include <cvc/core/state_exec/task.h>
+#include <cvc/core/state_exec/types.h>
 #include <optional>
 #include <string>
 #include <unordered_map>

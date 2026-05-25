@@ -3,7 +3,7 @@
   Phase 5 — state_write_policy tests.
 */
 
-#include <cvc/state_write_policy.h>
+#include <cvc/core/state_write_policy.h>
 #include <gtest/gtest.h>
 
 using cvc::state_write_policy;

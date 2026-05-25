@@ -33,11 +33,11 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <cstring>
-#include <cvc/app.h>
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/exception.h>
-#include <cvc/types.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/types.h>
 #include <iostream>
 #include <list>
 #include <string>

@@ -18,9 +18,9 @@
 
 #include <atomic>
 #include <boost/signals2/connection.hpp>
-#include <cvc/namespace.h>
-#include <cvc/state_change_journal.h>
-#include <cvc/state_subscription_router.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_change_journal.h>
+#include <cvc/core/state_subscription_router.h>
 #include <functional>
 #include <memory>
 #include <mutex>

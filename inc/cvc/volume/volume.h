@@ -23,8 +23,8 @@
 #ifndef __VOLMAGICK_VOLUME_H__
 #define __VOLMAGICK_VOLUME_H__
 
-#include <cvc/bounding_box.h>
-#include <cvc/voxels.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/voxels.h>
 #include <string>
 
 namespace cvc {

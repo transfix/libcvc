@@ -12,7 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <cvc/state_blob_store.h>
+#include <cvc/core/state_blob_store.h>
 #include <filesystem>
 #include <fstream>
 

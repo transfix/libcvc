@@ -11,7 +11,7 @@
 #include <boost/any.hpp>
 #include <cstdint>
 #include <cstring>
-#include <cvc/state_codec_registry.h>
+#include <cvc/core/state_codec_registry.h>
 #include <stdexcept>
 #include <string>
 

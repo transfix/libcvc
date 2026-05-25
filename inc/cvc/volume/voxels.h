@@ -29,12 +29,12 @@
 #include <boost/tuple/tuple.hpp>
 #include <cstddef>
 #include <cstring>
-#include <cvc/bounding_box.h>
-#include <cvc/cuda_utils.h>
-#include <cvc/dimension.h>
-#include <cvc/exception.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/utility/cuda_utils.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 
 namespace cvc {
 // Use std::byte for raw memory representation (C++17) or fallback

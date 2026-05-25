@@ -10,10 +10,10 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_node_telemetry.h>
-#include <cvc/state_telemetry_aggregator.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_node_telemetry.h>
+#include <cvc/core/state_telemetry_aggregator.h>
 #include <sstream>
 
 namespace cvc {

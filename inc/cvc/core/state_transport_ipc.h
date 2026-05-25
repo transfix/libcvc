@@ -14,9 +14,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cvc/namespace.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_transport.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_transport.h>
 #include <memory>
 #include <mutex>
 #include <string>

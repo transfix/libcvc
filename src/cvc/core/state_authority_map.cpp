@@ -9,7 +9,7 @@
 */
 
 #include <algorithm>
-#include <cvc/state_authority_map.h>
+#include <cvc/core/state_authority_map.h>
 #include <sstream>
 
 namespace cvc {

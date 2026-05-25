@@ -9,7 +9,7 @@
 */
 
 #include <atomic>
-#include <cvc/state_compression_registry.h>
+#include <cvc/core/state_compression_registry.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <stdexcept>

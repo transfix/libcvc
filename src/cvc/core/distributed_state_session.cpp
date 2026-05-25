@@ -9,15 +9,15 @@
 */
 
 #include <chrono>
-#include <cvc/distributed_state_session.h>
-#include <cvc/state_data_hydrator.h>
-#include <cvc/state_distributed_metrics.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/distributed_state_session.h>
+#include <cvc/core/state_data_hydrator.h>
+#include <cvc/core/state_distributed_metrics.h>
+#include <cvc/core/state_transport_inproc.h>
 #ifndef _WIN32
-#include <cvc/state_transport_ipc.h>
+#include <cvc/core/state_transport_ipc.h>
 #endif
 #ifdef CVC_ENABLE_GRPC
-#include <cvc/state_transport_grpc.h>
+#include <cvc/core/state_transport_grpc.h>
 #endif
 
 namespace cvc {

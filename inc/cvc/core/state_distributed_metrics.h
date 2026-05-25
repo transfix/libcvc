@@ -12,7 +12,7 @@
 #define __CVC_STATE_DISTRIBUTED_METRICS_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <string>
 
 namespace cvc {

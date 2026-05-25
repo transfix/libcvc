@@ -22,7 +22,7 @@
 
 #include <boost/current_function.hpp>
 #include <boost/format.hpp>
-#include <cvc/volume_file_io.h>
+#include <cvc/volume/volume_file_io.h>
 
 namespace cvc {
 // -------

@@ -1,4 +1,4 @@
-#include <cvc/state_change_journal.h>
+#include <cvc/core/state_change_journal.h>
 #include <sstream>
 
 namespace cvc {

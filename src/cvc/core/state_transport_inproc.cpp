@@ -9,8 +9,8 @@
 */
 
 #include <algorithm>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_transport_inproc.h>
 
 namespace cvc {
 

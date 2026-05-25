@@ -23,9 +23,9 @@
 #ifndef __VOLMAGICK_CUDA_UTILS_H__
 #define __VOLMAGICK_CUDA_UTILS_H__
 
-#include <cvc/exception.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 
 #ifdef CVC_USING_CUDA
 #include <cuda_runtime.h>

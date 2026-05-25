@@ -22,16 +22,16 @@
 
 /* $Id: App.cpp 5881 2012-07-20 19:34:04Z edwardsj $ */
 
-#include <cvc/app.h>
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/geometry.h>
-#include <cvc/io_handlers.h>
-#include <cvc/state.h>
-#include <cvc/types.h>
-#include <cvc/utility.h>
-#include <cvc/volume.h>
-#include <cvc/voxels.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/io_handlers.h>
+#include <cvc/core/state.h>
+#include <cvc/core/types.h>
+#include <cvc/utility/utility.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/voxels.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
 #include <log4cplus/configurator.h>

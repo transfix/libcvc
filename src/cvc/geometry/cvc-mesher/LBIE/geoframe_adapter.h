@@ -18,7 +18,7 @@ Designed for future CUDA unified memory support.
 #define __GEOFRAME_ADAPTER_H__
 
 #include "LBIE_geoframe.h"
-#include <cvc/geometry.h>
+#include <cvc/geometry/geometry.h>
 
 namespace LBIE
 {

@@ -28,7 +28,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
-#include <cvc/hdf5_utils.h>
+#include <cvc/volume/hdf5_utils.h>
 
 namespace cvc {
 namespace hdf5_utils {

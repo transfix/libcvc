@@ -9,7 +9,7 @@
 #ifndef CVC_STATE_EXEC_PARSER_H
 #define CVC_STATE_EXEC_PARSER_H
 
-#include <cvc/state_exec/types.h>
+#include <cvc/core/state_exec/types.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>

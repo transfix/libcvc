@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/state_message.h>
+#include <cvc/core/state_message.h>
 #include <utility>
 
 namespace cvc {

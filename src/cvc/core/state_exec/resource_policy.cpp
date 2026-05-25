@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cvc/state_exec/resource_policy.h>
+#include <cvc/core/state_exec/resource_policy.h>
 #include <stdexcept>
 
 namespace cvc::state_exec {

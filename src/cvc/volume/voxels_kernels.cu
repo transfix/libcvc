@@ -20,8 +20,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/cuda_utils.h>
-#include <cvc/types.h>
+#include <cvc/utility/cuda_utils.h>
+#include <cvc/core/types.h>
 
 namespace cvc
 {

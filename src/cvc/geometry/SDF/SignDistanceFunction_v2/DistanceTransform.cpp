@@ -40,7 +40,7 @@
 
 // Include app.h BEFORE DistanceTransform.h to avoid macro conflicts
 // (reg3data.h defines error() as a macro which conflicts with cvc::app)
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 
 #include "DistanceTransform.h"
 #include "mtxlib.h"

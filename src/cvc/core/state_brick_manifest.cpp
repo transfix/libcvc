@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <cstring>
-#include <cvc/state_brick_manifest.h>
-#include <cvc/types.h>
+#include <cvc/core/state_brick_manifest.h>
+#include <cvc/core/types.h>
 #include <stdexcept>
 
 namespace cvc {

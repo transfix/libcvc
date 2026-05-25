@@ -12,7 +12,7 @@
 #define __CVC_STATE_WRITE_POLICY_H__
 
 #include <cstddef>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>

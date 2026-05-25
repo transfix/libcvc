@@ -2,7 +2,7 @@
 #define CVC_STATE_LIST_H
 
 #include <cstddef>
-#include <cvc/state.h>
+#include <cvc/core/state.h>
 #include <iterator>
 #include <string>
 

@@ -21,14 +21,14 @@
 */
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/utility.h>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/utility.h>
 
 #ifdef CVC_GEOMETRY_ENABLE_PROJECT
 // Requires CGAL
-#include <cvc/project_verts.h>
+#include <cvc/geometry/project_verts.h>
 #endif
 
 #include <boost/algorithm/string.hpp>

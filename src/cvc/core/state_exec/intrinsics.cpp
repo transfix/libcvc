@@ -1,12 +1,12 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
 #include <chrono>
-#include <cvc/state.h>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/intrinsics.h>
-#include <cvc/state_exec/memory_tracker.h>
-#include <cvc/state_exec/process.h>
-#include <cvc/state_exec/scheduler.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/intrinsics.h>
+#include <cvc/core/state_exec/memory_tracker.h>
+#include <cvc/core/state_exec/process.h>
+#include <cvc/core/state_exec/scheduler.h>
 #include <stdexcept>
 #include <string>
 

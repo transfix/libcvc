@@ -2,8 +2,8 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
-#include <cvc/app.h>
-#include <cvc/utility.h>
+#include <cvc/core/app.h>
+#include <cvc/utility/utility.h>
 #include <xmlrpc/XmlRpc.h>
 
 namespace cvc {

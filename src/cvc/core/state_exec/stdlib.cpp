@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cmath>
-#include <cvc/state_exec/builtins.h>
-#include <cvc/state_exec/stdlib.h>
+#include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/stdlib.h>
 #include <numeric>
 #include <random>
 #include <sstream>

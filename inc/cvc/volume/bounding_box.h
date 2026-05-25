@@ -32,10 +32,10 @@
 #include <boost/lexical_cast.hpp>
 #include <cmath>
 #include <cstdio>
-#include <cvc/dimension.h>
-#include <cvc/exception.h>
-#include <cvc/namespace.h>
-#include <cvc/types.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/types.h>
 #include <string>
 #include <vector>
 

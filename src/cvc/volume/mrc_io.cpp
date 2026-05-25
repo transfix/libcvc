@@ -20,9 +20,9 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <cvc/app.h>
-#include <cvc/endians.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/endians.h>
+#include <cvc/volume/volmagick.h>
 
 #ifdef CVC_USING_IMOD_MRC
 #include <iimage.h>

@@ -2,7 +2,7 @@
 #define __CVC_STATE_SUBSCRIPTION_ROUTER_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>

@@ -12,8 +12,8 @@
 #define __CVC_STATE_TELEMETRY_AGGREGATOR_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
-#include <cvc/state_node_telemetry.h>
+#include <cvc/core/namespace.h>
+#include <cvc/core/state_node_telemetry.h>
 #include <functional>
 #include <mutex>
 #include <string>

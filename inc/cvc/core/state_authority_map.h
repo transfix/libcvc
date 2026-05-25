@@ -12,7 +12,7 @@
 #define __CVC_STATE_AUTHORITY_MAP_H__
 
 #include <cstdint>
-#include <cvc/namespace.h>
+#include <cvc/core/namespace.h>
 #include <map>
 #include <memory>
 #include <mutex>

@@ -5,8 +5,8 @@
 */
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 
 using namespace cvc;
