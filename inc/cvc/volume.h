@@ -27,7 +27,7 @@
 #include <cvc/voxels.h>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(sub_volume_out_of_bounds);
 
 /**
@@ -169,6 +169,6 @@ protected:
   bounding_box _boundingBox;
   std::string _desc;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

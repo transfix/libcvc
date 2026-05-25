@@ -20,12 +20,12 @@ namespace {
  * Commands
  */
 
-typedef boost::function<void(CVC_NAMESPACE::app &, const std::vector<std::string> &)> command_func;
+typedef boost::function<void(cvc::app &, const std::vector<std::string> &)> command_func;
 typedef boost::tuple<command_func, std::string> command;
 typedef std::map<std::string, command> command_map;
 command_map commands;
 
-void help(CVC_NAMESPACE::app & /*ctx*/, const std::vector<std::string> &args) {
+void help(cvc::app & /*ctx*/, const std::vector<std::string> &args) {
   using namespace std;
   cout << "Usage: libcvc <command> <command args>" << endl << endl;
   for (command_map::iterator i = commands.begin(); i != commands.end(); ++i) {
@@ -34,10 +34,10 @@ void help(CVC_NAMESPACE::app & /*ctx*/, const std::vector<std::string> &args) {
   }
 }
 
-void copy(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void copy(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   if (args.empty())
@@ -47,10 +47,10 @@ void copy(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   save(ctx, load(ctx, args[0]), args[1]);
 }
 
-void info(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void info(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
 
   if (args.empty())
@@ -111,9 +111,9 @@ void info(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
 }
 
 // 01/11/2014 - Joe R. - moved bounding box to last argument and made optional.
-void sdf(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void sdf(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing geometry filename");
@@ -130,10 +130,10 @@ void sdf(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   sdf(ctx, geom, dimension(args[1]), bbox).write(args[2]);
 }
 
-void iso(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void iso(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing volume filename");
@@ -145,10 +145,10 @@ void iso(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
 }
 
 #ifdef USING_XMLRPC
-void server(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void server(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   int port = XMLRPC_DEFAULT_PORT;
   if (!args.empty())
@@ -158,10 +158,10 @@ void server(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
   ctx.wait();                                                 // wait for the server thread to quit
 }
 
-void client(CVC_NAMESPACE::app &ctx, const std::vector<std::string> &args) {
+void client(cvc::app &ctx, const std::vector<std::string> &args) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (args.empty())
     throw command_line_error("Missing host:port");
@@ -211,7 +211,7 @@ public:
         command_func(server),
         str(boost::format(string("server [port]\n"
                                  "Starts an xmlrpc server at the specified port. Defaults to %d")) %
-            CVC_NAMESPACE::XMLRPC_DEFAULT_PORT));
+            cvc::XMLRPC_DEFAULT_PORT));
     commands["client"] = boost::make_tuple(
         command_func(client), string("client <host:port> <xmlrpc_method> [method args]\n"
                                      "Calls an rpc method on the target host:port."));
@@ -222,7 +222,7 @@ public:
 
 int main(int argc, char **argv) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
 
   app cvc_ctx;
 
@@ -246,7 +246,7 @@ int main(int argc, char **argv) {
       cout << "Error: " << e.what_str() << endl;
     cout << "Usage: " << argv[0] << " <command> <command args>" << endl;
     return EXIT_FAILURE;
-  } catch (CVC_NAMESPACE::exception &e) {
+  } catch (cvc::exception &e) {
     cerr << "Exception: " << e.what() << endl;
   }
 

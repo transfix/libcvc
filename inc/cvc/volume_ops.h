@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(dimension_mismatch);
 
 // ── Volume statistics ──
@@ -147,6 +147,6 @@ volume vol_rgba_merge(const volume &r, const volume &g, const volume &b, const v
 // Split a multi-variable volume into separate single-variable volumes.
 // Returns a vector of volumes, one per variable in the input.
 std::vector<volume> vol_split_vars(const volume &vol);
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::brick_extent
@@ -195,6 +195,6 @@ private:
   const state_compression_registry *_compression;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_BRICK_MANIFEST_H__

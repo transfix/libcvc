@@ -15,7 +15,7 @@
 #include <cvc/namespace.h>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class app;
 class state_cluster_shard;
@@ -72,6 +72,6 @@ struct state_distributed_metrics {
   static std::size_t publish_conflicts(app &ctx, const state_cluster_shard &shard);
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_DISTRIBUTED_METRICS_H__

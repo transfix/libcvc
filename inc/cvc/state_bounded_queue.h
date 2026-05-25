@@ -21,7 +21,7 @@
 #include <mutex>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_bounded_queue<T>
@@ -226,6 +226,6 @@ private:
   std::atomic<std::uint64_t> _rejected_closed{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_BOUNDED_QUEUE_H__

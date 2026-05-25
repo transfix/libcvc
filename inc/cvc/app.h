@@ -56,7 +56,7 @@
 #include <typeinfo>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // --------
 // cvc::app
 // --------
@@ -333,7 +333,7 @@ public:
     }
 
     threads(wait ? key : this->uniqueThreadKey(key),
-            CVC_NAMESPACE::thread_ptr(new boost::thread(t)));
+            cvc::thread_ptr(new boost::thread(t)));
   }
 
   // Start a thread with priority using the thread pool
@@ -607,23 +607,23 @@ template <class T> data_type dataType();
 
 // Returns a human-readable name for the data_type enum, or empty string.
 std::string dataTypeName(data_type dt);
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 // Guarded PascalCase aliases for case-insensitive filesystems (macOS) where
 // consumer compat shims are bypassed.
 #ifndef CVC_COMPAT_APP_DEFINED
 #define CVC_COMPAT_APP_DEFINED
-namespace CVC_NAMESPACE {
+namespace cvc {
 typedef app App;
 typedef app::thread_info ThreadInfo;
 typedef app::thread_feedback ThreadFeedback;
 typedef app::scoped_lock ScopedLock;
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 namespace CVC {
-typedef CVC_NAMESPACE::app App;
-typedef CVC_NAMESPACE::thread_info ThreadInfo;
-typedef CVC_NAMESPACE::thread_feedback ThreadFeedback;
-typedef CVC_NAMESPACE::scoped_lock ScopedLock;
+typedef cvc::app App;
+typedef cvc::thread_info ThreadInfo;
+typedef cvc::thread_feedback ThreadFeedback;
+typedef cvc::scoped_lock ScopedLock;
 } // namespace CVC
 #endif // CVC_COMPAT_APP_DEFINED
 

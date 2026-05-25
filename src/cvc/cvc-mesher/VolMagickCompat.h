@@ -20,26 +20,26 @@
 namespace VolMagick
 {
   // Type aliases - old VolMagick types now use CVC implementations
-  using Volume = CVC_NAMESPACE::volume;
-  using Dimension = CVC_NAMESPACE::dimension;
-  using BoundingBox = CVC_NAMESPACE::bounding_box;
-  using VoxelType = CVC_NAMESPACE::data_type;
+  using Volume = cvc::volume;
+  using Dimension = cvc::dimension;
+  using BoundingBox = cvc::bounding_box;
+  using VoxelType = cvc::data_type;
   
   // VoxelType enum values
-  using CVC_NAMESPACE::UChar;
-  using CVC_NAMESPACE::UShort;
-  using CVC_NAMESPACE::UInt;
-  using CVC_NAMESPACE::Float;
-  using CVC_NAMESPACE::Double;
-  using CVC_NAMESPACE::UInt64;
+  using cvc::UChar;
+  using cvc::UShort;
+  using cvc::UInt;
+  using cvc::Float;
+  using cvc::Double;
+  using cvc::UInt64;
   
   // Function aliases
-  using CVC_NAMESPACE::readVolumeFile;
-  using CVC_NAMESPACE::writeVolumeFile;
-  using CVC_NAMESPACE::createVolumeFile;
+  using cvc::readVolumeFile;
+  using cvc::writeVolumeFile;
+  using cvc::createVolumeFile;
   
   // Exception alias
-  using Exception = CVC_NAMESPACE::exception;
+  using Exception = cvc::exception;
   
   // Define old exception types as CVC exceptions
   CVC_DEF_EXCEPTION(InvalidBoundingBox);

@@ -27,7 +27,7 @@
 #include <cvc/state_transport_inproc.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ---------------------------------------------------------------
 // ewma
@@ -417,4 +417,4 @@ bool state_node_telemetry::publish_snapshot() {
   return _bus->admit(msg);
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

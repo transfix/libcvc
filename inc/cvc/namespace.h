@@ -25,19 +25,15 @@
 
 #include <cvc/config.h>
 
-#ifndef CVC_NAMESPACE
-#define CVC_NAMESPACE cvc
-#endif
-
 // Backward-compat: many older consumers (F2Dock, volrover, TexMol) reference
 // symbols as `CVC::Foo`. Provide `CVC` as a *real* nested namespace with a
 // using-directive into the canonical lowercase namespace so those references
 // resolve transparently — and so consumer code is still free to reopen
 // `namespace CVC { ... }` to add its own aliases (which would be forbidden
 // if CVC were a namespace *alias*).
-namespace CVC_NAMESPACE {}
+namespace cvc {}
 namespace CVC {
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 }
 
 #endif

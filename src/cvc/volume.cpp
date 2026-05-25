@@ -25,7 +25,7 @@
 #include <cvc/utility.h>
 #include <cvc/volume.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 volume &volume::copy(const volume &vol) {
   if (this == &vol)
     return *this;
@@ -271,4 +271,4 @@ volume &volume::write(const std::string &filename) {
   writeVolumeFile(ctx(), *this, filename);
   return *this;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

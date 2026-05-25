@@ -45,7 +45,7 @@
 #define UNION_NOT_SUPPORTED
 // #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_bounding_box);
 CVC_DEF_EXCEPTION(invalid_bounding_box_string);
 
@@ -343,14 +343,14 @@ private:
 
 typedef generic_bounding_box<double> bounding_box;       // object space
 typedef generic_bounding_box<uint64> index_bounding_box; // image space
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc
 
 // Legacy PascalCase aliases (Phase 8 compat layer). Separate `namespace CVC`
 // block so internal libcvc code in `namespace cvc` is unaffected by possible
 // name collisions (e.g. SDF's local `struct BoundingBox`).
 namespace CVC {
-typedef CVC_NAMESPACE::bounding_box BoundingBox;
-typedef CVC_NAMESPACE::index_bounding_box IndexBoundingBox;
+typedef cvc::bounding_box BoundingBox;
+typedef cvc::index_bounding_box IndexBoundingBox;
 } // namespace CVC
 
 #endif

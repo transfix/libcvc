@@ -69,7 +69,7 @@ typedef struct var_record_t {
   char varName[64];
 } var_record_t;
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_rawv_header);
 
 // -------
@@ -724,7 +724,7 @@ struct rawv_io : public volume_file_io {
       dim[0] += off_x;
       dim[1] += off_y;
       dim[2] += off_z;
-      CVC_NAMESPACE::createVolumeFile(ctx, filename, box, dim,
+      cvc::createVolumeFile(ctx, filename, box, dim,
                                       std::vector<data_type>(1, vol.voxelType()), 1, 1, 0.0, 0.0);
       volinfo.read(ctx, filename);
 
@@ -848,10 +848,10 @@ protected:
   std::string _id;
   std::list<std::string> _extensions;
 };
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_rawv_io(app & /*ctx*/) {
   volume_file_io::insertHandler(volume_file_io::ptr(new rawv_io));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

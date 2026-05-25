@@ -16,7 +16,7 @@
 #include <filesystem>
 #include <fstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -322,4 +322,4 @@ std::vector<std::string> file_state_blob_store::digests() const {
   return out;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

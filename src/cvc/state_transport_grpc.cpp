@@ -21,7 +21,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -1045,4 +1045,4 @@ void state_transport_grpc::heartbeat_loop() {
   }
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -43,7 +43,7 @@ class volume;
  */
 class GraphicsNode : public SceneNode {
 public:
-  GraphicsNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "");
+  GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "");
   virtual ~GraphicsNode();
 
   // Identity and naming

@@ -37,7 +37,7 @@ namespace LBIE
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/26/2025 -- Joe R. -- Removed string-based version, use enum only.
-  geoframe quality_improve(CVC_NAMESPACE::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
+  geoframe quality_improve(cvc::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
 			   bool verbose = false);
 
   // -----------------------------------------------------------------------
@@ -54,10 +54,10 @@ namespace LBIE
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
   // 12/28/2025 -- Joe R. -- Changed normaltype from string to enum.
-  CVC_NAMESPACE::geometry do_mesh_geometry(
+  cvc::geometry do_mesh_geometry(
       const VolMagick::Volume& vol,
       float isovalue, float isovalue_in, float err, float err_in,
-      CVC_NAMESPACE::geometry::geometry_type geom_type,
+      cvc::geometry::geometry_type geom_type,
       Mesher::ImproveMethod improve_method,
       Mesher::NormalType normaltype, 
       Mesher::ExtractionMethod extract_method,
@@ -74,9 +74,9 @@ namespace LBIE
   //   PREFERRED API for external callers.
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
-  CVC_NAMESPACE::geometry quality_improve_geometry(
-      CVC_NAMESPACE::app& ctx,
-      const CVC_NAMESPACE::geometry& geom,
+  cvc::geometry quality_improve_geometry(
+      cvc::app& ctx,
+      const cvc::geometry& geom,
       Mesher::ImproveMethod improve_method,
       int improve_iterations,
       bool verbose = false);

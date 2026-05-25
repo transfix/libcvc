@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(unsupported_geometry_file_type);
 
 // ----------------
@@ -163,6 +163,6 @@ geometry read_geometry(const std::string &filename);
 // ---- Change History ----
 // 01/11/2014 -- Joe R. -- Creation.
 void write_geometry(const geometry &geo, const std::string &filename);
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

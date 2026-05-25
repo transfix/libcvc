@@ -44,7 +44,7 @@
 #include <iostream>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 typedef boost::int64_t int64;
 typedef boost::uint64_t uint64;
 
@@ -61,7 +61,7 @@ static const char *data_type_strings[] = {
     "uint64",        "char",           "int",          "int64", "void"};
 
 // This is to be used with boost::lexical_cast<> like so
-//  bool b = boost::lexical_cast< CVC_NAMESPACE::locale_bool >("true");
+//  bool b = boost::lexical_cast< cvc::locale_bool >("true");
 // Found here on stack overflow: http://bit.ly/oR1wnk
 #ifdef CVC_ENABLE_LOCALE_BOOL
 struct locale_bool {
@@ -164,35 +164,35 @@ enum normal_type {
   CENTRAL_DIFFERENCE = 1,   // Central difference (faster, less accurate)
   BSPLINE_INTERPOLATION = 2 // B-spline interpolation (balanced)
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 // ------------------------------------------------------------------
 // Legacy PascalCase aliases (Phase 8 compat layer).
-// Placed in a *separate* `namespace CVC` block (not inside CVC_NAMESPACE)
+// Placed in a *separate* `namespace CVC` block (not inside cvc)
 // so that internal libcvc code in `namespace cvc` is unaffected by any
 // symbol-name collisions (e.g. SDF's local `struct BoundingBox`), while
 // consumer code reaching this header via case-insensitive resolution of
 // <CVC/Types.h> still finds CVC::DataType, CVC::DataMap, etc.
 // ------------------------------------------------------------------
 namespace CVC {
-typedef CVC_NAMESPACE::data_type DataType;
+typedef cvc::data_type DataType;
 
-typedef CVC_NAMESPACE::signal Signal;
-typedef CVC_NAMESPACE::map_change_signal MapChangeSignal;
-typedef CVC_NAMESPACE::data_map DataMap;
-typedef CVC_NAMESPACE::data_type_name_map DataTypeNameMap;
-typedef CVC_NAMESPACE::data_type_enum_map DataTypeEnumMap;
-typedef CVC_NAMESPACE::property_map PropertyMap;
-typedef CVC_NAMESPACE::thread_ptr ThreadPtr;
-typedef CVC_NAMESPACE::thread_map ThreadMap;
-typedef CVC_NAMESPACE::thread_progress_map ThreadProgressMap;
-typedef CVC_NAMESPACE::thread_key_map ThreadKeyMap;
-typedef CVC_NAMESPACE::thread_info_map ThreadInfoMap;
-typedef CVC_NAMESPACE::data_reader DataReader;
-typedef CVC_NAMESPACE::data_reader_collection DataReaderCollection;
-typedef CVC_NAMESPACE::mutex_ptr MutexPtr;
-typedef CVC_NAMESPACE::mutex_map_element MutexMapElement;
-typedef CVC_NAMESPACE::mutex_map MutexMap;
+typedef cvc::signal Signal;
+typedef cvc::map_change_signal MapChangeSignal;
+typedef cvc::data_map DataMap;
+typedef cvc::data_type_name_map DataTypeNameMap;
+typedef cvc::data_type_enum_map DataTypeEnumMap;
+typedef cvc::property_map PropertyMap;
+typedef cvc::thread_ptr ThreadPtr;
+typedef cvc::thread_map ThreadMap;
+typedef cvc::thread_progress_map ThreadProgressMap;
+typedef cvc::thread_key_map ThreadKeyMap;
+typedef cvc::thread_info_map ThreadInfoMap;
+typedef cvc::data_reader DataReader;
+typedef cvc::data_reader_collection DataReaderCollection;
+typedef cvc::mutex_ptr MutexPtr;
+typedef cvc::mutex_map_element MutexMapElement;
+typedef cvc::mutex_map MutexMap;
 } // namespace CVC
 
 // Guarded statics/extra typedefs for case-insensitive filesystems (macOS)
@@ -202,18 +202,18 @@ typedef CVC_NAMESPACE::mutex_map MutexMap;
 #ifndef CVC_COMPAT_TYPES_STATICS_DEFINED
 #define CVC_COMPAT_TYPES_STATICS_DEFINED
 namespace CVC {
-static const unsigned int *DataTypeSizes = CVC_NAMESPACE::data_type_sizes;
-static const char **DataTypeStrings = CVC_NAMESPACE::data_type_strings;
+static const unsigned int *DataTypeSizes = cvc::data_type_sizes;
+static const char **DataTypeStrings = cvc::data_type_strings;
 } // namespace CVC
 #endif // CVC_COMPAT_TYPES_STATICS_DEFINED
 
-// PascalCase aliases inside CVC_NAMESPACE itself so sources nested in
+// PascalCase aliases inside cvc itself so sources nested in
 // `namespace cvc { ... }` can refer to unqualified `DataType`, `PropertyMap`,
 // etc. on case-insensitive filesystems (macOS) where consumer compat shims
 // are bypassed.
 #ifndef CVC_COMPAT_PASCAL_TYPES_DEFINED
 #define CVC_COMPAT_PASCAL_TYPES_DEFINED
-namespace CVC_NAMESPACE {
+namespace cvc {
 typedef data_type DataType;
 typedef signal Signal;
 typedef map_change_signal MapChangeSignal;
@@ -231,7 +231,7 @@ typedef data_reader_collection DataReaderCollection;
 typedef mutex_ptr MutexPtr;
 typedef mutex_map_element MutexMapElement;
 typedef mutex_map MutexMap;
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 #endif // CVC_COMPAT_PASCAL_TYPES_DEFINED
 
 #endif

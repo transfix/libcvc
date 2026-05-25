@@ -5,7 +5,7 @@
 #include <fstream>
 #include <iomanip>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_off_file);
 
 struct off_io : public geometry_file_io {
@@ -187,12 +187,12 @@ protected:
   std::string _id;
   extension_list _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_off_io(app & /*ctx*/) {
   geometry_file_io::insert_handler(geometry_file_io::ptr(new off_io));
 }
 
 void register_off_io() { geometry_file_io::insert_handler(geometry_file_io::ptr(new off_io)); }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

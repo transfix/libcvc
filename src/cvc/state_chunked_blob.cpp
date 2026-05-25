@@ -12,7 +12,7 @@
 #include <cvc/state_chunked_blob.h>
 #include <stdexcept>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -260,4 +260,4 @@ bool state_chunked_blob_reader::get(const std::string &manifest_digest,
   return get(m, out);
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

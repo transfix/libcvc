@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 enum class state_mutation_op {
   set_value,
@@ -81,6 +81,6 @@ private:
   std::vector<state_mutation> _mutations;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_CHANGE_JOURNAL_H__

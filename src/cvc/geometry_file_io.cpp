@@ -3,7 +3,7 @@
 #include <cvc/geometry_file_io.h>
 #include <cvc/io_handlers.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // A regex to extract a filename extension
 const char *geometry_file_io::FILE_EXTENSION_EXPR = "^(.*)(\\.\\S*)$";
 
@@ -214,4 +214,4 @@ void register_default_geometry_handlers() {
   register_off_io();
   register_cvcraw_io();
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

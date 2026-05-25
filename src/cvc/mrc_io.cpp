@@ -178,7 +178,7 @@ static inline void geterrstr(int errnum, char *strerrbuf, size_t buflen) {
 // Use std::isfinite for portability (finite() removed on macOS/MSVC)
 using std::isfinite;
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_mrc_header);
 CVC_DEF_EXCEPTION(invalid_mrc_file);
 CVC_DEF_EXCEPTION(unsupported_mrc_file);
@@ -827,7 +827,7 @@ struct mrc_io : public volume_file_io {
       dim[1] += off_y;
       dim[2] += off_z;
 
-      CVC_NAMESPACE::createVolumeFile(ctx, filename, box, dim,
+      cvc::createVolumeFile(ctx, filename, box, dim,
                                       std::vector<data_type>(1, vol.voxelType()), 1, 1, 0.0, 0.0);
       volinfo.read(ctx, filename);
 
@@ -1205,8 +1205,8 @@ struct imod_mrc_io : public mrc_io {
   }
 };
 #endif
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_mrc_io(app &ctx) { volume_file_io::insertHandler(volume_file_io::ptr(new mrc_io)); }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 namespace {
 

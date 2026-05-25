@@ -9,7 +9,7 @@
 #include <cvc/volume.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ============================================================================
 // Construction and Basic Properties Tests

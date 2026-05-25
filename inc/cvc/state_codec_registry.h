@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_codec_registry
@@ -94,6 +94,6 @@ private:
   std::unordered_map<std::string, codec_entry> _codecs;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_CODEC_REGISTRY_H__

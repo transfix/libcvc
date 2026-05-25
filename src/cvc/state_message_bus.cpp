@@ -13,7 +13,7 @@
 #include <cvc/state_message_bus.h>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_message_bus::state_message_bus() = default;
 
@@ -124,4 +124,4 @@ std::size_t state_message_bus::dedup_size() const {
   return _seen.size();
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

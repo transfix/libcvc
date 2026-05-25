@@ -26,7 +26,7 @@
 #include <cvc/volmagick.h>
 #include <math.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 voxels &voxels::bilateralFilter(double radiometricSigma, double spatialSigma,
                                 unsigned int filterRadius) {
   thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
@@ -160,4 +160,4 @@ voxels &voxels::bilateralFilter(double radiometricSigma, double spatialSigma,
   delete[] spatialMask;
   return *this;
 }
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc

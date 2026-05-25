@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class app;
 class state_cluster_shard;
@@ -248,6 +248,6 @@ private:
   telemetry_snapshot _latest;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_NODE_TELEMETRY_H__

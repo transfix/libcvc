@@ -5,7 +5,7 @@
 #include <cvc/utility.h>
 #include <fstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_bunny_operation);
 
 // --------
@@ -94,12 +94,12 @@ protected:
   std::string _id;
   extension_list _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_bunny_io(app & /*ctx*/) {
   geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io));
 }
 
 void register_bunny_io() { geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io)); }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -14,7 +14,7 @@ class vtkTextMapper;
 
 class GridNode : public GraphicsNode {
 public:
-  GridNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "grid");
+  GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "grid");
   ~GridNode() override;
 
   void setBounds(const cvc::bounding_box &bounds);

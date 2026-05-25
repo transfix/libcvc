@@ -37,7 +37,7 @@
 // # define UNION_NOT_SUPPORTED
 // #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(null_dimension);
 CVC_DEF_EXCEPTION(invalid_dimension_string);
 
@@ -152,11 +152,11 @@ public:
     }
   }
 };
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc
 
 // Legacy PascalCase alias (Phase 8 compat layer).
 namespace CVC {
-typedef CVC_NAMESPACE::dimension Dimension;
+typedef cvc::dimension Dimension;
 }
 
 #endif

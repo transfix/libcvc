@@ -4,7 +4,7 @@
 #include <cvc/utility.h>
 #include <fstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_cvcraw_file);
 
 struct cvcraw_io : public geometry_file_io {
@@ -468,9 +468,9 @@ protected:
   std::string _id;
   extension_list _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_cvcraw_io(app & /*ctx*/) {
   geometry_file_io::insert_handler(geometry_file_io::ptr(new cvcraw_io));
 }
@@ -478,4 +478,4 @@ void register_cvcraw_io(app & /*ctx*/) {
 void register_cvcraw_io() {
   geometry_file_io::insert_handler(geometry_file_io::ptr(new cvcraw_io));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_peer_registry::state_peer_registry() = default;
 
@@ -133,4 +133,4 @@ void state_peer_registry::clear() {
   _peers.clear();
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

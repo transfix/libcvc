@@ -24,7 +24,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -1005,4 +1005,4 @@ bool state_transport_ipc::request_snapshot(const std::string &cluster_id,
   return result;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

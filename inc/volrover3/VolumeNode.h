@@ -35,7 +35,7 @@ class state;
  */
 class VolumeNode : public GraphicsNode {
 public:
-  VolumeNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+  VolumeNode(cvc::app &ctx, const std::string &statePath,
              const std::string &name = "volume");
   ~VolumeNode() override;
 

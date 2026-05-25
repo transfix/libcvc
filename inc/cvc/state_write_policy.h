@@ -20,7 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_write_policy
@@ -89,6 +89,6 @@ private:
   std::size_t _count = 0;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_WRITE_POLICY_H__

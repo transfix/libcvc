@@ -24,7 +24,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_transport_grpc
@@ -243,6 +243,6 @@ private:
   void heartbeat_loop();
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_TRANSPORT_GRPC_H__

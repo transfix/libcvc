@@ -27,7 +27,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class state;
 
@@ -139,6 +139,6 @@ private:
   std::atomic<std::uint64_t> _total_chunks_fetched{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_DATA_HYDRATOR_H__

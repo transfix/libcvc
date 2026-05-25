@@ -92,7 +92,7 @@ namespace LBIE
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/26/2025 -- Joe R. -- Removed string-based version, use enum only.
-  geoframe quality_improve(CVC_NAMESPACE::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
+  geoframe quality_improve(cvc::app& ctx, const geoframe& g_frame, Mesher::ImproveMethod improve_method, int improve_iterations,
 			   bool verbose)
   {
     using namespace std;
@@ -126,10 +126,10 @@ namespace LBIE
   //   Uses geoframe_adapter for zero-copy conversion.
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
-  CVC_NAMESPACE::geometry do_mesh_geometry(
+  cvc::geometry do_mesh_geometry(
       const VolMagick::Volume& vol,
       float isovalue, float isovalue_in, float err, float err_in,
-      CVC_NAMESPACE::geometry::geometry_type geom_type,
+      cvc::geometry::geometry_type geom_type,
       Mesher::ImproveMethod improve_method,
       Mesher::NormalType normaltype, 
       Mesher::ExtractionMethod extract_method,
@@ -141,11 +141,11 @@ namespace LBIE
     // Convert geometry_type to geoframe::GEOTYPE
     geoframe::GEOTYPE meshtype;
     switch(geom_type) {
-      case CVC_NAMESPACE::geometry::SURFACE_TRI:  meshtype = geoframe::SINGLE; break;
-      case CVC_NAMESPACE::geometry::SURFACE_QUAD: meshtype = geoframe::QUAD; break;
-      case CVC_NAMESPACE::geometry::VOLUME_TET:   meshtype = geoframe::TETRA; break;
-      case CVC_NAMESPACE::geometry::VOLUME_HEX:   meshtype = geoframe::HEXA; break;
-      case CVC_NAMESPACE::geometry::MIXED:        meshtype = geoframe::SINGLE; break;
+      case cvc::geometry::SURFACE_TRI:  meshtype = geoframe::SINGLE; break;
+      case cvc::geometry::SURFACE_QUAD: meshtype = geoframe::QUAD; break;
+      case cvc::geometry::VOLUME_TET:   meshtype = geoframe::TETRA; break;
+      case cvc::geometry::VOLUME_HEX:   meshtype = geoframe::HEXA; break;
+      case cvc::geometry::MIXED:        meshtype = geoframe::SINGLE; break;
       default: throw cvc_mesher_exception("invalid geometry type");
     }
     
@@ -168,15 +168,15 @@ namespace LBIE
   // ---- Change History ----
   // 12/28/2024 -- Joe R. -- Creation (Week 4).
   // 12/28/2025 -- Joe R. -- Fixed: work with copy to avoid temporary reference issues.
-  CVC_NAMESPACE::geometry quality_improve_geometry(
-      CVC_NAMESPACE::app& ctx,
-      const CVC_NAMESPACE::geometry& geom,
+  cvc::geometry quality_improve_geometry(
+      cvc::app& ctx,
+      const cvc::geometry& geom,
       Mesher::ImproveMethod improve_method,
       int improve_iterations,
       bool verbose)
   {
     // Create a working copy of the geometry (needed because we modify it)
-    CVC_NAMESPACE::geometry working_copy(geom);
+    cvc::geometry working_copy(geom);
     
     // Convert geometry to geoframe
     geoframe gf = to_geoframe(working_copy);

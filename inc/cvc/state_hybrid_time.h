@@ -18,7 +18,7 @@
 #include <cvc/namespace.h>
 #include <mutex>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::hybrid_time
@@ -118,6 +118,6 @@ private:
   hybrid_time _last{};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_HYBRID_TIME_H__

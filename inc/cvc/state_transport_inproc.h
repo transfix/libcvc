@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_transport_inproc
@@ -184,6 +184,6 @@ private:
   state_blob_store *_blob_store = nullptr;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_TRANSPORT_INPROC_H__

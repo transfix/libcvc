@@ -32,7 +32,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class app;
 class state_transport;
@@ -396,6 +396,6 @@ private:
   std::uint32_t _max_inline_payload_bytes = 0; // 0 = disabled
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_CLUSTER_SHARD_H__

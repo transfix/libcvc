@@ -11,7 +11,7 @@
 #include <string>
 #include <thread>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ---- basic lifecycle ----
 

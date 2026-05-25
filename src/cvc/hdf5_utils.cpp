@@ -30,7 +30,7 @@
 #include <boost/lexical_cast.hpp>
 #include <cvc/hdf5_utils.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 namespace hdf5_utils {
 // --------------------
 // getPredType
@@ -1042,4 +1042,4 @@ double getDataSetMaximum(app &ctx, const std::string &hdf5_filename,
   return max_val;
 }
 } // namespace hdf5_utils
-} // namespace CVC_NAMESPACE
+} // namespace cvc

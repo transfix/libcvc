@@ -23,7 +23,7 @@
 #include <cvc/cuda_utils.h>
 #include <cvc/types.h>
 
-namespace CVC_NAMESPACE
+namespace cvc
 {
 
 // Device function for trilinear interpolation (GPU version of getTriVal)
@@ -1522,4 +1522,4 @@ extern "C" void cuda_gdtv_filter(
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

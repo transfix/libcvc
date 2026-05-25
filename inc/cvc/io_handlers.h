@@ -7,7 +7,7 @@
 // Called by app::registerDefaultHandlers() instead of static_init objects
 // to avoid static initialization order deadlocks.
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 class app;
 
 // Volume file I/O handlers
@@ -39,6 +39,6 @@ void register_cvcraw_io();
 // by geometry_file_io::get_handlers() to populate the handler map on
 // first access without requiring a cvc::app instance to exist.
 void register_default_geometry_handlers();
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

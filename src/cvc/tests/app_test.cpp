@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ===========================
 // AppTest fixture

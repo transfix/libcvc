@@ -28,7 +28,7 @@
 #include <cvc/cuda_utils.h>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 voxels &voxels::anisotropicDiffusion(unsigned int iterations) {
   thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
@@ -131,4 +131,4 @@ voxels &voxels::anisotropicDiffusion(unsigned int iterations) {
   _ctx.threadProgress(1.0f);
   return *this;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

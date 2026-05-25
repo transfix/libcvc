@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -191,4 +191,4 @@ void state_codec_registry::register_builtin_codecs() {
       "cvc.str.v1");
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

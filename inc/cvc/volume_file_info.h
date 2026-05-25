@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 class app; // forward-declared to avoid pulling all of app.h into headers
 
 class volume_file_info {
@@ -205,6 +205,6 @@ private:
   // later operations (e.g. calcMinMax) do not require app::instance().
   app *_ctx;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

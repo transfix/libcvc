@@ -71,11 +71,11 @@
     ch[1] = d;                                                                                     \
   }
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 static inline int big_endian() {
   long one = 1;
   return !(*((char *)(&one)));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

@@ -14,7 +14,7 @@
 #include <cvc/types.h>
 #include <stdexcept>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -533,4 +533,4 @@ std::size_t state_brick_reader::get_region(const state_brick_manifest &m,
   return fetched;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

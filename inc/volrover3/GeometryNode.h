@@ -42,7 +42,7 @@ enum class GeometryRenderMode {
  */
 class GeometryNode : public GraphicsNode {
 public:
-  GeometryNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+  GeometryNode(cvc::app &ctx, const std::string &statePath,
                const std::string &name = "geometry");
   ~GeometryNode() override;
 

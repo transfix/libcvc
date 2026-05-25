@@ -67,7 +67,7 @@ voxels                  (Multi-dimensional voxel container)
 #include <cvc/volume.h>
 #include <cvc/voxels.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Create a 128³ volume with float data
 dimension dim(128, 128, 128);
@@ -1120,7 +1120,7 @@ v1.composite(v2, 0, 0, 0, blend);
 ```cpp
 #include <cvc/volume.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
     try {
@@ -1164,7 +1164,7 @@ int main() {
 #include <cvc/volume.h>
 #include <cmath>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 volume generateSphere(double radius, uint64 resolution) {
     dimension dim(resolution, resolution, resolution);
@@ -1209,7 +1209,7 @@ int main() {
 #include <cvc/volume.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 void analyzeRegion(const volume& vol, const bounding_box& region) {
     // Extract subvolume
@@ -1264,7 +1264,7 @@ int main() {
 #include <cvc/volume.h>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Sample volume along a line
 std::vector<double> sampleLine(const volume& vol,
@@ -1334,7 +1334,7 @@ int main() {
 #include <cvc/volume.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
 #ifdef CVC_USING_CUDA

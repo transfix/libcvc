@@ -29,7 +29,7 @@
 #include <cvc/state.h>
 #include <set>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // Forward declaration
 template <class This> class state_object;
 
@@ -218,7 +218,7 @@ public:
       : _ctx(ctx), _batchDepth(0), _initDepth(0), _hasInstanceThreading(false),
         _instanceThreading(false),
         _state_path(state_path.empty()
-                        ? _ctx.dataTypeName<This>() + CVC_NAMESPACE::state::SEPARATOR +
+                        ? _ctx.dataTypeName<This>() + cvc::state::SEPARATOR +
                               boost::lexical_cast<std::string>(this)
                         : state_path) {
     // Register the data type - avoid the macro by using template syntax
@@ -256,7 +256,7 @@ public:
 
   // Use this to easily get the name of either this state object or it's children.
   std::string stateName(const std::string &childState = std::string()) const {
-    return !childState.empty() ? _state_path + CVC_NAMESPACE::state::SEPARATOR + childState
+    return !childState.empty() ? _state_path + cvc::state::SEPARATOR + childState
                                : _state_path;
   }
 
@@ -264,7 +264,7 @@ public:
   // class or it's children. Uses this object's bound app context rather
   // than the global cvcstate singleton.
   state &getState(const std::string &s = std::string()) const {
-    return CVC_NAMESPACE::state::instance(_ctx)(stateName(s));
+    return cvc::state::instance(_ctx)(stateName(s));
   }
 
   // Begin batching state changes - handlers are queued instead of spawned
@@ -438,6 +438,6 @@ private:
 
 // Initialize static member - threading enabled by default
 template <class This> bool state_object<This>::_useThreading = true;
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_OBJECT_H__

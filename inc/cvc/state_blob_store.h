@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_blob_store
@@ -157,6 +157,6 @@ private:
   std::uint64_t _bytes_stored;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_BLOB_STORE_H__

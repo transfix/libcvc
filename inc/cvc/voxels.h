@@ -36,16 +36,16 @@
 #include <cvc/namespace.h>
 #include <cvc/types.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // Use std::byte for raw memory representation (C++17) or fallback
 #if __cplusplus >= 201703L
 using byte = std::byte;
 #else
 using byte = unsigned char;
 #endif
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 #ifdef CVC_USING_CUDA
 // CUDA kernel launcher for trilinear resize (defined in voxels_kernels.cu)
 extern "C" void cuda_resize_trilinear(void *src_data, void *dst_data, uint64 src_x, uint64 src_y,
@@ -540,6 +540,6 @@ protected:
   // Check if the shared_array is unique (for copy-on-write)
   bool is_unique() const { return _voxels.unique(); }
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

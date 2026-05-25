@@ -24,7 +24,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_transport_ipc
@@ -190,6 +190,6 @@ private:
   std::unordered_map<std::uint64_t, std::shared_ptr<snap_waiter>> _snap_waiters;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_TRANSPORT_IPC_H__

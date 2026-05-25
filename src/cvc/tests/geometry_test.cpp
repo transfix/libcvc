@@ -23,7 +23,7 @@
 #include <unistd.h>
 #endif
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Global flag to enable/disable stress and performance tests
 // Can be enabled with --enable-stress-tests command line flag

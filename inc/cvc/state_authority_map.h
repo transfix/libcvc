@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_authority_map
@@ -98,6 +98,6 @@ private:
   std::size_t _count;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_AUTHORITY_MAP_H__

@@ -11,7 +11,7 @@
 #include <cvc/state_message.h>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 std::string state_message::effective_content_type() const noexcept {
   if (!content_type.empty())
@@ -48,4 +48,4 @@ state_message state_message::make_typed(std::string path, std::string content_ty
   return m;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

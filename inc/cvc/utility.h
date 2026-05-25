@@ -40,7 +40,7 @@
 #define TIME_UTC_ TIME_UTC
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 std::string get_local_ip_address();
 
 static inline unsigned int upToPowerOfTwo(unsigned int value) {
@@ -219,5 +219,5 @@ bool is_volume(const boost::any &data);
 bool is_volume_file_info(const boost::any &data);
 bool is_geometry_filename(const std::string &filename);
 bool is_volume_filename(const std::string &filename);
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 #endif

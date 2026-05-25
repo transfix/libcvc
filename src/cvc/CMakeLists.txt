@@ -178,10 +178,6 @@ if(NOT CVC_STATE_MEMORY_MANAGER)
   list(REMOVE_ITEM SOURCE_FILES state_memory_manager.cpp state_eviction_store.cpp)
 endif()
 
-# Configuration
-set(CVC_NAMESPACE cvc CACHE STRING "C++ namespace for CVC library")
-mark_as_advanced(CVC_NAMESPACE)
-
 # The libcvc version number
 set(CVC_VERSION_MAJOR 3)
 set(CVC_VERSION_MINOR 0)
@@ -815,8 +811,6 @@ endforeach()
 
 # Compile definitions
 target_compile_definitions(cvc
-  PUBLIC
-    CVC_NAMESPACE=${CVC_NAMESPACE}
   PRIVATE
     CVC_VERSION_STRING="${CVC_VERSION}"
 )

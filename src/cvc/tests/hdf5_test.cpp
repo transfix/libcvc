@@ -36,7 +36,7 @@
 #define CVC_GETPID() ::getpid()
 #endif
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ===========================
 // HDF5 Test Fixture

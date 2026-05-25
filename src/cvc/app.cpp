@@ -58,7 +58,7 @@
 #include <queue>
 #include <set>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 app::app_ptr app::_instance;
 boost::mutex app::_instanceMutex;
 
@@ -123,7 +123,7 @@ app::app_ptr app::instancePtr() {
 //                         thread has quit.
 // 12/12/2025 -- Joe R. -- Two-phase shutdown: interrupt all, then join with timeout.
 void app::wait_for_threads() {
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
 
   // Atexit context: use the existing singleton if it's still alive
   // rather than re-entering app::instance() (which would re-create
@@ -225,15 +225,15 @@ void app::registerDefaultTypes() {
   registerDataType(boost::shared_array<double>);
   registerDataType(state);
 
-  registerDataType<CVC_NAMESPACE::geometry>("cvc::geometry");
-  registerDataType<CVC_NAMESPACE::voxels>("cvc::voxels");
-  registerDataType<CVC_NAMESPACE::volume>("cvc::volume");
-  registerDataType<CVC_NAMESPACE::bounding_box>("cvc::bounding_box");
-  registerDataType<CVC_NAMESPACE::dimension>("cvc::dimension");
+  registerDataType<cvc::geometry>("cvc::geometry");
+  registerDataType<cvc::voxels>("cvc::voxels");
+  registerDataType<cvc::volume>("cvc::volume");
+  registerDataType<cvc::bounding_box>("cvc::bounding_box");
+  registerDataType<cvc::dimension>("cvc::dimension");
 
-  registerDataType<boost::shared_ptr<CVC_NAMESPACE::geometry>>("boost::shared_ptr<cvc::geometry>");
-  registerDataType<boost::shared_ptr<CVC_NAMESPACE::voxels>>("boost::shared_ptr<cvc::voxels>");
-  registerDataType<boost::shared_ptr<CVC_NAMESPACE::volume>>("boost::shared_ptr<cvc::volume>");
+  registerDataType<boost::shared_ptr<cvc::geometry>>("boost::shared_ptr<cvc::geometry>");
+  registerDataType<boost::shared_ptr<cvc::voxels>>("boost::shared_ptr<cvc::voxels>");
+  registerDataType<boost::shared_ptr<cvc::volume>>("boost::shared_ptr<cvc::volume>");
 }
 
 void app::registerDefaultHandlers() {
@@ -1098,4 +1098,4 @@ template data_type dataType<int64>();
 template data_type dataType<uint64>();
 
 std::string dataTypeName(data_type dt) { return std::string(staticDataTypeName(dt)); }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

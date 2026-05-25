@@ -39,7 +39,7 @@
 #include <cvc/types.h>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // Forward declaration for state_future
 class state;
 
@@ -355,8 +355,8 @@ public:
     vector<T> ret_data;
     BOOST_FOREACH (string dkey, vals) {
       trim(dkey);
-      if (CVC_NAMESPACE::state::instance(_ctx)(dkey).isData<T>())
-        ret_data.push_back(CVC_NAMESPACE::state::instance(_ctx)(dkey).data<T>());
+      if (cvc::state::instance(_ctx)(dkey).isData<T>())
+        ret_data.push_back(cvc::state::instance(_ctx)(dkey).data<T>());
     }
     return ret_data;
   }
@@ -688,17 +688,17 @@ state_future<T>::state_future(state *s) : _state(s), _ready(false), _has_value(f
 }
 
 template <typename T> T state_future<T>::getValue() { return _state->template value<T>(); }
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 // PascalCase aliases for consumer compat shims bypassed on case-insensitive
 // filesystems (macOS).
 #ifndef CVC_COMPAT_STATE_DEFINED
 #define CVC_COMPAT_STATE_DEFINED
-namespace CVC_NAMESPACE {
+namespace cvc {
 typedef state State;
 }
 namespace CVC {
-typedef CVC_NAMESPACE::state State;
+typedef cvc::state State;
 }
 #endif // CVC_COMPAT_STATE_DEFINED
 

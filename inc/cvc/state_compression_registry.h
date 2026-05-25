@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_compression_codec
@@ -134,6 +134,6 @@ private:
   int _level;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_COMPRESSION_REGISTRY_H__

@@ -28,7 +28,7 @@
 #include <cvc/namespace.h>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 /***** Exceptions ****/
 class exception : public boost::exception {
 public:
@@ -39,7 +39,7 @@ public:
 };
 
 #define CVC_DEF_EXCEPTION(name)                                                                    \
-  class name : public CVC_NAMESPACE::exception {                                                   \
+  class name : public cvc::exception {                                                   \
   public:                                                                                          \
     name() : _msg("cvc::" #name) {}                                                                \
     name(const std::string &msg)                                                                   \
@@ -62,7 +62,7 @@ CVC_DEF_EXCEPTION(command_line_error);
 CVC_DEF_EXCEPTION(timeout_error);
 CVC_DEF_EXCEPTION(type_conversion_error);
 CVC_DEF_EXCEPTION(read_only_error);
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc
 
 // Legacy PascalCase aliases for case-insensitive filesystems (macOS).
 // Guarded so consumer compat shims can opt-out by defining the guard first.
@@ -73,15 +73,15 @@ CVC_DEF_EXCEPTION(read_only_error);
 #ifndef CVC_COMPAT_EXCEPTION_DEFINED
 #define CVC_COMPAT_EXCEPTION_DEFINED
 namespace CVC {
-typedef CVC_NAMESPACE::exception Exception;
-typedef CVC_NAMESPACE::read_error ReadError;
-typedef CVC_NAMESPACE::write_error WriteError;
-typedef CVC_NAMESPACE::memory_allocation_error MemoryAllocationError;
-typedef CVC_NAMESPACE::index_out_of_bounds IndexOutOfBounds;
-typedef CVC_NAMESPACE::volume_properties_mismatch VolumePropertiesMismatch;
-typedef CVC_NAMESPACE::volume_cache_directory_file_error VolumeCacheDirectoryFileError;
-typedef CVC_NAMESPACE::unsupported_exception UnsupportedVolumeFileType;
-typedef CVC_NAMESPACE::unsupported_exception UnsupportedGeometryFileType;
+typedef cvc::exception Exception;
+typedef cvc::read_error ReadError;
+typedef cvc::write_error WriteError;
+typedef cvc::memory_allocation_error MemoryAllocationError;
+typedef cvc::index_out_of_bounds IndexOutOfBounds;
+typedef cvc::volume_properties_mismatch VolumePropertiesMismatch;
+typedef cvc::volume_cache_directory_file_error VolumeCacheDirectoryFileError;
+typedef cvc::unsupported_exception UnsupportedVolumeFileType;
+typedef cvc::unsupported_exception UnsupportedGeometryFileType;
 
 // Locally-defined exceptions that have no cvc:: equivalent
 CVC_DEF_EXCEPTION(SubVolumeOutOfBounds);

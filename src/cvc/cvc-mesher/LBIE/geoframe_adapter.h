@@ -56,7 +56,7 @@ class geoframe_adapter : public geoframe
 {
 public:
   // Constructor wrapping a geometry object (reference semantics)
-  explicit geoframe_adapter(CVC_NAMESPACE::geometry& geom);
+  explicit geoframe_adapter(cvc::geometry& geom);
   
   // Destructor - sync back to geometry
   ~geoframe_adapter();
@@ -74,29 +74,29 @@ public:
   void sync_to_geometry();
   
   // Get underlying geometry
-  CVC_NAMESPACE::geometry& get_geometry() { return _geom; }
-  const CVC_NAMESPACE::geometry& get_geometry() const { return _geom; }
+  cvc::geometry& get_geometry() { return _geom; }
+  const cvc::geometry& get_geometry() const { return _geom; }
   
   // Override reset to also clear geometry
   void reset();
   
 private:
-  CVC_NAMESPACE::geometry& _geom;  // Reference to wrapped geometry
+  cvc::geometry& _geom;  // Reference to wrapped geometry
   bool _dirty;                     // Track if adapter modified (needs sync)
 };
 
 // Helper functions for conversion at API boundaries
 
 // Create adapter from geometry (zero-copy reference)
-inline geoframe_adapter make_adapter(CVC_NAMESPACE::geometry& geom) {
+inline geoframe_adapter make_adapter(cvc::geometry& geom) {
   return geoframe_adapter(geom);
 }
 
 // Convert geoframe to geometry (requires copy since geoframe owns data)
-CVC_NAMESPACE::geometry to_geometry(const geoframe& gf);
+cvc::geometry to_geometry(const geoframe& gf);
 
 // Convert geometry to geoframe (requires copy)
-geoframe to_geoframe(const CVC_NAMESPACE::geometry& geom);
+geoframe to_geoframe(const cvc::geometry& geom);
 
 } // namespace LBIE
 

@@ -21,7 +21,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -313,4 +313,4 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
   return true;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

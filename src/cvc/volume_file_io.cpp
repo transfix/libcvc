@@ -27,7 +27,7 @@
 #include <cvc/utility.h>
 #include <cvc/volume_file_io.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // 09/05/2011 -- Joe R. -- moved the following 2 const vars from HDF5_IO
 // The group where volumes are stored in files that support hierarchical data structures
 const char *volume_file_io::CVC_VOLUME_GROUP = "/cvc/volumes";
@@ -116,12 +116,12 @@ void volume_file_io::writeBoundingBox(app &ctx, const bounding_box &bbox,
   std::vector<volume> vols;
   volume_file_info vfi(ctx, filename);
   vfi.boundingBox(bbox);
-  CVC_NAMESPACE::readVolumeFile(ctx, vols, filename);
+  cvc::readVolumeFile(ctx, vols, filename);
   BOOST_FOREACH (volume &vol, vols)
     vol.boundingBox(bbox);
-  CVC_NAMESPACE::createVolumeFile(
+  cvc::createVolumeFile(
       ctx, filename, vfi); // TODO: don't overwrite existing file until temp file write is complete
-  CVC_NAMESPACE::writeVolumeFile(ctx, vols, filename);
+  cvc::writeVolumeFile(ctx, vols, filename);
 }
 
 // ---------------------------
@@ -575,4 +575,4 @@ void createVolumeFile(app &ctx, const std::string &filename, const bounding_box 
                                                 BOOST_CURRENT_FUNCTION % filename % errors));
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

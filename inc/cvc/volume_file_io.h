@@ -34,7 +34,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 class app; // Forward declaration for app& overloads
 
 CVC_DEF_EXCEPTION(unsupported_volume_file_type);
@@ -279,6 +279,6 @@ void createVolumeFile(app &ctx, const std::string &filename, const bounding_box 
 void writeBoundingBox(app &ctx, const bounding_box &bbox, const std::string &filename);
 
 bounding_box readBoundingBox(app &ctx, const std::string &filename);
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

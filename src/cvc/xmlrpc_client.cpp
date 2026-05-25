@@ -6,7 +6,7 @@
 #include <cvc/utility.h>
 #include <xmlrpc/XmlRpc.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // --------------------
 // xmlrpc_client_thread
 // --------------------
@@ -33,7 +33,7 @@ public:
     using namespace boost;
     using namespace std;
 
-    CVC_NAMESPACE::thread_feedback feedback(*_app);
+    cvc::thread_feedback feedback(*_app);
 
     XmlRpc::XmlRpcClient c(_host.c_str(), _port);
     XmlRpc::XmlRpcValue params, result;
@@ -120,4 +120,4 @@ XmlRpc::XmlRpcValue rpc(app &ctx, const std::string &host_and_port, const std::s
   boost::tie(host, port) = get_xmlrpc_host_and_port(host_and_port);
   return rpc_call(ctx, host, port, method_name, params, sync, mod_time);
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

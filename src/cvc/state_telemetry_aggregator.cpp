@@ -16,7 +16,7 @@
 #include <cvc/state_telemetry_aggregator.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 static std::uint64_t agg_now_ns() {
   using namespace std::chrono;
@@ -190,4 +190,4 @@ state_telemetry_aggregator::evaluate_routing_feedback(const routing_feedback_pol
   return result;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

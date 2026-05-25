@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_message_bus
@@ -121,6 +121,6 @@ private:
   std::atomic<std::uint64_t> _dropped{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_MESSAGE_BUS_H__

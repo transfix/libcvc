@@ -22,7 +22,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class state_cluster_shard;
 class state_peer_registry;
@@ -210,6 +210,6 @@ private:
   std::atomic<std::uint64_t> _ctr_join{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_CLUSTER_MEMBERSHIP_H__

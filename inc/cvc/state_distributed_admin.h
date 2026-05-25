@@ -17,7 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class state;
 class state_blob_store;
@@ -251,6 +251,6 @@ private:
   state_telemetry_aggregator *_tel = nullptr;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_DISTRIBUTED_ADMIN_H__

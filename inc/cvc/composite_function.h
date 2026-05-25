@@ -25,7 +25,7 @@
 
 #include <cvc/voxels.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 class composite_function {
 public:
   composite_function() {}
@@ -91,6 +91,6 @@ public:
     return this_vox(this_i, this_j, this_k) - in_vox(in_i, in_j, in_k);
   }
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

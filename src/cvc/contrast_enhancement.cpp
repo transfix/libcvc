@@ -24,7 +24,7 @@
 #include <cvc/volmagick.h>
 #include <math.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 static inline void contrastEnhancementSlice(double resistor, voxels *paramin, voxels *paramax,
                                             voxels *imgavg, unsigned int k) {
   int i, j;
@@ -255,4 +255,4 @@ voxels &voxels::contrastEnhancement(double resistor) {
 
   return *this;
 }
-}; // namespace CVC_NAMESPACE
+}; // namespace cvc

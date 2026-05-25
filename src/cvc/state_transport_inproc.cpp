@@ -12,7 +12,7 @@
 #include <cvc/state_cluster_shard.h>
 #include <cvc/state_transport_inproc.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_transport_inproc::~state_transport_inproc() {
   // Close any installed outbox queues so blocked publishers wake.
@@ -373,4 +373,4 @@ std::size_t state_transport_inproc::fetch_chunks(const std::vector<std::string> 
   return n;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

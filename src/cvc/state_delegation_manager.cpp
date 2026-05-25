@@ -12,7 +12,7 @@
 #include <cvc/state_delegation_manager.h>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -116,4 +116,4 @@ state_delegation_manager::route(const std::string &path) const {
   return out;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

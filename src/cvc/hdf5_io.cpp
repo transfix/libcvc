@@ -64,7 +64,7 @@ namespace {
 // 01/17/2014 -- Joe R. -- using TIME_UTC_
 class build_hierarchy {
 public:
-  build_hierarchy(CVC_NAMESPACE::app &ctx, const std::string &threadKey,
+  build_hierarchy(cvc::app &ctx, const std::string &threadKey,
                   const std::string &hdf5_filename, const std::string &hdf5_volumeDataSet)
       : _ctx(ctx), _threadKey(threadKey), _hdf5_filename(hdf5_filename),
         _hdf5_volumeDataSet(hdf5_volumeDataSet) {}
@@ -82,9 +82,9 @@ public:
   }
 
   // lazy way to count the number of steps
-  CVC_NAMESPACE::uint64 countNumSteps(const CVC_NAMESPACE::dimension &fullDim,
-                                      const CVC_NAMESPACE::bounding_box &bbox) {
-    using namespace CVC_NAMESPACE;
+  cvc::uint64 countNumSteps(const cvc::dimension &fullDim,
+                                      const cvc::bounding_box &bbox) {
+    using namespace cvc;
 
     dimension prevDim(fullDim);
     uint64 steps = 0;
@@ -116,7 +116,7 @@ public:
   }
 
   void operator()() {
-    using namespace CVC_NAMESPACE;
+    using namespace cvc;
     using namespace hdf5_utils;
     using namespace boost;
 
@@ -204,25 +204,25 @@ public:
     } catch (boost::thread_interrupted &) {
       _ctx.log(6, str(boost::format("%1% :: thread %2% interrupted\n") % BOOST_CURRENT_FUNCTION %
                       _ctx.threadKey()));
-    } catch (CVC_NAMESPACE::exception &e) {
+    } catch (cvc::exception &e) {
       _ctx.log(1, str(boost::format("%1% :: ERROR :: %2%\n") % BOOST_CURRENT_FUNCTION % e.what()));
     }
   }
 
-  static void start(CVC_NAMESPACE::app &ctx, const std::string &threadKey,
+  static void start(cvc::app &ctx, const std::string &threadKey,
                     const std::string &hdf5_filename, const std::string &hdf5_volumeDataSet) {
     ctx.startThread(threadKey, build_hierarchy(ctx, threadKey, hdf5_filename, hdf5_volumeDataSet));
   }
 
 protected:
-  CVC_NAMESPACE::app &_ctx;
+  cvc::app &_ctx;
   std::string _threadKey;
   std::string _hdf5_filename;
   std::string _hdf5_volumeDataSet;
 };
 } // namespace
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // -------
 // hdf5_io
 // -------
@@ -269,7 +269,7 @@ struct hdf5_io : public volume_file_io {
   // 09/17/2011 -- Joe R. -- Maxdim is now on the property map.
   // 09/30/2011 -- Joe R. -- Checking that the maxdim property doesn't exist
   //                         before setting it.
-  hdf5_io(CVC_NAMESPACE::app &ctx) : _ctx(ctx), _id("hdf5_io : v1.0") {
+  hdf5_io(cvc::app &ctx) : _ctx(ctx), _id("hdf5_io : v1.0") {
     _extensions.push_back(".h5");
     _extensions.push_back(".hdf5");
     _extensions.push_back(".hdf");
@@ -872,14 +872,14 @@ struct hdf5_io : public volume_file_io {
   }
 
 protected:
-  CVC_NAMESPACE::app &_ctx;
+  cvc::app &_ctx;
   std::string _id;
   extension_list _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
-void register_hdf5_io(CVC_NAMESPACE::app &ctx) {
+namespace cvc {
+void register_hdf5_io(cvc::app &ctx) {
   volume_file_io::insertHandler(volume_file_io::ptr(new hdf5_io(ctx)));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

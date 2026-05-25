@@ -18,7 +18,7 @@
 #include <mutex>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_delegation_manager (Phase 6)
@@ -107,6 +107,6 @@ private:
   mutable state_authority_map _authority;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_DELEGATION_MANAGER_H__

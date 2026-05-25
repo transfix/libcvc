@@ -16,7 +16,7 @@
 #include <cvc/volume.h>
 #include <stdexcept>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -352,4 +352,4 @@ void register_volume_geometry_codecs(state_codec_registry &registry) {
   registry.register_codec("cvc::geometry", encode_geometry, decode_geometry, "cvc.geometry.v1");
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

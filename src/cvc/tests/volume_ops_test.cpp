@@ -7,7 +7,7 @@
 #include <cvc/volume_ops.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Helper: create a small Float volume with a constant value
 static volume make_const_vol(app &ctx, uint64 dim, double val,

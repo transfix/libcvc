@@ -32,7 +32,7 @@
 #include <cvc/types.h>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 class app;
 
 typedef boost::uint64_t uint64_t;
@@ -48,7 +48,7 @@ typedef boost::uint64_t uint64_t;
 // 11/16/2011 -- arand  -- Added off reader. This is not fully functional but it does
 //                         handle the most common variants of off files...
 // 12/29/2013 -- Joe R. -- Making read_off, read_raw protected, adding read function.
-// 01/11/2014 -- Joe R. -- Added missing line_t at CVC_NAMESPACE
+// 01/11/2014 -- Joe R. -- Added missing line_t at cvc
 // 01/12/2014 -- Joe R. -- Moving bunny() to its own bunny_io class.
 // 12/27/2024 -- Joe R. -- Added tetrahedral/hexahedral support, auxiliary data, geometry type
 // tracking
@@ -317,6 +317,6 @@ typedef geometry::tris_t tris_t;
 typedef geometry::quads_t quads_t;
 typedef geometry::tets_t tets_t;
 typedef geometry::hexs_t hexs_t;
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

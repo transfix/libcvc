@@ -70,7 +70,7 @@
  *
  */
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_hdf5_file);
 CVC_DEF_EXCEPTION(hdf5_exception);
 
@@ -1336,6 +1336,6 @@ inline void setAttribute(app &ctx, const std::string &hdf5_filename,
 
 // All hdf5_utils free functions require an explicit cvc::app context.
 } // namespace hdf5_utils
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

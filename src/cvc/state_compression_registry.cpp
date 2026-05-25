@@ -13,7 +13,7 @@
 #include <zstd.h>
 #include <zstd_errors.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ---------- state_rle_compression_codec ----------
 
@@ -193,4 +193,4 @@ state_compression_registry &state_compression_registry::shared() {
   return instance;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

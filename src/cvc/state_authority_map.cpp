@@ -12,7 +12,7 @@
 #include <cvc/state_authority_map.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 std::string state_authority_map::normalize_path(const std::string &path) {
   std::string s = path;
@@ -170,4 +170,4 @@ state_authority_map::snapshot() const {
   return out;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

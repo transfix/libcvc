@@ -149,12 +149,12 @@ float Distance(float *Pt1, float *Pt2) {
   return Dist_f;
 }
 
-void smooth_geometry(CVC_NAMESPACE::app &ctx, CVC_NAMESPACE::geometry &geo, float delta,
+void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta,
                      bool fix_boundary, bool perturb_1, bool geometric_flow, bool smoothing_enabled,
                      bool perturb_2) {
   using namespace std;
   using namespace boost;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
 
   vector<float> Vertices_gf;
   vector<float> VerticesBackup_gf;
@@ -654,11 +654,11 @@ void smooth_geometry(CVC_NAMESPACE::app &ctx, CVC_NAMESPACE::geometry &geo, floa
 }
 }; // namespace
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 geometry &geometry::smoothing(app &ctx, float delta, bool fix_boundary, bool perturb_1,
                               bool geometric_flow, bool smoothing_enabled, bool perturb_2) {
   smooth_geometry(ctx, *this, delta, fix_boundary, perturb_1, geometric_flow, smoothing_enabled,
                   perturb_2);
   return *this;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

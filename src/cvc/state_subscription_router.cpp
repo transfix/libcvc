@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cvc/state_subscription_router.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_subscription_router::state_subscription_router() : _next_id(1) {}
 
@@ -144,4 +144,4 @@ state_subscription_router::find_node(const std::string &path_prefix) const {
   return node;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

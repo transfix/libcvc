@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_message
@@ -96,6 +96,6 @@ struct state_message {
                                   std::string string_value = std::string());
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_MESSAGE_H__

@@ -34,7 +34,7 @@
 #include <vector>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(cuda_error);
 CVC_DEF_EXCEPTION(cuda_not_available);
 
@@ -235,6 +235,6 @@ public:
 
 #endif // CVC_USING_CUDA
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __VOLMAGICK_CUDA_UTILS_H__

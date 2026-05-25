@@ -45,7 +45,7 @@
 #include <utility>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // SEPARATOR is now an inline variable defined in state.h (C++17).
 // Keeping the symbol exported from the DLL would otherwise require an
 // explicit __declspec(dllexport), since WINDOWS_EXPORT_ALL_SYMBOLS only
@@ -560,7 +560,7 @@ void state::ptree(const boost::property_tree::ptree &pt) {
 //  Returns a json string version of the property map.
 // ---- Change History ----
 // 01/12/2014 -- Joe R. -- Creation.
-std::string state::json() { return CVC_NAMESPACE::json(ptree()); }
+std::string state::json() { return cvc::json(ptree()); }
 
 // -----------
 // state::json
@@ -569,7 +569,7 @@ std::string state::json() { return CVC_NAMESPACE::json(ptree()); }
 //  Sets this state object and its children based on an incoming json.
 // ---- Change History ----
 // 01/13/2014 -- Joe R. -- Creation.
-void state::json(const std::string &j) { ptree(CVC_NAMESPACE::json(j)); }
+void state::json(const std::string &j) { ptree(cvc::json(j)); }
 
 // -----------
 // state::save
@@ -1412,7 +1412,7 @@ std::string state::sanitizeStateName(const std::string &name) {
 
   return result;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 namespace {
 // -----------
@@ -1424,12 +1424,12 @@ namespace {
 // 01/13/2014 -- Joe R. -- Creation.
 class system_init {
 public:
-  static void init(CVC_NAMESPACE::app &ctx) {
+  static void init(cvc::app &ctx) {
     using namespace boost::posix_time;
-    CVC_NAMESPACE::state::instance(ctx)("__system.start")
+    cvc::state::instance(ctx)("__system.start")
         .value(to_simple_string(microsec_clock::universal_time()));
   }
 
-  system_init() { CVC_NAMESPACE::state::on_startup(CVC_NAMESPACE::state::app_init_func(init)); }
+  system_init() { cvc::state::on_startup(cvc::state::app_init_func(init)); }
 } static_init;
 } // namespace

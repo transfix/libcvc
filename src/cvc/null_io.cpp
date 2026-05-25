@@ -24,7 +24,7 @@
 #include <boost/format.hpp>
 #include <cvc/volume_file_io.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // -------
 // null_io
 // -------
@@ -128,10 +128,10 @@ protected:
   std::string _id;
   extension_list _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_null_io(app & /*ctx*/) {
   volume_file_io::insertHandler(volume_file_io::ptr(new null_io));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

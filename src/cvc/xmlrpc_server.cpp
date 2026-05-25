@@ -7,7 +7,7 @@
 #include <cvc/utility.h>
 #include <xmlrpc/XmlRpc.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(xmlrpc_server_error);
 CVC_DEF_EXCEPTION(xmlrpc_server_error_listen);
 CVC_DEF_EXCEPTION(xmlrpc_server_terminate);
@@ -43,7 +43,7 @@ public:
   explicit xmlrpc_server_thread(app &ctx) : _app(&ctx) {}
 
   void operator()() const {
-    CVC_NAMESPACE::thread_feedback feedback(*_app);
+    cvc::thread_feedback feedback(*_app);
 
     // document the tree regarding the xmlrpc server
     state::instance (*_app)("__system.xmlrpc.port").comment("The port used by the xmlrpc server.");
@@ -51,7 +51,7 @@ public:
     try {
       using namespace boost;
       std::string host = asio::ip::host_name();
-      std::string ipaddr = CVC_NAMESPACE::get_local_ip_address();
+      std::string ipaddr = cvc::get_local_ip_address();
 
       // Useful info to have
       state::instance (*_app)("__system.xmlrpc.hostname")
@@ -185,20 +185,20 @@ XMLRPC_METHOD_DEFINITION(cvcstate_terminate) {
   app *a = _app;
   _app->startThread("xmlrpc_server_thread_shutdown", [a]() { xmlrpc_server_thread::shutdown(*a); });
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 namespace {
 class xmlrpc_server_thread_init {
 public:
-  static void monitor(CVC_NAMESPACE::app &ctx) {
+  static void monitor(cvc::app &ctx) {
     try {
-      if (!CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").value().empty() &&
+      if (!cvc::state::instance(ctx)("__system.xmlrpc").value().empty() &&
           boost::lexical_cast<int>(
-              CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").value())) {
+              cvc::state::instance(ctx)("__system.xmlrpc").value())) {
         // Create a new XMLRPC thread to handle IPC
         if (ctx.hasThread("xmlrpc_server_thread"))
           ctx.threads("xmlrpc_server_thread")->interrupt();
-        ctx.startThread("xmlrpc_server_thread", CVC_NAMESPACE::xmlrpc_server_thread(ctx), false);
+        ctx.startThread("xmlrpc_server_thread", cvc::xmlrpc_server_thread(ctx), false);
       } else {
         if (ctx.hasThread("xmlrpc_server_thread")) {
           ctx.threads("xmlrpc_server_thread")->interrupt();
@@ -213,15 +213,15 @@ public:
   // sets a monitor function to observe the value of __system.xmlrpc.
   // If it is set to anything that evaluates to true, the xmlrpc server thread will be started.
   // If it is set to false, the running xmlrpc server will be terminated.
-  static void init(CVC_NAMESPACE::app &ctx) {
-    CVC_NAMESPACE::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() {
+  static void init(cvc::app &ctx) {
+    cvc::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() {
       monitor(ctx);
     });
     monitor(ctx);
   }
 
   xmlrpc_server_thread_init() {
-    CVC_NAMESPACE::state::on_startup(CVC_NAMESPACE::state::app_init_func(init));
+    cvc::state::on_startup(cvc::state::app_init_func(init));
   }
 } static_init;
 } // namespace

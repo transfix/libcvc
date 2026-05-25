@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class state_cluster_shard;
 
@@ -179,6 +179,6 @@ protected:
   state_peer_registry _peers;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_TRANSPORT_H__

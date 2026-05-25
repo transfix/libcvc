@@ -28,7 +28,7 @@
 #include <sstream>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 #ifdef CVC_USING_CUDA
 
@@ -227,4 +227,4 @@ size_t cuda_device_manager::get_total_memory(int device_id) {
 
 #endif // CVC_USING_CUDA
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

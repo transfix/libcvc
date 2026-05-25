@@ -31,7 +31,7 @@
 #include <Magick++.h>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // ── helpers ──
 
 static void check_dims_match(const volume &a, const volume &b) {
@@ -652,4 +652,4 @@ std::vector<volume> vol_split_vars(const volume &vol) {
   result.push_back(vol);
   return result;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

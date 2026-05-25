@@ -15,7 +15,7 @@
 #include <cvc/state_codec_registry.h>
 #include <string>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // Volume / Geometry codec registration
@@ -63,6 +63,6 @@ namespace CVC_NAMESPACE {
 // Register volume and geometry codecs on `registry`. Idempotent.
 void register_volume_geometry_codecs(state_codec_registry &registry);
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_VOLUME_CODEC_H__

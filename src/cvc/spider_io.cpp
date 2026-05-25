@@ -35,7 +35,7 @@
 using namespace std;
 // TODO: modify this so I/O for spider files is out-of-core.
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(invalid_spider_file);
 
 const char *read_err_strings[] = {"OK", "Cannot open file", "File is not a Spider volume",
@@ -745,7 +745,7 @@ struct spider_io : public volume_file_io {
       volume_file_info volinfo(ctx, filename);
       readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, volinfo.voxel_dimensions());
     } catch (read_error &e) {
-      CVC_NAMESPACE::createVolumeFile(ctx, filename, bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+      cvc::createVolumeFile(ctx, filename, bounding_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
                                       wvol.voxel_dimensions(),
                                       std::vector<data_type>(1, wvol.voxelType()), 0, 0, 0.0, 0.0);
       readVolumeFile(ctx, vol, filename, 0, 0, 0, 0, 0, wvol.voxel_dimensions());
@@ -769,10 +769,10 @@ protected:
   std::string _id;
   std::list<std::string> _extensions;
 };
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 void register_spider_io(app &ctx) {
   volume_file_io::insertHandler(volume_file_io::ptr(new spider_io));
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

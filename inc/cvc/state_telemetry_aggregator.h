@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 struct state_message;
 class state_message_bus;
@@ -167,6 +167,6 @@ private:
   std::unordered_map<std::string, telemetry_snapshot> _peers;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_TELEMETRY_AGGREGATOR_H__

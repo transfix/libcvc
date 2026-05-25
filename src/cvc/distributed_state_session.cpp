@@ -20,7 +20,7 @@
 #include <cvc/state_transport_grpc.h>
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 distributed_state_session::distributed_state_session(const distributed_state_config &config)
     : _config(config) {}
@@ -269,4 +269,4 @@ replica_status distributed_state_session::status() const {
   return s;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -14,7 +14,7 @@
 #include <cvc/state_transport.h>
 #include <exception>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 void state_distributed_metrics::write_u64(app &ctx, const std::string &cluster_id,
                                           const std::string &key, std::uint64_t value) {
@@ -75,4 +75,4 @@ std::size_t state_distributed_metrics::publish_conflicts(app &ctx,
   return n;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

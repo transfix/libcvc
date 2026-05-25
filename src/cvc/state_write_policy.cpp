@@ -12,7 +12,7 @@
 #include <memory>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_write_policy::state_write_policy() = default;
 
@@ -130,4 +130,4 @@ void state_write_policy::clear() {
   _count = 0;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

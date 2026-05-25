@@ -21,7 +21,7 @@ Week 5 Plan (True Zero-Copy):
 namespace LBIE
 {
 
-geoframe_adapter::geoframe_adapter(CVC_NAMESPACE::geometry& geom)
+geoframe_adapter::geoframe_adapter(cvc::geometry& geom)
   : geoframe(), _geom(geom), _dirty(false)
 {
   sync_from_geometry();
@@ -320,7 +320,7 @@ void geoframe_adapter::sync_to_geometry()
     tets.reserve(num_tets);
     
     for (int i = 0; i < num_tets; ++i) {
-      CVC_NAMESPACE::geometry::tet_t tet;
+      cvc::geometry::tet_t tet;
       // Decode from triangle encoding
       tet[0] = triangles[i*4 + 0][0];
       tet[1] = triangles[i*4 + 0][1];
@@ -329,7 +329,7 @@ void geoframe_adapter::sync_to_geometry()
       tets.push_back(tet);
     }
     
-    _geom.set_geometry_type(CVC_NAMESPACE::geometry::VOLUME_TET);
+    _geom.set_geometry_type(cvc::geometry::VOLUME_TET);
   }
   else if (mesh_type == geoframe::HEXA) {
     // Decode quads back to hexs
@@ -339,7 +339,7 @@ void geoframe_adapter::sync_to_geometry()
     hexs.reserve(num_hexs);
     
     for (int i = 0; i < num_hexs; ++i) {
-      CVC_NAMESPACE::geometry::hex_t hex;
+      cvc::geometry::hex_t hex;
       // Decode from quad encoding
       hex[0] = quads[i*6 + 0][0];
       hex[1] = quads[i*6 + 0][1];
@@ -352,7 +352,7 @@ void geoframe_adapter::sync_to_geometry()
       hexs.push_back(hex);
     }
     
-    _geom.set_geometry_type(CVC_NAMESPACE::geometry::VOLUME_HEX);
+    _geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
   }
   else if (mesh_type == geoframe::QUAD) {
     // Copy quads
@@ -363,7 +363,7 @@ void geoframe_adapter::sync_to_geometry()
         geom_quads[i][j] = quads[i][j];
       }
     }
-    _geom.set_geometry_type(CVC_NAMESPACE::geometry::SURFACE_QUAD);
+    _geom.set_geometry_type(cvc::geometry::SURFACE_QUAD);
   }
   else {
     // Copy triangles (SINGLE or other)
@@ -374,7 +374,7 @@ void geoframe_adapter::sync_to_geometry()
         geom_tris[i][j] = triangles[i][j];
       }
     }
-    _geom.set_geometry_type(CVC_NAMESPACE::geometry::SURFACE_TRI);
+    _geom.set_geometry_type(cvc::geometry::SURFACE_TRI);
   }
   
   _dirty = false;
@@ -389,9 +389,9 @@ void geoframe_adapter::reset()
 
 // Helper functions
 
-CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
+cvc::geometry to_geometry(const geoframe& gf)
 {
-  CVC_NAMESPACE::geometry geom;
+  cvc::geometry geom;
   
   // Copy vertex data
   auto& points = geom.points();
@@ -452,7 +452,7 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
     tets.reserve(num_tets);
     
     for (int i = 0; i < num_tets; ++i) {
-      CVC_NAMESPACE::geometry::tet_t tet;
+      cvc::geometry::tet_t tet;
       tet[0] = gf.triangles[i*4 + 0][0];
       tet[1] = gf.triangles[i*4 + 0][1];
       tet[2] = gf.triangles[i*4 + 0][2];
@@ -460,7 +460,7 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
       tets.push_back(tet);
     }
     
-    geom.set_geometry_type(CVC_NAMESPACE::geometry::VOLUME_TET);
+    geom.set_geometry_type(cvc::geometry::VOLUME_TET);
   }
   else if (gf.mesh_type == geoframe::HEXA) {
     // Decode quads to hexs
@@ -469,7 +469,7 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
     hexs.reserve(num_hexs);
     
     for (int i = 0; i < num_hexs; ++i) {
-      CVC_NAMESPACE::geometry::hex_t hex;
+      cvc::geometry::hex_t hex;
       hex[0] = gf.quads[i*6 + 0][0];
       hex[1] = gf.quads[i*6 + 0][1];
       hex[2] = gf.quads[i*6 + 0][2];
@@ -481,7 +481,7 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
       hexs.push_back(hex);
     }
     
-    geom.set_geometry_type(CVC_NAMESPACE::geometry::VOLUME_HEX);
+    geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
   }
   else if (gf.mesh_type == geoframe::QUAD) {
     // Copy quads
@@ -492,7 +492,7 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
         quads[i][j] = gf.quads[i][j];
       }
     }
-    geom.set_geometry_type(CVC_NAMESPACE::geometry::SURFACE_QUAD);
+    geom.set_geometry_type(cvc::geometry::SURFACE_QUAD);
   }
   else {
     // Copy triangles
@@ -503,18 +503,18 @@ CVC_NAMESPACE::geometry to_geometry(const geoframe& gf)
         tris[i][j] = gf.triangles[i][j];
       }
     }
-    geom.set_geometry_type(CVC_NAMESPACE::geometry::SURFACE_TRI);
+    geom.set_geometry_type(cvc::geometry::SURFACE_TRI);
   }
   
   return geom;
 }
 
-geoframe to_geoframe(const CVC_NAMESPACE::geometry& geom)
+geoframe to_geoframe(const cvc::geometry& geom)
 {
   geoframe gf;
   
   // Create working copy of geometry to ensure normals are computed
-  CVC_NAMESPACE::geometry working_geom(geom);
+  cvc::geometry working_geom(geom);
   
   // Ensure normals are computed if we have triangles or quads
   const auto& normals = working_geom.const_normals();

@@ -23,7 +23,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -661,4 +661,4 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
   return result;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

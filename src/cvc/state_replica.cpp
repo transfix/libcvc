@@ -12,7 +12,7 @@
 #include <cvc/state_replica.h>
 #include <utility>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_replica::state_replica(std::string local_node_id) : _local_node_id(std::move(local_node_id)) {
   // Local node always counts as a peer of itself, alive.
@@ -188,4 +188,4 @@ void state_replica::clear_seen() {
   _seen.clear();
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 void state_distributed_admin::attach_shard(state_cluster_shard *shard) noexcept { _shard = shard; }
 
@@ -494,4 +494,4 @@ std::vector<std::string> state_distributed_admin::gc_stale_peers(std::uint64_t n
   return removed;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

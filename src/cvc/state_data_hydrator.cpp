@@ -11,7 +11,7 @@
 #include <cvc/state.h>
 #include <cvc/state_data_hydrator.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_data_hydrator::state_data_hydrator(state_blob_store &store, state_codec_registry &codecs,
                                          const state_compression_registry *compression)
@@ -196,4 +196,4 @@ void state_data_hydrator::notify(const std::string &path, hydration_status statu
   }
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

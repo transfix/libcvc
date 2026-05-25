@@ -27,7 +27,7 @@
 #include <cvc/volume_file_info.h>
 #include <cvc/volume_file_io.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 // --------------------
 // volume_file_info::read
 // --------------------
@@ -102,4 +102,4 @@ void volume_file_info::calcMinMax(unsigned int var, unsigned int time) const {
   _data._minIsSet[var][time] = true;
   _data._maxIsSet[var][time] = true;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

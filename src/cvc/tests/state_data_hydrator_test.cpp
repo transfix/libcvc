@@ -15,7 +15,7 @@
 #include <gtest/gtest.h>
 #include <string>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 class DataHydratorTest : public ::testing::Test {
 protected:

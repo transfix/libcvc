@@ -22,7 +22,7 @@
 #include <cvc/volume.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 namespace {
 

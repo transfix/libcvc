@@ -1,7 +1,7 @@
 #include <cvc/state_change_journal.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 state_payload state_payload::none() { return state_payload(); }
 
@@ -111,4 +111,4 @@ std::string state_change_journal::make_mutation_id(const state_mutation &mutatio
   return output.str();
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

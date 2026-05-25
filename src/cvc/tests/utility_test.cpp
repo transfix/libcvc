@@ -32,7 +32,7 @@
 #define CVC_GETPID() ::getpid()
 #endif
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 class UtilityTest : public ::testing::Test {
 protected:

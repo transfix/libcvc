@@ -28,7 +28,7 @@
 
 using namespace std;
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 static inline float phi(float x, float q) { return ((2 - q) * pow(x, 1 - q)); }
 
 /*--------------------------------------------------------------------*/
@@ -652,4 +652,4 @@ voxels &voxels::gdtvFilter(double parameterq, double lambda, unsigned int iterat
   *this = filter;
   return *this;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

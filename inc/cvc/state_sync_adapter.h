@@ -28,7 +28,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class app;
 class state;
@@ -177,6 +177,6 @@ private:
   mutable std::atomic<std::uint64_t> _forwarded_through_link_count{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_SYNC_ADAPTER_H__

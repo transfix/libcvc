@@ -80,10 +80,10 @@ namespace {
 // Wrapper for tet with index and bbox
 struct TetElement {
   size_t index;
-  CVC_NAMESPACE::bounding_box bbox;
+  cvc::bounding_box bbox;
 
-  TetElement(size_t idx, const CVC_NAMESPACE::geometry::tets_t &t,
-             const CVC_NAMESPACE::geometry::points_t &v)
+  TetElement(size_t idx, const cvc::geometry::tets_t &t,
+             const cvc::geometry::points_t &v)
       : index(idx) {
     // Compute bbox from 4 tet vertices
     const auto &tet = t[idx];
@@ -98,17 +98,17 @@ struct TetElement {
       maxy = std::max(maxy, v[tet[i]][1]);
       maxz = std::max(maxz, v[tet[i]][2]);
     }
-    bbox = CVC_NAMESPACE::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+    bbox = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
   }
 };
 
 // Wrapper for hex with index and bbox
 struct HexElement {
   size_t index;
-  CVC_NAMESPACE::bounding_box bbox;
+  cvc::bounding_box bbox;
 
-  HexElement(size_t idx, const CVC_NAMESPACE::geometry::hexs_t &h,
-             const CVC_NAMESPACE::geometry::points_t &v)
+  HexElement(size_t idx, const cvc::geometry::hexs_t &h,
+             const cvc::geometry::points_t &v)
       : index(idx) {
     // Compute bbox from 8 hex vertices
     const auto &hex = h[idx];
@@ -123,7 +123,7 @@ struct HexElement {
       maxy = std::max(maxy, v[hex[i]][1]);
       maxz = std::max(maxz, v[hex[i]][2]);
     }
-    bbox = CVC_NAMESPACE::bounding_box(minx, miny, minz, maxx, maxy, maxz);
+    bbox = cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz);
   }
 };
 } // namespace
@@ -137,14 +137,14 @@ CVC_DEF_EXCEPTION(cvc_mesher_error);
 #endif
 
 // Helper function to round up to nearest power of 2
-CVC_NAMESPACE::uint64 next_power_of_2(CVC_NAMESPACE::uint64 n) {
+cvc::uint64 next_power_of_2(cvc::uint64 n) {
   if (n == 0)
     return 1;
   // Check if already power of 2
   if ((n & (n - 1)) == 0)
     return n;
   // Round up to next power of 2
-  CVC_NAMESPACE::uint64 power = 1;
+  cvc::uint64 power = 1;
   while (power < n)
     power <<= 1;
   return power;
@@ -161,11 +161,11 @@ CVC_NAMESPACE::uint64 next_power_of_2(CVC_NAMESPACE::uint64 n) {
 // 12/10/2025 -- Joe R. -- Updated to use thread-safe SDFContext API.
 // 12/23/2025 -- Joe R. -- Added power-of-2 rounding for arbitrary dimensions.
 // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
-CVC_NAMESPACE::volume sdf_library(CVC_NAMESPACE::app &ctx, const CVC_NAMESPACE::geometry &geom,
-                                  const CVC_NAMESPACE::dimension &dim,
-                                  const CVC_NAMESPACE::bounding_box &bbox, bool flipNormals) {
+cvc::volume sdf_library(cvc::app &ctx, const cvc::geometry &geom,
+                                  const cvc::dimension &dim,
+                                  const cvc::bounding_box &bbox, bool flipNormals) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   // NOTE: Don't pass flipNormals to SDFLibrary - its "fireworks" normal orientation
   // will override it. Instead, we negate the SDF values after computation.
   const int flipNormalsInt = 0;
@@ -262,11 +262,11 @@ CVC_NAMESPACE::volume sdf_library(CVC_NAMESPACE::app &ctx, const CVC_NAMESPACE::
 // 12/23/2025 -- Joe R. -- Creation.
 // 12/24/2025 -- Joe R. -- Fixed to respect provided bounding box.
 // 12/27/2025 -- Joe R. -- Added flipNormals parameter.
-CVC_NAMESPACE::volume sdf_library_v2(CVC_NAMESPACE::app &ctx, const CVC_NAMESPACE::geometry &geom,
-                                     const CVC_NAMESPACE::dimension &dim,
-                                     const CVC_NAMESPACE::bounding_box &bbox, bool flipNormals) {
+cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom,
+                                     const cvc::dimension &dim,
+                                     const cvc::bounding_box &bbox, bool flipNormals) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
 
   ctx.threadProgress(0.05); // Starting
 
@@ -378,9 +378,9 @@ template <class T, class A> bool get_arg(T &lhs, A &argv, const std::string &var
     return false;
 }
 
-CVC_NAMESPACE::geometry convert(const LBIE::geoframe &geo) {
+cvc::geometry convert(const LBIE::geoframe &geo) {
   using namespace std;
-  CVC_NAMESPACE::geometry ret_geom;
+  cvc::geometry ret_geom;
   ret_geom.points().resize(geo.verts.size());
   copy(geo.verts.begin(), geo.verts.end(), ret_geom.points().begin());
   ret_geom.normals().resize(geo.normals.size());
@@ -395,30 +395,30 @@ CVC_NAMESPACE::geometry convert(const LBIE::geoframe &geo) {
   if (geo.mesh_type == LBIE::geoframe::TETRA || geo.mesh_type == LBIE::geoframe::TETRA2) {
     // Tetrahedral mesh: triangles array contains tet faces (4 tris per tet)
     // Convert from geoframe's unsigned int to geometry's uint64_t
-    CVC_NAMESPACE::geometry::tris_t encoded_tris;
+    cvc::geometry::tris_t encoded_tris;
     encoded_tris.reserve(geo.triangles.size());
     for (const auto &tri : geo.triangles) {
-      CVC_NAMESPACE::geometry::tri_t converted_tri;
+      cvc::geometry::tri_t converted_tri;
       converted_tri[0] = tri[0];
       converted_tri[1] = tri[1];
       converted_tri[2] = tri[2];
       encoded_tris.push_back(converted_tri);
     }
-    ret_geom.tets() = CVC_NAMESPACE::decode_tets_from_triangles(encoded_tris);
+    ret_geom.tets() = cvc::decode_tets_from_triangles(encoded_tris);
   } else if (geo.mesh_type == LBIE::geoframe::HEXA) {
     // Hexahedral mesh: quads array contains hex faces (6 quads per hex)
     // Convert from geoframe's unsigned int to geometry's uint64_t
-    CVC_NAMESPACE::geometry::quads_t encoded_quads;
+    cvc::geometry::quads_t encoded_quads;
     encoded_quads.reserve(geo.quads.size());
     for (const auto &quad : geo.quads) {
-      CVC_NAMESPACE::geometry::quad_t converted_quad;
+      cvc::geometry::quad_t converted_quad;
       converted_quad[0] = quad[0];
       converted_quad[1] = quad[1];
       converted_quad[2] = quad[2];
       converted_quad[3] = quad[3];
       encoded_quads.push_back(converted_quad);
     }
-    ret_geom.hexs() = CVC_NAMESPACE::decode_hexs_from_quads(encoded_quads);
+    ret_geom.hexs() = cvc::decode_hexs_from_quads(encoded_quads);
   } else {
     // Surface mesh: copy triangles and quads directly
     ret_geom.tris().resize(geo.triangles.size());
@@ -436,7 +436,7 @@ CVC_NAMESPACE::geometry convert(const LBIE::geoframe &geo) {
   return ret_geom;
 }
 
-LBIE::geoframe convert(const CVC_NAMESPACE::geometry &geo) {
+LBIE::geoframe convert(const cvc::geometry &geo) {
   using namespace std;
   LBIE::geoframe ret_geom;
   ret_geom.verts.resize(geo.num_points());
@@ -458,8 +458,8 @@ LBIE::geoframe convert(const CVC_NAMESPACE::geometry &geo) {
   if (has_tets && !has_hexs && !has_tris && !has_quads) {
     // Pure tetrahedral mesh: encode tets as triangles (4 tris per tet)
     ret_geom.mesh_type = LBIE::geoframe::TETRA;
-    CVC_NAMESPACE::geometry::tris_t encoded =
-        CVC_NAMESPACE::encode_triangles_from_tets(geo.const_tets());
+    cvc::geometry::tris_t encoded =
+        cvc::encode_triangles_from_tets(geo.const_tets());
     // Convert from geometry's uint64_t to geoframe's unsigned int
     ret_geom.triangles.reserve(encoded.size());
     for (const auto &tri : encoded) {
@@ -474,8 +474,8 @@ LBIE::geoframe convert(const CVC_NAMESPACE::geometry &geo) {
   } else if (has_hexs && !has_tets && !has_tris && !has_quads) {
     // Pure hexahedral mesh: encode hexs as quads (6 quads per hex)
     ret_geom.mesh_type = LBIE::geoframe::HEXA;
-    CVC_NAMESPACE::geometry::quads_t encoded =
-        CVC_NAMESPACE::encode_quads_from_hexs(geo.const_hexs());
+    cvc::geometry::quads_t encoded =
+        cvc::encode_quads_from_hexs(geo.const_hexs());
     // Convert from geometry's uint64_t to geoframe's unsigned int
     ret_geom.quads.reserve(encoded.size());
     for (const auto &quad : encoded) {
@@ -523,9 +523,9 @@ LBIE::geoframe convert(const CVC_NAMESPACE::geometry &geo) {
 // ---- Change History ----
 // 01/10/2014 -- Joe R. -- Creation.
 typedef std::map<std::string, boost::any> Arguments;
-CVC_NAMESPACE::geometry cvc_mesher(const CVC_NAMESPACE::volume &vol, Arguments argv) {
+cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
 
   float isovalue = LBIE::DEFAULT_IVAL, isovalue_in = LBIE::DEFAULT_IVAL_IN, err = LBIE::DEFAULT_ERR,
         err_in = LBIE::DEFAULT_ERR_IN;
@@ -552,10 +552,10 @@ CVC_NAMESPACE::geometry cvc_mesher(const CVC_NAMESPACE::volume &vol, Arguments a
   get_arg(improve_iterations, argv, string("improve_iterations"));
 
   // Extract optional property volume
-  boost::optional<const CVC_NAMESPACE::volume &> propertyVol = boost::none;
+  boost::optional<const cvc::volume &> propertyVol = boost::none;
   if (argv.count("propertyVol")) {
     try {
-      propertyVol = boost::any_cast<const CVC_NAMESPACE::volume &>(argv["propertyVol"]);
+      propertyVol = boost::any_cast<const cvc::volume &>(argv["propertyVol"]);
     } catch (...) {
     }
   }
@@ -566,28 +566,28 @@ CVC_NAMESPACE::geometry cvc_mesher(const CVC_NAMESPACE::volume &vol, Arguments a
   }
 
   // Convert geoframe mesh type to geometry type
-  CVC_NAMESPACE::geometry::geometry_type geom_type;
+  cvc::geometry::geometry_type geom_type;
   switch (meshtype_enum) {
   case LBIE::geoframe::SINGLE:
-    geom_type = CVC_NAMESPACE::geometry::SURFACE_TRI;
+    geom_type = cvc::geometry::SURFACE_TRI;
     break;
   case LBIE::geoframe::TETRA:
-    geom_type = CVC_NAMESPACE::geometry::VOLUME_TET;
+    geom_type = cvc::geometry::VOLUME_TET;
     break;
   case LBIE::geoframe::TETRA2:
-    geom_type = CVC_NAMESPACE::geometry::VOLUME_TET;
+    geom_type = cvc::geometry::VOLUME_TET;
     break;
   case LBIE::geoframe::QUAD:
-    geom_type = CVC_NAMESPACE::geometry::SURFACE_QUAD;
+    geom_type = cvc::geometry::SURFACE_QUAD;
     break;
   case LBIE::geoframe::HEXA:
-    geom_type = CVC_NAMESPACE::geometry::VOLUME_HEX;
+    geom_type = cvc::geometry::VOLUME_HEX;
     break;
   case LBIE::geoframe::DOUBLE:
-    geom_type = CVC_NAMESPACE::geometry::MIXED;
+    geom_type = cvc::geometry::MIXED;
     break;
   default:
-    geom_type = CVC_NAMESPACE::geometry::SURFACE_TRI;
+    geom_type = cvc::geometry::SURFACE_TRI;
     break;
   }
 
@@ -622,10 +622,10 @@ CVC_NAMESPACE::geometry cvc_mesher(const CVC_NAMESPACE::volume &vol, Arguments a
 // ---- Change History ----
 // 01/10/2014 -- Joe R. -- Creation.
 // 12/28/2024 -- Joe R. -- Week 4: Use new geometry-based API.
-CVC_NAMESPACE::geometry cvc_mesher(CVC_NAMESPACE::app &ctx, const CVC_NAMESPACE::geometry &geom,
+cvc::geometry cvc_mesher(cvc::app &ctx, const cvc::geometry &geom,
                                    Arguments argv) {
   using namespace std;
-  using namespace CVC_NAMESPACE;
+  using namespace cvc;
   int improve_iterations = 1;
   LBIE::Mesher::ImproveMethod improvement_method_enum = LBIE::Mesher::GEO_FLOW;
 
@@ -638,7 +638,7 @@ CVC_NAMESPACE::geometry cvc_mesher(CVC_NAMESPACE::app &ctx, const CVC_NAMESPACE:
 #endif // CVC_ENABLE_MESHER
 } // namespace
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 #ifdef CVC_ENABLE_SDF
 // ---
 // sdf
@@ -2570,4 +2570,4 @@ geometry generate_cone(double cx, double cy, double cz, double radius, double he
 
   return geom;
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -41,7 +41,7 @@ class Mesher;
 }
 #endif
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 #ifdef CVC_ENABLE_SDF
 // ---
 // sdf
@@ -442,6 +442,6 @@ geometry generate_torus(double cx, double cy, double cz, double majorRadius, dou
 // Returns triangular mesh with normals (separate vertices for side and base cap)
 geometry generate_cone(double cx, double cy, double cz, double radius, double height, int res = 32);
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif

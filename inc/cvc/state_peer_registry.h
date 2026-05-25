@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_peer_registry
@@ -112,6 +112,6 @@ private:
   std::unordered_map<std::string, peer> _peers;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_PEER_REGISTRY_H__

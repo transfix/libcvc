@@ -27,7 +27,7 @@
 #include <thread>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 class app;
 
@@ -203,6 +203,6 @@ private:
   std::atomic<std::uint64_t> _pump_cycles{0};
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_DISTRIBUTED_STATE_SESSION_H__

@@ -14,7 +14,7 @@
 #include <cvc/state_delta_codec.h>
 #include <stdexcept>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // Build the IEEE 802.3 CRC-32 look-up table at static init time.
 static std::uint32_t make_crc_entry(std::uint32_t idx) {
@@ -225,4 +225,4 @@ std::size_t state_delta_codec::baseline_count() const {
   return _baselines.size();
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

@@ -10,7 +10,7 @@
 #include <cvc/types.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 class BrickManifestTest : public ::testing::Test {
 protected:

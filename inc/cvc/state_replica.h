@@ -19,7 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_replica
@@ -122,6 +122,6 @@ private:
   std::unordered_map<std::string, std::vector<std::uint64_t>> _seen;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_REPLICA_H__

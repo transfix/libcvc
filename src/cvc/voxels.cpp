@@ -26,7 +26,7 @@
 #include <cvc/utility.h>
 #include <cvc/voxels.h>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 voxels::voxels(app &ctx, const dimension &d, data_type vt)
     : _ctx(ctx), _dimension(d), _voxelType(vt), _minIsSet(false), _maxIsSet(false),
       _histogram(nullptr), _histogramSize(0), _histogramDirty(true), _using_cuda(false),
@@ -1114,4 +1114,4 @@ void voxels::migrate_from_cuda() {
   free_cuda_memory();
 #endif
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

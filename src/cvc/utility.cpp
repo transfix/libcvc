@@ -29,7 +29,7 @@
 #include <cvc/utility.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 CVC_DEF_EXCEPTION(network_error);
 
 // --------------------
@@ -53,7 +53,7 @@ std::string get_local_ip_address() {
     socket.connect(ep);
     addr = socket.local_endpoint().address();
   } catch (std::exception &e) {
-    throw CVC_NAMESPACE::network_error(e.what());
+    throw cvc::network_error(e.what());
   }
   return addr.to_string();
 }
@@ -224,12 +224,12 @@ boost::tuple<std::string, int> get_xmlrpc_host_and_port(const std::string &host_
   return boost::make_tuple(host, port);
 }
 
-bool is_geometry(const boost::any &data) { return data.type() == typeid(CVC_NAMESPACE::geometry); }
+bool is_geometry(const boost::any &data) { return data.type() == typeid(cvc::geometry); }
 
-bool is_volume(const boost::any &data) { return data.type() == typeid(CVC_NAMESPACE::volume); }
+bool is_volume(const boost::any &data) { return data.type() == typeid(cvc::volume); }
 
 bool is_volume_file_info(const boost::any &data) {
-  return data.type() == typeid(CVC_NAMESPACE::volume_file_info);
+  return data.type() == typeid(cvc::volume_file_info);
 }
 
 bool is_geometry_filename(const std::string &filename) {
@@ -238,7 +238,7 @@ bool is_geometry_filename(const std::string &filename) {
   boost::smatch what;
 
   if (boost::regex_match(filename, what, file_extension)) {
-    std::vector<std::string> exts = CVC_NAMESPACE::geometry_file_io::get_extensions();
+    std::vector<std::string> exts = cvc::geometry_file_io::get_extensions();
     BOOST_FOREACH (std::string &ext, exts)
       if (what[2] == ext)
         return true;
@@ -252,7 +252,7 @@ bool is_volume_filename(const std::string &filename) {
   boost::smatch what;
 
   if (boost::regex_match(filename, what, file_extension)) {
-    std::vector<std::string> exts = CVC_NAMESPACE::volume_file_io::getExtensions();
+    std::vector<std::string> exts = cvc::volume_file_io::getExtensions();
     BOOST_FOREACH (std::string &ext, exts)
       if (what[2] == ext)
         return true;
@@ -267,13 +267,13 @@ boost::any load(app &ctx, const std::string &filename) {
   boost::smatch what;
 
   if (is_geometry_filename(filename)) {
-    CVC_NAMESPACE::geometry geo(ctx, filename);
+    cvc::geometry geo(ctx, filename);
     return geo;
   } else if (is_volume_filename(filename)) {
-    CVC_NAMESPACE::volume vol(ctx, filename);
+    cvc::volume vol(ctx, filename);
     return vol;
   } else
-    throw CVC_NAMESPACE::read_error(BOOST_CURRENT_FUNCTION);
+    throw cvc::read_error(BOOST_CURRENT_FUNCTION);
 
   return boost::any();
 }
@@ -281,12 +281,12 @@ boost::any load(app &ctx, const std::string &filename) {
 void save(app &ctx, const boost::any &data, const std::string &filename) {
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (is_geometry(data)) {
-    CVC_NAMESPACE::geometry geo = boost::any_cast<CVC_NAMESPACE::geometry>(data);
+    cvc::geometry geo = boost::any_cast<cvc::geometry>(data);
     geo.write(filename);
   } else if (is_volume(data)) {
-    CVC_NAMESPACE::volume vol = boost::any_cast<CVC_NAMESPACE::volume>(data);
+    cvc::volume vol = boost::any_cast<cvc::volume>(data);
     vol.write(filename);
   } else
-    throw CVC_NAMESPACE::write_error(BOOST_CURRENT_FUNCTION);
+    throw cvc::write_error(BOOST_CURRENT_FUNCTION);
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

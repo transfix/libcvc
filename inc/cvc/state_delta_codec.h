@@ -19,7 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 // ----------------
 // cvc::state_delta_codec
@@ -88,6 +88,6 @@ private:
   std::unordered_map<std::string, std::vector<unsigned char>> _baselines;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_DELTA_CODEC_H__

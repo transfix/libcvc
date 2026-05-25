@@ -18,7 +18,7 @@
 #include <cvc/state_transport.h>
 #include <sstream>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 namespace {
 
@@ -383,4 +383,4 @@ bool state_cluster_membership::get_peer(const std::string &node_id, peer_status 
   return true;
 }
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc

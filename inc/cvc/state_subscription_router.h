@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 
 using state_subscription_id = std::uint64_t;
 
@@ -48,6 +48,6 @@ private:
   std::unordered_map<state_subscription_id, state_subscription> _subscriptions;
 };
 
-} // namespace CVC_NAMESPACE
+} // namespace cvc
 
 #endif // __CVC_STATE_SUBSCRIPTION_ROUTER_H__

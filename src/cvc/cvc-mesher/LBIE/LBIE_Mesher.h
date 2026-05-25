@@ -23,7 +23,7 @@ namespace LBIE
     enum NormalType { BSPLINE_CONVOLUTION, CENTRAL_DIFFERENCE, BSPLINE_INTERPOLATION };
     enum ExtractionMethod { DUALLIB, FASTCONTOURING, LIBISOCONTOUR };
 
-    Mesher(CVC_NAMESPACE::app& ctx,
+    Mesher(cvc::app& ctx,
 	   float isovalue = DEFAULT_IVAL,
 	   float isovalue_in = DEFAULT_IVAL_IN,
 	   float err = DEFAULT_ERR,

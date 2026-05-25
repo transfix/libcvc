@@ -23,7 +23,7 @@ class state;
  */
 class NullGraphicNode : public GraphicsNode {
 public:
-  NullGraphicNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
+  NullGraphicNode(cvc::app &ctx, const std::string &statePath,
                   const std::string &name = "null");
   ~NullGraphicNode() override;
 

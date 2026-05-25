@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Global flag to control stress/performance tests
 bool enable_stress_tests = false;

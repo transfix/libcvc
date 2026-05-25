@@ -46,7 +46,7 @@
 
 // #define CVC_GEOMETRY_CORRECT_INDEX_START
 
-namespace CVC_NAMESPACE {
+namespace cvc {
 geometry::geometry() : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(nullptr) {
   for (uint64_t i = 0; i < 3; i++)
     _min[i] = _max[i] = 0.0;
@@ -648,4 +648,4 @@ geometry::geometry(app &ctx, const std::string &filename)
   init_ptrs();
   read(filename);
 }
-} // namespace CVC_NAMESPACE
+} // namespace cvc

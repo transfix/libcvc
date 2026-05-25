@@ -26,7 +26,7 @@
 #include <cvc/geometry.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Test sphere generation
 void test_sphere() {
