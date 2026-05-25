@@ -37,9 +37,13 @@ public:
   explicit async_evaluator(environment_ptr global_env);
 
   /// Evaluate a parsed expression (coroutine).
-  task<value_t> evaluate(const value_t &expr, environment_ptr env = nullptr);
+  task<value_t> evaluate(value_t expr, environment_ptr env = nullptr);
 
-  /// Parse + evaluate a script string (coroutine).
+  /// Parse a script string then evaluate it.
+  /// Not itself a coroutine — parsing is done eagerly, then delegates to
+  /// evaluate().  This avoids MSVC coroutine-frame corruption when complex
+  /// locals (parser vectors) live in the coroutine frame alongside
+  /// symmetric-transfer suspension points.
   task<value_t> evaluate_script(const std::string &script, environment_ptr env = nullptr);
 
   /// Blocking wrappers that run the coroutine to completion.

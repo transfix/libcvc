@@ -25,7 +25,7 @@ async_evaluator::async_evaluator(environment_ptr global_env) : global_env_(std::
 // public API — coroutines
 // ---------------------------------------------------------------------------
 
-task<value_t> async_evaluator::evaluate(const value_t &expr, environment_ptr env) {
+task<value_t> async_evaluator::evaluate(value_t expr, environment_ptr env) {
   auto run_env = env ? env : environment::extend(global_env_);
   root_expr_ = expr;
   stats_.start();
@@ -40,32 +40,20 @@ task<value_t> async_evaluator::evaluate(const value_t &expr, environment_ptr env
 }
 
 task<value_t> async_evaluator::evaluate_script(const std::string &script, environment_ptr env) {
+  // Non-coroutine: parse outside any coroutine frame then delegate to
+  // evaluate().  Keeping the parser/vector work out of the coroutine frame
+  // avoids an MSVC coroutine-frame-corruption bug that manifests as
+  // "bad variant access" on symmetric transfer.
   auto exprs = parse_all(script);
   if (exprs.empty())
-    co_return nil_value;
-  value_t expr_to_eval;
-  if (exprs.size() == 1) {
-    expr_to_eval = std::move(exprs[0]);
-  } else {
-    std::vector<value_t> begin_exprs;
-    begin_exprs.reserve(1 + exprs.size());
-    begin_exprs.push_back(value_t{symbol{"begin"}});
-    begin_exprs.insert(begin_exprs.end(), exprs.begin(), exprs.end());
-    expr_to_eval = make_list(std::move(begin_exprs));
-  }
-  // Inline the evaluate logic here to avoid an extra coroutine nesting layer.
-  // This prevents MSVC coroutine symmetric-transfer depth issues.
-  auto run_env = env ? env : environment::extend(global_env_);
-  root_expr_ = expr_to_eval;
-  stats_.start();
-  try {
-    value_t result = co_await eval_internal(expr_to_eval, run_env);
-    stats_.mark_complete();
-    co_return result;
-  } catch (...) {
-    stats_.mark_complete();
-    throw;
-  }
+    return evaluate(nil_value, env);
+  if (exprs.size() == 1)
+    return evaluate(std::move(exprs[0]), env);
+  std::vector<value_t> begin_exprs;
+  begin_exprs.reserve(1 + exprs.size());
+  begin_exprs.push_back(value_t{symbol{"begin"}});
+  begin_exprs.insert(begin_exprs.end(), exprs.begin(), exprs.end());
+  return evaluate(make_list(std::move(begin_exprs)), env);
 }
 
 // ---------------------------------------------------------------------------
