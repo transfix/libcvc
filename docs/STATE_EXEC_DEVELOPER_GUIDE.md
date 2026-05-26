@@ -122,10 +122,35 @@ auto results = sched.run();
 **String:** `str` (convert to string), `str-concat`
 **List:** `list`, `car`, `cdr`, `cons`, `nth`, `set-nth`, `length`, `append`, `slice`, `del-nth`
 **Dict:** `dict`, `get-attr`, `set-attr`, `del-attr`
-**Type:** `null?`, `list?`, `type-of`, `generator?`
+**Type:** `null?`, `list?`, `type-of`, `generator?`, `is-int`, `is-float`, `is-string`
+**Conversion:** `int` (to integer), `float` (to float)
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+
+#### Type Conversion
+
+```lisp
+;; Convert to integer — truncates floats, parses strings
+(int 3.7)       ;; => 3
+(int "123")     ;; => 123
+(int true)      ;; => 1
+
+;; Convert to float — widens integers, parses strings
+(float 5)       ;; => 5.0
+(float "3.14")  ;; => 3.14
+(float true)    ;; => 1.0
+
+;; Type predicates
+(is-int 42)       ;; => true
+(is-int 3.14)     ;; => false
+(is-float 3.14)   ;; => true
+(is-float 42)     ;; => false
+(is-string "hi")  ;; => true
+(is-string 42)    ;; => false
+```
+
+Conversion errors throw a runtime error (e.g., `(int "abc")` fails).
 
 ### Example Programs
 
@@ -671,6 +696,76 @@ Key points:
 - The callback fires synchronously inside `admit()` — keep it fast
 - Unsubscribe when done to avoid dangling references
 
+### Receiving Messages (DSL)
+
+`msg-recv` suspends the calling process until a message arrives on the
+specified path.  If a message is already queued, it returns immediately.
+
+```lisp
+;; Block until a message arrives on "events.data"
+(set msg (msg-recv "events.data"))
+
+;; msg is a dict — extract the payload
+(get-attr msg "payload")
+```
+
+Resolution order when `msg-recv` is called:
+1. **Inbox** — if the process has buffered messages, pops the front one
+2. **Pending queue** — if the scheduler has a pre-delivered message for the path, returns it
+3. **Suspend** — otherwise the process enters `waiting` status until a message is delivered
+
+### Checking for Pending Messages
+
+`msg-pending` returns the number of queued messages for a path without
+blocking:
+
+```lisp
+;; Non-blocking check
+(if (> (msg-pending "events.data") 0)
+    (set msg (msg-recv "events.data"))
+    (print "no messages yet"))
+```
+
+### Sleeping
+
+`sleep` suspends the current process for a given number of seconds.
+The scheduler automatically wakes it when the duration expires.
+
+```lisp
+;; Sleep for half a second
+(sleep 0.5)
+
+;; Polling loop with sleep
+(while true
+  (begin
+    (if (> (msg-pending "work.queue") 0)
+        (begin
+          (set job (msg-recv "work.queue"))
+          (process-job job))
+        (sleep 0.1))))
+```
+
+`sleep` accepts integer or floating-point seconds (must be non-negative).
+It returns `true` on success.
+
+### Message-Driven Process Example
+
+A complete receiver that waits for messages and accumulates results:
+
+```lisp
+(begin
+  (set results (list))
+  (set done false)
+  (while (not done)
+    (begin
+      (set m (msg-recv "tasks.input"))
+      (set payload (get-attr m "payload"))
+      (if (= payload "stop")
+          (set done true)
+          (set results (append results (list payload))))))
+  results)
+```
+
 ---
 
 ## 7. Resource Limits & Policies
@@ -734,6 +829,45 @@ process_limits requested{
 auto validated = validate_limits(policy, requested);
 // validated.max_time is clamped to 60.0
 ```
+
+### Scheduler Settings via the State Tree
+
+Scheduler configuration can be loaded from the state tree, allowing
+runtime adjustment without recompilation.  Settings are resolved in
+order: per-scheduler override → global default → hardcoded fallback.
+
+```cpp
+scheduler sched;
+sched.set_watch_root(&root);   // point to the state tree root
+sched.set_id("worker-1");      // scheduler identity
+sched.load_settings();         // read and apply settings
+```
+
+**State tree paths:**
+
+| Setting | Per-scheduler path | Global path | Default |
+|---------|-------------------|-------------|---------|
+| `max_pending_messages` | `state_exec.schedulers.<id>.max_pending_messages` | `state_exec.defaults.max_pending_messages` | `1024` |
+
+```cpp
+// Set a global default for all schedulers
+root("state_exec.defaults.max_pending_messages").value("512");
+sched.load_settings();
+// sched.max_pending_messages == 512
+
+// Override for a specific scheduler
+root("state_exec.schedulers.worker-1.max_pending_messages").value("2048");
+sched.load_settings();
+// sched.max_pending_messages == 2048
+
+// "0" means unlimited; invalid values fall back to 1024
+```
+
+After `load_settings()`, the scheduler publishes its effective
+configuration back to the state tree:
+
+- `state_exec.schedulers.<id>.max_pending_messages` — the resolved cap
+- `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
 
 ---
 
@@ -1210,7 +1344,8 @@ stdlib.import_module("math", env, {"math.sqrt", "math.abs"});
 │  async_scheduler.h → async variant of scheduler                │
 │  memory_tracker.h  → per-process byte tracking                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  intrinsics.h      → state-get/set, spawn, fork, ps, msg-send  │
+│  intrinsics.h      → state-get/set, spawn, fork, ps, msg-send,  │
+│                       msg-recv, msg-pending, sleep               │
 │  resource_policy.h → cluster-wide resource constraints         │
 ├─────────────────────────────────────────────────────────────────┤
 │  exec_coordinator.h → leader election, submit, migrate, admin  │
