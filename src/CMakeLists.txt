@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 option(CVC_USING_XMLRPC "Enable cvc::state network sharing with XMLRPC" OFF)
 
 add_subdirectory(cvc)
+add_subdirectory(cvc-cli)
 
 if(CVC_USING_XMLRPC)
   add_subdirectory(xmlrpc)
