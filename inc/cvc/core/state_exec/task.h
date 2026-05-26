@@ -17,6 +17,17 @@
 
 namespace cvc::state_exec {
 
+// ---------------------------------------------------------------------------
+// Trampoline for coroutine resumption — avoids stack overflow from deep
+// recursive symmetric transfer chains (e.g. fib(15) in debug builds).
+// ---------------------------------------------------------------------------
+namespace detail {
+inline std::coroutine_handle<> &trampoline_next() noexcept {
+  static thread_local std::coroutine_handle<> h{std::noop_coroutine()};
+  return h;
+}
+} // namespace detail
+
 /// Lazy, single-shot coroutine return type with continuation support.
 ///
 /// Usage:
@@ -49,7 +60,8 @@ public:
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
-          return h.promise().continuation_;
+          detail::trampoline_next() = h.promise().continuation_;
+          return std::noop_coroutine();
         }
         void await_resume() noexcept {}
       };
@@ -85,12 +97,18 @@ public:
       handle_.destroy();
   }
 
-  /// Run the coroutine to completion synchronously.
+  /// Run the coroutine to completion synchronously via trampoline loop.
   T sync_wait() {
+    auto saved = detail::trampoline_next();
     handle_.promise().continuation_ = std::noop_coroutine();
-    handle_.resume();
-    while (!handle_.done())
-      handle_.resume();
+    detail::trampoline_next() = handle_;
+    while (detail::trampoline_next() != std::noop_coroutine()) {
+      auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
+      next.resume();
+      if (handle_.done())
+        break;
+    }
+    detail::trampoline_next() = saved;
     auto &r = handle_.promise().result_;
     if (r.index() == 2)
       std::rethrow_exception(std::get<2>(r));
@@ -107,7 +125,8 @@ public:
       bool await_ready() noexcept { return false; }
       std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
-        return h; // symmetric transfer to inner
+        detail::trampoline_next() = h;
+        return std::noop_coroutine();
       }
       T await_resume() {
         auto &r = h.promise().result_;
@@ -146,7 +165,8 @@ public:
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
-          return h.promise().continuation_;
+          detail::trampoline_next() = h.promise().continuation_;
+          return std::noop_coroutine();
         }
         void await_resume() noexcept {}
       };
@@ -183,9 +203,16 @@ public:
   }
 
   void sync_wait() {
+    auto saved = detail::trampoline_next();
     handle_.promise().continuation_ = std::noop_coroutine();
-    while (!handle_.done())
-      handle_.resume();
+    detail::trampoline_next() = handle_;
+    while (detail::trampoline_next() != std::noop_coroutine()) {
+      auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
+      next.resume();
+      if (handle_.done())
+        break;
+    }
+    detail::trampoline_next() = saved;
     if (handle_.promise().exception_)
       std::rethrow_exception(handle_.promise().exception_);
   }
@@ -196,7 +223,8 @@ public:
       bool await_ready() noexcept { return false; }
       std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
-        return h;
+        detail::trampoline_next() = h;
+        return std::noop_coroutine();
       }
       void await_resume() {
         if (h.promise().exception_)
