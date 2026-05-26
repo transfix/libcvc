@@ -375,6 +375,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
 ### Core Documentation
 
+- **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** - Unified `cvc` CLI guide with examples for volume processing, geometry meshing, distributed state, and script execution
 - **[USAGE.md](USAGE.md)** - Consumer guide for `find_package(cvc)` from a CMake project
 - **[docs/APP_API.md](docs/APP_API.md)** - `cvc::app` runtime context API
 - **[docs/STATE_API.md](docs/STATE_API.md)** - State tree / property bag API
