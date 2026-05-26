@@ -4,8 +4,44 @@
  *
  * Provides task<T>, a C++20 coroutine type that suspends immediately on
  * creation and resumes when awaited.  Supports both void and non-void
- * return types, exception propagation, and symmetric transfer for
- * efficient coroutine chaining.
+ * return types, exception propagation, and a trampoline-based
+ * resumption loop for safe coroutine chaining.
+ *
+ * ## Trampoline pattern
+ *
+ * The C++20 symmetric-transfer idiom (await_suspend returning a
+ * coroutine_handle) is designed to let the compiler turn chains of
+ * co_await calls into tail calls, keeping the native stack depth at
+ * O(1).  In practice, GCC and Clang only perform this optimisation
+ * at -O1 and above.  In debug builds (-O0 / -Og) every symmetric
+ * transfer becomes a regular call, so a deeply recursive evaluator
+ * script such as fib(15) — which produces ~1 200 nested
+ * eval_internal → apply_closure → eval_internal frames, each
+ * involving an intermediate check_interrupted_async co_await —
+ * generates 59 000+ native stack frames and immediately segfaults.
+ *
+ * The fix is a thread-local trampoline:
+ *
+ *   1. Instead of returning the next coroutine handle from
+ *      await_suspend (symmetric transfer), every suspension point
+ *      writes the handle into a thread-local slot and returns
+ *      std::noop_coroutine() — which returns control to the
+ *      nearest resume() call on the native stack.
+ *
+ *   2. sync_wait() (and the sync_evaluate timeout loop in
+ *      async_evaluator.cpp) drives a flat while-loop that reads
+ *      the thread-local, clears it, and resumes the handle, one
+ *      step at a time.  The native stack depth is always 1
+ *      regardless of how deeply the script recurses.
+ *
+ *   3. The thread-local is saved/restored on entry/exit of
+ *      sync_wait() so that nested synchronous evaluations (e.g.
+ *      defclass method wrappers that call sync_wait inside a
+ *      native_fn) compose correctly.
+ *
+ * This gives the same semantics as symmetric transfer — each
+ * suspension still resumes exactly the right continuation — but
+ * works reliably at every optimisation level.
  */
 #ifndef CVC_STATE_EXEC_TASK_H
 #define CVC_STATE_EXEC_TASK_H
@@ -18,8 +54,14 @@
 namespace cvc::state_exec {
 
 // ---------------------------------------------------------------------------
-// Trampoline for coroutine resumption — avoids stack overflow from deep
-// recursive symmetric transfer chains (e.g. fib(15) in debug builds).
+// Thread-local trampoline slot.
+//
+// Every co_await and final_suspend writes the next coroutine handle
+// here instead of doing direct symmetric transfer.  The sync_wait()
+// loop picks it up and resumes the handle in a flat loop, avoiding
+// O(N) native stack growth for N-deep recursive evaluations.
+//
+// noop_coroutine() is the sentinel meaning "nothing to resume".
 // ---------------------------------------------------------------------------
 namespace detail {
 inline std::coroutine_handle<> &trampoline_next() noexcept {
@@ -55,13 +97,15 @@ public:
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
-    // On final suspend, resume the continuation (the awaiting coroutine)
+    // On final suspend, hand the continuation to the trampoline rather
+    // than doing symmetric transfer (returning it directly), so that the
+    // native call stack unwinds back to the sync_wait/trampoline loop.
     auto final_suspend() noexcept {
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
           detail::trampoline_next() = h.promise().continuation_;
-          return std::noop_coroutine();
+          return std::noop_coroutine(); // unwind to trampoline loop
         }
         void await_resume() noexcept {}
       };
@@ -97,18 +141,28 @@ public:
       handle_.destroy();
   }
 
-  /// Run the coroutine to completion synchronously via trampoline loop.
+  /// Run the coroutine to completion synchronously.
+  ///
+  /// Drives the trampoline loop: each iteration resumes exactly one
+  /// coroutine; that coroutine's await_suspend / final_suspend writes
+  /// the *next* handle into the thread-local slot and returns
+  /// noop_coroutine, so resume() returns here immediately.  The loop
+  /// keeps the native stack depth at 1 regardless of script recursion.
+  ///
+  /// The save/restore of the thread-local lets nested sync_wait calls
+  /// (e.g. defclass method wrappers) work without corrupting the
+  /// outer evaluation's trampoline state.
   T sync_wait() {
-    auto saved = detail::trampoline_next();
+    auto saved = detail::trampoline_next();   // save for re-entrancy
     handle_.promise().continuation_ = std::noop_coroutine();
-    detail::trampoline_next() = handle_;
+    detail::trampoline_next() = handle_;      // seed the loop
     while (detail::trampoline_next() != std::noop_coroutine()) {
       auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
-      next.resume();
+      next.resume();  // runs one coroutine step; sets trampoline_next
       if (handle_.done())
         break;
     }
-    detail::trampoline_next() = saved;
+    detail::trampoline_next() = saved;        // restore for re-entrancy
     auto &r = handle_.promise().result_;
     if (r.index() == 2)
       std::rethrow_exception(std::get<2>(r));
@@ -118,11 +172,14 @@ public:
   }
 
   /// Awaiter: suspends the caller, stores it as continuation,
-  /// and resumes this (inner) coroutine.
+  /// and schedules this (inner) coroutine via the trampoline.
   auto operator co_await() noexcept {
     struct awaiter {
       handle_type h;
       bool await_ready() noexcept { return false; }
+      // Store caller as continuation so final_suspend chains back,
+      // then park the inner handle in the trampoline slot and return
+      // noop_coroutine to unwind to the trampoline loop.
       std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
         detail::trampoline_next() = h;
@@ -161,12 +218,13 @@ public:
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
+    // Same trampoline strategy as task<T>::final_suspend (see above).
     auto final_suspend() noexcept {
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
           detail::trampoline_next() = h.promise().continuation_;
-          return std::noop_coroutine();
+          return std::noop_coroutine(); // unwind to trampoline loop
         }
         void await_resume() noexcept {}
       };
@@ -202,6 +260,7 @@ public:
       handle_.destroy();
   }
 
+  /// Run the void coroutine to completion (see task<T>::sync_wait).
   void sync_wait() {
     auto saved = detail::trampoline_next();
     handle_.promise().continuation_ = std::noop_coroutine();
@@ -217,6 +276,7 @@ public:
       std::rethrow_exception(handle_.promise().exception_);
   }
 
+  // Same trampoline-based co_await as task<T> (see above).
   auto operator co_await() noexcept {
     struct awaiter {
       handle_type h;
@@ -224,7 +284,7 @@ public:
       std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
         detail::trampoline_next() = h;
-        return std::noop_coroutine();
+        return std::noop_coroutine(); // unwind to trampoline loop
       }
       void await_resume() {
         if (h.promise().exception_)
