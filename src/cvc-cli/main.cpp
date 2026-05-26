@@ -25,6 +25,15 @@
 // Consolidates the old libcvc CLI, volutils, and geometry/volume
 // processing commands into a single tool with subcommands.
 
+#include <algorithm>
+#include <boost/filesystem.hpp>
+#include <boost/format.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/program_options.hpp>
+#include <chrono>
+#include <cmath>
+#include <csignal>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/distributed_state_session.h>
 #include <cvc/core/state.h>
@@ -41,17 +50,6 @@
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
 #include <cvc/volume/volume_ops.h>
-
-#include <boost/filesystem.hpp>
-#include <boost/format.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/program_options.hpp>
-
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <csignal>
-#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -81,11 +79,10 @@ static cvc::data_type string_to_type(const std::string &s) {
     const char *alias;
     cvc::data_type dt;
   } type_map[] = {
-      {"UChar", cvc::UChar},           {"unsigned char", cvc::UChar},
-      {"UShort", cvc::UShort},         {"unsigned short", cvc::UShort},
-      {"UInt", cvc::UInt},             {"unsigned int", cvc::UInt},
-      {"Float", cvc::Float},           {"float", cvc::Float},
-      {"Double", cvc::Double},         {"double", cvc::Double},
+      {"UChar", cvc::UChar},           {"unsigned char", cvc::UChar}, {"UShort", cvc::UShort},
+      {"unsigned short", cvc::UShort}, {"UInt", cvc::UInt},           {"unsigned int", cvc::UInt},
+      {"Float", cvc::Float},           {"float", cvc::Float},         {"Double", cvc::Double},
+      {"double", cvc::Double},
   };
   for (const auto &t : type_map)
     if (s == t.alias)
@@ -100,16 +97,18 @@ static cvc::data_type string_to_type(const std::string &s) {
 
 static int cmd_info(int argc, char **argv) {
   po::options_description desc("cvc info - display file metadata (volume or geometry)");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input file");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input file");
 
   po::positional_options_description pos;
   pos.add("input", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -135,16 +134,16 @@ static int cmd_info(int argc, char **argv) {
     vfi.read(app, input);
     std::cout << "File:       " << vfi.filename() << "\n"
               << "Dimensions: " << vfi.XDim() << " x " << vfi.YDim() << " x " << vfi.ZDim() << "\n"
-              << "BBox:       [" << vfi.boundingBox().minx << ", " << vfi.boundingBox().miny
-              << ", " << vfi.boundingBox().minz << "] - [" << vfi.boundingBox().maxx << ", "
+              << "BBox:       [" << vfi.boundingBox().minx << ", " << vfi.boundingBox().miny << ", "
+              << vfi.boundingBox().minz << "] - [" << vfi.boundingBox().maxx << ", "
               << vfi.boundingBox().maxy << ", " << vfi.boundingBox().maxz << "]\n"
-              << "Span:       " << vfi.XSpan() << " x " << vfi.YSpan() << " x " << vfi.ZSpan() << "\n"
+              << "Span:       " << vfi.XSpan() << " x " << vfi.YSpan() << " x " << vfi.ZSpan()
+              << "\n"
               << "Variables:  " << vfi.numVariables() << "\n"
               << "Timesteps:  " << vfi.numTimesteps() << "\n";
 
     for (unsigned v = 0; v < vfi.numVariables(); ++v) {
-      std::cout << "  Var " << v << ": name=" << vfi.name(v)
-                << " type=" << vfi.voxelTypeStr(v);
+      std::cout << "  Var " << v << ": name=" << vfi.name(v) << " type=" << vfi.voxelTypeStr(v);
       for (unsigned t = 0; t < vfi.numTimesteps(); ++t) {
         std::cout << " min=" << vfi.min(v, t) << " max=" << vfi.max(v, t);
       }
@@ -158,24 +157,25 @@ static int cmd_info(int argc, char **argv) {
 
 static int cmd_stats(int argc, char **argv) {
   po::options_description desc("cvc stats - compute volume statistics");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file");
 
   po::positional_options_description pos;
   pos.add("input", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
   vol.read(vm["input"].as<std::string>());
   cvc::volume_stats s = cvc::compute_stats(vol);
 
-  std::cout << std::setprecision(12)
-            << "Min:     " << s.min << "\n"
+  std::cout << std::setprecision(12) << "Min:     " << s.min << "\n"
             << "Max:     " << s.max << "\n"
             << "Mean:    " << s.mean << "\n"
             << "StdDev:  " << s.std_dev << "\n"
@@ -189,40 +189,42 @@ static int cmd_stats(int argc, char **argv) {
 
 static int cmd_copy(int argc, char **argv) {
   po::options_description desc("cvc copy - copy/convert files (auto-detects volume or geometry)");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input file")
-    ("output,o", po::value<std::string>()->required(), "output file");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input file")(
+      "output,o", po::value<std::string>()->required(), "output file");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
-  cvc::save(app, cvc::load(app, vm["input"].as<std::string>()),
-            vm["output"].as<std::string>());
+  cvc::save(app, cvc::load(app, vm["input"].as<std::string>()), vm["output"].as<std::string>());
   return 0;
 }
 
 static int cmd_convert(int argc, char **argv) {
   po::options_description desc("cvc convert - convert between volume formats or voxel types");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("type,t", po::value<std::string>(),
-     "output voxel type (UChar, UShort, UInt, Float, Double)");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "type,t", po::value<std::string>(), "output voxel type (UChar, UShort, UInt, Float, Double)");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -239,29 +241,29 @@ static int cmd_convert(int argc, char **argv) {
 
 #ifdef CVC_ENABLE_SDF
 static int cmd_sdf(int argc, char **argv) {
-  po::options_description desc(
-    "cvc sdf - compute signed distance field from geometry\n\n"
-    "Algorithms:\n"
-    "  v1  Original SDFLibrary (octree-based, thread-safe) [default]\n"
-    "  v2  DistanceTransform (brute-force)\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input geometry file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("dim,d", po::value<std::string>()->default_value("64,64,64"),
-     "output dimensions (NxNxN or X,Y,Z)")
-    ("bbox,b", po::value<std::string>(),
-     "bounding box (minx,miny,minz,maxx,maxy,maxz); defaults to geometry extents")
-    ("algorithm,a", po::value<std::string>()->default_value("v1"),
-     "SDF algorithm: v1 or v2")
-    ("flip-normals", "flip normals to invert inside/outside");
+  po::options_description desc("cvc sdf - compute signed distance field from geometry\n\n"
+                               "Algorithms:\n"
+                               "  v1  Original SDFLibrary (octree-based, thread-safe) [default]\n"
+                               "  v2  DistanceTransform (brute-force)\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input geometry file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("dim,d", po::value<std::string>()->default_value("64,64,64"),
+                            "output dimensions (NxNxN or X,Y,Z)")(
+      "bbox,b", po::value<std::string>(),
+      "bounding box (minx,miny,minz,maxx,maxy,maxz); defaults to geometry extents")(
+      "algorithm,a", po::value<std::string>()->default_value("v1"),
+      "SDF algorithm: v1 or v2")("flip-normals", "flip normals to invert inside/outside");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -292,36 +294,34 @@ static int cmd_sdf(int argc, char **argv) {
 
 #ifdef CVC_ENABLE_MESHER
 static int cmd_iso(int argc, char **argv) {
-  po::options_description desc(
-    "cvc iso - extract isosurface geometry from a volume\n\n"
-    "Extraction methods:\n"
-    "  duallib         Dual contouring library [default]\n"
-    "  fastcontouring  Fast contouring\n"
-    "  libisocontour   ISO contouring library\n\n"
-    "Normal types:\n"
-    "  bspline-conv    B-spline convolution [default]\n"
-    "  central-diff    Central difference\n"
-    "  bspline-interp  B-spline interpolation\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output geometry file")
-    ("isovalue,v", po::value<double>()->required(), "isovalue")
-    ("method,m", po::value<std::string>()->default_value("duallib"),
-     "extraction method")
-    ("improve,q", po::value<int>()->default_value(0),
-     "quality improvement iterations (0 = none)")
-    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
-     "normal computation method")
-    ("property-vol,p", po::value<std::string>(),
-     "optional property volume for interpolation");
+  po::options_description desc("cvc iso - extract isosurface geometry from a volume\n\n"
+                               "Extraction methods:\n"
+                               "  duallib         Dual contouring library [default]\n"
+                               "  fastcontouring  Fast contouring\n"
+                               "  libisocontour   ISO contouring library\n\n"
+                               "Normal types:\n"
+                               "  bspline-conv    B-spline convolution [default]\n"
+                               "  central-diff    Central difference\n"
+                               "  bspline-interp  B-spline interpolation\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output geometry file")("isovalue,v", po::value<double>()->required(), "isovalue")(
+      "method,m", po::value<std::string>()->default_value("duallib"), "extraction method")(
+      "improve,q", po::value<int>()->default_value(0), "quality improvement iterations (0 = none)")(
+      "normals,n", po::value<std::string>()->default_value("bspline-conv"),
+      "normal computation method")("property-vol,p", po::value<std::string>(),
+                                   "optional property volume for interpolation");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -331,14 +331,18 @@ static int cmd_iso(int argc, char **argv) {
   // Parse extraction method
   cvc::extraction_method method = cvc::DUALLIB;
   std::string mstr = vm["method"].as<std::string>();
-  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
-  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+  if (mstr == "fastcontouring")
+    method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour")
+    method = cvc::LIBISOCONTOUR;
 
   // Parse normal type
   cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
   std::string nstr = vm["normals"].as<std::string>();
-  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
-  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+  if (nstr == "central-diff")
+    normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp")
+    normals = cvc::BSPLINE_INTERPOLATION;
 
   int improve = vm["improve"].as<int>();
   double isovalue = vm["isovalue"].as<double>();
@@ -353,43 +357,41 @@ static int cmd_iso(int argc, char **argv) {
   }
 
   result.write(vm["output"].as<std::string>());
-  std::cout << "Wrote isosurface (" << result.num_points() << " verts, "
-            << result.num_tris() << " tris) to " << vm["output"].as<std::string>() << "\n";
+  std::cout << "Wrote isosurface (" << result.num_points() << " verts, " << result.num_tris()
+            << " tris) to " << vm["output"].as<std::string>() << "\n";
   return 0;
 }
 
 static int cmd_tetrahedralize(int argc, char **argv) {
-  po::options_description desc(
-    "cvc tetrahedralize - extract tetrahedral mesh from volume\n\n"
-    "Improvement methods:\n"
-    "  none          No improvement [default]\n"
-    "  geo-flow      Geometric flow smoothing\n"
-    "  edge-contract Edge contraction\n"
-    "  joe-liu       Joe-Liu method\n"
-    "  minimal-vol   Minimal volume\n"
-    "  optimization  Optimization-based\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output geometry file")
-    ("isovalue,v", po::value<double>()->required(), "isovalue")
-    ("method,m", po::value<std::string>()->default_value("duallib"),
-     "extraction method (duallib, fastcontouring, libisocontour)")
-    ("improve", po::value<std::string>()->default_value("none"),
-     "improvement method")
-    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
-     "normal type (bspline-conv, central-diff, bspline-interp)")
-    ("iterations,q", po::value<int>()->default_value(0),
-     "improvement iterations")
-    ("property-vol,p", po::value<std::string>(),
-     "optional property volume");
+  po::options_description desc("cvc tetrahedralize - extract tetrahedral mesh from volume\n\n"
+                               "Improvement methods:\n"
+                               "  none          No improvement [default]\n"
+                               "  geo-flow      Geometric flow smoothing\n"
+                               "  edge-contract Edge contraction\n"
+                               "  joe-liu       Joe-Liu method\n"
+                               "  minimal-vol   Minimal volume\n"
+                               "  optimization  Optimization-based\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output geometry file")("isovalue,v", po::value<double>()->required(), "isovalue")(
+      "method,m", po::value<std::string>()->default_value("duallib"),
+      "extraction method (duallib, fastcontouring, libisocontour)")(
+      "improve", po::value<std::string>()->default_value("none"),
+      "improvement method")("normals,n", po::value<std::string>()->default_value("bspline-conv"),
+                            "normal type (bspline-conv, central-diff, bspline-interp)")(
+      "iterations,q", po::value<int>()->default_value(0), "improvement iterations")(
+      "property-vol,p", po::value<std::string>(), "optional property volume");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -398,21 +400,30 @@ static int cmd_tetrahedralize(int argc, char **argv) {
 
   cvc::extraction_method method = cvc::DUALLIB;
   std::string mstr = vm["method"].as<std::string>();
-  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
-  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+  if (mstr == "fastcontouring")
+    method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour")
+    method = cvc::LIBISOCONTOUR;
 
   cvc::improvement_method improve = cvc::NO_IMPROVE;
   std::string istr = vm["improve"].as<std::string>();
-  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
-  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
-  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
-  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
-  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+  if (istr == "geo-flow")
+    improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract")
+    improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu")
+    improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol")
+    improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization")
+    improve = cvc::OPTIMIZATION;
 
   cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
   std::string nstr = vm["normals"].as<std::string>();
-  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
-  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+  if (nstr == "central-diff")
+    normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp")
+    normals = cvc::BSPLINE_INTERPOLATION;
 
   int iters = vm["iterations"].as<int>();
   double isovalue = vm["isovalue"].as<double>();
@@ -434,26 +445,28 @@ static int cmd_tetrahedralize(int argc, char **argv) {
 
 static int cmd_hexahedralize(int argc, char **argv) {
   po::options_description desc("cvc hexahedralize - extract hexahedral mesh from volume");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output geometry file")
-    ("isovalue,v", po::value<double>()->required(), "isovalue")
-    ("method,m", po::value<std::string>()->default_value("duallib"),
-     "extraction method (duallib, fastcontouring, libisocontour)")
-    ("improve", po::value<std::string>()->default_value("none"),
-     "improvement method (none, geo-flow, edge-contract, joe-liu, minimal-vol, optimization)")
-    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
-     "normal type (bspline-conv, central-diff, bspline-interp)")
-    ("iterations,q", po::value<int>()->default_value(0), "improvement iterations")
-    ("property-vol,p", po::value<std::string>(), "optional property volume");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output geometry file")("isovalue,v", po::value<double>()->required(), "isovalue")(
+      "method,m", po::value<std::string>()->default_value("duallib"),
+      "extraction method (duallib, fastcontouring, libisocontour)")(
+      "improve", po::value<std::string>()->default_value("none"),
+      "improvement method (none, geo-flow, edge-contract, joe-liu, minimal-vol, optimization)")(
+      "normals,n", po::value<std::string>()->default_value("bspline-conv"),
+      "normal type (bspline-conv, central-diff, bspline-interp)")(
+      "iterations,q", po::value<int>()->default_value(0), "improvement iterations")(
+      "property-vol,p", po::value<std::string>(), "optional property volume");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -462,21 +475,30 @@ static int cmd_hexahedralize(int argc, char **argv) {
 
   cvc::extraction_method method = cvc::DUALLIB;
   std::string mstr = vm["method"].as<std::string>();
-  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
-  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+  if (mstr == "fastcontouring")
+    method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour")
+    method = cvc::LIBISOCONTOUR;
 
   cvc::improvement_method improve = cvc::NO_IMPROVE;
   std::string istr = vm["improve"].as<std::string>();
-  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
-  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
-  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
-  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
-  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+  if (istr == "geo-flow")
+    improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract")
+    improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu")
+    improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol")
+    improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization")
+    improve = cvc::OPTIMIZATION;
 
   cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
   std::string nstr = vm["normals"].as<std::string>();
-  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
-  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+  if (nstr == "central-diff")
+    normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp")
+    normals = cvc::BSPLINE_INTERPOLATION;
 
   int iters = vm["iterations"].as<int>();
   double isovalue = vm["isovalue"].as<double>();
@@ -498,35 +520,35 @@ static int cmd_hexahedralize(int argc, char **argv) {
 
 static int cmd_tetrahedralize2(int argc, char **argv) {
   po::options_description desc(
-    "cvc tetrahedralize2 - extract dual tetrahedral (tet2) mesh from volume\n\n"
-    "Produces a dual tetrahedral mesh (TETRA2 element type).\n\n"
-    "Improvement methods:\n"
-    "  none          No improvement [default]\n"
-    "  geo-flow      Geometric flow smoothing\n"
-    "  edge-contract Edge contraction\n"
-    "  joe-liu       Joe-Liu method\n"
-    "  minimal-vol   Minimal volume\n"
-    "  optimization  Optimization-based\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output geometry file")
-    ("isovalue,v", po::value<double>()->required(), "isovalue")
-    ("method,m", po::value<std::string>()->default_value("duallib"),
-     "extraction method (duallib, fastcontouring, libisocontour)")
-    ("improve", po::value<std::string>()->default_value("none"),
-     "improvement method")
-    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
-     "normal type (bspline-conv, central-diff, bspline-interp)")
-    ("iterations,q", po::value<int>()->default_value(0),
-     "improvement iterations");
+      "cvc tetrahedralize2 - extract dual tetrahedral (tet2) mesh from volume\n\n"
+      "Produces a dual tetrahedral mesh (TETRA2 element type).\n\n"
+      "Improvement methods:\n"
+      "  none          No improvement [default]\n"
+      "  geo-flow      Geometric flow smoothing\n"
+      "  edge-contract Edge contraction\n"
+      "  joe-liu       Joe-Liu method\n"
+      "  minimal-vol   Minimal volume\n"
+      "  optimization  Optimization-based\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output geometry file")("isovalue,v", po::value<double>()->required(), "isovalue")(
+      "method,m", po::value<std::string>()->default_value("duallib"),
+      "extraction method (duallib, fastcontouring, libisocontour)")(
+      "improve", po::value<std::string>()->default_value("none"),
+      "improvement method")("normals,n", po::value<std::string>()->default_value("bspline-conv"),
+                            "normal type (bspline-conv, central-diff, bspline-interp)")(
+      "iterations,q", po::value<int>()->default_value(0), "improvement iterations");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -535,21 +557,30 @@ static int cmd_tetrahedralize2(int argc, char **argv) {
 
   cvc::extraction_method method = cvc::DUALLIB;
   std::string mstr = vm["method"].as<std::string>();
-  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
-  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+  if (mstr == "fastcontouring")
+    method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour")
+    method = cvc::LIBISOCONTOUR;
 
   cvc::improvement_method improve = cvc::NO_IMPROVE;
   std::string istr = vm["improve"].as<std::string>();
-  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
-  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
-  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
-  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
-  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+  if (istr == "geo-flow")
+    improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract")
+    improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu")
+    improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol")
+    improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization")
+    improve = cvc::OPTIMIZATION;
 
   cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
   std::string nstr = vm["normals"].as<std::string>();
-  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
-  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+  if (nstr == "central-diff")
+    normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp")
+    normals = cvc::BSPLINE_INTERPOLATION;
 
   int iters = vm["iterations"].as<int>();
   double isovalue = vm["isovalue"].as<double>();
@@ -564,37 +595,37 @@ static int cmd_tetrahedralize2(int argc, char **argv) {
 
 static int cmd_layer_mesh(int argc, char **argv) {
   po::options_description desc(
-    "cvc layer-mesh - extract tetrahedral mesh of layer between two isosurfaces\n\n"
-    "Produces a volumetric tet2 mesh of the region between an outer and inner\n"
-    "isovalue. Useful for meshing shells, cortical layers, or material boundaries.\n\n"
-    "Improvement methods:\n"
-    "  none          No improvement [default]\n"
-    "  geo-flow      Geometric flow smoothing\n"
-    "  edge-contract Edge contraction\n"
-    "  joe-liu       Joe-Liu method\n"
-    "  minimal-vol   Minimal volume\n"
-    "  optimization  Optimization-based\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output geometry file")
-    ("isovalue-outer", po::value<double>()->required(), "outer isovalue")
-    ("isovalue-inner", po::value<double>()->required(), "inner isovalue")
-    ("method,m", po::value<std::string>()->default_value("duallib"),
-     "extraction method (duallib, fastcontouring, libisocontour)")
-    ("improve", po::value<std::string>()->default_value("none"),
-     "improvement method")
-    ("normals,n", po::value<std::string>()->default_value("bspline-conv"),
-     "normal type (bspline-conv, central-diff, bspline-interp)")
-    ("iterations,q", po::value<int>()->default_value(0),
-     "improvement iterations");
+      "cvc layer-mesh - extract tetrahedral mesh of layer between two isosurfaces\n\n"
+      "Produces a volumetric tet2 mesh of the region between an outer and inner\n"
+      "isovalue. Useful for meshing shells, cortical layers, or material boundaries.\n\n"
+      "Improvement methods:\n"
+      "  none          No improvement [default]\n"
+      "  geo-flow      Geometric flow smoothing\n"
+      "  edge-contract Edge contraction\n"
+      "  joe-liu       Joe-Liu method\n"
+      "  minimal-vol   Minimal volume\n"
+      "  optimization  Optimization-based\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output geometry file")("isovalue-outer", po::value<double>()->required(), "outer isovalue")(
+      "isovalue-inner", po::value<double>()->required(),
+      "inner isovalue")("method,m", po::value<std::string>()->default_value("duallib"),
+                        "extraction method (duallib, fastcontouring, libisocontour)")(
+      "improve", po::value<std::string>()->default_value("none"),
+      "improvement method")("normals,n", po::value<std::string>()->default_value("bspline-conv"),
+                            "normal type (bspline-conv, central-diff, bspline-interp)")(
+      "iterations,q", po::value<int>()->default_value(0), "improvement iterations");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -603,28 +634,37 @@ static int cmd_layer_mesh(int argc, char **argv) {
 
   cvc::extraction_method method = cvc::DUALLIB;
   std::string mstr = vm["method"].as<std::string>();
-  if (mstr == "fastcontouring") method = cvc::FASTCONTOURING;
-  else if (mstr == "libisocontour") method = cvc::LIBISOCONTOUR;
+  if (mstr == "fastcontouring")
+    method = cvc::FASTCONTOURING;
+  else if (mstr == "libisocontour")
+    method = cvc::LIBISOCONTOUR;
 
   cvc::improvement_method improve = cvc::NO_IMPROVE;
   std::string istr = vm["improve"].as<std::string>();
-  if (istr == "geo-flow") improve = cvc::GEO_FLOW;
-  else if (istr == "edge-contract") improve = cvc::EDGE_CONTRACT;
-  else if (istr == "joe-liu") improve = cvc::JOE_LIU;
-  else if (istr == "minimal-vol") improve = cvc::MINIMAL_VOL;
-  else if (istr == "optimization") improve = cvc::OPTIMIZATION;
+  if (istr == "geo-flow")
+    improve = cvc::GEO_FLOW;
+  else if (istr == "edge-contract")
+    improve = cvc::EDGE_CONTRACT;
+  else if (istr == "joe-liu")
+    improve = cvc::JOE_LIU;
+  else if (istr == "minimal-vol")
+    improve = cvc::MINIMAL_VOL;
+  else if (istr == "optimization")
+    improve = cvc::OPTIMIZATION;
 
   cvc::normal_type normals = cvc::BSPLINE_CONVOLUTION;
   std::string nstr = vm["normals"].as<std::string>();
-  if (nstr == "central-diff") normals = cvc::CENTRAL_DIFFERENCE;
-  else if (nstr == "bspline-interp") normals = cvc::BSPLINE_INTERPOLATION;
+  if (nstr == "central-diff")
+    normals = cvc::CENTRAL_DIFFERENCE;
+  else if (nstr == "bspline-interp")
+    normals = cvc::BSPLINE_INTERPOLATION;
 
   int iters = vm["iterations"].as<int>();
   double iso_outer = vm["isovalue-outer"].as<double>();
   double iso_inner = vm["isovalue-inner"].as<double>();
 
-  cvc::geometry result = cvc::tetrahedralize2(vol, iso_outer, iso_inner,
-                                               method, improve, normals, iters);
+  cvc::geometry result =
+      cvc::tetrahedralize2(vol, iso_outer, iso_inner, method, improve, normals, iters);
 
   result.write(vm["output"].as<std::string>());
   std::cout << "Wrote layer mesh (" << result.num_points() << " verts) to "
@@ -639,15 +679,17 @@ static int cmd_layer_mesh(int argc, char **argv) {
 
 static int cmd_add(int argc, char **argv) {
   po::options_description desc("cvc add - add two volumes element-wise");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "two input volume files")
-    ("output,o", po::value<std::string>()->required(), "output volume file");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two input volume files")("output,o", po::value<std::string>()->required(),
+                                "output volume file");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto inputs = vm["input"].as<std::vector<std::string>>();
@@ -665,15 +707,17 @@ static int cmd_add(int argc, char **argv) {
 
 static int cmd_subtract(int argc, char **argv) {
   po::options_description desc("cvc subtract - subtract second volume from first");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "two input volume files")
-    ("output,o", po::value<std::string>()->required(), "output volume file");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two input volume files")("output,o", po::value<std::string>()->required(),
+                                "output volume file");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto inputs = vm["input"].as<std::vector<std::string>>();
@@ -691,18 +735,20 @@ static int cmd_subtract(int argc, char **argv) {
 
 static int cmd_scale(int argc, char **argv) {
   po::options_description desc("cvc scale - multiply volume by scalar");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("factor,f", po::value<double>()->required(), "scale factor");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("factor,f", po::value<double>()->required(), "scale factor");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -714,19 +760,21 @@ static int cmd_scale(int argc, char **argv) {
 
 static int cmd_normalize(int argc, char **argv) {
   po::options_description desc("cvc normalize - remap voxel values to [min, max]");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("min", po::value<double>()->default_value(0.0), "new minimum")
-    ("max", po::value<double>()->default_value(1.0), "new maximum");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("min", po::value<double>()->default_value(0.0), "new minimum")(
+      "max", po::value<double>()->default_value(1.0), "new maximum");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -738,18 +786,20 @@ static int cmd_normalize(int argc, char **argv) {
 
 static int cmd_clip(int argc, char **argv) {
   po::options_description desc("cvc clip - zero voxels above threshold");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("threshold,t", po::value<double>()->required(), "clipping threshold");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("threshold,t", po::value<double>()->required(), "clipping threshold");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -761,17 +811,19 @@ static int cmd_clip(int argc, char **argv) {
 
 static int cmd_negate(int argc, char **argv) {
   po::options_description desc("cvc negate - negate all voxel values");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -783,19 +835,21 @@ static int cmd_negate(int argc, char **argv) {
 
 static int cmd_mask(int argc, char **argv) {
   po::options_description desc("cvc mask - zero voxels where mask is nonzero");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("mask,m", po::value<std::string>()->required(), "mask volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("inverse", "use inverse mask (zero where mask IS zero)");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "mask,m", po::value<std::string>()->required(),
+      "mask volume file")("output,o", po::value<std::string>()->required(), "output volume file")(
+      "inverse", "use inverse mask (zero where mask IS zero)");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -803,27 +857,28 @@ static int cmd_mask(int argc, char **argv) {
   vol.read(vm["input"].as<std::string>());
   mask_vol.read(vm["mask"].as<std::string>());
 
-  cvc::volume result = vm.count("inverse")
-    ? cvc::vol_inverse_mask(vol, mask_vol)
-    : cvc::vol_mask(vol, mask_vol);
+  cvc::volume result =
+      vm.count("inverse") ? cvc::vol_inverse_mask(vol, mask_vol) : cvc::vol_mask(vol, mask_vol);
   result.write(vm["output"].as<std::string>());
   return 0;
 }
 
 static int cmd_downsample(int argc, char **argv) {
   po::options_description desc("cvc downsample - reduce volume resolution");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("factor,f", po::value<unsigned int>()->default_value(2), "downsample factor");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "factor,f", po::value<unsigned int>()->default_value(2), "downsample factor");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -840,20 +895,21 @@ static int cmd_downsample(int argc, char **argv) {
 
 static int cmd_rotate(int argc, char **argv) {
   po::options_description desc("cvc rotate - rotate volume around Z-axis");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output volume file")
-    ("angle,a", po::value<double>()->required(), "rotation angle in degrees")
-    ("count,n", po::value<int>()->default_value(1),
-     "number of evenly-spaced rotations");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "angle,a", po::value<double>()->required(), "rotation angle in degrees")(
+      "count,n", po::value<int>()->default_value(1), "number of evenly-spaced rotations");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -885,17 +941,19 @@ static int cmd_rotate(int argc, char **argv) {
 
 static int cmd_ssim(int argc, char **argv) {
   po::options_description desc("cvc ssim - compute Structural Similarity Index (SSIM)");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "two input volume files")
-    ("output,o", po::value<std::string>(), "output SSIM map volume file")
-    ("window,w", po::value<int>()->default_value(11), "Gaussian window size (odd)")
-    ("sigma,s", po::value<double>()->default_value(1.5), "Gaussian sigma");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two input volume files")("output,o", po::value<std::string>(),
+                                "output SSIM map volume file")(
+      "window,w", po::value<int>()->default_value(11), "Gaussian window size (odd)")(
+      "sigma,s", po::value<double>()->default_value(1.5), "Gaussian sigma");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto inputs = vm["input"].as<std::vector<std::string>>();
@@ -907,8 +965,7 @@ static int cmd_ssim(int argc, char **argv) {
   a.read(inputs[0]);
   b.read(inputs[1]);
 
-  cvc::ssim_result result = cvc::vol_ssim(a, b, vm["window"].as<int>(),
-                                           vm["sigma"].as<double>());
+  cvc::ssim_result result = cvc::vol_ssim(a, b, vm["window"].as<int>(), vm["sigma"].as<double>());
   std::cout << std::setprecision(12) << "Mean SSIM: " << result.mean_ssim << "\n";
 
   if (vm.count("output")) {
@@ -924,20 +981,22 @@ static int cmd_ssim(int argc, char **argv) {
 
 static int cmd_project(int argc, char **argv) {
   po::options_description desc("cvc project - forward ray projection of volume");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("output,o", po::value<std::string>()->required(), "output projection volume")
-    ("angles,a", po::value<std::string>()->required(),
-     "file with angles in degrees (one per line)")
-    ("step", po::value<double>()->default_value(0.5), "ray step size");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output projection volume")(
+      "angles,a", po::value<std::string>()->required(),
+      "file with angles in degrees (one per line)")("step", po::value<double>()->default_value(0.5),
+                                                    "ray step size");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   std::vector<double> angles;
@@ -954,29 +1013,31 @@ static int cmd_project(int argc, char **argv) {
   vol.read(vm["input"].as<std::string>());
   cvc::volume result = cvc::vol_project(vol, angles, vm["step"].as<double>());
   result.write(vm["output"].as<std::string>());
-  std::cout << "Projected " << angles.size() << " angles -> "
-            << vm["output"].as<std::string>() << "\n";
+  std::cout << "Projected " << angles.size() << " angles -> " << vm["output"].as<std::string>()
+            << "\n";
   return 0;
 }
 
 static int cmd_backproject(int argc, char **argv) {
   po::options_description desc(
-    "cvc backproject - filtered back-projection (tomographic reconstruction)");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input projection volume")
-    ("output,o", po::value<std::string>()->required(), "output reconstructed volume")
-    ("angles,a", po::value<std::string>()->required(),
-     "file with angles in degrees (one per line)")
-    ("dim,d", po::value<unsigned int>()->required(), "output cube dimension")
-    ("no-filter", "disable FFT ramp filter");
+      "cvc backproject - filtered back-projection (tomographic reconstruction)");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input projection volume")(
+      "output,o", po::value<std::string>()->required(),
+      "output reconstructed volume")("angles,a", po::value<std::string>()->required(),
+                                     "file with angles in degrees (one per line)")(
+      "dim,d", po::value<unsigned int>()->required(),
+      "output cube dimension")("no-filter", "disable FFT ramp filter");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   std::vector<double> angles;
@@ -992,8 +1053,7 @@ static int cmd_backproject(int argc, char **argv) {
   cvc::volume proj(cvc_app());
   proj.read(vm["input"].as<std::string>());
   bool filter = !vm.count("no-filter");
-  cvc::volume result = cvc::vol_back_project(proj, angles,
-                                              vm["dim"].as<unsigned int>(), filter);
+  cvc::volume result = cvc::vol_back_project(proj, angles, vm["dim"].as<unsigned int>(), filter);
   result.write(vm["output"].as<std::string>());
   std::cout << "Reconstructed " << vm["dim"].as<unsigned int>() << "^3 volume -> "
             << vm["output"].as<std::string>() << "\n";
@@ -1006,19 +1066,21 @@ static int cmd_backproject(int argc, char **argv) {
 
 static int cmd_vol2img(int argc, char **argv) {
   po::options_description desc("cvc vol2img - export volume slices as images");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::string>()->required(), "input volume file")
-    ("dir,d", po::value<std::string>()->required(), "output directory")
-    ("format,f", po::value<std::string>()->default_value("slice_%05d.png"),
-     "filename pattern (printf-style)");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "dir,d", po::value<std::string>()->required(),
+      "output directory")("format,f", po::value<std::string>()->default_value("slice_%05d.png"),
+                          "filename pattern (printf-style)");
 
   po::positional_options_description pos;
   pos.add("input", 1).add("dir", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   cvc::volume vol(cvc_app());
@@ -1034,36 +1096,40 @@ static int cmd_vol2img(int argc, char **argv) {
 
 static int cmd_img2vol(int argc, char **argv) {
   po::options_description desc("cvc img2vol - import image stack into volume");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "input image files (in Z order)")
-    ("output,o", po::value<std::string>()->required(), "output volume file");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "input image files (in Z order)")("output,o", po::value<std::string>()->required(),
+                                        "output volume file");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto inputs = vm["input"].as<std::vector<std::string>>();
   cvc::volume result = cvc::slices_to_volume(cvc_app(), inputs);
   result.write(vm["output"].as<std::string>());
-  std::cout << "Imported " << inputs.size() << " images -> "
-            << vm["output"].as<std::string>() << "\n";
+  std::cout << "Imported " << inputs.size() << " images -> " << vm["output"].as<std::string>()
+            << "\n";
   return 0;
 }
 
 static int cmd_rgba_merge(int argc, char **argv) {
   po::options_description desc("cvc rgba-merge - merge 4 volumes into RGBA");
-  desc.add_options()
-    ("help,h", "show help")
-    ("input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "4 input volume files (R G B A)")
-    ("output,o", po::value<std::string>()->required(), "output volume file");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "4 input volume files (R G B A)")("output,o", po::value<std::string>()->required(),
+                                        "output volume file");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto inputs = vm["input"].as<std::vector<std::string>>();
@@ -1087,22 +1153,24 @@ static int cmd_rgba_merge(int argc, char **argv) {
 
 static int cmd_bunny(int argc, char **argv) {
   po::options_description desc("cvc bunny - output Stanford bunny geometry or SDF volume");
-  desc.add_options()
-    ("help,h", "show help")
-    ("output,o", po::value<std::string>()->required(),
-     "output file (.off for geometry, .rawiv/.mrc for volume)")
-    ("volume", "output SDF volume instead of geometry")
-    ("dims,d", po::value<unsigned int>()->default_value(64), "volume dimensions (cube)")
-    ("padding,p", po::value<double>()->default_value(0.1), "bounding box padding factor")
-    ("algorithm,a", po::value<std::string>()->default_value("v1"),
-     "SDF algorithm: v1 (octree) or v2 (distance transform)");
+  desc.add_options()("help,h",
+                     "show help")("output,o", po::value<std::string>()->required(),
+                                  "output file (.off for geometry, .rawiv/.mrc for volume)")(
+      "volume", "output SDF volume instead of geometry")(
+      "dims,d", po::value<unsigned int>()->default_value(64), "volume dimensions (cube)")(
+      "padding,p", po::value<double>()->default_value(0.1),
+      "bounding box padding factor")("algorithm,a", po::value<std::string>()->default_value("v1"),
+                                     "SDF algorithm: v1 (octree) or v2 (distance transform)");
 
   po::positional_options_description pos;
   pos.add("output", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   std::string output = vm["output"].as<std::string>();
@@ -1124,8 +1192,7 @@ static int cmd_bunny(int argc, char **argv) {
     double cx = (pmin[0] + pmax[0]) * 0.5;
     double cy = (pmin[1] + pmax[1]) * 0.5;
     double cz = (pmin[2] + pmax[2]) * 0.5;
-    cvc::bounding_box bbox(cx - half, cy - half, cz - half,
-                           cx + half, cy + half, cz + half);
+    cvc::bounding_box bbox(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half);
 
 #ifdef CVC_ENABLE_SDF
     cvc::sdf_algorithm algo = cvc::SDF_V1;
@@ -1140,8 +1207,8 @@ static int cmd_bunny(int argc, char **argv) {
     std::cout << "Wrote bunny SDF volume " << d << "^3 to " << output << "\n";
   } else {
     bunny.write(output);
-    std::cout << "Wrote bunny geometry (" << bunny.num_points() << " verts, "
-              << bunny.num_tris() << " tris) to " << output << "\n";
+    std::cout << "Wrote bunny geometry (" << bunny.num_points() << " verts, " << bunny.num_tris()
+              << " tris) to " << output << "\n";
   }
   return 0;
 }
@@ -1156,48 +1223,47 @@ static void serve_signal_handler(int) { g_serve_running.store(false); }
 
 static int cmd_serve(int argc, char **argv) {
   po::options_description desc(
-    "cvc serve - run a headless CVC state server\n\n"
-    "Starts a distributed state server that volrover3 instances (or other\n"
-    "cvc clients) can connect to. Supports standalone, peer clustering,\n"
-    "TLS, bearer-token auth, and subtree delegation.\n\n"
-    "Transport modes:\n"
-    "  ipc    Unix domain socket (same host)\n"
-    "  grpc   gRPC over TCP (networked, requires CVC_ENABLE_GRPC)\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("listen,l", po::value<std::string>()->required(),
-     "listen address (socket path for ipc, host:port for grpc)")
-    ("transport,t", po::value<std::string>()->default_value("grpc"),
-     "transport: ipc or grpc")
-    ("cluster-id", po::value<std::string>()->default_value("cvc-cluster"),
-     "cluster identifier")
-    ("node-id", po::value<std::string>(),
-     "node identifier (default: random UUID)")
-    ("seed,s", po::value<std::vector<std::string>>()->multitoken(),
-     "peer endpoint(s) to connect to for clustering")
-    ("root-path", po::value<std::string>()->default_value(""),
-     "subtree to replicate (empty = whole tree)")
-    ("sync-mode", po::value<std::string>()->default_value("read-write"),
-     "default sync mode: read-only, read-write, authoritative")
-    ("enforce-authority", "enforce authority map on remote mutations")
-    ("enforce-write-policy", "enforce write policies")
-    ("resolve-conflicts", "enable LWW conflict resolution")
-    ("tls-cert", po::value<std::string>(), "TLS server certificate PEM file")
-    ("tls-key", po::value<std::string>(), "TLS server private key PEM file")
-    ("tls-ca", po::value<std::string>(), "TLS root CA PEM file")
-    ("tls-require-client-auth", "require mutual TLS")
-    ("auth-token", po::value<std::string>(),
-     "bearer token for authentication (both expected and outbound)")
-    ("enable-exec", "enable state_exec script execution engine")
-    ("blob-store-path", po::value<std::string>(), "path for blob storage (default: memory-only)")
-    ("pump-interval", po::value<int>()->default_value(10),
-     "pump loop interval in ms (0 = no pump thread)")
-    ("delegate", po::value<std::vector<std::string>>()->multitoken(),
-     "delegate subtree: path:cluster_id:endpoint[:lease_seconds]");
+      "cvc serve - run a headless CVC state server\n\n"
+      "Starts a distributed state server that volrover3 instances (or other\n"
+      "cvc clients) can connect to. Supports standalone, peer clustering,\n"
+      "TLS, bearer-token auth, and subtree delegation.\n\n"
+      "Transport modes:\n"
+      "  ipc    Unix domain socket (same host)\n"
+      "  grpc   gRPC over TCP (networked, requires CVC_ENABLE_GRPC)\n");
+  desc.add_options()("help,h",
+                     "show help")("listen,l", po::value<std::string>()->required(),
+                                  "listen address (socket path for ipc, host:port for grpc)")(
+      "transport,t", po::value<std::string>()->default_value("grpc"), "transport: ipc or grpc")(
+      "cluster-id", po::value<std::string>()->default_value("cvc-cluster"), "cluster identifier")(
+      "node-id", po::value<std::string>(), "node identifier (default: random UUID)")(
+      "seed,s", po::value<std::vector<std::string>>()->multitoken(),
+      "peer endpoint(s) to connect to for clustering")("root-path",
+                                                       po::value<std::string>()->default_value(""),
+                                                       "subtree to replicate (empty = whole tree)")(
+      "sync-mode", po::value<std::string>()->default_value("read-write"),
+      "default sync mode: read-only, read-write, authoritative")(
+      "enforce-authority", "enforce authority map on remote mutations")("enforce-write-policy",
+                                                                        "enforce write policies")(
+      "resolve-conflicts", "enable LWW conflict resolution")("tls-cert", po::value<std::string>(),
+                                                             "TLS server certificate PEM file")(
+      "tls-key", po::value<std::string>(), "TLS server private key PEM file")(
+      "tls-ca", po::value<std::string>(), "TLS root CA PEM file")("tls-require-client-auth",
+                                                                  "require mutual TLS")(
+      "auth-token", po::value<std::string>(),
+      "bearer token for authentication (both expected and outbound)")(
+      "enable-exec", "enable state_exec script execution engine")(
+      "blob-store-path", po::value<std::string>(), "path for blob storage (default: memory-only)")(
+      "pump-interval", po::value<int>()->default_value(10),
+      "pump loop interval in ms (0 = no pump thread)")(
+      "delegate", po::value<std::vector<std::string>>()->multitoken(),
+      "delegate subtree: path:cluster_id:endpoint[:lease_seconds]");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -1217,9 +1283,12 @@ static int cmd_serve(int argc, char **argv) {
   cfg.listen_address = vm["listen"].as<std::string>();
 
   std::string tstr = vm["transport"].as<std::string>();
-  if (tstr == "ipc") cfg.transport = cvc::transport_kind::ipc;
-  else if (tstr == "grpc") cfg.transport = cvc::transport_kind::grpc;
-  else throw std::runtime_error("Unknown transport: " + tstr + " (use ipc or grpc)");
+  if (tstr == "ipc")
+    cfg.transport = cvc::transport_kind::ipc;
+  else if (tstr == "grpc")
+    cfg.transport = cvc::transport_kind::grpc;
+  else
+    throw std::runtime_error("Unknown transport: " + tstr + " (use ipc or grpc)");
 
   if (vm.count("seed"))
     cfg.seeds = vm["seed"].as<std::vector<std::string>>();
@@ -1227,8 +1296,10 @@ static int cmd_serve(int argc, char **argv) {
   // Parse sync mode
   cvc::sync_mode smode = cvc::sync_mode::read_write;
   std::string sstr = vm["sync-mode"].as<std::string>();
-  if (sstr == "read-only") smode = cvc::sync_mode::read_only;
-  else if (sstr == "authoritative") smode = cvc::sync_mode::authoritative;
+  if (sstr == "read-only")
+    smode = cvc::sync_mode::read_only;
+  else if (sstr == "authoritative")
+    smode = cvc::sync_mode::authoritative;
   cfg.mounts.push_back({cfg.root_path, smode});
 
   cfg.enforce_authority = vm.count("enforce-authority");
@@ -1238,9 +1309,9 @@ static int cmd_serve(int argc, char **argv) {
   // TLS
   auto read_file_to_string = [](const std::string &path) -> std::string {
     std::ifstream f(path);
-    if (!f) throw std::runtime_error("Cannot read file: " + path);
-    return std::string(std::istreambuf_iterator<char>(f),
-                       std::istreambuf_iterator<char>());
+    if (!f)
+      throw std::runtime_error("Cannot read file: " + path);
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
   };
   if (vm.count("tls-cert"))
     cfg.tls_server_cert_pem = read_file_to_string(vm["tls-cert"].as<std::string>());
@@ -1269,7 +1340,8 @@ static int cmd_serve(int argc, char **argv) {
             << "  transport: " << tstr << "\n";
   if (!cfg.seeds.empty()) {
     std::cout << "  seeds:";
-    for (auto &s : cfg.seeds) std::cout << " " << s;
+    for (auto &s : cfg.seeds)
+      std::cout << " " << s;
     std::cout << "\n";
   }
 
@@ -1283,18 +1355,19 @@ static int cmd_serve(int argc, char **argv) {
       std::vector<std::string> parts;
       std::istringstream ss(spec);
       std::string part;
-      while (std::getline(ss, part, ':')) parts.push_back(part);
+      while (std::getline(ss, part, ':'))
+        parts.push_back(part);
       if (parts.size() < 3)
-        throw std::runtime_error("Invalid delegation spec: " + spec
-                                 + " (expected path:cluster_id:endpoint[:lease_seconds])");
+        throw std::runtime_error("Invalid delegation spec: " + spec +
+                                 " (expected path:cluster_id:endpoint[:lease_seconds])");
       cvc::delegation_target dt;
       dt.cluster_id = parts[1];
       dt.endpoint = parts[2];
       if (parts.size() > 3)
         dt.lease_duration_ns = std::stoull(parts[3]) * 1000000000ULL;
       session->delegate(parts[0], dt);
-      std::cout << "  delegated " << parts[0] << " -> " << dt.cluster_id
-                << " @ " << dt.endpoint << "\n";
+      std::cout << "  delegated " << parts[0] << " -> " << dt.cluster_id << " @ " << dt.endpoint
+                << "\n";
     }
   }
 
@@ -1326,7 +1399,8 @@ static int cmd_serve(int argc, char **argv) {
   }
 
   std::cout << "\nShutting down...\n";
-  if (coord) coord->stop();
+  if (coord)
+    coord->stop();
   session->stop();
   std::cout << "Server stopped.\n";
   return 0;
@@ -1338,25 +1412,27 @@ static int cmd_serve(int argc, char **argv) {
 
 static int cmd_exec(int argc, char **argv) {
   po::options_description desc(
-    "cvc exec - run state_exec scripts\n\n"
-    "Executes a state_exec (Scheme-like) script against the local state\n"
-    "tree. The script can read/write state values, perform computations,\n"
-    "and interact with the CVC data model.\n\n"
-    "Examples:\n"
-    "  cvc exec -e '(+ 1 2 3)'\n"
-    "  cvc exec -f script.sx\n"
-    "  cvc exec -e '(state-set! \"scene.camera.x\" 1.5)'\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("expression,e", po::value<std::string>(), "expression to evaluate")
-    ("file,f", po::value<std::string>(), "script file to execute")
-    ("max-steps", po::value<uint64_t>()->default_value(0), "max steps (0 = unlimited)")
-    ("max-time", po::value<double>()->default_value(0.0), "max time in seconds (0 = unlimited)")
-    ("name,n", po::value<std::string>()->default_value("cli"), "process name");
+      "cvc exec - run state_exec scripts\n\n"
+      "Executes a state_exec (Scheme-like) script against the local state\n"
+      "tree. The script can read/write state values, perform computations,\n"
+      "and interact with the CVC data model.\n\n"
+      "Examples:\n"
+      "  cvc exec -e '(+ 1 2 3)'\n"
+      "  cvc exec -f script.sx\n"
+      "  cvc exec -e '(state-set! \"scene.camera.x\" 1.5)'\n");
+  desc.add_options()("help,h", "show help")("expression,e", po::value<std::string>(),
+                                            "expression to evaluate")(
+      "file,f", po::value<std::string>(), "script file to execute")(
+      "max-steps", po::value<uint64_t>()->default_value(0), "max steps (0 = unlimited)")(
+      "max-time", po::value<double>()->default_value(0.0), "max time in seconds (0 = unlimited)")(
+      "name,n", po::value<std::string>()->default_value("cli"), "process name");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   if (!vm.count("expression") && !vm.count("file"))
@@ -1365,9 +1441,9 @@ static int cmd_exec(int argc, char **argv) {
   std::string script;
   if (vm.count("file")) {
     std::ifstream f(vm["file"].as<std::string>());
-    if (!f) throw std::runtime_error("Cannot read file: " + vm["file"].as<std::string>());
-    script = std::string(std::istreambuf_iterator<char>(f),
-                         std::istreambuf_iterator<char>());
+    if (!f)
+      throw std::runtime_error("Cannot read file: " + vm["file"].as<std::string>());
+    script = std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
   } else {
     script = vm["expression"].as<std::string>();
   }
@@ -1403,27 +1479,28 @@ static int cmd_exec(int argc, char **argv) {
 // ---------------------------------------------------------------------------
 
 static int cmd_state(int argc, char **argv) {
-  po::options_description desc(
-    "cvc state - query and modify the state tree\n\n"
-    "Operations:\n"
-    "  get <path>            get state value at path\n"
-    "  set <path> <value>    set state value at path\n"
-    "  list [path]           list children of a state node\n"
-    "  json [path]           export subtree as JSON\n"
-    "  delete <path>         delete a state node\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("op", po::value<std::string>()->required(), "operation: get, set, list, json, delete")
-    ("path", po::value<std::string>()->default_value(""), "state path (dot-separated)")
-    ("value", po::value<std::string>(), "value to set (for 'set' operation)")
-    ("args", po::value<std::vector<std::string>>(), "additional arguments");
+  po::options_description desc("cvc state - query and modify the state tree\n\n"
+                               "Operations:\n"
+                               "  get <path>            get state value at path\n"
+                               "  set <path> <value>    set state value at path\n"
+                               "  list [path]           list children of a state node\n"
+                               "  json [path]           export subtree as JSON\n"
+                               "  delete <path>         delete a state node\n");
+  desc.add_options()("help,h", "show help")("op", po::value<std::string>()->required(),
+                                            "operation: get, set, list, json, delete")(
+      "path", po::value<std::string>()->default_value(""), "state path (dot-separated)")(
+      "value", po::value<std::string>(), "value to set (for 'set' operation)")(
+      "args", po::value<std::vector<std::string>>(), "additional arguments");
 
   po::positional_options_description pos;
   pos.add("op", 1).add("path", 1).add("value", 1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -1432,14 +1509,17 @@ static int cmd_state(int argc, char **argv) {
   std::string path = vm["path"].as<std::string>();
 
   if (op == "get") {
-    if (path.empty()) throw std::runtime_error("Path required for 'get'");
+    if (path.empty())
+      throw std::runtime_error("Path required for 'get'");
     auto &node = root(path);
     if (!node.initialized())
       throw std::runtime_error("State path not initialized: " + path);
     std::cout << node.value() << "\n";
   } else if (op == "set") {
-    if (path.empty()) throw std::runtime_error("Path required for 'set'");
-    if (!vm.count("value")) throw std::runtime_error("Value required for 'set'");
+    if (path.empty())
+      throw std::runtime_error("Path required for 'set'");
+    if (!vm.count("value"))
+      throw std::runtime_error("Value required for 'set'");
     root(path).value(vm["value"].as<std::string>());
     std::cout << "Set " << path << " = " << vm["value"].as<std::string>() << "\n";
   } else if (op == "list") {
@@ -1453,13 +1533,14 @@ static int cmd_state(int argc, char **argv) {
     auto &node = path.empty() ? root : root(path);
     std::cout << node.json() << "\n";
   } else if (op == "delete") {
-    if (path.empty()) throw std::runtime_error("Path required for 'delete'");
+    if (path.empty())
+      throw std::runtime_error("Path required for 'delete'");
     // Touch with empty to mark; actual deletion depends on state impl
     root(path).value(std::string(""));
     std::cout << "Cleared " << path << "\n";
   } else {
-    throw std::runtime_error("Unknown state operation: " + op
-                             + " (use get, set, list, json, or delete)");
+    throw std::runtime_error("Unknown state operation: " + op +
+                             " (use get, set, list, json, or delete)");
   }
   return 0;
 }
@@ -1469,25 +1550,22 @@ static int cmd_state(int argc, char **argv) {
 // ---------------------------------------------------------------------------
 
 static int cmd_cluster_status(int argc, char **argv) {
-  po::options_description desc(
-    "cvc cluster-status - display cluster health report\n\n"
-    "Starts a temporary session connected to a cluster and prints\n"
-    "the admin status report (peers, delegations, blob store, etc.).\n");
-  desc.add_options()
-    ("help,h", "show help")
-    ("listen,l", po::value<std::string>()->required(),
-     "listen address for temporary session")
-    ("transport,t", po::value<std::string>()->default_value("grpc"),
-     "transport: ipc or grpc")
-    ("cluster-id", po::value<std::string>()->default_value("cvc-cluster"),
-     "cluster identifier")
-    ("seed,s", po::value<std::vector<std::string>>()->multitoken()->required(),
-     "peer endpoint(s) to connect to")
-    ("auth-token", po::value<std::string>(), "bearer token");
+  po::options_description desc("cvc cluster-status - display cluster health report\n\n"
+                               "Starts a temporary session connected to a cluster and prints\n"
+                               "the admin status report (peers, delegations, blob store, etc.).\n");
+  desc.add_options()("help,h", "show help")("listen,l", po::value<std::string>()->required(),
+                                            "listen address for temporary session")(
+      "transport,t", po::value<std::string>()->default_value("grpc"), "transport: ipc or grpc")(
+      "cluster-id", po::value<std::string>()->default_value("cvc-cluster"), "cluster identifier")(
+      "seed,s", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "peer endpoint(s) to connect to")("auth-token", po::value<std::string>(), "bearer token");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -1500,9 +1578,12 @@ static int cmd_cluster_status(int argc, char **argv) {
   }
   cfg.listen_address = vm["listen"].as<std::string>();
   std::string tstr = vm["transport"].as<std::string>();
-  if (tstr == "ipc") cfg.transport = cvc::transport_kind::ipc;
-  else if (tstr == "grpc") cfg.transport = cvc::transport_kind::grpc;
-  else throw std::runtime_error("Unknown transport: " + tstr);
+  if (tstr == "ipc")
+    cfg.transport = cvc::transport_kind::ipc;
+  else if (tstr == "grpc")
+    cfg.transport = cvc::transport_kind::grpc;
+  else
+    throw std::runtime_error("Unknown transport: " + tstr);
   cfg.seeds = vm["seed"].as<std::vector<std::string>>();
   cfg.mounts.push_back({"", cvc::sync_mode::read_only});
   if (vm.count("auth-token")) {
@@ -1537,15 +1618,17 @@ static int cmd_cluster_status(int argc, char **argv) {
 
 static int cmd_ps(int argc, char **argv) {
   po::options_description desc(
-    "cvc ps - list running state_exec processes\n\n"
-    "Shows processes managed by the local state_exec scheduler.\n"
-    "Use with 'cvc serve --enable-exec' to see cluster-wide processes.\n");
-  desc.add_options()
-    ("help,h", "show help");
+      "cvc ps - list running state_exec processes\n\n"
+      "Shows processes managed by the local state_exec scheduler.\n"
+      "Use with 'cvc serve --enable-exec' to see cluster-wide processes.\n");
+  desc.add_options()("help,h", "show help");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
 
   // Create a scheduler and report (useful mainly for embedded use;
   // in standalone mode there are no persistent processes)
@@ -1557,29 +1640,34 @@ static int cmd_ps(int argc, char **argv) {
     std::cout << "No running processes.\n";
     return 0;
   }
-  std::cout << std::left << std::setw(6) << "PID"
-            << std::setw(16) << "NAME"
-            << std::setw(12) << "STATUS"
-            << std::setw(10) << "STEPS"
-            << std::setw(10) << "TIME"
-            << std::setw(10) << "MEM"
-            << "\n";
+  std::cout << std::left << std::setw(6) << "PID" << std::setw(16) << "NAME" << std::setw(12)
+            << "STATUS" << std::setw(10) << "STEPS" << std::setw(10) << "TIME" << std::setw(10)
+            << "MEM" << "\n";
   for (auto &p : procs) {
     const char *status_str = "unknown";
     switch (p.status) {
-      case cvc::state_exec::process_status::ready: status_str = "ready"; break;
-      case cvc::state_exec::process_status::running: status_str = "running"; break;
-      case cvc::state_exec::process_status::paused: status_str = "paused"; break;
-      case cvc::state_exec::process_status::waiting: status_str = "waiting"; break;
-      case cvc::state_exec::process_status::terminated: status_str = "done"; break;
-      case cvc::state_exec::process_status::killed: status_str = "killed"; break;
+    case cvc::state_exec::process_status::ready:
+      status_str = "ready";
+      break;
+    case cvc::state_exec::process_status::running:
+      status_str = "running";
+      break;
+    case cvc::state_exec::process_status::paused:
+      status_str = "paused";
+      break;
+    case cvc::state_exec::process_status::waiting:
+      status_str = "waiting";
+      break;
+    case cvc::state_exec::process_status::terminated:
+      status_str = "done";
+      break;
+    case cvc::state_exec::process_status::killed:
+      status_str = "killed";
+      break;
     }
-    std::cout << std::left << std::setw(6) << p.pid
-              << std::setw(16) << p.name
-              << std::setw(12) << status_str
-              << std::setw(10) << p.step_count
-              << std::setw(10) << std::fixed << std::setprecision(2) << p.elapsed_time
-              << std::setw(10) << p.current_memory
+    std::cout << std::left << std::setw(6) << p.pid << std::setw(16) << p.name << std::setw(12)
+              << status_str << std::setw(10) << p.step_count << std::setw(10) << std::fixed
+              << std::setprecision(2) << p.elapsed_time << std::setw(10) << p.current_memory
               << "\n";
   }
   return 0;
@@ -1594,14 +1682,15 @@ static int cmd_ps(int argc, char **argv) {
 
 static int cmd_server(int argc, char **argv) {
   po::options_description desc("cvc server - start XMLRPC server");
-  desc.add_options()
-    ("help,h", "show help")
-    ("port,p", po::value<int>()->default_value(cvc::XMLRPC_DEFAULT_PORT),
-     "server port");
+  desc.add_options()("help,h", "show help")(
+      "port,p", po::value<int>()->default_value(cvc::XMLRPC_DEFAULT_PORT), "server port");
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
@@ -1614,26 +1703,28 @@ static int cmd_server(int argc, char **argv) {
 
 static int cmd_client(int argc, char **argv) {
   po::options_description desc("cvc client - call XMLRPC method on remote server");
-  desc.add_options()
-    ("help,h", "show help")
-    ("host", po::value<std::string>()->required(), "host:port")
-    ("method", po::value<std::string>()->required(), "RPC method name")
-    ("args", po::value<std::vector<std::string>>()->multitoken(), "method arguments");
+  desc.add_options()("help,h", "show help")("host", po::value<std::string>()->required(),
+                                            "host:port")(
+      "method", po::value<std::string>()->required(), "RPC method name")(
+      "args", po::value<std::vector<std::string>>()->multitoken(), "method arguments");
 
   po::positional_options_description pos;
   pos.add("host", 1).add("method", 1).add("args", -1);
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
   po::notify(vm);
 
   auto &app = cvc_app();
   std::vector<std::string> rpc_args;
   if (vm.count("args"))
     rpc_args = vm["args"].as<std::vector<std::string>>();
-  std::string result = cvc::rpc(app, vm["host"].as<std::string>(),
-                                vm["method"].as<std::string>(), rpc_args);
+  std::string result =
+      cvc::rpc(app, vm["host"].as<std::string>(), vm["method"].as<std::string>(), rpc_args);
   if (!result.empty())
     std::cout << result << "\n";
   return 0;
@@ -1729,8 +1820,8 @@ static void print_usage() {
       current_category = commands[i].category;
       std::cout << "  " << current_category << ":\n";
     }
-    std::cout << "    " << std::left << std::setw(18) << commands[i].name
-              << commands[i].help << "\n";
+    std::cout << "    " << std::left << std::setw(18) << commands[i].name << commands[i].help
+              << "\n";
   }
   std::cout << "\nRun 'cvc <command> --help' for command-specific options.\n";
 }

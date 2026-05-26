@@ -67,19 +67,34 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
   auto t = evaluate(expr, env);
   if (timeout_sec) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(*timeout_sec);
+    // Drive the coroutine via the same thread-local trampoline used by
+    // task<T>::sync_wait() (see task.h for the full pattern description).
+    // Each iteration resumes one coroutine step; the await_suspend /
+    // final_suspend handlers in task.h write the next handle into the
+    // trampoline slot and return noop_coroutine, keeping the native
+    // call stack flat even for deeply recursive evaluator scripts.
+    t.handle().promise().continuation_ = std::noop_coroutine();
+    detail::trampoline_next() = t.handle();
     while (!t.done()) {
       if (std::chrono::steady_clock::now() >= deadline) {
         interrupt();
         // Drive coroutine to propagate the interrupt
         try {
-          while (!t.done())
-            t.handle().resume();
+          while (!t.done()) {
+            auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
+            if (next == std::noop_coroutine())
+              next = t.handle();
+            next.resume();
+          }
         } catch (...) {
         }
         reset_interrupt();
         throw evaluation_timeout("evaluation exceeded timeout");
       }
-      t.handle().resume();
+      auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
+      if (next == std::noop_coroutine())
+        next = t.handle();
+      next.resume();
     }
     auto &r = t.handle().promise().result_;
     if (r.index() == 2)
