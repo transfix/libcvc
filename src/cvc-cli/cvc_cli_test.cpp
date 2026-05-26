@@ -40,9 +40,13 @@
 #if defined(_WIN32)
 #include <process.h>
 #define CVC_GETPID() _getpid()
+#define CVC_POPEN(cmd, mode) _popen(cmd, mode)
+#define CVC_PCLOSE(fp) _pclose(fp)
 #else
 #include <unistd.h>
 #define CVC_GETPID() ::getpid()
+#define CVC_POPEN(cmd, mode) popen(cmd, mode)
+#define CVC_PCLOSE(fp) pclose(fp)
 #endif
 
 namespace fs = std::filesystem;
@@ -60,7 +64,7 @@ static RunResult run_cmd(const std::string &cmd) {
   RunResult r;
   r.output.clear();
   std::string full_cmd = cmd + " 2>&1";
-  FILE *fp = popen(full_cmd.c_str(), "r");
+  FILE *fp = CVC_POPEN(full_cmd.c_str(), "r");
   if (!fp) {
     r.exit_code = -1;
     r.output = "popen() failed";
@@ -69,7 +73,7 @@ static RunResult run_cmd(const std::string &cmd) {
   std::array<char, 4096> buf;
   while (fgets(buf.data(), static_cast<int>(buf.size()), fp))
     r.output += buf.data();
-  int status = pclose(fp);
+  int status = CVC_PCLOSE(fp);
 #if defined(_WIN32)
   r.exit_code = status;
 #else
@@ -81,8 +85,7 @@ static RunResult run_cmd(const std::string &cmd) {
 // Create a small synthetic volume (4x4x4 gradient) for testing.
 static void write_test_volume(const std::string &path) {
   cvc::app ctx;
-  cvc::volume v(ctx, cvc::dimension(4, 4, 4), cvc::Float,
-                cvc::bounding_box(0, 0, 0, 3, 3, 3));
+  cvc::volume v(ctx, cvc::dimension(4, 4, 4), cvc::Float, cvc::bounding_box(0, 0, 0, 3, 3, 3));
   for (unsigned k = 0; k < 4; ++k)
     for (unsigned j = 0; j < 4; ++j)
       for (unsigned i = 0; i < 4; ++i)
@@ -113,8 +116,8 @@ class CvcCliTest : public ::testing::Test {
 protected:
   std::string test_dir;
   std::string cvc_bin;
-  std::string test_vol;  // pre-created 4^3 rawiv
-  std::string test_geo;  // pre-created tetrahedron OFF
+  std::string test_vol; // pre-created 4^3 rawiv
+  std::string test_geo; // pre-created tetrahedron OFF
 
   void SetUp() override {
     // Locate the cvc binary
@@ -133,8 +136,7 @@ protected:
     // Create unique temporary directory
     static std::atomic<unsigned> counter{0};
     std::ostringstream oss;
-    oss << "cvc_cli_test_" << CVC_GETPID() << "_"
-        << std::this_thread::get_id() << "_"
+    oss << "cvc_cli_test_" << CVC_GETPID() << "_" << std::this_thread::get_id() << "_"
         << counter.fetch_add(1, std::memory_order_relaxed) << "_"
         << std::chrono::steady_clock::now().time_since_epoch().count();
     fs::path base = std::getenv("CMAKE_CURRENT_BINARY_DIR")
@@ -156,13 +158,9 @@ protected:
     fs::remove_all(test_dir, ec);
   }
 
-  RunResult cvc(const std::string &args) {
-    return run_cmd("\"" + cvc_bin + "\" " + args);
-  }
+  RunResult cvc(const std::string &args) { return run_cmd("\"" + cvc_bin + "\" " + args); }
 
-  std::string path(const std::string &name) const {
-    return test_dir + "/" + name;
-  }
+  std::string path(const std::string &name) const { return test_dir + "/" + name; }
 };
 
 // ===========================================================================
@@ -875,8 +873,7 @@ TEST_F(CvcCliTest, Integration_IsoExtractionMethods) {
 
   // With different normal types
   std::string iso_centraldiff = path("iso_centraldiff.off");
-  auto r6 = cvc("iso -i " + sdf_vol + " -o " + iso_centraldiff
-                 + " -v 0.0 -n central-diff");
+  auto r6 = cvc("iso -i " + sdf_vol + " -o " + iso_centraldiff + " -v 0.0 -n central-diff");
   EXPECT_EQ(0, r6.exit_code);
   EXPECT_TRUE(fs::exists(iso_centraldiff));
 }
@@ -951,8 +948,7 @@ TEST_F(CvcCliTest, Integration_SdfFlipNormals) {
   ASSERT_EQ(0, r1.exit_code);
 
   std::string flipped_vol = path("sdf_flipped.rawiv");
-  auto r2 = cvc("sdf -i " + geo + " -o " + flipped_vol
-                 + " -d 16,16,16 -a v2 --flip-normals");
+  auto r2 = cvc("sdf -i " + geo + " -o " + flipped_vol + " -d 16,16,16 -a v2 --flip-normals");
   ASSERT_EQ(0, r2.exit_code);
   EXPECT_TRUE(fs::exists(flipped_vol));
 
@@ -986,8 +982,8 @@ TEST_F(CvcCliTest, Integration_LayerMesh) {
   ASSERT_EQ(0, r1.exit_code);
 
   std::string layer_out = path("bunny_layer.off");
-  auto r2 = cvc("layer-mesh -i " + sdf_vol + " -o " + layer_out
-                + " --isovalue-outer -0.1 --isovalue-inner 0.1");
+  auto r2 = cvc("layer-mesh -i " + sdf_vol + " -o " + layer_out +
+                " --isovalue-outer -0.1 --isovalue-inner 0.1");
   EXPECT_EQ(0, r2.exit_code);
   EXPECT_TRUE(fs::exists(layer_out));
   EXPECT_NE(std::string::npos, r2.output.find("Wrote layer mesh"));
@@ -1092,13 +1088,14 @@ TEST_F(CvcCliTest, PsEmpty) {
 TEST_F(CvcCliTest, Integration_ServeStartStop) {
   // Start a server in the background, verify it starts, then kill it
   std::string sock = path("test_server.sock");
-  std::string cmd_str = "\"" + cvc_bin + "\" serve -l " + sock
-                        + " -t ipc --cluster-id test-cluster --node-id test-node"
-                        + " --pump-interval 50";
+  std::string cmd_str = "\"" + cvc_bin + "\" serve -l " + sock +
+                        " -t ipc --cluster-id test-cluster --node-id test-node" +
+                        " --pump-interval 50";
   // Start server with a timeout — we just need to verify it starts cleanly
   // Use popen and immediately close after checking output
-  FILE *fp = popen((cmd_str + " &").c_str(), "r");
-  if (fp) pclose(fp);
+  FILE *fp = CVC_POPEN((cmd_str + " &").c_str(), "r");
+  if (fp)
+    CVC_PCLOSE(fp);
 
   // Give the server a moment to start
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
