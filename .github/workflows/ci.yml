@@ -1067,7 +1067,7 @@ jobs:
           $extra += $buildBin
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
           # See linux ctest step for rationale.
-          $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if ('${{ github.event_name }}' -eq 'push') {
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `

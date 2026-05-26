@@ -82,6 +82,15 @@ static RunResult run_cmd(const std::string &cmd) {
   return r;
 }
 
+// Shell-quote a string: single quotes on Unix, double quotes on Windows.
+static std::string sq(const std::string &s) {
+#if defined(_WIN32)
+  return "\"" + s + "\"";
+#else
+  return "'" + s + "'";
+#endif
+}
+
 // Create a small synthetic volume (4x4x4 gradient) for testing.
 static void write_test_volume(const std::string &path) {
   cvc::app ctx;
@@ -994,25 +1003,25 @@ TEST_F(CvcCliTest, Integration_LayerMesh) {
 // ===========================================================================
 
 TEST_F(CvcCliTest, ExecArithmetic) {
-  auto r = cvc("exec -e '(+ 1 2 3)'");
+  auto r = cvc("exec -e " + sq("(+ 1 2 3)"));
   EXPECT_EQ(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("6"));
 }
 
 TEST_F(CvcCliTest, ExecMultiply) {
-  auto r = cvc("exec -e '(* 7 6)'");
+  auto r = cvc("exec -e " + sq("(* 7 6)"));
   EXPECT_EQ(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("42"));
 }
 
 TEST_F(CvcCliTest, ExecDefine) {
-  auto r = cvc("exec -e '(let ((x 10)) (+ x 5))'");
+  auto r = cvc("exec -e " + sq("(let ((x 10)) (+ x 5))"));
   EXPECT_EQ(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("15"));
 }
 
 TEST_F(CvcCliTest, ExecLambda) {
-  auto r = cvc("exec -e '(let ((f (lambda (x y) (+ x y)))) (f 3 4))'");
+  auto r = cvc("exec -e " + sq("(let ((f (lambda (x y) (+ x y)))) (f 3 4))"));
   EXPECT_EQ(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("7"));
 }
@@ -1107,29 +1116,29 @@ TEST_F(CvcCliTest, Integration_ServeStartStop) {
 
 TEST_F(CvcCliTest, Integration_ExecScriptPipeline) {
   // Test let+lambda pattern
-  auto r1 = cvc("exec -e '(let ((square (lambda (x) (* x x)))) (square 9))'");
+  auto r1 = cvc("exec -e " + sq("(let ((square (lambda (x) (* x x)))) (square 9))"));
   EXPECT_EQ(0, r1.exit_code);
   EXPECT_NE(std::string::npos, r1.output.find("81"));
 
   // Test list operations
-  auto r2 = cvc("exec -e '(car (list 10 20 30))'");
+  auto r2 = cvc("exec -e " + sq("(car (list 10 20 30))"));
   EXPECT_EQ(0, r2.exit_code);
   EXPECT_NE(std::string::npos, r2.output.find("10"));
 
   // Test conditional
-  auto r3 = cvc("exec -e '(if (> 5 3) 99 0)'");
+  auto r3 = cvc("exec -e " + sq("(if (> 5 3) 99 0)"));
   EXPECT_EQ(0, r3.exit_code);
   EXPECT_NE(std::string::npos, r3.output.find("99"));
 
   // Test nested let with multiple bindings
-  auto r4 = cvc("exec -e '(let ((a 10) (b 20)) (+ a b))'");
+  auto r4 = cvc("exec -e " + sq("(let ((a 10) (b 20)) (+ a b))"));
   EXPECT_EQ(0, r4.exit_code);
   EXPECT_NE(std::string::npos, r4.output.find("30"));
 }
 
 TEST_F(CvcCliTest, Integration_ExecWithResourceLimits) {
   // Test max-steps enforcement — a long-running computation should be stopped
-  auto r = cvc("exec -e '(begin 1 2 3 4 5 6 7 8 9 10)' --max-steps 100");
+  auto r = cvc("exec -e " + sq("(begin 1 2 3 4 5 6 7 8 9 10)") + " --max-steps 100");
   // Should complete fine with the step limit
   EXPECT_EQ(0, r.exit_code);
 }
