@@ -26,6 +26,12 @@
 // processing commands into a single tool with subcommands.
 
 #include <cvc/core/app.h>
+#include <cvc/core/distributed_state_session.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_distributed_admin.h>
+#include <cvc/core/state_exec/exec_coordinator.h>
+#include <cvc/core/state_exec/parser.h>
+#include <cvc/core/state_exec/scheduler.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -42,7 +48,9 @@
 #include <boost/program_options.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -1139,6 +1147,445 @@ static int cmd_bunny(int argc, char **argv) {
 }
 
 // ---------------------------------------------------------------------------
+// State server (distributed_state_session)
+// ---------------------------------------------------------------------------
+
+static std::atomic<bool> g_serve_running{true};
+
+static void serve_signal_handler(int) { g_serve_running.store(false); }
+
+static int cmd_serve(int argc, char **argv) {
+  po::options_description desc(
+    "cvc serve - run a headless CVC state server\n\n"
+    "Starts a distributed state server that volrover3 instances (or other\n"
+    "cvc clients) can connect to. Supports standalone, peer clustering,\n"
+    "TLS, bearer-token auth, and subtree delegation.\n\n"
+    "Transport modes:\n"
+    "  ipc    Unix domain socket (same host)\n"
+    "  grpc   gRPC over TCP (networked, requires CVC_ENABLE_GRPC)\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("listen,l", po::value<std::string>()->required(),
+     "listen address (socket path for ipc, host:port for grpc)")
+    ("transport,t", po::value<std::string>()->default_value("grpc"),
+     "transport: ipc or grpc")
+    ("cluster-id", po::value<std::string>()->default_value("cvc-cluster"),
+     "cluster identifier")
+    ("node-id", po::value<std::string>(),
+     "node identifier (default: random UUID)")
+    ("seed,s", po::value<std::vector<std::string>>()->multitoken(),
+     "peer endpoint(s) to connect to for clustering")
+    ("root-path", po::value<std::string>()->default_value(""),
+     "subtree to replicate (empty = whole tree)")
+    ("sync-mode", po::value<std::string>()->default_value("read-write"),
+     "default sync mode: read-only, read-write, authoritative")
+    ("enforce-authority", "enforce authority map on remote mutations")
+    ("enforce-write-policy", "enforce write policies")
+    ("resolve-conflicts", "enable LWW conflict resolution")
+    ("tls-cert", po::value<std::string>(), "TLS server certificate PEM file")
+    ("tls-key", po::value<std::string>(), "TLS server private key PEM file")
+    ("tls-ca", po::value<std::string>(), "TLS root CA PEM file")
+    ("tls-require-client-auth", "require mutual TLS")
+    ("auth-token", po::value<std::string>(),
+     "bearer token for authentication (both expected and outbound)")
+    ("enable-exec", "enable state_exec script execution engine")
+    ("blob-store-path", po::value<std::string>(), "path for blob storage (default: memory-only)")
+    ("pump-interval", po::value<int>()->default_value(10),
+     "pump loop interval in ms (0 = no pump thread)")
+    ("delegate", po::value<std::vector<std::string>>()->multitoken(),
+     "delegate subtree: path:cluster_id:endpoint[:lease_seconds]");
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  auto &app = cvc_app();
+  cvc::distributed_state_config cfg;
+  cfg.cluster_id = vm["cluster-id"].as<std::string>();
+
+  if (vm.count("node-id")) {
+    cfg.node_id = vm["node-id"].as<std::string>();
+  } else {
+    // Generate a simple unique node ID
+    std::ostringstream oss;
+    oss << "node-" << std::chrono::steady_clock::now().time_since_epoch().count();
+    cfg.node_id = oss.str();
+  }
+
+  cfg.root_path = vm["root-path"].as<std::string>();
+  cfg.listen_address = vm["listen"].as<std::string>();
+
+  std::string tstr = vm["transport"].as<std::string>();
+  if (tstr == "ipc") cfg.transport = cvc::transport_kind::ipc;
+  else if (tstr == "grpc") cfg.transport = cvc::transport_kind::grpc;
+  else throw std::runtime_error("Unknown transport: " + tstr + " (use ipc or grpc)");
+
+  if (vm.count("seed"))
+    cfg.seeds = vm["seed"].as<std::vector<std::string>>();
+
+  // Parse sync mode
+  cvc::sync_mode smode = cvc::sync_mode::read_write;
+  std::string sstr = vm["sync-mode"].as<std::string>();
+  if (sstr == "read-only") smode = cvc::sync_mode::read_only;
+  else if (sstr == "authoritative") smode = cvc::sync_mode::authoritative;
+  cfg.mounts.push_back({cfg.root_path, smode});
+
+  cfg.enforce_authority = vm.count("enforce-authority");
+  cfg.enforce_write_policy = vm.count("enforce-write-policy");
+  cfg.resolve_conflicts = vm.count("resolve-conflicts");
+
+  // TLS
+  auto read_file_to_string = [](const std::string &path) -> std::string {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("Cannot read file: " + path);
+    return std::string(std::istreambuf_iterator<char>(f),
+                       std::istreambuf_iterator<char>());
+  };
+  if (vm.count("tls-cert"))
+    cfg.tls_server_cert_pem = read_file_to_string(vm["tls-cert"].as<std::string>());
+  if (vm.count("tls-key"))
+    cfg.tls_server_key_pem = read_file_to_string(vm["tls-key"].as<std::string>());
+  if (vm.count("tls-ca"))
+    cfg.tls_root_ca_pem = read_file_to_string(vm["tls-ca"].as<std::string>());
+  cfg.tls_require_client_auth = vm.count("tls-require-client-auth") > 0;
+
+  // Auth
+  if (vm.count("auth-token")) {
+    std::string token = vm["auth-token"].as<std::string>();
+    cfg.auth_expected_token = token;
+    cfg.auth_outbound_token = token;
+  }
+
+  if (vm.count("blob-store-path"))
+    cfg.blob_store_path = vm["blob-store-path"].as<std::string>();
+  cfg.pump_interval_ms = static_cast<uint32_t>(vm["pump-interval"].as<int>());
+
+  // Join session
+  std::cout << "Starting CVC state server...\n"
+            << "  cluster: " << cfg.cluster_id << "\n"
+            << "  node:    " << cfg.node_id << "\n"
+            << "  listen:  " << cfg.listen_address << "\n"
+            << "  transport: " << tstr << "\n";
+  if (!cfg.seeds.empty()) {
+    std::cout << "  seeds:";
+    for (auto &s : cfg.seeds) std::cout << " " << s;
+    std::cout << "\n";
+  }
+
+  auto session = cvc::distributed_state_session::join(app, cfg);
+  std::cout << "Server running.\n";
+
+  // Process delegations
+  if (vm.count("delegate")) {
+    for (auto &spec : vm["delegate"].as<std::vector<std::string>>()) {
+      // Parse path:cluster_id:endpoint[:lease_seconds]
+      std::vector<std::string> parts;
+      std::istringstream ss(spec);
+      std::string part;
+      while (std::getline(ss, part, ':')) parts.push_back(part);
+      if (parts.size() < 3)
+        throw std::runtime_error("Invalid delegation spec: " + spec
+                                 + " (expected path:cluster_id:endpoint[:lease_seconds])");
+      cvc::delegation_target dt;
+      dt.cluster_id = parts[1];
+      dt.endpoint = parts[2];
+      if (parts.size() > 3)
+        dt.lease_duration_ns = std::stoull(parts[3]) * 1000000000ULL;
+      session->delegate(parts[0], dt);
+      std::cout << "  delegated " << parts[0] << " -> " << dt.cluster_id
+                << " @ " << dt.endpoint << "\n";
+    }
+  }
+
+  // Optional exec coordinator
+  std::unique_ptr<cvc::state_exec::scheduler> sched;
+  std::unique_ptr<cvc::state_exec::exec_coordinator> coord;
+  if (vm.count("enable-exec")) {
+    sched = std::make_unique<cvc::state_exec::scheduler>();
+    sched->set_watch_root(&cvc::state::instance(app));
+    coord = std::make_unique<cvc::state_exec::exec_coordinator>();
+    coord->set_node_id(cfg.node_id);
+    coord->set_cluster_id(cfg.cluster_id);
+    coord->attach_scheduler(sched.get());
+    coord->attach_shard(&session->shard());
+    coord->attach_message_bus(&session->shard().message_bus());
+    coord->start();
+    std::cout << "  exec coordinator: enabled\n";
+  }
+
+  // Block until SIGINT/SIGTERM
+  std::signal(SIGINT, serve_signal_handler);
+  std::signal(SIGTERM, serve_signal_handler);
+  std::cout << "Press Ctrl+C to stop.\n";
+  while (g_serve_running.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // If exec enabled, step the scheduler
+    if (sched && sched->has_runnable())
+      sched->step();
+  }
+
+  std::cout << "\nShutting down...\n";
+  if (coord) coord->stop();
+  session->stop();
+  std::cout << "Server stopped.\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// State exec — run scripts locally or submit to cluster
+// ---------------------------------------------------------------------------
+
+static int cmd_exec(int argc, char **argv) {
+  po::options_description desc(
+    "cvc exec - run state_exec scripts\n\n"
+    "Executes a state_exec (Scheme-like) script against the local state\n"
+    "tree. The script can read/write state values, perform computations,\n"
+    "and interact with the CVC data model.\n\n"
+    "Examples:\n"
+    "  cvc exec -e '(+ 1 2 3)'\n"
+    "  cvc exec -f script.sx\n"
+    "  cvc exec -e '(state-set! \"scene.camera.x\" 1.5)'\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("expression,e", po::value<std::string>(), "expression to evaluate")
+    ("file,f", po::value<std::string>(), "script file to execute")
+    ("max-steps", po::value<uint64_t>()->default_value(0), "max steps (0 = unlimited)")
+    ("max-time", po::value<double>()->default_value(0.0), "max time in seconds (0 = unlimited)")
+    ("name,n", po::value<std::string>()->default_value("cli"), "process name");
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  if (!vm.count("expression") && !vm.count("file"))
+    throw std::runtime_error("Either -e <expression> or -f <file> is required");
+
+  std::string script;
+  if (vm.count("file")) {
+    std::ifstream f(vm["file"].as<std::string>());
+    if (!f) throw std::runtime_error("Cannot read file: " + vm["file"].as<std::string>());
+    script = std::string(std::istreambuf_iterator<char>(f),
+                         std::istreambuf_iterator<char>());
+  } else {
+    script = vm["expression"].as<std::string>();
+  }
+
+  auto &app = cvc_app();
+  cvc::state_exec::scheduler sched;
+  sched.set_watch_root(&cvc::state::instance(app));
+
+  cvc::state_exec::execute_options opts;
+  opts.name = vm["name"].as<std::string>();
+  opts.max_steps = vm["max-steps"].as<uint64_t>();
+  opts.max_time = vm["max-time"].as<double>();
+
+  int pid = sched.execute(script, opts);
+
+  // Run the scheduler to completion
+  auto results = sched.run();
+  auto result = sched.get_result(pid);
+  if (result) {
+    std::string output = cvc::state_exec::to_string(*result);
+    if (!output.empty() && output != "nil")
+      std::cout << output << "\n";
+  }
+
+  auto info = sched.get_process_info(pid);
+  if (info && info->status == cvc::state_exec::process_status::killed)
+    return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// State tree commands — get/set/list/export
+// ---------------------------------------------------------------------------
+
+static int cmd_state(int argc, char **argv) {
+  po::options_description desc(
+    "cvc state - query and modify the state tree\n\n"
+    "Operations:\n"
+    "  get <path>            get state value at path\n"
+    "  set <path> <value>    set state value at path\n"
+    "  list [path]           list children of a state node\n"
+    "  json [path]           export subtree as JSON\n"
+    "  delete <path>         delete a state node\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("op", po::value<std::string>()->required(), "operation: get, set, list, json, delete")
+    ("path", po::value<std::string>()->default_value(""), "state path (dot-separated)")
+    ("value", po::value<std::string>(), "value to set (for 'set' operation)")
+    ("args", po::value<std::vector<std::string>>(), "additional arguments");
+
+  po::positional_options_description pos;
+  pos.add("op", 1).add("path", 1).add("value", 1);
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  auto &app = cvc_app();
+  auto &root = cvc::state::instance(app);
+  std::string op = vm["op"].as<std::string>();
+  std::string path = vm["path"].as<std::string>();
+
+  if (op == "get") {
+    if (path.empty()) throw std::runtime_error("Path required for 'get'");
+    auto &node = root(path);
+    if (!node.initialized())
+      throw std::runtime_error("State path not initialized: " + path);
+    std::cout << node.value() << "\n";
+  } else if (op == "set") {
+    if (path.empty()) throw std::runtime_error("Path required for 'set'");
+    if (!vm.count("value")) throw std::runtime_error("Value required for 'set'");
+    root(path).value(vm["value"].as<std::string>());
+    std::cout << "Set " << path << " = " << vm["value"].as<std::string>() << "\n";
+  } else if (op == "list") {
+    auto &node = path.empty() ? root : root(path);
+    auto children = node.children();
+    for (auto &child : children)
+      std::cout << child << "\n";
+    if (children.empty())
+      std::cout << "(no children)\n";
+  } else if (op == "json") {
+    auto &node = path.empty() ? root : root(path);
+    std::cout << node.json() << "\n";
+  } else if (op == "delete") {
+    if (path.empty()) throw std::runtime_error("Path required for 'delete'");
+    // Touch with empty to mark; actual deletion depends on state impl
+    root(path).value(std::string(""));
+    std::cout << "Cleared " << path << "\n";
+  } else {
+    throw std::runtime_error("Unknown state operation: " + op
+                             + " (use get, set, list, json, or delete)");
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Cluster status — admin report
+// ---------------------------------------------------------------------------
+
+static int cmd_cluster_status(int argc, char **argv) {
+  po::options_description desc(
+    "cvc cluster-status - display cluster health report\n\n"
+    "Starts a temporary session connected to a cluster and prints\n"
+    "the admin status report (peers, delegations, blob store, etc.).\n");
+  desc.add_options()
+    ("help,h", "show help")
+    ("listen,l", po::value<std::string>()->required(),
+     "listen address for temporary session")
+    ("transport,t", po::value<std::string>()->default_value("grpc"),
+     "transport: ipc or grpc")
+    ("cluster-id", po::value<std::string>()->default_value("cvc-cluster"),
+     "cluster identifier")
+    ("seed,s", po::value<std::vector<std::string>>()->multitoken()->required(),
+     "peer endpoint(s) to connect to")
+    ("auth-token", po::value<std::string>(), "bearer token");
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+  po::notify(vm);
+
+  auto &app = cvc_app();
+  cvc::distributed_state_config cfg;
+  cfg.cluster_id = vm["cluster-id"].as<std::string>();
+  {
+    std::ostringstream oss;
+    oss << "status-" << std::chrono::steady_clock::now().time_since_epoch().count();
+    cfg.node_id = oss.str();
+  }
+  cfg.listen_address = vm["listen"].as<std::string>();
+  std::string tstr = vm["transport"].as<std::string>();
+  if (tstr == "ipc") cfg.transport = cvc::transport_kind::ipc;
+  else if (tstr == "grpc") cfg.transport = cvc::transport_kind::grpc;
+  else throw std::runtime_error("Unknown transport: " + tstr);
+  cfg.seeds = vm["seed"].as<std::vector<std::string>>();
+  cfg.mounts.push_back({"", cvc::sync_mode::read_only});
+  if (vm.count("auth-token")) {
+    std::string t = vm["auth-token"].as<std::string>();
+    cfg.auth_expected_token = t;
+    cfg.auth_outbound_token = t;
+  }
+  cfg.pump_interval_ms = 50;
+
+  auto session = cvc::distributed_state_session::join(app, cfg);
+
+  // Give the session a moment to sync
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  auto &admin = session->admin();
+  std::cout << admin.to_text() << "\n";
+
+  auto status = session->status();
+  std::cout << "Session status:\n"
+            << "  running:     " << (status.running ? "yes" : "no") << "\n"
+            << "  peers:       " << status.peer_count << "\n"
+            << "  local seq:   " << status.local_sequence << "\n"
+            << "  pump cycles: " << status.pump_cycles << "\n";
+
+  session->stop();
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Process listing (state_exec scheduler)
+// ---------------------------------------------------------------------------
+
+static int cmd_ps(int argc, char **argv) {
+  po::options_description desc(
+    "cvc ps - list running state_exec processes\n\n"
+    "Shows processes managed by the local state_exec scheduler.\n"
+    "Use with 'cvc serve --enable-exec' to see cluster-wide processes.\n");
+  desc.add_options()
+    ("help,h", "show help");
+
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+
+  // Create a scheduler and report (useful mainly for embedded use;
+  // in standalone mode there are no persistent processes)
+  auto &app = cvc_app();
+  cvc::state_exec::scheduler sched;
+  sched.set_watch_root(&cvc::state::instance(app));
+  auto procs = sched.list_processes();
+  if (procs.empty()) {
+    std::cout << "No running processes.\n";
+    return 0;
+  }
+  std::cout << std::left << std::setw(6) << "PID"
+            << std::setw(16) << "NAME"
+            << std::setw(12) << "STATUS"
+            << std::setw(10) << "STEPS"
+            << std::setw(10) << "TIME"
+            << std::setw(10) << "MEM"
+            << "\n";
+  for (auto &p : procs) {
+    const char *status_str = "unknown";
+    switch (p.status) {
+      case cvc::state_exec::process_status::ready: status_str = "ready"; break;
+      case cvc::state_exec::process_status::running: status_str = "running"; break;
+      case cvc::state_exec::process_status::paused: status_str = "paused"; break;
+      case cvc::state_exec::process_status::waiting: status_str = "waiting"; break;
+      case cvc::state_exec::process_status::terminated: status_str = "done"; break;
+      case cvc::state_exec::process_status::killed: status_str = "killed"; break;
+    }
+    std::cout << std::left << std::setw(6) << p.pid
+              << std::setw(16) << p.name
+              << std::setw(12) << status_str
+              << std::setw(10) << p.step_count
+              << std::setw(10) << std::fixed << std::setprecision(2) << p.elapsed_time
+              << std::setw(10) << p.current_memory
+              << "\n";
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // XMLRPC commands (conditional)
 // ---------------------------------------------------------------------------
 
@@ -1254,7 +1701,14 @@ static const command_entry commands[] = {
   // ── Test data ──
   {"bunny",          "Test Data",       "output Stanford bunny geometry or SDF",         cmd_bunny},
 
-  // ── Network ──
+  // ── State & Distributed ──
+  {"serve",          "State Server",    "run headless CVC state server",                 cmd_serve},
+  {"exec",           "State Exec",      "run state_exec script",                         cmd_exec},
+  {"state",          "State",           "get/set/list state tree values",                cmd_state},
+  {"cluster-status", "State Server",    "display cluster health report",                 cmd_cluster_status},
+  {"ps",             "State Exec",      "list state_exec processes",                     cmd_ps},
+
+  // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC
   {"server",         "Network",         "start XMLRPC server",                           cmd_server},
   {"client",         "Network",         "call XMLRPC method on remote server",           cmd_client},
