@@ -153,16 +153,16 @@ public:
   /// (e.g. defclass method wrappers) work without corrupting the
   /// outer evaluation's trampoline state.
   T sync_wait() {
-    auto saved = detail::trampoline_next();   // save for re-entrancy
+    auto saved = detail::trampoline_next(); // save for re-entrancy
     handle_.promise().continuation_ = std::noop_coroutine();
-    detail::trampoline_next() = handle_;      // seed the loop
-    while (detail::trampoline_next() != std::noop_coroutine()) {
+    detail::trampoline_next() = handle_; // seed the loop
+    while (!handle_.done()) {
       auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
-      next.resume();  // runs one coroutine step; sets trampoline_next
-      if (handle_.done())
-        break;
+      if (next == std::noop_coroutine())
+        next = handle_; // coroutine suspended via non-trampoline awaitable (e.g. suspend_point)
+      next.resume();    // runs one coroutine step; sets trampoline_next
     }
-    detail::trampoline_next() = saved;        // restore for re-entrancy
+    detail::trampoline_next() = saved; // restore for re-entrancy
     auto &r = handle_.promise().result_;
     if (r.index() == 2)
       std::rethrow_exception(std::get<2>(r));
@@ -265,11 +265,11 @@ public:
     auto saved = detail::trampoline_next();
     handle_.promise().continuation_ = std::noop_coroutine();
     detail::trampoline_next() = handle_;
-    while (detail::trampoline_next() != std::noop_coroutine()) {
+    while (!handle_.done()) {
       auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
+      if (next == std::noop_coroutine())
+        next = handle_; // coroutine suspended via non-trampoline awaitable (e.g. suspend_point)
       next.resume();
-      if (handle_.done())
-        break;
     }
     detail::trampoline_next() = saved;
     if (handle_.promise().exception_)

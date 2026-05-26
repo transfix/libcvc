@@ -83,7 +83,7 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
           while (!t.done()) {
             auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
             if (next == std::noop_coroutine())
-              break;
+              next = t.handle();
             next.resume();
           }
         } catch (...) {
@@ -93,7 +93,7 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
       }
       auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
       if (next == std::noop_coroutine())
-        break;
+        next = t.handle();
       next.resume();
     }
     auto &r = t.handle().promise().result_;
