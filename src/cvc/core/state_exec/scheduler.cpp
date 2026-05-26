@@ -19,8 +19,7 @@ scheduler::scheduler(scheduling_policy policy)
 // ---------------------------------------------------------------------------
 
 // Helper: read a size_t from a state node, returning nullopt on missing/bad.
-static std::optional<std::size_t> read_size_setting(cvc::state *root,
-                                                    const std::string &path) {
+static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
   auto *node = root->findDescendant(path);
   if (!node)
     return std::nullopt;
@@ -43,14 +42,13 @@ void scheduler::load_settings() {
   std::size_t effective = fallback_max_pending;
 
   // Global default
-  if (auto v = read_size_setting(watch_root_,
-                                 std::string(defaults_prefix) + ".max_pending_messages"))
+  if (auto v =
+          read_size_setting(watch_root_, std::string(defaults_prefix) + ".max_pending_messages"))
     effective = *v;
 
   // Per-scheduler override
   if (!id_.empty()) {
-    std::string per = std::string(sched_prefix) + "." + id_ +
-                      ".max_pending_messages";
+    std::string per = std::string(sched_prefix) + "." + id_ + ".max_pending_messages";
     if (auto v = read_size_setting(watch_root_, per))
       effective = *v;
   }
@@ -60,12 +58,11 @@ void scheduler::load_settings() {
   // Publish effective values to per-scheduler subtree
   if (!id_.empty()) {
     std::string base = std::string(sched_prefix) + "." + id_;
-    (*watch_root_)(base + ".max_pending_messages")
-        .value(std::to_string(max_pending_messages));
+    (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
     (*watch_root_)(base + ".policy")
-        .value(policy_ == scheduling_policy::round_robin   ? "round_robin"
-               : policy_ == scheduling_policy::priority    ? "priority"
-                                                           : "priority_rr");
+        .value(policy_ == scheduling_policy::round_robin ? "round_robin"
+               : policy_ == scheduling_policy::priority  ? "priority"
+                                                         : "priority_rr");
   }
 }
 
@@ -583,8 +580,7 @@ bool scheduler::receive_message(int pid, const std::string &path) {
 int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::waiting && proc->recv_path &&
-        *proc->recv_path == path) {
+    if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
       proc->inbox.push(msg);
       proc->recv_path.reset();
       proc->state.result = msg;

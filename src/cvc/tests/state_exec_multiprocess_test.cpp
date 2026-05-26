@@ -46,8 +46,8 @@ std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   auto dir = std::filesystem::temp_directory_path();
-  auto p = dir / ("cvc_exec_mp_" + std::to_string(pid) + "_" +
-                   std::to_string(now) + "_" + label + ".sock");
+  auto p = dir / ("cvc_exec_mp_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label +
+                  ".sock");
   return p.string();
 }
 
@@ -92,8 +92,7 @@ exec_env make_exec_env(scheduler &sched, cvc::state &root) {
 /// Pump transport and step scheduler in an interleaved loop until
 /// either the scheduler has no runnable processes or timeout expires.
 template <typename Transport>
-void pump_and_run(Transport &transport, scheduler &sched,
-                  std::chrono::milliseconds timeout) {
+void pump_and_run(Transport &transport, scheduler &sched, std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     transport.pump_all();
@@ -111,8 +110,7 @@ void pump_and_run(Transport &transport, scheduler &sched,
 /// waiting on state values from a remote peer — keeps pumping even
 /// when no process is runnable if some processes are still waiting.
 template <typename Transport>
-void pump_until_done(Transport &transport, scheduler &sched,
-                     std::chrono::milliseconds timeout) {
+void pump_until_done(Transport &transport, scheduler &sched, std::chrono::milliseconds timeout) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     transport.pump_all();
@@ -180,13 +178,13 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
         (set v2 (state-get "shared.y"))
         (set v3 (state-get "shared.z"))
         (str-concat v1 ":" v2 ":" v3))
-    )"), opts);
+    )"),
+                              opts);
 
     sched_b.run();
     auto result = sched_b.get_result(pid);
 
-    bool ok = result.has_value() &&
-              std::holds_alternative<std::string>(result->v) &&
+    bool ok = result.has_value() && std::holds_alternative<std::string>(result->v) &&
               std::get<std::string>(result->v) == "10:20:30";
 
     tr_b.stop();
@@ -223,7 +221,8 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
       (state-set "shared.y" "20")
       (state-set "shared.z" "30")
       "written")
-  )"), opts);
+  )"),
+                            opts);
 
   sched_a.run();
   auto result = sched_a.get_result(pid);
@@ -250,8 +249,7 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
   std::filesystem::remove(sock_b, ec);
 
   ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
-  EXPECT_EQ(WEXITSTATUS(status), 0)
-      << "exit codes: 10=socket, 11=connect, 12=value mismatch";
+  EXPECT_EQ(WEXITSTATUS(status), 0) << "exit codes: 10=socket, 11=connect, 12=value mismatch";
 }
 
 // ===========================================================================
@@ -313,7 +311,8 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
       (begin
         (set m (msg-recv "oob.chan"))
         (get-attr m "payload"))
-    )"), opts);
+    )"),
+                              opts);
 
     // Step the scheduler once so the process reaches msg-recv and suspends.
     for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
@@ -341,8 +340,7 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
     }
 
     auto result = sched_b.get_result(pid);
-    bool ok = result.has_value() &&
-              std::holds_alternative<std::string>(result->v) &&
+    bool ok = result.has_value() && std::holds_alternative<std::string>(result->v) &&
               std::get<std::string>(result->v) == "hello-from-A";
 
     tr_b.stop();
@@ -378,7 +376,8 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
     (begin
       (msg-send "oob.chan" "hello-from-A")
       "sent")
-  )"), opts);
+  )"),
+                            opts);
 
   // Run sender to completion.
   sched_a.run();
@@ -470,14 +469,14 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
             (set concat (str-concat concat val ":"))))
         (state-set "result.consumer" (str-concat (str count) "|" concat))
         count)
-    )"), opts);
+    )"),
+                              opts);
 
     sched_b.run();
     auto result = sched_b.get_result(pid);
 
     // 5 items read → count = 5
-    bool ok = result.has_value() &&
-              std::holds_alternative<int64_t>(result->v) &&
+    bool ok = result.has_value() && std::holds_alternative<int64_t>(result->v) &&
               std::get<int64_t>(result->v) == 5;
 
     // Pump our result back to Process A.
@@ -529,7 +528,8 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
           (state-set idx val)))
       (state-set "items.ready" "true")
       "produced")
-  )"), opts);
+  )"),
+                            opts);
 
   sched_a.run();
   auto result = sched_a.get_result(pid);
@@ -563,8 +563,7 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
   EXPECT_EQ(WEXITSTATUS(status), 0)
       << "exit codes: 10=socket, 11=connect, 12=generator count mismatch";
   // Consumer should have read 5 items
-  EXPECT_TRUE(consumer_result.find("5|") == 0)
-      << "consumer result: " << consumer_result;
+  EXPECT_TRUE(consumer_result.find("5|") == 0) << "consumer result: " << consumer_result;
 }
 
 // ===========================================================================
@@ -620,13 +619,13 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
                 (set count (+ count 1))
                 0))))
         count)
-    )"), opts);
+    )"),
+                              opts);
 
     sched_b.run();
     auto result = sched_b.get_result(pid);
     // 9 items total (3 producers × 3 items)
-    bool ok = result.has_value() &&
-              std::holds_alternative<int64_t>(result->v) &&
+    bool ok = result.has_value() && std::holds_alternative<int64_t>(result->v) &&
               std::get<int64_t>(result->v) == 9;
 
     tr_b.stop();
@@ -659,12 +658,15 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
     opts.name = "producer-" + std::to_string(p);
     opts.env = e.env;
     std::string ps = std::to_string(p);
-    std::string script =
-        "(begin"
-        "  (for i (range 3)"
-        "    (state-set (str-concat \"producer." + ps + ".item.\" (str i))"
-        "              (str-concat \"" + ps + "-\" (str i))))"
-        "  \"done\")";
+    std::string script = "(begin"
+                         "  (for i (range 3)"
+                         "    (state-set (str-concat \"producer." +
+                         ps +
+                         ".item.\" (str i))"
+                         "              (str-concat \"" +
+                         ps +
+                         "-\" (str i))))"
+                         "  \"done\")";
     sched_a.execute(script, opts);
   }
 
@@ -763,7 +765,8 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
               (set i (+ i 1)))))
         (state-set "pipeline.result" result)
         result)
-    )"), opts);
+    )"),
+                              opts);
 
     // Step to get the process started and waiting on msg-recv.
     for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
@@ -793,8 +796,7 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
 
     auto result = sched_b.get_result(pid);
     // Payloads: "aa", "bb", "cc", "dd" → concatenated "aa,bb,cc,dd,"
-    bool ok = result.has_value() &&
-              std::holds_alternative<std::string>(result->v) &&
+    bool ok = result.has_value() && std::holds_alternative<std::string>(result->v) &&
               std::get<std::string>(result->v) == "aa,bb,cc,dd,";
 
     // Pump result back.
@@ -841,7 +843,8 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
       (for payload payload-gen
         (msg-send "pipe.data" payload))
       "all-sent")
-  )"), opts);
+  )"),
+                            opts);
 
   // Run sender synchronously (matches the working OobMessageDelivery pattern).
   sched_a.run();
@@ -931,7 +934,8 @@ TEST(StateExecMultiprocessGrpc, StateTreeReplication) {
       (state-set "grpc.x" "alpha")
       (state-set "grpc.y" "beta")
       "written")
-  )"), opts_a);
+  )"),
+                              opts_a);
   sched_a.run();
   ASSERT_TRUE(sched_a.get_result(pid_a).has_value());
 
@@ -952,7 +956,8 @@ TEST(StateExecMultiprocessGrpc, StateTreeReplication) {
   int pid_b = sched_b.execute(std::string(R"(
     (begin
       (str-concat (state-get "grpc.x") ":" (state-get "grpc.y")))
-  )"), opts_b);
+  )"),
+                              opts_b);
   sched_b.run();
 
   auto result = sched_b.get_result(pid_b);
@@ -1003,7 +1008,8 @@ TEST(StateExecMultiprocessGrpc, OobMessageDelivery) {
     (begin
       (set m (msg-recv "grpc.chan"))
       (get-attr m "payload"))
-  )"), opts_b);
+  )"),
+                              opts_b);
 
   // Step until the receiver is waiting on msg-recv.
   for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
@@ -1022,7 +1028,8 @@ TEST(StateExecMultiprocessGrpc, OobMessageDelivery) {
     (begin
       (msg-send "grpc.chan" "hello-grpc")
       "sent")
-  )"), opts_a);
+  )"),
+                              opts_a);
 
   // Run sender, pump OOB to B.
   pump_and_run(tr_a, sched_a, std::chrono::milliseconds(5000));
@@ -1089,7 +1096,8 @@ TEST(StateExecMultiprocessGrpc, BidirectionalProducerConsumerGenerators) {
             (set i (+ i 1)))))
       (state-set "data.ready" "true")
       "produced")
-  )"), opts_a);
+  )"),
+                              opts_a);
 
   sched_a.run();
   ASSERT_TRUE(sched_a.get_result(pid_a).has_value());
@@ -1117,7 +1125,8 @@ TEST(StateExecMultiprocessGrpc, BidirectionalProducerConsumerGenerators) {
       (for val reader
         (set sum (+ sum val)))
       sum)
-  )"), opts_b);
+  )"),
+                              opts_b);
 
   sched_b.run();
   auto result = sched_b.get_result(pid_b);

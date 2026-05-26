@@ -103,18 +103,14 @@ TEST_F(BuiltinsTest, IntFromNegativeString) {
   EXPECT_EQ(std::get<int64_t>(call("int", {std::string("-42")}).v), -42);
 }
 
-TEST_F(BuiltinsTest, IntFromDouble) {
-  EXPECT_EQ(std::get<int64_t>(call("int", {3.7}).v), 3);
-}
+TEST_F(BuiltinsTest, IntFromDouble) { EXPECT_EQ(std::get<int64_t>(call("int", {3.7}).v), 3); }
 
 TEST_F(BuiltinsTest, IntFromBool) {
   EXPECT_EQ(std::get<int64_t>(call("int", {true}).v), 1);
   EXPECT_EQ(std::get<int64_t>(call("int", {false}).v), 0);
 }
 
-TEST_F(BuiltinsTest, IntFromInt) {
-  EXPECT_EQ(std::get<int64_t>(call("int", {int64_t{99}}).v), 99);
-}
+TEST_F(BuiltinsTest, IntFromInt) { EXPECT_EQ(std::get<int64_t>(call("int", {int64_t{99}}).v), 99); }
 
 TEST_F(BuiltinsTest, IntBadStringThrows) {
   EXPECT_THROW(call("int", {std::string("abc")}), std::runtime_error);
@@ -295,12 +291,12 @@ TEST_F(BuiltinsTest, Apply) {
 
 TEST_F(BuiltinsTest, DefaultEnvironmentHasAllBuiltins) {
   std::vector<std::string> expected = {
-      "+",        "-",        "*",        "/",          "%",      "<",       ">",       "<=",
-      ">=",       "=",        "!=",       "str-concat", "str",    "list",    "car",     "cdr",
-      "cons",     "nth",      "set-nth",  "length",     "append", "slice",   "del-nth", "dict",
-      "get-attr", "set-attr", "del-attr", "send",       "apply",  "is-null", "is-list", "type-of",
-      "print",    "not",      "and",      "or",         "generator", "next",  "generator?",
-      "gen-done?", "range",   "collect",
+      "+",     "-",         "*",       "/",          "%",          "<",        ">",
+      "<=",    ">=",        "=",       "!=",         "str-concat", "str",      "list",
+      "car",   "cdr",       "cons",    "nth",        "set-nth",    "length",   "append",
+      "slice", "del-nth",   "dict",    "get-attr",   "set-attr",   "del-attr", "send",
+      "apply", "is-null",   "is-list", "type-of",    "print",      "not",      "and",
+      "or",    "generator", "next",    "generator?", "gen-done?",  "range",    "collect",
   };
   for (auto &name : expected) {
     EXPECT_NE(env->lookup(name), nullptr) << "missing: " << name;

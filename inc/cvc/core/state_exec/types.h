@@ -73,9 +73,9 @@ using native_fn = std::function<value_tag(std::span<const value_tag>)>;
 ///   data_object_ptr → typed data from state::data()
 ///   generator_ptr → lazy sequence with yield support
 struct value_tag {
-  using variant_type = std::variant<std::monostate, bool, int64_t, double, std::string, symbol,
-                                    list_ptr, closure_ptr, dict_ptr, native_fn, data_object_ptr,
-                                    generator_ptr>;
+  using variant_type =
+      std::variant<std::monostate, bool, int64_t, double, std::string, symbol, list_ptr,
+                   closure_ptr, dict_ptr, native_fn, data_object_ptr, generator_ptr>;
 
   variant_type v;
 

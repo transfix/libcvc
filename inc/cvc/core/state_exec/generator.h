@@ -41,8 +41,7 @@ struct generator {
   std::function<std::optional<value_t>()> native_step;
 
   /// Construct a closure-based generator (evaluator takes a default env).
-  explicit generator(environment_ptr env)
-      : evaluator(std::move(env)) {}
+  explicit generator(environment_ptr env) : evaluator(std::move(env)) {}
 };
 
 /// Advance a generator by one value.

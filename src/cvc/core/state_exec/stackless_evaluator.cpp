@@ -736,7 +736,7 @@ void stackless_evaluator::step_return_value(evaluator_state &state, eval_frame &
 
 void stackless_evaluator::step_yield_value(evaluator_state &state, eval_frame &frame) {
   auto val = frame.results.back();
-  state.result = val;   // Store value where generator_next can find it
+  state.result = val; // Store value where generator_next can find it
   pop_frame(state, val);
   state.yielded = true; // Signal generator_next to stop stepping
 }

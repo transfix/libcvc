@@ -225,9 +225,7 @@ value_t intrinsic_fork(intrinsics_context *ctx, std::span<const value_t> args) {
 
 value_t intrinsic_self_pid(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "self-pid");
-  int pid = (ctx->sched && ctx->sched->current_pid() >= 0)
-                ? ctx->sched->current_pid()
-                : ctx->pid;
+  int pid = (ctx->sched && ctx->sched->current_pid() >= 0) ? ctx->sched->current_pid() : ctx->pid;
   return value_t(static_cast<int64_t>(pid));
 }
 
@@ -581,8 +579,7 @@ value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> arg
   // Otherwise, suspend the process until a message arrives.
   bool ok = ctx->sched->receive_message(pid, path);
   if (!ok)
-    throw std::runtime_error("msg-recv: cannot suspend process " +
-                             std::to_string(pid));
+    throw std::runtime_error("msg-recv: cannot suspend process " + std::to_string(pid));
   // Return nil as a placeholder — the scheduler will overwrite
   // state.result with the actual message when delivery occurs.
   return nil_value;

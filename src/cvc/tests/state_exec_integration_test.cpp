@@ -857,7 +857,8 @@ TEST_F(MessagingIntegrationTest, MsgRecvDrainsQueuedMessages) {
       (msg-send "drain.test" "second")
       (msg-send "drain.test" "third")
       "sent")
-  )"), prod_opts);
+  )"),
+                      prod_opts);
 
   // Run producer to completion first
   sched.run();
@@ -876,7 +877,8 @@ TEST_F(MessagingIntegrationTest, MsgRecvDrainsQueuedMessages) {
       (list (get-attr m1 "status")
             (get-attr m2 "status")
             (get-attr m3 "status")))
-  )"), cons_opts);
+  )"),
+                      cons_opts);
 
   sched.run();
   ASSERT_TRUE(sched.get_result(cons_pid).has_value());
@@ -1653,7 +1655,8 @@ TEST_F(ProducerConsumerTest, SingleProducerSingleConsumer) {
             (set i (+ i 1)))))
       (state-set "queue.count" "5")
       "produce-done")
-  )", prod_opts);
+  )",
+                  prod_opts);
 
   execute_options cons_opts;
   cons_opts.name = "consumer";
@@ -1668,7 +1671,8 @@ TEST_F(ProducerConsumerTest, SingleProducerSingleConsumer) {
         (for i (range 5)
           (set total (+ total 1)))
         total))
-  )", cons_opts);
+  )",
+                  cons_opts);
 
   auto results = sched.run();
   ASSERT_TRUE(results.count(prod));
@@ -1689,7 +1693,8 @@ TEST_F(ProducerConsumerTest, GeneratorDrivenProducerBatch) {
         (state-set (str-concat "batch." (str i)) (str (* i 10))))
       (state-set "batch.done" "true")
       10)
-  )", prod_opts);
+  )",
+                  prod_opts);
 
   // Consumer: waits for "batch.done", collects values via generator.
   execute_options cons_opts;
@@ -1705,7 +1710,8 @@ TEST_F(ProducerConsumerTest, GeneratorDrivenProducerBatch) {
         (for i (range 10)
           (set sum (+ sum (* i 10))))
         sum))
-  )", cons_opts);
+  )",
+                  cons_opts);
 
   auto results = sched.run();
   ASSERT_TRUE(results.count(prod));
@@ -1727,7 +1733,8 @@ TEST_F(ProducerConsumerTest, ClosureGeneratorConsumer) {
         (state-set (str-concat "sq." (str i)) (str (* i i))))
       (state-set "sq.ready" "5")
       "squares-done")
-  )", prod_opts);
+  )",
+                  prod_opts);
 
   // Consumer uses a closure generator to transform values.
   execute_options cons_opts;
@@ -1747,7 +1754,8 @@ TEST_F(ProducerConsumerTest, ClosureGeneratorConsumer) {
         (for x g
           (set count (+ count 1)))
         count))
-  )", cons_opts);
+  )",
+                  cons_opts);
 
   auto results = sched.run();
   ASSERT_TRUE(results.count(prod));
@@ -1765,16 +1773,20 @@ TEST_F(ProducerConsumerTest, MultiProducerSingleConsumer) {
     execute_options opts;
     opts.name = "producer-" + std::to_string(p);
     // Each producer writes 3 values: p*3+0, p*3+1, p*3+2
-    int pid = exec(
-        "(begin"
-        "  (let ((base (* " + std::to_string(p) + " 3)))"
-        "    (for offset (range 3)"
-        "      (let ((idx (+ base offset))"
-        "            (val (+ base offset)))"
-        "        (state-set (str-concat \"data.\" (str idx)) (str val)))))"
-        "  (state-set \"data.producer." + std::to_string(p) + ".done\" \"true\")"
-        "  \"prod-" + std::to_string(p) + "-done\")",
-        opts);
+    int pid = exec("(begin"
+                   "  (let ((base (* " +
+                       std::to_string(p) +
+                       " 3)))"
+                       "    (for offset (range 3)"
+                       "      (let ((idx (+ base offset))"
+                       "            (val (+ base offset)))"
+                       "        (state-set (str-concat \"data.\" (str idx)) (str val)))))"
+                       "  (state-set \"data.producer." +
+                       std::to_string(p) +
+                       ".done\" \"true\")"
+                       "  \"prod-" +
+                       std::to_string(p) + "-done\")",
+                   opts);
     prod_pids.push_back(pid);
   }
 
@@ -1794,7 +1806,8 @@ TEST_F(ProducerConsumerTest, MultiProducerSingleConsumer) {
         (for i (range 12)
           (set total (+ total 1)))
         total))
-  )", cons_opts);
+  )",
+                  cons_opts);
 
   auto results = sched.run();
   // All producers should complete
@@ -1864,11 +1877,13 @@ TEST_F(ProducerConsumerTest, ConcurrentProducersGeneratorConsumer) {
   for (int p = 0; p < 3; ++p) {
     execute_options opts;
     opts.name = "writer-" + std::to_string(p);
-    int pid = exec(
-        "(begin"
-        "  (state-set \"status." + std::to_string(p) + "\" \"ok\")"
-        "  \"writer-" + std::to_string(p) + "-done\")",
-        opts);
+    int pid = exec("(begin"
+                   "  (state-set \"status." +
+                       std::to_string(p) +
+                       "\" \"ok\")"
+                       "  \"writer-" +
+                       std::to_string(p) + "-done\")",
+                   opts);
     pids.push_back(pid);
   }
 
@@ -1887,7 +1902,8 @@ TEST_F(ProducerConsumerTest, ConcurrentProducersGeneratorConsumer) {
           (let ((val (state-get (str-concat "status." (str i)))))
             (append results val)))
         (length results)))
-  )", cons_opts);
+  )",
+                  cons_opts);
 
   auto results = sched.run();
   for (int pid : pids) {
@@ -1995,8 +2011,7 @@ TEST_F(ProducerConsumerTest, FanOutWithSpawnedWorkers) {
   for (int p = 0; p < 3; ++p) {
     execute_options opts;
     opts.name = "worker-" + std::to_string(p);
-    exec("(state-set \"worker." + std::to_string(p) +
-             ".result\" (str (* " + std::to_string(p) +
+    exec("(state-set \"worker." + std::to_string(p) + ".result\" (str (* " + std::to_string(p) +
              " " + std::to_string(p) + ")))",
          opts);
   }
@@ -2069,14 +2084,16 @@ TEST_F(ProducerConsumerTest, MultiProcessMsgProducerGeneratorConsumer) {
           (yield 1)))))
       ;; Collect into a list and take its length
       (length (collect ones)))
-  )", cons_opts);
+  )",
+                      cons_opts);
 
   for (int i = 0; i < 3; ++i) {
-    std::string script =
-        "(begin"
-        "  (for j (range 3)"
-        "    (msg-send \"work.queue\" (str (+ " + std::to_string(i * 100) + " j))))"
-        "  \"prod-done\")";
+    std::string script = "(begin"
+                         "  (for j (range 3)"
+                         "    (msg-send \"work.queue\" (str (+ " +
+                         std::to_string(i * 100) +
+                         " j))))"
+                         "  \"prod-done\")";
     execute_options opts;
     opts.name = "producer-" + std::to_string(i);
     exec(script, opts);
@@ -2111,16 +2128,18 @@ TEST_F(ProducerConsumerTest, ProducerConsumerWithGeneratorTransform) {
           (yield (str-concat p p))))))
       ;; Collect the doubled strings and count them
       (length (collect doubler)))
-  )", cons_opts);
+  )",
+                      cons_opts);
 
   // --- 2 producers (each sends 4 messages) ---
   for (int i = 0; i < 2; ++i) {
     int base = i * 4 + 1;
-    std::string script =
-        "(begin"
-        "  (for j (range " + std::to_string(base) + " " + std::to_string(base + 4) + ")"
-        "    (msg-send \"data.in\" (str j)))"
-        "  \"done\")";
+    std::string script = "(begin"
+                         "  (for j (range " +
+                         std::to_string(base) + " " + std::to_string(base + 4) +
+                         ")"
+                         "    (msg-send \"data.in\" (str j)))"
+                         "  \"done\")";
     execute_options opts;
     opts.name = "producer-" + std::to_string(i);
     exec(script, opts);
@@ -2142,7 +2161,8 @@ TEST_F(ProducerConsumerTest, ConsumerBreaksOnSentinel) {
     (begin
       (set msg (msg-recv "ch"))
       42)
-  )", cons_opts);
+  )",
+                      cons_opts);
 
   execute_options prod_opts;
   prod_opts.name = "producer";
@@ -2150,7 +2170,8 @@ TEST_F(ProducerConsumerTest, ConsumerBreaksOnSentinel) {
     (begin
       (msg-send "ch" "hello")
       99)
-  )", prod_opts);
+  )",
+                      prod_opts);
 
   auto results = sched.run(1000000, 5.0);
   ASSERT_TRUE(results.count(cons_pid));

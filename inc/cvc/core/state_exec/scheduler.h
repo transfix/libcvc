@@ -228,9 +228,9 @@ public:
   void load_settings();
 
   /// Well-known state tree paths for scheduler configuration.
-  static constexpr const char *settings_root   = "state_exec";
+  static constexpr const char *settings_root = "state_exec";
   static constexpr const char *defaults_prefix = "state_exec.defaults";
-  static constexpr const char *sched_prefix    = "state_exec.schedulers";
+  static constexpr const char *sched_prefix = "state_exec.schedulers";
 
 private:
   std::string id_;
