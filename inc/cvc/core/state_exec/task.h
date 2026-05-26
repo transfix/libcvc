@@ -24,9 +24,11 @@
  *
  *   1. Instead of returning the next coroutine handle from
  *      await_suspend (symmetric transfer), every suspension point
- *      writes the handle into a thread-local slot and returns
- *      std::noop_coroutine() — which returns control to the
- *      nearest resume() call on the native stack.
+ *      writes the handle into a thread-local slot and uses a void
+ *      return from await_suspend to unconditionally suspend —
+ *      which returns control to the nearest resume() call on the
+ *      native stack.  (We avoid returning noop_coroutine() because
+ *      MSVC has coroutine-frame bugs with that pattern.)
  *
  *   2. sync_wait() (and the sync_evaluate timeout loop in
  *      async_evaluator.cpp) drives a flat while-loop that reads
@@ -100,12 +102,14 @@ public:
     // On final suspend, hand the continuation to the trampoline rather
     // than doing symmetric transfer (returning it directly), so that the
     // native call stack unwinds back to the sync_wait/trampoline loop.
+    // We use void-returning await_suspend (unconditional suspend) instead
+    // of returning noop_coroutine(), because MSVC's coroutine frame
+    // management has bugs when await_suspend returns noop_coroutine().
     auto final_suspend() noexcept {
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
           detail::trampoline_next() = h.promise().continuation_;
-          return std::noop_coroutine(); // unwind to trampoline loop
         }
         void await_resume() noexcept {}
       };
@@ -178,12 +182,12 @@ public:
       handle_type h;
       bool await_ready() noexcept { return false; }
       // Store caller as continuation so final_suspend chains back,
-      // then park the inner handle in the trampoline slot and return
-      // noop_coroutine to unwind to the trampoline loop.
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
+      // then park the inner handle in the trampoline slot and use
+      // void return to unconditionally suspend (avoids MSVC bugs
+      // with noop_coroutine return from await_suspend).
+      void await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
         detail::trampoline_next() = h;
-        return std::noop_coroutine();
       }
       T await_resume() {
         auto &r = h.promise().result_;
@@ -222,9 +226,8 @@ public:
     auto final_suspend() noexcept {
       struct final_awaiter {
         bool await_ready() noexcept { return false; }
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
           detail::trampoline_next() = h.promise().continuation_;
-          return std::noop_coroutine(); // unwind to trampoline loop
         }
         void await_resume() noexcept {}
       };
@@ -281,10 +284,9 @@ public:
     struct awaiter {
       handle_type h;
       bool await_ready() noexcept { return false; }
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
+      void await_suspend(std::coroutine_handle<> caller) noexcept {
         h.promise().continuation_ = caller;
         detail::trampoline_next() = h;
-        return std::noop_coroutine(); // unwind to trampoline loop
       }
       void await_resume() {
         if (h.promise().exception_)
