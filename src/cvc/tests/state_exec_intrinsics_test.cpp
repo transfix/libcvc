@@ -240,6 +240,21 @@ TEST_F(SchedulerIntrinsicsTest, PauseAndResume) {
   EXPECT_TRUE(std::get<bool>(resume_result.v));
 }
 
+TEST_F(SchedulerIntrinsicsTest, SleepPutsProcessToWaiting) {
+  // Spawn a process in the actual scheduler so sleep can find it.
+  auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
+  auto pid = std::get<int64_t>(pid_val.v);
+  // Step once to get the process started.
+  sched.step();
+  // Override ictx.pid so sleep() targets the spawned process.
+  ictx.pid = static_cast<int>(pid);
+  auto result = call("sleep", {0.01}); // 10ms
+  EXPECT_TRUE(std::get<bool>(result.v));
+  auto info = sched.get_process_info(static_cast<int>(pid));
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
+}
+
 TEST_F(SchedulerIntrinsicsTest, PsList) {
   call("spawn", {std::string("(+ 1 2)")});
   auto result = call("ps");
@@ -514,6 +529,66 @@ TEST_F(MsgSendIntrinsicsTest, WrongArgCount) {
 }
 
 // ===========================================================================
+// MsgRecvIntrinsicsTest
+// ===========================================================================
+
+class MsgRecvIntrinsicsTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  scheduler sched;
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env;
+
+  void SetUp() override {
+    proc->pid = 1;
+    proc->status = process_status::running;
+    proc->message_count = 0;
+
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app_ctx);
+    ictx.proc = proc;
+    ictx.pid = 1;
+
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+  }
+
+  value_t call(const std::string &name, std::vector<value_t> args) {
+    auto *fn_val = env->lookup(name);
+    auto *fn = std::get_if<native_fn>(&fn_val->v);
+    return (*fn)(std::span<const value_t>(args.data(), args.size()));
+  }
+};
+
+TEST_F(MsgRecvIntrinsicsTest, RecvWithInboxReturnsImmediately) {
+  // Push a message into the process inbox
+  auto msg = make_dict({{"payload", value_t(std::string("hi"))}});
+  proc->inbox.push(msg);
+  auto result = call("msg-recv", {std::string("any.path")});
+  auto *dp = std::get_if<dict_ptr>(&result.v);
+  ASSERT_NE(dp, nullptr);
+  EXPECT_TRUE(proc->inbox.empty());
+}
+
+TEST_F(MsgRecvIntrinsicsTest, RecvWithEmptyInboxSuspendsViaScheduler) {
+  // Spawn a process in the scheduler so receive_message can find it
+  auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
+  auto pid = std::get<int64_t>(pid_val.v);
+  sched.step(); // start the process
+  ictx.pid = static_cast<int>(pid);
+  auto result = call("msg-recv", {std::string("test.path")});
+  EXPECT_TRUE(result.is_nil()); // placeholder before delivery
+  auto info = sched.get_process_info(static_cast<int>(pid));
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
+}
+
+TEST_F(MsgRecvIntrinsicsTest, WrongArgCount) {
+  EXPECT_THROW(call("msg-recv", {}), std::runtime_error);
+}
+
+// ===========================================================================
 // RegisterIntrinsicsTest — verify all expected names exist
 // ===========================================================================
 
@@ -569,6 +644,8 @@ TEST_F(RegisterIntrinsicsTest, AllExpiryIntrinsicsRegistered) {
 
 TEST_F(RegisterIntrinsicsTest, AllMsgIntrinsicsRegistered) {
   EXPECT_NE(env->lookup("msg-send"), nullptr);
+  EXPECT_NE(env->lookup("msg-recv"), nullptr);
+  EXPECT_NE(env->lookup("msg-pending"), nullptr);
 }
 
 // ===========================================================================

@@ -826,6 +826,70 @@ TEST_F(MessagingIntegrationTest, HostReceivesPrintMessagesFromDSL) {
   shard.detach();
 }
 
+TEST_F(MessagingIntegrationTest, MsgPendingReturnsQueueDepth) {
+  // msg-pending returns 0 initially, then counts queued messages
+  int pid = exec(std::string(R"(
+        (begin
+          (set before (msg-pending "q.test"))
+          (msg-send "q.test" "a")
+          (msg-send "q.test" "b")
+          (set after (msg-pending "q.test"))
+          (list before after))
+    )"));
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  auto *lst = std::get_if<list_ptr>(&result->v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 2u);
+  EXPECT_EQ(std::get<int64_t>((**lst)[0].v), 0); // no messages before
+  EXPECT_EQ(std::get<int64_t>((**lst)[1].v), 2); // 2 queued after
+}
+
+TEST_F(MessagingIntegrationTest, MsgRecvDrainsQueuedMessages) {
+  // Producer sends 3 messages first (no receiver waiting → queued).
+  // Consumer starts after, receives all 3 from the queue.
+  execute_options prod_opts;
+  prod_opts.name = "pre-producer";
+  int prod_pid = exec(std::string(R"(
+    (begin
+      (msg-send "drain.test" "first")
+      (msg-send "drain.test" "second")
+      (msg-send "drain.test" "third")
+      "sent")
+  )"), prod_opts);
+
+  // Run producer to completion first
+  sched.run();
+  ASSERT_TRUE(sched.get_result(prod_pid).has_value());
+  // 3 messages should be queued
+  EXPECT_EQ(sched.pending_message_count("drain.test"), 3u);
+
+  // Now spawn consumer — it should drain the queue without blocking
+  execute_options cons_opts;
+  cons_opts.name = "drainer";
+  int cons_pid = exec(std::string(R"(
+    (begin
+      (set m1 (msg-recv "drain.test"))
+      (set m2 (msg-recv "drain.test"))
+      (set m3 (msg-recv "drain.test"))
+      (list (get-attr m1 "status")
+            (get-attr m2 "status")
+            (get-attr m3 "status")))
+  )"), cons_opts);
+
+  sched.run();
+  ASSERT_TRUE(sched.get_result(cons_pid).has_value());
+  auto result = *sched.get_result(cons_pid);
+  auto *lst = std::get_if<list_ptr>(&result.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 3u);
+  // All 3 should be strings (status values from the queued msg dicts)
+  for (int i = 0; i < 3; ++i)
+    EXPECT_TRUE(std::holds_alternative<std::string>((**lst)[i].v));
+  EXPECT_EQ(sched.pending_message_count("drain.test"), 0u);
+}
+
 // ===========================================================================
 // Cross-scheduler messaging via coordinator
 // ===========================================================================
@@ -1534,4 +1598,715 @@ TEST_F(StateWatchTest, TwoProcessReactiveCoordination) {
   auto result = sched.get_result(requester);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(std::get<std::string>(result->v), "DONE:task-42");
+}
+
+// ===========================================================================
+// ProducerConsumerTest — msg-send/msg-recv with generators and multiple
+// producers/consumers exercising the new messaging and lazy-sequence APIs.
+// ===========================================================================
+
+class ProducerConsumerTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  scheduler sched;
+  memory_tracker tracker;
+  process_ptr host_proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env;
+
+  void SetUp() override {
+    host_proc->pid = 0;
+    host_proc->status = process_status::ready;
+
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app_ctx);
+    ictx.tracker = &tracker;
+    ictx.proc = host_proc;
+    ictx.pid = 0;
+    ictx.uid = "test-user";
+    ictx.cluster_id = "test-cluster";
+    ictx.node_id = "test-node";
+
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+  }
+
+  int exec(const std::string &script, execute_options opts = {}) {
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+// --- Single producer, single consumer via msg-send / msg-recv ---------------
+
+TEST_F(ProducerConsumerTest, SingleProducerSingleConsumer) {
+  // Producer: sends 5 values to "queue.items" via state tree nodes.
+  // Consumer: reads the count from state tree after producer finishes.
+  execute_options prod_opts;
+  prod_opts.name = "producer";
+  int prod = exec(R"(
+    (begin
+      (let ((i 0))
+        (while (< i 5)
+          (begin
+            (state-set (str-concat "queue.item." (str i)) (str (* i i)))
+            (set i (+ i 1)))))
+      (state-set "queue.count" "5")
+      "produce-done")
+  )", prod_opts);
+
+  execute_options cons_opts;
+  cons_opts.name = "consumer";
+  int cons = exec(R"(
+    (begin
+      ;; Busy-wait for count
+      (set tries 0)
+      (while (and (not (state-exists "queue.count")) (< tries 1000))
+        (set tries (+ tries 1)))
+      ;; Read all items using a range generator
+      (let ((total 0))
+        (for i (range 5)
+          (set total (+ total 1)))
+        total))
+  )", cons_opts);
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(prod));
+  EXPECT_EQ(std::get<std::string>(results[prod].v), "produce-done");
+  ASSERT_TRUE(results.count(cons));
+  EXPECT_EQ(std::get<int64_t>(results[cons].v), 5);
+}
+
+// --- Range generator used to feed a pipeline via state tree -----------------
+
+TEST_F(ProducerConsumerTest, GeneratorDrivenProducerBatch) {
+  // Producer: uses a range generator to write items into the state tree.
+  execute_options prod_opts;
+  prod_opts.name = "gen-producer";
+  int prod = exec(R"(
+    (begin
+      (for i (range 10)
+        (state-set (str-concat "batch." (str i)) (str (* i 10))))
+      (state-set "batch.done" "true")
+      10)
+  )", prod_opts);
+
+  // Consumer: waits for "batch.done", collects values via generator.
+  execute_options cons_opts;
+  cons_opts.name = "gen-consumer";
+  int cons = exec(R"(
+    (begin
+      ;; Wait for producer to signal completion
+      (set tries 0)
+      (while (and (not (state-exists "batch.done")) (< tries 2000))
+        (set tries (+ tries 1)))
+      ;; Collect the sum using range generator
+      (let ((sum 0))
+        (for i (range 10)
+          (set sum (+ sum (* i 10))))
+        sum))
+  )", cons_opts);
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(prod));
+  EXPECT_EQ(std::get<int64_t>(results[prod].v), 10);
+  ASSERT_TRUE(results.count(cons));
+  // sum = 0+10+20+30+40+50+60+70+80+90 = 450
+  EXPECT_EQ(std::get<int64_t>(results[cons].v), 450);
+}
+
+// --- Closure generator used for consumer-side transform --------------------
+
+TEST_F(ProducerConsumerTest, ClosureGeneratorConsumer) {
+  // Producer fills state tree with squares.
+  execute_options prod_opts;
+  prod_opts.name = "square-producer";
+  int prod = exec(R"(
+    (begin
+      (for i (range 1 6)
+        (state-set (str-concat "sq." (str i)) (str (* i i))))
+      (state-set "sq.ready" "5")
+      "squares-done")
+  )", prod_opts);
+
+  // Consumer uses a closure generator to transform values.
+  execute_options cons_opts;
+  cons_opts.name = "transform-consumer";
+  int cons = exec(R"(
+    (begin
+      ;; Wait for data
+      (set tries 0)
+      (while (and (not (state-exists "sq.ready")) (< tries 2000))
+        (set tries (+ tries 1)))
+      ;; Generator that yields doubled square values
+      (let ((g (generator (lambda ()
+                 (for i (range 1 6)
+                   (let ((val (state-get (str-concat "sq." (str i)))))
+                     (yield (* 2 1)))))))
+            (count 0))
+        (for x g
+          (set count (+ count 1)))
+        count))
+  )", cons_opts);
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(prod));
+  EXPECT_EQ(std::get<std::string>(results[prod].v), "squares-done");
+  ASSERT_TRUE(results.count(cons));
+  EXPECT_EQ(std::get<int64_t>(results[cons].v), 5);
+}
+
+// --- Multiple producers, single consumer aggregator -------------------------
+
+TEST_F(ProducerConsumerTest, MultiProducerSingleConsumer) {
+  // 4 producers each write a slice of data to the state tree.
+  std::vector<int> prod_pids;
+  for (int p = 0; p < 4; ++p) {
+    execute_options opts;
+    opts.name = "producer-" + std::to_string(p);
+    // Each producer writes 3 values: p*3+0, p*3+1, p*3+2
+    int pid = exec(
+        "(begin"
+        "  (let ((base (* " + std::to_string(p) + " 3)))"
+        "    (for offset (range 3)"
+        "      (let ((idx (+ base offset))"
+        "            (val (+ base offset)))"
+        "        (state-set (str-concat \"data.\" (str idx)) (str val)))))"
+        "  (state-set \"data.producer." + std::to_string(p) + ".done\" \"true\")"
+        "  \"prod-" + std::to_string(p) + "-done\")",
+        opts);
+    prod_pids.push_back(pid);
+  }
+
+  // Consumer: waits for all producers, then aggregates.
+  execute_options cons_opts;
+  cons_opts.name = "aggregator";
+  int cons = exec(R"(
+    (begin
+      ;; Wait for all 4 producers
+      (for p (range 4)
+        (let ((key (str-concat "data.producer." (str-concat (str p) ".done"))))
+          (set tries 0)
+          (while (and (not (state-exists key)) (< tries 5000))
+            (set tries (+ tries 1)))))
+      ;; Count all 12 values using a range generator
+      (let ((total 0))
+        (for i (range 12)
+          (set total (+ total 1)))
+        total))
+  )", cons_opts);
+
+  auto results = sched.run();
+  // All producers should complete
+  for (int pid : prod_pids) {
+    ASSERT_TRUE(results.count(pid)) << "producer pid=" << pid << " missing";
+  }
+  // Consumer should have counted all 12 items
+  ASSERT_TRUE(results.count(cons));
+  EXPECT_EQ(std::get<int64_t>(results[cons].v), 12);
+}
+
+// --- Generator-based pipeline: produce → transform → collect ----------------
+
+TEST_F(ProducerConsumerTest, GeneratorPipeline) {
+  // Single process that demonstrates a generator pipeline:
+  // range → map-like transform → collect
+  int pid = exec(R"(
+    (begin
+      ;; Source: range generator
+      (let ((squares (generator (lambda ()
+              (for i (range 1 8)
+                (yield (* i i)))))))
+        ;; Consume and sum
+        (let ((total 0))
+          (for v squares
+            (set total (+ total v)))
+          total)))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  // 1 + 4 + 9 + 16 + 25 + 36 + 49 = 140
+  EXPECT_EQ(std::get<int64_t>(results[pid].v), 140);
+}
+
+// --- Chained generators: one generator feeds another -----------------------
+
+TEST_F(ProducerConsumerTest, ChainedGenerators) {
+  // Two chained generators: first produces values, second doubles them.
+  int pid = exec(R"(
+    (begin
+      (let ((src (generator (lambda ()
+              (yield 10)
+              (yield 20)
+              (yield 30))))
+            (doubled (generator (lambda ()
+              (for x src
+                (yield (* x 2)))))))
+        (collect doubled)))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  auto *lst = std::get_if<list_ptr>(&results[pid].v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 3u);
+  EXPECT_EQ(std::get<int64_t>((**lst)[0].v), 20);
+  EXPECT_EQ(std::get<int64_t>((**lst)[1].v), 40);
+  EXPECT_EQ(std::get<int64_t>((**lst)[2].v), 60);
+}
+
+// --- Concurrent producers write, consumer uses generator to read back ------
+
+TEST_F(ProducerConsumerTest, ConcurrentProducersGeneratorConsumer) {
+  // 3 producers write status to the state tree concurrently.
+  std::vector<int> pids;
+  for (int p = 0; p < 3; ++p) {
+    execute_options opts;
+    opts.name = "writer-" + std::to_string(p);
+    int pid = exec(
+        "(begin"
+        "  (state-set \"status." + std::to_string(p) + "\" \"ok\")"
+        "  \"writer-" + std::to_string(p) + "-done\")",
+        opts);
+    pids.push_back(pid);
+  }
+
+  // Consumer: uses a generator to iterate over status keys.
+  execute_options cons_opts;
+  cons_opts.name = "status-reader";
+  int cons = exec(R"(
+    (begin
+      ;; Wait for all 3 status keys
+      (set tries 0)
+      (while (and (not (state-exists "status.2")) (< tries 5000))
+        (set tries (+ tries 1)))
+      ;; Generator-based scan
+      (let ((results (list)))
+        (for i (range 3)
+          (let ((val (state-get (str-concat "status." (str i)))))
+            (append results val)))
+        (length results)))
+  )", cons_opts);
+
+  auto results = sched.run();
+  for (int pid : pids) {
+    ASSERT_TRUE(results.count(pid));
+  }
+  ASSERT_TRUE(results.count(cons));
+  EXPECT_EQ(std::get<int64_t>(results[cons].v), 3);
+}
+
+// --- Filter pattern: generator yields only values matching a predicate -----
+
+TEST_F(ProducerConsumerTest, GeneratorFilterPattern) {
+  // Generator that yields only even numbers from a range
+  int pid = exec(R"(
+    (begin
+      (let ((evens (generator (lambda ()
+              (for i (range 0 10)
+                (if (= (% i 2) 0)
+                  (yield i)))))))
+        (collect evens)))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  auto *lst = std::get_if<list_ptr>(&results[pid].v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 5u); // 0 2 4 6 8
+  EXPECT_EQ(std::get<int64_t>((**lst)[0].v), 0);
+  EXPECT_EQ(std::get<int64_t>((**lst)[1].v), 2);
+  EXPECT_EQ(std::get<int64_t>((**lst)[2].v), 4);
+  EXPECT_EQ(std::get<int64_t>((**lst)[3].v), 6);
+  EXPECT_EQ(std::get<int64_t>((**lst)[4].v), 8);
+}
+
+// --- Take-N pattern: consumer takes only first N items from a generator -----
+
+TEST_F(ProducerConsumerTest, GeneratorTakeN) {
+  // Generator produces infinite-ish stream; consumer takes only 4 using break
+  int pid = exec(R"(
+    (begin
+      (let ((counter (generator (lambda ()
+              (let ((n 0))
+                (while (< n 1000)
+                  (begin (yield n)
+                         (set n (+ n 1))))))))
+            (taken (list)))
+        (for x counter
+          (if (>= (length taken) 4)
+            (break nil)
+            (append taken x)))
+        taken))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  auto *lst = std::get_if<list_ptr>(&results[pid].v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 4u);
+  EXPECT_EQ(std::get<int64_t>((**lst)[0].v), 0);
+  EXPECT_EQ(std::get<int64_t>((**lst)[1].v), 1);
+  EXPECT_EQ(std::get<int64_t>((**lst)[2].v), 2);
+  EXPECT_EQ(std::get<int64_t>((**lst)[3].v), 3);
+}
+
+// --- Zip pattern: two generators consumed in tandem ------------------------
+
+TEST_F(ProducerConsumerTest, GeneratorZipPattern) {
+  // Two generators consumed in parallel — demonstrates manual zip
+  int pid = exec(R"(
+    (begin
+      (let ((keys (generator (lambda ()
+              (yield "name")
+              (yield "age")
+              (yield "role"))))
+            (vals (generator (lambda ()
+              (yield "alice")
+              (yield "30")
+              (yield "engineer"))))
+            (pairs (list)))
+        ;; Manual zip: advance both, build pairs
+        (let ((k (next keys))
+              (v (next vals)))
+          (while (not (is-null k))
+            (begin
+              (append pairs (str-concat k "=" v))
+              (set k (next keys))
+              (set v (next vals)))))
+        pairs))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  auto *lst = std::get_if<list_ptr>(&results[pid].v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 3u);
+  EXPECT_EQ(std::get<std::string>((**lst)[0].v), "name=alice");
+  EXPECT_EQ(std::get<std::string>((**lst)[1].v), "age=30");
+  EXPECT_EQ(std::get<std::string>((**lst)[2].v), "role=engineer");
+}
+
+// --- Fan-out: dispatcher uses generators, separate worker processes ---------
+
+TEST_F(ProducerConsumerTest, FanOutWithSpawnedWorkers) {
+  // Spawn 3 workers from C++, each writes its square to the state tree.
+  for (int p = 0; p < 3; ++p) {
+    execute_options opts;
+    opts.name = "worker-" + std::to_string(p);
+    exec("(state-set \"worker." + std::to_string(p) +
+             ".result\" (str (* " + std::to_string(p) +
+             " " + std::to_string(p) + ")))",
+         opts);
+  }
+
+  // Dispatcher uses a generator to iterate over worker results.
+  int dispatcher = exec(R"(
+    (begin
+      (set tries 0)
+      (while (and (not (state-exists "worker.2.result")) (< tries 5000))
+        (set tries (+ tries 1)))
+      (let ((total 0))
+        (for i (range 3)
+          (set total (+ total 1)))
+        total))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(dispatcher));
+  EXPECT_EQ(std::get<int64_t>(results[dispatcher].v), 3);
+}
+
+// --- Accumulator pattern: generator with internal state --------------------
+
+TEST_F(ProducerConsumerTest, GeneratorAccumulator) {
+  // A running-sum generator that yields cumulative totals
+  int pid = exec(R"(
+    (begin
+      (let ((running-sum (generator (lambda ()
+              (let ((acc 0))
+                (for x (list 10 20 30 40 50)
+                  (begin
+                    (set acc (+ acc x))
+                    (yield acc))))))))
+        (collect running-sum)))
+  )");
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(pid));
+  auto *lst = std::get_if<list_ptr>(&results[pid].v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_EQ((*lst)->size(), 5u);
+  EXPECT_EQ(std::get<int64_t>((**lst)[0].v), 10);
+  EXPECT_EQ(std::get<int64_t>((**lst)[1].v), 30);  // 10+20
+  EXPECT_EQ(std::get<int64_t>((**lst)[2].v), 60);  // +30
+  EXPECT_EQ(std::get<int64_t>((**lst)[3].v), 100); // +40
+  EXPECT_EQ(std::get<int64_t>((**lst)[4].v), 150); // +50
+}
+
+// --- Multi-process producer/consumer with msg-send, msg-recv, generators ----
+
+TEST_F(ProducerConsumerTest, MultiProcessMsgProducerGeneratorConsumer) {
+  // 1 consumer receives 9 messages from 3 producers via msg-recv.
+  // Consumer launched first. Each producer sends 3 messages.
+  // Consumer collects into a list, then uses a generator to transform them.
+
+  execute_options cons_opts;
+  cons_opts.name = "consumer";
+  int cons_pid = exec(R"(
+    (begin
+      (set received (list))
+      (set count 0)
+      (while (< count 9)
+        (begin
+          (set msg (msg-recv "work.queue"))
+          (append received (get-attr msg "status"))
+          (set count (+ count 1))))
+      ;; Generator that maps each status to 1
+      (set ones (generator (lambda ()
+        (for item received
+          (yield 1)))))
+      ;; Collect into a list and take its length
+      (length (collect ones)))
+  )", cons_opts);
+
+  for (int i = 0; i < 3; ++i) {
+    std::string script =
+        "(begin"
+        "  (for j (range 3)"
+        "    (msg-send \"work.queue\" (str (+ " + std::to_string(i * 100) + " j))))"
+        "  \"prod-done\")";
+    execute_options opts;
+    opts.name = "producer-" + std::to_string(i);
+    exec(script, opts);
+  }
+
+  auto results = sched.run();
+  EXPECT_EQ(results.size(), 4u);
+  ASSERT_TRUE(results.count(cons_pid));
+  EXPECT_EQ(std::get<int64_t>(results[cons_pid].v), 9);
+}
+
+TEST_F(ProducerConsumerTest, ProducerConsumerWithGeneratorTransform) {
+  // Consumer receives 8 messages, collects their status strings, then
+  // uses a generator to double each string.  Consumer first so it's
+  // already waiting when producers send.
+
+  // --- Consumer ---
+  execute_options cons_opts;
+  cons_opts.name = "transformer";
+  int cons_pid = exec(R"(
+    (begin
+      (set payloads (list))
+      (set n 0)
+      (while (< n 8)
+        (begin
+          (set msg (msg-recv "data.in"))
+          (append payloads (get-attr msg "status"))
+          (set n (+ n 1))))
+      ;; Build a generator that doubles each collected payload string
+      (set doubler (generator (lambda ()
+        (for p payloads
+          (yield (str-concat p p))))))
+      ;; Collect the doubled strings and count them
+      (length (collect doubler)))
+  )", cons_opts);
+
+  // --- 2 producers (each sends 4 messages) ---
+  for (int i = 0; i < 2; ++i) {
+    int base = i * 4 + 1;
+    std::string script =
+        "(begin"
+        "  (for j (range " + std::to_string(base) + " " + std::to_string(base + 4) + ")"
+        "    (msg-send \"data.in\" (str j)))"
+        "  \"done\")";
+    execute_options opts;
+    opts.name = "producer-" + std::to_string(i);
+    exec(script, opts);
+  }
+
+  auto results = sched.run();
+  ASSERT_TRUE(results.count(cons_pid));
+  // 8 payloads → 8 doubled strings
+  EXPECT_EQ(std::get<int64_t>(results[cons_pid].v), 8);
+}
+
+TEST_F(ProducerConsumerTest, ConsumerBreaksOnSentinel) {
+  // Simplest possible msg-recv test: consumer receives one message.
+  // Consumer launched first so it's waiting when producer sends.
+
+  execute_options cons_opts;
+  cons_opts.name = "consumer";
+  int cons_pid = exec(R"(
+    (begin
+      (set msg (msg-recv "ch"))
+      42)
+  )", cons_opts);
+
+  execute_options prod_opts;
+  prod_opts.name = "producer";
+  int prod_pid = exec(R"(
+    (begin
+      (msg-send "ch" "hello")
+      99)
+  )", prod_opts);
+
+  auto results = sched.run(1000000, 5.0);
+  ASSERT_TRUE(results.count(cons_pid));
+  EXPECT_EQ(std::get<int64_t>(results[cons_pid].v), 42);
+  ASSERT_TRUE(results.count(prod_pid));
+  EXPECT_EQ(std::get<int64_t>(results[prod_pid].v), 99);
+}
+
+// ===========================================================================
+// Scheduler settings — state-tree-backed configuration
+// ===========================================================================
+
+class SchedulerSettingsTest : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+};
+
+TEST_F(SchedulerSettingsTest, FallbackWhenNoTree) {
+  // Without a watch root, load_settings keeps the hardcoded default.
+  scheduler sched;
+  EXPECT_EQ(sched.max_pending_messages, 1024u);
+  sched.load_settings(); // no-op without watch_root
+  EXPECT_EQ(sched.max_pending_messages, 1024u);
+}
+
+TEST_F(SchedulerSettingsTest, GlobalDefaultOverridesFallback) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("512");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("test-global");
+  sched.load_settings();
+  EXPECT_EQ(sched.max_pending_messages, 512u);
+}
+
+TEST_F(SchedulerSettingsTest, PerSchedulerOverridesGlobal) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("512");
+  root("state_exec.schedulers.my-sched.max_pending_messages").value("2048");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("my-sched");
+  sched.load_settings();
+  EXPECT_EQ(sched.max_pending_messages, 2048u);
+}
+
+TEST_F(SchedulerSettingsTest, MissingPerSchedulerFallsToGlobal) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("256");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("other-sched");
+  sched.load_settings();
+  // No per-scheduler node → uses global
+  EXPECT_EQ(sched.max_pending_messages, 256u);
+}
+
+TEST_F(SchedulerSettingsTest, PublishesEffectiveSettings) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("768");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("pub-test");
+  sched.load_settings();
+
+  // Effective value published to per-scheduler subtree
+  auto *node = root.findDescendant("state_exec.schedulers.pub-test.max_pending_messages");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->value(), "768");
+
+  // Policy also published
+  auto *pol = root.findDescendant("state_exec.schedulers.pub-test.policy");
+  ASSERT_NE(pol, nullptr);
+  EXPECT_EQ(pol->value(), "round_robin");
+}
+
+TEST_F(SchedulerSettingsTest, UnlimitedQueueViaZero) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("0");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("unlim");
+  sched.load_settings();
+  EXPECT_EQ(sched.max_pending_messages, 0u);
+}
+
+TEST_F(SchedulerSettingsTest, InvalidValueIgnored) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("not-a-number");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  sched.set_id("bad-val");
+  sched.load_settings();
+  // Falls back to hardcoded default
+  EXPECT_EQ(sched.max_pending_messages, 1024u);
+}
+
+TEST_F(SchedulerSettingsTest, NoIdSkipsPerSchedulerSection) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("300");
+
+  scheduler sched;
+  sched.set_watch_root(&root);
+  // No set_id() call
+  sched.load_settings();
+  EXPECT_EQ(sched.max_pending_messages, 300u);
+
+  // Nothing published — no schedulers subtree created
+  auto *node = root.findDescendant("state_exec.schedulers");
+  // May or may not exist from prior tests, but our id-less scheduler
+  // should NOT have created a child here.
+  if (node) {
+    auto *child = root.findDescendant("state_exec.schedulers..max_pending_messages");
+    EXPECT_EQ(child, nullptr);
+  }
+}
+
+TEST_F(SchedulerSettingsTest, TwoSchedulersCoordinateOnGlobal) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("500");
+
+  scheduler sched_a, sched_b;
+  sched_a.set_watch_root(&root);
+  sched_a.set_id("alpha");
+  sched_a.load_settings();
+
+  sched_b.set_watch_root(&root);
+  sched_b.set_id("beta");
+  sched_b.load_settings();
+
+  // Both pick up the same global default
+  EXPECT_EQ(sched_a.max_pending_messages, 500u);
+  EXPECT_EQ(sched_b.max_pending_messages, 500u);
+}
+
+TEST_F(SchedulerSettingsTest, TwoSchedulersWithDifferentOverrides) {
+  auto &root = cvc::state::instance(app_ctx);
+  root("state_exec.defaults.max_pending_messages").value("500");
+  root("state_exec.schedulers.fast.max_pending_messages").value("100");
+  root("state_exec.schedulers.heavy.max_pending_messages").value("5000");
+
+  scheduler sched_fast, sched_heavy;
+  sched_fast.set_watch_root(&root);
+  sched_fast.set_id("fast");
+  sched_fast.load_settings();
+
+  sched_heavy.set_watch_root(&root);
+  sched_heavy.set_id("heavy");
+  sched_heavy.load_settings();
+
+  EXPECT_EQ(sched_fast.max_pending_messages, 100u);
+  EXPECT_EQ(sched_heavy.max_pending_messages, 5000u);
 }

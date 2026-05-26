@@ -102,10 +102,12 @@ auto results = sched.run();
 | `if` | `(if cond then [else])` | Conditional |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
 | `while` | `(while cond body)` | Loop while condition is true |
-| `for` | `(for x collection body)` | Iterate over a list |
+| `for` | `(for x collection body)` | Iterate over a list or generator |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
 | `quote` | `(quote (1 2 3))` | Return expression unevaluated |
 | `return` | `(return expr)` | Early return from a function |
+| `break` | `(break)` or `(break expr)` | Exit nearest `while`/`for` loop |
+| `yield` | `(yield expr)` | Produce a value from a generator |
 | `defmacro` | `(defmacro name (params) template)` | Macro definition |
 | `eval` | `(eval expr)` | Evaluate a quoted expression |
 | `defclass` | `(defclass Name ...)` | OOP class definition |
@@ -120,8 +122,9 @@ auto results = sched.run();
 **String:** `str` (convert to string), `str-concat`
 **List:** `list`, `car`, `cdr`, `cons`, `nth`, `set-nth`, `length`, `append`, `slice`, `del-nth`
 **Dict:** `dict`, `get-attr`, `set-attr`, `del-attr`
-**Type:** `null?`, `list?`, `type-of`
+**Type:** `null?`, `list?`, `type-of`, `generator?`
 **I/O:** `print`
+**Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
 
 ### Example Programs
@@ -147,6 +150,137 @@ auto results = sched.run();
 ;; Process 1 writes, Process 2 reads
 (state-set "shared.counter" "0")
 ```
+
+### Generators and Lazy Sequences
+
+Generators produce values lazily — one at a time, on demand.  They are first-class
+values and can be consumed with `(next gen)`, iterated with `(for x gen body)`,
+or materialised with `(collect gen)`.
+
+#### Creating Generators
+
+**From a closure with `yield`:**
+
+```lisp
+;; A generator that yields 1, 2, 3
+(set g (generator (lambda ()
+  (yield 1)
+  (yield 2)
+  (yield 3))))
+```
+
+**From `range`:**
+
+```lisp
+(range 5)         ;; yields 0, 1, 2, 3, 4
+(range 2 8)       ;; yields 2, 3, 4, 5, 6, 7
+(range 0 10 3)    ;; yields 0, 3, 6, 9
+```
+
+#### Consuming Generators
+
+```lisp
+;; Pull one value at a time
+(set g (range 3))
+(next g)           ;; => 0
+(next g)           ;; => 1
+(next g)           ;; => 2
+(next g)           ;; => nil (exhausted)
+
+;; Check if exhausted
+(gen-done? g)      ;; => true
+
+;; Iterate with for
+(for x (range 5)
+  (print x))       ;; prints 0 1 2 3 4
+
+;; Materialise all values into a list
+(collect (range 5))  ;; => (0 1 2 3 4)
+```
+
+#### Generator Patterns
+
+**Filter — yield only values matching a predicate:**
+
+```lisp
+(set evens (generator (lambda ()
+  (for x (range 10)
+    (if (= (% x 2) 0)
+      (yield x) nil)))))
+(collect evens)  ;; => (0 2 4 6 8)
+```
+
+**Map — transform each value:**
+
+```lisp
+(set squares (generator (lambda ()
+  (for x (range 5)
+    (yield (* x x))))))
+(collect squares)  ;; => (0 1 4 9 16)
+```
+
+**Take-N with `break` — consume only the first N values:**
+
+```lisp
+(set taken (list))
+(for x (range 1000)
+  (if (>= (length taken) 4)
+    (break nil)
+    (append taken x)))
+taken  ;; => (0 1 2 3)
+```
+
+**Accumulator — running sum:**
+
+```lisp
+(set running-sum (generator (lambda ()
+  (let ((total 0))
+    (for x (range 1 6)
+      (begin
+        (set total (+ total x))
+        (yield total)))))))
+(collect running-sum)  ;; => (1 3 6 10 15)
+```
+
+**Infinite-style with while + yield:**
+
+```lisp
+(set counter (generator (lambda ()
+  (let ((n 0))
+    (while (< n 1000)
+      (begin (yield n)
+             (set n (+ n 1))))))))
+;; Consume lazily with break
+(for x counter
+  (if (= x 5) (break x) nil))  ;; => 5
+```
+
+### The `break` Statement
+
+`break` exits the nearest enclosing `while` or `for` loop.
+
+```lisp
+;; Exit with no value (loop evaluates to nil)
+(while t (break))
+
+;; Exit with a value
+(while t (break 42))  ;; => 42
+
+;; Find first match
+(for x (list 10 20 30 40)
+  (if (> x 25) (break x) nil))  ;; => 30
+
+;; Nested loops — break exits only the innermost
+(set sum 0)
+(for i (list 1 2 3)
+  (for j (list 10 20 30)
+    (if (= j 20) (break nil)      ;; exits inner for
+      (set sum (+ sum j)))))
+sum  ;; => 30  (10 + 10 + 10)
+```
+
+`break` unwinds through `begin`, `let`, `if`, and any other intermediate
+forms — it always targets the nearest loop boundary.
 
 ---
 

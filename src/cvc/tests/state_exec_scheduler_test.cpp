@@ -332,6 +332,177 @@ TEST_F(SchedulerTest, ResumeNonPaused) {
   EXPECT_FALSE(sched.resume(pid));
 }
 
+TEST_F(SchedulerTest, SleepAndWake) {
+  // Sleep for a very short duration so the test completes quickly.
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+
+  // Step once to get the process running.
+  sched.step();
+
+  // Put the process to sleep for 10 ms.
+  EXPECT_TRUE(sched.sleep(pid, 0.01));
+  auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::waiting);
+
+  // Stepping should not run the sleeping process.
+  EXPECT_EQ(sched.step(), 0);
+
+  // But has_runnable should still return true (sleeping counts).
+  EXPECT_TRUE(sched.has_runnable());
+
+  // Wait for the sleep to expire, then it should wake up.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto results = sched.run();
+  EXPECT_TRUE(results.count(pid));
+}
+
+TEST_F(SchedulerTest, SleepNonexistent) { EXPECT_FALSE(sched.sleep(999, 1.0)); }
+
+TEST_F(SchedulerTest, ReceiveMessageSuspendsProcess) {
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.step();
+  EXPECT_TRUE(sched.receive_message(pid, "test.path"));
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::waiting);
+}
+
+TEST_F(SchedulerTest, ReceiveMessageNonexistent) {
+  EXPECT_FALSE(sched.receive_message(999, "test.path"));
+}
+
+TEST_F(SchedulerTest, DeliverToReceiversWakesProcess) {
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.step();
+  sched.receive_message(pid, "test.inbox");
+  auto msg = make_dict({{"payload", value_t(std::string("hello"))}});
+  int woken = sched.deliver_to_receivers("test.inbox", msg);
+  EXPECT_EQ(woken, 1);
+  auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::ready);
+}
+
+TEST_F(SchedulerTest, DeliverToReceiversNoMatch) {
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.step();
+  sched.receive_message(pid, "test.inbox");
+  auto msg = make_dict({{"payload", value_t(std::string("hello"))}});
+  int woken = sched.deliver_to_receivers("other.path", msg);
+  EXPECT_EQ(woken, 0);
+  // Process should still be waiting
+  auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::waiting);
+}
+
+TEST_F(SchedulerTest, HasRunnableCountsMessageWaiting) {
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.step();
+  sched.receive_message(pid, "test.inbox");
+  // Only waiting process, but has recv_path → still considered runnable
+  EXPECT_TRUE(sched.has_runnable());
+}
+
+// --- Message queue tests ---
+
+TEST_F(SchedulerTest, DeliverQueuesWhenNoReceiver) {
+  // No processes waiting → message goes to pending queue
+  auto msg = make_dict({{"payload", value_t(std::string("queued"))}});
+  int woken = sched.deliver_to_receivers("q.path", msg);
+  EXPECT_EQ(woken, 0);
+  EXPECT_EQ(sched.pending_message_count("q.path"), 1u);
+  EXPECT_EQ(sched.total_pending_messages(), 1u);
+}
+
+TEST_F(SchedulerTest, PopPendingMessageDrainsQueue) {
+  auto msg1 = make_dict({{"n", value_t(int64_t(1))}});
+  auto msg2 = make_dict({{"n", value_t(int64_t(2))}});
+  sched.deliver_to_receivers("q", msg1);
+  sched.deliver_to_receivers("q", msg2);
+  EXPECT_EQ(sched.pending_message_count("q"), 2u);
+
+  auto m1 = sched.pop_pending_message("q");
+  ASSERT_TRUE(m1.has_value());
+  EXPECT_EQ(sched.pending_message_count("q"), 1u);
+
+  auto m2 = sched.pop_pending_message("q");
+  ASSERT_TRUE(m2.has_value());
+  EXPECT_EQ(sched.pending_message_count("q"), 0u);
+
+  auto m3 = sched.pop_pending_message("q");
+  EXPECT_FALSE(m3.has_value());
+}
+
+TEST_F(SchedulerTest, PopPendingMessageFIFOOrder) {
+  for (int i = 0; i < 5; ++i)
+    sched.deliver_to_receivers("fifo", make_dict({{"i", value_t(int64_t(i))}}));
+  EXPECT_EQ(sched.pending_message_count("fifo"), 5u);
+
+  for (int i = 0; i < 5; ++i) {
+    auto m = sched.pop_pending_message("fifo");
+    ASSERT_TRUE(m.has_value());
+    auto *dp = std::get_if<dict_ptr>(&m->v);
+    ASSERT_NE(dp, nullptr);
+    // dict is vector<pair<string,value_t>>; find "i" key
+    int64_t val = -1;
+    for (auto &[k, v] : **dp) {
+      if (k == "i") {
+        val = std::get<int64_t>(v.v);
+        break;
+      }
+    }
+    EXPECT_EQ(val, i);
+  }
+}
+
+TEST_F(SchedulerTest, DeliverPrefersLiveReceiverOverQueue) {
+  int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.step();
+  sched.receive_message(pid, "live");
+  auto msg = make_dict({{"x", value_t(int64_t(42))}});
+  int woken = sched.deliver_to_receivers("live", msg);
+  EXPECT_EQ(woken, 1);
+  // Message went to receiver, not to queue
+  EXPECT_EQ(sched.pending_message_count("live"), 0u);
+}
+
+TEST_F(SchedulerTest, PendingQueueBounded) {
+  sched.max_pending_messages = 3;
+  for (int i = 0; i < 10; ++i)
+    sched.deliver_to_receivers("bounded", make_dict({{"i", value_t(int64_t(i))}}));
+  EXPECT_EQ(sched.pending_message_count("bounded"), 3u);
+  // First 3 messages are preserved (FIFO)
+  for (int i = 0; i < 3; ++i) {
+    auto m = sched.pop_pending_message("bounded");
+    ASSERT_TRUE(m.has_value());
+    auto *dp = std::get_if<dict_ptr>(&m->v);
+    ASSERT_NE(dp, nullptr);
+    int64_t val = -1;
+    for (auto &[k, v] : **dp) {
+      if (k == "i") {
+        val = std::get<int64_t>(v.v);
+        break;
+      }
+    }
+    EXPECT_EQ(val, i);
+  }
+}
+
+TEST_F(SchedulerTest, PendingQueueMultiplePaths) {
+  sched.deliver_to_receivers("a", make_dict({{"path", value_t(std::string("a"))}}));
+  sched.deliver_to_receivers("b", make_dict({{"path", value_t(std::string("b"))}}));
+  sched.deliver_to_receivers("a", make_dict({{"path", value_t(std::string("a2"))}}));
+  EXPECT_EQ(sched.pending_message_count("a"), 2u);
+  EXPECT_EQ(sched.pending_message_count("b"), 1u);
+  EXPECT_EQ(sched.total_pending_messages(), 3u);
+}
+
+TEST_F(SchedulerTest, PopPendingEmptyPath) {
+  auto m = sched.pop_pending_message("nonexistent");
+  EXPECT_FALSE(m.has_value());
+  EXPECT_EQ(sched.pending_message_count("nonexistent"), 0u);
+}
+
 TEST_F(SchedulerTest, KillProcess) {
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
   sched.step();

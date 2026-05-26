@@ -1377,6 +1377,8 @@ static int cmd_serve(int argc, char **argv) {
   if (vm.count("enable-exec")) {
     sched = std::make_unique<cvc::state_exec::scheduler>();
     sched->set_watch_root(&cvc::state::instance(app));
+    sched->set_id("serve");
+    sched->load_settings();
     coord = std::make_unique<cvc::state_exec::exec_coordinator>();
     coord->set_node_id(cfg.node_id);
     coord->set_cluster_id(cfg.cluster_id);
@@ -1451,6 +1453,8 @@ static int cmd_exec(int argc, char **argv) {
   auto &app = cvc_app();
   cvc::state_exec::scheduler sched;
   sched.set_watch_root(&cvc::state::instance(app));
+  sched.set_id("exec");
+  sched.load_settings();
 
   cvc::state_exec::execute_options opts;
   opts.name = vm["name"].as<std::string>();
@@ -1635,6 +1639,8 @@ static int cmd_ps(int argc, char **argv) {
   auto &app = cvc_app();
   cvc::state_exec::scheduler sched;
   sched.set_watch_root(&cvc::state::instance(app));
+  sched.set_id("ps");
+  sched.load_settings();
   auto procs = sched.list_processes();
   if (procs.empty()) {
     std::cout << "No running processes.\n";

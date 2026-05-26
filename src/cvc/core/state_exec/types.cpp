@@ -1,3 +1,4 @@
+#include <cvc/core/state_exec/generator.h>
 #include <cvc/core/state_exec/types.h>
 #include <sstream>
 
@@ -31,6 +32,8 @@ std::string value_tag::type_name() const {
           return "native_fn";
         else if constexpr (std::is_same_v<T, data_object_ptr>)
           return "data_object";
+        else if constexpr (std::is_same_v<T, generator_ptr>)
+          return "generator";
         else
           return "unknown";
       },
@@ -127,6 +130,8 @@ std::string to_string(const value_t &val) {
           return "<native_fn>";
         else if constexpr (std::is_same_v<T, data_object_ptr>)
           return arg ? "<data_object:" + arg->type_name + ">" : "<data_object:null>";
+        else if constexpr (std::is_same_v<T, generator_ptr>)
+          return arg && arg->exhausted ? "<generator:exhausted>" : "<generator>";
         else
           return "<unknown>";
       },
@@ -186,6 +191,8 @@ bool values_equal(const value_t &a, const value_t &b) {
         } else if constexpr (std::is_same_v<T, native_fn>)
           return false; // functions are never equal
         else if constexpr (std::is_same_v<T, data_object_ptr>)
+          return arg_a == arg_b; // identity comparison
+        else if constexpr (std::is_same_v<T, generator_ptr>)
           return arg_a == arg_b; // identity comparison
         else
           return false;

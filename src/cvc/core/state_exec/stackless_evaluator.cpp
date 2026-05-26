@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/generator.h>
 #include <cvc/core/state_exec/parser.h>
 #include <cvc/core/state_exec/stackless_evaluator.h>
 
@@ -97,6 +98,12 @@ bool stackless_evaluator::step(evaluator_state &state) {
     step_super_args(state, frame);
     break;
   case eval_phase::defclass_methods: /* handled inline */
+    break;
+  case eval_phase::yield_value:
+    step_yield_value(state, frame);
+    break;
+  case eval_phase::break_unwind:
+    step_break_unwind(state, frame);
     break;
   }
   return state.done;
@@ -327,6 +334,26 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
       throw std::runtime_error("return: expected 1 arg");
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
+    return;
+  }
+  if (name == "yield") {
+    if (args.empty())
+      throw std::runtime_error("yield: expected 1 arg");
+    frame.phase = eval_phase::yield_value;
+    push_frame(state, args[0], env);
+    return;
+  }
+  if (name == "break") {
+    frame.phase = eval_phase::break_unwind;
+    if (args.empty()) {
+      // (break) — no value, use nil
+      frame.results.push_back(nil_value);
+    } else {
+      // (break val) — evaluate the value first
+      push_frame(state, args[0], env);
+      return;
+    }
+    // Fall through to step_break_unwind on next step
     return;
   }
   if (name == "let") {
@@ -576,9 +603,24 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
   if (frame.index == -1) {
     // Collection was just evaluated
     auto collection = frame.results.back();
+    if (auto *gp = std::get_if<generator_ptr>(&collection.v)) {
+      // Generator: store in extra_vals[1] for lazy iteration
+      frame.extra_vals.push_back(collection);
+      frame.extra_lists = {{}}; // placeholder
+      auto next = generator_next(**gp);
+      if (!next) {
+        pop_frame(state, nil_value);
+        return;
+      }
+      frame.index = 0;
+      frame.results.clear();
+      frame.env->set(frame.extra_strs[0], *next);
+      push_frame(state, frame.extra_vals[0], frame.env);
+      return;
+    }
     auto *lp = std::get_if<list_ptr>(&collection.v);
     if (!lp)
-      throw std::runtime_error("for: collection must be a list");
+      throw std::runtime_error("for: collection must be a list or generator");
     frame.extra_lists = {std::vector<value_t>((*lp)->begin(), (*lp)->end())};
     frame.index = 0;
     frame.results.clear();
@@ -587,6 +629,22 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
     frame.results.clear();
   }
 
+  // Generator path: extra_vals has size > 1 when a generator is stored
+  if (frame.extra_vals.size() > 1) {
+    auto *gp = std::get_if<generator_ptr>(&frame.extra_vals[1].v);
+    if (gp) {
+      auto next = generator_next(**gp);
+      if (!next) {
+        pop_frame(state, nil_value);
+        return;
+      }
+      frame.env->set(frame.extra_strs[0], *next);
+      push_frame(state, frame.extra_vals[0], frame.env);
+      return;
+    }
+  }
+
+  // List path
   auto &iter = frame.extra_lists[0];
   if (static_cast<size_t>(frame.index) < iter.size()) {
     frame.env->set(frame.extra_strs[0], iter[frame.index]);
@@ -660,6 +718,42 @@ void stackless_evaluator::step_return_value(evaluator_state &state, eval_frame &
     auto &top = state.stack.back();
     if (top.phase == eval_phase::apply) {
       state.stack.pop_back();
+      break;
+    }
+    state.stack.pop_back();
+  }
+  if (!state.stack.empty()) {
+    state.stack.back().results.push_back(val);
+  } else {
+    state.result = val;
+    state.done = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// step: yield (generator support)
+// ---------------------------------------------------------------------------
+
+void stackless_evaluator::step_yield_value(evaluator_state &state, eval_frame &frame) {
+  auto val = frame.results.back();
+  state.result = val;   // Store value where generator_next can find it
+  pop_frame(state, val);
+  state.yielded = true; // Signal generator_next to stop stepping
+}
+
+// ---------------------------------------------------------------------------
+// step: break (loop exit)
+// ---------------------------------------------------------------------------
+
+void stackless_evaluator::step_break_unwind(evaluator_state &state, eval_frame &frame) {
+  auto val = frame.results.back();
+  state.stack.pop_back(); // Remove the break frame
+  // Unwind to loop boundary
+  while (!state.stack.empty()) {
+    auto &top = state.stack.back();
+    if (top.phase == eval_phase::while_cond || top.phase == eval_phase::while_body ||
+        top.phase == eval_phase::for_body) {
+      state.stack.pop_back(); // Remove the loop frame
       break;
     }
     state.stack.pop_back();
