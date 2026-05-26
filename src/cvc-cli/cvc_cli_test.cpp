@@ -63,7 +63,17 @@ struct RunResult {
 static RunResult run_cmd(const std::string &cmd) {
   RunResult r;
   r.output.clear();
+#if defined(_WIN32)
+  // _popen invokes "cmd /c <command>".  When <command> begins with a
+  // double-quote, cmd.exe may strip the first and last quote characters
+  // as a matched outer pair, which breaks commands that contain multiple
+  // quoted segments (e.g. a quoted exe path AND a quoted argument).
+  // Wrapping the entire command in an extra pair of quotes avoids this:
+  //   cmd /c ""path\to\exe" args "expr"" 2>&1
+  std::string full_cmd = "\"" + cmd + " 2>&1\"";
+#else
   std::string full_cmd = cmd + " 2>&1";
+#endif
   FILE *fp = CVC_POPEN(full_cmd.c_str(), "r");
   if (!fp) {
     r.exit_code = -1;
@@ -167,7 +177,9 @@ protected:
     fs::remove_all(test_dir, ec);
   }
 
-  RunResult cvc(const std::string &args) { return run_cmd("\"" + cvc_bin + "\" " + args); }
+  RunResult cvc(const std::string &args) {
+    return run_cmd("\"" + cvc_bin + "\" " + args);
+  }
 
   std::string path(const std::string &name) const { return test_dir + "/" + name; }
 };
