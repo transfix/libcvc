@@ -26,7 +26,8 @@ you can drop directly into a test or application.
 9. [Process Migration](#9-process-migration)
 10. [Access Control Model](#10-access-control-model)
 11. [Standard Library](#11-standard-library)
-12. [Architecture Reference](#12-architecture-reference)
+12. [Gotchas & Pitfalls](#12-gotchas--pitfalls)
+13. [Architecture Reference](#13-architecture-reference)
 
 ---
 
@@ -1323,7 +1324,183 @@ stdlib.import_module("math", env, {"math.sqrt", "math.abs"});
 
 ---
 
-## 12. Architecture Reference
+## 12. Gotchas & Pitfalls
+
+This section collects non-obvious behaviours that can bite you when
+writing DSL programs, setting up state replication, or integrating
+the state_exec system with C++ hosts.
+
+### 12.1 First Write to a New Path Is Not Replicated
+
+The `state_sync_adapter` attaches observers **lazily**.  When a node is
+created (e.g. via `state-set` or `cvc::state::operator()(path).value(v)`),
+the internal sequence is:
+
+1. `valueChanged()` fires on the new node — **no observer yet**.
+2. `childChanged()` propagates up from parent to root.
+3. The adapter's `childChanged` handler attaches an observer on the
+   new node.
+
+Because step 1 happens before step 3, the **very first value written
+to a brand-new path** is never captured by the journal and therefore
+never replicated to peers.
+
+**Workaround — seed paths before real writes:**
+
+```cpp
+// Create the node (triggers observer attachment) with a throwaway value.
+root("myapp.status").value(std::string("seed"));
+
+// Now the adapter has an observer — this write IS replicated.
+root("myapp.status").value(std::string("running"));
+```
+
+In DSL code the same principle applies: call `state-set` with a
+dummy value before the real write when the path has never been
+accessed before, or seed the path from C++ before the program starts.
+
+### 12.2 Duplicate-Value Writes Are Silently Dropped
+
+`state::value(v)` guards with `if (value() == v) return *this;` and
+skips the write entirely — no `valueChanged()` signal, no journal
+entry, no replication:
+
+```cpp
+root("k").value(std::string("hello"));
+root("k").value(std::string("hello"));  // no-op: no signal, no journal entry
+```
+
+If you need to "re-publish" the same value (e.g. to signal a peer),
+either use `state::touch()` or write a distinct sentinel first.
+
+### 12.3 Pumping Before a Peer Connects Loses Mutations
+
+`state_cluster_shard::drain_local()` returns pending mutations **and
+permanently advances the publish cursor**.  If no peer is connected
+when `pump_all()` is called, the mutations are drained but never sent
+— and they will **not** be re-sent on subsequent pumps.
+
+```cpp
+// BAD — peer may not be connected yet
+shard.attach();
+transport.start(sock, "A", "C");
+root("data").value(std::string("important"));
+transport.pump_all();   // drains cursor; if no peer, data is lost
+```
+
+**Fix — wait for a peer before pumping:**
+
+```cpp
+shard.attach();
+transport.start(sock, "A", "C");
+
+auto deadline = steady_clock::now() + 5s;
+while (transport.connection_count() == 0 && steady_clock::now() < deadline)
+    std::this_thread::sleep_for(5ms);
+
+root("data").value(std::string("important"));
+transport.pump_all();   // peer is connected — data is sent
+```
+
+### 12.4 `let` Creates a New Scope — Variables Don't Escape
+
+`let` introduces **local bindings** that are not visible outside the
+block.  To carry state across iterations, use `set`:
+
+```lisp
+;; WRONG — i is scoped to the let body; the outer i never changes
+(set i 0)
+(while (< i 5)
+  (let ((i (+ i 1)))
+    (print i)))  ;; infinite loop!
+
+;; RIGHT — use set for loop-carried state
+(set i 0)
+(while (< i 5)
+  (begin
+    (print i)
+    (set i (+ i 1))))
+```
+
+### 12.5 All State Values Are Strings
+
+The state tree stores everything as `std::string`.  `state-set`
+converts its argument with `str`, and `state-get` always returns a
+string.  Convert explicitly for numeric work:
+
+```lisp
+(state-set "counter" (str 42))
+(set raw (state-get "counter"))   ;; raw is "42" (string)
+(set n (int raw))                  ;; n is 42 (integer)
+(if (> n 40) "big" "small")       ;; => "big"
+```
+
+### 12.6 Generators Are Single-Use
+
+A generator can be iterated **exactly once**.  After exhaustion,
+`next` returns `nil` and `for` produces no values:
+
+```lisp
+(set g (range 3))
+(collect g)        ;; => (0 1 2)
+(collect g)        ;; => ()  — already exhausted
+
+;; To reuse, wrap in a factory
+(defun make-range () (range 3))
+(collect (make-range))   ;; => (0 1 2)
+(collect (make-range))   ;; => (0 1 2)
+```
+
+### 12.7 `msg-recv` Suspends the Process
+
+`msg-recv` is a **blocking** intrinsic.  If no message is available,
+the calling process enters `waiting` status and yields to the
+scheduler.  In a single-process program with no external sender this
+creates a deadlock:
+
+```lisp
+;; DEADLOCK — nothing else is running to send a message
+(msg-recv "work.queue")
+```
+
+Always pair with a producer (another spawned process or the host)
+or check `msg-pending` first.
+
+### 12.8 `sleep` Granularity Depends on the Scheduler Tick
+
+`sleep` records a wake-up time and suspends the process.  The process
+resumes on the **next `step()` after** the duration expires.  If the
+host calls `step()` infrequently (e.g. a pump loop with a 50 ms
+sleep), the effective granularity is limited by that polling interval,
+not by the requested duration.
+
+### 12.9 `break` Exits Only the Innermost Loop
+
+`break` targets the nearest enclosing `while` or `for`.  There is no
+labelled-break or "break N".  To exit an outer loop from an inner
+one, set a flag and check it in the outer condition:
+
+```lisp
+(set done false)
+(for i (range 10)
+  (if done nil
+    (for j (range 10)
+      (if (= j 3)
+        (begin (set done true) (break nil))
+        nil))))
+```
+
+### 12.10 Fork-Based IPC Tests and Socket Cleanup
+
+Tests using `fork()` with `state_transport_ipc` create Unix domain
+socket files in `/tmp`.  If a test is killed before cleanup, stale
+socket files cause "address already in use" on the next run.  Use
+unique socket paths (incorporating PID or a UUID) and
+`std::filesystem::remove()` in both setup and teardown.
+
+---
+
+## 13. Architecture Reference
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
