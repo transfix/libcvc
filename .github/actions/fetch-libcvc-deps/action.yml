@@ -16,10 +16,6 @@ description: |
   source or apt/brew.
 
 inputs:
-  version:
-    description: 'libcvc-deps release version (without leading v). Used as git ref for the cvcpkg-install action.'
-    required: false
-    default: '1.2.0'
   os:
     description: 'linux | macos | windows. Defaults to runner.os (unused by cvcpkg-install, kept for interface compat).'
     required: false
@@ -50,10 +46,9 @@ runs:
   steps:
     - name: Install libcvc-deps via cvcpkg
       id: cvcpkg
-      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@v1.2.0
+      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@master
       with:
         requirements: cvc-requirements.yaml
         build_type: ${{ inputs.build_type }}
         link: ${{ inputs.link }}
         prefix: ${{ inputs.prefix }}
-        libcvc_deps_ref: v${{ inputs.version }}
