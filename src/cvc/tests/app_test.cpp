@@ -10,13 +10,13 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ===========================
 // AppTest fixture

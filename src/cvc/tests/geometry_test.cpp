@@ -7,12 +7,12 @@
 #include <boost/thread.hpp>
 #include <chrono>
 #include <cmath>
-#include <cvc/algorithm.h>
-#include <cvc/app.h>
-#include <cvc/exception.h>
-#include <cvc/geometry.h>
-#include <cvc/geometry_file_io.h>
-#include <cvc/volmagick.h>
+#include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/utility/algorithm.h>
+#include <cvc/volume/volmagick.h>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iomanip>
@@ -23,7 +23,7 @@
 #include <unistd.h>
 #endif
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Global flag to enable/disable stress and performance tests
 // Can be enabled with --enable-stress-tests command line flag

@@ -16,11 +16,11 @@
 // previous "mirror everything" behavior when the filter is off.
 
 #include <atomic>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
 #include <gtest/gtest.h>
 #include <string>
 
@@ -46,7 +46,7 @@ cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
 
 TEST(StateInterestFilterTest, DefaultPermissiveMatchesPreviousBehavior) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
 
   EXPECT_FALSE(sh.enforce_interest());
@@ -61,7 +61,7 @@ TEST(StateInterestFilterTest, DefaultPermissiveMatchesPreviousBehavior) {
 
 TEST(StateInterestFilterTest, EnforceWithEmptyInterestSetRejectsAll) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   std::size_t before = cvc::state::instance(a).numChildren();
@@ -78,7 +78,7 @@ TEST(StateInterestFilterTest, EnforceWithEmptyInterestSetRejectsAll) {
 
 TEST(StateInterestFilterTest, MatchingPrefixIsAdmitted) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("scene");
@@ -94,7 +94,7 @@ TEST(StateInterestFilterTest, MatchingPrefixIsAdmitted) {
 
 TEST(StateInterestFilterTest, SiblingPathIsRejected) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("scene.lights");
@@ -109,7 +109,7 @@ TEST(StateInterestFilterTest, DotBoundaryPreventsScenerySpoof) {
   // "scene" must NOT match "scenery": prefix matching is
   // dot-segment-aware.
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("scene");
@@ -122,7 +122,7 @@ TEST(StateInterestFilterTest, DotBoundaryPreventsScenerySpoof) {
 
 TEST(StateInterestFilterTest, EmptyPrefixMatchesEverything) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("");
@@ -136,7 +136,7 @@ TEST(StateInterestFilterTest, EmptyPrefixMatchesEverything) {
 
 TEST(StateInterestFilterTest, RemoveInterestStopsAccepting) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("scene");
@@ -149,7 +149,7 @@ TEST(StateInterestFilterTest, RemoveInterestStopsAccepting) {
 
 TEST(StateInterestFilterTest, ClearInterestsRejectsAllWhenEnforced) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("a");
@@ -166,7 +166,7 @@ TEST(StateInterestFilterTest, FilteredMutationCanLandAfterAddingInterest) {
   // Crucially the seen-set is NOT advanced when we filter out, so
   // a re-publish after add_interest must succeed.
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
 
@@ -184,7 +184,7 @@ TEST(StateInterestFilterTest, FilteredMutationCanLandAfterAddingInterest) {
 
 TEST(StateInterestFilterTest, AddInterestIsIdempotent) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.add_interest("scene");
   sh.add_interest("scene");
   sh.add_interest(".scene."); // gets normalized
@@ -195,7 +195,7 @@ TEST(StateInterestFilterTest, AddInterestIsIdempotent) {
 
 TEST(StateInterestFilterTest, IngestRemoteMessageRespectsFilter) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true);
   sh.add_interest("scene");
@@ -204,7 +204,7 @@ TEST(StateInterestFilterTest, IngestRemoteMessageRespectsFilter) {
   sh.message_bus().subscribe("", [&](const cvc::state_message &) { hits.fetch_add(1); });
 
   cvc::state_message in_msg;
-  in_msg.cluster_id = "cluster-A";
+  in_msg.cluster_id = "clusterA";
   in_msg.origin_node_id = "nodeB";
   in_msg.message_id = "m1";
   in_msg.path = "scene.event";
@@ -223,19 +223,19 @@ TEST(StateInterestFilterTest, DelegationOpsBypassInterestFilter) {
   // Control-plane mutations are routing metadata, not value
   // writes; they must always flow regardless of interest set.
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_enforce_interest(true); // no interests => block all data
 
   cvc::state_mutation d;
-  d.cluster_id = "cluster-A";
+  d.cluster_id = "clusterA";
   d.tree_id = "default";
   d.origin_node_id = "nodeB";
   d.sequence = 1;
   d.mutation_id = "nodeB:1";
   d.path = "off.limits";
   d.op = cvc::state_mutation_op::delegate_subtree;
-  d.string_value = "cluster-B"; // owner cluster
+  d.string_value = "clusterB"; // owner cluster
   auto r = sh.ingest_remote(d);
   EXPECT_TRUE(r.applied) << r.reject_reason;
   EXPECT_EQ(sh.total_remote_filtered_out(), 0u);

@@ -8,7 +8,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <boost/signals2.hpp>
-#include <cvc/state.h>
+#include <cvc/core/state.h>
 #include <string>
 #include <vector>
 

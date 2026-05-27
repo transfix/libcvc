@@ -11,7 +11,7 @@
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
-#include <cvc/state.h>
+#include <cvc/core/state.h>
 #include <volrover3/GridNode.h>
 #include <volrover3/GridOptionsDialog.h>
 

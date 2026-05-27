@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/volume/volume.h>
 #include <iomanip>
 #include <set>
 #include <sstream>

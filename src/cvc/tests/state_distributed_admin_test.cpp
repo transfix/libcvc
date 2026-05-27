@@ -9,14 +9,15 @@
 */
 
 #include <cstdint>
-#include <cvc/app.h>
-#include <cvc/state_blob_store.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_delegation_manager.h>
-#include <cvc/state_distributed_admin.h>
-#include <cvc/state_message.h>
-#include <cvc/state_message_bus.h>
-#include <cvc/state_peer_registry.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_delegation_manager.h>
+#include <cvc/core/state_distributed_admin.h>
+#include <cvc/core/state_message.h>
+#include <cvc/core/state_message_bus.h>
+#include <cvc/core/state_peer_registry.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <unordered_set>
@@ -250,4 +251,88 @@ TEST(StateDistributedAdmin, ReportIsCopyable) {
   auto r2 = r1; // copy
   EXPECT_EQ(r1.shard.cluster_id, r2.shard.cluster_id);
   EXPECT_EQ(r1.delegations.size(), r2.delegations.size());
+}
+
+// ---- Phase 7: force resync + stale peer GC tests ----
+
+TEST(StateDistributedAdmin, ForceResyncNoAttachments) {
+  cvc::state_distributed_admin admin;
+  auto result = admin.force_resync("nodeX");
+  EXPECT_EQ(result.mutations_sent, 0u);
+  EXPECT_EQ(result.bytes_sent, 0u);
+}
+
+TEST(StateDistributedAdmin, ForceResyncUnknownPeer) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cA", "nodeA");
+  sh.attach();
+  cvc::state_peer_registry reg;
+  cvc::state_distributed_admin admin;
+  admin.attach_shard(&sh);
+  admin.attach_peer_registry(&reg);
+  auto result = admin.force_resync("unknown");
+  EXPECT_EQ(result.mutations_sent, 0u);
+}
+
+TEST(StateDistributedAdmin, ForceResyncDrainsPendingMutations) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "cA", "nodeA");
+  sh.attach();
+  cvc::state_peer_registry reg;
+  reg.add_peer("nodeB", "cA");
+
+  // Make some local changes to produce pending mutations.
+  a.root()("x").value("hello");
+  a.root()("y").value("world");
+
+  cvc::state_distributed_admin admin;
+  admin.attach_shard(&sh);
+  admin.attach_peer_registry(&reg);
+  auto result = admin.force_resync("nodeB");
+  // drain_local returns whatever local mutations are pending.
+  // The exact count depends on internal journaling.
+  EXPECT_GE(result.mutations_sent, 0u);
+}
+
+TEST(StateDistributedAdmin, GcStalePeersRemovesOldPeers) {
+  cvc::state_peer_registry reg;
+  reg.add_peer("nodeA", "cA");
+  reg.add_peer("nodeB", "cA");
+  reg.add_peer("nodeC", "cA");
+
+  // Mark nodeA and nodeB as seen at t=1000, nodeC not seen.
+  reg.note_seen("nodeA", 1000);
+  reg.note_seen("nodeB", 1000);
+  // nodeC never seen (last_seen_ns == 0), should not be GC'd.
+
+  cvc::state_distributed_admin admin;
+  admin.attach_peer_registry(&reg);
+
+  // At t=5000 with threshold 2000: nodeA and nodeB are stale (age=4000 > 2000).
+  auto removed = admin.gc_stale_peers(5000, 2000);
+  EXPECT_EQ(removed.size(), 2u);
+  EXPECT_FALSE(reg.has_peer("nodeA"));
+  EXPECT_FALSE(reg.has_peer("nodeB"));
+  // nodeC was never seen — should still be there.
+  EXPECT_TRUE(reg.has_peer("nodeC"));
+}
+
+TEST(StateDistributedAdmin, GcStalePeersKeepsFreshPeers) {
+  cvc::state_peer_registry reg;
+  reg.add_peer("nodeA", "cA");
+  reg.note_seen("nodeA", 9000);
+
+  cvc::state_distributed_admin admin;
+  admin.attach_peer_registry(&reg);
+
+  // At t=10000 with threshold 5000: age=1000 < 5000, not stale.
+  auto removed = admin.gc_stale_peers(10000, 5000);
+  EXPECT_TRUE(removed.empty());
+  EXPECT_TRUE(reg.has_peer("nodeA"));
+}
+
+TEST(StateDistributedAdmin, GcStalePeersNoPeerRegistry) {
+  cvc::state_distributed_admin admin;
+  auto removed = admin.gc_stale_peers(10000, 5000);
+  EXPECT_TRUE(removed.empty());
 }

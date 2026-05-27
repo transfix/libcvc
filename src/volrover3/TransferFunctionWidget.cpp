@@ -8,8 +8,8 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/state.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <volrover3/SceneGraph.h>
 #include <volrover3/TransferFunctionWidget.h>
 #include <volrover3/VolumeNode.h>

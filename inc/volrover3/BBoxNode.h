@@ -1,7 +1,7 @@
 #ifndef BBOXNODE_H
 #define BBOXNODE_H
 
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <vector>
 #include <vtkSmartPointer.h>
 

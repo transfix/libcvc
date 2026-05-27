@@ -1,7 +1,7 @@
 #ifndef SCENENODE_H
 #define SCENENODE_H
 
-#include <cvc/state_object.h>
+#include <cvc/core/state_object.h>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -11,14 +11,14 @@ class vtkProp;
 class vtkRenderer;
 class SceneGraph;
 
-class SceneNode : public CVC_NAMESPACE::state_object<SceneNode> {
+class SceneNode : public cvc::state_object<SceneNode> {
 public:
-  SceneNode(CVC_NAMESPACE::app &ctx, const std::string &statePath);
+  SceneNode(cvc::app &ctx, const std::string &statePath);
   virtual ~SceneNode();
 
   // Access the app context this node is bound to. Subclasses use this when
   // creating child nodes so that the singleton is not consulted.
-  CVC_NAMESPACE::app &app() const { return _ctx; }
+  cvc::app &app() const { return _ctx; }
 
   virtual void addToRenderer(vtkRenderer *renderer);
   virtual void removeFromRenderer(vtkRenderer *renderer);

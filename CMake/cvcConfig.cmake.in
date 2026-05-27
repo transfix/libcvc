@@ -5,39 +5,56 @@ include(CMakeFindDependencyMacro)
 # Required dependencies
 find_dependency(Boost COMPONENTS thread date_time regex filesystem system chrono)
 
-# Optional dependencies (only required if libcvc was built with them)
+# ---------------------------------------------------------------------------
+# Optional dependencies — only required if libcvc was built with them.
+# Each guard checks the build-time flag baked into this config file.
+# If the dependency is not found on the consumer system the imported
+# target will still load; the consumer just won't be able to use the
+# features that need the missing library at link time.
+# ---------------------------------------------------------------------------
+
 if(NOT @DISABLE_CGAL@)
-  find_dependency(CGAL CONFIG)
+  find_package(CGAL CONFIG QUIET)
 endif()
 
 if(@CVC_USING_HDF5@)
-  find_dependency(HDF5 COMPONENTS C CXX)
+  find_package(HDF5 COMPONENTS C CXX QUIET)
 endif()
 
 if(@CVC_ENABLE_OPENMP@)
-  find_dependency(OpenMP)
+  find_package(OpenMP QUIET)
 endif()
 
 if(@CVC_ENABLE_IMAGEMAGICK@)
-  find_dependency(ImageMagick COMPONENTS Magick++ MagickCore)
+  find_package(ImageMagick COMPONENTS Magick++ MagickCore QUIET)
 endif()
 
 if(@CVC_ENABLE_FFTW@)
-  find_dependency(PkgConfig)
+  find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
-    pkg_check_modules(FFTW3 QUIET fftw3)
+    pkg_check_modules(FFTW3 QUIET IMPORTED_TARGET fftw3)
   endif()
   if(NOT FFTW3_FOUND)
     find_path(FFTW3_INCLUDE_DIRS fftw3.h)
     find_library(FFTW3_LIBRARIES NAMES fftw3)
+    if(FFTW3_INCLUDE_DIRS AND FFTW3_LIBRARIES AND NOT TARGET PkgConfig::FFTW3)
+      add_library(PkgConfig::FFTW3 INTERFACE IMPORTED)
+      set_target_properties(PkgConfig::FFTW3 PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${FFTW3_LIBRARIES}")
+    endif()
   endif()
+endif()
+
+if(@CVC_USING_IMOD_MRC@)
+  find_package(libiimod CONFIG QUIET)
 endif()
 
 # CUDA: when libcvc was built with CUDA support its INTERFACE links the
 # CUDA::cudart imported target, so consumers need CUDAToolkit imported
 # before cvcTargets.cmake is read.
 if(@CVC_ENABLE_CUDA@)
-  find_dependency(CUDAToolkit)
+  find_package(CUDAToolkit QUIET)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/cvcTargets.cmake")

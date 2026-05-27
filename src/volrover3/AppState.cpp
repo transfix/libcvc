@@ -2,8 +2,8 @@
 #include <algorithm>
 #include <boost/lexical_cast.hpp>
 #include <cmath>
-#include <cvc/geometry_file_io.h>
-#include <cvc/volume_file_io.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/volume/volume_file_io.h>
 #include <sstream>
 #include <volrover3/AppState.h>
 #include <volrover3/volrover3_app.h>

@@ -12,7 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cvc/state_codec_registry.h>
+#include <cvc/core/state_codec_registry.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>

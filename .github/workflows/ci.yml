@@ -125,6 +125,10 @@ jobs:
           - name: libcvc-release
             kind: libcvc
             build_type: Release
+          - name: libcvc-debug-grpc
+            kind: libcvc
+            build_type: Debug
+            enable_grpc: true
           - name: volrover3-debug
             kind: volrover3
             build_type: Debug
@@ -166,6 +170,10 @@ jobs:
             libmagick++-dev libcgal-dev liblog4cplus-dev
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
             sudo apt-get install -y --no-install-recommends lcov
+          fi
+          if [ "${{ matrix.enable_grpc }}" = "true" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
           fi
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
@@ -292,6 +300,10 @@ jobs:
               coverage=ON
             fi
           fi
+          grpc=OFF
+          if [ "${{ matrix.enable_grpc }}" = "true" ]; then
+            grpc=ON
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
@@ -302,7 +314,8 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_ENABLE_GRPC=$grpc
 
       - name: Build
         run: cmake --build build --parallel
@@ -320,8 +333,10 @@ jobs:
           #   Stress|Convergence|Benchmark            : long-running suites
           #   Performance                              : perf benchmarks (>200s in Debug)
           #   BunnySDF_IsoRoundtrip|QualityImproveAllMethods : heavy Debug-only
-          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          #   Integration                              : CLI integration tests (several minutes)
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if [ "${{ github.event_name }}" = "push" ]; then
+            CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel \
@@ -539,14 +554,14 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus zstd
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal
+          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal zstd
           echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
@@ -589,8 +604,9 @@ jobs:
         run: |
           set -euo pipefail
           # See linux ctest step for rationale.
-          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if [ "${{ github.event_name }}" = "push" ]; then
+            CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
           else
@@ -1051,8 +1067,9 @@ jobs:
           $extra += $buildBin
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
           # See linux ctest step for rationale.
-          $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods)'
+          $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if ('${{ github.event_name }}' -eq 'push') {
+            $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
           } else {

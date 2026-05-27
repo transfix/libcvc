@@ -1,7 +1,7 @@
 #ifndef NULLGRAPHICNODE_H
 #define NULLGRAPHICNODE_H
 
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <volrover3/GraphicsNode.h>
 #include <vtkSmartPointer.h>
 
@@ -23,8 +23,7 @@ class state;
  */
 class NullGraphicNode : public GraphicsNode {
 public:
-  NullGraphicNode(CVC_NAMESPACE::app &ctx, const std::string &statePath,
-                  const std::string &name = "null");
+  NullGraphicNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "null");
   ~NullGraphicNode() override;
 
   // Set custom bounding box extents (user-modifiable)

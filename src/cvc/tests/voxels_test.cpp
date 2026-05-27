@@ -23,11 +23,11 @@
 #include <atomic>
 #include <boost/thread.hpp>
 #include <chrono>
-#include <cvc/app.h>
-#include <cvc/composite_function.h>
-#include <cvc/exception.h>
-#include <cvc/types.h>
-#include <cvc/voxels.h>
+#include <cvc/core/app.h>
+#include <cvc/core/exception.h>
+#include <cvc/core/types.h>
+#include <cvc/utility/composite_function.h>
+#include <cvc/volume/voxels.h>
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <iostream>

@@ -9,7 +9,7 @@
 */
 
 #include <cstdint>
-#include <cvc/state_chunked_blob.h>
+#include <cvc/core/state_chunked_blob.h>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <random>
@@ -385,7 +385,7 @@ TEST(StateChunkedBlobTest, ConcurrentWritersAreSafe) {
 // Compression integration tests (Phase 6 bullet 3)
 // ----------------
 
-#include <cvc/state_compression_registry.h>
+#include <cvc/core/state_compression_registry.h>
 
 TEST(StateChunkedBlobTest, CompressionShrinksRunfulPayload) {
   cvc::memory_state_blob_store store;

@@ -11,7 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/state_authority_map.h>
+#include <cvc/core/state_authority_map.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>

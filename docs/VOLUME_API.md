@@ -64,10 +64,10 @@ voxels                  (Multi-dimensional voxel container)
 ## Quick Start
 
 ```cpp
-#include <cvc/volume.h>
-#include <cvc/voxels.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/voxels.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Create a 128³ volume with float data
 dimension dim(128, 128, 128);
@@ -984,7 +984,7 @@ vol.write("output.mrc");  // MRC stores description
 ### dimension
 
 ```cpp
-#include <cvc/dimension.h>
+#include <cvc/volume/dimension.h>
 
 // 3D dimensions
 dimension dim(100, 200, 300);
@@ -1006,7 +1006,7 @@ bool diff = (dim != dim2);  // false
 ### bounding_box
 
 ```cpp
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 
 // Generic bounding box (usually double)
 typedef generic_bounding_box<double> bounding_box;
@@ -1065,7 +1065,7 @@ const char* name = data_type_strings[dt]; // "float"
 ### composite_function
 
 ```cpp
-#include <cvc/composite_function.h>
+#include <cvc/utility/composite_function.h>
 
 // Abstract base class for voxel compositing
 class composite_function {
@@ -1118,9 +1118,9 @@ v1.composite(v2, 0, 0, 0, blend);
 ### Example 1: Load, Filter, and Save
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
     try {
@@ -1161,10 +1161,10 @@ int main() {
 ### Example 2: Generate Synthetic Volume
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 #include <cmath>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 volume generateSphere(double radius, uint64 resolution) {
     dimension dim(resolution, resolution, resolution);
@@ -1206,10 +1206,10 @@ int main() {
 ### Example 3: Subvolume Extraction and Analysis
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 void analyzeRegion(const volume& vol, const bounding_box& region) {
     // Extract subvolume
@@ -1261,10 +1261,10 @@ int main() {
 ### Example 4: Volume Interpolation and Resampling
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Sample volume along a line
 std::vector<double> sampleLine(const volume& vol,
@@ -1331,10 +1331,10 @@ int main() {
 ### Example 5: CUDA-Accelerated Processing
 
 ```cpp
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 #include <iostream>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 int main() {
 #ifdef CVC_USING_CUDA
@@ -1667,7 +1667,7 @@ downsampled.resize(vol.voxel_dimensions());  // Restore resolution
 **Common Exceptions:**
 
 ```cpp
-#include <cvc/exception.h>
+#include <cvc/core/exception.h>
 
 try {
     volume vol(dimension(1000, 1000, 1000), Double);

@@ -1,6 +1,6 @@
 #include <QApplication>
-#include <cvc/app.h>
-#include <cvc/bounding_box.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/bounding_box.h>
 #include <gtest/gtest.h>
 #include <volrover3/AppState.h>
 #include <volrover3/GridNode.h>

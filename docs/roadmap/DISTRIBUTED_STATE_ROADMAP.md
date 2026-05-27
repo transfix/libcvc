@@ -5,7 +5,7 @@ Date: May 22, 2026
 ## Status Snapshot
 
 - Phases 1, 2, 3a, 3b, 3c, 3d, 3e, 4, 5, 6 are landed on `master` (mutation journal + adapter, codec registry + chunked blob store, replica/authority map, cluster shard, transport interface + inproc/ipc/gRPC, OOB messaging, multi-node cluster semantics with TLS + write policy, subtree delegation with leases, admin facade, per-codec compression, per-peer bounded outbox).
-- Phase 8 (link nodes) slices 4a–4e landed via PR #78; writable transparent links and cycle-collapse tests landed via PR #79. Slice 6 (resolveRemote + cross-cluster link tests) in flight on `feature/phase8-slice6-resolve-remote`:
+- Phase 8 (link nodes) is complete: slices 4a–4e landed via PR #78, writable transparent links and cycle-collapse tests via PR #79, resolveRemote + cross-cluster link tests via PR #80, link benchmark suite via PR #81.
   - 4a: inbound interest filter on subscription routing.
   - 4b: `link_mode` (transparent/opaque) on link nodes plus `resolvedValue` with hop budget.
   - 4c: `state_distributed_admin::transparent_link_index` and `transparent_link_aliases`.
@@ -15,7 +15,15 @@ Date: May 22, 2026
   - Subscription-collapse over N-link cycles: covered by `StateSyncAdapterLinkForwardingTest`.
   - `state_distributed_admin::link_cycles()` static cycle enumerator.
   - Slice 6: `state::resolveRemote(hop_budget)` — pull-on-demand remote link resolution composing with delegation + lease expiry. Cross-cluster link tests covering authority transfer, lease expiry invalidation, and sendMessage routing over transparent links without the caller naming a cluster_id.
-- Phase 7 (perf + production hardening) and Phase 9 (network analytics) are not started.
+- Phase 9 (network analytics & live telemetry) core delivered: `state_node_telemetry` (EWMA, latency histogram, JSON ser/deser, OOB publish), `state_telemetry_aggregator` (cluster rollups, stale detection, routing feedback), admin `to_text()` telemetry section. 31 tests across two new test suites. Remaining: 100-node bench, CBOR encoding, periodic auto-publish timer.
+- Phase 7 (perf + production hardening): admin telemetry integration delivered; production benchmarks, delta encoding, and zstd compression not started.
+
+## Related: state_exec DSL Engine
+
+A new `state_exec` module (S-expression DSL engine built on `cvc::state`) is
+under active development.  Phase 1 (foundation) is complete:
+`state_list`, `state_memory_manager`, core types, and parser.
+See [STATE_EXEC_ROADMAP.md](STATE_EXEC_ROADMAP.md) for full status.
 
 ## Purpose
 
@@ -261,11 +269,11 @@ This is intentionally similar in spirit to IP-packet TTL plus a multicast tree: 
 - Add admin tooling for inspection, manual resync, and blob garbage collection.
 - Document operational patterns for small interactive clusters and larger distributed processing clusters.
 
-### Phase 8: Link Nodes (Symbolic References) (in progress)
+### Phase 8: Link Nodes (Symbolic References) (complete)
 
 State trees need *link* nodes that hold no data of their own and instead point to another path in the same tree, in another cluster, or at the root of an entire tree. Links are the distributed-tree analog of a symlink and let us share subtrees, mount remote clusters, and build graph-shaped views over a tree-shaped store.
 
-Delivered so far on `feature/distributed-state-sync` (PR #78), PR #79, and `feature/phase8-slice6-resolve-remote`:
+Delivered on `feature/distributed-state-sync` (PR #78), PR #79, PR #80 (resolveRemote), and PR #81 (link benchmark):
 
 - 4a — inbound interest filter: subscription router exposes `subscriptions_for(path)` with longest-prefix semantics so the adapter can drive interest-based dispatch.
 - 4b — `link_mode` (`transparent`/`opaque`) on link nodes; `state::resolvedValue(path, hop_budget = 64)` follows transparent links to a value with cycle detection.
@@ -276,10 +284,11 @@ Delivered so far on `feature/distributed-state-sync` (PR #78), PR #79, and `feat
 - Subscription-collapse over N-link cycles: `StateSyncAdapterLinkForwardingTest` covers two-link cycle, self-loop, N-link chain-with-cycle, and resolver termination under `hop_budget`, asserting a single logical subscription per cycle.
 - `state_distributed_admin::link_cycles()` static cycle enumerator exposed for tooling.
 - Slice 6 — `state::resolveRemote(hop_budget)`: extends `resolveLink()` with authority-map awareness. When a link target is absent locally, consults the default shard's `state_delegation_manager` to classify the target as `resolved_remote` (active delegation), `lease_expired`, or `broken`. Cross-cluster link tests in `state_cross_cluster_link_test` cover: authority transfer mid-test, lease expiry invalidation, `sendMessage` over transparent links without naming a `cluster_id`, two-shard delegation propagation, and compile-time API checks.
+- Link benchmark (`state_link_bench_test`): 7 opt-in benchmarks (gated on `CVC_DISTRIBUTED_STATE_BENCH=1`) exercising `resolveLink`, `resolvedValue`, `resolveRemote` on 1M-path trees, and `transparent_link_index`, `transparent_link_aliases`, `subscriptions_for_path`, `link_cycles` on 100k-path trees. 3 always-on correctness companions. CI excludes the `StateLinkBenchmark` suite on PRs via the existing `Benchmark` stress-regex and enables the env gate on push-to-master for full execution.
 
 Remaining for Phase 8:
 
-- Bench: 1M-path tree with 10k links and a few cycles; assert resolver/subscription latency stays bounded.
+*None — Phase 8 is complete.*
 
 - Add a `state_link` node kind alongside scalar/value/group nodes. A link records:
   - target `path` (absolute, may be the empty path meaning the tree root) — this is the **only** required field for the developer-facing API,
@@ -309,9 +318,16 @@ Remaining for Phase 8:
   - Cluster-agnostic API: `linkTo("data.world.geometry")` and `sendMessage(...)` on the link node must succeed when authority for `data.world.geometry` is local, when it has been delegated to a second cluster mid-test, and after authority moves back — the test never names a `cluster_id`. A regression that requires the caller to know the owning cluster fails this test.
   - Bench: 1M-path tree with 10k links, including a few cycles, and assert resolver/subscription latency stays bounded.
 
-### Phase 9: Network Analytics And Live Telemetry
+### Phase 9: Network Analytics And Live Telemetry (in progress)
 
 Each node needs a live picture of the cluster's health and shape so operators (and the system itself, for routing decisions) can answer questions like "how big is this tree, how fast can I move a blob to peer X, how many nodes are in cluster Y" without per-query polling. Analytics piggyback on the OOB messaging bus and the existing `state_distributed_metrics` module so they cost no extra connections.
+
+Delivered so far on `feature/phase9-telemetry`:
+
+- `state_node_telemetry` — per-node sampler with EWMA (configurable half-life), power-of-2 latency histogram (22 buckets, O(1) record, p50/p90/p99 queries), `telemetry_snapshot` POD struct (35+ fields covering counters, rates, latency percentiles, tree/cluster shape), `sample()` reads shard/transport/bus counters, `publish_snapshot()` serializes to JSON and publishes via OOB bus on `__telemetry.<cluster>.<node>` topic, JSON round-trip serialize/deserialize with no external dependency.
+- `state_telemetry_aggregator` — cluster-level rollup: subscribes to `__telemetry.<cluster_id>` on the OOB bus, ingests peer snapshots, computes `cluster_telemetry_summary` (aggregated counters, max latencies, summed rates), stale-peer detection (configurable threshold, default 5 s), `evaluate_routing_feedback(policy)` returning isolate/release node lists based on p99 latency and outbox drop thresholds, `to_text()` for human-readable dumps.
+- `state_distributed_admin` extensions — `attach_telemetry(state_telemetry_aggregator*)`, `telemetry()` accessor, `to_text()` now appends a `[telemetry]` section when an aggregator is attached.
+- Tests — 18 test cases in `state_node_telemetry_test` (EWMA, histogram, JSON round-trip, sampling, latency recording, rate computation, bus publish), 13 test cases in `state_telemetry_aggregator_test` (aggregation, stale detection, routing feedback, admin integration). All pass.
 
 - Per-node sampler (`state_node_telemetry`):
   - Counters and rolling EWMAs for: bytes-sent / bytes-received per peer and per transport; mutation publish rate; message admit/dedup/drop rates; bounded-queue depths and overflow events; blob bytes uploaded/downloaded with throughput EWMA.

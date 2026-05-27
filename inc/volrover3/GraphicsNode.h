@@ -4,7 +4,7 @@
 #include <any>
 #include <array>
 #include <boost/signals2.hpp>
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <map>
 #include <string>
 #include <volrover3/SceneNode.h>
@@ -43,7 +43,7 @@ class volume;
  */
 class GraphicsNode : public SceneNode {
 public:
-  GraphicsNode(CVC_NAMESPACE::app &ctx, const std::string &statePath, const std::string &name = "");
+  GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "");
   virtual ~GraphicsNode();
 
   // Identity and naming

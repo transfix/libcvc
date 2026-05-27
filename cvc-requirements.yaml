@@ -1,13 +1,13 @@
 # cvc-requirements.yaml — component set for libcvc.
 #
-# Usage (local):
+# Usage:
 #   cvcpkg install --from cvc-requirements.yaml --prefix ./deps
+#   cmake -B build -DCMAKE_PREFIX_PATH=./deps
 #
-# This file declares the components needed to build libcvc.
-# The cvcpkg-install action in CI uses this file automatically.
+# For a debug build:
+#   cvcpkg install --from cvc-requirements.yaml --config debug
 #
 # See https://github.com/transfix/libcvc-deps/blob/master/docs/roadmap/split-distribution.md
-
 platform: auto
 arch: auto
 config: release
@@ -15,24 +15,24 @@ link: shared
 
 components:
   - zlib
-  - yaml
+  - boost
+  - fftw3
   - gsl
+  - cgal
+  - hdf5
   - log4cplus
   - tiff
-  - fftw3
-  - openblas
-  - levmar
-  - hdf5
   - imagemagick
+  - yaml
+  - levmar
   - libiimod
+  - openblas
   - openssl
   - c-ares
   - re2
   - abseil
   - protobuf
   - grpc
-  - boost
-  - cgal
   - qt6
   - vtk
   - pthreads4w

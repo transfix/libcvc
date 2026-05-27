@@ -17,10 +17,10 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cvc/app.h>
-#include <cvc/state_cluster_shard.h>
-#include <cvc/state_delegation_manager.h>
-#include <cvc/state_transport_inproc.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state_cluster_shard.h>
+#include <cvc/core/state_delegation_manager.h>
+#include <cvc/core/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 
@@ -172,17 +172,17 @@ TEST(StateDistributedDelegationIntegration, AuthorityTransfer) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  sA.publish_delegation("data.world.geometry", "render-cluster", "", 0);
+  sA.publish_delegation("data.world.geometry", "renderCluster", "", 0);
   EXPECT_GE(t.pump_shard(sA), 1u);
-  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "render-cluster");
+  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "renderCluster");
 
   sA.publish_revocation("data.world.geometry");
   EXPECT_GE(t.pump_shard(sA), 1u);
   EXPECT_TRUE(sB.delegation().is_local("data.world.geometry.mesh"));
 
-  sA.publish_delegation("data.world.geometry", "physics-cluster", "", 0);
+  sA.publish_delegation("data.world.geometry", "physicsCluster", "", 0);
   EXPECT_GE(t.pump_shard(sA), 1u);
-  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "physics-cluster");
+  EXPECT_EQ(sB.delegation().route("data.world.geometry.mesh").cluster_id, "physicsCluster");
 }
 
 // ----------------
@@ -202,7 +202,7 @@ TEST(StateDistributedDelegationIntegration, EnforcementInteraction) {
 
   sB.set_enforce_delegation(true);
 
-  sA.publish_delegation("vol.brick", "remote-cluster", "", 0);
+  sA.publish_delegation("vol.brick", "remoteCluster", "", 0);
   EXPECT_GE(t.pump_shard(sA), 1u);
   ASSERT_EQ(sB.delegation().route("vol.brick.x").kind,
             cvc::state_delegation_manager::route_kind::remote);

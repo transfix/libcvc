@@ -5,11 +5,11 @@
 */
 
 #include <cmath>
-#include <cvc/app.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // ============================================================================
 // Construction and Basic Properties Tests

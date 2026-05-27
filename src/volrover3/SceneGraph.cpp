@@ -1,8 +1,8 @@
 #include <algorithm>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
-#include <cvc/volume.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/volume.h>
 #include <limits>
 #include <volrover3/AppState.h>
 #include <volrover3/AxisNode.h>

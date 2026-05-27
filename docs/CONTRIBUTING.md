@@ -178,7 +178,7 @@ When the test framework is added:
 Example test structure (Catch2):
 ```cpp
 #include <catch2/catch.hpp>
-#include <cvc/volume.h>
+#include <cvc/volume/volume.h>
 
 TEST_CASE("Volume loading", "[volume][io]") {
   SECTION("Load RAWIV file") {

@@ -11,9 +11,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cvc/app.h>
-#include <cvc/state.h>
-#include <cvc/state_cluster_shard.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_blob_store.h>
+#include <cvc/core/state_cluster_shard.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -29,7 +30,7 @@ bool env_flag(const char *name) {
 cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
                                    const std::string &path, const std::string &val) {
   cvc::state_mutation m;
-  m.cluster_id = "test-cluster";
+  m.cluster_id = "testCluster";
   m.tree_id = "default";
   m.origin_node_id = origin;
   m.sequence = seq;
@@ -46,8 +47,8 @@ cvc::state_mutation make_set_value(const std::string &origin, std::uint64_t seq,
 
 TEST(StateClusterShardTest, ConstructAndAccessors) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
-  EXPECT_EQ(sh.cluster_id(), "cluster-A");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  EXPECT_EQ(sh.cluster_id(), "clusterA");
   EXPECT_EQ(sh.local_node_id(), "nodeA");
   EXPECT_EQ(sh.root_path(), "");
   EXPECT_FALSE(sh.is_attached());
@@ -60,7 +61,7 @@ TEST(StateClusterShardTest, ConstructAndAccessors) {
 
 TEST(StateClusterShardTest, AttachDetachIdempotent) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   EXPECT_TRUE(sh.is_attached());
   sh.attach(); // idempotent
@@ -72,7 +73,7 @@ TEST(StateClusterShardTest, AttachDetachIdempotent) {
 
 TEST(StateClusterShardTest, LocalChangesAreJournaled) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   cvc::state::instance(a)("sh.local.path").value(std::string("hello"));
   cvc::state::instance(a)("sh.local.path").value(std::string("world"));
@@ -92,7 +93,7 @@ TEST(StateClusterShardTest, LocalChangesAreJournaled) {
 
 TEST(StateClusterShardTest, IngestRemoteAppliesAndDeduplicates) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
 
   auto m = make_set_value("nodeB", 1, "sh.remote.a", "rval");
@@ -113,7 +114,7 @@ TEST(StateClusterShardTest, IngestRemoteAppliesAndDeduplicates) {
 
 TEST(StateClusterShardTest, IngestRemoteDoesNotLoopBackToJournal) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
 
   // Seed a local mutation so the publish cursor moves.
@@ -134,9 +135,9 @@ TEST(StateClusterShardTest, IngestRemoteDoesNotLoopBackToJournal) {
 
 TEST(StateClusterShardTest, AuthorityEnforcementRejectsForeignWrites) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.authority().delegate("owned", "cluster-B");
+  sh.authority().delegate("owned", "clusterB");
   sh.set_enforce_authority(true);
   EXPECT_TRUE(sh.enforce_authority());
 
@@ -154,9 +155,9 @@ TEST(StateClusterShardTest, AuthorityEnforcementRejectsForeignWrites) {
 
 TEST(StateClusterShardTest, AuthorityOwnedByThisClusterAccepted) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.authority().delegate("here", "cluster-A");
+  sh.authority().delegate("here", "clusterA");
   sh.set_enforce_authority(true);
   auto m = make_set_value("nodeB", 1, "here.leaf", "ok");
   auto r = sh.ingest_remote(m);
@@ -166,7 +167,7 @@ TEST(StateClusterShardTest, AuthorityOwnedByThisClusterAccepted) {
 
 TEST(StateClusterShardTest, RewindPublishCursorReemits) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   cvc::state::instance(a)("rw.path").value(std::string("a"));
   cvc::state::instance(a)("rw.path").value(std::string("b"));
@@ -182,7 +183,7 @@ TEST(StateClusterShardTest, RewindPublishCursorReemits) {
 
 TEST(StateClusterShardTest, IngestRemoteScopedToRootPath) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   auto m = make_set_value("nodeB", 1, "scoped.deep.leaf", "v");
   auto r = sh.ingest_remote(m);
@@ -192,7 +193,7 @@ TEST(StateClusterShardTest, IngestRemoteScopedToRootPath) {
 
 TEST(StateClusterShardTest, DetachStopsLocalJournaling) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   cvc::state::instance(a)("det.path").value(std::string("a"));
   cvc::state::instance(a)("det.path").value(std::string("b"));
@@ -214,7 +215,7 @@ TEST(StateClusterShardStressTest, OptionalConcurrentIngestStress) {
                     "stress tests";
   }
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
 
   const int kThreads = 4;
@@ -247,7 +248,7 @@ TEST(StateClusterShardPerformanceTest, OptionalIngestThroughputSmoke) {
                     "performance smoke tests";
   }
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
 
   const int kIters = 5000;
@@ -268,7 +269,7 @@ TEST(StateClusterShardPerformanceTest, OptionalIngestThroughputSmoke) {
 
 TEST(StateClusterShardTest, WritePolicyDeniesUnauthorizedOrigin) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.write_policy().allow("locked", {"trusted"});
   sh.set_enforce_write_policy(true);
@@ -287,7 +288,7 @@ TEST(StateClusterShardTest, WritePolicyDeniesUnauthorizedOrigin) {
 
 TEST(StateClusterShardTest, WritePolicyAllowsUncoveredPaths) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.write_policy().allow("only.this", {"trusted"});
   sh.set_enforce_write_policy(true);
@@ -300,7 +301,7 @@ TEST(StateClusterShardTest, WritePolicyAllowsUncoveredPaths) {
 
 TEST(StateClusterShardTest, ConflictResolutionDropsLoser) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   sh.set_resolve_conflicts(true);
 
@@ -321,7 +322,7 @@ TEST(StateClusterShardTest, ConflictResolutionDropsLoser) {
 
 TEST(StateClusterShardTest, ConflictResolutionDisabledAlwaysApplies) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   // Default: not enabled.
   auto m_high = make_set_value("zzz", 1, "k", "high");
@@ -333,7 +334,7 @@ TEST(StateClusterShardTest, ConflictResolutionDisabledAlwaysApplies) {
 
 TEST(StateClusterShardTest, MetricsCountersAdvance) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   EXPECT_EQ(0u, sh.total_remote_applied());
   auto m = make_set_value("nodeB", 1, "p", "v");
@@ -348,16 +349,16 @@ TEST(StateClusterShardTest, MetricsCountersAdvance) {
 
 TEST(StateClusterShardTest, DelegationEnforcementRejectsForeignWrites) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.delegation().delegate("simulation", "cluster-B", "grpc://h:1");
+  sh.delegation().delegate("simulation", "clusterB", "grpc://h:1");
   sh.set_enforce_delegation(true);
 
   auto m = make_set_value("nodeC", 1, "simulation.volume", "v");
   auto r = sh.ingest_remote(m);
   EXPECT_FALSE(r.applied);
   EXPECT_TRUE(r.rejected);
-  EXPECT_NE(r.reject_reason.find("delegated to cluster 'cluster-B'"), std::string::npos)
+  EXPECT_NE(r.reject_reason.find("delegated to cluster 'clusterB'"), std::string::npos)
       << r.reject_reason;
   EXPECT_EQ(1u, sh.total_remote_rejected());
   EXPECT_EQ(1u, sh.total_delegation_routed());
@@ -366,10 +367,10 @@ TEST(StateClusterShardTest, DelegationEnforcementRejectsForeignWrites) {
 
 TEST(StateClusterShardTest, DelegationEnforcementAllowsLocalCluster) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   // Delegation that maps to the local cluster: NOT a foreign route.
-  sh.delegation().delegate("ours", "cluster-A");
+  sh.delegation().delegate("ours", "clusterA");
   sh.set_enforce_delegation(true);
 
   auto m = make_set_value("nodeB", 1, "ours.x", "v");
@@ -379,9 +380,9 @@ TEST(StateClusterShardTest, DelegationEnforcementAllowsLocalCluster) {
 
 TEST(StateClusterShardTest, DelegationEnforcementAllowsUncoveredPaths) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.delegation().delegate("simulation", "cluster-B");
+  sh.delegation().delegate("simulation", "clusterB");
   sh.set_enforce_delegation(true);
 
   // Path outside any delegation prefix: stays local.
@@ -391,12 +392,12 @@ TEST(StateClusterShardTest, DelegationEnforcementAllowsUncoveredPaths) {
 
 TEST(StateClusterShardTest, DelegationEnforcementRejectsOnExpiredLease) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   // Inject a controllable clock.
   std::uint64_t now = 1000;
   sh.delegation().set_clock([&now]() { return now; });
-  sh.delegation().delegate("simulation", "cluster-B", "", /*lease=*/500);
+  sh.delegation().delegate("simulation", "clusterB", "", /*lease=*/500);
   sh.set_enforce_delegation(true);
 
   // Before expiry: rejected as foreign-routed.
@@ -415,9 +416,9 @@ TEST(StateClusterShardTest, DelegationEnforcementRejectsOnExpiredLease) {
 
 TEST(StateClusterShardTest, DelegationDisabledDoesNotReject) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.delegation().delegate("simulation", "cluster-B");
+  sh.delegation().delegate("simulation", "clusterB");
   // enforce_delegation defaults to false.
 
   auto m = make_set_value("nodeC", 1, "simulation.x", "v");
@@ -427,48 +428,113 @@ TEST(StateClusterShardTest, DelegationDisabledDoesNotReject) {
 
 TEST(StateClusterShardTest, RoutePathClassifiesPaths) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
-  sh.delegation().delegate("simulation", "cluster-B");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.delegation().delegate("simulation", "clusterB");
 
   auto loc = sh.route_path("controls.x");
   EXPECT_EQ(loc.kind, cvc::state_delegation_manager::route_kind::local);
 
   auto rem = sh.route_path("simulation.volume");
   EXPECT_EQ(rem.kind, cvc::state_delegation_manager::route_kind::remote);
-  EXPECT_EQ(rem.cluster_id, "cluster-B");
+  EXPECT_EQ(rem.cluster_id, "clusterB");
 }
 
 TEST(StateClusterShardTest, AuthorityTransferUpdatesRouting) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.delegation().delegate("p", "cluster-B");
+  sh.delegation().delegate("p", "clusterB");
   sh.set_enforce_delegation(true);
 
   auto r1 = sh.ingest_remote(make_set_value("nodeC", 1, "p.x", "v"));
   EXPECT_TRUE(r1.rejected);
-  EXPECT_NE(r1.reject_reason.find("cluster-B"), std::string::npos);
+  EXPECT_NE(r1.reject_reason.find("clusterB"), std::string::npos);
 
   // Transfer authority.
-  sh.delegation().delegate("p", "cluster-C");
+  sh.delegation().delegate("p", "clusterC");
   auto r2 = sh.ingest_remote(make_set_value("nodeC", 2, "p.x", "v"));
   EXPECT_TRUE(r2.rejected);
-  EXPECT_NE(r2.reject_reason.find("cluster-C"), std::string::npos);
+  EXPECT_NE(r2.reject_reason.find("clusterC"), std::string::npos);
 
   // Transfer back to local.
-  sh.delegation().delegate("p", "cluster-A");
+  sh.delegation().delegate("p", "clusterA");
   auto r3 = sh.ingest_remote(make_set_value("nodeC", 3, "p.x", "v"));
   EXPECT_TRUE(r3.applied);
 }
 
 TEST(StateClusterShardTest, DelegationRevocationRestoresLocal) {
   cvc::app a;
-  cvc::state_cluster_shard sh(a, "cluster-A", "nodeA");
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
-  sh.delegation().delegate("simulation", "cluster-B");
+  sh.delegation().delegate("simulation", "clusterB");
   sh.set_enforce_delegation(true);
 
   EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 1, "simulation.x", "v")).rejected);
   EXPECT_TRUE(sh.delegation().revoke("simulation"));
   EXPECT_TRUE(sh.ingest_remote(make_set_value("nodeC", 2, "simulation.x", "v")).applied);
+}
+
+TEST(StateClusterShardTest, InlinePayloadOffloadToBlobStore) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+
+  // Set up blob store and threshold.
+  cvc::memory_state_blob_store store;
+  sh.set_blob_store(&store);
+  sh.set_max_inline_payload_bytes(10); // offload values > 10 bytes
+
+  // Write a small value (should stay inline).
+  cvc::state::instance(a)("test.small").value(std::string("hi"));
+  cvc::state::instance(a)("test.small").value(std::string("hello")); // 5 bytes
+  auto drained = sh.drain_local();
+  bool found_small = false;
+  for (auto &m : drained) {
+    if (m.path == "test.small") {
+      found_small = true;
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
+      EXPECT_EQ(m.string_value, "hello");
+    }
+  }
+  EXPECT_TRUE(found_small);
+
+  // Write a large value (should be offloaded to blob store).
+  std::string big_value(200, 'X');
+  cvc::state::instance(a)("test.big").value(std::string("init"));
+  cvc::state::instance(a)("test.big").value(big_value);
+  auto drained2 = sh.drain_local();
+  bool found_big = false;
+  for (auto &m : drained2) {
+    if (m.path == "test.big") {
+      found_big = true;
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::blob);
+      EXPECT_TRUE(m.string_value.empty());
+      EXPECT_FALSE(m.payload.blob.digest.empty());
+      EXPECT_EQ(m.payload.blob.size_bytes, 200u);
+      // Verify we can retrieve the blob from the store.
+      std::vector<unsigned char> retrieved;
+      EXPECT_TRUE(store.get(m.payload.blob.digest, retrieved));
+      EXPECT_EQ(retrieved.size(), 200u);
+      EXPECT_EQ(retrieved, std::vector<unsigned char>(200, 'X'));
+    }
+  }
+  EXPECT_TRUE(found_big);
+}
+
+TEST(StateClusterShardTest, InlinePayloadOffloadDisabledByDefault) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+
+  // No blob store set — large values should stay inline.
+  std::string big_value(200, 'Y');
+  cvc::state::instance(a)("test.noblobstore").value(std::string("init"));
+  cvc::state::instance(a)("test.noblobstore").value(big_value);
+  auto drained = sh.drain_local();
+  for (auto &m : drained) {
+    if (m.path == "test.noblobstore") {
+      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
+      EXPECT_EQ(m.string_value, big_value);
+    }
+  }
 }

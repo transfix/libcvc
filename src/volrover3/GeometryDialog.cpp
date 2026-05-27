@@ -14,11 +14,11 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
-#include <cvc/algorithm.h>
-#include <cvc/app.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
-#include <cvc/types.h>
+#include <cvc/core/app.h>
+#include <cvc/core/state.h>
+#include <cvc/core/types.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/utility/algorithm.h>
 #include <volrover3/GeometryDialog.h>
 #include <volrover3/GeometryNode.h>
 #include <volrover3/GraphicsNode.h>

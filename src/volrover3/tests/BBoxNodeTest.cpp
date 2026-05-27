@@ -1,4 +1,4 @@
-#include <cvc/bounding_box.h>
+#include <cvc/volume/bounding_box.h>
 #include <gtest/gtest.h>
 #include <volrover3/BBoxNode.h>
 #include <vtkMatrix4x4.h>

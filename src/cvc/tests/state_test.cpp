@@ -13,20 +13,20 @@
 #include <atomic>
 #include <boost/chrono.hpp>
 #include <boost/thread.hpp>
-#include <cvc/bounding_box.h>
-#include <cvc/dimension.h>
-#include <cvc/geometry.h>
-#include <cvc/state.h>
-#include <cvc/state_object.h>
-#include <cvc/volume.h>
-#include <cvc/voxels.h>
+#include <cvc/core/state.h>
+#include <cvc/core/state_object.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/dimension.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/voxels.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
-using namespace CVC_NAMESPACE;
+using namespace cvc;
 
 // Global flag to control stress/performance tests
 bool enable_stress_tests = false;

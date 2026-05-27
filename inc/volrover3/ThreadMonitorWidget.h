@@ -8,7 +8,7 @@
 #include <QTimer>
 #include <QWidget>
 #include <boost/signals2/connection.hpp>
-#include <cvc/app.h>
+#include <cvc/core/app.h>
 #include <map>
 
 class ThreadMonitorWidget : public QWidget {

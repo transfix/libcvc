@@ -9,7 +9,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <Qt>
-#include <cvc/state.h>
+#include <cvc/core/state.h>
 #include <volrover3/CameraSettingsDialog.h>
 
 // KeyBindButton implementation
