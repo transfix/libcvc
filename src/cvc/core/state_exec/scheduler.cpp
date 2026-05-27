@@ -581,7 +581,6 @@ int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg)
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
-      proc->inbox.push(msg);
       proc->recv_path.reset();
       proc->state.result = msg;
       // Patch the nil placeholder that msg-recv left in the parent frame.

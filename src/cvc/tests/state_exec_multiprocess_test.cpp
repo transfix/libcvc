@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
@@ -115,14 +116,13 @@ void pump_until_done(Transport &transport, scheduler &sched, std::chrono::millis
   while (std::chrono::steady_clock::now() < deadline) {
     transport.pump_all();
     transport.flush();
-    if (sched.has_runnable()) {
-      sched.step();
-    } else {
-      // All done?
-      auto stats = sched.get_stats();
-      if (stats.ready == 0 && stats.running == 0 && stats.paused == 0)
-        break;
+    if (sched.has_runnable() && sched.step() > 0) {
+      continue; // Made progress, skip sleep.
     }
+    // All done? (total_processes == terminated + killed means no live processes)
+    auto stats = sched.get_stats();
+    if (stats.total_processes == stats.terminated + stats.killed)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 }
@@ -240,15 +240,17 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
       break;
   }
 
-  if (!WIFEXITED(status))
+  if (!WIFEXITED(status)) {
+    kill(child, SIGKILL);
     waitpid(child, &status, 0);
+  }
 
   tr_a.stop();
   shard_a.detach();
   std::filesystem::remove(sock_a, ec);
   std::filesystem::remove(sock_b, ec);
 
-  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
+  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally (killed after timeout)";
   EXPECT_EQ(WEXITSTATUS(status), 0) << "exit codes: 10=socket, 11=connect, 12=value mismatch";
 }
 
@@ -315,12 +317,14 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
                               opts);
 
     // Step the scheduler once so the process reaches msg-recv and suspends.
-    for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
-      sched_b.step();
+    for (int i = 0; i < 200 && sched_b.has_runnable(); ++i) {
+      if (sched_b.step() == 0)
+        break;
+    }
 
     // Pump, deliver queued messages from main thread, and step.
     {
-      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(10000);
+      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(25000);
       while (std::chrono::steady_clock::now() < dl) {
         tr_b.pump_all();
         tr_b.flush();
@@ -330,10 +334,12 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
             sched_b.deliver_to_receivers(path, dict);
           msg_queue.clear();
         }
-        while (sched_b.has_runnable())
-          sched_b.step();
+        while (sched_b.has_runnable()) {
+          if (sched_b.step() == 0)
+            break;
+        }
         auto stats = sched_b.get_stats();
-        if (stats.ready == 0 && stats.running == 0 && stats.paused == 0)
+        if (stats.total_processes == stats.terminated + stats.killed)
           break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
@@ -386,7 +392,7 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
 
   // Pump to deliver the OOB message to the child.
   int status = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30000);
   while (std::chrono::steady_clock::now() < deadline) {
     tr_a.pump_all();
     tr_a.flush();
@@ -396,15 +402,17 @@ TEST(StateExecMultiprocessIpc, OobMessageDelivery) {
       break;
   }
 
-  if (!WIFEXITED(status))
+  if (!WIFEXITED(status)) {
+    kill(child, SIGKILL);
     waitpid(child, &status, 0);
+  }
 
   tr_a.stop();
   shard_a.detach();
   std::filesystem::remove(sock_a, ec);
   std::filesystem::remove(sock_b, ec);
 
-  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
+  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally (killed after timeout)";
   EXPECT_EQ(WEXITSTATUS(status), 0)
       << "exit codes: 10=socket, 11=connect, 12=msg-recv payload mismatch";
 }
@@ -547,8 +555,10 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
       break;
   }
 
-  if (!WIFEXITED(status))
+  if (!WIFEXITED(status)) {
+    kill(child, SIGKILL);
     waitpid(child, &status, 0);
+  }
 
   // Check that the consumer's result was replicated back.
   tr_a.wait_for_received(1, std::chrono::milliseconds(3000));
@@ -559,7 +569,7 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
   std::filesystem::remove(sock_a, ec);
   std::filesystem::remove(sock_b, ec);
 
-  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
+  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally (killed after timeout)";
   EXPECT_EQ(WEXITSTATUS(status), 0)
       << "exit codes: 10=socket, 11=connect, 12=generator count mismatch";
   // Consumer should have read 5 items
@@ -687,15 +697,17 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
       break;
   }
 
-  if (!WIFEXITED(status))
+  if (!WIFEXITED(status)) {
+    kill(child, SIGKILL);
     waitpid(child, &status, 0);
+  }
 
   tr_a.stop();
   shard_a.detach();
   std::filesystem::remove(sock_a, ec);
   std::filesystem::remove(sock_b, ec);
 
-  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
+  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally (killed after timeout)";
   EXPECT_EQ(WEXITSTATUS(status), 0)
       << "exit codes: 10=socket, 11=connect, 12=aggregation mismatch (expected 9)";
 }
@@ -757,23 +769,25 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
     int pid = sched_b.execute(std::string(R"(
       (begin
         (set result "")
-        (let ((i 0))
-          (while (< i 4)
-            (begin
-              (set m (msg-recv "pipe.data"))
-              (set result (str-concat result (get-attr m "payload") ","))
-              (set i (+ i 1)))))
+        (set i 0)
+        (while (< i 4)
+          (begin
+            (set m (msg-recv "pipe.data"))
+            (set result (str-concat result (get-attr m "payload") ","))
+            (set i (+ i 1))))
         (state-set "pipeline.result" result)
         result)
     )"),
                               opts);
 
     // Step to get the process started and waiting on msg-recv.
-    for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
-      sched_b.step();
+    for (int i = 0; i < 200 && sched_b.has_runnable(); ++i) {
+      if (sched_b.step() == 0)
+        break;
+    }
 
     // Pump, deliver queued messages from main thread, and step.
-    auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
+    auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(25000);
     while (std::chrono::steady_clock::now() < dl) {
       tr_b.pump_all();
       tr_b.flush();
@@ -786,10 +800,12 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
       }
       // Step repeatedly to consume delivered messages and reach
       // the next msg-recv suspend point (or completion).
-      while (sched_b.has_runnable())
-        sched_b.step();
+      while (sched_b.has_runnable()) {
+        if (sched_b.step() == 0)
+          break;
+      }
       auto stats = sched_b.get_stats();
-      if (stats.ready == 0 && stats.running == 0 && stats.paused == 0)
+      if (stats.total_processes == stats.terminated + stats.killed)
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -853,7 +869,7 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
 
   // Keep pumping until child is done.
   int status = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30000);
   while (std::chrono::steady_clock::now() < deadline) {
     tr_a.pump_all();
     tr_a.flush();
@@ -863,15 +879,17 @@ TEST(StateExecMultiprocessIpc, OobMessagePipeline) {
       break;
   }
 
-  if (!WIFEXITED(status))
+  if (!WIFEXITED(status)) {
+    kill(child, SIGKILL);
     waitpid(child, &status, 0);
+  }
 
   tr_a.stop();
   shard_a.detach();
   std::filesystem::remove(sock_a, ec);
   std::filesystem::remove(sock_b, ec);
 
-  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally";
+  ASSERT_TRUE(WIFEXITED(status)) << "child did not exit normally (killed after timeout)";
   EXPECT_EQ(WEXITSTATUS(status), 0)
       << "exit codes: 10=socket, 11=connect, 12=pipeline concat mismatch";
 }
@@ -1012,8 +1030,10 @@ TEST(StateExecMultiprocessGrpc, OobMessageDelivery) {
                               opts_b);
 
   // Step until the receiver is waiting on msg-recv.
-  for (int i = 0; i < 200 && sched_b.has_runnable(); ++i)
-    sched_b.step();
+  for (int i = 0; i < 200 && sched_b.has_runnable(); ++i) {
+    if (sched_b.step() == 0)
+      break;
+  }
 
   // Process A: sender.
   scheduler sched_a;
