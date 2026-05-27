@@ -1000,6 +1000,7 @@ TEST(StateExecMultiprocessGrpc, OobMessageDelivery) {
   cvc::state_cluster_shard shard_b(app_b, "C", "B");
   shard_a.attach();
   shard_b.attach();
+  shard_a.set_transport(&tr_a);
   tr_a.register_shard(&shard_a);
   tr_b.register_shard(&shard_b);
 
