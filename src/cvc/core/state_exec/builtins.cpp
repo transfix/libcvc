@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cvc/core/state_exec/builtins.h>
+#include <cvc/core/state_exec/generator.h>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -300,6 +301,59 @@ value_t builtin_str(std::span<const value_t> args) {
   return value_t{to_string(args[0])};
 }
 
+value_t builtin_int(std::span<const value_t> args) {
+  expect_exact(args, 1, "int");
+  auto &a = args[0];
+  if (auto *i = std::get_if<int64_t>(&a.v))
+    return a;
+  if (auto *d = std::get_if<double>(&a.v))
+    return value_t{static_cast<int64_t>(*d)};
+  if (auto *b = std::get_if<bool>(&a.v))
+    return value_t{int64_t{*b ? 1 : 0}};
+  if (auto *s = std::get_if<std::string>(&a.v)) {
+    try {
+      return value_t{static_cast<int64_t>(std::stoll(*s))};
+    } catch (...) {
+      throw std::runtime_error("int: cannot convert string \"" + *s + "\" to integer");
+    }
+  }
+  throw std::runtime_error("int: cannot convert " + a.type_name() + " to integer");
+}
+
+value_t builtin_float(std::span<const value_t> args) {
+  expect_exact(args, 1, "float");
+  auto &a = args[0];
+  if (auto *d = std::get_if<double>(&a.v))
+    return a;
+  if (auto *i = std::get_if<int64_t>(&a.v))
+    return value_t{static_cast<double>(*i)};
+  if (auto *b = std::get_if<bool>(&a.v))
+    return value_t{*b ? 1.0 : 0.0};
+  if (auto *s = std::get_if<std::string>(&a.v)) {
+    try {
+      return value_t{std::stod(*s)};
+    } catch (...) {
+      throw std::runtime_error("float: cannot convert string \"" + *s + "\" to float");
+    }
+  }
+  throw std::runtime_error("float: cannot convert " + a.type_name() + " to float");
+}
+
+value_t builtin_is_int(std::span<const value_t> args) {
+  expect_exact(args, 1, "is-int");
+  return value_t{std::holds_alternative<int64_t>(args[0].v)};
+}
+
+value_t builtin_is_float(std::span<const value_t> args) {
+  expect_exact(args, 1, "is-float");
+  return value_t{std::holds_alternative<double>(args[0].v)};
+}
+
+value_t builtin_is_string(std::span<const value_t> args) {
+  expect_exact(args, 1, "is-string");
+  return value_t{std::holds_alternative<std::string>(args[0].v)};
+}
+
 // ---------------------------------------------------------------------------
 // List
 // ---------------------------------------------------------------------------
@@ -518,6 +572,112 @@ value_t builtin_print(std::span<const value_t> args) {
 }
 
 // ---------------------------------------------------------------------------
+// Generators
+// ---------------------------------------------------------------------------
+
+value_t builtin_generator(std::span<const value_t> args) {
+  expect_exact(args, 1, "generator");
+  auto *cp = std::get_if<closure_ptr>(&args[0].v);
+  if (!cp || !*cp)
+    throw std::runtime_error("generator: expected closure");
+  auto &cls = **cp;
+
+  auto gen = std::make_shared<generator>(cls.env_snapshot ? cls.env_snapshot
+                                                          : std::make_shared<environment>());
+
+  // Set up evaluator state to run the closure body
+  auto env = environment::extend(cls.env_snapshot);
+  value_t body_expr;
+  if (cls.body.size() == 1) {
+    body_expr = cls.body[0];
+  } else {
+    std::vector<value_t> begin_exprs;
+    begin_exprs.reserve(1 + cls.body.size());
+    begin_exprs.push_back(value_t{symbol{"begin"}});
+    begin_exprs.insert(begin_exprs.end(), cls.body.begin(), cls.body.end());
+    body_expr = make_list(std::move(begin_exprs));
+  }
+  gen->state = gen->evaluator.create_state(body_expr, env);
+  gen->state.stats.start();
+
+  return value_t{std::move(gen)};
+}
+
+value_t builtin_next(std::span<const value_t> args) {
+  expect_exact(args, 1, "next");
+  auto *gp = std::get_if<generator_ptr>(&args[0].v);
+  if (!gp || !*gp)
+    throw std::runtime_error("next: expected generator");
+  auto result = generator_next(**gp);
+  return result ? *result : nil_value;
+}
+
+value_t builtin_is_generator(std::span<const value_t> args) {
+  expect_exact(args, 1, "generator?");
+  return value_t{std::holds_alternative<generator_ptr>(args[0].v)};
+}
+
+value_t builtin_gen_done(std::span<const value_t> args) {
+  expect_exact(args, 1, "gen-done?");
+  auto *gp = std::get_if<generator_ptr>(&args[0].v);
+  if (!gp || !*gp)
+    throw std::runtime_error("gen-done?: expected generator");
+  return value_t{(*gp)->exhausted};
+}
+
+value_t builtin_range(std::span<const value_t> args) {
+  if (args.size() < 1 || args.size() > 3)
+    throw std::runtime_error("range: expected 1-3 arguments (end) or (start end [step])");
+
+  int64_t start = 0, end = 0, step = 1;
+  if (args.size() == 1) {
+    if (auto *i = std::get_if<int64_t>(&args[0].v))
+      end = *i;
+    else
+      throw std::runtime_error("range: expected integer argument");
+  } else {
+    if (auto *i = std::get_if<int64_t>(&args[0].v))
+      start = *i;
+    else
+      throw std::runtime_error("range: expected integer start");
+    if (auto *i = std::get_if<int64_t>(&args[1].v))
+      end = *i;
+    else
+      throw std::runtime_error("range: expected integer end");
+    if (args.size() == 3) {
+      if (auto *i = std::get_if<int64_t>(&args[2].v))
+        step = *i;
+      else
+        throw std::runtime_error("range: expected integer step");
+      if (step == 0)
+        throw std::runtime_error("range: step must be non-zero");
+    }
+  }
+
+  auto gen = std::make_shared<generator>(std::make_shared<environment>());
+  gen->native_step = [current = start, end, step]() mutable -> std::optional<value_t> {
+    if ((step > 0 && current >= end) || (step < 0 && current <= end))
+      return std::nullopt;
+    auto val = value_t(current);
+    current += step;
+    return val;
+  };
+
+  return value_t{std::move(gen)};
+}
+
+value_t builtin_collect(std::span<const value_t> args) {
+  expect_exact(args, 1, "collect");
+  auto *gp = std::get_if<generator_ptr>(&args[0].v);
+  if (!gp || !*gp)
+    throw std::runtime_error("collect: expected generator");
+  std::vector<value_t> result;
+  while (auto next = generator_next(**gp))
+    result.push_back(std::move(*next));
+  return make_list(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
 // Logic
 // ---------------------------------------------------------------------------
 
@@ -566,9 +726,14 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "=", builtin_eq);
   register_fn(env, "!=", builtin_ne);
 
-  // String
+  // String / conversion
   register_fn(env, "str-concat", builtin_str_concat);
   register_fn(env, "str", builtin_str);
+  register_fn(env, "int", builtin_int);
+  register_fn(env, "float", builtin_float);
+  register_fn(env, "is-int", builtin_is_int);
+  register_fn(env, "is-float", builtin_is_float);
+  register_fn(env, "is-string", builtin_is_string);
 
   // List
   register_fn(env, "list", builtin_list);
@@ -598,6 +763,14 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "is-null", builtin_is_null);
   register_fn(env, "is-list", builtin_is_list);
   register_fn(env, "type-of", builtin_type_of);
+
+  // Generators
+  register_fn(env, "generator", builtin_generator);
+  register_fn(env, "next", builtin_next);
+  register_fn(env, "generator?", builtin_is_generator);
+  register_fn(env, "gen-done?", builtin_gen_done);
+  register_fn(env, "range", builtin_range);
+  register_fn(env, "collect", builtin_collect);
 
   // I/O
   register_fn(env, "print", builtin_print);

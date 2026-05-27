@@ -17,6 +17,7 @@
 #include <cvc/core/state_exec/types.h>
 #include <functional>
 #include <optional>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -124,6 +125,41 @@ public:
   bool resume(int pid);
   bool kill(int pid);
 
+  /// Put a process to sleep for the given number of seconds.
+  /// The process enters `waiting` status and is automatically woken
+  /// by the scheduler loop once the deadline expires.
+  bool sleep(int pid, double seconds);
+
+  /// Put a process into `waiting` status until a message arrives at
+  /// the given state-tree path.  Returns false if the PID is invalid
+  /// or the process is not in a runnable state.
+  bool receive_message(int pid, const std::string &path);
+
+  /// Deliver a message dict to all processes waiting on `path`.
+  /// Each matching process has the message pushed to its inbox,
+  /// its evaluator result set to the message, and its status
+  /// changed to `ready`.  Returns the number of processes woken.
+  ///
+  /// When no process is currently waiting on `path`, the message
+  /// is stored in a per-path FIFO queue so that a future
+  /// `msg-recv` call can retrieve it without blocking.  The queue
+  /// is bounded by `max_pending_messages` (default 1024); excess
+  /// messages are silently dropped.
+  int deliver_to_receivers(const std::string &path, const value_t &msg);
+
+  /// Pop one queued message for `path`, or nullopt if the queue
+  /// is empty.  Called by `msg-recv` before suspending.
+  std::optional<value_t> pop_pending_message(const std::string &path);
+
+  /// Number of queued (undelivered) messages for `path`.
+  std::size_t pending_message_count(const std::string &path) const;
+
+  /// Total queued messages across all paths.
+  std::size_t total_pending_messages() const;
+
+  /// Maximum messages that can be queued per path (0 = unlimited).
+  std::size_t max_pending_messages = 1024;
+
   /// Fork a running/ready process.  Returns child PID or -1 on failure.
   int fork(int pid);
 
@@ -156,6 +192,12 @@ public:
   /// Check if any process is still runnable.
   bool has_runnable() const;
 
+  /// PID of the process currently being stepped (-1 if none).
+  int current_pid() const { return current_pid_; }
+
+  /// Process pointer of the process currently being stepped (nullptr if none).
+  const process_ptr &current_process() const { return current_proc_; }
+
   /// Queue a watch event for a process by PID.
   void queue_watch_event(int pid, process::watch_event evt);
 
@@ -168,19 +210,47 @@ public:
   /// Set the state-tree root for watch polling.
   void set_watch_root(cvc::state *root) { watch_root_ = root; }
 
+  /// Set a unique identifier for this scheduler instance.
+  /// Used as the key under `state_exec.schedulers.<id>` in the state tree.
+  void set_id(const std::string &id) { id_ = id; }
+  const std::string &id() const { return id_; }
+
+  /// Load settings from the state tree.
+  ///
+  /// Resolution order (per setting):
+  ///   1. Per-scheduler: `state_exec.schedulers.<id>.<key>` (if id set)
+  ///   2. Global default: `state_exec.defaults.<key>`
+  ///   3. Hardcoded fallback
+  ///
+  /// After resolution, effective values are published back to the
+  /// per-scheduler subtree so they are visible in the state tree.
+  /// Requires set_watch_root() and (for per-scheduler) set_id() first.
+  void load_settings();
+
+  /// Well-known state tree paths for scheduler configuration.
+  static constexpr const char *settings_root = "state_exec";
+  static constexpr const char *defaults_prefix = "state_exec.defaults";
+  static constexpr const char *sched_prefix = "state_exec.schedulers";
+
 private:
+  std::string id_;
   scheduling_policy policy_;
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;
   bool stop_requested_ = false;
   uint64_t total_steps_ = 0;
+  int current_pid_ = -1;
+  process_ptr current_proc_;
 
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
 
   std::unordered_map<int, process_ptr> processes_;
+
+  /// Per-path FIFO queue for messages sent when no receiver is waiting.
+  std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
 
   /// Select the next process to run based on scheduling policy.
   process_ptr select_process();
@@ -199,6 +269,9 @@ private:
 
   /// Poll all watch_handlers entries for value changes, queuing events.
   void poll_watches();
+
+  /// Wake sleeping processes whose deadline has passed.
+  void wake_sleeping_processes();
 
   /// Check resource limits after a step.  May kill the process.
   void check_limits(process &proc);

@@ -65,6 +65,16 @@ struct process {
   double accumulated_time = 0.0; // Seconds running so far
   std::chrono::steady_clock::time_point last_run_start;
 
+  // Sleep support: process is in `waiting` status until this deadline.
+  std::optional<std::chrono::steady_clock::time_point> wake_time;
+
+  // Message receive support: process is in `waiting` status until a
+  // message arrives at this state-tree path.  When msg-send delivers
+  // to the matching path the scheduler pushes a dict into `inbox`
+  // and wakes the process.
+  std::optional<std::string> recv_path;
+  std::queue<value_t> inbox;
+
   // Completion
   value_t exit_code;
   std::optional<std::string> exit_error;

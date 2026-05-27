@@ -15,6 +15,58 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()) {}
 
 // ---------------------------------------------------------------------------
+// Settings — state-tree-backed configuration
+// ---------------------------------------------------------------------------
+
+// Helper: read a size_t from a state node, returning nullopt on missing/bad.
+static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
+  auto *node = root->findDescendant(path);
+  if (!node)
+    return std::nullopt;
+  std::string v = node->value();
+  if (v.empty())
+    return std::nullopt;
+  try {
+    return static_cast<std::size_t>(std::stoul(v));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+void scheduler::load_settings() {
+  if (!watch_root_)
+    return;
+
+  // --- max_pending_messages ---
+  constexpr std::size_t fallback_max_pending = 1024;
+  std::size_t effective = fallback_max_pending;
+
+  // Global default
+  if (auto v =
+          read_size_setting(watch_root_, std::string(defaults_prefix) + ".max_pending_messages"))
+    effective = *v;
+
+  // Per-scheduler override
+  if (!id_.empty()) {
+    std::string per = std::string(sched_prefix) + "." + id_ + ".max_pending_messages";
+    if (auto v = read_size_setting(watch_root_, per))
+      effective = *v;
+  }
+
+  max_pending_messages = effective;
+
+  // Publish effective values to per-scheduler subtree
+  if (!id_.empty()) {
+    std::string base = std::string(sched_prefix) + "." + id_;
+    (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
+    (*watch_root_)(base + ".policy")
+        .value(policy_ == scheduling_policy::round_robin ? "round_robin"
+               : policy_ == scheduling_policy::priority  ? "priority"
+                                                         : "priority_rr");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Process submission
 // ---------------------------------------------------------------------------
 
@@ -124,6 +176,19 @@ process_ptr scheduler::select_process() {
 // ---------------------------------------------------------------------------
 
 void scheduler::execute_process_step(process &proc) {
+  // Track which process is currently executing so intrinsics can query it.
+  current_pid_ = proc.pid;
+  current_proc_ = processes_[proc.pid];
+  // Ensure current_pid_ is reset even on early returns.
+  struct guard {
+    int &pid;
+    process_ptr &pp;
+    ~guard() {
+      pid = -1;
+      pp.reset();
+    }
+  } reset_guard{current_pid_, current_proc_};
+
   // 1. Handle pending signals first
   if (!proc.pending_signals.empty() && !proc.in_signal_handler && !proc.in_watch_handler) {
     handle_signal(proc);
@@ -164,12 +229,17 @@ void scheduler::execute_process_step(process &proc) {
   // 7. Check completion
   if (done) {
     terminate_process(proc, proc.state.result);
-  } else {
+  } else if (proc.status == process_status::running) {
+    // Only reset to ready if the intrinsic didn't change the status
+    // (e.g. sleep or msg-recv set it to waiting).
     proc.status = process_status::ready;
   }
 }
 
 int scheduler::step() {
+  // Wake sleeping processes whose deadline has passed.
+  wake_sleeping_processes();
+
   // Check for value changes on watched state paths.
   poll_watches();
 
@@ -209,9 +279,14 @@ void scheduler::stop() { stop_requested_ = true; }
 
 bool scheduler::has_runnable() const {
   for (const auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::ready || proc->status == process_status::running) {
+    if (proc->status == process_status::ready || proc->status == process_status::running)
       return true;
-    }
+    // A sleeping process will become runnable when its deadline expires.
+    if (proc->status == process_status::waiting && proc->wake_time)
+      return true;
+    // A message-waiting process will become runnable when a message arrives.
+    if (proc->status == process_status::waiting && proc->recv_path)
+      return true;
   }
   return false;
 }
@@ -264,6 +339,20 @@ void scheduler::poll_watches() {
         entry.last_value = cur;
         proc->pending_watch_events.push_back({wid});
       }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sleep / wake
+// ---------------------------------------------------------------------------
+
+void scheduler::wake_sleeping_processes() {
+  auto now = std::chrono::steady_clock::now();
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->wake_time && now >= *proc->wake_time) {
+      proc->wake_time.reset();
+      proc->status = process_status::ready;
     }
   }
 }
@@ -452,6 +541,87 @@ bool scheduler::resume(int pid) {
     return false;
   proc.status = process_status::ready;
   return true;
+}
+
+bool scheduler::sleep(int pid, double seconds) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  auto &proc = *it->second;
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running) {
+    auto now = std::chrono::steady_clock::now();
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  }
+  proc.wake_time = std::chrono::steady_clock::now() +
+                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                       std::chrono::duration<double>(seconds));
+  proc.status = process_status::waiting;
+  return true;
+}
+
+bool scheduler::receive_message(int pid, const std::string &path) {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  auto &proc = *it->second;
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running) {
+    auto now = std::chrono::steady_clock::now();
+    proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
+  }
+  proc.recv_path = path;
+  proc.status = process_status::waiting;
+  return true;
+}
+
+int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  int woken = 0;
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
+      proc->recv_path.reset();
+      proc->state.result = msg;
+      // Patch the nil placeholder that msg-recv left in the parent frame.
+      if (!proc->state.stack.empty() && !proc->state.stack.back().results.empty())
+        proc->state.stack.back().results.back() = msg;
+      proc->status = process_status::ready;
+      ++woken;
+    }
+  }
+  // If no process was waiting, queue for later msg-recv calls.
+  if (woken == 0) {
+    auto &q = pending_messages_[path];
+    if (max_pending_messages == 0 || q.size() < max_pending_messages)
+      q.push(msg);
+  }
+  return woken;
+}
+
+std::optional<value_t> scheduler::pop_pending_message(const std::string &path) {
+  auto it = pending_messages_.find(path);
+  if (it == pending_messages_.end() || it->second.empty())
+    return std::nullopt;
+  auto msg = std::move(it->second.front());
+  it->second.pop();
+  if (it->second.empty())
+    pending_messages_.erase(it);
+  return msg;
+}
+
+std::size_t scheduler::pending_message_count(const std::string &path) const {
+  auto it = pending_messages_.find(path);
+  if (it == pending_messages_.end())
+    return 0;
+  return it->second.size();
+}
+
+std::size_t scheduler::total_pending_messages() const {
+  std::size_t total = 0;
+  for (const auto &[_, q] : pending_messages_)
+    total += q.size();
+  return total;
 }
 
 bool scheduler::kill(int pid) {

@@ -225,7 +225,8 @@ value_t intrinsic_fork(intrinsics_context *ctx, std::span<const value_t> args) {
 
 value_t intrinsic_self_pid(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "self-pid");
-  return value_t(static_cast<int64_t>(ctx->pid));
+  int pid = (ctx->sched && ctx->sched->current_pid() >= 0) ? ctx->sched->current_pid() : ctx->pid;
+  return value_t(static_cast<int64_t>(pid));
 }
 
 value_t intrinsic_self_uid(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -252,6 +253,18 @@ value_t intrinsic_resume(intrinsics_context *ctx, std::span<const value_t> args)
   require_sched(ctx, "resume");
   int pid = static_cast<int>(as_int(args[0], "resume"));
   return value_t(ctx->sched->resume(pid));
+}
+
+value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "sleep");
+  require_sched(ctx, "sleep");
+  double seconds = as_number(args[0], "sleep");
+  if (seconds < 0)
+    throw std::runtime_error("sleep: duration must be non-negative");
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid;
+  return value_t(ctx->sched->sleep(pid, seconds));
 }
 
 value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -505,7 +518,16 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
     node = &(*ctx->root)(path);
   }
   auto result = node->sendMessage(payload, content_type);
-  if (ctx->proc) {
+  // Update message counters on the currently executing process.
+  process *proc = nullptr;
+  if (ctx->sched && ctx->sched->current_process())
+    proc = ctx->sched->current_process().get();
+  if (proc) {
+    proc->message_count++;
+    proc->message_bytes += payload.size();
+  }
+  // Also update ctx->proc if it's a different object (for test fixtures).
+  if (ctx->proc && ctx->proc.get() != proc) {
     ctx->proc->message_count++;
     ctx->proc->message_bytes += payload.size();
   }
@@ -516,7 +538,58 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
                               ? "delivered"
                               : "error")));
   entries.emplace_back("path", value_t(result.resolved_path));
-  return make_dict(std::move(entries));
+  auto msg = make_dict(std::move(entries));
+
+  // Deliver to any processes waiting to receive on this path.
+  if (ctx->sched)
+    ctx->sched->deliver_to_receivers(path, msg);
+
+  return msg;
+}
+
+value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "msg-recv");
+  require_sched(ctx, "msg-recv");
+  auto &path = as_string(args[0], "msg-recv");
+
+  // Resolve the actual PID of the currently executing process.
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid; // fallback for unit-test contexts
+
+  // Resolve the process pointer for inbox check.
+  process *proc = nullptr;
+  if (ctx->sched->current_process())
+    proc = ctx->sched->current_process().get();
+  else if (ctx->proc)
+    proc = ctx->proc.get();
+
+  // If the process already has a message in its inbox, return it immediately.
+  if (proc && !proc->inbox.empty()) {
+    auto msg = std::move(proc->inbox.front());
+    proc->inbox.pop();
+    return msg;
+  }
+
+  // Check the scheduler's pending message queue for this path.
+  auto pending = ctx->sched->pop_pending_message(path);
+  if (pending)
+    return *pending;
+
+  // Otherwise, suspend the process until a message arrives.
+  bool ok = ctx->sched->receive_message(pid, path);
+  if (!ok)
+    throw std::runtime_error("msg-recv: cannot suspend process " + std::to_string(pid));
+  // Return nil as a placeholder — the scheduler will overwrite
+  // state.result with the actual message when delivery occurs.
+  return nil_value;
+}
+
+value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "msg-pending");
+  require_sched(ctx, "msg-pending");
+  auto &path = as_string(args[0], "msg-pending");
+  return value_t(static_cast<int64_t>(ctx->sched->pending_message_count(path)));
 }
 
 } // anonymous namespace
@@ -551,6 +624,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("kill", intrinsic_kill);
   reg("pause", intrinsic_pause);
   reg("resume", intrinsic_resume);
+  reg("sleep", intrinsic_sleep);
   reg("ps", intrinsic_ps);
   reg("inspect", intrinsic_inspect);
 
@@ -580,6 +654,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
 
   // Messaging
   reg("msg-send", intrinsic_msg_send);
+  reg("msg-recv", intrinsic_msg_recv);
+  reg("msg-pending", intrinsic_msg_pending);
 }
 
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {

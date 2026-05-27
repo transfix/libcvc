@@ -102,10 +102,12 @@ auto results = sched.run();
 | `if` | `(if cond then [else])` | Conditional |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
 | `while` | `(while cond body)` | Loop while condition is true |
-| `for` | `(for x collection body)` | Iterate over a list |
+| `for` | `(for x collection body)` | Iterate over a list or generator |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
 | `quote` | `(quote (1 2 3))` | Return expression unevaluated |
 | `return` | `(return expr)` | Early return from a function |
+| `break` | `(break)` or `(break expr)` | Exit nearest `while`/`for` loop |
+| `yield` | `(yield expr)` | Produce a value from a generator |
 | `defmacro` | `(defmacro name (params) template)` | Macro definition |
 | `eval` | `(eval expr)` | Evaluate a quoted expression |
 | `defclass` | `(defclass Name ...)` | OOP class definition |
@@ -120,9 +122,35 @@ auto results = sched.run();
 **String:** `str` (convert to string), `str-concat`
 **List:** `list`, `car`, `cdr`, `cons`, `nth`, `set-nth`, `length`, `append`, `slice`, `del-nth`
 **Dict:** `dict`, `get-attr`, `set-attr`, `del-attr`
-**Type:** `null?`, `list?`, `type-of`
+**Type:** `null?`, `list?`, `type-of`, `generator?`, `is-int`, `is-float`, `is-string`
+**Conversion:** `int` (to integer), `float` (to float)
 **I/O:** `print`
+**Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+
+#### Type Conversion
+
+```lisp
+;; Convert to integer — truncates floats, parses strings
+(int 3.7)       ;; => 3
+(int "123")     ;; => 123
+(int true)      ;; => 1
+
+;; Convert to float — widens integers, parses strings
+(float 5)       ;; => 5.0
+(float "3.14")  ;; => 3.14
+(float true)    ;; => 1.0
+
+;; Type predicates
+(is-int 42)       ;; => true
+(is-int 3.14)     ;; => false
+(is-float 3.14)   ;; => true
+(is-float 42)     ;; => false
+(is-string "hi")  ;; => true
+(is-string 42)    ;; => false
+```
+
+Conversion errors throw a runtime error (e.g., `(int "abc")` fails).
 
 ### Example Programs
 
@@ -147,6 +175,137 @@ auto results = sched.run();
 ;; Process 1 writes, Process 2 reads
 (state-set "shared.counter" "0")
 ```
+
+### Generators and Lazy Sequences
+
+Generators produce values lazily — one at a time, on demand.  They are first-class
+values and can be consumed with `(next gen)`, iterated with `(for x gen body)`,
+or materialised with `(collect gen)`.
+
+#### Creating Generators
+
+**From a closure with `yield`:**
+
+```lisp
+;; A generator that yields 1, 2, 3
+(set g (generator (lambda ()
+  (yield 1)
+  (yield 2)
+  (yield 3))))
+```
+
+**From `range`:**
+
+```lisp
+(range 5)         ;; yields 0, 1, 2, 3, 4
+(range 2 8)       ;; yields 2, 3, 4, 5, 6, 7
+(range 0 10 3)    ;; yields 0, 3, 6, 9
+```
+
+#### Consuming Generators
+
+```lisp
+;; Pull one value at a time
+(set g (range 3))
+(next g)           ;; => 0
+(next g)           ;; => 1
+(next g)           ;; => 2
+(next g)           ;; => nil (exhausted)
+
+;; Check if exhausted
+(gen-done? g)      ;; => true
+
+;; Iterate with for
+(for x (range 5)
+  (print x))       ;; prints 0 1 2 3 4
+
+;; Materialise all values into a list
+(collect (range 5))  ;; => (0 1 2 3 4)
+```
+
+#### Generator Patterns
+
+**Filter — yield only values matching a predicate:**
+
+```lisp
+(set evens (generator (lambda ()
+  (for x (range 10)
+    (if (= (% x 2) 0)
+      (yield x) nil)))))
+(collect evens)  ;; => (0 2 4 6 8)
+```
+
+**Map — transform each value:**
+
+```lisp
+(set squares (generator (lambda ()
+  (for x (range 5)
+    (yield (* x x))))))
+(collect squares)  ;; => (0 1 4 9 16)
+```
+
+**Take-N with `break` — consume only the first N values:**
+
+```lisp
+(set taken (list))
+(for x (range 1000)
+  (if (>= (length taken) 4)
+    (break nil)
+    (append taken x)))
+taken  ;; => (0 1 2 3)
+```
+
+**Accumulator — running sum:**
+
+```lisp
+(set running-sum (generator (lambda ()
+  (let ((total 0))
+    (for x (range 1 6)
+      (begin
+        (set total (+ total x))
+        (yield total)))))))
+(collect running-sum)  ;; => (1 3 6 10 15)
+```
+
+**Infinite-style with while + yield:**
+
+```lisp
+(set counter (generator (lambda ()
+  (let ((n 0))
+    (while (< n 1000)
+      (begin (yield n)
+             (set n (+ n 1))))))))
+;; Consume lazily with break
+(for x counter
+  (if (= x 5) (break x) nil))  ;; => 5
+```
+
+### The `break` Statement
+
+`break` exits the nearest enclosing `while` or `for` loop.
+
+```lisp
+;; Exit with no value (loop evaluates to nil)
+(while t (break))
+
+;; Exit with a value
+(while t (break 42))  ;; => 42
+
+;; Find first match
+(for x (list 10 20 30 40)
+  (if (> x 25) (break x) nil))  ;; => 30
+
+;; Nested loops — break exits only the innermost
+(set sum 0)
+(for i (list 1 2 3)
+  (for j (list 10 20 30)
+    (if (= j 20) (break nil)      ;; exits inner for
+      (set sum (+ sum j)))))
+sum  ;; => 30  (10 + 10 + 10)
+```
+
+`break` unwinds through `begin`, `let`, `if`, and any other intermediate
+forms — it always targets the nearest loop boundary.
 
 ---
 
@@ -537,6 +696,76 @@ Key points:
 - The callback fires synchronously inside `admit()` — keep it fast
 - Unsubscribe when done to avoid dangling references
 
+### Receiving Messages (DSL)
+
+`msg-recv` suspends the calling process until a message arrives on the
+specified path.  If a message is already queued, it returns immediately.
+
+```lisp
+;; Block until a message arrives on "events.data"
+(set msg (msg-recv "events.data"))
+
+;; msg is a dict — extract the payload
+(get-attr msg "payload")
+```
+
+Resolution order when `msg-recv` is called:
+1. **Inbox** — if the process has buffered messages, pops the front one
+2. **Pending queue** — if the scheduler has a pre-delivered message for the path, returns it
+3. **Suspend** — otherwise the process enters `waiting` status until a message is delivered
+
+### Checking for Pending Messages
+
+`msg-pending` returns the number of queued messages for a path without
+blocking:
+
+```lisp
+;; Non-blocking check
+(if (> (msg-pending "events.data") 0)
+    (set msg (msg-recv "events.data"))
+    (print "no messages yet"))
+```
+
+### Sleeping
+
+`sleep` suspends the current process for a given number of seconds.
+The scheduler automatically wakes it when the duration expires.
+
+```lisp
+;; Sleep for half a second
+(sleep 0.5)
+
+;; Polling loop with sleep
+(while true
+  (begin
+    (if (> (msg-pending "work.queue") 0)
+        (begin
+          (set job (msg-recv "work.queue"))
+          (process-job job))
+        (sleep 0.1))))
+```
+
+`sleep` accepts integer or floating-point seconds (must be non-negative).
+It returns `true` on success.
+
+### Message-Driven Process Example
+
+A complete receiver that waits for messages and accumulates results:
+
+```lisp
+(begin
+  (set results (list))
+  (set done false)
+  (while (not done)
+    (begin
+      (set m (msg-recv "tasks.input"))
+      (set payload (get-attr m "payload"))
+      (if (= payload "stop")
+          (set done true)
+          (set results (append results (list payload))))))
+  results)
+```
+
 ---
 
 ## 7. Resource Limits & Policies
@@ -600,6 +829,45 @@ process_limits requested{
 auto validated = validate_limits(policy, requested);
 // validated.max_time is clamped to 60.0
 ```
+
+### Scheduler Settings via the State Tree
+
+Scheduler configuration can be loaded from the state tree, allowing
+runtime adjustment without recompilation.  Settings are resolved in
+order: per-scheduler override → global default → hardcoded fallback.
+
+```cpp
+scheduler sched;
+sched.set_watch_root(&root);   // point to the state tree root
+sched.set_id("worker-1");      // scheduler identity
+sched.load_settings();         // read and apply settings
+```
+
+**State tree paths:**
+
+| Setting | Per-scheduler path | Global path | Default |
+|---------|-------------------|-------------|---------|
+| `max_pending_messages` | `state_exec.schedulers.<id>.max_pending_messages` | `state_exec.defaults.max_pending_messages` | `1024` |
+
+```cpp
+// Set a global default for all schedulers
+root("state_exec.defaults.max_pending_messages").value("512");
+sched.load_settings();
+// sched.max_pending_messages == 512
+
+// Override for a specific scheduler
+root("state_exec.schedulers.worker-1.max_pending_messages").value("2048");
+sched.load_settings();
+// sched.max_pending_messages == 2048
+
+// "0" means unlimited; invalid values fall back to 1024
+```
+
+After `load_settings()`, the scheduler publishes its effective
+configuration back to the state tree:
+
+- `state_exec.schedulers.<id>.max_pending_messages` — the resolved cap
+- `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
 
 ---
 
@@ -1076,7 +1344,8 @@ stdlib.import_module("math", env, {"math.sqrt", "math.abs"});
 │  async_scheduler.h → async variant of scheduler                │
 │  memory_tracker.h  → per-process byte tracking                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  intrinsics.h      → state-get/set, spawn, fork, ps, msg-send  │
+│  intrinsics.h      → state-get/set, spawn, fork, ps, msg-send,  │
+│                       msg-recv, msg-pending, sleep               │
 │  resource_policy.h → cluster-wide resource constraints         │
 ├─────────────────────────────────────────────────────────────────┤
 │  exec_coordinator.h → leader election, submit, migrate, admin  │

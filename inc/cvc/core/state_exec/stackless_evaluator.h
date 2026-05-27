@@ -43,6 +43,8 @@ enum class eval_phase {
   eval_inner,
   super_args,
   defclass_methods,
+  yield_value,  // Generator: evaluate yield expression then pause
+  break_unwind, // Loop break: evaluate optional value then unwind to loop
 };
 
 /// A single evaluation frame on the explicit stack.
@@ -68,6 +70,7 @@ struct evaluator_state {
   environment_ptr global_env;
   evaluator::macro_map user_macros;
   evaluation_stats stats;
+  bool yielded = false; // Set by (yield val) — signals generator_next to stop
 };
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
@@ -137,6 +140,8 @@ private:
   void step_return_value(evaluator_state &state, eval_frame &frame);
   void step_eval_inner(evaluator_state &state, eval_frame &frame);
   void step_super_args(evaluator_state &state, eval_frame &frame);
+  void step_yield_value(evaluator_state &state, eval_frame &frame);
+  void step_break_unwind(evaluator_state &state, eval_frame &frame);
 
   // Helpers
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,

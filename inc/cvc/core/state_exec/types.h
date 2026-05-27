@@ -26,6 +26,7 @@ namespace cvc::state_exec {
 // Forward declarations
 struct closure;
 struct environment;
+struct generator;
 
 using closure_ptr = std::shared_ptr<closure>;
 using environment_ptr = std::shared_ptr<environment>;
@@ -44,6 +45,7 @@ struct data_object {
   bool is_type(const std::string &t) const { return type_name == t; }
 };
 using data_object_ptr = std::shared_ptr<data_object>;
+using generator_ptr = std::shared_ptr<generator>;
 
 // Ordered map preserving insertion order for dicts
 using ordered_map = std::vector<std::pair<std::string, struct value_tag>>;
@@ -69,9 +71,11 @@ using native_fn = std::function<value_tag(std::span<const value_tag>)>;
 ///   dict_ptr   → ordered dictionary
 ///   native_fn  → C++ callable (built-in or stdlib bridge)
 ///   data_object_ptr → typed data from state::data()
+///   generator_ptr → lazy sequence with yield support
 struct value_tag {
-  using variant_type = std::variant<std::monostate, bool, int64_t, double, std::string, symbol,
-                                    list_ptr, closure_ptr, dict_ptr, native_fn, data_object_ptr>;
+  using variant_type =
+      std::variant<std::monostate, bool, int64_t, double, std::string, symbol, list_ptr,
+                   closure_ptr, dict_ptr, native_fn, data_object_ptr, generator_ptr>;
 
   variant_type v;
 
@@ -92,6 +96,7 @@ struct value_tag {
   value_tag(dict_ptr d) : v(std::move(d)) {}
   value_tag(native_fn f) : v(std::move(f)) {}
   value_tag(data_object_ptr d) : v(std::move(d)) {}
+  value_tag(generator_ptr g) : v(std::move(g)) {}
 
   /// Check if the value is nil (monostate).
   bool is_nil() const { return std::holds_alternative<std::monostate>(v); }
