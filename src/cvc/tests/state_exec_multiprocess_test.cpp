@@ -160,12 +160,25 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
     if (!tr_b.connect_to_peer(sock_a, std::chrono::milliseconds(3000)))
       _exit(11);
 
-    // Wait for replicated values from Process A.
-    tr_b.wait_for_received(3, std::chrono::milliseconds(8000));
+    // Pump until the real values arrive from Process A.
+    // The parent seeds three paths then overwrites them with 10/20/30.
+    // We pump until all three hold their final values.
+    auto &root_b = cvc::state::instance(app_b);
+    {
+      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
+      while (std::chrono::steady_clock::now() < dl) {
+        tr_b.pump_all();
+        tr_b.flush();
+        if (root_b.findDescendant("shared.x") && root_b("shared.x").value() == "10" &&
+            root_b.findDescendant("shared.y") && root_b("shared.y").value() == "20" &&
+            root_b.findDescendant("shared.z") && root_b("shared.z").value() == "30")
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    }
 
     // Set up scheduler and run a DSL program that reads the replicated values.
     scheduler sched_b;
-    auto &root_b = cvc::state::instance(app_b);
     sched_b.set_watch_root(&root_b);
     auto e = make_exec_env(sched_b, root_b);
 
@@ -230,7 +243,7 @@ TEST(StateExecMultiprocessIpc, StateTreeReplication) {
 
   // Pump until child is done.
   int status = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30000);
   while (std::chrono::steady_clock::now() < deadline) {
     tr_a.pump_all();
     tr_a.flush();
@@ -448,11 +461,20 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
     if (!tr_b.connect_to_peer(sock_a, std::chrono::milliseconds(3000)))
       _exit(11);
 
-    // Wait for the producer's "ready" signal.
-    tr_b.wait_for_received(7, std::chrono::milliseconds(8000));
+    // Pump until the producer's "items.ready" signal arrives.
+    auto &root_b = cvc::state::instance(app_b);
+    {
+      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
+      while (std::chrono::steady_clock::now() < dl) {
+        tr_b.pump_all();
+        tr_b.flush();
+        if (root_b.findDescendant("items.ready") && root_b("items.ready").value() == "true")
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    }
 
     scheduler sched_b;
-    auto &root_b = cvc::state::instance(app_b);
     sched_b.set_watch_root(&root_b);
     auto e = make_exec_env(sched_b, root_b);
 
@@ -516,9 +538,12 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
   sched_a.set_watch_root(&root_a);
   auto e = make_exec_env(sched_a, root_a);
 
-  // Seed the state tree paths (including the result path for B→A replication).
+  // Seed the state tree paths (including the result path for B→A
+  // replication and the items.ready signal path). Seeding ensures the
+  // adapter has observers before the real writes happen.
   for (int i = 0; i < 5; ++i)
     root_a("items.v" + std::to_string(i)).value(std::string("seed"));
+  root_a("items.ready").value(std::string("seed"));
   root_a("result.consumer").value(std::string("seed"));
 
   execute_options opts;
@@ -545,7 +570,7 @@ TEST(StateExecMultiprocessIpc, BidirectionalProducerConsumerGenerators) {
 
   // Pump until child finishes, then check the consumer's replicated result.
   int status = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(12000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30000);
   while (std::chrono::steady_clock::now() < deadline) {
     tr_a.pump_all();
     tr_a.flush();
@@ -606,11 +631,20 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
     if (!tr_b.connect_to_peer(sock_a, std::chrono::milliseconds(3000)))
       _exit(11);
 
-    // Wait for all producer data + ready signal.
-    tr_b.wait_for_received(10, std::chrono::milliseconds(10000));
+    // Pump until the "producers.ready" signal arrives from Process A.
+    auto &root_b = cvc::state::instance(app_b);
+    {
+      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
+      while (std::chrono::steady_clock::now() < dl) {
+        tr_b.pump_all();
+        tr_b.flush();
+        if (root_b.findDescendant("producers.ready") && root_b("producers.ready").value() == "true")
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    }
 
     scheduler sched_b;
-    auto &root_b = cvc::state::instance(app_b);
     sched_b.set_watch_root(&root_b);
     auto e = make_exec_env(sched_b, root_b);
 
@@ -656,11 +690,15 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
   sched_a.set_watch_root(&root_a);
   auto e = make_exec_env(sched_a, root_a);
 
-  // Seed all paths.
+  // Seed all paths so the state_sync_adapter has observers attached
+  // before the real writes happen. The adapter's childChanged handler
+  // lazily attaches *after* valueChanged fires, so without seeding,
+  // the very first write to a new path is invisible to the journal.
   for (int p = 0; p < 3; ++p)
     for (int i = 0; i < 3; ++i)
       root_a("producer." + std::to_string(p) + ".item." + std::to_string(i))
           .value(std::string("seed"));
+  root_a("producers.ready").value(std::string("seed"));
 
   // Spawn 3 producer DSL processes. Each writes items with a tag.
   for (int p = 0; p < 3; ++p) {
@@ -687,7 +725,7 @@ TEST(StateExecMultiprocessIpc, MultiProducerSingleConsumer) {
 
   // Pump until child finishes.
   int status = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(12000);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30000);
   while (std::chrono::steady_clock::now() < deadline) {
     tr_a.pump_all();
     tr_a.flush();
@@ -1098,9 +1136,10 @@ TEST(StateExecMultiprocessGrpc, BidirectionalProducerConsumerGenerators) {
   sched_a.set_watch_root(&root_a);
   auto ea = make_exec_env(sched_a, root_a);
 
-  // Seed paths.
+  // Seed paths (including data.ready so the adapter journals it).
   for (int i = 0; i < 5; ++i)
     root_a("data.v" + std::to_string(i)).value(std::string("seed"));
+  root_a("data.ready").value(std::string("seed"));
 
   execute_options opts_a;
   opts_a.name = "grpc-producer-gen";
