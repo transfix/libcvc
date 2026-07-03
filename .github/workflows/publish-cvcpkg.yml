@@ -1,0 +1,215 @@
+# Publish libcvc to cvcpkg.org
+#
+# Triggered by version tags (v*) and manual dispatch. Builds libcvc on
+# Linux, macOS, and Windows, then packs each install into a tar.zst
+# archive and publishes to the `cvc` organization on cvcpkg.org (created
+# if it doesn't exist yet).
+#
+# Requires two repository secrets:
+#   CVCPKG_TOKEN       — publisher-role token for the cvc org
+#   CVCPKG_SERVER_URL  — optional; defaults to https://cvcpkg.org
+#
+# NOTE: the archive packing step depends on `cvcpkg pack-from-prefix`
+# which is on the cvcpkg roadmap but not yet released. Until it ships
+# this workflow will run through build + install and then exit early at
+# the pack step with a clear message. Once cvcpkg gains the subcommand,
+# swap the stub for the real invocation and remove the `continue-on-error`
+# guard on the publish job.
+
+name: publish-cvcpkg
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and pack only; skip publish.'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+concurrency:
+  group: publish-cvcpkg-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CVCPKG_ORG: cvc
+  CVCPKG_SERVER: ${{ secrets.CVCPKG_SERVER_URL || 'https://cvcpkg.org' }}
+
+jobs:
+  ensure-org:
+    runs-on: ubuntu-latest
+    env:
+      CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+    steps:
+      - name: Ensure cvc org exists on cvcpkg.org
+        if: env.CVCPKG_TOKEN != ''
+        run: |
+          set -euo pipefail
+          server="${CVCPKG_SERVER%/}"
+          slug="$CVCPKG_ORG"
+          # POST /v1/orgs — 200 on create, 409 if it already exists.
+          status=$(curl -sS -o /tmp/org.json -w '%{http_code}' \
+            -X POST "$server/v1/orgs" \
+            -H "Authorization: Bearer $CVCPKG_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "slug": "cvc",
+              "display_name": "Center for Computational Visualization",
+              "description": "Official CVC-lab package publisher.",
+              "homepage": "https://www.cs.utexas.edu/~bajaj/cvc/",
+              "is_private": false
+            }')
+          if [ "$status" = "200" ] || [ "$status" = "201" ]; then
+            echo "Created org $slug"
+          elif [ "$status" = "409" ]; then
+            echo "Org $slug already exists — OK"
+          else
+            echo "Org creation failed with HTTP $status:"
+            cat /tmp/org.json
+            exit 1
+          fi
+
+  build:
+    needs: ensure-org
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - os: macos-14
+            platform: macos
+            arch: arm64
+          - os: windows-latest
+            platform: windows
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cvcpkg (from local workspace clone)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pull from libcvc-deps master rather than PyPI so we always
+          # pick up server/schema fixes without a release cadence.
+          python -m pip install --upgrade pip
+          pip install 'git+https://github.com/transfix/libcvc-deps@master#subdirectory=tools/cvcpkg'
+          cvcpkg --version
+
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Configure (Linux/macOS)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$extra_prefix" ]; then
+            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$extra_prefix" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
+            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DDISABLE_CGAL=OFF \
+            -DCVC_BUILD_VOLROVER3=OFF \
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
+
+      - name: Configure (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$depsPath" `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage" `
+            -DCVC_BUILD_TESTS=OFF `
+            -DCVC_ENABLE_CUDA=OFF `
+            -DDISABLE_CGAL=OFF `
+            -DCVC_BUILD_VOLROVER3=OFF `
+            -DCVC_ENABLE_MESHER=ON `
+            -DCVC_ENABLE_SDF=ON
+
+      - name: Build & install
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel --config Release
+          cmake --install build --config Release --component libcvc
+
+      - name: Pack archive (cvcpkg pack-from-prefix)
+        id: pack
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # `cvcpkg pack-from-prefix` is planned but not yet shipped.
+          # Once released:
+          #   cvcpkg pack-from-prefix \
+          #     --recipe cvcpkg/recipes/libcvc/recipe.yaml \
+          #     --prefix stage \
+          #     --platform ${{ matrix.platform }} \
+          #     --arch ${{ matrix.arch }} \
+          #     --config release --link shared \
+          #     --version-from cmake \
+          #     --output-dir dist
+          if cvcpkg pack-from-prefix --help >/dev/null 2>&1; then
+            cvcpkg pack-from-prefix \
+              --recipe cvcpkg/recipes/libcvc/recipe.yaml \
+              --prefix stage \
+              --platform "${{ matrix.platform }}" \
+              --arch "${{ matrix.arch }}" \
+              --config release --link shared \
+              --version-from cmake \
+              --output-dir dist
+          else
+            echo "cvcpkg pack-from-prefix not available yet; skipping pack step."
+            echo "Install tree contents:"
+            find stage -maxdepth 3 -type d | head -40 || true
+            echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+      - name: Upload install tree (debug)
+        if: env.SKIP_PUBLISH == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcvc-stage-${{ matrix.platform }}-${{ matrix.arch }}
+          path: stage/
+          retention-days: 7
+
+      - name: Publish to cvcpkg.org
+        if: env.SKIP_PUBLISH != '1' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          cvcpkg publish \
+            --all \
+            --input-dir dist \
+            --server "$CVCPKG_SERVER" \
+            --org "$CVCPKG_ORG" \
+            --token "$CVCPKG_TOKEN"
