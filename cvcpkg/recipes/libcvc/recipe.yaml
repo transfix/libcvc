@@ -14,10 +14,10 @@ recipe:
 source:
   # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
   # (see cvcpkg roadmap) does not consume this field, but the schema
-  # requires it; `..` points at the libcvc repo root for tools that walk
+  # requires it; `../../..` points at the libcvc repo root for tools that walk
   # the source tree.
   type: vendored
-  path: ..
+  path: ../../..
 
 patches: []
 
@@ -75,4 +75,4 @@ package:
         - cvc::cvc
 
 abi:
-  cxx_std: "17"
+  cxx_std: 17

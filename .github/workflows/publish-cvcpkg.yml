@@ -9,13 +9,6 @@
 #   CVCPKG_TOKEN       — publisher-role token for the cvc org
 #   CVCPKG_SERVER_URL  — optional; defaults to https://cvcpkg.org
 #
-# NOTE: the archive packing step depends on `cvcpkg pack-from-prefix`
-# which is on the cvcpkg roadmap but not yet released. Until it ships
-# this workflow will run through build + install and then exit early at
-# the pack step with a clear message. Once cvcpkg gains the subcommand,
-# swap the stub for the real invocation and remove the `continue-on-error`
-# guard on the publish job.
-
 name: publish-cvcpkg
 
 on:
@@ -159,57 +152,37 @@ jobs:
           cmake --build build --parallel --config Release
           cmake --install build --config Release --component libcvc
 
-      - name: Pack archive (cvcpkg pack-from-prefix)
+      - name: Pack archive
         id: pack
         shell: bash
-        continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p dist
-          # `cvcpkg pack-from-prefix` is planned but not yet shipped.
-          # Once released:
-          #   cvcpkg pack-from-prefix \
-          #     --recipe cvcpkg/recipes/libcvc/recipe.yaml \
-          #     --prefix stage \
-          #     --platform ${{ matrix.platform }} \
-          #     --arch ${{ matrix.arch }} \
-          #     --config release --link shared \
-          #     --version-from cmake \
-          #     --output-dir dist
-          if cvcpkg pack-from-prefix --help >/dev/null 2>&1; then
-            cvcpkg pack-from-prefix \
-              --recipe cvcpkg/recipes/libcvc/recipe.yaml \
-              --prefix stage \
-              --platform "${{ matrix.platform }}" \
-              --arch "${{ matrix.arch }}" \
-              --config release --link shared \
-              --version-from cmake \
-              --output-dir dist
-          else
-            echo "cvcpkg pack-from-prefix not available yet; skipping pack step."
-            echo "Install tree contents:"
-            find stage -maxdepth 3 -type d | head -40 || true
-            echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-      - name: Upload install tree (debug)
-        if: env.SKIP_PUBLISH == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: libcvc-stage-${{ matrix.platform }}-${{ matrix.arch }}
-          path: stage/
-          retention-days: 7
+          cvcpkg pack cvcpkg/recipes/libcvc \
+            --from-prefix stage \
+            --platform "${{ matrix.platform }}" \
+            --config release \
+            --link shared \
+            --local \
+            --output-dir dist
 
       - name: Publish to cvcpkg.org
-        if: env.SKIP_PUBLISH != '1' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
+        shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${CVCPKG_TOKEN:-}" ]; then
+            echo "CVCPKG_TOKEN secret is required to publish"
+            exit 1
+          fi
           cvcpkg publish \
-            --all \
-            --input-dir dist \
+            libcvc \
             --server "$CVCPKG_SERVER" \
             --org "$CVCPKG_ORG" \
+            --platform "${{ matrix.platform }}" \
+            --config release \
+            --link shared \
+            --output-dir dist \
             --token "$CVCPKG_TOKEN"
