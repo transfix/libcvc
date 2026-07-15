@@ -39,14 +39,8 @@ on:
 #   - macOS:   libcvc-<ver>-<sha>-macos-<arch>-<config>.zip
 #   - Windows: libcvc-<ver>-<sha>-windows-<arch>-<config>.zip
 #
-# volrover3 end-user app (per OS, both Debug + Release):
-#   - Linux:   volrover3-<ver>-<sha>-linux-<arch>-<config>.tar.gz
-#              volrover3-<ver>-<sha>-linux-<arch>-<config>.deb
-#              VolumeRover3-<ver>-<sha>-<arch>-<config>.AppImage
-#   - macOS:   VolumeRover3-<ver>-<sha>-macos-<arch>-<config>.dmg
-#              VolumeRover3-<ver>-<sha>-macos-<arch>-<config>.zip
-#   - Windows: VolumeRover3-<ver>-<sha>-windows-<arch>-<config>.zip
-#              VolumeRover3-<ver>-<sha>-windows-<arch>-<config>-setup.exe
+# (The volrover3 end-user app moved to the volrover repository —
+# https://github.com/transfix/volrover — along with its packaging.)
 # ───────────────────────────────────────────────────────────────────
 
 jobs:
@@ -129,12 +123,6 @@ jobs:
             kind: libcvc
             build_type: Debug
             enable_grpc: true
-          - name: volrover3-debug
-            kind: volrover3
-            build_type: Debug
-          - name: volrover3-release
-            kind: volrover3
-            build_type: Release
     name: package-linux / ${{ matrix.name }}
     # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
     # Cancellation strands the cache and forces every subsequent run
@@ -189,28 +177,12 @@ jobs:
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cudart-dev"]'
 
-      - name: Install dependencies (volrover3)
-        if: matrix.kind == 'volrover3'
-        run: |
-          sudo apt-get update
-          # Qt6 + VTK + Boost/HDF5/FFTW/GSL/ImageMagick/CGAL/log4cplus all
-          # come from cvcpkg via fetch-libcvc-deps below. We only install
-          # the system runtime deps that Qt/VTK dlopen at runtime
-          # (OpenGL, X11, GLEW), plus AppImage-tooling deps (libfuse2,
-          # file, desktop-file-utils).
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
-            libgl1-mesa-dev libxt-dev mesa-common-dev libglew-dev \
-            libxrender-dev libxcursor-dev libxinerama-dev libxi-dev \
-            libfuse2 file desktop-file-utils
-
       # ── Pull dep bundle from libcvc-deps (via cvcpkg) ──
-      # For volrover3 builds this provides Qt6 + VTK + all third-party
-      # C/C++ deps in one shot; there is no fallback build path — if
+      # The bundle provides the `libiimod` CMake package (no longer
+      # vendored in this tree) plus Boost/HDF5/FFTW/GSL/ImageMagick/
+      # CGAL/log4cplus prebuilt. There is no fallback build path — if
       # cvcpkg cannot fetch the components, CMake configure will fail
-      # with "Could not find Qt6/VTK", which is the right signal.
-      # For libcvc-kind builds the bundle also provides the `libiimod`
-      # CMake package (no longer vendored in this tree).
+      # with an explicit "Could not find X", which is the right signal.
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
@@ -220,36 +192,21 @@ jobs:
 
       - name: Configure
         run: |
-          extra_prefix=""
-          if [ "${{ matrix.kind }}" = "volrover3" ]; then
-            # Qt6 + VTK + all third-party deps come from cvcpkg via
-            # fetch-libcvc-deps. No source-build fallback.
+          # libcvc needs libiimod from the libcvc-deps bundle. Fall
+          # back to the default cvcpkg-install prefix when the step
+          # gracefully returned empty (e.g. a single-bundle download
+          # failed but earlier bundles unpacked into $HOME/libcvc-deps).
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
             extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-            if [ -z "$extra_prefix" ]; then
-              extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
-            fi
-          elif [ "${{ matrix.kind }}" = "libcvc" ]; then
-            # libcvc-kind needs libiimod from the libcvc-deps bundle.
-            # Fall back to the default cvcpkg-install prefix when the
-            # step gracefully returned empty (e.g. a single-bundle
-            # download failed but earlier bundles unpacked into
-            # $HOME/libcvc-deps).
-            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-            else
-              extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
-            fi
+          else
+            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          # libcvc-kind builds enable tests so the same artifacts we
-          # ship get exercised by ctest. volrover3 builds keep tests
-          # off (its install component has no test targets).
-          tests=OFF
+          # Enable tests so the same artifacts we ship get exercised
+          # by ctest.
+          tests=ON
           coverage=OFF
-          if [ "${{ matrix.kind }}" = "libcvc" ]; then
-            tests=ON
-            if [ "${{ matrix.build_type }}" = "Debug" ]; then
-              coverage=ON
-            fi
+          if [ "${{ matrix.build_type }}" = "Debug" ]; then
+            coverage=ON
           fi
           grpc=OFF
           if [ "${{ matrix.enable_grpc }}" = "true" ]; then
@@ -263,7 +220,6 @@ jobs:
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
             -DDISABLE_CGAL=OFF \
-            -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_ENABLE_GRPC=$grpc
@@ -341,86 +297,6 @@ jobs:
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
-      - name: Build AppImage
-        if: matrix.kind == 'volrover3'
-        run: |
-          set -euo pipefail
-          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component libcvc
-          DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr --component volrover3
-          curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -L -o linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
-          chmod +x linuxdeploy linuxdeploy-plugin-qt
-          cp AppDir/usr/share/applications/volrover3.desktop AppDir/
-          cp AppDir/usr/share/icons/hicolor/256x256/apps/volrover_logo.png AppDir/volrover_logo.png
-          export QML_SOURCES_PATHS=""
-          export OUTPUT="${STEM}.AppImage"
-          # linuxdeploy walks the volrover3 ELF NEEDED entries and
-          # resolves them by name; libcvc.so.3 lives under
-          # AppDir/usr/lib/x86_64-linux-gnu/ (Debian's GNUInstallDirs
-          # default) which is not on the default search path. Qt6 + VTK
-          # come from the libcvc-deps prefix populated by cvcpkg.
-          deps_root="${{ steps.libcvc-deps.outputs.path }}"
-          if [ -z "$deps_root" ]; then
-            deps_root="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
-          fi
-          vtk_lib_path="$deps_root/lib"
-          export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:$vtk_lib_path:${LD_LIBRARY_PATH:-}"
-          ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
-                        --desktop-file AppDir/volrover3.desktop \
-                        --icon-file    AppDir/volrover_logo.png || \
-          ./linuxdeploy --appdir AppDir --output appimage \
-                        --desktop-file AppDir/volrover3.desktop \
-                        --icon-file    AppDir/volrover_logo.png
-          # Rename the produced AppImage to the canonical STEM only if
-          # appimagetool didn't already write it under that name.
-          # (linuxdeploy honors OUTPUT=$STEM.AppImage, so usually it
-          # is already correct; older versions wrote a generic name.)
-          for f in *.AppImage; do
-            case "$f" in
-              linuxdeploy*) ;;
-              "${STEM}.AppImage") ;;
-              *) mv "$f" "${STEM}.AppImage" ;;
-            esac
-          done
-
-      - name: Pack volrover3 tarball + .deb
-        if: matrix.kind == 'volrover3'
-        run: |
-          set -euo pipefail
-          STEM="volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          # AppDir was populated by linuxdeploy in the previous step and
-          # contains libcvc.so, Qt6, VTK, and all transitive deps. Pack
-          # that tree (not the bare cpack volrover3 component, which is
-          # ~700 KB and useless without the bundled runtime).
-          tar czf "$STEM.tar.gz" --transform 's|^AppDir|volrover3|' AppDir
-
-          pkg=pkg-deb
-          rm -rf "$pkg"
-          mkdir -p "$pkg/opt/volrover3" "$pkg/usr/local/bin" \
-                   "$pkg/usr/share/applications" "$pkg/DEBIAN"
-          cp -a AppDir/. "$pkg/opt/volrover3/"
-          ln -sf /opt/volrover3/AppRun "$pkg/usr/local/bin/volrover3"
-          if [ -f AppDir/volrover3.desktop ]; then
-            cp AppDir/volrover3.desktop "$pkg/usr/share/applications/"
-          fi
-          arch_deb=$(dpkg --print-architecture)
-          inst_kb=$(du -sk "$pkg/opt" "$pkg/usr" | awk '{s+=$1} END {print s}')
-          cat > "$pkg/DEBIAN/control" <<CONTROL
-          Package: volrover3
-          Version: ${{ steps.meta.outputs.version }}
-          Section: science
-          Priority: optional
-          Architecture: $arch_deb
-          Installed-Size: $inst_kb
-          Maintainer: CVC <noreply@github.com>
-          Description: VolumeRover3 - volumetric visualization application
-           Self-contained build with bundled Qt6, VTK, and libcvc.
-          CONTROL
-          # dpkg expects column-1 fields; strip the heredoc indent.
-          sed -i 's/^          //' "$pkg/DEBIAN/control"
-          dpkg-deb --build --root-owner-group "$pkg" "$STEM.deb"
-
       # One artifact per file so each shows its real extension on GitHub.
       - name: Upload Linux libcvc tarball
         if: matrix.kind == 'libcvc'
@@ -428,33 +304,6 @@ jobs:
         with:
           name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
           path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Linux volrover3 tarball
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
-          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Linux volrover3 .deb
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.deb
-          path: volrover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.deb
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Linux volrover3 AppImage
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.AppImage
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -470,12 +319,6 @@ jobs:
             build_type: Debug
           - name: libcvc-release
             kind: libcvc
-            build_type: Release
-          - name: volrover3-debug
-            kind: volrover3
-            build_type: Debug
-          - name: volrover3-release
-            kind: volrover3
             build_type: Release
     name: package-macos / ${{ matrix.name }}
     # Heavy job: do not cancel in-progress runs (mirrors package-linux).
@@ -507,16 +350,9 @@ jobs:
           # fetch-libcvc-deps below. Only build tooling here.
           brew install cmake ninja zstd
 
-      - name: Install dependencies (volrover3)
-        if: matrix.kind == 'volrover3'
-        run: |
-          # Qt6 + VTK + all third-party C/C++ deps come from cvcpkg via
-          # fetch-libcvc-deps below. Only build tooling here.
-          brew install cmake ninja zstd
-
       # ── Pull dep prefix via cvcpkg ──
-      # Provides Qt6 + VTK + all third-party C/C++ deps for volrover3
-      # and the libiimod CMake package for libcvc.
+      # Provides the libiimod CMake package and all third-party C/C++
+      # deps for libcvc.
       - name: Fetch libcvc-deps
         id: libcvc-deps-macos
         uses: ./.github/actions/fetch-libcvc-deps
@@ -526,8 +362,6 @@ jobs:
 
       - name: Configure
         run: |
-          tests=OFF
-          [ "${{ matrix.kind }}" = "libcvc" ] && tests=ON
           # cvcpkg is the sole third-party prefix on macOS.
           deps_path="${{ steps.libcvc-deps-macos.outputs.path }}"
           if [ -z "$deps_path" ]; then
@@ -536,10 +370,9 @@ jobs:
           export CMAKE_PREFIX_PATH="$deps_path"
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCVC_BUILD_TESTS=$tests \
+            -DCVC_BUILD_TESTS=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=OFF \
-            -DCVC_BUILD_VOLROVER3=${{ matrix.kind == 'volrover3' && 'ON' || 'OFF' }} \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON
 
@@ -573,53 +406,12 @@ jobs:
           mv "$STEM-libcvc.zip" "$STEM.zip"
           cp "$STEM.zip" "$GITHUB_WORKSPACE/"
 
-      - name: Pack volrover3 .dmg + .zip
-        if: matrix.kind == 'volrover3'
-        working-directory: build
-        run: |
-          set -euo pipefail
-          STEM="VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          # CPack DragNDrop runs the install rules (which invoke
-          # macdeployqt) and produces a deployed VolumeRover3.app under
-          # _CPack_Packages/Darwin/DragNDrop/<STEM>/ALL_IN_ONE/, then
-          # wraps it into the .dmg.
-          cpack -G DragNDrop -D CPACK_COMPONENTS_ALL=volrover3 \
-                             -D CPACK_PACKAGE_FILE_NAME="$STEM"
-          # Zip the already-deployed .app instead of running cpack -G ZIP
-          # a second time. Re-running cpack triggers a fresh install +
-          # macdeployqt pass that hits a component-dependency edge case
-          # in CPack (volrover3 → libcvc) and aborts during compression.
-          # `ditto -c -k --keepParent` is the canonical macOS-native zip
-          # for app bundles (preserves resource forks, symlinks, perms,
-          # extended attrs, codesign metadata).
-          APP_DIR="_CPack_Packages/Darwin/DragNDrop/$STEM/ALL_IN_ONE"
-          ditto -c -k --keepParent "$APP_DIR/VolumeRover3.app" "$STEM.zip"
-          cp "$STEM.dmg" "$STEM.zip" "$GITHUB_WORKSPACE/"
-
       - name: Upload macOS libcvc zip
         if: matrix.kind == 'libcvc'
         uses: actions/upload-artifact@v4
         with:
           name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
           path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload macOS volrover3 dmg
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.dmg
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.dmg
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload macOS volrover3 zip
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-macos-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -635,12 +427,6 @@ jobs:
             build_type: Debug
           - name: libcvc-release
             kind: libcvc
-            build_type: Release
-          - name: volrover3-debug
-            kind: volrover3
-            build_type: Debug
-          - name: volrover3-release
-            kind: volrover3
             build_type: Release
     name: package-windows / ${{ matrix.name }}
     # Do NOT cancel in-progress runs; see package-linux for rationale.
@@ -692,8 +478,6 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
-          $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           if (-not $depsPath) {
             # cvcpkg-install fell back; try the default prefix in case
@@ -708,11 +492,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
-            -DCVC_BUILD_TESTS=$tests `
+            -DCVC_BUILD_TESTS=ON `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=OFF `
-            -DCVC_BUILD_VOLROVER3=$vol `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON
 
@@ -741,14 +524,10 @@ jobs:
         # as SEH access violations (0xc0000005) and "unknown C++
         # exception" failures inside HDF5/Boost APIs.
         #
-        # cvcpkg, however, ships Qt6 only at top-level bin/
-        # (Qt6Core.dll AND Qt6Cored.dll co-located there because Qt
-        # uses a 'd' suffix for Debug). So a Debug build still needs
-        # bin/ on PATH to resolve Qt6Cored.dll, otherwise Qt-based
-        # tests (GraphicsNodeTest, VolumeNodeTest, etc.) exit with
-        # STATUS_DLL_NOT_FOUND (0xc0000135). Put debug/bin FIRST so
-        # same-named-port DLLs load their debug variant, and bin/
-        # second so Qt6's debug-suffixed DLLs still resolve.
+        # cvcpkg, however, ships some debug-suffixed DLLs only at
+        # top-level bin/. Put debug/bin FIRST so same-named-port DLLs
+        # load their debug variant, and bin/ second so debug-suffixed
+        # DLLs still resolve.
         run: |
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           $isDebug = '${{ matrix.build_type }}' -eq 'Debug'
@@ -807,10 +586,6 @@ jobs:
                   -E "$stressRegex"
           }
 
-      - name: Install NSIS
-        if: matrix.kind == 'volrover3'
-        run: choco install nsis -y
-
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'
         shell: pwsh
@@ -821,79 +596,11 @@ jobs:
           Move-Item "$stem-libcvc.zip" "$stem.zip"
           Copy-Item "$stem.zip" "$env:GITHUB_WORKSPACE/"
 
-      - name: Pack volrover3 zip + NSIS
-        if: matrix.kind == 'volrover3'
-        shell: pwsh
-        working-directory: build
-        run: |
-          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\NSIS' -ErrorAction SilentlyContinue).'(default)'
-          if (-not $nsisPath) {
-            $nsisPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\NSIS' -ErrorAction SilentlyContinue).'(default)'
-          }
-          if ($nsisPath) { $env:PATH = "$nsisPath;$env:PATH" }
-
-          # Override CPACK_COMPONENT_VOLROVER3_DEPENDS so cpack does not
-          # try to package the libcvc component (which has no install
-          # tree in this volrover3-only build).
-          cpack -G ZIP  -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem"
-          Move-Item "$stem-volrover3.zip" "$stem.zip"
-          cpack -G NSIS -C ${{ matrix.build_type }} -D CPACK_COMPONENTS_ALL=volrover3 -D CPACK_COMPONENT_VOLROVER3_DEPENDS= -D CPACK_PACKAGE_FILE_NAME="$stem-setup"
-
-          Copy-Item "$stem.zip"        "$env:GITHUB_WORKSPACE/"
-          Copy-Item "$stem-setup.exe"  "$env:GITHUB_WORKSPACE/"
-
-      # Setup MSVC dev shell so dumpbin.exe is on PATH for the
-      # dependency verification step below.
-      - name: Activate MSVC dev shell (for dumpbin)
-        if: matrix.kind == 'volrover3'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # Verify that the staged volrover3.exe and every DLL it transitively
-      # depends on are present alongside the binary. Fails CI on any
-      # missing non-system DLL (cudart64_*.dll, fftw3.dll, libomp140*.dll,
-      # zlib1.dll, etc.) so we never ship a Windows artifact that crashes
-      # at launch with a "DLL not found" error.
-      - name: Verify Windows DLL dependencies (volrover3)
-        if: matrix.kind == 'volrover3'
-        shell: pwsh
-        run: |
-          $stem = "VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}"
-          $extract = "$env:GITHUB_WORKSPACE\verify-bin"
-          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
-          Expand-Archive -Path "$env:GITHUB_WORKSPACE\$stem.zip" -DestinationPath $extract
-          # CPack ZIP layout: <stem>/bin/volrover3.exe (CMAKE_INSTALL_BINDIR=bin)
-          $bin = Get-ChildItem -Path $extract -Recurse -Filter volrover3.exe -File | Select-Object -First 1
-          if (-not $bin) { throw "volrover3.exe not found in extracted zip" }
-          & "$env:GITHUB_WORKSPACE\.github\scripts\verify-windows-deps.ps1" `
-              -BinDir $bin.Directory.FullName `
-              -Binaries volrover3.exe
-
       - name: Upload Windows libcvc zip
         if: matrix.kind == 'libcvc'
         uses: actions/upload-artifact@v4
         with:
           name: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
           path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Windows volrover3 zip
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.zip
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload Windows volrover3 NSIS installer
-        if: matrix.kind == 'volrover3'
-        uses: actions/upload-artifact@v4
-        with:
-          name: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}-setup.exe
-          path: VolumeRover3-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-windows-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}-setup.exe
           if-no-files-found: error
           retention-days: 30

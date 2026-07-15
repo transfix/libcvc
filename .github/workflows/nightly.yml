@@ -1,8 +1,8 @@
 name: Nightly
 
 # Produces the same full artifact matrix as `release.yml` (libcvc SDK in
-# debug+release × shared+static for Linux/macOS/Windows, plus the
-# volrover3 app) from the current tip of `master` and publishes them to
+# debug+release × shared+static for Linux/macOS/Windows) from the
+# current tip of `master` and publishes them to
 # a rolling `nightly` GitHub Release. The rolling tag is force-recreated
 # on the latest master commit at the start of each publish so consumers
 # can pin against either `nightly` or the underlying SHA.

@@ -43,8 +43,6 @@ depends:
     - name: abseil
     - name: protobuf
     - name: grpc
-    - name: qt6
-    - name: vtk
     - name: pthreads4w
       platforms: [windows]
   host_tools:
