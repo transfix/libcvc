@@ -67,6 +67,7 @@ package:
     - lib/cvc*
     - lib/cmake/cvc/
     - include/cvc/
+    - include/xmlrpc/
   cmake_packages:
     - name: cvc
       targets:
