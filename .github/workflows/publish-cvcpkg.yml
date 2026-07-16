@@ -86,7 +86,12 @@ jobs:
           - { os: ubuntu-24.04-arm, platform: linux,   arch: arm64, experimental: true }
           - { os: macos-14,         platform: macos,   arch: arm64 }
           - { os: macos-13,         platform: macos,   arch: x86_64 }
-          - { os: windows-latest,   platform: windows, arch: x86_64 }
+          # windows-2022 (VS2022 v143) pinned deliberately: windows-latest now
+          # ships VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's
+          # C++20 state_exec/distributed-state TUs (seen in dry-runs round 2-7;
+          # same root cause as ci.yml's package-windows failures after the
+          # image flip). Revisit when the v180 toolset stabilizes.
+          - { os: windows-2022,     platform: windows, arch: x86_64 }
         exclude:
           # Windows debug is unsound to publish here: the catalog has no
           # windows-debug dep bundles, so a Debug libcvc would link against
@@ -95,7 +100,7 @@ jobs:
           # (via the remote-builder fleet). Linux/macOS have no such issue:
           # a Debug libcvc links the Release (shared, ABI-stable) deps fine.
           - config: debug
-            target: { os: windows-latest, platform: windows, arch: x86_64 }
+            target: { os: windows-2022, platform: windows, arch: x86_64 }
     runs-on: ${{ matrix.target.os }}
     continue-on-error: ${{ matrix.target.experimental || false }}
     env:
