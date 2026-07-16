@@ -73,17 +73,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            arch: x86_64
-          - os: macos-14
-            platform: macos
-            arch: arm64
-          - os: windows-latest
-            platform: windows
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
+        # Two axes cross-product: every target × both configs = 10 jobs.
+        # fail-fast off + per-job publish means each (arch, config) is
+        # independent — a debug arch with no debug dep bundles source-builds
+        # or fails on its own without blocking the release artifacts.
+        config: [release, debug]
+        target:
+          - { os: ubuntu-latest,    platform: linux,   arch: x86_64 }
+          # Experimental: no linux-arm64 dep bundles on the catalog yet
+          # (builder fleet is x86_64 + macOS); relies on cvcpkg source
+          # fallback until the Phase-9 emulated-arch/arm64 builders land.
+          - { os: ubuntu-24.04-arm, platform: linux,   arch: arm64, experimental: true }
+          - { os: macos-14,         platform: macos,   arch: arm64 }
+          - { os: macos-13,         platform: macos,   arch: x86_64 }
+          # windows-2022 (VS2022 v143) pinned deliberately: windows-latest now
+          # ships VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's
+          # C++20 state_exec/distributed-state TUs (seen in dry-runs round 2-7;
+          # same root cause as ci.yml's package-windows failures after the
+          # image flip). Revisit when the v180 toolset stabilizes.
+          - { os: windows-2022,     platform: windows, arch: x86_64 }
+        exclude:
+          # Windows debug is unsound to publish here: the catalog has no
+          # windows-debug dep bundles, so a Debug libcvc would link against
+          # Release MSVC deps — a debug/release CRT mismatch producing a
+          # broken artifact. Restore once debug Windows dep bundles exist
+          # (via the remote-builder fleet). Linux/macOS have no such issue:
+          # a Debug libcvc links the Release (shared, ABI-stable) deps fine.
+          - config: debug
+            target: { os: windows-2022, platform: windows, arch: x86_64 }
+    runs-on: ${{ matrix.target.os }}
+    continue-on-error: ${{ matrix.target.experimental || false }}
+    env:
+      # CMake build-type (capitalized) derived from the cvcpkg config token.
+      CMAKE_CFG: ${{ matrix.config == 'debug' && 'Debug' || 'Release' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -94,18 +116,23 @@ jobs:
           # Pull from libcvc-deps master rather than PyPI so we always
           # pick up server/schema fixes without a release cadence.
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master#subdirectory=tools/cvcpkg'
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
           cvcpkg --version
 
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
+          # Always fetch RELEASE deps — the catalog's debug coverage is
+          # partial (e.g. no libiimod/hdf5 debug-linux bundles), and a Debug
+          # libcvc links the Release, ABI-stable shared deps perfectly on
+          # Linux/macOS (you debug libcvc's own code, not its dependencies).
+          # This is why Windows debug is excluded above (CRT mismatch).
           build_type: Release
           link: shared
 
       - name: Configure (Linux/macOS)
-        if: matrix.platform != 'windows'
+        if: matrix.target.platform != 'windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -114,7 +141,7 @@ jobs:
             extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
             -DCVC_BUILD_TESTS=OFF \
@@ -125,17 +152,21 @@ jobs:
             -DCVC_ENABLE_SDF=ON
 
       - name: Configure (Windows)
-        if: matrix.platform == 'windows'
+        if: matrix.target.platform == 'windows'
         shell: pwsh
         run: |
           $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
           if (-not $depsPath) {
             $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
           }
+          # No vcpkg toolchain: cvcpkg is the sole third-party prefix, exactly
+          # like libcvc's own ci.yml. Pulling in vcpkg.cmake here injected
+          # conflicting MSVC flags/headers that crashed CL.exe (0xC0000005) on
+          # the CGAL translation units — ci.yml builds Windows WITH CGAL and
+          # uncapped parallelism precisely because it doesn't use vcpkg.
           cmake -B build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CONFIGURATION_TYPES=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
+            -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
             -DCMAKE_PREFIX_PATH="$depsPath" `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage" `
             -DCVC_BUILD_TESTS=OFF `
@@ -149,8 +180,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake --build build --parallel --config Release
-          cmake --install build --config Release --component libcvc
+          cmake --build build --parallel --config "$CMAKE_CFG"
+          cmake --install build --config "$CMAKE_CFG" --component libcvc
 
       - name: Pack archive
         id: pack
@@ -160,8 +191,8 @@ jobs:
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/libcvc \
             --from-prefix stage \
-            --platform "${{ matrix.platform }}" \
-            --config release \
+            --platform "${{ matrix.target.platform }}" \
+            --config "${{ matrix.config }}" \
             --link shared \
             --local \
             --output-dir dist
@@ -181,8 +212,8 @@ jobs:
             libcvc \
             --server "$CVCPKG_SERVER" \
             --org "$CVCPKG_ORG" \
-            --platform "${{ matrix.platform }}" \
-            --config release \
+            --platform "${{ matrix.target.platform }}" \
+            --config "${{ matrix.config }}" \
             --link shared \
             --output-dir dist \
             --token "$CVCPKG_TOKEN"
