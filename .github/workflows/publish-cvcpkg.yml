@@ -154,10 +154,14 @@ jobs:
           if (-not $depsPath) {
             $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
           }
+          # No vcpkg toolchain: cvcpkg is the sole third-party prefix, exactly
+          # like libcvc's own ci.yml. Pulling in vcpkg.cmake here injected
+          # conflicting MSVC flags/headers that crashed CL.exe (0xC0000005) on
+          # the CGAL translation units — ci.yml builds Windows WITH CGAL and
+          # uncapped parallelism precisely because it doesn't use vcpkg.
           cmake -B build `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$depsPath" `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage" `
             -DCVC_BUILD_TESTS=OFF `
@@ -171,16 +175,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Windows: cap parallelism. Round-2 dry run hit an MSVC internal
-          # compiler crash (CL.exe 0xC0000005) building the CGAL TUs with
-          # full /MP on the 4-core hosted runner — the classic memory-
-          # pressure ICE (debug TUs are heavier still). CGAL stays ON
-          # (unlike ci.yml's CGAL-less Windows build) for a complete SDK.
-          if [ "${{ matrix.target.platform }}" = "windows" ]; then
-            cmake --build build --parallel 2 --config "$CMAKE_CFG"
-          else
-            cmake --build build --parallel --config "$CMAKE_CFG"
-          fi
+          cmake --build build --parallel --config "$CMAKE_CFG"
           cmake --install build --config "$CMAKE_CFG" --component libcvc
 
       - name: Pack archive
