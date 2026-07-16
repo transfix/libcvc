@@ -10,6 +10,11 @@ if(CVC_USING_XMLRPC)
   add_subdirectory(xmlrpc)
 endif()
 
+# pycvc SWIG Python bindings (opt-in; see top-level CVC_BUILD_PYTHON option)
+if(CVC_BUILD_PYTHON)
+  add_subdirectory(pycvc)
+endif()
+
 # Note: CUDA is now integrated via native CMake support (3.17+)
 # No special clean targets needed - handled automatically
 

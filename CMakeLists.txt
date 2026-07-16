@@ -126,6 +126,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
+option(CVC_BUILD_PYTHON "Build pycvc SWIG Python bindings (requires SWIG, Python3, NumPy)" OFF)
 
 # Include macros for setting up library dependencies
 include(SetupFFTW)
