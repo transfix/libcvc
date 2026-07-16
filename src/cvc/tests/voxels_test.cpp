@@ -29,7 +29,9 @@
 #include <cvc/utility/composite_function.h>
 #include <cvc/volume/voxels.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -3726,4 +3728,89 @@ int main(int argc, char **argv) {
   }
 
   return RUN_ALL_TESTS();
+}
+
+// ---------------------------------------------------------------------------
+// Regression: mutating filters must invalidate the cached min/max.
+//
+// bilateralFilter() reads min()/max() BEFORE filtering (priming the cache with
+// pre-filter bounds) and then writes through the raw data pointer, bypassing
+// preWrite() — which dirties the histogram but not the min/max cache. Without
+// an unsetMinMax() at the end, a bilateralFilter -> vol_normalize pipeline
+// remaps against stale pre-filter bounds and does not stretch to the target
+// range. anisotropicDiffusion/gdtvFilter are covered as the same invariant
+// (currently safe via copy()/operator= importing-or-unsetting; the explicit
+// invalidation keeps them safe under refactors).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Independent ground truth: scan every voxel through the read accessor.
+static void scan_min_max(const cvc::voxels &v, double &lo, double &hi) {
+  lo = std::numeric_limits<double>::infinity();
+  hi = -std::numeric_limits<double>::infinity();
+  for (cvc::uint64 k = 0; k < v.ZDim(); ++k)
+    for (cvc::uint64 j = 0; j < v.YDim(); ++j)
+      for (cvc::uint64 i = 0; i < v.XDim(); ++i) {
+        const double val = v(i, j, k);
+        lo = std::min(lo, val);
+        hi = std::max(hi, val);
+      }
+}
+
+// A small volume with a hot impulse: smoothing filters must pull the max
+// down (and generally lift the min), so pre- and post-filter bounds differ.
+static cvc::voxels impulse_volume(cvc::app &ctx) {
+  cvc::voxels v(ctx, cvc::dimension(8, 8, 8), cvc::Float);
+  for (cvc::uint64 k = 0; k < 8; ++k)
+    for (cvc::uint64 j = 0; j < 8; ++j)
+      for (cvc::uint64 i = 0; i < 8; ++i)
+        v(i, j, k, 10.0);
+  v(4, 4, 4, 200.0); // impulse
+  return v;
+}
+
+} // namespace
+
+TEST_F(VoxelsTest, BilateralFilterInvalidatesMinMaxCache) {
+  voxels v = impulse_volume(ctx);
+
+  // Prime the cache with PRE-filter bounds (this is what the filter itself
+  // also does internally).
+  EXPECT_DOUBLE_EQ(v.min(), 10.0);
+  EXPECT_DOUBLE_EQ(v.max(), 200.0);
+
+  v.bilateralFilter(50.0, 1.5, 1);
+
+  double lo, hi;
+  scan_min_max(v, lo, hi);
+  // The smoothed impulse must no longer reach the original max...
+  ASSERT_LT(hi, 200.0);
+  // ...and the cached accessors must agree with the actual post-filter data.
+  EXPECT_DOUBLE_EQ(v.min(), lo);
+  EXPECT_DOUBLE_EQ(v.max(), hi);
+}
+
+TEST_F(VoxelsTest, AnisotropicDiffusionInvalidatesMinMaxCache) {
+  voxels v = impulse_volume(ctx);
+  EXPECT_DOUBLE_EQ(v.max(), 200.0); // prime cache
+
+  v.anisotropicDiffusion(3);
+
+  double lo, hi;
+  scan_min_max(v, lo, hi);
+  EXPECT_DOUBLE_EQ(v.min(), lo);
+  EXPECT_DOUBLE_EQ(v.max(), hi);
+}
+
+TEST_F(VoxelsTest, GdtvFilterInvalidatesMinMaxCache) {
+  voxels v = impulse_volume(ctx);
+  EXPECT_DOUBLE_EQ(v.max(), 200.0); // prime cache
+
+  v.gdtvFilter(1.0, 0.1, 2, false);
+
+  double lo, hi;
+  scan_min_max(v, lo, hi);
+  EXPECT_DOUBLE_EQ(v.min(), lo);
+  EXPECT_DOUBLE_EQ(v.max(), hi);
 }
