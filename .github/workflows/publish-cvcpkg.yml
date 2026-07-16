@@ -116,7 +116,7 @@ jobs:
           # Pull from libcvc-deps master rather than PyPI so we always
           # pick up server/schema fixes without a release cadence.
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'git+https://github.com/transfix/libcvc-deps@master' pydantic
           cvcpkg --version
 
       - name: Fetch libcvc-deps
