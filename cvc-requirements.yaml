@@ -19,6 +19,8 @@ components:
   - fftw3
   - gsl
   - cgal
+  - gmp
+  - mpfr
   - hdf5
   - log4cplus
   - tiff
