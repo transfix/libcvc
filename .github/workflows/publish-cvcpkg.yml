@@ -160,7 +160,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake --build build --parallel --config Release
+          # Windows: cap parallelism. Round-2 dry run hit an MSVC internal
+          # compiler crash (CL.exe 0xC0000005) building the CGAL TUs with
+          # full /MP on the 4-core hosted runner — the classic memory-
+          # pressure ICE. CGAL stays ON (unlike ci.yml's CGAL-less Windows
+          # build); we trade build time for a complete SDK artifact.
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cmake --build build --parallel 2 --config Release
+          else
+            cmake --build build --parallel --config Release
+          fi
           cmake --install build --config Release --component libcvc
 
       - name: Pack archive
