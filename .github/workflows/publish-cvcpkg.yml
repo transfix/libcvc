@@ -87,6 +87,15 @@ jobs:
           - { os: macos-14,         platform: macos,   arch: arm64 }
           - { os: macos-13,         platform: macos,   arch: x86_64 }
           - { os: windows-latest,   platform: windows, arch: x86_64 }
+        exclude:
+          # Windows debug is unsound to publish here: the catalog has no
+          # windows-debug dep bundles, so a Debug libcvc would link against
+          # Release MSVC deps — a debug/release CRT mismatch producing a
+          # broken artifact. Restore once debug Windows dep bundles exist
+          # (via the remote-builder fleet). Linux/macOS have no such issue:
+          # a Debug libcvc links the Release (shared, ABI-stable) deps fine.
+          - config: debug
+            target: { os: windows-latest, platform: windows, arch: x86_64 }
     runs-on: ${{ matrix.target.os }}
     continue-on-error: ${{ matrix.target.experimental || false }}
     env:
@@ -109,9 +118,12 @@ jobs:
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
         with:
-          # Match the libcvc build config: debug libcvc links debug deps.
-          # Where a debug dep bundle is absent, cvcpkg source-builds it.
-          build_type: ${{ env.CMAKE_CFG }}
+          # Always fetch RELEASE deps — the catalog's debug coverage is
+          # partial (e.g. no libiimod/hdf5 debug-linux bundles), and a Debug
+          # libcvc links the Release, ABI-stable shared deps perfectly on
+          # Linux/macOS (you debug libcvc's own code, not its dependencies).
+          # This is why Windows debug is excluded above (CRT mismatch).
+          build_type: Release
           link: shared
 
       - name: Configure (Linux/macOS)
