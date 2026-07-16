@@ -970,6 +970,18 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/cvc/
   FILES_MATCHING PATTERN "*.h"
 )
 
+# The vendored XmlRpc++ headers must always ship with the SDK:
+# cvc/utility/utility.h unconditionally does #include <xmlrpc/XmlRpc.h>,
+# so external find_package(cvc) consumers need these headers on the
+# include path even when the xmlrpc network library itself was not
+# built (CVC_USING_XMLRPC=OFF). When CVC_USING_XMLRPC=ON the xmlrpc
+# subproject installs the same files; the duplicate rule is idempotent.
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/inc/xmlrpc
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  COMPONENT libcvc
+  FILES_MATCHING PATTERN "*.h"
+)
+
 install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cvc/core
   COMPONENT libcvc

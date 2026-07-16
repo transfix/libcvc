@@ -43,8 +43,6 @@ depends:
     - name: abseil
     - name: protobuf
     - name: grpc
-    - name: qt6
-    - name: vtk
     - name: pthreads4w
       platforms: [windows]
   host_tools:
@@ -69,6 +67,7 @@ package:
     - lib/cvc*
     - lib/cmake/cvc/
     - include/cvc/
+    - include/xmlrpc/
   cmake_packages:
     - name: cvc
       targets:

@@ -19,7 +19,6 @@ $args = @(
   "-DCMAKE_BUILD_TYPE=$cmakeBuildType",
   "-DBUILD_SHARED_LIBS=$buildSharedLibs",
   '-DCVC_BUILD_TESTS=OFF',
-  '-DCVC_BUILD_VOLROVER3=OFF',
   '-DCVC_ENABLE_CUDA=OFF',
   '-DCVC_ENABLE_GRPC=OFF'
 )
