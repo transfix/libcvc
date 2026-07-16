@@ -1,189 +1,54 @@
 name: 'Fetch libcvc-deps'
 description: |
-  Attempts to download a pinned libcvc-deps release archive matching
-  the current platform / build config and extract it to a known
-  prefix path. The extracted root contains a self-contained CMake
-  prefix (Boost, HDF5, FFTW, GSL, log4cplus, CGAL, ImageMagick,
-  Qt 6, VTK 9.5) so workflow steps can skip the slow
-  VTK-from-source build whenever a matching dep bundle is available.
+  Installs libcvc-deps component bundles into a CMake-ready prefix.
 
-  Behaviour:
-    * Computes the URL from inputs (defaults match libcvc-deps's
-      release.yml stem naming).
-    * curl -fL the archive into a temp file; falls back to nothing
-      on any HTTP error (404, network blip, etc.) instead of
-      failing the build. This keeps the calling workflow robust to
-      the libcvc-deps release not yet existing for a given version.
-    * On success, extracts to <prefix>/libcvc-deps-<...> and emits
-      that path as the `path` output.
-    * Caller is expected to gate the from-source VTK build step on
-      `steps.<id>.outputs.path != ''` and to add `path` to
-      CMAKE_PREFIX_PATH when set.
+  This action now uses `cvcpkg-install` from transfix/libcvc-deps to
+  download only the components listed in `cvc-requirements.yaml`,
+  rather than a monolithic ~2 GB archive.
+
+  The output interface (`path`) is unchanged — callers that gate steps
+  on `steps.<id>.outputs.path != ''` and add the path to
+  CMAKE_PREFIX_PATH continue to work without modification.
+
+  Falls back gracefully: if the catalog is unavailable (e.g. no
+  release has published component bundles yet), `path` is set to
+  empty so the calling workflow can fall back to building from
+  source or apt/brew.
 
 inputs:
-  version:
-    description: 'libcvc-deps release version (without leading v).'
-    required: false
-    default: '1.0.2'
   os:
-    description: 'linux | macos | windows. Defaults to runner.os.'
+    description: 'linux | macos | windows. Defaults to runner.os (unused by cvcpkg-install, kept for interface compat).'
     required: false
     default: ''
   arch:
-    description: 'CPU arch (x86_64, arm64). Defaults to runner host arch.'
+    description: 'CPU arch (x86_64, arm64). Defaults to runner host arch (unused by cvcpkg-install, kept for interface compat).'
     required: false
     default: ''
   build_type:
     description: 'Debug or Release. Used to pick the matching archive flavor.'
     required: true
   link:
-    description: 'shared or static. Picks the -static suffix if static.'
+    description: 'shared or static. Picks the matching archive flavor.'
     required: false
     default: 'shared'
   prefix:
-    description: 'Directory under which to extract the archive.'
+    description: 'Directory under which to install the bundles.'
     required: false
     default: ''
 
 outputs:
   path:
-    description: 'Absolute path to the extracted libcvc-deps root, or empty string if no matching archive was available.'
-    value: ${{ steps.extract.outputs.path }}
+    description: 'Absolute path to the installed libcvc-deps prefix, or empty string if no matching bundles were available.'
+    value: ${{ steps.cvcpkg.outputs.path }}
 
 runs:
   using: 'composite'
   steps:
-    - name: 'libcvc-deps: try fetch + extract'
-      id: extract
-      shell: bash
-      env:
-        LCD_VERSION:    ${{ inputs.version }}
-        LCD_OS:         ${{ inputs.os }}
-        LCD_ARCH:       ${{ inputs.arch }}
-        LCD_BUILD_TYPE: ${{ inputs.build_type }}
-        LCD_LINK:       ${{ inputs.link }}
-        LCD_PREFIX:     ${{ inputs.prefix }}
-        RUNNER_OS:      ${{ runner.os }}
-      run: |
-        set -euo pipefail
-
-        # Resolve defaults from the runner context when caller did
-        # not pin os/arch/prefix.
-        os="${LCD_OS}"
-        if [ -z "$os" ]; then
-          case "$RUNNER_OS" in
-            Linux)   os=linux ;;
-            macOS)   os=macos ;;
-            Windows) os=windows ;;
-            *)       os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]') ;;
-          esac
-        fi
-
-        arch="${LCD_ARCH}"
-        if [ -z "$arch" ]; then
-          if [ "$os" = "windows" ]; then
-            arch="x86_64"
-          else
-            arch=$(uname -m)
-          fi
-        fi
-
-        btlc=$(echo "${LCD_BUILD_TYPE}" | tr '[:upper:]' '[:lower:]')
-
-        linksfx=""
-        if [ "${LCD_LINK}" = "static" ]; then
-          linksfx="-static"
-        fi
-
-        # Linux ships .tar.gz; macOS ships .zip; Windows ships .7z
-        # (v1.1.0+) or .zip (v1.0.x). We probe candidate extensions in
-        # order of preference and use the first one that exists.
-        if [ "$os" = "linux" ]; then
-          exts="tar.gz"
-        elif [ "$os" = "macos" ]; then
-          exts="zip"
-        else
-          exts="7z zip"
-        fi
-
-        stem="libcvc-deps-${LCD_VERSION}-${os}-${arch}-${btlc}${linksfx}"
-
-        prefix="${LCD_PREFIX}"
-        if [ -z "$prefix" ]; then
-          if [ "$os" = "windows" ]; then
-            prefix="D:/libcvc-deps"
-          else
-            prefix="$HOME/libcvc-deps"
-          fi
-        fi
-        mkdir -p "$prefix"
-
-        tmp="$(mktemp -d)"
-        archive=""
-        ext=""
-        for try_ext in $exts; do
-          try_url="https://github.com/transfix/libcvc-deps/releases/download/v${LCD_VERSION}/${stem}.${try_ext}"
-          try_archive="$tmp/${stem}.${try_ext}"
-          echo "libcvc-deps: trying $try_url"
-          if curl -fL -o "$try_archive" "$try_url"; then
-            archive="$try_archive"
-            ext="$try_ext"
-            break
-          fi
-          rm -f "$try_archive"
-        done
-
-        if [ -z "$archive" ]; then
-          echo "libcvc-deps: archive not available (HTTP error); falling back."
-          echo "path=" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        # Sanity-check the archive is non-empty before extracting.
-        if [ ! -s "$archive" ]; then
-          echo "libcvc-deps: archive is empty; ignoring."
-          echo "path=" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        case "$ext" in
-          tar.gz)
-            tar -xzf "$archive" -C "$prefix"
-            ;;
-          zip)
-            # unzip is preinstalled on all GH runners (incl. Git Bash on Windows).
-            unzip -q "$archive" -d "$prefix"
-            ;;
-          7z)
-            # 7z is preinstalled on GH Windows runners (`7z` on PATH).
-            # On Linux/macOS we'd need apt/brew install; not expected
-            # to hit this branch outside Windows.
-            7z x -y -o"$prefix" "$archive" >/dev/null
-            ;;
-        esac
-
-        # Some archives extract as a single root dir matching $stem
-        # (Linux + macOS via tar/ditto-keepParent); the Windows zip
-        # is flat from libcvc-deps's `Compress-Archive -Path $dist/*`.
-        # Normalise both layouts so the output path always points at
-        # a directory that contains include/, lib/, etc.
-        if [ -d "$prefix/$stem" ]; then
-          root="$prefix/$stem"
-        elif [ -d "$prefix/lib" ] || [ -d "$prefix/include" ]; then
-          # Flat archive; the prefix itself is the root.
-          root="$prefix"
-        else
-          # Fall back to the largest subdirectory at the prefix.
-          root="$(find "$prefix" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-        fi
-
-        if [ -z "$root" ] || [ ! -d "$root" ]; then
-          echo "libcvc-deps: extraction did not yield a usable root; falling back."
-          echo "path=" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        echo "libcvc-deps: ready at $root"
-        ls "$root" | head -20 || true
-        echo "path=$root" >> "$GITHUB_OUTPUT"
-# v1.0.2 fetch action default
+    - name: Install libcvc-deps via cvcpkg
+      id: cvcpkg
+      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@master
+      with:
+        requirements: cvc-requirements.yaml
+        build_type: ${{ inputs.build_type }}
+        link: ${{ inputs.link }}
+        prefix: ${{ inputs.prefix }}

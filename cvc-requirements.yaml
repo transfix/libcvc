@@ -33,4 +33,6 @@ components:
   - abseil
   - protobuf
   - grpc
+  - qt6
+  - vtk
   - pthreads4w

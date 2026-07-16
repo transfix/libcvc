@@ -35,18 +35,18 @@ permissions:
 #
 # Shared and static archives are both fully self-contained: every
 # project-level dependency (Boost, HDF5, FFTW, GSL on all platforms;
-# plus ImageMagick + CGAL/GMP/MPFR on Windows via vcpkg) is bundled
+# plus ImageMagick + CGAL/GMP/MPFR on Windows via cvcpkg) is bundled
 # alongside libcvc, so consumers can `find_package(cvc CONFIG)` from
-# the extracted archive without needing apt / Homebrew / vcpkg on the
-# host. Shared archives ship .so/.dylib/.dll (with rpath fixups on
-# Linux+macOS) plus their import .lib on Windows; static archives ship
-# .a/.lib only. Both flavors include cvc::xmlrpc. VTK is intentionally
-# NOT bundled — downstream consumers (F2Dock, MolSurf, volrover) bring
-# their own VTK with the configuration they need (e.g. Qt-enabled for
-# volrover).
+# the extracted archive without needing apt / Homebrew / cvcpkg on
+# the host. Shared archives ship .so/.dylib/.dll (with rpath fixups
+# on Linux+macOS) plus their import .lib on Windows; static archives
+# ship .a/.lib only. Both flavors include cvc::xmlrpc. VTK is
+# intentionally NOT bundled — downstream consumers (F2Dock, MolSurf,
+# volrover) bring their own VTK with the configuration they need
+# (e.g. Qt-enabled for volrover).
 #
 # Debug archives on Windows also include MSVC .pdb files for libcvc
-# itself and every vcpkg-built dependency, so symbolicated stack
+# itself and every cvcpkg-provided dependency, so symbolicated stack
 # traces work out of the box.
 #
 # System libraries (glibc, libstdc++, libm, Windows UCRT) are
@@ -127,10 +127,11 @@ jobs:
         if: matrix.kind == 'libcvc'
         run: |
           sudo apt-get update
+          # Only build-tooling + AppImage helpers here; Boost/HDF5/FFTW/
+          # GSL/ImageMagick/CGAL/log4cplus come from cvcpkg via
+          # fetch-libcvc-deps below.
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build \
-            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev libcgal-dev liblog4cplus-dev libzstd-dev
+            build-essential cmake ninja-build libzstd-dev
 
       # CUDA toolkit so the shipped artifacts can offload to NVIDIA GPUs
       # at runtime when an NVIDIA driver is present. cudart is linked
@@ -149,29 +150,25 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: |
           sudo apt-get update
-          # Use Qt6 across the board; Ubuntu's libvtk9-qt-dev is
-          # Qt5-only, so VTK is built from source against Qt6 in the
-          # next step (cached).
+          # Qt6 + VTK + all third-party C/C++ deps come from cvcpkg via
+          # fetch-libcvc-deps below. Only install system runtime libs
+          # that Qt/VTK dlopen at runtime (OpenGL/X11/GLEW) and the
+          # AppImage tooling.
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
-            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev \
-            qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev \
             libgl1-mesa-dev libxt-dev mesa-common-dev libglew-dev \
             libxrender-dev libxcursor-dev libxinerama-dev libxi-dev \
-            libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Pull deps from a libcvc-deps release bundle ──
+      # ── Pull deps from cvcpkg (via libcvc-deps composite action) ──
       # libcvc kind: required for libiimod (no longer vendored, see
       #   PR #63), in addition to providing Boost/HDF5/FFTW/GSL/CGAL/
       #   log4cplus/ImageMagick prebuilt.
-      # volrover3 kind: also speedup vs. cold-cache VTK source build
-      #   (~15-20 min). On hit, the subsequent VTK source build is
-      #   skipped and CMAKE_PREFIX_PATH picks up VTK from the deps tree.
-      # On miss the action emits an empty `path` output; libcvc kind
-      # will then fail Configure (libiimod is required), which is the
-      # correct signal.
+      # volrover3 kind: also provides Qt6 + VTK for the app build.
+      # On miss the action emits an empty `path` output; both kinds
+      # then fail Configure with an explicit "Could not find X" error,
+      # which is the correct signal (no in-workflow source-build
+      # fallback — cvcpkg is the sole source of truth).
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
@@ -182,49 +179,11 @@ jobs:
           build_type: ${{ matrix.kind == 'volrover3' && 'Release' || matrix.build_type }}
           link: shared
 
-      # ── VTK 9.5 built against Qt6, cached ──
-      # Cache key matches ci.yml so the build is shared across both
-      # workflows and only happens once per (vtk_version, qt_major, os).
-      - name: Cache VTK (Qt6) install tree
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == ''
-        id: vtk-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-v2
-
-      - name: Build VTK 9.5 from source (Qt6)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == '' && steps.vtk-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B vtk-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=$HOME/vtk-qt6 \
-            -DBUILD_SHARED_LIBS=ON \
-            -DVTK_GROUP_ENABLE_Qt=YES \
-            -DVTK_QT_VERSION=6 \
-            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO \
-            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO \
-            -DVTK_BUILD_TESTING=OFF \
-            -DVTK_BUILD_EXAMPLES=OFF \
-            -DVTK_BUILD_DOCUMENTATION=OFF \
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build vtk-build --parallel --target install
-          rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
-
       - name: Configure
         run: |
-          extra_prefix=""
-          # libcvc-deps (when present) carries libiimod for libcvc and
-          # VTK for volrover3 alongside the rest of the third-party
-          # tree. Prefer it for both kinds.
-          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-          elif [ "${{ matrix.kind }}" = "volrover3" ]; then
-            # Fall back to from-source VTK install under ~/vtk-qt6.
-            extra_prefix="$HOME/vtk-qt6"
+          extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$extra_prefix" ]; then
+            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           # link=shared → BUILD_SHARED_LIBS=ON (legacy default).
           # link=static → BUILD_SHARED_LIBS=OFF plus static dep flags so
@@ -385,16 +344,13 @@ jobs:
           # linuxdeploy walks the volrover3 ELF NEEDED entries and
           # resolves them by name; libcvc.so.3 lives under
           # AppDir/usr/lib/x86_64-linux-gnu/ (Debian's GNUInstallDirs
-          # default) which is not on the default search path. VTK 9.5
-          # was built into $HOME/vtk-qt6/lib (cached, off-system) or,
-          # when the libcvc-deps speedup hit, lives under the
-          # extracted libcvc-deps root.
-          vtk_lib_path=""
-          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-            vtk_lib_path="${{ steps.libcvc-deps.outputs.path }}/lib"
-          else
-            vtk_lib_path="$HOME/vtk-qt6/lib"
+          # default) which is not on the default search path. Qt6 + VTK
+          # live under the cvcpkg-populated libcvc-deps prefix.
+          deps_root="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps_root" ]; then
+            deps_root="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          vtk_lib_path="$deps_root/lib"
           export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:$vtk_lib_path:${LD_LIBRARY_PATH:-}"
           ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
                         --desktop-file AppDir/volrover3.desktop \
@@ -486,22 +442,20 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus zstd
-          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
+          # All C/C++ third-party libs come from cvcpkg via
+          # fetch-libcvc-deps below. Only build tooling here;
+          # dylibbundler is installed later inside the stage step.
+          brew install cmake ninja zstd
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal zstd
-          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
-          echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
+          # Qt6 + VTK + all third-party C/C++ deps come from cvcpkg via
+          # fetch-libcvc-deps below. Only build tooling here.
+          brew install cmake ninja zstd
 
-      # ── Pull libiimod (and other prebuilt deps) from libcvc-deps ──
-      # libcvc no longer vendors libiimod (PR #63); the macOS bundle
-      # ships libiimodConfig.cmake under share/cmake/libiimod and the
-      # dylibs alongside.
+      # ── Pull deps (incl. Qt6/VTK/libiimod) from cvcpkg ──
+      # cvcpkg is the sole third-party provider on macOS.
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
@@ -511,33 +465,22 @@ jobs:
 
       - name: Configure
         run: |
-          # Append the libcvc-deps tree (libiimod + bundled deps) to
-          # the CMAKE_PREFIX_PATH env var that brew set earlier. We do
-          # NOT pass -DCMAKE_PREFIX_PATH on the cmake command line:
-          #   * The env-var form is `:`-separated on Unix (CMake reads
-          #     it natively).
-          #   * The -D form is a CMake list and is `;`-separated.
-          # Mixing `:`-joined paths into -DCMAKE_PREFIX_PATH would
-          # collapse everything into a single path and break find_package.
-          #
-          # Order matters: we APPEND (not prepend) so that brew's
-          # working HDF5 / Boost / Qt configs win over any incomplete
-          # cmake configs in the libcvc-deps bundle (e.g. the macOS
-          # bundle's hdf5-config.cmake references a libhdf5.a that is
-          # not shipped). libcvc-deps is only consulted as a fallback
-          # for packages brew doesn't provide (libiimod).
-          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-            if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
-              export CMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH:${{ steps.libcvc-deps.outputs.path }}"
-            else
-              export CMAKE_PREFIX_PATH="${{ steps.libcvc-deps.outputs.path }}"
-            fi
+          # cvcpkg is the sole third-party prefix on macOS. Do NOT set
+          # -DCMAKE_PREFIX_PATH on the command line (its list is
+          # semicolon-separated); use the env var so CMake reads it as
+          # a native colon-separated PATH.
+          deps_path="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps_path" ]; then
+            deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          export CMAKE_PREFIX_PATH="$deps_path"
           if [ "${{ matrix.link }}" = "static" ]; then
             shared_libs=OFF
-            # Homebrew's boost / hdf5 / fftw / gsl bottles ship both .a
-            # and .dylib; CMake's standard flags select the .a flavor.
-            static_deps="-DBoost_USE_STATIC_LIBS=ON -DHDF5_USE_STATIC_LIBRARIES=ON"
+            # cvcpkg publishes both shared (.dylib) and static (.a)
+            # flavors; the static requirement filter is applied via
+            # link=static in fetch-libcvc-deps, so no extra find_package
+            # hints are needed here.
+            static_deps=""
           else
             shared_libs=ON
             static_deps=""
@@ -568,14 +511,17 @@ jobs:
           cmake --install build --prefix "$DIST" --component libcvc
           mkdir -p "$DIST/lib" "$DIST/include"
 
+          # Third-party prefix populated by cvcpkg.
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then
+            DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+
           # Headers are always needed for downstream `find_package`
-          # consumers; copy them from Homebrew prefixes.
-          for pkg in boost hdf5 fftw gsl log4cplus; do
-            P=$(brew --prefix "$pkg" 2>/dev/null || true)
-            if [ -n "$P" ] && [ -d "$P/include" ]; then
-              cp -R "$P/include/." "$DIST/include/" 2>/dev/null || true
-            fi
-          done
+          # consumers; copy them from the cvcpkg prefix.
+          if [ -d "$DEPS/include" ]; then
+            cp -R "$DEPS/include/." "$DIST/include/" 2>/dev/null || true
+          fi
 
           if [ "${{ matrix.link }}" = "shared" ]; then
             # dylibbundler walks libcvc.dylib's transitive deps, copies
@@ -584,36 +530,29 @@ jobs:
             # than hand-rolled install_name_tool plumbing across the deep
             # Boost/HDF5 dependency graph.
             brew install dylibbundler
-            # Build an explicit search-path list of every brewed dep
-            # plus the standard Homebrew lib roots. Without this,
-            # dylibbundler hits transitive deps it cannot resolve
-            # (e.g. libgmp.10.dylib pulled in via CGAL → gmpxx → gmp)
-            # and drops into an interactive "Try again" prompt; with
-            # no TTY in CI, that prompt loops forever and burns the
-            # job until it times out. -s adds search paths, and we
-            # also close stdin so any unresolved dep aborts cleanly
-            # instead of looping.
-            BUNDLER_SEARCH=()
-            for pkg in boost hdf5 fftw gsl log4cplus cgal gmp mpfr imagemagick libomp libaec libheif libtiff webp x265 aom libde265 zstd libvmaf openexr little-cms2 jpeg-xl xz; do
-              P=$(brew --prefix "$pkg" 2>/dev/null || true)
-              [ -n "$P" ] && [ -d "$P/lib" ] && BUNDLER_SEARCH+=( -s "$P/lib" )
-            done
-            BUNDLER_SEARCH+=( -s /opt/homebrew/lib -s /usr/local/lib )
+            # Search list: cvcpkg lib dir first (authoritative source of
+            # every third-party dylib), then macOS system dirs as a
+            # last-resort fallback. Without this, dylibbundler hits
+            # unresolved transitive deps and drops into an interactive
+            # "Try again" prompt; with no TTY in CI, that prompt loops
+            # forever. -s adds search paths, and we close stdin so any
+            # remaining unresolved dep aborts cleanly.
+            BUNDLER_SEARCH=( -s "$DEPS/lib" )
+            [ -d /opt/homebrew/lib ] && BUNDLER_SEARCH+=( -s /opt/homebrew/lib )
+            [ -d /usr/local/lib ]    && BUNDLER_SEARCH+=( -s /usr/local/lib )
             for dy in "$DIST"/lib/libcvc*.dylib; do
               [ -e "$dy" ] || continue
               [ -L "$dy" ] && continue
               dylibbundler -b -x "$dy" -d "$DIST/lib" -p '@loader_path/' -of -cd "${BUNDLER_SEARCH[@]}" </dev/null || true
             done
           else
-            # Static flavour: just copy the .a archives. No install_name
-            # fixup needed — static linkage embeds object code directly.
-            for pkg in boost hdf5 fftw gsl log4cplus; do
-              P=$(brew --prefix "$pkg" 2>/dev/null || true)
-              if [ -n "$P" ] && [ -d "$P/lib" ]; then
-                find "$P/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
-                  | xargs -0 -I {} cp -RP {} "$DIST/lib/" 2>/dev/null || true
-              fi
-            done
+            # Static flavour: copy .a archives from the cvcpkg prefix.
+            # No install_name fixup needed — static linkage embeds
+            # object code directly.
+            if [ -d "$DEPS/lib" ]; then
+              find "$DEPS/lib" -maxdepth 1 -name '*.a' -print0 2>/dev/null \
+                | xargs -0 -I {} cp -RP {} "$DIST/lib/" 2>/dev/null || true
+            fi
           fi
 
           # ── Bundle VTK (no Qt) ──────────────────────────────────
@@ -696,120 +635,32 @@ jobs:
           BTLC=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
           if [ "${{ matrix.link }}" = "static" ]; then
             LINKSFX="-static"
-            TRIPLET="x64-windows-static"
           else
             LINKSFX=""
-            TRIPLET="x64-windows"
           fi
           echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
           echo "arch=x86_64"       >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
           echo "linksfx=$LINKSFX"  >> "$GITHUB_OUTPUT"
-          echo "triplet=$TRIPLET"  >> "$GITHUB_OUTPUT"
 
-      # ── Optional: pull all third-party deps from a libcvc-deps bundle ──
-      # libcvc-deps ships Boost/HDF5/FFTW/GSL/log4cplus/CGAL/ImageMagick
-      # + Qt 6 + VTK 9.5 as a self-contained CMake prefix. When a
-      # matching archive is available we skip vcpkg + aqtinstall + VTK
-      # build entirely (~tens of minutes saved on cold cache).
+      # ── Pull all third-party deps (incl. Qt6 + VTK) from cvcpkg ──
+      # cvcpkg is the sole source of truth for third-party components.
+      # On miss (network blip, catalog outage) CMake configure fails
+      # with an explicit "Could not find X" error — there is no vcpkg
+      # or source-build fallback.
       #
-      # NOTE: the Windows libcvc-deps archive is shared-only (no
-      # -static flavor). Static matrix entries also consume the shared
-      # archive: libcvc itself stays static (BUILD_SHARED_LIBS=OFF) but
-      # third-party deps are linked as DLLs. The Configure step below
-      # then switches the MSVC runtime to /MD so libcvc objects can
-      # safely cross API boundaries with the shared-CRT-built deps.
-      - name: Fetch libcvc-deps (Windows speedup)
+      # NOTE: the Windows cvcpkg prefix is shared-only. Static matrix
+      # entries also consume the shared prefix: libcvc itself stays
+      # static (BUILD_SHARED_LIBS=OFF) but third-party deps link as
+      # DLLs. The Configure step below then switches the MSVC runtime
+      # to /MD so libcvc objects can safely cross API boundaries with
+      # the shared-CRT-built deps.
+      - name: Fetch libcvc-deps (Windows)
         id: libcvc-deps-windows
         uses: ./.github/actions/fetch-libcvc-deps
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
-
-      # Cache key intentionally excludes hashFiles(workflow) so editing
-      # this file does not invalidate the warm vcpkg cache. The triplet
-      # is part of the key so static (x64-windows-static) and shared
-      # (x64-windows) builds do not share buildtrees.
-      - name: Cache vcpkg installed packages
-        if: steps.libcvc-deps-windows.outputs.path == ''
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
-            ~\AppData\Local\vcpkg\archives
-          key: vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v7
-          restore-keys: |
-            vcpkg-release-${{ matrix.kind }}-${{ matrix.build_type }}-${{ steps.meta.outputs.triplet }}-v7-
-
-      # Install Qt6 from official prebuilt binaries via aqtinstall.
-      # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
-      # we route Qt around vcpkg entirely; VTK and CGAL still come from
-      # vcpkg. install-qt-action prepends Qt's bin/ to PATH and exports
-      # Qt6_DIR + QT_ROOT_DIR for CMake to find. Skipped on libcvc-deps
-      # hit (Qt6 ships inside the bundle).
-      - name: Install Qt6 (volrover3)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.*'
-          host: 'windows'
-          target: 'desktop'
-          # Qt does not publish msvc2022_64 binaries for 6.7.x; the
-          # msvc2019_64 build is ABI-compatible with the MSVC 2022
-          # toolchain that windows-latest provides.
-          arch: 'win64_msvc2019_64'
-          modules: ''
-          cache: true
-
-      # windows-latest C: drive has only ~14 GB free; vcpkg + qt + vtk
-      # buildtrees blow it up. Free up hosted-tool dirs we don't need
-      # and route vcpkg's heavy working dirs to D: where there's ~80 GB.
-      - name: 'Free disk space and route vcpkg to D: (Windows)'
-        shell: pwsh
-        run: |
-          foreach ($dir in @(
-              'C:\Android', 'C:\Program Files\dotnet',
-              'C:\hostedtoolcache\windows\Ruby',
-              'C:\hostedtoolcache\windows\PyPy',
-              'C:\hostedtoolcache\windows\go',
-              'C:\hostedtoolcache\windows\node')) {
-            if (Test-Path $dir) {
-              Write-Host "Removing $dir"
-              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dir
-            }
-          }
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-buildtrees | Out-Null
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-packages   | Out-Null
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-downloads  | Out-Null
-          "VCPKG_DOWNLOADS=D:\vcpkg-downloads"   | Out-File -Append $env:GITHUB_ENV
-          "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append $env:GITHUB_ENV
-          "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append $env:GITHUB_ENV
-
-          # Restrict vcpkg to building only the matrix.build_type
-          # configuration of each port (instead of building both
-          # Debug+Release upstream-default). The overlay triplet at
-          # vcpkg-overlay/triplets/x64-windows{,-static}.cmake reads
-          # VCPKG_FORCE_BUILD_TYPE and applies it as VCPKG_BUILD_TYPE.
-          $btlc = '${{ matrix.build_type }}'.ToLower()
-          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append $env:GITHUB_ENV
-          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append $env:GITHUB_ENV
-
-          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
-
-      # Persist vcpkg's source-tarball download cache across runs so a
-      # transient upstream timeout (e.g. gmplib.org) does not poison
-      # subsequent attempts. Save runs even if a later step fails so
-      # partial progress is captured. Downloads are triplet-agnostic,
-      # so all matrix jobs share a single cache.
-      - name: Restore vcpkg downloads cache (Windows)
-        id: vcpkg-downloads-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\vcpkg-downloads
-          key: vcpkg-downloads-${{ hashFiles('.github/workflows/release.yml') }}
-          restore-keys: |
-            vcpkg-downloads-
 
       # CUDA toolkit so the shipped Windows artifacts can offload to
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
@@ -822,101 +673,6 @@ jobs:
           method: 'network'
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
-      - name: Install dependencies
-        if: steps.libcvc-deps-windows.outputs.path == ''
-        shell: pwsh
-        env:
-          # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
-          # repackaged from the upstream Inno Setup installer; see
-          # vcpkg-overlay/ports/imagemagick/portfile.cmake).
-          VCPKG_OVERLAY_PORTS: ${{ github.workspace }}\vcpkg-overlay\ports
-        run: |
-          $packages = @(
-            'boost-thread','boost-date-time','boost-regex','boost-filesystem',
-            'boost-system','boost-chrono','boost-program-options','boost-signals2',
-            'boost-format','boost-property-tree','boost-algorithm','boost-asio',
-            'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
-            'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
-            'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick','log4cplus'
-          )
-          # cgal is required by libcvc's SDF/Mesher features and by
-          # volrover3. qt6-base is intentionally omitted on volrover3 —
-          # handled by install-qt-action above. vtk[qt,opengl] is also
-          # omitted: the qt feature pulled qt6-base/qt5compat/qttools/
-          # qtdeclarative as transitive build deps, rebuilding all of
-          # Qt6 from source on every cold-cache run. We build VTK 9.5
-          # from source against aqtinstall's prebuilt Qt6 in a separate
-          # cached step below (mirrors Ubuntu).
-          $packages += @('cgal')
-          for ($i = 1; $i -le 5; $i++) {
-            Write-Host "vcpkg install attempt $i / 5"
-            # --clean-after-build deletes each port's buildtree/packages
-            # immediately after installation. --x-buildtrees-root /
-            # --x-packages-root keep the heavy working dirs on D:.
-            vcpkg install @packages --triplet ${{ steps.meta.outputs.triplet }} `
-              --clean-after-build `
-              --x-buildtrees-root=D:\vcpkg-buildtrees `
-              --x-packages-root=D:\vcpkg-packages
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 5) { exit $LASTEXITCODE }
-            # Clear half-finished buildtrees/packages so the retry does
-            # not trip over stale state from the previous attempt.
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue D:\vcpkg-buildtrees\*
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue D:\vcpkg-packages\*
-            $sleep = [Math]::Min(60 * $i, 180)
-            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
-            Start-Sleep -Seconds $sleep
-          }
-
-      - name: Save vcpkg downloads cache (Windows)
-        if: always() && steps.libcvc-deps-windows.outputs.path == '' && steps.vcpkg-downloads-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: D:\vcpkg-downloads
-          key: vcpkg-downloads-${{ hashFiles('.github/workflows/release.yml') }}
-
-      # ── VTK 9.5 built from source against aqt Qt6, cached ──
-      # Mirrors the Ubuntu strategy. Cache key includes build_type
-      # because MSVC Debug and Release VTK DLLs are not interchangeable.
-      - name: Restore VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
-        id: vtk-cache-windows
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
-
-      - name: Build VTK 9.5 from source against Qt6 (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz -OutFile vtk.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B D:\vtk-build `
-            -DCMAKE_INSTALL_PREFIX=D:\vtk-qt6 `
-            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
-            -DBUILD_SHARED_LIBS=ON `
-            -DVTK_GROUP_ENABLE_Qt=YES `
-            -DVTK_QT_VERSION=6 `
-            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO `
-            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO `
-            -DVTK_BUILD_TESTING=OFF `
-            -DVTK_BUILD_EXAMPLES=OFF `
-            -DVTK_BUILD_DOCUMENTATION=OFF `
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build D:\vtk-build --config ${{ matrix.build_type }} --parallel --target install
-          Remove-Item -Recurse -Force D:\vtk-build
-          Remove-Item -Recurse -Force VTK-9.5.0
-          Remove-Item -Force vtk.tar.gz
-
-      - name: Save VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: D:\vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
-
       - name: Configure
         shell: pwsh
         run: |
@@ -925,41 +681,28 @@ jobs:
           # the GUI app and its extra deps.
           $xmlrpc = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-          # link=shared → BUILD_SHARED_LIBS=ON + x64-windows triplet (DLLs)
-          # link=static → BUILD_SHARED_LIBS=OFF + x64-windows-static triplet
-          #   (.lib for libcvc and every vcpkg dep, MSVC static runtime).
-          # libcvc-deps Windows is shared-only: when it hits on a static
-          # matrix entry, force /MD (DLL CRT) so libcvc objects can
-          # cross API boundaries with the /MD-built libcvc-deps DLLs
-          # without heap mismatches. libcvc itself stays static.
-          if ('${{ matrix.link }}' -eq 'static' -and -not $depsPath) {
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+            if (-not (Test-Path $depsPath)) { $depsPath = '' }
+          }
+          # The Windows cvcpkg prefix is shared-only. Static matrix
+          # entries still consume the shared prefix: libcvc stays
+          # static (BUILD_SHARED_LIBS=OFF) but its third-party deps
+          # link as DLLs. Force /MD (DLL CRT) so libcvc objects can
+          # cross API boundaries with the /MD-built deps DLLs without
+          # heap mismatches.
+          if ('${{ matrix.link }}' -eq 'static') {
             $shared = 'OFF'
-            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>'
-          } elseif ('${{ matrix.link }}' -eq 'static') {
-            $shared = 'OFF'
-            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
           } else {
             $shared = 'ON'
-            $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
           }
-          # Pin Qt6 to install-qt-action's tree (QT_ROOT_DIR) and add
-          # the from-source VTK install tree alongside it (or the
-          # libcvc-deps tree, when the speedup hit). CMAKE_PREFIX_PATH
-          # is a semicolon-separated list on Windows.
-          $prefixes = @()
-          # libcvc-deps (when present) ships Boost/HDF5/FFTW/GSL/log4cplus/
-          # CGAL/ImageMagick + Qt6 + VTK for BOTH kinds, so prefer it.
-          if ($depsPath) { $prefixes += $depsPath }
-          if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
-          if ('${{ matrix.kind }}' -eq 'volrover3' -and -not $depsPath) {
-            $prefixes += 'D:\vtk-qt6'
-          }
-          $qtPrefix = $prefixes -join ';'
+          $msvcrt = 'MultiThreaded$<$<CONFIG:Debug>:Debug>DLL'
+          # cvcpkg is the sole third-party prefix. No vcpkg toolchain
+          # file, no aqt Qt6, no VTK source cache.
+          $qtPrefix = if ($depsPath) { $depsPath } else { '' }
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=${{ steps.meta.outputs.triplet }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DBUILD_SHARED_LIBS=$shared `
             -DCMAKE_MSVC_RUNTIME_LIBRARY="$msvcrt" `
@@ -1011,35 +754,22 @@ jobs:
                 }
           }
 
-          # ── third-party deps: from vcpkg installed/ OR libcvc-deps ──
-          # On libcvc-deps hit (steps.libcvc-deps-windows.outputs.path
-          # non-empty) the dep tree is laid out flat under $depsPath
-          # with include/, lib/, bin/ at the root (shared build, no
-          # debug/ subtree). On miss, deps come from vcpkg's
-          # installed/<triplet>/{bin,lib,include}{,/debug}.
+          # ── third-party deps: from cvcpkg (libcvc-deps prefix) ──
+          # The cvcpkg prefix is laid out flat under $depsPath with
+          # include/, lib/, bin/ at the root (shared build, no debug/
+          # subtree). Debug bundles include .pdb files alongside the
+          # DLLs and .lib import libs.
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-          if ($depsPath) {
-            $libSrc = Join-Path $depsPath 'lib'
-            $binSrc = Join-Path $depsPath 'bin'
-            $incSrc = Join-Path $depsPath 'include'
-            $havePdbs = $isDebug   # libcvc-deps debug bundles ship .pdb
-          } else {
-            $triplet = '${{ steps.meta.outputs.triplet }}'
-            $vcRoot  = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/$triplet"
-            if (-not (Test-Path $vcRoot)) {
-              throw "vcpkg installed tree not found at $vcRoot"
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+            if (-not (Test-Path $depsPath)) {
+              throw "cvcpkg prefix not found (checked steps.libcvc-deps-windows.outputs.path and $depsPath)"
             }
-
-            # Layout per triplet:
-            #   <triplet>/{bin,lib,include}        — release
-            #   <triplet>/debug/{bin,lib}          — debug (headers shared)
-            # Debug subtrees also carry .pdb files alongside their .dll /
-            # .lib outputs (vcpkg builds with /Zi /DEBUG by default).
-            $libSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/lib' } else { Join-Path $vcRoot 'lib' }
-            $binSrc  = if ($isDebug) { Join-Path $vcRoot 'debug/bin' } else { Join-Path $vcRoot 'bin' }
-            $incSrc  = Join-Path $vcRoot 'include'
-            $havePdbs = $isDebug
           }
+          $libSrc = Join-Path $depsPath 'lib'
+          $binSrc = Join-Path $depsPath 'bin'
+          $incSrc = Join-Path $depsPath 'include'
+          $havePdbs = $isDebug
 
           New-Item -ItemType Directory -Force -Path "$dist/lib","$dist/include" | Out-Null
           if (Test-Path $incSrc) {
@@ -1052,11 +782,11 @@ jobs:
                 | Copy-Item -Destination "$dist/lib/" -Force
             }
           }
-          # On libcvc-deps hit, third-party DLLs need to ship even for
-          # static matrix entries because libcvc-deps is shared-only on
-          # Windows (libcvc itself is still .lib; consumers load the
-          # shipped DLLs at runtime).
-          $shipBin = ('${{ matrix.link }}' -eq 'shared') -or [bool]$depsPath
+          # Third-party DLLs always ship because the Windows cvcpkg
+          # prefix is shared-only, even for static matrix entries
+          # (libcvc itself is still .lib; consumers load the shipped
+          # DLLs at runtime).
+          $shipBin = $true
           if ($shipBin) {
             New-Item -ItemType Directory -Force -Path "$dist/bin" | Out-Null
             if (Test-Path $binSrc) {

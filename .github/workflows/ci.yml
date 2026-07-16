@@ -12,7 +12,7 @@ on:
 #  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
 #    fast feedback.
 #  * Heavy package jobs use job-level concurrency that does NOT cancel
-#    in-progress, so a long VTK / vcpkg build always finishes and seeds
+#    in-progress, so a long VTK build always finishes and seeds
 #    its cache. Without this, a push during a 22-min VTK build cancels
 #    the run before the post-job cache save can fire, which traps the
 #    workflow in a permanent cold-cache state.
@@ -193,28 +193,24 @@ jobs:
         if: matrix.kind == 'volrover3'
         run: |
           sudo apt-get update
-          # Ubuntu 24.04's libvtk9-qt-dev is built against Qt5, not Qt6.
-          # We use Qt6 across the board (matching macOS/Windows), and
-          # build VTK from source against Qt6 in the next step. The
-          # libgl1/libxt/libglew/etc. packages are needed by VTK's
-          # rendering and GUISupportQt modules.
+          # Qt6 + VTK + Boost/HDF5/FFTW/GSL/ImageMagick/CGAL/log4cplus all
+          # come from cvcpkg via fetch-libcvc-deps below. We only install
+          # the system runtime deps that Qt/VTK dlopen at runtime
+          # (OpenGL, X11, GLEW), plus AppImage-tooling deps (libfuse2,
+          # file, desktop-file-utils).
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
-            libboost-all-dev libhdf5-dev libfftw3-dev libgsl-dev \
-            libmagick++-dev \
-            qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev \
             libgl1-mesa-dev libxt-dev mesa-common-dev libglew-dev \
             libxrender-dev libxcursor-dev libxinerama-dev libxi-dev \
-            libcgal-dev \
             libfuse2 file desktop-file-utils
 
-      # ── Pull dep bundle from libcvc-deps release ──
-      # For volrover3 builds this lets us skip the slow VTK-from-source
-      # build (~25-40 min). For libcvc-kind builds the bundle provides
-      # the `libiimod` CMake package (no longer vendored in this tree).
-      # On miss the action emits an empty `path` output; libcvc-kind
-      # will then fail at find_package(libiimod), while volrover3 falls
-      # back to the cache-then-build path below.
+      # ── Pull dep bundle from libcvc-deps (via cvcpkg) ──
+      # For volrover3 builds this provides Qt6 + VTK + all third-party
+      # C/C++ deps in one shot; there is no fallback build path — if
+      # cvcpkg cannot fetch the components, CMake configure will fail
+      # with "Could not find Qt6/VTK", which is the right signal.
+      # For libcvc-kind builds the bundle also provides the `libiimod`
+      # CMake package (no longer vendored in this tree).
       - name: Fetch libcvc-deps
         id: libcvc-deps
         uses: ./.github/actions/fetch-libcvc-deps
@@ -222,72 +218,27 @@ jobs:
           build_type: Release
           link: shared
 
-      # ── VTK 9.5 built against Qt6, cached ──
-      #
-      # Ubuntu's prebuilt libvtk9-qt-dev is Qt5-only. We build VTK
-      # from source against Qt6 once per cache key (~25-40 min cold)
-      # and reuse the install tree from cache thereafter (~30s warm).
-      # The cache is keyed on (VTK version, Qt major, runner OS) and
-      # is shared between ci.yml and release.yml.
-      #
-      # We use the split restore/save pattern so the cache is committed
-      # to the store IMMEDIATELY after VTK installs successfully, rather
-      # than as a post-job step that never runs when the workflow is
-      # cancelled mid-flight.
-      - name: Restore VTK (Qt6) cache
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == ''
-        id: vtk-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-v2
-
-      - name: Build VTK 9.5 from source (Qt6)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == '' && steps.vtk-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          curl -L -o vtk.tar.gz https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B vtk-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=$HOME/vtk-qt6 \
-            -DBUILD_SHARED_LIBS=ON \
-            -DVTK_GROUP_ENABLE_Qt=YES \
-            -DVTK_QT_VERSION=6 \
-            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO \
-            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO \
-            -DVTK_BUILD_TESTING=OFF \
-            -DVTK_BUILD_EXAMPLES=OFF \
-            -DVTK_BUILD_DOCUMENTATION=OFF \
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build vtk-build --parallel --target install
-          # Free disk before continuing.
-          rm -rf vtk-build VTK-9.5.0 vtk.tar.gz
-
-      # Persist the install tree as soon as it lands, before the rest of
-      # the job (which may take another 5-15 min) has any chance of
-      # being cancelled.
-      - name: Save VTK (Qt6) cache
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps.outputs.path == '' && steps.vtk-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-v2
-
       - name: Configure
         run: |
           extra_prefix=""
           if [ "${{ matrix.kind }}" = "volrover3" ]; then
-            # Prefer libcvc-deps when the speedup hit; else fall back
-            # to the from-source VTK install under ~/vtk-qt6.
-            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-            else
-              extra_prefix="$HOME/vtk-qt6"
+            # Qt6 + VTK + all third-party deps come from cvcpkg via
+            # fetch-libcvc-deps. No source-build fallback.
+            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+            if [ -z "$extra_prefix" ]; then
+              extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
             fi
           elif [ "${{ matrix.kind }}" = "libcvc" ]; then
             # libcvc-kind needs libiimod from the libcvc-deps bundle.
-            extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+            # Fall back to the default cvcpkg-install prefix when the
+            # step gracefully returned empty (e.g. a single-bundle
+            # download failed but earlier bundles unpacked into
+            # $HOME/libcvc-deps).
+            if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+              extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+            else
+              extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+            fi
           fi
           # libcvc-kind builds enable tests so the same artifacts we
           # ship get exercised by ctest. volrover3 builds keep tests
@@ -407,16 +358,13 @@ jobs:
           # linuxdeploy walks the volrover3 ELF NEEDED entries and
           # resolves them by name; libcvc.so.3 lives under
           # AppDir/usr/lib/x86_64-linux-gnu/ (Debian's GNUInstallDirs
-          # default) which is not on the default search path. VTK 9.5
-          # was built into $HOME/vtk-qt6/lib (cached, off-system) or,
-          # when the libcvc-deps speedup hit, lives under the extracted
-          # libcvc-deps root.
-          vtk_lib_path=""
-          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
-            vtk_lib_path="${{ steps.libcvc-deps.outputs.path }}/lib"
-          else
-            vtk_lib_path="$HOME/vtk-qt6/lib"
+          # default) which is not on the default search path. Qt6 + VTK
+          # come from the libcvc-deps prefix populated by cvcpkg.
+          deps_root="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps_root" ]; then
+            deps_root="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          vtk_lib_path="$deps_root/lib"
           export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:$PWD/AppDir/usr/lib/x86_64-linux-gnu:$vtk_lib_path:${LD_LIBRARY_PATH:-}"
           ./linuxdeploy --appdir AppDir --plugin qt --output appimage \
                         --desktop-file AppDir/volrover3.desktop \
@@ -554,20 +502,21 @@ jobs:
       - name: Install dependencies (libcvc)
         if: matrix.kind == 'libcvc'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick cgal log4cplus zstd
-          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix hdf5)" >> $GITHUB_ENV
+          # All C/C++ third-party libs (Boost/HDF5/FFTW/GSL/ImageMagick/
+          # CGAL/log4cplus/libiimod) come from cvcpkg via
+          # fetch-libcvc-deps below. Only build tooling here.
+          brew install cmake ninja zstd
 
       - name: Install dependencies (volrover3)
         if: matrix.kind == 'volrover3'
         run: |
-          brew install cmake ninja boost hdf5 fftw gsl imagemagick qt@6 vtk cgal zstd
-          echo "BOOST_ROOT=$(brew --prefix boost)" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost):$(brew --prefix qt@6):$(brew --prefix hdf5)" >> $GITHUB_ENV
-          echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
+          # Qt6 + VTK + all third-party C/C++ deps come from cvcpkg via
+          # fetch-libcvc-deps below. Only build tooling here.
+          brew install cmake ninja zstd
 
-      # ── Pull dep bundle from libcvc-deps release ──
-      # Provides the libiimod CMake package (no longer vendored).
+      # ── Pull dep prefix via cvcpkg ──
+      # Provides Qt6 + VTK + all third-party C/C++ deps for volrover3
+      # and the libiimod CMake package for libcvc.
       - name: Fetch libcvc-deps
         id: libcvc-deps-macos
         uses: ./.github/actions/fetch-libcvc-deps
@@ -579,13 +528,12 @@ jobs:
         run: |
           tests=OFF
           [ "${{ matrix.kind }}" = "libcvc" ] && tests=ON
-          # Append libcvc-deps to CMAKE_PREFIX_PATH so find_package
-          # (libiimod) resolves. brew prefixes from the prior step
-          # remain via $CMAKE_PREFIX_PATH (env var).
+          # cvcpkg is the sole third-party prefix on macOS.
           deps_path="${{ steps.libcvc-deps-macos.outputs.path }}"
-          if [ -n "$deps_path" ]; then
-            export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:+$CMAKE_PREFIX_PATH:}$deps_path"
+          if [ -z "$deps_path" ]; then
+            deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          export CMAKE_PREFIX_PATH="$deps_path"
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCVC_BUILD_TESTS=$tests \
@@ -695,8 +643,7 @@ jobs:
             kind: volrover3
             build_type: Release
     name: package-windows / ${{ matrix.name }}
-    # Heavy job (vcpkg builds VTK + CGAL from source): do NOT cancel
-    # in-progress runs. See package-linux for rationale.
+    # Do NOT cancel in-progress runs; see package-linux for rationale.
     concurrency:
       group: ci-${{ github.ref }}-package-windows-${{ matrix.name }}
       cancel-in-progress: false
@@ -717,139 +664,19 @@ jobs:
           echo "arch=x86_64"       >> "$GITHUB_OUTPUT"
           echo "btlc=$BTLC"        >> "$GITHUB_OUTPUT"
 
-      # Cache key intentionally excludes hashFiles(workflow) so editing
-      # this file does not invalidate the warm vcpkg cache.
-      #
-      # Split restore/save: we commit the cache immediately after the
-      # vcpkg install step succeeds rather than waiting for a post-job
-      # save that gets skipped on cancellation.
-      #
-      # NOTE: this step must run AFTER "Free disk space and route
-      # vcpkg to D" so the cache restores into the junctioned dirs.
-      - name: 'Free disk space and route vcpkg to D: (Windows)'
-        if: matrix.kind == 'volrover3'
-        shell: pwsh
-        run: |
-          # vcpkg builds VTK + Qt + CGAL from source. Even with
-          # --clean-after-build, individual port buildtrees (qtdeclarative
-          # is ~25 GB) exceed the free space on C: of windows-latest.
-          # Two complementary fixes:
-          #   1) Remove pre-installed toolchains we don't use to free C:.
-          #   2) Redirect vcpkg's heavy working dirs to D: via vcpkg's
-          #      own relocation flags (VCPKG_DOWNLOADS env var,
-          #      --x-buildtrees-root, --x-packages-root). We deliberately
-          #      avoid filesystem junctions because Python's
-          #      os.path.relpath (used by meson inside harfbuzz/qt builds)
-          #      raises ValueError when a path crosses mount points via
-          #      a junction.
-          $paths = @(
-            'C:\Android',
-            'C:\Program Files\Android',
-            'C:\Program Files (x86)\Android',
-            'C:\Program Files (x86)\dotnet',
-            'C:\Program Files\dotnet\sdk\NuGetFallbackFolder',
-            'C:\Program Files (x86)\Google',
-            'C:\Program Files\MySQL',
-            'C:\Program Files\Mozilla Firefox',
-            'C:\Program Files\Microsoft SDKs\Azure',
-            'C:\hostedtoolcache\windows\Ruby',
-            'C:\hostedtoolcache\windows\PyPy',
-            'C:\hostedtoolcache\windows\go',
-            'C:\hostedtoolcache\windows\node'
-          )
-          $cBefore = (Get-PSDrive C).Free / 1GB
-          $dBefore = (Get-PSDrive D).Free / 1GB
-          foreach ($p in $paths) {
-            if (Test-Path $p) {
-              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $p
-            }
-          }
-
-          # Pre-create D: paths and export them as env vars for later steps.
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-buildtrees | Out-Null
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-packages   | Out-Null
-          New-Item -ItemType Directory -Force -Path D:\vcpkg-downloads  | Out-Null
-          "VCPKG_DOWNLOADS=D:\vcpkg-downloads"   | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          "VCPKG_BUILDTREES=D:\vcpkg-buildtrees" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          "VCPKG_PACKAGES=D:\vcpkg-packages"     | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          # Restrict vcpkg to building only the matrix.build_type
-          # configuration of each port (instead of the upstream default
-          # which always builds both Debug+Release). The overlay triplet
-          # at vcpkg-overlay/triplets/x64-windows.cmake reads
-          # VCPKG_FORCE_BUILD_TYPE and applies it as VCPKG_BUILD_TYPE.
-          $btlc = '${{ matrix.build_type }}'.ToLower()
-          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          $cAfter = (Get-PSDrive C).Free / 1GB
-          $dAfter = (Get-PSDrive D).Free / 1GB
-          Write-Host ("Free space on C: {0:N1} GB -> {1:N1} GB" -f $cBefore, $cAfter)
-          Write-Host ("Free space on D: {0:N1} GB -> {1:N1} GB" -f $dBefore, $dAfter)
-
-      # Configure vcpkg to build only the matrix.build_type config for
-      # libcvc Windows jobs (the volrover3-gated disk-routing step
-      # above already exports VCPKG_FORCE_BUILD_TYPE for volrover3).
-      - name: Configure vcpkg overlay triplet (libcvc Windows)
-        if: matrix.kind == 'libcvc'
-        shell: pwsh
-        run: |
-          $btlc = '${{ matrix.build_type }}'.ToLower()
-          "VCPKG_FORCE_BUILD_TYPE=$btlc" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}\vcpkg-overlay\triplets" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-
-      # ── Optional: pull all third-party deps from a libcvc-deps bundle ──
-      # When a matching libcvc-deps release archive exists for this
-      # platform + matrix.build_type, downloading it (~minutes) is far
-      # cheaper than letting vcpkg compile Boost/HDF5/FFTW/GSL/log4cplus/
-      # CGAL/ImageMagick from source AND building VTK separately
-      # (~25-40 min cold). On hit, we skip:
-      #   * vcpkg restore + install + save
-      #   * install-qt-action (Qt6 is in the bundle)
-      #   * VTK cache restore + from-source build (volrover3 only)
-      # On miss (e.g. libcvc-deps release not yet published, network
-      # blip), the action emits an empty `path` output and we fall back
-      # to the previous vcpkg / aqtinstall / VTK-from-source path.
-      - name: Fetch libcvc-deps (Windows speedup)
+      # ── Pull all third-party deps (incl. Qt6 + VTK) from cvcpkg ──
+      # cvcpkg is the sole source of truth for third-party components
+      # on Windows: Boost, HDF5, FFTW, GSL, ImageMagick, log4cplus,
+      # CGAL, Qt6, VTK, etc. If cvcpkg cannot fetch the components,
+      # CMake configure will fail with an explicit "Could not find X"
+      # error, which is the correct signal — there is no vcpkg or
+      # source-build fallback.
+      - name: Fetch libcvc-deps (Windows)
         id: libcvc-deps-windows
         uses: ./.github/actions/fetch-libcvc-deps
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
-
-      - name: Restore vcpkg cache
-        if: steps.libcvc-deps-windows.outputs.path == ''
-        id: vcpkg-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
-            ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
-          restore-keys: |
-            vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7-
-
-      # Install Qt6 from official prebuilt binaries via aqtinstall.
-      # vcpkg's qt6-base port builds Qt from source (~30+ min cold) so
-      # we route Qt around vcpkg entirely; VTK and CGAL still come from
-      # vcpkg (they are smaller and don't have a comparable prebuilt).
-      # install-qt-action prepends Qt's bin/ to PATH and exports
-      # Qt6_DIR + QT_ROOT_DIR for CMake to find. Skipped on libcvc-deps
-      # hit (Qt6 ships inside the bundle).
-      - name: Install Qt6 (volrover3)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.*'
-          host: 'windows'
-          target: 'desktop'
-          # Qt does not publish msvc2022_64 binaries for 6.7.x; the
-          # msvc2019_64 build is ABI-compatible with the MSVC 2022
-          # toolchain that windows-latest provides.
-          arch: 'win64_msvc2019_64'
-          modules: ''
-          cache: true
 
       # CUDA toolkit so the shipped Windows artifacts can offload to
       # NVIDIA GPUs at runtime when an NVIDIA driver is present. cudart
@@ -862,122 +689,24 @@ jobs:
           method: 'network'
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
-      - name: Install dependencies
-        if: steps.libcvc-deps-windows.outputs.path == ''
-        shell: pwsh
-        env:
-          # Pull our hand-rolled imagemagick overlay port (Q16-HDRI x64,
-          # repackaged from the upstream Inno Setup installer; see
-          # vcpkg-overlay/ports/imagemagick/portfile.cmake).
-          VCPKG_OVERLAY_PORTS: ${{ github.workspace }}\vcpkg-overlay\ports
-        run: |
-          $packages = @(
-            'boost-thread','boost-date-time','boost-regex','boost-filesystem',
-            'boost-system','boost-chrono','boost-program-options','boost-signals2',
-            'boost-format','boost-property-tree','boost-algorithm','boost-asio',
-            'boost-any','boost-array','boost-dynamic-bitset','boost-exception',
-            'boost-foreach','boost-function','boost-lambda','boost-lexical-cast',
-            'boost-multi-array','boost-optional','boost-smart-ptr','boost-tuple',
-            'boost-utility','hdf5[cpp]','fftw3','gsl','imagemagick','log4cplus','cgal'
-          )
-          # qt6-base/vtk are NOT pulled via vcpkg — see install-qt-action
-          # above and the from-source VTK build below.
-          for ($i = 1; $i -le 5; $i++) {
-            Write-Host "vcpkg install attempt $i / 5"
-            # --clean-after-build deletes each port's buildtree/packages
-            # immediately after installation so the disk does not fill
-            # while iterating through hundreds of dependencies.
-            # --x-buildtrees-root / --x-packages-root relocate vcpkg's
-            # heavy working directories to D: where free space is
-            # ~80 GB vs ~14 GB on C:. The install root and binary
-            # cache stay on C: so actions/cache picks them up.
-            vcpkg install @packages --triplet x64-windows `
-              --clean-after-build `
-              --x-buildtrees-root=D:\vcpkg-buildtrees `
-              --x-packages-root=D:\vcpkg-packages
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 5) { exit $LASTEXITCODE }
-            $sleep = [Math]::Min(60 * $i, 180)
-            Write-Host "Retrying after transient failure (sleeping $sleep s)..."
-            Start-Sleep -Seconds $sleep
-          }
-
-      # Persist vcpkg state as soon as install completes successfully so
-      # later cancellations don't strand a 20+ minute build.
-      - name: Save vcpkg cache
-        if: steps.libcvc-deps-windows.outputs.path == '' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
-            ${{ env.VCPKG_INSTALLATION_ROOT }}\packages
-            ~\AppData\Local\vcpkg\archives
-          key: vcpkg-pkg-${{ matrix.kind }}-${{ matrix.build_type }}-v7
-
-      # ── VTK 9.5 built from source against aqt Qt6, cached ──
-      # Mirrors the Ubuntu strategy. Cache key includes build_type
-      # because MSVC Debug and Release VTK DLLs are not interchangeable.
-      # Uses Visual Studio generator (windows-latest default) so we
-      # don't need a separate MSVC env activation step.
-      - name: Restore VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == ''
-        id: vtk-cache-windows
-        uses: actions/cache/restore@v4
-        with:
-          path: D:\vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
-
-      - name: Build VTK 9.5 from source against Qt6 (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri https://github.com/Kitware/VTK/archive/refs/tags/v9.5.0.tar.gz -OutFile vtk.tar.gz
-          tar xzf vtk.tar.gz
-          cmake -S VTK-9.5.0 -B D:\vtk-build `
-            -DCMAKE_INSTALL_PREFIX=D:\vtk-qt6 `
-            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
-            -DBUILD_SHARED_LIBS=ON `
-            -DVTK_GROUP_ENABLE_Qt=YES `
-            -DVTK_QT_VERSION=6 `
-            -DVTK_MODULE_ENABLE_VTK_GUISupportQtQuick=NO `
-            -DVTK_MODULE_ENABLE_VTK_RenderingQtQuick=NO `
-            -DVTK_BUILD_TESTING=OFF `
-            -DVTK_BUILD_EXAMPLES=OFF `
-            -DVTK_BUILD_DOCUMENTATION=OFF `
-            -DVTK_LEGACY_REMOVE=ON
-          cmake --build D:\vtk-build --config ${{ matrix.build_type }} --parallel --target install
-          Remove-Item -Recurse -Force D:\vtk-build
-          Remove-Item -Recurse -Force VTK-9.5.0
-          Remove-Item -Force vtk.tar.gz
-
-      - name: Save VTK (Qt6) cache (Windows)
-        if: matrix.kind == 'volrover3' && steps.libcvc-deps-windows.outputs.path == '' && steps.vtk-cache-windows.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: D:\vtk-qt6
-          key: vtk-9.5.0-qt6-${{ runner.os }}-${{ matrix.build_type }}-v1
-
       - name: Configure
         shell: pwsh
         run: |
           $vol = if ('${{ matrix.kind }}' -eq 'volrover3') { 'ON' } else { 'OFF' }
           $tests = if ('${{ matrix.kind }}' -eq 'libcvc') { 'ON' } else { 'OFF' }
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
-          $prefixes = @()
-          # libcvc-deps (when present) ships Boost/HDF5/FFTW/GSL/log4cplus/
-          # CGAL/ImageMagick + Qt6 + VTK for BOTH kinds, so prefer it.
-          if ($depsPath) {
-            $prefixes += $depsPath
+          if (-not $depsPath) {
+            # cvcpkg-install fell back; try the default prefix in case
+            # some bundles unpacked before the failure.
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+            if (-not (Test-Path $depsPath)) { $depsPath = '' }
           }
-          if ($env:QT_ROOT_DIR) { $prefixes += $env:QT_ROOT_DIR }
-          if ('${{ matrix.kind }}' -eq 'volrover3' -and -not $depsPath) {
-            $prefixes += 'D:\vtk-qt6'
-          }
-          $qtPrefix = $prefixes -join ';'
+          # cvcpkg is the sole third-party prefix. No vcpkg toolchain
+          # file, no aqt Qt6, no VTK source cache.
+          $qtPrefix = if ($depsPath) { $depsPath } else { '' }
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=$tests `
             -DCVC_ENABLE_CUDA=ON `
@@ -1003,7 +732,7 @@ jobs:
         #     Error running test executable. Path: '.../state_test.exe'
         #     Result: Exit code 0xc0000135
         #
-        # CRITICAL: vcpkg ships Debug DLLs at debug/bin/ with the
+        # CRITICAL: cvcpkg ships Debug DLLs at debug/bin/ with the
         # SAME filename as their Release counterparts at bin/ (e.g.
         # both directories contain hdf5.dll, boost_thread-vc143-mt*).
         # Putting bin/ on PATH first under a Debug build causes the
@@ -1012,14 +741,14 @@ jobs:
         # as SEH access violations (0xc0000005) and "unknown C++
         # exception" failures inside HDF5/Boost APIs.
         #
-        # libcvc-deps, however, ships Qt6 only at top-level bin/
+        # cvcpkg, however, ships Qt6 only at top-level bin/
         # (Qt6Core.dll AND Qt6Cored.dll co-located there because Qt
         # uses a 'd' suffix for Debug). So a Debug build still needs
         # bin/ on PATH to resolve Qt6Cored.dll, otherwise Qt-based
         # tests (GraphicsNodeTest, VolumeNodeTest, etc.) exit with
         # STATUS_DLL_NOT_FOUND (0xc0000135). Put debug/bin FIRST so
-        # vcpkg-style same-named ports load their debug variant, and
-        # bin/ second so Qt6's debug-suffixed DLLs still resolve.
+        # same-named-port DLLs load their debug variant, and bin/
+        # second so Qt6's debug-suffixed DLLs still resolve.
         run: |
           $depsPath = '${{ steps.libcvc-deps-windows.outputs.path }}'
           $isDebug = '${{ matrix.build_type }}' -eq 'Debug'

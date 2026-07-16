@@ -1,0 +1,78 @@
+schema_version: 1
+recipe:
+  name: libcvc
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "Center for Computational Visualization core C++ library — volumetric data structures, distributed state, geometry & image processing, DSL runtime."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, volumetric, state, dsl, geometry]
+
+source:
+  # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
+  # (see cvcpkg roadmap) does not consume this field, but the schema
+  # requires it; `../../..` points at the libcvc repo root for tools that walk
+  # the source tree.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build: []
+  runtime:
+    - name: zlib
+    - name: boost
+    - name: fftw3
+    - name: gsl
+    - name: cgal
+    - name: hdf5
+    - name: log4cplus
+    - name: tiff
+    - name: imagemagick
+    - name: yaml
+    - name: levmar
+    - name: libiimod
+    - name: openblas
+    - name: openssl
+    - name: c-ares
+    - name: re2
+    - name: abseil
+    - name: protobuf
+    - name: grpc
+    - name: qt6
+    - name: vtk
+    - name: pthreads4w
+      platforms: [windows]
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    - bin/cvc*
+    - lib/libcvc*
+    - lib/cvc*
+    - lib/cmake/cvc/
+    - include/cvc/
+  cmake_packages:
+    - name: cvc
+      targets:
+        - cvc::cvc
+
+abi:
+  cxx_std: 17
