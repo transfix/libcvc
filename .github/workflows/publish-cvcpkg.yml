@@ -77,13 +77,24 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             arch: x86_64
+          # Experimental: no linux-arm64 dep bundles on the catalog yet
+          # (builder fleet is x86_64 + macOS); relies on cvcpkg source
+          # fallback until the Phase-9 emulated-arch/arm64 builders land.
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            experimental: true
           - os: macos-14
             platform: macos
             arch: arm64
+          - os: macos-13
+            platform: macos
+            arch: x86_64
           - os: windows-latest
             platform: windows
             arch: x86_64
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@v5
 
