@@ -16,6 +16,7 @@
 #include <cvc/core/app.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
+#include <cvc/volume/volume_file_io.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <sstream>
@@ -263,6 +264,33 @@ TEST_F(VolumeIOTest, CvcRawRoundTrip) {
   volume in(ctx);
   ASSERT_NO_THROW(in.read(p));
   expect_volume_equal(out, in);
+}
+
+// ============================================================================
+// Free-function writeVolumeFile(app, vol, filename) on a fresh path
+//
+// The single-volume writeVolumeFile overload writes into an existing file; for
+// a not-yet-created target it now creates the file first (like volume::write),
+// so external SDK consumers that call it directly get a valid file instead of
+// a misleading unsupported_volume_file_type.
+// ============================================================================
+
+TEST_F(VolumeIOTest, WriteVolumeFileCreatesMissingFile) {
+  volume out = make_test_volume(ctx);
+  std::string p = path("fresh_single.rawiv");
+  ASSERT_FALSE(std::filesystem::exists(p));
+
+  ASSERT_NO_THROW(writeVolumeFile(ctx, out, p));
+  ASSERT_TRUE(std::filesystem::exists(p));
+
+  volume in(ctx);
+  ASSERT_NO_THROW(in.read(p));
+  expect_volume_equal(out, in);
+}
+
+TEST_F(VolumeIOTest, WriteVolumeFileUnknownExtensionStillThrows) {
+  volume out = make_test_volume(ctx);
+  EXPECT_ANY_THROW(writeVolumeFile(ctx, out, path("fresh.xyz_unknown")));
 }
 
 // ============================================================================
