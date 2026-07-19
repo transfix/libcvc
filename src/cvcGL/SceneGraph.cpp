@@ -19,16 +19,16 @@
 #include <vtkRenderer.h>
 
 SceneGraph::SceneGraph(const std::string &statePrefix)
-    : m_renderer(nullptr), m_statePrefix(statePrefix), m_gridNode(nullptr), m_axisNode(nullptr),
-      m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
-      m_renderNeeded(false) {
+    : m_renderer(nullptr), m_statePrefix(statePrefix), m_ownerThread(std::this_thread::get_id()),
+      m_gridNode(nullptr), m_axisNode(nullptr), m_graphicsRoot(nullptr), m_nullGraphic(nullptr),
+      m_multiVolumeRenderingEnabled(false), m_renderNeeded(false) {
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
   m_nullGraphic = std::make_shared<NullGraphicNode>(cvc::gl::context(), rootStatePath, "root");
 
-  // Set SceneGraph reference IMMEDIATELY after construction
-  // This enables threading for event posting (nodes disable threading in constructor)
+  // Attach the root (and, recursively, its children) to this SceneGraph so their
+  // runOnMainThread() work marshals through this scene's pump / owner thread.
   m_nullGraphic->setSceneGraph(this);
 
   m_nullGraphic->setShowBBox(true);                          // Show bbox by default
@@ -94,22 +94,6 @@ void SceneGraph::processEvents() {
       callback();
     }
     events.pop();
-  }
-}
-
-void SceneGraph::flushPendingEvents() {
-  // Pump the queue until it quiesces. A callback may post follow-on callbacks
-  // (processEvents() runs a snapshot, so those land back on m_eventQueue), so
-  // loop; cap the passes so a handler that perpetually re-posts cannot spin
-  // forever.
-  constexpr int kMaxDrainPasses = 100;
-  for (int pass = 0; pass < kMaxDrainPasses; ++pass) {
-    {
-      std::lock_guard<std::mutex> lock(m_eventQueueMutex);
-      if (m_eventQueue.empty())
-        break;
-    }
-    processEvents();
   }
 }
 
@@ -372,28 +356,14 @@ void SceneGraph::removeGraphics(const std::string &name) {
     return;
   }
 
-  // Hold a strong reference so the node stays alive through the whole teardown
-  // below, even after it is unlinked from the graph and erased from the map.
   auto graphicsNode = it->second;
 
-  // A node's state changes are dispatched on background handler threads
-  // (state_object::stateChanged -> app::startThread), and both those handlers
-  // and addGraphics() post main-thread callbacks via runOnMainThread() that
-  // capture the node's raw `this` (e.g. GeometryNode::setGeometry ->
-  // updateBoundingBoxNode -> getBoundingBox()). If the node is destroyed while
-  // any such callback is still queued, a later processEvents() -- at the latest
-  // the one in ~SceneGraph -- invokes a virtual method on freed memory and
-  // crashes. This bites hardest headless (pycvc.gl), where nothing pumps the
-  // queue between add and remove, so the callbacks are still pending.
-  //
-  // Mirror the safe teardown order of ~SceneGraph (drain, then destroy): while
-  // the node is still alive, join its in-flight handlers, stop it from spawning
-  // new ones, then drain every queued callback so none outlives it.
-  graphicsNode->waitForHandlers();
-  graphicsNode->setInstanceThreading(false);
-  flushPendingEvents();
-
-  // Unlink from the graphics root and drop it from the lookup map.
+  // Unlink from the graphics root and drop it from the lookup map. This may drop
+  // the last reference and destroy the node. That is safe: scene nodes run their
+  // state handlers synchronously (no handler thread can be touching this node),
+  // and any main-thread callback still queued for it is weak-guarded (see
+  // SceneNode::runOnMainThread), so it becomes a no-op once the node is gone.
+  // No drain or join is needed — teardown here is race-free by construction.
   m_graphicsRoot->removeGraphicsChild(graphicsNode);
   m_graphicsNodes.erase(it);
 
@@ -410,12 +380,6 @@ void SceneGraph::removeGraphics(const std::string &name) {
 
   // If scene is now empty, add null graphic back
   ensureNullGraphicIfEmpty();
-
-  // Unlinking above (and the root's bounds resync) queued fresh callbacks. Run
-  // them now, while graphicsNode is still alive, so the local reference is the
-  // last to go and nothing left in the queue holds a dangling pointer once this
-  // function returns and the node is destroyed.
-  flushPendingEvents();
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string &name) {

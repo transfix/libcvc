@@ -12,6 +12,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -47,6 +48,17 @@ public:
   // Post a callback to be executed on the main thread during processEvents()
   // This is thread-safe and can be called from any thread
   void postEvent(std::function<void()> callback);
+
+  // True when called from this SceneGraph's owner thread — the thread that
+  // constructed it and drives processEvents() (main/GUI thread, or the sole
+  // thread in a headless/scripted context). Node work initiated on the owner
+  // thread runs inline; work from any other thread is marshalled through the
+  // event queue. See SceneNode::runOnMainThread().
+  bool onOwnerThread() const { return std::this_thread::get_id() == m_ownerThread; }
+
+  // Rebind the owner thread to the caller. Use only if a different thread will
+  // henceforth own the scene and drive processEvents().
+  void adoptOwnerThread() { m_ownerThread = std::this_thread::get_id(); }
 
   // Check if a render is needed and reset the flag
   bool checkAndResetRenderNeeded();
@@ -153,6 +165,7 @@ public:
 private:
   vtkRenderer *m_renderer;
   std::string m_statePrefix;
+  std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
 
   std::shared_ptr<GridNode> m_gridNode;
   std::shared_ptr<AxisNode> m_axisNode;
@@ -181,11 +194,6 @@ private:
   // Null graphic management
   void ensureNullGraphicIfEmpty();
   void removeNullGraphicIfPresent();
-
-  // Pump the main-thread callback queue until it quiesces. Used during node
-  // teardown so queued callbacks that captured a node run while it is still
-  // alive, instead of dangling once the node is destroyed.
-  void flushPendingEvents();
 
   // Connection for root node bounds changes
   boost::signals2::connection m_rootBoundsConnection;

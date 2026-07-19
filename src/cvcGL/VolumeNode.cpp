@@ -103,10 +103,10 @@ VolumeNode::~VolumeNode() {
   m_sampleDistanceConnection.disconnect();
   m_autoAdjustSampleDistancesConnection.disconnect();
 
-  // Note: Do NOT call waitForHandlers() here!
-  // The base class state_object<VolumeNode> destructor will handle it,
-  // but only AFTER our VTK members are destroyed. Calling it here would
-  // allow handlers to access destroyed VTK objects.
+  // Disconnecting above is enough: scene nodes run their state handlers
+  // synchronously on the owner thread (see SceneNode), so there is no in-flight
+  // handler thread that could touch this node's VTK members as they are
+  // destroyed. No waitForHandlers()/join is needed.
 }
 
 vtkProp *VolumeNode::getProp() { return m_vtkVolume; }
