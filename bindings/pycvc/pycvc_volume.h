@@ -7,6 +7,8 @@
 // cvc::volume; only the .cpp includes libcvc).
 #pragma once
 
+#include "pycvc_buffer.h"
+
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -45,6 +47,11 @@ public:
   double ymax() const;
   double zmin() const;
   double zmax() const;
+
+  // Zero-copy numpy view of the voxel grid (no data copy; numpy keeps the
+  // volume alive via a shared_ptr in the array's base). Shape (nz, ny, nx),
+  // float32, writable. Requires a Float volume (as built by set_float_grid).
+  ArrayView grid();
 
   // File I/O (.rawiv and friends, via cvc::volume_file_io).
   void load(const std::string &filename);

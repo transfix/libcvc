@@ -85,6 +85,20 @@ double Volume::ymax() const { return vol_->YMax(); }
 double Volume::zmin() const { return vol_->ZMin(); }
 double Volume::zmax() const { return vol_->ZMax(); }
 
+ArrayView Volume::grid() {
+  if (vol_->voxelType() != cvc::Float)
+    throw std::invalid_argument("grid(): zero-copy view requires a Float volume");
+  ArrayView v;
+  v.dtype = DType::Float32;
+  v.writable = true;
+  // Row-major (nz, ny, nx): index = ((k*ny)+j)*nx + i matches operator()(i,j,k).
+  v.shape = {static_cast<long>(vol_->ZDim()), static_cast<long>(vol_->YDim()),
+             static_cast<long>(vol_->XDim())};
+  v.data = vol_->data_ptr();
+  v.owner = vol_; // shared_ptr<cvc::volume> -> shared_ptr<void>
+  return v;
+}
+
 void Volume::load(const std::string &filename) { cvc::readVolumeFile(ctx(), *vol_, filename); }
 void Volume::save(const std::string &filename) const {
   cvc::writeVolumeFile(ctx(), *vol_, filename);

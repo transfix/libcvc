@@ -95,6 +95,30 @@ std::size_t Geometry::num_vertices() const { return geom_->points().size(); }
 std::size_t Geometry::num_triangles() const { return geom_->tris().size(); }
 std::size_t Geometry::num_lines() const { return geom_->lines().size(); }
 
+ArrayView Geometry::vertices() {
+  // cvc::geometry::points() is a std::vector<boost::array<double,3>>, i.e. a
+  // contiguous block of 3*N doubles — expose it as an (N,3) view.
+  auto &pts = geom_->points();
+  ArrayView v;
+  v.dtype = DType::Float64;
+  v.writable = true;
+  v.shape = {static_cast<long>(pts.size()), 3};
+  v.data = pts.empty() ? nullptr : &pts[0][0];
+  v.owner = geom_; // shared_ptr<cvc::geometry> -> shared_ptr<void>
+  return v;
+}
+
+ArrayView Geometry::vertex_colors() {
+  auto &cols = geom_->colors();
+  ArrayView v;
+  v.dtype = DType::Float64;
+  v.writable = true;
+  v.shape = {static_cast<long>(cols.size()), 3};
+  v.data = cols.empty() ? nullptr : &cols[0][0];
+  v.owner = geom_;
+  return v;
+}
+
 void Geometry::compute_normals() { geom_->compute_normals(); }
 void Geometry::clear() { *geom_ = cvc::geometry(); }
 
