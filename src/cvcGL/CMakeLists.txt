@@ -50,3 +50,9 @@ enable_testing()
 add_executable(cvcgl_smoke test/cvcgl_smoke.cpp)
 target_link_libraries(cvcgl_smoke PRIVATE cvcGL)
 add_test(NAME cvcgl_smoke COMMAND cvcgl_smoke)
+
+# Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
+# against the no-renderer teardown crash the Python lab would otherwise hit.
+add_executable(cvcgl_remove test/cvcgl_remove.cpp)
+target_link_libraries(cvcgl_remove PRIVATE cvcGL)
+add_test(NAME cvcgl_remove COMMAND cvcgl_remove)

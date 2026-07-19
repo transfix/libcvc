@@ -182,6 +182,11 @@ private:
   void ensureNullGraphicIfEmpty();
   void removeNullGraphicIfPresent();
 
+  // Pump the main-thread callback queue until it quiesces. Used during node
+  // teardown so queued callbacks that captured a node run while it is still
+  // alive, instead of dangling once the node is destroyed.
+  void flushPendingEvents();
+
   // Connection for root node bounds changes
   boost::signals2::connection m_rootBoundsConnection;
 };
