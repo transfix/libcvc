@@ -92,12 +92,9 @@ def test_volume_rawiv_roundtrip():
     v.set_float_grid(vals, nx, ny, nz, 0, 0, 0, 1, 1, 1)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "field.rawiv")
-        try:
-            v.save(path)
-        except RuntimeError:
-            # This libcvc build may not register the .rawiv volume handler;
-            # the field-building path (the core value) is covered above.
-            return
+        # .rawiv is the canonical CVC format and its handler is always
+        # registered, so save() must succeed for a fresh path.
+        v.save(path)
         assert os.path.getsize(path) > 0
         w = pycvc.Volume()
         w.load(path)
