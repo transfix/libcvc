@@ -42,3 +42,29 @@ add_test(
 set_tests_properties(pycvc_smoke PROPERTIES
   ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
 )
+
+# ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph) ──
+# Build cvcGL (the sibling scene-graph library) and a second SWIG module
+# that %imports pycvc for the Geometry/Volume types.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
+                 ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
+
+set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
+swig_add_library(pycvc_gl
+  LANGUAGE python
+  SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
+)
+target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pycvc_gl PRIVATE cvcGL cvc::cvc Python3::Module)
+set_target_properties(pycvc_gl PROPERTIES
+  SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+add_test(
+  NAME pycvc_gl_smoke
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py
+)
+set_tests_properties(pycvc_gl_smoke PROPERTIES
+  ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
+)
