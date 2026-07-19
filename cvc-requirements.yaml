@@ -24,6 +24,16 @@ components:
   - hdf5
   - log4cplus
   - tiff
+  # ImageMagick delegate libraries. The imagemagick recipe under-declares its
+  # dependencies (only zlib+tiff), so cvcpkg does not pull these into the
+  # prefix — which leaves the dependency closure incomplete and breaks loading
+  # on platforms without a matching system library (e.g. macOS fails to find
+  # @rpath/libjpeg.62.dylib). List them explicitly so the prefix is
+  # self-contained across platforms and does not fall back to system libs.
+  - libjpeg-turbo
+  - libpng
+  - libwebp
+  - freetype
   - imagemagick
   - yaml
   - levmar
