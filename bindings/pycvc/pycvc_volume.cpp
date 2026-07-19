@@ -99,6 +99,25 @@ ArrayView Volume::grid() {
   return v;
 }
 
+// cvc::voxels::cuda_data_ptr() only exists when libcvc was built with CUDA
+// (CVC_USING_CUDA is propagated via cvc::cvc's interface compile defs). On
+// host-only builds there is no GPU residency, so both report "host".
+bool Volume::on_gpu() const {
+#ifdef CVC_USING_CUDA
+  return vol_->cuda_data_ptr() != nullptr;
+#else
+  return false;
+#endif
+}
+
+unsigned long long Volume::cuda_ptr() const {
+#ifdef CVC_USING_CUDA
+  return reinterpret_cast<unsigned long long>(vol_->cuda_data_ptr());
+#else
+  return 0;
+#endif
+}
+
 void Volume::load(const std::string &filename) { cvc::readVolumeFile(ctx(), *vol_, filename); }
 void Volume::save(const std::string &filename) const {
   cvc::writeVolumeFile(ctx(), *vol_, filename);

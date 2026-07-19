@@ -197,6 +197,29 @@ def test_writer_reader_thread_consistency():
     assert 0.0 <= float(grid[0, 0, 0]) < 100.0
 
 
+# ── CUDA / unified-memory adapter ───────────────────────────────────
+
+
+def test_gpu_adapter_host_build_degrades_cleanly():
+    # libcvc stores GPU voxels in CUDA UNIFIED memory, so grid() (the host
+    # numpy view) works whether data is on CPU or GPU. __cuda_array_interface__
+    # additionally exposes the SAME unified buffer to cupy/torch on-device.
+    # On a CUDA-disabled build (or host-resident data), on_gpu() is False and
+    # there is no CUDA interface — the correct signal for GPU array libs.
+    vol = pycvc.Volume()
+    vol.set_float_grid([1.0] * 8, 2, 2, 2, 0, 0, 0, 1, 1, 1)
+    assert vol.on_gpu() is False
+    assert vol.cuda_ptr() == 0
+    try:
+        _ = vol.__cuda_array_interface__
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("host-resident volume must not expose CAI")
+    # the host numpy view is unaffected and would be identical for unified GPU
+    assert np.asarray(vol.grid()).shape == (2, 2, 2)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

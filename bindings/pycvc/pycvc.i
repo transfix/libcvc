@@ -97,3 +97,29 @@ namespace pycvc { struct ArrayView; }
 
 %include "pycvc_geometry.h"
 %include "pycvc_volume.h"
+
+// ── GPU adapter: expose a GPU-resident volume to cupy/torch/numba ───
+// When the voxels live in CUDA unified memory (on_gpu()), the same buffer
+// grid() views on the host is also device-accessible. __cuda_array_interface__
+// (CAI v3) lets GPU array libraries wrap it zero-copy on the device — so a
+// single unified allocation serves numpy (host) AND cupy (device) with no
+// copies. Raises AttributeError on host-only / CUDA-disabled builds, which is
+// the correct signal for those libraries.
+%extend pycvc::Volume {
+%pythoncode %{
+    @property
+    def __cuda_array_interface__(self):
+        if not self.on_gpu():
+            raise AttributeError(
+                "volume is not GPU-resident (CUDA-disabled build or host data); "
+                "use grid() for a host numpy view")
+        nz, ny, nx = self.zdim(), self.ydim(), self.xdim()
+        return {
+            "shape": (nz, ny, nx),
+            "typestr": "<f4",
+            "data": (self.cuda_ptr(), False),  # (ptr, read_only=False)
+            "version": 3,
+            "strides": None,                    # C-contiguous
+        }
+%}
+}
