@@ -56,6 +56,9 @@ swig_add_library(pycvc_gl
 )
 target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pycvc_gl PRIVATE cvcGL cvc::cvc Python3::Module)
+find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
+target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
 set_target_properties(pycvc_gl PROPERTIES
   SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"

@@ -29,6 +29,12 @@ public:
   std::size_t num_graphics() const;
   bool has(const std::string &name) const;
 
+  // ── Display (VTK render window, no Qt) ─────────────────────────────
+  // Open an interactive window and block until closed (needs a display).
+  void show(const std::string &title = "cvc lab", int width = 1024, int height = 768);
+  // Offscreen render of one frame to a PNG (needs a GL context).
+  void render_png(const std::string &path, int width = 1024, int height = 768);
+
 private:
   std::shared_ptr<SceneGraph> sg_;
 };
