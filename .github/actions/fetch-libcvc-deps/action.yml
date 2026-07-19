@@ -76,33 +76,41 @@ runs:
         fi
         # Resolve to an absolute, symlink-free directory so recorded paths are stable.
         libdir="$(cd "$libdir" && pwd -P)"
-        stale_re='(/cvcpkg-|/T/)[^ ]*/install/lib/[^ ]*\.dylib'
         fixed=0
         while IFS= read -r lib; do
           leaf="$(basename "$lib")"
           # 1) Point this dylib's own id at its real absolute location.
           install_name_tool -id "$libdir/$leaf" "$lib" 2>/dev/null || true
-          # 2) Repoint any load command that still targets an ephemeral cvcpkg
-          #    temp prefix to the sibling dylib's real location (when present).
+          # 2) Repoint every load command that resolves to a library we ship in
+          #    this prefix to that library's real absolute location — regardless
+          #    of whether it currently reads as an ephemeral cvcpkg temp path,
+          #    @rpath/…, or @loader_path/… . This makes the dependency graph
+          #    fully self-resolving without relying on any consumer's RPATH.
+          #    System libraries (/usr/lib, /System) are left untouched.
           while IFS= read -r dep; do
             case "$dep" in
-              */cvcpkg-*/install/lib/*.dylib | */T/*/install/lib/*.dylib)
-                dleaf="$(basename "$dep")"
-                if [ -e "$libdir/$dleaf" ]; then
-                  install_name_tool -change "$dep" "$libdir/$dleaf" "$lib" 2>/dev/null || true
-                fi
-                ;;
+              /usr/lib/* | /System/*) continue ;;
             esac
+            dleaf="$(basename "$dep")"
+            if [ "$dep" != "$libdir/$dleaf" ] && [ -e "$libdir/$dleaf" ]; then
+              install_name_tool -change "$dep" "$libdir/$dleaf" "$lib" 2>/dev/null || true
+            fi
           done < <(otool -L "$lib" | awk 'NR>1{print $1}')
           # 3) Re-sign ad-hoc; install_name_tool voids the signature on arm64.
           codesign --force --sign - "$lib" 2>/dev/null || true
           fixed=$((fixed + 1))
         done < <(find "$libdir" -maxdepth 1 -type f -name '*.dylib')
         echo "Canonicalized install names for $fixed dylib(s) under $libdir"
-        # Fail loudly if any dylib still references an ephemeral temp prefix.
-        leftover="$(find "$libdir" -maxdepth 1 -type f -name '*.dylib' \
-          -exec sh -c 'otool -L "$1" | grep -Eq "'"$stale_re"'" && echo "$1"' _ {} \; || true)"
-        if [ -n "$leftover" ]; then
-          echo "::warning::dylibs still referencing an ephemeral cvcpkg temp prefix:"
-          echo "$leftover"
-        fi
+        # Warn if any shipped dylib still resolves a dependency via @rpath/
+        # @loader_path whose target we actually ship here (would need consumer
+        # RPATH to load). Not fatal — the build also sets CMAKE_BUILD_RPATH.
+        while IFS= read -r lib; do
+          otool -L "$lib" | awk 'NR>1{print $1}' | while IFS= read -r dep; do
+            case "$dep" in
+              @rpath/* | @loader_path/*)
+                dleaf="$(basename "$dep")"
+                [ -e "$libdir/$dleaf" ] && echo "::warning::$(basename "$lib") still uses $dep"
+                ;;
+            esac
+          done
+        done < <(find "$libdir" -maxdepth 1 -type f -name '*.dylib') || true

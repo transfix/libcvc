@@ -368,8 +368,14 @@ jobs:
             deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           export CMAKE_PREFIX_PATH="$deps_path"
+          # Put the cvcpkg dep libdir on the build RPATH so any dependency that
+          # is referenced via @rpath (e.g. ImageMagick's libjpeg) resolves when
+          # gtest_discover_tests launches the freshly built test exes. The
+          # fetch step also canonicalizes dep install names, but this covers
+          # any @rpath load command that survives in our own binaries.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_BUILD_RPATH="$deps_path/lib" \
             -DCVC_BUILD_TESTS=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=OFF \
