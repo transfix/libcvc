@@ -52,3 +52,57 @@ runs:
         build_type: ${{ inputs.build_type }}
         link: ${{ inputs.link }}
         prefix: ${{ inputs.prefix }}
+
+    # cvcpkg builds each dependency in an ephemeral temp prefix and bakes that
+    # absolute path into every dylib's install name (LC_ID_DYLIB) and into its
+    # cross-dependency load commands. Once the temp dir is gone, anything that
+    # links these dylibs fails to load them — e.g. gtest_discover_tests runs a
+    # freshly built test exe at build time and aborts with
+    #   dyld: Library not loaded: /.../T/cvcpkg-gmp-*/install/lib/libgmpxx.4.dylib
+    # which fails the whole macOS build. Rewrite each install name to the
+    # dylib's real, stable location in the fetched prefix (and repoint stale
+    # cross-references there) so every binary that subsequently links them
+    # records a path that still exists. install_name_tool invalidates the
+    # code signature on arm64, so re-sign ad-hoc afterwards.
+    - name: Canonicalize macOS dep dylib install names
+      if: runner.os == 'macOS' && steps.cvcpkg.outputs.path != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        libdir="${{ steps.cvcpkg.outputs.path }}/lib"
+        if [ ! -d "$libdir" ]; then
+          echo "no lib dir at $libdir; nothing to canonicalize"
+          exit 0
+        fi
+        # Resolve to an absolute, symlink-free directory so recorded paths are stable.
+        libdir="$(cd "$libdir" && pwd -P)"
+        stale_re='(/cvcpkg-|/T/)[^ ]*/install/lib/[^ ]*\.dylib'
+        fixed=0
+        while IFS= read -r lib; do
+          leaf="$(basename "$lib")"
+          # 1) Point this dylib's own id at its real absolute location.
+          install_name_tool -id "$libdir/$leaf" "$lib" 2>/dev/null || true
+          # 2) Repoint any load command that still targets an ephemeral cvcpkg
+          #    temp prefix to the sibling dylib's real location (when present).
+          while IFS= read -r dep; do
+            case "$dep" in
+              */cvcpkg-*/install/lib/*.dylib | */T/*/install/lib/*.dylib)
+                dleaf="$(basename "$dep")"
+                if [ -e "$libdir/$dleaf" ]; then
+                  install_name_tool -change "$dep" "$libdir/$dleaf" "$lib" 2>/dev/null || true
+                fi
+                ;;
+            esac
+          done < <(otool -L "$lib" | awk 'NR>1{print $1}')
+          # 3) Re-sign ad-hoc; install_name_tool voids the signature on arm64.
+          codesign --force --sign - "$lib" 2>/dev/null || true
+          fixed=$((fixed + 1))
+        done < <(find "$libdir" -maxdepth 1 -type f -name '*.dylib')
+        echo "Canonicalized install names for $fixed dylib(s) under $libdir"
+        # Fail loudly if any dylib still references an ephemeral temp prefix.
+        leftover="$(find "$libdir" -maxdepth 1 -type f -name '*.dylib' \
+          -exec sh -c 'otool -L "$1" | grep -Eq "'"$stale_re"'" && echo "$1"' _ {} \; || true)"
+        if [ -n "$leftover" ]; then
+          echo "::warning::dylibs still referencing an ephemeral cvcpkg temp prefix:"
+          echo "$leftover"
+        fi
