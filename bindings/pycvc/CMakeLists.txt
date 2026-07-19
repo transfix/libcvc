@@ -22,7 +22,7 @@ set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
 
 swig_add_library(pycvc
   LANGUAGE python
-  SOURCES pycvc.i pycvc_geometry.cpp
+  SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
 )
 target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pycvc PRIVATE cvc::cvc Python3::Module)

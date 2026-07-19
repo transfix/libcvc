@@ -8,6 +8,7 @@
 
 %{
 #include "pycvc_geometry.h"
+#include "pycvc_volume.h"
 %}
 
 %include <std_string.i>
@@ -16,11 +17,16 @@
 
 // Surface C++ exceptions (e.g. bad array lengths, unreadable files) as
 // Python exceptions instead of aborting the interpreter.
+// cvc exceptions derive from boost::exception (NOT std::exception), so the
+// catch(...) fallback is required to translate them into Python errors
+// instead of std::terminate.
 %exception {
   try {
     $action
   } catch (const std::exception& e) {
     SWIG_exception(SWIG_RuntimeError, e.what());
+  } catch (...) {
+    SWIG_exception(SWIG_RuntimeError, "pycvc: C++ exception (see libcvc)");
   }
 }
 
@@ -29,8 +35,10 @@ namespace std {
   %template(IndexVector) vector<unsigned long>;
 }
 
-// native() exposes cvc::geometry (an opaque, forward-declared type) for
-// C++ host apps only — not meaningful from Python.
+// native() exposes an opaque, forward-declared cvc type for C++ host apps
+// only — not meaningful from Python.
 %ignore pycvc::Geometry::native;
+%ignore pycvc::Volume::native;
 
 %include "pycvc_geometry.h"
+%include "pycvc_volume.h"
