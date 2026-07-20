@@ -33,6 +33,16 @@ depends:
     - name: log4cplus
     - name: tiff
     - name: imagemagick
+    # ImageMagick delegates + libtiff codecs. The imagemagick and tiff recipes
+    # under-declare these, so without listing them here the installed prefix is
+    # missing libjpeg/libpng/libwebp/freetype/libxml2 and only loads where a
+    # matching system library happens to exist — which is why macOS could not
+    # resolve @rpath/libjpeg.62.dylib / libxml2. (gmp/mpfr arrive via cgal.)
+    - name: libjpeg-turbo
+    - name: libpng
+    - name: libwebp
+    - name: freetype
+    - name: libxml2
     - name: yaml
     - name: levmar
     - name: libiimod
