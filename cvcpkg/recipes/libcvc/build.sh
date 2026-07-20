@@ -31,6 +31,11 @@ CMAKE_ARGS=(
   -DCVC_BUILD_TESTS=OFF
   -DCVC_ENABLE_CUDA=OFF
   -DCVC_ENABLE_GRPC=OFF
+  # Build + install the pycvc Python bindings into the prefix site-packages,
+  # so a published libcvc bundle carries `import pycvc`. Needs swig, a Python
+  # dev interpreter, and numpy in the deps prefix (see recipe.yaml depends).
+  # Overridable (e.g. CVC_WITH_PYCVC=OFF for a bindings-free variant).
+  -DCVC_BUILD_PYCVC="${CVC_WITH_PYCVC:-ON}"
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then

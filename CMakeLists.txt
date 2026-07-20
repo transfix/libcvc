@@ -270,6 +270,14 @@ endif()
 
 add_subdirectory(src)
 
+# ************* pycvc Python bindings (opt-in) *************
+# Off by default so a plain libcvc build needs neither SWIG nor Python.
+# Enabled by the cvcpkg recipe so the published bundle carries `import pycvc`.
+option(CVC_BUILD_PYCVC "Build and install the pycvc Python bindings" OFF)
+if(CVC_BUILD_PYCVC)
+  add_subdirectory(bindings/pycvc)
+endif()
+
 # ************* Install documentation & resources *************
 install(FILES README.md USAGE.md LICENSE
   DESTINATION ${CMAKE_INSTALL_DOCDIR}
