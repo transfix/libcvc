@@ -85,9 +85,15 @@ double Volume::ymax() const { return vol_->YMax(); }
 double Volume::zmin() const { return vol_->ZMin(); }
 double Volume::zmax() const { return vol_->ZMax(); }
 
-void Volume::load(const std::string &filename) { cvc::readVolumeFile(ctx(), *vol_, filename); }
+void Volume::load(const std::string &filename) { vol_->read(filename); }
 void Volume::save(const std::string &filename) const {
-  cvc::writeVolumeFile(ctx(), *vol_, filename);
+  // Delegate to cvc::volume::write(), which first createVolumeFile()s the
+  // (possibly non-existent) target and then fills it in. The free-function
+  // writeVolumeFile(app, vol, filename) overload used previously writes only
+  // into an *already existing* file, so for a fresh path the format handler
+  // threw while trying to read the missing file — surfacing as
+  // unsupported_volume_file_type even though the handler was registered.
+  vol_->write(filename);
 }
 
 cvc::volume &Volume::native() { return *vol_; }
