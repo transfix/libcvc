@@ -118,6 +118,37 @@ unsigned long long Volume::cuda_ptr() const {
 #endif
 }
 
+bool Volume::cuda_available() {
+#ifdef CVC_USING_CUDA
+  return cvc::voxels::cuda_available();
+#else
+  return false;
+#endif
+}
+
+void Volume::enable_cuda(int device) {
+#ifdef CVC_USING_CUDA
+  vol_->enableCUDA(device);
+#else
+  (void)device;
+  throw std::runtime_error("enable_cuda: this libcvc build has CUDA disabled");
+#endif
+}
+
+void Volume::disable_cuda() {
+#ifdef CVC_USING_CUDA
+  vol_->disableCUDA();
+#endif
+}
+
+bool Volume::using_cuda() const {
+#ifdef CVC_USING_CUDA
+  return vol_->using_cuda();
+#else
+  return false;
+#endif
+}
+
 void Volume::load(const std::string &filename) { cvc::readVolumeFile(ctx(), *vol_, filename); }
 void Volume::save(const std::string &filename) const {
   cvc::writeVolumeFile(ctx(), *vol_, filename);

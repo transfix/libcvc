@@ -66,6 +66,16 @@ public:
   bool on_gpu() const;
   unsigned long long cuda_ptr() const;
 
+  // Move this volume's voxels into CUDA unified memory (enable_cuda) or back
+  // to host (disable_cuda). After enable_cuda(), on_gpu() is True and the
+  // same buffer is both host-accessible (grid()/numpy) and device-accessible
+  // (cuda_ptr()/__cuda_array_interface__). No-op alternative to check first:
+  // cuda_available() reports whether this build+machine can use the GPU.
+  static bool cuda_available();
+  void enable_cuda(int device = -1);
+  void disable_cuda();
+  bool using_cuda() const;
+
   // File I/O (.rawiv and friends, via cvc::volume_file_io).
   void load(const std::string &filename);
   void save(const std::string &filename) const;

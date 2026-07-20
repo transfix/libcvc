@@ -224,6 +224,32 @@ def test_threading_shared_object_views():
     assert not errors, errors
 
 
+def test_cuda_unified_memory():
+    # Skips cleanly on CUDA-disabled builds / GPU-less machines. On a CUDA
+    # build with a GPU it proves the single unified allocation serves numpy
+    # (host) AND __cuda_array_interface__ (device) with no copies.
+    if not pycvc.Volume.cuda_available():
+        return
+    nx, ny, nz = 4, 4, 4
+    vol = pycvc.Volume()
+    vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
+    assert vol.on_gpu() is False  # host-resident by default
+    vol.enable_cuda()
+    assert vol.using_cuda() and vol.on_gpu()
+    # host numpy view of the SAME unified buffer, zero-copy, writable
+    g = vol.grid()
+    g[0, 0, 0] = 77.0
+    assert vol.value(0, 0, 0) == 77.0  # host write migrates + reflects
+    # device interface for cupy/torch — same buffer, on-device zero-copy
+    cai = vol.__cuda_array_interface__
+    assert cai["shape"] == (nz, ny, nx)
+    assert cai["typestr"] == "<f4"
+    assert cai["data"][0] != 0  # valid device pointer
+    vol.disable_cuda()
+    assert vol.using_cuda() is False and vol.on_gpu() is False
+    assert vol.value(0, 0, 0) == 77.0  # data preserved back on host
+
+
 if __name__ == "__main__":
     test_incremental_build()
     test_bulk_build_and_lines()
@@ -239,4 +265,5 @@ if __name__ == "__main__":
     test_volume_grid_view()
     test_threading_concurrent_build_and_view()
     test_threading_shared_object_views()
+    test_cuda_unified_memory()
     print("pycvc smoke test: OK")
