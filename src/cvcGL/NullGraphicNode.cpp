@@ -122,9 +122,6 @@ void NullGraphicNode::syncBoundsToChildren() {
   if (!m_syncBoundsWithChildren)
     return;
 
-  std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Syncing bounds for node '"
-            << getName() << "', children count: " << m_graphicsChildren.size() << std::endl;
-
   // Calculate combined bounds of all children (without including our own bounds)
   double acc_minx = std::numeric_limits<double>::max();
   double acc_miny = std::numeric_limits<double>::max();
@@ -179,10 +176,6 @@ void NullGraphicNode::syncBoundsToChildren() {
   // Update bounds to match children (if we have any valid children)
   if (hasChildren && acc_minx <= acc_maxx && acc_miny <= acc_maxy && acc_minz <= acc_maxz) {
     m_bounds = cvc::bounding_box(acc_minx, acc_miny, acc_minz, acc_maxx, acc_maxy, acc_maxz);
-
-    std::cout << "[DEBUG] NullGraphicNode::syncBoundsToChildren - Updated bounds to [" << acc_minx
-              << "," << acc_miny << "," << acc_minz << "] to [" << acc_maxx << "," << acc_maxy
-              << "," << acc_maxz << "]" << std::endl;
 
     // Update state tree
     std::ostringstream oss;

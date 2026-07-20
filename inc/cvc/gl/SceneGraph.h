@@ -194,9 +194,6 @@ private:
   // Null graphic management
   void ensureNullGraphicIfEmpty();
   void removeNullGraphicIfPresent();
-
-  // Connection for root node bounds changes
-  boost::signals2::connection m_rootBoundsConnection;
 };
 
 #endif // SCENEGRAPH_H
