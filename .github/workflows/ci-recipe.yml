@@ -5,10 +5,10 @@ name: CI (recipe-first) [DRAFT]
 #
 # This is the intended replacement for the apt + cvc-requirements.yaml +
 # hand-written `cmake` steps in ci.yml. Instead it builds libcvc from its
-# in-tree cvcpkg recipe (recipes/libcvc/), which declares the full
+# in-tree cvcpkg recipe (cvcpkg/recipes/libcvc/), which declares the full
 # third-party closure — so the same recipe a developer runs locally
 #
-#     cvcpkg build libcvc --recipes-dir recipes --prefix /tmp/libcvc
+#     cvcpkg build libcvc --recipes-dir cvcpkg/recipes --prefix /tmp/libcvc
 #
 # is exactly what CI runs. No apt/brew library installs; cvcpkg is the sole
 # source of third-party deps on every platform.
@@ -71,7 +71,7 @@ jobs:
             extra="--fallback-to-source"
           fi
           cvcpkg build libcvc \
-            --recipes-dir recipes \
+            --recipes-dir cvcpkg/recipes \
             --prefix "${{ runner.temp }}/libcvc" \
             --config "$config" \
             $extra
