@@ -19,16 +19,16 @@
 #include <vtkRenderer.h>
 
 SceneGraph::SceneGraph(const std::string &statePrefix)
-    : m_renderer(nullptr), m_statePrefix(statePrefix), m_gridNode(nullptr), m_axisNode(nullptr),
-      m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
-      m_renderNeeded(false) {
+    : m_renderer(nullptr), m_statePrefix(statePrefix), m_ownerThread(std::this_thread::get_id()),
+      m_gridNode(nullptr), m_axisNode(nullptr), m_graphicsRoot(nullptr), m_nullGraphic(nullptr),
+      m_multiVolumeRenderingEnabled(false), m_renderNeeded(false) {
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
   m_nullGraphic = std::make_shared<NullGraphicNode>(cvc::gl::context(), rootStatePath, "root");
 
-  // Set SceneGraph reference IMMEDIATELY after construction
-  // This enables threading for event posting (nodes disable threading in constructor)
+  // Attach the root (and, recursively, its children) to this SceneGraph so their
+  // runOnMainThread() work marshals through this scene's pump / owner thread.
   m_nullGraphic->setSceneGraph(this);
 
   m_nullGraphic->setShowBBox(true);                          // Show bbox by default
@@ -358,10 +358,13 @@ void SceneGraph::removeGraphics(const std::string &name) {
 
   auto graphicsNode = it->second;
 
-  // Remove from graphics root
+  // Unlink from the graphics root and drop it from the lookup map. This may drop
+  // the last reference and destroy the node. That is safe: scene nodes run their
+  // state handlers synchronously (no handler thread can be touching this node),
+  // and any main-thread callback still queued for it is weak-guarded (see
+  // SceneNode::runOnMainThread), so it becomes a no-op once the node is gone.
+  // No drain or join is needed — teardown here is race-free by construction.
   m_graphicsRoot->removeGraphicsChild(graphicsNode);
-
-  // Remove from lookup map
   m_graphicsNodes.erase(it);
 
   // Explicitly notify state tree that children have changed
@@ -377,8 +380,6 @@ void SceneGraph::removeGraphics(const std::string &name) {
 
   // If scene is now empty, add null graphic back
   ensureNullGraphicIfEmpty();
-
-  // Note: No manual sync needed - state_object handles state tree automatically
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string &name) {

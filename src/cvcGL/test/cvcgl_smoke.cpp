@@ -2,8 +2,7 @@
 // node, run the re-pumpable pump (no Qt loop, no VTK renderer), and query.
 // Proves the extracted scene graph is usable standalone / SWIG-drivable.
 //
-// (removeGraphics() is intentionally not exercised: it segfaults in a
-// headless no-renderer context — tracked as a follow-up.)
+// (The headless add + remove path is exercised separately by cvcgl_remove.)
 #include <cassert>
 #include <cstdio>
 #include <cvc/geometry/geometry.h>

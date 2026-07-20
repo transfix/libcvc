@@ -6,59 +6,47 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
-// Static member for main thread callback (DEPRECATED - use SceneGraph event queue)
-SceneNode::MainThreadCallback SceneNode::s_mainThreadCallback;
-
-void SceneNode::setMainThreadCallback(MainThreadCallback callback) {
-  s_mainThreadCallback = callback;
-}
-
 void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
   m_sceneGraph = sceneGraph;
 
-  // Enable threading now that we have a SceneGraph for event posting
-  // If sceneGraph is null (cleanup), use static threading setting
-  if (sceneGraph) {
-    setInstanceThreading(state_object<SceneNode>::getUseThreading());
-  } else {
-    clearInstanceThreading();
-  }
-
-  // Propagate to all children
+  // Propagate to all children so they marshal through the same pump.
   for (auto &child : m_children) {
     child->setSceneGraph(sceneGraph);
   }
 }
 
 void SceneNode::runOnMainThread(std::function<void()> func) {
-  // If threading is disabled (tests or during construction), execute immediately
-  if (!getInstanceThreading()) {
+  // On the owner thread (or not yet attached to a SceneGraph): run inline. The
+  // node is alive and we are on the render/owner thread, so VTK work happens
+  // immediately and in order. This matters for teardown: removing a node runs
+  // its removeFromRenderer() synchronously, pulling its prop from the renderer
+  // *before* the node is destroyed — never leaving a dangling prop behind.
+  if (!m_sceneGraph || m_sceneGraph->onOwnerThread()) {
     func();
     return;
   }
 
-  // Try node's SceneGraph event queue first (production with threading)
-  if (m_sceneGraph) {
-    m_sceneGraph->postEvent(std::move(func));
-    return;
-  }
-
-  // Fallback to old callback system (for Qt-based scenarios without SceneGraph)
-  if (s_mainThreadCallback) {
-    s_mainThreadCallback(func);
-    return;
-  }
-
-  // No queue or callback available - execute immediately as last resort
-  // This should rarely happen in production
-  func();
+  // Off the owner thread: marshal to it via the event queue (drained by
+  // processEvents()). Guard the callback with a weak_ptr to this node so that if
+  // the node is destroyed before the callback runs, it is skipped rather than
+  // dereferencing a freed `this`. This keeps cross-thread marshalling safe
+  // across teardown: a destroyed node's still-queued callbacks become no-ops.
+  std::weak_ptr<SceneNode> weak = weak_from_this();
+  m_sceneGraph->postEvent([weak, func = std::move(func)]() {
+    if (auto self = weak.lock()) {
+      func();
+    }
+  });
 }
 
 SceneNode::SceneNode(cvc::app &ctx, const std::string &statePath)
     : state_object<SceneNode>(ctx, statePath), m_visible(true), m_renderer(nullptr),
       m_sceneGraph(nullptr) {
-  // Disable threading for this instance during construction
-  // Will be enabled when SceneGraph reference is set
+  // Scene nodes run their state handlers synchronously on the caller's thread —
+  // never on a background thread spawned by state_object. This is permanent (it
+  // is never re-enabled) and is half of the teardown-safety contract: no library
+  // thread can be mid-handleStateChanged() on a node while it is being destroyed.
+  // See the class comment in SceneNode.h.
   setInstanceThreading(false);
   // Initialize visible state
   if (!statePath.empty()) {
