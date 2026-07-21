@@ -57,6 +57,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
 # must be on the loader path; the dual-mode cvc target's output dir works both
 # in-tree (a built target) and standalone (an imported target).
 enable_testing()
+# ctest: base pycvc (facades + zero-copy numpy views).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
 foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
   string(REPLACE ":" ";" _pair "${_t}")
@@ -67,3 +68,31 @@ foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
   set_tests_properties(${_name} PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endforeach()
+
+# ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph) ──
+# Build cvcGL (the sibling scene-graph library) and a second SWIG module.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
+                 ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
+
+set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
+swig_add_library(pycvc_gl
+  LANGUAGE python
+  SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
+)
+target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pycvc_gl PRIVATE cvcGL ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
+find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
+target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
+set_target_properties(pycvc_gl PROPERTIES
+  SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
+  DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
+
+add_test(NAME pycvc_gl_smoke
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
+set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
+  "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:cvcGL>:${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
