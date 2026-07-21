@@ -417,7 +417,12 @@ jobs:
 
   # ──────────────────────────── Windows packaging ────────────────────────────
   package-windows:
-    runs-on: windows-latest
+    # windows-2022 (VS2022 v143) pinned deliberately: windows-latest now ships
+    # VS2026 (v180), whose CL.exe ICEs (0xC0000005) building libcvc's C++20
+    # state_exec/distributed-state TUs (cvc.vcxproj) — the "image flip" failure.
+    # This mirrors the pin already applied to publish-cvcpkg.yml (which noted the
+    # same root cause here); ci.yml was missed. Revisit when v180 stabilizes.
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
