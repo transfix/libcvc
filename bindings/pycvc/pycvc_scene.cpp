@@ -4,7 +4,6 @@
 #include "pycvc_volume.h"
 
 #include <cvc/gl/SceneGraph.h>
-
 #include <vtkNew.h>
 #include <vtkPNGWriter.h>
 #include <vtkRenderWindow.h>
@@ -33,13 +32,13 @@ void Scene::show(const std::string &title, int width, int height) {
   window->AddRenderer(renderer);
   window->SetSize(width, height);
   window->SetWindowName(title.c_str());
-  sg_->setRenderer(renderer);  // attaches all node actors
+  sg_->setRenderer(renderer); // attaches all node actors
   sg_->processEvents();
   renderer->ResetCamera();
   vtkNew<vtkRenderWindowInteractor> interactor;
   interactor->SetRenderWindow(window);
   window->Render();
-  interactor->Start();  // blocks until the window closes
+  interactor->Start(); // blocks until the window closes
 }
 
 void Scene::render_png(const std::string &path, int width, int height) {
