@@ -20,6 +20,7 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include <algorithm>
 #include <atomic>
 #include <boost/thread.hpp>
 #include <chrono>
@@ -29,10 +30,9 @@
 #include <cvc/utility/composite_function.h>
 #include <cvc/volume/voxels.h>
 #include <gtest/gtest.h>
-#include <algorithm>
 #include <iomanip>
-#include <limits>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
