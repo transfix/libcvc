@@ -11,6 +11,8 @@
 // native() in C++ — that accessor is %ignore'd on the Python side.
 #pragma once
 
+#include "pycvc_buffer.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -45,6 +47,12 @@ public:
   std::size_t num_vertices() const;
   std::size_t num_triangles() const;
   std::size_t num_lines() const;
+
+  // Zero-copy numpy views (no data copy; numpy keeps the geometry alive via
+  // a shared_ptr in the returned array's base). Writable: mutating the numpy
+  // array edits the mesh in place.
+  ArrayView vertices();      // (num_vertices, 3) float64
+  ArrayView vertex_colors(); // (num_vertices, 3) float64; empty if unset
 
   void compute_normals();
   void clear();
