@@ -129,6 +129,12 @@ voxels &voxels::anisotropicDiffusion(unsigned int iterations) {
   }
 
   _ctx.threadProgress(1.0f);
+  // Required: tempt was written through the voxel setter, which maintains an
+  // EXPANDING min/max cache that still includes tempt's initial zero-fill —
+  // copy(tempt) then imports those contaminated bounds into *this (regression
+  // test proves stale values without this). Invalidate so the next min()/max()
+  // scans the actual diffused data (see bilateral_filter.cpp).
+  unsetMinMax();
   return *this;
 }
 } // namespace cvc

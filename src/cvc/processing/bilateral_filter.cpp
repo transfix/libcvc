@@ -158,6 +158,14 @@ voxels &voxels::bilateralFilter(double radiometricSigma, double spatialSigma,
 
   _ctx.threadProgress(1.0f);
   delete[] spatialMask;
+
+  // The loop above wrote through the raw data pointer, bypassing preWrite()
+  // (which only dirties the histogram, not the min/max cache) — and min()/
+  // max() were called before filtering, so the cache holds PRE-filter bounds.
+  // Invalidate so the next min()/max() recomputes from the filtered data
+  // (e.g. a bilateralFilter -> vol_normalize pipeline stretches correctly).
+  // The CUDA path above is safe as-is: copy(result) imports-or-unsets.
+  unsetMinMax();
   return *this;
 }
 }; // namespace cvc

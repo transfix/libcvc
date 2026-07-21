@@ -650,6 +650,11 @@ voxels &voxels::gdtvFilter(double parameterq, double lambda, unsigned int iterat
   }
 
   *this = filter;
+  // Required: 'filter' was written through the voxel setter, whose expanding
+  // min/max cache still includes its initial fill values; operator=/copy()
+  // imports those contaminated bounds (regression test proves stale values
+  // without this). Invalidate so min()/max() reflect the filtered data.
+  unsetMinMax();
   return *this;
 }
 } // namespace cvc
