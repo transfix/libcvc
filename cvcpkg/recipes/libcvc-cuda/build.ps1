@@ -1,4 +1,4 @@
-# cvcpkg/recipes/libcvc/build.ps1 - build libcvc from the in-repo source tree.
+# cvcpkg/recipes/libcvc-cuda/build.ps1 - build libcvc from the in-repo source tree.
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:CVC_SOURCE_DIR) { throw 'CVC_SOURCE_DIR must be set' }

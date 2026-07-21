@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cvcpkg/recipes/libcvc/build.sh - build libcvc from the in-repo source tree.
+# cvcpkg/recipes/libcvc-cuda/build.sh - build libcvc from the in-repo source tree.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"
