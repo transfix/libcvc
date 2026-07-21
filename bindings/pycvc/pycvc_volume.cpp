@@ -85,9 +85,79 @@ double Volume::ymax() const { return vol_->YMax(); }
 double Volume::zmin() const { return vol_->ZMin(); }
 double Volume::zmax() const { return vol_->ZMax(); }
 
-void Volume::load(const std::string &filename) { cvc::readVolumeFile(ctx(), *vol_, filename); }
+ArrayView Volume::grid() {
+  if (vol_->voxelType() != cvc::Float)
+    throw std::invalid_argument("grid(): zero-copy view requires a Float volume");
+  ArrayView v;
+  v.dtype = DType::Float32;
+  v.writable = true;
+  // Row-major (nz, ny, nx): index = ((k*ny)+j)*nx + i matches operator()(i,j,k).
+  v.shape = {static_cast<long>(vol_->ZDim()), static_cast<long>(vol_->YDim()),
+             static_cast<long>(vol_->XDim())};
+  v.data = vol_->data_ptr();
+  v.owner = vol_; // shared_ptr<cvc::volume> -> shared_ptr<void>
+  return v;
+}
+
+// cvc::voxels::cuda_data_ptr() only exists when libcvc was built with CUDA
+// (CVC_USING_CUDA is propagated via cvc::cvc's interface compile defs). On
+// host-only builds there is no GPU residency, so both report "host".
+bool Volume::on_gpu() const {
+#ifdef CVC_USING_CUDA
+  return vol_->cuda_data_ptr() != nullptr;
+#else
+  return false;
+#endif
+}
+
+unsigned long long Volume::cuda_ptr() const {
+#ifdef CVC_USING_CUDA
+  return reinterpret_cast<unsigned long long>(vol_->cuda_data_ptr());
+#else
+  return 0;
+#endif
+}
+
+bool Volume::cuda_available() {
+#ifdef CVC_USING_CUDA
+  return cvc::voxels::cuda_available();
+#else
+  return false;
+#endif
+}
+
+void Volume::enable_cuda(int device) {
+#ifdef CVC_USING_CUDA
+  vol_->enableCUDA(device);
+#else
+  (void)device;
+  throw std::runtime_error("enable_cuda: this libcvc build has CUDA disabled");
+#endif
+}
+
+void Volume::disable_cuda() {
+#ifdef CVC_USING_CUDA
+  vol_->disableCUDA();
+#endif
+}
+
+bool Volume::using_cuda() const {
+#ifdef CVC_USING_CUDA
+  return vol_->using_cuda();
+#else
+  return false;
+#endif
+}
+
+void Volume::load(const std::string &filename) { vol_->read(filename); }
 void Volume::save(const std::string &filename) const {
-  cvc::writeVolumeFile(ctx(), *vol_, filename);
+  // Delegate to cvc::volume::write(), which first createVolumeFile()s the
+  // (possibly non-existent) target and then fills it in. The free-function
+  // writeVolumeFile(app, vol, filename) overload used previously writes only
+  // into an *already existing* file, so for a fresh path the format handler
+  // threw while trying to read the missing file — surfacing as
+  // unsupported_volume_file_type even though the handler was registered.
+  vol_->write(filename);
 }
 
 cvc::volume &Volume::native() { return *vol_; }

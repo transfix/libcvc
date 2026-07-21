@@ -22,8 +22,15 @@ source:
 patches: []
 
 depends:
-  build: []
+  build:
+    # pycvc bindings (CVC_BUILD_PYCVC=ON): SWIG generates the wrapper, the
+    # Python dev interpreter supplies headers, numpy supplies its C API.
+    - name: python311
+    - name: numpy-cp311
   runtime:
+    # pycvc runs against this interpreter + numpy from the same prefix.
+    - name: python311
+    - name: numpy-cp311
     - name: zlib
     - name: boost
     - name: fftw3
@@ -33,6 +40,16 @@ depends:
     - name: log4cplus
     - name: tiff
     - name: imagemagick
+    # ImageMagick delegates + libtiff codecs. The imagemagick and tiff recipes
+    # under-declare these, so without listing them here the installed prefix is
+    # missing libjpeg/libpng/libwebp/freetype/libxml2 and only loads where a
+    # matching system library happens to exist — which is why macOS could not
+    # resolve @rpath/libjpeg.62.dylib / libxml2. (gmp/mpfr arrive via cgal.)
+    - name: libjpeg-turbo
+    - name: libpng
+    - name: libwebp
+    - name: freetype
+    - name: libxml2
     - name: yaml
     - name: levmar
     - name: libiimod
@@ -48,6 +65,8 @@ depends:
   host_tools:
     - cmake
     - ninja
+    - swig
+    - python311
 
 build:
   matrix:

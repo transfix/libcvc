@@ -7,6 +7,8 @@
 // cvc::volume; only the .cpp includes libcvc).
 #pragma once
 
+#include "pycvc_buffer.h"
+
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -45,6 +47,34 @@ public:
   double ymax() const;
   double zmin() const;
   double zmax() const;
+
+  // Zero-copy numpy view of the voxel grid (no data copy; numpy keeps the
+  // volume alive via a shared_ptr in the array's base). Shape (nz, ny, nx),
+  // float32, writable. Requires a Float volume (as built by set_float_grid).
+  //
+  // Works for BOTH host and GPU data: libcvc stores GPU voxels in CUDA
+  // *unified* (managed) memory, so data_ptr() is host-accessible either way
+  // — numpy views it directly and CUDA migrates pages on host access. (If a
+  // GPU kernel is concurrently writing, the caller must synchronize first.)
+  ArrayView grid();
+
+  // GPU/CUDA support. on_gpu() is False on CUDA-disabled libcvc builds or
+  // when the voxels are host-resident. When True, cuda_ptr() is the
+  // device-accessible pointer to the same unified buffer grid() views —
+  // exposed to cupy/torch via __cuda_array_interface__ (see pycvc.i) for
+  // on-device zero-copy without host migration.
+  bool on_gpu() const;
+  unsigned long long cuda_ptr() const;
+
+  // Move this volume's voxels into CUDA unified memory (enable_cuda) or back
+  // to host (disable_cuda). After enable_cuda(), on_gpu() is True and the
+  // same buffer is both host-accessible (grid()/numpy) and device-accessible
+  // (cuda_ptr()/__cuda_array_interface__). No-op alternative to check first:
+  // cuda_available() reports whether this build+machine can use the GPU.
+  static bool cuda_available();
+  void enable_cuda(int device = -1);
+  void disable_cuda();
+  bool using_cuda() const;
 
   // File I/O (.rawiv and friends, via cvc::volume_file_io).
   void load(const std::string &filename);

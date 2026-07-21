@@ -21,6 +21,7 @@
   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/foreach.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
@@ -349,6 +350,22 @@ void writeVolumeFile(app &ctx, const volume &vol, const std::string &filename, u
   std::string objectName;
 
   boost::tie(actualFileName, objectName) = volume_file_io::splitRawFilename(filename);
+
+  // Writing a whole volume to a target that does not exist yet: create the
+  // file first from this volume's own metadata, then fall through to fill it
+  // in. The format handlers write *into* an already-existing file, so without
+  // this the handler fails to open the missing file and the error surfaces
+  // (misleadingly) as unsupported_volume_file_type. This mirrors what
+  // volume::write() and the std::vector<volume> overload already do, making
+  // the single-volume call robust for every SDK consumer. Partial writes
+  // (nonzero offset/var/time) still require the file to be created up front
+  // via createVolumeFile(), since a single chunk does not describe the full
+  // target geometry; those fall straight through to the handler as before.
+  if (var == 0 && time == 0 && off_x == 0 && off_y == 0 && off_z == 0 &&
+      !boost::filesystem::exists(actualFileName)) {
+    createVolumeFile(ctx, filename, vol.boundingBox(), vol.voxel_dimensions(),
+                     std::vector<data_type>(1, vol.voxelType()));
+  }
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
