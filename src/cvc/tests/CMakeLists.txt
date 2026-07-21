@@ -955,7 +955,12 @@ if(CVC_STATE_EXEC)
   gtest_discover_tests(state_exec_integration_test)
   gtest_discover_tests(state_exec_advanced_integration_test)
   if(TARGET state_exec_multiprocess_test)
-    gtest_discover_tests(state_exec_multiprocess_test)
+    # Forks real OS processes and replicates state over Unix-domain-socket IPC
+    # with internal pump deadlines. Under `ctest --parallel` on a loaded CI
+    # runner the forked children get starved and miss those windows, so
+    # StateTreeReplication intermittently fails all `until-pass` retries.
+    # RUN_SERIAL keeps this suite off the shared parallel scheduler.
+    gtest_discover_tests(state_exec_multiprocess_test PROPERTIES RUN_SERIAL TRUE)
   endif()
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
@@ -978,7 +983,9 @@ gtest_discover_tests(state_conflict_ring_test)
 gtest_discover_tests(state_zstd_round_trip_test)
 gtest_discover_tests(state_session_status_test)
 if(NOT WIN32)
-  gtest_discover_tests(state_multiprocess_ipc_test)
+  # Same fork()+IPC timing profile as state_exec_multiprocess_test — serialize
+  # so the parallel scheduler can't starve its socket/replication windows.
+  gtest_discover_tests(state_multiprocess_ipc_test PROPERTIES RUN_SERIAL TRUE)
   gtest_discover_tests(state_snapshot_protocol_test)
 endif()
 if(TARGET state_transport_grpc_test)
