@@ -24,7 +24,7 @@ endif()
 
 find_package(SWIG 4.0 REQUIRED COMPONENTS python)
 include(UseSWIG)
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
 set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
 # Re-run SWIG when a %include'd facade header changes (ninja otherwise keeps a
@@ -38,7 +38,7 @@ swig_add_library(pycvc
   SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
 )
 target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module)
+target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
 
 set_target_properties(pycvc PROPERTIES
   SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
@@ -53,15 +53,17 @@ install(TARGETS pycvc LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
   DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
 
-# ctest: import the module and exercise the facades end-to-end. Needs the
-# built libcvc on the loader path when run in-tree.
+# ctest: exercise the facades + zero-copy numpy views end-to-end. libcvc.so
+# must be on the loader path; the dual-mode cvc target's output dir works both
+# in-tree (a built target) and standalone (an imported target).
 enable_testing()
-add_test(
-  NAME pycvc_smoke
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc.py
-)
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
-set_tests_properties(pycvc_smoke PROPERTIES
-  ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}"
-)
+foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
+  string(REPLACE ":" ";" _pair "${_t}")
+  list(GET _pair 0 _name)
+  list(GET _pair 1 _script)
+  add_test(NAME ${_name}
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${_script})
+  set_tests_properties(${_name} PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+endforeach()
