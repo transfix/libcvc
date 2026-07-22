@@ -9,6 +9,8 @@
 %{
 #include "pycvc_geometry.h"
 #include "pycvc_volume.h"
+#include "pycvc_state.h"
+#include "pycvc_exec.h"
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
@@ -46,12 +48,14 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
 namespace std {
   %template(DoubleVector) vector<double>;
   %template(IndexVector) vector<unsigned long>;
+  %template(StringVector) vector<string>;
 }
 
 // native() exposes an opaque, forward-declared cvc type for C++ host apps
 // only — not meaningful from Python.
 %ignore pycvc::Geometry::native;
 %ignore pycvc::Volume::native;
+%ignore pycvc::State::native;
 
 // ── Zero-copy numpy views ──────────────────────────────────────────
 // A facade method returning a pycvc::ArrayView becomes a numpy array that
@@ -97,6 +101,8 @@ namespace pycvc { struct ArrayView; }
 
 %include "pycvc_geometry.h"
 %include "pycvc_volume.h"
+%include "pycvc_state.h"
+%include "pycvc_exec.h"
 
 // ── GPU adapter: expose a GPU-resident volume to cupy/torch/numba ───
 // When the voxels live in CUDA unified memory (on_gpu()), the same buffer
