@@ -196,6 +196,19 @@ public:
   const tets_t &tets() const { return const_tets(); }
   const hexs_t &hexs() const { return const_hexs(); }
 
+  // Non-detaching shared owners of the points/colors containers. Unlike
+  // points()/colors(), these do NOT pre_write() (no copy-on-write detach), so
+  // taking one does not decouple the caller from the live geometry. Holding
+  // the returned shared_ptr bumps the container's use count, so a subsequent
+  // mutation's pre_write()/make_unique() will COW-detach to a fresh copy —
+  // retiring THIS block to the holder instead of reallocating under it. Used
+  // by the Python bindings to make a zero-copy numpy view over the buffer
+  // fail SAFE across an append/clear (a valid, decoupled snapshot, never a
+  // dangling read) rather than pinning the whole geometry, which does not
+  // participate in the per-container COW refcount.
+  points_ptr_t points_ptr() const { return _points; }
+  colors_ptr_t colors_ptr() const { return _colors; }
+
   point_t min_point() const;
   point_t max_point() const;
   bounding_box extents() const;

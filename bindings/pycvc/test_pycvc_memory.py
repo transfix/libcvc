@@ -19,12 +19,15 @@ bindings, independent of any threading:
     `__cuda_array_interface__` data pointer. `enable_cuda`/`disable_cuda`
     *migrate* (reallocate) the buffer and free the previous block, so callers
     should re-fetch after each transition to stay coherent with the live data.
-  * Fail-safe stale views — `grid()` pins the EXACT block it views (not just
-    the volume facade), so a view taken before a migration (or before a
-    `set_float_grid()` that reallocates) never dangles: dereferencing it is a
-    valid, decoupled *snapshot* of the pre-migration data, never a segfault.
-    Re-fetching is still required for coherence with the live buffer, but a
-    missed re-fetch fails SAFE instead of faulting.
+  * Fail-safe stale views — a view pins the EXACT block it aliases, not the
+    owning facade: `grid()` pins the voxel block, `vertices()`/`vertex_colors()`
+    pin the specific points/colors container (which cvc::geometry copy-on-
+    writes). So a view taken before the buffer is reallocated — a CUDA
+    migration, a `set_float_grid()` rebuild, an `add_vertices()`/`set_colors()`
+    append, or a `clear()` — never dangles: dereferencing it is a valid,
+    decoupled *snapshot* of the pre-mutation data, never a segfault. Re-fetching
+    is still required for coherence with the live buffer, but a missed re-fetch
+    fails SAFE instead of faulting.
 
 Style matches the sibling test files: plain asserts + prints, run under
 `__main__`; any failure raises and exits nonzero.
@@ -208,9 +211,11 @@ def test_dropping_all_views_is_safe():
 
 
 # ── Fail-safe stale views: buffer swapped out from under a view ──────
-# grid() pins the specific voxel block it aliases, so a view taken BEFORE the
-# buffer is reallocated (set_float_grid rebuild, or a CUDA migration) stays
-# valid — a decoupled snapshot — instead of dangling into freed memory.
+# A view pins the specific block it aliases (grid() the voxel block;
+# vertices()/vertex_colors() the points/colors container), so a view taken
+# BEFORE the buffer is reallocated — set_float_grid rebuild, CUDA migration,
+# add_vertices append, set_colors rebuild, clear — stays valid as a decoupled
+# snapshot instead of dangling into freed memory.
 
 
 def test_grid_view_survives_host_buffer_reallocation():
@@ -240,6 +245,62 @@ def test_grid_view_survives_host_buffer_reallocation():
     gc.collect()  # facade gone; the pinned old block keeps the stale view alive
     assert stale[1, 2, 3] == snapshot[1, 2, 3]
     print("  ok: grid() view stays valid (snapshot) after host buffer realloc")
+
+
+def test_vertices_view_survives_append_reallocation():
+    # vertices() pins the specific points container (which cvc::geometry
+    # copy-on-writes), not the whole geometry. add_vertices() reallocates the
+    # underlying std::vector; without pinning, a view captured beforehand would
+    # dangle. With it, the append COW-detaches and the old block is retired to
+    # the view as a decoupled snapshot -- valid memory, never a segfault.
+    g = pycvc.Geometry()
+    g.add_vertices([float(i) for i in range(30)])  # 10 verts
+    stale = g.vertices()  # view over the ORIGINAL points block
+    old_ptr = _ptr(stale)
+    snapshot = np.array(stale, copy=True)
+
+    # Grow the mesh: reserve()+push_back reallocates the vector. cvc::geometry's
+    # pre_write() sees the container shared (the view holds it) and detaches.
+    g.add_vertices([float(i) for i in range(300, 330)])  # +10 verts
+    fresh = g.vertices()
+    assert fresh.shape == (20, 3)
+    assert _ptr(fresh) != old_ptr, "append must reallocate (else nothing to prove)"
+
+    # The pinned view is still valid: a decoupled snapshot of the first 10 verts.
+    assert np.array_equal(stale, snapshot), "stale view must hold its pre-append snapshot"
+    assert np.array_equal(fresh[:10], snapshot), "fresh view keeps the original verts"
+    assert fresh[10, 0] == 300.0 and fresh[19, 2] == 329.0, "fresh view has the appended verts"
+    stale[0, 0] = -9.0  # still safely writable into the old (orphaned) block
+    assert stale[0, 0] == -9.0
+    assert fresh[0, 0] == 0.0, "writing the stale snapshot must not touch the live buffer"
+
+    del g, fresh
+    gc.collect()  # facade gone; the pinned old block keeps the stale view alive
+    assert stale[9, 2] == snapshot[9, 2]
+    print("  ok: vertices() view stays valid (snapshot) after append realloc")
+
+
+def test_vertex_colors_view_survives_set_colors_and_clear():
+    # The same guarantee for the colors container across set_colors() (which
+    # clears + rebuilds it) and clear() (which swaps the whole geometry).
+    g = pycvc.Geometry()
+    g.add_vertices([0, 0, 0, 1, 1, 1, 2, 2, 2])  # 3 verts
+    g.set_colors([1, 0, 0, 0, 1, 0, 0, 0, 1])
+    stale = g.vertex_colors()
+    snapshot = np.array(stale, copy=True)
+
+    g.set_colors([0.5, 0.5, 0.5] * 3)  # rebuild colors -> old block retired to `stale`
+    assert np.array_equal(stale, snapshot), "colors view survives set_colors() rebuild"
+    assert np.allclose(g.vertex_colors(), 0.5), "live colors reflect the rebuild"
+
+    # clear() swaps geom_'s containers wholesale; the pinned old block persists.
+    verts_view = g.vertices()
+    verts_snap = np.array(verts_view, copy=True)
+    g.clear()
+    assert g.num_vertices() == 0
+    assert np.array_equal(verts_view, verts_snap), "vertices view survives clear()"
+    assert np.array_equal(stale, snapshot), "colors view still valid after clear()"
+    print("  ok: colors/vertices views survive set_colors() + clear()")
 
 
 # ── Refcount sanity (CPython-specific; robust, not over-fit) ─────────
