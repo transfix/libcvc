@@ -2,7 +2,13 @@ schema_version: 1
 recipe:
   name: libcvc
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
+  # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
+  # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
+  # compatible with the published 3.2.4+cvc.1, so it must publish as +cvc.2.
+  # (libcvc-cuda is unchanged — it already had the wide member — so it stays
+  # +cvc.1 and is now ABI-identical to this CPU build.)
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -10,6 +16,13 @@ recipe:
   homepage: https://github.com/transfix/libcvc
   license: GPL-2.0-or-later
   tags: [scientific, volumetric, state, dsl, geometry]
+
+# Declares the `libcvc` provider slot so the CUDA peer libcvc-cuda (which also
+# `provides: [libcvc]`) is a mutually-exclusive alternative, and a future
+# hardware-aware resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU for
+# a dependency on the virtual name `libcvc`. The selection that acts on this is
+# not implemented yet (see the libcvc-cuda recipe).
+provides: ["libcvc"]
 
 source:
   # The recipe is co-located with the libcvc source tree. `pack-from-prefix`

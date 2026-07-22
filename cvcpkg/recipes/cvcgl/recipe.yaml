@@ -15,9 +15,20 @@ recipe:
 # pure C++ SDK with no VTK dependency. cvcGL adds the VTK scene graph and so
 # pulls in VTK. It builds src/cvcGL standalone against the installed libcvc SDK
 # (find_package(cvc CONFIG)) + VTK, and installs a cvcGLConfig.cmake so
-# consumers can find_package(cvcGL CONFIG) and link cvc::cvcGL. It picks up CUDA
-# automatically when the resolved libcvc is the CUDA variant (cvc::cvc carries
-# CVC_USING_CUDA in its interface), so it works against either libcvc variant.
+# consumers can find_package(cvcGL CONFIG) and link cvc::cvcGL.
+#
+# This CPU build links the CPU libcvc. It is ABI-safe against EITHER libcvc
+# variant because cvc::volume's layout is variant-invariant (voxels::
+# _cuda_unified_ptr is always a shared_ptr<void>). cvcGL's own GL <-> CUDA
+# interop paths are `#ifdef CVC_USING_CUDA`-gated, so they compile only in the
+# GPU build — the separate `cvcgl-cuda` recipe (provides: [cvcgl]) — which GPU
+# hosts install instead of this one.
+
+# Declares the `cvcgl` provider slot so the CUDA peer cvcgl-cuda (which also
+# `provides: [cvcgl]`) is a mutually-exclusive alternative and a hardware-aware
+# resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU for a dependency on
+# the virtual name `cvcgl`. Selection is not implemented yet — see cvcgl-cuda.
+provides: ["cvcgl"]
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at
