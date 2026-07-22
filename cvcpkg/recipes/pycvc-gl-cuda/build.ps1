@@ -1,32 +1,23 @@
-# cvcpkg/recipes/libcvc-cuda/build.ps1 - build libcvc from the in-repo source tree.
+# cvcpkg/recipes/pycvc-gl-cuda/build.ps1 — build the full pycvc Python bindings (core + scene)
+# standalone against an installed libcvc SDK (Windows). CVC_BUILD_PYCVC_GL=OFF
+# ⇒ core + scene (cvcGL + VTK).
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:CVC_SOURCE_DIR) { throw 'CVC_SOURCE_DIR must be set' }
 if (-not $env:CVC_BUILD_DIR) { throw 'CVC_BUILD_DIR must be set' }
 if (-not $env:CVC_INSTALL_DIR) { throw 'CVC_INSTALL_DIR must be set' }
 if (-not $env:CVC_BUILD_TYPE) { $env:CVC_BUILD_TYPE = 'Release' }
-if (-not $env:CVC_LINK) { $env:CVC_LINK = 'shared' }
 if (-not $env:CVC_JOBS) { $env:CVC_JOBS = [Environment]::ProcessorCount }
 
 $cmakeBuildType = if ($env:CVC_BUILD_TYPE.ToLower() -eq 'debug') { 'Debug' } else { 'Release' }
-$buildSharedLibs = if ($env:CVC_LINK -eq 'static') { 'OFF' } else { 'ON' }
 
 $args = @(
   '-G', 'Ninja',
-  '-S', $env:CVC_SOURCE_DIR,
+  '-S', "$env:CVC_SOURCE_DIR/bindings/pycvc",
   '-B', $env:CVC_BUILD_DIR,
   "-DCMAKE_INSTALL_PREFIX=$env:CVC_INSTALL_DIR",
   "-DCMAKE_BUILD_TYPE=$cmakeBuildType",
-  "-DBUILD_SHARED_LIBS=$buildSharedLibs",
-  '-DCVC_BUILD_TESTS=OFF',
-  # The `cvc` CLI ships as its own package (cvc-cli / cvc-cli-cuda); keep it OUT
-  # of the SDK bundle.
-  '-DCVC_BUILD_CLI=OFF',
-  # CUDA opt-in: the `libcvc` recipe leaves this OFF; `libcvc-cuda` sets
-  # CVC_ENABLE_CUDA=ON in its build.matrix env to reuse this script for the GPU
-  # variant.
-  "-DCVC_ENABLE_CUDA=$(if ($env:CVC_ENABLE_CUDA) { $env:CVC_ENABLE_CUDA } else { 'OFF' })",
-  '-DCVC_ENABLE_GRPC=OFF'
+  '-DCVC_BUILD_PYCVC_GL=ON'
 )
 
 if ($env:CVC_DEPS_PREFIX) {

@@ -124,6 +124,11 @@ option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
 option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of libcvc subdirectory" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
+# The `cvc` CLI is packaged SEPARATELY (the cvc-cli / cvc-cli-cuda cvcpkg
+# recipes) so it lands deliberately in a user's PATH rather than riding along
+# with the libcvc SDK bundle. The libcvc recipe builds with CVC_BUILD_CLI=OFF;
+# a plain in-tree build still builds it by default.
+option(CVC_BUILD_CLI "Build the cvc command-line executable" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 

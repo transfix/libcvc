@@ -1,0 +1,74 @@
+schema_version: 1
+recipe:
+  name: cvc-cli-cuda
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "cvc (CUDA/GPU host build) — the same unified `cvc` command-line tool as the CPU `cvc-cli` package, but pinned to the CUDA libcvc-cuda SDK so a GPU host installs the `cvc` tool alongside the GPU library. Same executable and same subcommands as `cvc-cli`."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, volumetric, cli, geometry, tools, cuda, gpu]
+
+# The GPU-host build of the `cvc` tool — identical source to the CPU `cvc-cli`
+# recipe, built against libcvc-cuda instead of the CPU libcvc.
+#
+# WHY this peer is NARROW (read before assuming it is needed): unlike pycvc and
+# cvcgl, cvc-cli has NO `#ifdef CVC_USING_CUDA` code of its own — it is a thin
+# Boost.program_options frontend over libcvc's public API. Its compiled output
+# does NOT change with the CUDA flag, and because cvc::volume's ABI is variant-
+# invariant (voxels::_cuda_unified_ptr is always a shared_ptr<void>), ONE cvc
+# binary is ABI-safe against EITHER libcvc and picks up GPU acceleration purely
+# by loading libcvc-cuda at runtime on a GPU host. So this bundle is byte-
+# identical to `cvc-cli` and — unlike cvcgl-cuda, which diverges once the GL<->
+# CUDA interop lands — it has no pending code that will ever make it diverge.
+#
+# What it BUYS: an explicit GPU-host install target that pins libcvc-cuda for the
+# `libcvc` dependency BEFORE hardware-aware auto-selection exists (cvcpkg Roadmap
+# Phase 10). `cvcpkg install cvc-cli-cuda` on a CUDA host gets both the `cvc`
+# tool and the GPU libcvc-cuda in one shot. Once Phase 10 lands, `cvc-cli`'s
+# `libcvc` dependency would resolve to libcvc-cuda on a GPU host on its own and
+# this peer becomes redundant — keep it only as long as the explicit target is
+# wanted. It provides the `cvc-cli` slot (mutually exclusive with the CPU
+# `cvc-cli`) and requires the `cuda` capability. No macOS (CUDA is linux+windows).
+provides: ["cvc-cli"]
+requires_capabilities: ["cuda"]
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # src/cvc-cli. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda) +
+    # Boost.program_options (the CLI's argument parser).
+    - name: libcvc-cuda
+    - name: boost
+  runtime:
+    - name: libcvc-cuda
+    - name: boost
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  # linux + windows only (CUDA has no macOS), mirroring libcvc-cuda.
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  # Same layout as the CPU `cvc-cli` package (they share the `cvc-cli` slot and
+  # are never installed together).
+  files:
+    - bin/cvc*
+
+abi:
+  cxx_std: 17
