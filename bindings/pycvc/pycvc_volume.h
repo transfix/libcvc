@@ -77,8 +77,7 @@ public:
   void anisotropic_diffusion(unsigned int iterations = 20);
   // Dr. Zhang's GDTV filter. `neighbours == 0` selects the 6-neighbour
   // stencil; nonzero selects the 26-neighbour stencil.
-  void gdtv_filter(double q, double lambda, unsigned int iterations,
-                   unsigned int neighbours = 0);
+  void gdtv_filter(double q, double lambda, unsigned int iterations, unsigned int neighbours = 0);
 
   // GPU/CUDA support. on_gpu() is False on CUDA-disabled libcvc builds or
   // when the voxels are host-resident. When True, cuda_ptr() is the
