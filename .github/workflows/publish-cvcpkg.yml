@@ -57,6 +57,14 @@ on:
         options:
           - 'false'
           - 'true'
+      publish_cuda:
+        description: 'Also build+publish the linux libcvc-cuda GPU variant (needs a self-hosted [self-hosted, linux, cuda] runner; skipped otherwise).'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 concurrency:
   group: publish-cvcpkg-${{ github.ref }}
@@ -508,3 +516,111 @@ jobs:
           } else {
             Write-Host 'dry-run: skipping pycvc/pycvc-gl publish'
           }
+
+  # ── Linux libcvc-cuda (GPU variant) — DORMANT until a CUDA runner exists ──
+  # The GitHub-hosted images have no nvcc or NVIDIA GPU, so the CUDA build
+  # cannot run on ubuntu-latest. This job is therefore (a) opt-in: it only runs
+  # on a manual dispatch with publish_cuda=true, and (b) targeted at a
+  # self-hosted runner advertising the `cuda` label. Until a
+  # [self-hosted, linux, cuda] runner (NVIDIA GPU + CUDA toolkit) is registered
+  # — and the cvcpkg builder-fleet capability feature lands, so jobs requiring
+  # the `cuda` capability are scheduled onto CUDA-capable builders — leave
+  # publish_cuda=false: the `if` then evaluates false and the job is skipped
+  # (no runner is requested), so the rest of the workflow is unaffected.
+  #
+  # It builds the SAME sources as the CPU `build` job with CVC_ENABLE_CUDA=ON,
+  # then packs/publishes the `libcvc-cuda` recipe
+  # (provides: [libcvc], requires_capabilities: [cuda]). CMAKE_CUDA_ARCHITECTURES
+  # defaults to 50;60;70;75;80 (top-level CMakeLists) — a broadly-usable
+  # multi-arch fatbin; do NOT narrow it to the builder's own GPU.
+  build-cuda:
+    needs: ensure-org
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
+    runs-on: [self-hosted, linux, cuda]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Release only for now; add `debug` here once a debug-linux CUDA path is
+        # exercised (Debug libcvc links the Release, ABI-stable shared deps).
+        config: [release]
+    env:
+      CMAKE_CFG: ${{ matrix.config == 'debug' && 'Debug' || 'Release' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cvcpkg (from local workspace clone)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          cvcpkg --version
+
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Configure (CUDA / Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$extra_prefix" ]; then
+            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          # CVC_ENABLE_CUDA=ON is the ONLY delta from the CPU `build` job's
+          # Configure (Linux/macOS) step — keep the rest in sync with it.
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
+            -DCMAKE_PREFIX_PATH="$extra_prefix" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
+            -DCVC_BUILD_TESTS=OFF \
+            -DCVC_ENABLE_CUDA=ON \
+            -DDISABLE_CGAL=OFF \
+            -DCVC_BUILD_VOLROVER3=OFF \
+            -DCVC_ENABLE_MESHER=ON \
+            -DCVC_ENABLE_SDF=ON
+
+      - name: Build & install
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel --config "$CMAKE_CFG"
+          cmake --install build --config "$CMAKE_CFG" --component libcvc
+
+      - name: Pack archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/libcvc-cuda \
+            --from-prefix stage \
+            --platform linux \
+            --config "${{ matrix.config }}" \
+            --link shared \
+            --local \
+            --output-dir dist
+
+      - name: Publish to cvcpkg.org
+        if: github.event.inputs.dry_run == 'false'
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CVCPKG_TOKEN:-}" ]; then
+            echo "CVCPKG_TOKEN secret is required to publish"
+            exit 1
+          fi
+          cvcpkg publish \
+            libcvc-cuda \
+            --server "$CVCPKG_SERVER" \
+            --org "$CVCPKG_ORG" \
+            --platform linux \
+            --config "${{ matrix.config }}" \
+            --link shared \
+            --output-dir dist \
+            --token "$CVCPKG_TOKEN"
