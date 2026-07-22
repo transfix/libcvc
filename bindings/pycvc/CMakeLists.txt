@@ -76,7 +76,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
              pycvc_algorithm:test_pycvc_algorithm.py
-             pycvc_state:test_pycvc_state.py)
+             pycvc_state:test_pycvc_state.py
+             pycvc_async:test_pycvc_async.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)

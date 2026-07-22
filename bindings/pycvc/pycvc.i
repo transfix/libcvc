@@ -628,3 +628,107 @@ namespace cvc {
 // on every state mutation. Only this class gets a director.
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
+
+// ── Async state handlers on a bounded coroutine pool ────────────────────
+// AsyncStateObserver rides on the state_observer director: C++ delivers
+// on_changed(path) SYNCHRONOUSLY on the state writer thread (GIL held), and we
+// marshal it onto an asyncio loop with call_soon_threadsafe (thread-safe, never
+// blocks the writer). A bounded queue feeds a fixed pool of N worker coroutines,
+// so a burst of state changes can't spawn unbounded work; on overflow the queue
+// drops (oldest by default) and counts it. Because handlers re-read current
+// state, dropping intermediate changes is safe — you converge to the latest.
+%pythoncode %{
+class AsyncStateObserver(state_observer):
+    """Dispatch state-change callbacks to async handlers on a bounded pool.
+
+    Override `async def handle(self, path)` in a subclass, or pass
+    handler=<async fn>. Then call start(app, loop) to begin watching. Do NOT
+    override on_changed() — that is the C++ director callback (runs on the writer
+    thread) and is used internally to marshal onto the loop.
+
+        obs = pycvc.AsyncStateObserver(handler, concurrency=8, maxsize=1000)
+        obs.start(app)                 # from inside a running loop
+        ...
+        await obs.drain(); await obs.stop()
+    """
+
+    def __init__(self, handler=None, *, concurrency=4, maxsize=1024,
+                 overflow="drop_oldest"):
+        super().__init__()
+        if overflow not in ("drop_oldest", "drop_newest"):
+            raise ValueError("overflow must be 'drop_oldest' or 'drop_newest'")
+        self._handler = handler
+        self._concurrency = int(concurrency)
+        self._maxsize = int(maxsize)
+        self._overflow = overflow
+        self._loop = None
+        self._queue = None
+        self._workers = []
+        self.dropped = 0
+
+    async def handle(self, path):
+        """Override this, or pass handler= to __init__."""
+        if self._handler is None:
+            raise NotImplementedError("override handle() or pass handler=")
+        await self._handler(path)
+
+    def start(self, app, loop=None):
+        """Spawn the worker pool and begin watching `app`'s state tree."""
+        import asyncio
+        self._loop = loop or asyncio.get_running_loop()
+        self._queue = asyncio.Queue(maxsize=self._maxsize)
+        self._workers = [self._loop.create_task(self._worker())
+                         for _ in range(self._concurrency)]
+        self.watch(app)
+        return self
+
+    # C++ director callback — runs on the state WRITER thread (GIL held).
+    def on_changed(self, path):
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._offer, path)
+
+    def _offer(self, path):
+        # Runs on the loop thread (asyncio.Queue is not thread-safe).
+        import asyncio
+        try:
+            self._queue.put_nowait(path)
+        except asyncio.QueueFull:
+            self.dropped += 1
+            if self._overflow == "drop_oldest":
+                try:
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                    self._queue.put_nowait(path)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+            # drop_newest: drop `path` (already counted)
+
+    async def _worker(self):
+        import asyncio
+        try:
+            while True:
+                path = await self._queue.get()
+                try:
+                    await self.handle(path)
+                except Exception:
+                    pass  # a bad handler must not kill the pool
+                finally:
+                    self._queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
+    async def drain(self):
+        """Wait until every queued change has been processed."""
+        if self._queue is not None:
+            await self._queue.join()
+
+    async def stop(self):
+        """Stop watching and shut the pool down."""
+        import asyncio
+        self.unwatch()
+        for w in self._workers:
+            w.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        self._workers = []
+%}
