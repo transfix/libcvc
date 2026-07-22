@@ -1,8 +1,10 @@
 #include "pycvc_scene.h"
 
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/volume/volume.h>
+#include <stdexcept>
 #include <vtkNew.h>
 #include <vtkPNGWriter.h>
 #include <vtkRenderWindow.h>
@@ -12,7 +14,11 @@
 
 namespace pycvc {
 
-Scene::Scene() : sg_(std::make_shared<SceneGraph>()) {}
+Scene::Scene(const std::shared_ptr<cvc::app> &app, const std::string &state_prefix)
+    : app_(app), sg_(app ? std::make_shared<SceneGraph>(*app, state_prefix) : nullptr) {
+  if (!app)
+    throw std::invalid_argument("pycvc.Scene: null app handle");
+}
 Scene::~Scene() = default;
 
 void Scene::add_geometry(const std::string &name, const cvc::geometry &g) {

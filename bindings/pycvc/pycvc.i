@@ -113,6 +113,12 @@ namespace pycvc {
 %pythoncode %{
 App = make_app
 %}
+// Keep the app alive for as long as a volume/geometry built from it lives: the
+// C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this
+// the app could be freed while a Python object still points at it. Stash it on
+// the proxy (the ctor arg is named `app`).
+%pythonappend cvc::volume::volume(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
+%pythonappend cvc::geometry::geometry(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
 // state_set/get/has/children/remove + state_observer come from pycvc_state.h
 // (%include'd below), all taking the app explicitly.
 

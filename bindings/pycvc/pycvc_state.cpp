@@ -83,6 +83,8 @@ void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path)
 
 // ── state_observer ──────────────────────────────────────────────────────
 struct state_observer::Impl {
+  // Co-own the app while watching so its state tree (and our signal) outlive us.
+  std::shared_ptr<cvc::app> app;
   // scoped_connection auto-disconnects on destruction, so a dead observer's
   // slot is removed before its (director) object is freed.
   boost::signals2::scoped_connection conn;
@@ -96,6 +98,7 @@ void state_observer::on_changed(const std::string & /*path*/) {}
 
 void state_observer::watch(const std::shared_ptr<cvc::app> &app) {
   cvc::state &root = root_of(app);
+  impl_->app = app; // keep the app alive while we watch its tree
   // The root's childChanged fires for every mutation anywhere in the tree,
   // carrying the full dotted path (each node re-fires its parent with
   // name()+SEP+child). This runs on the WRITER thread — acquire the GIL before
@@ -114,7 +117,10 @@ void state_observer::watch(const std::shared_ptr<cvc::app> &app) {
   });
 }
 
-void state_observer::unwatch() { impl_->conn.disconnect(); }
+void state_observer::unwatch() {
+  impl_->conn.disconnect();
+  impl_->app.reset(); // release the app once we're no longer watching
+}
 
 bool state_observer::watching() const { return impl_->conn.connected(); }
 

@@ -177,6 +177,7 @@ std::string render_result(const value_t &v) {
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
 struct Exec::ExecImpl {
+  std::shared_ptr<cvc::app> app; // co-own so root/ictx stay valid for our lifetime
   cvc::state *root = nullptr;
   scheduler sched;
   intrinsics_context ictx;
@@ -187,6 +188,7 @@ struct Exec::ExecImpl {
 Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecImpl>()) {
   if (!app)
     throw std::invalid_argument("pycvc.Exec: null app handle");
+  impl_->app = app; // keep the app alive for as long as this Exec exists
   impl_->root = &cvc::state::instance(*app);
   impl_->sched.set_watch_root(impl_->root);
 

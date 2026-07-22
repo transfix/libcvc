@@ -11,6 +11,7 @@
 class SceneGraph; // cvcGL (global namespace)
 
 namespace cvc {
+class app;
 class geometry;
 class volume;
 } // namespace cvc
@@ -19,7 +20,10 @@ namespace pycvc {
 
 class Scene {
 public:
-  Scene();
+  // Bound to an EXPLICIT app (no cvcGL context() singleton): the SceneGraph
+  // lives on this app's state tree under `state_prefix`, so the scene shares the
+  // host's app/context like everything else in pycvc.
+  Scene(const std::shared_ptr<cvc::app> &app, const std::string &state_prefix = "cvcgl");
   ~Scene();
 
   // Add a mesh/polyline or a scalar-field volume as a named node. The
@@ -41,6 +45,9 @@ public:
   void render_png(const std::string &path, int width = 1024, int height = 768);
 
 private:
+  // Co-own the app so it outlives the SceneGraph (which references the app's
+  // state tree by raw reference). Declared BEFORE sg_ so sg_ is destroyed first.
+  std::shared_ptr<cvc::app> app_;
   std::shared_ptr<SceneGraph> sg_;
 };
 
