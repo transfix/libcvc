@@ -2,14 +2,18 @@
 
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <stdexcept>
 #include <vtkNew.h>
 #include <vtkPNGWriter.h>
+#include <vtkProp.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
+#include <vtkSmartPointer.h>
 #include <vtkWindowToImageFilter.h>
 
 namespace pycvc {
@@ -21,8 +25,50 @@ Scene::Scene(const std::shared_ptr<cvc::app> &app, const std::string &state_pref
 }
 Scene::~Scene() = default;
 
+namespace {
+// A concrete GraphicsNode that renders a caller-supplied vtkProp (e.g. a
+// Python-built vtkActor). cvcGL's GraphicsNode is abstract (getProp/getBoundingBox
+// are virtual); this adapter just hands back the prop it was given, so a Python
+// VTK object flows into the C++ render tree via getProp(). Modeled on
+// NullGraphicNode. vtkSmartPointer keeps the prop alive while the node lives.
+class PropNode : public GraphicsNode {
+public:
+  PropNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
+      : GraphicsNode(ctx, statePath, name) {}
+  void setProp(vtkProp *p) { m_prop = p; }
+  void setBounds(const cvc::bounding_box &b) { m_bounds = b; }
+  vtkProp *heldProp() const { return m_prop; }
+  cvc::bounding_box getBoundingBox() const override { return m_bounds; }
+
+protected:
+  vtkProp *getProp() override { return m_prop; }
+
+private:
+  vtkSmartPointer<vtkProp> m_prop;
+  cvc::bounding_box m_bounds;
+};
+} // namespace
+
 void Scene::add_geometry(const std::string &name, const cvc::geometry &g) {
   sg_->addGraphics(name, g);
+}
+
+void Scene::add_prop(const std::string &name, vtkProp *prop, double minx, double miny, double minz,
+                     double maxx, double maxy, double maxz) {
+  if (!prop)
+    throw std::invalid_argument("pycvc Scene.add_prop: null prop");
+  // addGraphicsChild<T>(name) builds the node with the proper "..children.name"
+  // state path and adds it to the render tree (works for a C++ type like
+  // PropNode; only a *Python* subclass couldn't be make_shared'd this way).
+  auto node = sg_->getGraphicsRoot()->addGraphicsChild<PropNode>(name);
+  node->setBounds(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+  node->setProp(prop);
+  sg_->registerGraphics(name, node); // also expose it in the flat name lookup
+}
+
+vtkProp *Scene::prop(const std::string &name) const {
+  auto pn = std::dynamic_pointer_cast<PropNode>(sg_->getGraphics(name));
+  return pn ? pn->heldProp() : nullptr;
 }
 void Scene::add_volume(const std::string &name, const cvc::volume &v) { sg_->addGraphics(name, v); }
 void Scene::pump() { sg_->processEvents(); }

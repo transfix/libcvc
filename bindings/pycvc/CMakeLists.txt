@@ -130,6 +130,25 @@ if(CVC_BUILD_PYCVC_GL)
   find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
   target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
+  # VTK Python bridge (F3): link the wrapping-core lib that defines
+  # vtkPythonUtil::* (from the vtk-python cvcpkg package — installs side-by-side
+  # with vtk in the same prefix). vtkPythonUtil.h is already on the include path
+  # via VTK::CommonCore. VTK's monolithic CMake config doesn't enumerate the
+  # Python modules, so find the plain shared lib directly rather than as a
+  # find_package COMPONENT.
+  # The wrapping-core lib carries the Python-ABI suffix, e.g.
+  # libvtkWrappingPythonCore3.12-9.5.so — construct that exact name (plus
+  # unsuffixed fallbacks for other VTK packagings).
+  find_library(VTK_WRAPPING_PYTHONCORE
+    NAMES vtkWrappingPythonCore${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}-9.5
+          vtkWrappingPythonCore-9.5 vtkWrappingPythonCore
+    HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+  if(NOT VTK_WRAPPING_PYTHONCORE)
+    message(FATAL_ERROR
+      "libvtkWrappingPythonCore not found — install the `vtk-python` cvcpkg "
+      "package (VTK built with VTK_WRAP_PYTHON=ON) into the prefix.")
+  endif()
+  target_link_libraries(pycvc_gl PRIVATE ${VTK_WRAPPING_PYTHONCORE} Python3::Module)
   set_target_properties(pycvc_gl PROPERTIES
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
@@ -140,5 +159,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
   set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
+  # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
+  add_test(NAME pycvc_vtk
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_vtk.py)
+  set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL

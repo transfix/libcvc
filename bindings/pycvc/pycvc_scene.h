@@ -9,6 +9,7 @@
 #include <string>
 
 class SceneGraph; // cvcGL (global namespace)
+class vtkProp;    // VTK (global namespace) — bridged via vtkPythonUtil typemaps
 
 namespace cvc {
 class app;
@@ -31,6 +32,18 @@ public:
   // pycvc.i), so pycvc.geometry / pycvc.volume cross into the scene as-is.
   void add_geometry(const std::string &name, const cvc::geometry &g);
   void add_volume(const std::string &name, const cvc::volume &v);
+
+  // ── VTK Python bridge (Goal 2) ─────────────────────────────────────
+  // Add a Python-built VTK prop (e.g. a vtkActor created with vtkmodules) as a
+  // named scene node, with an explicit bounding box. The vtkProp* in-typemap
+  // (vtkPythonUtil::GetPointerFromObject) unwraps the live Python VTK object
+  // into a C++ vtkProp* that cvcGL renders directly — Python graphics flow
+  // straight into the C++ scene.
+  void add_prop(const std::string &name, vtkProp *prop, double minx = -1.0, double miny = -1.0,
+                double minz = -1.0, double maxx = 1.0, double maxy = 1.0, double maxz = 1.0);
+  // Return a node's vtkProp back to Python as a live vtkmodules object (via the
+  // out-typemap). Null if `name` is not a prop node.
+  vtkProp *prop(const std::string &name) const;
 
   // Re-pumpable event pump: apply queued scene mutations (no Qt loop).
   void pump();
