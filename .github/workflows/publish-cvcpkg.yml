@@ -1,12 +1,33 @@
-# Publish libcvc to cvcpkg.org
+# Publish the libcvc package family to cvcpkg.org
 #
 # Triggered by version tags (v*) and manual dispatch. Builds libcvc on
 # Linux, macOS, and Windows, then packs each install into a tar.zst
 # archive and publishes to the `cvc` organization on cvcpkg.org (created
 # if it doesn't exist yet).
 #
+# Beyond the base libcvc SDK, the same build jobs also build, pack, and
+# publish the rest of the family from their recipes in this repo
+# (cvcpkg/recipes/{cvcgl,pycvc,pycvc-gl}):
+#   * cvcgl     — the Qt-free VTK scene-graph library (needs VTK).
+#   * pycvc     — the core SWIG numpy bindings (needs Python + numpy).
+#   * pycvc-gl  — the scriptable-scene bindings (needs cvcgl + VTK + Python).
+# Platform coverage (see the guards on each step below):
+#   * Linux   — libcvc + cvcgl + pycvc + pycvc-gl (release config).
+#   * Windows — libcvc + cvcgl always; pycvc/pycvc-gl only behind the
+#               `windows_pycvc` dispatch input (still a TODO — unverified).
+#   * macOS   — libcvc only: there is no macOS VTK bundle on the catalog
+#               yet, so cvcgl/pycvc-gl cannot build and pycvc is skipped
+#               to keep the family consistent per-platform.
+# The family packages are built in the RELEASE matrix jobs only (they pack
+# with `--config release` against the release Python/numpy/VTK bundles).
+#
 # Requires two repository secrets:
-#   CVCPKG_TOKEN       — publisher-role token for the cvc org
+#   CVCPKG_TOKEN       — publisher token for the cvc org. IMPORTANT: in prod
+#                        this token's owning user MUST be a member of the cvc
+#                        org with owner/publisher role, or every `cvcpkg
+#                        publish` here 403s. (Do not rotate/add secrets in the
+#                        workflow — this is an org-membership requirement on
+#                        the token itself.)
 #   CVCPKG_SERVER_URL  — optional; defaults to https://cvcpkg.org
 #
 name: publish-cvcpkg
@@ -25,6 +46,17 @@ on:
         options:
           - 'true'
           - 'false'
+      windows_pycvc:
+        description: >-
+          Also build/pack/publish pycvc + pycvc-gl on Windows (EXPERIMENTAL,
+          unverified — Python/numpy/SWIG discovery on Windows is still a TODO).
+          Off by default; cvcgl on Windows is unaffected and always runs.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 concurrency:
   group: publish-cvcpkg-${{ github.ref }}
@@ -177,6 +209,7 @@ jobs:
             -DCVC_ENABLE_SDF=ON
 
       - name: Build & install
+        id: build-libcvc
         shell: bash
         run: |
           set -euo pipefail
@@ -217,3 +250,261 @@ jobs:
             --link shared \
             --output-dir dist \
             --token "$CVCPKG_TOKEN"
+
+      # ────────────────────────────────────────────────────────────────
+      #  libcvc package FAMILY: cvcgl + pycvc + pycvc-gl
+      #
+      #  These build in the SAME job against the just-installed libcvc SDK
+      #  (`stage`, the CMAKE_INSTALL_PREFIX above) + the fetched deps prefix,
+      #  each into its own stage dir, then pack from their recipe and publish.
+      #
+      #  Independence: every step below is guarded with `!cancelled()` so a
+      #  failure in one package does NOT skip the others (each still attempts,
+      #  and a real failure stays visible as a red step — we deliberately do
+      #  not `continue-on-error`, which would mask it). Ordering that matters:
+      #  pycvc-gl links the installed cvcgl, so it runs after the cvcgl step.
+      #
+      #  Platform guards: family runs on Linux (all packages) and Windows
+      #  (cvcgl always; pycvc/pycvc-gl behind the `windows_pycvc` input).
+      #  macOS is intentionally libcvc-only (no macOS VTK bundle yet). Family
+      #  is built only in RELEASE jobs (packs `--config release`).
+      # ────────────────────────────────────────────────────────────────
+
+      - name: Install family deps (Python 3.11 + numpy + VTK) [Linux]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          # python311 + numpy (for pycvc/pycvc-gl) and vtk (for cvcgl/pycvc-gl).
+          cvcpkg install python311 numpy-cp311 vtk \
+            --prefix "$PY" --config release --link shared
+          # The published numpy-cp311 wheel bundles openblas under
+          # numpy.libs/, but that .so is NOT self-resolved by RPATH, so a bare
+          # `import numpy` (which find_package(Python3 ... NumPy) performs)
+          # fails. Put numpy.libs (and $PY/lib) on the loader path so the
+          # interpreter can import numpy during configure, and compute the
+          # include dir with the same environment.
+          #   TODO: drop this guard once the numpy recipe fixes the wheel's
+          #   RPATH and republishes (tracked in a separate libcvc-deps PR).
+          export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
+          NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
+          {
+            echo "PY=$PY"
+            echo "NPY_INC=$NPY_INC"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, pack & publish cvcgl [Linux]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # cvcgl links the installed libcvc SDK ($STAGE) + VTK (from $PY).
+          cmake -S src/cvcGL -B build-cvcgl -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-cvcgl" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-cvcgl --parallel
+          cmake --install build-cvcgl
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/cvcgl \
+            --from-prefix stage-cvcgl \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish cvcgl \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping cvcgl publish"
+          fi
+
+      - name: Build, pack & publish pycvc [Linux]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # Core numpy bindings only (no VTK). Python3_EXECUTABLE / NumPy include
+          # come from the family-deps step ($PY, $NPY_INC on $LD_LIBRARY_PATH).
+          cmake -S bindings/pycvc -B build-pycvc -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvc" \
+            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-pycvc --parallel
+          cmake --install build-pycvc
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/pycvc \
+            --from-prefix stage-pycvc \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish pycvc \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping pycvc publish"
+          fi
+
+      - name: Build, pack & publish pycvc-gl [Linux]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # Scene module only; links the installed cvcgl (stage-cvcgl) + VTK.
+          cmake -S bindings/pycvc -B build-pycvcgl -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=OFF \
+            -DCVC_BUILD_PYCVC_GL=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvcgl" \
+            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$GITHUB_WORKSPACE/stage-cvcgl"
+          cmake --build build-pycvcgl --parallel
+          cmake --install build-pycvcgl
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/pycvc-gl \
+            --from-prefix stage-pycvcgl \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish pycvc-gl \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping pycvc-gl publish"
+          fi
+
+      - name: Build, pack & publish cvcgl [Windows]
+        # cvcgl needs no Python, so it runs on Windows unconditionally (release).
+        # Mirrors the libcvc Windows path: default VS2022 generator (no vcpkg
+        # toolchain), multi-config `--config Release`.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $py    = "$env:GITHUB_WORKSPACE/py"
+          # Only VTK is needed for cvcgl (no Python/numpy on this path).
+          cvcpkg install vtk --prefix "$py" --config release --link shared
+          cmake -B build-cvcgl -S src/cvcGL `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-cvcgl" `
+            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath"
+          cmake --build build-cvcgl --config Release
+          cmake --install build-cvcgl --config Release
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/cvcgl `
+            --from-prefix stage-cvcgl `
+            --platform windows --config release --link shared --local --output-dir dist
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish cvcgl `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+          } else {
+            Write-Host 'dry-run: skipping cvcgl publish'
+          }
+
+      - name: Build, pack & publish pycvc + pycvc-gl [Windows, EXPERIMENTAL]
+        # TODO: Windows Python 3.11 + numpy + SWIG discovery for the bindings is
+        # not yet verified (the numpy.libs loader-path workaround is Linux-only;
+        # the Windows equivalent — PATH + _pycvc*.pyd — is untested). Gated OFF
+        # behind the `windows_pycvc` dispatch input so tag pushes never run it;
+        # flip the input to 'true' via workflow_dispatch to trial it. Until this
+        # is proven, Windows publishes libcvc + cvcgl only.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && github.event.inputs.windows_pycvc == 'true' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $py    = "$env:GITHUB_WORKSPACE/py"
+          cvcpkg install python311 numpy-cp311 vtk --prefix "$py" --config release --link shared
+          # Locate the interpreter + numpy include (paths differ from Linux).
+          $python = if (Test-Path "$py/python.exe") { "$py/python.exe" } else { "$py/bin/python.exe" }
+          # numpy's bundled DLLs live in numpy.libs; put them (and $py) on PATH
+          # so `import numpy` works during configure (Windows analogue of the
+          # Linux LD_LIBRARY_PATH numpy.libs guard).
+          $env:PATH = "$py;$py/Library/bin;$py/lib/site-packages/numpy.libs;$env:PATH"
+          $npyInc = (& $python -c 'import numpy; print(numpy.get_include())')
+          # ── pycvc (core) ──
+          cmake -B build-pycvc -S bindings/pycvc `
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCVC_BUILD_PYCVC_CORE=ON -DCVC_BUILD_PYCVC_GL=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-pycvc" `
+            -DPython3_EXECUTABLE="$python" -DPython3_NumPy_INCLUDE_DIR="$npyInc" `
+            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath"
+          cmake --build build-pycvc --config Release
+          cmake --install build-pycvc --config Release
+          # ── pycvc-gl (scene; links installed cvcgl) ──
+          cmake -B build-pycvcgl -S bindings/pycvc `
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCVC_BUILD_PYCVC_CORE=OFF -DCVC_BUILD_PYCVC_GL=ON `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage-pycvcgl" `
+            -DPython3_EXECUTABLE="$python" -DPython3_NumPy_INCLUDE_DIR="$npyInc" `
+            -DCMAKE_PREFIX_PATH="$stage;$py;$depsPath;$env:GITHUB_WORKSPACE/stage-cvcgl"
+          cmake --build build-pycvcgl --config Release
+          cmake --install build-pycvcgl --config Release
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/pycvc    --from-prefix stage-pycvc   --platform windows --config release --link shared --local --output-dir dist
+          cvcpkg pack cvcpkg/recipes/pycvc-gl --from-prefix stage-pycvcgl --platform windows --config release --link shared --local --output-dir dist
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish pycvc    --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
+            cvcpkg publish pycvc-gl --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
+          } else {
+            Write-Host 'dry-run: skipping pycvc/pycvc-gl publish'
+          }
