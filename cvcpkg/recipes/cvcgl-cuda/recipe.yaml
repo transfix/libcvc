@@ -1,0 +1,81 @@
+schema_version: 1
+recipe:
+  name: cvcgl-cuda
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "cvcGL (CUDA/GPU build) — the Qt-free VTK scene-graph library built against the CUDA libcvc-cuda SDK, so its GPU-only code paths (GL <-> CUDA interop: mapping a volume's CUDA unified/device buffer into a GL 3D texture for on-device volume rendering) compile in. Same cmake package (cvc::cvcGL) and same API as the CPU `cvcgl` package."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, volumetric, scene, vtk, graphics, cuda, gpu]
+
+# The GPU build of cvcGL — identical sources to the CPU `cvcgl` recipe, built
+# against libcvc-cuda instead of the CPU libcvc.
+#
+# WHY a peer: cvcGL's own GL <-> CUDA interop (mapping a volume's CUDA unified
+# buffer into a GL 3D texture via cudaGraphicsGLRegisterImage / cudaMemcpy3D for
+# on-device volume rendering) is `#ifdef CVC_USING_CUDA`-gated, so it only
+# compiles when cvcGL is built against libcvc-cuda (whose cvc::cvc carries
+# CVC_USING_CUDA). That makes cvcGL's compiled output variant-dependent → its own
+# bundle key, exactly like libcvc / pycvc.
+#
+# STATUS: until that interop code lands, cvcGL has no CUDA-gated code of its own,
+# so — GIVEN the variant-invariant cvc::volume ABI (voxels::_cuda_unified_ptr is
+# always a shared_ptr<void>) — this bundle is byte-identical to `cvcgl`. It is
+# published as the `cvcgl` provider slot for CUDA hosts so pycvc-gl-cuda has an
+# ABI-matched cvcGL to link, and it diverges automatically once the interop code
+# is added. (Without the ABI-invariance fix a CPU-built cvcgl would be
+# ABI-unsafe against libcvc-cuda regardless — see the fix in voxels.h.)
+#
+# Selection mirrors libcvc/libcvc-cuda: provides the `cvcgl` slot (mutually
+# exclusive with the CPU cvcgl) and requires the `cuda` capability. Hardware-
+# aware auto-selection is cvcpkg Roadmap Phase 10 (not implemented); until then
+# install cvcgl-cuda explicitly on GPU hosts. No macOS (CUDA is linux+windows).
+provides: ["cvcgl"]
+requires_capabilities: ["cuda"]
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # src/cvcGL. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda, whose
+    # cvc::cvc interface carries CVC_USING_CUDA) + VTK (the scene backend).
+    - name: libcvc-cuda
+    - name: vtk
+  runtime:
+    - name: libcvc-cuda
+    - name: vtk
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  # linux + windows only (CUDA has no macOS), mirroring libcvc-cuda.
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    # Same layout as the CPU `cvcgl` package (they share the `cvcgl` slot and are
+    # never installed together).
+    - lib/libcvcGL*
+    - lib/cmake/cvcGL/
+    - include/cvc/gl/
+  cmake_packages:
+    - name: cvcGL
+      targets:
+        - cvc::cvcGL
+
+abi:
+  cxx_std: 17
