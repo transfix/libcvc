@@ -1,13 +1,22 @@
 # pycvc — SWIG Python bindings for libcvc (Phase-13 modernization deliverable).
 #
+# Two independently-selectable modules that ship as SEPARATE, side-by-side
+# cvcpkg packages (installable together):
+#   * pycvc     (CORE=ON,  GL=OFF) — the numpy bindings, no VTK.
+#   * pycvc-gl  (CORE=OFF, GL=ON)  — only the scene module; depends on the
+#                                    `pycvc` package for the core at runtime.
+# In-tree / dev builds default both ON, so one build produces both modules.
+#
 # Dual-mode:
 #   * In-tree  — add_subdirectory(bindings/pycvc) from libcvc with
-#                -DCVC_BUILD_PYCVC=ON; links the in-tree `cvc` target and
-#                installs the module into the bundle's site-packages, so a
-#                published/activatable libcvc prefix carries `import pycvc`.
+#                -DCVC_BUILD_PYCVC=ON; links the in-tree `cvc` target.
 #   * Standalone — `cmake -S bindings/pycvc -B build
 #                   -DCMAKE_PREFIX_PATH="<cvcpkg-prefix>;<installed-libcvc-sdk>"`
 #                consumes libcvc via find_package(cvc CONFIG), like volrover3.
+#                The bindings pick up CUDA automatically when the resolved
+#                libcvc is the CUDA variant (cvc::cvc carries CVC_USING_CUDA in
+#                its interface compile defs), so pycvc/pycvc-gl work against
+#                both libcvc and libcvc-cuda.
 cmake_minimum_required(VERSION 3.16)
 
 # Standalone iff this directory is the top of the CMake build.
@@ -33,66 +42,72 @@ set_property(SOURCE pycvc.i PROPERTY DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_geometry.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_volume.h)
 
-swig_add_library(pycvc
-  LANGUAGE python
-  SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
-)
-target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
-
-set_target_properties(pycvc PROPERTIES
-  SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
-
-# Install into the prefix's site-packages so `import pycvc` works from an
-# activated libcvc prefix (alongside where python_sdist recipes install).
+# Shared by both modules — defined before either option block so the scene
+# module can install/test even when the core module isn't built in this run.
+enable_testing()
+# site-packages of the prefix interpreter (where python_sdist recipes install).
 set(_PYCVC_SITEDIR
   "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
-install(TARGETS pycvc LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
-  DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
-
-# ctest: exercise the facades + zero-copy numpy views end-to-end. libcvc.so
-# must be on the loader path; the dual-mode cvc target's output dir works both
-# in-tree (a built target) and standalone (an imported target).
-enable_testing()
-# ctest: base pycvc (facades + zero-copy numpy views).
+# libcvc.so must be on the loader path for the tests; the dual-mode cvc target's
+# output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
-foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
-  string(REPLACE ":" ";" _pair "${_t}")
-  list(GET _pair 0 _name)
-  list(GET _pair 1 _script)
-  add_test(NAME ${_name}
-           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${_script})
-  set_tests_properties(${_name} PROPERTIES ENVIRONMENT
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
-endforeach()
 
-# ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph) ──
-# Build cvcGL (the sibling scene-graph library) and a second SWIG module.
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
-                 ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
+# ── Core pycvc — cvc::geometry/volume facades + zero-copy numpy views ──
+option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
+if(CVC_BUILD_PYCVC_CORE)
+  swig_add_library(pycvc
+    LANGUAGE python
+    SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
+  )
+  target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
+  set_target_properties(pycvc PROPERTIES
+    SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+  )
+  install(TARGETS pycvc LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # ctest: facades + zero-copy numpy views end-to-end.
+  foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
+    string(REPLACE ":" ";" _pair "${_t}")
+    list(GET _pair 0 _name)
+    list(GET _pair 1 _script)
+    add_test(NAME ${_name}
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${_script})
+    set_tests_properties(${_name} PROPERTIES ENVIRONMENT
+      "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  endforeach()
+endif() # CVC_BUILD_PYCVC_CORE
 
-set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
-swig_add_library(pycvc_gl
-  LANGUAGE python
-  SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
-)
-target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pycvc_gl PRIVATE cvcGL ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
-find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
-target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
-vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
-set_target_properties(pycvc_gl PROPERTIES
-  SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
-install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
-  DESTINATION "${_PYCVC_SITEDIR}" COMPONENT libcvc)
-
-add_test(NAME pycvc_gl_smoke
-         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
-set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
-  "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:cvcGL>:${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+# ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph; needs VTK) ──
+# pycvc_gl `%import`s pycvc.i for cross-module types and `import pycvc` at
+# runtime, so the pycvc-gl package depends on the pycvc package. It compiles its
+# own copy of the facades, so it does not need the core module built here.
+option(CVC_BUILD_PYCVC_GL "Build the pycvc.gl scene bindings (needs cvcGL + VTK)" ON)
+if(CVC_BUILD_PYCVC_GL)
+  # Build cvcGL (the sibling scene-graph library) and the scene SWIG module.
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
+                   ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
+  set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
+  swig_add_library(pycvc_gl
+    LANGUAGE python
+    SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
+  )
+  target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(pycvc_gl PRIVATE cvcGL ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
+  find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
+  target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
+  vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
+  set_target_properties(pycvc_gl PROPERTIES
+    SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+  )
+  install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc_gl)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc_gl)
+  add_test(NAME pycvc_gl_smoke
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
+  set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:cvcGL>:${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+endif() # CVC_BUILD_PYCVC_GL

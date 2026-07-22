@@ -34,11 +34,11 @@ CMAKE_ARGS=(
   # build.matrix env so this same script produces the GPU variant.
   -DCVC_ENABLE_CUDA="${CVC_ENABLE_CUDA:-OFF}"
   -DCVC_ENABLE_GRPC=OFF
-  # Build + install the pycvc Python bindings into the prefix site-packages,
-  # so a published libcvc bundle carries `import pycvc`. Needs swig, a Python
-  # dev interpreter, and numpy in the deps prefix (see recipe.yaml depends).
-  # Overridable (e.g. CVC_WITH_PYCVC=OFF for a bindings-free variant).
-  -DCVC_BUILD_PYCVC="${CVC_WITH_PYCVC:-ON}"
+  # libcvc is a pure C++ SDK: the Python bindings are a SEPARATE `pycvc`
+  # recipe that builds bindings/pycvc against the installed libcvc, so a plain
+  # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is
+  # already OFF; kept explicit.)
+  -DCVC_BUILD_PYCVC=OFF
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
