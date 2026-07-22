@@ -70,6 +70,11 @@ foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py)
 endforeach()
 
 # ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph) ──
+# The scene bindings pull in cvcGL + VTK; the core pycvc module above does not.
+# OFF ⇒ a lean pycvc with no VTK dependency (the `pycvc` cvcpkg recipe); ON ⇒
+# the full scriptable-scene bindings (in-tree/dev builds; the `pycvc-gl` recipe).
+option(CVC_BUILD_PYCVC_GL "Build the pycvc.gl scene bindings (needs cvcGL + VTK)" ON)
+if(CVC_BUILD_PYCVC_GL)
 # Build cvcGL (the sibling scene-graph library) and a second SWIG module.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
                  ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
@@ -96,3 +101,4 @@ add_test(NAME pycvc_gl_smoke
          COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
 set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
   "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:cvcGL>:${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+endif() # CVC_BUILD_PYCVC_GL

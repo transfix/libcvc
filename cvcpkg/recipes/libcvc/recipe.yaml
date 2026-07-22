@@ -22,15 +22,9 @@ source:
 patches: []
 
 depends:
-  build:
-    # pycvc bindings (CVC_BUILD_PYCVC=ON): SWIG generates the wrapper, the
-    # Python dev interpreter supplies headers, numpy supplies its C API.
-    - name: python311
-    - name: numpy-cp311
+  # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
+  # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
-    # pycvc runs against this interpreter + numpy from the same prefix.
-    - name: python311
-    - name: numpy-cp311
     - name: zlib
     - name: boost
     - name: fftw3
@@ -65,8 +59,6 @@ depends:
   host_tools:
     - cmake
     - ninja
-    - swig
-    - python311
 
 build:
   matrix:
