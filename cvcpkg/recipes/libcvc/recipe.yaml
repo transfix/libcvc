@@ -11,6 +11,13 @@ recipe:
   license: GPL-2.0-or-later
   tags: [scientific, volumetric, state, dsl, geometry]
 
+# Declares the `libcvc` provider slot so the CUDA peer libcvc-cuda (which also
+# `provides: [libcvc]`) is a mutually-exclusive alternative, and a future
+# hardware-aware resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU for
+# a dependency on the virtual name `libcvc`. The selection that acts on this is
+# not implemented yet (see the libcvc-cuda recipe).
+provides: ["libcvc"]
+
 source:
   # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
   # (see cvcpkg roadmap) does not consume this field, but the schema

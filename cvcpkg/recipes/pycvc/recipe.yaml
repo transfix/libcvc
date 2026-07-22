@@ -17,6 +17,12 @@ recipe:
 # the installed libcvc SDK (find_package(cvc CONFIG)) with CVC_BUILD_PYCVC_GL=OFF
 # (no cvcGL/VTK).
 
+# Declares the `pycvc` provider slot so the CUDA peer pycvc-cuda (which also
+# `provides: [pycvc]`) is a mutually-exclusive alternative, and a future
+# hardware-aware resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU for
+# a dependency on the virtual name `pycvc`. Not implemented yet — see pycvc-cuda.
+provides: ["pycvc"]
+
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at
   # bindings/pycvc. `../../..` is the libcvc repo root.

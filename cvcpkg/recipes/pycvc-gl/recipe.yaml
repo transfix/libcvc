@@ -18,6 +18,14 @@ recipe:
 # up CUDA when their libcvc dependency resolves to libcvc-cuda (cvc::cvc carries
 # CVC_USING_CUDA), so they work against either libcvc variant.
 
+# Declares the `pycvc-gl` provider slot so a future CUDA peer (pycvc-gl-cuda,
+# built against libcvc-cuda) is a mutually-exclusive alternative and a
+# hardware-aware resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU for
+# a dependency on the virtual name `pycvc-gl`. pycvc-gl-cuda is NOT published yet
+# — it is blocked on the cvc::volume ABI being made variant-invariant (so the
+# single `cvcgl` package is ABI-safe against libcvc-cuda); see the roadmap.
+provides: ["pycvc-gl"]
+
 source:
   type: vendored
   path: ../../..
