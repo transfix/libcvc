@@ -79,6 +79,42 @@ sudo apt-get install -y \
     liblog4cplus-dev
 ```
 
+### Dependencies via cvcpkg (reproducible — matches CI)
+
+Instead of system packages, you can install libcvc's **exact, pinned dependency
+set** — the same bundles CI builds against — with [cvcpkg](https://cvcpkg.org).
+The dependency list lives in exactly one place: libcvc's in-tree recipe
+`cvcpkg/recipes/libcvc`. `cvcpkg install-deps` reads its declared deps straight
+from there (there is no separate requirements file):
+
+```bash
+# Install libcvc's dependency closure (boost, hdf5, cgal, fftw3, gsl,
+# imagemagick, libiimod, openblas, protobuf/grpc, …) into ./deps.
+cvcpkg install-deps cvcpkg/recipes/libcvc --prefix deps --config release
+```
+
+Then build libcvc against that prefix — either drive CMake yourself:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/deps"
+cmake --build build -j
+```
+
+…or build through the recipe, **reusing the deps you just installed** — `--no-deps`
+skips re-resolving them. It builds *this* checkout (the recipe's source is the
+repo root) and installs into the same prefix:
+
+```bash
+cvcpkg build libcvc --recipes-dir cvcpkg/recipes --no-deps --prefix deps --config release
+```
+
+Notes:
+
+- Host build tools (CMake, Ninja) come from your system `PATH` —
+  `install-deps` installs only the library dependencies. Add
+  `--include-host-tools` to install cmake/ninja from cvcpkg as well.
+- For a debug dependency set + build, pass `--config debug` to **both** commands.
+
 ### Build Instructions
 
 ```bash
