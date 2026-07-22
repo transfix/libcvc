@@ -3,6 +3,7 @@
 // functions in cvc/utility/algorithm.h.
 #include "pycvc_algorithm.h"
 
+#include <array>
 #include <cvc/core/app.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
@@ -10,8 +11,6 @@
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/volume.h>
-
-#include <array>
 #include <stdexcept>
 
 namespace pycvc {
@@ -54,15 +53,15 @@ void require_len(const std::vector<double> &xyz, std::size_t n, const char *what
 
 // ── SDF ────────────────────────────────────────────────────────────────
 #ifdef CVC_ENABLE_SDF
-Volume sdf(const Geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz, int algorithm,
-           bool flipNormals) {
+Volume sdf(const Geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz,
+           int algorithm, bool flipNormals) {
   cvc::dimension dim(nx, ny, nz);
   // cvc::sdf()'s header says a default (null) bbox uses the geometry's extents,
   // but the implementation does NOT perform that substitution — it forwards the
   // null box, which degenerates to a zero-size grid. Do the documented fallback
   // here so the bbox-less overload works as advertised.
   return wrap_volume(cvc::sdf(ctx(), geom.native(), dim, geom.native().extents(),
-                             static_cast<cvc::sdf_algorithm>(algorithm), flipNormals));
+                              static_cast<cvc::sdf_algorithm>(algorithm), flipNormals));
 }
 
 Volume sdf(const Geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz, double minx,
@@ -71,7 +70,7 @@ Volume sdf(const Geometry &geom, unsigned long nx, unsigned long ny, unsigned lo
   cvc::dimension dim(nx, ny, nz);
   cvc::bounding_box box(minx, miny, minz, maxx, maxy, maxz);
   return wrap_volume(cvc::sdf(ctx(), geom.native(), dim, box,
-                             static_cast<cvc::sdf_algorithm>(algorithm), flipNormals));
+                              static_cast<cvc::sdf_algorithm>(algorithm), flipNormals));
 }
 #else
 Volume sdf(const Geometry &, unsigned long, unsigned long, unsigned long, int, bool) {
@@ -86,8 +85,8 @@ Volume sdf(const Geometry &, unsigned long, unsigned long, unsigned long, double
 // ── Isosurface / meshing ───────────────────────────────────────────────
 #ifdef CVC_ENABLE_MESHER
 Geometry isosurface(const Volume &vol, double isovalue, int method, int improve_iterations) {
-  return wrap_geometry(cvc::iso(vol.native(), isovalue,
-                                static_cast<cvc::extraction_method>(method), improve_iterations));
+  return wrap_geometry(cvc::iso(vol.native(), isovalue, static_cast<cvc::extraction_method>(method),
+                                improve_iterations));
 }
 
 Geometry tetrahedralize(const Volume &vol, double isovalue, int method, int improve_method,

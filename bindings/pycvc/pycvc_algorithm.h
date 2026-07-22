@@ -97,10 +97,10 @@ Geometry extract_surface(const Geometry &geom);
 // Each takes a flat, row-major list of the element's vertex coordinates:
 // a tet is 4 points (12 doubles), a hex is 8 points (24 doubles).
 double tet_volume(const std::vector<double> &verts_xyz);
-double tet_aspect_ratio(const std::vector<double> &verts_xyz);        // equilateral ≈ 2.04
-double tet_min_dihedral_angle(const std::vector<double> &verts_xyz);  // degrees
+double tet_aspect_ratio(const std::vector<double> &verts_xyz);       // equilateral ≈ 2.04
+double tet_min_dihedral_angle(const std::vector<double> &verts_xyz); // degrees
 double hex_volume(const std::vector<double> &verts_xyz);
-double hex_scaled_jacobian(const std::vector<double> &verts_xyz);     // [-1, 1], 1 = perfect cube
+double hex_scaled_jacobian(const std::vector<double> &verts_xyz); // [-1, 1], 1 = perfect cube
 
 // Quality statistics over every tet/hex element of a mesh.
 QualityStats compute_tet_quality_stats(const Geometry &geom, int metric = TET_ASPECT_RATIO);
@@ -110,8 +110,7 @@ QualityStats compute_hex_quality_stats(const Geometry &geom, int metric = HEX_SC
 std::vector<double> compute_mesh_bounds(const Geometry &geom);
 
 // ── Procedural geometry generators ─────────────────────────────────────
-Geometry sphere(double cx, double cy, double cz, double radius, int thetaRes = 32,
-                int phiRes = 16);
+Geometry sphere(double cx, double cy, double cz, double radius, int thetaRes = 32, int phiRes = 16);
 Geometry cube(double cx, double cy, double cz, double sizeX, double sizeY, double sizeZ);
 Geometry torus(double cx, double cy, double cz, double majorRadius, double minorRadius,
                int majorRes = 32, int minorRes = 16);
