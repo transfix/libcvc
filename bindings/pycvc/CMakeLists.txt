@@ -43,7 +43,8 @@ set_property(SOURCE pycvc.i PROPERTY DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_buffer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_algorithm.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h)
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
@@ -60,7 +61,7 @@ option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
 if(CVC_BUILD_PYCVC_CORE)
   swig_add_library(pycvc
     LANGUAGE python
-    SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp
+    SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp pycvc_exec.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -77,7 +78,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
              pycvc_algorithm:test_pycvc_algorithm.py
              pycvc_state:test_pycvc_state.py
-             pycvc_async:test_pycvc_async.py)
+             pycvc_async:test_pycvc_async.py
+             pycvc_exec:test_pycvc_exec.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)

@@ -33,6 +33,7 @@
 #include "pycvc_buffer.h"
 #include "pycvc_algorithm.h"
 #include "pycvc_state.h"
+#include "pycvc_exec.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -732,3 +733,10 @@ class AsyncStateObserver(state_observer):
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers = []
 %}
+
+// ── Phase 4: DSL execution + Python-authored DSL functions ──────────────
+// pycvc.Exec(app) runs state_exec DSL programs over app's state root and lets a
+// Python callable be registered as a DSL function (register_fn). PyObject* is
+// SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
+// INCREFs and manages its lifetime).
+%include "pycvc_exec.h"
