@@ -95,29 +95,32 @@ std::size_t Geometry::num_vertices() const { return geom_->points().size(); }
 std::size_t Geometry::num_triangles() const { return geom_->tris().size(); }
 std::size_t Geometry::num_lines() const { return geom_->lines().size(); }
 
-ArrayView Geometry::vertices() {
-  // cvc::geometry::points() is a std::vector<boost::array<double,3>>, i.e. a
-  // contiguous block of 3*N doubles — expose it as an (N,3) view.
-  auto &pts = geom_->points();
+// Build a zero-copy view over one of cvc::geometry's shared containers, pinning
+// the SPECIFIC container shared_ptr (not the whole geometry). cvc::geometry
+// already copy-on-writes each container (points()/colors() -> pre_write ->
+// make_unique detaches when the shared_ptr is not unique). By owning that exact
+// shared_ptr, the view participates in that refcount: a later append/clear/load
+// COW-detaches to a fresh copy and this block is RETIRED to the view — a valid,
+// decoupled snapshot — instead of being reallocated out from under it. Read via
+// the non-detaching *_ptr() accessor so merely creating a view doesn't itself
+// trigger a detach (two views before any mutation still alias one buffer).
+template <class SharedPtr> static ArrayView view_over(const SharedPtr &container) {
+  auto &vec = *container; // std::vector<boost::array<double,3>> — 3*N contiguous
   ArrayView v;
   v.dtype = DType::Float64;
   v.writable = true;
-  v.shape = {static_cast<long>(pts.size()), 3};
-  v.data = pts.empty() ? nullptr : &pts[0][0];
-  v.owner = geom_; // shared_ptr<cvc::geometry> -> shared_ptr<void>
+  v.shape = {static_cast<long>(vec.size()), 3};
+  v.data = vec.empty() ? nullptr : &vec[0][0];
+  // boost::shared_ptr -> std::shared_ptr<void> keep-alive alias: the no-op
+  // deleter captures a copy of `container`, holding the block for the view's
+  // lifetime (its stored pointer is just an owner tag).
+  v.owner = std::shared_ptr<void>(container.get(), [container](void *) { /* keep-alive */ });
   return v;
 }
 
-ArrayView Geometry::vertex_colors() {
-  auto &cols = geom_->colors();
-  ArrayView v;
-  v.dtype = DType::Float64;
-  v.writable = true;
-  v.shape = {static_cast<long>(cols.size()), 3};
-  v.data = cols.empty() ? nullptr : &cols[0][0];
-  v.owner = geom_;
-  return v;
-}
+ArrayView Geometry::vertices() { return view_over(geom_->points_ptr()); }
+
+ArrayView Geometry::vertex_colors() { return view_over(geom_->colors_ptr()); }
 
 void Geometry::compute_normals() { geom_->compute_normals(); }
 void Geometry::clear() { *geom_ = cvc::geometry(); }
