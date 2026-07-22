@@ -75,7 +75,7 @@ public:
 private:
   void ensure_watch(const std::string &path, cvc::state &node);
 
-  cvc::state *root_;               // app-scoped; outlives this facade (non-owning)
+  cvc::state *root_;                // app-scoped; outlives this facade (non-owning)
   std::shared_ptr<StateImpl> impl_; // change recorder + signal connections
 };
 

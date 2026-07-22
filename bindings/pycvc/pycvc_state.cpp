@@ -4,13 +4,11 @@
 
 #include "pycvc_context.h"
 
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/signals2/connection.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/core/state_object.h>
-
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/signals2/connection.hpp>
-
 #include <map>
 #include <mutex>
 #include <set>

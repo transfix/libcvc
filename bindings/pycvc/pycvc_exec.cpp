@@ -16,7 +16,6 @@
 #include <cvc/core/state_exec/process.h>
 #include <cvc/core/state_exec/scheduler.h>
 #include <cvc/core/state_exec/types.h>
-
 #include <string>
 #include <variant>
 
