@@ -452,8 +452,13 @@ def test_cuda_pre_migration_device_view_stays_valid_after_disable():
 
 
 def test_cuda_pre_migration_host_view_stays_valid_after_enable():
-    # The reverse transition: a host view taken before enable_cuda() must also
-    # stay valid (a snapshot) once the volume migrates onto the GPU.
+    # The reverse transition. enable_cuda() copies the host block into CUDA
+    # unified memory but RETAINS it (it does not reallocate the host buffer), so
+    # a host view taken beforehand is unaffected by the migration and by later
+    # device-side writes, and never faults. disable_cuda() migrates the unified
+    # block back INTO that same retained host block, so the view stays valid and
+    # then reflects the round-tripped data (it re-couples — it is not a frozen
+    # snapshot in this direction, because nothing freed the buffer it aliases).
     if not pycvc.Volume.cuda_available():
         print("  skip: CUDA not available")
         return
@@ -463,18 +468,21 @@ def test_cuda_pre_migration_host_view_stays_valid_after_enable():
     host_view = vol.grid()  # view over the host block
     snapshot = np.array(host_view, copy=True)
 
-    vol.enable_cuda()  # migrates to CUDA unified memory
+    vol.enable_cuda()  # copies host -> unified; the host block is RETAINED
     try:
-        assert np.array_equal(host_view, snapshot), "host view must survive enable_cuda()"
-        # Live data now lives on the GPU block; the host view is decoupled.
+        # Unaffected by the migration itself...
+        assert np.array_equal(host_view, snapshot), "host view survives enable_cuda()"
+        # ...and by a device-side write while GPU-resident (live data is unified).
         dev = vol.grid()
         dev[2, 2, 2] = 321.0
-        assert host_view[2, 2, 2] == snapshot[2, 2, 2], "host view is a decoupled snapshot"
+        assert host_view[2, 2, 2] == snapshot[2, 2, 2], "on-GPU device write not seen by host view"
         assert vol.value(2, 2, 2) == 321.0
     finally:
-        vol.disable_cuda()
-    assert np.array_equal(host_view, snapshot)
-    print("  ok: pre-migration host view survives enable_cuda() (no fault)")
+        vol.disable_cuda()  # migrates unified back INTO the retained host block
+    # Still valid (no fault); now reflects the migrated-back data.
+    assert host_view[2, 2, 2] == 321.0, "host view reflects the round-tripped data"
+    assert host_view[0, 0, 0] == snapshot[0, 0, 0], "untouched elsewhere"
+    print("  ok: pre-migration host view stays valid across enable/disable_cuda")
 
 
 if __name__ == "__main__":
