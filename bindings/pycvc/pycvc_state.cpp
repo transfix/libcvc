@@ -1,11 +1,16 @@
 // pycvc_state.cpp — implementation of the direct state accessors and the
 // state_observer director. Includes Python.h for GIL management around the
 // cross-thread director upcall.
+// Python.h must precede any standard headers (it sets feature macros the
+// standard headers read); keep it first even under clang-format's regrouping.
+// clang-format off
+#include <Python.h>
+// clang-format on
+
 #include "pycvc_state.h"
 
 #include "pycvc_context.h"
 
-#include <Python.h>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/signals2/connection.hpp>
 #include <cvc/core/app.h>
