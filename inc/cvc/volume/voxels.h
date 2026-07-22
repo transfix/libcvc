@@ -513,12 +513,20 @@ protected:
   bool _using_cuda;
   int _cuda_device_id;
 
-  // CUDA unified memory with reference counting via std::shared_ptr
-#ifdef CVC_USING_CUDA
+  // CUDA unified memory with reference counting via std::shared_ptr.
+  //
+  // Declared as std::shared_ptr<void> UNCONDITIONALLY — even on host-only builds
+  // (no CVC_USING_CUDA), where it stays empty and unused — so that sizeof(voxels)
+  // is IDENTICAL whether or not CUDA is enabled. This keeps cvc::volume's C++ ABI
+  // variant-invariant: downstream consumers (cvcGL, volrover3, the pycvc facades)
+  // that include the volume headers see the same layout regardless of which
+  // libcvc variant they link, so a CPU-built consumer is never silently
+  // corrupted when run against libcvc-cuda (and vice versa). Only code that is
+  // itself #ifdef CVC_USING_CUDA-gated needs a separate -cuda build. Every
+  // shared_ptr-specific use of this member (.get()/.reset()/assign-from-a-CUDA-
+  // allocation) is already CVC_USING_CUDA-guarded; on host-only builds it is only
+  // default-constructed / copied, so it stays an empty, inert 16-byte slot.
   std::shared_ptr<void> _cuda_unified_ptr;
-#else
-  void *_cuda_unified_ptr;
-#endif
 
   // Helper methods for CUDA memory management
   void allocate_cuda_memory(data_type vt);
