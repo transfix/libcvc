@@ -427,9 +427,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: libcvc-debug
-            kind: libcvc
-            build_type: Debug
+          # Release only. There are no windows-debug dep bundles on the catalog,
+          # so fetch-libcvc-deps(build_type: Debug) finds nothing, falls back to
+          # an empty prefix, and configure fails at find_package(libiimod).
+          # Even with deps, a Debug libcvc (/MDd) linked against the Release,
+          # shared deps (/MD) is a CRT mismatch that yields a broken artifact —
+          # the same reason publish-cvcpkg.yml excludes the windows-debug target.
+          # Restore the Debug row once windows-debug dep bundles exist (remote-
+          # builder fleet). Linux/macOS have no such issue: Debug libcvc links
+          # the Release, ABI-stable shared deps fine, so they keep both rows.
           - name: libcvc-release
             kind: libcvc
             build_type: Release
