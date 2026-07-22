@@ -12,7 +12,11 @@
 // Every constructor/op is bound to the ONE module app (pycvc::ctx(), from
 // pycvc_context.{h,cpp}, Phase 0): the factory %extend ctors build against
 // it so a host-injected app and Python share one state tree.
-%module pycvc
+// directors="1": enable cross-language polymorphism so Python can subclass
+// C++ types and have C++ call the Python overrides. Used (per-class, via
+// %feature) only where a real callback interface exists — currently
+// pycvc::state_observer (Phase 3 state push callbacks).
+%module(directors="1") pycvc
 
 %{
 #include <cvc/core/app.h>
@@ -27,6 +31,7 @@
 #include "pycvc_context.h"
 #include "pycvc_buffer.h"
 #include "pycvc_algorithm.h"
+#include "pycvc_state.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -69,6 +74,7 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
 namespace std {
   %template(DoubleVector) vector<double>;
   %template(IndexVector) vector<unsigned long>;
+  %template(StringVector) vector<string>;
 }
 
 // boost's fixed-width integer typedefs (uint64_t/int64_t, used by geometry's
@@ -599,3 +605,10 @@ namespace cvc {
 // the real wrapped cvc::geometry/cvc::volume (declared above). Comes last so
 // those value types are already known to SWIG.
 %include "pycvc_algorithm.h"
+
+// ── Phase 3: state access + push callbacks ──────────────────────────────
+// state_has/children/remove act on the shared root; state_observer is a
+// director base — a Python subclass overriding on_changed() is called by C++
+// on every state mutation. Only this class gets a director.
+%feature("director") pycvc::state_observer;
+%include "pycvc_state.h"
