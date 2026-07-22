@@ -28,6 +28,9 @@ depends:
   build:
     # libcvc (find_package(cvc CONFIG)); resolves to libcvc-cuda on a CUDA host.
     - name: libcvc
+    # cvcGL is now the separate `cvcgl` package (find_package(cvcGL CONFIG) +
+    # link cvc::cvcGL) instead of being compiled inline here.
+    - name: cvcgl
     - name: python311
     - name: numpy-cp311
     - name: vtk
@@ -35,6 +38,8 @@ depends:
     # pycvc supplies the core `import pycvc` module this scene module bridges to.
     - name: pycvc
     - name: libcvc
+    # the installed cvcGL this module links against.
+    - name: cvcgl
     - name: python311
     - name: numpy-cp311
     - name: vtk

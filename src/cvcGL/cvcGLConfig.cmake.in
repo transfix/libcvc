@@ -1,0 +1,20 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# cvcGL's public interface links cvc::cvc and the VTK modules below, so both
+# must be found before cvcGLTargets.cmake is read. The VTK component list is
+# substituted from the same list cvcGL links at build time (kept in sync).
+#
+# Guarded so re-processing this config (e.g. a consumer that already did
+# find_package(cvc) then find_package(cvcGL)) does not re-run cvcConfig — its
+# FindImageMagick pass is not idempotent and errors on a second add_library.
+# Mirrors the same `if(NOT TARGET cvc::cvc)` guard cvcGL uses in-tree.
+if(NOT TARGET cvc::cvc)
+  find_dependency(cvc CONFIG)
+endif()
+find_dependency(VTK COMPONENTS @CVCGL_VTK_COMPONENTS@)
+
+include("${CMAKE_CURRENT_LIST_DIR}/cvcGLTargets.cmake")
+
+check_required_components(cvcGL)

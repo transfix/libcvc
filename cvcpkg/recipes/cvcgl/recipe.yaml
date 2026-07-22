@@ -1,0 +1,62 @@
+schema_version: 1
+recipe:
+  name: cvcgl
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "cvcGL — the Qt-free VTK scene-graph library extracted from volrover3: a reactive SceneGraph of GraphicsNode/GeometryNode/VolumeNode over cvc::state that renders cvc::geometry / cvc::volume via VTK. Ships libcvcGL.a + headers + a cmake package config; provides the cvcGL cmake package (cvc::cvcGL target). Consumed by pycvc-gl and other non-Qt scene consumers."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, volumetric, scene, vtk, graphics]
+
+# cvcGL is its OWN package, separate from libcvc: a plain libcvc bundle is a
+# pure C++ SDK with no VTK dependency. cvcGL adds the VTK scene graph and so
+# pulls in VTK. It builds src/cvcGL standalone against the installed libcvc SDK
+# (find_package(cvc CONFIG)) + VTK, and installs a cvcGLConfig.cmake so
+# consumers can find_package(cvcGL CONFIG) and link cvc::cvcGL. It picks up CUDA
+# automatically when the resolved libcvc is the CUDA variant (cvc::cvc carries
+# CVC_USING_CUDA in its interface), so it works against either libcvc variant.
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # src/cvcGL. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # libcvc SDK (find_package(cvc CONFIG)) + VTK (the scene backend).
+    - name: libcvc
+    - name: vtk
+  runtime:
+    # cvcGL's public interface links cvc::cvc and the VTK modules.
+    - name: libcvc
+    - name: vtk
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  # VTK is available on linux + windows (no macOS VTK bundle yet).
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    - lib/libcvcGL*
+    - lib/cmake/cvcGL/
+    - include/cvc/gl/
+  cmake_packages:
+    - name: cvcGL
+      targets:
+        - cvc::cvcGL
+
+abi:
+  cxx_std: 17
