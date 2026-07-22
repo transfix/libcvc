@@ -22,14 +22,14 @@ import pycvc_gl
 
 
 def _make_tri():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([0, 0, 0, 10, 0, 0, 0, 10, 0])
     g.add_triangle(0, 1, 2)
     return g
 
 
 def _make_field(n=3):
-    v = pycvc.Volume()
+    v = pycvc.volume()
     v.set_float_grid([float(i) for i in range(n * n * n)], n, n, n, 0, 0, 0, 1, 1, 1)
     return v
 

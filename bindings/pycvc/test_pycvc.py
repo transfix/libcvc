@@ -11,7 +11,7 @@ import pycvc
 
 
 def test_incremental_build():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     a = g.add_vertex(0.0, 0.0, 0.0)
     b = g.add_vertex(1.0, 0.0, 0.0)
     c = g.add_vertex(0.0, 1.0, 0.0)
@@ -22,7 +22,7 @@ def test_incremental_build():
 
 
 def test_bulk_build_and_lines():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])  # 4 verts
     g.add_triangles([0, 1, 2, 0, 2, 3])  # 2 tris (a quad)
     g.add_lines([0, 1, 1, 2, 2, 3, 3, 0])  # 4 edges
@@ -34,7 +34,7 @@ def test_bulk_build_and_lines():
 
 
 def test_bad_lengths_raise():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     for bad in (lambda: g.add_vertices([0, 0]), lambda: g.add_triangles([0, 1])):
         try:
             bad()
@@ -45,14 +45,14 @@ def test_bad_lengths_raise():
 
 
 def test_off_roundtrip():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([0, 0, 0, 1, 0, 0, 0, 1, 0])
     g.add_triangles([0, 1, 2])
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "tri.off")
         g.save(path)
         assert os.path.getsize(path) > 0
-        h = pycvc.Geometry()
+        h = pycvc.geometry()
         h.load(path)
         assert h.num_vertices() == 3
         assert h.num_triangles() == 1
@@ -62,7 +62,7 @@ def test_volume_float_grid():
     nx, ny, nz = 4, 3, 2
     # ramp field: value == flat index, row-major (x fastest)
     vals = [float(i) for i in range(nx * ny * nz)]
-    v = pycvc.Volume()
+    v = pycvc.volume()
     v.set_float_grid(vals, nx, ny, nz, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
     assert (v.xdim(), v.ydim(), v.zdim()) == (nx, ny, nz)
     assert v.value(0, 0, 0) == 0.0
@@ -73,7 +73,7 @@ def test_volume_float_grid():
 
 
 def test_volume_bad_length_raises():
-    v = pycvc.Volume()
+    v = pycvc.volume()
     try:
         v.set_float_grid([1.0, 2.0], 2, 2, 2, 0, 0, 0, 1, 1, 1)  # 2 != 8
     except Exception:
@@ -88,7 +88,7 @@ def test_volume_rawiv_roundtrip():
 
     nx, ny, nz = 4, 4, 4
     vals = [float(i % 7) for i in range(nx * ny * nz)]
-    v = pycvc.Volume()
+    v = pycvc.volume()
     v.set_float_grid(vals, nx, ny, nz, 0, 0, 0, 1, 1, 1)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "field.rawiv")
@@ -96,7 +96,7 @@ def test_volume_rawiv_roundtrip():
         # registered, so save() must succeed for a fresh path.
         v.save(path)
         assert os.path.getsize(path) > 0
-        w = pycvc.Volume()
+        w = pycvc.volume()
         w.load(path)
         assert (w.xdim(), w.ydim(), w.zdim()) == (nx, ny, nz)
         assert w.value(1, 0, 0) == v.value(1, 0, 0)
@@ -108,7 +108,7 @@ def test_volume_rawiv_roundtrip():
 def test_view_shares_memory_no_copy():
     import numpy as np
 
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([1, 2, 3, 4, 5, 6])
     v = g.vertices()
     assert v.shape == (2, 3) and v.dtype == np.float64
@@ -119,7 +119,7 @@ def test_view_shares_memory_no_copy():
 
 
 def test_view_mutation_is_bidirectional():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([0, 0, 0, 0, 0, 0])
     v = g.vertices()
     v[1, 2] = 7.5  # numpy write -> C++
@@ -133,7 +133,7 @@ def test_view_mutation_is_bidirectional():
 def test_view_outlives_facade():
     import gc
 
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([9, 8, 7, 6, 5, 4])
     v = g.vertices()
     del g
@@ -142,7 +142,7 @@ def test_view_outlives_facade():
 
 
 def test_empty_view_is_safe():
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     v = g.vertices()  # no vertices
     assert v.shape == (0, 3)
     c = g.vertex_colors()  # no colors
@@ -154,7 +154,7 @@ def test_volume_grid_view():
 
     nx, ny, nz = 5, 4, 3
     vals = [float(i) for i in range(nx * ny * nz)]
-    vol = pycvc.Volume()
+    vol = pycvc.volume()
     vol.set_float_grid(vals, nx, ny, nz, 0, 0, 0, 1, 1, 1)
     g = vol.grid()
     assert g.shape == (nz, ny, nx) and g.dtype == np.float32
@@ -176,7 +176,7 @@ def test_threading_concurrent_build_and_view():
     def worker(seed):
         try:
             for _ in range(50):
-                g = pycvc.Geometry()
+                g = pycvc.geometry()
                 g.add_vertices([float(seed)] * 300)  # 100 verts
                 v = g.vertices()
                 v += seed  # in-place on the C++ buffer
@@ -200,7 +200,7 @@ def test_threading_shared_object_views():
     # churn). Must not crash or corrupt; the shared C++ buffer is stable.
     import threading
 
-    g = pycvc.Geometry()
+    g = pycvc.geometry()
     g.add_vertices([float(i) for i in range(3000)])  # 1000 verts
     errors = []
 
@@ -225,10 +225,10 @@ def test_cuda_unified_memory():
     # Skips cleanly on CUDA-disabled builds / GPU-less machines. On a CUDA
     # build with a GPU it proves the single unified allocation serves numpy
     # (host) AND __cuda_array_interface__ (device) with no copies.
-    if not pycvc.Volume.cuda_available():
+    if not pycvc.volume.cuda_available():
         return
     nx, ny, nz = 4, 4, 4
-    vol = pycvc.Volume()
+    vol = pycvc.volume()
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     assert vol.on_gpu() is False  # host-resident by default
     vol.enable_cuda()

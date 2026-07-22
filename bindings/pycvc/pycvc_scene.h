@@ -1,6 +1,7 @@
 // pycvc_scene.h — SWIG-safe facade over cvcGL's SceneGraph, so Python can
-// build a live 3D scene: add pycvc.Geometry / pycvc.Volume as nodes and
-// pump the reactive scene graph. Generic — no domain knowledge.
+// build a live 3D scene: add pycvc.geometry / pycvc.volume (the directly-
+// wrapped cvc value types) as nodes and pump the reactive scene graph.
+// Generic — no domain knowledge.
 #pragma once
 
 #include <cstddef>
@@ -9,19 +10,23 @@
 
 class SceneGraph; // cvcGL (global namespace)
 
-namespace pycvc {
+namespace cvc {
+class geometry;
+class volume;
+} // namespace cvc
 
-class Geometry;
-class Volume;
+namespace pycvc {
 
 class Scene {
 public:
   Scene();
   ~Scene();
 
-  // Add a mesh/polyline or a scalar-field volume as a named node.
-  void add_geometry(const std::string &name, const Geometry &g);
-  void add_volume(const std::string &name, const Volume &v);
+  // Add a mesh/polyline or a scalar-field volume as a named node. The
+  // arguments are the directly-wrapped cvc types (SWIG %import's them from
+  // pycvc.i), so pycvc.geometry / pycvc.volume cross into the scene as-is.
+  void add_geometry(const std::string &name, const cvc::geometry &g);
+  void add_volume(const std::string &name, const cvc::volume &v);
 
   // Re-pumpable event pump: apply queued scene mutations (no Qt loop).
   void pump();

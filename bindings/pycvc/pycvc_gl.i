@@ -3,6 +3,7 @@
 %module pycvc_gl
 
 %{
+#include <cvc/core/exception.h>  // the %import'd %exception block catches cvc::exception
 #include "pycvc_scene.h"
 %}
 

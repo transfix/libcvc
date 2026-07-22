@@ -36,11 +36,11 @@ include(UseSWIG)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
 set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
-# Re-run SWIG when a %include'd facade header changes (ninja otherwise keeps a
-# stale wrapper after edits to pycvc_*.h).
+# Re-run SWIG when a helper header the interface pulls in changes (ninja
+# otherwise keeps a stale wrapper). The directly-wrapped libcvc headers are
+# tracked as ordinary compile dependencies of the generated wrapper.
 set_property(SOURCE pycvc.i PROPERTY DEPENDS
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_geometry.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_volume.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_buffer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h)
 
 # Shared by both modules — defined before either option block so the scene
@@ -58,7 +58,7 @@ option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
 if(CVC_BUILD_PYCVC_CORE)
   swig_add_library(pycvc
     LANGUAGE python
-    SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp pycvc_context.cpp
+    SOURCES pycvc.i pycvc_context.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -107,9 +107,15 @@ if(CVC_BUILD_PYCVC_GL)
     set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
   endif()
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
+  # Re-run SWIG when the Scene facade header (or the %import'd pycvc.i) changes.
+  set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_scene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc.i)
+  # Scene now takes the directly-wrapped cvc::geometry/cvc::volume (%import'd
+  # from pycvc.i), so pycvc_gl no longer compiles the old facade TUs.
   swig_add_library(pycvc_gl
     LANGUAGE python
-    SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp pycvc_context.cpp
+    SOURCES pycvc_gl.i pycvc_scene.cpp
   )
   target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc_gl PRIVATE ${_PYCVC_CVCGL_TARGET} ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
