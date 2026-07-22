@@ -41,6 +41,9 @@ depends:
     - name: python311
     - name: numpy-cp311
     - name: vtk
+    # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge (F3):
+    # a Python vtkActor crosses into the C++ scene as a real vtkProp*.
+    - name: vtk-python
   runtime:
     # pycvc supplies the core `import pycvc` module this scene module bridges to.
     - name: pycvc
@@ -50,6 +53,8 @@ depends:
     - name: python311
     - name: numpy-cp311
     - name: vtk
+    # vtkmodules import + the wrapping-core .so at load for the vtkProp* bridge.
+    - name: vtk-python
   host_tools:
     - cmake
     - ninja
