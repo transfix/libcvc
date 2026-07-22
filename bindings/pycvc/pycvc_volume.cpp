@@ -95,7 +95,14 @@ ArrayView Volume::grid() {
   v.shape = {static_cast<long>(vol_->ZDim()), static_cast<long>(vol_->YDim()),
              static_cast<long>(vol_->XDim())};
   v.data = vol_->data_ptr();
-  v.owner = vol_; // shared_ptr<cvc::volume> -> shared_ptr<void>
+  // Pin the EXACT block this view aliases, not the whole cvc::volume. A later
+  // enable_cuda()/disable_cuda() migrates by reallocation (host <-> CUDA
+  // unified) and frees the old block; owning the volume would keep the object
+  // alive but NOT that specific buffer, so the numpy view would dangle and
+  // segfault. Owning the block makes a stale view fail SAFE — valid (if
+  // decoupled) memory rather than a use-after-free. The shape is already
+  // captured by value above, so the buffer alone is a sufficient owner.
+  v.owner = vol_->active_storage();
   return v;
 }
 

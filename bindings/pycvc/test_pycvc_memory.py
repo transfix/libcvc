@@ -17,10 +17,14 @@ bindings, independent of any threading:
     `cudaMallocManaged` buffer backs BOTH the host numpy view and the device
     pointer, so `grid()`'s host address == `cuda_ptr()` == the
     `__cuda_array_interface__` data pointer. `enable_cuda`/`disable_cuda`
-    *migrate* (reallocate) the buffer, so a view is only valid until the next
-    migration — the tests re-fetch after each transition and prove the data is
-    preserved (they never dereference a pre-migration view; doing so is a
-    use-after-free — see the PR notes).
+    *migrate* (reallocate) the buffer and free the previous block, so callers
+    should re-fetch after each transition to stay coherent with the live data.
+  * Fail-safe stale views — `grid()` pins the EXACT block it views (not just
+    the volume facade), so a view taken before a migration (or before a
+    `set_float_grid()` that reallocates) never dangles: dereferencing it is a
+    valid, decoupled *snapshot* of the pre-migration data, never a segfault.
+    Re-fetching is still required for coherence with the live buffer, but a
+    missed re-fetch fails SAFE instead of faulting.
 
 Style matches the sibling test files: plain asserts + prints, run under
 `__main__`; any failure raises and exits nonzero.
@@ -203,6 +207,41 @@ def test_dropping_all_views_is_safe():
     print("  ok: dropping views / holding a bare capsule is crash-free")
 
 
+# ── Fail-safe stale views: buffer swapped out from under a view ──────
+# grid() pins the specific voxel block it aliases, so a view taken BEFORE the
+# buffer is reallocated (set_float_grid rebuild, or a CUDA migration) stays
+# valid — a decoupled snapshot — instead of dangling into freed memory.
+
+
+def test_grid_view_survives_host_buffer_reallocation():
+    # set_float_grid() rebuilds the volume, replacing (and freeing) the old
+    # voxel buffer. A grid() view captured beforehand must not fault on access.
+    nx, ny, nz = 4, 3, 2
+    vol = pycvc.Volume()
+    vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
+    stale = vol.grid()  # view over the ORIGINAL block
+    old_ptr = _ptr(stale)
+    snapshot = np.array(stale, copy=True)  # what the old block held
+
+    # Rebuild: a fresh, differently-valued grid. Under the old (facade-owning)
+    # model this frees the block `stale` points at -> use-after-free.
+    vol.set_float_grid([100.0 + i for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
+    fresh = vol.grid()
+    assert _ptr(fresh) != old_ptr, "rebuild must reallocate (else nothing to prove)"
+
+    # The pinned view is still valid memory: a decoupled snapshot, not a fault.
+    assert np.array_equal(stale, snapshot), "stale view must hold its pre-rebuild snapshot"
+    assert np.array_equal(fresh, np.arange(100.0, 100.0 + nx * ny * nz).reshape(nz, ny, nx))
+    stale[0, 0, 0] = -7.0  # still safely writable into the old (orphaned) block
+    assert stale[0, 0, 0] == -7.0
+    assert fresh[0, 0, 0] == 100.0, "writing the stale snapshot must not touch the live buffer"
+
+    del vol, fresh
+    gc.collect()  # facade gone; the pinned old block keeps the stale view alive
+    assert stale[1, 2, 3] == snapshot[1, 2, 3]
+    print("  ok: grid() view stays valid (snapshot) after host buffer realloc")
+
+
 # ── Refcount sanity (CPython-specific; robust, not over-fit) ─────────
 
 
@@ -316,6 +355,65 @@ def test_cuda_array_interface_present_only_when_on_gpu():
     else:
         raise AssertionError("CAI must disappear after disable_cuda()")
     print("  ok: __cuda_array_interface__ present iff on_gpu(), absent on host")
+
+
+def test_cuda_pre_migration_device_view_stays_valid_after_disable():
+    # THE migration hazard: a grid() taken while GPU-resident points at the CUDA
+    # unified block, which disable_cuda() frees. The view pins that exact block,
+    # so dereferencing it afterward is a valid snapshot, never a use-after-free.
+    if not pycvc.Volume.cuda_available():
+        print("  skip: CUDA not available")
+        return
+    nx, ny, nz = 4, 4, 4
+    vol = pycvc.Volume()
+    vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
+    vol.enable_cuda()
+    dev_view = vol.grid()  # view over the CUDA unified block
+    dev_view[1, 1, 1] = 555.0
+    assert vol.value(1, 1, 1) == 555.0
+    snapshot = np.array(dev_view, copy=True)
+
+    vol.disable_cuda()  # migrates back to host and FREES the unified block
+    # Old model: dev_view now dangles into freed device memory -> segfault.
+    # Pinned model: the block is still owned by the view -> valid snapshot.
+    assert np.array_equal(dev_view, snapshot), "device view must survive disable_cuda()"
+
+    # Decoupled: mutating the live (host) buffer must not touch the snapshot.
+    live = vol.grid()
+    live[1, 1, 1] = 999.0
+    assert dev_view[1, 1, 1] == 555.0, "stale device view is a decoupled snapshot"
+    assert vol.value(1, 1, 1) == 999.0
+
+    del vol, live
+    gc.collect()  # facade gone; pinned unified block keeps the stale view alive
+    assert dev_view[1, 1, 1] == 555.0
+    print("  ok: pre-migration device view survives disable_cuda() (no fault)")
+
+
+def test_cuda_pre_migration_host_view_stays_valid_after_enable():
+    # The reverse transition: a host view taken before enable_cuda() must also
+    # stay valid (a snapshot) once the volume migrates onto the GPU.
+    if not pycvc.Volume.cuda_available():
+        print("  skip: CUDA not available")
+        return
+    nx, ny, nz = 4, 4, 4
+    vol = pycvc.Volume()
+    vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
+    host_view = vol.grid()  # view over the host block
+    snapshot = np.array(host_view, copy=True)
+
+    vol.enable_cuda()  # migrates to CUDA unified memory
+    try:
+        assert np.array_equal(host_view, snapshot), "host view must survive enable_cuda()"
+        # Live data now lives on the GPU block; the host view is decoupled.
+        dev = vol.grid()
+        dev[2, 2, 2] = 321.0
+        assert host_view[2, 2, 2] == snapshot[2, 2, 2], "host view is a decoupled snapshot"
+        assert vol.value(2, 2, 2) == 321.0
+    finally:
+        vol.disable_cuda()
+    assert np.array_equal(host_view, snapshot)
+    print("  ok: pre-migration host view survives enable_cuda() (no fault)")
 
 
 if __name__ == "__main__":

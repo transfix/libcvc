@@ -29,6 +29,7 @@
 #include <boost/tuple/tuple.hpp>
 #include <cstddef>
 #include <cstring>
+#include <memory>
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
@@ -422,6 +423,17 @@ public:
   // Legacy compatibility: convert to shared_array for old VolMagick code
   // Now we already use shared_array internally, so just return it directly
   boost::shared_array<unsigned char> data_as_shared_array() const { return _voxels; }
+
+  // Shared owner of the voxel block that data_ptr() *currently* points at:
+  // the host shared_array normally, or the CUDA unified block while
+  // using_cuda(). Holding the returned shared_ptr keeps THAT EXACT buffer
+  // alive across a later enableCUDA()/disableCUDA() migration (each of which
+  // reallocates data_ptr()'s target and frees the previous block) or a
+  // whole-object reassignment. This lets an external zero-copy view over
+  // data_ptr() — e.g. a numpy array in the Python bindings — fail SAFE: after
+  // a migration the view is decoupled from the live buffer (it sees a stale
+  // snapshot) but it still references valid memory instead of dangling.
+  std::shared_ptr<void> active_storage() const;
 
 protected:
   void calcMinMax() const;

@@ -1114,4 +1114,23 @@ void voxels::migrate_from_cuda() {
   free_cuda_memory();
 #endif
 }
+
+std::shared_ptr<void> voxels::active_storage() const {
+#ifdef CVC_USING_CUDA
+  // On the GPU, data_ptr() returns the CUDA unified block; hand back its own
+  // shared_ptr so the caller shares ownership of that exact allocation. A later
+  // disableCUDA() drops this object's reference, but the block survives until
+  // the caller's copy is released too.
+  if (_using_cuda && _cuda_unified_ptr)
+    return _cuda_unified_ptr;
+#endif
+  // Host path: data_ptr() returns _voxels.get(). boost::shared_array is not a
+  // std::shared_ptr, so alias it — a std::shared_ptr whose no-op deleter
+  // captures a copy of the shared_array. That copy holds a boost reference for
+  // as long as the returned owner lives, so the host block cannot be freed out
+  // from under a view even if the volume is later reassigned or migrated.
+  boost::shared_array<unsigned char> host = _voxels;
+  void *raw = host.get();
+  return std::shared_ptr<void>(raw, [host](void *) { /* keep-alive only */ });
+}
 } // namespace cvc
