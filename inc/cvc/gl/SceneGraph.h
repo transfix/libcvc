@@ -25,6 +25,7 @@ class AxisNode;
 class BBoxNode;
 
 namespace cvc {
+class app;
 class geometry;
 class volume;
 class state;
@@ -32,7 +33,16 @@ class state;
 
 class SceneGraph {
 public:
+  // Default: runs under cvcGL's own process-wide app (cvc::gl::context()).
+  // Preserved verbatim so existing consumers (VolRover) are unaffected.
   SceneGraph(const std::string &statePrefix = "cvcgl");
+
+  // Injected-app ctor: run this scene under a HOST-provided cvc::app so its
+  // scene state lives in the host's state tree (cvc::state::instance(ctx)),
+  // sharing one context with Python / the host. The default ctor delegates
+  // here with cvc::gl::context(). `ctx` must outlive this SceneGraph.
+  SceneGraph(cvc::app &ctx, const std::string &statePrefix);
+
   ~SceneGraph();
 
   // Get the state prefix for this scene graph
@@ -164,6 +174,7 @@ public:
 
 private:
   vtkRenderer *m_renderer;
+  cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::string m_statePrefix;
   std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
 

@@ -1,6 +1,8 @@
 // pycvc_volume.cpp — Volume facade implementation.
 #include "pycvc_volume.h"
 
+#include "pycvc_context.h"
+
 #include <cvc/core/app.h>
 #include <cvc/core/types.h>
 #include <cvc/volume/dimension.h>
@@ -10,15 +12,10 @@
 
 namespace pycvc {
 
-namespace {
-// Process-wide app context (thread pool, state root). Mirrors the CLI's
-// `static cvc::app app;` pattern — the public accessor instancePtr() is
-// protected, so hosts hold their own instance.
-cvc::app &ctx() {
-  static cvc::app app;
-  return app;
-}
-} // namespace
+// The Volume facade binds to the module-wide app context (pycvc::ctx(), in
+// pycvc_context.{h,cpp}) rather than a private singleton, so a host-injected
+// app and Python share one context / state tree. `ctx()` below resolves to
+// pycvc::ctx() by ordinary namespace lookup.
 
 Volume::Volume() : vol_(std::make_shared<cvc::volume>(ctx())) {}
 Volume::~Volume() = default;

@@ -9,6 +9,7 @@
 %{
 #include "pycvc_geometry.h"
 #include "pycvc_volume.h"
+#include "pycvc_context.h"
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
@@ -26,6 +27,7 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
 
 %include <std_string.i>
 %include <std_vector.i>
+%include <std_shared_ptr.i>
 %include <exception.i>
 
 // Surface C++ exceptions (e.g. bad array lengths, unreadable files) as
@@ -46,6 +48,26 @@ static void pycvc_owner_capsule_dtor(PyObject* cap) {
 namespace std {
   %template(DoubleVector) vector<double>;
   %template(IndexVector) vector<unsigned long>;
+}
+
+// ── Injected-app substrate (Phase 0) ────────────────────────────────
+// cvc::app is shared into Python as an OPAQUE std::shared_ptr<cvc::app>: a
+// host makes one (make_app()) and attach()es it; the module then binds all
+// facades to that app's state tree. cvc::app is never dereferenced from
+// Python — the handle is just passed back into the *_on helpers. Uses the std
+// flavor of %shared_ptr (app manages these handles with std, not boost).
+%shared_ptr(cvc::app)
+namespace cvc { class app; }
+
+namespace pycvc {
+  std::shared_ptr<cvc::app> make_app();
+  void attach(std::shared_ptr<cvc::app> handle);
+  void detach();
+  void state_set(const std::string& path, const std::string& value);
+  std::string state_get(const std::string& path);
+  void state_set_on(std::shared_ptr<cvc::app> handle, const std::string& path,
+                    const std::string& value);
+  std::string state_get_on(std::shared_ptr<cvc::app> handle, const std::string& path);
 }
 
 // native() exposes an opaque, forward-declared cvc type for C++ host apps

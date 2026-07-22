@@ -40,7 +40,8 @@ set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
 # stale wrapper after edits to pycvc_*.h).
 set_property(SOURCE pycvc.i PROPERTY DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_geometry.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_volume.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_volume.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h)
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
@@ -57,7 +58,7 @@ option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
 if(CVC_BUILD_PYCVC_CORE)
   swig_add_library(pycvc
     LANGUAGE python
-    SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
+    SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp pycvc_context.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -70,7 +71,8 @@ if(CVC_BUILD_PYCVC_CORE)
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py
-             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py)
+             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
+             pycvc_attach:test_pycvc_attach.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -107,7 +109,7 @@ if(CVC_BUILD_PYCVC_GL)
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
   swig_add_library(pycvc_gl
     LANGUAGE python
-    SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
+    SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp pycvc_context.cpp
   )
   target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc_gl PRIVATE ${_PYCVC_CVCGL_TARGET} ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
