@@ -26,6 +26,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include "pycvc_context.h"
 #include "pycvc_buffer.h"
+#include "pycvc_algorithm.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -302,6 +303,10 @@ namespace cvc {
 %ignore cvc::geometry::project;
 %ignore cvc::geometry::smoothing;
 %ignore cvc::geometry::quality_improve;
+// ...but re-expose our Pythonic %extend overloads (Phase-2 filters), whose
+// signatures differ from the real app&/enum ones, so only these reach Python.
+%rename("%s") cvc::geometry::smoothing(double, bool, bool);
+%rename("%s") cvc::geometry::quality_improve(int, int);
 %ignore cvc::geometry::read;
 %ignore cvc::geometry::write;
 
@@ -406,6 +411,22 @@ namespace cvc {
 #ifdef CVC_USING_CUDA
     $self->disableCUDA();
 #endif
+  }
+
+  // ── Denoise / enhance filters (in-place cvc::voxels ops; the real
+  // camelCase methods are %ignore'd — these lower_snake wrappers have
+  // distinct names so no ignore-collision; each auto-dispatches to the CUDA
+  // kernel when the volume is GPU-resident). ──
+  void bilateral_filter(double radiometric_sigma = 200.0, double spatial_sigma = 1.5,
+                        unsigned int filter_radius = 2) {
+    $self->bilateralFilter(radiometric_sigma, spatial_sigma, filter_radius);
+  }
+  void contrast_enhancement(double resistor = 0.95) { $self->contrastEnhancement(resistor); }
+  void anisotropic_diffusion(unsigned int iterations = 20) {
+    $self->anisotropicDiffusion(iterations);
+  }
+  void gdtv_filter(double q, double lambda, unsigned int iterations, unsigned int neighbours = 0) {
+    $self->gdtvFilter(q, lambda, iterations, neighbours);
   }
 
 // ── GPU adapter: expose a GPU-resident volume to cupy/torch/numba ───
@@ -550,7 +571,31 @@ namespace cvc {
     return v;
   }
 
+  // ── Mesh filters. smoothing() takes the injected app explicitly;
+  // quality_improve() is mesher-gated (LBIE) — raises when the build has the
+  // mesher off. The real same-named methods are %ignore'd and these %extend
+  // overloads are re-exposed by signature (see the %rename notes above). ──
+  void smoothing(double delta = 0.1, bool fix_boundary = false, bool geometric_flow = true) {
+    $self->smoothing(pycvc::ctx(), static_cast<float>(delta), fix_boundary, /*perturb_1=*/false,
+                     geometric_flow, /*smoothing_enabled=*/true, /*perturb_2=*/false);
+  }
+  void quality_improve(int iterations = 1, int method = 1) {
+#ifdef CVC_ENABLE_MESHER
+    $self->quality_improve(iterations, static_cast<cvc::improvement_method>(method));
+#else
+    (void)iterations;
+    (void)method;
+    throw std::runtime_error("quality_improve: this libcvc build has the mesher disabled");
+#endif
+  }
+
   // File I/O (.off/.raw/.rawc/…) via cvc::geometry_file_io free functions.
   void save(const std::string& filename) const { cvc::write_geometry(*$self, filename); }
   void load(const std::string& filename) { *$self = cvc::read_geometry(filename); }
 }
+
+// ── Phase 2: compute layer (SDF / meshing / quality / generators) ───────
+// Module-level free functions + enum constants + QualityStats, taking/returning
+// the real wrapped cvc::geometry/cvc::volume (declared above). Comes last so
+// those value types are already known to SWIG.
+%include "pycvc_algorithm.h"
