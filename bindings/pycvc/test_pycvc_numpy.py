@@ -13,12 +13,15 @@ import threading
 import numpy as np
 import pycvc
 
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
+
 
 # ── Data processing: views share memory, both directions ────────────
 
 
 def test_vertices_view_shares_memory():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0])
     v = g.vertices()
     assert v.shape == (4, 3) and v.dtype == np.float64
@@ -33,7 +36,7 @@ def test_vertices_view_shares_memory():
 
 
 def test_vertices_view_is_not_a_copy():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([1.0, 2.0, 3.0])
     a = g.vertices()
     b = g.vertices()
@@ -43,13 +46,13 @@ def test_vertices_view_is_not_a_copy():
 
 
 def test_empty_geometry_view():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     v = g.vertices()
     assert v.shape == (0, 3) and v.size == 0
 
 
 def test_colors_view():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 1, 1, 1])
     g.set_colors([1, 0, 0, 0, 1, 0])
     c = g.vertex_colors()
@@ -60,7 +63,7 @@ def test_colors_view():
 def test_volume_grid_view_and_indexing():
     nx, ny, nz = 2, 3, 4
     vals = [float(i) for i in range(nx * ny * nz)]
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid(vals, nx, ny, nz, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     assert grid.shape == (nz, ny, nx) and grid.dtype == np.float32
@@ -74,7 +77,7 @@ def test_volume_grid_view_and_indexing():
 
 
 def test_grid_view_writability_flag():
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([1.0] * 8, 2, 2, 2, 0, 0, 0, 1, 1, 1)
     assert vol.grid().flags.writeable is True
 
@@ -84,7 +87,7 @@ def test_grid_view_writability_flag():
 
 def test_view_outlives_facade_object():
     def make():
-        g = pycvc.geometry()
+        g = pycvc.geometry(app)
         g.add_vertices([9, 9, 9, 8, 8, 8])
         return g.vertices()
 
@@ -96,7 +99,7 @@ def test_view_outlives_facade_object():
 
 def test_volume_view_outlives_facade_object():
     def make():
-        vol = pycvc.volume()
+        vol = pycvc.volume(app)
         vol.set_float_grid([float(i) for i in range(8)], 2, 2, 2, 0, 0, 0, 1, 1, 1)
         return vol.grid()
 
@@ -107,7 +110,7 @@ def test_volume_view_outlives_facade_object():
 
 
 def test_many_views_then_drop_source():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices(list(range(3 * 100)))
     views = [g.vertices() for _ in range(50)]
     del g
@@ -127,12 +130,12 @@ def test_threaded_build_and_view():
 
     def worker(seed):
         try:
-            g = pycvc.geometry()
+            g = pycvc.geometry(app)
             g.add_vertices([float(seed)] * (3 * 64))
             v = g.vertices()
             assert v.shape == (64, 3)
             assert float(v[0, 0]) == float(seed)
-            vol = pycvc.volume()
+            vol = pycvc.volume(app)
             vol.set_float_grid([float(seed)] * 64, 4, 4, 4, 0, 0, 0, 1, 1, 1)
             assert float(vol.grid()[0, 0, 0]) == float(seed)
         except Exception as e:  # noqa: BLE001
@@ -147,7 +150,7 @@ def test_threaded_build_and_view():
 
 
 def test_threaded_reads_of_shared_view():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(3 * 256)])
     view = g.vertices()
     results = []
@@ -170,7 +173,7 @@ def test_threaded_reads_of_shared_view():
 def test_writer_reader_thread_consistency():
     # One writer mutates the shared buffer; readers must never see torn/invalid
     # memory (GIL serializes element ops; the buffer stays alive throughout).
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([0.0] * (8 * 8 * 8), 8, 8, 8, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     stop = threading.Event()
@@ -206,7 +209,7 @@ def test_gpu_adapter_host_build_degrades_cleanly():
     # additionally exposes the SAME unified buffer to cupy/torch on-device.
     # On a CUDA-disabled build (or host-resident data), on_gpu() is False and
     # there is no CUDA interface — the correct signal for GPU array libs.
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([1.0] * 8, 2, 2, 2, 0, 0, 0, 1, 1, 1)
     assert vol.on_gpu() is False
     assert vol.cuda_ptr() == 0

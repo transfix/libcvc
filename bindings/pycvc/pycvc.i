@@ -9,9 +9,10 @@
 // adds the numpy-friendly convenience surface (builders, lowercase
 // dimension accessors, zero-copy views, CUDA adapter) that the tests use.
 //
-// Every constructor/op is bound to the ONE module app (pycvc::ctx(), from
-// pycvc_context.{h,cpp}, Phase 0): the factory %extend ctors build against
-// it so a host-injected app and Python share one state tree.
+// Every constructor/op takes the cvc::app EXPLICITLY (pycvc.volume(app),
+// state_set(app,...), sdf(app,...), observer.watch(app)). There is no
+// module-global "current app" and no attach/detach — a host passes the
+// shared_ptr<cvc::app> it owns; standalone code uses make_app()/pycvc.App().
 // directors="1": enable cross-language polymorphism so Python can subclass
 // C++ types and have C++ call the Python overrides. Used (per-class, via
 // %feature) only where a real callback interface exists — currently
@@ -87,25 +88,32 @@ namespace std {
 %apply unsigned long long { boost::uint64_t };
 %apply long long { boost::int64_t };
 
-// ── Injected-app substrate (Phase 0) ────────────────────────────────
-// cvc::app is shared into Python as an OPAQUE std::shared_ptr<cvc::app>: a
-// host makes one (make_app()) and attach()es it; the module then binds all
-// wrapped ctors/ops to that app's state tree. cvc::app is never dereferenced
-// from Python — the handle is just passed back into the *_on helpers. Uses
-// the std flavor of %shared_ptr (app manages these handles with std).
+// ── The app handle (explicit, no module-global) ─────────────────────
+// cvc::app crosses to Python as an OPAQUE std::shared_ptr<cvc::app> and is
+// threaded EXPLICITLY into every ctor/op (pycvc.volume(app), state_set(app,…),
+// sdf(app,…), observer.watch(app)). There is no attach()/detach() and no
+// "current app": make_app() (a.k.a. pycvc.App) mints a standalone one; a host
+// passes the shared_ptr it already owns. cvc::app is never dereferenced from
+// Python. %shared_ptr uses the std flavor (app manages these handles with std).
 %shared_ptr(cvc::app)
-namespace cvc { class app; }
+// An OPAQUE wrapped class (empty body) — not just a forward declaration — so
+// SWIG generates a proxy for cvc::app and %shared_ptr can hang the destructor
+// on it (a bare `class app;` leaks the shared_ptr<app>, "no destructor found").
+// The real (heavy, non-copyable) cvc::app comes from <cvc/core/app.h> in the
+// %{ %} block; this body is only for SWIG's parser. %nodefaultctor: Python
+// never constructs an app directly — it comes from make_app()/the host.
+%nodefaultctor cvc::app;
+namespace cvc { class app {}; }
 
 namespace pycvc {
   std::shared_ptr<cvc::app> make_app();
-  void attach(std::shared_ptr<cvc::app> handle);
-  void detach();
-  void state_set(const std::string& path, const std::string& value);
-  std::string state_get(const std::string& path);
-  void state_set_on(std::shared_ptr<cvc::app> handle, const std::string& path,
-                    const std::string& value);
-  std::string state_get_on(std::shared_ptr<cvc::app> handle, const std::string& path);
 }
+// Ergonomic alias: pycvc.App() reads as a constructor for a fresh app.
+%pythoncode %{
+App = make_app
+%}
+// state_set/get/has/children/remove + state_observer come from pycvc_state.h
+// (%include'd below), all taking the app explicitly.
 
 // ── Zero-copy numpy views ──────────────────────────────────────────
 // A wrapped method returning a pycvc::ArrayView becomes a numpy array that
@@ -229,11 +237,11 @@ namespace cvc {
 // the double-valued spatial accessors (XMin..ZMax, XSpan..ZSpan), desc(),
 // interpolate(). read/write are kept only for the C++ %extend load/save.
 %ignore cvc::volume::volume;
-// ...but KEEP the zero-arg %extend factory ctor below. A blanket
-// `%ignore Class::Class` also suppresses %extend-added constructors of the
-// same name; volume has no real zero-arg ctor, so re-exposing volume() by
-// signature un-ignores ONLY our factory (which binds to pycvc::ctx()).
-%rename("%s") cvc::volume::volume();
+// ...but KEEP our %extend factory ctor volume(app) below. A blanket
+// `%ignore Class::Class` also suppresses same-named %extend ctors; the real
+// volume ctors take app& (not shared_ptr<app>), so re-exposing the
+// shared_ptr<app> signature un-ignores ONLY our factory.
+%rename("%s") cvc::volume::volume(std::shared_ptr<cvc::app>);
 %ignore cvc::volume::copy;
 %ignore cvc::volume::sub;
 %ignore cvc::volume::resize;
@@ -251,17 +259,12 @@ namespace cvc {
 // the C++ %extend builders/views — plus the by-value boost::array returns
 // (min_point/max_point/extents), the num_* accessors (re-added as
 // num_vertices/num_triangles/num_lines), and the Phase-2 algorithms.
-// cvc::geometry HAS a real app-less default ctor `geometry()` (and a copy
-// ctor); keep both exposed. Its container ops (points/tris/colors, COW) and
-// the free-function file IO (read_geometry/write_geometry, no app&) never
-// deref _ctx — only the member read() and Phase-2 algorithms do — so an
-// app-less geometry is safe for everything Phase 1 exposes. Ignore ONLY the
-// app&/string ctors (blanket-ignoring geometry() would also kill the default,
-// leaving no constructor). Do NOT %extend a geometry() ctor: it would collide
-// with the real zero-arg default.
-%ignore cvc::geometry::geometry(cvc::app &);
-%ignore cvc::geometry::geometry(cvc::app &, const std::string &);
-%ignore cvc::geometry::geometry(const std::string &);
+// Hide ALL real geometry ctors (the app-less default sets _ctx=nullptr; we
+// require an explicit app for consistency with volume). Our %extend factory
+// geometry(app) below is re-exposed by its shared_ptr<app> signature — the real
+// ctors take app&/string/geometry&, none take shared_ptr<app>, so no collision.
+%ignore cvc::geometry::geometry;
+%rename("%s") cvc::geometry::geometry(std::shared_ptr<cvc::app>);
 %ignore cvc::geometry::copy;
 %ignore cvc::geometry::ctx;
 %ignore cvc::geometry::points;
@@ -311,7 +314,7 @@ namespace cvc {
 %ignore cvc::geometry::quality_improve;
 // ...but re-expose our Pythonic %extend overloads (Phase-2 filters), whose
 // signatures differ from the real app&/enum ones, so only these reach Python.
-%rename("%s") cvc::geometry::smoothing(double, bool, bool);
+%rename("%s") cvc::geometry::smoothing(std::shared_ptr<cvc::app>, double, bool, bool);
 %rename("%s") cvc::geometry::quality_improve(int, int);
 %ignore cvc::geometry::read;
 %ignore cvc::geometry::write;
@@ -334,7 +337,11 @@ namespace cvc {
 // ── volume: factory ctor, builders, views, CUDA adapter ─────────────
 %extend cvc::volume {
   // Default-construct against the module app (Phase 0 injected context).
-  volume() { return new cvc::volume(pycvc::ctx()); }
+  volume(std::shared_ptr<cvc::app> app) {
+    if (!app)
+      throw std::invalid_argument("pycvc.volume: null app handle");
+    return new cvc::volume(*app);
+  }
 
   // Build a Float volume from a flat, row-major (x fastest, then y, then z)
   // scalar grid of nx*ny*nz values, over the object-space box
@@ -351,7 +358,9 @@ namespace cvc {
     std::vector<float> fbuf(values.begin(), values.end());
     cvc::dimension dim(nx, ny, nz);
     cvc::bounding_box box(minx, miny, minz, maxx, maxy, maxz);
-    *$self = cvc::volume(pycvc::ctx(), reinterpret_cast<const unsigned char*>(fbuf.data()), dim,
+    // Rebuild in place using THIS volume's own app (set when it was
+    // constructed via pycvc.volume(app) — voxels stores it as _ctx).
+    *$self = cvc::volume($self->ctx(), reinterpret_cast<const unsigned char*>(fbuf.data()), dim,
                          cvc::Float, box);
   }
 
@@ -462,8 +471,12 @@ namespace cvc {
 
 // ── geometry: factory ctor, builders, zero-copy views, I/O ──────────
 %extend cvc::geometry {
-  // (No factory ctor here — the real app-less geometry() default ctor is kept
-  // exposed above; it is safe for all Phase-1 ops. See the %ignore notes.)
+  // Construct against an explicit app (the real explicit geometry(app&) ctor).
+  geometry(std::shared_ptr<cvc::app> app) {
+    if (!app)
+      throw std::invalid_argument("pycvc.geometry: null app handle");
+    return new cvc::geometry(*app);
+  }
 
   // Incremental builders. Indices use size_t (== uint64 on LP64).
   std::size_t add_vertex(double x, double y, double z) {
@@ -581,8 +594,11 @@ namespace cvc {
   // quality_improve() is mesher-gated (LBIE) — raises when the build has the
   // mesher off. The real same-named methods are %ignore'd and these %extend
   // overloads are re-exposed by signature (see the %rename notes above). ──
-  void smoothing(double delta = 0.1, bool fix_boundary = false, bool geometric_flow = true) {
-    $self->smoothing(pycvc::ctx(), static_cast<float>(delta), fix_boundary, /*perturb_1=*/false,
+  void smoothing(std::shared_ptr<cvc::app> app, double delta = 0.1, bool fix_boundary = false,
+                 bool geometric_flow = true) {
+    if (!app)
+      throw std::invalid_argument("pycvc geometry.smoothing: null app handle");
+    $self->smoothing(*app, static_cast<float>(delta), fix_boundary, /*perturb_1=*/false,
                      geometric_flow, /*smoothing_enabled=*/true, /*perturb_2=*/false);
   }
   void quality_improve(int iterations = 1, int method = 1) {

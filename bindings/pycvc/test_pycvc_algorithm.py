@@ -18,6 +18,9 @@ import math
 import numpy as np
 import pycvc
 
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
+
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -34,7 +37,7 @@ def _analytic_sphere_field(radius=1.0, dim=32, lo=-2.0, hi=2.0):
             for i in range(dim):
                 x = lo + span * i / (dim - 1)
                 vals.append(math.sqrt(x * x + y * y + z * z) - radius)
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid(vals, dim, dim, dim, lo, lo, lo, hi, hi, hi)
     return vol
 
@@ -101,7 +104,7 @@ def test_compute_mesh_bounds_sphere():
 def test_sdf_sign_and_shape():
     geom = pycvc.sphere(0, 0, 0, 1.0, 32, 16)
     dim = 24
-    vol = pycvc.sdf(geom, dim, dim, dim, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0)
+    vol = pycvc.sdf(app, geom, dim, dim, dim, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0)
     assert (vol.xdim(), vol.ydim(), vol.zdim()) == (dim, dim, dim)
     grid = np.asarray(vol.grid())
     assert grid.shape == (dim, dim, dim)
@@ -117,7 +120,7 @@ def test_sdf_sign_and_shape():
 def test_sdf_bbox_from_geometry_extents():
     # The bbox-less overload uses the geometry's own extents.
     geom = pycvc.sphere(0, 0, 0, 1.0, 24, 12)
-    vol = pycvc.sdf(geom, 16, 16, 16)
+    vol = pycvc.sdf(app, geom, 16, 16, 16)
     assert (vol.xdim(), vol.ydim(), vol.zdim()) == (16, 16, 16)
     assert vol.min_value() < 0.0  # some samples fall inside the sphere
     print(f"sdf(no-bbox) 16^3: min={vol.min_value():.3f} max={vol.max_value():.3f}")
@@ -125,7 +128,7 @@ def test_sdf_bbox_from_geometry_extents():
 
 def test_sdf_v2_algorithm_selection():
     geom = pycvc.sphere(0, 0, 0, 1.0, 24, 12)
-    vol = pycvc.sdf(geom, 20, 20, 20, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0, pycvc.SDF_V2)
+    vol = pycvc.sdf(app, geom, 20, 20, 20, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0, pycvc.SDF_V2)
     assert (vol.xdim(), vol.ydim(), vol.zdim()) == (20, 20, 20)
     assert vol.min_value() < 0.0 < vol.max_value()
     print(f"sdf SDF_V2: min={vol.min_value():.3f} max={vol.max_value():.3f}")
@@ -148,7 +151,7 @@ def test_isosurface_analytic_field():
 
 def test_isosurface_of_sdf():
     geom = pycvc.sphere(0, 0, 0, 1.0, 32, 16)
-    vol = pycvc.sdf(geom, 32, 32, 32, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0)
+    vol = pycvc.sdf(app, geom, 32, 32, 32, -2.0, -2.0, -2.0, 2.0, 2.0, 2.0)
     iso = pycvc.isosurface(vol, 0.0)
     assert iso.num_vertices() > 0 and iso.num_triangles() > 0
     radii = np.linalg.norm(np.asarray(iso.vertices()), axis=1)

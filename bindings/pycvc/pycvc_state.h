@@ -1,33 +1,40 @@
-// pycvc_state.h — direct access to the injected app's state tree, plus a
-// director base for Python push callbacks on state changes.
+// pycvc_state.h — direct access to an app's state tree, plus a director base
+// for Python push callbacks on state changes.
 //
-// Phase-3 rearchitecture. All operations act on the ONE shared root,
-// cvc::state::instance(pycvc::ctx()) — the same tree the host app (and the DSL,
-// Phase 4) see, so a write here is visible everywhere. state_set()/state_get()
-// live in pycvc_context.h (Phase 0); this header adds has/children/remove and
-// the observer. There is no facade State object: these are direct functions on
-// the real tree.
+// Every function takes the cvc::app EXPLICITLY (no module-global): all ops act
+// on that app's own root, cvc::state::instance(*app) — the same tree the host
+// app (and the DSL, Phase 4) see, so a write is visible everywhere the same app
+// is used. There is no facade State object; these are direct functions on the
+// real tree.
 #pragma once
 
 #include <memory>
 #include <string>
 #include <vector>
 
+namespace cvc {
+class app;
+}
+
 namespace pycvc {
 
-// ── Direct state access on the shared root ──────────────────────────────
-// True iff a node exists at `path` (dotted, e.g. "a.b.c").
-bool state_has(const std::string &path);
-// Immediate child leaf-names of `path` ("" = the root). Reduced from
-// cvc::state::children()'s recursive absolute-path list to single segments.
-std::vector<std::string> state_children(const std::string &path);
+// ── Direct state access on a given app's root ───────────────────────────
+// set navigates/creates dotted-path nodes (state::operator()); get reads
+// without creating and throws on a missing path.
+void state_set(const std::shared_ptr<cvc::app> &app, const std::string &path,
+               const std::string &value);
+std::string state_get(const std::shared_ptr<cvc::app> &app, const std::string &path);
+bool state_has(const std::shared_ptr<cvc::app> &app, const std::string &path);
+// Immediate child leaf-names of `path` ("" = the root).
+std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
+                                        const std::string &path);
 // Remove the node at `path` (and its subtree). Idempotent; the root is never
 // removed.
-void state_remove(const std::string &path);
+void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path);
 
 // ── Push callbacks (SWIG director) ──────────────────────────────────────
-// Subclass in Python and override on_changed(path); call watch() to connect to
-// the shared root's tree-wide childChanged signal (fires for EVERY mutation
+// Subclass in Python and override on_changed(path); call watch(app) to connect
+// to that app's tree-wide childChanged signal (fires for EVERY mutation
 // anywhere, carrying the full dotted path — real push, no polling). The signal
 // fires SYNCHRONOUSLY on the state-writing thread, which may not hold the GIL,
 // so the C++ dispatch acquires it before the Python upcall and swallows any
@@ -42,9 +49,9 @@ public:
   // Overridden in Python. `path` is the dotted path of the changed node.
   virtual void on_changed(const std::string &path);
 
-  void watch();          // connect to the shared root's childChanged
-  void unwatch();        // disconnect (idempotent)
-  bool watching() const; // currently connected?
+  void watch(const std::shared_ptr<cvc::app> &app); // connect to app's root childChanged
+  void unwatch();                                   // disconnect (idempotent)
+  bool watching() const;                            // currently connected?
 
 private:
   struct Impl;                 // holds the boost::signals2::scoped_connection

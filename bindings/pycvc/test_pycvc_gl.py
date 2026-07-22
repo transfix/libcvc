@@ -18,18 +18,21 @@ analogue of cvcgl_teardown's Case A/B. All headless: no `show()`, no render.
 import gc
 
 import pycvc
+
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
 import pycvc_gl
 
 
 def _make_tri():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 10, 0, 0, 0, 10, 0])
     g.add_triangle(0, 1, 2)
     return g
 
 
 def _make_field(n=3):
-    v = pycvc.volume()
+    v = pycvc.volume(app)
     v.set_float_grid([float(i) for i in range(n * n * n)], n, n, n, 0, 0, 0, 1, 1, 1)
     return v
 

@@ -1,6 +1,6 @@
 // pycvc_algorithm.cpp — implementation of the compute free functions. Bridges
 // the directly-wrapped cvc::geometry / cvc::volume to cvc/utility/algorithm.h,
-// using the Phase-0 injected app (pycvc::ctx()).
+// using the app passed explicitly to sdf() (the only compute fn that needs one).
 #include "pycvc_algorithm.h"
 
 #include "pycvc_context.h"
@@ -33,30 +33,36 @@ void require_len(const std::vector<double> &xyz, std::size_t n, const char *what
 
 // ── SDF ────────────────────────────────────────────────────────────────
 #ifdef CVC_ENABLE_SDF
-cvc::volume sdf(const cvc::geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz,
-                int algorithm, bool flipNormals) {
+cvc::volume sdf(const std::shared_ptr<cvc::app> &app, const cvc::geometry &geom, unsigned long nx,
+                unsigned long ny, unsigned long nz, int algorithm, bool flipNormals) {
+  if (!app)
+    throw std::invalid_argument("sdf: null app handle");
   cvc::dimension dim(nx, ny, nz);
   // cvc::sdf()'s header says a default (null) bbox uses the geometry's extents,
   // but the implementation does NOT perform that substitution — it forwards the
   // null box, which degenerates to a zero-size grid. Do the documented fallback
   // here so the bbox-less overload works as advertised.
-  return cvc::sdf(ctx(), geom, dim, geom.extents(), static_cast<cvc::sdf_algorithm>(algorithm),
+  return cvc::sdf(*app, geom, dim, geom.extents(), static_cast<cvc::sdf_algorithm>(algorithm),
                   flipNormals);
 }
 
-cvc::volume sdf(const cvc::geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz,
-                double minx, double miny, double minz, double maxx, double maxy, double maxz,
-                int algorithm, bool flipNormals) {
+cvc::volume sdf(const std::shared_ptr<cvc::app> &app, const cvc::geometry &geom, unsigned long nx,
+                unsigned long ny, unsigned long nz, double minx, double miny, double minz,
+                double maxx, double maxy, double maxz, int algorithm, bool flipNormals) {
+  if (!app)
+    throw std::invalid_argument("sdf: null app handle");
   cvc::dimension dim(nx, ny, nz);
   cvc::bounding_box box(minx, miny, minz, maxx, maxy, maxz);
-  return cvc::sdf(ctx(), geom, dim, box, static_cast<cvc::sdf_algorithm>(algorithm), flipNormals);
+  return cvc::sdf(*app, geom, dim, box, static_cast<cvc::sdf_algorithm>(algorithm), flipNormals);
 }
 #else
-cvc::volume sdf(const cvc::geometry &, unsigned long, unsigned long, unsigned long, int, bool) {
+cvc::volume sdf(const std::shared_ptr<cvc::app> &, const cvc::geometry &, unsigned long,
+                unsigned long, unsigned long, int, bool) {
   throw std::runtime_error("sdf: this libcvc build has the SDF module disabled (CVC_ENABLE_SDF)");
 }
-cvc::volume sdf(const cvc::geometry &, unsigned long, unsigned long, unsigned long, double, double,
-                double, double, double, double, int, bool) {
+cvc::volume sdf(const std::shared_ptr<cvc::app> &, const cvc::geometry &, unsigned long,
+                unsigned long, unsigned long, double, double, double, double, double, double, int,
+                bool) {
   throw std::runtime_error("sdf: this libcvc build has the SDF module disabled (CVC_ENABLE_SDF)");
 }
 #endif // CVC_ENABLE_SDF

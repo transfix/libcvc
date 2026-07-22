@@ -18,7 +18,12 @@
 // the C++ compiler needs them complete for the by-value returns below.
 #include <cvc/geometry/geometry.h>
 #include <cvc/volume/volume.h>
+#include <memory>
 #include <vector>
+
+namespace cvc {
+class app;
+}
 
 namespace pycvc {
 
@@ -64,14 +69,17 @@ struct QualityStats {
 };
 
 // ── Signed distance field (CVC_ENABLE_SDF) ─────────────────────────────
-// Sample a signed-distance field of `geom` onto an nx*ny*nz grid. Sign
-// convention follows libcvc (inside vs outside differ; flip with flipNormals).
-// The bbox-less overload uses the geometry's own extents.
-cvc::volume sdf(const cvc::geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz,
-                int algorithm = SDF_V1, bool flipNormals = false);
-cvc::volume sdf(const cvc::geometry &geom, unsigned long nx, unsigned long ny, unsigned long nz,
-                double minx, double miny, double minz, double maxx, double maxy, double maxz,
-                int algorithm = SDF_V1, bool flipNormals = false);
+// Sample a signed-distance field of `geom` onto an nx*ny*nz grid, in `app`'s
+// context (sdf needs the app's thread pool). Sign convention follows libcvc
+// (inside vs outside differ; flip with flipNormals). The bbox-less overload
+// uses the geometry's own extents.
+cvc::volume sdf(const std::shared_ptr<cvc::app> &app, const cvc::geometry &geom, unsigned long nx,
+                unsigned long ny, unsigned long nz, int algorithm = SDF_V1,
+                bool flipNormals = false);
+cvc::volume sdf(const std::shared_ptr<cvc::app> &app, const cvc::geometry &geom, unsigned long nx,
+                unsigned long ny, unsigned long nz, double minx, double miny, double minz,
+                double maxx, double maxy, double maxz, int algorithm = SDF_V1,
+                bool flipNormals = false);
 
 // ── Isosurface / volumetric meshing (CVC_ENABLE_MESHER) ────────────────
 cvc::geometry isosurface(const cvc::volume &vol, double isovalue, int method = DUALLIB,

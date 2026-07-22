@@ -19,6 +19,9 @@ proving the C++ methods auto-dispatch to their CUDA kernels on GPU data.
 import numpy as np
 import pycvc
 
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
+
 SEED = 12345
 
 
@@ -33,7 +36,7 @@ def _volume_from_field(field):
     (index = ((k*ny)+j)*nx + i), matching Volume.value(i, j, k) / grid()[k,j,i].
     """
     nz, ny, nx = field.shape
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid(field.astype(np.float64).ravel(order="C").tolist(),
                        nx, ny, nz, 0, 0, 0, 1, 1, 1)
     return vol
@@ -60,7 +63,7 @@ def _neighbour_energy(a):
 
 
 def _mesh_from(verts, faces):
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices(verts.astype(np.float64).ravel(order="C").tolist())
     g.add_triangles(faces.astype(np.int64).ravel(order="C").tolist())
     return g
@@ -254,7 +257,7 @@ def test_geometry_smoothing_moves_and_smooths():
     before = g.vertices().copy()
     rough_before = _laplacian_roughness(before, m)
     for _ in range(3):
-        g.smoothing(0.5, False, False)  # delta, fix_boundary, geometric_flow=Laplacian
+        g.smoothing(app, 0.5, False, False)  # delta, fix_boundary, geometric_flow=Laplacian
     after = np.asarray(g.vertices())
     # topology preserved
     assert g.num_vertices() == nv and g.num_triangles() == nt

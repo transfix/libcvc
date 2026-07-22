@@ -9,25 +9,45 @@
 
 #include "pycvc_state.h"
 
-#include "pycvc_context.h"
-
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/signals2/connection.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <stdexcept>
 
 namespace pycvc {
 
 namespace {
 constexpr char kSep = '.'; // cvc::state::SEPARATOR
+
+cvc::state &root_of(const std::shared_ptr<cvc::app> &app) {
+  if (!app)
+    throw std::invalid_argument("pycvc state op: null app handle");
+  return cvc::state::instance(*app);
+}
 } // namespace
 
-bool state_has(const std::string &path) {
-  return cvc::state::instance(ctx()).findDescendant(path) != nullptr;
+void state_set(const std::shared_ptr<cvc::app> &app, const std::string &path,
+               const std::string &value) {
+  // operator()(path) creates child nodes as needed (same as the state-set
+  // intrinsic); value() fires valueChanged only on an actual change.
+  root_of(app)(path).value(value);
 }
 
-std::vector<std::string> state_children(const std::string &path) {
-  cvc::state &root = cvc::state::instance(ctx());
+std::string state_get(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  cvc::state *node = root_of(app).findDescendant(path);
+  if (!node)
+    throw std::out_of_range("pycvc.state_get: no node at path: " + path);
+  return node->value();
+}
+
+bool state_has(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return root_of(app).findDescendant(path) != nullptr;
+}
+
+std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
+                                        const std::string &path) {
+  cvc::state &root = root_of(app);
   cvc::state *node = path.empty() ? &root : root.findDescendant(path);
   if (!node)
     return {};
@@ -50,8 +70,8 @@ std::vector<std::string> state_children(const std::string &path) {
   return immediate;
 }
 
-void state_remove(const std::string &path) {
-  cvc::state &root = cvc::state::instance(ctx());
+void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  cvc::state &root = root_of(app);
   cvc::state *node = root.findDescendant(path);
   if (!node)
     return; // idempotent
@@ -74,8 +94,8 @@ state_observer::~state_observer() = default;
 // Default no-op; Python subclasses override this (director upcall).
 void state_observer::on_changed(const std::string & /*path*/) {}
 
-void state_observer::watch() {
-  cvc::state &root = cvc::state::instance(ctx());
+void state_observer::watch(const std::shared_ptr<cvc::app> &app) {
+  cvc::state &root = root_of(app);
   // The root's childChanged fires for every mutation anywhere in the tree,
   // carrying the full dotted path (each node re-fires its parent with
   // name()+SEP+child). This runs on the WRITER thread — acquire the GIL before

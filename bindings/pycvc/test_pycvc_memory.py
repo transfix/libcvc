@@ -39,6 +39,9 @@ import sys
 import numpy as np
 import pycvc
 
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
+
 
 def _ptr(a):
     """Data pointer of a numpy array (as an int)."""
@@ -50,7 +53,7 @@ def _ptr(a):
 
 def test_grid_two_calls_alias_same_buffer():
     nx, ny, nz = 4, 3, 2
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     a = vol.grid()
     b = vol.grid()
@@ -63,7 +66,7 @@ def test_grid_two_calls_alias_same_buffer():
 
 
 def test_vertices_two_calls_alias_same_buffer():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(30)])  # 10 verts
     a = g.vertices()
     b = g.vertices()
@@ -76,7 +79,7 @@ def test_vertices_two_calls_alias_same_buffer():
 
 
 def test_grid_mutation_is_bidirectional_with_scalar_accessor():
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([0.0] * 24, 2, 3, 4, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     # numpy -> C++
@@ -93,7 +96,7 @@ def test_grid_mutation_is_bidirectional_with_scalar_accessor():
 
 def test_grid_layout_is_nz_ny_nx_float32_c_contig_writable():
     nx, ny, nz = 5, 4, 3
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([1.0] * (nx * ny * nz), nx, ny, nz, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     assert grid.shape == (nz, ny, nx), "grid shape must be (nz, ny, nx)"
@@ -106,7 +109,7 @@ def test_grid_layout_is_nz_ny_nx_float32_c_contig_writable():
 
 
 def test_vertices_layout_is_n3_float64_c_contig():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(12)])  # 4 verts
     v = g.vertices()
     assert v.shape == (4, 3)
@@ -119,7 +122,7 @@ def test_vertices_layout_is_n3_float64_c_contig():
 
 
 def test_colors_layout_and_values():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 1, 1, 1])
     g.set_colors([1, 0, 0, 0, 1, 0])
     c = g.vertex_colors()
@@ -130,7 +133,7 @@ def test_colors_layout_and_values():
 
 
 def test_empty_views_are_safe_and_shaped():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     assert g.vertices().shape == (0, 3) and g.vertices().size == 0
     assert g.vertex_colors().shape == (0, 3)
     print("  ok: empty geometry views are (0,3) and safe")
@@ -140,7 +143,7 @@ def test_empty_views_are_safe_and_shaped():
 
 
 def test_volume_view_outlives_facade_del_gc():
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(8)], 2, 2, 2, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     del vol
@@ -153,7 +156,7 @@ def test_volume_view_outlives_facade_del_gc():
 
 
 def test_vertices_view_outlives_facade_del_gc():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([9, 8, 7, 6, 5, 4])
     v = g.vertices()
     del g
@@ -163,7 +166,7 @@ def test_vertices_view_outlives_facade_del_gc():
 
 
 def test_slice_and_reshape_keep_base_alive_after_facade_gone():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(30)])  # 10 verts
     v = g.vertices()
     s = v[2:5]  # slice: base chains up to the parent array
@@ -178,7 +181,7 @@ def test_slice_and_reshape_keep_base_alive_after_facade_gone():
 
 
 def test_many_views_then_drop_source_all_valid_and_shared():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices(list(range(3 * 100)))  # 100 verts
     views = [g.vertices() for _ in range(50)]
     del g
@@ -194,7 +197,7 @@ def test_many_views_then_drop_source_all_valid_and_shared():
 def test_dropping_all_views_is_safe():
     # Best-effort: the facade owns the data; dropping every view must not free
     # anything the facade still uses, and dropping the last view must not crash.
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     v = g.vertices()
     del v
@@ -222,7 +225,7 @@ def test_grid_view_survives_host_buffer_reallocation():
     # set_float_grid() rebuilds the volume, replacing (and freeing) the old
     # voxel buffer. A grid() view captured beforehand must not fault on access.
     nx, ny, nz = 4, 3, 2
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     stale = vol.grid()  # view over the ORIGINAL block
     old_ptr = _ptr(stale)
@@ -253,7 +256,7 @@ def test_vertices_view_survives_append_reallocation():
     # underlying std::vector; without pinning, a view captured beforehand would
     # dangle. With it, the append COW-detaches and the old block is retired to
     # the view as a decoupled snapshot -- valid memory, never a segfault.
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(30)])  # 10 verts
     stale = g.vertices()  # view over the ORIGINAL points block
     old_ptr = _ptr(stale)
@@ -283,7 +286,7 @@ def test_vertices_view_survives_append_reallocation():
 def test_vertex_colors_view_survives_set_colors_and_clear():
     # The same guarantee for the colors container across set_colors() (which
     # clears + rebuilds it) and clear() (which swaps the whole geometry).
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 1, 1, 1, 2, 2, 2])  # 3 verts
     g.set_colors([1, 0, 0, 0, 1, 0, 0, 0, 1])
     stale = g.vertex_colors()
@@ -310,7 +313,7 @@ def test_capsule_refcount_drops_by_one_when_array_deleted():
     if sys.implementation.name != "cpython":
         print("  skip: refcount test (non-CPython interpreter)")
         return
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(30)])
     a = g.vertices()
     cap = a.base
@@ -322,7 +325,7 @@ def test_capsule_refcount_drops_by_one_when_array_deleted():
 
 
 def test_each_call_mints_distinct_capsule_over_same_data():
-    g = pycvc.geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([float(i) for i in range(30)])
     a = g.vertices()
     b = g.vertices()
@@ -339,7 +342,7 @@ def test_cuda_unified_pointer_identity():
         print("  skip: CUDA not available")
         return
     nx, ny, nz = 4, 4, 4
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     assert vol.on_gpu() is False and vol.cuda_ptr() == 0
     vol.enable_cuda()
@@ -366,7 +369,7 @@ def test_cuda_host_device_coherence_and_migration_preserves_data():
         print("  skip: CUDA not available")
         return
     nx, ny, nz = 4, 4, 4
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     host_ptr_before = _ptr(vol.grid())
 
@@ -393,7 +396,7 @@ def test_cuda_array_interface_present_only_when_on_gpu():
     if not pycvc.volume.cuda_available():
         print("  skip: CUDA not available")
         return
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([1.0] * 8, 2, 2, 2, 0, 0, 0, 1, 1, 1)
     # Host-resident: no device interface (correct signal for cupy/torch).
     try:
@@ -426,7 +429,7 @@ def test_cuda_pre_migration_device_view_stays_valid_after_disable():
         print("  skip: CUDA not available")
         return
     nx, ny, nz = 4, 4, 4
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     vol.enable_cuda()
     dev_view = vol.grid()  # view over the CUDA unified block
@@ -463,7 +466,7 @@ def test_cuda_pre_migration_host_view_stays_valid_after_enable():
         print("  skip: CUDA not available")
         return
     nx, ny, nz = 4, 4, 4
-    vol = pycvc.volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([float(i) for i in range(nx * ny * nz)], nx, ny, nz, 0, 0, 0, 1, 1, 1)
     host_view = vol.grid()  # view over the host block
     snapshot = np.array(host_view, copy=True)
