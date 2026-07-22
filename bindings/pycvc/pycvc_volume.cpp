@@ -106,6 +106,28 @@ ArrayView Volume::grid() {
   return v;
 }
 
+// ── Filters ─────────────────────────────────────────────────────────
+// cvc::volume publicly extends cvc::voxels, so the voxel filters are
+// callable directly on *vol_. The C++ methods return voxels& (self); the
+// facade discards it and mutates in place. When the voxels are GPU-resident
+// (using_cuda()), the underlying methods dispatch to their CUDA kernels
+// automatically — nothing extra to do here.
+void Volume::bilateral_filter(double radiometric_sigma, double spatial_sigma,
+                              unsigned int filter_radius) {
+  vol_->bilateralFilter(radiometric_sigma, spatial_sigma, filter_radius);
+}
+
+void Volume::contrast_enhancement(double resistor) { vol_->contrastEnhancement(resistor); }
+
+void Volume::anisotropic_diffusion(unsigned int iterations) {
+  vol_->anisotropicDiffusion(iterations);
+}
+
+void Volume::gdtv_filter(double q, double lambda, unsigned int iterations,
+                         unsigned int neighbours) {
+  vol_->gdtvFilter(q, lambda, iterations, neighbours);
+}
+
 // cvc::voxels::cuda_data_ptr() only exists when libcvc was built with CUDA
 // (CVC_USING_CUDA is propagated via cvc::cvc's interface compile defs). On
 // host-only builds there is no GPU residency, so both report "host".

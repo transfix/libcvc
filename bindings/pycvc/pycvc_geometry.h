@@ -57,6 +57,19 @@ public:
   void compute_normals();
   void clear();
 
+  // ── Mesh processing (mutate the mesh IN PLACE) ─────────────────────
+  // Sangmin Park's smoothing (Laplacian / geometric-flow). Moves vertices to
+  // reduce surface noise; topology (vertex/triangle counts) is preserved.
+  // `fix_boundary` pins vertices flagged in the mesh's boundary set. Uses the
+  // facade's process app context internally.
+  void smoothing(double delta = 0.1, bool fix_boundary = false, bool geometric_flow = true);
+
+  // LBIE mesh quality improvement. `method` is a cvc::improvement_method
+  // value: 0 = NO_IMPROVE, 1 = GEO_FLOW (default), 2 = EDGE_CONTRACT,
+  // 3 = JOE_LIU, 4 = MINIMAL_VOL, 5 = OPTIMIZATION. Requires a MESHER-enabled
+  // libcvc build; raises RuntimeError otherwise.
+  void quality_improve(int iterations = 1, int method = 1 /* GEO_FLOW */);
+
   // ── File I/O (via cvc::geometry_file_io: .off/.raw/.rawc/…) ─────────
   void load(const std::string &filename);
   void save(const std::string &filename) const;

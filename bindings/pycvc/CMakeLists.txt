@@ -70,7 +70,8 @@ if(CVC_BUILD_PYCVC_CORE)
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py
-             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py)
+             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
+             pycvc_filters:test_pycvc_filters.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)

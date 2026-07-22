@@ -2,13 +2,28 @@
 // includes libcvc).
 #include "pycvc_geometry.h"
 
+#include <cvc/core/app.h>
+#include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <stdexcept>
 
 namespace pycvc {
 
-Geometry::Geometry() : geom_(std::make_shared<cvc::geometry>()) {}
+namespace {
+// Process-wide app context (thread pool, state root). Mirrors pycvc_volume.cpp
+// and the CLI's `static cvc::app app;`. The mesh-processing methods
+// (smoothing/quality_improve) need an app: smoothing takes one explicitly, and
+// quality_improve reaches through cvc::geometry::ctx() internally — so the
+// facade's geometry is constructed WITH this context (a default-constructed
+// cvc::geometry has a null ctx, which quality_improve would dereference).
+cvc::app &ctx() {
+  static cvc::app app;
+  return app;
+}
+} // namespace
+
+Geometry::Geometry() : geom_(std::make_shared<cvc::geometry>(ctx())) {}
 Geometry::~Geometry() = default;
 
 std::size_t Geometry::add_vertex(double x, double y, double z) {
@@ -123,10 +138,36 @@ ArrayView Geometry::vertices() { return view_over(geom_->points_ptr()); }
 ArrayView Geometry::vertex_colors() { return view_over(geom_->colors_ptr()); }
 
 void Geometry::compute_normals() { geom_->compute_normals(); }
-void Geometry::clear() { *geom_ = cvc::geometry(); }
+// Rebuild WITH the process ctx (not a null-ctx default geometry) so the
+// facade's "geom_ always carries a valid ctx" invariant holds for
+// quality_improve() after a clear().
+void Geometry::clear() { *geom_ = cvc::geometry(ctx()); }
 
-void Geometry::load(const std::string &filename) { *geom_ = cvc::read_geometry(filename); }
+// geometry::read() preserves the existing _ctx across the read (unlike the
+// free read_geometry(), which returns a null-ctx geometry), keeping the ctx
+// invariant so quality_improve() works after load().
+void Geometry::load(const std::string &filename) { geom_->read(filename); }
 void Geometry::save(const std::string &filename) const { cvc::write_geometry(*geom_, filename); }
+
+// ── Mesh processing ────────────────────────────────────────────────
+void Geometry::smoothing(double delta, bool fix_boundary, bool geometric_flow) {
+  // cvc::geometry::smoothing(app&, delta, fix_boundary, perturb_1,
+  // geometric_flow, smoothing_enabled, perturb_2). We expose the three most
+  // useful knobs and keep the perturbation passes off (their defaults).
+  geom_->smoothing(ctx(), static_cast<float>(delta), fix_boundary, /*perturb_1=*/false,
+                   geometric_flow, /*smoothing_enabled=*/true, /*perturb_2=*/false);
+}
+
+void Geometry::quality_improve(int iterations, int method) {
+#ifdef CVC_ENABLE_MESHER
+  geom_->quality_improve(iterations, static_cast<cvc::improvement_method>(method));
+#else
+  (void)iterations;
+  (void)method;
+  throw std::runtime_error("quality_improve: this libcvc build has the mesher disabled "
+                           "(CVC_ENABLE_MESHER)");
+#endif
+}
 
 cvc::geometry &Geometry::native() { return *geom_; }
 const cvc::geometry &Geometry::native() const { return *geom_; }

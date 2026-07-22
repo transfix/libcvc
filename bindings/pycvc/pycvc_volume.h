@@ -58,6 +58,28 @@ public:
   // GPU kernel is concurrently writing, the caller must synchronize first.)
   ArrayView grid();
 
+  // ── Filters (denoise / enhance; mutate the grid IN PLACE) ───────────
+  // Thin wrappers over cvc::voxels' filters (cvc::volume extends voxels).
+  // Each mutates *this in place and returns nothing. On a CUDA-enabled
+  // volume (enable_cuda()) the underlying C++ methods auto-dispatch to their
+  // GPU kernels, so a filter "just works" on GPU-resident data — no special
+  // casing here. NOTE: enable_cuda()/disable_cuda() reallocate the buffer, so
+  // any prior grid() numpy view dangles after a filter that migrates residency
+  // (filters themselves do not migrate; enable/disable do). Re-fetch grid()
+  // after enable_cuda()/disable_cuda().
+  //
+  // Edge-preserving denoise: Gaussian weighting in both space and intensity.
+  void bilateral_filter(double radiometric_sigma = 200.0, double spatial_sigma = 1.5,
+                        unsigned int filter_radius = 2);
+  // Zeyun's contrast enhancement; `resistor` in [0, 1] (clamped otherwise).
+  void contrast_enhancement(double resistor = 0.95);
+  // Zeyun's anisotropic diffusion: denoise while preserving edges.
+  void anisotropic_diffusion(unsigned int iterations = 20);
+  // Dr. Zhang's GDTV filter. `neighbours == 0` selects the 6-neighbour
+  // stencil; nonzero selects the 26-neighbour stencil.
+  void gdtv_filter(double q, double lambda, unsigned int iterations,
+                   unsigned int neighbours = 0);
+
   // GPU/CUDA support. on_gpu() is False on CUDA-disabled libcvc builds or
   // when the voxels are host-resident. When True, cuda_ptr() is the
   // device-accessible pointer to the same unified buffer grid() views —
