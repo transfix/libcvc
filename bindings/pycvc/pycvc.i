@@ -9,6 +9,7 @@
 %{
 #include "pycvc_geometry.h"
 #include "pycvc_volume.h"
+#include "pycvc_algorithm.h"
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
@@ -97,6 +98,7 @@ namespace pycvc { struct ArrayView; }
 
 %include "pycvc_geometry.h"
 %include "pycvc_volume.h"
+%include "pycvc_algorithm.h"
 
 // ── GPU adapter: expose a GPU-resident volume to cupy/torch/numba ───
 // When the voxels live in CUDA unified memory (on_gpu()), the same buffer
