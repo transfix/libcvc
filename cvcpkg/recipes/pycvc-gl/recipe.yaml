@@ -6,16 +6,17 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "pycvc-gl — the full pycvc Python bindings including the scriptable scene graph (pycvc.gl over cvcGL + VTK). A superset of the core `pycvc` package: numpy facades PLUS a headless-scriptable VTK scene (Scene.add_geometry/add_volume/show/render_png), as used by the grl-snam lab."
+  description: "pycvc-gl — the pycvc.gl scriptable scene bindings (over cvcGL + VTK): a headless-scriptable VTK scene (Scene.add_geometry/add_volume/show/render_png) used by the grl-snam lab. Ships only the scene module and DEPENDS on the core `pycvc` package; the two install side by side."
   homepage: https://github.com/transfix/libcvc
   license: GPL-2.0-or-later
-  tags: [python, bindings, swig, numpy, vtk, scene, scientific, volumetric]
+  tags: [python, bindings, swig, vtk, scene, scientific, volumetric]
 
-# pycvc-gl builds bindings/pycvc with CVC_BUILD_PYCVC_GL=ON: both the core
-# `pycvc` module AND the `pycvc_gl` scene module (cvcGL + VTK). It therefore
-# `provides: [pycvc]` — install pycvc-gl when you want the scriptable scene
-# (the lab), or the lean `pycvc` recipe for numpy bindings with no VTK.
-provides: ["pycvc"]
+# pycvc-gl builds ONLY the scene module (CVC_BUILD_PYCVC_CORE=OFF,
+# CVC_BUILD_PYCVC_GL=ON): it installs just _pycvc_gl + pycvc_gl.py and depends
+# on the `pycvc` package for the core `import pycvc` module. So pycvc and
+# pycvc-gl are installable together, side by side (no file overlap). Both pick
+# up CUDA when their libcvc dependency resolves to libcvc-cuda (cvc::cvc carries
+# CVC_USING_CUDA), so they work against either libcvc variant.
 
 source:
   type: vendored
@@ -25,11 +26,14 @@ patches: []
 
 depends:
   build:
+    # libcvc (find_package(cvc CONFIG)); resolves to libcvc-cuda on a CUDA host.
     - name: libcvc
     - name: python311
     - name: numpy-cp311
     - name: vtk
   runtime:
+    # pycvc supplies the core `import pycvc` module this scene module bridges to.
+    - name: pycvc
     - name: libcvc
     - name: python311
     - name: numpy-cp311
@@ -50,9 +54,9 @@ build:
 
 package:
   files:
-    # Core pycvc + the pycvc_gl scene module, in the interpreter's site-packages.
-    - lib/python*/site-packages/pycvc.py
-    - lib/python*/site-packages/_pycvc*
+    # ONLY the scene module — the core _pycvc/pycvc.py come from the pycvc
+    # package, so the two install side by side with no file overlap.
+    - lib/python*/site-packages/_pycvc_gl*
     - lib/python*/site-packages/pycvc_gl.py
 
 abi:

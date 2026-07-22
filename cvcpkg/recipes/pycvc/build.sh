@@ -23,7 +23,9 @@ CMAKE_ARGS=(
   -B "$CVC_BUILD_DIR"
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
-  # Core bindings only — the pycvc.gl scene module (cvcGL + VTK) is pycvc-gl.
+  # Core numpy-bindings module only (no VTK). The scene module ships as the
+  # separate, side-by-side pycvc-gl package.
+  -DCVC_BUILD_PYCVC_CORE=ON
   -DCVC_BUILD_PYCVC_GL=OFF
 )
 
