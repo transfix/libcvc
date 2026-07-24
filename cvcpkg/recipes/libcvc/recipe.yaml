@@ -55,6 +55,18 @@ depends:
     - name: fftw3
     - name: gsl
     - name: cgal
+    # CGAL is header-only and does NOT vendor its math backends: it declares
+    # gmp/mpfr as its own runtime deps, which the FLAT `cvcpkg install` does not
+    # auto-pull. So they must be listed HERE or the prefix has no gmp/mpfr and
+    # `find_package(CGAL CONFIG)` (src/cvc/CMakeLists.txt) fails inside CGAL's
+    # FindGMP with `Could NOT find GMP (missing GMP_LIBRARIES GMP_INCLUDE_DIR)`.
+    # Linux/macOS masked the gap via a system GMP; Windows (MSVC find_library
+    # matches only .lib, so Strawberry Perl's MinGW libgmp.a is invisible) had
+    # none, so only windows-release hit it. Verified on the phm-win11 builder:
+    # a cgal-only prefix fails FindGMP; adding gmp+mpfr lands gmp.lib/mpfr.lib +
+    # gmp.h/mpfr.h in the prefix and FindGMP resolves them.
+    - name: gmp
+    - name: mpfr
     - name: hdf5
     - name: log4cplus
     - name: tiff
@@ -66,8 +78,8 @@ depends:
     # SYSTEM library happens to exist (macOS: dyld `Library not loaded:
     # @rpath/<lib> ... no such file`). libtiff links the FULL codec set —
     # jpeg + zlib(base) + xz(lzma) + zstd + webp + lerc — so all of those must be
-    # present. (gmp/mpfr arrive via cgal; libsharpyuv ships inside the libwebp
-    # bundle so it needs no separate entry.)
+    # present. (gmp/mpfr are declared above with cgal; libsharpyuv ships inside
+    # the libwebp bundle so it needs no separate entry.)
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
