@@ -2,7 +2,12 @@ schema_version: 1
 recipe:
   name: pycvc
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: republish from post-#136 master. pycvc was rearchitected (#136)
+  # to direct SWIG wrapping + an injected cvc::app — make_app()/geometry(app)/
+  # state_set(app, ...) replace the old class-Geometry/class-Volume facade — and it
+  # links the +cvc.2 libcvc (#134). The published +cvc.1 shim predates the rearch,
+  # so the new bundle supersedes it as +cvc.2.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

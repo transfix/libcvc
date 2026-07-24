@@ -2,7 +2,11 @@ schema_version: 1
 recipe:
   name: cvcgl
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: republish from post-#136 master. cvcGL gained the injected-app
+  # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
+  # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
+  # so the new bundle must supersede it as +cvc.2.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

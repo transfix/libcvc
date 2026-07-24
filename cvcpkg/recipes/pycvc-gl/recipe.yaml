@@ -2,7 +2,11 @@ schema_version: 1
 recipe:
   name: pycvc-gl
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: republish from post-#136 master. The scriptable-scene bindings
+  # follow the pycvc #136 rearch (injected cvc::app) and link the +cvc.2 cvcgl +
+  # pycvc + libcvc. The published +cvc.1 predates the rearch, so supersede as
+  # +cvc.2.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
