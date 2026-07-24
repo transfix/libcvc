@@ -303,6 +303,21 @@ jobs:
             echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
 
+      - name: Install X11 + OpenGL system libs for the VTK build [Linux]
+        # cvcgl / pycvc-gl link VTK, whose CMake package config runs
+        # find_package(X11) + OpenGL. ubuntu-latest ships neither dev package, so
+        # the cvcgl configure dies with "Could NOT find X11 (missing:
+        # X11_X11_INCLUDE_PATH X11_X11_LIB)" and pycvc-gl then can't find the
+        # (never-installed) cvcGL. libcvc itself needs none of this, which is why
+        # only the family steps were affected. Install the dev libs VTK probes for.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxt-dev libgl1-mesa-dev libglu1-mesa-dev
+
       - name: Build, pack & publish cvcgl [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
