@@ -288,7 +288,15 @@ jobs:
           # vtk-python-cp311 — libvtkWrappingPythonCore + vtkPythonUtil.h for
           # pycvc-gl's Phase-5b vtkProp bridge (Python vtkActor -> C++ scene).
           # Without it pycvc-gl's configure dies at CMakeLists.txt:147.
-          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 \
+          #
+          # xorgproto: the X11 protocol headers (X11/X.h, extension *proto.h).
+          # cvcgl's find_package(VTK) re-runs VTK's FindX11, which needs X11/X.h —
+          # but xorgproto is only a *build* dep of the libx11/libxext/... recipes,
+          # so `cvcpkg install vtk` (which pulls libx11 etc. as runtime deps) does
+          # NOT drag in xorgproto, and X11_X11_INCLUDE_PATH goes unfound. Install
+          # it explicitly. (Proper fix, follow-up: make xorgproto a runtime dep of
+          # the X11 libs whose public headers #include it, so it's transitive.)
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
             --prefix "$PY" --config release --link shared
           # The published numpy-cp311 wheel bundles openblas under
           # numpy.libs/, but that .so is NOT self-resolved by RPATH, so a bare
