@@ -43,6 +43,11 @@ CMAKE_ARGS=(
   # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is
   # already OFF; kept explicit.)
   -DCVC_BUILD_PYCVC=OFF
+  # Enable the XMLRPC module so the bundle exports the cvc::xmlrpc target
+  # (and ships libxmlrpc). cvc::state's network sharing and downstream
+  # consumers such as VolumeRover 2.x link cvc::xmlrpc directly; it is a
+  # self-contained STATIC + PIC library with no extra third-party deps.
+  -DCVC_USING_XMLRPC=ON
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
