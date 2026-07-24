@@ -158,7 +158,9 @@ static int cmd_info(int argc, char **argv) {
 static int cmd_stats(int argc, char **argv) {
   po::options_description desc("cvc stats - compute volume statistics");
   desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
-                                            "input volume file");
+                                            "input volume file")(
+      "region,r", po::value<std::string>(),
+      "restrict stats to an object-space region \"minx,miny,minz,maxx,maxy,maxz\"");
 
   po::positional_options_description pos;
   pos.add("input", 1);
@@ -173,7 +175,10 @@ static int cmd_stats(int argc, char **argv) {
 
   cvc::volume vol(cvc_app());
   vol.read(vm["input"].as<std::string>());
-  cvc::volume_stats s = cvc::compute_stats(vol);
+  cvc::volume_stats s =
+      vm.count("region")
+          ? cvc::compute_stats(vol, cvc::bounding_box(vm["region"].as<std::string>()))
+          : cvc::compute_stats(vol);
 
   std::cout << std::setprecision(12) << "Min:     " << s.min << "\n"
             << "Max:     " << s.max << "\n"
@@ -1738,6 +1743,310 @@ static int cmd_client(int argc, char **argv) {
 #endif // USING_XMLRPC
 
 // ===========================================================================
+// VolUtils capability wrappers (issue #123)
+//
+// Part A — expose existing libcvc capabilities as `cvc` subcommands: the noise
+// filters (voxels.h), arbitrary resample-to-dims (volume::resize), the trivial
+// volume-op wrappers (volume_ops.h), and variable/timestep extraction.  Region-
+// restricted stats is wired into `stats --region` above.  Part B novel bit:
+// `compare` — a voxel abs-diff pass/fail with a nonzero exit code, the CI-checker
+// contract that the similarity-scored `ssim` does not provide.
+// ===========================================================================
+
+// ── Filters (voxels.h; legacy VolUtils defaults) ──
+
+static int cmd_bilateral(int argc, char **argv) {
+  po::options_description desc("cvc bilateral - edge-preserving bilateral noise filter");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "radiometric", po::value<double>()->default_value(200.0),
+      "radiometric sigma")("spatial", po::value<double>()->default_value(1.5), "spatial sigma")(
+      "radius", po::value<unsigned int>()->default_value(2), "filter radius in voxels");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  vol.bilateralFilter(vm["radiometric"].as<double>(), vm["spatial"].as<double>(),
+                      vm["radius"].as<unsigned int>());
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_contrast(int argc, char **argv) {
+  po::options_description desc("cvc contrast - Zeyun's contrast enhancement");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "resistor", po::value<double>()->default_value(0.95), "resistor in [0, 1]");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  vol.contrastEnhancement(vm["resistor"].as<double>());
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_anisotropic(int argc, char **argv) {
+  po::options_description desc("cvc anisotropic - Zeyun's anisotropic diffusion (edge-preserving)");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "iterations,n", po::value<unsigned int>()->default_value(20), "diffusion iterations");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  vol.anisotropicDiffusion(vm["iterations"].as<unsigned int>());
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_gdtv(int argc, char **argv) {
+  po::options_description desc("cvc gdtv - Dr. Zhang's GDTV filter");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "q", po::value<double>()->default_value(1.5), "parameter q (nonlinearity)")(
+      "lambda", po::value<double>()->default_value(0.3), "lambda (data fidelity)")(
+      "iterations,n", po::value<unsigned int>()->default_value(3),
+      "filter iterations")("neighbours", po::value<unsigned int>()->default_value(0),
+                           "neighbourhood mode (0 = 6-neighbour)");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  vol.gdtvFilter(vm["q"].as<double>(), vm["lambda"].as<double>(),
+                 vm["iterations"].as<unsigned int>(), vm["neighbours"].as<unsigned int>());
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+// ── Arbitrary resample-to-dims (volume::resize) ──
+
+static int cmd_resize(int argc, char **argv) {
+  po::options_description desc("cvc resize - resample a volume to new voxel dimensions");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(), "output volume file")(
+      "dims,d", po::value<std::vector<cvc::uint64>>()->multitoken()->required(),
+      "target dimensions: X Y Z");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  auto d = vm["dims"].as<std::vector<cvc::uint64>>();
+  if (d.size() != 3)
+    throw std::runtime_error("resize requires exactly 3 dimensions: --dims X Y Z");
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  vol.resize(cvc::dimension(d[0], d[1], d[2]));
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+// ── Trivial op wrappers (volume_ops.h) ──
+
+static int cmd_difference(int argc, char **argv) {
+  po::options_description desc("cvc difference - absolute difference |a - b| of two volumes");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two input volume files")("output,o", po::value<std::string>()->required(),
+                                "output volume file");
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  auto inputs = vm["input"].as<std::vector<std::string>>();
+  if (inputs.size() != 2)
+    throw std::runtime_error("difference requires exactly 2 input files");
+
+  auto &app = cvc_app();
+  cvc::volume a(app), b(app);
+  a.read(inputs[0]);
+  b.read(inputs[1]);
+  cvc::vol_difference(a, b).write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_clamp_min(int argc, char **argv) {
+  po::options_description desc("cvc clamp-min - raise voxels below a floor up to that floor");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("min,m", po::value<double>()->required(), "minimum value floor");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>());
+  cvc::vol_clamp_min(vol, vm["min"].as<double>()).write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_average(int argc, char **argv) {
+  po::options_description desc("cvc average - element-wise average of N volumes (pairwise fold)");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two or more input volume files")("output,o", po::value<std::string>()->required(),
+                                        "output volume file");
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  auto inputs = vm["input"].as<std::vector<std::string>>();
+  if (inputs.size() < 2)
+    throw std::runtime_error("average requires at least 2 input files");
+
+  auto &app = cvc_app();
+  cvc::volume acc(app);
+  acc.read(inputs[0]);
+  // N-way fold over the pairwise vol_average, matching the legacy VolUtils
+  // behaviour: acc <- avg(acc, next) for each subsequent input.
+  for (std::size_t i = 1; i < inputs.size(); ++i) {
+    cvc::volume next(app);
+    next.read(inputs[i]);
+    acc = cvc::vol_average(acc, next);
+  }
+  acc.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+static int cmd_extract(int argc, char **argv) {
+  po::options_description desc("cvc extract - extract a variable/timestep from a multi-var volume");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("var", po::value<unsigned int>()->default_value(0), "variable index")(
+      "time,t", po::value<unsigned int>()->default_value(0), "timestep index");
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  cvc::volume vol(cvc_app());
+  vol.read(vm["input"].as<std::string>(), vm["var"].as<unsigned int>(),
+           vm["time"].as<unsigned int>());
+  vol.write(vm["output"].as<std::string>());
+  return 0;
+}
+
+// ── compare (Part B): voxel abs-diff pass/fail with a nonzero exit code ──
+
+static int cmd_compare(int argc, char **argv) {
+  po::options_description desc(
+      "cvc compare - exact voxel comparison; exits nonzero on any mismatch");
+  desc.add_options()("help,h", "show help")(
+      "input,i", po::value<std::vector<std::string>>()->multitoken()->required(),
+      "two input volume files")("tolerance,t", po::value<double>()->default_value(0.0),
+                                "max allowed absolute per-voxel difference");
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  auto inputs = vm["input"].as<std::vector<std::string>>();
+  if (inputs.size() != 2)
+    throw std::runtime_error("compare requires exactly 2 input files");
+
+  auto &app = cvc_app();
+  cvc::volume a(app), b(app);
+  a.read(inputs[0]);
+  b.read(inputs[1]);
+
+  if (a.voxel_dimensions() != b.voxel_dimensions()) {
+    std::cerr << "MISMATCH: dimensions differ (" << a.XDim() << "x" << a.YDim() << "x" << a.ZDim()
+              << " vs " << b.XDim() << "x" << b.YDim() << "x" << b.ZDim() << ")\n";
+    return 1;
+  }
+
+  const double tol = vm["tolerance"].as<double>();
+  cvc::uint64 mismatches = 0;
+  double max_diff = 0.0;
+  for (cvc::uint64 k = 0; k < a.ZDim(); ++k)
+    for (cvc::uint64 j = 0; j < a.YDim(); ++j)
+      for (cvc::uint64 i = 0; i < a.XDim(); ++i) {
+        double diff = std::abs(a(i, j, k) - b(i, j, k));
+        if (diff > max_diff)
+          max_diff = diff;
+        if (diff > tol)
+          ++mismatches;
+      }
+
+  if (mismatches > 0) {
+    std::cerr << std::setprecision(12) << "MISMATCH: " << mismatches
+              << " voxel(s) exceed tolerance " << tol << " (max abs diff " << max_diff << ")\n";
+    return 1;
+  }
+  std::cout << std::setprecision(12) << "OK: volumes match within tolerance " << tol
+            << " (max abs diff " << max_diff << ")\n";
+  return 0;
+}
+
+// ===========================================================================
 // Command dispatch table
 // ===========================================================================
 
@@ -1757,6 +2066,7 @@ static const command_entry commands[] = {
   // ── File conversion ──
   {"copy",           "Conversion",      "copy/convert files (auto-detects type)",         cmd_copy},
   {"convert",        "Conversion",      "convert volume format or voxel type",            cmd_convert},
+  {"extract",        "Conversion",      "extract a variable/timestep from a volume",      cmd_extract},
 
   // ── Geometry processing ──
 #ifdef CVC_ENABLE_SDF
@@ -1779,12 +2089,23 @@ static const command_entry commands[] = {
   {"negate",         "Vol Arithmetic",  "negate all voxel values",                        cmd_negate},
   {"mask",           "Vol Arithmetic",  "apply mask volume",                              cmd_mask},
   {"downsample",     "Vol Arithmetic",  "reduce volume resolution",                      cmd_downsample},
+  {"difference",     "Vol Arithmetic",  "absolute difference |a - b| of two volumes",    cmd_difference},
+  {"clamp-min",      "Vol Arithmetic",  "raise voxels below a floor up to it",           cmd_clamp_min},
+  {"average",        "Vol Arithmetic",  "element-wise average of N volumes",             cmd_average},
 
   // ── Volume transforms ──
   {"rotate",         "Vol Transform",   "rotate volume around Z-axis",                   cmd_rotate},
+  {"resize",         "Vol Transform",   "resample volume to new voxel dimensions",       cmd_resize},
+
+  // ── Filters ──
+  {"bilateral",      "Filters",         "edge-preserving bilateral noise filter",        cmd_bilateral},
+  {"contrast",       "Filters",         "Zeyun's contrast enhancement",                  cmd_contrast},
+  {"anisotropic",    "Filters",         "anisotropic diffusion (edge-preserving)",       cmd_anisotropic},
+  {"gdtv",           "Filters",         "Dr. Zhang's GDTV filter",                       cmd_gdtv},
 
   // ── Analysis ──
   {"ssim",           "Analysis",        "compute SSIM between two volumes",              cmd_ssim},
+  {"compare",        "Analysis",        "exact voxel comparison (nonzero exit on mismatch)", cmd_compare},
 
   // ── Projection / Reconstruction ──
   {"project",        "Projection",      "forward ray projection",                        cmd_project},
