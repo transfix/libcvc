@@ -6,7 +6,11 @@ recipe:
   # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
   # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
   # so the new bundle must supersede it as +cvc.2.
-  cvc_revision: 2
+  # Bumped 2 -> 3: hermetic republish. cvcGL links VTK, which is now vtk
+  # 9.5.0+cvc.2 (built against the cvcpkg X11/OpenGL recipes, libcvc-deps #368) —
+  # so this bundle links the hermetic VTK and its build no longer needs the
+  # apt-get X11/GL step (removed from publish-cvcpkg.yml). Source unchanged.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
