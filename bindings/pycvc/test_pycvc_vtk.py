@@ -13,7 +13,15 @@ try:
     from vtkmodules.vtkFiltersSources import vtkSphereSource
     from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
 
-    HAVE_VTK = True
+    # Registry-consistency guard: the loaded vtkmodules must be the SAME VTK build
+    # pycvc_gl linked its wrapping-core against — vtkPythonUtil's type registry
+    # lives in that one libvtkWrappingPythonCore. In a proper single-prefix
+    # install (vtk + vtk-python side by side) this always holds; in a split dev
+    # env a different VTK can be resolved at runtime, and then the bridge can't
+    # recognize the object. Detect that via a round trip and SKIP rather than
+    # fail on a mismatched environment.
+    _probe = vtkActor()
+    HAVE_VTK = pycvc_gl.identity_prop(_probe) is _probe
 except Exception:
     HAVE_VTK = False
 
