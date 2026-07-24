@@ -6,8 +6,13 @@ recipe:
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
   # compatible with the published 3.2.4+cvc.1, so it must publish as +cvc.2.
-  # (libcvc-cuda is unchanged — it already had the wide member — so it stays
-  # +cvc.1 and is now ABI-identical to this CPU build.)
+  # (libcvc-cuda already had the wide member, so it did not need the ABI bump —
+  # but it does bump to +cvc.2 for the CLI-packaging change below.)
+  #
+  # This same +cvc.2 bundle ALSO drops the bundled `cvc` CLI: it now ships as its
+  # own package (the cvc-cli / cvc-cli-cuda recipes) so it lands deliberately in
+  # a user's PATH. The +cvc.2 republish (still pending) carries both changes; no
+  # extra bump is needed since +cvc.2 was never published.
   cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -86,7 +91,8 @@ build:
 
 package:
   files:
-    - bin/cvc*
+    # NB: no bin/cvc* — the `cvc` CLI is a separate package (cvc-cli /
+    # cvc-cli-cuda). This bundle is the pure SDK: libs, cmake config, headers.
     - lib/libcvc*
     - lib/cvc*
     - lib/cmake/cvc/

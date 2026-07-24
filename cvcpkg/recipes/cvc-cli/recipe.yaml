@@ -1,0 +1,71 @@
+schema_version: 1
+recipe:
+  name: cvc-cli
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "cvc — the unified command-line tool for libcvc: volume / geometry / image processing and the absorbed VolUtils capabilities (resample, filters, region stats, edge detection, format conversion, …) plus cvc::state distributed-session admin, exposed as subcommands of a single `cvc` executable. A thin Boost.program_options frontend over the installed libcvc SDK."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, volumetric, cli, geometry, tools]
+
+# cvc-cli is its OWN package, separate from libcvc, so the `cvc` tool lands
+# deliberately in a user's PATH (`cvcpkg install cvc-cli`) rather than riding
+# along inside the libcvc SDK bundle. It builds src/cvc-cli standalone against
+# the installed libcvc SDK (find_package(cvc CONFIG)) + Boost.program_options,
+# and installs just the `cvc` executable.
+#
+# WHY it does not rebuild libcvc: the standalone build compiles only
+# src/cvc-cli/main.cpp and links the pre-installed cvc::cvc. cvcpkg installs the
+# libcvc dependency once (from its published bundle); cvc-cli never recompiles
+# the library — the whole build is one translation unit + a link.
+#
+# Declares the `cvc-cli` provider slot so the CUDA peer cvc-cli-cuda (which also
+# `provides: [cvc-cli]`) is a mutually-exclusive alternative and a hardware-aware
+# resolver (cvcpkg Roadmap Phase 10) can tie-break CPU vs GPU. Selection is not
+# implemented yet — see cvc-cli-cuda for the (narrow) case for the peer.
+provides: ["cvc-cli"]
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # src/cvc-cli. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # libcvc SDK (find_package(cvc CONFIG)) + Boost.program_options (the CLI's
+    # argument parser; not part of the libcvc link interface).
+    - name: libcvc
+    - name: boost
+  runtime:
+    - name: libcvc
+    - name: boost
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  # Everywhere libcvc goes — the CLI has no GPU/VTK dependency of its own.
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
+
+package:
+  # Just the `cvc` executable (bin/cvc, bin/cvc.exe on Windows). No cmake package
+  # config — cvc-cli is an application, not a library others link.
+  files:
+    - bin/cvc*
+
+abi:
+  cxx_std: 17

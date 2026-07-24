@@ -19,6 +19,9 @@ $args = @(
   "-DCMAKE_BUILD_TYPE=$cmakeBuildType",
   "-DBUILD_SHARED_LIBS=$buildSharedLibs",
   '-DCVC_BUILD_TESTS=OFF',
+  # The `cvc` CLI ships as its own package (cvc-cli / cvc-cli-cuda); keep it OUT
+  # of the SDK bundle.
+  '-DCVC_BUILD_CLI=OFF',
   # CUDA opt-in: the `libcvc` recipe leaves this OFF; `libcvc-cuda` sets
   # CVC_ENABLE_CUDA=ON in its build.matrix env to reuse this script for the GPU
   # variant.

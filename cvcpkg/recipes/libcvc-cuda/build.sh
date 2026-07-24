@@ -29,6 +29,10 @@ CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
   -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS"
   -DCVC_BUILD_TESTS=OFF
+  # The `cvc` CLI ships as its own package (the cvc-cli / cvc-cli-cuda recipes)
+  # so it lands deliberately in a user's PATH instead of riding along with the
+  # SDK bundle. Keep it OUT of the libcvc-cuda bundle.
+  -DCVC_BUILD_CLI=OFF
   # CUDA is opt-in per recipe: the `libcvc` recipe leaves this OFF (portable
   # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
   # build.matrix env so this same script produces the GPU variant.

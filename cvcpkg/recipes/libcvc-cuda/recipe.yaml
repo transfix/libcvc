@@ -2,7 +2,11 @@ schema_version: 1
 recipe:
   name: libcvc-cuda
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
+  # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
+  # Dropping the binary changes bundle contents, and +cvc.1 was already published
+  # (linux), so the CLI-less SDK must publish as +cvc.2.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -91,7 +95,8 @@ build:
 
 package:
   files:
-    - bin/cvc*
+    # NB: no bin/cvc* — the `cvc` CLI is a separate package (cvc-cli /
+    # cvc-cli-cuda). This bundle is the pure SDK: libs, cmake config, headers.
     - lib/libcvc*
     - lib/cvc*
     - lib/cmake/cvc/

@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.15)
 
+# ---------------------------------------------------------------------------
+# Dual-mode build.
+#
+#   In-tree  (add_subdirectory(cvc-cli) from the libcvc build): the cvc target
+#            already exists, so we just link cvc::cvc.
+#   Standalone (the cvc-cli / cvc-cli-cuda cvcpkg recipes build ONLY this dir):
+#            no libcvc tree is present, so we project() and find the installed
+#            libcvc SDK via find_package(cvc CONFIG). The recipe points
+#            CMAKE_PREFIX_PATH at the deps prefix that holds libcvc's SDK.
+# ---------------------------------------------------------------------------
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  project(cvc-cli LANGUAGES CXX)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  find_package(cvc CONFIG REQUIRED)
+endif()
+
 # Unified CVC CLI executable
 add_executable(cvc-cli main.cpp)
 
@@ -10,14 +27,17 @@ target_link_libraries(cvc-cli PRIVATE cvc::cvc)
 find_package(Boost REQUIRED COMPONENTS program_options)
 target_link_libraries(cvc-cli PRIVATE Boost::program_options)
 
-# Install the executable as "cvc"
+# Install the executable as "cvc". COMPONENT lets the libcvc bundle exclude the
+# CLI (it is CVC_BUILD_CLI=OFF there); the cvc-cli recipe installs this
+# component into a user's PATH deliberately.
 set_target_properties(cvc-cli PROPERTIES OUTPUT_NAME cvc)
-install(TARGETS cvc-cli RUNTIME DESTINATION bin)
+install(TARGETS cvc-cli RUNTIME DESTINATION bin COMPONENT cvc-cli)
 
 # ---------------------------------------------------------------------------
-# Integration tests (exercise the CLI as a subprocess)
+# Integration tests (exercise the CLI as a subprocess). In-tree only: they link
+# the raw cvc target and need GTest from the libcvc superbuild.
 # ---------------------------------------------------------------------------
-if(CVC_BUILD_TESTS)
+if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(cvc_cli_test cvc_cli_test.cpp)
   target_link_libraries(cvc_cli_test
     PRIVATE
