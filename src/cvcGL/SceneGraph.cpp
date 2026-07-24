@@ -18,14 +18,19 @@
 #include <vtkMultiVolume.h>
 #include <vtkRenderer.h>
 
+// Default ctor: delegate to the injected-app ctor with cvcGL's own process app.
 SceneGraph::SceneGraph(const std::string &statePrefix)
-    : m_renderer(nullptr), m_statePrefix(statePrefix), m_ownerThread(std::this_thread::get_id()),
-      m_gridNode(nullptr), m_axisNode(nullptr), m_graphicsRoot(nullptr), m_nullGraphic(nullptr),
-      m_multiVolumeRenderingEnabled(false), m_renderNeeded(false) {
+    : SceneGraph(cvc::gl::context(), statePrefix) {}
+
+SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
+    : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix),
+      m_ownerThread(std::this_thread::get_id()), m_gridNode(nullptr), m_axisNode(nullptr),
+      m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
+      m_renderNeeded(false) {
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
-  m_nullGraphic = std::make_shared<NullGraphicNode>(cvc::gl::context(), rootStatePath, "root");
+  m_nullGraphic = std::make_shared<NullGraphicNode>(m_ctx, rootStatePath, "root");
 
   // Attach the root (and, recursively, its children) to this SceneGraph so their
   // runOnMainThread() work marshals through this scene's pump / owner thread.
@@ -260,12 +265,12 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
 // Multi-object graphics management
 std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
                                                       const cvc::geometry &geom) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(m_ctx, BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-    cvc::gl::context().log(0, "SceneGraph::addGraphics: Graphics object '" + name +
-                                  "' already exists, replacing");
+    m_ctx.log(0,
+              "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
     removeGraphics(name);
   }
 
@@ -293,12 +298,12 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(m_ctx, BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-    cvc::gl::context().log(0, "SceneGraph::addGraphics: Graphics object '" + name +
-                                  "' already exists, replacing");
+    m_ctx.log(0,
+              "SceneGraph::addGraphics: Graphics object '" + name + "' already exists, replacing");
     removeGraphics(name);
   }
 
@@ -329,12 +334,11 @@ bool SceneGraph::hasGraphics(const std::string &name) const {
 }
 
 void SceneGraph::removeGraphics(const std::string &name) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(m_ctx, BOOST_CURRENT_FUNCTION);
 
   auto it = m_graphicsNodes.find(name);
   if (it == m_graphicsNodes.end()) {
-    cvc::gl::context().log(0,
-                           "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
+    m_ctx.log(0, "SceneGraph::removeGraphics: Graphics object '" + name + "' not found");
     return;
   }
 
@@ -381,12 +385,11 @@ void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<Graph
 // Volume graphics management
 std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
                                                     const cvc::volume &vol) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(m_ctx, BOOST_CURRENT_FUNCTION);
 
   // Check if name already exists
   if (m_graphicsNodes.find(name) != m_graphicsNodes.end()) {
-    cvc::gl::context().log(0, "SceneGraph::addGraphics: Volume '" + name +
-                                  "' already exists, replacing");
+    m_ctx.log(0, "SceneGraph::addGraphics: Volume '" + name + "' already exists, replacing");
     removeGraphics(name);
   }
 

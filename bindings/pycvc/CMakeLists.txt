@@ -36,11 +36,15 @@ include(UseSWIG)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
 set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
-# Re-run SWIG when a %include'd facade header changes (ninja otherwise keeps a
-# stale wrapper after edits to pycvc_*.h).
+# Re-run SWIG when a helper header the interface pulls in changes (ninja
+# otherwise keeps a stale wrapper). The directly-wrapped libcvc headers are
+# tracked as ordinary compile dependencies of the generated wrapper.
 set_property(SOURCE pycvc.i PROPERTY DEPENDS
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_geometry.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_volume.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_buffer.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_algorithm.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h)
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
@@ -57,7 +61,7 @@ option(CVC_BUILD_PYCVC_CORE "Build the core pycvc numpy bindings module" ON)
 if(CVC_BUILD_PYCVC_CORE)
   swig_add_library(pycvc
     LANGUAGE python
-    SOURCES pycvc.i pycvc_geometry.cpp pycvc_volume.cpp
+    SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp pycvc_exec.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -70,7 +74,13 @@ if(CVC_BUILD_PYCVC_CORE)
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py
-             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py)
+             pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
+             pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
+             pycvc_algorithm:test_pycvc_algorithm.py
+             pycvc_state:test_pycvc_state.py
+             pycvc_async:test_pycvc_async.py
+             pycvc_exec:test_pycvc_exec.py
+             pycvc_integration:test_pycvc_integration.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -105,15 +115,40 @@ if(CVC_BUILD_PYCVC_GL)
     set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
   endif()
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
+  # Re-run SWIG when the Scene facade header (or the %import'd pycvc.i) changes.
+  set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_scene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc.i)
+  # Scene now takes the directly-wrapped cvc::geometry/cvc::volume (%import'd
+  # from pycvc.i), so pycvc_gl no longer compiles the old facade TUs.
   swig_add_library(pycvc_gl
     LANGUAGE python
-    SOURCES pycvc_gl.i pycvc_scene.cpp pycvc_geometry.cpp pycvc_volume.cpp
+    SOURCES pycvc_gl.i pycvc_scene.cpp
   )
   target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc_gl PRIVATE ${_PYCVC_CVCGL_TARGET} ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
   find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
   target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
+  # VTK Python bridge (F3): link the wrapping-core lib that defines
+  # vtkPythonUtil::* (from the vtk-python cvcpkg package — installs side-by-side
+  # with vtk in the same prefix). vtkPythonUtil.h is already on the include path
+  # via VTK::CommonCore. VTK's monolithic CMake config doesn't enumerate the
+  # Python modules, so find the plain shared lib directly rather than as a
+  # find_package COMPONENT.
+  # The wrapping-core lib carries the Python-ABI suffix, e.g.
+  # libvtkWrappingPythonCore3.12-9.5.so — construct that exact name (plus
+  # unsuffixed fallbacks for other VTK packagings).
+  find_library(VTK_WRAPPING_PYTHONCORE
+    NAMES vtkWrappingPythonCore${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}-9.5
+          vtkWrappingPythonCore-9.5 vtkWrappingPythonCore
+    HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib)
+  if(NOT VTK_WRAPPING_PYTHONCORE)
+    message(FATAL_ERROR
+      "libvtkWrappingPythonCore not found — install the `vtk-python` cvcpkg "
+      "package (VTK built with VTK_WRAP_PYTHON=ON) into the prefix.")
+  endif()
+  target_link_libraries(pycvc_gl PRIVATE ${VTK_WRAPPING_PYTHONCORE} Python3::Module)
   set_target_properties(pycvc_gl PROPERTIES
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
@@ -124,5 +159,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
   set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
+  # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
+  add_test(NAME pycvc_vtk
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_vtk.py)
+  set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL

@@ -18,24 +18,27 @@ analogue of cvcgl_teardown's Case A/B. All headless: no `show()`, no render.
 import gc
 
 import pycvc
+
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
 import pycvc_gl
 
 
 def _make_tri():
-    g = pycvc.Geometry()
+    g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 10, 0, 0, 0, 10, 0])
     g.add_triangle(0, 1, 2)
     return g
 
 
 def _make_field(n=3):
-    v = pycvc.Volume()
+    v = pycvc.volume(app)
     v.set_float_grid([float(i) for i in range(n * n * n)], n, n, n, 0, 0, 0, 1, 1, 1)
     return v
 
 
 def test_build_scene():
-    scene = pycvc_gl.Scene()
+    scene = pycvc_gl.Scene(app)
     scene.add_geometry("tri", _make_tri())
     scene.add_volume("field", _make_field())
     scene.pump()  # re-pumpable, no Qt loop
@@ -51,7 +54,7 @@ def test_build_scene():
 def test_scene_teardown_no_crash():
     # cvcgl_teardown Case A from Python: add, pump, then drop the scene with
     # (possibly) queued callbacks — must not fault.
-    scene = pycvc_gl.Scene()
+    scene = pycvc_gl.Scene(app)
     scene.add_geometry("tri", _make_tri())
     scene.add_volume("field", _make_field())
     scene.pump()
@@ -59,7 +62,7 @@ def test_scene_teardown_no_crash():
     del scene  # ~Scene -> ~SceneGraph tears down every node
     gc.collect()
     # Build another scene afterward to prove the shared cvcGL context survived.
-    scene2 = pycvc_gl.Scene()
+    scene2 = pycvc_gl.Scene(app)
     scene2.add_geometry("tri", _make_tri())
     assert scene2.num_graphics() == 1
     print("  ok: scene teardown after add+pump is crash-free (context survives)")
@@ -72,7 +75,7 @@ def test_scene_add_destroy_churn():
     tri = _make_tri()
     field = _make_field()
     for it in range(60):
-        scene = pycvc_gl.Scene()
+        scene = pycvc_gl.Scene(app)
         for k in range(4):
             scene.add_geometry("g%d" % k, tri)
         scene.add_volume("field", field)
@@ -91,7 +94,7 @@ def test_scene_rebuild_same_names_across_scenes():
     # Distinct scenes reuse node names independently; teardown of one must not
     # affect the next (no shared/leaked node state across SceneGraph instances).
     for _ in range(10):
-        s = pycvc_gl.Scene()
+        s = pycvc_gl.Scene(app)
         s.add_geometry("shared", _make_tri())
         assert s.has("shared") and s.num_graphics() == 1
         del s

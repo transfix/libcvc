@@ -24,6 +24,9 @@ import threading
 
 import pycvc
 
+# Explicit app threaded through every op (no module-global).
+app = pycvc.make_app()
+
 N_THREADS = 8
 
 
@@ -47,7 +50,7 @@ def test_isolation_each_thread_owns_a_volume():
         try:
             barrier.wait()  # all threads hit the C++ app context together
             for _ in range(40):
-                vol = pycvc.Volume()
+                vol = pycvc.volume(app)
                 base = float(seed)
                 vol.set_float_grid([base] * 64, 4, 4, 4, 0, 0, 0, 1, 1, 1)
                 grid = vol.grid()
@@ -70,7 +73,7 @@ def test_isolation_each_thread_owns_a_geometry():
         try:
             barrier.wait()
             for _ in range(40):
-                g = pycvc.Geometry()
+                g = pycvc.geometry(app)
                 g.add_vertices([float(seed)] * (3 * 100))
                 v = g.vertices()
                 v += seed
@@ -93,7 +96,7 @@ def test_concurrent_readers_of_one_shared_view():
     # One immutable-during-read buffer, many concurrent readers. The shared
     # storage stays alive and every reader must compute the same, correct sum.
     nx, ny, nz = 8, 8, 8
-    vol = pycvc.Volume()
+    vol = pycvc.volume(app)
     vals = [float(i) for i in range(nx * ny * nz)]
     vol.set_float_grid(vals, nx, ny, nz, 0, 0, 0, 1, 1, 1)
     view = vol.grid()
@@ -127,7 +130,7 @@ def test_single_writer_many_readers_never_tear():
     # atomic. With a SINGLE writer cycling a known value set, readers must only
     # ever observe values from that set (never torn/garbage), and the final
     # state is deterministic because we define the access pattern.
-    vol = pycvc.Volume()
+    vol = pycvc.volume(app)
     vol.set_float_grid([0.0] * (8 * 8 * 8), 8, 8, 8, 0, 0, 0, 1, 1, 1)
     grid = vol.grid()
     valid = {float(x) for x in range(100)}
@@ -183,7 +186,7 @@ def test_stress_build_view_drop_churn():
             acc = 0.0
             for it in range(150):
                 if it % 2 == 0:
-                    g = pycvc.Geometry()
+                    g = pycvc.geometry(app)
                     g.add_vertices([float(seed + it)] * 12)  # 4 verts
                     view = g.vertices()
                     del g
@@ -191,7 +194,7 @@ def test_stress_build_view_drop_churn():
                     acc += float(view[0, 0])
                     del view
                 else:
-                    vol = pycvc.Volume()
+                    vol = pycvc.volume(app)
                     vol.set_float_grid([float(seed + it)] * 8, 2, 2, 2, 0, 0, 0, 1, 1, 1)
                     view = vol.grid()
                     del vol
@@ -212,7 +215,7 @@ def test_stress_build_view_drop_churn():
 
 
 def test_cuda_isolation_under_concurrent_host_builds():
-    if not pycvc.Volume.cuda_available():
+    if not pycvc.volume.cuda_available():
         print("  skip: CUDA not available")
         return
     # One thread drives a GPU volume (enable -> coherence check -> disable)
@@ -226,7 +229,7 @@ def test_cuda_isolation_under_concurrent_host_builds():
         try:
             barrier.wait()
             for _ in range(30):
-                vol = pycvc.Volume()
+                vol = pycvc.volume(app)
                 vol.set_float_grid([float(seed)] * 64, 4, 4, 4, 0, 0, 0, 1, 1, 1)
                 grid = vol.grid()
                 assert vol.on_gpu() is False
@@ -238,7 +241,7 @@ def test_cuda_isolation_under_concurrent_host_builds():
     def gpu_worker():
         try:
             barrier.wait()
-            vol = pycvc.Volume()
+            vol = pycvc.volume(app)
             vol.set_float_grid([float(i) for i in range(64)], 4, 4, 4, 0, 0, 0, 1, 1, 1)
             vol.enable_cuda()
             try:
