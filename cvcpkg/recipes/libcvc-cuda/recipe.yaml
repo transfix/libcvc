@@ -50,6 +50,14 @@ depends:
     - name: fftw3
     - name: gsl
     - name: cgal
+    # CGAL is header-only and declares gmp/mpfr as its own runtime deps rather
+    # than vendoring them; the FLAT `cvcpkg install` does not auto-pull them, so
+    # list them HERE or `find_package(CGAL CONFIG)` fails in FindGMP with
+    # `Could NOT find GMP`. Only windows-release hit it (MSVC find_library sees
+    # only .lib, so no system/MinGW GMP fallback). Kept in lockstep with the CPU
+    # libcvc; see that recipe for the full note.
+    - name: gmp
+    - name: mpfr
     - name: hdf5
     - name: log4cplus
     - name: tiff
@@ -58,8 +66,9 @@ depends:
     # named bundle FLAT (a bundle's required_deps are NOT auto-pulled), so every
     # transitive codec libtiff / MagickCore link must be listed HERE or the
     # installed prefix is missing it. libtiff links the FULL codec set —
-    # jpeg + zlib + xz(lzma) + zstd + webp + lerc. (gmp/mpfr via cgal; libsharpyuv
-    # ships inside the libwebp bundle.) Kept in lockstep with the CPU libcvc.
+    # jpeg + zlib + xz(lzma) + zstd + webp + lerc. (gmp/mpfr declared above with
+    # cgal; libsharpyuv ships inside the libwebp bundle.) Kept in lockstep with
+    # the CPU libcvc.
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
