@@ -2,9 +2,10 @@ name: 'Fetch libcvc-deps'
 description: |
   Installs libcvc-deps component bundles into a CMake-ready prefix.
 
-  This action now uses `cvcpkg-install` from transfix/libcvc-deps to
-  download only the components listed in `cvc-requirements.yaml`,
-  rather than a monolithic ~2 GB archive.
+  This action uses `cvcpkg install-deps` (via the `cvcpkg-install` action from
+  transfix/libcvc-deps) to install the dependency closure declared by libcvc's
+  in-tree recipe (`cvcpkg/recipes/libcvc`) — the single source of truth for
+  libcvc's deps. There is no separate `cvc-requirements.yaml`.
 
   The output interface (`path`) is unchanged — callers that gate steps
   on `steps.<id>.outputs.path != ''` and add the path to
@@ -48,7 +49,11 @@ runs:
       id: cvcpkg
       uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@master
       with:
-        requirements: cvc-requirements.yaml
+        # "Just recipes": install libcvc's dependency closure straight from its
+        # in-tree recipe (single source of truth), instead of a parallel
+        # cvc-requirements.yaml. cvcpkg install-deps reads the recipe's
+        # build+runtime deps (host_tools excluded — CI provides cmake/ninja).
+        recipe: cvcpkg/recipes/libcvc
         build_type: ${{ inputs.build_type }}
         link: ${{ inputs.link }}
         prefix: ${{ inputs.prefix }}
