@@ -7,7 +7,15 @@ recipe:
   # state_set(app, ...) replace the old class-Geometry/class-Volume facade — and it
   # links the +cvc.2 libcvc (#134). The published +cvc.1 shim predates the rearch,
   # so the new bundle supersedes it as +cvc.2.
-  cvc_revision: 2
+  # Bumped 2 -> 3: SAME source, rebuilt with the current cvcpkg swig (4.4.1). The
+  # +cvc.2 bundle was generated with SWIG 4.2.0 (swig_runtime_data4); any SWIG
+  # module that %imports pycvc.i (pycvc-gl, volrover3's vrhost) must share pycvc's
+  # runtime type table, whose capsule name is SWIG-version-specific (4.2.x -> data4,
+  # >=4.3 -> data5). Building a consumer with the 4.4.1 toolchain against a data4
+  # pycvc silently breaks cross-module type sharing (state_set(host.app()) rejects
+  # the handle). +cvc.3 is the data5 rebuild; pycvc-gl is bumped in lockstep so the
+  # family stays on one SWIG runtime.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
