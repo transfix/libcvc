@@ -52,14 +52,24 @@ depends:
     - name: log4cplus
     - name: tiff
     - name: imagemagick
-    # ImageMagick delegates + libtiff codecs. The imagemagick and tiff recipes
-    # under-declare these, so without listing them here the installed prefix is
-    # missing libjpeg/libpng/libwebp/freetype/libxml2 and only loads where a
-    # matching system library happens to exist — which is why macOS could not
-    # resolve @rpath/libjpeg.62.dylib / libxml2. (gmp/mpfr arrive via cgal.)
+    # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
+    # named bundle FLAT — a bundle's own required_deps are NOT auto-pulled — so
+    # every transitive codec libtiff / MagickCore link must be listed HERE or the
+    # installed prefix is missing it and the dylib only loads where a matching
+    # SYSTEM library happens to exist (macOS: dyld `Library not loaded:
+    # @rpath/<lib> ... no such file`). libtiff links the FULL codec set —
+    # jpeg + zlib(base) + xz(lzma) + zstd + webp + lerc — so all of those must be
+    # present. (gmp/mpfr arrive via cgal; libsharpyuv ships inside the libwebp
+    # bundle so it needs no separate entry.)
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
+    # libtiff codecs beyond jpeg/webp — separate bundles, so declare them or
+    # macOS libtiff.dylib fails to load (@rpath/libLerc.4.dylib / libzstd /
+    # liblzma not found).
+    - name: lerc
+    - name: zstd
+    - name: xz
     - name: freetype
     - name: libxml2
     - name: yaml
