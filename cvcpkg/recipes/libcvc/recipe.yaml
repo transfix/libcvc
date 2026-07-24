@@ -11,8 +11,15 @@ recipe:
   #
   # This same +cvc.2 bundle ALSO drops the bundled `cvc` CLI: it now ships as its
   # own package (the cvc-cli / cvc-cli-cuda recipes) so it lands deliberately in
-  # a user's PATH. The +cvc.2 republish (still pending) carries both changes; no
-  # extra bump is needed since +cvc.2 was never published.
+  # a user's PATH.
+  #
+  # And it enables the XMLRPC module (build.{sh,ps1} now pass
+  # -DCVC_USING_XMLRPC=ON) so the bundle exports the cvc::xmlrpc target and ships
+  # libxmlrpc — the published +cvc.1 was built with the default OFF and so was
+  # missing cvc::xmlrpc, which downstream consumers (VolumeRover 2.x) require.
+  #
+  # The +cvc.2 republish (still pending) carries all three changes; no extra bump
+  # is needed since +cvc.2 was never published.
   cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -95,6 +102,11 @@ package:
     # cvc-cli-cuda). This bundle is the pure SDK: libs, cmake config, headers.
     - lib/libcvc*
     - lib/cvc*
+    # The XMLRPC module (CVC_USING_XMLRPC=ON) installs its STATIC archive as
+    # lib/libxmlrpc.a — it does not match lib/libcvc*/lib/cvc*, so it must be
+    # listed explicitly or downstream links to cvc::xmlrpc fail with a missing
+    # archive.
+    - lib/libxmlrpc*
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
@@ -102,6 +114,7 @@ package:
     - name: cvc
       targets:
         - cvc::cvc
+        - cvc::xmlrpc
 
 abi:
   cxx_std: 17

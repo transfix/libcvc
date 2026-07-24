@@ -26,7 +26,10 @@ $args = @(
   # CVC_ENABLE_CUDA=ON in its build.matrix env to reuse this script for the GPU
   # variant.
   "-DCVC_ENABLE_CUDA=$(if ($env:CVC_ENABLE_CUDA) { $env:CVC_ENABLE_CUDA } else { 'OFF' })",
-  '-DCVC_ENABLE_GRPC=OFF'
+  '-DCVC_ENABLE_GRPC=OFF',
+  # Enable the XMLRPC module so the bundle exports cvc::xmlrpc (+ libxmlrpc)
+  # for downstream consumers like VolumeRover 2.x. Self-contained STATIC lib.
+  '-DCVC_USING_XMLRPC=ON'
 )
 
 if ($env:CVC_DEPS_PREFIX) {
