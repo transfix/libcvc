@@ -889,6 +889,32 @@ endif()
 
 # Register tests with CTest
 include(GoogleTest)
+
+# ── macOS test-discovery robustness ───────────────────────────────────────
+# gtest_discover_tests defaults to POST_BUILD mode: it runs each freshly-built
+# test executable at BUILD time to enumerate its cases. On the macOS *debug* CI
+# that is fragile — every launch dyld-loads the full libcvc-deps dylib closure
+# (~30 libs: boost, Magick++, hdf5, tiff, gmp/mpfr, …) and, under parallel-build
+# CPU contention, intermittently exceeds the 5 s default DISCOVERY_TIMEOUT. The
+# exe is killed before it prints its --gtest_list_tests JSON, so CMake's
+# ParseTestList aborts the *build* with "Syntax error: value, object or array
+# expected". The offending test varied run to run — the signature of a timeout,
+# not a real per-test crash. Release binaries load fast enough to stay under
+# 5 s, which is why only macos-debug failed.
+#
+# Fix (macOS only, so Linux/Windows POST_BUILD behavior — including Windows'
+# build-time DLL-PATH setup for discovery — is left untouched): run discovery at
+# TEST time (PRE_TEST), moving it off the build critical path, and give cold
+# dyld loads a generous timeout. macOS binaries resolve their deps via embedded
+# @rpath, so test-time discovery needs no extra environment. _gtest_discover_tests
+# is the original module command, shadowed here by a same-named macro so every
+# bare gtest_discover_tests(<target>) call below inherits these options.
+if(APPLE)
+  macro(gtest_discover_tests)
+    _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+  endmacro()
+endif()
+
 gtest_discover_tests(app_test)
 gtest_discover_tests(state_test)
 gtest_discover_tests(voxels_test)
