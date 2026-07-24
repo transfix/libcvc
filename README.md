@@ -502,17 +502,14 @@ libcvc/
   - Per-app state caching keyed on the owning `cvc::app` instance.
   - Documentation refresh across `README.md`, `docs/APP_API.md`,
     `docs/STATE_API.md`, `docs/TESTING.md`, `docs/THREAD_POOL*.md`,
-    `docs/IMAGE_PROCESSING_ALGORITHMS.md`, and
-    `docs/GRAPHICS_DATA_DRIVEN_UPDATES.md`.
+    and `docs/IMAGE_PROCESSING_ALGORITHMS.md`.
 - **3.0.0** (2026) - **Production-grade packaging & CI/CD release**
-  - Cross-platform release artifacts: Linux (.tar.gz, .deb, AppImage),
-    macOS (.zip, .dmg with VolumeRover3.app bundle), Windows (.zip,
-    NSIS installer with desktop/start-menu shortcuts)
-  - Separate libcvc SDK (Debug + Release) and volrover3 user-app
-    components, packaged independently per platform
+  - Cross-platform release artifacts: Linux (.tar.gz, .deb),
+    macOS (.zip, .dmg), Windows (.zip, NSIS installer)
+  - Separate Debug + Release libcvc SDK components, packaged
+    independently per platform
   - Portable `find_package(cvc)` with full transitive dependency
     discovery (Boost, CGAL, HDF5, OpenMP, FFTW, CUDAToolkit, etc.)
-  - Qt deployment integration (windeployqt, macdeployqt, linuxdeploy)
   - Multi-platform CI matrix (Ubuntu, macOS, Windows) with vcpkg
     binary caching
 - **2.0.0** (2025) - **Major modernization release**
