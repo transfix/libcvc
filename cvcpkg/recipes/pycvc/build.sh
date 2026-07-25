@@ -33,6 +33,16 @@ CMAKE_ARGS=(
 # python311, numpy, and swig.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
+  # Pin the interpreter + its numpy headers so find_package(Python3 ... NumPy)
+  # doesn't fall through to a system python without numpy — which fails configure
+  # with "Could NOT find Python3 (missing: Python3_NumPy_INCLUDE_DIRS NumPy)".
+  # Derive the include dir from the interpreter (numpy>=2 -> _core/include,
+  # <2 -> core/include) rather than hardcoding it.
+  if [[ -x "$CVC_DEPS_PREFIX/bin/python3.11" ]]; then
+    CMAKE_ARGS+=("-DPython3_EXECUTABLE=$CVC_DEPS_PREFIX/bin/python3.11")
+    _npy_inc=$("$CVC_DEPS_PREFIX/bin/python3.11" -c 'import numpy; print(numpy.get_include())' 2>/dev/null || true)
+    [[ -n "$_npy_inc" ]] && CMAKE_ARGS+=("-DPython3_NumPy_INCLUDE_DIRS=$_npy_inc")
+  fi
 fi
 
 cmake "${CMAKE_ARGS[@]}"
