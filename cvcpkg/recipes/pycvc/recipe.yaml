@@ -15,7 +15,12 @@ recipe:
   # pycvc silently breaks cross-module type sharing (state_set(host.app()) rejects
   # the handle). +cvc.3 is the data5 rebuild; pycvc-gl is bumped in lockstep so the
   # family stays on one SWIG runtime.
-  cvc_revision: 3
+  # Bumped 3 -> 4: add pycvc.app_from_capsule(cap) — an embedding host (volrover3)
+  # hands its LIVE app across as a PyCapsule("cvc.app") and pycvc wraps it into its
+  # OWN app type here, so the host needs NO SWIG module and NO pycvc.i (retiring the
+  # cross-module type-sharing + SWIG-version coupling entirely). Additive; pycvc-gl
+  # is unaffected and stays at +cvc.3.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

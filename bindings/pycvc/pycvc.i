@@ -109,6 +109,29 @@ namespace cvc { class app {}; }
 namespace pycvc {
   std::shared_ptr<cvc::app> make_app();
 }
+
+// Adopt a host-owned cvc::app delivered as a PyCapsule named "cvc.app" (which
+// holds a std::shared_ptr<cvc::app>*). This is how an EMBEDDING HOST (e.g.
+// volrover3) hands pycvc scripts its LIVE app WITHOUT the host needing pycvc.i or
+// a SWIG module of its own: the host builds the capsule; pycvc wraps it into
+// pycvc's OWN app proxy right here, so the handle is type-compatible with
+// state_set / volume / geometry BY CONSTRUCTION — no cross-module SWIG type
+// sharing, no SWIG-runtime-version coupling. This is the first entry of pycvc's
+// intended cross-extension C-API (a NumPy-style capi header would formalize it).
+%inline %{
+namespace pycvc {
+std::shared_ptr<cvc::app> app_from_capsule(PyObject *cap) {
+  if (!cap || !PyCapsule_CheckExact(cap))
+    throw std::invalid_argument("pycvc.app_from_capsule: argument is not a PyCapsule");
+  void *p = PyCapsule_GetPointer(cap, "cvc.app");
+  if (!p)
+    throw std::invalid_argument(
+        "pycvc.app_from_capsule: capsule is not named \"cvc.app\" or is empty");
+  return *static_cast<std::shared_ptr<cvc::app> *>(p);
+}
+} // namespace pycvc
+%}
+
 // Ergonomic alias: pycvc.App() reads as a constructor for a fresh app.
 %pythoncode %{
 App = make_app
