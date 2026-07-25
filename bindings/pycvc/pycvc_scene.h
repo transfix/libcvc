@@ -25,6 +25,15 @@ public:
   // lives on this app's state tree under `state_prefix`, so the scene shares the
   // host's app/context like everything else in pycvc.
   Scene(const std::shared_ptr<cvc::app> &app, const std::string &state_prefix = "cvcgl");
+#ifndef SWIG
+  // Adopt an EXISTING SceneGraph (e.g. an embedding host's LIVE scene) instead of
+  // constructing a fresh one, so add_geometry/add_volume mutate the RUNNING scene
+  // and render in the host's own window. Co-owns both the app and the scene (the
+  // host keeps its own refs, so this shared ownership never double-frees). Hidden
+  // from SWIG: Python constructs this via pycvc_gl.scene_from_capsule(app_cap,
+  // scene_cap), not this ctor (SceneGraph is not a SWIG-wrapped type here).
+  Scene(const std::shared_ptr<cvc::app> &app, const std::shared_ptr<SceneGraph> &existing);
+#endif
   ~Scene();
 
   // Add a mesh/polyline or a scalar-field volume as a named node. The
