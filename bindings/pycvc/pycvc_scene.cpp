@@ -23,6 +23,16 @@ Scene::Scene(const std::shared_ptr<cvc::app> &app, const std::string &state_pref
   if (!app)
     throw std::invalid_argument("pycvc.Scene: null app handle");
 }
+// Adopt an existing (host-owned) SceneGraph — see the header. add_geometry/
+// add_volume/pump then target this live scene; show()/render_png() still work but
+// are rarely used when the host already owns the render window.
+Scene::Scene(const std::shared_ptr<cvc::app> &app, const std::shared_ptr<SceneGraph> &existing)
+    : app_(app), sg_(existing) {
+  if (!app)
+    throw std::invalid_argument("pycvc.Scene: null app handle");
+  if (!existing)
+    throw std::invalid_argument("pycvc.Scene: null scene graph (adopt ctor)");
+}
 Scene::~Scene() = default;
 
 namespace {

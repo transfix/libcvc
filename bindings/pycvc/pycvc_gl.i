@@ -4,6 +4,7 @@
 
 %{
 #include <cvc/core/exception.h>  // the %import'd %exception block catches cvc::exception
+#include <stdexcept>
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands
@@ -46,6 +47,37 @@
 %apply vtkProp* { vtkActor*, vtkVolume*, vtkImageActor* };
 
 %include "pycvc_scene.h"
+
+// ── Live-scene bridge: adopt an embedding host's SceneGraph ─────────────────
+// An embedding host (e.g. volrover3) hands its LIVE app + SceneGraph across as
+// two PyCapsules — "cvc.app" and "cvc.scenegraph", each holding a heap
+// shared_ptr COPY. scene_from_capsule extracts both raw and builds a Scene that
+// ADOPTS the existing SceneGraph (no fresh make_shared), so add_geometry/
+// add_volume mutate the RUNNING scene and appear in the host's window. Both
+// handles cross as raw shared_ptr through the capsule — NOT through SWIG's
+// cross-module type table — so this needs no SWIG type sharing with the host and
+// no SWIG-runtime-version coupling (mirrors pycvc.app_from_capsule).
+%newobject scene_from_capsule;  // Python owns the returned Scene
+%inline %{
+namespace pycvc {
+Scene *scene_from_capsule(PyObject *app_cap, PyObject *scene_cap) {
+  if (!app_cap || !PyCapsule_CheckExact(app_cap))
+    throw std::invalid_argument("pycvc_gl.scene_from_capsule: app arg is not a PyCapsule");
+  if (!scene_cap || !PyCapsule_CheckExact(scene_cap))
+    throw std::invalid_argument("pycvc_gl.scene_from_capsule: scene arg is not a PyCapsule");
+  void *ap = PyCapsule_GetPointer(app_cap, "cvc.app");
+  if (!ap)
+    throw std::invalid_argument("pycvc_gl.scene_from_capsule: app capsule is not named \"cvc.app\"");
+  void *sp = PyCapsule_GetPointer(scene_cap, "cvc.scenegraph");
+  if (!sp)
+    throw std::invalid_argument(
+        "pycvc_gl.scene_from_capsule: scene capsule is not named \"cvc.scenegraph\"");
+  std::shared_ptr<cvc::app> app = *static_cast<std::shared_ptr<cvc::app> *>(ap);
+  std::shared_ptr<SceneGraph> sg = *static_cast<std::shared_ptr<SceneGraph> *>(sp);
+  return new Scene(app, sg); // adopt-existing ctor
+}
+} // namespace pycvc
+%}
 
 // Round-trip proof of the bridge, independent of the scene graph: hand a Python
 // vtkProp in and get the same object back out — exercises both typemaps.
