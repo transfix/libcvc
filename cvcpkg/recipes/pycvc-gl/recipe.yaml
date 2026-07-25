@@ -11,7 +11,11 @@ recipe:
   # pycvc's SWIG runtime version; the +cvc.2 pair was SWIG 4.2.0 (data4). This is a
   # toolchain rebuild only (same source, still links the +cvc.2 cvcgl/pycvc/libcvc
   # and the published vtk-python-cp311 for the vtkProp bridge).
-  cvc_revision: 3
+  # Bumped 3 -> 4: hermetic republish. Rebuilt against the hermetic cvcgl +cvc.3
+  # and vtk 9.5.0+cvc.2 (cvcpkg X11/OpenGL, libcvc-deps #368); the build no longer
+  # needs the apt-get X11/GL step (removed from publish-cvcpkg.yml). Keeps pycvc's
+  # SWIG 4.4.1 (data5) runtime. Source unchanged.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

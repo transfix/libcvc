@@ -288,7 +288,15 @@ jobs:
           # vtk-python-cp311 — libvtkWrappingPythonCore + vtkPythonUtil.h for
           # pycvc-gl's Phase-5b vtkProp bridge (Python vtkActor -> C++ scene).
           # Without it pycvc-gl's configure dies at CMakeLists.txt:147.
-          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 \
+          #
+          # xorgproto: the X11 protocol headers (X11/X.h, extension *proto.h).
+          # cvcgl's find_package(VTK) re-runs VTK's FindX11, which needs X11/X.h —
+          # but xorgproto is only a *build* dep of the libx11/libxext/... recipes,
+          # so `cvcpkg install vtk` (which pulls libx11 etc. as runtime deps) does
+          # NOT drag in xorgproto, and X11_X11_INCLUDE_PATH goes unfound. Install
+          # it explicitly. (Proper fix, follow-up: make xorgproto a runtime dep of
+          # the X11 libs whose public headers #include it, so it's transitive.)
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
             --prefix "$PY" --config release --link shared
           # The published numpy-cp311 wheel bundles openblas under
           # numpy.libs/, but that .so is NOT self-resolved by RPATH, so a bare
@@ -306,20 +314,11 @@ jobs:
             echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
 
-      - name: Install X11 + OpenGL system libs for the VTK build [Linux]
-        # cvcgl / pycvc-gl link VTK, whose CMake package config runs
-        # find_package(X11) + OpenGL. ubuntu-latest ships neither dev package, so
-        # the cvcgl configure dies with "Could NOT find X11 (missing:
-        # X11_X11_INCLUDE_PATH X11_X11_LIB)" and pycvc-gl then can't find the
-        # (never-installed) cvcGL. libcvc itself needs none of this, which is why
-        # only the family steps were affected. Install the dev libs VTK probes for.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libx11-dev libxt-dev libgl1-mesa-dev libglu1-mesa-dev
+      # X11/OpenGL for the cvcgl/pycvc-gl VTK build now come HERMETICALLY from the
+      # cvcpkg vtk bundle (>= 9.5.0+cvc.2), which carries libx11/libxext/libxt/
+      # libglvnd/glu as runtime deps — so `cvcpkg install vtk` above already
+      # staged them into $PY and there is nothing to apt-get. (The old
+      # apt-get libx11-dev/libgl1-mesa-dev step was removed here.)
 
       - name: Build, pack & publish cvcgl [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
