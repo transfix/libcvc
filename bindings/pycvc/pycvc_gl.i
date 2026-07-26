@@ -20,6 +20,8 @@
 
 %{
 #include <cvc/core/exception.h> // the %import'd %exception block catches cvc::exception
+#include <any>
+#include <functional>
 #include <stdexcept>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -31,6 +33,7 @@
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands
 // in include/vtk-9.5/, already on VTK::CommonCore's include path).
 #include "vtkPythonUtil.h"
+#include "vtkMatrix4x4.h"
 #include "vtkProp.h"
 #include "vtkActor.h"
 %}
@@ -67,6 +70,35 @@
 // The scene stores props in vtkSmartPointer (Register/UnRegister), so the
 // borrowed pointer from GetPointerFromObject is safe to retain. Cover subtypes.
 %apply vtkProp* { vtkActor*, vtkVolume*, vtkImageActor* };
+
+// ── PyCallable -> std::function<void()> ─────────────────────────────────────
+// A Python callable crosses as a C++ std::function so Python functions can be
+// used for scene callbacks (SceneGraph::postEvent, on_graphics_changed, ...).
+// A shared_ptr holder owns one reference and DECREFs it (under the GIL) when the
+// last copy of the std::function is destroyed; the call site re-acquires the GIL
+// and reports (does not swallow into C++) any Python exception.
+%typemap(in) std::function<void()> {
+  if (!PyCallable_Check($input))
+    SWIG_exception_fail(SWIG_TypeError, "expected a callable for std::function<void()>");
+  Py_INCREF($input);
+  std::shared_ptr<PyObject> _cb($input, [](PyObject *p) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    Py_DECREF(p);
+    PyGILState_Release(g);
+  });
+  $1 = [_cb]() {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject *r = PyObject_CallObject(_cb.get(), nullptr);
+    if (!r)
+      PyErr_Print();
+    else
+      Py_DECREF(r);
+    PyGILState_Release(g);
+  };
+}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_POINTER) std::function<void()> {
+  $1 = PyCallable_Check($input) ? 1 : 0;
+}
 // directorout: when a Python-defined node's getProp() returns a vtkmodules
 // object, unwrap it to the C++ vtkProp* the scene renders (None -> nullptr).
 // This is what makes a Python scene node's Python-built actor flow into C++.
@@ -160,6 +192,72 @@
       throw std::invalid_argument("setTransform: need 16 doubles (row-major 4x4)");
     $self->setTransform(m.data());
   }
+  // Read this node's local transform as a 16-element row-major list (the
+  // vtkMatrix4x4 return is ignored; this marshals cleanly).
+  std::vector<double> get_transform() {
+    std::vector<double> out(16, 0.0);
+    out[0] = out[5] = out[10] = out[15] = 1.0;
+    if (vtkMatrix4x4* m = $self->getTransform())
+      for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) out[i * 4 + j] = m->GetElement(i, j);
+    return out;
+  }
+  // The accumulated world transform (this node * all parents), row-major 16.
+  std::vector<double> get_world_transform() {
+    std::vector<double> out(16, 0.0);
+    out[0] = out[5] = out[10] = out[15] = 1.0;
+    if (auto m = $self->getWorldTransform())
+      for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) out[i * 4 + j] = m->GetElement(i, j);
+    return out;
+  }
+  // (minx, miny, minz, maxx, maxy, maxz) — the opaque bounding_box returns are
+  // ignored; these expose them as plain 6-tuples.
+  std::vector<double> get_bounding_box() {
+    cvc::bounding_box b = $self->getBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  std::vector<double> get_combined_bounding_box() {
+    cvc::bounding_box b = $self->getCombinedBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // Names of this node's direct children (traverse via SceneGraph.getGraphics).
+  std::vector<std::string> child_names() {
+    std::vector<std::string> out;
+    for (auto& c : $self->getGraphicsChildren())
+      if (c) out.push_back(c->getName());
+    return out;
+  }
+  // Per-node metadata backed by std::any: bool / int / float / str round-trip by
+  // type_info; other types raise. (The raw std::any accessors are ignored.)
+  void set_metadata(const std::string& key, PyObject* value) {
+    if (PyBool_Check(value))
+      $self->setMetadata(key, std::any(value == Py_True));
+    else if (PyLong_Check(value))
+      $self->setMetadata(key, std::any(static_cast<long>(PyLong_AsLong(value))));
+    else if (PyFloat_Check(value))
+      $self->setMetadata(key, std::any(PyFloat_AsDouble(value)));
+    else if (PyUnicode_Check(value))
+      $self->setMetadata(key, std::any(std::string(PyUnicode_AsUTF8(value))));
+    else
+      throw std::invalid_argument("set_metadata: value must be bool, int, float, or str");
+  }
+  PyObject* get_metadata(const std::string& key) {
+    if (!$self->hasMetadata(key))
+      Py_RETURN_NONE;
+    std::any a = $self->getMetadata(key);
+    const std::type_info& t = a.type();
+    if (t == typeid(bool))
+      return PyBool_FromLong(std::any_cast<bool>(a));
+    if (t == typeid(long))
+      return PyLong_FromLong(std::any_cast<long>(a));
+    if (t == typeid(double))
+      return PyFloat_FromDouble(std::any_cast<double>(a));
+    if (t == typeid(std::string))
+      return PyUnicode_FromString(std::any_cast<std::string>(a).c_str());
+    Py_RETURN_NONE; // unknown stored type
+  }
+  bool has_metadata(const std::string& key) { return $self->hasMetadata(key); }
 }
 %include "cvc/gl/GraphicsNode.h"
 
@@ -178,7 +276,9 @@
 %ignore SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
 %ignore SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
 %ignore SceneGraph::setRenderer;
-%ignore SceneGraph::postEvent;
+// SceneGraph::postEvent(std::function<void()>) is NOT ignored — the callable
+// typemap above marshals a Python function to the std::function, so Python can
+// post work onto the scene's owner thread.
 %ignore SceneGraph::getGridNode;
 %ignore SceneGraph::getAllGraphics;
 %ignore SceneGraph::getAllGraphicsOfType;
@@ -258,6 +358,53 @@
     $self->getGraphicsRoot()->addGraphicsChild(node);
     $self->registerGraphics(name, node);
   }
+  // Names of all registered graphics nodes (getAllGraphics is ignored for the
+  // Python surface; this exposes its keys).
+  std::vector<std::string> graphics_names() const {
+    std::vector<std::string> out;
+    for (auto& kv : $self->getAllGraphics()) out.push_back(kv.first);
+    return out;
+  }
+  // Combined world bounds of all graphics / all volumes as (minx..maxz) — the
+  // opaque bounding_box returns are ignored; these expose them as 6-tuples.
+  std::vector<double> compute_graphics_bounds() const {
+    cvc::bounding_box b = $self->computeGraphicsBounds();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  std::vector<double> compute_volume_bounds() const {
+    cvc::bounding_box b = $self->computeVolumeBounds();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // Resize the world grid/box to (minx..maxz) (updateGrid takes an opaque bbox).
+  void update_grid(double minx, double miny, double minz, double maxx, double maxy, double maxz) {
+    $self->updateGrid(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+  }
+  // Add a geometry / volume as a CHILD of `parent` (inherits its transform), and
+  // register it so getGraphics(name) finds it.
+  std::shared_ptr<GeometryNode> add_child_geometry(const std::string& parent,
+                                                   const std::string& name,
+                                                   const cvc::geometry& g) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_geometry: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<GeometryNode>(name);
+    child->setGeometry(g);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  std::shared_ptr<VolumeNode> add_child_volume(const std::string& parent, const std::string& name,
+                                               const cvc::volume& v) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_volume: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<VolumeNode>(name);
+    child->setData(v);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // Connect a Python callable to the scene's graphics-changed signal (fires when
+  // a node is added or removed) — Python functions as scene callbacks.
+  void on_graphics_changed(std::function<void()> cb) { $self->graphicsChanged.connect(cb); }
 }
 %include "cvc/gl/SceneGraph.h"
 

@@ -39,9 +39,12 @@ void show(SceneGraph &sg, const std::string &title = "pycvc_gl", int width = 102
 // live Python VTK object into a C++ vtkProp* the scene renders directly. (With
 // directors you can instead subclass GraphicsNode in Python and return the prop
 // from getProp(); this is the quick imperative path for an already-built prop.)
+// `parent` (default "" = the graphics root) attaches the prop as a CHILD of that
+// named node, so it inherits the parent's transform (e.g. a building mesh as a
+// child of the terrain node stays aligned to it and moves with it).
 void add_prop(SceneGraph &sg, const std::string &name, vtkProp *prop, double minx = -1.0,
               double miny = -1.0, double minz = -1.0, double maxx = 1.0, double maxy = 1.0,
-              double maxz = 1.0);
+              double maxz = 1.0, const std::string &parent = "");
 
 // Return a node's vtkProp back to Python as a live vtkmodules object (via the
 // out-typemap). Null if `name` is absent or was not added via add_prop.

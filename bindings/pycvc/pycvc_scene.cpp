@@ -79,12 +79,18 @@ void show(SceneGraph &sg, const std::string &title, int width, int height) {
 }
 
 void add_prop(SceneGraph &sg, const std::string &name, vtkProp *prop, double minx, double miny,
-              double minz, double maxx, double maxy, double maxz) {
+              double minz, double maxx, double maxy, double maxz, const std::string &parent) {
   if (!prop)
     throw std::invalid_argument("pycvc_gl.add_prop: null prop");
+  // Attach under `parent` (default the graphics root) so the prop inherits that
+  // node's transform — e.g. a building mesh as a child of the terrain node.
+  std::shared_ptr<GraphicsNode> parentNode =
+      parent.empty() ? sg.getGraphicsRoot() : sg.getGraphics(parent);
+  if (!parentNode)
+    throw std::invalid_argument("pycvc_gl.add_prop: no parent node named '" + parent + "'");
   // addGraphicsChild<T>(name) builds the node with the proper "..children.name"
-  // state path and adds it to the render tree.
-  auto node = sg.getGraphicsRoot()->addGraphicsChild<PropNode>(name);
+  // state path and adds it to the render tree under the parent.
+  auto node = parentNode->addGraphicsChild<PropNode>(name);
   node->setBounds(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
   node->setProp(prop);
   sg.registerGraphics(name, node); // also expose it in the flat name lookup
