@@ -10,7 +10,12 @@ recipe:
   # 9.5.0+cvc.2 (built against the cvcpkg X11/OpenGL recipes, libcvc-deps #368) —
   # so this bundle links the hermetic VTK and its build no longer needs the
   # apt-get X11/GL step (removed from publish-cvcpkg.yml). Source unchanged.
-  cvc_revision: 3
+  # Bumped 3 -> 4: post-#152 republish. cvcGL now honors BUILD_SHARED_LIBS (a single
+  # libcvcGL.so.3 shared by volrover3 + pycvc-gl — no two-copies hazard), stores
+  # per-vertex colors as direct uchar (faithful colors, texture-ready), grew the
+  # GraphicsNode API (transforms/bounds/parenting/metadata/callbacks) + world-bounds
+  # recompute, and rebuilds against libcvc +cvc.3. Part of the family republish.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

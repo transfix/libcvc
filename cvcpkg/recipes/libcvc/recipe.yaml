@@ -18,9 +18,16 @@ recipe:
   # libxmlrpc — the published +cvc.1 was built with the default OFF and so was
   # missing cvc::xmlrpc, which downstream consumers (VolumeRover 2.x) require.
   #
-  # The +cvc.2 republish (still pending) carries all three changes; no extra bump
-  # is needed since +cvc.2 was never published.
-  cvc_revision: 2
+  # The +cvc.2 republish carries all three changes.
+  # Bumped 2 -> 3: coordinated FAMILY republish for post-#152 master. libcvc core
+  # moved forward since +cvc.2 (e.g. geometry views pin their container, COW-safe
+  # across append/clear, #127), and the downstream cvcgl/pycvc-gl changed (cvcGL
+  # shared build + faithful colors + expanded GraphicsNode API; pycvc-gl
+  # direct-wraps the scene graph). Per cvcpkg policy a new UPSTREAM revision can
+  # break downstream, so every downstream rebuilds + republishes against it — the
+  # whole family (libcvc/cvcgl/pycvc/pycvc-gl) bumps together to a consistent,
+  # tested-together set.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

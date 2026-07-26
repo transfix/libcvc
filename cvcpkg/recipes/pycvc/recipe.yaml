@@ -20,7 +20,11 @@ recipe:
   # OWN app type here, so the host needs NO SWIG module and NO pycvc.i (retiring the
   # cross-module type-sharing + SWIG-version coupling entirely). Additive; pycvc-gl
   # is unaffected and stays at +cvc.3.
-  cvc_revision: 4
+  # Bumped 4 -> 5: family republish for post-#152 master. Rebuilt against libcvc
+  # +cvc.3; pycvc core carries the accumulated bindings work (geometry views pin
+  # their COW container, #127). Bumped in lockstep with the family so consumers get
+  # one consistent, tested-together set.
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
