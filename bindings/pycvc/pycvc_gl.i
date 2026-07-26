@@ -28,6 +28,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands
@@ -264,8 +265,18 @@
 
 // ── GeometryNode: setGeometry (in-place data), material + render-mode setters ─
 // enum class + scalar setters + cvc::geometry (%import'd) marshal cleanly; only
-// the opaque-by-value bbox override needs ignoring.
+// the opaque-by-value bbox override needs ignoring. setTexture / clearTexture /
+// texture_modified auto-wrap (cvc::image is %import'd from pycvc.i); the snake
+// aliases below match the pycvc image/texture demo surface.
 %ignore GeometryNode::getBoundingBox;
+%extend GeometryNode {
+  // Zero-copy texture (default): the vtkTexture aliases img's RGBA8 buffer, so a
+  // later img.numpy() pixel edit + texture_modified() shows live with no re-copy.
+  void set_texture(const cvc::image& img) { $self->setTexture(img, /*zeroCopy=*/true); }
+  // Convert-flip-and-copy fallback (any format; the texture owns its own copy).
+  void set_texture_copy(const cvc::image& img) { $self->setTexture(img, /*zeroCopy=*/false); }
+  void clear_texture() { $self->clearTexture(); }
+}
 %include "cvc/gl/GeometryNode.h"
 
 // ── VolumeNode: transfer function (vector<double>) + rendering props ────────
@@ -311,14 +322,34 @@
 // None when a lookup misses or a typed cast fails. (Adopted scenes have no
 // _pycvc_app — the host owns app+scene+nodes for the whole session, so None is
 // correct there.) These %feature lines MUST precede the wrapping below.
+// getGraphics()/addGraphics(name, geom) are typed shared_ptr<GraphicsNode> at
+// the C++ boundary, so SWIG hands Python the BASE proxy — a GeometryNode's
+// set_texture() / a VolumeNode's setVolume() are invisible on it. Downcast the
+// result to its concrete node type via the typed accessors so scripts can do
+// sg.getGraphics(name).set_texture(img) / .setVolume(vol) directly (as the
+// pycvc image/texture + SDF demos do), not only through geometry_node()/
+// volume_node(). args[0] is the node name for both wrapped methods.
+%pythoncode %{
+def _typed_node(sg, name):
+    n = sg.geometry_node(name)
+    if n is None:
+        n = sg.volume_node(name)
+    return n
+%}
 %pythonappend SceneGraph::getGraphics %{
-    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+    if val is not None:
+        _t = _typed_node(self, name)
+        if _t is not None: val = _t
+        val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend SceneGraph::getGraphicsRoot %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend SceneGraph::addGraphics %{
-    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+    if val is not None:
+        _t = _typed_node(self, args[0])
+        if _t is not None: val = _t
+        val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %pythonappend SceneGraph::geometry_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)

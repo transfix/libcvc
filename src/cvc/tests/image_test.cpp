@@ -89,6 +89,28 @@ TEST(ImageTest, CopyOnWrite) {
   EXPECT_EQ(a.storage().get(), a.data());
 }
 
+// Binding contract for the zero-copy pycvc image.numpy() view + the cvcGL
+// zero-copy setTexture: storage() shares the buffer WITHOUT a copy-on-write
+// detach, so two copies (or a numpy view + a vtkTexture) alias the same bytes;
+// an edit through storage() is visible to all, until someone data()-detaches.
+TEST(ImageTest, StorageAliasesAcrossCopyUntilDetach) {
+  image a = make_rgba(4, 4);
+  image b = a; // shares the buffer
+  // storage() does not detach: a and b alias the SAME block.
+  EXPECT_EQ(a.storage().get(), b.storage().get());
+  ASSERT_NE(a.storage().get(), nullptr);
+  // A raw write through storage() (no COW) is seen by both — the zero-copy
+  // live-edit path (numpy view edit reaches the aliased vtkTexture buffer).
+  a.storage().get()[0] = 123;
+  EXPECT_EQ(b.storage().get()[0], 123);
+  // data() detaches the shared image to a private buffer; b keeps the old one.
+  unsigned char *pa = a.data();
+  EXPECT_NE(a.storage().get(), b.storage().get());
+  pa[0] = 200;
+  EXPECT_EQ(a.storage().get()[0], 200);
+  EXPECT_EQ(b.storage().get()[0], 123); // b decoupled, unaffected
+}
+
 TEST(ImageTest, FlippedVertical) {
   image a = make_rgba(2, 3);
   image f = a.flipped_vertical();

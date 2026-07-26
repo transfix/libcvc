@@ -229,6 +229,7 @@ public:
   points_ptr_t points_ptr() const { return _points; }
   colors_ptr_t colors_ptr() const { return _colors; }
   uvs_ptr_t uvs_ptr() const { return _uvs; }
+  tangents_ptr_t tangents_ptr() const { return _tangents; }
 
   point_t min_point() const;
   point_t max_point() const;

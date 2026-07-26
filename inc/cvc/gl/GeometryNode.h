@@ -1,6 +1,7 @@
 #ifndef GEOMETRYNODE_H
 #define GEOMETRYNODE_H
 
+#include <boost/shared_array.hpp>
 #include <cvc/gl/GraphicsNode.h>
 #include <memory>
 #include <vtkSmartPointer.h>
@@ -9,6 +10,7 @@ class vtkActor;
 class vtkPolyDataMapper;
 class vtkPolyData;
 class vtkTexture;
+class vtkImageData;
 
 namespace cvc {
 class geometry;
@@ -55,10 +57,23 @@ public:
   const cvc::geometry *getGeometry() const { return m_geometry.get(); }
 
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
-  // UVs (SetTCoords). The image is uploaded as an RGBA8 vtkTexture on the actor;
-  // clearTexture() removes it. Meaningful only when the geometry carries uvs.
-  void setTexture(const cvc::image &img);
+  // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
+  //
+  // zeroCopy (default): when `img` is already RGBA8, the vtkTexture ALIASES the
+  // image's pixel buffer (vtkUnsignedCharArray::SetArray, no memcpy) — the
+  // GeometryNode holds a ref to the buffer for the texture's lifetime, so a later
+  // in-place pixel edit (e.g. via pycvc image.numpy()) followed by
+  // texture_modified() shows live with no re-upload copy. The top-left-origin vs
+  // VTK-bottom-left mismatch is resolved by flipping the TCoords' V (no pixel
+  // copy). When `img` is not RGBA8, or zeroCopy is false, it falls back to the
+  // convert-flip-and-copy path. clearTexture() removes the texture and drops the
+  // aliased buffer.
+  void setTexture(const cvc::image &img, bool zeroCopy = true);
   void clearTexture();
+  // Signal that the texture's pixels were edited in place (through an aliased
+  // zero-copy buffer): marks the vtkTexture + its input image data Modified() so
+  // the next render re-samples the new bytes WITHOUT any re-copy.
+  void texture_modified();
 
   // Render mode control
   void setRenderMode(GeometryRenderMode mode);
@@ -108,6 +123,9 @@ private:
   vtkSmartPointer<vtkPolyDataMapper> m_mapper;
   vtkSmartPointer<vtkPolyData> m_polyData;
   vtkSmartPointer<vtkTexture> m_texture;
+  vtkSmartPointer<vtkImageData> m_textureImageData; // the texture's input (for texture_modified())
+  boost::shared_array<unsigned char> m_textureStorage; // keeps the aliased zero-copy buffer alive
+  bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
 
   boost::signals2::connection m_dataConnection;
 };

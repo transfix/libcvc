@@ -44,7 +44,8 @@ set_property(SOURCE pycvc.i PROPERTY DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_algorithm.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_image.i)
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
@@ -77,6 +78,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
              pycvc_algorithm:test_pycvc_algorithm.py
+             pycvc_image:test_pycvc_image.py
              pycvc_state:test_pycvc_state.py
              pycvc_async:test_pycvc_async.py
              pycvc_exec:test_pycvc_exec.py
@@ -167,5 +169,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_vtk
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_vtk.py)
   set_tests_properties(pycvc_vtk PROPERTIES ENVIRONMENT
+    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  # Phase-5 zero-copy texture: node.set_texture + image.numpy() live edit +
+  # texture_modified (the strong VTK-inspection check self-skips without vtkmodules).
+  add_test(NAME pycvc_texture
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_texture.py)
+  set_tests_properties(pycvc_texture PROPERTIES ENVIRONMENT
     "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
 endif() # CVC_BUILD_PYCVC_GL
