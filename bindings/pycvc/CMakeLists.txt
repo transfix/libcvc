@@ -91,10 +91,11 @@ if(CVC_BUILD_PYCVC_CORE)
   endforeach()
 endif() # CVC_BUILD_PYCVC_CORE
 
-# ── pycvc_gl — Scene facade over cvcGL (scriptable scene graph; needs VTK) ──
+# ── pycvc_gl — direct wrap of the cvcGL scene graph (scriptable; needs VTK) ──
 # pycvc_gl `%import`s pycvc.i for cross-module types and `import pycvc` at
-# runtime, so the pycvc-gl package depends on the pycvc package. It compiles its
-# own copy of the facades, so it does not need the core module built here.
+# runtime, so the pycvc-gl package depends on the pycvc package. It wraps the
+# REAL cvcGL classes (SceneGraph + the node hierarchy) directly — no facade — so
+# it does not need the core module built here.
 option(CVC_BUILD_PYCVC_GL "Build the pycvc.gl scene bindings (needs cvcGL + VTK)" ON)
 if(CVC_BUILD_PYCVC_GL)
   # cvcGL (the sibling scene-graph library) is dual-mode like cvc above:
@@ -115,12 +116,13 @@ if(CVC_BUILD_PYCVC_GL)
     set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
   endif()
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
-  # Re-run SWIG when the Scene facade header (or the %import'd pycvc.i) changes.
+  # Re-run SWIG when the render-helper header (or the %import'd pycvc.i) changes.
   set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_scene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/pycvc.i)
-  # Scene now takes the directly-wrapped cvc::geometry/cvc::volume (%import'd
-  # from pycvc.i), so pycvc_gl no longer compiles the old facade TUs.
+  # pycvc_scene.cpp holds only the standalone VTK render helpers + the Python
+  # vtkProp bridge (free functions); the scene model itself is the directly
+  # %include'd cvcGL headers, which cross cvc::geometry/cvc::volume in via %import.
   swig_add_library(pycvc_gl
     LANGUAGE python
     SOURCES pycvc_gl.i pycvc_scene.cpp

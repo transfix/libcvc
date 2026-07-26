@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
@@ -19,6 +20,7 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkTransform.h>
+#include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
@@ -530,20 +532,33 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     m_polyData->GetPointData()->SetNormals(nullptr);
   }
 
-  // Add per-vertex colors if available AND single color mode is disabled
+  // Add per-vertex colors if available AND single color mode is disabled.
+  // Store them as an UNSIGNED CHAR (0..255) array: VTK treats a 3-component
+  // uchar scalar array as LITERAL colors — never routed through the mapper's
+  // lookup table — so the direct-color behavior is intrinsic to the data type
+  // and can't be re-broken by a stray SetColorMode* elsewhere (or by a fresh
+  // mapper). A vtkFloatArray, by contrast, renders through the LUT unless
+  // SetColorModeToDirectScalars() is ALSO set — the omission that turned red
+  // meshes blue. This uchar path is also texture-ready: when UVs land later they
+  // go in the dedicated SetTCoords slot and never collide with these colors.
+  // geom.colors() are RGB doubles in [0,1] (geometry.h color_t).
   if (!m_useSingleColor && geom.colors().size() == geom.num_points()) {
-    vtkSmartPointer<vtkFloatArray> colors = vtkSmartPointer<vtkFloatArray>::New();
+    vtkSmartPointer<vtkUnsignedCharArray> colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
     colors->SetNumberOfComponents(3);
     colors->SetNumberOfTuples(geom.num_points());
     colors->SetName("Colors");
 
     for (size_t i = 0; i < geom.num_points(); ++i) {
       const auto &c = geom.colors()[i];
-      colors->SetTuple3(i, c[0], c[1], c[2]);
+      unsigned char rgb[3] = {
+          static_cast<unsigned char>(std::lround(std::clamp(c[0], 0.0, 1.0) * 255.0)),
+          static_cast<unsigned char>(std::lround(std::clamp(c[1], 0.0, 1.0) * 255.0)),
+          static_cast<unsigned char>(std::lround(std::clamp(c[2], 0.0, 1.0) * 255.0))};
+      colors->SetTypedTuple(i, rgb);
     }
 
     m_polyData->GetPointData()->SetScalars(colors);
-    // Tell VTK mapper to use vertex colors
+    // uchar scalars are used directly as colors; select point-data + enable.
     m_mapper->SetScalarModeToUsePointData();
     m_mapper->ScalarVisibilityOn();
   } else {

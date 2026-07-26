@@ -35,7 +35,11 @@ file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
-add_library(cvcGL STATIC ${CVCGL_SOURCES})
+# Library type follows BUILD_SHARED_LIBS: STATIC by default (a copy embedded in
+# each consumer), or a single shared libcvcGL.so with -DBUILD_SHARED_LIBS=ON
+# (one in-process copy shared by volrover3 + pycvc_gl — avoids the two-copies
+# hazard). Both builds are supported.
+add_library(cvcGL ${CVCGL_SOURCES})
 # Namespaced alias so in-tree consumers (e.g. pycvc-gl via add_subdirectory) can
 # link cvc::cvcGL — the same name find_package(cvcGL CONFIG) exports.
 add_library(cvc::cvcGL ALIAS cvcGL)
@@ -46,13 +50,17 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
-set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
+  VERSION ${PROJECT_VERSION} SOVERSION 3)
 
 # ── Install + export a package config so consumers can find_package(cvcGL) ──
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-install(TARGETS cvcGL EXPORT cvcGLTargets ARCHIVE DESTINATION lib)
+install(TARGETS cvcGL EXPORT cvcGLTargets
+  ARCHIVE DESTINATION lib   # static libcvcGL.a
+  LIBRARY DESTINATION lib   # shared libcvcGL.so
+  RUNTIME DESTINATION bin)  # cvcGL.dll (Windows)
 install(DIRECTORY "${_CVCGL_INC}/cvc/gl" DESTINATION include/cvc
         FILES_MATCHING PATTERN "*.h")
 

@@ -137,6 +137,7 @@ void SceneGraph::updateGrid(const cvc::bounding_box &bounds) {
 
   // Update grid to match combined bounds
   m_gridNode->setBounds(combinedBounds);
+  m_worldBounds = combinedBounds; // track for grow-only recompute on node moves
 
   // Scale axis length to be proportional to combined bounding box size
   double spanX = combinedBounds[3] - combinedBounds[0];
@@ -280,6 +281,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
 
   // Add to lookup map
   m_graphicsNodes[name] = graphicsNode;
+  trackNodeBounds(graphicsNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();
@@ -312,6 +314,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
 
   // Add to lookup map
   m_graphicsNodes[name] = graphicsNode;
+  trackNodeBounds(graphicsNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();
@@ -379,7 +382,37 @@ std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string &name) {
 void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<GraphicsNode> node) {
   if (node) {
     m_graphicsNodes[name] = node;
+    trackNodeBounds(node);
   }
+}
+
+void SceneGraph::trackNodeBounds(const std::shared_ptr<GraphicsNode> &node) {
+  if (!node)
+    return;
+  // When the node moves, marshal the world-bounds recompute onto the owner thread
+  // (updateGrid touches the VTK grid/axis actors). The connection is owned here
+  // and dies with the SceneGraph, so the captured `this` is safe.
+  m_boundsConns.push_back(node->transformChanged.connect(
+      [this](GraphicsNode *) { postEvent([this]() { onGraphicsBoundsChanged(); }); }));
+}
+
+void SceneGraph::onGraphicsBoundsChanged() {
+  cvc::bounding_box b = computeGraphicsBounds();
+  // Grow-only: only resize the grid when graphics have moved OUTSIDE the current
+  // world box (a node "left" it) — so in-bounds animation never jitters the grid.
+  bool outside = false;
+  for (int i = 0; i < 3; ++i)
+    if (b[i] < m_worldBounds[i] || b[i + 3] > m_worldBounds[i + 3])
+      outside = true;
+  if (!outside)
+    return;
+  cvc::bounding_box grown;
+  for (int i = 0; i < 3; ++i) {
+    grown[i] = std::min(b[i], m_worldBounds[i]);
+    grown[i + 3] = std::max(b[i + 3], m_worldBounds[i + 3]);
+  }
+  updateGrid(grown);
+  m_renderNeeded = true;
 }
 
 // Volume graphics management
@@ -399,6 +432,7 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
 
   // Add to lookup map
   m_graphicsNodes[name] = volumeNode;
+  trackNodeBounds(volumeNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();

@@ -64,18 +64,19 @@ def test_wrong_type_rejected():
 
 def test_python_actor_into_cpp_scene():
     """add_prop: a Python vtkActor flows into the cvcGL scene graph, and prop()
-    hands it back as a live vtkmodules object."""
+    hands it back as a live vtkmodules object. (Free functions over the real
+    wrapped SceneGraph — pycvc_gl has no facade.)"""
     if not HAVE_VTK:
         return
     app = pycvc.make_app()
-    scene = pycvc_gl.Scene(app)
+    scene = pycvc_gl.SceneGraph(app)
 
     actor = _make_actor()
-    scene.add_prop("pyactor", actor, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
-    assert scene.has("pyactor")
+    pycvc_gl.add_prop(scene, "pyactor", actor, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+    assert scene.hasGraphics("pyactor")
     assert scene.num_graphics() >= 1
 
-    got = scene.prop("pyactor")
+    got = pycvc_gl.prop(scene, "pyactor")
     assert got is not None
     assert got is actor  # same object back out
     assert got.IsA("vtkActor")  # a real VTK object on the Python side
@@ -86,15 +87,15 @@ def test_mixed_python_and_native_nodes():
     if not HAVE_VTK:
         return
     app = pycvc.make_app()
-    scene = pycvc_gl.Scene(app)
+    scene = pycvc_gl.SceneGraph(app)
 
     g = pycvc.geometry(app)
     g.add_vertices([0, 0, 0, 1, 0, 0, 0, 1, 0])
     g.add_triangles([0, 1, 2])
-    scene.add_geometry("nativetri", g)
+    scene.addGraphics("nativetri", g)
 
-    scene.add_prop("pysphere", _make_actor())
-    assert scene.has("nativetri") and scene.has("pysphere")
+    pycvc_gl.add_prop(scene, "pysphere", _make_actor())
+    assert scene.hasGraphics("nativetri") and scene.hasGraphics("pysphere")
     assert scene.num_graphics() >= 2
 
 

@@ -193,6 +193,15 @@ private:
   std::map<std::string, std::shared_ptr<GraphicsNode>> m_graphicsNodes; // Flat lookup by name
   std::shared_ptr<NullGraphicNode> m_nullGraphic; // Placeholder when scene is empty
 
+  // World-bounds tracking: the grid box GROWS to follow a node that moves out of
+  // it. Each registered node's transformChanged signal is connected (connections
+  // owned here, so they die with the scene) to marshal onGraphicsBoundsChanged()
+  // onto the owner thread; grow-only so in-bounds animation never resizes the grid.
+  cvc::bounding_box m_worldBounds;
+  std::vector<boost::signals2::scoped_connection> m_boundsConns;
+  void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
+  void onGraphicsBoundsChanged();
+
   // Multi-volume rendering state
   bool m_multiVolumeRenderingEnabled;
   vtkSmartPointer<vtkMultiVolume> m_multiVolume; // For multi-volume rendering when needed

@@ -221,7 +221,7 @@ vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const {
   return worldTransform;
 }
 
-void GraphicsNode::updateTransform() {
+void GraphicsNode::updateTransform(bool isRoot) {
   // Update VTK transform wrapper
   m_vtkTransform->SetMatrix(m_transform);
   m_vtkTransform->Modified();
@@ -229,9 +229,9 @@ void GraphicsNode::updateTransform() {
   // Apply to VTK prop (subclasses override this)
   applyTransformToVTK();
 
-  // Update all children
+  // Update all children (their world transform changed too) — not a root move.
   for (auto &child : m_graphicsChildren) {
-    child->updateTransform();
+    child->updateTransform(false);
   }
 
   // Update bbox if visible
@@ -242,6 +242,12 @@ void GraphicsNode::updateTransform() {
   // Update clip planes if clipping is enabled
   if (m_clipChildren) {
     updateClipPlanes();
+  }
+
+  // Notify once, at the top of the moved subtree, so the SceneGraph can recompute
+  // the world bounds/grid to follow this node.
+  if (isRoot) {
+    transformChanged(this);
   }
 }
 

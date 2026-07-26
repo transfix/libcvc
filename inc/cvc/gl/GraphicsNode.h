@@ -72,6 +72,12 @@ public:
   // Get world transform (accumulated from all parents)
   vtkSmartPointer<vtkMatrix4x4> getWorldTransform() const;
 
+  // Fired ONCE when this node's transform changes (setPosition/setRotation/
+  // setScale/setTransform/resetTransform, or a state-driven move) — not once per
+  // recursively-updated child. The SceneGraph connects to it to recompute the
+  // world bounds/grid so the world box tracks a node that moves out of it.
+  boost::signals2::signal<void(GraphicsNode *)> transformChanged;
+
   // Hierarchical structure
 
   // Template factory method for creating child graphics nodes
@@ -169,7 +175,10 @@ public:
   void removeFromRenderer(vtkRenderer *renderer) override;
 
 protected:
-  void updateTransform();
+  // isRoot=true (the default, used by the public setters + state handlers) fires
+  // transformChanged after the subtree is updated; the child recursion passes
+  // false so the signal fires once per user move, not once per node.
+  void updateTransform(bool isRoot = true);
   void updateBoundingBoxNode(); // Update bbox node with current bounds + transform
   void updateLabel();           // Update label position and properties
   void updateClipPlanes();      // Update clip planes based on bounding box and transform
