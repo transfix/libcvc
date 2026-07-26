@@ -60,6 +60,8 @@ public:
   typedef boost::array<scalar_t, 3> vector_t;
   typedef vector_t normal_t;
   typedef boost::array<scalar_t, 3> color_t;
+  typedef boost::array<scalar_t, 2> uv_t;      // Texture coordinate (u, v)
+  typedef boost::array<scalar_t, 4> tangent_t; // Tangent basis: xyz + handedness (w = +/-1)
   typedef boost::array<scalar_t, 2> curvature_t; // Principal curvatures (k1, k2)
   typedef scalar_t function_t;                   // Scalar function value
   typedef boost::array<index_t, 2> line_t;
@@ -72,6 +74,8 @@ public:
   typedef boost::dynamic_bitset<> boundary_t;
   typedef std::vector<vector_t> normals_t;
   typedef std::vector<color_t> colors_t;
+  typedef std::vector<uv_t> uvs_t;
+  typedef std::vector<tangent_t> tangents_t;
   typedef std::vector<curvature_t> curvatures_t;
   typedef std::vector<function_t> functions_t;
   typedef std::vector<line_t> lines_t;
@@ -84,6 +88,8 @@ public:
   typedef boost::shared_ptr<boundary_t> boundary_ptr_t;
   typedef boost::shared_ptr<normals_t> normals_ptr_t;
   typedef boost::shared_ptr<colors_t> colors_ptr_t;
+  typedef boost::shared_ptr<uvs_t> uvs_ptr_t;
+  typedef boost::shared_ptr<tangents_t> tangents_ptr_t;
   typedef boost::shared_ptr<curvatures_t> curvatures_ptr_t;
   typedef boost::shared_ptr<functions_t> functions_ptr_t;
   typedef boost::shared_ptr<lines_t> lines_ptr_t;
@@ -111,7 +117,9 @@ public:
     TRIS,
     QUADS,
     TETS,
-    HEXS
+    HEXS,
+    UVS,      // per-vertex texture coordinates (appended to keep prior enum values stable)
+    TANGENTS  // per-vertex tangent basis
   };
 
   geometry();
@@ -142,6 +150,14 @@ public:
   colors_t &colors() {
     pre_write(COLORS);
     return *_colors;
+  }
+  uvs_t &uvs() {
+    pre_write(UVS);
+    return *_uvs;
+  }
+  tangents_t &tangents() {
+    pre_write(TANGENTS);
+    return *_tangents;
   }
   curvatures_t &curvatures() {
     pre_write(CURVATURES);
@@ -176,6 +192,8 @@ public:
   const boundary_t &const_boundary() const { return *_boundary; }
   const normals_t &const_normals() const { return *_normals; }
   const colors_t &const_colors() const { return *_colors; }
+  const uvs_t &const_uvs() const { return *_uvs; }
+  const tangents_t &const_tangents() const { return *_tangents; }
   const curvatures_t &const_curvatures() const { return *_curvatures; }
   const functions_t &const_functions() const { return *_functions; }
   const lines_t &const_lines() const { return *_lines; }
@@ -188,6 +206,8 @@ public:
   const boundary_t &boundary() const { return const_boundary(); }
   const normals_t &normals() const { return const_normals(); }
   const colors_t &colors() const { return const_colors(); }
+  const uvs_t &uvs() const { return const_uvs(); }
+  const tangents_t &tangents() const { return const_tangents(); }
   const curvatures_t &curvatures() const { return const_curvatures(); }
   const functions_t &functions() const { return const_functions(); }
   const lines_t &lines() const { return const_lines(); }
@@ -208,6 +228,7 @@ public:
   // participate in the per-container COW refcount.
   points_ptr_t points_ptr() const { return _points; }
   colors_ptr_t colors_ptr() const { return _colors; }
+  uvs_ptr_t uvs_ptr() const { return _uvs; }
 
   point_t min_point() const;
   point_t max_point() const;
@@ -288,6 +309,8 @@ protected:
   boundary_ptr_t _boundary;
   normals_ptr_t _normals;
   colors_ptr_t _colors;
+  uvs_ptr_t _uvs;
+  tangents_ptr_t _tangents;
   curvatures_ptr_t _curvatures;
   functions_ptr_t _functions;
   lines_ptr_t _lines;
@@ -312,6 +335,8 @@ typedef geometry::index_t index_t;
 typedef geometry::vector_t vector_t;
 typedef geometry::point_t point_t;
 typedef geometry::color_t color_t;
+typedef geometry::uv_t uv_t;
+typedef geometry::tangent_t tangent_t;
 typedef geometry::curvature_t curvature_t;
 typedef geometry::function_t function_t;
 typedef geometry::line_t line_t;
@@ -323,6 +348,8 @@ typedef geometry::points_t points_t;
 typedef geometry::boundary_t boundary_t;
 typedef geometry::normals_t normals_t;
 typedef geometry::colors_t colors_t;
+typedef geometry::uvs_t uvs_t;
+typedef geometry::tangents_t tangents_t;
 typedef geometry::curvatures_t curvatures_t;
 typedef geometry::functions_t functions_t;
 typedef geometry::lines_t lines_t;
