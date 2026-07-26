@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 #include <string>
 
+#ifdef CVC_ENABLE_IMAGEMAGICK
+#include <Magick++.h> // for the CMYK-input regression test (synthesizes a CMYK file)
+#endif
+
 using cvc::image;
 
 namespace {
@@ -214,4 +218,38 @@ TEST(ImageTest, JpegRoundTripDimensions) {
 }
 
 TEST(ImageTest, ReadMissingFileThrows) { EXPECT_ANY_THROW(image::load("/no/such/dir/nope.png")); }
+
+// Regression: a CMYK-encoded input (common in print/Adobe pipelines; jpg/tif are
+// advertised extensions) must be colorspace-converted to RGB on read. Magick's
+// "RGBA" pixel export does NOT convert colorspace, so without an explicit
+// normalization the raw C,M,Y,K quantums land in R,G,B,A — a pure-cyan CMYK pixel
+// came back bright RED. Synthesize a genuine CMYK file and assert read() -> cyan.
+TEST(ImageTest, ReadsCmykInputAsRgb) {
+  Magick::InitializeMagick(nullptr); // idempotent; the test uses Magick++ directly
+  // A 4x4 pure-cyan image transformed into the CMYK colorspace, so the file on
+  // disk is genuinely CMYK (not an RGB image merely tagged CMYK).
+  Magick::Image cyan(Magick::Geometry(4, 4), Magick::ColorRGB(0.0, 1.0, 1.0));
+  cyan.colorSpace(Magick::sRGBColorspace);
+  cyan.colorSpace(Magick::CMYKColorspace); // transforms the pixels to CMYK
+  ASSERT_EQ(cyan.colorSpace(), Magick::CMYKColorspace);
+
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_cmyk.tif";
+  try {
+    cyan.write(path); // TIFF stores CMYK losslessly, no Adobe-inversion games
+  } catch (const Magick::Exception &e) {
+    GTEST_SKIP() << "CMYK/TIFF delegate unavailable in this ImageMagick build: " << e.what();
+  }
+
+  image b = image::load(path);
+  ASSERT_EQ(b.width(), 4);
+  ASSERT_EQ(b.height(), 4);
+  ASSERT_EQ(b.channels(), 4);
+  const unsigned char *p = b.data();
+  // Cyan is sRGB (0, 255, 255). Loose bounds cleanly separate the correct cyan
+  // from the pre-fix garbage (a raw CMYK->RGBA dump rendered this ~ (255, 0, 0)).
+  EXPECT_LT(p[0], 80) << "R too high — CMYK was dumped straight into RGBA (the bug)";
+  EXPECT_GT(p[1], 180) << "G too low for cyan";
+  EXPECT_GT(p[2], 180) << "B too low for cyan";
+  EXPECT_EQ(p[3], 255) << "alpha should be opaque";
+}
 #endif // CVC_ENABLE_IMAGEMAGICK

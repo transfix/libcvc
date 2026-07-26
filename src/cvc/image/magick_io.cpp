@@ -49,6 +49,15 @@ public:
     init_magick_once();
     try {
       Magick::Image mi(path);
+      // Normalize non-RGB inputs to sRGB before exporting via the "RGBA" map.
+      // ExportImagePixels (what write(...,"RGBA",...) calls) does NOT convert
+      // colorspace — it dumps the raw channel quantums. So a CMYK/Lab/etc. image
+      // (CMYK JPEG/TIFF are common in print pipelines and are advertised
+      // extensions) would otherwise copy C,M,Y,K straight into R,G,B,A = garbage.
+      // colorSpace(sRGB) calls TransformImageColorspace (a no-op if already that
+      // space). RGB (linear) is left untouched to avoid an unwanted gamma shift.
+      if (mi.colorSpace() != Magick::sRGBColorspace && mi.colorSpace() != Magick::RGBColorspace)
+        mi.colorSpace(Magick::sRGBColorspace);
       int w = static_cast<int>(mi.columns());
       int h = static_cast<int>(mi.rows());
       image out(w, h, image::pixel_format::RGBA, image::data_type::u8);
