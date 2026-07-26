@@ -155,9 +155,18 @@ if(CVC_BUILD_PYCVC_GL)
     SWIG_USE_TARGET_INCLUDE_DIRECTORIES ON
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
   )
-  install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc_gl)
+  # pycvc_gl installs as a PACKAGE: the SWIG proxy becomes the package
+  # __init__.py, the extension module lives inside it, and the pure-Python scene
+  # helpers (pymod_gl/{camera,vehicle,lab,scenes}.py) ship as submodules — so a
+  # consumer gets BOTH the bindings (pycvc_gl.SceneGraph) and the reusable scene
+  # utilities (pycvc_gl.camera.ChaseCamera, pycvc_gl.vehicle.VehiclePose,
+  # pycvc_gl.lab.Lab, pycvc_gl.scenes.*) from one import, with no external package.
+  install(TARGETS pycvc_gl LIBRARY DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc_gl.py"
-    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc_gl)
+    DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" RENAME __init__.py COMPONENT pycvc_gl)
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/"
+    DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
+    FILES_MATCHING PATTERN "*.py")
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
   set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT
