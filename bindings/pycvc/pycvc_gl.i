@@ -184,6 +184,7 @@
 %ignore GraphicsNode::removeFromRenderer;
 %ignore GraphicsNode::addGraphicsChild;         // templates + shared_ptr overload
 %ignore GraphicsNode::createChild;
+%ignore GraphicsNode::transformChanged;         // public boost::signals2::signal member
 %extend GraphicsNode {
   // Row-major 4x4 transform from a 16-element list (the vtkMatrix4x4 overload is
   // ignored; this is the Python-friendly path). Full rotate/scale/translate.
