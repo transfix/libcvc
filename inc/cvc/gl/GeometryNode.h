@@ -8,9 +8,11 @@
 class vtkActor;
 class vtkPolyDataMapper;
 class vtkPolyData;
+class vtkTexture;
 
 namespace cvc {
 class geometry;
+class image;
 class state;
 } // namespace cvc
 
@@ -51,6 +53,12 @@ public:
   void setGeometry(const cvc::geometry &geom);
   bool hasGeometry() const { return m_hasGeometry; }
   const cvc::geometry *getGeometry() const { return m_geometry.get(); }
+
+  // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
+  // UVs (SetTCoords). The image is uploaded as an RGBA8 vtkTexture on the actor;
+  // clearTexture() removes it. Meaningful only when the geometry carries uvs.
+  void setTexture(const cvc::image &img);
+  void clearTexture();
 
   // Render mode control
   void setRenderMode(GeometryRenderMode mode);
@@ -99,6 +107,7 @@ private:
   vtkSmartPointer<vtkActor> m_actor;
   vtkSmartPointer<vtkPolyDataMapper> m_mapper;
   vtkSmartPointer<vtkPolyData> m_polyData;
+  vtkSmartPointer<vtkTexture> m_texture;
 
   boost::signals2::connection m_dataConnection;
 };

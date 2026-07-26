@@ -21,6 +21,10 @@
 #include <vtkRenderer.h>
 #include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
+#include <vtkImageData.h>
+#include <vtkTexture.h>
+#include <cvc/image/image.h>
+#include <cstring>
 #include <vtkVertex.h>
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
@@ -292,6 +296,46 @@ void GeometryNode::setUseSingleColor(bool useSingleColor) {
 }
 
 vtkProp *GeometryNode::getProp() { return m_actor; }
+
+void GeometryNode::setTexture(const cvc::image &img) {
+  if (!m_actor)
+    return;
+  if (img.empty()) {
+    clearTexture();
+    return;
+  }
+  // VTK textures sample with a bottom-left origin, so flip the top-left cvc::image.
+  // Upload as RGBA8 (converting if needed — a loaded texture is already RGBA8).
+  cvc::image rgba =
+      (img.format() == cvc::image::pixel_format::RGBA && img.type() == cvc::image::data_type::u8)
+          ? img
+          : img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  rgba = rgba.flipped_vertical();
+
+  auto id = vtkSmartPointer<vtkImageData>::New();
+  id->SetDimensions(rgba.width(), rgba.height(), 1);
+  id->AllocateScalars(VTK_UNSIGNED_CHAR, 4);
+  std::memcpy(id->GetScalarPointer(), rgba.data(), rgba.size_bytes());
+
+  auto tex = vtkSmartPointer<vtkTexture>::New();
+  tex->SetInputData(id);
+  tex->InterpolateOn();
+  tex->MipmapOn();
+  m_texture = tex;
+  m_actor->SetTexture(tex);
+  // A texture supplies the surface color; per-vertex color scalars would tint it,
+  // so let the texture stand on its own.
+  m_mapper->ScalarVisibilityOff();
+  m_actor->Modified();
+}
+
+void GeometryNode::clearTexture() {
+  m_texture = nullptr;
+  if (m_actor) {
+    m_actor->SetTexture(nullptr);
+    m_actor->Modified();
+  }
+}
 
 void GeometryNode::setGeometry(const cvc::geometry &geom) {
   cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
@@ -565,6 +609,23 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     // Use single color from actor property - clear per-vertex colors
     m_polyData->GetPointData()->SetScalars(nullptr);
     m_mapper->ScalarVisibilityOff();
+  }
+
+  // Texture coordinates (UVs) — the dedicated SetTCoords slot, orthogonal to the
+  // color scalars above. A textured mesh (glTF/OBJ carrying cvc::geometry uvs)
+  // samples the vtkTexture set via setTexture(). vtkFloatArray, 2 components (u,v).
+  if (geom.uvs().size() == geom.num_points()) {
+    vtkSmartPointer<vtkFloatArray> tcoords = vtkSmartPointer<vtkFloatArray>::New();
+    tcoords->SetNumberOfComponents(2);
+    tcoords->SetNumberOfTuples(geom.num_points());
+    tcoords->SetName("TCoords");
+    for (size_t i = 0; i < geom.num_points(); ++i) {
+      const auto &uv = geom.uvs()[i];
+      tcoords->SetTuple2(i, uv[0], uv[1]);
+    }
+    m_polyData->GetPointData()->SetTCoords(tcoords);
+  } else {
+    m_polyData->GetPointData()->SetTCoords(nullptr);
   }
 
   m_polyData->Modified();
