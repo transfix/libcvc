@@ -101,6 +101,11 @@ depends:
     - name: yaml
     - name: levmar
     - name: libiimod
+    # Native mesh/model import (Phase 3: cvc::model + read_model/read_geometry for
+    # obj/ply/stl/fbx/gltf/... via Assimp). Guarded by CVC_ENABLE_ASSIMP; the
+    # bundle links libassimp so it must be present in the flat prefix. (libcvc's
+    # CMake rewrites assimp's exported absolute-zlib-path quirk to ZLIB::ZLIB.)
+    - name: assimp
     - name: openblas
     - name: openssl
     - name: c-ares

@@ -81,6 +81,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/app.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
+  ../../inc/cvc/model/model.h
+  ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
 )
 
@@ -97,6 +99,9 @@ set(SOURCE_FILES
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
+  model/model.cpp
+  model/model_file_io.cpp
+  model/assimp_io.cpp
   volume/mrc_io.cpp
   volume/null_io.cpp
   geometry/off_io.cpp
@@ -645,6 +650,39 @@ if(CVC_ENABLE_IMAGEMAGICK)
   endif()
 endif()
 
+# Assimp support (for native mesh/model import - cvc::model / read_geometry)
+option(CVC_ENABLE_ASSIMP "Enable Assimp for native mesh/model import" ON)
+if(CVC_ENABLE_ASSIMP)
+  find_package(assimp CONFIG)
+  if(assimp_FOUND)
+    message(STATUS "Assimp found: ${assimp_VERSION}")
+    # DEFENSIVE: the cvcpkg assimp bundle's exported target hardcodes an ABSOLUTE
+    # build-sandbox zlib path in INTERFACE_LINK_LIBRARIES. The recipe builds
+    # assimp with -DASSIMP_BUILD_ZLIB=OFF, and assimp's CMake bakes
+    # ${ZLIB_LIBRARIES} (an absolute path from FindZLIB) into the export instead
+    # of the relocatable ZLIB::ZLIB target — so the published bundle carries a
+    # path like /tmp/cvcpkg-builder/.../lib/libz.so that exists on no consumer,
+    # and linking assimp::assimp fails everywhere (locally and in CI). libcvc
+    # links zlib itself, so rewrite that stale entry to the relocatable
+    # ZLIB::ZLIB target (falling back to a bare -lz). Remove once the assimp
+    # recipe exports zlib via an imported target (tracked libcvc-deps follow-up).
+    find_package(ZLIB QUIET)
+    get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
+    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|cvcpkg-builder")
+      if(TARGET ZLIB::ZLIB)
+        string(REGEX REPLACE "[^;]*libz\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
+      else()
+        string(REGEX REPLACE "[^;]*libz\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+      endif()
+      set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
+      message(STATUS "  (rewrote assimp's stale absolute zlib link to a relocatable target)")
+    endif()
+  else()
+    message(STATUS "Assimp not found - disabling native mesh/model import")
+    set(CVC_ENABLE_ASSIMP OFF)
+  endif()
+endif()
+
 # FFTW support (for volume_ops filtered back-projection)
 option(CVC_ENABLE_FFTW "Enable FFTW support for filtered back-projection in volume_ops" ON)
 if(CVC_ENABLE_FFTW)
@@ -887,6 +925,13 @@ if(CVC_ENABLE_IMAGEMAGICK)
   else()
     target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
   endif()
+endif()
+
+# Assimp linking. PUBLIC so tests inherit the CVC_ENABLE_ASSIMP define (as with
+# ImageMagick). The assimp::assimp imported target carries its own include dirs.
+if(CVC_ENABLE_ASSIMP)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_ASSIMP)
+  target_link_libraries(cvc PUBLIC assimp::assimp)
 endif()
 
 # FFTW linking

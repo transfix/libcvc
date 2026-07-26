@@ -213,5 +213,8 @@ void register_default_geometry_handlers() {
   register_bunny_io();
   register_off_io();
   register_cvcraw_io();
+#ifdef CVC_ENABLE_ASSIMP
+  register_assimp_geometry_io();
+#endif
 }
 } // namespace cvc
