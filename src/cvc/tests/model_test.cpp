@@ -3,6 +3,7 @@
 // Assimp-backed loader (guarded on CVC_ENABLE_ASSIMP) for OBJ (UVs + material +
 // texture), the read_geometry() flatten path, and STL (no UVs).
 
+#include <cmath>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/model/model.h>
@@ -59,6 +60,20 @@ geometry make_box_corner(double ox, double oy, double oz) {
   return g;
 }
 
+// The same triangle as make_triangle() but carrying per-vertex UVs (distinct
+// values so a misalignment after merge is detectable).
+geometry make_triangle_with_uvs() {
+  geometry g = make_triangle();
+  const double uvs[3][2] = {{0.10, 0.20}, {0.30, 0.40}, {0.50, 0.60}};
+  for (int i = 0; i < 3; ++i) {
+    cvc::uv_t uv;
+    uv[0] = uvs[i][0];
+    uv[1] = uvs[i][1];
+    g.uvs().push_back(uv);
+  }
+  return g;
+}
+
 } // namespace
 
 // ── value-type tests (no Assimp needed) ──────────────────────────────────────
@@ -90,6 +105,47 @@ TEST(ModelTest, MergedOffsetsIndices) {
   EXPECT_EQ(merged.const_tris()[1][0], 3u);
   EXPECT_EQ(merged.const_tris()[1][1], 4u);
   EXPECT_EQ(merged.const_tris()[1][2], 5u);
+}
+
+// Regression for the merged() attribute-desync blocker: geometry::merge appends
+// per-vertex arrays without padding, so merging a UV'd mesh with a UV-less one
+// would leave uvs shorter than points and misaligned against the offset indices.
+// merged() must normalize (pad) so every present per-vertex array stays exactly
+// num_points() long and index-aligned regardless of mesh order.
+TEST(ModelTest, MergedPadsHeterogeneousAttributes) {
+  model m;
+  model::mesh a;
+  a.geom = make_triangle_with_uvs(); // 3 verts WITH uvs
+  model::mesh b;
+  b.geom = make_triangle(); // 3 verts, NO uvs
+  m.meshes.push_back(a);
+  m.meshes.push_back(b);
+
+  geometry merged = m.merged();
+  ASSERT_EQ(merged.num_points(), 6u);
+  // Padded to full length (would be 3 without the fix).
+  ASSERT_EQ(merged.const_uvs().size(), 6u);
+  // Mesh A's authored UVs stay attached to vertices 0..2.
+  EXPECT_NEAR(merged.const_uvs()[0][0], 0.10, 1e-6);
+  EXPECT_NEAR(merged.const_uvs()[1][0], 0.30, 1e-6);
+  EXPECT_NEAR(merged.const_uvs()[2][0], 0.50, 1e-6);
+  // Mesh B (no UVs) gets neutral (0,0) padding at 3..5 — NOT A's values.
+  EXPECT_NEAR(merged.const_uvs()[3][0], 0.0, 1e-6);
+  EXPECT_NEAR(merged.const_uvs()[4][1], 0.0, 1e-6);
+
+  // Reverse order: a UV-less mesh first must not slide A's UVs onto wrong verts.
+  model m2;
+  model::mesh b2;
+  b2.geom = make_triangle();
+  m2.meshes.push_back(b2);
+  model::mesh a2;
+  a2.geom = make_triangle_with_uvs();
+  m2.meshes.push_back(a2);
+  geometry merged2 = m2.merged();
+  ASSERT_EQ(merged2.const_uvs().size(), 6u);
+  EXPECT_NEAR(merged2.const_uvs()[0][0], 0.0, 1e-6);  // padded (mesh B)
+  EXPECT_NEAR(merged2.const_uvs()[3][0], 0.10, 1e-6); // mesh A vertex 0
+  EXPECT_NEAR(merged2.const_uvs()[5][0], 0.50, 1e-6); // mesh A vertex 2
 }
 
 TEST(ModelTest, ExtentsUnion) {
@@ -218,6 +274,21 @@ TEST(ModelTest, ObjWithUvsMaterialTexture) {
   ASSERT_TRUE(mat.has_base_color_texture());
   EXPECT_EQ(mat.base_color_texture.width(), 4);
   EXPECT_EQ(mat.base_color_texture.height(), 4);
+  // Decoded pixels round-trip (PNG is lossless; the texture is a uniform color so
+  // this is flip-invariant) — guards the channel order / decode path, not just dims.
+  const unsigned char *tp = mat.base_color_texture.data();
+  ASSERT_TRUE(tp != NULL);
+  EXPECT_EQ(static_cast<int>(tp[0]), 200);
+  EXPECT_EQ(static_cast<int>(tp[1]), 100);
+  EXPECT_EQ(static_cast<int>(tp[2]), 50);
+  EXPECT_EQ(static_cast<int>(tp[3]), 255);
+
+  // The mesh has UVs, so aiProcess_CalcTangentSpace produced tangents: full-length
+  // and unit-handedness (w == +/-1), which is how build_geometry reconstructs w.
+  const geometry::tangents_t &tan = mesh.geom.const_tangents();
+  ASSERT_EQ(tan.size(), mesh.geom.num_points());
+  for (std::size_t i = 0; i < tan.size(); ++i)
+    EXPECT_NEAR(std::abs(tan[i][3]), 1.0, 1e-6);
 }
 
 TEST(ModelTest, ReadGeometryObjFlatten) {

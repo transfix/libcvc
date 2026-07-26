@@ -28,6 +28,7 @@
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/texture.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/geometry/geometry_file_io.h>
@@ -35,6 +36,12 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace cvc {
 namespace {
@@ -99,9 +106,16 @@ std::string default_temp_dir() {
 image decode_embedded_compressed(const aiTexture *tex) {
   std::string hint(tex->achFormatHint);
   std::string ext = hint.empty() ? std::string("bin") : hint;
-  static int counter = 0;
-  std::string tmp = default_temp_dir() + "/cvc_embedded_tex_" +
-                    std::to_string(static_cast<long long>(counter++)) + "." + ext;
+  // Unique temp name: an atomic counter (intra-process races) qualified by the
+  // pid (two processes sharing TMPDIR) — a plain static int would collide.
+  static std::atomic<unsigned long long> counter(0);
+#if defined(_WIN32)
+  const long pid = static_cast<long>(_getpid());
+#else
+  const long pid = static_cast<long>(::getpid());
+#endif
+  std::string tmp = default_temp_dir() + "/cvc_embedded_tex_" + std::to_string(pid) + "_" +
+                    std::to_string(counter.fetch_add(1)) + "." + ext;
   {
     std::ofstream ofs(tmp.c_str(), std::ios::binary);
     if (!ofs)
