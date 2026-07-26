@@ -46,11 +46,15 @@ public:
   int height() const { return _h; }
   pixel_format format() const { return _fmt; }
   data_type type() const { return _dt; }
-  int channels() const;               // 1..4, from format
+  int channels() const;                  // 1..4, from format
   std::size_t bytes_per_channel() const; // 1/2/4, from data_type
-  std::size_t bytes_per_pixel() const { return static_cast<std::size_t>(channels()) * bytes_per_channel(); }
+  std::size_t bytes_per_pixel() const {
+    return static_cast<std::size_t>(channels()) * bytes_per_channel();
+  }
   std::size_t row_stride_bytes() const { return static_cast<std::size_t>(_w) * bytes_per_pixel(); }
-  std::size_t size_bytes() const { return row_stride_bytes() * static_cast<std::size_t>(_h < 0 ? 0 : _h); }
+  std::size_t size_bytes() const {
+    return row_stride_bytes() * static_cast<std::size_t>(_h < 0 ? 0 : _h);
+  }
 
   // -- save (encode by extension) --
   void save(const std::string &path) const;
@@ -62,7 +66,7 @@ public:
   image flipped_vertical() const;                      // GL/VTK bottom-left origin helper
 
   // -- raw pixel access --
-  unsigned char *data();                     // detaches (copy-on-write), interleaved
+  unsigned char *data(); // detaches (copy-on-write), interleaved
   const unsigned char *data() const { return _data.get(); }
   // The owning buffer, for zero-copy pinning (e.g. a numpy view or a
   // vtkUnsignedCharArray::SetArray that must keep the storage alive).
@@ -93,8 +97,8 @@ public:
 
   // Registry. add() appends (registration order = priority).
   static void add(const ptr &handler);
-  static ptr for_read(const std::string &path);      // first can_read() wins
-  static ptr for_write_ext(const std::string &ext);  // last-registered wins per ext
+  static ptr for_read(const std::string &path);     // first can_read() wins
+  static ptr for_write_ext(const std::string &ext); // last-registered wins per ext
   static std::vector<std::string> known_extensions();
 };
 

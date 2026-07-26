@@ -32,9 +32,7 @@ void init_magick_once() {
 
 class magick_image_io : public image_file_io {
 public:
-  magick_image_io() {
-    _exts = {"png", "jpg", "jpeg", "tif", "tiff", "bmp", "tga", "gif", "webp"};
-  }
+  magick_image_io() { _exts = {"png", "jpg", "jpeg", "tif", "tiff", "bmp", "tga", "gif", "webp"}; }
 
   std::string id() const override { return "magick_image_io"; }
   const std::list<std::string> &extensions() const override { return _exts; }

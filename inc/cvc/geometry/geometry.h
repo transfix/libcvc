@@ -60,8 +60,8 @@ public:
   typedef boost::array<scalar_t, 3> vector_t;
   typedef vector_t normal_t;
   typedef boost::array<scalar_t, 3> color_t;
-  typedef boost::array<scalar_t, 2> uv_t;      // Texture coordinate (u, v)
-  typedef boost::array<scalar_t, 4> tangent_t; // Tangent basis: xyz + handedness (w = +/-1)
+  typedef boost::array<scalar_t, 2> uv_t;        // Texture coordinate (u, v)
+  typedef boost::array<scalar_t, 4> tangent_t;   // Tangent basis: xyz + handedness (w = +/-1)
   typedef boost::array<scalar_t, 2> curvature_t; // Principal curvatures (k1, k2)
   typedef scalar_t function_t;                   // Scalar function value
   typedef boost::array<index_t, 2> line_t;
@@ -118,8 +118,8 @@ public:
     QUADS,
     TETS,
     HEXS,
-    UVS,      // per-vertex texture coordinates (appended to keep prior enum values stable)
-    TANGENTS  // per-vertex tangent basis
+    UVS,     // per-vertex texture coordinates (appended to keep prior enum values stable)
+    TANGENTS // per-vertex tangent basis
   };
 
   geometry();

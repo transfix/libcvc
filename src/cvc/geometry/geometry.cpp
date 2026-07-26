@@ -64,10 +64,10 @@ geometry::geometry(app &ctx) : _geom_type(SURFACE_TRI), _extents_set(false), _ct
 geometry::geometry(const geometry &geom)
     : _points(geom._points), _boundary(geom._boundary), _normals(geom._normals),
       _colors(geom._colors), _uvs(geom._uvs), _tangents(geom._tangents),
-      _curvatures(geom._curvatures), _functions(geom._functions),
-      _lines(geom._lines), _tris(geom._tris), _quads(geom._quads), _tets(geom._tets),
-      _hexs(geom._hexs), _geom_type(geom._geom_type), _extents_set(geom._extents_set),
-      _min(geom._min), _max(geom._max), _ctx(geom._ctx) {
+      _curvatures(geom._curvatures), _functions(geom._functions), _lines(geom._lines),
+      _tris(geom._tris), _quads(geom._quads), _tets(geom._tets), _hexs(geom._hexs),
+      _geom_type(geom._geom_type), _extents_set(geom._extents_set), _min(geom._min),
+      _max(geom._max), _ctx(geom._ctx) {
   // make sure all our pointers are valid
   init_ptrs();
 }

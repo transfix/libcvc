@@ -213,7 +213,5 @@ TEST(ImageTest, JpegRoundTripDimensions) {
   EXPECT_FALSE(b.empty());
 }
 
-TEST(ImageTest, ReadMissingFileThrows) {
-  EXPECT_ANY_THROW(image::load("/no/such/dir/nope.png"));
-}
+TEST(ImageTest, ReadMissingFileThrows) { EXPECT_ANY_THROW(image::load("/no/such/dir/nope.png")); }
 #endif // CVC_ENABLE_IMAGEMAGICK

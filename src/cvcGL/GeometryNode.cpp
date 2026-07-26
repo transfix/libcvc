@@ -1,16 +1,19 @@
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/context.h>
+#include <cvc/image/image.h>
 #include <set>
 #include <sstream>
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkFloatArray.h>
+#include <vtkImageData.h>
 #include <vtkLine.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -19,12 +22,9 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkTexture.h>
 #include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
-#include <vtkImageData.h>
-#include <vtkTexture.h>
-#include <cvc/image/image.h>
-#include <cstring>
 #include <vtkVertex.h>
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)

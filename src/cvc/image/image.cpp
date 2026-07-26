@@ -111,8 +111,8 @@ image image::resized(int w, int h) const {
       int sx = static_cast<int>((static_cast<long long>(x) * _w) / w);
       if (sx >= _w)
         sx = _w - 1;
-      std::memcpy(dst + (std::size_t(y) * w + x) * bpp,
-                  src + (std::size_t(sy) * _w + sx) * bpp, bpp);
+      std::memcpy(dst + (std::size_t(y) * w + x) * bpp, src + (std::size_t(sy) * _w + sx) * bpp,
+                  bpp);
     }
   }
   return out;
@@ -274,8 +274,6 @@ image image::load(const std::string &path) { return read_image(path); }
 
 void image::save(const std::string &path) const { write_image(*this, path, 90); }
 
-void image::save(const std::string &path, int quality) const {
-  write_image(*this, path, quality);
-}
+void image::save(const std::string &path, int quality) const { write_image(*this, path, quality); }
 
 } // namespace cvc
