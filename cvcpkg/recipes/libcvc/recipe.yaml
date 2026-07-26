@@ -105,7 +105,16 @@ depends:
     # obj/ply/stl/fbx/gltf/... via Assimp). Guarded by CVC_ENABLE_ASSIMP; the
     # bundle links libassimp so it must be present in the flat prefix. (libcvc's
     # CMake rewrites assimp's exported absolute-zlib-path quirk to ZLIB::ZLIB.)
+    #
+    # Scoped to the platforms assimp is published for (linux/macos-arm64/freebsd/
+    # netbsd). It is NOT yet built for windows, and `cvcpkg install-deps` reads
+    # THIS recipe's closure to set up the build prefix — an unconditional assimp
+    # dep would fail the windows deps-install (no bundle) for both CI and publish.
+    # Where assimp is absent, find_package(assimp CONFIG) misses and CVC_ENABLE_
+    # ASSIMP flips OFF, so libcvc still builds (without the model loader) — add
+    # windows here once an assimp windows bundle is published.
     - name: assimp
+      platforms: [linux, macos, freebsd, netbsd]
     - name: openblas
     - name: openssl
     - name: c-ares
