@@ -15,7 +15,12 @@ recipe:
   # and vtk 9.5.0+cvc.2 (cvcpkg X11/OpenGL, libcvc-deps #368); the build no longer
   # needs the apt-get X11/GL step (removed from publish-cvcpkg.yml). Keeps pycvc's
   # SWIG 4.4.1 (data5) runtime. Source unchanged.
-  cvc_revision: 4
+  # Bumped 4 -> 5: post-#152 republish. pycvc-gl now DIRECT-WRAPS the cvcGL scene
+  # graph (SceneGraph + GraphicsNode/GeometryNode/VolumeNode, %feature directors,
+  # in-place transform/color updates) instead of the old add-only facade, and
+  # adopts a host's live scene (scene_from_capsule) for volrover3. Rebuilt against
+  # the new cvcgl +cvc.4 + pycvc +cvc.5 + libcvc +cvc.3.
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
