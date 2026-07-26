@@ -108,8 +108,50 @@ jobs:
             exit 1
           fi
 
-  build:
+  # Compute ONE cvc_revision per family package before the build matrix, so
+  # every platform/config of a package publishes the SAME +cvc.N (uniform, like
+  # the old manual family bump). Each pack step below pins its number with
+  # --cvc-revision. `next-revision` returns max(recipe_floor, highest_published
+  # + 1) on the package's current upstream version, or the recipe floor if the
+  # server is unreachable (harmless — such runs don't publish).
+  compute-revisions:
     needs: ensure-org
+    runs-on: ubuntu-latest
+    env:
+      CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+    outputs:
+      libcvc: ${{ steps.rev.outputs.libcvc }}
+      cvcgl: ${{ steps.rev.outputs.cvcgl }}
+      pycvc: ${{ steps.rev.outputs.pycvc }}
+      pycvc_gl: ${{ steps.rev.outputs.pycvc_gl }}
+      libcvc_cuda: ${{ steps.rev.outputs.libcvc_cuda }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cvcpkg (from libcvc-deps master)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+      - name: Compute next revision per package
+        id: rev
+        shell: bash
+        run: |
+          set -euo pipefail
+          emit() {
+            local pkg="$1" key="$2" rev
+            rev="$(cvcpkg next-revision "cvcpkg/recipes/$pkg" \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" --token "$CVCPKG_TOKEN")"
+            echo "$pkg -> +cvc.$rev"
+            echo "$key=$rev" >> "$GITHUB_OUTPUT"
+          }
+          emit libcvc      libcvc
+          emit cvcgl       cvcgl
+          emit pycvc       pycvc
+          emit pycvc-gl    pycvc_gl
+          emit libcvc-cuda libcvc_cuda
+
+  build:
+    needs: [ensure-org, compute-revisions]
     strategy:
       fail-fast: false
       matrix:
@@ -230,12 +272,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # --cvc-revision: the uniform revision computed once by the
+          # compute-revisions job, so a republish of the same upstream version
+          # never 409s. Replaces the manual "family revision bump".
           cvcpkg pack cvcpkg/recipes/libcvc \
             --from-prefix stage \
             --platform "${{ matrix.target.platform }}" \
             --config "${{ matrix.config }}" \
             --link shared \
             --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.libcvc }} \
             --output-dir dist
 
       - name: Publish to cvcpkg.org
@@ -342,7 +388,9 @@ jobs:
           cvcpkg pack cvcpkg/recipes/cvcgl \
             --from-prefix stage-cvcgl \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local --output-dir dist
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
+            --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
@@ -383,7 +431,9 @@ jobs:
           cvcpkg pack cvcpkg/recipes/pycvc \
             --from-prefix stage-pycvc \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local --output-dir dist
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc }} \
+            --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
@@ -423,7 +473,9 @@ jobs:
           cvcpkg pack cvcpkg/recipes/pycvc-gl \
             --from-prefix stage-pycvcgl \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local --output-dir dist
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl }} \
+            --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
@@ -465,7 +517,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           cvcpkg pack cvcpkg/recipes/cvcgl `
             --from-prefix stage-cvcgl `
-            --platform windows --config release --link shared --local --output-dir dist
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} `
+            --output-dir dist
           $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
           if ($doPublish) {
             if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
@@ -523,8 +577,8 @@ jobs:
           cmake --build build-pycvcgl --config Release
           cmake --install build-pycvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cvcpkg pack cvcpkg/recipes/pycvc    --from-prefix stage-pycvc   --platform windows --config release --link shared --local --output-dir dist
-          cvcpkg pack cvcpkg/recipes/pycvc-gl --from-prefix stage-pycvcgl --platform windows --config release --link shared --local --output-dir dist
+          cvcpkg pack cvcpkg/recipes/pycvc    --from-prefix stage-pycvc   --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc }} --output-dir dist
+          cvcpkg pack cvcpkg/recipes/pycvc-gl --from-prefix stage-pycvcgl --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl }} --output-dir dist
           $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
           if ($doPublish) {
             if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
@@ -551,7 +605,7 @@ jobs:
   # defaults to 50;60;70;75;80 (top-level CMakeLists) — a broadly-usable
   # multi-arch fatbin; do NOT narrow it to the builder's own GPU.
   build-cuda:
-    needs: ensure-org
+    needs: [ensure-org, compute-revisions]
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
     runs-on: [self-hosted, linux, cuda]
     strategy:
@@ -619,6 +673,7 @@ jobs:
             --config "${{ matrix.config }}" \
             --link shared \
             --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.libcvc_cuda }} \
             --output-dir dist
 
       - name: Publish to cvcpkg.org
