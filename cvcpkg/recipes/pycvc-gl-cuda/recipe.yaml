@@ -65,11 +65,12 @@ build:
 
 package:
   files:
-    # ONLY the scene module — the core _pycvc/pycvc.py come from pycvc-cuda, so
-    # the two install side by side with no file overlap. Same paths as the CPU
-    # `pycvc-gl` package (they share the `pycvc-gl` slot).
-    - lib/python*/site-packages/_pycvc_gl*
-    - lib/python*/site-packages/pycvc_gl.py
+    # pycvc_gl is now a PACKAGE (#155): __init__.py (SWIG proxy) + _pycvc_gl*.so
+    # inside it + the camera/vehicle/lab/scenes submodules. Ship the whole package
+    # dir. The core _pycvc/pycvc.py come from pycvc-cuda, so the two install side
+    # by side with no file overlap. Same path as the CPU `pycvc-gl` package (they
+    # share the `pycvc-gl` slot).
+    - lib/python*/site-packages/pycvc_gl/
 
 abi:
   cxx_std: 17

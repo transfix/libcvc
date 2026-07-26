@@ -20,7 +20,16 @@ recipe:
   # in-place transform/color updates) instead of the old add-only facade, and
   # adopts a host's live scene (scene_from_capsule) for volrover3. Rebuilt against
   # the new cvcgl +cvc.4 + pycvc +cvc.5 + libcvc +cvc.3.
-  cvc_revision: 5
+  # Bumped 5 -> 6: post-#155 republish. pycvc_gl is now a PACKAGE, not a flat
+  # module: the SWIG proxy became __init__.py, _pycvc_gl*.so moved inside it, and
+  # the reusable pure-Python scene helpers ship as submodules (pycvc_gl.camera,
+  # .vehicle, .lab, .scenes) — so grl_snam_lab (and any consumer) gets them from
+  # the bindings with no external package. The published +cvc.5 was the old flat
+  # `pycvc_gl.py`; this republish ships the package layout (see package.files).
+  # Same SWIG runtime / same linked +cvc peers — install-layout change only.
+  # (compute-revisions in publish-cvcpkg.yml still mints max(floor, published+1);
+  # this floor makes the intended +cvc.6 explicit and robust to a degraded query.)
+  cvc_revision: 6
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -89,10 +98,13 @@ build:
 
 package:
   files:
-    # ONLY the scene module — the core _pycvc/pycvc.py come from the pycvc
-    # package, so the two install side by side with no file overlap.
-    - lib/python*/site-packages/_pycvc_gl*
-    - lib/python*/site-packages/pycvc_gl.py
+    # pycvc_gl is now a PACKAGE (#155): the SWIG proxy is __init__.py, the
+    # extension module _pycvc_gl*.so lives INSIDE it, and the pure-Python scene
+    # helpers ship as submodules (camera/vehicle/lab/scenes). Ship the whole
+    # package dir — the old flat globs (_pycvc_gl* / pycvc_gl.py at site-packages
+    # top level) now match nothing. The core _pycvc/pycvc.py still come from the
+    # pycvc package, so the two install side by side with no file overlap.
+    - lib/python*/site-packages/pycvc_gl/
 
 abi:
   cxx_std: 17
