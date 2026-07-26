@@ -4,6 +4,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/volume/bounding_box.h>
 #include <stdexcept>
+#include <vtkCamera.h>
 #include <vtkNew.h>
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
@@ -71,6 +72,38 @@ void render_png(SceneGraph &sg, const std::string &path, int width, int height) 
   // Release the GL/offscreen context now, while the render window is still fully
   // alive, rather than leaving it to VTK's static teardown at process exit (which
   // segfaults on some offscreen backends). The scene keeps no ref to this window.
+  sg.setRenderer(nullptr);
+  window->Finalize();
+}
+
+void render_png_camera(SceneGraph &sg, const std::string &path, int width, int height,
+                       double eye_x, double eye_y, double eye_z, double focal_x, double focal_y,
+                       double focal_z, double up_x, double up_y, double up_z, double view_angle,
+                       double clip_near, double clip_far) {
+  // Like render_png, but sets an EXPLICIT camera (eye / focal / up + view angle +
+  // clip range) instead of ResetCamera() — so a caller can script a chase camera
+  // for frame-by-frame offscreen capture. Needs a GL context (offscreen is fine).
+  vtkNew<vtkRenderer> renderer;
+  vtkNew<vtkRenderWindow> window;
+  window->SetOffScreenRendering(1);
+  window->AddRenderer(renderer);
+  window->SetSize(width, height);
+  sg.setRenderer(renderer);
+  sg.processEvents();
+  vtkCamera *cam = renderer->GetActiveCamera();
+  cam->SetPosition(eye_x, eye_y, eye_z);
+  cam->SetFocalPoint(focal_x, focal_y, focal_z);
+  cam->SetViewUp(up_x, up_y, up_z);
+  cam->SetViewAngle(view_angle);
+  cam->SetClippingRange(clip_near, clip_far);
+  window->Render();
+  vtkNew<vtkWindowToImageFilter> w2i;
+  w2i->SetInput(window);
+  w2i->Update();
+  vtkNew<vtkPNGWriter> writer;
+  writer->SetFileName(path.c_str());
+  writer->SetInputConnection(w2i->GetOutputPort());
+  writer->Write();
   sg.setRenderer(nullptr);
   window->Finalize();
 }
