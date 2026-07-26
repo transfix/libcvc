@@ -35,6 +35,13 @@ void register_bunny_io();
 void register_off_io();
 void register_cvcraw_io();
 
+// Conditionally compiled geometry handler. The Assimp geometry flattening
+// handler (defined in model/assimp_io.cpp) registers itself into the
+// geometry_file_io registry so read_geometry("foo.obj") works.
+#ifdef CVC_ENABLE_ASSIMP
+void register_assimp_geometry_io();
+#endif
+
 // Convenience entry point that calls each register_*_io() above. Used
 // by geometry_file_io::get_handlers() to populate the handler map on
 // first access without requiring a cvc::app instance to exist.
