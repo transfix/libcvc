@@ -95,6 +95,8 @@ set(SOURCE_FILES
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
   geometry/geometry_file_io.cpp
+  image/image.cpp
+  image/magick_io.cpp
   volume/mrc_io.cpp
   volume/null_io.cpp
   geometry/off_io.cpp

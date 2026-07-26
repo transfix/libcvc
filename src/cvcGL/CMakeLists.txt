@@ -105,3 +105,14 @@ add_test(NAME cvcgl_remove COMMAND cvcgl_remove)
 add_executable(cvcgl_teardown test/cvcgl_teardown.cpp)
 target_link_libraries(cvcgl_teardown PRIVATE cvcGL)
 add_test(NAME cvcgl_teardown COMMAND cvcgl_teardown)
+
+# Phase-4 texture support: geometry UVs -> SetTCoords + setTexture(cvc::image).
+add_executable(cvcgl_texture test/cvcgl_texture.cpp)
+target_link_libraries(cvcgl_texture PRIVATE cvcGL)
+add_test(NAME cvcgl_texture COMMAND cvcgl_texture)
+
+# Phase-5 zero-copy texture: setTexture aliases the cvc::image buffer (no copy),
+# in-place pixel edits are live, texture_modified() bumps the MTime.
+add_executable(cvcgl_texture_zerocopy test/cvcgl_texture_zerocopy.cpp)
+target_link_libraries(cvcgl_texture_zerocopy PRIVATE cvcGL)
+add_test(NAME cvcgl_texture_zerocopy COMMAND cvcgl_texture_zerocopy)

@@ -63,10 +63,11 @@ geometry::geometry(app &ctx) : _geom_type(SURFACE_TRI), _extents_set(false), _ct
 
 geometry::geometry(const geometry &geom)
     : _points(geom._points), _boundary(geom._boundary), _normals(geom._normals),
-      _colors(geom._colors), _curvatures(geom._curvatures), _functions(geom._functions),
-      _lines(geom._lines), _tris(geom._tris), _quads(geom._quads), _tets(geom._tets),
-      _hexs(geom._hexs), _geom_type(geom._geom_type), _extents_set(geom._extents_set),
-      _min(geom._min), _max(geom._max), _ctx(geom._ctx) {
+      _colors(geom._colors), _uvs(geom._uvs), _tangents(geom._tangents),
+      _curvatures(geom._curvatures), _functions(geom._functions), _lines(geom._lines),
+      _tris(geom._tris), _quads(geom._quads), _tets(geom._tets), _hexs(geom._hexs),
+      _geom_type(geom._geom_type), _extents_set(geom._extents_set), _min(geom._min),
+      _max(geom._max), _ctx(geom._ctx) {
   // make sure all our pointers are valid
   init_ptrs();
 }
@@ -80,6 +81,8 @@ void geometry::copy(const geometry &geom, bool deepCopy) {
     _boundary = boundary_ptr_t(new boundary_t(*geom._boundary));
     _normals = normals_ptr_t(new normals_t(*geom._normals));
     _colors = colors_ptr_t(new colors_t(*geom._colors));
+    _uvs = uvs_ptr_t(new uvs_t(*geom._uvs));
+    _tangents = tangents_ptr_t(new tangents_t(*geom._tangents));
     _curvatures = curvatures_ptr_t(new curvatures_t(*geom._curvatures));
     _functions = functions_ptr_t(new functions_t(*geom._functions));
     _lines = lines_ptr_t(new lines_t(*geom._lines));
@@ -93,6 +96,8 @@ void geometry::copy(const geometry &geom, bool deepCopy) {
     _boundary = geom._boundary;
     _normals = geom._normals;
     _colors = geom._colors;
+    _uvs = geom._uvs;
+    _tangents = geom._tangents;
     _curvatures = geom._curvatures;
     _functions = geom._functions;
     _lines = geom._lines;
@@ -164,6 +169,8 @@ geometry &geometry::merge(const geometry &geom) {
   points().insert(points().end(), geom.points().begin(), geom.points().end());
   normals().insert(normals().end(), geom.normals().begin(), geom.normals().end());
   colors().insert(colors().end(), geom.colors().begin(), geom.colors().end());
+  uvs().insert(uvs().end(), geom.uvs().begin(), geom.uvs().end());
+  tangents().insert(tangents().end(), geom.tangents().begin(), geom.tangents().end());
 
   // we apparently don't have normal iterators for boundary_t :/
   unsigned int old_size = boundary().size();
@@ -524,6 +531,10 @@ void geometry::init_ptrs() {
     _normals.reset(new normals_t);
   if (!_colors)
     _colors.reset(new colors_t);
+  if (!_uvs)
+    _uvs.reset(new uvs_t);
+  if (!_tangents)
+    _tangents.reset(new tangents_t);
   if (!_curvatures)
     _curvatures.reset(new curvatures_t);
   if (!_functions)
@@ -594,6 +605,12 @@ void geometry::pre_write(ARRAY_TYPE at) {
     break;
   case COLORS:
     make_unique(_colors);
+    break;
+  case UVS:
+    make_unique(_uvs);
+    break;
+  case TANGENTS:
+    make_unique(_tangents);
     break;
   case CURVATURES:
     make_unique(_curvatures);

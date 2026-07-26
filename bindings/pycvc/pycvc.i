@@ -158,6 +158,8 @@ namespace pycvc { struct ArrayView; }
   std::vector<npy_intp> _dims(_v.shape.begin(), _v.shape.end());
   int _npt = (_v.dtype == pycvc::DType::Float64)   ? NPY_DOUBLE
              : (_v.dtype == pycvc::DType::Float32) ? NPY_FLOAT
+             : (_v.dtype == pycvc::DType::UInt8)   ? NPY_UINT8
+             : (_v.dtype == pycvc::DType::UInt16)  ? NPY_UINT16
                                                    : NPY_UINT64;
   npy_intp _n = 1;
   for (npy_intp _d : _dims) _n *= _d;
@@ -321,6 +323,20 @@ namespace cvc {
 %ignore cvc::geometry::const_hexs;
 %ignore cvc::geometry::points_ptr;
 %ignore cvc::geometry::colors_ptr;
+// Phase-2 UVs / tangents: hide the raw boost::array-vector accessors + shared
+// owners (like points/colors above). The Python surface is the flat set_uvs/
+// set_tangents builders + the zero-copy uvs()/tangents() views in the %extend
+// below. Those views are DECLARED as uvs_view()/tangents_view() (distinct names,
+// so the %ignore here does not swallow them) and %rename'd back to the natural
+// uvs()/tangents() — a same-named %extend would be eaten by the %ignore.
+%ignore cvc::geometry::uvs;
+%ignore cvc::geometry::const_uvs;
+%ignore cvc::geometry::tangents;
+%ignore cvc::geometry::const_tangents;
+%ignore cvc::geometry::uvs_ptr;
+%ignore cvc::geometry::tangents_ptr;
+%rename(uvs) cvc::geometry::uvs_view;
+%rename(tangents) cvc::geometry::tangents_view;
 %ignore cvc::geometry::min_point;
 %ignore cvc::geometry::max_point;
 %ignore cvc::geometry::extents;
@@ -585,6 +601,40 @@ namespace cvc {
     }
   }
 
+  // Per-vertex texture coordinates (Phase 2). Flat row-major u,v pairs; one uv
+  // per vertex (len == 2 * num_vertices()). Mirrors set_colors. These reach the
+  // cvcGL SetTCoords slot so a textured mesh samples node.set_texture().
+  void set_uvs(const std::vector<double>& uv) {
+    if (uv.size() != $self->const_points().size() * 2)
+      throw std::invalid_argument("set_uvs: length must equal 2 * num_vertices()");
+    auto& uvs = $self->uvs();
+    uvs.clear();
+    uvs.reserve(uv.size() / 2);
+    for (std::size_t i = 0; i + 1 < uv.size(); i += 2) {
+      cvc::geometry::uv_t t;
+      t[0] = uv[i];
+      t[1] = uv[i + 1];
+      uvs.push_back(t);
+    }
+  }
+  // Per-vertex tangent basis (Phase 2). Flat x,y,z,w quads (w = handedness ±1);
+  // one tangent per vertex (len == 4 * num_vertices()).
+  void set_tangents(const std::vector<double>& t) {
+    if (t.size() != $self->const_points().size() * 4)
+      throw std::invalid_argument("set_tangents: length must equal 4 * num_vertices()");
+    auto& tangents = $self->tangents();
+    tangents.clear();
+    tangents.reserve(t.size() / 4);
+    for (std::size_t i = 0; i + 3 < t.size(); i += 4) {
+      cvc::geometry::tangent_t tg;
+      tg[0] = t[i];
+      tg[1] = t[i + 1];
+      tg[2] = t[i + 2];
+      tg[3] = t[i + 3];
+      tangents.push_back(tg);
+    }
+  }
+
   std::size_t num_vertices() const { return $self->const_points().size(); }
   std::size_t num_triangles() const { return $self->const_tris().size(); }
   // num_lines(): use the real inherited accessor (kept un-ignored above).
@@ -619,6 +669,33 @@ namespace cvc {
     v.owner = std::shared_ptr<void>(container.get(), [container](void*) { /* keep-alive */ });
     return v;
   }
+  // Zero-copy (N,2) float64 view of the UVs, pinned via uvs_ptr() (same COW-safe
+  // keep-alive as vertices()/vertex_colors()). %rename'd to uvs(). Writable — a
+  // numpy edit writes the geometry's uv container in place.
+  pycvc::ArrayView uvs_view() {
+    cvc::geometry::uvs_ptr_t container = $self->uvs_ptr();
+    auto& vec = *container;
+    pycvc::ArrayView v;
+    v.dtype = pycvc::DType::Float64;
+    v.writable = true;
+    v.shape = {static_cast<long>(vec.size()), 2};
+    v.data = vec.empty() ? nullptr : &vec[0][0];
+    v.owner = std::shared_ptr<void>(container.get(), [container](void*) { /* keep-alive */ });
+    return v;
+  }
+  // Zero-copy (N,4) float64 view of the tangent basis, pinned via tangents_ptr().
+  // %rename'd to tangents().
+  pycvc::ArrayView tangents_view() {
+    cvc::geometry::tangents_ptr_t container = $self->tangents_ptr();
+    auto& vec = *container;
+    pycvc::ArrayView v;
+    v.dtype = pycvc::DType::Float64;
+    v.writable = true;
+    v.shape = {static_cast<long>(vec.size()), 4};
+    v.data = vec.empty() ? nullptr : &vec[0][0];
+    v.owner = std::shared_ptr<void>(container.get(), [container](void*) { /* keep-alive */ });
+    return v;
+  }
 
   // ── Mesh filters. smoothing() takes the injected app explicitly;
   // quality_improve() is mesher-gated (LBIE) — raises when the build has the
@@ -645,6 +722,14 @@ namespace cvc {
   void save(const std::string& filename) const { cvc::write_geometry(*$self, filename); }
   void load(const std::string& filename) { *$self = cvc::read_geometry(filename); }
 }
+
+// ── Phase 1: cvc::image value type + zero-copy numpy() view ──────────────
+// Wraps the VTK-free raster image (load/save, resize/convert/flip) and a
+// zero-copy (H,W,C) numpy view over its buffer. Kept in a sibling interface
+// file %include'd here so `image` lands in the `pycvc` module (pycvc.image.*)
+// and cvcGL's node.set_texture(image) can %import it. Uses the ArrayView
+// machinery + capsule dtor defined above.
+%include "pycvc_image.i"
 
 // ── Phase 2: compute layer (SDF / meshing / quality / generators) ───────
 // Module-level free functions + enum constants + QualityStats, taking/returning

@@ -1,16 +1,19 @@
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/context.h>
+#include <cvc/image/image.h>
 #include <set>
 #include <sstream>
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkFloatArray.h>
+#include <vtkImageData.h>
 #include <vtkLine.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
@@ -19,6 +22,7 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkTexture.h>
 #include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
@@ -28,7 +32,7 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
       m_actor(vtkSmartPointer<vtkActor>::New()),
       m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()),
-      m_polyData(vtkSmartPointer<vtkPolyData>::New()) {
+      m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);
 
@@ -292,6 +296,128 @@ void GeometryNode::setUseSingleColor(bool useSingleColor) {
 }
 
 vtkProp *GeometryNode::getProp() { return m_actor; }
+
+void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
+  if (!m_actor)
+    return;
+  if (img.empty()) {
+    clearTexture();
+    return;
+  }
+
+  // CRITICAL: the VTK work below — vtkImageData/vtkTexture creation, updatePolyData()'s
+  // mutation of the shared m_polyData, and m_actor->SetTexture() — must run on the owner
+  // thread. setTexture() is exposed to Python (pycvc_gl) and callable from any thread;
+  // racing the renderer on m_polyData/m_actor corrupts frames or crashes (the same reason
+  // setGeometry()/setColor()/setRenderMode() all marshal). Capture the image BY VALUE so
+  // its (COW-shared) buffer stays alive until the marshaled lambda runs — and, in the
+  // zero-copy path, for the texture's lifetime via m_textureStorage.
+  runOnMainThread([this, img, zeroCopy]() {
+    // Alias the image's RGBA8 buffer directly when possible (zero-copy); otherwise
+    // convert/flip/copy into a fresh vtkImageData (fallback).
+    const bool canAlias = zeroCopy && img.format() == cvc::image::pixel_format::RGBA &&
+                          img.type() == cvc::image::data_type::u8;
+
+    auto id = vtkSmartPointer<vtkImageData>::New();
+    bool mipmap = true;
+    if (canAlias) {
+      // ── Zero-copy: the vtkTexture samples the SAME bytes the cvc::image owns (no
+      // memcpy). The GeometryNode holds a ref to the buffer (m_textureStorage) for
+      // the texture's lifetime, so an in-place pixel edit through an aliased view
+      // (pycvc image.numpy()) + texture_modified() shows live with no re-copy. The
+      // top-left-vs-bottom-left origin mismatch is resolved by flipping the TCoords'
+      // V (below), NOT the pixels, so the aliasing is preserved.
+      cvc::image shared = img;                                     // shares the buffer (COW)
+      boost::shared_array<unsigned char> store = shared.storage(); // non-detaching owner
+      const vtkIdType n = static_cast<vtkIdType>(shared.size_bytes());
+
+      auto arr = vtkSmartPointer<vtkUnsignedCharArray>::New();
+      arr->SetNumberOfComponents(4);
+      arr->SetArray(store.get(), n, /*save=*/1); // save=1: VTK must not free our buffer
+
+      id->SetDimensions(shared.width(), shared.height(), 1);
+      id->GetPointData()->SetScalars(arr); // wrap the aliased buffer as RGBA scalars
+
+      m_textureStorage = store; // keep the aliased buffer alive
+      m_textureFlipV = true;    // flip the TCoords, not the pixels
+      // No mipmaps: they would be rebuilt from the input on every edit; a live
+      // texture stays crisp and cheap without them.
+      mipmap = false;
+    } else {
+      // ── Fallback copy: convert to RGBA8 + flip the PIXELS, then memcpy. ────────
+      cvc::image rgba =
+          (img.format() == cvc::image::pixel_format::RGBA &&
+           img.type() == cvc::image::data_type::u8)
+              ? img
+              : img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+      rgba = rgba.flipped_vertical();
+      id->SetDimensions(rgba.width(), rgba.height(), 1);
+      id->AllocateScalars(VTK_UNSIGNED_CHAR, 4);
+      std::memcpy(id->GetScalarPointer(), rgba.data(), rgba.size_bytes());
+      m_textureStorage.reset(); // nothing aliased to keep alive
+      m_textureFlipV = false;   // pixels already flipped -> TCoords must not be
+    }
+
+    // Regenerate the polydata TCoords to honor the (possibly just-changed) flip
+    // flag before attaching the texture; idempotent across repeated setTexture.
+    if (m_hasGeometry && m_geometry)
+      updatePolyData(*m_geometry);
+
+    auto tex = vtkSmartPointer<vtkTexture>::New();
+    tex->SetInputData(id);
+    tex->InterpolateOn();
+    if (mipmap)
+      tex->MipmapOn();
+    else
+      tex->MipmapOff();
+    m_texture = tex;
+    m_textureImageData = id;
+    m_actor->SetTexture(tex);
+    // The texture supplies the surface color; per-vertex color scalars would tint
+    // it. Set this LAST — after updatePolyData, which may re-enable scalar
+    // visibility for a colored mesh — so the texture stands on its own.
+    m_mapper->ScalarVisibilityOff();
+    m_actor->Modified();
+  });
+}
+
+void GeometryNode::clearTexture() {
+  // Marshaled to the owner thread: mutates shared VTK state (m_actor's texture and,
+  // via updatePolyData, the shared m_polyData) that the renderer reads.
+  runOnMainThread([this]() {
+    m_texture = nullptr;
+    m_textureImageData = nullptr;
+    m_textureStorage.reset();
+    if (m_actor) {
+      m_actor->SetTexture(nullptr);
+      m_actor->Modified();
+    }
+    // Restore un-flipped TCoords now that no top-left texture is active.
+    if (m_textureFlipV) {
+      m_textureFlipV = false;
+      if (m_hasGeometry && m_geometry)
+        updatePolyData(*m_geometry);
+    }
+  });
+}
+
+void GeometryNode::texture_modified() {
+  // The pixels were edited in place through the aliased buffer; bump the MTime of
+  // the texture and its input image data so VTK re-samples on the next render — no
+  // data re-copy. Marshaled to the owner thread: it bumps shared VTK MTime state the
+  // renderer reads, and the caller may be a Python worker thread.
+  runOnMainThread([this]() {
+    if (m_textureImageData) {
+      if (vtkDataArray *scalars = m_textureImageData->GetPointData()->GetScalars())
+        scalars->Modified();
+      m_textureImageData->Modified();
+    }
+    if (m_texture)
+      m_texture->Modified();
+    if (m_actor)
+      m_actor->Modified();
+  });
+}
 
 void GeometryNode::setGeometry(const cvc::geometry &geom) {
   cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
@@ -565,6 +691,26 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     // Use single color from actor property - clear per-vertex colors
     m_polyData->GetPointData()->SetScalars(nullptr);
     m_mapper->ScalarVisibilityOff();
+  }
+
+  // Texture coordinates (UVs) — the dedicated SetTCoords slot, orthogonal to the
+  // color scalars above. A textured mesh (glTF/OBJ carrying cvc::geometry uvs)
+  // samples the vtkTexture set via setTexture(). vtkFloatArray, 2 components (u,v).
+  if (geom.uvs().size() == geom.num_points()) {
+    vtkSmartPointer<vtkFloatArray> tcoords = vtkSmartPointer<vtkFloatArray>::New();
+    tcoords->SetNumberOfComponents(2);
+    tcoords->SetNumberOfTuples(geom.num_points());
+    tcoords->SetName("TCoords");
+    for (size_t i = 0; i < geom.num_points(); ++i) {
+      const auto &uv = geom.uvs()[i];
+      // When a texture is active the V axis is flipped here (not in the pixels):
+      // cvc::image is top-left origin, VTK samples bottom-left, so flipping the
+      // TCoords' V keeps the zero-copy pixel buffer aliased (no flip-copy).
+      tcoords->SetTuple2(i, uv[0], m_textureFlipV ? (1.0 - uv[1]) : uv[1]);
+    }
+    m_polyData->GetPointData()->SetTCoords(tcoords);
+  } else {
+    m_polyData->GetPointData()->SetTCoords(nullptr);
   }
 
   m_polyData->Modified();

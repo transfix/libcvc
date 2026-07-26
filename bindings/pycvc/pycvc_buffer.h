@@ -13,7 +13,7 @@
 
 namespace pycvc {
 
-enum class DType { Float64, Float32, UInt64 };
+enum class DType { Float64, Float32, UInt64, UInt8, UInt16 };
 
 struct ArrayView {
   const void *data = nullptr;   // contiguous, row-major buffer

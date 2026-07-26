@@ -92,6 +92,8 @@ add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
+add_executable(image_test image_test.cpp)
+add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
 
 # Track all test targets so we can conditionally add HDF5 tests
@@ -138,6 +140,8 @@ set(TEST_TARGETS
   procedural_geometry_test
   volume_ops_test
   volume_io_test
+  image_test
+  geometry_attributes_test
   utility_test
 )
 
@@ -243,6 +247,20 @@ target_link_libraries(volume_ops_test
 )
 
 target_link_libraries(volume_io_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(image_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(geometry_attributes_test
   PRIVATE
     cvc
     GTest::gtest
@@ -768,6 +786,8 @@ endif()
 target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
 target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 target_compile_features(volume_io_test PRIVATE cxx_std_17)
+target_compile_features(image_test PRIVATE cxx_std_17)
+target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
@@ -927,6 +947,8 @@ if(TARGET algorithm_test)
 endif()
 gtest_discover_tests(volume_ops_test)
 gtest_discover_tests(volume_io_test)
+gtest_discover_tests(image_test)
+gtest_discover_tests(geometry_attributes_test)
 gtest_discover_tests(utility_test)
 gtest_discover_tests(state_change_journal_test)
 gtest_discover_tests(state_subscription_router_test)
