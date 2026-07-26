@@ -25,7 +25,19 @@ class PropNode : public GraphicsNode {
 public:
   PropNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
       : GraphicsNode(ctx, statePath, name) {}
-  void setProp(vtkProp *p) { m_prop = p; }
+  void setProp(vtkProp *p) {
+    m_prop = p;
+    // If this node was already attached to a renderer BEFORE the prop was set —
+    // the incremental-add path: addGraphicsChild -> addToRenderer runs while
+    // getProp() is still null, then setProp is called — attach the prop now so it
+    // renders in the LIVE scene (not only after a fresh setRenderer, e.g.
+    // render_png). m_renderer / m_visible / runOnMainThread are the SceneNode's.
+    if (m_renderer && m_visible && p) {
+      vtkRenderer *r = m_renderer;
+      vtkProp *prop = p;
+      runOnMainThread([r, prop]() { r->AddViewProp(prop); });
+    }
+  }
   void setBounds(const cvc::bounding_box &b) { m_bounds = b; }
   vtkProp *heldProp() const { return m_prop; }
   cvc::bounding_box getBoundingBox() const override { return m_bounds; }
