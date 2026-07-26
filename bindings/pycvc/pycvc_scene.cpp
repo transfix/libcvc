@@ -76,10 +76,10 @@ void render_png(SceneGraph &sg, const std::string &path, int width, int height) 
   window->Finalize();
 }
 
-void render_png_camera(SceneGraph &sg, const std::string &path, int width, int height,
-                       double eye_x, double eye_y, double eye_z, double focal_x, double focal_y,
-                       double focal_z, double up_x, double up_y, double up_z, double view_angle,
-                       double clip_near, double clip_far) {
+void render_png_camera(SceneGraph &sg, const std::string &path, int width, int height, double eye_x,
+                       double eye_y, double eye_z, double focal_x, double focal_y, double focal_z,
+                       double up_x, double up_y, double up_z, double view_angle, double clip_near,
+                       double clip_far) {
   // Like render_png, but sets an EXPLICIT camera (eye / focal / up + view angle +
   // clip range) instead of ResetCamera() — so a caller can script a chase camera
   // for frame-by-frame offscreen capture. Needs a GL context (offscreen is fine).

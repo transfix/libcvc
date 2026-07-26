@@ -31,10 +31,10 @@ void render_png(SceneGraph &sg, const std::string &path, int width = 1024, int h
 // Render one offscreen frame with an EXPLICIT camera (eye / focal-point / up +
 // view angle + clip range) instead of auto-framing — for scripting a chase camera
 // across a sequence of frames (e.g. capturing a drive to video). Offscreen is fine.
-void render_png_camera(SceneGraph &sg, const std::string &path, int width, int height,
-                       double eye_x, double eye_y, double eye_z, double focal_x, double focal_y,
-                       double focal_z, double up_x, double up_y, double up_z,
-                       double view_angle = 30.0, double clip_near = 1.0, double clip_far = 1e5);
+void render_png_camera(SceneGraph &sg, const std::string &path, int width, int height, double eye_x,
+                       double eye_y, double eye_z, double focal_x, double focal_y, double focal_z,
+                       double up_x, double up_y, double up_z, double view_angle = 30.0,
+                       double clip_near = 1.0, double clip_far = 1e5);
 
 // Open a blocking interactive window on `sg` (needs a display); returns when the
 // window closes. Don't call this in the embedded case — the host owns the loop.
