@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/BBoxNode.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -451,8 +452,18 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
       SceneNode::handleStateChanged(childState);
     }
 
-    // Request render after any state change
-    if (m_renderer && m_renderer->GetRenderWindow()) {
+    // Request render after any state change. NEVER render synchronously here:
+    // this handler runs once per changed state key, and per-frame animation
+    // (setTransform/setColor on many nodes) writes many keys per frame — a
+    // synchronous Render() per key turns each displayed frame into dozens of
+    // full scene renders (measured: 63 animated nodes at ~5 ms per render
+    // dragged VolRover3 from 60 FPS to under 3). The host's frame loop renders
+    // once per frame via checkAndResetRenderNeeded(). The synchronous fallback
+    // remains only for a node used without a SceneGraph, where nothing drains
+    // the flag.
+    if (m_sceneGraph) {
+      m_sceneGraph->requestRender();
+    } else if (m_renderer && m_renderer->GetRenderWindow()) {
       m_renderer->GetRenderWindow()->Render();
     }
   });

@@ -73,6 +73,15 @@ public:
   // Check if a render is needed and reset the flag
   bool checkAndResetRenderNeeded();
 
+  // Mark the scene as needing a render, WITHOUT rendering. The host's frame
+  // loop picks it up via checkAndResetRenderNeeded(). Nodes reacting to state
+  // changes must use this rather than calling vtkRenderWindow::Render()
+  // themselves: a synchronous render per state change turns N per-frame
+  // property updates into N full scene renders per displayed frame (measured
+  // in VolRover3: ~5 ms per update on a city-scale scene — 63 animated nodes
+  // dragged the app from 60 FPS to under 3).
+  void requestRender();
+
   // Multi-object graphics management (unified for both geometry and volumes)
   std::shared_ptr<GraphicsNode> addGraphics(const std::string &name, const cvc::geometry &geom);
   std::shared_ptr<VolumeNode> addGraphics(const std::string &name, const cvc::volume &vol);

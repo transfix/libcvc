@@ -92,6 +92,11 @@ void SceneGraph::processEvents() {
   }
 }
 
+void SceneGraph::requestRender() {
+  std::lock_guard<std::mutex> lock(m_eventQueueMutex);
+  m_renderNeeded = true;
+}
+
 bool SceneGraph::checkAndResetRenderNeeded() {
   std::lock_guard<std::mutex> lock(m_eventQueueMutex);
   bool needed = m_renderNeeded;
