@@ -1,11 +1,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
-#include <cvc/gl/SceneGraph.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/BBoxNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <vtkActor2D.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>

@@ -2,11 +2,11 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/gl/SceneGraph.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/context.h>
 #include <cvc/image/image.h>
 #include <set>
