@@ -3,10 +3,12 @@ a :class:`pycvc_gl.lab.Lab`.
 
 These are generic loaders for a ``geometry_bundle`` export — a ``terrain.json``
 heightfield plus a ``buildings.glb`` (glTF 2.0) city mesh, as produced by the
-CVC-DBG ``geometry-scene-gen`` tool (e.g. the Austin bundle). The glTF is read
-with VTK's ``vtkGLTFReader`` (no trimesh/pygltflib needed) and added as a single
-VTK prop; the terrain becomes a draped surface mesh; a bilinear ``sampler`` lets
-you drape an agent onto the terrain.
+CVC-DBG ``geometry-scene-gen`` tool (e.g. the Austin bundle). The glTF is loaded
+NATIVELY via libcvc (``pycvc.load_model`` → ``cvc::model``, the Assimp-backed
+mesh loader — no ``vtkGLTFReader``, no trimesh/pygltflib) and added as a single
+native geometry node; the terrain becomes a draped surface mesh; a bilinear
+``sampler`` lets you drape an agent onto the terrain. (``building_occupancy``
+below still rasterizes the mesh through VTK offscreen — a separate concern.)
 
 ATTRIBUTION: bundles generated from OpenStreetMap are © OpenStreetMap
 contributors and licensed under the Open Database License (ODbL,
@@ -77,41 +79,39 @@ def add_terrain_json(lab, path: str, name: str = "terrain", color=(0.34, 0.40, 0
 def add_gltf(
     lab, path: str, name: str, color=(0.74, 0.74, 0.78), opacity: float = 1.0, parent: str = ""
 ):
-    """Load a glTF/GLB mesh with VTK and add it to ``lab`` as one named prop node.
-    ``parent`` (default the root) makes it a CHILD of that node so it stays aligned
-    to and moves with it (e.g. buildings under the terrain). Returns the
-    ``vtkActor``. Needs the vtk-python wrappers (vtkmodules)."""
-    from vtkmodules.vtkIOGeometry import vtkGLTFReader
-    from vtkmodules.vtkFiltersGeometry import vtkCompositeDataGeometryFilter
-    from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+    """Load a glTF/GLB (or any Assimp-supported) mesh NATIVELY via libcvc and add it
+    to ``lab`` as one named ``GeometryNode``. ``parent`` (default the root) makes it a
+    CHILD of that node so it stays aligned to and moves with it (e.g. buildings under
+    the terrain). Returns the live ``GeometryNode``.
 
-    reader = vtkGLTFReader()
-    reader.SetFileName(path)
-    reader.Update()
-    # glTF comes back as a multiblock; flatten to one polydata.
-    geom = vtkCompositeDataGeometryFilter()
-    geom.SetInputConnection(reader.GetOutputPort())
-    geom.Update()
-    pd = geom.GetOutput()
+    The whole file is flattened to a single ``cvc::geometry``
+    (``pycvc.load_model(path).merged()``) and rendered with a UNIFORM
+    ``color``/``opacity`` — the demo deliberately renders a single-color city, not
+    per-glTF materials — matching the previous VTK path's look (ambient 0.45 /
+    diffuse 0.7 / specular 0.05). Imports NO VTK glTF reader; the scene node itself
+    still renders through cvcGL/VTK as usual."""
+    pycvc = lab._pycvc
+    # Native load: one flattened geometry (single-color, one-node city mesh).
+    g = pycvc.load_model(path).merged()
 
-    mapper = vtkPolyDataMapper()
-    mapper.SetInputData(pd)
-    mapper.SetStatic(1)  # geometry never changes -> VTK caches the VBO, no per-frame rebuild
-    mapper.ScalarVisibilityOff()  # use the single material color, not any glTF scalars
-    actor = vtkActor()
-    actor.SetMapper(mapper)
-    prop = actor.GetProperty()
-    prop.SetColor(*color)
-    prop.SetOpacity(opacity)
-    # Ground-level views leave many building faces facing away from the light; a
-    # strong ambient term keeps them from going black so the city reads clearly.
-    prop.SetAmbient(0.45)
-    prop.SetDiffuse(0.7)
-    prop.SetSpecular(0.05)
+    # Add via the native scene path, honoring parent (child inherits its transform).
+    scene = lab._scene
+    if parent:
+        node = scene.add_child_geometry(parent, name, g)
+    else:
+        node = scene.addGraphics(name, g)  # downcast to the GeometryNode proxy
 
-    b = pd.GetBounds()  # (xmin,xmax, ymin,ymax, zmin,zmax)
-    lab.add_prop(name, actor, (b[0], b[2], b[4], b[1], b[3], b[5]), parent=parent)
-    return actor
+    # Uniform single-color material through the actor property (per-vertex colors go
+    # through VTK's LUT and mangle channels — see Lab.recolor). Ground-level views
+    # leave many building faces facing away from the light; a strong ambient term
+    # keeps them from going black so the city reads clearly.
+    node.setUseSingleColor(True)
+    node.setColor(*[float(c) for c in color])
+    node.setOpacity(float(opacity))
+    node.setAmbient(0.45)
+    node.setDiffuse(0.7)
+    node.setSpecular(0.05)
+    return node
 
 
 # ── grounded routing: keep a vehicle ON THE STREETS, out of the buildings ────
@@ -123,7 +123,12 @@ def add_gltf(
 
 
 def building_occupancy(
-    glb_path: str, bounds2d, nx: int = 512, ny: int = 512, inflate_m: float = 10.0, cache: bool = True
+    glb_path: str,
+    bounds2d,
+    nx: int = 512,
+    ny: int = 512,
+    inflate_m: float = 10.0,
+    cache: bool = True,
 ):
     """Rasterize ``buildings.glb`` into a SOLID boolean occupancy grid (``True`` =
     inside a building footprint) over ``bounds2d`` = ``(min_x, min_y, max_x, max_y)``.
@@ -148,7 +153,11 @@ def building_occupancy(
     import numpy as np
 
     cache_path = "%s.occ_%dx%d_i%d.npy" % (glb_path, nx, ny, int(round(inflate_m)))
-    if cache and os.path.exists(cache_path) and os.path.getmtime(cache_path) >= os.path.getmtime(glb_path):
+    if (
+        cache
+        and os.path.exists(cache_path)
+        and os.path.getmtime(cache_path) >= os.path.getmtime(glb_path)
+    ):
         return np.load(cache_path)
 
     # Register VTK's OpenGL2 render factory — in a raw Python interpreter (unlike the
