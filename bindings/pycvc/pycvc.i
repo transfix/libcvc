@@ -731,6 +731,13 @@ namespace cvc {
 // machinery + capsule dtor defined above.
 %include "pycvc_image.i"
 
+// ── Phase 3 (Phase-6 binding): cvc::model + pycvc.load_model ─────────────
+// The multi-mesh scene value type (meshes + materials + textures) and the native
+// loader pycvc.load_model(path) → pycvc.model. %include'd HERE, after geometry
+// AND image, because model::mesh holds a cvc::geometry and material holds a
+// cvc::image — both must already be wrapped for model's accessors to marshal.
+%include "pycvc_model.i"
+
 // ── Phase 2: compute layer (SDF / meshing / quality / generators) ───────
 // Module-level free functions + enum constants + QualityStats, taking/returning
 // the real wrapped cvc::geometry/cvc::volume (declared above). Comes last so
