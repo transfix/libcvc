@@ -6,6 +6,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/context.h>
 #include <cvc/image/image.h>
 #include <set>
@@ -254,8 +255,12 @@ void GeometryNode::updateRenderModeVTK() {
   if (m_actor)
     m_actor->Modified();
 
-  // Request a render update (if we have a renderer with a render window)
-  if (m_renderer && m_renderer->GetRenderWindow()) {
+  // Request a render update — flag-only; see GraphicsNode::handleStateChanged
+  // for why a synchronous Render() here is catastrophic under per-frame
+  // property animation (setColor alone writes three state keys).
+  if (m_sceneGraph) {
+    m_sceneGraph->requestRender();
+  } else if (m_renderer && m_renderer->GetRenderWindow()) {
     m_renderer->GetRenderWindow()->Render();
   }
 }
