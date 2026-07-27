@@ -63,6 +63,25 @@ def _write_obj_fixture():
     return obj, texture_ok
 
 
+def _write_tetra_obj_fixture():
+    """Write a NON-planar tetrahedron OBJ with a known, non-zero-volume bbox
+    (x∈[0,2], y∈[0,3], z∈[0,4]) so extents() has concrete values to assert — a
+    flat triangle's bbox collapses to the null/identity box (see the C++
+    ExtentsUnion test, which uses non-planar geometry for the same reason)."""
+    d = tempfile.mkdtemp(prefix="pycvc_model_tetra_")
+    obj = os.path.join(d, "tetra.obj")
+    with open(obj, "w") as oo:
+        oo.write("v 0 0 0\n")
+        oo.write("v 2 0 0\n")
+        oo.write("v 0 3 0\n")
+        oo.write("v 0 0 4\n")
+        oo.write("f 1 2 3\n")
+        oo.write("f 1 2 4\n")
+        oo.write("f 1 3 4\n")
+        oo.write("f 2 3 4\n")
+    return obj
+
+
 def _load_or_skip(path):
     """load_model(path) or None (printing a skip) when no handler is built."""
     try:
@@ -157,20 +176,20 @@ def test_load_obj_material():
     assert tuple(int(v) for v in px[0, 0]) == _TEX_RGBA
 
 
-def test_extents_is_six_tuple():
-    obj, _ = _write_obj_fixture()
-    m = _load_or_skip(obj)
+def test_extents_values():
+    # A non-planar tetra (bbox x∈[0,2], y∈[0,3], z∈[0,4]) so extents() has real
+    # values — this proves the (minx,miny,minz,maxx,maxy,maxz) marshaling ORDER,
+    # which an all-zero flat-triangle bbox could not distinguish from a broken
+    # (swapped/transposed/default) binding.
+    m = _load_or_skip(_write_tetra_obj_fixture())
     if m is None:
         return
     e = m.extents()
-    # (minx, miny, minz, maxx, maxy, maxz) as a 6-element sequence of finite floats.
-    # NOTE: the fixture is a single FLAT (z=0) triangle, whose bbox is zero-volume;
-    # cvc::bounding_box::operator+ treats a zero-volume box as the identity (see
-    # model.cpp / the C++ ExtentsUnion test, which uses a non-planar mesh on
-    # purpose), so this particular model's union collapses to a null (all-zero)
-    # box. We assert the marshaling (shape + finiteness), not specific extents.
     assert len(e) == 6
     assert all(np.isfinite(v) for v in e)
+    minx, miny, minz, maxx, maxy, maxz = e
+    assert np.isclose(minx, 0.0) and np.isclose(miny, 0.0) and np.isclose(minz, 0.0)
+    assert np.isclose(maxx, 2.0) and np.isclose(maxy, 3.0) and np.isclose(maxz, 4.0)
 
 
 if __name__ == "__main__":
