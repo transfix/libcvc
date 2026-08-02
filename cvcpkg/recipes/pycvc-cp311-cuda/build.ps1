@@ -1,6 +1,7 @@
-# cvcpkg/recipes/pycvc-gl/build.ps1 — build the full pycvc Python bindings (core + scene)
-# standalone against an installed libcvc SDK (Windows). CVC_BUILD_PYCVC_GL=OFF
-# ⇒ core + scene (cvcGL + VTK).
+# cvcpkg/recipes/pycvc-cp311-cuda/build.ps1 — build the core pycvc Python
+# bindings standalone against an installed libcvc SDK (Windows, CUDA deps).
+# CVC_BUILD_PYCVC_GL=OFF ⇒ no cvcGL/VTK; the scene bindings are the separate
+# pycvc-gl-cp311-cuda recipe.
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:CVC_SOURCE_DIR) { throw 'CVC_SOURCE_DIR must be set' }
@@ -17,7 +18,7 @@ $args = @(
   '-B', $env:CVC_BUILD_DIR,
   "-DCMAKE_INSTALL_PREFIX=$env:CVC_INSTALL_DIR",
   "-DCMAKE_BUILD_TYPE=$cmakeBuildType",
-  '-DCVC_BUILD_PYCVC_GL=ON'
+  '-DCVC_BUILD_PYCVC_GL=OFF'
 )
 
 if ($env:CVC_DEPS_PREFIX) {

@@ -7,17 +7,28 @@
 #
 # Beyond the base libcvc SDK, the same build jobs also build, pack, and
 # publish the rest of the family from their recipes in this repo
-# (cvcpkg/recipes/{cvcgl,pycvc,pycvc-gl}):
-#   * cvcgl     — the Qt-free VTK scene-graph library (needs VTK).
-#   * pycvc     — the core SWIG numpy bindings (needs Python + numpy).
-#   * pycvc-gl  — the scriptable-scene bindings (needs cvcgl + VTK + Python).
+# (cvcpkg/recipes/{cvcgl,pycvc-cp31X,pycvc-gl-cp31X}):
+#   * cvcgl          — the Qt-free VTK scene-graph library (needs VTK).
+#   * pycvc-cp31X    — the core SWIG numpy bindings, one recipe per
+#                      interpreter column (python31X + numpy-cp31X).
+#   * pycvc-gl-cp31X — the scriptable-scene bindings per column (needs
+#                      cvcgl + VTK + vtk-python-cp31X + Python).
+# The interpreter column is a matrix dimension (`pyver`): every job carries
+# the base "311", and extra linux-x86_64 release jobs (matrix include) build
+# the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
+# to link against, but pack+publish ONLY their pycvc-cp31X/pycvc-gl-cp31X
+# pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
+# `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + pycvc + pycvc-gl (release config).
-#   * Windows — libcvc + cvcgl always; pycvc/pycvc-gl only behind the
-#               `windows_pycvc` dispatch input (still a TODO — unverified).
+#   * Linux   — libcvc + cvcgl + pycvc-cp311/312/313 + pycvc-gl-cp311/312/313
+#               (release config; the 312/313 columns on x86_64 only).
+#   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
+#               the `windows_pycvc` dispatch input (still a TODO — unverified;
+#               Windows stays cp311-only for now).
 #   * macOS   — libcvc only: there is no macOS VTK bundle on the catalog
-#               yet, so cvcgl/pycvc-gl cannot build and pycvc is skipped
-#               to keep the family consistent per-platform.
+#               yet, so the cvcgl/pycvc-gl-cp31X recipes cannot build and the
+#               pycvc-cp31X columns are skipped to keep the family consistent
+#               per-platform.
 # The family packages are built in the RELEASE matrix jobs only (they pack
 # with `--config release` against the release Python/numpy/VTK bundles).
 #
@@ -48,9 +59,10 @@ on:
           - 'false'
       windows_pycvc:
         description: >-
-          Also build/pack/publish pycvc + pycvc-gl on Windows (EXPERIMENTAL,
-          unverified — Python/numpy/SWIG discovery on Windows is still a TODO).
-          Off by default; cvcgl on Windows is unaffected and always runs.
+          Also build/pack/publish pycvc-cp311 + pycvc-gl-cp311 on Windows
+          (EXPERIMENTAL, unverified — Python/numpy/SWIG discovery on Windows is
+          still a TODO; Windows stays cp311-only). Off by default; cvcgl on
+          Windows is unaffected and always runs.
         required: false
         default: 'false'
         type: choice
@@ -122,8 +134,14 @@ jobs:
     outputs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
-      pycvc: ${{ steps.rev.outputs.pycvc }}
-      pycvc_gl: ${{ steps.rev.outputs.pycvc_gl }}
+      # One output per pycvc interpreter column; the build matrix selects the
+      # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
+      pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
+      pycvc_cp312: ${{ steps.rev.outputs.pycvc_cp312 }}
+      pycvc_cp313: ${{ steps.rev.outputs.pycvc_cp313 }}
+      pycvc_gl_cp311: ${{ steps.rev.outputs.pycvc_gl_cp311 }}
+      pycvc_gl_cp312: ${{ steps.rev.outputs.pycvc_gl_cp312 }}
+      pycvc_gl_cp313: ${{ steps.rev.outputs.pycvc_gl_cp313 }}
       libcvc_cuda: ${{ steps.rev.outputs.libcvc_cuda }}
     steps:
       - uses: actions/checkout@v5
@@ -144,11 +162,15 @@ jobs:
             echo "$pkg -> +cvc.$rev"
             echo "$key=$rev" >> "$GITHUB_OUTPUT"
           }
-          emit libcvc      libcvc
-          emit cvcgl       cvcgl
-          emit pycvc       pycvc
-          emit pycvc-gl    pycvc_gl
-          emit libcvc-cuda libcvc_cuda
+          emit libcvc         libcvc
+          emit cvcgl          cvcgl
+          emit pycvc-cp311    pycvc_cp311
+          emit pycvc-cp312    pycvc_cp312
+          emit pycvc-cp313    pycvc_cp313
+          emit pycvc-gl-cp311 pycvc_gl_cp311
+          emit pycvc-gl-cp312 pycvc_gl_cp312
+          emit pycvc-gl-cp313 pycvc_gl_cp313
+          emit libcvc-cuda    libcvc_cuda
 
   build:
     needs: [ensure-org, compute-revisions]
@@ -160,6 +182,11 @@ jobs:
         # independent — a debug arch with no debug dep bundles source-builds
         # or fails on its own without blocking the release artifacts.
         config: [release, debug]
+        # Interpreter column for the pycvc family (pycvc-cp31X/pycvc-gl-cp31X).
+        # "311" is the base for every job; the `include` entries below add
+        # linux-x86_64 release jobs for the cp312/cp313 columns. Guards keyed
+        # on `matrix.pyver == '311'` keep libcvc/cvcgl publishing exactly once.
+        pyver: ["311"]
         target:
           - { os: ubuntu-latest,    platform: linux,   arch: x86_64 }
           # Experimental: no linux-arm64 dep bundles on the catalog yet
@@ -183,6 +210,17 @@ jobs:
           # a Debug libcvc links the Release (shared, ABI-stable) deps fine.
           - config: debug
             target: { os: windows-2022, platform: windows, arch: x86_64 }
+        include:
+          # Extra pycvc-column jobs (linux x86_64, release only): each builds
+          # libcvc + cvcgl locally to link against, then packs+publishes ONLY
+          # its pycvc-cp31X + pycvc-gl-cp31X pair. Windows/macOS and the
+          # experimental linux-arm64 lane stay cp311-only for now.
+          - config: release
+            pyver: "312"
+            target: { os: ubuntu-latest, platform: linux, arch: x86_64 }
+          - config: release
+            pyver: "313"
+            target: { os: ubuntu-latest, platform: linux, arch: x86_64 }
     runs-on: ${{ matrix.target.os }}
     continue-on-error: ${{ matrix.target.experimental || false }}
     env:
@@ -268,6 +306,10 @@ jobs:
 
       - name: Pack archive
         id: pack
+        # Only the base pyver-311 job publishes libcvc; the 312/313 column
+        # jobs build the same libcvc purely as a link target for their
+        # pycvc-cp31X/pycvc-gl-cp31X packages.
+        if: matrix.pyver == '311'
         shell: bash
         run: |
           set -euo pipefail
@@ -285,7 +327,7 @@ jobs:
             --output-dir dist
 
       - name: Publish to cvcpkg.org
-        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
+        if: ${{ matrix.pyver == '311' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -306,34 +348,45 @@ jobs:
             --token "$CVCPKG_TOKEN"
 
       # ────────────────────────────────────────────────────────────────
-      #  libcvc package FAMILY: cvcgl + pycvc + pycvc-gl
+      #  libcvc package FAMILY: cvcgl + pycvc-cp31X + pycvc-gl-cp31X
       #
       #  These build in the SAME job against the just-installed libcvc SDK
       #  (`stage`, the CMAKE_INSTALL_PREFIX above) + the fetched deps prefix,
       #  each into its own stage dir, then pack from their recipe and publish.
+      #  The interpreter column comes from `matrix.pyver` (311/312/313): the
+      #  pycvc steps derive the recipe names (pycvc-cp${pyver}), the deps
+      #  (python${pyver} / numpy-cp${pyver} / vtk-python-cp${pyver}), and the
+      #  per-column revision output from it — one set of steps serves every
+      #  column.
       #
       #  Independence: every step below is guarded with `!cancelled()` so a
       #  failure in one package does NOT skip the others (each still attempts,
       #  and a real failure stays visible as a red step — we deliberately do
       #  not `continue-on-error`, which would mask it). Ordering that matters:
-      #  pycvc-gl links the installed cvcgl, so it runs after the cvcgl step.
+      #  pycvc-gl-cp31X links the installed cvcgl, so it runs after the cvcgl
+      #  step.
       #
       #  Platform guards: family runs on Linux (all packages) and Windows
-      #  (cvcgl always; pycvc/pycvc-gl behind the `windows_pycvc` input).
-      #  macOS is intentionally libcvc-only (no macOS VTK bundle yet). Family
-      #  is built only in RELEASE jobs (packs `--config release`).
+      #  (cvcgl always; pycvc-cp311/pycvc-gl-cp311 behind the `windows_pycvc`
+      #  input — Windows stays cp311-only). macOS is intentionally libcvc-only
+      #  (no macOS VTK bundle yet). Family is built only in RELEASE jobs
+      #  (packs `--config release`).
       # ────────────────────────────────────────────────────────────────
 
-      - name: Install family deps (Python 3.11 + numpy + VTK) [Linux]
+      - name: Install family deps (python${{ matrix.pyver }} column + numpy + VTK) [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         run: |
           set -euo pipefail
           PY="$GITHUB_WORKSPACE/py"
-          # python311 + numpy (for pycvc/pycvc-gl), vtk (for cvcgl/pycvc-gl), and
-          # vtk-python-cp311 — libvtkWrappingPythonCore + vtkPythonUtil.h for
-          # pycvc-gl's Phase-5b vtkProp bridge (Python vtkActor -> C++ scene).
-          # Without it pycvc-gl's configure dies at CMakeLists.txt:147.
+          # The interpreter column: pyver=311 -> python311/3.11, etc.
+          PYVER="${{ matrix.pyver }}"
+          PYDOT="${PYVER:0:1}.${PYVER:1}"
+          # python31X + numpy-cp31X (for pycvc-cp31X/pycvc-gl-cp31X), vtk (for
+          # cvcgl/pycvc-gl-cp31X), and vtk-python-cp31X —
+          # libvtkWrappingPythonCore + vtkPythonUtil.h for pycvc-gl's Phase-5b
+          # vtkProp bridge (Python vtkActor -> C++ scene). Without it
+          # pycvc-gl's configure dies at CMakeLists.txt:147.
           #
           # xorgproto: the X11 protocol headers (X11/X.h, extension *proto.h).
           # cvcgl's find_package(VTK) re-runs VTK's FindX11, which needs X11/X.h —
@@ -342,9 +395,9 @@ jobs:
           # NOT drag in xorgproto, and X11_X11_INCLUDE_PATH goes unfound. Install
           # it explicitly. (Proper fix, follow-up: make xorgproto a runtime dep of
           # the X11 libs whose public headers #include it, so it's transitive.)
-          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
+          cvcpkg install "python$PYVER" "numpy-cp$PYVER" vtk "vtk-python-cp$PYVER" xorgproto \
             --prefix "$PY" --config release --link shared
-          # The published numpy-cp311 wheel bundles openblas under
+          # The published numpy-cp31X wheels bundle openblas under
           # numpy.libs/, but that .so is NOT self-resolved by RPATH, so a bare
           # `import numpy` (which find_package(Python3 ... NumPy) performs)
           # fails. Put numpy.libs (and $PY/lib) on the loader path so the
@@ -352,10 +405,12 @@ jobs:
           # include dir with the same environment.
           #   TODO: drop this guard once the numpy recipe fixes the wheel's
           #   RPATH and republishes (tracked in a separate libcvc-deps PR).
-          export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
-          NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
+          export LD_LIBRARY_PATH="$PY/lib/python$PYDOT/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
+          PYBIN="$PY/bin/python$PYDOT"
+          NPY_INC="$("$PYBIN" -c 'import numpy; print(numpy.get_include())')"
           {
             echo "PY=$PY"
+            echo "PYBIN=$PYBIN"
             echo "NPY_INC=$NPY_INC"
             echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
@@ -367,11 +422,15 @@ jobs:
       # apt-get libx11-dev/libgl1-mesa-dev step was removed here.)
 
       - name: Build, pack & publish cvcgl [Linux]
+        # Builds in EVERY linux release column job (pycvc-gl-cp31X links the
+        # installed cvcgl), but packs+publishes only from the pyver-311 job so
+        # cvcgl is published exactly once.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
           DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          PACK_CVCGL: ${{ matrix.pyver == '311' && '1' || '0' }}
         run: |
           set -euo pipefail
           STAGE="$GITHUB_WORKSPACE/stage"
@@ -384,6 +443,10 @@ jobs:
             -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
           cmake --build build-cvcgl --parallel
           cmake --install build-cvcgl
+          if [ "$PACK_CVCGL" != "1" ]; then
+            echo "pyver ${{ matrix.pyver }} column job: cvcgl built for linking only (packed/published by the 311 job)"
+            exit 0
+          fi
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/cvcgl \
             --from-prefix stage-cvcgl \
@@ -404,89 +467,96 @@ jobs:
             echo "dry-run: skipping cvcgl publish"
           fi
 
-      - name: Build, pack & publish pycvc [Linux]
+      - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
           DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          PKG: pycvc-cp${{ matrix.pyver }}
+          PKG_REVISION: ${{ needs.compute-revisions.outputs[format('pycvc_cp{0}', matrix.pyver)] }}
         run: |
           set -euo pipefail
           STAGE="$GITHUB_WORKSPACE/stage"
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
           # Core numpy bindings only (no VTK). Python3_EXECUTABLE / NumPy include
-          # come from the family-deps step ($PY, $NPY_INC on $LD_LIBRARY_PATH).
+          # come from the family-deps step ($PYBIN, $NPY_INC on $LD_LIBRARY_PATH),
+          # which installed THIS job's interpreter column.
           cmake -S bindings/pycvc -B build-pycvc -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_PYCVC_CORE=ON \
             -DCVC_BUILD_PYCVC_GL=OFF \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvc" \
-            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_EXECUTABLE="$PYBIN" \
             -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
             -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
           cmake --build build-pycvc --parallel
           cmake --install build-pycvc
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/pycvc \
+          cvcpkg pack "cvcpkg/recipes/$PKG" \
             --from-prefix stage-pycvc \
             --platform "${{ matrix.target.platform }}" \
             --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc }} \
+            --cvc-revision "$PKG_REVISION" \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish pycvc \
+            cvcpkg publish "$PKG" \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
               --config release --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
-            echo "dry-run: skipping pycvc publish"
+            echo "dry-run: skipping $PKG publish"
           fi
 
-      - name: Build, pack & publish pycvc-gl [Linux]
+      - name: Build, pack & publish pycvc-gl-cp${{ matrix.pyver }} [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
           DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          PKG: pycvc-gl-cp${{ matrix.pyver }}
+          PKG_REVISION: ${{ needs.compute-revisions.outputs[format('pycvc_gl_cp{0}', matrix.pyver)] }}
         run: |
           set -euo pipefail
           STAGE="$GITHUB_WORKSPACE/stage"
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
-          # Scene module only; links the installed cvcgl (stage-cvcgl) + VTK.
+          # Scene module only; links the installed cvcgl (stage-cvcgl) + VTK +
+          # this column's vtk-python-cp${{ matrix.pyver }} (installed into $PY
+          # by the family-deps step).
           cmake -S bindings/pycvc -B build-pycvcgl -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCVC_BUILD_PYCVC_CORE=OFF \
             -DCVC_BUILD_PYCVC_GL=ON \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvcgl" \
-            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_EXECUTABLE="$PYBIN" \
             -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
             -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS;$GITHUB_WORKSPACE/stage-cvcgl"
           cmake --build build-pycvcgl --parallel
           cmake --install build-pycvcgl
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/pycvc-gl \
+          cvcpkg pack "cvcpkg/recipes/$PKG" \
             --from-prefix stage-pycvcgl \
             --platform "${{ matrix.target.platform }}" \
             --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl }} \
+            --cvc-revision "$PKG_REVISION" \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish pycvc-gl \
+            cvcpkg publish "$PKG" \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
               --config release --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
-            echo "dry-run: skipping pycvc-gl publish"
+            echo "dry-run: skipping $PKG publish"
           fi
 
       - name: Build, pack & publish cvcgl [Windows]
@@ -531,13 +601,15 @@ jobs:
             Write-Host 'dry-run: skipping cvcgl publish'
           }
 
-      - name: Build, pack & publish pycvc + pycvc-gl [Windows, EXPERIMENTAL]
+      - name: Build, pack & publish pycvc-cp311 + pycvc-gl-cp311 [Windows, EXPERIMENTAL]
         # TODO: Windows Python 3.11 + numpy + SWIG discovery for the bindings is
         # not yet verified (the numpy.libs loader-path workaround is Linux-only;
         # the Windows equivalent — PATH + _pycvc*.pyd — is untested). Gated OFF
         # behind the `windows_pycvc` dispatch input so tag pushes never run it;
         # flip the input to 'true' via workflow_dispatch to trial it. Until this
-        # is proven, Windows publishes libcvc + cvcgl only.
+        # is proven, Windows publishes libcvc + cvcgl only. Windows stays
+        # cp311-only for now — extend to the cp312/cp313 columns once the
+        # cp311 path is verified.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && github.event.inputs.windows_pycvc == 'true' }}
         shell: pwsh
         env:
@@ -577,15 +649,15 @@ jobs:
           cmake --build build-pycvcgl --config Release
           cmake --install build-pycvcgl --config Release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cvcpkg pack cvcpkg/recipes/pycvc    --from-prefix stage-pycvc   --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc }} --output-dir dist
-          cvcpkg pack cvcpkg/recipes/pycvc-gl --from-prefix stage-pycvcgl --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl }} --output-dir dist
+          cvcpkg pack cvcpkg/recipes/pycvc-cp311    --from-prefix stage-pycvc   --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_cp311 }} --output-dir dist
+          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp311 --from-prefix stage-pycvcgl --platform windows --config release --link shared --local --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl_cp311 }} --output-dir dist
           $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
           if ($doPublish) {
             if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
-            cvcpkg publish pycvc    --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
-            cvcpkg publish pycvc-gl --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
+            cvcpkg publish pycvc-cp311    --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
+            cvcpkg publish pycvc-gl-cp311 --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
           } else {
-            Write-Host 'dry-run: skipping pycvc/pycvc-gl publish'
+            Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
           }
 
   # ── Linux libcvc-cuda (GPU variant) — DORMANT until a CUDA runner exists ──

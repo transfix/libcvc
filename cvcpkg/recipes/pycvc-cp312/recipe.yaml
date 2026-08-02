@@ -1,0 +1,83 @@
+schema_version: 1
+recipe:
+  # The CPython 3.12 column of the pycvc family, added when the libcvc-deps
+  # python matrix made every python package a per-interpreter column recipe
+  # (<name>-cp311/-cp312/-cp313). Same sources as pycvc-cp311, built against
+  # python312 + numpy-cp312. New catalog name — revision starts at 1.
+  name: pycvc-cp312
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "pycvc-cp312 — SWIG Python bindings for libcvc, the CPython 3.12 (cp312) column: cvc::geometry / cvc::volume facades with zero-copy numpy views (and CUDA unified-memory when built against libcvc-cuda). The core, VTK-free bindings; the scriptable-scene bindings are the separate pycvc-gl-cp312 recipe."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [python, bindings, swig, numpy, scientific, volumetric]
+
+# pycvc is deliberately its OWN package, separate from libcvc: a plain libcvc
+# bundle is a pure C++ SDK with no Python/numpy/swig dependency. Install a
+# pycvc-cp31X column only when you want `import pycvc` on that interpreter.
+# It builds bindings/pycvc standalone against the installed libcvc SDK
+# (find_package(cvc CONFIG)) with CVC_BUILD_PYCVC_GL=OFF (no cvcGL/VTK).
+
+# Declares the `pycvc-cp312` provider slot, mirroring the family pattern
+# (libcvc/cvcgl/cvc-cli/pycvc-cp311 all self-provide their slot so a CUDA peer
+# can be a mutually-exclusive alternative). There is NO pycvc-cp312-cuda yet —
+# the CUDA peers stay cp311-only for now.
+provides: ["pycvc-cp312"]
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # bindings/pycvc. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+# The interpreter column this recipe targets. The cvcpkg builder exports
+# CVC_PYTHON_INTERPRETER / CVC_PYTHON_ABI from this block, and build.sh
+# derives the python3.X paths from it — so the build scripts are identical
+# across the cp311/cp312/cp313 columns.
+python:
+  interpreter: python312
+  abi: cp312
+
+depends:
+  build:
+    # libcvc SDK (find_package(cvc CONFIG)); Python dev interpreter + numpy C API.
+    - name: libcvc
+    - name: python312
+    - name: numpy-cp312
+  runtime:
+    # pycvc imports against this interpreter + numpy and loads libcvc at runtime.
+    - name: libcvc
+    - name: python312
+    - name: numpy-cp312
+  host_tools:
+    - cmake
+    - ninja
+    - swig
+    - python312
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    # The SWIG module: _pycvc<ext> + the pycvc.py shim, pinned to THIS
+    # column's interpreter dir (each cp31X column ships only its own
+    # site-packages — no cross-interpreter globs).
+    - lib/python3.12/site-packages/pycvc.py
+    - lib/python3.12/site-packages/_pycvc*
+
+abi:
+  cxx_std: 17

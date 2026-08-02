@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# cvcpkg/recipes/pycvc-cuda/build.sh — build the core pycvc Python bindings
-# (cvc::geometry/volume facades + zero-copy numpy views) standalone against an
-# installed libcvc SDK. CVC_BUILD_PYCVC_GL=OFF ⇒ no cvcGL/VTK dependency; the
-# scriptable-scene bindings are the separate `pycvc-gl` recipe.
+# cvcpkg/recipes/pycvc-gl-cp311-cuda/build.sh — build the pycvc_gl
+# scriptable-scene Python bindings (over cvcGL + VTK) standalone against an
+# installed libcvc SDK (the CUDA stack — libcvc-cuda + cvcgl-cuda in the deps
+# prefix). CVC_BUILD_PYCVC_CORE=OFF + CVC_BUILD_PYCVC_GL=ON ⇒ scene module
+# only; the lean, VTK-free core module is the separate `pycvc-cp311-cuda`
+# recipe this package depends on at runtime.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
@@ -23,10 +25,11 @@ CMAKE_ARGS=(
   -B "$CVC_BUILD_DIR"
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
-  # Core numpy-bindings module only (no VTK). The scene module ships as the
-  # separate, side-by-side pycvc-gl package.
-  -DCVC_BUILD_PYCVC_CORE=ON
-  -DCVC_BUILD_PYCVC_GL=OFF
+  # Scene module ONLY (cvcGL + VTK). The core pycvc module comes from the
+  # pycvc-cp311-cuda package (a runtime dependency), so this package installs
+  # just the pycvc_gl package dir — the two live side by side.
+  -DCVC_BUILD_PYCVC_CORE=OFF
+  -DCVC_BUILD_PYCVC_GL=ON
 )
 
 # The deps prefix carries the installed libcvc SDK (find_package(cvc CONFIG)),
