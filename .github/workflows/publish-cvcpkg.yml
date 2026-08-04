@@ -633,6 +633,26 @@ jobs:
     needs: [ensure-org, compute-revisions]
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
     runs-on: [self-hosted, linux, cuda]
+    # Build inside a 22.04 CUDA image, NOT on the runner host.
+    #
+    # The only cuda-capable linux runner (prettyhatemachine) is Ubuntu 24.04 =
+    # glibc 2.39, and the cvcpkg fleet floor is 2.35. Building on the host
+    # produces GLIBC_2.38 references, which `cvcpkg pack` now hard-rejects
+    # (libcvc-deps#432) — so this job would fail at pack time rather than ship a
+    # bundle that cannot load on the 22.04 fleet or on 22.04 users.
+    #
+    # This is the manylinux answer: pin the BUILD environment's glibc rather
+    # than the host's. 12.9.x-devel-ubuntu22.04 matches the CUDA major already
+    # on the fleet (prettyhatemachine 12.0, sandipaws 12.9) and keeps sm_50 in
+    # CMAKE_CUDA_ARCHITECTURES alive — newer CUDA majors drop the oldest arches.
+    #
+    # --gpus is deliberately NOT requested: nvcc cross-compiles a multi-arch
+    # fatbin and no test executes on the GPU here, so the job needs the toolkit,
+    # not the device. Requiring a device would also make the job fail on any
+    # future cuda runner whose driver/container-toolkit pairing is off.
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu22.04
+      options: --user root
     strategy:
       fail-fast: false
       matrix:
