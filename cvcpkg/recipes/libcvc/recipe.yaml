@@ -115,7 +115,25 @@ depends:
     # windows here once an assimp windows bundle is published.
     - name: assimp
       platforms: [linux, macos, freebsd, netbsd]
+    # Scoped for the same reason as assimp above, but the other way round:
+    # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
+    # Accelerate framework, so libcvc-deps uses the system libraries there —
+    # see the "No macOS entry" comment on openblas's own build matrix, and
+    # levmar, which already scopes its openblas dep the same way.
+    #
+    # Unconditional, this failed EVERY macos deps-install outright:
+    #     Error: requested component(s) not found in the catalog for this
+    #     platform tuple: openblas
+    # and because install-deps is all-or-nothing, nothing else got installed
+    # either — so the visible symptom was a bogus `find_package(libiimod)`
+    # failure at src/cvc/CMakeLists.txt:279, naming an innocent package. That
+    # red predates 2026-07-27 and was mistaken for the Xcode 26.5 breakage.
+    #
+    # Nothing needs openblas by name on macOS: libcvc reaches BLAS through
+    # levmar, whose config tries `find_dependency(OpenBLAS CONFIG QUIET)` and
+    # falls back to `find_dependency(LAPACK)` — which resolves to Accelerate.
     - name: openblas
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
     - name: openssl
     - name: c-ares
     - name: re2
