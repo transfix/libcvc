@@ -113,6 +113,11 @@ depends:
     # published for every platform libcvc builds.
     - name: fontconfig
       platforms: [linux, macos]
+    # fontconfig's own link — flat install means adding a dep can reveal the
+    # next layer, so the prefix was re-scanned after adding fontconfig and
+    # libfontconfig.dylib -> @rpath/libexpat.1.10.0.dylib turned up. Unscoped:
+    # expat is published for every platform libcvc builds.
+    - name: expat
     - name: bzip2
     - name: libxml2
     - name: yaml
