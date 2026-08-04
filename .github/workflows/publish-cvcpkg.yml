@@ -161,11 +161,25 @@ jobs:
         # or fails on its own without blocking the release artifacts.
         config: [release, debug]
         target:
-          - { os: ubuntu-latest,    platform: linux,   arch: x86_64 }
+          # ubuntu-22.04 (glibc 2.35) pinned deliberately — same class of bug as
+          # the windows-2022 pin below, but silent. ubuntu-latest is now 24.04
+          # (glibc 2.39): glibc is backward- but not forward-compatible, so every
+          # linux bundle published from it carries GLIBC_2.38 symbol references
+          # and dies on the 22.04 fleet and on 22.04 users with
+          #     version `GLIBC_2.38' not found
+          # There is no compile error and no test failure — the artifact packs,
+          # uploads and installs fine, then refuses to load. A catalog audit on
+          # 2026-08-03 found this had already shipped libcvc, pycvc-gl, volrover3
+          # and libcvc-cuda broken for every 22.04 consumer.
+          # 2.35 is the cvcpkg fleet floor (libcvc-deps#432); cvcpkg pack now
+          # verifies it and hard-fails, so leaving this on -latest would turn a
+          # silent breakage into a red build — pin it so it is neither.
+          - { os: ubuntu-22.04,     platform: linux,   arch: x86_64 }
           # Experimental: no linux-arm64 dep bundles on the catalog yet
           # (builder fleet is x86_64 + macOS); relies on cvcpkg source
           # fallback until the Phase-9 emulated-arch/arm64 builders land.
-          - { os: ubuntu-24.04-arm, platform: linux,   arch: arm64, experimental: true }
+          # 22.04 here too, for the same floor reason.
+          - { os: ubuntu-22.04-arm, platform: linux,   arch: arm64, experimental: true }
           - { os: macos-14,         platform: macos,   arch: arm64 }
           - { os: macos-13,         platform: macos,   arch: x86_64 }
           # windows-2022 (VS2022 v143) pinned deliberately: windows-latest now
@@ -604,6 +618,17 @@ jobs:
   # (provides: [libcvc], requires_capabilities: [cuda]). CMAKE_CUDA_ARCHITECTURES
   # defaults to 50;60;70;75;80 (top-level CMakeLists) — a broadly-usable
   # multi-arch fatbin; do NOT narrow it to the builder's own GPU.
+  #
+  # GLIBC FLOOR — READ BEFORE RE-ENABLING. Unlike the `build` matrix above, this
+  # job's OS is whatever the self-hosted cuda runner happens to be, and today
+  # that is prettyhatemachine: Ubuntu 24.04, glibc 2.39. The 2026-08-03 catalog
+  # audit found libcvc-cuda 3.2.4+cvc.1 shipped requiring GLIBC_2.38, unusable
+  # on the 22.04 fleet. cvcpkg pack now verifies the floor (libcvc-deps#432), so
+  # re-running this as-is FAILS at pack time rather than shipping a broken
+  # bundle — that is the intended behaviour, not a regression. To actually
+  # publish libcvc-cuda, the cuda runner must be glibc <= 2.35 (a 22.04 host
+  # with an NVIDIA GPU + CUDA toolkit). Pinning an image cannot fix this the way
+  # it fixes the matrix above; it needs the right machine.
   build-cuda:
     needs: [ensure-org, compute-revisions]
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
