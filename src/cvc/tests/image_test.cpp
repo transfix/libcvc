@@ -83,14 +83,35 @@ TEST(ImageTest, ConstructFromSourceCopies) {
 TEST(ImageTest, CopyOnWrite) {
   image a = make_rgba(4, 4);
   image b = a; // shares the buffer
-  EXPECT_EQ(a.data(), a.data());
+  // The copy really does share: check via storage(), which does NOT detach.
+  // (Checking with data() cannot work — the first data() call detaches, so it
+  // would destroy the very aliasing it is trying to observe.)
+  EXPECT_EQ(a.storage().get(), b.storage().get());
   unsigned char before = a.data()[0];
   // mutate b through data() -> detach; a must be untouched
   b.data()[0] = static_cast<unsigned char>(before ^ 0xff);
   EXPECT_EQ(a.data()[0], before);
   EXPECT_NE(b.data()[0], before);
-  // storage() shares without detaching
-  EXPECT_EQ(a.storage().get(), a.data());
+
+  // storage() shares without detaching — but this MUST be sequenced, not
+  // written as EXPECT_EQ(a.storage().get(), a.data()).
+  //
+  // storage() returns the shared_array BY VALUE, so the returned temporary
+  // holds a reference and pushes use_count() to 2; data() -> detach() copies
+  // whenever use_count() > 1. Argument evaluation order is UNSPECIFIED in C++,
+  // so in one full-expression the two calls race:
+  //   data() first    -> no extra ref, no detach       -> pointers equal
+  //   storage() first -> its temporary is still alive  -> data() DETACHES
+  // gcc happened to pick the first order and clang the second, so this passed
+  // on linux and failed on macOS for as long as macOS got far enough to run
+  // tests. Reproduced locally: same expression, g++ PASS / clang++ FAIL.
+  //
+  // Detaching while a storage() handle is outstanding is CORRECT — that handle
+  // may be a live zero-copy view (pycvc numpy, cvcGL vtkTexture), and a
+  // mutable data() must not write through it. The implementation is fine; only
+  // the test's sequencing was wrong.
+  unsigned char *p = a.data(); // detach (if still shared) happens here
+  EXPECT_EQ(a.storage().get(), p);
 }
 
 // Binding contract for the zero-copy pycvc image.numpy() view + the cvcGL
