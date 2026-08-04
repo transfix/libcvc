@@ -97,6 +97,28 @@ depends:
     - name: zstd
     - name: xz
     - name: freetype
+    # Two more MagickCore links, found by scanning the installed macOS prefix
+    # for @rpath deps nothing in it provides (rather than one CI round-trip per
+    # missing dylib):
+    #   libMagickCore-7.Q16HDRI.dylib -> @rpath/libfontconfig.1.dylib
+    #   animate/compare/composite     -> @rpath/libbz2.1.0.8.dylib
+    # The fontconfig one is what actually broke package-macos: it surfaced as a
+    # gtest `discover_tests` failure, because discovery RUNS the test binary and
+    # dyld resolves MagickCore's whole chain at that point — so an undeclared
+    # delegate looks like a broken test harness, not a missing package.
+    #
+    # fontconfig is scoped: it has linux/macos bundles only, and libcvc also
+    # builds windows, where an unconditional dep would fail the deps-install
+    # outright (same trap as assimp/openblas above). bzip2 is unscoped — it is
+    # published for every platform libcvc builds.
+    - name: fontconfig
+      platforms: [linux, macos]
+    # fontconfig's own link — flat install means adding a dep can reveal the
+    # next layer, so the prefix was re-scanned after adding fontconfig and
+    # libfontconfig.dylib -> @rpath/libexpat.1.10.0.dylib turned up. Unscoped:
+    # expat is published for every platform libcvc builds.
+    - name: expat
+    - name: bzip2
     - name: libxml2
     - name: yaml
     - name: levmar
@@ -115,7 +137,25 @@ depends:
     # windows here once an assimp windows bundle is published.
     - name: assimp
       platforms: [linux, macos, freebsd, netbsd]
+    # Scoped for the same reason as assimp above, but the other way round:
+    # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
+    # Accelerate framework, so libcvc-deps uses the system libraries there —
+    # see the "No macOS entry" comment on openblas's own build matrix, and
+    # levmar, which already scopes its openblas dep the same way.
+    #
+    # Unconditional, this failed EVERY macos deps-install outright:
+    #     Error: requested component(s) not found in the catalog for this
+    #     platform tuple: openblas
+    # and because install-deps is all-or-nothing, nothing else got installed
+    # either — so the visible symptom was a bogus `find_package(libiimod)`
+    # failure at src/cvc/CMakeLists.txt:279, naming an innocent package. That
+    # red predates 2026-07-27 and was mistaken for the Xcode 26.5 breakage.
+    #
+    # Nothing needs openblas by name on macOS: libcvc reaches BLAS through
+    # levmar, whose config tries `find_dependency(OpenBLAS CONFIG QUIET)` and
+    # falls back to `find_dependency(LAPACK)` — which resolves to Accelerate.
     - name: openblas
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
     - name: openssl
     - name: c-ares
     - name: re2
