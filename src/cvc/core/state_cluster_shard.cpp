@@ -346,14 +346,9 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
   return r;
 }
 
-std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_count) {
-  std::uint64_t cursor;
-  {
-    std::lock_guard<std::mutex> lk(_mutex);
-    cursor = _publish_cursor;
-  }
-
-  std::vector<state_mutation> pending = _adapter->journal().replay_after(cursor);
+std::vector<state_mutation> state_cluster_shard::collect_local(std::uint64_t after_sequence,
+                                                               std::size_t max_count) {
+  std::vector<state_mutation> pending = _adapter->journal().replay_after(after_sequence);
   std::vector<state_mutation> out;
   out.reserve(pending.size());
   for (auto &m : pending) {
@@ -381,6 +376,17 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     if (max_count != 0 && out.size() >= max_count)
       break;
   }
+  return out;
+}
+
+std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_count) {
+  std::uint64_t cursor;
+  {
+    std::lock_guard<std::mutex> lk(_mutex);
+    cursor = _publish_cursor;
+  }
+
+  std::vector<state_mutation> out = collect_local(cursor, max_count);
 
   if (!out.empty()) {
     std::lock_guard<std::mutex> lk(_mutex);
@@ -389,6 +395,13 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     _replica->observe_local(_publish_cursor);
   }
   return out;
+}
+
+std::vector<state_mutation> state_cluster_shard::replay_local(std::uint64_t after_sequence) {
+  // Deliberately does not touch _publish_cursor: a backfill is an
+  // extra copy sent to one peer, not a hand-off of the pending
+  // queue. The receiver's seen-set discards anything it already has.
+  return collect_local(after_sequence, /*max_count=*/0);
 }
 
 std::uint64_t state_cluster_shard::published_cursor() const {

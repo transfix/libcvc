@@ -145,6 +145,19 @@ public:
   // pending.
   std::vector<state_mutation> drain_local(std::size_t max_count = 0);
 
+  // Return local-origin mutations journaled after `after_sequence`,
+  // stamped for the wire exactly as drain_local() stamps them, but
+  // WITHOUT advancing the publish cursor.
+  //
+  // Transports use this to backfill a peer that connects mid-stream.
+  // drain_local() advances the cursor whether or not the transport
+  // had anywhere to send the mutations, so any write made while no
+  // peer was connected is otherwise invisible to a peer that
+  // connects later. Replaying is safe to repeat: the receiving
+  // shard's replica seen-set drops (origin_node_id, sequence) pairs
+  // it has already applied.
+  std::vector<state_mutation> replay_local(std::uint64_t after_sequence = 0);
+
   // Last drained local sequence (0 if none drained yet).
   std::uint64_t published_cursor() const;
 
@@ -345,6 +358,11 @@ public:
   void uninstall_as_default();
 
 private:
+  // Shared body of drain_local()/replay_local(): replay the journal
+  // past `after_sequence`, keep local-origin mutations, and stamp
+  // each one for the wire (cluster id, HLC time, blob offload).
+  std::vector<state_mutation> collect_local(std::uint64_t after_sequence, std::size_t max_count);
+
   std::string _cluster_id;
   std::string _local_node_id;
   std::string _root_path;
