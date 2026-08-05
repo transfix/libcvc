@@ -58,7 +58,7 @@ on:
           - 'false'
           - 'true'
       publish_cuda:
-        description: 'Also build+publish the libcvc-cuda GPU variant on linux AND windows (needs the self-hosted cuda runners; skipped otherwise).'
+        description: 'Also build+publish the libcvc-cuda GPU variant on linux AND windows (needs the self-hosted cuda runners). Only affects manual dispatches — a v* tag push always builds them.'
         required: false
         default: 'false'
         type: choice
@@ -624,8 +624,18 @@ jobs:
   # broken bundle.
   build-cuda:
     needs: [ensure-org, compute-revisions]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
+    # Runs on a `v*` tag push as well as an opt-in dispatch, so a release ships
+    # libcvc-cuda alongside the CPU packages instead of leaving it to whoever
+    # remembers to dispatch by hand. Before this, tagging a release published
+    # libcvc/cvcgl/pycvc/pycvc-gl and silently omitted the CUDA variant, which
+    # then drifted a version behind on every release.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true') }}
     runs-on: [self-hosted, linux, cuda]
+    # Bounds a wedged build. It does NOT bound the QUEUE: a job waiting on an
+    # offline self-hosted runner sits until the workflow's own 24h limit. That
+    # is a live exposure now that a tag push requests these runners
+    # unconditionally — see the windows twin, whose machine roams.
+    timeout-minutes: 180
     # Build inside a 22.04 CUDA image, NOT on the runner host.
     #
     # The only cuda-capable linux runner (prettyhatemachine) is Ubuntu 24.04 =
@@ -792,7 +802,7 @@ jobs:
             --output-dir dist
 
       - name: Publish to cvcpkg.org
-        if: github.event.inputs.dry_run == 'false'
+        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -850,8 +860,17 @@ jobs:
   #     cvcpkg builder agent uses it).
   build-cuda-windows:
     needs: [ensure-org, compute-revisions]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true' }}
+    # Same tag-push gate as the linux twin — see there.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true') }}
     runs-on: [self-hosted, windows, cuda]
+    # ⚠ sandipaws ROAMS. If it is offline when a release is tagged, this job
+    # queues rather than fails, and nothing here can bound that — timeout-minutes
+    # only starts counting once a job is running. The rest of the release still
+    # publishes (every job publishes independently), but the RUN will not reach
+    # a terminal state, and `concurrency: cancel-in-progress: false` means the
+    # next same-ref run queues behind it. That is the identical failure the dead
+    # macos-13 lane already causes; if it bites, cancel the run.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -1227,7 +1246,7 @@ jobs:
             --output-dir dist
 
       - name: Publish to cvcpkg.org
-        if: github.event.inputs.dry_run == 'false'
+        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
         shell: pwsh
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
