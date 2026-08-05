@@ -904,9 +904,42 @@ jobs:
               if ($_ -match '([A-Za-z]:\\[^\r\n]*python\.exe)') { $cands.Add($Matches[1]) }
             }
           } catch { }
-          foreach ($root in @("$env:LOCALAPPDATA\Programs\Python", 'C:\Program Files', 'C:\Program Files (x86)', 'C:\')) {
+
+          # Ask the cvcpkg builder service where ITS interpreter lives. The
+          # builder is a Python application and already runs on this machine,
+          # so if anything here has a working CPython, that does.
+          try {
+            Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match 'cvcpkg' -or $_.PathName -match 'cvcpkg' } |
+              ForEach-Object {
+                if ($_.PathName -match '([A-Za-z]:\\[^"'']*python(?:w)?\.exe)') { $cands.Add($Matches[1]) }
+              }
+          } catch { }
+
+          # NOTE on LOCALAPPDATA: this runner service is LocalSystem, so that
+          # variable points at the SYSTEM profile, not a human's. The first
+          # attempt at this step therefore found nothing but MSYS2's python
+          # even though the box has others — a per-user Python install, and the
+          # user-PATH entry that comes with it, are both invisible here. Hence
+          # the explicit sweep of every user profile below.
+          $roots = @(
+            "$env:LOCALAPPDATA\Programs\Python",
+            'C:\Program Files', 'C:\Program Files (x86)', 'C:\',
+            'C:\ProgramData'
+          )
+          Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $roots += "$($_.FullName)\AppData\Local\Programs\Python"
+          }
+          foreach ($root in $roots) {
             if (Test-Path $root) {
               Get-ChildItem -Path $root -Filter 'Python*' -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  $p = Join-Path $_.FullName 'python.exe'
+                  if (Test-Path $p) { $cands.Add($p) }
+                }
+              # conda/mamba distributions keep python.exe at the root.
+              Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^(mini|ana)(forge|conda)\d*$' } |
                 ForEach-Object {
                   $p = Join-Path $_.FullName 'python.exe'
                   if (Test-Path $p) { $cands.Add($p) }
@@ -925,10 +958,14 @@ jobs:
             $chosen = $p; break
           }
           if (-not $chosen) {
-            Write-Host '::error::No usable CPython on this runner — need one with pip. Install a python.org CPython on sandipaws.'
+            Write-Host '::error::No usable CPython on this runner (need one with pip, outside an msys64/Strawberry tree).'
             Write-Host 'Candidates considered:'
             if ($rejected) { $rejected | ForEach-Object { Write-Host "  - $_" } }
             else { Write-Host '  (none found at all)' }
+            Write-Host ''
+            Write-Host 'FIX: install a python.org CPython on this machine with "Install for all users"'
+            Write-Host '     (and "Add python.exe to PATH"). A per-user install is NOT enough — this'
+            Write-Host '     runner service is LocalSystem and cannot see a human profile or user PATH.'
             exit 1
           }
           Write-Host "Using python: $chosen"
