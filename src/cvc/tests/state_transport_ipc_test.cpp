@@ -711,6 +711,121 @@ TEST(StateTransportIpcTest, MessageRoundTripCrossPeer) {
   tB.stop();
 }
 
+// Two nodes that each dial the other end up with two connections
+// between them, and the fan-out used to put every frame on both. The
+// receiver dropped the copy, but the two copies arrived on two reader
+// threads that record-then-apply with no cross-connection ordering,
+// so the later frame could be applied before the earlier one. That is
+// what made StateExecMultiprocessIpc.OobMessagePipeline flaky: its
+// child saw payloads as "aa,bb,dd,cc,".
+//
+// The frame count is the deterministic half of this: 2x before the
+// fix, 1x after. The ordering assertion is the half that actually
+// matters.
+TEST(StateTransportIpcTest, RedundantConnectionsSendEachMessageOncePerPeer) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_dup");
+  auto pB = make_socket_path("B_dup");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+
+  // Each side dials the other: two connections for one peering.
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tA.connection_count() == 2u && tB.connection_count() == 2u; },
+                         std::chrono::milliseconds(3000)))
+      << "expected the doubly-connected topology this test is about";
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // Let both HELLOs land so the fan-out knows each peer's node id.
+  ASSERT_TRUE(
+      wait_until([&] { return tA.total_received_frames() >= 2; }, std::chrono::milliseconds(2000)));
+
+  std::mutex mu;
+  std::vector<std::string> got;
+  sB.message_bus().subscribe("chat", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    got.push_back(m.string_value);
+  });
+
+  const int kCount = 32;
+  std::vector<std::string> want;
+  for (int i = 0; i < kCount; ++i) {
+    std::string id = "m" + std::to_string(i);
+    want.push_back(id);
+    tA.publish_message(make_oob_ipc("C", "A", id, "chat.lobby", id));
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return got.size() >= static_cast<std::size_t>(kCount);
+      },
+      std::chrono::milliseconds(5000)));
+  // Give any duplicate a chance to show up before asserting on counts.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  std::lock_guard<std::mutex> lk(mu);
+  EXPECT_EQ(got, want) << "subscriber saw the stream out of order";
+  EXPECT_EQ(tB.total_received_messages(), static_cast<std::uint64_t>(kCount))
+      << "each message should cross the wire once per peer, not once per connection";
+}
+
+// Same for mutations: the duplicate copy is dropped by the seen-set,
+// but two reader threads applying it race, and because the seen-set is
+// exact membership rather than a high-water mark an older mutation
+// applied late silently reinstates a stale value.
+TEST(StateTransportIpcTest, RedundantConnectionsSendEachMutationOncePerPeer) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_dupm");
+  auto pB = make_socket_path("B_dupm");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tA.connection_count() == 2u && tB.connection_count() == 2u; },
+                         std::chrono::milliseconds(3000)));
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(
+      wait_until([&] { return tA.total_received_frames() >= 2; }, std::chrono::milliseconds(2000)));
+
+  const int kCount = 32;
+  cvc::state::instance(aA)("dup.k").value(std::string("seed"));
+  for (int i = 0; i < kCount; ++i) {
+    cvc::state::instance(aA)("dup.k").value("v" + std::to_string(i));
+    tA.pump_all();
+    tA.flush();
+  }
+
+  std::string want = "v" + std::to_string(kCount - 1);
+  ASSERT_TRUE(wait_until([&] { return cvc::state::instance(aB)("dup.k").value() == want; },
+                         std::chrono::milliseconds(5000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  EXPECT_EQ(cvc::state::instance(aB)("dup.k").value(), want);
+  EXPECT_EQ(tB.total_received_mutations(), static_cast<std::uint64_t>(kCount))
+      << "each mutation should cross the wire once per peer, not once per connection";
+
+  tA.stop();
+  tB.stop();
+}
+
 TEST(StateTransportIpcTest, MessageDedupAcrossMultiPath) {
   cvc::app aA, aB;
   cvc::state_transport_ipc tA, tB;
