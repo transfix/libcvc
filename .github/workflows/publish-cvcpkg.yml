@@ -847,10 +847,36 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Provision python and cmake instead of inheriting whatever this box has
+      # on PATH. The first dry run showed exactly why:
+      #
+      #     python -> C:\msys64\mingw64\bin\python.exe   ("No module named pip")
+      #     cmake  -> C:\Strawberry\c\bin\cmake.exe      (3.29.2, Strawberry Perl's)
+      #
+      # i.e. an MSYS2 MinGW interpreter with no pip, and the cmake that ships
+      # with Strawberry Perl for building CPAN XS modules against gcc. Neither
+      # belongs anywhere near an MSVC + nvcc build. setup-python prepends its
+      # interpreter (and its Scripts dir, where pip puts cmake.exe) to PATH, so
+      # both shadow the accidental ones.
+      #
+      # This mirrors the linux lane: depend on the runner for the CUDA toolkit
+      # and MSVC, and provision everything else.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cmake
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 'cmake<4' for the same reason as the linux job — see there.
+          python -m pip install --no-cache-dir 'cmake<4'
+          if ($LASTEXITCODE -ne 0) { throw "cmake install failed ($LASTEXITCODE)" }
+
       # A self-hosted Windows box has whatever was installed on it by hand,
       # which drifts. Fail here with a readable message rather than 40 minutes
       # later inside CMake's compiler detection.
-      - name: Preflight (toolchain present)
+      - name: Preflight (toolchain is the RIGHT toolchain)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -858,6 +884,17 @@ jobs:
             $found = Get-Command $exe -ErrorAction SilentlyContinue
             if (-not $found) { throw "$exe is not on PATH on this runner" }
             Write-Host "$exe -> $($found.Source)"
+          }
+          # Presence is NOT enough — the first dry run failed with a python that
+          # existed and a cmake that existed, both of them the wrong ones. Assert
+          # capability and provenance, not just that the name resolves.
+          python -m pip --version
+          if ($LASTEXITCODE -ne 0) { throw 'the python on PATH has no pip — wrong interpreter is shadowing setup-python' }
+          foreach ($bad in 'msys64', 'Strawberry', 'MinGW', 'mingw64') {
+            foreach ($exe in 'python', 'cmake') {
+              $src = (Get-Command $exe).Source
+              if ($src -like "*$bad*") { throw "$exe resolves to $src — a $bad toolchain is shadowing the provisioned one" }
+            }
           }
           # CUDA_PATH is set by the NVIDIA installer and is what the Configure
           # step hands to CMake as the CUDA toolset (see there for why).
