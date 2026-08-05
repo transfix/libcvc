@@ -15,11 +15,16 @@
 #include <cvc/core/state.h>
 #include <cvc/core/state_cluster_shard.h>
 #include <cvc/core/state_transport_ipc.h>
+#include <fcntl.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -48,6 +53,21 @@ bool wait_connected(cvc::state_transport_ipc &a, cvc::state_transport_ipc &b,
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   return false;
+}
+
+// Spin until `pred` holds or timeout. Receive-side assertions need
+// this rather than wait_for_received(): that counter is incremented
+// by the reader thread when a frame is decoded, which is before
+// dispatch_inbound has ingested it, so it can be satisfied a moment
+// before the mutation is visible in the tree or the replica.
+template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
 }
 
 } // namespace
@@ -92,7 +112,8 @@ TEST(StateTransportIpcTest, TwoEndpointConvergence) {
   EXPECT_GE(pumped, 1u);
   tA.flush();
   // Receive is async on B.
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("k").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
 
   EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1");
   EXPECT_GE(sB.replica().last_applied("A"), 1u);
@@ -124,7 +145,8 @@ TEST(StateTransportIpcTest, RoundTripSuppressedByDedup) {
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   tA.pump_all();
   tA.flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("rt").value() == "payload"; },
+                         std::chrono::milliseconds(2000)));
 
   // B applied A's mutation but does not re-journal it. Pumping B
   // should be a no-op so nothing flows back.
@@ -134,7 +156,8 @@ TEST(StateTransportIpcTest, RoundTripSuppressedByDedup) {
   cvc::state::instance(aA)("rt").value(std::string("payload2"));
   tA.pump_all();
   tA.flush();
-  tB.wait_for_received(2, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("rt").value() == "payload2"; },
+                         std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("rt").value(), "payload2");
   tA.stop();
   tB.stop();
@@ -166,6 +189,252 @@ TEST(StateTransportIpcTest, CrossClusterIsolation) {
 
   EXPECT_NE(cvc::state::instance(aB)("iso").value(), "v");
   EXPECT_EQ(sB.replica().last_applied("A"), 0u);
+  tA.stop();
+  tB.stop();
+}
+
+// A writes and pumps while nobody is connected. pump_shard() drains
+// the journal and advances the publish cursor regardless of whether
+// there was anywhere to send, so without backfill-on-connect those
+// mutations are gone: a peer that connects afterwards would never
+// see them, however long it pumps.
+TEST(StateTransportIpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_late");
+  auto pB = make_socket_path("B_late");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("late.k").value(std::string("seed"));
+  cvc::state::instance(aA)("late.k").value(std::string("v1"));
+
+  // The drop: drained with zero connections, cursor advanced anyway.
+  ASSERT_EQ(tA.connection_count(), 0u);
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+  EXPECT_GT(sA.published_cursor(), 0u);
+
+  // B joins only now, and A never writes again.
+  ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("late.k").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
+  EXPECT_EQ(cvc::state::instance(aB)("late.k").value(), "v1");
+  EXPECT_GT(tA.total_backfilled(), 0u);
+  tA.stop();
+  tB.stop();
+}
+
+// Backfill must reach the peer ahead of any concurrently published
+// mutation. The receiving replica's seen-set is exact membership, not
+// a high-water mark, so if a live frame overtook the replay the older
+// values would be applied last and clobber the newer one.
+//
+// Reads frames off a raw socket rather than using a second transport,
+// because the property under test is wire order: mutation sequences
+// must arrive monotonically even while another thread publishes.
+TEST(StateTransportIpcTest, BackfillPrecedesConcurrentLiveTraffic) {
+  cvc::app aA;
+  cvc::state_transport_ipc tA;
+  auto pA = make_socket_path("A_order");
+  tA.start(pA, "A", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  sA.attach();
+  tA.register_shard(&sA);
+
+  cvc::state::instance(aA)("ord.k").value(std::string("seed"));
+  for (int i = 0; i < 64; ++i)
+    cvc::state::instance(aA)("ord.k").value("v" + std::to_string(i));
+  tA.pump_all(); // Dropped: no peers yet. Journal keeps all 64.
+  tA.flush();
+
+  // Raw peer: connect, then keep publishing so live frames race the
+  // backfill on this very connection.
+  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, pA.c_str(), sizeof(addr.sun_path) - 1);
+  ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)), 0);
+
+  // Drain the socket on its own thread throughout. publish() writes
+  // synchronously, so a peer that stops reading would wedge the
+  // writer once the socket buffer filled.
+  ASSERT_EQ(::fcntl(fd, F_SETFL, O_NONBLOCK), 0);
+  std::vector<unsigned char> buf;
+  std::mutex buf_mu;
+  std::atomic<bool> stop_reader{false};
+  std::thread drainer([&]() {
+    while (!stop_reader.load()) {
+      unsigned char tmp[65536];
+      ssize_t r = ::recv(fd, tmp, sizeof(tmp), 0);
+      if (r > 0) {
+        std::lock_guard<std::mutex> lk(buf_mu);
+        buf.insert(buf.end(), tmp, tmp + r);
+        continue;
+      }
+      if (r == 0)
+        return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+
+  for (int i = 64; i < 128; ++i) {
+    cvc::state::instance(aA)("ord.k").value("v" + std::to_string(i));
+    tA.pump_all();
+    tA.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  stop_reader.store(true);
+  drainer.join();
+  ::close(fd);
+  std::lock_guard<std::mutex> buf_lk(buf_mu);
+
+  // Walk the frame stream: u32 magic, u16 version, u16 type, u32 len.
+  auto le32 = [&](std::size_t o) {
+    return static_cast<std::uint32_t>(buf[o]) | (static_cast<std::uint32_t>(buf[o + 1]) << 8) |
+           (static_cast<std::uint32_t>(buf[o + 2]) << 16) |
+           (static_cast<std::uint32_t>(buf[o + 3]) << 24);
+  };
+  std::size_t off = 0;
+  int frames = 0, mutations = 0;
+  std::uint64_t prev_seq = 0;
+  bool first_frame_is_hello = false;
+  while (off + 12 <= buf.size()) {
+    std::uint16_t mtype = static_cast<std::uint16_t>(buf[off + 4 + 2] | (buf[off + 4 + 3] << 8));
+    std::uint32_t len = le32(off + 8);
+    if (off + 12 + len > buf.size())
+      break;
+    if (frames == 0)
+      first_frame_is_hello = (mtype == 1);
+    if (mtype == 2) { // MUTATION
+      // Payload: cluster_id, tree_id, origin_node_id (all u32-len
+      // prefixed strings), then u64 sequence.
+      std::size_t p = off + 12;
+      for (int f = 0; f < 3; ++f)
+        p += 4 + le32(p);
+      std::uint64_t seq = 0;
+      for (int b = 0; b < 8; ++b)
+        seq |= static_cast<std::uint64_t>(buf[p + b]) << (8 * b);
+      // Non-decreasing, not strictly increasing: a mutation caught by
+      // both the backfill snapshot and a live publish legitimately
+      // goes out twice, and the receiver's seen-set drops the repeat.
+      // Only a sequence going *backwards* means the replay lost the
+      // race and would overwrite a newer value with an older one.
+      EXPECT_GE(seq, prev_seq) << "mutation sequence went backwards at frame " << frames << " ("
+                               << seq << " after " << prev_seq
+                               << "): backfill lost the race with live traffic";
+      prev_seq = seq;
+      ++mutations;
+    }
+    off += 12 + len;
+    ++frames;
+  }
+  EXPECT_TRUE(first_frame_is_hello);
+  EXPECT_GE(mutations, 64) << "expected the whole journal to be backfilled";
+  tA.stop();
+}
+
+// Convergence check on the same race, through a real peer: whatever
+// the interleaving, B must end up holding A's latest value.
+TEST(StateTransportIpcTest, BackfillDoesNotClobberConcurrentWrites) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_race");
+  auto pB = make_socket_path("B_race");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("race.k").value(std::string("seed"));
+  for (int i = 0; i < 32; ++i)
+    cvc::state::instance(aA)("race.k").value("v" + std::to_string(i));
+  tA.pump_all(); // Dropped: no peers yet.
+  tA.flush();
+
+  // Keep publishing while B connects, so a live frame races the
+  // backfill on the same connection.
+  std::atomic<bool> stop_writer{false};
+  std::atomic<int> last_written{-1};
+  std::thread writer([&]() {
+    for (int i = 32; !stop_writer.load(); ++i) {
+      cvc::state::instance(aA)("race.k").value("v" + std::to_string(i));
+      last_written.store(i);
+      tA.pump_all();
+      tA.flush();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+
+  ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  stop_writer.store(true);
+  writer.join();
+
+  // Drain anything still queued, then let it settle.
+  tA.pump_all();
+  tA.flush();
+  std::string want = "v" + std::to_string(last_written.load());
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (cvc::state::instance(aB)("race.k").value() == want)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  // B must converge on the newest value, not on a replayed older one.
+  EXPECT_EQ(cvc::state::instance(aB)("race.k").value(), want);
+  tA.stop();
+  tB.stop();
+}
+
+// The escape hatch: with backfill disabled the transport keeps its
+// old behaviour, so the late joiner sees nothing.
+TEST(StateTransportIpcTest, BackfillCanBeDisabled) {
+  cvc::app aA, aB;
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_nobf");
+  auto pB = make_socket_path("B_nobf");
+  tA.set_backfill_on_connect(false);
+  EXPECT_FALSE(tA.backfill_on_connect());
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("nobf.k").value(std::string("seed"));
+  cvc::state::instance(aA)("nobf.k").value(std::string("v1"));
+  tA.pump_all();
+  tA.flush();
+
+  ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  EXPECT_EQ(tA.total_backfilled(), 0u);
+  EXPECT_NE(cvc::state::instance(aB)("nobf.k").value(), "v1");
   tA.stop();
   tB.stop();
 }
@@ -244,7 +513,8 @@ TEST(StateTransportIpcTest, BlobPayloadRoundTrip) {
 
   tA.publish(m);
   tA.flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return sB.replica().last_applied("A") == 100u; },
+                         std::chrono::milliseconds(2000)));
 
   EXPECT_GE(tB.total_received_frames(), 1u);
   // sB.replica should record A,100 as last_applied (blob fetch may
