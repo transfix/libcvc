@@ -150,6 +150,61 @@ jobs:
           emit pycvc-gl    pycvc_gl
           emit libcvc-cuda libcvc_cuda
 
+  # Is there an ONLINE self-hosted runner for each CUDA lane?
+  #
+  # A job whose labels match a registered-but-offline runner does not fail — it
+  # QUEUES, and `timeout-minutes` cannot save it because that clock only starts
+  # once a job is running. The run then never reaches a terminal state, and
+  # `concurrency.cancel-in-progress: false` makes the next same-ref run stack up
+  # behind it. That is exactly how the retired macos-13 lane stranded runs for
+  # 19+ hours, and now that a `v*` tag requests the CUDA runners automatically,
+  # a release tagged while sandipaws (which roams) is offline would do the same.
+  #
+  # So: ask first, and skip the lane rather than hang the release.
+  #
+  # Listing runners needs administration:read, which GITHUB_TOKEN does not
+  # normally carry. The check therefore FAILS OPEN — if the API call is refused
+  # it reports both lanes available and behaviour is exactly as before, never
+  # worse. Set CVCPKG_RUNNER_PAT (a PAT with repo admin read) to make it
+  # effective.
+  check-cuda-runners:
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.probe.outputs.linux }}
+      windows: ${{ steps.probe.outputs.windows }}
+    steps:
+      - name: Probe self-hosted CUDA runners
+        id: probe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CVCPKG_RUNNER_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if ! runners="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runners" --paginate 2>/dev/null)"; then
+            echo "::warning::Cannot list self-hosted runners (needs administration:read; set CVCPKG_RUNNER_PAT). Assuming both CUDA lanes are available."
+            echo "linux=true"   >> "$GITHUB_OUTPUT"
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          probe() {  # $1 = os label
+            jq -r --arg os "$1" '
+              [ .runners[]
+                | select(.status == "online")
+                | select([.labels[].name] | index("cuda"))
+                | select([.labels[].name | ascii_downcase] | index($os))
+              ] | length' <<<"$runners"
+          }
+          for os in linux windows; do
+            n="$(probe "$os")"
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "$os: $n online cuda runner(s)"
+              echo "$os=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::No ONLINE self-hosted [$os, cuda] runner — skipping that CUDA lane instead of queueing on it."
+              echo "$os=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
   build:
     needs: [ensure-org, compute-revisions]
     strategy:
@@ -181,7 +236,24 @@ jobs:
           # 22.04 here too, for the same floor reason.
           - { os: ubuntu-22.04-arm, platform: linux,   arch: arm64, experimental: true }
           - { os: macos-14,         platform: macos,   arch: arm64 }
-          - { os: macos-13,         platform: macos,   arch: x86_64 }
+          # macos-13 was RETIRED by GitHub on 2025-12-04. The label still
+          # resolves, so jobs did not fail — they queued forever. Observed on
+          # 2026-08-05: run 30887429235 sat with both macos-13 jobs `queued`
+          # for 19+ hours while every other job finished, and because
+          # `concurrency.cancel-in-progress` is false, later runs on the same
+          # ref stacked up behind it and never started either.
+          #
+          # macos-15-intel is GitHub's designated replacement and the LAST
+          # x86_64 macOS image — it goes away in August 2027, after which
+          # Actions has no Intel macOS at all.
+          #
+          # Marked experimental for the same reason the arm64 lane is: the
+          # catalog contains ZERO macos/x86_64 bundles (checked), so this lane
+          # source-builds its entire dependency closure and must not be able to
+          # fail the release. Drop the entry outright if Intel macOS is not
+          # actually a supported target — that is the honest alternative, given
+          # the 2027 sunset and the empty catalog.
+          - { os: macos-15-intel,   platform: macos,   arch: x86_64, experimental: true }
           # windows-2022 (VS2022 v143) pinned deliberately: windows-latest now
           # ships VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's
           # C++20 state_exec/distributed-state TUs (seen in dry-runs round 2-7;
@@ -623,18 +695,16 @@ jobs:
   # (libcvc-deps#432), so a host build fails at pack time rather than shipping a
   # broken bundle.
   build-cuda:
-    needs: [ensure-org, compute-revisions]
+    needs: [ensure-org, compute-revisions, check-cuda-runners]
     # Runs on a `v*` tag push as well as an opt-in dispatch, so a release ships
     # libcvc-cuda alongside the CPU packages instead of leaving it to whoever
     # remembers to dispatch by hand. Before this, tagging a release published
     # libcvc/cvcgl/pycvc/pycvc-gl and silently omitted the CUDA variant, which
     # then drifted a version behind on every release.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true') }}
+    if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true')) && needs.check-cuda-runners.outputs.linux == 'true' }}
     runs-on: [self-hosted, linux, cuda]
-    # Bounds a wedged build. It does NOT bound the QUEUE: a job waiting on an
-    # offline self-hosted runner sits until the workflow's own 24h limit. That
-    # is a live exposure now that a tag push requests these runners
-    # unconditionally — see the windows twin, whose machine roams.
+    # Bounds a wedged build. It does NOT bound the QUEUE — check-cuda-runners
+    # is what keeps this job from queueing on a machine that is not there.
     timeout-minutes: 180
     # Build inside a 22.04 CUDA image, NOT on the runner host.
     #
@@ -859,17 +929,16 @@ jobs:
   #     would be depending on an accident. pwsh 7 is present on sandipaws (the
   #     cvcpkg builder agent uses it).
   build-cuda-windows:
-    needs: [ensure-org, compute-revisions]
-    # Same tag-push gate as the linux twin — see there.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true') }}
+    needs: [ensure-org, compute-revisions, check-cuda-runners]
+    # Same tag-push gate as the linux twin, plus the availability probe.
+    #
+    # sandipaws ROAMS, so this is the lane that most needs the probe: without
+    # it, tagging a release while that machine is offline would queue this job
+    # indefinitely rather than fail it. Skipped-with-a-warning is the right
+    # outcome — the rest of the release publishes regardless, and the run can
+    # actually finish.
+    if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true')) && needs.check-cuda-runners.outputs.windows == 'true' }}
     runs-on: [self-hosted, windows, cuda]
-    # ⚠ sandipaws ROAMS. If it is offline when a release is tagged, this job
-    # queues rather than fails, and nothing here can bound that — timeout-minutes
-    # only starts counting once a job is running. The rest of the release still
-    # publishes (every job publishes independently), but the RUN will not reach
-    # a terminal state, and `concurrency: cancel-in-progress: false` means the
-    # next same-ref run queues behind it. That is the identical failure the dead
-    # macos-13 lane already causes; if it bites, cancel the run.
     timeout-minutes: 180
     strategy:
       fail-fast: false
