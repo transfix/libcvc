@@ -125,6 +125,8 @@ jobs:
       pycvc: ${{ steps.rev.outputs.pycvc }}
       pycvc_gl: ${{ steps.rev.outputs.pycvc_gl }}
       libcvc_cuda: ${{ steps.rev.outputs.libcvc_cuda }}
+      pycvc_cuda: ${{ steps.rev.outputs.pycvc_cuda }}
+      pycvc_gl_cuda: ${{ steps.rev.outputs.pycvc_gl_cuda }}
     steps:
       - uses: actions/checkout@v5
       - name: Install cvcpkg (from libcvc-deps master)
@@ -148,7 +150,9 @@ jobs:
           emit cvcgl       cvcgl
           emit pycvc       pycvc
           emit pycvc-gl    pycvc_gl
-          emit libcvc-cuda libcvc_cuda
+          emit libcvc-cuda  libcvc_cuda
+          emit pycvc-cuda   pycvc_cuda
+          emit pycvc-gl-cuda pycvc_gl_cuda
 
   # Is there an ONLINE self-hosted runner for each CUDA lane?
   #
@@ -891,6 +895,135 @@ jobs:
             --link shared \
             --output-dir dist \
             --token "$CVCPKG_TOKEN"
+
+      # ── CUDA family: pycvc-cuda + pycvc-gl-cuda ─────────────────────────
+      #
+      # Which packages need a -cuda peer is decided by ONE question: does this
+      # package's own compiled output change when CVC_USING_CUDA flips?
+      #
+      #   pycvc / pycvc-gl  YES — both compile pycvc_volume.cpp, whose
+      #                     on_gpu/cuda_ptr/enable_cuda bodies are
+      #                     #ifdef CVC_USING_CUDA (real device pointers vs
+      #                     host stubs). Public Python API is identical.
+      #   cvcgl             NO  — it contains no CUDA code at all, and
+      #                     cvc::volume's ABI is variant-INVARIANT
+      #                     (voxels.h declares _cuda_unified_ptr
+      #                     unconditionally so sizeof(voxels) matches), so the
+      #                     single published cvcgl links correctly against
+      #                     libcvc-cuda. That is the roadmap's resolution (1),
+      #                     which has landed — hence no cvcgl-cuda here.
+      #
+      # These steps mirror the CPU `build` job's Linux family steps; the only
+      # deltas are the CUDA stage prefix and the -cuda recipe names. Guarded
+      # with !cancelled() so one package failing does not skip the others.
+
+      - name: Install CUDA family deps (Python 3.11 + numpy + VTK + cvcgl)
+        if: ${{ !cancelled() && matrix.config == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          # Same set as the CPU family step, plus the PUBLISHED cvcgl: this job
+          # deliberately does not build cvcgl from source, because there is only
+          # one cvcgl and it is ABI-compatible with either libcvc variant.
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto cvcgl \
+            --prefix "$PY" --config release --link shared
+          # numpy's bundled openblas is not self-resolved by RPATH, so a bare
+          # `import numpy` (which find_package(Python3 ... NumPy) performs)
+          # fails without numpy.libs on the loader path. Same guard as the CPU job.
+          export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
+          NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
+          {
+            echo "PY=$PY"
+            echo "NPY_INC=$NPY_INC"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, pack & publish pycvc-cuda
+        if: ${{ !cancelled() && matrix.config == 'release' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"          # the CUDA libcvc built above
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # Core numpy bindings only (no VTK). Building against the CUDA $STAGE
+          # is the ONLY difference from the CPU pycvc build — CVC_USING_CUDA
+          # arrives as a PUBLIC compile definition on cvc::cvc, so the GPU
+          # bodies are selected automatically.
+          cmake -S bindings/pycvc -B build-pycvc-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvc-cuda" \
+            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-pycvc-cuda --parallel
+          cmake --install build-pycvc-cuda
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/pycvc-cuda \
+            --from-prefix stage-pycvc-cuda \
+            --platform linux \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_cuda }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish pycvc-cuda \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform linux --config release --link shared \
+              --output-dir dist --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping pycvc-cuda publish"
+          fi
+
+      - name: Build, pack & publish pycvc-gl-cuda
+        if: ${{ !cancelled() && matrix.config == 'release' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # Scene module. cvcgl comes from $PY (the published single package),
+          # not from a source build — see the family header above.
+          cmake -S bindings/pycvc -B build-pycvcgl-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=OFF \
+            -DCVC_BUILD_PYCVC_GL=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvcgl-cuda" \
+            -DPython3_EXECUTABLE="$PY/bin/python3.11" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-pycvcgl-cuda --parallel
+          cmake --install build-pycvcgl-cuda
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/pycvc-gl-cuda \
+            --from-prefix stage-pycvcgl-cuda \
+            --platform linux \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.pycvc_gl_cuda }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish pycvc-gl-cuda \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform linux --config release --link shared \
+              --output-dir dist --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping pycvc-gl-cuda publish"
+          fi
 
       # The container runs as root (--user root, needed for apt) but the
       # workspace is a bind-mount of the runner's _work dir on the host, and the

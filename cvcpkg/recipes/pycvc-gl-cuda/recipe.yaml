@@ -6,17 +6,31 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "pycvc-gl-cuda — the pycvc.gl scriptable scene bindings (over cvcGL + VTK) built against the CUDA stack (libcvc-cuda + cvcgl-cuda), so the volume facade it compiles exposes GPU behavior (enable_cuda / __cuda_array_interface__) and it links the GPU cvcGL. Same Python API as the CPU `pycvc-gl`; depends on the core `pycvc-cuda` module."
+  description: "pycvc-gl-cuda — the pycvc.gl scriptable scene bindings (over cvcGL + VTK) built against the CUDA stack (libcvc-cuda + the single cvcgl), so the volume facade it compiles exposes GPU behavior (enable_cuda / __cuda_array_interface__). Same Python API as the CPU `pycvc-gl`; depends on the core `pycvc-cuda` module."
   homepage: https://github.com/transfix/libcvc
   license: GPL-2.0-or-later
   tags: [python, bindings, swig, vtk, scene, scientific, volumetric, cuda, gpu]
 
 # The GPU build of the pycvc scene bindings — identical sources to the CPU
-# `pycvc-gl` recipe, built against the CUDA variants. It needs a peer for TWO
-# reasons: (1) it compiles pycvc_volume.cpp, whose CUDA methods are
-# `#ifdef CVC_USING_CUDA`-gated (real device pointers vs host stubs); (2) it
-# links cvcGL, and it must link the ABI/CUDA-matched cvcgl-cuda (not the CPU
-# cvcgl) so cvcGL's GL <-> CUDA interop is available and the volume ABI matches.
+# `pycvc-gl` recipe, built against the CUDA libcvc. It needs a peer because it
+# compiles pycvc_volume.cpp, whose CUDA methods are `#ifdef CVC_USING_CUDA`-
+# gated (real device pointers vs host stubs).
+#
+# It links the SINGLE `cvcgl`, not a cvcgl-cuda. An earlier draft of this
+# recipe required an ABI/CUDA-matched cvcgl peer; both halves of that
+# requirement are now moot. cvcGL contains no CUDA code of its own, and
+# cvc::volume's ABI is variant-INVARIANT — voxels.h declares
+# `_cuda_unified_ptr` unconditionally so sizeof(voxels) is identical with and
+# without CVC_USING_CUDA — so one cvcgl links correctly against either libcvc.
+# That is the cvcpkg roadmap's resolution (1) ("only the CUDA-code-bearing
+# packages get -cuda peers"), and it is precisely what unblocks this recipe:
+# the roadmap had deferred it "pending resolution (1) so it can keep the
+# single cvcgl".
+#
+# Reintroduce a cvcgl-cuda peer if and when cvcGL grows its own
+# `#ifdef CVC_USING_CUDA` code (the planned GL <-> CUDA 3D-texture interop) —
+# at that point cvcGL's compiled output becomes variant-dependent and this
+# dependency should move back.
 #
 # Selection mirrors the rest of the family: provides the `pycvc-gl` slot
 # (mutually exclusive with the CPU pycvc-gl; same installed files) and requires
@@ -34,9 +48,9 @@ patches: []
 
 depends:
   build:
-    # The GPU libcvc SDK + the GPU cvcGL (ABI/CUDA-matched) + Python + numpy + VTK.
+    # The GPU libcvc SDK + the single (variant-invariant) cvcGL + Python + numpy + VTK.
     - name: libcvc-cuda
-    - name: cvcgl-cuda
+    - name: cvcgl
     - name: python311
     - name: numpy-cp311
     - name: vtk
@@ -45,7 +59,7 @@ depends:
     # consistent (pycvc-cuda, not the CPU pycvc).
     - name: pycvc-cuda
     - name: libcvc-cuda
-    - name: cvcgl-cuda
+    - name: cvcgl
     - name: python311
     - name: numpy-cp311
     - name: vtk
