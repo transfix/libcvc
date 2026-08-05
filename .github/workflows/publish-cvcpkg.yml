@@ -879,16 +879,73 @@ jobs:
       #
       # This mirrors the linux lane: depend on the runner for the CUDA toolkit
       # and MSVC, and provision everything else.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # actions/setup-python does NOT work on this runner. Its Windows install
+      # script edits HKLM and the runner does not have the rights:
+      #
+      #     Remove registry entries for Python 3.12(x64)...
+      #     ##[error]Remove-Item : Requested registry access is not allowed.
+      #
+      # A working CPython does exist on sandipaws — the cvcpkg builder agent is
+      # a Python application and runs there — it simply is not what `python`
+      # resolves to for the Actions service, which gets MSYS2's (no pip). So
+      # find the real one instead of installing another.
+      #
+      # On failure this prints every candidate it considered and why each was
+      # rejected, so a provisioning gap is diagnosable from the log alone
+      # rather than costing another dispatch to find out.
+      - name: Locate a usable Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cands = New-Object System.Collections.Generic.List[string]
+          # The py launcher knows about every registered install.
+          try {
+            (& py -0p 2>$null) | ForEach-Object {
+              if ($_ -match '([A-Za-z]:\\[^\r\n]*python\.exe)') { $cands.Add($Matches[1]) }
+            }
+          } catch { }
+          foreach ($root in @("$env:LOCALAPPDATA\Programs\Python", 'C:\Program Files', 'C:\Program Files (x86)', 'C:\')) {
+            if (Test-Path $root) {
+              Get-ChildItem -Path $root -Filter 'Python*' -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  $p = Join-Path $_.FullName 'python.exe'
+                  if (Test-Path $p) { $cands.Add($p) }
+                }
+            }
+          }
+          $onPath = Get-Command python -ErrorAction SilentlyContinue
+          if ($onPath) { $cands.Add($onPath.Source) }
+
+          $rejected = @()
+          $chosen = $null
+          foreach ($p in ($cands | Select-Object -Unique)) {
+            if ($p -match 'msys64|Strawberry|MinGW|mingw') { $rejected += "$p  (gcc-world toolchain)"; continue }
+            & $p -m pip --version *> $null
+            if ($LASTEXITCODE -ne 0) { $rejected += "$p  (no pip)"; continue }
+            $chosen = $p; break
+          }
+          if (-not $chosen) {
+            Write-Host '::error::No usable CPython on this runner — need one with pip. Install a python.org CPython on sandipaws.'
+            Write-Host 'Candidates considered:'
+            if ($rejected) { $rejected | ForEach-Object { Write-Host "  - $_" } }
+            else { Write-Host '  (none found at all)' }
+            exit 1
+          }
+          Write-Host "Using python: $chosen"
+          $dir = Split-Path $chosen
+          # Prepend so this interpreter, its pip, and anything pip installs
+          # (cmake.exe, cvcpkg.exe) all shadow the MSYS2/Strawberry copies.
+          $dir             | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$dir\Scripts"   | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "PYEXE=$chosen"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install cmake
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # 'cmake<4' for the same reason as the linux job — see there.
-          python -m pip install --no-cache-dir 'cmake<4'
+          # 'cmake<4' for the same reason as the linux job — see there. This
+          # also displaces Strawberry Perl's cmake, which is built for gcc.
+          & $env:PYEXE -m pip install --no-cache-dir 'cmake<4'
           if ($LASTEXITCODE -ne 0) { throw "cmake install failed ($LASTEXITCODE)" }
 
       # A self-hosted Windows box has whatever was installed on it by hand,
