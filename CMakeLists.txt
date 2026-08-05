@@ -40,8 +40,40 @@ if(CVC_ENABLE_CUDA)
     # the fleet's own sm_86 cards. Verified by unpacking the built bundle:
     # `cuobjdump -lelf` listed exactly one target, sm_52.
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-      # Maxwell, Pascal, Volta, Turing, Ampere.
-      set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80")
+      # Maxwell, Pascal, Volta, Turing, Ampere — accepted by every CUDA
+      # toolkit we support (50/60/70 warn as deprecated on 12.9).
+      set(_cvc_cuda_arch 50 60 70 75 80)
+
+      # Newer generations are added only when THIS nvcc knows them, so a source
+      # build on an older toolkit still configures instead of dying with
+      # "Unsupported gpu architecture 'compute_100'". The version has to be
+      # probed directly: enable_language(CUDA) has not run yet, so
+      # CMAKE_CUDA_COMPILER_VERSION does not exist at this point.
+      #
+      # These are REAL targets, not virtual ones, and that is deliberate: the
+      # shipped bundles contain no PTX to JIT from, because SetupCUDA.cmake
+      # sets CUDA_RESOLVE_DEVICE_SYMBOLS and the device-link step emits SASS
+      # only (measured — adding an `-virtual` entry changes nothing). So an
+      # architecture that is not compiled in simply cannot run, and this list
+      # is the package's entire compatibility surface.
+      execute_process(COMMAND "${CMAKE_CUDA_COMPILER}" --version
+                      OUTPUT_VARIABLE _cvc_nvcc_version ERROR_QUIET)
+      if(_cvc_nvcc_version MATCHES "release ([0-9]+)\\.([0-9]+)")
+        set(_cvc_cuda_ver "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+        if(_cvc_cuda_ver VERSION_GREATER_EQUAL 11.8)
+          list(APPEND _cvc_cuda_arch 90)        # Hopper
+        endif()
+        if(_cvc_cuda_ver VERSION_GREATER_EQUAL 12.8)
+          list(APPEND _cvc_cuda_arch 100 120)   # Blackwell (datacenter, consumer)
+        endif()
+      endif()
+
+      # CACHE, not a plain variable: a plain `set` here leaves CMakeCache.txt
+      # with no CMAKE_CUDA_ARCHITECTURES entry at all, which silently defeats
+      # anything inspecting the cache to confirm what was built (the publish
+      # workflow's multi-arch guard does exactly that).
+      set(CMAKE_CUDA_ARCHITECTURES "${_cvc_cuda_arch}" CACHE STRING
+          "CUDA architectures libcvc compiles device code for")
     endif()
     enable_language(CUDA)
   else()
