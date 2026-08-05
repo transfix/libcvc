@@ -41,6 +41,21 @@ bool wait_connected(cvc::state_transport_grpc &a, cvc::state_transport_grpc &b,
   return false;
 }
 
+// Spin until `pred` holds or timeout. Receive-side assertions need
+// this rather than wait_for_received(): that counter is incremented
+// by the reader thread when a frame is decoded, which is before
+// on_inbound_mutation has ingested it, so it can be satisfied a
+// moment before the mutation is visible in the tree or the replica.
+template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
+}
+
 } // namespace
 
 TEST(StateTransportGrpcTest, StartStopBindsEphemeralPort) {
@@ -57,6 +72,206 @@ TEST(StateTransportGrpcTest, ConnectFailsWhenPeerMissing) {
   // Connect to a port that should be unbound.
   EXPECT_FALSE(t.connect_to_peer("127.0.0.1:1", std::chrono::milliseconds(150)));
   t.stop();
+}
+
+// A writes and pumps while nobody is connected. pump_shard() drains
+// the journal and advances the publish cursor regardless of whether
+// there was anywhere to send, so without backfill-on-connect those
+// mutations are gone: a peer that connects afterwards would never
+// see them, however long it pumps.
+//
+// B dials A here, so the backfill goes out from A's server-side
+// stream handler.
+TEST(StateTransportGrpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
+  cvc::app aA, aB;
+  cvc::state_transport_grpc tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("late.k").value(std::string("seed"));
+  cvc::state::instance(aA)("late.k").value(std::string("v1"));
+
+  // The drop: drained with zero connections, cursor advanced anyway.
+  ASSERT_EQ(tA.connection_count(), 0u);
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+  EXPECT_GT(sA.published_cursor(), 0u);
+
+  // B joins only now, and A never writes again.
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("late.k").value() == "v1"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("late.k").value(), "v1");
+  EXPECT_GT(tA.total_backfilled(), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+// Same, but A dials B, so the backfill goes out from A's client-side
+// connect_to_peer() path instead. gRPC establishes streams in two
+// places and both have to replay.
+TEST(StateTransportGrpcTest, LateJoinerBackfilledWhenLocalNodeDials) {
+  cvc::app aA, aB;
+  cvc::state_transport_grpc tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("dial.k").value(std::string("seed"));
+  cvc::state::instance(aA)("dial.k").value(std::string("v1"));
+  ASSERT_EQ(tA.connection_count(), 0u);
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+
+  ASSERT_TRUE(tA.connect_to_peer(tB.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("dial.k").value() == "v1"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("dial.k").value(), "v1");
+  EXPECT_GT(tA.total_backfilled(), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+// Backfill must reach the peer ahead of any concurrently published
+// mutation. The receiving replica's seen-set is exact membership,
+// not a high-water mark, so if a live frame overtook the replay the
+// older values would be applied last and clobber the newer one.
+//
+// B dials A, so A replays on its server handler thread while A's
+// main thread keeps publishing — that concurrency is the whole
+// point, and dialling from A instead would complete the backfill
+// inside connect_to_peer() before any live write could race it.
+// A writes strictly increasing v0..vN, so B's view must never move
+// backwards.
+TEST(StateTransportGrpcTest, BackfillPrecedesConcurrentLiveTraffic) {
+  cvc::app aA, aB;
+  cvc::state_transport_grpc tA, tB;
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  auto suffix = [](const std::string &v) -> long {
+    if (v.size() < 2 || v[0] != 'v')
+      return -1;
+    try {
+      return std::stol(v.substr(1));
+    } catch (...) {
+      return -1;
+    }
+  };
+
+  cvc::state::instance(aA)("ord.k").value(std::string("seed"));
+  for (int i = 0; i < 64; ++i)
+    cvc::state::instance(aA)("ord.k").value("v" + std::to_string(i));
+  tA.pump_all(); // Dropped: no peers yet. Journal keeps all 64.
+  tA.flush();
+
+  // Watch B for a value that goes backwards while the race is on.
+  std::atomic<bool> stop_watch{false};
+  std::atomic<long> regressions{0};
+  std::thread watcher([&]() {
+    long seen = -1;
+    while (!stop_watch.load()) {
+      long cur = suffix(cvc::state::instance(aB)("ord.k").value());
+      if (cur >= 0) {
+        if (cur < seen)
+          regressions.fetch_add(1);
+        else
+          seen = cur;
+      }
+    }
+  });
+
+  // Publish continuously; B connects into the middle of it.
+  std::atomic<bool> stop_writer{false};
+  std::atomic<int> last_written{63};
+  std::thread writer([&]() {
+    for (int i = 64; !stop_writer.load(); ++i) {
+      cvc::state::instance(aA)("ord.k").value("v" + std::to_string(i));
+      tA.pump_all();
+      tA.flush();
+      last_written.store(i);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  stop_writer.store(true);
+  writer.join();
+
+  std::string want = "v" + std::to_string(last_written.load());
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("ord.k").value() == want; },
+                         std::chrono::milliseconds(3000)));
+  stop_watch.store(true);
+  watcher.join();
+
+  EXPECT_EQ(regressions.load(), 0)
+      << "B's value moved backwards: backfill lost the race with live traffic";
+  EXPECT_EQ(cvc::state::instance(aB)("ord.k").value(), want);
+  EXPECT_GT(tA.total_backfilled(), 0u);
+
+  tA.stop();
+  tB.stop();
+}
+
+// The escape hatch: with backfill disabled the transport keeps its
+// old behaviour, so the late joiner sees nothing.
+TEST(StateTransportGrpcTest, BackfillCanBeDisabled) {
+  cvc::app aA, aB;
+  cvc::state_transport_grpc tA, tB;
+  tA.set_backfill_on_connect(false);
+  EXPECT_FALSE(tA.backfill_on_connect());
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  cvc::state::instance(aA)("nobf.k").value(std::string("seed"));
+  cvc::state::instance(aA)("nobf.k").value(std::string("v1"));
+  tA.pump_all();
+  tA.flush();
+
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  EXPECT_EQ(tA.total_backfilled(), 0u);
+  EXPECT_NE(cvc::state::instance(aB)("nobf.k").value(), "v1");
+
+  tA.stop();
+  tB.stop();
 }
 
 TEST(StateTransportGrpcTest, TwoEndpointConvergence) {

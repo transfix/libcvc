@@ -179,16 +179,33 @@ state_message decode_message(const pb::Message &in) {
 
 // Connection abstracts a single bidirectional stream. Server-side
 // streams run inside a gRPC handler thread; client-side streams own
-// a reader thread that we manage. Writes go through write_fn under
+// a reader thread that we manage. Writes go through write() under
 // write_mu so that the publish() fan-out and the per-stream Hello
 // path serialize on the same lock.
+//
+// write_locked() exists for admit_connection(), which has to keep
+// write_mu held across several frames; write_raw is the underlying
+// stream write and must only be called with write_mu held.
 class state_transport_grpc::connection {
 public:
   std::mutex write_mu;
-  std::function<bool(const pb::Frame &)> write_fn;
+  std::function<bool(const pb::Frame &)> write_raw;
   std::atomic<bool> alive{true};
   std::string remote_node_id;
   std::string remote_cluster_id;
+
+  bool can_write() const { return static_cast<bool>(write_raw); }
+
+  bool write_locked(const pb::Frame &f) {
+    if (!alive.load() || !write_raw)
+      return false;
+    return write_raw(f);
+  }
+
+  bool write(const pb::Frame &f) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    return write_locked(f);
+  }
 
   // Client-side only.
   std::shared_ptr<grpc::ClientContext> client_ctx;
@@ -224,28 +241,11 @@ public:
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
     auto *raw_stream = stream;
-    auto *write_mu = &conn->write_mu;
-    std::weak_ptr<state_transport_grpc::connection> wconn = conn;
-    conn->write_fn = [raw_stream, write_mu, wconn](const pb::Frame &f) -> bool {
-      auto sc = wconn.lock();
-      if (!sc)
-        return false;
-      std::lock_guard<std::mutex> lk(*write_mu);
-      if (!sc->alive.load())
-        return false;
-      return raw_stream->Write(f);
-    };
+    conn->write_raw = [raw_stream](const pb::Frame &f) -> bool { return raw_stream->Write(f); };
 
-    _owner->register_connection(conn);
-
-    // Send our Hello first.
-    {
-      pb::Frame f;
-      auto *h = f.mutable_hello();
-      h->set_node_id(_owner->local_node_id());
-      h->set_cluster_id(_owner->local_cluster_id());
-      conn->write_fn(f);
-    }
+    // Registers the connection and sends Hello followed by the
+    // journal backfill, all under this connection's write mutex.
+    _owner->admit_connection(conn);
 
     pb::Frame in;
     while (!ctx->IsCancelled() && stream->Read(&in)) {
@@ -423,28 +423,12 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   conn->client_stub = std::move(stub);
   conn->client_channel = channel;
 
-  auto *write_mu = &conn->write_mu;
-  std::weak_ptr<connection> wconn = conn;
-  conn->write_fn = [stream, write_mu, wconn](const pb::Frame &f) -> bool {
-    auto sc = wconn.lock();
-    if (!sc)
-      return false;
-    std::lock_guard<std::mutex> lk(*write_mu);
-    if (!sc->alive.load())
-      return false;
-    return stream->Write(f);
-  };
+  conn->write_raw = [stream](const pb::Frame &f) -> bool { return stream->Write(f); };
 
-  // Send our Hello.
-  {
-    pb::Frame f;
-    auto *h = f.mutable_hello();
-    h->set_node_id(_node_id);
-    h->set_cluster_id(_cluster_id);
-    conn->write_fn(f);
-  }
-
-  // Spawn reader.
+  // Spawn the reader before publishing the connection. admit_connection()
+  // makes it visible to stop(), which joins client_reader — so the thread
+  // has to already be assigned or stop() could miss it and leave a
+  // joinable std::thread to destruct.
   conn->client_reader = std::thread([this, conn]() {
     pb::Frame in;
     while (conn->alive.load() && conn->client_stream->Read(&in)) {
@@ -494,7 +478,9 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
     conn->alive.store(false);
   });
 
-  register_connection(conn);
+  // Registers the connection and sends Hello followed by the journal
+  // backfill, all under this connection's write mutex.
+  admit_connection(conn);
   return true;
 }
 
@@ -592,13 +578,13 @@ state_transport::publish_stats state_transport_grpc::publish(const state_mutatio
     conns = _conns;
   }
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn)
+    if (!c || !c->alive.load() || !c->can_write())
       continue;
     if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
-    if (c->write_fn(frame)) {
+    if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
       if (!c->remote_node_id.empty())
@@ -683,13 +669,13 @@ state_transport_grpc::publish_message(const state_message &m) {
     conns = _conns;
   }
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn)
+    if (!c || !c->alive.load() || !c->can_write())
       continue;
     if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
-    if (c->write_fn(frame)) {
+    if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
       if (!c->remote_node_id.empty())
@@ -743,6 +729,57 @@ void state_transport_grpc::on_inbound_message(const state_message &m) {
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {
   std::lock_guard<std::mutex> lk(_conns_mu);
   _conns.push_back(std::move(conn));
+}
+
+void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &conn) {
+  // Snapshot the shard list before taking the write mutex: every
+  // other path releases _shards_mu before touching a connection's
+  // write mutex, and keeping that order here avoids introducing a
+  // lock cycle.
+  std::vector<state_cluster_shard *> shards;
+  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+
+  // Hold the write mutex across publication of the connection so a
+  // concurrent publish() blocks until Hello and the backfill are on
+  // the wire. If a live mutation went out first, the older values
+  // replayed behind it would land on the peer afterwards and clobber
+  // the newer one (the seen-set only suppresses exact repeats).
+  std::lock_guard<std::mutex> wlk(conn->write_mu);
+  register_connection(conn);
+  send_hello_locked(*conn);
+  if (!shards.empty())
+    send_backfill_locked(*conn, shards);
+}
+
+void state_transport_grpc::send_hello_locked(connection &c) {
+  pb::Frame f;
+  auto *h = f.mutable_hello();
+  h->set_node_id(_node_id);
+  h->set_cluster_id(_cluster_id);
+  c.write_locked(f);
+}
+
+void state_transport_grpc::send_backfill_locked(connection &c,
+                                                const std::vector<state_cluster_shard *> &shards) {
+  // The peer's Hello has not arrived yet, so there is no remote node
+  // id to filter on; send everything and let the receiver drop what
+  // does not match its cluster (on_inbound_mutation) or its interest
+  // set (ingest_remote), exactly as it would for live traffic.
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    for (const auto &m : s->replay_local()) {
+      pb::Frame f;
+      encode_mutation(m, f.mutable_mutation());
+      if (!c.write_locked(f))
+        return; // Stream died mid-backfill; the reader will reap it.
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _backfilled.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 void state_transport_grpc::unregister_connection(connection *conn) {
@@ -806,8 +843,8 @@ void state_transport_grpc::on_inbound_chunk_request(connection *conn, const std:
   } else {
     rsp->set_found(false);
   }
-  if (conn && conn->alive.load() && conn->write_fn) {
-    conn->write_fn(f);
+  if (conn && conn->alive.load() && conn->can_write()) {
+    conn->write(f);
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
@@ -860,9 +897,9 @@ bool state_transport_grpc::fetch_chunk(const std::string &digest, chunk_callback
   }
   std::size_t sent = 0;
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn)
+    if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (c->write_fn(frame)) {
+    if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++sent;
     }
@@ -933,8 +970,8 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
     pe->set_sequence(e.sequence);
   }
 
-  if (conn && conn->alive.load() && conn->write_fn) {
-    conn->write_fn(f);
+  if (conn && conn->alive.load() && conn->can_write()) {
+    conn->write(f);
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
@@ -987,9 +1024,9 @@ bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
   }
   std::size_t sent = 0;
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->write_fn)
+    if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (c->write_fn(frame)) {
+    if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++sent;
       break; // only need one peer
@@ -1037,9 +1074,9 @@ void state_transport_grpc::heartbeat_loop() {
       conns = _conns;
     }
     for (auto &c : conns) {
-      if (!c || !c->alive.load() || !c->write_fn)
+      if (!c || !c->alive.load() || !c->can_write())
         continue;
-      if (c->write_fn(frame))
+      if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
