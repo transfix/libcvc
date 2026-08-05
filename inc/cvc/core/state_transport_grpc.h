@@ -54,6 +54,17 @@ namespace cvc {
 //   join client reader threads. Server handler threads are joined
 //   inside Shutdown.
 //
+// Catch-up:
+//   publish() is fire-and-forget to whichever streams exist at that
+//   instant, while pump_shard() advances the shard's publish cursor
+//   either way. A mutation pumped before any peer connected is
+//   therefore never retried. To keep late joiners convergent, every
+//   new stream is sent the registered shards' journaled local
+//   mutations before it sees live traffic — see
+//   set_backfill_on_connect(). Two nodes that each dial the other
+//   hold two streams and so exchange the backfill twice; the
+//   receiving replica's seen-set makes the repeat a no-op.
+//
 // Lifetime:
 //   Same constraint as state_transport_ipc: callers MUST stop() (or
 //   destroy) the transport before destroying any registered
@@ -128,6 +139,20 @@ public:
   void set_blob_store(state_blob_store *store) noexcept { _blob_store = store; }
   state_blob_store *blob_store() const noexcept { return _blob_store; }
 
+  // Backfill on connect (default true). When enabled, a newly
+  // established stream is sent every local-origin mutation each
+  // registered shard has journaled, before any live traffic, so a
+  // peer that connects after local writes still converges. Without
+  // it a mutation pumped while no peer was connected is dropped by
+  // publish() and never resent -- see pump_shard().
+  //
+  // Turn it off only when peers are known to obtain their initial
+  // view another way (request_snapshot(), or a peer that is always
+  // connected before the first write); the cost is one extra frame
+  // per journaled mutation per connect.
+  void set_backfill_on_connect(bool enable) noexcept { _backfill_on_connect = enable; }
+  bool backfill_on_connect() const noexcept { return _backfill_on_connect; }
+
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
@@ -149,6 +174,7 @@ public:
   std::uint64_t total_received_mutations() const noexcept { return _recv_mutations.load(); }
   std::uint64_t total_received_messages() const noexcept { return _recv_messages.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
+  std::uint64_t total_backfilled() const noexcept { return _backfilled.load(); }
 
   // Wait until at least `target` MUTATION frames have been received
   // (Hello frames are not counted) or `timeout` elapses.
@@ -180,6 +206,11 @@ public:
                                     const std::vector<snapshot_entry> &entries, bool final);
   void on_inbound_heartbeat(const std::string &node_id, const std::string &cluster_id);
   void register_connection(std::shared_ptr<connection> conn);
+  // Register `conn`, then send Hello and (if enabled) the backfill,
+  // all while holding conn->write_mu so that a publish() racing on
+  // another thread cannot slip a newer mutation in ahead of the
+  // older ones being replayed.
+  void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
   void increment_recv_mutations() noexcept {
@@ -190,6 +221,9 @@ public:
   }
 
 private:
+  void send_hello_locked(connection &c);
+  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+
   struct impl;
   std::unique_ptr<impl> _impl;
 
@@ -207,6 +241,9 @@ private:
   mutable std::mutex _conns_mu;
   std::vector<std::shared_ptr<connection>> _conns;
 
+  std::atomic<bool> _backfill_on_connect{true};
+
+  std::atomic<std::uint64_t> _backfilled{0};
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};
   std::atomic<std::uint64_t> _recv_frames{0};
