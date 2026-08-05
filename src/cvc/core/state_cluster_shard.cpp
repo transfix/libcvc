@@ -179,6 +179,10 @@ bool state_cluster_shard::ingest_remote_message(const state_message &m) {
 state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const state_mutation &m) {
   ingest_result r;
 
+  // Record-and-apply must be atomic against other ingesting threads;
+  // see the _ingest_mutex comment in the header.
+  std::lock_guard<std::recursive_mutex> ingest_lk(_ingest_mutex);
+
   // Loop detection: have we already applied this exact (origin,seq)?
   if (_replica->seen(m.origin_node_id, m.sequence, /*record*/ false)) {
     r.duplicate = true;

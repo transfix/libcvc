@@ -21,14 +21,14 @@ state_message_bus::subscription_id state_message_bus::subscribe(std::string path
                                                                 subscriber_fn cb) {
   if (!cb)
     return 0;
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   subscription_id id = _next_id++;
   _subs.push_back({id, std::move(path_prefix), std::move(cb)});
   return id;
 }
 
 bool state_message_bus::unsubscribe(subscription_id id) {
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   auto it =
       std::remove_if(_subs.begin(), _subs.end(), [id](const subscriber &s) { return s.id == id; });
   if (it == _subs.end())
@@ -55,33 +55,37 @@ bool state_message_bus::admit(const state_message &m) {
   // that want every admit to fire).
   std::vector<subscriber_fn> matched;
   bool dedup_bypass = m.origin_node_id.empty() && m.message_id.empty();
-  {
-    std::lock_guard<std::mutex> lk(_mu);
+  // Held across the dispatch below, not just the dedup: releasing it
+  // first would let two threads admit in one order and reach
+  // subscribers in another. See the threading note in the header.
+  std::lock_guard<std::recursive_mutex> lk(_mu);
 
-    if (!dedup_bypass) {
-      std::string key;
-      key.reserve(m.origin_node_id.size() + 1 + m.message_id.size());
-      key.append(m.origin_node_id);
-      key.push_back('\0');
-      key.append(m.message_id);
-      auto ins = _seen.insert(key);
-      if (!ins.second) {
-        _dups.fetch_add(1, std::memory_order_relaxed);
-        return false;
-      }
-      _seen_order.push_back(key);
-      if (_dedup_cap != 0 && _seen_order.size() > _dedup_cap) {
-        const std::string &old = _seen_order.front();
-        _seen.erase(old);
-        _seen_order.pop_front();
-      }
+  if (!dedup_bypass) {
+    std::string key;
+    key.reserve(m.origin_node_id.size() + 1 + m.message_id.size());
+    key.append(m.origin_node_id);
+    key.push_back('\0');
+    key.append(m.message_id);
+    auto ins = _seen.insert(key);
+    if (!ins.second) {
+      _dups.fetch_add(1, std::memory_order_relaxed);
+      return false;
     }
+    _seen_order.push_back(key);
+    if (_dedup_cap != 0 && _seen_order.size() > _dedup_cap) {
+      const std::string &old = _seen_order.front();
+      _seen.erase(old);
+      _seen_order.pop_front();
+    }
+  }
 
-    matched.reserve(_subs.size());
-    for (const auto &s : _subs) {
-      if (prefix_matches(s.prefix, m.path))
-        matched.push_back(s.fn);
-    }
+  // Copied rather than iterated in place: a subscriber is allowed to
+  // unsubscribe (or subscribe) from inside its own callback, which
+  // would otherwise invalidate the iterator mid-dispatch.
+  matched.reserve(_subs.size());
+  for (const auto &s : _subs) {
+    if (prefix_matches(s.prefix, m.path))
+      matched.push_back(s.fn);
   }
 
   _admitted.fetch_add(1, std::memory_order_relaxed);
@@ -99,7 +103,7 @@ bool state_message_bus::admit(const state_message &m) {
 void state_message_bus::note_dropped() { _dropped.fetch_add(1, std::memory_order_relaxed); }
 
 void state_message_bus::set_dedup_capacity(std::size_t cap) {
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   _dedup_cap = cap;
   if (cap != 0) {
     while (_seen_order.size() > cap) {
@@ -110,17 +114,17 @@ void state_message_bus::set_dedup_capacity(std::size_t cap) {
 }
 
 std::size_t state_message_bus::dedup_capacity() const noexcept {
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   return _dedup_cap;
 }
 
 std::size_t state_message_bus::subscriber_count() const {
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   return _subs.size();
 }
 
 std::size_t state_message_bus::dedup_size() const {
-  std::lock_guard<std::mutex> lk(_mu);
+  std::lock_guard<std::recursive_mutex> lk(_mu);
   return _seen.size();
 }
 

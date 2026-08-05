@@ -538,3 +538,43 @@ TEST(StateClusterShardTest, InlinePayloadOffloadDisabledByDefault) {
     }
   }
 }
+
+// A shard can be fed one peer's ordered stream by more than one
+// reader thread -- two connections to the same peer, for instance.
+// ingest_remote() records the mutation in the seen-set and then
+// applies it; without a lock spanning both, the two threads can
+// record in order and apply out of order. state_replica::seen() is
+// exact membership rather than a high-water mark, so nothing catches
+// an older mutation landing last: it silently reinstates a stale
+// value. Both threads replay the same ascending sequence here, so the
+// shard must settle on the newest value every time.
+TEST(StateClusterShardTest, ConcurrentIngestOfOneStreamAppliesInOrder) {
+  const int kMutations = 300;
+  const int kRounds = 20;
+
+  for (int round = 0; round < kRounds; ++round) {
+    cvc::app ctx;
+    cvc::state_cluster_shard sh(ctx, "testCluster", "local");
+    sh.attach();
+
+    std::atomic<bool> go{false};
+    auto feed = [&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      for (int i = 1; i <= kMutations; ++i)
+        sh.ingest_remote(
+            make_set_value("A", static_cast<std::uint64_t>(i), "ord.k", "v" + std::to_string(i)));
+    };
+    std::thread t1(feed), t2(feed);
+    go.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    std::string want = "v" + std::to_string(kMutations);
+    ASSERT_EQ(cvc::state::instance(ctx)("ord.k").value(), want)
+        << "a stale mutation was applied last (round " << round << ")";
+    EXPECT_EQ(sh.replica().last_applied("A"), static_cast<std::uint64_t>(kMutations));
+
+    sh.detach();
+  }
+}
