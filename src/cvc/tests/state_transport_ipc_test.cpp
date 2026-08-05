@@ -55,6 +55,21 @@ bool wait_connected(cvc::state_transport_ipc &a, cvc::state_transport_ipc &b,
   return false;
 }
 
+// Spin until `pred` holds or timeout. Receive-side assertions need
+// this rather than wait_for_received(): that counter is incremented
+// by the reader thread when a frame is decoded, which is before
+// dispatch_inbound has ingested it, so it can be satisfied a moment
+// before the mutation is visible in the tree or the replica.
+template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
+}
+
 } // namespace
 
 TEST(StateTransportIpcTest, StartStopBindsAndUnlinks) {
@@ -97,7 +112,8 @@ TEST(StateTransportIpcTest, TwoEndpointConvergence) {
   EXPECT_GE(pumped, 1u);
   tA.flush();
   // Receive is async on B.
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("k").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
 
   EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1");
   EXPECT_GE(sB.replica().last_applied("A"), 1u);
@@ -129,7 +145,8 @@ TEST(StateTransportIpcTest, RoundTripSuppressedByDedup) {
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   tA.pump_all();
   tA.flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("rt").value() == "payload"; },
+                         std::chrono::milliseconds(2000)));
 
   // B applied A's mutation but does not re-journal it. Pumping B
   // should be a no-op so nothing flows back.
@@ -139,7 +156,8 @@ TEST(StateTransportIpcTest, RoundTripSuppressedByDedup) {
   cvc::state::instance(aA)("rt").value(std::string("payload2"));
   tA.pump_all();
   tA.flush();
-  tB.wait_for_received(2, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("rt").value() == "payload2"; },
+                         std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("rt").value(), "payload2");
   tA.stop();
   tB.stop();
@@ -207,8 +225,9 @@ TEST(StateTransportIpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
   // B joins only now, and A never writes again.
   ASSERT_TRUE(tB.connect_to_peer(pA, std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
 
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("late.k").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("late.k").value(), "v1");
   EXPECT_GT(tA.total_backfilled(), 0u);
   tA.stop();
@@ -308,7 +327,12 @@ TEST(StateTransportIpcTest, BackfillPrecedesConcurrentLiveTraffic) {
       std::uint64_t seq = 0;
       for (int b = 0; b < 8; ++b)
         seq |= static_cast<std::uint64_t>(buf[p + b]) << (8 * b);
-      EXPECT_GT(seq, prev_seq) << "mutation sequence went backwards at frame " << frames << " ("
+      // Non-decreasing, not strictly increasing: a mutation caught by
+      // both the backfill snapshot and a live publish legitimately
+      // goes out twice, and the receiver's seen-set drops the repeat.
+      // Only a sequence going *backwards* means the replay lost the
+      // race and would overwrite a newer value with an older one.
+      EXPECT_GE(seq, prev_seq) << "mutation sequence went backwards at frame " << frames << " ("
                                << seq << " after " << prev_seq
                                << "): backfill lost the race with live traffic";
       prev_seq = seq;
@@ -489,7 +513,8 @@ TEST(StateTransportIpcTest, BlobPayloadRoundTrip) {
 
   tA.publish(m);
   tA.flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return sB.replica().last_applied("A") == 100u; },
+                         std::chrono::milliseconds(2000)));
 
   EXPECT_GE(tB.total_received_frames(), 1u);
   // sB.replica should record A,100 as last_applied (blob fetch may
