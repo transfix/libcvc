@@ -374,6 +374,18 @@ private:
   std::unique_ptr<state_message_bus> _message_bus;
   std::unique_ptr<state_write_policy> _write_policy;
 
+  // Serializes the whole of ingest_remote(). The seen-set record and
+  // the apply are two steps, and without a lock spanning both, two
+  // reader threads feeding this shard one peer's ordered stream can
+  // record in order and apply out of order. state_replica::seen() is
+  // exact membership rather than a high-water mark, so an older
+  // mutation applied late silently reinstates a stale value.
+  //
+  // Ordered before _mutex: paths that hold this may take _mutex, and
+  // none go the other way. Recursive so a state observer reached
+  // through apply_remote() can re-enter on the same thread.
+  mutable std::recursive_mutex _ingest_mutex;
+
   mutable std::mutex _mutex;
   std::uint64_t _publish_cursor = 0; // last drained local sequence
   bool _enforce_authority = false;
