@@ -865,35 +865,38 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Provision python and cmake instead of inheriting whatever this box has
-      # on PATH. The first dry run showed exactly why:
+      # ── Bootstrap ────────────────────────────────────────────────────────
+      # This job takes exactly TWO things from the machine: MSVC and the CUDA
+      # toolkit. Both are things a package manager cannot reasonably ship.
+      # Everything else — cmake, the dependency closure — comes from the cvcpkg
+      # catalog, and Python is bootstrapped if absent. Nothing here requires
+      # anyone to have logged into the runner and installed something by hand.
       #
-      #     python -> C:\msys64\mingw64\bin\python.exe   ("No module named pip")
-      #     cmake  -> C:\Strawberry\c\bin\cmake.exe      (3.29.2, Strawberry Perl's)
+      # Getting here took three dry runs, each finding a different way this box
+      # differs from a GitHub-hosted image:
       #
-      # i.e. an MSYS2 MinGW interpreter with no pip, and the cmake that ships
-      # with Strawberry Perl for building CPAN XS modules against gcc. Neither
-      # belongs anywhere near an MSVC + nvcc build. setup-python prepends its
-      # interpreter (and its Scripts dir, where pip puts cmake.exe) to PATH, so
-      # both shadow the accidental ones.
+      #   1. `python` is C:\msys64\mingw64\bin\python.exe, which has no pip,
+      #      and `cmake` is C:\Strawberry\c\bin\cmake.exe — Strawberry Perl's,
+      #      built for gcc. Neither belongs near an MSVC + nvcc build.
+      #   2. actions/setup-python cannot fix that: its Windows installer edits
+      #      HKLM and this runner lacks the rights —
+      #      "Remove registry entries for Python 3.12(x64)...
+      #       ##[error]Remove-Item : Requested registry access is not allowed."
+      #   3. Searching for an existing interpreter found only the MSYS2 one.
+      #      The runner service is LocalSystem, so $env:LOCALAPPDATA is the
+      #      SYSTEM profile: per-user installs, and the user PATH they extend,
+      #      are structurally invisible here. No amount of probing fixes that.
       #
-      # This mirrors the linux lane: depend on the runner for the CUDA toolkit
-      # and MSVC, and provision everything else.
-      # actions/setup-python does NOT work on this runner. Its Windows install
-      # script edits HKLM and the runner does not have the rights:
+      # Hence: look for a usable interpreter, and if there is none, unpack
+      # python.org's embeddable zip — no installer, no registry, no admin.
+      # Python is ONLY needed because cvcpkg is a Python application; it is a
+      # bootstrap, not part of the build toolchain.
       #
-      #     Remove registry entries for Python 3.12(x64)...
-      #     ##[error]Remove-Item : Requested registry access is not allowed.
-      #
-      # A working CPython does exist on sandipaws — the cvcpkg builder agent is
-      # a Python application and runs there — it simply is not what `python`
-      # resolves to for the Actions service, which gets MSYS2's (no pip). So
-      # find the real one instead of installing another.
-      #
-      # On failure this prints every candidate it considered and why each was
-      # rejected, so a provisioning gap is diagnosable from the log alone
-      # rather than costing another dispatch to find out.
+      # The search still runs first (a real interpreter beats a bootstrapped
+      # one) and reports every candidate it rejected, because each iteration on
+      # a roaming machine costs a dispatch.
       - name: Locate a usable Python
+        id: findpy
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -958,16 +961,17 @@ jobs:
             $chosen = $p; break
           }
           if (-not $chosen) {
-            Write-Host '::error::No usable CPython on this runner (need one with pip, outside an msys64/Strawberry tree).'
+            # NOT an error — the next step bootstraps a portable interpreter.
+            # Nothing about this build should require someone to have logged
+            # into the machine and installed Python by hand.
+            Write-Host 'No pre-existing usable CPython; will bootstrap a portable one.'
             Write-Host 'Candidates considered:'
             if ($rejected) { $rejected | ForEach-Object { Write-Host "  - $_" } }
             else { Write-Host '  (none found at all)' }
-            Write-Host ''
-            Write-Host 'FIX: install a python.org CPython on this machine with "Install for all users"'
-            Write-Host '     (and "Add python.exe to PATH"). A per-user install is NOT enough — this'
-            Write-Host '     runner service is LocalSystem and cannot see a human profile or user PATH.'
-            exit 1
+            'found=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
           }
+          'found=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Using python: $chosen"
           $dir = Split-Path $chosen
           # Prepend so this interpreter, its pip, and anything pip installs
@@ -976,62 +980,124 @@ jobs:
           "$dir\Scripts"   | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           "PYEXE=$chosen"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Install cmake
+      - name: Bootstrap a portable Python (only if the box has none)
+        if: steps.findpy.outputs.found != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # 'cmake<4' for the same reason as the linux job — see there. This
-          # also displaces Strawberry Perl's cmake, which is built for gcc.
-          & $env:PYEXE -m pip install --no-cache-dir 'cmake<4'
-          if ($LASTEXITCODE -ne 0) { throw "cmake install failed ($LASTEXITCODE)" }
+          # python.org's EMBEDDABLE distribution: a plain zip. No installer, no
+          # registry writes, no admin rights, nothing left on the machine —
+          # which is exactly why it works where actions/setup-python does not.
+          #
+          # This is a bootstrap, not the build toolchain. It exists only to run
+          # cvcpkg, which then supplies cmake from the catalog. Everything the
+          # build itself touches comes from cvcpkg or the CUDA toolkit.
+          $ver  = '3.12.10'
+          $root = Join-Path $env:RUNNER_TEMP 'py-embed'
+          $zip  = Join-Path $env:RUNNER_TEMP 'py-embed.zip'
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://www.python.org/ftp/python/$ver/python-$ver-embed-amd64.zip" -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $root -Force
+
+          # The embeddable build ships with site imports disabled via a ._pth
+          # file; pip cannot work until `import site` is uncommented.
+          Get-ChildItem $root -Filter 'python*._pth' | ForEach-Object {
+            (Get-Content $_.FullName) -replace '^#\s*import site', 'import site' |
+              Set-Content $_.FullName
+          }
+          # ensurepip is not bundled in the embeddable distribution either.
+          $getpip = Join-Path $root 'get-pip.py'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile $getpip
+          $py = Join-Path $root 'python.exe'
+          & $py $getpip --no-warn-script-location
+          if ($LASTEXITCODE -ne 0) { throw "get-pip failed ($LASTEXITCODE)" }
+          & $py -m pip --version
+          if ($LASTEXITCODE -ne 0) { throw "bootstrapped python still has no pip ($LASTEXITCODE)" }
+
+          Write-Host "Bootstrapped python: $py"
+          $root             | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$root\Scripts"   | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "PYEXE=$py"       | Out-File -FilePath $env:GITHUB_ENV  -Append -Encoding utf8
 
       # A self-hosted Windows box has whatever was installed on it by hand,
       # which drifts. Fail here with a readable message rather than 40 minutes
       # later inside CMake's compiler detection.
-      - name: Preflight (toolchain is the RIGHT toolchain)
+      # Scope: only the things this job legitimately expects FROM THE MACHINE —
+      # MSVC and the CUDA toolkit — plus the bootstrap interpreter. cmake is
+      # NOT checked here: it does not exist yet, because it comes from the
+      # cvcpkg catalog two steps down, and that step verifies it itself.
+      - name: Preflight (what must come from the machine)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($exe in 'python', 'cmake', 'nvcc') {
-            $found = Get-Command $exe -ErrorAction SilentlyContinue
-            if (-not $found) { throw "$exe is not on PATH on this runner" }
-            Write-Host "$exe -> $($found.Source)"
-          }
-          # Presence is NOT enough — the first dry run failed with a python that
-          # existed and a cmake that existed, both of them the wrong ones. Assert
-          # capability and provenance, not just that the name resolves.
-          python -m pip --version
-          if ($LASTEXITCODE -ne 0) { throw 'the python on PATH has no pip — wrong interpreter is shadowing setup-python' }
-          foreach ($bad in 'msys64', 'Strawberry', 'MinGW', 'mingw64') {
-            foreach ($exe in 'python', 'cmake') {
-              $src = (Get-Command $exe).Source
-              if ($src -like "*$bad*") { throw "$exe resolves to $src — a $bad toolchain is shadowing the provisioned one" }
-            }
-          }
+          # Presence is NOT enough — an earlier dry run failed with a python
+          # that existed and a cmake that existed, both the wrong ones. Assert
+          # capability, not that a name resolves.
+          if (-not $env:PYEXE) { throw 'PYEXE unset — the Python provisioning steps did not run' }
+          Write-Host "python -> $env:PYEXE"
+          & $env:PYEXE -m pip --version
+          if ($LASTEXITCODE -ne 0) { throw "the selected python ($env:PYEXE) has no pip" }
+
+          $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+          if (-not $nvcc) { throw 'nvcc is not on PATH — the CUDA toolkit must be installed on this runner' }
+          Write-Host "nvcc -> $($nvcc.Source)"
           # CUDA_PATH is set by the NVIDIA installer and is what the Configure
           # step hands to CMake as the CUDA toolset (see there for why).
           if (-not $env:CUDA_PATH) { throw 'CUDA_PATH is not set — is the CUDA toolkit installed?' }
           if (-not (Test-Path $env:CUDA_PATH)) { throw "CUDA_PATH points at a missing directory: $env:CUDA_PATH" }
           Write-Host "CUDA_PATH -> $env:CUDA_PATH"
-          cmake --version
           nvcc --version
 
       - name: Install cvcpkg (from local workspace clone)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pip install --upgrade pip
+          & $env:PYEXE -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed ($LASTEXITCODE)" }
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          & $env:PYEXE -m pip install 'git+https://github.com/transfix/libcvc-deps@master'
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install failed ($LASTEXITCODE)" }
-          cvcpkg --version
+          & $env:PYEXE -m cvcpkg --version
 
-      - name: Fetch libcvc-deps
+      - name: Install cmake from the cvcpkg catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # cmake 3.31.7+cvc.1 is published for windows/x86_64, so take it from
+          # the catalog rather than pip or the machine. That keeps this lane on
+          # the same cmake the rest of the fleet builds with, and displaces
+          # Strawberry Perl's gcc-oriented copy that PATH would otherwise hand
+          # us. (ninja is not needed — this job uses the VS generator.)
+          $tools = Join-Path $env:GITHUB_WORKSPACE 'tools'
+          & $env:PYEXE -m cvcpkg install cmake --prefix "$tools" --platform windows --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install cmake failed ($LASTEXITCODE)" }
+          $bin = Join-Path $tools 'bin'
+          if (-not (Test-Path (Join-Path $bin 'cmake.exe'))) {
+            Write-Host "::error::cvcpkg installed cmake but no cmake.exe under $bin"
+            Get-ChildItem $tools -Recurse -Filter 'cmake.exe' | ForEach-Object { Write-Host "  found: $($_.FullName)" }
+            exit 1
+          }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install libcvc deps
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
-        with:
-          build_type: Release
-          link: shared
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Deliberately NOT the ./.github/actions/fetch-libcvc-deps composite.
+          # That action is built for GitHub-hosted images: it runs
+          # actions/setup-python (which cannot install on this runner) and its
+          # steps are `shell: bash`. Calling install-deps directly is what the
+          # composite does anyway, minus two dependencies this machine cannot
+          # satisfy.
+          #
+          # Release deps for a Release build — Windows debug is excluded from
+          # publishing precisely because no windows-debug dep bundles exist.
+          $deps = Join-Path $env:GITHUB_WORKSPACE 'deps'
+          & $env:PYEXE -m cvcpkg install-deps cvcpkg/recipes/libcvc `
+            --prefix "$deps" --platform windows --arch x86_64 --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install-deps failed ($LASTEXITCODE)" }
+          "path=$deps" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Configure (CUDA / Windows)
         shell: pwsh
@@ -1119,7 +1185,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cvcpkg pack cvcpkg/recipes/libcvc-cuda `
+          & $env:PYEXE -m cvcpkg pack cvcpkg/recipes/libcvc-cuda `
             --from-prefix stage `
             --platform windows `
             --config "${{ matrix.config }}" `
@@ -1136,7 +1202,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
-          cvcpkg publish libcvc-cuda `
+          & $env:PYEXE -m cvcpkg publish libcvc-cuda `
             --server "$env:CVCPKG_SERVER" `
             --org "$env:CVCPKG_ORG" `
             --platform windows `
