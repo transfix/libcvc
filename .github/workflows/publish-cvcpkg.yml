@@ -933,20 +933,29 @@ jobs:
           Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $roots += "$($_.FullName)\AppData\Local\Programs\Python"
           }
+          # Every probe below is best-effort. Reading another account's profile
+          # as LocalSystem can raise "Access to the path ... is denied", and an
+          # unhandled one kills the whole step under ErrorActionPreference=Stop
+          # — which is exactly what happened on the first attempt, aborting
+          # before the bootstrap fallback could run. A directory we cannot look
+          # in is simply not a candidate.
           foreach ($root in $roots) {
-            if (Test-Path $root) {
+            try {
+              if (-not (Test-Path $root -ErrorAction SilentlyContinue)) { continue }
               Get-ChildItem -Path $root -Filter 'Python*' -Directory -ErrorAction SilentlyContinue |
                 ForEach-Object {
                   $p = Join-Path $_.FullName 'python.exe'
-                  if (Test-Path $p) { $cands.Add($p) }
+                  if (Test-Path $p -ErrorAction SilentlyContinue) { $cands.Add($p) }
                 }
               # conda/mamba distributions keep python.exe at the root.
               Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -match '^(mini|ana)(forge|conda)\d*$' } |
                 ForEach-Object {
                   $p = Join-Path $_.FullName 'python.exe'
-                  if (Test-Path $p) { $cands.Add($p) }
+                  if (Test-Path $p -ErrorAction SilentlyContinue) { $cands.Add($p) }
                 }
+            } catch {
+              Write-Host "  (skipping $root : $($_.Exception.Message))"
             }
           }
           $onPath = Get-Command python -ErrorAction SilentlyContinue
@@ -956,8 +965,14 @@ jobs:
           $chosen = $null
           foreach ($p in ($cands | Select-Object -Unique)) {
             if ($p -match 'msys64|Strawberry|MinGW|mingw') { $rejected += "$p  (gcc-world toolchain)"; continue }
-            & $p -m pip --version *> $null
-            if ($LASTEXITCODE -ne 0) { $rejected += "$p  (no pip)"; continue }
+            # Also best-effort: launching an interpreter inside a profile this
+            # service cannot read throws rather than returning an exit code.
+            try {
+              & $p -m pip --version *> $null
+              if ($LASTEXITCODE -ne 0) { $rejected += "$p  (no pip)"; continue }
+            } catch {
+              $rejected += "$p  (not runnable: $($_.Exception.Message))"; continue
+            }
             $chosen = $p; break
           }
           if (-not $chosen) {
