@@ -23,6 +23,26 @@ if(CVC_ENABLE_CUDA)
   check_language(CUDA)
   
   if(CMAKE_CUDA_COMPILER)
+    # The architecture list MUST be set before enable_language(CUDA).
+    #
+    # Under CMP0104 — NEW for any CMake >= 3.18, which this file's
+    # `cmake_minimum_required(VERSION 3.15...3.28)` range selects —
+    # enable_language(CUDA) DEFINES CMAKE_CUDA_ARCHITECTURES itself, from
+    # nvcc's own default of sm_52. The "if(NOT DEFINED ...)" block further
+    # down then saw it as already-defined and never fired, so the intended
+    # multi-arch list was dead code and every CUDA build silently produced a
+    # single-arch sm_52 fatbin.
+    #
+    # That is not a cosmetic loss. cubins are only forward-compatible within
+    # one major compute capability, and nothing here emits PTX to JIT from, so
+    # an sm_52-only libcvc-cuda fails to launch on any sm_6x+ GPU with
+    # "no kernel image is available for execution on the device" — including
+    # the fleet's own sm_86 cards. Verified by unpacking the built bundle:
+    # `cuobjdump -lelf` listed exactly one target, sm_52.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+      # Maxwell, Pascal, Volta, Turing, Ampere.
+      set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80")
+    endif()
     enable_language(CUDA)
   else()
     message(STATUS "CUDA compiler not found - disabling CUDA support")
@@ -105,12 +125,11 @@ if(CVC_ENABLE_CUDA)
   # Enable CUDA separable compilation for device code
   set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
   
-  # Set CUDA architectures (adjust as needed for your target GPUs)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    # Default to common architectures: Maxwell, Pascal, Volta, Turing, Ampere
-    set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80")
-  endif()
-  
+  # NOTE: CMAKE_CUDA_ARCHITECTURES is deliberately NOT set here — by this point
+  # enable_language(CUDA) has already defined it, so a default applied here can
+  # never take effect. It is set just before enable_language() above; see the
+  # comment there. Overriding on the command line still works from either spot.
+
   message(STATUS "CUDA support enabled")
   message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
   message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")

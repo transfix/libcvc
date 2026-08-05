@@ -752,6 +752,24 @@ jobs:
           echo "CUDA compiler: $cuda_cc"
           "$cuda_cc" --version
 
+          # And assert the fatbin is actually multi-arch. The first dry run
+          # packed a bundle whose device code was a single sm_52 target,
+          # because enable_language(CUDA) pre-defines CMAKE_CUDA_ARCHITECTURES
+          # and the project's list was applied too late to matter (fixed in
+          # CMakeLists.txt). cubins only work forward within one major compute
+          # capability and nothing emits PTX here, so a single-arch bundle
+          # fails to launch on the fleet's own sm_86 cards. Cheap to check,
+          # invisible until someone unpacks the tarball otherwise.
+          arches="$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[^=]*=//p' build/CMakeCache.txt | head -1)"
+          echo "CUDA architectures: $arches"
+          case "$arches" in
+            *\;*) ;;
+            *)
+              echo "::error::CMAKE_CUDA_ARCHITECTURES='$arches' is a single architecture. Refusing to pack a libcvc-cuda that cannot launch off that exact GPU generation."
+              exit 1
+              ;;
+          esac
+
       - name: Build & install
         shell: bash
         run: |
@@ -976,6 +994,18 @@ jobs:
             exit 1
           }
           Write-Host "CUDA compiler: $cc"
+
+          # Multi-arch assertion — see the Linux twin for the full rationale:
+          # a single-architecture fatbin cannot launch off that one GPU
+          # generation, and the first dry run produced exactly that.
+          $al = Select-String -Path build/CMakeCache.txt -Pattern '^CMAKE_CUDA_ARCHITECTURES:' |
+                Select-Object -First 1
+          $arches = if ($al) { ($al.Line -split '=', 2)[1] } else { '' }
+          Write-Host "CUDA architectures: $arches"
+          if ($arches -notmatch ';') {
+            Write-Host "::error::CMAKE_CUDA_ARCHITECTURES='$arches' is a single architecture. Refusing to pack a libcvc-cuda that cannot launch off that exact GPU generation."
+            exit 1
+          }
 
       - name: Build & install
         shell: pwsh
