@@ -23,6 +23,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <unordered_set>
 
 namespace cvc {
 
@@ -228,6 +229,27 @@ bool decode_message(const std::vector<unsigned char> &bytes, state_message &out)
   out.string_value = r.str();
   out.bytes = r.bytes();
   return r.ok();
+}
+
+// Two nodes that each dial the other hold two connections to the same
+// peer, and publish()/publish_message() would then put the same frame
+// on both. The peer drops the copy (mutations by (origin, sequence),
+// messages by (origin, message_id)), but the two copies arrive on two
+// reader threads which record-then-apply without any cross-connection
+// ordering, so the later frame can be applied before the earlier one.
+// For mutations that silently reinstates a stale value; for OOB
+// messages it hands subscribers the stream out of order.
+//
+// Sending once per peer removes the duplicate and, with it, the race:
+// a peer's frames all travel one connection and a connection is read
+// by exactly one thread, so per-peer order is the order they were
+// published in. Returns false when this peer was already served.
+// A connection whose HELLO has not landed yet has no node id to key
+// on and is always served.
+bool claim_peer(std::unordered_set<std::string> &served, const std::string &remote_node_id) {
+  if (remote_node_id.empty())
+    return true;
+  return served.insert(remote_node_id).second;
 }
 
 bool write_all(int fd, const unsigned char *data, std::size_t n) {
@@ -739,6 +761,7 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
+  std::unordered_set<std::string> sent_to;
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
@@ -746,6 +769,8 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
+    if (!claim_peer(sent_to, c->remote_node_id))
+      continue;
     std::lock_guard<std::mutex> wlk(c->write_mu);
     if (write_frame_locked(*c, kMsgMutation, body)) {
       ++stats.delivered;
@@ -834,6 +859,7 @@ state_transport_ipc::publish_message(const state_message &m) {
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
+  std::unordered_set<std::string> sent_to;
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
@@ -841,6 +867,8 @@ state_transport_ipc::publish_message(const state_message &m) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
+    if (!claim_peer(sent_to, c->remote_node_id))
+      continue;
     std::lock_guard<std::mutex> wlk(c->write_mu);
     if (write_frame_locked(*c, kMsgOob, body)) {
       ++stats.peers;
