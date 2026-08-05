@@ -114,6 +114,48 @@ jobs:
   # --cvc-revision. `next-revision` returns max(recipe_floor, highest_published
   # + 1) on the package's current upstream version, or the recipe floor if the
   # server is unreachable (harmless — such runs don't publish).
+  # Push this repo's recipes to the server.
+  #
+  # cvcpkg.org builds its dependency graph (/v1/deps) from the recipes it
+  # knows about. libcvc's recipes live HERE, not in libcvc-deps, so until they
+  # are pushed the server has never seen them — and every package in this
+  # family (libcvc, libcvc-cuda, cvcgl, pycvc, pycvc-gl, cvc-cli, and the -cuda
+  # peers) renders a package page with NO "Dependencies" and NO "Used By"
+  # section, and is badged `community` rather than mainline. Nothing errors;
+  # the sections are simply absent, which is why this went unnoticed.
+  #
+  # --no-default-recipes is important: without it push-all would also push
+  # whatever recipe set the installed cvcpkg carries (all ~557 libcvc-deps
+  # recipes), which this repo does not own and must not overwrite.
+  push-recipes:
+    needs: ensure-org
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cvcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+      - name: Push libcvc's recipes
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CVCPKG_TOKEN:-}" ]; then
+            echo "CVCPKG_TOKEN secret is required to push recipes"
+            exit 1
+          fi
+          cvcpkg recipe push-all \
+            --server "$CVCPKG_SERVER" \
+            --org "$CVCPKG_ORG" \
+            --recipes-dir cvcpkg/recipes \
+            --no-default-recipes \
+            --token "$CVCPKG_TOKEN"
+
   compute-revisions:
     needs: ensure-org
     runs-on: ubuntu-latest
