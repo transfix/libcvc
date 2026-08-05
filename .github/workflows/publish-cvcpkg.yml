@@ -1070,7 +1070,24 @@ jobs:
           $ErrorActionPreference = 'Stop'
           & $env:PYEXE -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed ($LASTEXITCODE)" }
-          & $env:PYEXE -m pip install 'git+https://github.com/transfix/libcvc-deps@master'
+
+          # --no-build-isolation, with the build backend installed up front.
+          #
+          # libcvc-deps builds with poetry-core, and pip's default isolated
+          # build environment does not work under python.org's embeddable
+          # distribution: that build suppresses normal sys.path construction in
+          # favour of its ._pth file, so the isolated env's site-packages never
+          # gets imported and the backend is invisible to the hook subprocess:
+          #
+          #     BackendUnavailable: Cannot import 'poetry.core.masonry.api'
+          #
+          # Installing poetry-core into the main environment and skipping
+          # isolation makes the backend importable from the site-packages we
+          # deliberately re-enabled. Safe here because the backend is the only
+          # build requirement (pyproject: requires = ["poetry-core>=1.8.0"]).
+          & $env:PYEXE -m pip install 'poetry-core>=1.8.0'
+          if ($LASTEXITCODE -ne 0) { throw "poetry-core install failed ($LASTEXITCODE)" }
+          & $env:PYEXE -m pip install --no-build-isolation 'git+https://github.com/transfix/libcvc-deps@master'
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install failed ($LASTEXITCODE)" }
           & $env:PYEXE -m cvcpkg --version
 
