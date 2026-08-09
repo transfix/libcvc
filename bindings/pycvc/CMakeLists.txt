@@ -52,8 +52,28 @@ set_property(SOURCE pycvc.i PROPERTY DEPENDS
 # module can install/test even when the core module isn't built in this run.
 enable_testing()
 # site-packages of the prefix interpreter (where python_sdist recipes install).
-set(_PYCVC_SITEDIR
-  "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+#
+# ASK the interpreter; do not assume a layout. The POSIX scheme is
+# lib/pythonX.Y/site-packages, but Windows CPython uses Lib/site-packages and
+# searches ONLY that. Hardcoding the POSIX form meant a Windows install landed
+# in a directory sys.path never contains: `import pycvc` failed even though the
+# files were sitting in the prefix, which reads as a missing package rather
+# than a misfiled one.
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" -c
+    "import os,sys,sysconfig;print(os.path.relpath(sysconfig.get_paths()['platlib'],sys.prefix).replace(os.sep,'/'))"
+  OUTPUT_VARIABLE _PYCVC_SITEDIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE _pycvc_sitedir_rc)
+if(NOT _pycvc_sitedir_rc EQUAL 0 OR _PYCVC_SITEDIR STREQUAL "" OR _PYCVC_SITEDIR MATCHES "^\\.\\.")
+  if(WIN32)
+    set(_PYCVC_SITEDIR "Lib/site-packages")
+  else()
+    set(_PYCVC_SITEDIR
+      "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+  endif()
+endif()
+message(STATUS "pycvc: installing python modules to \${CMAKE_INSTALL_PREFIX}/${_PYCVC_SITEDIR}")
 # libcvc.so must be on the loader path for the tests; the dual-mode cvc target's
 # output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
