@@ -1,0 +1,167 @@
+name: CI (recipe-first)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Recipe-first build path.
+#
+# Builds libcvc from its in-tree cvcpkg recipe (cvcpkg/recipes/libcvc/),
+# which declares the full third-party closure — so what CI runs is exactly
+# what a developer runs locally:
+#
+#     cvcpkg install-deps cvcpkg/recipes/libcvc --prefix ./deps
+#     cvcpkg build libcvc --recipes-dir cvcpkg/recipes --no-deps --prefix ./deps
+#
+# No apt/brew library installs; cvcpkg is the sole source of third-party
+# deps. The dependency bundles come prebuilt from the cvcpkg.org catalog
+# (the closure — libxml2, the ImageMagick delegates, the libtiff codecs,
+# hdf5, boost, cgal/gmp/mpfr, … — is fully published for linux; macOS and
+# Windows coverage is newer, so those lanes are continue-on-error below).
+#
+# Notes on current reality (2026-08-11):
+#   * The old draft blocker is resolved: libcvc + its whole dep closure are
+#     published to cvcpkg.org. Third-party deps address by bare name from
+#     the public catalog; nothing here needs org-qualified (cvc/<name>)
+#     addressing because libcvc itself is built from the LOCAL recipe, not
+#     installed from the catalog.
+#   * Deps are always installed with --config release: the catalog's debug
+#     coverage is partial, and a Debug libcvc links the Release, ABI-stable
+#     shared deps fine on Linux/macOS (same policy as publish-cvcpkg.yml's
+#     fetch-libcvc-deps step). Windows Debug is excluded outright — Debug
+#     libcvc against Release MSVC deps is a CRT mismatch.
+#   * The smoke-test binary needs the prefix's lib dir on the loader path:
+#     ELF RUNPATH is not transitive, and `cvcpkg build` installs libcvc.so
+#     without an $ORIGIN RPATH (the relocation pass runs at pack time, not
+#     build time). LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH below is
+#     load-bearing, not belt-and-braces.
+#   * This workflow does NOT yet retire the apt-based jobs in ci.yml; it
+#     runs alongside them. Retiring them (and cvc-requirements.yaml) is the
+#     follow-up once the macos/windows lanes here have a green track record.
+# ─────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      fallback_to_source:
+        description: "Build any unpublished deps from source (slow)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-recipe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-recipe:
+    name: recipe / ${{ matrix.os }} / ${{ matrix.build_type }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is the verified, REQUIRED lane (both configs).
+          - { os: ubuntu-latest, build_type: Release, experimental: false }
+          - { os: ubuntu-latest, build_type: Debug, experimental: false }
+          # macOS/Windows: the catalog closure is newer there (macOS
+          # closure completed via libcvc#144; Windows via the phm-win11
+          # builder bundles) and the `cvcpkg build` build.ps1 path is
+          # young — informative lanes, not merge blockers yet.
+          - { os: macos-latest, build_type: Release, experimental: true }
+          - { os: macos-latest, build_type: Debug, experimental: true }
+          - { os: windows-latest, build_type: Release, experimental: true }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The cvcpkg CLI itself (same pin used by publish-cvcpkg.yml: master,
+      # so server/schema fixes arrive without a release cadence).
+      - name: Install cvcpkg
+        shell: bash
+        run: |
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          cvcpkg --version
+
+      # Install the recipe-declared dependency closure, prebuilt from the
+      # cvcpkg.org catalog, into a CMake-ready prefix. Always release deps
+      # (see header). Host tools (cmake/ninja) come from the runner image.
+      - name: Install dependency closure from the catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          cvcpkg install-deps cvcpkg/recipes/libcvc \
+            --prefix "${{ runner.temp }}/libcvc-prefix" \
+            --config release --link shared
+
+      # Build libcvc itself from the in-tree recipe against that prefix.
+      - name: Build libcvc from its recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
+          extra=""
+          if [ "${{ inputs.fallback_to_source || 'false' }}" = "true" ]; then
+            extra="--fallback-to-source"
+          fi
+          cvcpkg build libcvc \
+            --recipes-dir cvcpkg/recipes \
+            --no-deps \
+            --prefix "${{ runner.temp }}/libcvc-prefix" \
+            --config "$config" \
+            $extra
+
+      # Prove the installed SDK is consumable: find_package(cvc CONFIG) must
+      # resolve and a trivial program must link cvc::cvc and round-trip a
+      # .rawiv (exercising the #111 write path end to end).
+      - name: Smoke-test the installed SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="${{ runner.temp }}/libcvc-prefix"
+          work="${{ runner.temp }}/consumer"
+          mkdir -p "$work"
+          cat > "$work/main.cpp" <<'CPP'
+          #include <cvc/core/app.h>
+          #include <cvc/volume/volume.h>
+          #include <cvc/volume/volume_file_io.h>
+          int main() {
+            cvc::app app;                      // registers volume handlers
+            cvc::dimension dim(4, 4, 4);
+            cvc::bounding_box box(0, 0, 0, 1, 1, 1);
+            std::vector<float> buf(4 * 4 * 4, 1.0f);
+            cvc::volume v(app, reinterpret_cast<const unsigned char *>(buf.data()), dim,
+                          cvc::Float, box);
+            v.write("smoke.rawiv");            // exercises the write path (#111)
+            cvc::volume r(app);
+            r.read("smoke.rawiv");
+            return (r.XDim() == 4) ? 0 : 1;
+          }
+          CPP
+          cat > "$work/CMakeLists.txt" <<'CMK'
+          cmake_minimum_required(VERSION 3.16)
+          project(cvc_smoke LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          find_package(cvc CONFIG REQUIRED)
+          add_executable(smoke main.cpp)
+          target_link_libraries(smoke PRIVATE cvc::cvc)
+          CMK
+          cmake -S "$work" -B "$work/build" \
+            -DCMAKE_PREFIX_PATH="$prefix" \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}"
+          cmake --build "$work/build" --config "${{ matrix.build_type }}"
+          # Locate the binary (single-config puts it in build/, VS multi-config
+          # in build/<Config>/).
+          smoke="$work/build/smoke"
+          [ -x "$smoke" ] || smoke="$work/build/${{ matrix.build_type }}/smoke.exe"
+          # Loader path is load-bearing — see header. All three variables so
+          # this one step serves every OS.
+          export LD_LIBRARY_PATH="$prefix/lib"
+          export DYLD_LIBRARY_PATH="$prefix/lib"
+          export PATH="$prefix/bin:$prefix/lib:$PATH"
+          ( cd "$work/build" && "$smoke" )
+          echo "smoke test passed"
