@@ -129,13 +129,22 @@ class Lab:
         vertices: Sequence[float],
         triangles: Sequence[int],
         color: Color | None = None,
+        uvs: Sequence[float] | None = None,
     ):
         """Add a triangle mesh (obstacle / building / surface) from flat
         row-major ``vertices`` (``[x,y,z,...]``) and ``triangles``
-        (``[i,j,k,...]``)."""
+        (``[i,j,k,...]``).
+
+        Pass ``uvs`` (flat ``[u,v,...]``, one pair per vertex) to give the mesh
+        texture coordinates, then :meth:`set_texture` to drape an image on it —
+        e.g. a terrain surface carrying its satellite/water raster instead of a
+        separate overlay mesh that z-fights the ground.
+        """
         g = self._pycvc.geometry(self._app)
         g.add_vertices(list(vertices))
         g.add_triangles(list(triangles))
+        if uvs is not None:
+            g.set_uvs(list(uvs))
         self._scene.addGraphics(name, g)
         if color is not None:
             self.recolor(name, color)  # single-color material (faithful; see recolor)
@@ -147,9 +156,21 @@ class Lab:
         bounds: Bounds2D,
         color: Color | None = None,
     ):
-        """Add a terrain surface from a heightmap over an XY box."""
+        """Add a terrain surface from a heightmap over an XY box.
+
+        The surface carries planar UVs (u along +x, v along +y) so it can be
+        draped with a raster via :meth:`set_texture` (e.g. a river from a
+        watermask) without a separate overlay mesh z-fighting the ground.
+        """
         verts, tris = terrain_mesh(heights, bounds)
-        return self.add_mesh("terrain", verts, tris, color=color)
+        rows = len(heights)
+        cols = len(heights[0]) if rows else 0
+        uvs: list[float] = []
+        for r in range(rows):
+            v = r / (rows - 1) if rows > 1 else 0.0
+            for c in range(cols):
+                uvs += [c / (cols - 1) if cols > 1 else 0.0, v]
+        return self.add_mesh("terrain", verts, tris, color=color, uvs=uvs)
 
     # -- agents & paths ------------------------------------------------------
 
@@ -243,6 +264,26 @@ class Lab:
             raise KeyError(f"pycvc_gl.Lab.recolor: no mesh node named {name!r}")
         gn.setUseSingleColor(True)
         gn.setColor(*[float(c) for c in color])
+        return self
+
+    def set_texture(self, name: str, image, *, zero_copy: bool = True):
+        """Drape ``image`` on mesh ``name`` (which must have been added with
+        ``uvs``). ``image`` is a ``pycvc.image`` or an ``(H, W, C)`` uint8/uint16/
+        float32 numpy array (converted via ``pycvc.image.from_numpy``).
+
+        This is the faithful way to paint a raster (satellite ground, a river
+        from a watermask) ONTO a surface — no separate overlay mesh to z-fight
+        the terrain. ``zero_copy`` aliases the image buffer (a later pixel edit +
+        the node's texture refresh shows live); pass ``False`` for a converted,
+        owned copy.
+        """
+        gn = self._scene.geometry_node(name)
+        if gn is None:
+            raise KeyError(f"pycvc_gl.Lab.set_texture: no mesh node named {name!r}")
+        img = image
+        if not isinstance(img, self._pycvc.image):
+            img = self._pycvc.image.from_numpy(img)
+        gn.set_texture(img) if zero_copy else gn.set_texture_copy(img)
         return self
 
     # -- lifecycle -----------------------------------------------------------
