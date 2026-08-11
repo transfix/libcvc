@@ -193,7 +193,14 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          # [publish] is REQUIRED, not decoration: cvcpkg's core install is
+          # click + PyYAML only, and everything that speaks to a cvcpkg
+          # server over HTTP now lives behind an extra named for its entry
+          # point. `cvcpkg next-revision` below asks the server for the
+          # highest published revision, so it needs httpx — which only the
+          # extra pulls in. PEP 508 direct reference: the bracket goes on
+          # the NAME, before the `@ <url>`.
+          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
       - name: Compute next revision per package
         id: rev
         shell: bash
@@ -373,8 +380,16 @@ jobs:
           set -euo pipefail
           # Pull from libcvc-deps master rather than PyPI so we always
           # pick up server/schema fixes without a release cadence.
+          #
+          # [publish] is REQUIRED, not decoration: cvcpkg's core install is
+          # click + PyYAML only, and everything that speaks to a cvcpkg
+          # server over HTTP now lives behind an extra named for its entry
+          # point. This job runs `cvcpkg publish` (libcvc, cvcgl, pycvc,
+          # pycvc-gl), which needs httpx — only the extra pulls it in.
+          # PEP 508 direct reference: the bracket goes on the NAME, before
+          # the `@ <url>`.
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
           cvcpkg --version
 
       - name: Fetch libcvc-deps
@@ -900,8 +915,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # [publish] is REQUIRED, not decoration: cvcpkg's core install is
+          # click + PyYAML only, and everything that speaks to a cvcpkg
+          # server over HTTP now lives behind an extra named for its entry
+          # point. This job runs `cvcpkg publish` (libcvc-cuda), which needs
+          # httpx — only the extra pulls it in. PEP 508 direct reference:
+          # the bracket goes on the NAME, before the `@ <url>`.
           python -m pip install --upgrade pip
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'cvcpkg[publish] @ git+https://github.com/transfix/libcvc-deps@master'
           cvcpkg --version
 
       - name: Fetch libcvc-deps
