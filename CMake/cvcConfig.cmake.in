@@ -29,6 +29,20 @@ if(@CVC_ENABLE_IMAGEMAGICK@)
   find_package(ImageMagick COMPONENTS Magick++ MagickCore QUIET)
 endif()
 
+# When the assimp model loader is built in, cvcTargets.cmake puts
+# `assimp::assimp` in cvc::cvc's INTERFACE_LINK_LIBRARIES — so every CONSUMER
+# has to be able to resolve that imported target. Without this, the first
+# downstream find_package(cvc) dies in cvcTargets.cmake with
+#     The link interface of target "cvc::cvc" contains: assimp::assimp
+#     but the target was not found.
+# which is what broke cvcgl / pycvc / pycvc-gl in the release publish leg.
+# NOT QUIET/optional: if assimp is in the link interface, a consumer that
+# cannot find it cannot link, so failing here names the real missing package
+# instead of surfacing as a confusing missing-target error two levels down.
+if(@CVC_ENABLE_ASSIMP@)
+  find_dependency(assimp)
+endif()
+
 if(@CVC_ENABLE_FFTW@)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)

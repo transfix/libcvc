@@ -145,6 +145,19 @@ public:
   // pending.
   std::vector<state_mutation> drain_local(std::size_t max_count = 0);
 
+  // Return local-origin mutations journaled after `after_sequence`,
+  // stamped for the wire exactly as drain_local() stamps them, but
+  // WITHOUT advancing the publish cursor.
+  //
+  // Transports use this to backfill a peer that connects mid-stream.
+  // drain_local() advances the cursor whether or not the transport
+  // had anywhere to send the mutations, so any write made while no
+  // peer was connected is otherwise invisible to a peer that
+  // connects later. Replaying is safe to repeat: the receiving
+  // shard's replica seen-set drops (origin_node_id, sequence) pairs
+  // it has already applied.
+  std::vector<state_mutation> replay_local(std::uint64_t after_sequence = 0);
+
   // Last drained local sequence (0 if none drained yet).
   std::uint64_t published_cursor() const;
 
@@ -345,6 +358,11 @@ public:
   void uninstall_as_default();
 
 private:
+  // Shared body of drain_local()/replay_local(): replay the journal
+  // past `after_sequence`, keep local-origin mutations, and stamp
+  // each one for the wire (cluster id, HLC time, blob offload).
+  std::vector<state_mutation> collect_local(std::uint64_t after_sequence, std::size_t max_count);
+
   std::string _cluster_id;
   std::string _local_node_id;
   std::string _root_path;
@@ -355,6 +373,18 @@ private:
   std::unique_ptr<state_codec_registry> _codecs;
   std::unique_ptr<state_message_bus> _message_bus;
   std::unique_ptr<state_write_policy> _write_policy;
+
+  // Serializes the whole of ingest_remote(). The seen-set record and
+  // the apply are two steps, and without a lock spanning both, two
+  // reader threads feeding this shard one peer's ordered stream can
+  // record in order and apply out of order. state_replica::seen() is
+  // exact membership rather than a high-water mark, so an older
+  // mutation applied late silently reinstates a stale value.
+  //
+  // Ordered before _mutex: paths that hold this may take _mutex, and
+  // none go the other way. Recursive so a state observer reached
+  // through apply_remote() can re-enter on the same thread.
+  mutable std::recursive_mutex _ingest_mutex;
 
   mutable std::mutex _mutex;
   std::uint64_t _publish_cursor = 0; // last drained local sequence

@@ -5,7 +5,9 @@
 #include <cvc/core/state_message.h>
 #include <cvc/core/state_message_bus.h>
 #include <gtest/gtest.h>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using cvc::state_message;
@@ -136,4 +138,69 @@ TEST(StateMessageBus, DistinctOriginsAreNotDeduped) {
   EXPECT_TRUE(bus.admit(make_msg("C", "1", "x")));
   EXPECT_FALSE(bus.admit(make_msg("A", "1", "x")));
   EXPECT_EQ(hits.load(), 3);
+}
+
+// The same logical stream can reach a bus over more than one path --
+// two transport reader threads carrying one peer's messages, say.
+// Dedup picks the right winner for each message, but if dispatch
+// happened after the lock were dropped the winners could reach
+// subscribers in the wrong order: thread A wins m2 and thread B wins
+// m3, then B's callback runs first. Both threads feed the same
+// ordered sequence here, so subscribers must see exactly that order.
+TEST(StateMessageBus, ConcurrentAdmitOfOneStreamDispatchesInOrder) {
+  const int kMessages = 400;
+  const int kRounds = 20;
+
+  for (int round = 0; round < kRounds; ++round) {
+    state_message_bus bus;
+    std::mutex mu;
+    std::vector<int> seen;
+    bus.subscribe("s", [&](const state_message &m) {
+      std::lock_guard<std::mutex> lk(mu);
+      seen.push_back(std::stoi(m.string_value));
+    });
+
+    std::atomic<bool> go{false};
+    auto feed = [&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      for (int i = 0; i < kMessages; ++i)
+        bus.admit(make_msg("A", "m" + std::to_string(i), "s.chan", std::to_string(i)));
+    };
+    std::thread t1(feed), t2(feed);
+    go.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_EQ(seen.size(), static_cast<std::size_t>(kMessages))
+        << "each message should be dispatched exactly once (round " << round << ")";
+    for (int i = 0; i < kMessages; ++i) {
+      ASSERT_EQ(seen[i], i) << "subscriber saw the stream out of order at index " << i << " (round "
+                            << round << ")";
+    }
+  }
+}
+
+// A subscriber is allowed to call back into the bus on the
+// dispatching thread. admit() holds its lock across dispatch, so that
+// lock has to be recursive or this deadlocks.
+TEST(StateMessageBus, SubscriberMayReenterTheBus) {
+  state_message_bus bus;
+  std::atomic<int> outer{0};
+  std::atomic<int> inner{0};
+
+  bus.subscribe("in", [&](const state_message &) { inner.fetch_add(1); });
+  bus.subscribe("out", [&](const state_message &) {
+    outer.fetch_add(1);
+    // Re-entrant admit, plus a read and a subscription change.
+    bus.admit(make_msg("A", "nested", "in.chan", "x"));
+    (void)bus.total_admitted();
+    auto id = bus.subscribe("never", [](const state_message &) {});
+    bus.unsubscribe(id);
+  });
+
+  EXPECT_TRUE(bus.admit(make_msg("A", "outer", "out.chan", "y")));
+  EXPECT_EQ(outer.load(), 1);
+  EXPECT_EQ(inner.load(), 1);
 }

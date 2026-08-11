@@ -23,6 +23,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <unordered_set>
 
 namespace cvc {
 
@@ -230,6 +231,27 @@ bool decode_message(const std::vector<unsigned char> &bytes, state_message &out)
   return r.ok();
 }
 
+// Two nodes that each dial the other hold two connections to the same
+// peer, and publish()/publish_message() would then put the same frame
+// on both. The peer drops the copy (mutations by (origin, sequence),
+// messages by (origin, message_id)), but the two copies arrive on two
+// reader threads which record-then-apply without any cross-connection
+// ordering, so the later frame can be applied before the earlier one.
+// For mutations that silently reinstates a stale value; for OOB
+// messages it hands subscribers the stream out of order.
+//
+// Sending once per peer removes the duplicate and, with it, the race:
+// a peer's frames all travel one connection and a connection is read
+// by exactly one thread, so per-peer order is the order they were
+// published in. Returns false when this peer was already served.
+// A connection whose HELLO has not landed yet has no node id to key
+// on and is always served.
+bool claim_peer(std::unordered_set<std::string> &served, const std::string &remote_node_id) {
+  if (remote_node_id.empty())
+    return true;
+  return served.insert(remote_node_id).second;
+}
+
 bool write_all(int fd, const unsigned char *data, std::size_t n) {
   while (n > 0) {
     ssize_t w = ::send(fd, data, n, MSG_NOSIGNAL);
@@ -402,11 +424,7 @@ void state_transport_ipc::accept_loop() {
 
     auto conn = std::make_shared<connection>();
     conn->fd = cfd;
-    {
-      std::lock_guard<std::mutex> lk(_conns_mu);
-      _conns.push_back(conn);
-    }
-    send_hello(*conn);
+    admit_connection(conn);
     conn->reader_thread = std::thread([this, conn]() { reader_loop(conn); });
   }
 }
@@ -439,21 +457,59 @@ bool state_transport_ipc::connect_to_peer(const std::string &path,
 
   auto conn = std::make_shared<connection>();
   conn->fd = fd;
-  {
-    std::lock_guard<std::mutex> lk(_conns_mu);
-    _conns.push_back(conn);
-  }
-  send_hello(*conn);
+  admit_connection(conn);
   conn->reader_thread = std::thread([this, conn]() { reader_loop(conn); });
   return true;
 }
 
-void state_transport_ipc::send_hello(connection &c) {
+void state_transport_ipc::admit_connection(const std::shared_ptr<connection> &conn) {
+  // Snapshot the shard list before taking the write mutex: every
+  // other path releases _shards_mu before touching a connection's
+  // write mutex, and keeping that order here avoids introducing a
+  // lock cycle.
+  std::vector<state_cluster_shard *> shards;
+  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+
+  // Hold the write mutex across publication of the connection so a
+  // concurrent publish() blocks until HELLO and the backfill are on
+  // the wire. If a live mutation went out first, the older values
+  // replayed behind it would land on the peer afterwards and clobber
+  // the newer one (the seen-set only suppresses exact repeats).
+  std::lock_guard<std::mutex> wlk(conn->write_mu);
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    _conns.push_back(conn);
+  }
+  send_hello_locked(*conn);
+  if (!shards.empty())
+    send_backfill_locked(*conn, shards);
+}
+
+void state_transport_ipc::send_hello_locked(connection &c) {
   std::vector<unsigned char> body;
   put_string(body, _node_id);
   put_string(body, _cluster_id);
-  std::lock_guard<std::mutex> lk(c.write_mu);
   write_frame_locked(c, kMsgHello, body);
+}
+
+void state_transport_ipc::send_backfill_locked(connection &c,
+                                               const std::vector<state_cluster_shard *> &shards) {
+  // The peer's HELLO has not arrived yet, so there is no remote node
+  // id to filter on; send everything and let the receiver drop what
+  // does not match its cluster (dispatch_inbound) or its interest
+  // set (ingest_remote), exactly as it would for live traffic.
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    for (const auto &m : s->replay_local()) {
+      if (!write_frame_locked(c, kMsgMutation, encode_mutation(m)))
+        return; // Connection died mid-backfill; reader_loop will reap it.
+      _backfilled.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 bool state_transport_ipc::write_frame_locked(connection &c, std::uint16_t msg_type,
@@ -705,6 +761,7 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
+  std::unordered_set<std::string> sent_to;
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
@@ -712,6 +769,8 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
+    if (!claim_peer(sent_to, c->remote_node_id))
+      continue;
     std::lock_guard<std::mutex> wlk(c->write_mu);
     if (write_frame_locked(*c, kMsgMutation, body)) {
       ++stats.delivered;
@@ -800,6 +859,7 @@ state_transport_ipc::publish_message(const state_message &m) {
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
+  std::unordered_set<std::string> sent_to;
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
@@ -807,6 +867,8 @@ state_transport_ipc::publish_message(const state_message &m) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
+    if (!claim_peer(sent_to, c->remote_node_id))
+      continue;
     std::lock_guard<std::mutex> wlk(c->write_mu);
     if (write_frame_locked(*c, kMsgOob, body)) {
       ++stats.peers;

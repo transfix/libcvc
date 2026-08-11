@@ -944,7 +944,18 @@ if(CVC_ENABLE_FFTW)
     foreach(_fftw_inc IN LISTS FFTW3_INCLUDE_DIRS)
       target_include_directories(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_inc}>")
     endforeach()
-    target_link_libraries(cvc PUBLIC ${FFTW3_LIBRARIES})
+    # The LIBRARIES need the same treatment the INCLUDE_DIRS just got, and for
+    # the same reason: find_library() yields an ABSOLUTE path, and linking it
+    # PUBLIC bakes that build-machine path into the exported cvcTargets.cmake
+    # INTERFACE_LINK_LIBRARIES. The published windows libcvc bundle carries
+    # "D:/libcvc-deps/lib/fftw3.lib" from exactly this line, so consuming it
+    # anywhere without a D:\libcvc-deps fails at link with
+    #   ninja: error: 'D:/libcvc-deps/lib/fftw3.lib', needed by ..., missing
+    # cvc is shared here, so it already resolves fftw3 itself — consumers do
+    # not need it on their link line.
+    foreach(_fftw_lib IN LISTS FFTW3_LIBRARIES)
+      target_link_libraries(cvc PUBLIC "$<BUILD_INTERFACE:${_fftw_lib}>")
+    endforeach()
   endif()
 endif()
 

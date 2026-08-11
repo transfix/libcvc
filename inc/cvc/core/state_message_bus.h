@@ -54,6 +54,21 @@ namespace cvc {
 //   All public methods are safe to call from multiple threads.
 //   subscriber callbacks fire synchronously inside admit().
 //
+//   admit() is atomic: the dedup decision and the subscriber
+//   dispatch happen under one lock, so subscribers observe messages
+//   in the same order the bus admitted them. That matters when the
+//   same logical stream reaches the bus over more than one path --
+//   two transport reader threads admitting one peer's messages, say.
+//   Dedup alone gives the right *winner* for each message but, if
+//   dispatch happened after the lock was dropped, not the right
+//   *order*: a later message could reach subscribers first.
+//
+//   The lock is recursive, so a subscriber may call back into the
+//   bus (admit(), subscribe(), unsubscribe(), counters) on the
+//   dispatching thread; a nested admit dispatches inside the outer
+//   one. A subscriber must NOT block waiting on another thread that
+//   needs this bus -- callbacks run with the bus held.
+//
 class state_message_bus {
 public:
   using subscriber_fn = std::function<void(const state_message &)>;
@@ -107,7 +122,7 @@ private:
     subscriber_fn fn;
   };
 
-  mutable std::mutex _mu;
+  mutable std::recursive_mutex _mu;
   std::vector<subscriber> _subs;
   subscription_id _next_id = 1;
 

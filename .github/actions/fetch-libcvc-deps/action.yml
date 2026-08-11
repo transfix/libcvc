@@ -45,9 +45,39 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # PINNED, deliberately. This is the one `uses:` in this repo that points
+    # at another repository, and it used to track @master — so every commit
+    # to libcvc-deps was live in libcvc CI the moment it merged, with no
+    # review and no way to reproduce a green run later.
+    #
+    # That is not hypothetical. On 2026-08-05 libcvc-deps merged an in-tree
+    # PEP 517 backend (its PR #448, on master at 06:16:53Z). The action's
+    # sparse checkout did not include the `pep517-backend/` directory the new
+    # `backend-path` names, so `pip install ./_libcvc-deps` failed before any
+    # C++ compiled:
+    #
+    #     BackendUnavailable: Cannot find module 'cvcpkg_build_backend'
+    #       in ['.../_libcvc-deps/pep517-backend']
+    #
+    # Every package-linux / package-macos / package-windows job on every open
+    # libcvc PR failed for the next 37 minutes, until libcvc-deps #462 added
+    # the directory to the sparse checkout at 06:53:34Z. Nothing in libcvc
+    # changed; nothing in libcvc could have prevented it.
+    #
+    # A full-length commit SHA is what GitHub recommends for third-party
+    # actions, and it is what makes a libcvc CI run reproducible: re-running
+    # an old commit resolves the same action it originally used.
+    #
+    # To bump: pick a libcvc-deps commit, put its full SHA here, and note what
+    # it buys in the commit message. Tags are not usable for this yet — the
+    # newest libcvc-deps tag (cvcpkg-v2.0.0) predates the fix above. Prefer a
+    # tag once the tag series catches up with master.
     - name: Install libcvc-deps via cvcpkg
       id: cvcpkg
-      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@master
+      # libcvc-deps master @ 2026-08-05T07:15:32Z
+      # "fix(recipes): co-locate the PyInstaller patch with its recipe (#461)"
+      # Includes #462, the sparse-checkout fix for pep517-backend.
+      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@c5091347c596fcf09c697bc74c585370fce08ad9
       with:
         # "Just recipes": install libcvc's dependency closure straight from its
         # in-tree recipe (single source of truth), instead of a parallel
