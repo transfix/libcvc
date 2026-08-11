@@ -1,6 +1,9 @@
-# cvcpkg/recipes/pycvc-cuda/build.ps1 — build the core pycvc Python bindings
+# cvcpkg/recipes/pycvc-cp31X/build.ps1 — build the core pycvc Python bindings
 # standalone against an installed libcvc SDK (Windows). CVC_BUILD_PYCVC_GL=OFF
-# ⇒ no cvcGL/VTK; the scene bindings are the separate pycvc-gl recipe.
+# ⇒ no cvcGL/VTK; the scene bindings are the separate pycvc-gl-cp31X recipes.
+# One identical copy per interpreter column (interpreter selection comes from
+# CMAKE_PREFIX_PATH; the builder exports CVC_PYTHON_INTERPRETER if a script
+# ever needs to pin it explicitly, mirroring build.sh).
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:CVC_SOURCE_DIR) { throw 'CVC_SOURCE_DIR must be set' }

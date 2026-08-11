@@ -1,0 +1,98 @@
+schema_version: 1
+recipe:
+  # The CPython 3.13 column of the pycvc-gl scene bindings, added when the
+  # libcvc-deps python matrix made every python package a per-interpreter
+  # column recipe. Same sources as pycvc-gl-cp311, built against python313 +
+  # numpy-cp313 + vtk-python-cp313. New catalog name — revision starts at 1.
+  # NO cp313t column: SWIG-generated modules are not free-threaded-safe.
+  name: pycvc-gl-cp313
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "pycvc-gl-cp313 — the pycvc.gl scriptable scene bindings (over cvcGL + VTK) for CPython 3.13 (cp313): a headless-scriptable VTK scene (Scene.add_geometry/add_volume/show/render_png) used by the grl-snam lab. Ships only the scene module and DEPENDS on the core `pycvc-cp313` package; the two install side by side."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [python, bindings, swig, vtk, scene, scientific, volumetric]
+
+# pycvc-gl builds ONLY the scene module (CVC_BUILD_PYCVC_CORE=OFF,
+# CVC_BUILD_PYCVC_GL=ON): it installs just the pycvc_gl package and depends
+# on the matching `pycvc-cp31X` column for the core `import pycvc` module. So
+# pycvc-cp313 and pycvc-gl-cp313 are installable together, side by side (no
+# file overlap). Both pick up CUDA when their libcvc dependency resolves to
+# libcvc-cuda (cvc::cvc carries CVC_USING_CUDA), so they work against either
+# libcvc variant.
+
+# Declares the `pycvc-gl-cp313` provider slot, mirroring the family pattern
+# (libcvc/cvcgl/cvc-cli/pycvc-gl-cp311 all self-provide their slot so a CUDA
+# peer can be a mutually-exclusive alternative). There is NO
+# pycvc-gl-cp313-cuda yet — the CUDA peers stay cp311-only for now.
+provides: ["pycvc-gl-cp313"]
+
+source:
+  type: vendored
+  path: ../../..
+
+patches: []
+
+# The interpreter column this recipe targets. The cvcpkg builder exports
+# CVC_PYTHON_INTERPRETER / CVC_PYTHON_ABI from this block, and build.sh
+# derives the python3.X paths from it — so the build scripts are identical
+# across the cp311/cp312/cp313 columns.
+python:
+  interpreter: python313
+  abi: cp313
+
+depends:
+  build:
+    # libcvc (find_package(cvc CONFIG)); resolves to libcvc-cuda on a CUDA host.
+    - name: libcvc
+    # cvcGL is now the separate `cvcgl` package (find_package(cvcGL CONFIG) +
+    # link cvc::cvcGL) instead of being compiled inline here.
+    - name: cvcgl
+    - name: python313
+    - name: numpy-cp313
+    - name: vtk
+    # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge (F3):
+    # a Python vtkActor crosses into the C++ scene as a real vtkProp*.
+    - name: vtk-python-cp313
+  runtime:
+    # pycvc-cp313 supplies the core `import pycvc` module this scene module
+    # bridges to (same interpreter column).
+    - name: pycvc-cp313
+    - name: libcvc
+    # the installed cvcGL this module links against.
+    - name: cvcgl
+    - name: python313
+    - name: numpy-cp313
+    - name: vtk
+    # vtkmodules import + the wrapping-core .so at load for the vtkProp* bridge.
+    - name: vtk-python-cp313
+  host_tools:
+    - cmake
+    - ninja
+    - swig
+    - python313
+
+build:
+  # cvcGL + VTK are available on linux + windows (no macOS VTK bundle yet).
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    # pycvc_gl is a PACKAGE (#155): the SWIG proxy is __init__.py, the
+    # extension module _pycvc_gl*.so lives INSIDE it, and the pure-Python scene
+    # helpers ship as submodules (camera/vehicle/lab/scenes). Ship the whole
+    # package dir, pinned to THIS column's interpreter (each cp31X column ships
+    # only its own site-packages — no cross-interpreter globs). The core
+    # _pycvc/pycvc.py still come from the pycvc-cp313 package, so the two
+    # install side by side with no file overlap.
+    - lib/python3.13/site-packages/pycvc_gl/
+
+abi:
+  cxx_std: 17

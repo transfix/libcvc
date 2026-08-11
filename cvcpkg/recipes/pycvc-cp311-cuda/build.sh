@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# cvcpkg/recipes/pycvc/build.sh — build the core pycvc Python bindings
-# (cvc::geometry/volume facades + zero-copy numpy views) standalone against an
-# installed libcvc SDK. CVC_BUILD_PYCVC_GL=OFF ⇒ no cvcGL/VTK dependency; the
-# scriptable-scene bindings are the separate `pycvc-gl` recipe.
+# cvcpkg/recipes/pycvc-cp311-cuda/build.sh — build the core pycvc Python
+# bindings (cvc::geometry/volume facades + zero-copy numpy views) standalone
+# against an installed libcvc SDK (the CUDA one — the deps prefix carries
+# libcvc-cuda). CVC_BUILD_PYCVC_GL=OFF ⇒ no cvcGL/VTK dependency; the
+# scriptable-scene bindings are the separate `pycvc-gl-cp311-cuda` recipe.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
@@ -24,7 +25,7 @@ CMAKE_ARGS=(
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
   # Core numpy-bindings module only (no VTK). The scene module ships as the
-  # separate, side-by-side pycvc-gl package.
+  # separate, side-by-side pycvc-gl-cp311-cuda package.
   -DCVC_BUILD_PYCVC_CORE=ON
   -DCVC_BUILD_PYCVC_GL=OFF
 )
@@ -33,16 +34,6 @@ CMAKE_ARGS=(
 # python311, numpy, and swig.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
-  # Pin the interpreter + its numpy headers so find_package(Python3 ... NumPy)
-  # doesn't fall through to a system python without numpy — which fails configure
-  # with "Could NOT find Python3 (missing: Python3_NumPy_INCLUDE_DIRS NumPy)".
-  # Derive the include dir from the interpreter (numpy>=2 -> _core/include,
-  # <2 -> core/include) rather than hardcoding it.
-  if [[ -x "$CVC_DEPS_PREFIX/bin/python3.11" ]]; then
-    CMAKE_ARGS+=("-DPython3_EXECUTABLE=$CVC_DEPS_PREFIX/bin/python3.11")
-    _npy_inc=$("$CVC_DEPS_PREFIX/bin/python3.11" -c 'import numpy; print(numpy.get_include())' 2>/dev/null || true)
-    [[ -n "$_npy_inc" ]] && CMAKE_ARGS+=("-DPython3_NumPy_INCLUDE_DIRS=$_npy_inc")
-  fi
 fi
 
 cmake "${CMAKE_ARGS[@]}"

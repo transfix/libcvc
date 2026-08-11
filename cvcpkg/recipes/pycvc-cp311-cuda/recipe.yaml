@@ -1,0 +1,87 @@
+schema_version: 1
+recipe:
+  # Renamed from `pycvc-cuda`: the pycvc family became per-interpreter column
+  # recipes, and the CUDA peer follows the libcvc-deps torch-cp311-cuda
+  # convention (<name>-cp311-cuda). CUDA stays cp311-only for now — no
+  # cp312/cp313 CUDA columns.
+  name: pycvc-cp311-cuda
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "pycvc-cp311-cuda — the pycvc SWIG bindings (cvc::geometry / cvc::volume facades, zero-copy numpy views) for CPython 3.11 (cp311), built against the CUDA/GPU libcvc-cuda SDK, so Volume.enable_cuda() migrates voxels into CUDA unified memory and grid()/__cuda_array_interface__ expose the same buffer host- and device-side. Same Python API as the CPU `pycvc-cp311` package."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [python, bindings, swig, numpy, scientific, volumetric, cuda, gpu]
+
+# The GPU build of the pycvc bindings — IDENTICAL sources to the CPU
+# `pycvc-cp311` recipe; the only difference is it builds against libcvc-cuda
+# instead of the CPU libcvc. CUDA is a COMPILE-TIME switch: CVC_USING_CUDA is a
+# PUBLIC compile definition on cvc::cvc, so compiling bindings/pycvc against
+# libcvc-cuda selects the `#ifdef CVC_USING_CUDA` bodies in pycvc_volume.cpp
+# (real device pointers) instead of the host stubs (false/0/throw). The public
+# Python API is unchanged, so callers code against one API and just install the
+# right variant.
+#
+# Virtual-package selection mirrors libcvc / libcvc-cuda:
+#   * provides: ["pycvc-cp311"] — satisfies a dependency on the virtual name
+#     `pycvc-cp311` and marks this as mutually exclusive with the CPU
+#     `pycvc-cp311` (same slot / same installed files: pycvc.py + _pycvc*).
+#   * requires_capabilities: ["cuda"] — a CUDA-host-only variant.
+# NOTE: the hardware-aware provider selection that ACTS on these is cvcpkg
+# Roadmap Phase 10 (Planned, not implemented in cvcpkg 2.0.0). Until it lands,
+# install pycvc-cp311-cuda explicitly on GPU hosts. No macOS entry — Apple has
+# no CUDA (same as libcvc-cuda).
+provides: ["pycvc-cp311"]
+requires_capabilities: ["cuda"]
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at
+  # bindings/pycvc. `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+# The interpreter column this recipe targets (the builder exports
+# CVC_PYTHON_INTERPRETER / CVC_PYTHON_ABI from it). CUDA is cp311-only.
+python:
+  interpreter: python311
+  abi: cp311
+
+depends:
+  build:
+    # The GPU libcvc SDK: find_package(cvc CONFIG) resolves libcvc-cuda, whose
+    # cvc::cvc interface carries CVC_USING_CUDA. Python dev interpreter + numpy.
+    - name: libcvc-cuda
+    - name: python311
+    - name: numpy-cp311
+  runtime:
+    - name: libcvc-cuda
+    - name: python311
+    - name: numpy-cp311
+  host_tools:
+    - cmake
+    - ninja
+    - swig
+    - python311
+
+build:
+  # linux + windows only (CUDA has no macOS), mirroring libcvc-cuda.
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  files:
+    # The SWIG module: _pycvc<ext> + the pycvc.py shim, pinned to this column's
+    # interpreter dir. Same paths as the CPU `pycvc-cp311` package (they share
+    # the `pycvc-cp311` slot and are never installed together).
+    - lib/python3.11/site-packages/pycvc.py
+    - lib/python3.11/site-packages/_pycvc*
+
+abi:
+  cxx_std: 17
