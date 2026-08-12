@@ -1,6 +1,6 @@
 # Distributed State Synchronization Roadmap
 
-Date: May 22, 2026
+Date: May 22, 2026 (status snapshot corrected 2026-08-11)
 
 ## Status Snapshot
 
@@ -16,13 +16,82 @@ Date: May 22, 2026
   - `state_distributed_admin::link_cycles()` static cycle enumerator.
   - Slice 6: `state::resolveRemote(hop_budget)` — pull-on-demand remote link resolution composing with delegation + lease expiry. Cross-cluster link tests covering authority transfer, lease expiry invalidation, and sendMessage routing over transparent links without the caller naming a cluster_id.
 - Phase 9 (network analytics & live telemetry) core delivered: `state_node_telemetry` (EWMA, latency histogram, JSON ser/deser, OOB publish), `state_telemetry_aggregator` (cluster rollups, stale detection, routing feedback), admin `to_text()` telemetry section. 31 tests across two new test suites. Remaining: 100-node bench, CBOR encoding, periodic auto-publish timer.
-- Phase 7 (perf + production hardening): admin telemetry integration delivered; production benchmarks, delta encoding, and zstd compression not started.
+- Phase 7 (perf + production hardening) is **complete**. Delta encoding
+  (`state_delta_codec`), zstd compression (`state_zstd_compression_codec` in
+  `state_compression_registry`), production benchmarks
+  (`state_distributed_bench_test`, 14 benches, env-gated on
+  `CVC_DISTRIBUTED_STATE_BENCH=1`), and the admin resync/GC surface
+  (`state_distributed_admin::force_resync`, `::gc_stale_peers`) all landed in
+  commit `0008bb2` on 2026-05-22. *(This entry previously read "not started";
+  it was already false when written — the work landed hours earlier the same
+  day.)*
+- Phase 10 (automatic cluster membership) is **landed**:
+  `state_cluster_membership` — heartbeat emission, an
+  `alive → suspect → dead → evicted` failure detector, event callbacks, and an
+  injectable clock. 21 tests. Note it is **not yet wired into
+  `distributed_state_session`**: peer discovery remains seed-list based, with
+  no gossip, and a caller who wants membership must construct it themselves.
+
+## Landed after this document was last revised
+
+The sections above were written on 2026-05-22 and do not mention work merged
+later that week. Also present on `master` today:
+
+- **`distributed_state_session`** — one-call assembly of the entire stack from
+  a config struct (`join()`), and the most user-facing entry point in the
+  subsystem. Consumed by `cvc serve`.
+- **`file_state_blob_store`** — a directory-backed, SHA-256 content-addressed
+  blob store alongside the in-memory one.
+- **Volume/geometry streaming primitives** — `state_brick_manifest` (per-chunk
+  extents, `bricks_in_region`, `bricks_in_frustum`), `state_brick_writer` /
+  `state_brick_reader`, `state_volume_codec`, and `state_data_hydrator` for
+  lazy blob fetch.
+- **Fork-based multi-process IPC integration tests**, exercising real
+  cross-process replication rather than in-process fan-out.
+
+## Known gaps in the "landed" surface
+
+These are implemented on the receive side or in isolation, and are easy to
+mistake for finished:
+
+- **`data()` does not replicate end to end.** `state_sync_adapter::attach_node`
+  connects only `valueChanged` and `childChanged`, so nothing journals
+  `dataChanged`, `commentChanged`, `hiddenChanged` or `readOnlyChanged` — even
+  though the op enum, the wire proto and `apply_remote` all support them. Those
+  mutations can currently only be produced by hand-constructing a
+  `state_mutation`. Additionally, `apply_remote`'s `set_data` case is an
+  explicit no-op pending a codec registry
+  (`src/cvc/core/state_sync_adapter.cpp:293`).
+- **`state_data_hydrator` is never driven from the ingest path.** It works and
+  is tested, but nothing calls it automatically on receiving a blob reference.
+- **Backpressure and slow-peer isolation are `inproc`-only.** The bounded
+  outbox, drop policies and quarantine live in `state_transport_inproc`; the
+  IPC and gRPC transports publish synchronously with no bounded queue.
+- **`distributed_state_config::blob_store_path` is not read.** `join()`
+  unconditionally constructs a `memory_state_blob_store`, so the field — which
+  `USAGE.md` documents as selecting filesystem persistence — currently has no
+  effect.
+- **`sync_mode::read_only` does not reject local writes.** Only
+  `authoritative` has an effect (it installs a write-policy entry naming the
+  local node).
+- **gRPC is `OFF` by default** (`CVC_ENABLE_GRPC`), so that transport and its
+  entire test suite are compiled out of a default build.
+- **No tests cover out-of-order delivery, partial blob transfer, or
+  split-brain authority**, all three of which the Testing Requirements section
+  below asks for. CI additionally excludes the `Integration` pattern on pull
+  requests, which skips the fork-based multi-process IPC suite except on pushes
+  to `master`.
+
+The journal is also **in-memory only** (`std::vector<state_mutation>`), so a
+process restart loses all replay history; there is no durable/WAL log.
 
 ## Related: state_exec DSL Engine
 
-A new `state_exec` module (S-expression DSL engine built on `cvc::state`) is
-under active development.  Phase 1 (foundation) is complete:
-`state_list`, `state_memory_manager`, core types, and parser.
+A `state_exec` module (S-expression DSL engine built on `cvc::state`) is
+complete through Phase 7 — including `exec_coordinator` with bully leader
+election, submission forwarding, and live process migration
+(pause → serialize → send → resume). *(This paragraph previously said only
+Phase 1 was done.)*
 See [STATE_EXEC_ROADMAP.md](STATE_EXEC_ROADMAP.md) for full status.
 
 ## Purpose

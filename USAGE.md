@@ -143,7 +143,7 @@ int main() {
 | `mounts` | `vector<distributed_state_mount>` | `{}` | Per-path replication modes |
 | `pump_interval_ms` | `uint32` | `10` | Background replication interval (0 = no pump thread) |
 | `max_inline_payload_bytes` | `uint32` | `65536` | Values larger than this go to the blob store |
-| `blob_store_path` | `string` | `""` | Filesystem path for blob persistence (`""` = memory only) |
+| `blob_store_path` | `string` | `""` | **Not yet honored** — `join()` always builds an in-memory blob store, so this field currently has no effect. |
 | `snapshot_on_join` | `bool` | `false` | Request a full snapshot from the first seed on join |
 | `enforce_authority` | `bool` | `false` | Reject mutations owned by a different cluster |
 | `enforce_write_policy` | `bool` | `false` | Consult write-policy before applying remote writes |

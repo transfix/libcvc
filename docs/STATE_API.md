@@ -1,5 +1,20 @@
 # State API Reference
 
+> **Scope: this document covers the LOCAL, in-process `cvc::state` API only.**
+> It does not describe the distributed layer, which is a separate subsystem
+> living alongside it: replication across processes and machines, cluster
+> shards, transports (inproc / IPC / gRPC), leased subtree delegation,
+> content-addressed blobs, link nodes, expiring state and out-of-band
+> messaging. For those see
+> [`roadmap/DISTRIBUTED_STATE_ROADMAP.md`](roadmap/DISTRIBUTED_STATE_ROADMAP.md)
+> and `USAGE.md` §6 ("Distributed state").
+>
+> Two behaviours documented below do **not** currently cross a process
+> boundary even when a cluster is running: `data()` payloads, and node
+> metadata (`comment`, `hidden`, `readOnly`). Only value and child-structure
+> changes are journaled for replication today — see the "Known gaps" section
+> of the distributed roadmap.
+
 ## Table of Contents
 
 - [Overview](#overview)

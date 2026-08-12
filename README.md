@@ -41,7 +41,12 @@ A comprehensive computational visualization library from the Computational Visua
 - 🔺 **Geometry Handling**: Read/write various geometry formats (OFF, OBJ, RAW variants)
 - 🎯 **Meshing & Isosurfacing**: Marching cubes, LBIE meshing, fast contouring
 - 📐 **Signed Distance Functions v2.0**: Thread-safe, 11x faster, GPU-ready architecture
-- 🌐 **Network Support**: Optional XMLRPC for distributed state sharing
+- 🌐 **Distributed state**: a federated `cvc::state` replication layer —
+  peer-to-peer mutation journal, inproc/IPC/gRPC transports, leased subtree
+  delegation, content-addressed blobs. See
+  [`docs/roadmap/DISTRIBUTED_STATE_ROADMAP.md`](docs/roadmap/DISTRIBUTED_STATE_ROADMAP.md)
+  and `USAGE.md` §6. (The legacy `CVC_USING_XMLRPC` option is unrelated to this
+  and is off by default.)
 - 🔬 **Image Filtering**: Bilateral filter, anisotropic diffusion, GDTV, contrast enhancement
 - 🧮 **Scientific Computing**: Integration with FFTW, GSL, CGAL, Boost
 
