@@ -60,13 +60,22 @@ jobs:
           # Linux is the verified, REQUIRED lane (both configs).
           - { os: ubuntu-latest, build_type: Release, experimental: false }
           - { os: ubuntu-latest, build_type: Debug, experimental: false }
-          # macOS/Windows: the catalog closure is newer there (macOS
-          # closure completed via libcvc#144; Windows via the phm-win11
-          # builder bundles) and the `cvcpkg build` build.ps1 path is
-          # young — informative lanes, not merge blockers yet.
+          # macOS: informative lane, not a merge blocker yet.
           - { os: macos-latest, build_type: Release, experimental: true }
           - { os: macos-latest, build_type: Debug, experimental: true }
-          - { os: windows-latest, build_type: Release, experimental: true }
+          # Windows is a REQUIRED lane. It was previously experimental on the
+          # theory that the catalog closure was too new -- it is not: the
+          # closure installs cleanly (37 components). The lane failed because
+          # the recipes hand-rolled `-G Ninja` with no compiler pin, so CMake
+          # took the first c++ on PATH (C:\mingw64\bin\c++.exe) and built
+          # with MinGW gcc against MSVC-built dep bundles. The recipes now
+          # dot-source _common/env-windows.ps1, which forces cl.exe.
+          #
+          # windows-2022 (VS2022 v143) pinned deliberately, matching
+          # ci.yml:425 and publish-cvcpkg.yml: windows-latest now ships
+          # VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's C++20
+          # state_exec/distributed-state TUs.
+          - { os: windows-2022, build_type: Release, experimental: false }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 90
@@ -86,6 +95,16 @@ jobs:
         run: |
           pip install 'git+https://github.com/transfix/libcvc-deps@master'
           cvcpkg --version
+
+      # Put cl.exe/link.exe on PATH before cvcpkg runs a recipe's build.ps1.
+      # The recipes import vcvars themselves (_common/env-windows.ps1's
+      # Import-CvcMsvcEnv), so this is belt-and-braces that also keeps this
+      # runner identical to the libcvc-deps builder fleet.
+      - name: Set up the MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       # Install the recipe-declared dependency closure, prebuilt from the
       # cvcpkg.org catalog, into a CMake-ready prefix. Always release deps
