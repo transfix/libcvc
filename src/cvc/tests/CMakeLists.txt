@@ -97,7 +97,9 @@ add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
 
-# Track all test targets so we can conditionally add HDF5 tests
+# Every test target `check` should build. Keep this in the same order as the
+# add_executable() calls above so the two blocks can be diffed by eye; the
+# guard at the bottom of this file turns any omission into a configure error.
 set(TEST_TARGETS
   app_test
   state_test
@@ -112,6 +114,15 @@ set(TEST_TARGETS
   state_authority_map_test
   state_cluster_shard_test
   state_message_bus_test
+  state_peer_registry_test
+  state_write_policy_test
+  state_distributed_metrics_test
+  state_delegation_manager_test
+  state_distributed_admin_test
+  state_cluster_membership_test
+  state_distributed_bench_test
+  state_message_test
+  state_bounded_queue_test
   state_transport_inproc_test
   state_blob_transport_integration_test
   state_distributed_delegation_integration_test
@@ -133,9 +144,15 @@ set(TEST_TARGETS
   state_data_hydrator_test
   state_node_telemetry_test
   state_telemetry_aggregator_test
-  state_cluster_membership_test
   file_state_blob_store_test
   distributed_state_session_test
+  state_large_tree_bench_test
+  state_hash_partition_test
+  state_hybrid_time_test
+  state_brick_frustum_test
+  state_conflict_ring_test
+  state_zstd_round_trip_test
+  state_session_status_test
   voxels_test
   volume_test
   procedural_geometry_test
@@ -146,6 +163,16 @@ set(TEST_TARGETS
   geometry_attributes_test
   utility_test
 )
+
+# POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
+if(NOT WIN32)
+  list(APPEND TEST_TARGETS
+    state_transport_ipc_test
+    state_reconnect_resilience_test
+    state_multiprocess_ipc_test
+    state_snapshot_protocol_test
+  )
+endif()
 
 if(CVC_STATE_EXEC)
   list(APPEND TEST_TARGETS
@@ -163,6 +190,9 @@ if(CVC_STATE_EXEC)
     state_exec_integration_test
     state_exec_advanced_integration_test
   )
+  if(NOT WIN32)
+    list(APPEND TEST_TARGETS state_exec_multiprocess_test)
+  endif()
 endif()
 
 if(CVC_STATE_MEMORY_MANAGER)
@@ -1054,6 +1084,52 @@ endif()
 if(TARGET hdf5_test)
   gtest_discover_tests(hdf5_test)
 endif()
+
+# ── TEST_TARGETS drift guard ──────────────────────────────────────────────
+# `check` builds exactly what TEST_TARGETS names, so a test declared with
+# add_executable() but never added to the list quietly stops being built by
+# `make check` / `ninja check`. It keeps *passing* under a bare `ctest` for as
+# long as a stale binary survives in the build tree, which is what let 20
+# targets drift off the list unnoticed.
+#
+# Fail at configure time instead. Every executable defined in this directory
+# must be reachable from TEST_TARGETS; list a target in
+# TEST_TARGETS_INTENTIONALLY_EXCLUDED (with a reason) to opt out.
+set(TEST_TARGETS_INTENTIONALLY_EXCLUDED
+  # (none today — add entries here with a comment explaining why)
+)
+
+get_property(_cvc_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+set(_cvc_untracked_tests "")
+foreach(_cvc_target IN LISTS _cvc_dir_targets)
+  get_target_property(_cvc_target_type ${_cvc_target} TYPE)
+  if(_cvc_target_type STREQUAL "EXECUTABLE"
+     AND NOT _cvc_target IN_LIST TEST_TARGETS
+     AND NOT _cvc_target IN_LIST TEST_TARGETS_INTENTIONALLY_EXCLUDED)
+    list(APPEND _cvc_untracked_tests ${_cvc_target})
+  endif()
+endforeach()
+
+if(_cvc_untracked_tests)
+  string(REPLACE ";" "\n  - " _cvc_untracked_pretty "${_cvc_untracked_tests}")
+  message(FATAL_ERROR
+    "These test executables are not in TEST_TARGETS, so `check` would not "
+    "build them:\n  - ${_cvc_untracked_pretty}\n"
+    "Add them to TEST_TARGETS in ${CMAKE_CURRENT_LIST_FILE} (under the same "
+    "if() guard as their add_executable), or to "
+    "TEST_TARGETS_INTENTIONALLY_EXCLUDED with a reason.")
+endif()
+
+# The converse: a name in TEST_TARGETS that no longer exists as a target makes
+# `check` fail late with an opaque dependency error.
+foreach(_cvc_target IN LISTS TEST_TARGETS)
+  if(NOT TARGET ${_cvc_target})
+    message(FATAL_ERROR
+      "TEST_TARGETS names '${_cvc_target}', but no such target is defined in "
+      "${CMAKE_CURRENT_LIST_FILE}. Remove it, or move it under the if() guard "
+      "that declares it.")
+  endif()
+endforeach()
 
 # Optional: Add a custom target to run all tests
 add_custom_target(check
