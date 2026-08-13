@@ -116,3 +116,15 @@ add_test(NAME cvcgl_texture COMMAND cvcgl_texture)
 add_executable(cvcgl_texture_zerocopy test/cvcgl_texture_zerocopy.cpp)
 target_link_libraries(cvcgl_texture_zerocopy PRIVATE cvcGL)
 add_test(NAME cvcgl_texture_zerocopy COMMAND cvcgl_texture_zerocopy)
+
+# SceneRenderer: a render target held open across frames (one GL context for a
+# whole sequence, a camera that survives the next render, live scene updates).
+add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
+target_link_libraries(cvcgl_renderer PRIVATE cvcGL)
+add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
+
+# Not a test: prints the per-frame cost of a held-open renderer against the
+# one-shot-per-frame shape it replaces. Built so the number can be re-measured
+# on any machine rather than quoted from a commit message.
+add_executable(cvcgl_renderer_bench test/cvcgl_renderer_bench.cpp)
+target_link_libraries(cvcgl_renderer_bench PRIVATE cvcGL)
