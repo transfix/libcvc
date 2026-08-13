@@ -157,6 +157,25 @@ int main() {
     third.render();
   }
 
+  // Two renderers over ONE scene are NOT independent: SceneGraph::setRenderer
+  // is a single attachment, so the second constructor takes every actor and
+  // the first is left drawing an empty frame. Nothing errors, which is what
+  // makes it worth pinning -- a caller building a picture-in-picture this way
+  // gets a blank main view and no diagnostic.
+  {
+    SceneRenderer first(sg, 96, 96, /*offscreen=*/true);
+    first.setCamera(0, -160, 90, 0, 0, 0, 0, 0, 1);
+    std::vector<unsigned char> alone = first.frameRGB();
+
+    SceneRenderer second(sg, 96, 96, /*offscreen=*/true);
+    second.render();
+    std::vector<unsigned char> after = first.frameRGB();
+
+    assert(alone.size() == after.size());
+    assert(frameDelta(alone, after) > 0.0 &&
+           "a second renderer over the same scene should have emptied the first");
+  }
+
   // Bad construction arguments are rejected.
   threw = false;
   try {
