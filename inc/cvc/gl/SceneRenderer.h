@@ -15,8 +15,9 @@
 #include <string>
 #include <vector>
 
-class SceneGraph;  // cvcGL (global namespace)
-class vtkRenderer; // VTK (global namespace)
+class SceneGraph;      // cvcGL (global namespace)
+class vtkRenderer;     // VTK (global namespace)
+class vtkRenderWindow; // VTK (global namespace)
 
 // ---------------
 // SceneRenderer
@@ -95,9 +96,12 @@ public:
   // True once the user has closed an onscreen window; always false offscreen.
   bool windowClosed() const;
 
-  // The renderer this draws through, for callers that need to reach VTK
-  // directly (adding a scalar bar, a text actor, a second camera pass).
+  // The renderer and window this draws through, for callers that need to
+  // reach VTK directly: lights, a 2-D HUD overlay, a gradient background, a
+  // scalar bar, a second camera pass. In Python these arrive as live
+  // vtkmodules objects, so the scene is scriptable rather than opaque.
   vtkRenderer *renderer() const;
+  vtkRenderWindow *renderWindow() const;
 
   // Detach from the scene and release the GL context. Idempotent; the
   // destructor calls it. Exposed so a caller can decide WHEN the context dies

@@ -166,6 +166,25 @@ int main() {
   }
   assert(threw && "a zero-width renderer must be rejected");
 
+  // ── the VTK handles are reachable ─────────────────────────────────────────
+  // Callers need these to light the scene, overlay a HUD, or set a gradient
+  // background. Returning them is only half the job -- pycvc_gl bridges them
+  // into live vtkmodules objects so Python can use them too.
+  {
+    SceneRenderer h(sg, 64, 64, /*offscreen=*/true);
+    assert(h.renderer() != nullptr);
+    assert(h.renderWindow() != nullptr);
+    h.render();
+    h.close();
+    bool threw = false;
+    try {
+      (void)h.renderer();
+    } catch (const std::runtime_error &) {
+      threw = true;
+    }
+    assert(threw && "renderer() after close must be diagnosed");
+  }
+
   printf("cvcgl_renderer: OK\n");
   return 0;
 }
