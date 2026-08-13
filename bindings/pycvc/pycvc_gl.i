@@ -28,6 +28,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/SceneRenderer.h>
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
@@ -441,9 +442,25 @@ def _typed_node(sg, name):
 %include "cvc/gl/SceneGraph.h"
 
 // ── Standalone render helpers + Python vtkProp bridge (free functions) ──────
-// Wrapped as module-level pycvc_gl.render_png(sg,...) / show / add_prop / prop.
+// Wrapped as module-level pycvc_gl.render_png(sg,...) / show / add_prop / prop,
+// plus the pycvc_gl.scene_renderer class.
 // Declared after SceneGraph so its SceneGraph& params resolve to the wrapped type.
+
 %include "pycvc_scene.h"
+
+// ── SceneRenderer: a render target that stays open across frames ────────────
+// Lives in cvcGL (inc/cvc/gl/SceneRenderer.h), not here, so volrover3 and any
+// other C++ consumer gets it too and Python is only a wrapper over it.
+//
+// frameRGB() returns raw framebuffer pixels, not text. The default
+// std::vector<unsigned char> wrapper would hand back a list of ints (slow and
+// enormous), so map it to bytes — the form an encoder actually wants. Must
+// precede the %include.
+%typemap(out) std::vector<unsigned char> SceneRenderer::frameRGB {
+  $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
+                                      static_cast<Py_ssize_t>($1.size()));
+}
+%include "cvc/gl/SceneRenderer.h"
 
 // ── Live-scene bridge: adopt an embedding host's SceneGraph ─────────────────
 // An embedding host (e.g. volrover3) hands its LIVE scene across as a PyCapsule
