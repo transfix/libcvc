@@ -157,6 +157,25 @@ int main() {
     third.render();
   }
 
+  // Two renderers over ONE scene are NOT independent: SceneGraph::setRenderer
+  // is a single attachment, so the second constructor takes every actor and
+  // the first is left drawing an empty frame. Nothing errors, which is what
+  // makes it worth pinning -- a caller building a picture-in-picture this way
+  // gets a blank main view and no diagnostic.
+  {
+    SceneRenderer first(sg, 96, 96, /*offscreen=*/true);
+    first.setCamera(0, -160, 90, 0, 0, 0, 0, 0, 1);
+    std::vector<unsigned char> alone = first.frameRGB();
+
+    SceneRenderer second(sg, 96, 96, /*offscreen=*/true);
+    second.render();
+    std::vector<unsigned char> after = first.frameRGB();
+
+    assert(alone.size() == after.size());
+    assert(frameDelta(alone, after) > 0.0 &&
+           "a second renderer over the same scene should have emptied the first");
+  }
+
   // Bad construction arguments are rejected.
   threw = false;
   try {
@@ -165,6 +184,25 @@ int main() {
     threw = true;
   }
   assert(threw && "a zero-width renderer must be rejected");
+
+  // ── the VTK handles are reachable ─────────────────────────────────────────
+  // Callers need these to light the scene, overlay a HUD, or set a gradient
+  // background. Returning them is only half the job -- pycvc_gl bridges them
+  // into live vtkmodules objects so Python can use them too.
+  {
+    SceneRenderer h(sg, 64, 64, /*offscreen=*/true);
+    assert(h.renderer() != nullptr);
+    assert(h.renderWindow() != nullptr);
+    h.render();
+    h.close();
+    bool threw = false;
+    try {
+      (void)h.renderer();
+    } catch (const std::runtime_error &) {
+      threw = true;
+    }
+    assert(threw && "renderer() after close must be diagnosed");
+  }
 
   printf("cvcgl_renderer: OK\n");
   return 0;

@@ -15,8 +15,9 @@
 #include <string>
 #include <vector>
 
-class SceneGraph;  // cvcGL (global namespace)
-class vtkRenderer; // VTK (global namespace)
+class SceneGraph;      // cvcGL (global namespace)
+class vtkRenderer;     // VTK (global namespace)
+class vtkRenderWindow; // VTK (global namespace)
 
 // ---------------
 // SceneRenderer
@@ -47,10 +48,18 @@ class vtkRenderer; // VTK (global namespace)
 // path, or they drift apart and the video stops matching what was on screen.
 //
 // NOT a singleton and not a global. A SceneRenderer holds a reference to the
-// SceneGraph it draws and owns its own VTK objects; construct as many as you
-// like (several views of one scene, or one per scene), and destroy them in any
-// order. Nothing is looked up from a global registry — consistent with the
-// rest of cvcGL, where the app handle is injected rather than discovered.
+// SceneGraph it draws and owns its own VTK objects; nothing is looked up from
+// a global registry — consistent with the rest of cvcGL, where the app handle
+// is injected rather than discovered.
+//
+// ONE RENDERER PER SCENE AT A TIME, THOUGH. SceneGraph::setRenderer is a
+// single attachment: constructing a second SceneRenderer over the same scene
+// moves every node's actor to it and leaves the first drawing an empty frame
+// — silently, since nothing errors and the first renderer keeps working, it
+// just has nothing left in it (measured: mean luma 81.8 -> 0.0). For several
+// views of one scene, re-aim ONE renderer between shots with setCamera; that
+// is cheap, and it is what the camera persisting across frames is for. Two
+// renderers are only independent when they draw two different scenes.
 //
 // Threading: like the rest of cvcGL, a renderer belongs to the thread that
 // drives it. Construct and render on the same thread the SceneGraph pumps.
@@ -95,9 +104,12 @@ public:
   // True once the user has closed an onscreen window; always false offscreen.
   bool windowClosed() const;
 
-  // The renderer this draws through, for callers that need to reach VTK
-  // directly (adding a scalar bar, a text actor, a second camera pass).
+  // The renderer and window this draws through, for callers that need to
+  // reach VTK directly: lights, a 2-D HUD overlay, a gradient background, a
+  // scalar bar, a second camera pass. In Python these arrive as live
+  // vtkmodules objects, so the scene is scriptable rather than opaque.
   vtkRenderer *renderer() const;
+  vtkRenderWindow *renderWindow() const;
 
   // Detach from the scene and release the GL context. Idempotent; the
   // destructor calls it. Exposed so a caller can decide WHEN the context dies

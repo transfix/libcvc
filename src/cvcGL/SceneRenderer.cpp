@@ -191,3 +191,8 @@ vtkRenderer *SceneRenderer::renderer() const {
   m_impl->requireOpen();
   return m_impl->renderer;
 }
+
+vtkRenderWindow *SceneRenderer::renderWindow() const {
+  m_impl->requireOpen();
+  return m_impl->window;
+}

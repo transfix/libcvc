@@ -38,6 +38,8 @@
 #include "vtkMatrix4x4.h"
 #include "vtkProp.h"
 #include "vtkActor.h"
+#include "vtkRenderer.h"
+#include "vtkRenderWindow.h"
 %}
 
 // pycvc.i's %exception (applied via %import) references SWIG_exception, so
@@ -47,6 +49,18 @@
 %include <std_vector.i>
 %include <std_shared_ptr.i>
 %import "pycvc.i"
+
+// Registering VTK's Python types is what makes renderer()/renderWindow()
+// return live vtkmodules objects rather than tripping the guard in the out
+// typemap. Best effort: a build without the VTK Python modules still imports,
+// it just cannot hand back a scriptable renderer.
+%pythoncode %{
+try:  # noqa: SIM105
+    import vtkmodules.vtkRenderingCore as _vtk_core  # noqa: F401
+    import vtkmodules.vtkRenderingOpenGL2 as _vtk_gl  # noqa: F401
+except Exception:  # pragma: no cover -- VTK python bindings are optional
+    pass
+%}
 
 // ── vtkProp* <-> Python VTK object typemaps (the F3 "full bridge") ──────
 // out: return a live vtkmodules wrapper for a C++ prop (new ref; Py_None if null).
@@ -72,6 +86,52 @@
 // The scene stores props in vtkSmartPointer (Register/UnRegister), so the
 // borrowed pointer from GetPointerFromObject is safe to retain. Cover subtypes.
 %apply vtkProp* { vtkActor*, vtkVolume*, vtkImageActor* };
+
+// ── the same bridge for the RENDERER and its window ─────────────────────────
+// Without these, SceneRenderer::renderer() came back as an opaque SwigPyObject
+// and every reason to reach for it failed: AddLight, AddActor2D for a HUD,
+// GradientBackgroundOn, a second camera pass. A scene you cannot light or
+// annotate from Python is only half-scriptable, so this is the difference
+// between "there is a renderer" and "you can use it".
+//
+// GetObjectFromPointer works for any vtkObjectBase; only the class NAME used
+// on the way in differs, which is why these cannot simply %apply the vtkProp
+// typemaps (GetPointerFromObject would type-check against "vtkProp").
+%define %CVC_VTK_BRIDGE(TYPE, NAME)
+%typemap(out) TYPE* {
+  $result = vtkPythonUtil::GetObjectFromPointer($1);
+  // GetObjectFromPointer returns Py_None for a NULL pointer -- and also when
+  // VTK's Python type registry has no wrapper for the class, which happens if
+  // the corresponding vtkmodules package was never imported. Silently handing
+  // back None there is the worst outcome: the caller sees a renderer that is
+  // not None-checked and fails one line later with a confusing AttributeError.
+  if ($1 && (!$result || $result == Py_None)) {
+    Py_XDECREF($result);
+    PyErr_SetString(PyExc_RuntimeError,
+                    "pycvc_gl: VTK Python types are not registered; "
+                    "import vtkmodules.vtkRenderingOpenGL2 before using this");
+    SWIG_fail;
+  }
+  if (!$result) SWIG_fail;
+}
+%typemap(in) TYPE* {
+  if ($input == Py_None) {
+    $1 = nullptr;
+  } else {
+    void* _p = vtkPythonUtil::GetPointerFromObject($input, NAME);
+    if (!_p) SWIG_fail;  // GetPointerFromObject sets a Python TypeError itself
+    $1 = reinterpret_cast<TYPE*>(_p);
+  }
+}
+%typemap(typecheck, precedence=SWIG_TYPECHECK_POINTER) TYPE* {
+  $1 = ($input == Py_None) ||
+       (vtkPythonUtil::GetPointerFromObject($input, NAME) != nullptr);
+  if (!$1) PyErr_Clear();  // typecheck must not leave an error set
+}
+%enddef
+
+%CVC_VTK_BRIDGE(vtkRenderer, "vtkRenderer")
+%CVC_VTK_BRIDGE(vtkRenderWindow, "vtkRenderWindow")
 
 // ── PyCallable -> std::function<void()> ─────────────────────────────────────
 // A Python callable crosses as a C++ std::function so Python functions can be
