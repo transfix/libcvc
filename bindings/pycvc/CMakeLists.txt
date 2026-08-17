@@ -104,6 +104,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state:test_pycvc_state.py
              pycvc_async:test_pycvc_async.py
              pycvc_exec:test_pycvc_exec.py
+             pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_integration:test_pycvc_integration.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
