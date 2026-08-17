@@ -200,8 +200,24 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   m_volume = std::make_shared<cvc::volume>(vol);
 
   updateImageData(vol);
+
+  // Take the range from the image data we just uploaded, NOT from vol.min()/
+  // max(). cvc::volume CACHES its min/max (minIsSet/maxIsSet), and editing the
+  // voxels in place through the zero-copy grid() view does not invalidate that
+  // cache — so a volume that was created empty and filled afterwards still
+  // reports [0, 0]. That stale range then produced a transfer function with
+  // both control points at the same scalar (see setDefaultTransferFunction),
+  // which VTK collapses to a single point applying to EVERY value: the volume
+  // rendered as a solid opaque block no matter what was in it. The image data
+  // cannot be stale here, because updateImageData just wrote it.
   m_dataMin = vol.min();
   m_dataMax = vol.max();
+  if (m_imageData && m_imageData->GetNumberOfPoints() > 0) {
+    double range[2] = {m_dataMin, m_dataMax};
+    m_imageData->GetScalarRange(range);
+    m_dataMin = range[0];
+    m_dataMax = range[1];
+  }
 
   // Update state tree with data range
   getState("data_min").value(m_dataMin);
@@ -422,18 +438,33 @@ void VolumeNode::setDefaultTransferFunction() {
   m_colorFunc->RemoveAllPoints();
   m_opacityFunc->RemoveAllPoints();
 
-  // Default grayscale color map using actual data range
-  m_colorFunc->AddRGBPoint(m_dataMin, 0.0, 0.0, 0.0);
-  m_colorFunc->AddRGBPoint(m_dataMax, 1.0, 1.0, 1.0);
+  double lo = m_dataMin;
+  double hi = m_dataMax;
 
-  // Default opacity ramp using actual data range
-  m_opacityFunc->AddPoint(m_dataMin, 0.0);
-  m_opacityFunc->AddPoint(m_dataMax, 1.0);
+  // A DEGENERATE range — an empty volume, or one whose voxels are all the same
+  // value — must not be fed to the transfer functions as-is. Both control
+  // points would land on the same scalar, VTK keeps only one, and a piecewise
+  // function with a single point returns that value for EVERY input: opacity
+  // 1.0 everywhere, i.e. a solid opaque block. That is the worst possible
+  // default, because it hides the rest of the scene behind a volume that has
+  // nothing in it. Give the ramp a real span and make it invisible instead.
+  const bool degenerate = !(hi > lo);
+  if (degenerate)
+    hi = lo + 1.0;
+  const double topOpacity = degenerate ? 0.0 : 1.0;
+
+  // Default grayscale color map over the data range
+  m_colorFunc->AddRGBPoint(lo, 0.0, 0.0, 0.0);
+  m_colorFunc->AddRGBPoint(hi, 1.0, 1.0, 1.0);
+
+  // Default opacity ramp over the data range
+  m_opacityFunc->AddPoint(lo, 0.0);
+  m_opacityFunc->AddPoint(hi, topOpacity);
 
   // Save to state tree
   std::ostringstream colorStr, opacityStr;
-  colorStr << m_dataMin << ",0,0,0," << m_dataMax << ",1,1,1";
-  opacityStr << m_dataMin << ",0," << m_dataMax << ",1";
+  colorStr << lo << ",0,0,0," << hi << ",1,1,1";
+  opacityStr << lo << ",0," << hi << "," << topOpacity;
   getState("transfer_function.color").value(colorStr.str());
   getState("transfer_function.opacity").value(opacityStr.str());
 }
