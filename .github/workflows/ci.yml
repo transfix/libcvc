@@ -236,13 +236,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Tests excluded on PRs (still run on push-to-master with --timeout 3600):
+          # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites
           #   Performance                              : perf benchmarks (>200s in Debug)
           #   BunnySDF_IsoRoundtrip|QualityImproveAllMethods : heavy Debug-only
           #   Integration                              : CLI integration tests (several minutes)
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # Skipped on PRs -- and now on DEBUG pushes too.
+          #
+          # A Debug push runs the full set with CVC_DISTRIBUTED_STATE_BENCH=1
+          # and --parallel (one ctest job per core). Master died there twice,
+          # in the same place both times:
+          #     Test #503: AlgorithmTest.FindHexsContainingPointPerformanceLargeMesh
+          #                ... Passed 274.78 sec        <- the ">200s in Debug" case above
+          #     Start 1134: StateLinkBenchmark.TransparentLinkIndexLargeTree
+          #     ##[error]Process completed with exit code 143
+          #     ##[error]The runner has received a shutdown signal.
+          # That is not a test failure and not a cancellation -- it is the
+          # hosted runner being killed. These suites allocate large trees and
+          # meshes, a Debug build inflates all of it, --parallel runs several
+          # at once, and ubuntu-latest has 16 GB. The agent dies with the box,
+          # so ctest never gets to report anything, and the error names the
+          # runner rather than the cause.
+          #
+          # Release pushes still run everything. A benchmark timed in a Debug
+          # build was never a meaningful number -- the reason to run these on
+          # push is the Release timings.
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ matrix.build_type }}" != "Debug" ]; then
             CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
@@ -384,9 +404,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # See linux ctest step for rationale.
+          # See linux ctest step for rationale, including why Debug pushes skip
+          # the heavy set (they killed the hosted runner outright).
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ matrix.build_type }}" != "Debug" ]; then
             CVC_DISTRIBUTED_STATE_BENCH=1 \
             ctest --test-dir build --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
