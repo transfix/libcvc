@@ -22,6 +22,7 @@
 %{
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/voxels.h>
@@ -88,6 +89,10 @@ namespace std {
 // long/long-long choice).
 %apply unsigned long long { boost::uint64_t };
 %apply long long { boost::int64_t };
+// Same treatment for the std:: spellings — world_clock's tick / dropped counts
+// are std::uint64_t and would otherwise leak as pointers rather than marshal.
+%apply unsigned long long { std::uint64_t };
+%apply long long { std::int64_t };
 
 // ── The app handle (explicit, no module-global) ─────────────────────
 // cvc::app crosses to Python as an OPAQUE std::shared_ptr<cvc::app> and is
@@ -214,6 +219,66 @@ namespace cvc {
   class composite_function;
   template <class T> class generic_bounding_box;
   typedef generic_bounding_box<double> bounding_box;
+}
+
+// ── cvc::world_clock — simulation time, decoupled from wall time ────
+// The authoritative simulation clock (cvc/core/world_clock.h): time advances in
+// whole fixed_dt quanta, so a scenario reproduces identically on a fast machine
+// and a slow one and anything with per-second units stays correct no matter how
+// often we render. Scripts driving an animation want exactly this instead of
+// integrating whatever variable wall-clock delta a host tick handed them.
+//
+// Two pieces of the C++ surface are reshaped for Python. `step_result` is
+// wrapped as itself, so advance() hands back an object with .steps / .alpha /
+// .dropped_steps — the names the C++ callers already use. But the nested
+// `config` struct and the `mode` enum class are %ignore'd in favour of:
+//   * a scalar ctor, world_clock(fixed_dt, scale, max_steps_per_advance);
+//   * a string mode — "live" / "replay" / "paused" / "stepping".
+// Both keep callers from having to construct a nested proxy type for what is
+// really just three numbers and a four-valued choice. Note that a name-wide
+// %ignore also suppresses a same-named %extend, which is why the replacements
+// below are named differently (mode_name) rather than shadowing the original.
+// An invalid quantum/scale still throws from the ctor
+// (cvc::unsupported_exception, surfaced by the %exception block above).
+// SWIG does not wrap nested structs by default (Warning 325) — advance() would
+// then hand back an opaque, leaked step_result. flatnested hoists it to a
+// top-level proxy so the three fields marshal properly.
+// flatnested hoists it to module scope, where a bare `step_result` would be far
+// too generic a name to sit next to volume/geometry — qualify it.
+%feature("flatnested") cvc::world_clock::step_result;
+%rename(world_clock_step_result) cvc::world_clock::step_result;
+%ignore cvc::world_clock::config;
+%ignore cvc::world_clock::mode;
+%ignore cvc::world_clock::world_clock(cvc::world_clock::config);
+%ignore cvc::world_clock::current_mode;
+%ignore cvc::world_clock::set_mode;
+%include "cvc/core/world_clock.h"
+%extend cvc::world_clock {
+  // Build with an explicit quantum instead of the nested config struct.
+  world_clock(double fixed_dt, double scale = 1.0, int max_steps_per_advance = 8) {
+    cvc::world_clock::config c;
+    c.fixed_dt = fixed_dt;
+    c.scale = scale;
+    c.max_steps_per_advance = max_steps_per_advance;
+    return new cvc::world_clock(c);
+  }
+  std::string mode_name() const {
+    switch ($self->current_mode()) {
+    case cvc::world_clock::mode::live: return "live";
+    case cvc::world_clock::mode::replay: return "replay";
+    case cvc::world_clock::mode::paused: return "paused";
+    case cvc::world_clock::mode::stepping: return "stepping";
+    }
+    return "live";
+  }
+  void set_mode_name(const std::string& m) {
+    if (m == "live") $self->set_mode(cvc::world_clock::mode::live);
+    else if (m == "replay") $self->set_mode(cvc::world_clock::mode::replay);
+    else if (m == "paused") $self->set_mode(cvc::world_clock::mode::paused);
+    else if (m == "stepping") $self->set_mode(cvc::world_clock::mode::stepping);
+    else throw std::invalid_argument(
+        "world_clock.set_mode_name: expected 'live', 'replay', 'paused' or 'stepping'");
+  }
 }
 
 // ── cvc::voxels — curate the surface ────────────────────────────────
