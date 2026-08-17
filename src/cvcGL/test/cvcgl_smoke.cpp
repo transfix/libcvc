@@ -3,6 +3,10 @@
 // Proves the extracted scene graph is usable standalone / SWIG-drivable.
 //
 // (The headless add + remove path is exercised separately by cvcgl_remove.)
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cvc/geometry/geometry.h>

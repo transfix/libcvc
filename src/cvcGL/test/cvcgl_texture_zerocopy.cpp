@@ -6,6 +6,10 @@
 // MTime, and that the TCoords' V is flipped (so no pixel flip-copy is needed).
 // Pure data-structure checks — no GL context.
 
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cvc/core/app.h>
