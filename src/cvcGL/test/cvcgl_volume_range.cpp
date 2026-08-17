@@ -22,13 +22,12 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <vector>
-
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/context.h>
 #include <cvc/volume/volume.h>
+#include <vector>
 
 namespace {
 
@@ -37,8 +36,7 @@ constexpr int N = 8;
 cvc::volume make_volume(float fill) {
   std::vector<float> data(static_cast<std::size_t>(N) * N * N, fill);
   return cvc::volume(cvc::gl::context(), reinterpret_cast<const unsigned char *>(data.data()),
-                     cvc::dimension(N, N, N), cvc::Float,
-                     cvc::bounding_box(0, 0, 0, 1, 1, 1));
+                     cvc::dimension(N, N, N), cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
 }
 
 // The opacity table is stored as flat scalar,alpha pairs.
