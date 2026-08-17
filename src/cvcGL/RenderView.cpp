@@ -8,12 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <vtkProp.h>
-#include <vtkRenderer.h>
-
 #include <cvc/gl/RenderView.h>
 #include <cvc/gl/nodes.h>
 #include <cvc/gl/traversal.h>
+#include <vtkProp.h>
+#include <vtkRenderer.h>
 
 namespace cvc {
 namespace gl {

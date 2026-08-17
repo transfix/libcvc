@@ -9,10 +9,9 @@
 */
 
 #include <algorithm>
-#include <stdexcept>
-
 #include <cvc/gl/nodes.h>
 #include <cvc/gl/traversal.h>
+#include <stdexcept>
 
 namespace cvc {
 namespace gl {

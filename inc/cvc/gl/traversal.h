@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-
 #include <vtkMatrix4x4.h>
 #include <vtkSmartPointer.h>
 

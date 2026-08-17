@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
-
+#include <cvc/geometry/geometry.h>
+#include <cvc/gl/RenderView.h>
+#include <cvc/gl/nodes.h>
 #include <vtkActor.h>
 #include <vtkCellArray.h>
 #include <vtkDoubleArray.h>
@@ -20,10 +22,6 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkUnsignedCharArray.h>
-
-#include <cvc/geometry/geometry.h>
-#include <cvc/gl/RenderView.h>
-#include <cvc/gl/nodes.h>
 
 namespace cvc {
 namespace gl {

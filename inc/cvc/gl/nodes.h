@@ -11,12 +11,11 @@
 #ifndef __CVC_GL_NODES_H__
 #define __CVC_GL_NODES_H__
 
+#include <cvc/gl/traversal.h>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <cvc/gl/traversal.h>
 
 class vtkProp;
 class vtkActor;

@@ -15,7 +15,6 @@
 #include <memory>
 #include <set>
 #include <string>
-
 #include <vtkSmartPointer.h>
 
 class vtkRenderer;

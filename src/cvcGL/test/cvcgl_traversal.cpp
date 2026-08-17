@@ -10,13 +10,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
-#include <stdexcept>
-
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/RenderView.h>
 #include <cvc/gl/nodes.h>
 #include <cvc/gl/traversal.h>
+#include <memory>
+#include <stdexcept>
 
 using namespace cvc::gl;
 
