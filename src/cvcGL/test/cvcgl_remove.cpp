@@ -2,6 +2,10 @@
 // add a geometry node, pump, then remove it. Exercises the add + remove path
 // with no VTK renderer set (m_renderer == nullptr) — the shape the embedded
 // Python lab (pycvc.gl) drives when scripting scene nodes headless.
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cvc/geometry/geometry.h>

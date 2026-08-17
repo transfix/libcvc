@@ -11,6 +11,10 @@
 //   * close() is idempotent and use-after-close is diagnosed, not a crash.
 //
 // Offscreen throughout, so this runs headless in CI.
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <cstdio>

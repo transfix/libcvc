@@ -11,6 +11,10 @@
 // This is the regression guard for the removeGraphics use-after-free. Before the
 // fix a tight add/remove loop faulted within the first iterations; it must now
 // run clean regardless of pump timing or destruction order.
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cvc/core/app.h>

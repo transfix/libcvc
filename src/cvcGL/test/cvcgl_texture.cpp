@@ -2,6 +2,10 @@
 // slot, and setTexture(cvc::image) attaches an RGBA vtkTexture to the actor
 // (clearTexture removes it). Pure data-structure checks — no GL context needed.
 
+// These tests assert(), and cvcpkg builds them Release -- where NDEBUG makes
+// assert() expand to nothing and every check below would pass vacuously.
+// Undefine it before <cassert> so the assertions actually run.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cvc/core/app.h>
