@@ -148,6 +148,16 @@ add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
 target_link_libraries(cvcgl_renderer PRIVATE cvcGL)
 add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 
+# The publisher keeps the state tree correct while keeping writes off the render
+# path: the value arrives (after a flush), the last write wins, and an external
+# write still drives the node.
+add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
+target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
+add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
+
+add_executable(cvcgl_state_probe test/cvcgl_state_probe.cpp)
+target_link_libraries(cvcgl_state_probe PRIVATE cvcGL)
+
 # Not a test: prints what posing a deep hierarchy costs. The shape is the
 # lsystem_forest example's (70 trees of ~21 nested modules), which is what
 # exposed the O(nodes * depth) world-transform cascade.

@@ -198,6 +198,22 @@ protected:
   // Protected members for subclass access
   std::string m_name;
   vtkSmartPointer<vtkMatrix4x4> m_transform;
+  // Cached object-to-world state, refreshed top-down by updateTransform().
+  // Both exist to keep the per-frame pose path ALLOCATION-FREE: it used to make
+  // a fresh vtkMatrix4x4 (inside getWorldTransform, which also recursed up to
+  // the root) and a fresh vtkTransform for every node the cascade touched,
+  // every frame. Reusing them is what takes the per-node cost down.
+  vtkSmartPointer<vtkMatrix4x4> m_worldMatrix;
+  // Full state paths for the transform keys, resolved ONCE. getState(name) costs
+  // ~8 us per call, which was a third of the price of moving a node.
+  std::string m_pathPosition, m_pathRotation, m_pathScale, m_pathMatrix;
+  // The last value this node published for each key. The node is the source of
+  // truth for its own transform, so when the publisher's write comes back
+  // through handleStateChanged it must be recognised as an echo and ignored —
+  // otherwise every pose runs the whole cascade a second time. An EXTERNAL write
+  // (the dashboard, a script) differs from what we published and still applies.
+  std::string m_echoPosition, m_echoRotation, m_echoScale, m_echoMatrix;
+  vtkSmartPointer<vtkTransform> m_worldXf;
   vtkSmartPointer<vtkTransform> m_vtkTransform; // VTK transform wrapper for m_transform
   std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
   GraphicsNode *m_parent; // Weak pointer to parent for world transform calculation
