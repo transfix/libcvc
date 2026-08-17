@@ -106,6 +106,12 @@ add_executable(cvcgl_smoke test/cvcgl_smoke.cpp)
 target_link_libraries(cvcgl_smoke PRIVATE cvcGL)
 add_test(NAME cvcgl_smoke COMMAND cvcgl_smoke)
 
+# Guards the "solid opaque block" volume bug: a stale cached min/max after an
+# in-place voxel edit, and a degenerate range collapsing the transfer function.
+add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
+target_link_libraries(cvcgl_volume_range PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
+
 # Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
 # against the no-renderer teardown crash the Python lab would otherwise hit.
 add_executable(cvcgl_remove test/cvcgl_remove.cpp)
