@@ -53,6 +53,18 @@ vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
   VERSION ${PROJECT_VERSION} SOVERSION 3)
 
+# Same reason as src/cvc/CMakeLists.txt:795-801, which cvcGL was missing: the
+# sources carry no __declspec(dllexport), so a SHARED Windows build emits a
+# .dll with an empty export table and NO import .lib. Every consumer then dies
+# with "LNK1181: cannot open input file 'cvcGL.lib'" — including this
+# directory's own test executables, which is how it was found: cvcpkg builds
+# windows/release/SHARED, and the test targets restored by #182 plus the new
+# SceneRenderer tests from #184 were the first things to link cvcGL in that
+# configuration. The static default had hidden it.
+if(WIN32)
+  set_target_properties(cvcGL PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 # ── Install + export a package config so consumers can find_package(cvcGL) ──
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
