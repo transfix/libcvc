@@ -27,6 +27,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
@@ -415,6 +416,21 @@ def _typed_node(sg, name):
 %pythonappend SceneGraph::geometry_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
+// The child-adders return live node proxies too, so they need the same app
+// keep-alive as getGraphics/addGraphics: a node proxy that outlives the app
+// would lock a destroyed state mutex in ~SceneNode.
+%pythonappend SceneGraph::add_child_group %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend SceneGraph::add_group %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend SceneGraph::add_child_geometry %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
+%pythonappend SceneGraph::add_child_volume %{
+    if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
+%}
 %pythonappend SceneGraph::volume_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
@@ -471,6 +487,34 @@ def _typed_node(sg, name):
   // Resize the world grid/box to (minx..maxz) (updateGrid takes an opaque bbox).
   void update_grid(double minx, double miny, double minz, double maxx, double maxy, double maxz) {
     $self->updateGrid(cvc::bounding_box(minx, miny, minz, maxx, maxy, maxz));
+  }
+  // Add an EMPTY grouping node as a child of `parent` — a pure transform node.
+  //
+  // Without this, every node in a Python-built hierarchy had to carry geometry,
+  // because add_child_geometry/add_child_volume were the only parenting
+  // primitives on offer (GraphicsNode::addGraphicsChild is a template, so SWIG
+  // cannot wrap it). That forced callers to flatten any multi-step local
+  // transform into a single matrix in Python instead of letting the graph
+  // compose it — see the lsystem_tree volrover3 example, where a whole turtle
+  // path per module gets collapsed for exactly this reason.
+  //
+  // NullGraphicNode is the concrete "no visual data" GraphicsNode (GraphicsNode
+  // itself is abstract — getProp() is pure virtual). Its bounds default to
+  // syncing with its children, so a group reports the extent of what it holds.
+  std::shared_ptr<GraphicsNode> add_child_group(const std::string& parent,
+                                                const std::string& name) {
+    auto p = $self->getGraphics(parent);
+    if (!p)
+      throw std::invalid_argument("add_child_group: no parent node named '" + parent + "'");
+    auto child = p->addGraphicsChild<NullGraphicNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
+  }
+  // The same, at the top of the graph.
+  std::shared_ptr<GraphicsNode> add_group(const std::string& name) {
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<NullGraphicNode>(name);
+    $self->registerGraphics(name, child);
+    return child;
   }
   // Add a geometry / volume as a CHILD of `parent` (inherits its transform), and
   // register it so getGraphics(name) finds it.
