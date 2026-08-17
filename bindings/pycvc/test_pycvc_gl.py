@@ -186,6 +186,45 @@ def test_director_python_node_type():
     print("  ok: director — C++ dispatches a virtual into a Python-defined node type")
 
 
+def test_group_nodes_compose_transforms():
+    """A pure grouping node: no geometry, just a transform its children inherit.
+
+    This is what add_child_geometry/add_child_volume alone could not express —
+    every node had to carry geometry, so a caller with a multi-step local
+    transform had to flatten it in Python instead of letting the graph compose
+    it. Here the graph does the composing.
+    """
+    sg = pycvc_gl.SceneGraph(app)
+    arm = sg.add_group("arm")
+    assert arm is not None
+    forearm = sg.add_child_group("arm", "forearm")
+    hand = sg.add_child_geometry("forearm", "hand", _make_tri())
+    assert sg.hasGraphics("arm") and sg.hasGraphics("forearm") and sg.hasGraphics("hand")
+
+    # Translate along the chain; the leaf's WORLD transform must accumulate all
+    # three, which is the whole point of grouping.
+    arm.setPosition(10.0, 0.0, 0.0)
+    forearm.setPosition(0.0, 5.0, 0.0)
+    hand.setPosition(0.0, 0.0, 2.0)
+    sg.processEvents()
+
+    w = hand.get_world_transform()  # row-major 4x4
+    assert abs(w[3] - 10.0) < 1e-9, w[3]
+    assert abs(w[7] - 5.0) < 1e-9, w[7]
+    assert abs(w[11] - 2.0) < 1e-9, w[11]
+
+    # Moving the group moves the whole subtree, without touching the leaf.
+    arm.setPosition(-4.0, 0.0, 0.0)
+    sg.processEvents()
+    w = hand.get_world_transform()
+    assert abs(w[3] + 4.0) < 1e-9, w[3]
+    assert abs(w[7] - 5.0) < 1e-9
+
+    assert "forearm" in arm.child_names()
+    assert "hand" in forearm.child_names()
+    print("  ok: group nodes carry transforms their children inherit")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_update_ops_no_rebuild()
@@ -194,4 +233,5 @@ if __name__ == "__main__":
     test_scene_add_destroy_churn()
     test_held_node_outlives_scene()
     test_director_python_node_type()
+    test_group_nodes_compose_transforms()
     print("pycvc_gl scene tests: OK")
