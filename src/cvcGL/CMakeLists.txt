@@ -112,6 +112,13 @@ add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
 target_link_libraries(cvcgl_volume_range PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
 
+# The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
+# per-view divergence and teardown. Runs with a null renderer, so it exercises
+# the whole walk without a GL context.
+add_executable(cvcgl_traversal test/cvcgl_traversal.cpp)
+target_link_libraries(cvcgl_traversal PRIVATE cvcGL)
+add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
+
 # Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
 # against the no-renderer teardown crash the Python lab would otherwise hit.
 add_executable(cvcgl_remove test/cvcgl_remove.cpp)
