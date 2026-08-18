@@ -263,11 +263,33 @@ jobs:
           # build was never a meaningful number -- the reason to run these on
           # push is the Release timings.
           if [ "${{ github.event_name }}" = "push" ] && [ "${{ matrix.build_type }}" != "Debug" ]; then
-            CVC_DISTRIBUTED_STATE_BENCH=1 \
+            # Everything EXCEPT the heavy suites, in parallel.
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
                   --output-on-failure --parallel \
-                  --repeat until-pass:3 --timeout 3600
+                  --repeat until-pass:3 --timeout 3600 \
+                  -E "${STRESS_REGEX}"
+            # Heavy suites, SERIALLY (--parallel 1).
+            #
+            # Excluding these from Debug pushes was not enough: Release
+            # died the same way, at test ~1510/2257, with
+            #     ##[error]Process completed with exit code 143
+            #     ##[error]The runner has received a shutdown signal.
+            # Config was never the variable -- CONCURRENCY is. These
+            # suites allocate large trees and meshes, plain --parallel
+            # starts one per core, and several at once exceed the 16 GB
+            # hosted runner. They pass individually, which is why the run
+            # gets ~1500 tests deep before dying and why the failure
+            # looks like a cancellation.
+            #
+            # Serial keeps the coverage instead of dropping it; only one
+            # heavy allocation is live at a time.
+            CVC_DISTRIBUTED_STATE_BENCH=1 \
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel 1 \
+                  --repeat until-pass:3 --timeout 3600 \
+                  -R "${STRESS_REGEX}"
           else
             ctest --test-dir build \
                   --build-config ${{ matrix.build_type }} \
@@ -408,11 +430,33 @@ jobs:
           # the heavy set (they killed the hosted runner outright).
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if [ "${{ github.event_name }}" = "push" ] && [ "${{ matrix.build_type }}" != "Debug" ]; then
+            # Everything EXCEPT the heavy suites, in parallel.
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 3600 \
+                  -E "${STRESS_REGEX}"
+            # Heavy suites, SERIALLY (--parallel 1).
+            #
+            # Excluding these from Debug pushes was not enough: Release
+            # died the same way, at test ~1510/2257, with
+            #     ##[error]Process completed with exit code 143
+            #     ##[error]The runner has received a shutdown signal.
+            # Config was never the variable -- CONCURRENCY is. These
+            # suites allocate large trees and meshes, plain --parallel
+            # starts one per core, and several at once exceed the 16 GB
+            # hosted runner. They pass individually, which is why the run
+            # gets ~1500 tests deep before dying and why the failure
+            # looks like a cancellation.
+            #
+            # Serial keeps the coverage instead of dropping it; only one
+            # heavy allocation is live at a time.
             CVC_DISTRIBUTED_STATE_BENCH=1 \
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
-          else
-            ctest --test-dir build --build-config ${{ matrix.build_type }} \
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel 1 \
+                  --repeat until-pass:3 --timeout 3600 \
+                  -R "${STRESS_REGEX}"
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
                   -E "${STRESS_REGEX}"
           fi
