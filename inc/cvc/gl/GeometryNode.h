@@ -4,6 +4,7 @@
 #include <boost/shared_array.hpp>
 #include <cvc/gl/GraphicsNode.h>
 #include <memory>
+#include <vector>
 #include <vtkSmartPointer.h>
 
 class vtkActor;
@@ -55,6 +56,39 @@ public:
   void setGeometry(const cvc::geometry &geom);
   bool hasGeometry() const { return m_hasGeometry; }
   const cvc::geometry *getGeometry() const { return m_geometry.get(); }
+
+  // Topology-preserving fast path: overwrite this mesh's vertex COORDINATES in
+  // place and mark it modified, WITHOUT rebuilding cells, colours, texture
+  // coords, or normals. `xyz` is flat [x,y,z, x,y,z, ...] and MUST have the same
+  // point count as the geometry last set via setGeometry() (a point-count
+  // mismatch logs and no-ops rather than corrupt the mesh — call setGeometry to
+  // change topology). For per-frame deformation of a fixed mesh (e.g. the merged
+  // L-system tree re-posed by wind, docs/RENDER_PERFORMANCE.md fix #3): one cheap
+  // buffer update instead of one draw call per module. Normals are left at their
+  // bind-pose values — the SHADOW map is built from depth (positions), which ARE
+  // updated, so cast shadows track the motion; per-frame normal recompute
+  // (vtkPolyDataNormals) is exactly the cost this path exists to avoid.
+  void updateVertices(const std::vector<double> &xyz);
+
+  // Inject GLSL into this mesh's shader (a passthrough to the actor's
+  // vtkShaderProperty). `original` is a VTK shader anchor (e.g.
+  // "//VTK::Normal::Impl") or a generated line; `replacement` is spliced in for
+  // the first occurrence. Enables procedural surface effects the fixed pipeline
+  // can't express — e.g. fragment BUMP MAPPING (perturb normalVCVSOutput by the
+  // surface-gradient of a procedural height, no tangents), so grass/dirt shades
+  // with fine detail instead of a smooth moulded sheen. Caller owns the GLSL;
+  // clearShaderReplacements() removes all injected code.
+  void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
+  void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
+  void clearShaderReplacements();
+
+  // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
+  // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
+  // frame. Needed whenever a shader reads vertex position for a WORLD-space
+  // procedural effect (e.g. the terrain bump map) — without it the position is
+  // offset/scaled and the effect mis-registers. Safe near the origin; a mesh very
+  // far from the origin trades a little float precision (jitter) for it.
+  void disableCoordinateShiftScale();
 
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.

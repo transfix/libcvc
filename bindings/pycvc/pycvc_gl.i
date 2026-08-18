@@ -331,6 +331,9 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // texture_modified auto-wrap (cvc::image is %import'd from pycvc.i); the snake
 // aliases below match the pycvc image/texture demo surface.
 %ignore GeometryNode::getBoundingBox;
+// Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
+// the per-frame deform path reads the buffer directly instead of via .tolist().
+%ignore GeometryNode::updateVertices(const std::vector<double> &);
 %extend GeometryNode {
   // Zero-copy texture (default): the vtkTexture aliases img's RGBA8 buffer, so a
   // later img.numpy() pixel edit + texture_modified() shows live with no re-copy.
@@ -338,6 +341,29 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   // Convert-flip-and-copy fallback (any format; the texture owns its own copy).
   void set_texture_copy(const cvc::image& img) { $self->setTexture(img, /*zeroCopy=*/false); }
   void clear_texture() { $self->clearTexture(); }
+
+  // numpy-direct vertex update: accept a C-contiguous float64 buffer (e.g. a numpy
+  // array's .ravel()) and blit it in place — skipping the ~N Python-float
+  // allocations that .tolist() would force on every frame of a deforming mesh.
+  // The std::vector<double> overload is %ignored for Python; this is updateVertices.
+  void updateVertices(PyObject *buf) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(buf, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) {
+      PyErr_Clear();
+      throw std::invalid_argument(
+          "updateVertices: expected a C-contiguous float64 buffer (e.g. a numpy array's .ravel())");
+    }
+    const char *fmt = view.format ? view.format : "";
+    bool is_double = fmt[0] == 'd' || ((fmt[0] == '<' || fmt[0] == '=') && fmt[1] == 'd');
+    if (!is_double) {
+      PyBuffer_Release(&view);
+      throw std::invalid_argument("updateVertices: expected float64 (double) data");
+    }
+    const double *data = static_cast<const double *>(view.buf);
+    std::vector<double> xyz(data, data + view.len / sizeof(double));
+    PyBuffer_Release(&view);
+    $self->updateVertices(xyz);
+  }
 }
 %include "cvc/gl/GeometryNode.h"
 

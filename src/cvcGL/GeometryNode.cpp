@@ -17,6 +17,8 @@
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLVertexBufferObject.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
@@ -25,6 +27,7 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkShaderProperty.h>
 #include <vtkTexture.h>
 #include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
@@ -482,6 +485,82 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
         nullParent->syncBoundsToChildren();
       }
     }
+  });
+}
+
+void GeometryNode::updateVertices(const std::vector<double> &xyz) {
+  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+
+  // Topology-preserving fast path (docs/RENDER_PERFORMANCE.md fix #3, route C):
+  // overwrite the existing vtkPoints coordinates in place and mark modified, so
+  // the next frame re-uploads the mesh WITHOUT rebuilding cells/colours/tcoords or
+  // re-running ensureNormals (the expensive part of setGeometry). `xyz` is flat
+  // [x,y,z, ...] with the SAME point count as the current geometry; a mismatch
+  // logs and no-ops rather than corrupt the mesh. Normals stay at bind pose on
+  // purpose — the shadow map is depth (positions), which ARE updated, so shadows
+  // track the sway; the small shading error from a per-frame rotation is not worth
+  // a vtkPolyDataNormals pass per frame. Runs on the main thread like setGeometry.
+  runOnMainThread([this, xyz]() {
+    if (!m_polyData)
+      return;
+    vtkPoints *pts = m_polyData->GetPoints();
+    const size_t n = xyz.size() / 3;
+    if (!pts || static_cast<size_t>(pts->GetNumberOfPoints()) != n) {
+      cvc::gl::context().log(0, "GeometryNode::updateVertices[" + getName() +
+                                    "]: point-count mismatch (" + std::to_string(n) + " given, " +
+                                    std::to_string(pts ? pts->GetNumberOfPoints() : 0) +
+                                    " in mesh) — ignoring; call setGeometry to change topology");
+      return;
+    }
+    for (size_t i = 0; i < n; ++i)
+      pts->SetPoint(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+    pts->Modified();
+    m_polyData->Modified();
+    // Request a redraw the same way handleStateChanged does — never render
+    // synchronously here (see GraphicsNode). The host frame loop drains it.
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::addVertexShaderReplacement(const std::string &original,
+                                              const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    if (m_actor && m_actor->GetShaderProperty())
+      m_actor->GetShaderProperty()->AddVertexShaderReplacement(original, true, replacement, false);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::addFragmentShaderReplacement(const std::string &original,
+                                                const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    if (m_actor && m_actor->GetShaderProperty())
+      m_actor->GetShaderProperty()->AddFragmentShaderReplacement(original, true, replacement,
+                                                                 false);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::clearShaderReplacements() {
+  runOnMainThread([this]() {
+    if (m_actor && m_actor->GetShaderProperty()) {
+      m_actor->GetShaderProperty()->ClearAllVertexShaderReplacements();
+      m_actor->GetShaderProperty()->ClearAllFragmentShaderReplacements();
+    }
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::disableCoordinateShiftScale() {
+  runOnMainThread([this]() {
+    if (auto *m = vtkOpenGLPolyDataMapper::SafeDownCast(m_mapper))
+      m->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
   });
 }
 
