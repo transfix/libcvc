@@ -128,7 +128,11 @@ if(CVC_BUILD_PYCVC_GL)
   #                  and link the imported cvc::cvcGL (the `cvcgl` cvcpkg pkg).
   #   * In-tree    — build it here via add_subdirectory and link the `cvcGL`
   #                  target (which also aliases cvc::cvcGL).
-  if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  if(TARGET cvcGL)
+    # Already built in-tree (e.g. top-level CVC_BUILD_CVCGL) — reuse that target.
+    set(_PYCVC_CVCGL_TARGET cvcGL)
+    set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
+  elseif(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     find_package(cvcGL CONFIG REQUIRED)
     set(_PYCVC_CVCGL_TARGET cvc::cvcGL)
     # Imported cvcGL is a static archive — no runtime dir to add to the loader

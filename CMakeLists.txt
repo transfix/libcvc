@@ -326,6 +326,18 @@ endif()
 
 add_subdirectory(src)
 
+# ************* cvcGL scene-graph library (opt-in, standalone) *************
+# cvcGL is normally pulled in by the pycvc bindings (add_subdirectory below), but
+# a pure-C++ consumer — an example, a demo, an app — should not have to build SWIG
+# and Python just to link the scene graph. This builds cvcGL (and, with
+# CVC_BUILD_EXAMPLES, its examples) in-tree against the just-built cvc core, no
+# pycvc required. Guarded on the target so it composes with the pycvc path, which
+# reuses this target when it is already defined.
+option(CVC_BUILD_CVCGL "Build the cvcGL scene-graph library in-tree (no pycvc needed)" OFF)
+if(CVC_BUILD_CVCGL AND NOT TARGET cvcGL)
+  add_subdirectory(src/cvcGL)
+endif()
+
 # ************* pycvc Python bindings (opt-in) *************
 # Off by default so a plain libcvc build needs neither SWIG nor Python.
 # Enabled by the cvcpkg recipe so the published bundle carries `import pycvc`.

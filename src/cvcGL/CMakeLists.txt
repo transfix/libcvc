@@ -175,3 +175,10 @@ target_link_libraries(cvcgl_transform_bench PRIVATE cvcGL)
 # on any machine rather than quoted from a commit message.
 add_executable(cvcgl_renderer_bench test/cvcgl_renderer_bench.cpp)
 target_link_libraries(cvcgl_renderer_bench PRIVATE cvcGL)
+
+# CameraController: orbit + Quake-fly navigation math (Z-up). Drives a bare
+# vtkCamera and asserts framing, the seamless orbit<->fly toggle, WASD/strafe/
+# vertical motion, mouse-look, and orbit-drag — no window needed.
+add_executable(cvcgl_camera test/cvcgl_camera.cpp)
+target_link_libraries(cvcgl_camera PRIVATE cvcGL)
+add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
