@@ -6,6 +6,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/state_publisher.h>
 #include <vtkActor2D.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
@@ -20,12 +21,24 @@
 
 GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
+      m_worldMatrix(vtkSmartPointer<vtkMatrix4x4>::New()),
+      m_worldXf(vtkSmartPointer<vtkTransform>::New()),
       m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
       m_bboxNode(std::make_shared<BBoxNode>()), m_showLabel(false), m_labelText(name),
       m_labelSize(14), m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),
       m_clipPlanes(vtkSmartPointer<vtkPlaneCollection>::New()) {
   // Initialize transform to identity
   m_transform->Identity();
+  m_worldMatrix->Identity();
+  m_worldXf->SetMatrix(m_worldMatrix);
+
+  // Resolve the transform state paths once (getState is ~8 us a call).
+  if (!statePath.empty()) {
+    m_pathPosition = getState("position").fullName();
+    m_pathRotation = getState("rotation").fullName();
+    m_pathScale = getState("scale").fullName();
+    m_pathMatrix = getState("matrix").fullName();
+  }
   m_vtkTransform->SetMatrix(m_transform);
 
   // Initialize label color to white
@@ -117,10 +130,15 @@ void GraphicsNode::setPosition(double x, double y, double z) {
   m_transform->SetElement(1, 3, y);
   m_transform->SetElement(2, 3, z);
 
-  // Update state tree
-  std::ostringstream oss;
-  oss << x << "," << y << "," << z;
-  getState("position").value(oss.str());
+  // Publish rather than write. The value still reaches the state tree, just on
+  // the publisher's cadence and coalesced, so posing a node no longer pays for a
+  // path lookup, a signal, and the echo-driven second cascade.
+  if (!m_pathPosition.empty()) {
+    std::ostringstream oss;
+    oss << x << "," << y << "," << z;
+    m_echoPosition = oss.str();
+    cvc::gl::state_publisher::instance().publish(m_pathPosition, m_echoPosition);
+  }
 
   updateTransform();
 }
@@ -207,22 +225,24 @@ void GraphicsNode::resetTransform() {
 }
 
 vtkSmartPointer<vtkMatrix4x4> GraphicsNode::getWorldTransform() const {
-  vtkSmartPointer<vtkMatrix4x4> worldTransform = vtkSmartPointer<vtkMatrix4x4>::New();
-
-  if (m_parent) {
-    // Get parent's world transform
-    vtkSmartPointer<vtkMatrix4x4> parentWorld = m_parent->getWorldTransform();
-    // Multiply: worldTransform = parentWorld * m_transform
-    vtkMatrix4x4::Multiply4x4(parentWorld, m_transform, worldTransform);
-  } else {
-    // No parent, local transform is world transform
-    worldTransform->DeepCopy(m_transform);
-  }
-
-  return worldTransform;
+  // A COPY of the cache, which updateTransform() keeps current top-down. Callers
+  // used to receive a freshly recursed product; the value is identical, and the
+  // copy preserves the contract that the result may be held and mutated.
+  auto out = vtkSmartPointer<vtkMatrix4x4>::New();
+  out->DeepCopy(m_worldMatrix);
+  return out;
 }
 
 void GraphicsNode::updateTransform(bool isRoot) {
+  // Refresh the cached world matrix from the parent's, which is already current
+  // because a parent is always updated before its children. One multiply, no
+  // walk back up to the root and no allocation.
+  if (m_parent)
+    vtkMatrix4x4::Multiply4x4(m_parent->m_worldMatrix, m_transform, m_worldMatrix);
+  else
+    m_worldMatrix->DeepCopy(m_transform);
+  m_worldXf->SetMatrix(m_worldMatrix); // reused object; SetMatrix marks it Modified
+
   // Update VTK transform wrapper
   m_vtkTransform->SetMatrix(m_transform);
   m_vtkTransform->Modified();
@@ -256,18 +276,16 @@ void GraphicsNode::applyWorldTransformToProps(const std::vector<vtkProp *> &prop
   if (props.empty())
     return;
 
-  // Compute world transform once
-  auto worldTransform = getWorldTransform();
-  vtkSmartPointer<vtkTransform> vtkWorldTransform = vtkSmartPointer<vtkTransform>::New();
-  vtkWorldTransform->SetMatrix(worldTransform);
-
-  // Apply to all props (cast to vtkProp3D which has SetUserTransform)
+  // m_worldXf already carries this node's current world transform (refreshed in
+  // updateTransform). Hand the SAME object to the prop and only re-set it if the
+  // prop is not already holding it: after the first frame this loop is a pointer
+  // compare, and the per-frame work is the one SetMatrix above.
   for (vtkProp *prop : props) {
-    if (prop) {
-      vtkProp3D *prop3D = vtkProp3D::SafeDownCast(prop);
-      if (prop3D) {
-        prop3D->SetUserTransform(vtkWorldTransform.Get());
-      }
+    if (!prop)
+      continue;
+    if (vtkProp3D *prop3D = vtkProp3D::SafeDownCast(prop)) {
+      if (prop3D->GetUserTransform() != m_worldXf.Get())
+        prop3D->SetUserTransform(m_worldXf.Get());
     }
   }
 }
@@ -333,6 +351,8 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     } else if (childState == "position") {
       try {
         std::string posStr = getState("position").value<std::string>();
+        if (posStr == m_echoPosition)
+          return; // our own published value coming back; the node already has it
         std::istringstream iss(posStr);
         double x, y, z;
         char comma;
