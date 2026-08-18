@@ -50,9 +50,26 @@ void state_publisher::publish(const std::string &path, std::string value) {
     // Superseded before it was ever written — this is the win for animation.
     it->second = std::move(value);
     m_coalesced.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    m_pending.emplace(path, std::move(value));
+    return;
   }
+
+  // Reservoir sampling (Algorithm R) over the offers in this flush window, so
+  // every offered path is retained with the same probability regardless of when
+  // it arrived. Evicting a random incumbent instead would still favour late
+  // arrivals, and the head of the scene would effectively never be published.
+  ++m_seen;
+  if (m_pending.size() >= m_maxPending) {
+    const std::size_t j = static_cast<std::size_t>(m_rng() % m_seen);
+    m_dropped.fetch_add(1, std::memory_order_relaxed);
+    if (j >= m_maxPending || m_keys.empty())
+      return; // this offer loses its place in the reservoir
+    m_pending.erase(m_keys[j]);
+    m_pending.emplace(path, std::move(value));
+    m_keys[j] = path;
+    return;
+  }
+  m_keys.push_back(path);
+  m_pending.emplace(path, std::move(value));
 }
 
 void state_publisher::flush() {
@@ -62,6 +79,8 @@ void state_publisher::flush() {
     if (m_pending.empty())
       return;
     batch.swap(m_pending); // hold the lock only for the swap
+    m_keys.clear();
+    m_seen = 0; // new sampling window
   }
   for (auto &kv : batch) {
     // operator()(path) resolves (creating as needed) and value() fires
@@ -71,6 +90,16 @@ void state_publisher::flush() {
     cvc::state::instance(m_ctx)(kv.first).value(kv.second);
   }
   m_written.fetch_add(batch.size(), std::memory_order_relaxed);
+}
+
+void state_publisher::set_max_pending(std::size_t n) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_maxPending = n ? n : 1;
+}
+
+std::size_t state_publisher::max_pending() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_maxPending;
 }
 
 std::size_t state_publisher::pending() const {

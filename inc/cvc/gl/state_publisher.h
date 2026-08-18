@@ -15,8 +15,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <random>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace cvc {
 class app;
@@ -81,10 +83,32 @@ public:
   void stop();
   bool running() const { return m_running.load(); }
 
-  // Observability — a queue that silently grows is worse than no queue.
+  // ── back pressure ────────────────────────────────────────────────────────
+  // Coalescing bounds the queue by DISTINCT PATHS, which under load is every
+  // animated node — so it is not a bound at all when the worker falls behind.
+  // This is: past the cap, updates are SHED rather than queued.
+  //
+  // Shedding is safe precisely because the queue is eventually consistent and
+  // every animated node republishes next frame: a dropped value is superseded,
+  // never lost. What it must not do is STARVE, and that is subtler than it
+  // looks. Refusing the newcomer starves the tail of the scene outright, since
+  // publish order is stable frame to frame. Evicting a random INCUMBENT is not
+  // fair either — it still favours late arrivals, because an early path has to
+  // survive every subsequent eviction: with a cap of 64 and 500 offers, the
+  // first path survives a window only ~0.1% of the time.
+  //
+  // So admission is RESERVOIR SAMPLING: with N offers in a window and a cap of
+  // k, every offer ends up retained with the same probability k/N, whatever its
+  // position. That is what makes "eventually consistent" actually true.
+  void set_max_pending(std::size_t n);
+  std::size_t max_pending() const;
+
+  // Observability — a queue that silently grows, or silently sheds, is worse
+  // than no queue. Same principle as world_clock reporting dropped_steps.
   std::size_t pending() const;
   std::uint64_t written() const { return m_written.load(); }
   std::uint64_t coalesced() const { return m_coalesced.load(); }
+  std::uint64_t dropped() const { return m_dropped.load(); }
 
 private:
   void worker(double hz);
@@ -92,10 +116,19 @@ private:
   cvc::app &m_ctx;
   mutable std::mutex m_mutex;
   std::unordered_map<std::string, std::string> m_pending;
+  // Pending keys, kept alongside the map purely so eviction can be O(1) AND
+  // uniform. Probing random hash buckets does not work: the map keeps a large
+  // bucket_count from earlier peaks, so at a low load factor the probes miss,
+  // eviction quietly fails and the "cap" stops capping anything.
+  std::vector<std::string> m_keys;
   std::condition_variable m_wake;
   std::atomic<bool> m_running{false};
   std::atomic<std::uint64_t> m_written{0};
   std::atomic<std::uint64_t> m_coalesced{0};
+  std::atomic<std::uint64_t> m_dropped{0};
+  std::size_t m_maxPending = 8192;
+  std::uint64_t m_seen = 0; // new-path offers this window (reservoir denominator)
+  std::minstd_rand m_rng{12345};
 };
 
 } // namespace gl

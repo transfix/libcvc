@@ -91,6 +91,40 @@ void test_background_flush() {
   std::printf("  ok: the pooled worker drains the queue on its own\n");
 }
 
+// Back pressure: past the cap the queue must stop growing, and shedding must
+// not starve anyone — every path has to land EVENTUALLY.
+void test_back_pressure_sheds_without_starving() {
+  auto &pub = cvc::gl::state_publisher::instance();
+  pub.flush();
+  const std::size_t cap = 64;
+  const std::size_t paths = 500; // deliberately far past the cap
+  pub.set_max_pending(cap);
+
+  const std::uint64_t dropped0 = pub.dropped();
+  for (std::size_t i = 0; i < paths; ++i)
+    pub.publish("bp.p" + std::to_string(i), "0");
+  // The whole point: bounded, not merely coalesced.
+  assert(pub.pending() <= cap);
+  assert(pub.dropped() > dropped0);
+  std::printf("  ok: %zu offers held to a %zu cap (%llu shed)\n", paths, cap,
+              static_cast<unsigned long long>(pub.dropped() - dropped0));
+
+  // Eventual consistency: republish every round, as an animated node does, and
+  // every path must eventually be stored. Starvation would leave some never set.
+  for (int round = 0; round < 400; ++round) {
+    for (std::size_t i = 0; i < paths; ++i)
+      pub.publish("bp.p" + std::to_string(i), std::to_string(round));
+    pub.flush();
+  }
+  std::size_t landed = 0;
+  for (std::size_t i = 0; i < paths; ++i)
+    if (!read("bp.p" + std::to_string(i)).empty())
+      ++landed;
+  assert(landed == paths);
+  std::printf("  ok: all %zu paths landed despite shedding (no starvation)\n", landed);
+  pub.set_max_pending(8192); // restore
+}
+
 } // namespace
 
 int main() {
@@ -98,6 +132,7 @@ int main() {
   test_coalescing_keeps_the_last_value();
   test_external_write_still_moves_the_node();
   test_background_flush();
+  test_back_pressure_sheds_without_starving();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }
