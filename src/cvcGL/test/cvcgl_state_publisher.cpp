@@ -7,9 +7,6 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
-#include <string>
-#include <thread>
-
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
@@ -17,6 +14,8 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/context.h>
 #include <cvc/gl/state_publisher.h>
+#include <string>
+#include <thread>
 
 namespace {
 

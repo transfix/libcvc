@@ -16,19 +16,18 @@
 // a number quoted in a commit message.
 #include <chrono>
 #include <cstdio>
+#include <cvc/geometry/geometry.h>
+#include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/SceneGraph.h>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <cvc/geometry/geometry.h>
-#include <cvc/gl/GeometryNode.h>
-#include <cvc/gl/SceneGraph.h>
-
 namespace {
 
 constexpr int TREES = 70;
-constexpr int BRANCH = 3;  // children per module
-constexpr int DEPTH = 4;   // module levels, as the forest's maturities average
+constexpr int BRANCH = 3; // children per module
+constexpr int DEPTH = 4;  // module levels, as the forest's maturities average
 
 cvc::geometry little_mesh() {
   cvc::geometry g;
@@ -68,7 +67,8 @@ double time_ms(const std::vector<std::shared_ptr<GraphicsNode>> &nodes, int reps
     for (const auto &n : nodes)
       n->setPosition(a, 1.0, 0.0);
   }
-  auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  auto dt =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   return dt / reps;
 }
 
@@ -87,8 +87,7 @@ int main() {
     all.push_back(root);
     grow(root, mesh, DEPTH - 1, counter, all);
   }
-  const double build =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const double build = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   std::printf("built %zu nodes (%d trees x %zu modules, depth %d) in %.1f s\n", all.size(), TREES,
               all.size() / TREES, DEPTH, build);

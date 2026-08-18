@@ -9,13 +9,12 @@
 */
 
 #include <chrono>
-#include <utility>
-#include <vector>
-
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/context.h>
 #include <cvc/gl/state_publisher.h>
+#include <utility>
+#include <vector>
 
 namespace cvc {
 namespace gl {
