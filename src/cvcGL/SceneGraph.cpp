@@ -19,6 +19,7 @@
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkLight.h>
 #include <vtkMultiVolume.h>
+#include <vtkObjectFactory.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
@@ -701,12 +702,53 @@ void SceneGraph::clearLights() {
 
 std::size_t SceneGraph::numLights() const { return m_lights.size(); }
 
+// A shadow baker that only re-bakes every Nth frame. The base pass re-renders the
+// whole scene depth from every light whenever geometry has moved; for a scene that
+// deforms every frame (a swaying forest) that is the dominant cost, yet the shadows
+// barely change between frames. On a skip frame we call SetUpToDate() instead of
+// baking, which leaves the last-baked depth maps in place and tells the downstream
+// vtkShadowMapPass they are current, so it samples them — a stale-by-a-frame shadow
+// that is invisible for slow motion. Interval is read live from the SceneGraph.
+class StridedShadowBaker : public vtkShadowMapBakerPass {
+public:
+  static StridedShadowBaker *New();
+  vtkTypeMacro(StridedShadowBaker, vtkShadowMapBakerPass);
+
+  int Interval = 1;
+
+  void Render(const vtkRenderState *s) override {
+    if (Interval <= 1 || (m_counter % static_cast<unsigned long>(Interval)) == 0) {
+      this->Superclass::Render(s); // real bake
+    } else {
+      this->SetUpToDate(); // reuse the last-baked maps this frame
+    }
+    ++m_counter;
+  }
+
+protected:
+  StridedShadowBaker() = default;
+
+private:
+  unsigned long m_counter = 0;
+  StridedShadowBaker(const StridedShadowBaker &) = delete;
+  void operator=(const StridedShadowBaker &) = delete;
+};
+vtkStandardNewMacro(StridedShadowBaker);
+
+void SceneGraph::setShadowUpdateInterval(int frames) {
+  m_shadowInterval = frames < 1 ? 1 : frames;
+  if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker))
+    b->Interval = m_shadowInterval;
+  requestRender();
+}
+
 bool SceneGraph::setShadowsEnabled(bool enabled) {
   m_shadowsEnabled = false;
   if (!m_renderer)
     return false;
   if (!enabled) {
     m_renderer->SetPass(nullptr);
+    m_shadowBaker = nullptr;
     requestRender();
     return true;
   }
@@ -714,7 +756,9 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   // the scene once per light into a depth map, and the shadow pass consumes
   // those while drawing. They have to sit inside a camera pass, or the light's
   // view never gets set up.
-  vtkSmartPointer<vtkShadowMapBakerPass> baker = vtkSmartPointer<vtkShadowMapBakerPass>::New();
+  vtkSmartPointer<StridedShadowBaker> baker = vtkSmartPointer<StridedShadowBaker>::New();
+  baker->Interval = m_shadowInterval;
+  m_shadowBaker = baker; // kept so setShadowUpdateInterval() can retune it live
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
 

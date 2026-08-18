@@ -18,6 +18,7 @@
 
 class vtkRenderer;
 class vtkMultiVolume;
+class vtkShadowMapBakerPass;
 class SceneNode;
 class NullGraphicNode;
 class GridNode;
@@ -82,6 +83,17 @@ public:
   // normals present the program builds and the passes draw.
   bool setShadowsEnabled(bool enabled);
   bool shadowsEnabled() const { return m_shadowsEnabled; }
+
+  // How often the shadow map is re-baked, in frames. The shadow baker re-renders
+  // the whole scene depth from every light whenever geometry moves, so at high
+  // deformation rates (e.g. a forest swaying every frame) it dominates. But
+  // shadows from slow motion barely change frame-to-frame, so baking every Nth
+  // frame and reusing the map between is visually indistinguishable and much
+  // cheaper — the shadow analogue of decoupling a simulation from the frame rate.
+  // n=1 (default) bakes every frame; n>1 bakes every n-th frame and samples the
+  // last-baked map in between. Takes effect immediately, no need to toggle shadows.
+  void setShadowUpdateInterval(int frames);
+  int shadowUpdateInterval() const { return m_shadowInterval; }
   void update();
 
   // Process pending events on the main thread
@@ -226,6 +238,8 @@ private:
   std::vector<LightDesc> m_lights;
   int m_nextLightId = 1;
   bool m_shadowsEnabled = false;
+  int m_shadowInterval = 1;                             // re-bake every N frames
+  vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker; // held so the interval is live
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::string m_statePrefix;
