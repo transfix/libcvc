@@ -8,6 +8,7 @@
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/context.h>
+#include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
 #include <set>
 #include <sstream>
@@ -731,13 +732,30 @@ void GeometryNode::ensureNormals() {
   // ("'vertexVC' : undeclared identifier"). Supplying normals is what makes
   // lighting and shadows work at all, and callers should not have to know that.
   //
-  // Only triangles get them: a LINES mesh (needle clusters, paths) has no
-  // meaningful surface normal, and running the filter over one would strip the
-  // lines out of the output.
-  if (!m_polyData || m_polyData->GetNumberOfPolys() == 0)
+  if (!m_polyData)
     return;
   if (m_polyData->GetPointData()->GetNormals())
     return; // the geometry carried its own; do not second-guess them
+
+  const vtkIdType numPts = m_polyData->GetNumberOfPoints();
+  if (numPts == 0)
+    return;
+
+  // A mesh with no POLYS -- a LINES cluster (pine needles, paths) or bare
+  // points -- has no surface to derive normals from, and running
+  // vtkPolyDataNormals over one strips the lines out of the output entirely.
+  // It still needs SOME normal array, though, for the reason above: the mapper
+  // picks the shader path on the mere presence of normals, so a single line
+  // primitive anywhere in the scene is enough to break every shader the moment
+  // shadows are switched on. That is not hypothetical -- it is what the forest
+  // example hit, where the trees' needles are lines.
+  //
+  // A constant normal is the honest choice: a line genuinely has no surface
+  // orientation, so any direction is arbitrary. +Z just makes it shade evenly.
+  if (m_polyData->GetNumberOfPolys() == 0) {
+    cvc::gl::ensureLineNormals(m_polyData);
+    return;
+  }
 
   vtkSmartPointer<vtkPolyDataNormals> filter = vtkSmartPointer<vtkPolyDataNormals>::New();
   filter->SetInputData(m_polyData);
