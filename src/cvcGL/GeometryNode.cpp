@@ -17,6 +17,8 @@
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLVertexBufferObject.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
@@ -25,6 +27,7 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkShaderProperty.h>
 #include <vtkTexture.h>
 #include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
@@ -515,6 +518,47 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
     m_polyData->Modified();
     // Request a redraw the same way handleStateChanged does — never render
     // synchronously here (see GraphicsNode). The host frame loop drains it.
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::addVertexShaderReplacement(const std::string &original,
+                                              const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    if (m_actor && m_actor->GetShaderProperty())
+      m_actor->GetShaderProperty()->AddVertexShaderReplacement(original, true, replacement, false);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::addFragmentShaderReplacement(const std::string &original,
+                                                const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    if (m_actor && m_actor->GetShaderProperty())
+      m_actor->GetShaderProperty()->AddFragmentShaderReplacement(original, true, replacement,
+                                                                 false);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::clearShaderReplacements() {
+  runOnMainThread([this]() {
+    if (m_actor && m_actor->GetShaderProperty()) {
+      m_actor->GetShaderProperty()->ClearAllVertexShaderReplacements();
+      m_actor->GetShaderProperty()->ClearAllFragmentShaderReplacements();
+    }
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::disableCoordinateShiftScale() {
+  runOnMainThread([this]() {
+    if (auto *m = vtkOpenGLPolyDataMapper::SafeDownCast(m_mapper))
+      m->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
     if (m_sceneGraph)
       m_sceneGraph->requestRender();
   });

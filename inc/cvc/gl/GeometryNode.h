@@ -70,6 +70,26 @@ public:
   // (vtkPolyDataNormals) is exactly the cost this path exists to avoid.
   void updateVertices(const std::vector<double> &xyz);
 
+  // Inject GLSL into this mesh's shader (a passthrough to the actor's
+  // vtkShaderProperty). `original` is a VTK shader anchor (e.g.
+  // "//VTK::Normal::Impl") or a generated line; `replacement` is spliced in for
+  // the first occurrence. Enables procedural surface effects the fixed pipeline
+  // can't express — e.g. fragment BUMP MAPPING (perturb normalVCVSOutput by the
+  // surface-gradient of a procedural height, no tangents), so grass/dirt shades
+  // with fine detail instead of a smooth moulded sheen. Caller owns the GLSL;
+  // clearShaderReplacements() removes all injected code.
+  void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
+  void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
+  void clearShaderReplacements();
+
+  // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
+  // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
+  // frame. Needed whenever a shader reads vertex position for a WORLD-space
+  // procedural effect (e.g. the terrain bump map) — without it the position is
+  // offset/scaled and the effect mis-registers. Safe near the origin; a mesh very
+  // far from the origin trades a little float precision (jitter) for it.
+  void disableCoordinateShiftScale();
+
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
   //
