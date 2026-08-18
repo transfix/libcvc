@@ -49,6 +49,48 @@ public:
   std::string getStatePrefix() const { return m_statePrefix; }
 
   void setRenderer(vtkRenderer *renderer);
+
+  // ── lighting ──────────────────────────────────────────────────────────────
+  // Lighting used to be entirely the host's business: nothing below the
+  // renderer could touch it, so a scene had no way to say "this is an
+  // afternoon" and a script had no way at all. Lights live here rather than on
+  // the renderer so they SURVIVE setRenderer — the scene owns its lighting and
+  // re-applies it to whatever renderer it is attached to, including a second
+  // one.
+  //
+  // Directional only, described the way you actually think about a sun:
+  // azimuth (compass bearing, 0 = +Y, growing towards +X) and elevation
+  // (degrees above the horizon). Returns an id for later edits.
+  int addDirectionalLight(double azimuthDeg, double elevationDeg, double r = 1.0, double g = 1.0,
+                          double b = 1.0, double intensity = 1.0);
+  void setLightDirection(int id, double azimuthDeg, double elevationDeg);
+  void setLightColor(int id, double r, double g, double b);
+  void setLightIntensity(int id, double intensity);
+  void removeLight(int id);
+  void clearLights();
+  std::size_t numLights() const;
+
+  // Shadow mapping, via VTK's shadow-map render passes. Returns false if there
+  // is no render target yet, so a caller can fall back rather than silently
+  // render unshadowed.
+  //
+  // EXPERIMENTAL, and known not to produce shadows yet. The passes install and
+  // the scene still draws, but VTK's generated fragment shader fails to compile
+  // against our meshes:
+  //
+  //     ERROR: 0:161: 'vertexVC' : undeclared identifier
+  //     ERROR: 0:162: 'calcShadow' : no matching overloaded function found
+  //
+  // The shadow shader is spliced into the lit-surface template, which only
+  // declares vertexVC when the mapper is actually running a lighting path. Our
+  // GeometryNode polydata carries no normals, so it takes the unlit path and
+  // the declaration never appears. The likely fix is generating normals
+  // (vtkPolyDataNormals) when a mesh arrives without them -- worth doing on its
+  // own merits, since unlit geometry also cannot show a directional light
+  // properly. Left in, off by default, rather than dropped, because the pass
+  // plumbing is correct and only the mesh side is missing.
+  bool setShadowsEnabled(bool enabled);
+  bool shadowsEnabled() const { return m_shadowsEnabled; }
   void update();
 
   // Process pending events on the main thread
@@ -183,6 +225,17 @@ public:
 
 private:
   vtkRenderer *m_renderer;
+
+  // Lights are kept as descriptions, not just vtkLights, so they can be
+  // re-created against a renderer attached later (or a second one).
+  struct LightDesc {
+    int id;
+    double az, el, r, g, b, intensity;
+  };
+  std::vector<LightDesc> m_lights;
+  int m_nextLightId = 1;
+  bool m_shadowsEnabled = false;
+  void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::string m_statePrefix;
   std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
