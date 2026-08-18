@@ -457,7 +457,11 @@ jobs:
                   --output-on-failure --parallel 1 \
                   --repeat until-pass:3 --timeout 3600 \
                   -R "${STRESS_REGEX}"
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 300 \
+          else
+            ctest --test-dir build \
+                  --build-config ${{ matrix.build_type }} \
+                  --output-on-failure --parallel \
+                  --repeat until-pass:3 --timeout 300 \
                   -E "${STRESS_REGEX}"
           fi
 
