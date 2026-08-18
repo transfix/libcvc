@@ -12,7 +12,6 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
-
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -94,10 +93,10 @@ void test_shadow_toggle() {
   assert(on == sg.shadowsEnabled());
   if (on) {
     assert(sr.renderer()->GetPass() != nullptr);
-    // Exercise the pass rather than just installing it. NOTE this currently
-    // logs a vtkShaderProgram error and renders WITHOUT shadows -- see
-    // SceneGraph::setShadowsEnabled. The assertions below deliberately only
-    // claim what is true: the passes attach, survive a render, and detach.
+    // Exercise the pass rather than just installing it. This only builds a
+    // working shader because the mesh has normals -- GeometryNode generates them
+    // for triangle meshes that arrive without any, and without them VTK takes
+    // the unlit path and the shadow shader fails to compile.
     assert(sg.setShadowsEnabled(false));
     assert(!sg.shadowsEnabled());
     assert(sr.renderer()->GetPass() == nullptr);

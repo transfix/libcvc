@@ -20,6 +20,7 @@
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyDataNormals.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
@@ -718,7 +719,39 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     m_polyData->GetPointData()->SetTCoords(nullptr);
   }
 
+  ensureNormals();
+
   m_polyData->Modified();
+}
+
+void GeometryNode::ensureNormals() {
+  // A mesh WITHOUT normals is not merely flat-looking: VTK's polydata mapper
+  // takes an unlit shader path for it, so a directional light does nothing and
+  // the shadow-map snippet spliced into the lit template fails to compile
+  // ("'vertexVC' : undeclared identifier"). Supplying normals is what makes
+  // lighting and shadows work at all, and callers should not have to know that.
+  //
+  // Only triangles get them: a LINES mesh (needle clusters, paths) has no
+  // meaningful surface normal, and running the filter over one would strip the
+  // lines out of the output.
+  if (!m_polyData || m_polyData->GetNumberOfPolys() == 0)
+    return;
+  if (m_polyData->GetPointData()->GetNormals())
+    return; // the geometry carried its own; do not second-guess them
+
+  vtkSmartPointer<vtkPolyDataNormals> filter = vtkSmartPointer<vtkPolyDataNormals>::New();
+  filter->SetInputData(m_polyData);
+  filter->SplittingOff();          // keep the vertex count, so per-vertex colours still line up
+  filter->ConsistencyOn();         // fix wind-order disagreements between neighbouring tris
+  filter->ComputePointNormalsOn(); // smooth shading across the surface
+  filter->ComputeCellNormalsOff();
+  filter->AutoOrientNormalsOff(); // needs a closed surface; terrain and canopies are not
+  filter->Update();
+
+  if (vtkPolyData *out = filter->GetOutput()) {
+    if (vtkDataArray *n = out->GetPointData()->GetNormals())
+      m_polyData->GetPointData()->SetNormals(n);
+  }
 }
 
 cvc::bounding_box GeometryNode::getBoundingBox() const {

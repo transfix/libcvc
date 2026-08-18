@@ -74,21 +74,12 @@ public:
   // is no render target yet, so a caller can fall back rather than silently
   // render unshadowed.
   //
-  // EXPERIMENTAL, and known not to produce shadows yet. The passes install and
-  // the scene still draws, but VTK's generated fragment shader fails to compile
-  // against our meshes:
-  //
-  //     ERROR: 0:161: 'vertexVC' : undeclared identifier
-  //     ERROR: 0:162: 'calcShadow' : no matching overloaded function found
-  //
-  // The shadow shader is spliced into the lit-surface template, which only
-  // declares vertexVC when the mapper is actually running a lighting path. Our
-  // GeometryNode polydata carries no normals, so it takes the unlit path and
-  // the declaration never appears. The likely fix is generating normals
-  // (vtkPolyDataNormals) when a mesh arrives without them -- worth doing on its
-  // own merits, since unlit geometry also cannot show a directional light
-  // properly. Left in, off by default, rather than dropped, because the pass
-  // plumbing is correct and only the mesh side is missing.
+  // Requires lit geometry, which now comes for free: GeometryNode generates
+  // point normals for any triangle mesh that arrives without them. Before that,
+  // the shadow snippet spliced into VTK's lit-surface template failed to compile
+  // ("'vertexVC' : undeclared identifier") because a normal-less mesh takes the
+  // UNLIT shader path, so the declaration it references never appeared. With
+  // normals present the program builds and the passes draw.
   bool setShadowsEnabled(bool enabled);
   bool shadowsEnabled() const { return m_shadowsEnabled; }
   void update();

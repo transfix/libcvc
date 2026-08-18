@@ -109,6 +109,8 @@ protected:
   void applyTransformToVTK() override;                       // Apply transform to actor
   void applyClipPlanes(vtkPlaneCollection *planes) override; // Apply clip planes to mapper
   void updatePolyData(const cvc::geometry &geom);
+  // Generate point normals for triangle meshes that arrive without them.
+  void ensureNormals();
   void updateRenderModeVTK(); // Helper to update VTK properties from render mode
   void updateMetadata(const cvc::geometry &geom);
   void onDataChanged();
