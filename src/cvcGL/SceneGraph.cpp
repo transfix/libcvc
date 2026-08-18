@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
@@ -14,9 +15,15 @@
 #include <cvc/gl/context.h>
 #include <cvc/volume/volume.h>
 #include <limits>
+#include <vtkCameraPass.h>
 #include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkLight.h>
 #include <vtkMultiVolume.h>
+#include <vtkRenderPassCollection.h>
 #include <vtkRenderer.h>
+#include <vtkSequencePass.h>
+#include <vtkShadowMapBakerPass.h>
+#include <vtkShadowMapPass.h>
 
 // Default ctor: delegate to the injected-app ctor with cvcGL's own process app.
 SceneGraph::SceneGraph(const std::string &statePrefix)
@@ -117,6 +124,7 @@ void SceneGraph::setRenderer(vtkRenderer *renderer) {
     for (auto &node : m_rootNodes) {
       node->addToRenderer(m_renderer);
     }
+    applyLights(); // the scene's lighting follows it onto the new renderer
   }
 }
 
@@ -599,4 +607,127 @@ void SceneGraph::ensureNullGraphicIfEmpty() {
 void SceneGraph::removeNullGraphicIfPresent() {
   // With new architecture: NullGraphicNode IS the graphics root, always present
   // No need to add/remove it
+}
+
+// ── lighting ────────────────────────────────────────────────────────────────
+// Directional lights, owned by the SCENE rather than by a renderer, so they
+// survive setRenderer and can be re-applied to a second renderer. Azimuth is a
+// compass bearing (0 = +Y, growing towards +X) and elevation is degrees above
+// the horizon, which is how you actually describe a sun; the unit vector is
+// derived here so callers never hand-roll the trigonometry.
+
+namespace {
+constexpr double kDeg = 3.14159265358979323846 / 180.0;
+// Far enough away that vtkLight's position reads as a direction. VTK has no
+// "infinite" directional light: a scene light is positional-or-not, and a
+// non-positional one uses position-minus-focal-point as its direction.
+constexpr double kSunDistance = 1.0e4;
+} // namespace
+
+void SceneGraph::applyLights() {
+  if (!m_renderer)
+    return;
+  m_renderer->RemoveAllLights();
+  for (const auto &l : m_lights) {
+    vtkSmartPointer<vtkLight> light = vtkSmartPointer<vtkLight>::New();
+    light->SetLightTypeToSceneLight();
+    light->SetPositional(false); // directional: only the direction matters
+    const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
+    light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
+                       -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
+    light->SetFocalPoint(0.0, 0.0, 0.0);
+    light->SetColor(l.r, l.g, l.b);
+    light->SetIntensity(l.intensity);
+    m_renderer->AddLight(light);
+  }
+  // With no lights of our own, hand the renderer back its default headlight
+  // rather than leaving the scene unlit.
+  if (m_lights.empty())
+    m_renderer->CreateLight();
+  requestRender();
+}
+
+int SceneGraph::addDirectionalLight(double azimuthDeg, double elevationDeg, double r, double g,
+                                    double b, double intensity) {
+  LightDesc d{m_nextLightId++, azimuthDeg, elevationDeg, r, g, b, intensity};
+  m_lights.push_back(d);
+  applyLights();
+  return d.id;
+}
+
+void SceneGraph::setLightDirection(int id, double azimuthDeg, double elevationDeg) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.az = azimuthDeg;
+      l.el = elevationDeg;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightColor(int id, double r, double g, double b) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.r = r;
+      l.g = g;
+      l.b = b;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightIntensity(int id, double intensity) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.intensity = intensity;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::removeLight(int id) {
+  for (auto it = m_lights.begin(); it != m_lights.end(); ++it)
+    if (it->id == id) {
+      m_lights.erase(it);
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::clearLights() {
+  m_lights.clear();
+  applyLights();
+}
+
+std::size_t SceneGraph::numLights() const { return m_lights.size(); }
+
+bool SceneGraph::setShadowsEnabled(bool enabled) {
+  m_shadowsEnabled = false;
+  if (!m_renderer)
+    return false;
+  if (!enabled) {
+    m_renderer->SetPass(nullptr);
+    requestRender();
+    return true;
+  }
+  // VTK's shadow maps are render PASSES, not a renderer flag: the baker renders
+  // the scene once per light into a depth map, and the shadow pass consumes
+  // those while drawing. They have to sit inside a camera pass, or the light's
+  // view never gets set up.
+  vtkSmartPointer<vtkShadowMapBakerPass> baker = vtkSmartPointer<vtkShadowMapBakerPass>::New();
+  vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
+  shadows->SetShadowMapBakerPass(baker);
+
+  vtkSmartPointer<vtkRenderPassCollection> passes = vtkSmartPointer<vtkRenderPassCollection>::New();
+  passes->AddItem(baker);
+  passes->AddItem(shadows);
+  vtkSmartPointer<vtkSequencePass> seq = vtkSmartPointer<vtkSequencePass>::New();
+  seq->SetPasses(passes);
+  vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();
+  cam->SetDelegatePass(seq);
+
+  m_renderer->SetPass(cam);
+  m_shadowsEnabled = true;
+  requestRender();
+  return true;
 }

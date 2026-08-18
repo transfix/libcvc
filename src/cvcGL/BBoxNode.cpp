@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cvc/gl/BBoxNode.h>
+#include <cvc/gl/line_normals.h>
 #include <iomanip>
 #include <sstream>
 #include <vtkActor.h>
@@ -130,6 +131,7 @@ void BBoxNode::createBBox() {
   vtkSmartPointer<vtkPolyData> polyData = vtkSmartPointer<vtkPolyData>::New();
   polyData->SetPoints(points);
   polyData->SetLines(lines);
+  cvc::gl::ensureLineNormals(polyData);
 
   m_mapper->SetInputData(polyData);
 }

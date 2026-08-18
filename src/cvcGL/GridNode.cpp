@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/gl/GridNode.h>
+#include <cvc/gl/line_normals.h>
 #include <iomanip>
 #include <sstream>
 #include <vtkActor.h>
@@ -507,6 +508,7 @@ void GridNode::createYZPlane() {
   vtkSmartPointer<vtkPolyData> polyData = vtkSmartPointer<vtkPolyData>::New();
   polyData->SetPoints(points);
   polyData->SetLines(lines);
+  cvc::gl::ensureLineNormals(polyData);
   m_yzMapper->SetInputData(polyData);
 }
 
@@ -552,6 +554,7 @@ void GridNode::createXZPlane() {
   vtkSmartPointer<vtkPolyData> polyData = vtkSmartPointer<vtkPolyData>::New();
   polyData->SetPoints(points);
   polyData->SetLines(lines);
+  cvc::gl::ensureLineNormals(polyData);
   m_xzMapper->SetInputData(polyData);
 }
 
@@ -597,6 +600,7 @@ void GridNode::createXYPlane() {
   vtkSmartPointer<vtkPolyData> polyData = vtkSmartPointer<vtkPolyData>::New();
   polyData->SetPoints(points);
   polyData->SetLines(lines);
+  cvc::gl::ensureLineNormals(polyData);
   m_xyMapper->SetInputData(polyData);
 }
 

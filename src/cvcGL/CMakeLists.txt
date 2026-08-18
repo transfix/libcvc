@@ -119,6 +119,12 @@ add_executable(cvcgl_traversal test/cvcgl_traversal.cpp)
 target_link_libraries(cvcgl_traversal PRIVATE cvcGL)
 add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
 
+# Scene-owned lighting: lights must survive setRenderer, so a second renderer
+# (offscreen capture, second window) lights the scene identically.
+add_executable(cvcgl_lighting test/cvcgl_lighting.cpp)
+target_link_libraries(cvcgl_lighting PRIVATE cvcGL)
+add_test(NAME cvcgl_lighting COMMAND cvcgl_lighting)
+
 # Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
 # against the no-renderer teardown crash the Python lab would otherwise hit.
 add_executable(cvcgl_remove test/cvcgl_remove.cpp)

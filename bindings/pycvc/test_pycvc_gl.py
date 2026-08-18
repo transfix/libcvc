@@ -225,6 +225,40 @@ def test_group_nodes_compose_transforms():
     print("  ok: group nodes carry transforms their children inherit")
 
 
+def test_scene_owned_lighting():
+    """A scene can describe its own sun, and keep it across render targets.
+
+    This is the whole reason lighting lives on the SceneGraph: a script builds a
+    scene and says what time of day it is, instead of the lighting being whatever
+    the host happened to configure. SWIG wraps the C++ surface directly -- there
+    is no %extend here, the defaults come across too.
+    """
+    sg = pycvc_gl.SceneGraph(app)
+    sg.addGraphics("lit", _make_tri())
+
+    sun = sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.05)
+    fill = sg.addDirectionalLight(140.0, 55.0, 0.55, 0.66, 0.85)  # intensity defaulted
+    assert sun != fill
+    assert sg.numLights() == 2
+
+    sg.setLightDirection(sun, -40.0, 20.0)
+    sg.setLightColor(sun, 1.0, 0.9, 0.7)
+    sg.setLightIntensity(sun, 0.8)
+    assert sg.numLights() == 2
+
+    sg.removeLight(fill)
+    assert sg.numLights() == 1
+    sg.clearLights()
+    assert sg.numLights() == 0
+
+    # Shadows report honestly rather than pretending: with no render target
+    # attached there is nothing to install the passes on.
+    assert sg.setShadowsEnabled(True) is False
+    assert sg.shadowsEnabled() is False
+    sg.processEvents()
+    print("  ok: a scene owns its lighting, and shadows refuse honestly")
+
+
 if __name__ == "__main__":
     test_build_scene()
     test_update_ops_no_rebuild()
@@ -234,4 +268,5 @@ if __name__ == "__main__":
     test_held_node_outlives_scene()
     test_director_python_node_type()
     test_group_nodes_compose_transforms()
+    test_scene_owned_lighting()
     print("pycvc_gl scene tests: OK")

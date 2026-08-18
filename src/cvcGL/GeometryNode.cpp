@@ -8,6 +8,7 @@
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/context.h>
+#include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
 #include <set>
 #include <sstream>
@@ -20,6 +21,7 @@
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyDataNormals.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
@@ -718,7 +720,56 @@ void GeometryNode::updatePolyData(const cvc::geometry &geom) {
     m_polyData->GetPointData()->SetTCoords(nullptr);
   }
 
+  ensureNormals();
+
   m_polyData->Modified();
+}
+
+void GeometryNode::ensureNormals() {
+  // A mesh WITHOUT normals is not merely flat-looking: VTK's polydata mapper
+  // takes an unlit shader path for it, so a directional light does nothing and
+  // the shadow-map snippet spliced into the lit template fails to compile
+  // ("'vertexVC' : undeclared identifier"). Supplying normals is what makes
+  // lighting and shadows work at all, and callers should not have to know that.
+  //
+  if (!m_polyData)
+    return;
+  if (m_polyData->GetPointData()->GetNormals())
+    return; // the geometry carried its own; do not second-guess them
+
+  const vtkIdType numPts = m_polyData->GetNumberOfPoints();
+  if (numPts == 0)
+    return;
+
+  // A mesh with no POLYS -- a LINES cluster (pine needles, paths) or bare
+  // points -- has no surface to derive normals from, and running
+  // vtkPolyDataNormals over one strips the lines out of the output entirely.
+  // It still needs SOME normal array, though, for the reason above: the mapper
+  // picks the shader path on the mere presence of normals, so a single line
+  // primitive anywhere in the scene is enough to break every shader the moment
+  // shadows are switched on. That is not hypothetical -- it is what the forest
+  // example hit, where the trees' needles are lines.
+  //
+  // A constant normal is the honest choice: a line genuinely has no surface
+  // orientation, so any direction is arbitrary. +Z just makes it shade evenly.
+  if (m_polyData->GetNumberOfPolys() == 0) {
+    cvc::gl::ensureLineNormals(m_polyData);
+    return;
+  }
+
+  vtkSmartPointer<vtkPolyDataNormals> filter = vtkSmartPointer<vtkPolyDataNormals>::New();
+  filter->SetInputData(m_polyData);
+  filter->SplittingOff();          // keep the vertex count, so per-vertex colours still line up
+  filter->ConsistencyOn();         // fix wind-order disagreements between neighbouring tris
+  filter->ComputePointNormalsOn(); // smooth shading across the surface
+  filter->ComputeCellNormalsOff();
+  filter->AutoOrientNormalsOff(); // needs a closed surface; terrain and canopies are not
+  filter->Update();
+
+  if (vtkPolyData *out = filter->GetOutput()) {
+    if (vtkDataArray *n = out->GetPointData()->GetNormals())
+      m_polyData->GetPointData()->SetNormals(n);
+  }
 }
 
 cvc::bounding_box GeometryNode::getBoundingBox() const {
