@@ -330,3 +330,214 @@ TEST(NavBatch, InflateBatchIsByteIdenticalToSerial) {
           << "plane " << i << " cells " << cells;
   }
 }
+
+// ─── sense_batch (BeliefGrid.sense) ──────────────────────────────────────────
+
+namespace {
+
+// A sparse random truth grid + N agents scattered in-bounds, bounds chosen so
+// cell_w == cell_h == 1 (world == cell units). `M` planes; agent_map is arange
+// for private (M==N) else a random label in [0,M).
+struct SenseCase {
+  int rows, cols, N, M;
+  std::vector<std::uint8_t> truth;
+  std::vector<double> pos, heading, range_m, fov_rad;
+  std::vector<std::int32_t> n_rays, amap;
+  SenseCase(int r, int c, int n, int m, unsigned seed) : rows(r), cols(c), N(n), M(m) {
+    unsigned x = seed | 1u;
+    auto rnd = [&]() {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      return x;
+    };
+    truth.assign(r * c, 0);
+    for (int k = 0; k < r * c / 8; ++k)
+      truth[rnd() % (r * c)] = 1;
+    pos.resize(2 * n);
+    heading.resize(n);
+    range_m.resize(n);
+    fov_rad.resize(n);
+    n_rays.resize(n);
+    amap.resize(n);
+    for (int i = 0; i < n; ++i) {
+      pos[2 * i] = static_cast<double>(rnd() % ((c - 1) * 100)) / 100.0;
+      pos[2 * i + 1] = static_cast<double>(rnd() % ((r - 1) * 100)) / 100.0;
+      heading[i] = static_cast<double>(rnd() % 628) / 100.0;
+      range_m[i] = 4.0 + (rnd() % 400) / 100.0;
+      fov_rad[i] = 6.283185307179586;
+      n_rays[i] = 60 + static_cast<int>(rnd() % 60);
+      amap[i] = (m == n) ? i : static_cast<int>(rnd() % m);
+    }
+  }
+  sense_agents agents() const {
+    sense_agents ag;
+    ag.pos = pos.data();
+    ag.heading = heading.data();
+    ag.range_m = range_m.data();
+    ag.fov_rad = fov_rad.data();
+    ag.n_rays = n_rays.data();
+    ag.agent_map = amap.data();
+    ag.n = N;
+    return ag;
+  }
+  // A one-plane sub-case of just this case's agents mapped to plane `g`,
+  // preserving ascending index — the per-group serial reference.
+  SenseCase select_group(int g) const {
+    SenseCase s = *this;
+    s.pos.clear();
+    s.heading.clear();
+    s.range_m.clear();
+    s.fov_rad.clear();
+    s.n_rays.clear();
+    s.amap.clear();
+    s.N = 0;
+    s.M = 1;
+    for (int i = 0; i < N; ++i)
+      if (amap[i] == g) {
+        s.pos.push_back(pos[2 * i]);
+        s.pos.push_back(pos[2 * i + 1]);
+        s.heading.push_back(heading[i]);
+        s.range_m.push_back(range_m[i]);
+        s.fov_rad.push_back(fov_rad[i]);
+        s.n_rays.push_back(n_rays[i]);
+        s.amap.push_back(0);
+        ++s.N;
+      }
+    return s;
+  }
+};
+
+struct Planes {
+  std::vector<float> lo;
+  std::vector<std::uint8_t> lv, es;
+  std::vector<std::int32_t> ver, flips;
+  Planes(int M, int HW, int N)
+      : lo(M * HW, 0.f), lv(M * HW, 0), es(M * HW, 0), ver(M, 0), flips(N, 0) {}
+};
+
+void run_case(const SenseCase &sc, Planes &p, int nt, const std::int32_t *peer = nullptr,
+              int kmax = 0, const std::int32_t *mov = nullptr, int nm = 0) {
+  belief_planes pl{p.lo.data(), p.lv.data(), p.es.data(), p.ver.data(), sc.M};
+  sense_batch(sc.truth.data(), sc.rows, sc.cols, 0.0, 0.0, static_cast<double>(sc.cols - 1),
+              static_cast<double>(sc.rows - 1), sc.agents(), peer, kmax, mov, nm, pl, 2.2, -1.4,
+              8.0, p.flips.data(), nt);
+}
+
+} // namespace
+
+// The race gate: same inputs, 1 vs 8 threads, must be byte-identical in every
+// mode. A within-plane data race or a fused/reordered scatter would break this.
+TEST(NavSense, DeterministicAcrossThreadCounts) {
+  for (unsigned seed : {11u, 23u, 47u}) {
+    for (int mode = 0; mode < 3; ++mode) {
+      const int N = 30;
+      const int M = mode == 0 ? N : (mode == 1 ? 4 : 1); // private / clustered / shared
+      SenseCase sc(24, 28, N, M, seed);
+      Planes a(M, sc.rows * sc.cols, N), b(M, sc.rows * sc.cols, N);
+      run_case(sc, a, 1);
+      run_case(sc, b, 8);
+      EXPECT_EQ(a.lo, b.lo) << "logodds seed " << seed << " M " << M;
+      EXPECT_EQ(a.lv, b.lv) << "last_visible seed " << seed << " M " << M;
+      EXPECT_EQ(a.es, b.es) << "ever_seen seed " << seed << " M " << M;
+      EXPECT_EQ(a.ver, b.ver) << "version seed " << seed << " M " << M;
+      EXPECT_EQ(a.flips, b.flips) << "flips seed " << seed << " M " << M;
+    }
+  }
+}
+
+// Private plane i must equal that one agent sensed alone in a 1-plane belief —
+// per-plane isolation + correct base offset.
+TEST(NavSense, PrivatePlaneEqualsSoloAgent) {
+  const int N = 12;
+  SenseCase sc(20, 22, N, N, 5u);
+  Planes grouped(N, sc.rows * sc.cols, N);
+  run_case(sc, grouped, 4);
+  const int HW = sc.rows * sc.cols;
+  for (int i = 0; i < N; ++i) {
+    SenseCase solo = sc.select_group(i); // exactly agent i, plane 0
+    Planes ref(1, HW, solo.N);
+    run_case(solo, ref, 1);
+    for (int k = 0; k < HW; ++k)
+      EXPECT_EQ(grouped.lo[static_cast<long>(i) * HW + k], ref.lo[k])
+          << "agent " << i << " cell " << k;
+  }
+}
+
+// Clustered plane g must equal that group's agents (ascending index) sensed into
+// a lone plane — the sequential-within-plane reference, and cluster isolation.
+TEST(NavSense, ClusteredPlaneEqualsGroupSubset) {
+  const int N = 40, M = 5;
+  SenseCase sc(24, 28, N, M, 77u);
+  Planes grouped(M, sc.rows * sc.cols, N);
+  run_case(sc, grouped, 4);
+  const int HW = sc.rows * sc.cols;
+  for (int g = 0; g < M; ++g) {
+    SenseCase sub = sc.select_group(g);
+    Planes ref(1, HW, sub.N);
+    run_case(sub, ref, 1);
+    for (int k = 0; k < HW; ++k) {
+      EXPECT_EQ(grouped.lo[static_cast<long>(g) * HW + k], ref.lo[k])
+          << "group " << g << " cell " << k;
+      EXPECT_EQ(grouped.es[static_cast<long>(g) * HW + k], ref.es[k])
+          << "everseen g " << g << " k " << k;
+    }
+  }
+}
+
+// An off-grid agent updates nothing (its logodds/ever_seen plane stays zero) and
+// reports zero flips (belief.py:113-115 early return).
+TEST(NavSense, OobAgentNoOps) {
+  const int rows = 16, cols = 16;
+  std::vector<std::uint8_t> truth(rows * cols, 0);
+  std::vector<double> pos = {-5.0, -5.0}; // far off grid
+  std::vector<double> heading = {0.0}, range_m = {5.0}, fov = {6.2831853};
+  std::vector<std::int32_t> n_rays = {90}, amap = {0};
+  sense_agents ag;
+  ag.pos = pos.data();
+  ag.heading = heading.data();
+  ag.range_m = range_m.data();
+  ag.fov_rad = fov.data();
+  ag.n_rays = n_rays.data();
+  ag.agent_map = amap.data();
+  ag.n = 1;
+  Planes p(1, rows * cols, 1);
+  belief_planes pl{p.lo.data(), p.lv.data(), p.es.data(), p.ver.data(), 1};
+  sense_batch(truth.data(), rows, cols, 0.0, 0.0, cols - 1.0, rows - 1.0, ag, nullptr, 0, nullptr,
+              0, pl, 2.2, -1.4, 8.0, p.flips.data(), 1);
+  for (float v : p.lo)
+    EXPECT_EQ(v, 0.0f);
+  for (std::uint8_t v : p.es)
+    EXPECT_EQ(v, 0u);
+  for (std::uint8_t v : p.lv)
+    EXPECT_EQ(v, 0u);
+  EXPECT_EQ(p.ver[0], 0);
+  EXPECT_EQ(p.flips[0], 0);
+}
+
+// A peer box occludes a ray AND deposits +L_OCC on its cell (peers are hits, R1).
+TEST(NavSense, PeerBoxOccludesAndDeposits) {
+  const int rows = 21, cols = 21;
+  std::vector<std::uint8_t> truth(rows * cols, 0); // empty world
+  std::vector<double> pos = {10.0, 10.0};          // centre
+  std::vector<double> heading = {0.0}, range_m = {12.0}, fov = {6.2831853};
+  std::vector<std::int32_t> n_rays = {180}, amap = {0};
+  sense_agents ag;
+  ag.pos = pos.data();
+  ag.heading = heading.data();
+  ag.range_m = range_m.data();
+  ag.fov_rad = fov.data();
+  ag.n_rays = n_rays.data();
+  ag.agent_map = amap.data();
+  ag.n = 1;
+  // one peer box at column 14 (east of centre), rows 9..12 (half-open r0,r1,c0,c1)
+  std::vector<std::int32_t> peer = {9, 12, 14, 15};
+  Planes p(1, rows * cols, 1);
+  belief_planes pl{p.lo.data(), p.lv.data(), p.es.data(), p.ver.data(), 1};
+  sense_batch(truth.data(), rows, cols, 0.0, 0.0, cols - 1.0, rows - 1.0, ag, peer.data(), 1,
+              nullptr, 0, pl, 2.2, -1.4, 8.0, p.flips.data(), 1);
+  // the box cell (10,14) should be occupied (>0); a cell just beyond it (10,16)
+  // should be UNSEEN (ray stopped) -> ever_seen 0.
+  EXPECT_GT(p.lo[10 * cols + 14], 0.0f) << "peer box cell should read occupied";
+  EXPECT_EQ(p.es[10 * cols + 16], 0u) << "cell behind the peer must be occluded (unseen)";
+}

@@ -156,6 +156,67 @@ std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std
                                                      int rows, int cols, int cells,
                                                      int num_threads = 0);
 
+// ─── Batched belief sensing (grl_snam BeliefGrid.sense) ──────────────────────
+//
+// The last per-agent Python hole in the real-time tick: N agents ray-cast the
+// truth grid and fold the result into a log-odds occupancy belief. This is a
+// bit-identical batched port of grl_snam/belief.py BeliefGrid.sense, sensing N
+// agents into K belief planes selected per agent by an `agent_map`, so the
+// shared/clustered/private belief modes are one data parameter (K = 1 / groups
+// / N). It threads across PLANES: distinct planes are disjoint memory, and the
+// agents mapped to one plane are folded sequentially in ascending index — which
+// is exactly what N serial BeliefGrid.sense calls do (each adds its per-cell
+// log-odds delta then clamps, and the next reads the clamped result), so the
+// result is bit-identical in every mode, with parallelism = the plane count.
+//
+// Bit-identity rests on the same discipline as the other kernels (this TU is
+// compiled without -ffast-math / -ffp-contract=fast) plus: float64 cos/sin/hypot
+// (system libm, which numpy dispatches to), std::rint under the default
+// round-half-to-even, a march-and-break DDA reproducing the vectorized
+// first-stop/free/occ masks, and log-odds accumulated as f32-store/f64-add of
+// the double constant (the np.add.at-onto-float32 semantics), free before occ.
+
+// K row-major rows*cols belief planes, all mutated IN PLACE. `logodds` is the
+// log-odds memory; `last_visible`/`ever_seen` are numpy-bool (0/1) FoV masks;
+// `version[k]` bumps once per agent whose sense flips any cell's occupied bit.
+struct belief_planes {
+  float *logodds = nullptr;             // [K*rows*cols]
+  std::uint8_t *last_visible = nullptr; // [K*rows*cols]
+  std::uint8_t *ever_seen = nullptr;    // [K*rows*cols]
+  std::int32_t *version = nullptr;      // [K]
+  int K = 0;
+};
+
+// Per-agent pose + sensor cone; every array has length n (the adapter broadcasts
+// scalar sensor params). `agent_map[i]` selects the belief plane agent i writes.
+struct sense_agents {
+  const double *pos = nullptr;             // [n*2] (x,y) world, interleaved
+  const double *heading = nullptr;         // [n] rad
+  const double *range_m = nullptr;         // [n] world units
+  const double *fov_rad = nullptr;         // [n] rad
+  const std::int32_t *n_rays = nullptr;    // [n]
+  const std::int32_t *agent_map = nullptr; // [n] -> plane in [0, K)
+  int n = 0;
+};
+
+// Sense `ag.n` agents into `planes`, bit-identically to `ag.n` sequential
+// BeliefGrid.sense calls in ascending agent index (agent i -> plane
+// agent_map[i]). `truth` is the row-major rows*cols static occupancy (nonzero =
+// blocked). `peer_boxes` is an optional [n*kmax*4] block of per-agent
+// (r0,r1,c0,c1) HALF-OPEN cell rects (self-excluded, already clamped;
+// zero-area = padding), `mover_boxes` an optional [n_movers*4] shared block;
+// both, where present, occlude rays AND deposit +l_occ AND enter the FoV,
+// exactly as the reference's truth_now composition does — so a caller that wants
+// peers kept OUT of the belief (the shared swarm) simply passes none.
+// bounds = (min_x, min_y, max_x, max_y); cell_w/cell_h are derived internally as
+// (max-min)/(dim-1), matching BeliefGrid.sense. `flips_out[i]` receives agent
+// i's flip count. num_threads <= 0 => hardware concurrency (capped at K).
+void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, double min_y,
+                 double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
+                 int kmax, const std::int32_t *mover_boxes, int n_movers,
+                 const belief_planes &planes, double l_occ, double l_free, double l_clamp,
+                 std::int32_t *flips_out, int num_threads = 0);
+
 // ─── Fixed-radius neighbour search (CGAL Kd_tree) ────────────────────────────
 //
 // For an N-body crowd, "which peers are within an agent's sensor range" is a

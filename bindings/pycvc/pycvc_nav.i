@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -51,6 +52,32 @@ pycvc::ArrayView pycvc_nav_view(std::vector<T> &&src, std::vector<long> shape,
   v.data = buf->empty() ? nullptr : buf->data();
   v.owner = buf;
   return v;
+}
+
+// Borrow a writable, C-contiguous ndarray of an EXACT dtype+ndim, WITHOUT a
+// copy (never PyArray_FROMANY here — a coerce-copy would silently swallow every
+// in-place write while the returned flips still looked plausible). Validate and
+// reject: throws unless the caller's array is already exactly right. Returns the
+// raw data pointer into caller memory (so the kernel writes through) and fills
+// `shp` with the dims. The array stays alive via the caller's live reference for
+// the whole call, so no INCREF is needed.
+void *pycvc_nav_writable(PyObject *o, int typenum, int ndim, const char *name,
+                         std::vector<npy_intp> &shp)
+{
+  const std::string who = std::string("pycvc.nav_sense_batch: ") + name;
+  if (!o || !PyArray_Check(o))
+    throw std::invalid_argument(who + " must be a numpy ndarray");
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(o);
+  if (PyArray_TYPE(a) != typenum)
+    throw std::invalid_argument(who + " has the wrong dtype (mutated in place, never coerced)");
+  if (PyArray_NDIM(a) != ndim)
+    throw std::invalid_argument(who + " has the wrong ndim");
+  if (!PyArray_ISWRITEABLE(a))
+    throw std::invalid_argument(who + " must be writable (it is mutated in place)");
+  if (!PyArray_ISCARRAY(a))
+    throw std::invalid_argument(who + " must be C-contiguous and aligned");
+  shp.assign(PyArray_DIMS(a), PyArray_DIMS(a) + ndim);
+  return PyArray_DATA(a);
 }
 
 // A flattened [r0,c0,...] path -> a fresh (K,2) uint64 numpy array (new ref).
@@ -418,6 +445,118 @@ PyObject *nav_neighbors(PyObject *positions, double radius)
     PyList_SET_ITEM(lst, i, arr);
   }
   return lst;
+}
+
+// Batched belief sense. `logodds` (M,H,W f32), `last_visible`/`ever_seen`
+// (M,H,W numpy-bool), `version` (M,) i32 are MUTATED IN PLACE (borrowed +
+// validated, never copied — see pycvc_nav_writable). N agents (`positions`
+// (N,2)f64, `headings`/`range_m`/`fov_rad` (N,)f64, `n_rays` (N,)i32) ray-cast
+// `truth` (H,W u8) into plane `agent_map[i]` ((N,)i32). `peer_boxes` (N,Kmax,4)
+// i32 and `mover_boxes` (Mv,4) i32 are optional half-open cell blockers (None to
+// omit). Returns a fresh `flips` (N,) i32. GIL released across the compute.
+PyObject *nav_sense_batch(PyObject *truth, PyObject *positions, PyObject *headings,
+                          PyObject *range_m, PyObject *n_rays, PyObject *fov_rad,
+                          PyObject *logodds, PyObject *last_visible, PyObject *ever_seen,
+                          PyObject *version, PyObject *agent_map, PyObject *peer_boxes,
+                          PyObject *mover_boxes, double min_x, double min_y, double max_x,
+                          double max_y, double l_occ, double l_free, double l_clamp,
+                          int num_threads = 0)
+{
+  // (a) In-place planes: borrow + validate (never copy). All three (M,H,W)
+  // blocks must agree; version is (M,).
+  std::vector<npy_intp> s_lo, s_lv, s_es, s_ver;
+  float *lo = static_cast<float *>(pycvc_nav_writable(logodds, NPY_FLOAT, 3, "logodds", s_lo));
+  std::uint8_t *lv =
+      static_cast<std::uint8_t *>(pycvc_nav_writable(last_visible, NPY_BOOL, 3, "last_visible", s_lv));
+  std::uint8_t *es =
+      static_cast<std::uint8_t *>(pycvc_nav_writable(ever_seen, NPY_BOOL, 3, "ever_seen", s_es));
+  std::int32_t *ver =
+      static_cast<std::int32_t *>(pycvc_nav_writable(version, NPY_INT32, 1, "version", s_ver));
+  const int M = static_cast<int>(s_lo[0]), H = static_cast<int>(s_lo[1]), W = static_cast<int>(s_lo[2]);
+  if (s_lv != s_lo || s_es != s_lo || s_ver[0] != M)
+    throw std::invalid_argument(
+        "pycvc.nav_sense_batch: logodds/last_visible/ever_seen must share (M,H,W) and version be (M,)");
+
+  // (b) Read-only inputs: FROMANY contiguous copies, tracked for cleanup.
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_sense_batch: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *tr = take(truth, NPY_UINT8, 2);
+  if (PyArray_DIM(tr, 0) != H || PyArray_DIM(tr, 1) != W)
+    fail("pycvc.nav_sense_batch: truth must be (H,W) matching the belief planes");
+  PyArrayObject *po = take(positions, NPY_DOUBLE, 2);
+  const int N = static_cast<int>(PyArray_DIM(po, 0));
+  if (PyArray_DIM(po, 1) != 2)
+    fail("pycvc.nav_sense_batch: positions must be (N,2)");
+  PyArrayObject *he = take(headings, NPY_DOUBLE, 1);
+  PyArrayObject *rg = take(range_m, NPY_DOUBLE, 1);
+  PyArrayObject *nr = take(n_rays, NPY_INT32, 1);
+  PyArrayObject *fv = take(fov_rad, NPY_DOUBLE, 1);
+  PyArrayObject *am = take(agent_map, NPY_INT32, 1);
+  if (PyArray_DIM(he, 0) != N || PyArray_DIM(rg, 0) != N || PyArray_DIM(nr, 0) != N ||
+      PyArray_DIM(fv, 0) != N || PyArray_DIM(am, 0) != N)
+    fail("pycvc.nav_sense_batch: headings/range_m/n_rays/fov_rad/agent_map must all be length N");
+
+  const std::int32_t *peer = nullptr;
+  int kmax = 0;
+  if (peer_boxes && peer_boxes != Py_None) {
+    PyArrayObject *pb = take(peer_boxes, NPY_INT32, 3);
+    if (PyArray_DIM(pb, 0) != N || PyArray_DIM(pb, 2) != 4)
+      fail("pycvc.nav_sense_batch: peer_boxes must be (N,Kmax,4)");
+    kmax = static_cast<int>(PyArray_DIM(pb, 1));
+    peer = static_cast<const std::int32_t *>(PyArray_DATA(pb));
+  }
+  const std::int32_t *mov = nullptr;
+  int n_movers = 0;
+  if (mover_boxes && mover_boxes != Py_None) {
+    PyArrayObject *mb = take(mover_boxes, NPY_INT32, 2);
+    if (PyArray_DIM(mb, 1) != 4)
+      fail("pycvc.nav_sense_batch: mover_boxes must be (Mv,4)");
+    n_movers = static_cast<int>(PyArray_DIM(mb, 0));
+    mov = static_cast<const std::int32_t *>(PyArray_DATA(mb));
+  }
+  // Validate agent_map range before releasing the GIL (a bad index is OOB write).
+  const std::int32_t *amd = static_cast<const std::int32_t *>(PyArray_DATA(am));
+  for (int i = 0; i < N; ++i)
+    if (amd[i] < 0 || amd[i] >= M)
+      fail("pycvc.nav_sense_batch: agent_map has an out-of-range plane index");
+
+  cvc::nav::sense_agents ag;
+  ag.pos = static_cast<const double *>(PyArray_DATA(po));
+  ag.heading = static_cast<const double *>(PyArray_DATA(he));
+  ag.range_m = static_cast<const double *>(PyArray_DATA(rg));
+  ag.fov_rad = static_cast<const double *>(PyArray_DATA(fv));
+  ag.n_rays = static_cast<const std::int32_t *>(PyArray_DATA(nr));
+  ag.agent_map = amd;
+  ag.n = N;
+  cvc::nav::belief_planes pl{lo, lv, es, ver, M};
+
+  npy_intp fd = N;
+  PyObject *flips = PyArray_SimpleNew(1, &fd, NPY_INT32);
+  if (!flips)
+    fail("pycvc.nav_sense_batch: flips alloc failed");
+  std::int32_t *fo = static_cast<std::int32_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(flips)));
+
+  const std::uint8_t *trd = static_cast<const std::uint8_t *>(PyArray_DATA(tr));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::sense_batch(trd, H, W, min_x, min_y, max_x, max_y, ag, peer, kmax, mov, n_movers, pl,
+                        l_occ, l_free, l_clamp, fo, num_threads);
+  Py_END_ALLOW_THREADS
+
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h); // planes/version are borrowed (NOT decref'd)
+  return flips;
 }
 
 } // namespace pycvc

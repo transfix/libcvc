@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cvc/nav/grid_nav.h>
 #include <limits>
 #include <queue>
@@ -443,6 +444,178 @@ std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std
   parallel_for(static_cast<int>(occs.size()), num_threads,
                [&](int i) { out[i] = inflate(occs[i], rows, cols, cells); });
   return out;
+}
+
+// ─── Belief sensing (BeliefGrid.sense) ───────────────────────────────────────
+
+namespace {
+
+// Point-in-any-box over a [m*4] block of (r0,r1,c0,c1) HALF-OPEN cell rects; a
+// zero-area rect (r0>=r1 || c0>=c1) is a padding slot and is skipped. This is
+// byte-identical to rasterizing the boxes into truth and indexing (the boxes
+// are the caller's peer/mover footprints, already cellified Python-side exactly
+// as BeliefGrid does), so no float surface is added.
+inline bool in_boxes(const std::int32_t *b, int m, int rr, int cc) {
+  for (int t = 0; t < m; ++t) {
+    const std::int32_t *q = b + 4 * t;
+    if (q[0] >= q[1] || q[2] >= q[3])
+      continue;
+    if (rr >= q[0] && rr < q[1] && cc >= q[2] && cc < q[3])
+      return true;
+  }
+  return false;
+}
+
+// Per-agent scratch: generation-stamped free/occ visit counts (a new agent is
+// O(1) via ++gen, not an O(rows*cols) clear — cf. the A* scratch), plus the list
+// of cells this agent's cone touched (its FoV). thread_local, one per worker.
+struct SenseScratch {
+  std::vector<int> free_cnt, occ_cnt;
+  std::vector<long long> tgen;
+  std::vector<int> touched;
+  long long gen = 0;
+  int n = 0;
+  long long begin(int need) {
+    if (n < need) {
+      n = need;
+      free_cnt.assign(n, 0);
+      occ_cnt.assign(n, 0);
+      tgen.assign(n, 0);
+      gen = 0;
+    }
+    touched.clear();
+    return ++gen;
+  }
+};
+
+// One agent's sense into `plane`, folded onto the running log-odds — a
+// transcription of BeliefGrid.sense (belief.py:88-175). Returns true iff the
+// agent's start cell is out of bounds (caller then blanks that plane's
+// last_visible, matching the reference early-return). `ever_seen` is OR-ed at
+// first touch (monotonic, order-free); logodds is accumulate-then-clamp per
+// cell; `version[plane]` bumps once iff any cell's occupied bit flips.
+bool sense_agent(int i, int plane, const std::uint8_t *truth, int rows, int cols, double min_x,
+                 double min_y, double max_x, double max_y, const sense_agents &ag,
+                 const std::int32_t *peer_boxes, int kmax, const std::int32_t *mover_boxes,
+                 int n_movers, const belief_planes &pl, double l_occ, double l_free, double l_clamp,
+                 SenseScratch &S, std::int32_t *flips_out) {
+  const double cell_w = (max_x - min_x) / (cols - 1); // == belief.py:109-110
+  const double cell_h = (max_y - min_y) / (rows - 1);
+  const double cxf = (ag.pos[2 * i] - min_x) / (max_x - min_x) * (cols - 1);
+  const double cyf = (ag.pos[2 * i + 1] - min_y) / (max_y - min_y) * (rows - 1);
+  const int r0 = static_cast<int>(std::rint(cyf)); // == int(round(...)) half-to-even
+  const int c0 = static_cast<int>(std::rint(cxf));
+  if (!(r0 >= 0 && r0 < rows && c0 >= 0 && c0 < cols)) {
+    flips_out[i] = 0;
+    return true; // belief.py:113-115 early return (last_visible blanked, no update)
+  }
+
+  const long long GEN = S.begin(rows * cols);
+  const long base = static_cast<long>(plane) * rows * cols;
+  const double rangem = ag.range_m[i], fov = ag.fov_rad[i], head = ag.heading[i];
+  const int nr = ag.n_rays[i];
+  const int n_steps = static_cast<int>(rangem / cell_w) + 1; // int() truncation
+  const std::int32_t *pbox = kmax ? peer_boxes + static_cast<long>(i) * kmax * 4 : nullptr;
+
+  for (int j = 0; j < nr; ++j) {
+    const double a = head + ((double)j / (double)std::max(nr, 1) - 0.5) * fov; // belief.py:121
+    const double dx = std::cos(a), dy = std::sin(a);
+    double sr = dy * (cell_w / cell_h), sc = dx;
+    const double nrm = std::max(std::max(std::fabs(sr), std::fabs(sc)), 1e-9);
+    sr /= nrm;
+    sc /= nrm;
+    for (int s = 0; s < n_steps; ++s) {
+      const int rr = static_cast<int>(std::rint((double)r0 + sr * (double)s));
+      const int cc = static_cast<int>(std::rint((double)c0 + sc * (double)s));
+      const double dist = std::hypot((double)(rr - r0) * cell_h, (double)(cc - c0) * cell_w);
+      if (!(rr >= 0 && rr < rows && cc >= 0 && cc < cols && dist <= rangem))
+        break; // !inside -> stop this ray, mark no occ (occ requires a hit, which is in-range)
+      const int k = rr * cols + cc;
+      if (S.tgen[k] != GEN) {
+        S.tgen[k] = GEN;
+        S.free_cnt[k] = 0;
+        S.occ_cnt[k] = 0;
+        S.touched.push_back(k);
+        pl.ever_seen[base + k] = 1; // FoV first-touch; monotonic OR
+      }
+      const bool occ = truth[k] || in_boxes(pbox, kmax, rr, cc) ||
+                       in_boxes(mover_boxes, n_movers, rr, cc); // peers/movers are hits (R1)
+      if (occ) {
+        ++S.occ_cnt[k];
+        break; // occlusion truncates the ray
+      }
+      ++S.free_cnt[k];
+    }
+  }
+
+  // Accumulate then clamp, per cell touched. Model C: the running delta is f32,
+  // each add is (float)((double)df + CONST) with the constant kept double — the
+  // empirically-verified np.add.at-onto-float32 semantics (a fused f64 sum or an
+  // f32-per-add both diverge by ~1 ULP). free block fully before occ block; a
+  // cell is single-sign so the block split is exact.
+  const float clampf = static_cast<float>(l_clamp);
+  int flips = 0;
+  for (int k : S.touched) {
+    float df = 0.0f;
+    for (int t = 0; t < S.free_cnt[k]; ++t)
+      df = static_cast<float>(static_cast<double>(df) + l_free);
+    for (int t = 0; t < S.occ_cnt[k]; ++t)
+      df = static_cast<float>(static_cast<double>(df) + l_occ);
+    const float old = pl.logodds[base + k];
+    float nv = static_cast<float>(old + df); // np.clip(logodds + delta, ...)
+    nv = std::min(std::max(nv, -clampf), clampf);
+    if ((old > 0.0f) != (nv > 0.0f))
+      ++flips;
+    pl.logodds[base + k] = nv;
+  }
+  if (flips)
+    ++pl.version[plane];
+  flips_out[i] = flips;
+  return false;
+}
+
+} // namespace
+
+void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, double min_y,
+                 double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
+                 int kmax, const std::int32_t *mover_boxes, int n_movers,
+                 const belief_planes &planes, double l_occ, double l_free, double l_clamp,
+                 std::int32_t *flips_out, int num_threads) {
+  // Bucket agents by plane, preserving ascending global index within each — so a
+  // plane's agents fold in exactly the order N serial sense() calls would.
+  std::vector<std::vector<int>> by_plane(planes.K);
+  for (int i = 0; i < ag.n; ++i)
+    by_plane[ag.agent_map[i]].push_back(i);
+
+  // The PLANE is the unit of parallelism (disjoint memory ⇒ race-free); agents
+  // within a plane are sequential. Private (K=n) => full parallelism; shared
+  // (K=1) => one worker, correctly serial.
+  parallel_for(planes.K, num_threads, [&](int p) {
+    thread_local SenseScratch S;
+    const long base = static_cast<long>(p) * rows * cols;
+    std::vector<int> last_vis;
+    bool last_oob = true;
+    for (int i : by_plane[p]) {
+      const bool oob =
+          sense_agent(i, p, truth, rows, cols, min_x, min_y, max_x, max_y, ag, peer_boxes, kmax,
+                      mover_boxes, n_movers, planes, l_occ, l_free, l_clamp, S, flips_out);
+      if (oob) {
+        last_oob = true;
+        last_vis.clear();
+      } else {
+        last_oob = false;
+        last_vis.assign(S.touched.begin(), S.touched.end());
+      }
+    }
+    // last_visible is last-agent-wins (belief.py:162): blank the plane, then
+    // stamp the final non-OOB agent's FoV. Deferred out of the per-agent loop —
+    // the intermediate states are unobservable within a tick.
+    std::uint8_t *lv = planes.last_visible + base;
+    std::memset(lv, 0, static_cast<std::size_t>(rows) * cols);
+    if (!last_oob)
+      for (int k : last_vis)
+        lv[k] = 1;
+  });
 }
 
 } // namespace nav
