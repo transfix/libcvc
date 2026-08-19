@@ -529,12 +529,14 @@ void reposeTree(Tree &tree, double t) {
 } // namespace
 
 int main(int argc, char **argv) {
-  bool offscreen = false;
+  bool offscreen = false, noShadows = false;
   int frames = 0;
   std::string png;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--offscreen"))
       offscreen = true;
+    else if (!std::strcmp(argv[i], "--no-shadows"))
+      noShadows = true;
     else if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
       frames = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--png") && i + 1 < argc)
@@ -606,8 +608,9 @@ int main(int argc, char **argv) {
   view.setBackground(0.62, 0.76, 0.92);
 
   // Shadows on (a render target now exists); re-baked every 3rd frame (cheap).
-  const bool shadows = sg.setShadowsEnabled(true);
-  sg.setShadowUpdateInterval(3);
+  const bool shadows = !noShadows && sg.setShadowsEnabled(true);
+  if (shadows)
+    sg.setShadowUpdateInterval(3);
 
   // Built-in navigation, framed on the island.
   CameraController cam(view);
@@ -619,9 +622,11 @@ int main(int argc, char **argv) {
   // island to a speck. It is scenery, not world.
   addSun(app, sg);
 
-  // Hide the lab grid/axis box (do it last + pump, so the visibility sticks).
+  // This is an island, not a lab bench: hide cvcGL's default grid, axis, AND the
+  // scene bounding box (the root NullGraphic shows its yellow bbox by default).
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
+  sg.getGraphicsRoot()->setShowBBox(false);
   sg.processEvents();
 
   std::printf("lsystem_forest: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",
