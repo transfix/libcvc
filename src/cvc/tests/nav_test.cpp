@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <gtest/gtest.h>
 #include <vector>
@@ -80,10 +81,19 @@ TEST(NavSdf, SignAndScaleAcrossAWall) {
   // phi at col 0: dist_to_building=2, dist_to_free=0 -> 2 * cell_w(1) * scale(.5)=1.0
   EXPECT_FLOAT_EQ(f.phi[0], 1.0f);
   EXPECT_FLOAT_EQ(f.phi[1], 0.5f); // one cell from the wall
-  // unit normals
+  // Unit normals — EXCEPT at the wall cell (col 2). It sits exactly on the SDF
+  // minimum (phi 0.5, -0.5, 0.5 across it), so the discrete central-difference
+  // gradient is (0, 0) and the normalized normal is (0, 0), magnitude 0. numpy's
+  // np.gradient produces the identical zero normal there (verified on a 2-row
+  // grid; on this single row np.gradient can't run at all, so build_sdf's y-axis
+  // gradient is 0 by construction). This cell formerly read as unit magnitude
+  // only because build_sdf's y-gradient read one float past phi — a heap
+  // buffer-overflow (ASan-confirmed) whose garbage made gy spuriously nonzero,
+  // which flaked NavSdf ~2/12 when that garbage was a NaN/huge value.
   for (int i = 0; i < rows * cols; ++i) {
     const float mag = std::sqrt(f.normal_x[i] * f.normal_x[i] + f.normal_y[i] * f.normal_y[i]);
-    EXPECT_NEAR(mag, 1.0f, 1e-5f) << "cell " << i;
+    const float want = (i == 2) ? 0.0f : 1.0f; // col 2 = wall minimum, gradient 0
+    EXPECT_NEAR(mag, want, 1e-5f) << "cell " << i;
   }
 }
 
@@ -540,4 +550,65 @@ TEST(NavSense, PeerBoxOccludesAndDeposits) {
   // should be UNSEEN (ray stopped) -> ever_seen 0.
   EXPECT_GT(p.lo[10 * cols + 14], 0.0f) << "peer box cell should read occupied";
   EXPECT_EQ(p.es[10 * cols + 16], 0u) << "cell behind the peer must be occluded (unseen)";
+}
+
+// ─── drive: bilinear SDF sampler ─────────────────────────────────────────────
+
+// A constant field per plane makes the bilinear sample exact and hand-checkable:
+// the sampled phi is the plane's phi constant everywhere, and the returned
+// normal is the plane's (nx,ny) renormalized. This checks the map_id gather (each
+// agent reads its own plane), the border clamp (a far-out-of-range position still
+// samples the constant), and the unit-normal renorm.
+TEST(NavDrive, ConstantFieldGatherAndRenorm) {
+  const int M = 2, H = 4, W = 5;
+  std::vector<float> data(static_cast<std::size_t>(M) * 3 * H * W);
+  auto plane = [&](int m, int ch) {
+    return data.data() + (static_cast<std::size_t>(m) * 3 + ch) * H * W;
+  };
+  std::fill(plane(0, 0), plane(0, 0) + H * W, 5.0f);  // plane 0 phi
+  std::fill(plane(0, 1), plane(0, 1) + H * W, 3.0f);  // plane 0 nx
+  std::fill(plane(0, 2), plane(0, 2) + H * W, 4.0f);  // plane 0 ny -> unit (0.6,0.8)
+  std::fill(plane(1, 0), plane(1, 0) + H * W, 9.0f);  // plane 1 phi
+  std::fill(plane(1, 1), plane(1, 1) + H * W, 0.0f);  // plane 1 nx
+  std::fill(plane(1, 2), plane(1, 2) + H * W, -2.0f); // plane 1 ny -> unit (0,-1)
+
+  cvc::nav::field_stack fs;
+  fs.data = data.data();
+  fs.M = M;
+  fs.H = H;
+  fs.W = W;
+  fs.mnx = -10;
+  fs.mny = -10;
+  fs.mxx = 10;
+  fs.mxy = 10;
+  fs.cx = 0;
+  fs.cy = 0;
+  fs.S = 1.0;
+
+  const int N = 4;
+  const float on[N * 2] = {0.f, 0.f, 0.f, 0.f, 500.f, 500.f, -500.f, -500.f};
+  const int map_id[N] = {0, 1, 1, 0};
+  std::vector<float> phi(N), nrm(N * 2);
+  cvc::nav::sdf_sample(fs, on, N, map_id, phi.data(), nrm.data(), 1);
+
+  const float exp_phi[N] = {5.f, 9.f, 9.f, 5.f};
+  const float exp_nx[N] = {0.6f, 0.f, 0.f, 0.6f};
+  const float exp_ny[N] = {0.8f, -1.f, -1.f, 0.8f};
+  for (int i = 0; i < N; ++i) {
+    EXPECT_NEAR(phi[i], exp_phi[i], 1e-5f) << "agent " << i;
+    EXPECT_NEAR(nrm[2 * i], exp_nx[i], 1e-5f) << "agent " << i;
+    EXPECT_NEAR(nrm[2 * i + 1], exp_ny[i], 1e-5f) << "agent " << i;
+  }
+
+  // map_id == nullptr => every agent reads plane 0.
+  std::vector<float> phi0(N), nrm0(N * 2);
+  cvc::nav::sdf_sample(fs, on, N, nullptr, phi0.data(), nrm0.data(), 1);
+  for (int i = 0; i < N; ++i)
+    EXPECT_NEAR(phi0[i], 5.0f, 1e-5f);
+
+  // Deterministic across thread counts (pure per-agent).
+  std::vector<float> phiT(N), nrmT(N * 2);
+  cvc::nav::sdf_sample(fs, on, N, map_id, phiT.data(), nrmT.data(), 4);
+  for (int i = 0; i < N; ++i)
+    EXPECT_EQ(phi[i], phiT[i]);
 }

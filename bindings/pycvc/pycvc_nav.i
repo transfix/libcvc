@@ -11,6 +11,7 @@
 // so no input array is pinned by a result.
 
 %{
+#include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <algorithm>
 #include <cstdint>
@@ -557,6 +558,88 @@ PyObject *nav_sense_batch(PyObject *truth, PyObject *positions, PyObject *headin
   for (PyArrayObject *h : hold)
     Py_DECREF(h); // planes/version are borrowed (NOT decref'd)
   return flips;
+}
+
+// Torch-free bilinear SDF sample (the drive's field read). `field` is (M,3,H,W)
+// float32, `on` is (N,2) float32 normalized positions, `map_id` is (N,) int32 or
+// None (=> plane 0 for all). The world<->grid constants match SDFField. Returns
+// a Python tuple (phi (N,) f32, normal (N,2) f32). Float-equivalent to
+// SDFField.sample / BatchedSDFField.sample; GIL released across the compute.
+PyObject *nav_sdf_sample(PyObject *field, PyObject *on, PyObject *map_id, double min_x, double min_y,
+                         double max_x, double max_y, double cx, double cy, double scale,
+                         int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_sdf_sample: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  if (PyArray_DIM(fa, 1) != 3)
+    fail("pycvc.nav_sdf_sample: field must be (M,3,H,W) float32");
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  if (PyArray_DIM(oa, 1) != 2)
+    fail("pycvc.nav_sdf_sample: on must be (N,2) float32");
+  const int M = static_cast<int>(PyArray_DIM(fa, 0));
+  const int H = static_cast<int>(PyArray_DIM(fa, 2));
+  const int W = static_cast<int>(PyArray_DIM(fa, 3));
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  const int *mid = nullptr;
+  if (map_id && map_id != Py_None) {
+    PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+    if (PyArray_DIM(ma, 0) != N)
+      fail("pycvc.nav_sdf_sample: map_id must be (N,)");
+    const std::int32_t *m = static_cast<const std::int32_t *>(PyArray_DATA(ma));
+    for (int i = 0; i < N; ++i)
+      if (m[i] < 0 || m[i] >= M)
+        fail("pycvc.nav_sdf_sample: map_id has an out-of-range plane index");
+    mid = m;
+  }
+
+  npy_intp pd = N;
+  PyObject *phi = PyArray_SimpleNew(1, &pd, NPY_FLOAT);
+  npy_intp nd2[2] = {N, 2};
+  PyObject *nrm = PyArray_SimpleNew(2, nd2, NPY_FLOAT);
+  if (!phi || !nrm) {
+    Py_XDECREF(phi);
+    Py_XDECREF(nrm);
+    fail("pycvc.nav_sdf_sample: output alloc failed");
+  }
+  float *phid = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(phi)));
+  float *nrmd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(nrm)));
+
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = M;
+  fs.H = H;
+  fs.W = W;
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  const float *ond = static_cast<const float *>(PyArray_DATA(oa));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::sdf_sample(fs, ond, N, mid, phid, nrmd, num_threads);
+  Py_END_ALLOW_THREADS
+
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(2, phi, nrm);
+  Py_DECREF(phi);
+  Py_DECREF(nrm);
+  return tup;
 }
 
 } // namespace pycvc

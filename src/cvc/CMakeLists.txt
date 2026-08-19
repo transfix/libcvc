@@ -169,6 +169,7 @@ set(SOURCE_FILES
   volume/vtk_io.cpp
   nav/grid_nav.cpp
   nav/spatial.cpp
+  nav/drive.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
