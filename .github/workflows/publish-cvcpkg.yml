@@ -775,7 +775,11 @@ jobs:
           }
           $stage = "$env:GITHUB_WORKSPACE/stage"
           $py    = "$env:GITHUB_WORKSPACE/py"
-          cvcpkg install python311 numpy-cp311 vtk --prefix "$py" --config release --link shared
+          # vtk-python-cp311 supplies vtkWrappingPythonCore*.lib + vtkPythonUtil.h
+          # that pycvc-gl links (bindings/pycvc/CMakeLists.txt:142 find_library) —
+          # the Linux path installs it too; omitting it here failed pycvc-gl with
+          # "libvtkWrappingPythonCore not found — install the vtk-python cvcpkg".
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 --prefix "$py" --config release --link shared
           # Locate the interpreter + numpy include (paths differ from Linux).
           $python = if (Test-Path "$py/python.exe") { "$py/python.exe" } else { "$py/bin/python.exe" }
           # numpy's bundled DLLs live in numpy.libs; put them (and $py) on PATH
