@@ -203,25 +203,25 @@ void GridNode::handleStateChanged(const std::string &childState) {
   if (childState == "yz_plane.visible") {
     runOnMainThread([this]() {
       m_yzPlaneVisible = getState("yz_plane.visible").value<bool>();
-      m_yzActor->SetVisibility(m_yzPlaneVisible);
+      m_yzActor->SetVisibility(m_yzPlaneVisible && isVisible());
       for (auto &actor : m_yzTickLabelActors) {
-        actor->SetVisibility(m_yzPlaneVisible);
+        actor->SetVisibility(m_yzPlaneVisible && isVisible());
       }
     });
   } else if (childState == "xz_plane.visible") {
     runOnMainThread([this]() {
       m_xzPlaneVisible = getState("xz_plane.visible").value<bool>();
-      m_xzActor->SetVisibility(m_xzPlaneVisible);
+      m_xzActor->SetVisibility(m_xzPlaneVisible && isVisible());
       for (auto &actor : m_xzTickLabelActors) {
-        actor->SetVisibility(m_xzPlaneVisible);
+        actor->SetVisibility(m_xzPlaneVisible && isVisible());
       }
     });
   } else if (childState == "xy_plane.visible") {
     runOnMainThread([this]() {
       m_xyPlaneVisible = getState("xy_plane.visible").value<bool>();
-      m_xyActor->SetVisibility(m_xyPlaneVisible);
+      m_xyActor->SetVisibility(m_xyPlaneVisible && isVisible());
       for (auto &actor : m_xyTickLabelActors) {
-        actor->SetVisibility(m_xyPlaneVisible);
+        actor->SetVisibility(m_xyPlaneVisible && isVisible());
       }
     });
   } else if (childState == "yz_plane.color_r" || childState == "yz_plane.color_g" ||
@@ -416,6 +416,32 @@ void GridNode::setXZPlaneVisible(bool visible) {
 
 void GridNode::setXYPlaneVisible(bool visible) {
   getState("xy_plane.visible").value(visible ? 1 : 0);
+}
+
+void GridNode::setVisible(bool visible) {
+  GraphicsNode::setVisible(visible); // base: the single getProp() actor + label
+  // Set visibility on every actor the grid draws with (gated per plane)...
+  m_yzActor->SetVisibility(visible && m_yzPlaneVisible);
+  for (auto &a : m_yzTickLabelActors)
+    a->SetVisibility(visible && m_yzPlaneVisible);
+  m_xzActor->SetVisibility(visible && m_xzPlaneVisible);
+  for (auto &a : m_xzTickLabelActors)
+    a->SetVisibility(visible && m_xzPlaneVisible);
+  m_xyActor->SetVisibility(visible && m_xyPlaneVisible);
+  for (auto &a : m_xyTickLabelActors)
+    a->SetVisibility(visible && m_xyPlaneVisible);
+  // ...AND add/remove from the renderer, so a hidden grid truly neither renders
+  // nor casts shadows (a stale prop with Visibility 0 can still bake into the
+  // shadow pass on some backends). removeFromRenderer clears m_renderer, so save
+  // it to restore for a later show.
+  if (vtkRenderer *r = m_renderer) {
+    if (visible)
+      addToRenderer(r);
+    else {
+      removeFromRenderer(r);
+      m_renderer = r;
+    }
+  }
 }
 
 void GridNode::setGridDivisions(int x, int y, int z) {
@@ -654,7 +680,7 @@ void GridNode::createYZTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(minX, y, z);
 
-    textActor->SetVisibility(m_yzPlaneVisible);
+    textActor->SetVisibility(m_yzPlaneVisible && isVisible());
     m_yzTickLabelActors.push_back(textActor);
   }
 
@@ -679,7 +705,7 @@ void GridNode::createYZTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(minX, y, z);
 
-    textActor->SetVisibility(m_yzPlaneVisible);
+    textActor->SetVisibility(m_yzPlaneVisible && isVisible());
     m_yzTickLabelActors.push_back(textActor);
   }
 }
@@ -728,7 +754,7 @@ void GridNode::createXZTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(x, minY, z);
 
-    textActor->SetVisibility(m_xzPlaneVisible);
+    textActor->SetVisibility(m_xzPlaneVisible && isVisible());
     m_xzTickLabelActors.push_back(textActor);
   }
 
@@ -753,7 +779,7 @@ void GridNode::createXZTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(x, minY, z);
 
-    textActor->SetVisibility(m_xzPlaneVisible);
+    textActor->SetVisibility(m_xzPlaneVisible && isVisible());
     m_xzTickLabelActors.push_back(textActor);
   }
 }
@@ -802,7 +828,7 @@ void GridNode::createXYTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(x, y, minZ);
 
-    textActor->SetVisibility(m_xyPlaneVisible);
+    textActor->SetVisibility(m_xyPlaneVisible && isVisible());
     m_xyTickLabelActors.push_back(textActor);
   }
 
@@ -827,7 +853,7 @@ void GridNode::createXYTickLabels() {
     textActor->GetPositionCoordinate()->SetCoordinateSystemToWorld();
     textActor->GetPositionCoordinate()->SetValue(x, y, minZ);
 
-    textActor->SetVisibility(m_xyPlaneVisible);
+    textActor->SetVisibility(m_xyPlaneVisible && isVisible());
     m_xyTickLabelActors.push_back(textActor);
   }
 }

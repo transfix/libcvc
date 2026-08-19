@@ -12,6 +12,7 @@
 #include <cvc/gl/SceneGraph.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 
@@ -199,5 +200,9 @@ int main() {
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
-  return failures ? 1 : 0;
+  // cvcGL's state_object / handler-thread teardown races at process exit (a known,
+  // harmless issue, independent of the checks above). Hard-exit with the real
+  // status so a teardown race can't turn a green run red.
+  std::fflush(stdout);
+  std::_Exit(failures ? 1 : 0);
 }

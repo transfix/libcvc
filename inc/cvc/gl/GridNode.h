@@ -34,6 +34,10 @@ public:
   void setXZPlaneVisible(bool visible);
   void setXYPlaneVisible(bool visible);
 
+  // Hide/show the WHOLE grid — all three plane actors and every tick label, not
+  // just the single getProp() actor the base handles.
+  void setVisible(bool visible) override;
+
   bool isYZPlaneVisible() const { return m_yzPlaneVisible; }
   bool isXZPlaneVisible() const { return m_xzPlaneVisible; }
   bool isXYPlaneVisible() const { return m_xyPlaneVisible; }

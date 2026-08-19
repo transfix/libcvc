@@ -14,6 +14,9 @@ public:
 
   void setAxisLength(double length);
 
+  // Hide/show the axes actor (including its X/Y/Z caption labels).
+  void setVisible(bool visible) override;
+
   cvc::bounding_box getBoundingBox() const override;
 
 protected:
