@@ -30,8 +30,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/drive.h>
+#include <vector>
 
 namespace cvc {
 namespace nav {
@@ -258,6 +260,25 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
     sp[i] = spi;
     minclr_out[i] = minclr;
   });
+}
+
+void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                const coef_mlp &model, int n, const int *map_id, const veh_params &v,
+                float *minclr_out, int num_threads) {
+  // sample + features -> coefficients -> rollout. The intermediate buffers are
+  // O(n); a CUDA drive keeps them in registers and fuses this into one launch.
+  std::vector<float> feat(static_cast<std::size_t>(n) * 5);
+  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads);
+  std::vector<float> coef(static_cast<std::size_t>(n) * 3);
+  model.forward(feat.data(), n, coef.data(), num_threads);
+  std::vector<float> al(n), be(n), ga(n);
+  for (int i = 0; i < n; ++i) {
+    al[i] = coef[3 * i + 0];
+    be[i] = coef[3 * i + 1];
+    ga[i] = coef[3 * i + 2];
+  }
+  bicycle_rollout(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, minclr_out,
+                  num_threads);
 }
 
 } // namespace nav

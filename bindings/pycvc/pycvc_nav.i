@@ -855,5 +855,110 @@ PyObject *nav_bicycle_rollout(PyObject *field, PyObject *on, PyObject *th, PyObj
   return tup;
 }
 
+// The fused per-agent drive tick: sample -> coef_feats -> coef_mlp(weights_path)
+// -> bicycle_rollout, given each agent's carrot. Returns fresh (o (N,2), th (N,),
+// sp (N,), minclr (N,)) f32. Float-equivalent to the torch Swarm drive.
+PyObject *nav_drive_step(PyObject *field, PyObject *on, PyObject *th, PyObject *sp, PyObject *carrot,
+                         const char *weights_path, PyObject *map_id, double min_x, double min_y,
+                         double max_x, double max_y, double cx, double cy, double scale, double rr,
+                         double d_hat, double dt, double vmax, double L, double delta_max,
+                         double a_max, double a_lat_max, double k_steer, int nsub,
+                         int allow_reverse, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_drive_step: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ta = take(th, NPY_FLOAT, 1);
+  PyArrayObject *sa = take(sp, NPY_FLOAT, 1);
+  PyArrayObject *ca = take(carrot, NPY_FLOAT, 2);
+  const int M = static_cast<int>(PyArray_DIM(fa, 0));
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(oa, 1) != 2 || PyArray_DIM(ta, 0) != N || PyArray_DIM(sa, 0) != N ||
+      PyArray_DIM(ca, 0) != N || PyArray_DIM(ca, 1) != 2)
+    fail("pycvc.nav_drive_step: pose / carrot arrays must all be length N");
+  const int *mid = nullptr;
+  if (map_id && map_id != Py_None) {
+    PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+    if (PyArray_DIM(ma, 0) != N)
+      fail("pycvc.nav_drive_step: map_id must be (N,)");
+    const std::int32_t *m = static_cast<const std::int32_t *>(PyArray_DATA(ma));
+    for (int i = 0; i < N; ++i)
+      if (m[i] < 0 || m[i] >= M)
+        fail("pycvc.nav_drive_step: map_id has an out-of-range plane index");
+    mid = m;
+  }
+  cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale file
+
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *to = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *so = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *mc = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  if (!oo || !to || !so || !mc) {
+    Py_XDECREF(oo);
+    Py_XDECREF(to);
+    Py_XDECREF(so);
+    Py_XDECREF(mc);
+    fail("pycvc.nav_drive_step: output alloc failed");
+  }
+  float *ood = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(oo)));
+  float *tod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(to)));
+  float *sod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(so)));
+  float *mcd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mc)));
+  std::memcpy(ood, PyArray_DATA(oa), sizeof(float) * 2 * N);
+  std::memcpy(tod, PyArray_DATA(ta), sizeof(float) * N);
+  std::memcpy(sod, PyArray_DATA(sa), sizeof(float) * N);
+
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = M;
+  fs.H = static_cast<int>(PyArray_DIM(fa, 2));
+  fs.W = static_cast<int>(PyArray_DIM(fa, 3));
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  cvc::nav::veh_params v;
+  v.rr = static_cast<float>(rr);
+  v.d_hat = static_cast<float>(d_hat);
+  v.dt = static_cast<float>(dt);
+  v.vmax = static_cast<float>(vmax);
+  v.L = static_cast<float>(L);
+  v.delta_max = static_cast<float>(delta_max);
+  v.a_max = static_cast<float>(a_max);
+  v.a_lat_max = static_cast<float>(a_lat_max);
+  v.k_steer = static_cast<float>(k_steer);
+  v.nsub = nsub;
+  v.allow_reverse = allow_reverse != 0;
+  const float *cad = static_cast<const float *>(PyArray_DATA(ca));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::drive_step(fs, ood, tod, sod, cad, model, N, mid, v, mcd, num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(4, oo, to, so, mc);
+  Py_DECREF(oo);
+  Py_DECREF(to);
+  Py_DECREF(so);
+  Py_DECREF(mc);
+  return tup;
+}
+
 } // namespace pycvc
 %}

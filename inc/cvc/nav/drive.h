@@ -44,6 +44,8 @@
 namespace cvc {
 namespace nav {
 
+class coef_mlp;
+
 // A stack of M built SDF fields sampled by the drive. `data` is the borrowed
 // [M][3][H][W] row-major block (channel 0 = phi, 1 = normal_x, 2 = normal_y;
 // element (m,ch,r,c) at ((m*3+ch)*H + r)*W + c) — exactly the memory of the
@@ -96,6 +98,15 @@ struct veh_params {
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,
                      const veh_params &v, float *minclr_out, int num_threads = 0);
+
+// The whole per-agent drive for one tick, fused: sample -> coef_feats ->
+// coef_mlp -> bicycle_rollout(nsub substeps), given the carrot each agent is
+// chasing. Equivalent to calling coef_feats + model.forward + bicycle_rollout in
+// sequence (a CUDA kernel fuses these into one launch). Updates o[n*2], th[n],
+// sp[n] IN PLACE and writes minclr_out[n]. Agents are independent — threaded.
+void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                const coef_mlp &model, int n, const int *map_id, const veh_params &v,
+                float *minclr_out, int num_threads = 0);
 
 } // namespace nav
 } // namespace cvc
