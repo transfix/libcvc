@@ -9,15 +9,19 @@
 // L-system FOREST (each tree grown from the grammar, merged route-C to one wood +
 // one needle actor, wind re-posed every frame via updateVertices, procedural bark
 // on the wood), a SEA volume (depth under a travelling wave), a drifting SKY of
-// L-system clouds (a 3-D turtle grows two density fields, crossfaded + scrolled so
-// the cloud evolves as it travels), the afternoon sun (disc + a directional light)
-// and striped shadows — all navigable with the built-in CameraController.
+// L-system + fBm clouds (a 3-D turtle grows two density fields, then fractal noise
+// frays them into fluffy cumulus; crossfaded + scrolled so the cloud evolves as it
+// travels; casts a soft ground dapple), a gradient sky with a camera-relative sun,
+// and shadows — all navigable with the built-in CameraController.
 //
 // Run (onscreen, navigable):   lsystem_forest
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
 // Verify (offscreen, headless): lsystem_forest --offscreen --frames 30 --png out.png
+// Cinematic capture (mp4-ready): lsystem_forest --capture fly --frames 1800 --fps 30 \
+//   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
 
 #include <algorithm>
+#include <boost/program_options.hpp>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -25,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -35,10 +40,13 @@
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <deque>
+#include <filesystem>
+#include <iostream>
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
+#include <vtkRenderer.h>
 
 using cvc::gl::CameraController;
 
@@ -437,7 +445,12 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
 }
 
 // ── the afternoon sun (a flat-lit disc + faint halo, far out) ────────────────
-constexpr double SUN_AZ = -52.0, SUN_EL = 34.0, SUN_DIST = 430.0, SUN_R = 13.0;
+constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
+constexpr double SUN_REF_DIST = 900.0; // reference distance for the sun's angular size
+constexpr double SUN_DISC_R = 26.0;    // disc radius at SUN_REF_DIST (~1.6° angular)
+constexpr double SUN_DEPTH_CAP =
+    150.0; // max sun-direction depth — keeps the sun within the
+           // shadow-map depth range so it never self-shadows the island
 Vec3d vnorm(Vec3d a) {
   double l = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
   return l > 1e-12 ? Vec3d{a.x / l, a.y / l, a.z / l} : Vec3d{0, 0, 1};
@@ -467,18 +480,27 @@ cvc::geometry discGeom(cvc::app &app, Vec3d c, Vec3d normal, double radius, int 
                         static_cast<cvc::geometry::index_t>(1 + (i + 1) % seg)});
   return g;
 }
+// Sun disc + halo, built at the ORIGIN facing back down the sun ray. main()
+// repositions them to (cameraEye + sunDir·SUN_CAM_DIST) every frame, so the sun
+// sits a constant distance AHEAD of the camera in the fixed world sun direction —
+// effectively at infinity: always in the sky where the light comes from, and never
+// able to drift between the camera and the island (the old fixed-world disc did,
+// eclipsing the scene as the camera came around). Flat-lit (ambient only), so it
+// is a bright disc from any angle and is immune to shadows.
 void addSun(cvc::app &app, SceneGraph &sg) {
   Vec3d d = sunDir(SUN_AZ, SUN_EL);
-  Vec3d c{d.x * SUN_DIST, d.y * SUN_DIST, d.z * SUN_DIST};
-  Vec3d face{-d.x, -d.y, -d.z}; // face the origin (where the camera orbits)
-  sg.addGraphics("sun", discGeom(app, c, face, SUN_R));
+  Vec3d face{-d.x, -d.y, -d.z}; // faces back toward the camera
+  sg.addGraphics("sun", discGeom(app, {0, 0, 0}, face, SUN_DISC_R));
   auto disc = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun"));
   disc->setColor(1.0, 0.97, 0.88);
   disc->setAmbient(1.0);
   disc->setDiffuse(0.0);
-  disc->setSpecular(0.0); // flat-lit — a sun must not be a dark disc lit from behind
-  Vec3d ch{c.x * 1.02, c.y * 1.02, c.z * 1.02};
-  sg.addGraphics("sun_halo", discGeom(app, ch, face, SUN_R * 3.2));
+  disc->setSpecular(0.0);
+  // Opacity just under 1 puts the disc in the TRANSLUCENT bucket, so the opaque
+  // shadow-map bake skips it (an opaque billboard 900 units away would stretch the
+  // light's depth range and self-shadow the island to black). Visually still solid.
+  disc->setOpacity(0.99);
+  sg.addGraphics("sun_halo", discGeom(app, {0, 0, 0}, face, SUN_DISC_R * 3.4));
   auto halo = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun_halo"));
   halo->setColor(1.0, 0.90, 0.72);
   halo->setAmbient(1.0);
@@ -532,14 +554,14 @@ cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
 // slab is thin in z relative to x/y, faded at all six faces so nothing is cut
 // square, and normalised on a high percentile so a few overlaps don't set the
 // scale. Empty sky is pinned EXACTLY transparent; only dense cores composite.
-constexpr int SKY_N = 48, SKY_NZ = 22;
+constexpr int SKY_N = 84, SKY_NZ = 38;             // finer grid so the fBm fractal detail resolves
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0; // a deep slab, so puffs are round
 constexpr double SKY_HALF = 150.0;                 // overhangs the island a little
 constexpr double CLOUD_DRIFT = 5.0;                // world units / second
 constexpr double CLOUD_MORPH_S = 26.0;             // seconds for a full crossfade
 constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
-constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 6.5, CLOUD_STEP_DECAY = 0.9;
-constexpr double CLOUD_PUFF0 = 7.0, CLOUD_PUFF_DECAY = 0.88;
+constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 11.4, CLOUD_STEP_DECAY = 0.9; // step/puff
+constexpr double CLOUD_PUFF0 = 12.3, CLOUD_PUFF_DECAY = 0.88; // scaled with SKY_N (keep the size)
 constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
 const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
 const char *cloudRule(char c) {
@@ -566,6 +588,40 @@ double percentileSorted(const std::vector<float> &a, double q) {
   if (lo + 1 >= a.size())
     return a.back();
   return a[lo] + (rank - lo) * (a[lo + 1] - a[lo]);
+}
+// ── 3-D value-noise fBm, for the clouds' fractal fluff ────────────────────────
+// A cheap integer-lattice hash -> smooth trilinear value noise -> a few octaves.
+// Summing octaves (each finer + fainter) gives fractal Brownian motion: the same
+// billowing detail at every scale, which is what turns a smooth blob into a
+// cauliflower cloud with wispy edges.
+double vhash3(int x, int y, int z) {
+  unsigned h = static_cast<unsigned>(x * 374761393 + y * 668265263 + z * 1274126177);
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return ((h ^ (h >> 16)) & 0xffffffu) / double(0x1000000);
+}
+double vnoise3(double x, double y, double z) {
+  int xi = (int)std::floor(x), yi = (int)std::floor(y), zi = (int)std::floor(z);
+  double fx = x - xi, fy = y - yi, fz = z - zi;
+  auto sm = [](double t) { return t * t * (3.0 - 2.0 * t); };
+  fx = sm(fx);
+  fy = sm(fy);
+  fz = sm(fz);
+  auto L = [](double a, double b, double t) { return a + (b - a) * t; };
+  double x00 = L(vhash3(xi, yi, zi), vhash3(xi + 1, yi, zi), fx);
+  double x10 = L(vhash3(xi, yi + 1, zi), vhash3(xi + 1, yi + 1, zi), fx);
+  double x01 = L(vhash3(xi, yi, zi + 1), vhash3(xi + 1, yi, zi + 1), fx);
+  double x11 = L(vhash3(xi, yi + 1, zi + 1), vhash3(xi + 1, yi + 1, zi + 1), fx);
+  return L(L(x00, x10, fy), L(x01, x11, fy), fz);
+}
+double fbm3(double x, double y, double z, int octaves) {
+  double f = 0.0, amp = 0.5, tot = 0.0, fr = 1.0;
+  for (int i = 0; i < octaves; ++i) {
+    f += amp * vnoise3(x * fr, y * fr, z * fr);
+    tot += amp;
+    amp *= 0.5;
+    fr *= 2.02;
+  }
+  return f / tot; // [0,1]
 }
 // Grow ONE 3-D cloud field: run the turtle, splat a Gaussian ball per F, normalise
 // on the 99.9th percentile, then fade at the faces (hanning^0.5 in x/y, sine in z).
@@ -650,7 +706,10 @@ std::vector<float> walkClouds(std::mt19937 &rng) {
   if (m > 0)
     for (float &v : field)
       v = std::min(1.0f, std::max(0.0f, v / static_cast<float>(m)));
-  // Fade at the slab faces (hanning^0.5 across x/y, a half-sine across z).
+  // Fade at the slab faces (hanning^0.5 across x/y, a half-sine across z), and in
+  // the same pass modulate the density with fractal (fBm) noise so the smooth
+  // Gaussian base billows into cauliflower lumps and frays into wisps at the edges
+  // — the fluffy, self-similar texture of a real cumulus rather than a soft blob.
   std::vector<double> w(N), zf(NZ);
   for (int i = 0; i < N; ++i)
     w[i] = std::sqrt(0.5 - 0.5 * std::cos(2.0 * M_PI * i / (N - 1)));
@@ -658,8 +717,14 @@ std::vector<float> walkClouds(std::mt19937 &rng) {
     zf[k] = std::sin(0.12 + (M_PI - 0.24) * k / (NZ - 1));
   for (int gz = 0; gz < NZ; ++gz)
     for (int gy = 0; gy < N; ++gy)
-      for (int gx = 0; gx < N; ++gx)
-        field[skyIdx(gz, gy, gx)] *= static_cast<float>(std::min(w[gy], w[gx]) * zf[gz]);
+      for (int gx = 0; gx < N; ++gx) {
+        float &v = field[skyIdx(gz, gy, gx)];
+        v *= static_cast<float>(std::min(w[gy], w[gx]) * zf[gz]);
+        if (v > 0.0f) {
+          double d = fbm3(gx * 0.30, gy * 0.30, gz * 0.62, 5); // [0,1] fractal detail
+          v = static_cast<float>(std::min(1.0, std::max(0.0, v * (0.32 + 1.5 * d))));
+        }
+      }
   return field;
 }
 // Holds the grown cloud maps + a normalisation peak; samples a continuous field.
@@ -732,8 +797,8 @@ cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
 // not ramped — a ramp still accumulates over the ~180 samples a ray takes through
 // the slab); cores must reach ~1 so a puff composites white, not as dirty smoke.
 void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
-  color = {0.0, 0.72, 0.76, 0.82, 0.45, 0.92, 0.94, 0.97, 1.0, 1.00, 1.00, 1.00};
-  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.60, 0.075, 1.0, 0.200};
+  color = {0.0, 0.90, 0.92, 0.95, 0.45, 0.97, 0.98, 0.99, 1.0, 1.00, 1.00, 1.00};
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
 }
 
 // ── cloud → ground shadow: a TRUE volumetric shadow, ray-marched along the sun ─
@@ -745,8 +810,8 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
 // light pass for a directional light, but computed once per cloud update. Floored
 // so shaded ground still catches skylight rather than going black.
 constexpr int SHADOW_RES = 192;
-constexpr double SHADOW_K = 0.19;     // optical-depth -> darkness
-constexpr double SHADOW_FLOOR = 0.42; // shaded ground keeps at least this much light
+constexpr double SHADOW_K = 0.06;     // optical-depth -> darkness (very gentle dapple)
+constexpr double SHADOW_FLOOR = 0.78; // shaded ground keeps most of its light
 
 // Trilinear sample of a sky density field at a WORLD point (0 outside the slab).
 float sampleSky(const std::vector<float> &field, double wx, double wy, double wz) {
@@ -835,18 +900,53 @@ void reposeTree(Tree &tree, double t) {
 } // namespace
 
 int main(int argc, char **argv) {
+  namespace po = boost::program_options;
   bool offscreen = false, noShadows = false;
-  int frames = 0;
-  std::string png;
-  for (int i = 1; i < argc; ++i) {
-    if (!std::strcmp(argv[i], "--offscreen"))
-      offscreen = true;
-    else if (!std::strcmp(argv[i], "--no-shadows"))
-      noShadows = true;
-    else if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
-      frames = std::atoi(argv[++i]);
-    else if (!std::strcmp(argv[i], "--png") && i + 1 < argc)
-      png = argv[++i];
+  int frames = 0, width = 1280, height = 800;
+  double fps = 30.0;
+  std::string png, captureStr, outDir;
+  po::options_description desc("lsystem_forest — a pure-C++ cvcGL island demo\nOptions");
+  desc.add_options()("help,h", "show this help and exit")                                //
+      ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")         //
+      ("no-shadows", po::bool_switch(&noShadows), "disable shadow maps")                 //
+      ("frames", po::value<int>(&frames)->default_value(0),                              //
+       "stop after N frames (0 = run until the window closes)")                          //
+      ("png", po::value<std::string>(&png)->default_value(""),                           //
+       "after the run, write the final frame to this PNG")                               //
+      ("capture", po::value<std::string>(&captureStr)->default_value("none"),            //
+       "cinematic capture path: none | orbit | fly (forces --offscreen)")                //
+      ("width", po::value<int>(&width)->default_value(1280), "render width in pixels")   //
+      ("height", po::value<int>(&height)->default_value(800), "render height in pixels") //
+      ("fps", po::value<double>(&fps)->default_value(30.0),                              //
+       "capture frames per second (drives the synthetic clock)")                         //
+      ("out", po::value<std::string>(&outDir)->default_value("frames"),                  //
+       "capture output directory for the numbered PNGs");
+  po::variables_map vm;
+  try {
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+  } catch (const std::exception &e) {
+    std::cerr << "error: " << e.what() << "\n\n" << desc << "\n";
+    return 2;
+  }
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  enum class Capture { None, Orbit, Fly } capture = Capture::None;
+  if (captureStr == "orbit")
+    capture = Capture::Orbit;
+  else if (captureStr == "fly")
+    capture = Capture::Fly;
+  else if (captureStr != "none") {
+    std::cerr << "unknown --capture '" << captureStr << "' (want none | orbit | fly)\n";
+    return 2;
+  }
+  const bool capturing = capture != Capture::None;
+  if (capturing) {
+    offscreen = true; // a capture path always renders offscreen to numbered PNGs
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
   }
 
   // Own the app and inject it — no global/singleton context.
@@ -920,25 +1020,22 @@ int main(int argc, char **argv) {
   // The billowed field HAS shape, so a directional light picks out the tops and
   // leaves the undersides dim — most of what makes cloud read as volume, not fog.
   // Ambient stays high so the shadowed side is grey-blue rather than black.
-  skyNode->setShading(true);
-  skyNode->setAmbient(0.55);
-  skyNode->setDiffuse(0.85);
-  skyNode->setSpecular(0.0); // cloud is not a specular surface
+  // DIFFUSE shading, not volumetric scattering: the fractal (fBm) detail baked into
+  // the field gives the density sharp gradients, so a plain directional diffuse term
+  // picks out the fluffy billows — bright cauliflower tops, gently shaded hollows —
+  // WITHOUT the dark rim the multi-scatter model draped around every blob. Ambient
+  // is high so the cloud stays bright and white (a fair-weather cumulus, not a storm
+  // cloud) and never gets a black outline. No scattering (0) => no self-shadow crust.
+  skyNode->setShading(false);
+  skyNode->setAmbient(0.95);
+  skyNode->setDiffuse(0.35);
+  skyNode->setSpecular(0.0);
+  skyNode->setVolumetricScattering(0.0);
   {
     std::vector<double> col, op;
     skyTransfer(col, op);
     skyNode->setTransferFunction(col, op);
   }
-  // Volumetric self-shadowing: the GPU ray-caster casts secondary rays so the
-  // cloud shades itself — sunlit tops, dim undersides — reading as a solid body
-  // rather than flat fog. Forward-scattering (anisotropy > 0), as water droplets do.
-  // Strong forward scattering (silver lining) + LOCAL shadows sculpt a sunlit top
-  // and a shadowed underside while keeping the body bright. On so thin a field a
-  // higher blend / longer GI reach just dims the whole cloud uniformly toward a
-  // flat storm-grey instead of a directional gradient — tuned by eye.
-  skyNode->setVolumetricScattering(0.5);
-  skyNode->setGlobalIlluminationReach(0.3);
-  skyNode->setScatteringAnisotropy(0.85);
 
   // The cloud's shadow on the ground: bake the initial transmittance into the
   // terrain's texture (kept in sync with the drifting cloud each update below).
@@ -954,8 +1051,15 @@ int main(int argc, char **argv) {
   sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.0);
   sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.55);
 
-  SceneRenderer view(sg, 1280, 800, offscreen, "main");
-  view.setBackground(0.62, 0.76, 0.92);
+  SceneRenderer view(sg, width, height, offscreen, "main");
+  // A real sky, not a flat void: a vertical gradient background (hazy horizon at
+  // the bottom, deep blue at the zenith). Done on the renderer rather than as a
+  // sky sphere on purpose — an enclosing sky sphere would occlude the directional
+  // light in the shadow-map pass and plunge the whole island into shadow. The sun
+  // itself is a camera-relative disc (below), so the two together read as sky.
+  view.renderer()->GradientBackgroundOn();
+  view.renderer()->SetBackground(0.66, 0.71, 0.74);  // horizon (screen bottom)
+  view.renderer()->SetBackground2(0.23, 0.44, 0.80); // zenith (screen top)
 
   // Shadows on (a render target now exists); re-baked every 3rd frame (cheap).
   const bool shadows = !noShadows && sg.setShadowsEnabled(true);
@@ -967,10 +1071,34 @@ int main(int argc, char **argv) {
   cvc::bounding_box b = sg.computeGraphicsBounds();
   cam.frameBounds(b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
 
-  // The sun disc is added AFTER framing — it sits ~430 units out, and folding it
-  // into the bounds would push the camera reset back far enough to shrink the
-  // island to a speck. It is scenery, not world.
+  // The sun is added AFTER framing — folding a far billboard into the bounds would
+  // shrink the island. It is repositioned relative to the camera every frame so it
+  // reads as an infinite sun in the light's direction.
   addSun(app, sg);
+  auto sunNode = sg.getGraphics("sun");
+  auto sunHalo = sg.getGraphics("sun_halo");
+  const Vec3d sdir = sunDir(SUN_AZ, SUN_EL);
+  // Place the sun along the sun ray FROM the eye, but CAP its sun-direction depth
+  // (its coordinate along sdir) at SUN_DEPTH_CAP. A sun billboard farther out in
+  // sdir would push the shadow-map's depth range past the scene, leaving the
+  // island at the far end with no depth precision — it then self-shadows to black.
+  // Capping keeps the sun within the scene's depth span (so it never darkens it),
+  // holds its angular size constant via scale, and hides it when the camera looks
+  // away from the sun (dd <= 0). Never occludes the island (it is up the sun ray).
+  auto placeSky = [&](const Vec3d &eye) {
+    const double eDotS = eye.x * sdir.x + eye.y * sdir.y + eye.z * sdir.z;
+    const double dd = std::min(SUN_REF_DIST, SUN_DEPTH_CAP - eDotS);
+    const bool vis = dd > 1.0;
+    sunNode->setVisible(vis);
+    sunHalo->setVisible(vis);
+    if (!vis)
+      return;
+    const double sc = dd / SUN_REF_DIST; // angular size stays SUN_DISC_R / SUN_REF_DIST
+    sunNode->setScale(sc, sc, sc);
+    sunHalo->setScale(sc, sc, sc);
+    sunNode->setPosition(eye.x + sdir.x * dd, eye.y + sdir.y * dd, eye.z + sdir.z * dd);
+    sunHalo->setPosition(eye.x + sdir.x * dd, eye.y + sdir.y * dd, eye.z + sdir.z * dd);
+  };
 
   // This is an island, not a lab bench: hide cvcGL's default grid, axis, AND the
   // scene bounding box (the root NullGraphic shows its yellow bbox by default).
@@ -982,15 +1110,59 @@ int main(int argc, char **argv) {
   std::printf("lsystem_forest: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",
               offscreen ? "offscreen" : "onscreen", TN, TN, shadows ? "on" : "unavailable");
 
+  // Cinematic capture paths (--capture) drive the camera over --frames at a fixed
+  // synthetic dt (so cloud drift / sea / wind play back at real time regardless of
+  // render speed), writing a numbered PNG per frame to --out:
+  //   orbit — a slow 360° turntable around the island.
+  //   fly   — a scripted Catmull-Rom flight: in low over the sea, close fly-bys,
+  //           then a rising reveal (eye keyframes below; the target stays near the
+  //           centre so the island is framed throughout).
+  const std::vector<Vec3d> flyEye = {{-270, -240, 50}, {-160, -80, 42}, {-40, 90, 70},
+                                     {110, 120, 95},   {190, -30, 120}, {60, -210, 165}};
+  const std::vector<Vec3d> flyTgt = {{0, 0, 42}, {0, 0, 42}, {0, 0, 45},
+                                     {0, 0, 48}, {0, 0, 50}, {0, 0, 58}};
+  auto crInterp = [](const std::vector<Vec3d> &p, double s) { // Catmull-Rom, ends clamped
+    int m = (int)p.size();
+    double x = s * (m - 1);
+    int i = std::min((int)std::floor(x), m - 2);
+    if (i < 0)
+      i = 0;
+    double u = x - i, u2 = u * u, u3 = u2 * u;
+    auto seg = [&](double a, double b, double c, double d) {
+      return 0.5 * (2 * b + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u2 +
+                    (-a + 3 * b - 3 * c + d) * u3);
+    };
+    const Vec3d &p0 = p[std::max(i - 1, 0)], &p1 = p[i], &p2 = p[i + 1],
+                &p3 = p[std::min(i + 2, m - 1)];
+    return Vec3d{seg(p0.x, p1.x, p2.x, p3.x), seg(p0.y, p1.y, p2.y, p3.y),
+                 seg(p0.z, p1.z, p2.z, p3.z)};
+  };
+  // Orbit drives the CameraController's azimuth through the state tree; read the
+  // framed starting azimuth so the turn begins from the default 3/4 view.
+  const std::string azPath = CameraController::viewerStatePath("forest", "main") + ".orbit.azimuth";
+  double orbitAz0 = 0.0;
+  if (capture == Capture::Orbit) {
+    try {
+      orbitAz0 = cvc::state::instance(app)(azPath).value<double>();
+    } catch (...) {
+    }
+  }
+
   auto start = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
   int n = 0;
   const int VOL_STRIDE = 3; // refresh the sea every 3rd frame (upload is not free)
   while (!view.windowClosed()) {
-    double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    double dt = t - last;
-    last = t;
+    double t, dt;
+    if (capturing) { // fixed synthetic clock -> real-time playback of the animation
+      t = frame / fps;
+      dt = 1.0 / fps;
+    } else {
+      t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+      dt = t - last;
+      last = t;
+    }
     view.processUIEvents();
     for (Tree &tr : forest) // wind: re-pose every tree (route C updateVertices)
       reposeTree(tr, t);
@@ -1015,8 +1187,28 @@ int main(int argc, char **argv) {
                            cvc::image::data_type::u8, shadowBuf.data());
       terrain->setTexture(shadowImg, false);
     }
-    cam.update(dt);
-    view.render();
+    if (capture == Capture::Fly) {
+      double s = frames > 1 ? double(frame) / (frames - 1) : 0.0;
+      s = s * s * (3.0 - 2.0 * s); // ease in/out over the whole flight
+      Vec3d e = crInterp(flyEye, s), tg = crInterp(flyTgt, s);
+      view.setCamera(e.x, e.y, e.z, tg.x, tg.y, tg.z, 0, 0, 1, 42.0, 1.0, 4000.0);
+      placeSky(e);
+    } else {
+      if (capture == Capture::Orbit && frames > 0) // one full slow turn over the run
+        cvc::state::instance(app)(azPath).value(orbitAz0 + 360.0 * double(frame) / frames);
+      cam.update(dt);
+      double ep[3], fp[3], upv[3];
+      cam.getPose(ep, fp, upv);
+      placeSky({ep[0], ep[1], ep[2]});
+      view.renderer()->ResetCameraClippingRange(); // reach the sun billboard
+    }
+    if (capturing) {
+      char path[1024];
+      std::snprintf(path, sizeof path, "%s/frame_%05ld.png", outDir.c_str(), frame);
+      view.writePNG(path);
+    } else {
+      view.render();
+    }
     ++frame;
     if (frames > 0 && ++n >= frames)
       break;

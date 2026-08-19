@@ -6,7 +6,8 @@
 # transitively from cvcGL.
 
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
+find_package(Boost REQUIRED COMPONENTS program_options)
 
 add_executable(lsystem_forest lsystem_forest.cpp)
-target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES})
+target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
