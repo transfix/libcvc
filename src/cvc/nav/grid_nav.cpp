@@ -252,6 +252,34 @@ struct AStarWorse {
   }
 };
 
+// Per-thread reusable A* scratch. Replaces the per-call `vector(ncells)` alloc +
+// O(ncells) fill of the came/g_best arrays with a "generation stamp": a cell
+// belongs to THIS search iff its stamp equals the current gen, so a new search
+// is just `++gen` (O(1)) instead of clearing the arrays. Held `thread_local`, so
+// each worker in astar_batch reuses one buffer across the queries it runs. The
+// values and comparisons are identical to the flat-array version — bit-identical
+// results — this only changes how "unvisited" / "g_best = +inf" is represented.
+struct AStarScratch {
+  std::vector<long long> came_gen; // came_val[k] belongs to this search iff ==gen
+  std::vector<long long> g_gen;    // g_val[k]  belongs to this search iff ==gen
+  std::vector<int> came_val;       // parent cell key (-1 == None)
+  std::vector<double> g_val;       // best g so far
+  long long gen = 0;
+  int n = 0;
+  // Prepare for a search over `need` cells and return this search's generation.
+  long long begin(int need) {
+    if (n < need) {
+      n = need;
+      came_gen.assign(n, 0);
+      g_gen.assign(n, 0);
+      came_val.resize(n);
+      g_val.resize(n);
+      gen = 0; // the assigns above zeroed every stamp, so restart the counter
+    }
+    return ++gen;
+  }
+};
+
 } // namespace
 
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
@@ -268,32 +296,35 @@ std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
   };
 
   std::priority_queue<AStarNode, std::vector<AStarNode>, AStarWorse> open;
-  // Flat closed-set / cost arrays keyed by the row-major cell index: identical
-  // values and pop order to Python's `came`/`g_best` dicts, but O(1) with no
-  // hashing. came: -2 = unvisited (== "not in came"), -1 = None (the start's
-  // parent), >=0 = parent cell key. g_best defaults to +inf (== dict.get miss).
+  // Closed-set / cost arrays keyed by row-major cell index, held per-thread and
+  // reused across searches via a generation stamp (see AStarScratch). Values and
+  // pop order are identical to Python's `came`/`g_best` dicts: a cell is "in
+  // came" iff came_gen[k] == GEN (came_val holds the parent key, -1 == None), and
+  // g_best is g_val[k] iff g_gen[k] == GEN else +inf.
+  static thread_local AStarScratch S;
   const int ncells = rows * cols;
-  std::vector<int> came(ncells, -2);
-  std::vector<double> g_best(ncells, std::numeric_limits<double>::infinity());
+  const long long GEN = S.begin(ncells);
   const int start_key = start.first * cols + start.second;
   const int goal_key = gr * cols + gc;
   open.push({h(start.first, start.second), 0.0, start.first, start.second, -1});
-  g_best[start_key] = 0.0;
+  S.g_gen[start_key] = GEN;
+  S.g_val[start_key] = 0.0;
 
   while (!open.empty()) {
     const AStarNode cur = open.top();
     open.pop();
     const int node_key = cur.r * cols + cur.c;
-    if (came[node_key] != -2)
+    if (S.came_gen[node_key] == GEN)
       continue;
-    came[node_key] = cur.pk;
+    S.came_gen[node_key] = GEN;
+    S.came_val[node_key] = cur.pk;
     if (node_key == goal_key) {
       std::vector<int> keys;
       keys.push_back(node_key);
-      int p = came[node_key];
+      int p = S.came_val[node_key];
       while (p != -1) {
         keys.push_back(p);
-        p = came[p];
+        p = S.came_val[p];
       }
       std::vector<int> path;
       path.reserve(keys.size() * 2);
@@ -317,8 +348,11 @@ std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
         if (cost)
           ng += cost[nr * cols + nc];
         const int nkey = nr * cols + nc;
-        if (ng < g_best[nkey]) {
-          g_best[nkey] = ng;
+        const double gb =
+            (S.g_gen[nkey] == GEN) ? S.g_val[nkey] : std::numeric_limits<double>::infinity();
+        if (ng < gb) {
+          S.g_gen[nkey] = GEN;
+          S.g_val[nkey] = ng;
           open.push({ng + h(nr, nc), ng, nr, nc, node_key});
         }
       }
