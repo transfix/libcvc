@@ -170,6 +170,7 @@ set(SOURCE_FILES
   nav/grid_nav.cpp
   nav/spatial.cpp
   nav/drive.cpp
+  nav/coef_mlp.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC

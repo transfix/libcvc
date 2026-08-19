@@ -11,6 +11,7 @@
 // so no input array is pinned by a result.
 
 %{
+#include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <algorithm>
@@ -640,6 +641,38 @@ PyObject *nav_sdf_sample(PyObject *field, PyObject *on, PyObject *map_id, double
   Py_DECREF(phi);
   Py_DECREF(nrm);
   return tup;
+}
+
+// Load a `.cvcnav` policy from `path` and forward `feats` (N,in) float32 ->
+// coeffs (N,out) float32. Reloads per call (a utility / the parity test uses it;
+// a long-lived C++ host holds the coef_mlp object). Float-equivalent to
+// CoefMLP.forward; GIL released across the compute.
+PyObject *nav_coef_mlp_forward(const char *path, PyObject *feats, int num_threads = 0)
+{
+  PyArrayObject *fa = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(feats, NPY_FLOAT, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+  if (!fa)
+    throw std::invalid_argument("pycvc.nav_coef_mlp_forward: feats must be (N,in) float32");
+  cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(path); // throws on a bad/stale file
+  const int N = static_cast<int>(PyArray_DIM(fa, 0));
+  const int in = static_cast<int>(PyArray_DIM(fa, 1));
+  if (in != model.in_features()) {
+    Py_DECREF(fa);
+    throw std::invalid_argument("pycvc.nav_coef_mlp_forward: feats width != model in_features");
+  }
+  npy_intp dims[2] = {N, model.out_features()};
+  PyObject *out = PyArray_SimpleNew(2, dims, NPY_FLOAT);
+  if (!out) {
+    Py_DECREF(fa);
+    throw std::runtime_error("pycvc.nav_coef_mlp_forward: output alloc failed");
+  }
+  const float *fd = static_cast<const float *>(PyArray_DATA(fa));
+  float *od = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)));
+  Py_BEGIN_ALLOW_THREADS
+  model.forward(fd, N, od, num_threads);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(fa);
+  return out;
 }
 
 } // namespace pycvc
