@@ -149,6 +149,13 @@ std::vector<sdf_field> build_sdf_batch(const std::vector<const std::uint8_t *> &
                                        int cols, double min_x, double min_y, double max_x,
                                        double max_y, double scale, int num_threads = 0);
 
+// Dilate N occupancy planes in parallel (each row-major rows*cols, nonzero =
+// blocked) by `cells` 4-connected steps. Returns N dilated planes (row-major
+// 0/1), in input order — each byte-identical to the serial inflate.
+std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std::uint8_t *> &occs,
+                                                     int rows, int cols, int cells,
+                                                     int num_threads = 0);
+
 } // namespace nav
 } // namespace cvc
 

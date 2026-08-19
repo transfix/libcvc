@@ -283,3 +283,20 @@ TEST(NavBatch, EmptyBatchIsFine) {
   std::vector<astar_query> none;
   EXPECT_TRUE(astar_batch(none, 8, 8, 4).empty());
 }
+
+TEST(NavBatch, InflateBatchIsByteIdenticalToSerial) {
+  const int rows = 11, cols = 13, N = 12;
+  std::vector<std::vector<std::uint8_t>> grids;
+  std::vector<const std::uint8_t *> occs;
+  for (int i = 0; i < N; ++i)
+    grids.push_back(pseudo_grid(rows, cols, 41u + i));
+  for (auto &g : grids)
+    occs.push_back(g.data());
+  for (int cells : {0, 1, 2, 4}) {
+    const auto batch = inflate_batch(occs, rows, cols, cells, 3);
+    ASSERT_EQ((int)batch.size(), N);
+    for (int i = 0; i < N; ++i)
+      EXPECT_EQ(batch[i], inflate(occs[i], rows, cols, cells))
+          << "plane " << i << " cells " << cells;
+  }
+}

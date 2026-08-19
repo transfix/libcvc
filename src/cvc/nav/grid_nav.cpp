@@ -436,5 +436,14 @@ std::vector<sdf_field> build_sdf_batch(const std::vector<const std::uint8_t *> &
   return out;
 }
 
+std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std::uint8_t *> &occs,
+                                                     int rows, int cols, int cells,
+                                                     int num_threads) {
+  std::vector<std::vector<std::uint8_t>> out(occs.size());
+  parallel_for(static_cast<int>(occs.size()), num_threads,
+               [&](int i) { out[i] = inflate(occs[i], rows, cols, cells); });
+  return out;
+}
+
 } // namespace nav
 } // namespace cvc

@@ -348,5 +348,34 @@ ArrayView nav_build_sdf_batch(PyObject *occ, double min_x, double min_y,
                                DType::Float32);
 }
 
+// Batched inflate. `occ` is (N,H,W) uint8/bool. Returns (N,H,W) uint8 dilated by
+// `cells` 4-connected steps. GIL released across the parallel compute.
+ArrayView nav_inflate_batch(PyObject *occ, int cells, int num_threads = 0)
+{
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(occ, NPY_UINT8, 3, 3, NPY_ARRAY_C_CONTIGUOUS));
+  if (!a)
+    throw std::invalid_argument(
+        "pycvc.nav_inflate_batch: occ must be an (N,H,W) uint8/bool array");
+  const int N = static_cast<int>(PyArray_DIM(a, 0));
+  const int rows = static_cast<int>(PyArray_DIM(a, 1));
+  const int cols = static_cast<int>(PyArray_DIM(a, 2));
+  const std::uint8_t *base = static_cast<const std::uint8_t *>(PyArray_DATA(a));
+  const long plane = static_cast<long>(rows) * cols;
+  std::vector<const std::uint8_t *> occs(N);
+  for (int i = 0; i < N; ++i)
+    occs[i] = base + static_cast<long>(i) * plane;
+  std::vector<std::vector<std::uint8_t>> res;
+  Py_BEGIN_ALLOW_THREADS
+  res = cvc::nav::inflate_batch(occs, rows, cols, cells, num_threads);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(a);
+  std::vector<std::uint8_t> out(static_cast<std::size_t>(N) * plane);
+  for (int i = 0; i < N; ++i)
+    std::copy(res[i].begin(), res[i].end(), out.data() + static_cast<std::size_t>(i) * plane);
+  return pycvc_nav_view<std::uint8_t>(std::move(out), {(long)N, (long)rows, (long)cols},
+                                      DType::UInt8);
+}
+
 } // namespace pycvc
 %}
