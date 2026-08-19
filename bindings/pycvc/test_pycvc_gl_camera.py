@@ -67,6 +67,18 @@ try:
     check("viewer camera state at scene.viewers.left.camera",
           pycvc.state_get(app, "scene.viewers.left.camera.mode") == "1")
     check("SceneRenderer.name()", view.name() == "left")
+
+    print("F. cinematic TRACK mode surface (third mode)")
+    vcam.setTrackTarget("mover")
+    vcam.setMode(CC.Mode_Track)
+    check("Mode_Track set", vcam.mode() == CC.Mode_Track)
+    check("track target via API + state", vcam.trackTarget() == "mover" and
+          pycvc.state_get(app, "scene.viewers.left.camera.track.target") == "mover")
+    check("track mode in state", pycvc.state_get(app, "scene.viewers.left.camera.mode") == "2")
+    # configure the follow via state (as a demo/script would)
+    pycvc.state_set(app, "scene.viewers.left.camera.track.back", "40")
+    pycvc.state_set(app, "scene.viewers.left.camera.track.target", "hero")
+    check("track params drive from state", vcam.trackTarget() == "hero")
 except Exception as e:  # noqa: BLE001 — offscreen GL may be unavailable
     print("  [SKIP] SceneRenderer path (offscreen GL unavailable): %s" % e)
 

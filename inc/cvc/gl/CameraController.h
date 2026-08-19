@@ -21,6 +21,7 @@ class vtkRenderer;               // VTK (global namespace)
 class vtkRenderWindow;           // VTK (global namespace)
 class vtkRenderWindowInteractor; // VTK (global namespace)
 class SceneRenderer;             // cvcGL (global namespace)
+class SceneGraph;                // cvcGL (global namespace)
 
 namespace cvc {
 class app;
@@ -59,7 +60,8 @@ namespace gl {
 //
 class CameraController : public cvc::state_object<CameraController> {
 public:
-  enum class Mode { Orbit = 0, Fly = 1 };
+  // Orbit (turntable), Fly (Quake), Track (cinematic follow of a scene actor).
+  enum class Mode { Orbit = 0, Fly = 1, Track = 2 };
 
   // Canonical: state at "<viewer.scene prefix>.viewers.<viewer.name>.camera",
   // rooted in the viewer's scene app, and auto-wired to the viewer's camera,
@@ -100,6 +102,18 @@ public:
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
+
+  // Cinematic TRACK mode (the third mode) — follow a named actor in the scene
+  // with two-stage smoothing (position -> heading) and a critically-damped pose,
+  // so the view eases filmically even when the actor's motion is noisy. Harvested
+  // from grl-snam's ChaseCamera. The actor's world position comes from its scene
+  // node each frame; set which node via state "track.target" or setTrackTarget().
+  // Trailing distance/height/look-ahead/easing time-constants are state "track.*"
+  // (back, height, look_ahead, look_up, pos_tau, vel_tau, cam_tau, min_speed).
+  // The scene to resolve the actor in is taken from the viewer (or setScene()).
+  void setScene(SceneGraph *scene);
+  void setTrackTarget(const std::string &nodeName);
+  std::string trackTarget() const;
 
   // Integrate held-key fly motion, push the pose to the camera, and mirror the
   // live pose to state on a throttle. Call once per rendered frame.
@@ -146,6 +160,8 @@ private:
   void syncConfigToState();  // write config back (guarded against echo)
   void syncPoseToState();    // write the live pose back (guarded against echo)
   void recenterPointer();    // X11 pointer warp for continuous captured look
+  void resetTrack();         // reset cinematic smoothing (ease in from current view)
+  bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

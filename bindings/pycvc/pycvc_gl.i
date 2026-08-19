@@ -609,6 +609,7 @@ def _typed_node(sg, name):
 %ignore cvc::gl::CameraController::setRenderer;
 %ignore cvc::gl::CameraController::setRenderWindow;
 %ignore cvc::gl::CameraController::attach;
+%ignore cvc::gl::CameraController::setScene; // raw SceneGraph* — the viewer ctor sets it
 %ignore cvc::gl::CameraController::getPose;
 %ignore cvc::gl::CameraController::getUpAxis;
 // Keep the injected viewer/app alive: ~state_object touches that app's state tree.

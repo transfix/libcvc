@@ -8,6 +8,8 @@
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/SceneGraph.h>
 
 #include <cmath>
 #include <cstdio>
@@ -161,6 +163,40 @@ int main() {
   vc.setMode(CameraController::Mode::Fly);
   check("camera state lands at the canonical path",
         root("myscene.viewers.right.camera.mode").value<int>() == 1);
+
+  printf("G. cinematic TRACK mode (follow a scene actor)\n");
+  {
+    SceneGraph sg(ctx, "scn");
+    auto actor = sg.addGraphics("mover"); // empty node — just a movable transform
+    actor->setPosition(0, 0, 0);
+    CameraController tc(ctx, "scn.viewers.main.camera");
+    vtkNew<vtkCamera> tcam;
+    tc.setCamera(tcam);
+    tc.setScene(&sg);
+    // configure tracking through the state tree (fast taus so the test converges)
+    root("scn.viewers.main.camera.track.target").value(std::string("mover"));
+    root("scn.viewers.main.camera.track.back").value(10.0);
+    root("scn.viewers.main.camera.track.height").value(5.0);
+    root("scn.viewers.main.camera.track.look_up").value(0.0);
+    for (const char *k : {"pos_tau", "vel_tau", "cam_tau"})
+      root(std::string("scn.viewers.main.camera.track.") + k).value(0.01);
+    tc.setMode(CameraController::Mode::Track);
+    check("mode is Track", tc.mode() == CameraController::Mode::Track);
+    check("track target set via state", tc.trackTarget() == "mover");
+    // drive the actor along +X; the camera should trail behind (-X) and sit above
+    double px = 0.0;
+    for (int i = 0; i < 200; ++i) {
+      px += 0.5;
+      actor->setPosition(px, 0, 0);
+      sg.processEvents();
+      tc.update(0.05);
+    }
+    double te[3], tf[3], tu[3];
+    tc.getPose(te, tf, tu);
+    check("track focal follows the actor", std::fabs(tf[0] - px) < 2.0 && std::fabs(tf[1]) < 1.0);
+    check("track eye trails behind (-X) and above (+Z)", te[0] < tf[0] - 5.0 && te[2] > 2.0);
+    check("track mode reflected in state", root("scn.viewers.main.camera.mode").value<int>() == 2);
+  }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   return failures ? 1 : 0;
