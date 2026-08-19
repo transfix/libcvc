@@ -488,17 +488,29 @@ struct SenseScratch {
   }
 };
 
-// One agent's sense into `plane`, folded onto the running log-odds — a
-// transcription of BeliefGrid.sense (belief.py:88-175). Returns true iff the
-// agent's start cell is out of bounds (caller then blanks that plane's
-// last_visible, matching the reference early-return). `ever_seen` is OR-ed at
-// first touch (monotonic, order-free); logodds is accumulate-then-clamp per
-// cell; `version[plane]` bumps once iff any cell's occupied bit flips.
-bool sense_agent(int i, int plane, const std::uint8_t *truth, int rows, int cols, double min_x,
-                 double min_y, double max_x, double max_y, const sense_agents &ag,
-                 const std::int32_t *peer_boxes, int kmax, const std::int32_t *mover_boxes,
-                 int n_movers, const belief_planes &pl, double l_occ, double l_free, double l_clamp,
-                 SenseScratch &S, std::int32_t *flips_out) {
+// One agent's ray-cast output: the cells its cone touched (in first-touch
+// order) with per-cell free/occ visit counts. Plane-INDEPENDENT — the raycast
+// reads only `truth` and the agent's own boxes, so it is order-free and safe to
+// run for every agent in parallel; the plane-dependent, order-dependent log-odds
+// fold is a separate pass (sense_batch). `oob` = start cell off the grid (that
+// agent updates nothing and blanks its plane's last_visible).
+struct agent_sense {
+  std::vector<int> cells;  // touched grid indices, first-touch order
+  std::vector<int> free_c; // parallel to cells: rays that passed through free
+  std::vector<int> occ_c;  // parallel to cells: rays that stopped on a hit
+  bool oob = true;
+};
+
+// Ray-cast one agent (BeliefGrid.sense's DDA, belief.py:118-155) into `out`. No
+// log-odds / version / last_visible / ever_seen touched here — this is the
+// order-free half, the expensive part, and the whole point of the split.
+void raycast_agent(int i, const std::uint8_t *truth, int rows, int cols, double min_x, double min_y,
+                   double max_x, double max_y, const sense_agents &ag,
+                   const std::int32_t *peer_boxes, int kmax, const std::int32_t *mover_boxes,
+                   int n_movers, SenseScratch &S, agent_sense &out) {
+  out.cells.clear();
+  out.free_c.clear();
+  out.occ_c.clear();
   const double cell_w = (max_x - min_x) / (cols - 1); // == belief.py:109-110
   const double cell_h = (max_y - min_y) / (rows - 1);
   const double cxf = (ag.pos[2 * i] - min_x) / (max_x - min_x) * (cols - 1);
@@ -506,12 +518,12 @@ bool sense_agent(int i, int plane, const std::uint8_t *truth, int rows, int cols
   const int r0 = static_cast<int>(std::rint(cyf)); // == int(round(...)) half-to-even
   const int c0 = static_cast<int>(std::rint(cxf));
   if (!(r0 >= 0 && r0 < rows && c0 >= 0 && c0 < cols)) {
-    flips_out[i] = 0;
-    return true; // belief.py:113-115 early return (last_visible blanked, no update)
+    out.oob = true; // belief.py:113-115 early return
+    return;
   }
+  out.oob = false;
 
   const long long GEN = S.begin(rows * cols);
-  const long base = static_cast<long>(plane) * rows * cols;
   const double rangem = ag.range_m[i], fov = ag.fov_rad[i], head = ag.heading[i];
   const int nr = ag.n_rays[i];
   const int n_steps = static_cast<int>(rangem / cell_w) + 1; // int() truncation
@@ -536,7 +548,6 @@ bool sense_agent(int i, int plane, const std::uint8_t *truth, int rows, int cols
         S.free_cnt[k] = 0;
         S.occ_cnt[k] = 0;
         S.touched.push_back(k);
-        pl.ever_seen[base + k] = 1; // FoV first-touch; monotonic OR
       }
       const bool occ = truth[k] || in_boxes(pbox, kmax, rr, cc) ||
                        in_boxes(mover_boxes, n_movers, rr, cc); // peers/movers are hits (R1)
@@ -548,30 +559,16 @@ bool sense_agent(int i, int plane, const std::uint8_t *truth, int rows, int cols
     }
   }
 
-  // Accumulate then clamp, per cell touched. Model C: the running delta is f32,
-  // each add is (float)((double)df + CONST) with the constant kept double — the
-  // empirically-verified np.add.at-onto-float32 semantics (a fused f64 sum or an
-  // f32-per-add both diverge by ~1 ULP). free block fully before occ block; a
-  // cell is single-sign so the block split is exact.
-  const float clampf = static_cast<float>(l_clamp);
-  int flips = 0;
+  // Copy the touched cells + counts out in first-touch order, so the later fold
+  // visits them in exactly the order the serial reference accumulated them.
+  out.cells.reserve(S.touched.size());
+  out.free_c.reserve(S.touched.size());
+  out.occ_c.reserve(S.touched.size());
   for (int k : S.touched) {
-    float df = 0.0f;
-    for (int t = 0; t < S.free_cnt[k]; ++t)
-      df = static_cast<float>(static_cast<double>(df) + l_free);
-    for (int t = 0; t < S.occ_cnt[k]; ++t)
-      df = static_cast<float>(static_cast<double>(df) + l_occ);
-    const float old = pl.logodds[base + k];
-    float nv = static_cast<float>(old + df); // np.clip(logodds + delta, ...)
-    nv = std::min(std::max(nv, -clampf), clampf);
-    if ((old > 0.0f) != (nv > 0.0f))
-      ++flips;
-    pl.logodds[base + k] = nv;
+    out.cells.push_back(k);
+    out.free_c.push_back(S.free_cnt[k]);
+    out.occ_c.push_back(S.occ_cnt[k]);
   }
-  if (flips)
-    ++pl.version[plane];
-  flips_out[i] = flips;
-  return false;
 }
 
 } // namespace
@@ -581,39 +578,73 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
                  int kmax, const std::int32_t *mover_boxes, int n_movers,
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
                  std::int32_t *flips_out, int num_threads) {
-  // Bucket agents by plane, preserving ascending global index within each — so a
-  // plane's agents fold in exactly the order N serial sense() calls would.
+  const int N = ag.n;
+
+  // Phase A — RAYCAST every agent in parallel. The raycast reads only `truth`
+  // and the agent's own boxes, so it is order-free and fully parallel across ALL
+  // N agents (not just across planes). This is what unblocks shared mode (M=1):
+  // there the whole cost is the raycast, and the old plane-keyed loop gave it a
+  // single worker (K=1). Bit-identity is untouched — a plane-independent raycast
+  // produces the same touched cells + counts regardless of when it runs.
+  std::vector<agent_sense> res(N);
+  parallel_for(N, num_threads, [&](int i) {
+    thread_local SenseScratch S;
+    raycast_agent(i, truth, rows, cols, min_x, min_y, max_x, max_y, ag, peer_boxes, kmax,
+                  mover_boxes, n_movers, S, res[i]);
+  });
+
+  // Bucket agents by plane, preserving ascending global index within each — the
+  // exact order N serial sense() calls would fold in.
   std::vector<std::vector<int>> by_plane(planes.K);
-  for (int i = 0; i < ag.n; ++i)
+  for (int i = 0; i < N; ++i)
     by_plane[ag.agent_map[i]].push_back(i);
 
-  // The PLANE is the unit of parallelism (disjoint memory ⇒ race-free); agents
-  // within a plane are sequential. Private (K=n) => full parallelism; shared
-  // (K=1) => one worker, correctly serial.
+  // Phase B — FOLD per plane, agents SEQUENTIAL in ascending index: accumulate
+  // each agent's per-cell delta (Model C) then clamp, reading the previous
+  // agent's clamped value — exactly as N serial BeliefGrid.sense calls do.
+  // Distinct planes are disjoint memory (parallel across planes); a plane's
+  // agents are ordered. This half is cheap, so shared mode's single-plane serial
+  // fold costs almost nothing while its raycast just ran N-way parallel.
+  const float clampf = static_cast<float>(l_clamp);
   parallel_for(planes.K, num_threads, [&](int p) {
-    thread_local SenseScratch S;
     const long base = static_cast<long>(p) * rows * cols;
-    std::vector<int> last_vis;
-    bool last_oob = true;
+    const std::vector<int> *last_cells = nullptr; // final non-OOB agent's FoV
     for (int i : by_plane[p]) {
-      const bool oob =
-          sense_agent(i, p, truth, rows, cols, min_x, min_y, max_x, max_y, ag, peer_boxes, kmax,
-                      mover_boxes, n_movers, planes, l_occ, l_free, l_clamp, S, flips_out);
-      if (oob) {
-        last_oob = true;
-        last_vis.clear();
-      } else {
-        last_oob = false;
-        last_vis.assign(S.touched.begin(), S.touched.end());
+      const agent_sense &a = res[i];
+      if (a.oob) {
+        flips_out[i] = 0;
+        last_cells = nullptr; // an OOB last agent blanks last_visible
+        continue;
       }
+      int flips = 0;
+      for (std::size_t t = 0; t < a.cells.size(); ++t) {
+        const int k = a.cells[t];
+        planes.ever_seen[base + k] = 1; // FoV, monotonic OR (plane-serial here => race-free)
+        // Model C: running delta is f32, each add is (float)((double)df + CONST)
+        // with the constant kept double — the np.add.at-onto-float32 semantics.
+        float df = 0.0f;
+        for (int u = 0; u < a.free_c[t]; ++u)
+          df = static_cast<float>(static_cast<double>(df) + l_free);
+        for (int u = 0; u < a.occ_c[t]; ++u)
+          df = static_cast<float>(static_cast<double>(df) + l_occ);
+        const float old = planes.logodds[base + k];
+        float nv = static_cast<float>(old + df); // np.clip(logodds + delta, ...)
+        nv = std::min(std::max(nv, -clampf), clampf);
+        if ((old > 0.0f) != (nv > 0.0f))
+          ++flips;
+        planes.logodds[base + k] = nv;
+      }
+      if (flips)
+        ++planes.version[p];
+      flips_out[i] = flips;
+      last_cells = &a.cells;
     }
     // last_visible is last-agent-wins (belief.py:162): blank the plane, then
-    // stamp the final non-OOB agent's FoV. Deferred out of the per-agent loop —
-    // the intermediate states are unobservable within a tick.
+    // stamp the final non-OOB agent's FoV.
     std::uint8_t *lv = planes.last_visible + base;
     std::memset(lv, 0, static_cast<std::size_t>(rows) * cols);
-    if (!last_oob)
-      for (int k : last_vis)
+    if (last_cells)
+      for (int k : *last_cells)
         lv[k] = 1;
   });
 }
