@@ -50,6 +50,17 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
+# X11 is used by CameraController for Quake-style pointer capture (warp the cursor
+# to centre each frame so mouse-look is continuous). Optional: without it, captured
+# look degrades to cursor-delta. Linux/X11 only.
+if(UNIX AND NOT APPLE)
+  find_package(X11)
+  if(X11_FOUND)
+    target_link_libraries(cvcGL PRIVATE ${X11_LIBRARIES})
+    target_include_directories(cvcGL PRIVATE ${X11_INCLUDE_DIR})
+  endif()
+endif()
+
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
   VERSION ${PROJECT_VERSION} SOVERSION 3)
 

@@ -49,6 +49,11 @@ public:
   // Get the state prefix for this scene graph
   std::string getStatePrefix() const { return m_statePrefix; }
 
+  // The app whose state tree / thread pool this scene runs under. A viewer's
+  // CameraController roots its state in this same tree so it shares the scene's
+  // reactive state graph.
+  cvc::app &appContext() const { return m_ctx; }
+
   void setRenderer(vtkRenderer *renderer);
 
   // ── lighting ──────────────────────────────────────────────────────────────

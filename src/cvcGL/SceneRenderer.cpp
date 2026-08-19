@@ -23,6 +23,7 @@
 
 struct SceneRenderer::impl {
   SceneGraph *scene = nullptr;
+  std::string name = "main";
   vtkSmartPointer<vtkRenderer> renderer;
   vtkSmartPointer<vtkRenderWindow> window;
   vtkSmartPointer<vtkRenderWindowInteractor> interactor; // onscreen only
@@ -35,12 +36,14 @@ struct SceneRenderer::impl {
   }
 };
 
-SceneRenderer::SceneRenderer(SceneGraph &scene, int width, int height, bool offscreen)
+SceneRenderer::SceneRenderer(SceneGraph &scene, int width, int height, bool offscreen,
+                             const std::string &name)
     : m_impl(new impl) {
   if (width < 1 || height < 1)
     throw std::invalid_argument("SceneRenderer: width and height must be >= 1");
 
   m_impl->scene = &scene;
+  m_impl->name = name;
   m_impl->offscreen = offscreen;
   m_impl->renderer = vtkSmartPointer<vtkRenderer>::New();
   m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
@@ -196,3 +199,6 @@ vtkRenderWindow *SceneRenderer::renderWindow() const {
   m_impl->requireOpen();
   return m_impl->window;
 }
+
+SceneGraph &SceneRenderer::scene() const { return *m_impl->scene; }
+const std::string &SceneRenderer::name() const { return m_impl->name; }
