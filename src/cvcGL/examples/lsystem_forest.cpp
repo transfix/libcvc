@@ -859,17 +859,23 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
 }
 
-// ── cloud → ground shadow: a TRUE volumetric shadow, ray-marched along the sun ─
-// The scene's sun is DIRECTIONAL, so every shadow ray is parallel: the pattern the
-// cloud throws on the ground is just the cloud's along-sun optical depth, sheared.
-// So for each ground point we march the SAME density field the volume shows, up
-// the sun ray through the slab, accumulate optical depth τ, and store transmittance
-// exp(-k·τ) into a texture the terrain samples — identical to a per-fragment GPU
-// light pass for a directional light, but computed once per cloud update. Floored
-// so shaded ground still catches skylight rather than going black.
-constexpr int SHADOW_RES = 96;        // soft shadow -> low-res map is plenty (was 192)
-constexpr double SHADOW_K = 0.06;     // optical-depth -> darkness (very gentle dapple)
-constexpr double SHADOW_FLOOR = 0.78; // shaded ground keeps most of its light
+// ── cloud → ground shadow: a volumetric shadow, ray-marched through the slab ─────
+// For each ground point we march the SAME density field the volume shows, up
+// through the slab, accumulate optical depth τ, and store transmittance exp(-k·τ)
+// into a texture the terrain samples — a per-fragment directional light pass for the
+// cloud, computed once per cloud update. Floored so shaded ground still catches
+// skylight rather than going black.
+//
+// The march is NOT along the true sun (elevation 34°): that low an angle throws the
+// shadow ~145 units — clear off the 120-unit island, onto the untextured sea, so the
+// ground under the cloud read as unshadowed. We march a STEEPER pseudo-sun instead
+// (same azimuth, high elevation), which lands the shadow on the island just off nadir
+// beneath the cloud. That is where the eye expects a cloud's shadow, and it is the
+// usual stylisation — a small, honest lie about the sun angle for a legible shadow.
+constexpr int SHADOW_RES = 96;          // soft shadow -> low-res map is plenty (was 192)
+constexpr double SHADOW_PROJ_EL = 66.0; // steeper than the sun's 34° so it lands on-island
+constexpr double SHADOW_K = 0.13;       // optical-depth -> darkness (a soft, clear patch)
+constexpr double SHADOW_FLOOR = 0.55;   // shaded ground keeps 55% of its light
 
 // Trilinear sample of a sky density field at a WORLD point (0 outside the slab).
 float sampleSky(const std::vector<float> &field, double wx, double wy, double wz) {
@@ -1128,7 +1134,7 @@ int main(int argc, char **argv) {
   // The cloud's shadow on the ground: bake the initial transmittance into the
   // terrain's texture (kept in sync with the drifting cloud each update below).
   std::vector<unsigned char> shadowBuf;
-  computeCloudShadow(sky.field(0.0, 0.0), sunDir(SUN_AZ, SUN_EL), shadowBuf);
+  computeCloudShadow(sky.field(0.0, 0.0), sunDir(SUN_AZ, SHADOW_PROJ_EL), shadowBuf);
   {
     cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
                          cvc::image::data_type::u8, shadowBuf.data());
@@ -1297,7 +1303,7 @@ int main(int argc, char **argv) {
       if (cloudDue)
         skyNode->updateScalars(skyF); // sky drift + morph
       if (shadowDue) {                // move the cloud's soft ground shadow with it
-        computeCloudShadow(skyF, sunDir(SUN_AZ, SUN_EL), shadowBuf);
+        computeCloudShadow(skyF, sunDir(SUN_AZ, SHADOW_PROJ_EL), shadowBuf);
         cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
                              cvc::image::data_type::u8, shadowBuf.data());
         terrain->setTexture(shadowImg, false);
