@@ -24,15 +24,13 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
-#include <vector>
-
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/volume/volume.h>
-
+#include <vector>
 #include <vtkCameraPass.h>
 #include <vtkRenderPass.h>
 #include <vtkRenderPassCollection.h>

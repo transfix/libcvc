@@ -5,17 +5,15 @@
 //   * two-way cvc::state binding: writing state changes the camera (mode, up
 //     axis, orbit center, key bindings), and driving the camera writes state;
 //   * a configurable up axis (Y-up), and the canonical viewer state path.
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
-
-#include <cmath>
-#include <cstdlib>
-#include <cstdio>
 #include <string>
-
 #include <vtkCamera.h>
 #include <vtkNew.h>
 
@@ -45,8 +43,8 @@ int main() {
 
   double e[3], f[3], u[3];
   c.getPose(e, f, u);
-  printf("orbit-framed eye=(%.1f,%.1f,%.1f) focal=(%.1f,%.1f,%.1f) up=(%.2f,%.2f,%.2f)\n", e[0], e[1],
-         e[2], f[0], f[1], f[2], u[0], u[1], u[2]);
+  printf("orbit-framed eye=(%.1f,%.1f,%.1f) focal=(%.1f,%.1f,%.1f) up=(%.2f,%.2f,%.2f)\n", e[0],
+         e[1], e[2], f[0], f[1], f[2], u[0], u[1], u[2]);
 
   printf("A. Z-up framing + navigation\n");
   check("world up is +Z", std::fabs(u[2] - 1.0) < 1e-9 && std::fabs(u[0]) < 1e-9);
@@ -75,8 +73,8 @@ int main() {
   c.keyUp("d");
   double aD[3];
   c.getPose(aD, f, u);
-  check("D strafes 10 horizontally", std::fabs(dist(aD, bD) - 10.0) < 1e-6 &&
-                                         std::fabs(aD[2] - bD[2]) < 1e-9);
+  check("D strafes 10 horizontally",
+        std::fabs(dist(aD, bD) - 10.0) < 1e-6 && std::fabs(aD[2] - bD[2]) < 1e-9);
   double bl[3], blf[3];
   c.getPose(bl, blf, u);
   c.mouseLook(100, 0);
@@ -93,8 +91,8 @@ int main() {
   root("test.camera.orbit.center.y").value(-5.0);
   double oe[3], of[3];
   c.getPose(oe, of, u);
-  check("state orbit.center -> focal moves", std::fabs(of[0] - 25.0) < 1e-6 &&
-                                                 std::fabs(of[1] + 5.0) < 1e-6);
+  check("state orbit.center -> focal moves",
+        std::fabs(of[0] - 25.0) < 1e-6 && std::fabs(of[1] + 5.0) < 1e-6);
 
   printf("C. camera -> state (driving writes state)\n");
   c.setOrbitCenter(3.0, 4.0, 5.0);

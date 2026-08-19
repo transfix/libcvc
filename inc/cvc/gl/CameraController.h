@@ -11,10 +11,9 @@
 #ifndef __CVC_GL_CAMERA_CONTROLLER_H__
 #define __CVC_GL_CAMERA_CONTROLLER_H__
 
+#include <cvc/core/state_object.h>
 #include <memory>
 #include <string>
-
-#include <cvc/core/state_object.h>
 
 class vtkCamera;                 // VTK (global namespace)
 class vtkRenderer;               // VTK (global namespace)
@@ -76,8 +75,7 @@ public:
   CameraController &operator=(const CameraController &) = delete;
 
   // The canonical state path for a viewer's camera.
-  static std::string viewerStatePath(const std::string &scenePrefix,
-                                     const std::string &viewerName);
+  static std::string viewerStatePath(const std::string &scenePrefix, const std::string &viewerName);
 
   // Wiring (the SceneRenderer ctor does all of this for you).
   void setCamera(vtkCamera *camera);
@@ -155,12 +153,12 @@ protected:
   void handleStateChanged(const std::string &childState) override;
 
 private:
-  void seedState();          // write defaults with the change signal suppressed
-  void readAllFromState();   // pull every setting/pose from state into members
-  void syncConfigToState();  // write config back (guarded against echo)
-  void syncPoseToState();    // write the live pose back (guarded against echo)
-  void recenterPointer();    // X11 pointer warp for continuous captured look
-  void resetTrack();         // reset cinematic smoothing (ease in from current view)
+  void seedState();                    // write defaults with the change signal suppressed
+  void readAllFromState();             // pull every setting/pose from state into members
+  void syncConfigToState();            // write config back (guarded against echo)
+  void syncPoseToState();              // write the live pose back (guarded against echo)
+  void recenterPointer();              // X11 pointer warp for continuous captured look
+  void resetTrack();                   // reset cinematic smoothing (ease in from current view)
   bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
 
   struct Impl;

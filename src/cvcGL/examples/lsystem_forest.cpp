@@ -17,17 +17,6 @@
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
 // Verify (offscreen, headless): lsystem_forest --offscreen --frames 30 --png out.png
 
-#include <cvc/core/app.h>
-#include <cvc/geometry/geometry.h>
-#include <cvc/gl/CameraController.h>
-#include <cvc/image/image.h>
-#include <cvc/gl/GeometryNode.h>
-#include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/SceneRenderer.h>
-#include <cvc/gl/VolumeNode.h>
-#include <cvc/volume/bounding_box.h>
-#include <cvc/volume/volume.h>
-
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -35,6 +24,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/gl/CameraController.h>
+#include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/VolumeNode.h>
+#include <cvc/image/image.h>
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
 #include <deque>
 #include <memory>
 #include <random>
@@ -124,22 +123,20 @@ void addTerrainBump(GeometryNode &node) {
   node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
   node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
                                   "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
-  node.addFragmentShaderReplacement("//VTK::Normal::Dec",
-                                    std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") +
-                                        GROUND_GLSL);
   node.addFragmentShaderReplacement(
-      "//VTK::Normal::Impl",
-      "//VTK::Normal::Impl\n"
-      "  {\n"
-      "    float h = groundH(gCoord);\n"
-      "    vec3 sS = dFdx(vertexVC.xyz);\n"
-      "    vec3 sT = dFdy(vertexVC.xyz);\n"
-      "    vec3 vn = normalVCVSOutput;\n"
-      "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
-      "    float det = dot(sS, R1);\n"
-      "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
-      "    normalVCVSOutput = normalize(abs(det)*vn - 1.4*sg);\n"
-      "  }\n");
+      "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+  node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                    "//VTK::Normal::Impl\n"
+                                    "  {\n"
+                                    "    float h = groundH(gCoord);\n"
+                                    "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                    "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                    "    vec3 vn = normalVCVSOutput;\n"
+                                    "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                    "    float det = dot(sS, R1);\n"
+                                    "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                    "    normalVCVSOutput = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "  }\n");
 }
 
 // ── L-system trees (a faithful C++ port of the Python demo's tree grammar) ────
@@ -176,14 +173,22 @@ Mat4 mMul(const Mat4 &a, const Mat4 &b) {
 Mat4 mRot(double ang, double x, double y, double z) {
   double c = std::cos(ang), s = std::sin(ang), k = 1.0 - c;
   Mat4 M = mIdent();
-  M.at(0, 0) = c + k * x * x; M.at(0, 1) = k * x * y - s * z; M.at(0, 2) = k * x * z + s * y;
-  M.at(1, 0) = k * x * y + s * z; M.at(1, 1) = c + k * y * y; M.at(1, 2) = k * y * z - s * x;
-  M.at(2, 0) = k * x * z - s * y; M.at(2, 1) = k * y * z + s * x; M.at(2, 2) = c + k * z * z;
+  M.at(0, 0) = c + k * x * x;
+  M.at(0, 1) = k * x * y - s * z;
+  M.at(0, 2) = k * x * z + s * y;
+  M.at(1, 0) = k * x * y + s * z;
+  M.at(1, 1) = c + k * y * y;
+  M.at(1, 2) = k * y * z - s * x;
+  M.at(2, 0) = k * x * z - s * y;
+  M.at(2, 1) = k * y * z + s * x;
+  M.at(2, 2) = c + k * z * z;
   return M;
 }
 Mat4 mTrans(double x, double y, double z) {
   Mat4 M = mIdent();
-  M.at(0, 3) = x; M.at(1, 3) = y; M.at(2, 3) = z;
+  M.at(0, 3) = x;
+  M.at(1, 3) = y;
+  M.at(2, 3) = z;
   return M;
 }
 Vec3d xform(const Mat4 &M, Vec3d p) { // p @ R^T + t  ==  R@p + t
@@ -192,9 +197,9 @@ Vec3d xform(const Mat4 &M, Vec3d p) { // p @ R^T + t  ==  R@p + t
           M.at(2, 0) * p.x + M.at(2, 1) * p.y + M.at(2, 2) * p.z + M.at(2, 3)};
 }
 
-const char *TREE_RULES[5] = {"FF[RL1][RR2][RRR3]F[RL3][RR1][RRR2]RFLR0",
-                             "FL[T[RF]2]R[TRFL]RTFL4", "FL[TRF3]RFLRTFL2",
-                             "FL[TFL2RFL]R[T[RFLF3]]RTFL2", "FL[TRFL4]RFLRTFL4"};
+const char *TREE_RULES[5] = {"FF[RL1][RR2][RRR3]F[RL3][RR1][RRR2]RFLR0", "FL[T[RF]2]R[TRFL]RTFL4",
+                             "FL[TRF3]RFLRTFL2", "FL[TFL2RFL]R[T[RFLF3]]RTFL2",
+                             "FL[TRFL4]RFLRTFL4"};
 constexpr double YROTATE = 10.0, TILT = 120.0, MICRO_TILT = 1.0e-4;
 constexpr double T_SCALE = 0.9, T_RADSCALE = 0.6, T_LENGTH = 5.0, T_RADIUS = 0.7;
 constexpr int BASE_TRI = 5, NEEDLES = 9;
@@ -204,9 +209,21 @@ const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
 const Vec3d C_WOOD_LIGHT{0.6549, 0.4901, 0.2392}, C_WOOD_DARK{0.3607, 0.2510, 0.2000};
 const Vec3d C_NEEDLE{0.1373, 0.5568, 0.1373};
 
-struct Seg { Mat4 m; double len, rad; };
-struct Leaf { Mat4 m; double sc; };
-struct Module { int parent; int level; Mat4 hang; std::vector<Seg> segs; std::vector<Leaf> leaves; };
+struct Seg {
+  Mat4 m;
+  double len, rad;
+};
+struct Leaf {
+  Mat4 m;
+  double sc;
+};
+struct Module {
+  int parent;
+  int level;
+  Mat4 hang;
+  std::vector<Seg> segs;
+  std::vector<Leaf> leaves;
+};
 
 int expandTree(const std::string &rule, int depth, double scale, double radscale, int parent,
                int level, std::vector<Module> &out, const Mat4 &tMicro, const Mat4 &tTilt,
@@ -308,11 +325,12 @@ void addBark(GeometryNode &node) {
   node.disableCoordinateShiftScale();
   node.addVertexShaderReplacement("//VTK::Normal::Dec",
                                   "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
-  node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
-                                  "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
+  node.addVertexShaderReplacement(
+      "//VTK::PositionVC::Impl",
+      "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
   node.addFragmentShaderReplacement(
-      "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") +
-                                BARK_GLSL);
+      "//VTK::Normal::Dec",
+      std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") + BARK_GLSL);
   node.addFragmentShaderReplacement(
       "//VTK::Normal::Impl",
       "//VTK::Normal::Impl\n"
@@ -360,9 +378,9 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
       }
       cvc::geometry::index_t base = wg.points().size();
       for (int v = 0; v < 2 * BASE_TRI + 2; ++v) {
-        Vec3d p = xform(s.m, loc[v]);        // module-frame vertex
+        Vec3d p = xform(s.m, loc[v]); // module-frame vertex
         rec.localWood.push_back(p);
-        Vec3d w = xform(world[i], p);        // bind-pose world vertex
+        Vec3d w = xform(world[i], p); // bind-pose world vertex
         wg.points().push_back({w.x, w.y, w.z});
         wg.colors().push_back({cyl.colors[v].x, cyl.colors[v].y, cyl.colors[v].z});
       }
@@ -374,8 +392,8 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
       cvc::geometry::index_t base = ng.points().size();
       Vec3d root = xform(lf.m, {0, 0, 0});
       rec.localNeedle.push_back({0, 0, 0});
-      ng.points().push_back({xform(world[i], root).x, xform(world[i], root).y,
-                             xform(world[i], root).z});
+      ng.points().push_back(
+          {xform(world[i], root).x, xform(world[i], root).y, xform(world[i], root).z});
       for (int t = 0; t < NEEDLES; ++t) {
         Vec3d tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc, nring[t].z * LEAF_RAD * lf.sc};
         Vec3d pm = xform(lf.m, tip);
@@ -484,9 +502,10 @@ std::vector<float> seaField(double t) {
         double x = -HALF + 2.0 * HALF * i / (SEA_N - 1);
         double phase = (2.0 * M_PI / WAVE_LEN) * (x + 0.6 * y);
         double surf = SEA_LEVEL + WAVE_AMP * (std::sin(phase - WAVE_SPEED * t * 0.1) +
-                                               0.45 * std::sin(1.7 * phase + WAVE_SPEED * t * 0.13));
+                                              0.45 * std::sin(1.7 * phase + WAVE_SPEED * t * 0.13));
         double below = surf - z, above = z - terrainH(x, y);
-        double depth = (below > 0.0 && above > 0.0) ? std::min(1.0, std::max(0.0, below / 6.0)) : 0.0;
+        double depth =
+            (below > 0.0 && above > 0.0) ? std::min(1.0, std::max(0.0, below / 6.0)) : 0.0;
         f[static_cast<size_t>(k) * SEA_N * SEA_N + j * SEA_N + i] = static_cast<float>(depth);
       }
     }
@@ -525,10 +544,14 @@ constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
 const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
 const char *cloudRule(char c) {
   switch (c) {
-  case 'A': return "FF[+<B]^F[-<C]<F[+<C]vFA"; // anvil-ward drift, throws B/C fringes
-  case 'B': return "F[+<F]F<[-<F]vB";
-  case 'C': return "^<F[+<F][-<F]^<FC";
-  default:  return nullptr;
+  case 'A':
+    return "FF[+<B]^F[-<C]<F[+<C]vFA"; // anvil-ward drift, throws B/C fringes
+  case 'B':
+    return "F[+<F]F<[-<F]vB";
+  case 'C':
+    return "^<F[+<F][-<F]^<FC";
+  default:
+    return nullptr;
   }
 }
 inline size_t skyIdx(int z, int y, int x) { // field is (nz, ny, nx), C order
@@ -559,7 +582,10 @@ std::vector<float> walkClouds(std::mt19937 &rng) {
   double head = uni(0.0, 360.0);
   double step = CLOUD_STEP0, puff = CLOUD_PUFF0, climb = 0.0;
   int depth = 0;
-  struct St { double x, y, z, head, step, puff, climb; int depth; };
+  struct St {
+    double x, y, z, head, step, puff, climb;
+    int depth;
+  };
   std::vector<St> stack;
   std::deque<char> todo(CLOUD_AXIOM, CLOUD_AXIOM + std::strlen(CLOUD_AXIOM));
   int guard = 0;
@@ -601,8 +627,14 @@ std::vector<float> walkClouds(std::mt19937 &rng) {
       if (!stack.empty()) {
         St s = stack.back();
         stack.pop_back();
-        x = s.x; y = s.y; z = s.z; head = s.head; step = s.step; puff = s.puff;
-        climb = s.climb; depth = s.depth;
+        x = s.x;
+        y = s.y;
+        z = s.z;
+        head = s.head;
+        step = s.step;
+        puff = s.puff;
+        climb = s.climb;
+        depth = s.depth;
       }
     } else if (cloudRule(c) && depth < CLOUD_DEPTH) {
       ++depth;
@@ -691,9 +723,10 @@ SkyModel buildSky() {
   return sky;
 }
 cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
-  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
-                     cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
-                     cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
+  return cvc::volume(
+      app, reinterpret_cast<const unsigned char *>(field.data()),
+      cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+      cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
 }
 // Empty sky must be EXACTLY invisible (alpha pinned flat at 0 up to CLOUD_EMPTY,
 // not ramped — a ramp still accumulates over the ~180 samples a ray takes through
@@ -967,7 +1000,8 @@ int main(int argc, char **argv) {
       seaTransfer(col, op, t);
       seaNode->setTransferFunction(col, op);
     }
-    if (frame % VOL_STRIDE == 1) { // sky drift+morph, staggered so the two uploads never share a frame
+    if (frame % VOL_STRIDE ==
+        1) { // sky drift+morph, staggered so the two uploads never share a frame
       double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
       double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
       std::vector<float> skyF = sky.field(shift, morph);

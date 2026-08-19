@@ -8,18 +8,15 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/gl/CameraController.h>
-
-#include <cvc/gl/GraphicsNode.h>
-#include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/SceneRenderer.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cvc/gl/CameraController.h>
+#include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/SceneRenderer.h>
 #include <set>
 #include <string>
-
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
 #include <vtkObjectFactory.h>
@@ -84,8 +81,7 @@ inline Basis basisFromUp(Vec3 up) {
 }
 inline Vec3 forwardVec(const Basis &b, double yawDeg, double pitchDeg) {
   double y = yawDeg * kDeg2Rad, p = pitchDeg * kDeg2Rad;
-  return b.N * (std::cos(p) * std::cos(y)) + b.E * (std::cos(p) * std::sin(y)) +
-         b.up * std::sin(p);
+  return b.N * (std::cos(p) * std::cos(y)) + b.E * (std::cos(p) * std::sin(y)) + b.up * std::sin(p);
 }
 inline Vec3 rightVec(const Basis &b, double yawDeg) {
   double y = yawDeg * kDeg2Rad;
@@ -507,9 +503,7 @@ void CameraController::setMode(Mode m) {
 
 // Tab toggles the two interactive modes; Track is entered explicitly (it needs a
 // target). From Track, Tab returns to Orbit.
-void CameraController::toggleMode() {
-  setMode(mode() == Mode::Orbit ? Mode::Fly : Mode::Orbit);
-}
+void CameraController::toggleMode() { setMode(mode() == Mode::Orbit ? Mode::Fly : Mode::Orbit); }
 
 void CameraController::setScene(SceneGraph *scene) { m_impl->scene = scene; }
 
@@ -793,9 +787,15 @@ void CameraController::getPose(double eye[3], double focal[3], double up[3]) con
     e = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
     f = s.orbitCenter;
   }
-  eye[0] = e.x; eye[1] = e.y; eye[2] = e.z;
-  focal[0] = f.x; focal[1] = f.y; focal[2] = f.z;
-  up[0] = b.up.x; up[1] = b.up.y; up[2] = b.up.z;
+  eye[0] = e.x;
+  eye[1] = e.y;
+  eye[2] = e.z;
+  focal[0] = f.x;
+  focal[1] = f.y;
+  focal[2] = f.z;
+  up[0] = b.up.x;
+  up[1] = b.up.y;
+  up[2] = b.up.z;
 }
 
 } // namespace gl
