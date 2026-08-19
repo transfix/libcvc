@@ -15,6 +15,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/sim_world.h>
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -906,6 +907,233 @@ PyObject *nav_bicycle_rollout(PyObject *field, PyObject *on, PyObject *th, PyObj
   Py_DECREF(so);
   Py_DECREF(mc);
   return tup;
+}
+
+// Carrot FSM (swarm.py._plan_carrot). The read-only pose/sample come in as
+// (N,2)/(N,) f32; the FSM state columns are borrowed writable and mutated IN
+// PLACE (stall/mode/hist_count i32, turn/dhit/best/wall_entry/pos_hist f32,
+// we_valid bool, sp f32); tracking/parked/active are read-only bool. Returns
+// carrot (N,2) f32.
+// ── sim_world: the pure-C++ reactive swarm runtime ──────────────────────────
+// Wrapped as an opaque PyCapsule handle (the object owns beliefs/field/policy/
+// columns); create -> step -> snapshot, with live retarget.
+
+static const char *kSimWorldCapsule = "cvc.nav.sim_world";
+
+static void sim_world_capsule_dtor(PyObject *cap)
+{
+  auto *sw = static_cast<cvc::nav::sim_world *>(PyCapsule_GetPointer(cap, kSimWorldCapsule));
+  delete sw;
+}
+
+static cvc::nav::sim_world *sim_world_from(PyObject *cap)
+{
+  if (!cap || !PyCapsule_CheckExact(cap))
+    throw std::invalid_argument("pycvc.nav_sim_world_*: not a sim_world handle");
+  auto *sw = static_cast<cvc::nav::sim_world *>(PyCapsule_GetPointer(cap, kSimWorldCapsule));
+  if (!sw)
+    throw std::invalid_argument("pycvc.nav_sim_world_*: null / already-destroyed handle");
+  return sw;
+}
+
+PyObject *nav_sim_world_create(PyObject *truth, PyObject *prior_occ, const char *weights_path,
+                               PyObject *on, PyObject *goal, PyObject *color, int rows, int cols,
+                               double min_x, double min_y, double max_x, double max_y, double cx,
+                               double cy, double scale, double range_m, int n_rays, double fov_rad,
+                               double rr, double d_hat, double dt, double vmax, double L,
+                               double delta_max, double a_max, double a_lat_max, double k_steer,
+                               int nsub, int allow_reverse, double reach_tol, int sense_every,
+                               int freeze_sense, double l_occ, double l_free, double l_clamp,
+                               int optimistic, double p_thresh, double band, double ttl_s)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_sim_world_create: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *tr = take(truth, NPY_UINT8, 2);
+  PyArrayObject *pr = take(prior_occ, NPY_UINT8, 2);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ga = take(goal, NPY_FLOAT, 2);
+  PyArrayObject *ca = take(color, NPY_FLOAT, 2);
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(tr, 0) != rows || PyArray_DIM(tr, 1) != cols || PyArray_DIM(pr, 0) != rows ||
+      PyArray_DIM(pr, 1) != cols || PyArray_DIM(ga, 0) != N || PyArray_DIM(ca, 0) != N)
+    fail("pycvc.nav_sim_world_create: truth/prior (rows,cols), on/goal/color (N,.) mismatch");
+
+  cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = rows;
+  cfg.cols = cols;
+  cfg.min_x = min_x;
+  cfg.min_y = min_y;
+  cfg.max_x = max_x;
+  cfg.max_y = max_y;
+  cfg.cx = cx;
+  cfg.cy = cy;
+  cfg.scale = scale;
+  cfg.range_m = range_m;
+  cfg.n_rays = n_rays;
+  cfg.fov_rad = fov_rad;
+  cfg.veh.rr = static_cast<float>(rr);
+  cfg.veh.d_hat = static_cast<float>(d_hat);
+  cfg.veh.dt = static_cast<float>(dt);
+  cfg.veh.vmax = static_cast<float>(vmax);
+  cfg.veh.L = static_cast<float>(L);
+  cfg.veh.delta_max = static_cast<float>(delta_max);
+  cfg.veh.a_max = static_cast<float>(a_max);
+  cfg.veh.a_lat_max = static_cast<float>(a_lat_max);
+  cfg.veh.k_steer = static_cast<float>(k_steer);
+  cfg.veh.nsub = nsub;
+  cfg.veh.allow_reverse = allow_reverse != 0;
+  cfg.reach_tol = static_cast<float>(reach_tol);
+  cfg.sense_every = sense_every;
+  cfg.freeze_sense = freeze_sense != 0;
+  cfg.l_occ = l_occ;
+  cfg.l_free = l_free;
+  cfg.l_clamp = l_clamp;
+  cfg.optimistic = optimistic != 0;
+  cfg.p_thresh = p_thresh;
+  cfg.band = band;
+  cfg.ttl_s = ttl_s;
+
+  cvc::nav::sim_world *sw = nullptr;
+  sw = new cvc::nav::sim_world(
+      cfg, static_cast<const std::uint8_t *>(PyArray_DATA(tr)),
+      static_cast<const std::uint8_t *>(PyArray_DATA(pr)), std::move(model),
+      static_cast<const float *>(PyArray_DATA(oa)), static_cast<const float *>(PyArray_DATA(ga)),
+      static_cast<const float *>(PyArray_DATA(ca)), N);
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  return PyCapsule_New(sw, kSimWorldCapsule, sim_world_capsule_dtor);
+}
+
+PyObject *nav_sim_world_step(PyObject *handle, int num_threads = 0)
+{
+  cvc::nav::sim_world *sw = sim_world_from(handle);
+  Py_BEGIN_ALLOW_THREADS
+  sw->step(num_threads);
+  Py_END_ALLOW_THREADS
+  Py_RETURN_NONE;
+}
+
+// Returns (pos (N,2) f32 world, heading (N,) f32, speed (N,) f32, mode (N,) i32,
+// reached (N,) bool).
+PyObject *nav_sim_world_snapshot(PyObject *handle)
+{
+  cvc::nav::sim_world *sw = sim_world_from(handle);
+  const int N = sw->size();
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *pos = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *hd = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *sp = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *md = PyArray_SimpleNew(1, &d1, NPY_INT32);
+  PyObject *rc = PyArray_SimpleNew(1, &d1, NPY_BOOL);
+  if (!pos || !hd || !sp || !md || !rc) {
+    Py_XDECREF(pos);
+    Py_XDECREF(hd);
+    Py_XDECREF(sp);
+    Py_XDECREF(md);
+    Py_XDECREF(rc);
+    throw std::runtime_error("pycvc.nav_sim_world_snapshot: alloc failed");
+  }
+  sw->snapshot(static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(pos))),
+               static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(hd))),
+               static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(sp))),
+               static_cast<int *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(md))),
+               static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(rc))));
+  PyObject *tup = PyTuple_Pack(5, pos, hd, sp, md, rc);
+  Py_DECREF(pos);
+  Py_DECREF(hd);
+  Py_DECREF(sp);
+  Py_DECREF(md);
+  Py_DECREF(rc);
+  return tup;
+}
+
+PyObject *nav_sim_world_retarget(PyObject *handle, int i, double gx_n, double gy_n)
+{
+  sim_world_from(handle)->retarget(i, static_cast<float>(gx_n), static_cast<float>(gy_n));
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_carrot_step(PyObject *on, PyObject *goal, PyObject *th, PyObject *sp, PyObject *phi,
+                          PyObject *nrm, PyObject *stall, PyObject *mode, PyObject *turn,
+                          PyObject *dhit, PyObject *best, PyObject *wall_entry, PyObject *we_valid,
+                          PyObject *tracking, PyObject *pos_hist, PyObject *hist_count,
+                          PyObject *parked, PyObject *active, double reach_tol, double a_max,
+                          double dt, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto ro = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_carrot_step: a read-only input had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *oa = ro(on, NPY_FLOAT, 2);
+  PyArrayObject *ga = ro(goal, NPY_FLOAT, 2);
+  PyArrayObject *tha = ro(th, NPY_FLOAT, 1);
+  PyArrayObject *pha = ro(phi, NPY_FLOAT, 1);
+  PyArrayObject *na = ro(nrm, NPY_FLOAT, 2);
+  PyArrayObject *tka = ro(tracking, NPY_BOOL, 1);
+  PyArrayObject *pka = ro(parked, NPY_BOOL, 1);
+  PyArrayObject *aca = ro(active, NPY_BOOL, 1);
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+
+  std::vector<npy_intp> sh;
+  cvc::nav::fsm_state s;
+  s.stall = static_cast<int *>(pycvc_nav_writable(stall, NPY_INT32, 1, "stall", sh));
+  s.mode = static_cast<int *>(pycvc_nav_writable(mode, NPY_INT32, 1, "mode", sh));
+  s.turn = static_cast<float *>(pycvc_nav_writable(turn, NPY_FLOAT, 1, "turn", sh));
+  s.dhit = static_cast<float *>(pycvc_nav_writable(dhit, NPY_FLOAT, 1, "dhit", sh));
+  s.best = static_cast<float *>(pycvc_nav_writable(best, NPY_FLOAT, 1, "best", sh));
+  s.wall_entry = static_cast<float *>(pycvc_nav_writable(wall_entry, NPY_FLOAT, 2, "wall_entry", sh));
+  s.we_valid = static_cast<std::uint8_t *>(pycvc_nav_writable(we_valid, NPY_BOOL, 1, "we_valid", sh));
+  s.pos_hist = static_cast<float *>(pycvc_nav_writable(pos_hist, NPY_FLOAT, 3, "pos_hist", sh));
+  s.hist_count = static_cast<int *>(pycvc_nav_writable(hist_count, NPY_INT32, 1, "hist_count", sh));
+  float *spd = static_cast<float *>(pycvc_nav_writable(sp, NPY_FLOAT, 1, "sp", sh));
+  s.tracking = static_cast<const std::uint8_t *>(PyArray_DATA(tka));
+  s.parked = static_cast<const std::uint8_t *>(PyArray_DATA(pka));
+  s.active = static_cast<const std::uint8_t *>(PyArray_DATA(aca));
+
+  npy_intp d2[2] = {N, 2};
+  PyObject *carrot = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  if (!carrot)
+    fail("pycvc.nav_carrot_step: output alloc failed");
+  cvc::nav::carrot_params cp;
+  cp.reach_tol = static_cast<float>(reach_tol);
+  cp.a_max = static_cast<float>(a_max);
+  cp.dt = static_cast<float>(dt);
+  const float *ond = static_cast<const float *>(PyArray_DATA(oa));
+  const float *gd = static_cast<const float *>(PyArray_DATA(ga));
+  const float *thd = static_cast<const float *>(PyArray_DATA(tha));
+  const float *phd = static_cast<const float *>(PyArray_DATA(pha));
+  const float *nd = static_cast<const float *>(PyArray_DATA(na));
+  float *cod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(carrot)));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::carrot_step(ond, gd, thd, spd, phd, nd, s, N, cp, cod, num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  return carrot;
 }
 
 // The fused per-agent drive tick: sample -> coef_feats -> coef_mlp(weights_path)

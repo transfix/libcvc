@@ -172,6 +172,7 @@ set(SOURCE_FILES
   nav/drive.cpp
   nav/coef_mlp.cpp
   nav/belief_occupancy.cpp
+  nav/sim_world.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC

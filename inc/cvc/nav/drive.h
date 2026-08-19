@@ -41,6 +41,8 @@
 #ifndef __CVC_NAV_DRIVE_H__
 #define __CVC_NAV_DRIVE_H__
 
+#include <cstdint>
+
 namespace cvc {
 namespace nav {
 
@@ -107,6 +109,41 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
                 float *minclr_out, int num_threads = 0);
+
+// ─── Carrot state machine (swarm.py._plan_carrot) ────────────────────────────
+
+// The per-agent steering-carrot FSM state, as SoA columns (all length n; the
+// pos_hist ring is n*40*2). The FSM reads and writes these in place. Each agent
+// is independent (reads/writes only its own columns), so it is parallel.
+struct fsm_state {
+  int *stall = nullptr;                   // stall / displacement-stall counter
+  int *mode = nullptr;                    // 0 = seek, 1 = wall-follow
+  float *turn = nullptr;                  // wall-follow turn direction (+/-1)
+  float *dhit = nullptr;                  // goal distance when wall-follow was entered
+  float *best = nullptr;                  // best (closest) goal distance seen
+  float *wall_entry = nullptr;            // [n*2] position where wall-follow entered
+  std::uint8_t *we_valid = nullptr;       // wall_entry has been set
+  const std::uint8_t *tracking = nullptr; // moving-goal (displacement-stall) mode
+  float *pos_hist = nullptr;              // [n*40*2] displacement ring buffer
+  int *hist_count = nullptr;              // ring fill count
+  const std::uint8_t *parked = nullptr;   // braking / holding at goal
+  const std::uint8_t *active = nullptr;   // agent participates this tick
+};
+
+struct carrot_params {
+  float reach_tol = 0.8f; // normalized "arrived" radius
+  float a_max = 1.5f;     // brake decel used by the parked branch
+  float dt = 0.06f;       // world dt
+};
+
+// Advance the carrot FSM one tick and place each agent's steering carrot,
+// float-equivalent to swarm.py._plan_carrot. `phi`/`nrm` are the shared-field
+// sample at each agent's current position (phi[n], nrm[n*2] unit normals). The
+// FSM columns in `s` are updated in place (and `sp` is decremented on the parked
+// branch). Writes carrot_out[n*2] (normalized). Parallel across agents.
+void carrot_step(const float *o, const float *goal, const float *th, float *sp, const float *phi,
+                 const float *nrm, const fsm_state &s, int n, const carrot_params &p,
+                 float *carrot_out, int num_threads = 0);
 
 } // namespace nav
 } // namespace cvc

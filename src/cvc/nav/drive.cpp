@@ -262,6 +262,95 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
   });
 }
 
+void carrot_step(const float *o, const float *goal, const float *th, float *sp, const float *phi,
+                 const float *nrm, const fsm_state &s, int n, const carrot_params &p,
+                 float *carrot_out, int num_threads) {
+  (void)phi; // phi is sampled with nrm by the caller; the FSM uses only nrm
+  constexpr int SEEK = 0, WALL = 1;
+  detail::parallel_for(n, num_threads, [&](int i) {
+    const float ox = o[2 * i], oy = o[2 * i + 1];
+    const float gx = goal[2 * i], gy = goal[2 * i + 1];
+    const float nx = nrm[2 * i], ny = nrm[2 * i + 1];
+    const float dgx = gx - ox, dgy = gy - oy;
+    const float dg = std::sqrt(dgx * dgx + dgy * dgy);
+    const float inv = 1.0f / (dg + 1e-6f);
+    const float gdx = dgx * inv, gdy = dgy * inv;
+    const float tangx = -ny, tangy = nx; // wall tangent
+    const bool tracked = s.tracking[i] && s.active[i];
+
+    // Branch 1 — stall accounting (non-tracking closing test vs tracking ring).
+    const bool closing = dg < s.best[i] - 1e-3f;
+    const int stall_nt = closing ? 0 : s.stall[i] + 1;
+    const float best_nt = closing ? dg : s.best[i];
+    const int slot = s.hist_count[i] % 40;
+    if (tracked) {
+      s.pos_hist[i * 80 + slot * 2] = ox;
+      s.pos_hist[i * 80 + slot * 2 + 1] = oy;
+    }
+    const int oldest = (s.hist_count[i] + 1) % 40;
+    const float phx = s.pos_hist[i * 80 + oldest * 2];
+    const float phy = s.pos_hist[i * 80 + oldest * 2 + 1];
+    const float moved = std::sqrt((ox - phx) * (ox - phx) + (oy - phy) * (oy - phy));
+    const bool have = s.hist_count[i] >= 40;
+    const bool frozen = have && (moved < 0.15f) && (dg > p.reach_tol);
+    const int stall_tk = have ? (frozen ? s.stall[i] + 1 : 0) : s.stall[i];
+    const float best_tk = std::min(s.best[i], dg);
+    if (tracked)
+      s.hist_count[i] += 1;
+    s.stall[i] = s.tracking[i] ? stall_tk : stall_nt;
+    s.best[i] = s.tracking[i] ? best_tk : best_nt;
+
+    // Branch 2 — seek -> wall entry.
+    if (s.mode[i] == SEEK && s.stall[i] > 70) {
+      s.dhit[i] = dg;
+      s.wall_entry[2 * i] = ox;
+      s.wall_entry[2 * i + 1] = oy;
+      s.we_valid[i] = 1;
+      s.turn[i] = (tangx * gdx + tangy * gdy) >= 0.0f ? 1.0f : -1.0f;
+      s.mode[i] = WALL;
+      s.stall[i] = 0;
+    }
+
+    // Branch 3 — carrot placement (uses the just-updated mode).
+    float cx, cy;
+    if (s.mode[i] == WALL) {
+      const float twx = s.turn[i] * tangx, twy = s.turn[i] * tangy;
+      cx = ox + (0.6f * twx + 0.4f * nx) * 1.6f;
+      cy = oy + (0.6f * twy + 0.4f * ny) * 1.6f;
+    } else {
+      const float m = std::min(1.8f, dg);
+      cx = ox + gdx * m;
+      cy = oy + gdy * m;
+    }
+
+    // Branch 4 — wall exit (affects the next tick's mode).
+    const float wex = ox - s.wall_entry[2 * i], wey = oy - s.wall_entry[2 * i + 1];
+    const bool esc_tk = s.we_valid[i] && (std::sqrt(wex * wex + wey * wey) > 2.0f);
+    const bool exit_tk = esc_tk || (s.stall[i] > 240);
+    const bool exit_nt = (dg < s.dhit[i] - 1.2f) || (s.stall[i] > 240);
+    if (s.mode[i] == WALL && (s.tracking[i] ? exit_tk : exit_nt)) {
+      s.mode[i] = SEEK;
+      s.best[i] = dg;
+      s.stall[i] = 0;
+    }
+
+    // Branch 5 — parked (brake; carrot straight ahead so steering error is 0).
+    if (s.parked[i]) {
+      float spv = sp[i] - p.a_max * p.dt;
+      if (spv < 0.0f)
+        spv = 0.0f;
+      sp[i] = spv;
+      const float ax = std::cos(th[i]), ay = std::sin(th[i]);
+      const float m = std::max(1e-3f, spv * 2.0f);
+      cx = ox + ax * m;
+      cy = oy + ay * m;
+    }
+
+    carrot_out[2 * i] = cx;
+    carrot_out[2 * i + 1] = cy;
+  });
+}
+
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
                 float *minclr_out, int num_threads) {
