@@ -35,6 +35,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/grid_nav.h>
 #include <limits>
 #include <queue>
@@ -384,36 +385,7 @@ std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols, const int
 
 namespace {
 
-// Run fn(i) for i in [0, n) across `num_threads` workers (<=0 => hardware
-// concurrency). A shared atomic counter hands out indices, so uneven per-item
-// cost (some A* queries expand far more nodes than others) self-balances. The
-// calling thread is one of the workers, so num_threads==1 runs inline.
-template <class F> void parallel_for(int n, int num_threads, F &&fn) {
-  if (n <= 0)
-    return;
-  int nt = num_threads > 0 ? num_threads : static_cast<int>(std::thread::hardware_concurrency());
-  if (nt < 1)
-    nt = 1;
-  if (nt > n)
-    nt = n;
-  if (nt == 1) {
-    for (int i = 0; i < n; ++i)
-      fn(i);
-    return;
-  }
-  std::atomic<int> next{0};
-  auto worker = [&]() {
-    for (int i = next.fetch_add(1); i < n; i = next.fetch_add(1))
-      fn(i);
-  };
-  std::vector<std::thread> pool;
-  pool.reserve(nt - 1);
-  for (int t = 0; t < nt - 1; ++t)
-    pool.emplace_back(worker);
-  worker();
-  for (auto &th : pool)
-    th.join();
-}
+using cvc::nav::detail::parallel_for; // the shared work-splitter (detail/parallel.h)
 
 } // namespace
 
