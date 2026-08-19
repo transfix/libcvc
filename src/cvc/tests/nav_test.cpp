@@ -684,3 +684,55 @@ TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   EXPECT_NEAR(out[1], 3.0f, 1e-4f); // beta
   EXPECT_NEAR(out[2], 4.0f, 1e-4f); // gamma
 }
+
+#ifdef CVC_NAV_SHIPPED_WEIGHTS
+TEST(NavSimWorld, LoadsShippedPolicyAndDrives) {
+  // The reference .cvcnav shipped in the tree (share/cvc/nav) loads and drives.
+  cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(CVC_NAV_SHIPPED_WEIGHTS);
+  EXPECT_EQ(model.in_features(), 5);
+  EXPECT_EQ(model.out_features(), 3);
+
+  const int R = 96, C = 96;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 256;
+  cvc::nav::sim_world world =
+      cvc::nav::sim_world::from_occupancy(cfg, occ.data(), std::move(model), N, 3);
+  std::vector<float> pos0(2 * N), pos(2 * N), hd(N), sp(N);
+  std::vector<int> md(N);
+  std::vector<std::uint8_t> rc(N);
+  world.snapshot(pos0.data(), hd.data(), sp.data(), md.data(), rc.data());
+  for (int t = 0; t < 250; ++t)
+    world.step(4);
+  world.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+  // The shipped policy loads and DRIVES: agents move and produce finite poses,
+  // and some arrive. (Scene-specific reach rate is measured Python-side against
+  // the story meta the policy expects — ~57%; here we assert usability in C++.)
+  int moved = 0, reached = 0;
+  for (int i = 0; i < N; ++i) {
+    EXPECT_TRUE(std::isfinite(pos[2 * i]) && std::isfinite(pos[2 * i + 1]));
+    const float dx = pos[2 * i] - pos0[2 * i], dy = pos[2 * i + 1] - pos0[2 * i + 1];
+    if (std::sqrt(dx * dx + dy * dy) > 1.0f)
+      ++moved;
+    reached += rc[i];
+  }
+  EXPECT_GT(moved, N / 2);
+  EXPECT_GT(reached, 0);
+}
+#endif

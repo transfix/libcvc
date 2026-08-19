@@ -23,6 +23,8 @@
 #include <cstdio>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
+#include <exception>
+#include <utility>
 #include <vector>
 
 int main() {
@@ -59,10 +61,19 @@ int main() {
   cfg.reach_tol = 0.8f;
   cfg.freeze_sense = true; // known map (no fog); flip off for discover-as-you-go
 
-  // 3. Build the swarm — a default bias-initialized policy needs NO weights file
-  //    (load a trained coef_mlp::load("coef_mlp.cvcnav") for learned driving).
+  // 3. Build the swarm. Prefer an installed/trained policy (resolved from the
+  //    install prefix or CVC_NAV_WEIGHTS), fall back to the zero-setup default
+  //    bias policy (needs no weights file at all).
+  coef_mlp policy = [] {
+    try {
+      return coef_mlp::load(coef_mlp::default_weights_path());
+    } catch (const std::exception &) {
+      std::puts("(no installed .cvcnav found — using the default bias policy)");
+      return coef_mlp::default_biased();
+    }
+  }();
   const int N = 2000;
-  sim_world world = sim_world::from_occupancy(cfg, occ.data(), coef_mlp::default_biased(), N, 42);
+  sim_world world = sim_world::from_occupancy(cfg, occ.data(), std::move(policy), N, 42);
 
   // 4. Run. Each tick: snapshot() gives world poses to hand a renderer.
   std::vector<float> pos(2 * N), heading(N), speed(N);

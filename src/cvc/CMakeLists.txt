@@ -1083,6 +1083,12 @@ configure_file(
 # Install a navigation policy to the canonical location when one is supplied
 # (trained + exported from GRL-SNAM via coef_export.py). Optional: an app can
 # always pass an explicit path to coef_mlp::load / sim_world.
+# Default to the reference policy shipped in the tree (exported from GRL-SNAM's
+# CoefMLP; retrain + re-export via grl_snam/tools/coef_train.py). A build can
+# override -DCVC_NAV_WEIGHTS_FILE=<path> to install its own trained policy.
+if(NOT CVC_NAV_WEIGHTS_FILE AND EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+  set(CVC_NAV_WEIGHTS_FILE "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+endif()
 if(CVC_NAV_WEIGHTS_FILE)
   install(FILES "${CVC_NAV_WEIGHTS_FILE}"
     DESTINATION ${CMAKE_INSTALL_DATADIR}/cvc/nav RENAME coef_mlp.cvcnav COMPONENT libcvc)
