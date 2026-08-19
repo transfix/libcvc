@@ -28,7 +28,8 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
       m_opacityFunc(vtkSmartPointer<vtkPiecewiseFunction>::New()),
       m_volumeProperty(vtkSmartPointer<vtkVolumeProperty>::New()), m_dataMin(0.0), m_dataMax(1.0),
       m_shading(true), m_ambient(0.3), m_diffuse(0.6), m_specular(0.2), m_specularPower(10.0),
-      m_scalarOpacityUnitDistance(1.0), m_sampleDistance(0.5), m_autoAdjustSampleDistances(true) {
+      m_scalarOpacityUnitDistance(1.0), m_sampleDistance(0.5), m_autoAdjustSampleDistances(true),
+      m_volumetricScattering(0.0), m_giReach(0.0), m_scatteringAnisotropy(0.0) {
   // Initialize with empty 1x1x1 volume to avoid VTK errors before data is loaded
   m_imageData->SetDimensions(1, 1, 1);
   m_imageData->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -60,6 +61,12 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
   m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
   m_mapper->SetSampleDistance(m_sampleDistance);
 
+  // Volumetric scattering / self-shadowing (off by default — a plain absorption
+  // volume). vtkSmartVolumeMapper forwards these to its GPU ray-cast delegate.
+  m_mapper->SetVolumetricScatteringBlending(static_cast<float>(m_volumetricScattering));
+  m_mapper->SetGlobalIlluminationReach(static_cast<float>(m_giReach));
+  m_volumeProperty->SetScatteringAnisotropy(static_cast<float>(m_scatteringAnisotropy));
+
   m_vtkVolume->SetProperty(m_volumeProperty);
 
   // Initialize state tree with all rendering attributes
@@ -77,6 +84,11 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
     getState("scalar_opacity_unit_distance").value(m_scalarOpacityUnitDistance);
     getState("sample_distance").value(m_sampleDistance);
     getState("auto_adjust_sample_distances").value(m_autoAdjustSampleDistances ? 1 : 0);
+
+    // Volumetric scattering / self-shadowing
+    getState("volumetric_scattering").value(m_volumetricScattering);
+    getState("gi_reach").value(m_giReach);
+    getState("scattering_anisotropy").value(m_scatteringAnisotropy);
 
     // Data range (will be updated when volume is loaded)
     getState("data_min").value(m_dataMin);
@@ -519,6 +531,14 @@ void VolumeNode::setScalarOpacityUnitDistance(double value) {
 
 void VolumeNode::setSampleDistance(double value) { getState("sample_distance").value(value); }
 
+void VolumeNode::setVolumetricScattering(double value) {
+  getState("volumetric_scattering").value(value);
+}
+void VolumeNode::setGlobalIlluminationReach(double value) { getState("gi_reach").value(value); }
+void VolumeNode::setScatteringAnisotropy(double value) {
+  getState("scattering_anisotropy").value(value);
+}
+
 void VolumeNode::setAutoAdjustSampleDistances(bool enabled) {
   getState("auto_adjust_sample_distances").value(enabled ? 1 : 0);
 }
@@ -617,6 +637,24 @@ void VolumeNode::handleStateChanged(const std::string &childState) {
       if (m_mapper) {
         m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
       }
+    });
+  } else if (childState == "volumetric_scattering") {
+    runOnMainThread([this]() {
+      m_volumetricScattering = getState("volumetric_scattering").value<double>();
+      if (m_mapper)
+        m_mapper->SetVolumetricScatteringBlending(static_cast<float>(m_volumetricScattering));
+    });
+  } else if (childState == "gi_reach") {
+    runOnMainThread([this]() {
+      m_giReach = getState("gi_reach").value<double>();
+      if (m_mapper)
+        m_mapper->SetGlobalIlluminationReach(static_cast<float>(m_giReach));
+    });
+  } else if (childState == "scattering_anisotropy") {
+    runOnMainThread([this]() {
+      m_scatteringAnisotropy = getState("scattering_anisotropy").value<double>();
+      if (m_volumeProperty)
+        m_volumeProperty->SetScatteringAnisotropy(static_cast<float>(m_scatteringAnisotropy));
     });
   } else if (childState == "data_min" || childState == "data_max") {
     runOnMainThread([this]() {

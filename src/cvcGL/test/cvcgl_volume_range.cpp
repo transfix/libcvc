@@ -123,6 +123,34 @@ void test_inplace_fill_then_resetvolume() {
   std::printf("  ok: in-place fill + setVolume picks up the real range\n");
 }
 
+// Volumetric scattering / self-shadowing controls forward to the mapper and
+// round-trip through the state tree. SceneNode dispatches state handlers inline on
+// the owner thread (setInstanceThreading(false)), so a setter's effect is visible
+// synchronously here — the getter reflects the value the handler pushed to the
+// vtkSmartVolumeMapper / vtkVolumeProperty. Defaults are 0 (a plain absorption
+// volume) so existing volumes are unchanged until a caller opts in.
+void test_scattering_forwards() {
+  SceneGraph sg;
+  auto node = sg.addGraphics("scat", make_volume(1.0f));
+  auto *vn = dynamic_cast<VolumeNode *>(node.get());
+  assert(vn != nullptr);
+
+  assert(vn->getVolumetricScattering() == 0.0);
+  assert(vn->getGlobalIlluminationReach() == 0.0);
+  assert(vn->getScatteringAnisotropy() == 0.0);
+
+  // Each setter writes state; SceneNode fires the handler inline, which pushes the
+  // value to the mapper/property AND updates the cached member the getter returns —
+  // so a getter that reflects the set value proves the whole reactive path ran.
+  vn->setVolumetricScattering(1.5);
+  vn->setGlobalIlluminationReach(0.6);
+  vn->setScatteringAnisotropy(0.7);
+  assert(std::fabs(vn->getVolumetricScattering() - 1.5) < 1e-9);
+  assert(std::fabs(vn->getGlobalIlluminationReach() - 0.6) < 1e-9);
+  assert(std::fabs(vn->getScatteringAnisotropy() - 0.7) < 1e-9);
+  std::printf("  ok: volumetric scattering / GI reach / anisotropy forward + round-trip\n");
+}
+
 } // namespace
 
 int main() {
@@ -130,6 +158,7 @@ int main() {
   test_constant_volume_is_not_opaque();
   test_real_range_still_ramps();
   test_inplace_fill_then_resetvolume();
+  test_scattering_forwards();
   std::printf("cvcgl_volume_range: OK\n");
   return 0;
 }

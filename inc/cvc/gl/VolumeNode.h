@@ -77,6 +77,20 @@ public:
   void setAutoAdjustSampleDistances(bool enabled);
   bool getAutoAdjustSampleDistances() const { return m_autoAdjustSampleDistances; }
 
+  // Volumetric scattering / self-shadowing (GPU ray-cast; only active when
+  // shading is on). `blend` in [0,2]: 0 = surfacic approximation only (no
+  // volumetric shadows), 1 = smart blend of the two models, 2 = full volumetric
+  // multi-scattering — this is what sculpts a soft field into lit tops and dim
+  // undersides. `reach` in [0,1] trades shadow locality (0, cheap) for full
+  // shadows (1, costlier). `g` in [-1,1] is the Henyey-Greenstein phase function
+  // asymmetry: > 0 forward-scatters (as clouds do), 0 is isotropic.
+  void setVolumetricScattering(double blend);
+  double getVolumetricScattering() const { return m_volumetricScattering; }
+  void setGlobalIlluminationReach(double reach);
+  double getGlobalIlluminationReach() const { return m_giReach; }
+  void setScatteringAnisotropy(double g);
+  double getScatteringAnisotropy() const { return m_scatteringAnisotropy; }
+
   // Implement GraphicsNode abstract methods
   cvc::bounding_box getBoundingBox() const override;
 
@@ -119,6 +133,9 @@ private:
   double m_scalarOpacityUnitDistance;
   double m_sampleDistance;
   bool m_autoAdjustSampleDistances;
+  double m_volumetricScattering;
+  double m_giReach;
+  double m_scatteringAnisotropy;
 
   cvc::state *m_stateNode;
   boost::signals2::connection m_dataConnection;
