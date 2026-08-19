@@ -419,6 +419,11 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
   sg.addGraphics(name, wg);
   tree.woodNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(name));
   tree.woodNode->setUseSingleColor(false);
+  // High material ambient softens the shadow map's self-shadowing on the thin
+  // trunks/needles: a fully self-shadowed sample still keeps this much light, so
+  // the aliased line-needle shadows read as a gentle dapple, not harsh dark speckle.
+  tree.woodNode->setAmbient(0.5);
+  tree.woodNode->setDiffuse(0.8);
   addBark(*tree.woodNode);
   tree.woodBuf.resize(wg.points().size() * 3);
   for (size_t v = 0; v < wg.points().size(); ++v) {
@@ -434,6 +439,8 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
     tree.needleNode->setRenderMode(GeometryRenderMode::LINES);
     tree.needleNode->setUseSingleColor(true);
     tree.needleNode->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
+    tree.needleNode->setAmbient(0.55); // soften self-shadow speckle on the line needles
+    tree.needleNode->setDiffuse(0.75);
     tree.needleBuf.resize(ng.points().size() * 3);
     for (size_t v = 0; v < ng.points().size(); ++v) {
       tree.needleBuf[v * 3] = ng.points()[v][0];
@@ -950,16 +957,14 @@ void reposeTree(Tree &tree, double t) {
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  bool offscreen = false, useShadows = false;
+  bool offscreen = false, noShadows = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0;
   std::string png, captureStr, outDir;
   po::options_description desc("lsystem_forest — a pure-C++ cvcGL island demo\nOptions");
   desc.add_options()("help,h", "show this help and exit")                                //
       ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")         //
-      ("shadows", po::bool_switch(&useShadows),                                          //
-       "cast tree shadows via a shadow map (OFF by default: the thin trunks and line "   //
-       "needles alias it into displaced, speckled shadows)")                             //
+      ("no-shadows", po::bool_switch(&noShadows), "disable tree shadows (a shadow map)") //
       ("frames", po::value<int>(&frames)->default_value(0),                              //
        "stop after N frames (0 = run until the window closes)")                          //
       ("png", po::value<std::string>(&png)->default_value(""),                           //
@@ -1114,16 +1119,11 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.66, 0.71, 0.74);  // horizon (screen bottom)
   view.renderer()->SetBackground2(0.23, 0.44, 0.80); // zenith (screen top)
 
-  // Tree-cast shadows are OPT-IN (--shadows), OFF by default. A shadow MAP can't
-  // represent this forest well: the wood is thin cylinders and the needles are
-  // lines, so even at high resolution they alias into displaced, speckled, self-
-  // shadowing artifacts on the ground and trunks. The scene reads cleaner and
-  // brighter without them — and the shadow that MATTERS, the cloud's soft dapple on
-  // the ground, is a terrain texture (computeCloudShadow), wholly independent of
-  // this pass. When on, use a high-res map re-baked every frame during a capture so
-  // the wind-blown shadows don't snap. (setShadowResolution demonstrates the cvcGL
-  // knob; the aliasing is inherent to line/thin geometry, not the resolution.)
-  const bool shadows = useShadows && sg.setShadowsEnabled(true);
+  // Tree-cast shadows on (--no-shadows to drop them). A high-res map keeps the thin
+  // trunks/needles from tearing badly; the trees' high material ambient (set above)
+  // softens the residual self-shadow speckle that a shadow map always gets on line/
+  // thin geometry. Capture re-bakes EVERY frame so the wind-blown shadows don't snap.
+  const bool shadows = !noShadows && sg.setShadowsEnabled(true);
   if (shadows) {
     sg.setShadowResolution(2048);
     sg.setShadowUpdateInterval(capturing ? 1 : 3);
