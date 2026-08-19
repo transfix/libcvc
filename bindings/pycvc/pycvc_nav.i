@@ -15,6 +15,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <algorithm>
 #include <cstring>
@@ -1065,6 +1066,130 @@ PyObject *nav_sim_world_retarget(PyObject *handle, int i, double gx_n, double gy
 {
   sim_world_from(handle)->retarget(i, static_cast<float>(gx_n), static_cast<float>(gy_n));
   Py_RETURN_NONE;
+}
+
+// ── sim_thread: run a sim_world off the render thread ───────────────────────
+// The C++ worker is a real thread that never touches the GIL (it runs only
+// cvc::nav kernels), so it advances genuinely concurrently with Python. The
+// sim_thread capsule holds a reference to the sim_world capsule so the world
+// outlives the thread; ~sim_thread joins before the world is released.
+
+static const char *kSimThreadCapsule = "cvc.nav.sim_thread";
+
+static void sim_thread_capsule_dtor(PyObject *cap)
+{
+  auto *st = static_cast<cvc::nav::sim_thread *>(PyCapsule_GetPointer(cap, kSimThreadCapsule));
+  delete st; // ~sim_thread stops+joins the worker before the world can be freed
+  PyObject *swcap = static_cast<PyObject *>(PyCapsule_GetContext(cap));
+  Py_XDECREF(swcap);
+}
+
+static cvc::nav::sim_thread *sim_thread_from(PyObject *cap)
+{
+  if (!cap || !PyCapsule_CheckExact(cap))
+    throw std::invalid_argument("pycvc.nav_sim_thread_*: not a sim_thread handle");
+  auto *st = static_cast<cvc::nav::sim_thread *>(PyCapsule_GetPointer(cap, kSimThreadCapsule));
+  if (!st)
+    throw std::invalid_argument("pycvc.nav_sim_thread_*: null handle");
+  return st;
+}
+
+PyObject *nav_sim_thread_create(PyObject *world_handle, double hz)
+{
+  cvc::nav::sim_world *sw = sim_world_from(world_handle); // validates the handle
+  auto *st = new cvc::nav::sim_thread(*sw, hz);
+  PyObject *cap = PyCapsule_New(st, kSimThreadCapsule, sim_thread_capsule_dtor);
+  if (!cap) {
+    delete st;
+    throw std::runtime_error("pycvc.nav_sim_thread_create: capsule alloc failed");
+  }
+  PyCapsule_SetContext(cap, world_handle); // keep the world alive under us
+  Py_INCREF(world_handle);
+  return cap;
+}
+
+PyObject *nav_sim_thread_start(PyObject *cap)
+{
+  sim_thread_from(cap)->start();
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_sim_thread_stop(PyObject *cap)
+{
+  cvc::nav::sim_thread *st = sim_thread_from(cap);
+  Py_BEGIN_ALLOW_THREADS
+  st->stop();
+  Py_END_ALLOW_THREADS
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_sim_thread_retarget(PyObject *cap, int i, double gx_n, double gy_n)
+{
+  sim_thread_from(cap)->retarget(i, static_cast<float>(gx_n), static_cast<float>(gy_n));
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_sim_thread_set_paused(PyObject *cap, int paused)
+{
+  sim_thread_from(cap)->set_paused(paused != 0);
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_sim_thread_set_rate(PyObject *cap, double hz)
+{
+  sim_thread_from(cap)->set_rate(hz);
+  Py_RETURN_NONE;
+}
+
+PyObject *nav_sim_thread_ticks(PyObject *cap)
+{
+  return PyLong_FromLong(sim_thread_from(cap)->ticks());
+}
+
+PyObject *nav_sim_thread_behind(PyObject *cap)
+{
+  return PyLong_FromLong(sim_thread_from(cap)->behind());
+}
+
+// Lock-free read of the latest published frame -> (pos (N,2) world f32, heading
+// f32, speed f32, mode i32, reached bool, tick int), or None before the first.
+PyObject *nav_sim_thread_read(PyObject *cap)
+{
+  std::shared_ptr<const cvc::nav::sim_thread::snapshot> s = sim_thread_from(cap)->read();
+  if (!s)
+    Py_RETURN_NONE;
+  const int N = s->n;
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *pos = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *hd = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *sp = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *md = PyArray_SimpleNew(1, &d1, NPY_INT32);
+  PyObject *rc = PyArray_SimpleNew(1, &d1, NPY_BOOL);
+  if (!pos || !hd || !sp || !md || !rc) {
+    Py_XDECREF(pos);
+    Py_XDECREF(hd);
+    Py_XDECREF(sp);
+    Py_XDECREF(md);
+    Py_XDECREF(rc);
+    throw std::runtime_error("pycvc.nav_sim_thread_read: alloc failed");
+  }
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(pos)), s->pos.data(),
+              sizeof(float) * 2 * N);
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(hd)), s->heading.data(),
+              sizeof(float) * N);
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(sp)), s->speed.data(),
+              sizeof(float) * N);
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(md)), s->mode.data(),
+              sizeof(int) * N);
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(rc)), s->reached.data(),
+              sizeof(std::uint8_t) * N);
+  PyObject *tup = PyTuple_Pack(6, pos, hd, sp, md, rc, PyLong_FromLong(s->tick));
+  Py_DECREF(pos);
+  Py_DECREF(hd);
+  Py_DECREF(sp);
+  Py_DECREF(md);
+  Py_DECREF(rc);
+  return tup;
 }
 
 PyObject *nav_carrot_step(PyObject *on, PyObject *goal, PyObject *th, PyObject *sp, PyObject *phi,
