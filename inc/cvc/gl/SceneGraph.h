@@ -99,6 +99,13 @@ public:
   // last-baked map in between. Takes effect immediately, no need to toggle shadows.
   void setShadowUpdateInterval(int frames);
   int shadowUpdateInterval() const { return m_shadowInterval; }
+
+  // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
+  // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
+  // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper
+  // but costs VRAM/fill. Takes effect immediately.
+  void setShadowResolution(int pixels);
+  int shadowResolution() const { return m_shadowResolution; }
   void update();
 
   // Process pending events on the main thread
@@ -244,6 +251,7 @@ private:
   int m_nextLightId = 1;
   bool m_shadowsEnabled = false;
   int m_shadowInterval = 1;                             // re-bake every N frames
+  int m_shadowResolution = 1024;                        // shadow-map pixels per side
   vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker; // held so the interval is live
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under

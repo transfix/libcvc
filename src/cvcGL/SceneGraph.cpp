@@ -745,6 +745,13 @@ void SceneGraph::setShadowUpdateInterval(int frames) {
   requestRender();
 }
 
+void SceneGraph::setShadowResolution(int pixels) {
+  m_shadowResolution = pixels < 64 ? 64 : pixels;
+  if (m_shadowBaker)
+    m_shadowBaker->SetResolution(m_shadowResolution);
+  requestRender();
+}
+
 bool SceneGraph::setShadowsEnabled(bool enabled) {
   m_shadowsEnabled = false;
   if (!m_renderer)
@@ -761,7 +768,8 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   // view never gets set up.
   vtkSmartPointer<StridedShadowBaker> baker = vtkSmartPointer<StridedShadowBaker>::New();
   baker->Interval = m_shadowInterval;
-  m_shadowBaker = baker; // kept so setShadowUpdateInterval() can retune it live
+  baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
+  m_shadowBaker = baker;                    // kept so the interval/resolution stay live
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
 

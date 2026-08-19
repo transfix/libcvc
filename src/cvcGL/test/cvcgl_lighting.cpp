@@ -88,6 +88,16 @@ void test_shadow_toggle() {
   assert(!sg.shadowsEnabled());
   std::printf("  ok: shadows refuse honestly with no render target\n");
 
+  // Shadow quality knobs round-trip (interval + resolution), and the resolution is
+  // clamped off silly-small values. These hold whether or not shadows are live.
+  sg.setShadowUpdateInterval(3);
+  assert(sg.shadowUpdateInterval() == 3);
+  sg.setShadowResolution(2048);
+  assert(sg.shadowResolution() == 2048);
+  sg.setShadowResolution(1); // clamped up
+  assert(sg.shadowResolution() >= 64);
+  sg.setShadowResolution(1024);
+
   SceneRenderer sr(sg, 64, 64, true);
   const bool on = sg.setShadowsEnabled(true);
   assert(on == sg.shadowsEnabled());
