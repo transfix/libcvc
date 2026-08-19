@@ -91,8 +91,8 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
   }
 }
 
-sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
-                                    int n, unsigned seed) {
+void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, unsigned seed,
+                             float *o, float *goal, float *color) {
   const long hw = static_cast<long>(cfg.rows) * cfg.cols;
   std::vector<int> free_cells;
   for (long i = 0; i < hw; ++i)
@@ -112,7 +112,6 @@ sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, 
     onx = static_cast<float>((x - cfg.cx) * cfg.scale);
     ony = static_cast<float>((y - cfg.cy) * cfg.scale);
   };
-  std::vector<float> o(2 * n), goal(2 * n), color(3 * n);
   for (int i = 0; i < n; ++i) {
     cell_to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
     cell_to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
@@ -120,6 +119,12 @@ sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, 
     color[3 * i + 1] = col(rng);
     color[3 * i + 2] = col(rng);
   }
+}
+
+sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
+                                    int n, unsigned seed) {
+  std::vector<float> o(2 * n), goal(2 * n), color(3 * n);
+  scatter_free(cfg, occ, n, seed, o.data(), goal.data(), color.data());
   return sim_world(cfg, occ, occ, std::move(model), o.data(), goal.data(), color.data(), n);
 }
 

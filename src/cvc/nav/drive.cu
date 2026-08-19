@@ -28,10 +28,14 @@
 // box). Manual bilinear — hardware texture filtering's 9-bit weights are ~1e-3,
 // far outside the contract. One thread per agent.
 
+#include <algorithm>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/grid_nav.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/nav/sim_world_cuda.h>
 #include <stdexcept>
 #include <vector>
 
@@ -372,6 +376,405 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   cudaFree(d_act);
   cudaFree(d_woff);
   cudaFree(d_boff);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Device-resident sim_world_cuda (see sim_world_cuda.h). Field, .cvcnav weights
+// and every SoA agent column (pose + full carrot-FSM state) stay on the GPU
+// across ticks; step() launches sample -> carrot FSM -> fused drive ->
+// reached/park with no host round-trip. Float-equivalent to CPU sim_world::step
+// with freeze_sense=true (shared static map): reuses the same device math above
+// and transcribes carrot_step / the reached-park loop one thread per agent.
+
+namespace {
+
+// carrot_step transcription (drive.cpp) — reads nrm (phi unused), advances the
+// per-agent FSM columns in place, writes the steering carrot. Purely per-agent.
+__global__ void carrot_kernel(const float *o, const float *goal, const float *th, float *sp,
+                              const float *nrm, int *stall, int *mode, float *turn, float *dhit,
+                              float *best, float *wall_entry, unsigned char *we_valid,
+                              const unsigned char *tracking, float *pos_hist, int *hist_count,
+                              const unsigned char *parked, const unsigned char *active,
+                              float reach_tol, float a_max, float dt, int n, float *carrot_out) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n)
+    return;
+  const int SEEK = 0, WALL = 1;
+  const float ox = o[2 * i], oy = o[2 * i + 1];
+  const float gx = goal[2 * i], gy = goal[2 * i + 1];
+  const float nx = nrm[2 * i], ny = nrm[2 * i + 1];
+  const float dgx = gx - ox, dgy = gy - oy;
+  const float dg = sqrtf(dgx * dgx + dgy * dgy);
+  const float inv = 1.0f / (dg + 1e-6f);
+  const float gdx = dgx * inv, gdy = dgy * inv;
+  const float tangx = -ny, tangy = nx;
+  const bool tracked = tracking[i] && active[i];
+
+  // Branch 1 — stall accounting (non-tracking closing test vs tracking ring).
+  const bool closing = dg < best[i] - 1e-3f;
+  const int stall_nt = closing ? 0 : stall[i] + 1;
+  const float best_nt = closing ? dg : best[i];
+  const int slot = hist_count[i] % 40;
+  if (tracked) {
+    pos_hist[i * 80 + slot * 2] = ox;
+    pos_hist[i * 80 + slot * 2 + 1] = oy;
+  }
+  const int oldest = (hist_count[i] + 1) % 40;
+  const float phx = pos_hist[i * 80 + oldest * 2];
+  const float phy = pos_hist[i * 80 + oldest * 2 + 1];
+  const float moved = sqrtf((ox - phx) * (ox - phx) + (oy - phy) * (oy - phy));
+  const bool have = hist_count[i] >= 40;
+  const bool frozen = have && (moved < 0.15f) && (dg > reach_tol);
+  const int stall_tk = have ? (frozen ? stall[i] + 1 : 0) : stall[i];
+  const float best_tk = fminf(best[i], dg);
+  if (tracked)
+    hist_count[i] += 1;
+  stall[i] = tracking[i] ? stall_tk : stall_nt;
+  best[i] = tracking[i] ? best_tk : best_nt;
+
+  // Branch 2 — seek -> wall entry.
+  if (mode[i] == SEEK && stall[i] > 70) {
+    dhit[i] = dg;
+    wall_entry[2 * i] = ox;
+    wall_entry[2 * i + 1] = oy;
+    we_valid[i] = 1;
+    turn[i] = (tangx * gdx + tangy * gdy) >= 0.0f ? 1.0f : -1.0f;
+    mode[i] = WALL;
+    stall[i] = 0;
+  }
+
+  // Branch 3 — carrot placement (uses the just-updated mode).
+  float cx, cy;
+  if (mode[i] == WALL) {
+    const float twx = turn[i] * tangx, twy = turn[i] * tangy;
+    cx = ox + (0.6f * twx + 0.4f * nx) * 1.6f;
+    cy = oy + (0.6f * twy + 0.4f * ny) * 1.6f;
+  } else {
+    const float m = fminf(1.8f, dg);
+    cx = ox + gdx * m;
+    cy = oy + gdy * m;
+  }
+
+  // Branch 4 — wall exit (affects the next tick's mode).
+  const float wex = ox - wall_entry[2 * i], wey = oy - wall_entry[2 * i + 1];
+  const bool esc_tk = we_valid[i] && (sqrtf(wex * wex + wey * wey) > 2.0f);
+  const bool exit_tk = esc_tk || (stall[i] > 240);
+  const bool exit_nt = (dg < dhit[i] - 1.2f) || (stall[i] > 240);
+  if (mode[i] == WALL && (tracking[i] ? exit_tk : exit_nt)) {
+    mode[i] = SEEK;
+    best[i] = dg;
+    stall[i] = 0;
+  }
+
+  // Branch 5 — parked (brake; carrot straight ahead so steering error is 0).
+  if (parked[i]) {
+    float spv = sp[i] - a_max * dt;
+    if (spv < 0.0f)
+      spv = 0.0f;
+    sp[i] = spv;
+    const float ax = cosf(th[i]), ay = sinf(th[i]);
+    const float m = fmaxf(1e-3f, spv * 2.0f);
+    cx = ox + ax * m;
+    cy = oy + ay * m;
+  }
+
+  carrot_out[2 * i] = cx;
+  carrot_out[2 * i + 1] = cy;
+}
+
+// reached/park (single-goal) — mirrors sim_world::step's metrics loop.
+__global__ void reached_park_kernel(const float *o, const float *goal, float reach_tol,
+                                    unsigned char *reached, unsigned char *parked,
+                                    const unsigned char *active, int n) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n)
+    return;
+  const float dx = goal[2 * i] - o[2 * i], dy = goal[2 * i + 1] - o[2 * i + 1];
+  const float dg = sqrtf(dx * dx + dy * dy);
+  const bool r = dg < reach_tol;
+  reached[i] = r ? 1 : 0;
+  if (r && !parked[i] && active[i])
+    parked[i] = 1;
+}
+
+// Live retarget of one agent — mirrors sim_world::retarget.
+__global__ void retarget_kernel(int i, float gx, float gy, float *goal, const float *o, float *best,
+                                float *init, unsigned char *tracking, unsigned char *reached,
+                                unsigned char *parked) {
+  goal[2 * i] = gx;
+  goal[2 * i + 1] = gy;
+  const float dx = gx - o[2 * i], dy = gy - o[2 * i + 1];
+  const float d = sqrtf(dx * dx + dy * dy);
+  best[i] = fminf(best[i], d);
+  init[i] = fmaxf(fmaxf(init[i], d), 1e-6f);
+  tracking[i] = 1;
+  reached[i] = 0;
+  parked[i] = 0;
+}
+
+} // namespace
+
+struct sim_world_cuda::impl {
+  int n = 0, rows = 0, cols = 0;
+  field_stack fs; // world<->grid constants; .data unused (device is d_field)
+  dev_veh v;      // vehicle/integration params
+  float reach_tol = 0.8f, a_max = 1.5f, dt = 0.06f;
+  double scale = 1.0, cx = 0.0, cy = 0.0; // pose -> world for snapshot
+  int in = 0, out = 0, num_layers = 0;
+
+  float *d_field = nullptr;                                   // [3*H*W]
+  float *d_w = nullptr, *d_ob = nullptr;                      // policy weights + out bias
+  int *d_rows = nullptr, *d_cols = nullptr, *d_act = nullptr; // layer shapes/acts
+  long *d_woff = nullptr, *d_boff = nullptr;                  // layer offsets
+  float *d_o = nullptr, *d_goal = nullptr, *d_th = nullptr, *d_sp = nullptr, *d_color = nullptr;
+  int *d_stall = nullptr, *d_mode = nullptr, *d_hist_count = nullptr;
+  float *d_turn = nullptr, *d_dhit = nullptr, *d_best = nullptr, *d_init = nullptr;
+  float *d_wall_entry = nullptr, *d_pos_hist = nullptr;
+  unsigned char *d_we_valid = nullptr, *d_tracking = nullptr, *d_parked = nullptr;
+  unsigned char *d_reached = nullptr, *d_active = nullptr;
+  float *d_phi = nullptr, *d_nrm = nullptr, *d_carrot = nullptr, *d_minclr = nullptr; // scratch
+
+  ~impl() {
+    for (void *p :
+         {(void *)d_field,      (void *)d_w,        (void *)d_ob,       (void *)d_rows,
+          (void *)d_cols,       (void *)d_act,      (void *)d_woff,     (void *)d_boff,
+          (void *)d_o,          (void *)d_goal,     (void *)d_th,       (void *)d_sp,
+          (void *)d_color,      (void *)d_stall,    (void *)d_mode,     (void *)d_hist_count,
+          (void *)d_turn,       (void *)d_dhit,     (void *)d_best,     (void *)d_init,
+          (void *)d_wall_entry, (void *)d_pos_hist, (void *)d_we_valid, (void *)d_tracking,
+          (void *)d_parked,     (void *)d_reached,  (void *)d_active,   (void *)d_phi,
+          (void *)d_nrm,        (void *)d_carrot,   (void *)d_minclr})
+      cudaFree(p);
+  }
+};
+
+bool sim_world_cuda::available() {
+  int c = 0;
+  return cudaGetDeviceCount(&c) == cudaSuccess && c > 0;
+}
+
+sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t *occ,
+                               coef_mlp model, const float *o, const float *goal,
+                               const float *color, int n)
+    : n_(n) {
+  if (!available())
+    throw std::runtime_error("cvc::nav::sim_world_cuda: no CUDA device");
+  p_ = new impl();
+  impl &s = *p_;
+  s.n = n;
+  s.rows = cfg.rows;
+  s.cols = cfg.cols;
+  const long hw = static_cast<long>(cfg.rows) * cfg.cols;
+
+  // 1. Build the field on the host (one EDT) and clip phi — identical to
+  //    sim_world::rebuild_field over the initial (static) map.
+  const sdf_field f =
+      build_sdf(occ, cfg.rows, cfg.cols, cfg.min_x, cfg.min_y, cfg.max_x, cfg.max_y, cfg.scale);
+  const float clip = static_cast<float>(2.0 * cfg.max_x * cfg.scale);
+  std::vector<float> field(3 * hw);
+  for (long i = 0; i < hw; ++i) {
+    field[i] = std::min(std::max(f.phi[i], -clip), clip);
+    field[hw + i] = f.normal_x[i];
+    field[2 * hw + i] = f.normal_y[i];
+  }
+
+  s.fs.M = 1;
+  s.fs.H = cfg.rows;
+  s.fs.W = cfg.cols;
+  s.fs.mnx = cfg.min_x;
+  s.fs.mny = cfg.min_y;
+  s.fs.mxx = cfg.max_x;
+  s.fs.mxy = cfg.max_y;
+  s.fs.cx = cfg.cx;
+  s.fs.cy = cfg.cy;
+  s.fs.S = cfg.scale;
+  s.scale = cfg.scale;
+  s.cx = cfg.cx;
+  s.cy = cfg.cy;
+  s.reach_tol = cfg.reach_tol;
+  s.a_max = cfg.veh.a_max;
+  s.dt = cfg.veh.dt;
+  s.v.rr = cfg.veh.rr;
+  s.v.d_hat = cfg.veh.d_hat;
+  s.v.dt = cfg.veh.dt;
+  s.v.vmax = cfg.veh.vmax;
+  s.v.L = cfg.veh.L;
+  s.v.delta_max = cfg.veh.delta_max;
+  s.v.a_max = cfg.veh.a_max;
+  s.v.a_lat_max = cfg.veh.a_lat_max;
+  s.v.k_steer = cfg.veh.k_steer;
+  s.v.nsub = cfg.veh.nsub;
+  s.v.allow_reverse = cfg.veh.allow_reverse ? 1 : 0;
+
+  // 2. Host-side agent init (th, best, init) — identical to sim_world's ctor.
+  std::vector<float> th(n), best(n), init(n), turn(n, 1.0f);
+  std::vector<unsigned char> active(n, 1);
+  for (int i = 0; i < n; ++i) {
+    const float dx = goal[2 * i] - o[2 * i], dy = goal[2 * i + 1] - o[2 * i + 1];
+    th[i] = std::atan2(dy, dx);
+    const float d = std::sqrt(dx * dx + dy * dy);
+    best[i] = d;
+    init[i] = std::max(d, 1e-6f);
+  }
+
+  // 3. Flat policy weights (folded out-bias) — same layout as drive_step_cuda.
+  const coef_mlp::flat_layers fl = model.export_flat();
+  s.in = fl.in;
+  s.out = fl.out;
+  s.num_layers = fl.num_layers;
+
+  // 4. Allocate every resident buffer + upload. Zero-init the FSM columns that
+  //    start at 0 (stall/mode/hist_count/dhit/wall_entry/pos_hist/we_valid/
+  //    tracking/parked/reached); turn=1 and active=1 are uploaded.
+  auto MALLOC = [&](void **d, size_t bytes, const char *w) { cuda_check(cudaMalloc(d, bytes), w); };
+  auto H2D = [&](void *d, const void *h, size_t bytes, const char *w) {
+    cuda_check(cudaMemcpy(d, h, bytes, cudaMemcpyHostToDevice), w);
+  };
+  auto ZERO = [&](void *d, size_t bytes, const char *w) { cuda_check(cudaMemset(d, 0, bytes), w); };
+  const size_t fn = static_cast<size_t>(n);
+
+  MALLOC((void **)&s.d_field, 3 * hw * sizeof(float), "field");
+  H2D(s.d_field, field.data(), 3 * hw * sizeof(float), "H2D field");
+  MALLOC((void **)&s.d_w, fl.data.size() * sizeof(float), "w");
+  MALLOC((void **)&s.d_ob, fl.out_bias_off.size() * sizeof(float), "ob");
+  MALLOC((void **)&s.d_rows, fl.num_layers * sizeof(int), "rows");
+  MALLOC((void **)&s.d_cols, fl.num_layers * sizeof(int), "cols");
+  MALLOC((void **)&s.d_act, fl.num_layers * sizeof(int), "act");
+  MALLOC((void **)&s.d_woff, fl.num_layers * sizeof(long), "woff");
+  MALLOC((void **)&s.d_boff, fl.num_layers * sizeof(long), "boff");
+  H2D(s.d_w, fl.data.data(), fl.data.size() * sizeof(float), "H2D w");
+  H2D(s.d_ob, fl.out_bias_off.data(), fl.out_bias_off.size() * sizeof(float), "H2D ob");
+  H2D(s.d_rows, fl.rows.data(), fl.num_layers * sizeof(int), "H2D rows");
+  H2D(s.d_cols, fl.cols.data(), fl.num_layers * sizeof(int), "H2D cols");
+  H2D(s.d_act, fl.act.data(), fl.num_layers * sizeof(int), "H2D act");
+  H2D(s.d_woff, fl.w_off.data(), fl.num_layers * sizeof(long), "H2D woff");
+  H2D(s.d_boff, fl.b_off.data(), fl.num_layers * sizeof(long), "H2D boff");
+
+  MALLOC((void **)&s.d_o, 2 * fn * sizeof(float), "o");
+  MALLOC((void **)&s.d_goal, 2 * fn * sizeof(float), "goal");
+  MALLOC((void **)&s.d_th, fn * sizeof(float), "th");
+  MALLOC((void **)&s.d_sp, fn * sizeof(float), "sp");
+  MALLOC((void **)&s.d_color, 3 * fn * sizeof(float), "color");
+  H2D(s.d_o, o, 2 * fn * sizeof(float), "H2D o");
+  H2D(s.d_goal, goal, 2 * fn * sizeof(float), "H2D goal");
+  H2D(s.d_th, th.data(), fn * sizeof(float), "H2D th");
+  ZERO(s.d_sp, fn * sizeof(float), "sp=0");
+  H2D(s.d_color, color, 3 * fn * sizeof(float), "H2D color");
+
+  MALLOC((void **)&s.d_stall, fn * sizeof(int), "stall");
+  MALLOC((void **)&s.d_mode, fn * sizeof(int), "mode");
+  MALLOC((void **)&s.d_hist_count, fn * sizeof(int), "hist_count");
+  MALLOC((void **)&s.d_turn, fn * sizeof(float), "turn");
+  MALLOC((void **)&s.d_dhit, fn * sizeof(float), "dhit");
+  MALLOC((void **)&s.d_best, fn * sizeof(float), "best");
+  MALLOC((void **)&s.d_init, fn * sizeof(float), "init");
+  MALLOC((void **)&s.d_wall_entry, 2 * fn * sizeof(float), "wall_entry");
+  MALLOC((void **)&s.d_pos_hist, 80 * fn * sizeof(float), "pos_hist");
+  MALLOC((void **)&s.d_we_valid, fn, "we_valid");
+  MALLOC((void **)&s.d_tracking, fn, "tracking");
+  MALLOC((void **)&s.d_parked, fn, "parked");
+  MALLOC((void **)&s.d_reached, fn, "reached");
+  MALLOC((void **)&s.d_active, fn, "active");
+  ZERO(s.d_stall, fn * sizeof(int), "stall=0");
+  ZERO(s.d_mode, fn * sizeof(int), "mode=0");
+  ZERO(s.d_hist_count, fn * sizeof(int), "hist_count=0");
+  H2D(s.d_turn, turn.data(), fn * sizeof(float), "H2D turn");
+  ZERO(s.d_dhit, fn * sizeof(float), "dhit=0");
+  H2D(s.d_best, best.data(), fn * sizeof(float), "H2D best");
+  H2D(s.d_init, init.data(), fn * sizeof(float), "H2D init");
+  ZERO(s.d_wall_entry, 2 * fn * sizeof(float), "wall_entry=0");
+  ZERO(s.d_pos_hist, 80 * fn * sizeof(float), "pos_hist=0");
+  ZERO(s.d_we_valid, fn, "we_valid=0");
+  ZERO(s.d_tracking, fn, "tracking=0");
+  ZERO(s.d_parked, fn, "parked=0");
+  ZERO(s.d_reached, fn, "reached=0");
+  H2D(s.d_active, active.data(), fn, "H2D active");
+
+  MALLOC((void **)&s.d_phi, fn * sizeof(float), "phi");
+  MALLOC((void **)&s.d_nrm, 2 * fn * sizeof(float), "nrm");
+  MALLOC((void **)&s.d_carrot, 2 * fn * sizeof(float), "carrot");
+  MALLOC((void **)&s.d_minclr, fn * sizeof(float), "minclr");
+}
+
+sim_world_cuda sim_world_cuda::from_occupancy(const sim_world::config &cfg, const std::uint8_t *occ,
+                                              coef_mlp model, int n, unsigned seed) {
+  std::vector<float> o(2 * n), goal(2 * n), color(3 * n);
+  sim_world::scatter_free(cfg, occ, n, seed, o.data(), goal.data(), color.data());
+  return sim_world_cuda(cfg, occ, std::move(model), o.data(), goal.data(), color.data(), n);
+}
+
+sim_world_cuda::~sim_world_cuda() { delete p_; }
+
+sim_world_cuda::sim_world_cuda(sim_world_cuda &&o) noexcept : p_(o.p_), n_(o.n_), gstep_(o.gstep_) {
+  o.p_ = nullptr;
+}
+
+sim_world_cuda &sim_world_cuda::operator=(sim_world_cuda &&o) noexcept {
+  if (this != &o) {
+    delete p_;
+    p_ = o.p_;
+    n_ = o.n_;
+    gstep_ = o.gstep_;
+    o.p_ = nullptr;
+  }
+  return *this;
+}
+
+void sim_world_cuda::step() {
+  impl &s = *p_;
+  const int T = 128, B = (s.n + T - 1) / T;
+  const dev_field df = to_dev_field(s.fs, s.d_field);
+  // sample (nrm for the carrot) -> carrot FSM -> fused drive -> reached/park.
+  // All on the default stream: kernel k+1 sees kernel k's writes (serialized).
+  sample_kernel<<<B, T>>>(df, s.d_o, s.n, s.d_phi, s.d_nrm);
+  carrot_kernel<<<B, T>>>(s.d_o, s.d_goal, s.d_th, s.d_sp, s.d_nrm, s.d_stall, s.d_mode, s.d_turn,
+                          s.d_dhit, s.d_best, s.d_wall_entry, s.d_we_valid, s.d_tracking,
+                          s.d_pos_hist, s.d_hist_count, s.d_parked, s.d_active, s.reach_tol,
+                          s.a_max, s.dt, s.n, s.d_carrot);
+  drive_kernel<<<B, T>>>(df, s.d_o, s.d_th, s.d_sp, s.d_carrot, s.d_w, s.d_rows, s.d_cols, s.d_act,
+                         s.d_woff, s.d_boff, s.num_layers, s.d_ob, s.in, s.out, s.v, s.n,
+                         s.d_minclr);
+  reached_park_kernel<<<B, T>>>(s.d_o, s.d_goal, s.reach_tol, s.d_reached, s.d_parked, s.d_active,
+                                s.n);
+  cuda_check(cudaGetLastError(), "sim_world_cuda step launch");
+  ++gstep_;
+}
+
+void sim_world_cuda::snapshot(float *pos_world, float *heading, float *speed, int *mode,
+                              std::uint8_t *reached) const {
+  const impl &s = *p_;
+  const size_t fn = static_cast<size_t>(s.n);
+  auto D2H = [&](void *h, const void *d, size_t bytes, const char *w) {
+    cuda_check(cudaMemcpy(h, d, bytes, cudaMemcpyDeviceToHost), w);
+  };
+  if (pos_world) {
+    std::vector<float> o(2 * fn);
+    D2H(o.data(), s.d_o, 2 * fn * sizeof(float), "D2H o");
+    for (int i = 0; i < s.n; ++i) {
+      pos_world[2 * i] = o[2 * i] / static_cast<float>(s.scale) + static_cast<float>(s.cx);
+      pos_world[2 * i + 1] = o[2 * i + 1] / static_cast<float>(s.scale) + static_cast<float>(s.cy);
+    }
+  }
+  if (heading)
+    D2H(heading, s.d_th, fn * sizeof(float), "D2H th");
+  if (speed) {
+    D2H(speed, s.d_sp, fn * sizeof(float), "D2H sp");
+    for (int i = 0; i < s.n; ++i)
+      speed[i] /= static_cast<float>(s.scale);
+  }
+  if (mode)
+    D2H(mode, s.d_mode, fn * sizeof(int), "D2H mode");
+  if (reached)
+    D2H(reached, s.d_reached, fn, "D2H reached");
+}
+
+void sim_world_cuda::retarget(int i, float gx_n, float gy_n) {
+  if (i < 0 || i >= n_)
+    return;
+  impl &s = *p_;
+  retarget_kernel<<<1, 1>>>(i, gx_n, gy_n, s.d_goal, s.d_o, s.d_best, s.d_init, s.d_tracking,
+                            s.d_reached, s.d_parked);
+  cuda_check(cudaGetLastError(), "sim_world_cuda retarget launch");
 }
 
 } // namespace nav
