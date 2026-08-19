@@ -53,6 +53,20 @@ pycvc::ArrayView pycvc_nav_view(std::vector<T> &&src, std::vector<long> shape,
   return v;
 }
 
+// A flattened [r0,c0,...] path -> a fresh (K,2) uint64 numpy array (new ref).
+PyObject *pycvc_nav_path_array(const std::vector<int> &p)
+{
+  npy_intp dims[2] = {static_cast<npy_intp>(p.size() / 2), 2};
+  PyObject *arr = PyArray_SimpleNew(2, dims, NPY_UINT64);
+  if (!arr)
+    return nullptr;
+  auto *d = static_cast<std::uint64_t *>(
+      PyArray_DATA(reinterpret_cast<PyArrayObject *>(arr)));
+  for (std::size_t j = 0; j < p.size(); ++j)
+    d[j] = static_cast<std::uint64_t>(p[j]);
+  return arr;
+}
+
 } // namespace
 %}
 
@@ -205,6 +219,133 @@ ArrayView nav_simplify(PyObject *occ, PyObject *path)
   const long m = static_cast<long>(s.size() / 2);
   std::vector<std::uint64_t> out(s.begin(), s.end());
   return pycvc_nav_view<std::uint64_t>(std::move(out), {m, 2}, DType::UInt64);
+}
+
+// ── Batched, threaded kernels (PERFORMANCE.md stage 4) ──────────────────────
+
+// Batched A*. `occ` is (N,H,W) uint8/bool — plane i is agent i's belief;
+// `starts`/`goals` are (N,2) int; `cost` is (N,H,W) float64 or None;
+// `num_threads` <= 0 uses hardware concurrency. Returns a length-N Python list
+// of (Ki,2) uint64 paths ((0,2) == unreachable). The GIL is released across
+// the parallel compute, so the N agents run concurrently.
+PyObject *nav_astar_batch(PyObject *occ, PyObject *starts, PyObject *goals,
+                          PyObject *cost, int num_threads = 0)
+{
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(occ, NPY_UINT8, 3, 3, NPY_ARRAY_C_CONTIGUOUS));
+  if (!a)
+    throw std::invalid_argument(
+        "pycvc.nav_astar_batch: occ must be an (N,H,W) uint8/bool array");
+  const int N = static_cast<int>(PyArray_DIM(a, 0));
+  const int rows = static_cast<int>(PyArray_DIM(a, 1));
+  const int cols = static_cast<int>(PyArray_DIM(a, 2));
+  PyArrayObject *sa = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(starts, NPY_INT32, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+  PyArrayObject *ga = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(goals, NPY_INT32, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+  if (!sa || !ga || PyArray_DIM(sa, 0) != N || PyArray_DIM(ga, 0) != N ||
+      PyArray_DIM(sa, 1) != 2 || PyArray_DIM(ga, 1) != 2)
+  {
+    Py_DECREF(a);
+    Py_XDECREF(sa);
+    Py_XDECREF(ga);
+    throw std::invalid_argument(
+        "pycvc.nav_astar_batch: starts/goals must be (N,2) matching occ");
+  }
+  PyArrayObject *ca = nullptr;
+  const double *cost_base = nullptr;
+  if (cost && cost != Py_None)
+  {
+    ca = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(cost, NPY_DOUBLE, 3, 3, NPY_ARRAY_C_CONTIGUOUS));
+    if (!ca || PyArray_DIM(ca, 0) != N || PyArray_DIM(ca, 1) != rows ||
+        PyArray_DIM(ca, 2) != cols)
+    {
+      Py_DECREF(a);
+      Py_DECREF(sa);
+      Py_DECREF(ga);
+      Py_XDECREF(ca);
+      throw std::invalid_argument(
+          "pycvc.nav_astar_batch: cost must be (N,H,W) matching occ");
+    }
+    cost_base = static_cast<const double *>(PyArray_DATA(ca));
+  }
+  const std::uint8_t *occ_base =
+      static_cast<const std::uint8_t *>(PyArray_DATA(a));
+  const std::int32_t *sd = static_cast<const std::int32_t *>(PyArray_DATA(sa));
+  const std::int32_t *gd = static_cast<const std::int32_t *>(PyArray_DATA(ga));
+  const long plane = static_cast<long>(rows) * cols;
+  std::vector<cvc::nav::astar_query> qs(N);
+  for (int i = 0; i < N; ++i)
+  {
+    qs[i].occ = occ_base + static_cast<long>(i) * plane;
+    qs[i].start_r = sd[2 * i];
+    qs[i].start_c = sd[2 * i + 1];
+    qs[i].goal_r = gd[2 * i];
+    qs[i].goal_c = gd[2 * i + 1];
+    qs[i].cost = cost_base ? cost_base + static_cast<long>(i) * plane : nullptr;
+  }
+  std::vector<std::vector<int>> results;
+  Py_BEGIN_ALLOW_THREADS
+  results = cvc::nav::astar_batch(qs, rows, cols, num_threads);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(a);
+  Py_DECREF(sa);
+  Py_DECREF(ga);
+  Py_XDECREF(ca);
+  PyObject *lst = PyList_New(static_cast<Py_ssize_t>(results.size()));
+  if (!lst)
+    throw std::runtime_error("pycvc.nav_astar_batch: result list alloc failed");
+  for (std::size_t i = 0; i < results.size(); ++i)
+  {
+    PyObject *arr = pycvc_nav_path_array(results[i]);
+    if (!arr)
+    {
+      Py_DECREF(lst);
+      throw std::runtime_error("pycvc.nav_astar_batch: path array alloc failed");
+    }
+    PyList_SET_ITEM(lst, static_cast<Py_ssize_t>(i), arr); // steals the ref
+  }
+  return lst;
+}
+
+// Batched SDF build. `occ` is (N,H,W) uint8/bool. Returns (N,3,H,W) float32:
+// plane [i,0]=phi, [i,1]=normal_x, [i,2]=normal_y. GIL released across compute.
+ArrayView nav_build_sdf_batch(PyObject *occ, double min_x, double min_y,
+                              double max_x, double max_y, double scale,
+                              int num_threads = 0)
+{
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(occ, NPY_UINT8, 3, 3, NPY_ARRAY_C_CONTIGUOUS));
+  if (!a)
+    throw std::invalid_argument(
+        "pycvc.nav_build_sdf_batch: occ must be an (N,H,W) uint8/bool array");
+  const int N = static_cast<int>(PyArray_DIM(a, 0));
+  const int rows = static_cast<int>(PyArray_DIM(a, 1));
+  const int cols = static_cast<int>(PyArray_DIM(a, 2));
+  const std::uint8_t *base = static_cast<const std::uint8_t *>(PyArray_DATA(a));
+  const long plane = static_cast<long>(rows) * cols;
+  std::vector<const std::uint8_t *> occs(N);
+  for (int i = 0; i < N; ++i)
+    occs[i] = base + static_cast<long>(i) * plane;
+  std::vector<cvc::nav::sdf_field> fields;
+  Py_BEGIN_ALLOW_THREADS
+  fields = cvc::nav::build_sdf_batch(occs, rows, cols, min_x, min_y, max_x,
+                                     max_y, scale, num_threads);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(a);
+  std::vector<float> out(static_cast<std::size_t>(N) * 3 * plane);
+  for (int i = 0; i < N; ++i)
+  {
+    float *dst = out.data() + static_cast<std::size_t>(i) * 3 * plane;
+    std::copy(fields[i].phi.begin(), fields[i].phi.end(), dst);
+    std::copy(fields[i].normal_x.begin(), fields[i].normal_x.end(), dst + plane);
+    std::copy(fields[i].normal_y.begin(), fields[i].normal_y.end(),
+              dst + 2 * plane);
+  }
+  return pycvc_nav_view<float>(std::move(out),
+                               {(long)N, 3, (long)rows, (long)cols},
+                               DType::Float32);
 }
 
 } // namespace pycvc

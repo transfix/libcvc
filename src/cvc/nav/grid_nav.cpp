@@ -34,9 +34,11 @@
 #include <cvc/nav/grid_nav.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <thread>
 
 namespace cvc {
 namespace nav {
@@ -380,6 +382,70 @@ std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols,
   }
   out.push_back(path[2 * (n - 1)]);
   out.push_back(path[2 * (n - 1) + 1]);
+  return out;
+}
+
+namespace {
+
+// Run fn(i) for i in [0, n) across `num_threads` workers (<=0 => hardware
+// concurrency). A shared atomic counter hands out indices, so uneven per-item
+// cost (some A* queries expand far more nodes than others) self-balances. The
+// calling thread is one of the workers, so num_threads==1 runs inline.
+template <class F> void parallel_for(int n, int num_threads, F &&fn)
+{
+  if (n <= 0)
+    return;
+  int nt = num_threads > 0
+               ? num_threads
+               : static_cast<int>(std::thread::hardware_concurrency());
+  if (nt < 1)
+    nt = 1;
+  if (nt > n)
+    nt = n;
+  if (nt == 1)
+  {
+    for (int i = 0; i < n; ++i)
+      fn(i);
+    return;
+  }
+  std::atomic<int> next{0};
+  auto worker = [&]() {
+    for (int i = next.fetch_add(1); i < n; i = next.fetch_add(1))
+      fn(i);
+  };
+  std::vector<std::thread> pool;
+  pool.reserve(nt - 1);
+  for (int t = 0; t < nt - 1; ++t)
+    pool.emplace_back(worker);
+  worker();
+  for (auto &th : pool)
+    th.join();
+}
+
+} // namespace
+
+std::vector<std::vector<int>>
+astar_batch(const std::vector<astar_query> &queries, int rows, int cols,
+            int num_threads)
+{
+  std::vector<std::vector<int>> out(queries.size());
+  parallel_for(static_cast<int>(queries.size()), num_threads, [&](int i) {
+    const astar_query &q = queries[i];
+    out[i] = astar(q.occ, rows, cols, q.start_r, q.start_c, q.goal_r, q.goal_c,
+                   q.cost);
+  });
+  return out;
+}
+
+std::vector<sdf_field>
+build_sdf_batch(const std::vector<const std::uint8_t *> &occs, int rows,
+                int cols, double min_x, double min_y, double max_x,
+                double max_y, double scale, int num_threads)
+{
+  std::vector<sdf_field> out(occs.size());
+  parallel_for(static_cast<int>(occs.size()), num_threads, [&](int i) {
+    out[i] = build_sdf(occs[i], rows, cols, min_x, min_y, max_x, max_y, scale);
+  });
   return out;
 }
 

@@ -232,3 +232,83 @@ TEST(NavSimplify, ShortPathUnchanged)
   const auto s = simplify(occ.data(), 1, 3, path.data(), 2);
   EXPECT_EQ(s, path);
 }
+
+// ─── batched / threaded kernels ─────────────────────────────────────────────
+
+namespace {
+
+// deterministic pseudo-random occupancy (no <random> dependency)
+std::vector<std::uint8_t> pseudo_grid(int rows, int cols, unsigned seed)
+{
+  std::vector<std::uint8_t> g(rows * cols);
+  unsigned x = seed * 2654435761u + 1u;
+  for (int i = 0; i < rows * cols; ++i)
+  {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g[i] = (x % 100u) < 22u ? 1 : 0; // ~22% blocked
+  }
+  g[0] = 0;
+  g[rows * cols - 1] = 0;
+  return g;
+}
+
+} // namespace
+
+TEST(NavBatch, AstarBatchIsByteIdenticalToSerial)
+{
+  const int rows = 12, cols = 12, N = 20;
+  std::vector<std::vector<std::uint8_t>> grids;
+  grids.reserve(N);
+  std::vector<astar_query> qs;
+  for (int i = 0; i < N; ++i)
+  {
+    grids.push_back(pseudo_grid(rows, cols, 100u + i));
+    astar_query q;
+    q.occ = grids.back().data();
+    q.start_r = i % rows;
+    q.start_c = (i * 3) % cols;
+    q.goal_r = (rows - 1) - (i % rows);
+    q.goal_c = (cols - 1) - ((i * 5) % cols);
+    q.cost = nullptr;
+    qs.push_back(q);
+  }
+  const auto batch = astar_batch(qs, rows, cols, 4); // 4 threads
+  ASSERT_EQ((int)batch.size(), N);
+  for (int i = 0; i < N; ++i)
+  {
+    const auto serial = astar(qs[i].occ, rows, cols, qs[i].start_r, qs[i].start_c,
+                              qs[i].goal_r, qs[i].goal_c, nullptr);
+    EXPECT_EQ(batch[i], serial) << "query " << i;
+  }
+}
+
+TEST(NavBatch, BuildSdfBatchIsByteIdenticalToSerial)
+{
+  const int rows = 10, cols = 14, N = 8;
+  std::vector<std::vector<std::uint8_t>> grids;
+  std::vector<const std::uint8_t *> occs;
+  for (int i = 0; i < N; ++i)
+  {
+    grids.push_back(pseudo_grid(rows, cols, 7u + i));
+    grids.back()[i % (rows * cols)] = 1; // ensure a building exists
+  }
+  for (auto &g : grids)
+    occs.push_back(g.data());
+  const auto batch = build_sdf_batch(occs, rows, cols, 0.0, 0.0, 13.0, 9.0, 0.1, 3);
+  ASSERT_EQ((int)batch.size(), N);
+  for (int i = 0; i < N; ++i)
+  {
+    const auto s = build_sdf(occs[i], rows, cols, 0.0, 0.0, 13.0, 9.0, 0.1);
+    EXPECT_EQ(batch[i].phi, s.phi) << "phi " << i;
+    EXPECT_EQ(batch[i].normal_x, s.normal_x) << "nx " << i;
+    EXPECT_EQ(batch[i].normal_y, s.normal_y) << "ny " << i;
+  }
+}
+
+TEST(NavBatch, EmptyBatchIsFine)
+{
+  std::vector<astar_query> none;
+  EXPECT_TRUE(astar_batch(none, 8, 8, 4).empty());
+}

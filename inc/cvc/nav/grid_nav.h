@@ -126,6 +126,37 @@ std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
 std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols,
                           const int *path, int n);
 
+// ─── Batched, threaded per-agent kernels (PERFORMANCE.md stage 4) ────────────
+//
+// The agents are independent, so a sense tick's N replans/rebuilds fan out
+// across cores. Each single-agent kernel already allocates all of its working
+// state locally, so the batch is data-race-free by construction and every
+// result is byte-identical to the equivalent serial call.
+
+// One independent A* query over its own occupancy plane. All queries in a batch
+// share rows/cols (the raster) but not the contents (each agent's belief map).
+struct astar_query
+{
+  const std::uint8_t *occ; // row-major rows*cols, nonzero = blocked
+  int start_r, start_c;
+  int goal_r, goal_c;
+  const double *cost; // optional per-cell surcharge (rows*cols) or nullptr
+};
+
+// Run `queries` in parallel across `num_threads` workers (<=0 => hardware
+// concurrency). Returns one flattened [r0,c0,...] path per query (empty ==
+// unreachable), in input order.
+std::vector<std::vector<int>> astar_batch(const std::vector<astar_query> &queries,
+                                          int rows, int cols,
+                                          int num_threads = 0);
+
+// Build one SDF field per occupancy plane in parallel. `occs[i]` is agent i's
+// footprint occupancy (row-major rows*cols); bounds and scale are shared.
+std::vector<sdf_field> build_sdf_batch(const std::vector<const std::uint8_t *> &occs,
+                                       int rows, int cols, double min_x,
+                                       double min_y, double max_x, double max_y,
+                                       double scale, int num_threads = 0);
+
 } // namespace nav
 } // namespace cvc
 
