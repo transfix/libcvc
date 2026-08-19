@@ -30,6 +30,8 @@
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_world.h>
 #include <limits>
+#include <random>
+#include <vector>
 
 namespace cvc {
 namespace nav {
@@ -87,6 +89,38 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
     best_[i] = d;
     init_[i] = std::max(d, 1e-6f);
   }
+}
+
+sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
+                                    int n, unsigned seed) {
+  const long hw = static_cast<long>(cfg.rows) * cfg.cols;
+  std::vector<int> free_cells;
+  for (long i = 0; i < hw; ++i)
+    if (!occ[i])
+      free_cells.push_back(static_cast<int>(i));
+  if (free_cells.empty())
+    for (long i = 0; i < hw; ++i)
+      free_cells.push_back(static_cast<int>(i));
+
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<int> pick(0, static_cast<int>(free_cells.size()) - 1);
+  std::uniform_real_distribution<float> col(0.2f, 1.0f);
+  auto cell_to_on = [&](int cell, float &onx, float &ony) {
+    const int r = cell / cfg.cols, c = cell % cfg.cols;
+    const double x = cfg.min_x + (double)c / (cfg.cols - 1) * (cfg.max_x - cfg.min_x);
+    const double y = cfg.min_y + (double)r / (cfg.rows - 1) * (cfg.max_y - cfg.min_y);
+    onx = static_cast<float>((x - cfg.cx) * cfg.scale);
+    ony = static_cast<float>((y - cfg.cy) * cfg.scale);
+  };
+  std::vector<float> o(2 * n), goal(2 * n), color(3 * n);
+  for (int i = 0; i < n; ++i) {
+    cell_to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
+    cell_to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
+    color[3 * i] = col(rng);
+    color[3 * i + 1] = col(rng);
+    color[3 * i + 2] = col(rng);
+  }
+  return sim_world(cfg, occ, occ, std::move(model), o.data(), goal.data(), color.data(), n);
 }
 
 field_stack sim_world::field_view() const {

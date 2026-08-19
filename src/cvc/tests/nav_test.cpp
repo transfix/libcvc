@@ -13,8 +13,10 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -611,4 +613,74 @@ TEST(NavDrive, ConstantFieldGatherAndRenorm) {
   cvc::nav::sdf_sample(fs, on, N, map_id, phiT.data(), nrmT.data(), 4);
   for (int i = 0; i < N; ++i)
     EXPECT_EQ(phi[i], phiT[i]);
+}
+
+// ─── sim_world: the whole swarm from PURE C++ (no Python, no libtorch) ────────
+
+TEST(NavSimWorld, RunsFromPureCppAndAgentsProgress) {
+  // A bordered room with a bar to route around.
+  const int R = 96, C = 96;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  const int N = 256;
+  // default_biased() drives with NO trained weights file — pure C++, no deps.
+  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7);
+  ASSERT_EQ(world.size(), N);
+
+  std::vector<float> pos0(2 * N), pos1(2 * N), goal_dist0(N);
+  std::vector<float> hd(N), sp(N);
+  std::vector<int> md(N);
+  std::vector<std::uint8_t> rc(N);
+  world.snapshot(pos0.data(), hd.data(), sp.data(), md.data(), rc.data());
+
+  for (int t = 0; t < 300; ++t)
+    world.step(4);
+
+  world.snapshot(pos1.data(), hd.data(), sp.data(), md.data(), rc.data());
+  // Agents moved (not frozen) and the whole thing produced finite poses.
+  int moved = 0, reached = 0;
+  for (int i = 0; i < N; ++i) {
+    EXPECT_TRUE(std::isfinite(pos1[2 * i]) && std::isfinite(pos1[2 * i + 1]));
+    const float dx = pos1[2 * i] - pos0[2 * i], dy = pos1[2 * i + 1] - pos0[2 * i + 1];
+    if (std::sqrt(dx * dx + dy * dy) > 1.0f)
+      ++moved;
+    reached += rc[i];
+  }
+  EXPECT_GT(moved, N / 2); // most agents drove somewhere
+  EXPECT_GT(reached, 0);   // at least one arrived
+  EXPECT_EQ(world.tick(), 300);
+}
+
+TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
+  // Zero linear weights => net == 0 => coeffs are the constant bias basin.
+  cvc::nav::coef_mlp m = cvc::nav::coef_mlp::default_biased();
+  ASSERT_EQ(m.in_features(), 5);
+  ASSERT_EQ(m.out_features(), 3);
+  float feat[5] = {0.5f, 10.0f, 0.3f, -0.7f, 0.1f};
+  float out[3] = {0, 0, 0};
+  m.forward(feat, 1, out, 1);
+  EXPECT_NEAR(out[0], 1.0f, 1e-4f); // alpha
+  EXPECT_NEAR(out[1], 3.0f, 1e-4f); // beta
+  EXPECT_NEAR(out[2], 4.0f, 1e-4f); // gamma
 }

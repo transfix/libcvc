@@ -37,11 +37,17 @@
 //   u32   meta_len     ; char meta[meta_len]          (provenance, ignored here)
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <cvc/core/config.h> // CVC_NAV_DATADIR
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/parallel.h>
 #include <fstream>
 #include <stdexcept>
+#include <string>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 namespace cvc {
 namespace nav {
@@ -161,6 +167,31 @@ coef_mlp coef_mlp::load_from_memory(const void *data, std::size_t nbytes) {
   return m;
 }
 
+coef_mlp coef_mlp::default_biased() {
+  coef_mlp m;
+  m.fmt_ = kFormatVersion;
+  m.flags_ = kFlagSoftplusLogExpm1;
+  m.in_ = 5;
+  m.out_ = 3;
+  auto mk = [](int r, int c, std::uint32_t act) {
+    Layer L;
+    L.rows = r;
+    L.cols = c;
+    L.act = act;
+    L.w.assign(static_cast<std::size_t>(r) * c, 0.0f);
+    L.b.assign(r, 0.0f);
+    return L;
+  };
+  m.layers_ = {mk(64, 5, 1), mk(64, 64, 1), mk(3, 64, 0)};
+  const float bias[3] = {1.0f, 3.0f, 4.0f}; // the CoefMLP bias-toward-basin
+  m.out_bias_off_.resize(3);
+  for (int i = 0; i < 3; ++i)
+    m.out_bias_off_[i] = std::log(std::expm1(bias[i]));
+  const std::vector<std::uint32_t> sa = {64, 5, 1, 64, 64, 1, 3, 64, 0};
+  m.arch_hash_ = compute_arch_hash(5, 3, sa);
+  return m;
+}
+
 coef_mlp::flat_layers coef_mlp::export_flat() const {
   flat_layers fl;
   fl.in = in_;
@@ -185,6 +216,38 @@ coef_mlp coef_mlp::load(const std::string &path) {
     throw std::runtime_error("cvc::nav::coef_mlp: cannot open " + path);
   std::vector<char> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   return load_from_memory(buf.data(), buf.size());
+}
+
+namespace {
+inline bool file_exists(const std::string &p) {
+  std::ifstream f(p);
+  return f.good();
+}
+} // namespace
+
+std::string coef_mlp::default_weights_path() {
+  if (const char *env = std::getenv("CVC_NAV_WEIGHTS")) {
+    if (env[0] && file_exists(env))
+      return std::string(env);
+  }
+  const std::string canonical = std::string(CVC_NAV_DATADIR) + "/coef_mlp.cvcnav";
+  if (file_exists(canonical))
+    return canonical;
+#ifndef _WIN32
+  // Relocated / cvcpkg install: resolve relative to the loaded libcvc library.
+  Dl_info info;
+  if (dladdr(reinterpret_cast<const void *>(&coef_mlp::default_weights_path), &info) &&
+      info.dli_fname) {
+    const std::string so = info.dli_fname;
+    const std::size_t slash = so.find_last_of('/');
+    if (slash != std::string::npos) {
+      const std::string reloc = so.substr(0, slash) + "/../share/cvc/nav/coef_mlp.cvcnav";
+      if (file_exists(reloc))
+        return reloc;
+    }
+  }
+#endif
+  return canonical; // load() will report it if absent
 }
 
 void coef_mlp::forward(const float *feats, int n, float *out, int num_threads) const {

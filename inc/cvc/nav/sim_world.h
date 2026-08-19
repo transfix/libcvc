@@ -67,6 +67,14 @@ public:
   sim_world(const config &cfg, const std::uint8_t *truth, const std::uint8_t *prior_occ,
             coef_mlp model, const float *o, const float *goal, const float *color, int n);
 
+  // Convenience factory: build a sim_world from one occupancy grid (used as both
+  // the truth and the initial known map), auto-scattering `n_agents` starts +
+  // goals on free cells (occ == 0) with random colors — the few-line path for a
+  // pure-C++ host (e.g. a cvcGL scene rasterized to occupancy) to drop navigating
+  // agents in. `model` is moved (use coef_mlp::default_biased() for zero-setup).
+  static sim_world from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
+                                  int n_agents, unsigned seed = 0);
+
   // Advance one fixed-dt tick: sense (gated) -> rebuild -> carrot FSM -> drive ->
   // reached/park. Threaded across agents / the sense fold.
   void step(int num_threads = 0);

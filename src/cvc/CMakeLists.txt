@@ -1063,6 +1063,15 @@ install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
 )
 
 # Generate config.h
+# cvc::nav policy data dir, baked into config.h so a default-installed build finds
+# $PREFIX/share/cvc/nav/coef_mlp.cvcnav (a relocated install falls back to a path
+# relative to the loaded library — see coef_mlp::default_weights_path).
+if(IS_ABSOLUTE "${CMAKE_INSTALL_DATADIR}")
+  set(CVC_NAV_DATADIR "${CMAKE_INSTALL_DATADIR}/cvc/nav")
+else()
+  set(CVC_NAV_DATADIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/cvc/nav")
+endif()
+
 # Use PROJECT_BINARY_DIR (not CMAKE_BINARY_DIR) so the generated header lands
 # under libcvc's own build tree when consumed via FetchContent/add_subdirectory.
 # Downstream projects can then add ${libcvc_BINARY_DIR}/inc to their include path.
@@ -1070,6 +1079,22 @@ configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/core/config.h.cmake
   ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
 )
+
+# Install a navigation policy to the canonical location when one is supplied
+# (trained + exported from GRL-SNAM via coef_export.py). Optional: an app can
+# always pass an explicit path to coef_mlp::load / sim_world.
+if(CVC_NAV_WEIGHTS_FILE)
+  install(FILES "${CVC_NAV_WEIGHTS_FILE}"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/cvc/nav RENAME coef_mlp.cvcnav COMPONENT libcvc)
+  message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
+endif()
+
+# The pure-C++ nav swarm demo (the template a cvcGL scene copies to add agents).
+option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm demo" OFF)
+if(CVC_BUILD_NAV_EXAMPLE)
+  add_executable(nav_swarm_demo ${PROJECT_SOURCE_DIR}/examples/nav_swarm_demo.cpp)
+  target_link_libraries(nav_swarm_demo PRIVATE cvc)
+endif()
 
 # Windows-specific batch file
 if(WIN32)

@@ -60,6 +60,21 @@ public:
   static coef_mlp load(const std::string &path);
   static coef_mlp load_from_memory(const void *data, std::size_t nbytes);
 
+  // The default policy location, resolved in order: the CVC_NAV_WEIGHTS env var,
+  // then the baked $PREFIX/share/cvc/nav/coef_mlp.cvcnav, then a path relative to
+  // the loaded libcvc library (for a relocated / cvcpkg install). Returns the
+  // first that exists, else the baked canonical path (so load() reports it). A
+  // pure-C++ host with no explicit weights path can `coef_mlp::load(coef_mlp::
+  // default_weights_path())`.
+  static std::string default_weights_path();
+
+  // A default, bias-initialized policy (the shipped 5->64->64->3 topology with
+  // zero linear weights), so a pure-C++ host can drive with NO trained weights
+  // file: net(feat) == 0, so the coefficients are the constant CoefMLP bias
+  // basin (alpha, beta, gamma) = (1, 3, 4) — the barrier / goal-spring / damping
+  // that navigates out of the box. Load a trained .cvcnav for learned behavior.
+  static coef_mlp default_biased();
+
   // feats: [n * in_features()] row-major; out: [n * out_features()] row-major
   // (alpha, beta, gamma). Threaded across the n independent agents
   // (num_threads <= 0 => hardware concurrency).
