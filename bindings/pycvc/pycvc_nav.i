@@ -377,5 +377,48 @@ ArrayView nav_inflate_batch(PyObject *occ, int cells, int num_threads = 0)
                                       DType::UInt8);
 }
 
+// Fixed-radius neighbour query (CGAL Kd_tree). `positions` is an (N,2) float64
+// array of (x,y). Returns a length-N Python list; entry i is a uint64 array of
+// the indices of every OTHER point within `radius` of point i.
+PyObject *nav_neighbors(PyObject *positions, double radius)
+{
+  PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(positions, NPY_DOUBLE, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+  if (!a)
+    throw std::invalid_argument(
+        "pycvc.nav_neighbors: positions must be an (N,2) float64 array");
+  if (PyArray_DIM(a, 1) != 2)
+  {
+    Py_DECREF(a);
+    throw std::invalid_argument("pycvc.nav_neighbors: positions must have shape (N,2)");
+  }
+  const int n = static_cast<int>(PyArray_DIM(a, 0));
+  const double *pos = static_cast<const double *>(PyArray_DATA(a));
+  cvc::nav::neighbor_csr csr;
+  Py_BEGIN_ALLOW_THREADS
+  csr = cvc::nav::neighbors_within_radius(pos, n, radius);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(a);
+  PyObject *lst = PyList_New(n);
+  if (!lst)
+    throw std::runtime_error("pycvc.nav_neighbors: result list alloc failed");
+  for (int i = 0; i < n; ++i)
+  {
+    npy_intp dim = csr.offsets[i + 1] - csr.offsets[i];
+    PyObject *arr = PyArray_SimpleNew(1, &dim, NPY_UINT64);
+    if (!arr)
+    {
+      Py_DECREF(lst);
+      throw std::runtime_error("pycvc.nav_neighbors: array alloc failed");
+    }
+    auto *d = static_cast<std::uint64_t *>(
+        PyArray_DATA(reinterpret_cast<PyArrayObject *>(arr)));
+    for (int j = csr.offsets[i]; j < csr.offsets[i + 1]; ++j)
+      d[j - csr.offsets[i]] = static_cast<std::uint64_t>(csr.indices[j]);
+    PyList_SET_ITEM(lst, i, arr);
+  }
+  return lst;
+}
+
 } // namespace pycvc
 %}

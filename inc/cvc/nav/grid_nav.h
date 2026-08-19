@@ -156,6 +156,26 @@ std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std
                                                      int rows, int cols, int cells,
                                                      int num_threads = 0);
 
+// ─── Fixed-radius neighbour search (CGAL Kd_tree) ────────────────────────────
+//
+// For an N-body crowd, "which peers are within an agent's sensor range" is a
+// fixed-radius all-neighbours query. A uniform grid degrades to O(N^2) on a
+// dense cluster; a Kd_tree stays robust. Implemented in spatial.cpp against
+// CGAL's Kd_tree + Fuzzy_sphere (exact, epsilon=0), which libcvc already links
+// — so this header stays CGAL-free (the signature is plain STL).
+
+// Neighbours in CSR form: point i's neighbours are indices[offsets[i] ..
+// offsets[i+1]).
+struct neighbor_csr {
+  std::vector<int> offsets; // size n+1
+  std::vector<int> indices; // concatenated neighbour indices
+};
+
+// Every OTHER point within `radius` (Euclidean, inclusive) of each of the `n`
+// 2-D points in `positions` (row-major [n][2], (x,y)). Neighbour indices are
+// returned ascending, so the result is deterministic.
+neighbor_csr neighbors_within_radius(const double *positions, int n, double radius);
+
 } // namespace nav
 } // namespace cvc
 

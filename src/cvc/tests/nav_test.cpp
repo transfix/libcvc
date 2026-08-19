@@ -284,6 +284,36 @@ TEST(NavBatch, EmptyBatchIsFine) {
   EXPECT_TRUE(astar_batch(none, 8, 8, 4).empty());
 }
 
+TEST(NavSpatial, NeighborsWithinRadiusMatchesBruteForce) {
+  const int n = 250;
+  std::vector<double> pos(2 * n);
+  unsigned x = 999u;
+  auto rnd = [&]() {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return (x % 100000) / 100.0;
+  };
+  for (int i = 0; i < 2 * n; ++i)
+    pos[i] = rnd();
+  for (double r : {3.0, 15.0, 60.0}) {
+    const auto csr = neighbors_within_radius(pos.data(), n, r);
+    ASSERT_EQ((int)csr.offsets.size(), n + 1);
+    for (int i = 0; i < n; ++i) {
+      std::vector<int> bf;
+      for (int j = 0; j < n; ++j)
+        if (j != i) {
+          const double dx = pos[2 * i] - pos[2 * j], dy = pos[2 * i + 1] - pos[2 * j + 1];
+          if (dx * dx + dy * dy <= r * r)
+            bf.push_back(j);
+        }
+      const std::vector<int> got(csr.indices.begin() + csr.offsets[i],
+                                 csr.indices.begin() + csr.offsets[i + 1]);
+      EXPECT_EQ(got, bf) << "point " << i << " radius " << r;
+    }
+  }
+}
+
 TEST(NavBatch, InflateBatchIsByteIdenticalToSerial) {
   const int rows = 11, cols = 13, N = 12;
   std::vector<std::vector<std::uint8_t>> grids;
