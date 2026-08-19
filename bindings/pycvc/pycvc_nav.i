@@ -15,6 +15,7 @@
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <algorithm>
+#include <cstring>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -673,6 +674,185 @@ PyObject *nav_coef_mlp_forward(const char *path, PyObject *feats, int num_thread
   Py_END_ALLOW_THREADS
   Py_DECREF(fa);
   return out;
+}
+
+// Coefficient-net features. field (M,3,H,W) f32, on/goal (N,2) f32 normalized,
+// map_id (N,) i32 or None. Returns feat (N,5) f32. Float-equivalent to
+// sdf_nav.coef_feats; GIL released across the compute.
+PyObject *nav_coef_feats(PyObject *field, PyObject *on, PyObject *goal, PyObject *map_id,
+                         double min_x, double min_y, double max_x, double max_y, double cx,
+                         double cy, double scale, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_coef_feats: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ga = take(goal, NPY_FLOAT, 2);
+  const int M = static_cast<int>(PyArray_DIM(fa, 0));
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(fa, 1) != 3 || PyArray_DIM(oa, 1) != 2 || PyArray_DIM(ga, 0) != N ||
+      PyArray_DIM(ga, 1) != 2)
+    fail("pycvc.nav_coef_feats: shapes must be field(M,3,H,W) on(N,2) goal(N,2)");
+  const int *mid = nullptr;
+  if (map_id && map_id != Py_None) {
+    PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+    if (PyArray_DIM(ma, 0) != N)
+      fail("pycvc.nav_coef_feats: map_id must be (N,)");
+    const std::int32_t *m = static_cast<const std::int32_t *>(PyArray_DATA(ma));
+    for (int i = 0; i < N; ++i)
+      if (m[i] < 0 || m[i] >= M)
+        fail("pycvc.nav_coef_feats: map_id has an out-of-range plane index");
+    mid = m;
+  }
+  npy_intp dims[2] = {N, 5};
+  PyObject *feat = PyArray_SimpleNew(2, dims, NPY_FLOAT);
+  if (!feat)
+    fail("pycvc.nav_coef_feats: output alloc failed");
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = M;
+  fs.H = static_cast<int>(PyArray_DIM(fa, 2));
+  fs.W = static_cast<int>(PyArray_DIM(fa, 3));
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  const float *ond = static_cast<const float *>(PyArray_DATA(oa));
+  const float *gd = static_cast<const float *>(PyArray_DATA(ga));
+  float *fo = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(feat)));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::coef_feats(fs, ond, gd, N, mid, fo, num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  return feat;
+}
+
+// One bicycle drive tick (nsub substeps). Returns fresh (o (N,2), th (N,), sp
+// (N,), minclr (N,)) f32; inputs are not mutated. Float-equivalent to
+// sdf_nav.bicycle_rollout(steps=1). GIL released across the compute.
+PyObject *nav_bicycle_rollout(PyObject *field, PyObject *on, PyObject *th, PyObject *sp,
+                              PyObject *goal, PyObject *al, PyObject *be, PyObject *ga,
+                              PyObject *map_id, double min_x, double min_y, double max_x,
+                              double max_y, double cx, double cy, double scale, double rr,
+                              double d_hat, double dt, double vmax, double L, double delta_max,
+                              double a_max, double a_lat_max, double k_steer, int nsub,
+                              int allow_reverse, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_bicycle_rollout: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ta = take(th, NPY_FLOAT, 1);
+  PyArrayObject *sa = take(sp, NPY_FLOAT, 1);
+  PyArrayObject *gla = take(goal, NPY_FLOAT, 2);
+  PyArrayObject *aa = take(al, NPY_FLOAT, 1);
+  PyArrayObject *ba = take(be, NPY_FLOAT, 1);
+  PyArrayObject *gaa = take(ga, NPY_FLOAT, 1);
+  const int M = static_cast<int>(PyArray_DIM(fa, 0));
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(oa, 1) != 2 || PyArray_DIM(ta, 0) != N || PyArray_DIM(sa, 0) != N ||
+      PyArray_DIM(gla, 0) != N || PyArray_DIM(gla, 1) != 2 || PyArray_DIM(aa, 0) != N ||
+      PyArray_DIM(ba, 0) != N || PyArray_DIM(gaa, 0) != N)
+    fail("pycvc.nav_bicycle_rollout: pose / coeff arrays must all be length N");
+  const int *mid = nullptr;
+  if (map_id && map_id != Py_None) {
+    PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+    if (PyArray_DIM(ma, 0) != N)
+      fail("pycvc.nav_bicycle_rollout: map_id must be (N,)");
+    const std::int32_t *m = static_cast<const std::int32_t *>(PyArray_DATA(ma));
+    for (int i = 0; i < N; ++i)
+      if (m[i] < 0 || m[i] >= M)
+        fail("pycvc.nav_bicycle_rollout: map_id has an out-of-range plane index");
+    mid = m;
+  }
+  // Fresh output copies (mutated in place); inputs untouched.
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *to = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *so = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *mc = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  if (!oo || !to || !so || !mc) {
+    Py_XDECREF(oo);
+    Py_XDECREF(to);
+    Py_XDECREF(so);
+    Py_XDECREF(mc);
+    fail("pycvc.nav_bicycle_rollout: output alloc failed");
+  }
+  float *ood = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(oo)));
+  float *tod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(to)));
+  float *sod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(so)));
+  float *mcd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mc)));
+  std::memcpy(ood, PyArray_DATA(oa), sizeof(float) * 2 * N);
+  std::memcpy(tod, PyArray_DATA(ta), sizeof(float) * N);
+  std::memcpy(sod, PyArray_DATA(sa), sizeof(float) * N);
+
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = M;
+  fs.H = static_cast<int>(PyArray_DIM(fa, 2));
+  fs.W = static_cast<int>(PyArray_DIM(fa, 3));
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  cvc::nav::veh_params v;
+  v.rr = static_cast<float>(rr);
+  v.d_hat = static_cast<float>(d_hat);
+  v.dt = static_cast<float>(dt);
+  v.vmax = static_cast<float>(vmax);
+  v.L = static_cast<float>(L);
+  v.delta_max = static_cast<float>(delta_max);
+  v.a_max = static_cast<float>(a_max);
+  v.a_lat_max = static_cast<float>(a_lat_max);
+  v.k_steer = static_cast<float>(k_steer);
+  v.nsub = nsub;
+  v.allow_reverse = allow_reverse != 0;
+  const float *gld = static_cast<const float *>(PyArray_DATA(gla));
+  const float *ald = static_cast<const float *>(PyArray_DATA(aa));
+  const float *bed = static_cast<const float *>(PyArray_DATA(ba));
+  const float *gad = static_cast<const float *>(PyArray_DATA(gaa));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::bicycle_rollout(fs, ood, tod, sod, gld, ald, bed, gad, N, mid, v, mcd, num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(4, oo, to, so, mc);
+  Py_DECREF(oo);
+  Py_DECREF(to);
+  Py_DECREF(so);
+  Py_DECREF(mc);
+  return tup;
 }
 
 } // namespace pycvc

@@ -69,6 +69,34 @@ struct field_stack {
 void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id, float *phi_out,
                 float *normal_out, int num_threads = 0);
 
+// Local features for the coefficient net, float-equivalent to sdf_nav.coef_feats:
+// feat = [phi, |goal-o|, gdir_x, gdir_y, gdir . unit_normal] per agent, where
+// gdir = (goal-o)/(|goal-o|+1e-6). Samples the field at each `on` (agent i ->
+// plane map_id[i]). `goal` is [n*2] normalized (the carrot). Writes feat_out
+// [n*5] row-major.
+void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
+                float *feat_out, int num_threads = 0);
+
+// Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
+// VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.
+struct veh_params {
+  float rr = 0, d_hat = 0, dt = 0, vmax = 0.9f; // meta / kw
+  float L = 0.035f, delta_max = 0.6f, a_max = 1.5f, a_lat_max = 1.0f, k_steer = 0.8f;
+  int nsub = 1;
+  bool allow_reverse = true;
+};
+
+// Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,
+// float-equivalent to sdf_nav.bicycle_rollout(steps=1). Each substep re-samples
+// the field (unit normal) at the agent's current position for the IPC wall
+// barrier; al/be/ga are the fixed per-agent coefficients (from coef_feats +
+// coef_mlp). `goal` is [n*2] normalized (the carrot). Updates o[n*2], th[n],
+// sp[n] IN PLACE and writes minclr_out[n] (min clearance seen). Agents are
+// independent — threaded across `num_threads` workers.
+void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
+                     const float *al, const float *be, const float *ga, int n, const int *map_id,
+                     const veh_params &v, float *minclr_out, int num_threads = 0);
+
 } // namespace nav
 } // namespace cvc
 
