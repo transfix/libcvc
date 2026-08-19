@@ -97,6 +97,7 @@ add_executable(image_test image_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
+add_executable(nav_test nav_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -164,6 +165,7 @@ set(TEST_TARGETS
   model_test
   geometry_attributes_test
   utility_test
+  nav_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -309,6 +311,13 @@ target_link_libraries(geometry_attributes_test
 )
 
 target_link_libraries(utility_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_test
   PRIVATE
     cvc
     GTest::gtest
@@ -838,6 +847,7 @@ target_compile_features(image_test PRIVATE cxx_std_17)
 target_compile_features(model_test PRIVATE cxx_std_17)
 target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
+target_compile_features(nav_test PRIVATE cxx_std_17)
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_test PRIVATE cxx_std_17)
@@ -1001,6 +1011,7 @@ gtest_discover_tests(image_test)
 gtest_discover_tests(model_test)
 gtest_discover_tests(geometry_attributes_test)
 gtest_discover_tests(utility_test)
+gtest_discover_tests(nav_test)
 gtest_discover_tests(state_change_journal_test)
 gtest_discover_tests(state_subscription_router_test)
 gtest_discover_tests(state_sync_adapter_test)

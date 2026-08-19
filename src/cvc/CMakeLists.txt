@@ -85,6 +85,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
+  ../../inc/cvc/nav/grid_nav.h
 )
 
 # Source files
@@ -166,6 +167,7 @@ set(SOURCE_FILES
   volume/volume_file_info.cpp
   volume/volume_ops.cpp
   volume/vtk_io.cpp
+  nav/grid_nav.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC

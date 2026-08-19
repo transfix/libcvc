@@ -46,7 +46,8 @@ set_property(SOURCE pycvc.i PROPERTY DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h
   ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_image.i
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_model.i)
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_model.i
+  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_nav.i)
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
