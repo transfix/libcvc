@@ -5,10 +5,13 @@
 // NO SINGLETON: owns an explicit cvc::app and injects it into the scene, so the
 // whole thing runs under one app the caller controls (cvc::gl::context() unused).
 //
-// WIP — this increment builds the terrain (matte + a procedural fragment bump map,
-// the same surface-gradient technique the tree bark uses), the afternoon sun and
-// striped shadows, and the navigable camera. The L-system trees (route-C merge +
-// procedural bark), the sea/sky volumes and the sun disc are ported next.
+// The island: a heightfield terrain (matte + a procedural fragment bump map), an
+// L-system FOREST (each tree grown from the grammar, merged route-C to one wood +
+// one needle actor, wind re-posed every frame via updateVertices, procedural bark
+// on the wood), a SEA volume (depth under a travelling wave), the afternoon sun
+// (disc + a directional light) and striped shadows — all navigable with the
+// built-in CameraController. (The Python demo's cloud/sky volume is the one part
+// not yet ported; it needs the cloud L-system grammar.)
 //
 // Run (onscreen, navigable):   lsystem_forest
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
@@ -20,7 +23,9 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
 
 #include <algorithm>
 #include <cctype>
@@ -403,6 +408,93 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
   return tree;
 }
 
+// ── the afternoon sun (a flat-lit disc + faint halo, far out) ────────────────
+constexpr double SUN_AZ = -52.0, SUN_EL = 34.0, SUN_DIST = 430.0, SUN_R = 13.0;
+Vec3d vnorm(Vec3d a) {
+  double l = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  return l > 1e-12 ? Vec3d{a.x / l, a.y / l, a.z / l} : Vec3d{0, 0, 1};
+}
+Vec3d vcross(Vec3d a, Vec3d b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+Vec3d sunDir(double azDeg, double elDeg) {
+  double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
+  return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
+}
+cvc::geometry discGeom(cvc::app &app, Vec3d c, Vec3d normal, double radius, int seg = 48) {
+  Vec3d n = vnorm(normal);
+  Vec3d up = std::fabs(n.z) < 0.9 ? Vec3d{0, 0, 1} : Vec3d{1, 0, 0};
+  Vec3d u = vnorm(vcross(n, up));
+  Vec3d v = vcross(n, u);
+  cvc::geometry g(app);
+  g.points().push_back({c.x, c.y, c.z});
+  for (int i = 0; i < seg; ++i) {
+    double th = i * 2.0 * M_PI / seg;
+    g.points().push_back({c.x + radius * (std::cos(th) * u.x + std::sin(th) * v.x),
+                          c.y + radius * (std::cos(th) * u.y + std::sin(th) * v.y),
+                          c.z + radius * (std::cos(th) * u.z + std::sin(th) * v.z)});
+  }
+  for (int i = 0; i < seg; ++i)
+    g.tris().push_back({0, static_cast<cvc::geometry::index_t>(1 + i),
+                        static_cast<cvc::geometry::index_t>(1 + (i + 1) % seg)});
+  return g;
+}
+void addSun(cvc::app &app, SceneGraph &sg) {
+  Vec3d d = sunDir(SUN_AZ, SUN_EL);
+  Vec3d c{d.x * SUN_DIST, d.y * SUN_DIST, d.z * SUN_DIST};
+  Vec3d face{-d.x, -d.y, -d.z}; // face the origin (where the camera orbits)
+  sg.addGraphics("sun", discGeom(app, c, face, SUN_R));
+  auto disc = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun"));
+  disc->setColor(1.0, 0.97, 0.88);
+  disc->setAmbient(1.0);
+  disc->setDiffuse(0.0);
+  disc->setSpecular(0.0); // flat-lit — a sun must not be a dark disc lit from behind
+  Vec3d ch{c.x * 1.02, c.y * 1.02, c.z * 1.02};
+  sg.addGraphics("sun_halo", discGeom(app, ch, face, SUN_R * 3.2));
+  auto halo = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun_halo"));
+  halo->setColor(1.0, 0.90, 0.72);
+  halo->setAmbient(1.0);
+  halo->setDiffuse(0.0);
+  halo->setSpecular(0.0);
+  halo->setOpacity(0.22);
+}
+
+// ── the sea: a volume whose field is depth under a travelling wave ───────────
+constexpr int SEA_N = 56, SEA_NZ = 18;
+constexpr double SEA_FLOOR = SEA_LEVEL - 20.0, SEA_TOP = SEA_LEVEL + 5.0;
+constexpr double WAVE_AMP = 1.6, WAVE_LEN = 46.0, WAVE_SPEED = 7.0;
+
+std::vector<float> seaField(double t) {
+  std::vector<float> f(static_cast<size_t>(SEA_N) * SEA_N * SEA_NZ, 0.0f);
+  for (int k = 0; k < SEA_NZ; ++k) {
+    double z = SEA_FLOOR + (SEA_TOP - SEA_FLOOR) * k / (SEA_NZ - 1);
+    for (int j = 0; j < SEA_N; ++j) {
+      double y = -HALF + 2.0 * HALF * j / (SEA_N - 1);
+      for (int i = 0; i < SEA_N; ++i) {
+        double x = -HALF + 2.0 * HALF * i / (SEA_N - 1);
+        double phase = (2.0 * M_PI / WAVE_LEN) * (x + 0.6 * y);
+        double surf = SEA_LEVEL + WAVE_AMP * (std::sin(phase - WAVE_SPEED * t * 0.1) +
+                                               0.45 * std::sin(1.7 * phase + WAVE_SPEED * t * 0.13));
+        double below = surf - z, above = z - terrainH(x, y);
+        double depth = (below > 0.0 && above > 0.0) ? std::min(1.0, std::max(0.0, below / 6.0)) : 0.0;
+        f[static_cast<size_t>(k) * SEA_N * SEA_N + j * SEA_N + i] = static_cast<float>(depth);
+      }
+    }
+  }
+  return f;
+}
+void seaTransfer(std::vector<double> &color, std::vector<double> &opacity, double t) {
+  double k = 0.0100 + 0.0015 * std::sin(t * 0.9);
+  color = {0.00, 0.42, 0.78, 0.74, 0.25, 0.14, 0.55, 0.66,
+           0.60, 0.04, 0.26, 0.46, 1.00, 0.01, 0.09, 0.22};
+  opacity = {0.00, 0.0, 0.12, k * 0.45, 0.55, k, 1.00, k * 2.0};
+}
+cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
+  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
+                     cvc::dimension(SEA_N, SEA_N, SEA_NZ), cvc::Float,
+                     cvc::bounding_box(-HALF, -HALF, SEA_FLOOR, HALF, HALF, SEA_TOP));
+}
+
 // Re-run the wind cascade and blit the posed vertices, one updateVertices each.
 void reposeTree(Tree &tree, double t) {
   double a = tree.sway * std::sin(1.3 * t + tree.phase);
@@ -491,15 +583,27 @@ int main(int argc, char **argv) {
       ++planted;
     }
 
+  // The sea: a volume filling the space between the seabed and a travelling wave,
+  // translucent in the shallows and opaque offshore, so the water sits only in the
+  // hollows and the sand shows through where it is shallow.
+  auto seaNode = sg.addGraphics("sea", seaVolume(app, seaField(0.0)));
+  {
+    std::vector<double> col, op;
+    seaTransfer(col, op, 0.0);
+    seaNode->setTransferFunction(col, op);
+  }
+  seaNode->setShading(true); // water is a lit surface; the swell throws a sun glint
+  seaNode->setAmbient(0.18);
+  seaNode->setDiffuse(0.72);
+  seaNode->setSpecular(0.85);
+  seaNode->setSpecularPower(70.0);
+
   // Afternoon sun (warm) + a dim cool sky fill from the opposite side.
   sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.0);
   sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.55);
 
   SceneRenderer view(sg, 1280, 800, offscreen, "main");
   view.setBackground(0.62, 0.76, 0.92);
-  sg.setGridVisible(false); // the island is the scene — no lab grid/axis box
-  sg.setAxisVisible(false);
-  sg.processEvents();
 
   // Shadows on (a render target now exists); re-baked every 3rd frame (cheap).
   const bool shadows = sg.setShadowsEnabled(true);
@@ -510,12 +614,24 @@ int main(int argc, char **argv) {
   cvc::bounding_box b = sg.computeGraphicsBounds();
   cam.frameBounds(b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
 
+  // The sun disc is added AFTER framing — it sits ~430 units out, and folding it
+  // into the bounds would push the camera reset back far enough to shrink the
+  // island to a speck. It is scenery, not world.
+  addSun(app, sg);
+
+  // Hide the lab grid/axis box (do it last + pump, so the visibility sticks).
+  sg.setGridVisible(false);
+  sg.setAxisVisible(false);
+  sg.processEvents();
+
   std::printf("lsystem_forest: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",
               offscreen ? "offscreen" : "onscreen", TN, TN, shadows ? "on" : "unavailable");
 
   auto start = std::chrono::steady_clock::now();
   double last = 0.0;
+  long frame = 0;
   int n = 0;
+  const int VOL_STRIDE = 3; // refresh the sea every 3rd frame (upload is not free)
   while (!view.windowClosed()) {
     double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     double dt = t - last;
@@ -523,8 +639,15 @@ int main(int argc, char **argv) {
     view.processUIEvents();
     for (Tree &tr : forest) // wind: re-pose every tree (route C updateVertices)
       reposeTree(tr, t);
+    if (frame % VOL_STRIDE == 0) { // travelling wave; setVolume RESETS the TF, so re-apply
+      seaNode->setVolume(seaVolume(app, seaField(t)));
+      std::vector<double> col, op;
+      seaTransfer(col, op, t);
+      seaNode->setTransferFunction(col, op);
+    }
     cam.update(dt);
     view.render();
+    ++frame;
     if (frames > 0 && ++n >= frames)
       break;
   }
