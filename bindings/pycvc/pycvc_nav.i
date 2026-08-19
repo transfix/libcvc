@@ -11,11 +11,13 @@
 // so no input array is pinned by a result.
 
 %{
+#include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -642,6 +644,57 @@ PyObject *nav_sdf_sample(PyObject *field, PyObject *on, PyObject *map_id, double
   Py_DECREF(phi);
   Py_DECREF(nrm);
   return tup;
+}
+
+// Belief log-odds -> planning occupancy (belief.to_occupancy / composite).
+// logodds (H,W) f32; optional dyn_stamp (H,W) f64. Returns occ (H,W) uint8 (0/1).
+PyObject *nav_composite_occupancy(PyObject *logodds, const char *policy, double p_thresh,
+                                  double band, PyObject *dyn_stamp, double t_now, double ttl_s)
+{
+  PyArrayObject *la = reinterpret_cast<PyArrayObject *>(
+      PyArray_FROMANY(logodds, NPY_FLOAT, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+  if (!la)
+    throw std::invalid_argument("pycvc.nav_composite_occupancy: logodds must be (H,W) float32");
+  const int H = static_cast<int>(PyArray_DIM(la, 0));
+  const int W = static_cast<int>(PyArray_DIM(la, 1));
+  cvc::nav::unknown_policy pol = cvc::nav::unknown_policy::optimistic;
+  if (std::string(policy) == "pessimistic")
+    pol = cvc::nav::unknown_policy::pessimistic;
+  else if (std::string(policy) != "optimistic") {
+    Py_DECREF(la);
+    throw std::invalid_argument("pycvc.nav_composite_occupancy: policy must be optimistic/pessimistic");
+  }
+  PyArrayObject *da = nullptr;
+  const double *dyn = nullptr;
+  if (dyn_stamp && dyn_stamp != Py_None) {
+    da = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(dyn_stamp, NPY_DOUBLE, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+    if (!da) {
+      Py_DECREF(la);
+      throw std::invalid_argument("pycvc.nav_composite_occupancy: dyn_stamp must be (H,W) float64");
+    }
+    if (PyArray_DIM(da, 0) != H || PyArray_DIM(da, 1) != W) {
+      Py_DECREF(la);
+      Py_DECREF(da);
+      throw std::invalid_argument("pycvc.nav_composite_occupancy: dyn_stamp shape != logodds");
+    }
+    dyn = static_cast<const double *>(PyArray_DATA(da));
+  }
+  npy_intp dims[2] = {H, W};
+  PyObject *occ = PyArray_SimpleNew(2, dims, NPY_UINT8);
+  if (!occ) {
+    Py_DECREF(la);
+    Py_XDECREF(da);
+    throw std::runtime_error("pycvc.nav_composite_occupancy: output alloc failed");
+  }
+  const float *lo = static_cast<const float *>(PyArray_DATA(la));
+  std::uint8_t *od = static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::composite_occupancy(lo, H, W, pol, p_thresh, band, dyn, t_now, ttl_s, od);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(la);
+  Py_XDECREF(da);
+  return occ;
 }
 
 // Load a `.cvcnav` policy from `path` and forward `feats` (N,in) float32 ->
