@@ -519,7 +519,31 @@ void addSun(cvc::app &app, SceneGraph &sg) {
 // ── the sea: a volume whose field is depth under a travelling wave ───────────
 constexpr int SEA_N = 56, SEA_NZ = 18;
 constexpr double SEA_FLOOR = SEA_LEVEL - 20.0, SEA_TOP = SEA_LEVEL + 5.0;
-constexpr double WAVE_AMP = 1.6, WAVE_LEN = 46.0, WAVE_SPEED = 7.0;
+constexpr double WAVE_AMP = 1.15; // overall wave height (reduced; crested multi-signal below)
+
+// A choppier sea than a lone sine: four travelling waves at different headings,
+// wavelengths and INCOMMENSURATE speeds (so the combined period reads erratic, never
+// obviously repeating), each CRESTED — a sharpened sine (s^2.4) that pinches the peaks
+// and broadens the troughs, so the water rolls and crests instead of undulating.
+double seaSurface(double x, double y, double t) {
+  struct Wave {
+    double hx, hy, len, omega, amp;
+  };
+  static const Wave W[] = {{0.86, 0.51, 58.0, 0.52, 1.00},
+                           {-0.30, 0.95, 37.0, 0.93, 0.55},
+                           {0.99, -0.16, 26.0, 1.37, 0.32},
+                           {0.42, 0.91, 71.0, 0.40, 0.62}};
+  double h = 0.0, wsum = 0.0;
+  for (const Wave &w : W) {
+    double k = 2.0 * M_PI / w.len;
+    double s = 0.5 + 0.5 * std::sin(k * (w.hx * x + w.hy * y) - w.omega * t); // [0,1]
+    h += w.amp * std::pow(s, 2.4); // crest: pinch peaks, broaden troughs
+    wsum += w.amp;
+  }
+  // h/wsum is the weighted-average crest (mean ~0.29); centre it so the calm water
+  // sits at SEA_LEVEL and crests poke up.
+  return SEA_LEVEL + WAVE_AMP * (h / wsum - 0.29);
+}
 
 std::vector<float> seaField(double t) {
   std::vector<float> f(static_cast<size_t>(SEA_N) * SEA_N * SEA_NZ, 0.0f);
@@ -529,9 +553,7 @@ std::vector<float> seaField(double t) {
       double y = -HALF + 2.0 * HALF * j / (SEA_N - 1);
       for (int i = 0; i < SEA_N; ++i) {
         double x = -HALF + 2.0 * HALF * i / (SEA_N - 1);
-        double phase = (2.0 * M_PI / WAVE_LEN) * (x + 0.6 * y);
-        double surf = SEA_LEVEL + WAVE_AMP * (std::sin(phase - WAVE_SPEED * t * 0.1) +
-                                              0.45 * std::sin(1.7 * phase + WAVE_SPEED * t * 0.13));
+        double surf = seaSurface(x, y, t);
         double below = surf - z, above = z - terrainH(x, y);
         double depth =
             (below > 0.0 && above > 0.0) ? std::min(1.0, std::max(0.0, below / 6.0)) : 0.0;
@@ -1215,6 +1237,8 @@ int main(int argc, char **argv) {
   double last = 0.0;
   long frame = 0;
   int n = 0;
+  double fpsLast = 0.0; // realtime FPS readout (interactive)
+  long fpsFrames = 0;
   const int VOL_STRIDE = 3; // refresh the sea every 3rd frame (upload is not free)
   while (!view.windowClosed()) {
     double t, dt;
@@ -1273,6 +1297,16 @@ int main(int argc, char **argv) {
       view.writePNG(path);
     } else {
       view.render();
+      // Realtime FPS readout (interactive only) — averaged over ~1 s.
+      ++fpsFrames;
+      if (t - fpsLast >= 1.0) {
+        std::printf("\r%.1f fps  (%zu trees, shadows %s, %dx%d)          ",
+                    fpsFrames / (t - fpsLast), forest.size(), shadows ? "on" : "off", width,
+                    height);
+        std::fflush(stdout);
+        fpsLast = t;
+        fpsFrames = 0;
+      }
     }
     ++frame;
     if (frames > 0 && ++n >= frames)
