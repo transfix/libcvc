@@ -76,6 +76,18 @@ public:
   static std::uint64_t compute_arch_hash(int in_features, int out_features,
                                          const std::vector<std::uint32_t> &layer_shape_act);
 
+  // Flattened weights for a device (CUDA) forward: per-layer metadata + one
+  // concatenated buffer (each layer's w[rows*cols] then b[rows]) + the folded
+  // output bias offset. Same values the CPU forward() uses.
+  struct flat_layers {
+    int in = 0, out = 0, num_layers = 0;
+    std::vector<int> rows, cols, act;
+    std::vector<long> w_off, b_off; // offsets into `data`
+    std::vector<float> data;
+    std::vector<float> out_bias_off;
+  };
+  flat_layers export_flat() const;
+
 private:
   struct Layer {
     int rows = 0, cols = 0;  // rows = out dim, cols = in dim (torch Linear [out,in])

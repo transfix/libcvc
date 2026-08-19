@@ -1366,5 +1366,104 @@ PyObject *nav_drive_step(PyObject *field, PyObject *on, PyObject *th, PyObject *
   return tup;
 }
 
+// GPU fused drive tick (nav/drive.cu). Same surface as nav_drive_step but runs
+// on the default CUDA device; shared field (plane 0). Returns fresh
+// (o (N,2), th (N,), sp (N,), minclr (N,)) f32. Present always; raises if this
+// pycvc was built without CUDA.
+PyObject *nav_drive_step_cuda(PyObject *field, PyObject *on, PyObject *th, PyObject *sp,
+                              PyObject *carrot, const char *weights_path, double min_x, double min_y,
+                              double max_x, double max_y, double cx, double cy, double scale,
+                              double rr, double d_hat, double dt, double vmax, double L,
+                              double delta_max, double a_max, double a_lat_max, double k_steer,
+                              int nsub, int allow_reverse)
+{
+#ifdef CVC_USING_CUDA
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_drive_step_cuda: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ta = take(th, NPY_FLOAT, 1);
+  PyArrayObject *sa = take(sp, NPY_FLOAT, 1);
+  PyArrayObject *ca = take(carrot, NPY_FLOAT, 2);
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path);
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *to = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *so = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *mc = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  if (!oo || !to || !so || !mc) {
+    Py_XDECREF(oo);
+    Py_XDECREF(to);
+    Py_XDECREF(so);
+    Py_XDECREF(mc);
+    fail("pycvc.nav_drive_step_cuda: output alloc failed");
+  }
+  float *ood = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(oo)));
+  float *tod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(to)));
+  float *sod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(so)));
+  float *mcd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mc)));
+  std::memcpy(ood, PyArray_DATA(oa), sizeof(float) * 2 * N);
+  std::memcpy(tod, PyArray_DATA(ta), sizeof(float) * N);
+  std::memcpy(sod, PyArray_DATA(sa), sizeof(float) * N);
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = static_cast<int>(PyArray_DIM(fa, 0));
+  fs.H = static_cast<int>(PyArray_DIM(fa, 2));
+  fs.W = static_cast<int>(PyArray_DIM(fa, 3));
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  cvc::nav::veh_params v;
+  v.rr = (float)rr;
+  v.d_hat = (float)d_hat;
+  v.dt = (float)dt;
+  v.vmax = (float)vmax;
+  v.L = (float)L;
+  v.delta_max = (float)delta_max;
+  v.a_max = (float)a_max;
+  v.a_lat_max = (float)a_lat_max;
+  v.k_steer = (float)k_steer;
+  v.nsub = nsub;
+  v.allow_reverse = allow_reverse != 0;
+  const float *cad = static_cast<const float *>(PyArray_DATA(ca));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::drive_step_cuda(fs, ood, tod, sod, cad, model, N, v, mcd);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(4, oo, to, so, mc);
+  Py_DECREF(oo);
+  Py_DECREF(to);
+  Py_DECREF(so);
+  Py_DECREF(mc);
+  return tup;
+#else
+  (void)field;
+  (void)on;
+  (void)th;
+  (void)sp;
+  (void)carrot;
+  (void)weights_path;
+  throw std::runtime_error("pycvc.nav_drive_step_cuda: this pycvc was built without CUDA");
+#endif
+}
+
 } // namespace pycvc
 %}

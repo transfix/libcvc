@@ -145,6 +145,24 @@ void carrot_step(const float *o, const float *goal, const float *th, float *sp, 
                  const float *nrm, const fsm_state &s, int n, const carrot_params &p,
                  float *carrot_out, int num_threads = 0);
 
+// ─── CUDA drive (device-resident; validation on this box, bench on a GPU box) ──
+// Defined in nav/drive.cu, compiled only when CVC_ENABLE_CUDA. The nav .cu is
+// built WITHOUT --use_fast_math (-fmad=false, IEEE div/sqrt) so it stays
+// float-equivalent to the CPU/torch reference — the deployment GPU path a
+// renderer/game engine uses when N outgrows the CPU. These allocate/copy per
+// call (a launcher; the fused device-resident sim_world.cu is the next step).
+
+// GPU bilinear sample of plane 0 at `n` normalized positions, float-equivalent to
+// sdf_sample. Writes phi_out[n] + unit normal_out[n*2]. Runs on the default GPU.
+void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_out,
+                     float *normal_out);
+
+// GPU fused drive tick (sample -> coef_feats -> coef_mlp -> bicycle nsub), one
+// thread per agent, float-equivalent to drive_step. Updates o[n*2], th[n], sp[n]
+// in place and writes minclr_out[n]. Shared field (plane 0).
+void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                     const coef_mlp &model, int n, const veh_params &v, float *minclr_out);
+
 } // namespace nav
 } // namespace cvc
 

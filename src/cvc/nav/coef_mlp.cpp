@@ -161,6 +161,24 @@ coef_mlp coef_mlp::load_from_memory(const void *data, std::size_t nbytes) {
   return m;
 }
 
+coef_mlp::flat_layers coef_mlp::export_flat() const {
+  flat_layers fl;
+  fl.in = in_;
+  fl.out = out_;
+  fl.num_layers = static_cast<int>(layers_.size());
+  fl.out_bias_off = out_bias_off_;
+  for (const Layer &L : layers_) {
+    fl.rows.push_back(L.rows);
+    fl.cols.push_back(L.cols);
+    fl.act.push_back(static_cast<int>(L.act));
+    fl.w_off.push_back(static_cast<long>(fl.data.size()));
+    fl.data.insert(fl.data.end(), L.w.begin(), L.w.end());
+    fl.b_off.push_back(static_cast<long>(fl.data.size()));
+    fl.data.insert(fl.data.end(), L.b.begin(), L.b.end());
+  }
+  return fl;
+}
+
 coef_mlp coef_mlp::load(const std::string &path) {
   std::ifstream f(path, std::ios::binary);
   if (!f)
