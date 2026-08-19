@@ -557,8 +557,8 @@ cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
 constexpr int SKY_N = 84, SKY_NZ = 38;             // finer grid so the fBm fractal detail resolves
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0; // a deep slab, so puffs are round
 constexpr double SKY_HALF = 150.0;                 // overhangs the island a little
-constexpr double CLOUD_DRIFT = 5.0;                // world units / second
-constexpr double CLOUD_MORPH_S = 26.0;             // seconds for a full crossfade
+constexpr double CLOUD_DRIFT = 3.0;                // world units / second (gentle)
+constexpr double CLOUD_MORPH_S = 60.0; // seconds per crossfade (slow, so it barely pulses)
 constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
 constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 11.4, CLOUD_STEP_DECAY = 0.9; // step/puff
 constexpr double CLOUD_PUFF0 = 12.3, CLOUD_PUFF_DECAY = 0.88; // scaled with SKY_N (keep the size)
@@ -725,6 +725,52 @@ std::vector<float> walkClouds(std::mt19937 &rng) {
           v = static_cast<float>(std::min(1.0, std::max(0.0, v * (0.32 + 1.5 * d))));
         }
       }
+  // Cheap BAKED top-light: march each voxel toward the sun, accumulate the cloud
+  // density in the way, and thin the voxel by that shadow. The sunlit crowns keep
+  // full density (solid + white); the self-shadowed undersides drop toward a floor
+  // (softer, more translucent, a cool wash of sky through them) — a real sense of
+  // depth WITHOUT VTK's volume gradient-shade, which grays this fractal field.
+  {
+    Vec3d sd = sunDir(SUN_AZ, SUN_EL); // toward the sun (world)
+    double ux = sd.x * N / (2.0 * SKY_HALF), uy = sd.y * N / (2.0 * SKY_HALF),
+           uz = sd.z * NZ / (SKY_TOP - SKY_BASE); // sun step in grid cells
+    double ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    auto samp = [&](double cx, double cy, double cz) -> double {
+      if (cx < 0 || cx > N - 1 || cy < 0 || cy > N - 1 || cz < 0 || cz > NZ - 1)
+        return 0.0;
+      int x0 = (int)cx, y0 = (int)cy, z0 = (int)cz;
+      int x1 = std::min(x0 + 1, N - 1), y1 = std::min(y0 + 1, N - 1), z1 = std::min(z0 + 1, NZ - 1);
+      double tx = cx - x0, ty = cy - y0, tz = cz - z0;
+      auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+      double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+      double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+      double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+      double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+      return (c00 * (1 - ty) + c10 * ty) * (1 - tz) + (c01 * (1 - ty) + c11 * ty) * tz;
+    };
+    const int LSTEPS = 7;
+    const double LK = 0.95, LFLOOR = 0.72,
+                 LSTEP = 1.6; // floor kept high: shade without fraying apart
+    std::vector<float> lit(field.size());
+    for (int gz = 0; gz < NZ; ++gz)
+      for (int gy = 0; gy < N; ++gy)
+        for (int gx = 0; gx < N; ++gx) {
+          size_t o = skyIdx(gz, gy, gx);
+          double v = field[o];
+          if (v <= 0.0) {
+            lit[o] = 0.0f;
+            continue;
+          }
+          double tau = 0.0;
+          for (int s = 1; s <= LSTEPS; ++s)
+            tau += samp(gx + ux * s * LSTEP, gy + uy * s * LSTEP, gz + uz * s * LSTEP) * LSTEP;
+          lit[o] = static_cast<float>(v * (LFLOOR + (1.0 - LFLOOR) * std::exp(-LK * tau)));
+        }
+    field.swap(lit);
+  }
   return field;
 }
 // Holds the grown cloud maps + a normalisation peak; samples a continuous field.
@@ -797,7 +843,10 @@ cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
 // not ramped — a ramp still accumulates over the ~180 samples a ray takes through
 // the slab); cores must reach ~1 so a puff composites white, not as dirty smoke.
 void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
-  color = {0.0, 0.90, 0.92, 0.95, 0.45, 0.97, 0.98, 0.99, 1.0, 1.00, 1.00, 1.00};
+  // Cool blue-grey at the low (self-shadowed / thin) end, warming to pure white at
+  // the dense, sunlit cores — so the baked top-light reads as cool shaded undersides
+  // under bright crowns rather than a flat white slab.
+  color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
 }
 
@@ -901,14 +950,16 @@ void reposeTree(Tree &tree, double t) {
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  bool offscreen = false, noShadows = false;
+  bool offscreen = false, useShadows = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0;
   std::string png, captureStr, outDir;
   po::options_description desc("lsystem_forest — a pure-C++ cvcGL island demo\nOptions");
   desc.add_options()("help,h", "show this help and exit")                                //
       ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")         //
-      ("no-shadows", po::bool_switch(&noShadows), "disable shadow maps")                 //
+      ("shadows", po::bool_switch(&useShadows),                                          //
+       "cast tree shadows via a shadow map (OFF by default: the thin trunks and line "   //
+       "needles alias it into displaced, speckled shadows)")                             //
       ("frames", po::value<int>(&frames)->default_value(0),                              //
        "stop after N frames (0 = run until the window closes)")                          //
       ("png", po::value<std::string>(&png)->default_value(""),                           //
@@ -960,6 +1011,8 @@ int main(int argc, char **argv) {
   // modulates or replaces the base colour with it.
   terrain->setUseSingleColor(true);
   terrain->setColor(1.0, 1.0, 1.0);
+  terrain->setAmbient(0.45); // keep the ground bright where the sun / cloud shade it
+  terrain->setDiffuse(0.85);
   addTerrainBump(*terrain);
 
   // Plant an L-system forest on the dry land, each tree merged to ONE wood actor
@@ -1048,8 +1101,8 @@ int main(int argc, char **argv) {
   }
 
   // Afternoon sun (warm) + a dim cool sky fill from the opposite side.
-  sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.0);
-  sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.55);
+  sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.15);
+  sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.70);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
   // A real sky, not a flat void: a vertical gradient background (hazy horizon at
@@ -1061,10 +1114,20 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.66, 0.71, 0.74);  // horizon (screen bottom)
   view.renderer()->SetBackground2(0.23, 0.44, 0.80); // zenith (screen top)
 
-  // Shadows on (a render target now exists); re-baked every 3rd frame (cheap).
-  const bool shadows = !noShadows && sg.setShadowsEnabled(true);
-  if (shadows)
-    sg.setShadowUpdateInterval(3);
+  // Tree-cast shadows are OPT-IN (--shadows), OFF by default. A shadow MAP can't
+  // represent this forest well: the wood is thin cylinders and the needles are
+  // lines, so even at high resolution they alias into displaced, speckled, self-
+  // shadowing artifacts on the ground and trunks. The scene reads cleaner and
+  // brighter without them — and the shadow that MATTERS, the cloud's soft dapple on
+  // the ground, is a terrain texture (computeCloudShadow), wholly independent of
+  // this pass. When on, use a high-res map re-baked every frame during a capture so
+  // the wind-blown shadows don't snap. (setShadowResolution demonstrates the cvcGL
+  // knob; the aliasing is inherent to line/thin geometry, not the resolution.)
+  const bool shadows = useShadows && sg.setShadowsEnabled(true);
+  if (shadows) {
+    sg.setShadowResolution(2048);
+    sg.setShadowUpdateInterval(capturing ? 1 : 3);
+  }
 
   // Built-in navigation, framed on the island.
   CameraController cam(view);
@@ -1166,14 +1229,16 @@ int main(int argc, char **argv) {
     view.processUIEvents();
     for (Tree &tr : forest) // wind: re-pose every tree (route C updateVertices)
       reposeTree(tr, t);
-    if (frame % VOL_STRIDE == 0) { // travelling wave; setVolume RESETS the TF, so re-apply
+    // Interactive strides the two volume re-imports (staggered, for speed); a
+    // capture refreshes BOTH every frame so the cloud drift and swell are smooth,
+    // not stepped (the stutter reads as a pulse).
+    if (capturing || frame % VOL_STRIDE == 0) { // travelling wave; setVolume RESETS the TF
       seaNode->setVolume(seaVolume(app, seaField(t)));
       std::vector<double> col, op;
       seaTransfer(col, op, t);
       seaNode->setTransferFunction(col, op);
     }
-    if (frame % VOL_STRIDE ==
-        1) { // sky drift+morph, staggered so the two uploads never share a frame
+    if (capturing || frame % VOL_STRIDE == 1) { // sky drift + morph
       double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
       double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
       std::vector<float> skyF = sky.field(shift, morph);
