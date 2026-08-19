@@ -72,8 +72,7 @@ std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols);
 // increasing clearance, i.e. (dphi/dcol, dphi/drow). All three grids are
 // float32, row-major rows×cols. bounds = (min_x, min_y, max_x, max_y) in world
 // units; `scale` maps world → the normalized regime.
-struct sdf_field
-{
+struct sdf_field {
   int rows = 0;
   int cols = 0;
   std::vector<float> phi;      // signed distance, normalized
@@ -81,30 +80,28 @@ struct sdf_field
   std::vector<float> normal_y; // unit gradient, row (y) component
 };
 
-sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x,
-                    double min_y, double max_x, double max_y, double scale);
+sdf_field build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double min_y,
+                    double max_x, double max_y, double scale);
 
 // ─── Belief-space grid navigation (planner.py) ──────────────────────────────
 
 // Binary dilation by `cells` 4-connected steps (planner.inflate). `occ` is
 // row-major rows×cols with nonzero = blocked; returns a row-major rows×cols
 // uint8 grid of 0/1. `cells` <= 0 returns a plain 0/1 copy of `occ`.
-std::vector<std::uint8_t> inflate(const std::uint8_t *occ, int rows, int cols,
-                                  int cells);
+std::vector<std::uint8_t> inflate(const std::uint8_t *occ, int rows, int cols, int cells);
 
 // Bresenham line-of-sight (planner._line_of_sight): true iff no blocked cell
 // lies on the inclusive segment from (ar, ac) to (br, bc). Endpoints are
 // (row, col). Callers guarantee endpoints are in bounds, exactly as the Python
 // reference does.
-bool line_of_sight(const std::uint8_t *occ, int rows, int cols, int ar, int ac,
-                   int br, int bc);
+bool line_of_sight(const std::uint8_t *occ, int rows, int cols, int ar, int ac, int br, int bc);
 
 // Snap (r, c) to the nearest free cell using planner._nearest_free's exact
 // (top-left-biased) scan order and `max_radius` bound. Returns {row, col};
 // {-1, -1} means None (no free cell within the radius). (r, c) is first clamped
 // into the grid, matching the Python reference.
-std::pair<int, int> nearest_free(const std::uint8_t *occ, int rows, int cols,
-                                 int r, int c, int max_radius = 12);
+std::pair<int, int> nearest_free(const std::uint8_t *occ, int rows, int cols, int r, int c,
+                                 int max_radius = 12);
 
 // 8-connected A* with corner-cut prevention over the free cells of `occ`
 // (row-major rows×cols, nonzero = blocked). Reproduces Python heapq's
@@ -115,16 +112,14 @@ std::pair<int, int> nearest_free(const std::uint8_t *occ, int rows, int cols,
 // nullptr for the plain shortest path. Returns the path flattened as
 // [r0, c0, r1, c1, ...]; an empty vector means None (unreachable, or a snapped
 // endpoint was None).
-std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r,
-                       int start_c, int goal_r, int goal_c,
-                       const double *cost = nullptr);
+std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
+                       int goal_r, int goal_c, const double *cost = nullptr);
 
 // String-pull (planner.simplify): keep only the corners needed to preserve
 // line of sight. `path` is flattened [r0, c0, r1, c1, ...] of length 2*n;
 // returns the simplified path flattened the same way. Paths shorter than three
 // points are returned unchanged.
-std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols,
-                          const int *path, int n);
+std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols, const int *path, int n);
 
 // ─── Batched, threaded per-agent kernels (PERFORMANCE.md stage 4) ────────────
 //
@@ -135,8 +130,7 @@ std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols,
 
 // One independent A* query over its own occupancy plane. All queries in a batch
 // share rows/cols (the raster) but not the contents (each agent's belief map).
-struct astar_query
-{
+struct astar_query {
   const std::uint8_t *occ; // row-major rows*cols, nonzero = blocked
   int start_r, start_c;
   int goal_r, goal_c;
@@ -146,16 +140,14 @@ struct astar_query
 // Run `queries` in parallel across `num_threads` workers (<=0 => hardware
 // concurrency). Returns one flattened [r0,c0,...] path per query (empty ==
 // unreachable), in input order.
-std::vector<std::vector<int>> astar_batch(const std::vector<astar_query> &queries,
-                                          int rows, int cols,
-                                          int num_threads = 0);
+std::vector<std::vector<int>> astar_batch(const std::vector<astar_query> &queries, int rows,
+                                          int cols, int num_threads = 0);
 
 // Build one SDF field per occupancy plane in parallel. `occs[i]` is agent i's
 // footprint occupancy (row-major rows*cols); bounds and scale are shared.
-std::vector<sdf_field> build_sdf_batch(const std::vector<const std::uint8_t *> &occs,
-                                       int rows, int cols, double min_x,
-                                       double min_y, double max_x, double max_y,
-                                       double scale, int num_threads = 0);
+std::vector<sdf_field> build_sdf_batch(const std::vector<const std::uint8_t *> &occs, int rows,
+                                       int cols, double min_x, double min_y, double max_x,
+                                       double max_y, double scale, int num_threads = 0);
 
 } // namespace nav
 } // namespace cvc
