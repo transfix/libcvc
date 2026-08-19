@@ -193,3 +193,13 @@ target_link_libraries(cvcgl_renderer_bench PRIVATE cvcGL)
 add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
+
+# ── examples (opt-in, OFF by default) ──
+# Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
+# (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
+# track). What cvcGL-as-a-demo-toolkit is for: quick self-contained scenes that
+# scale toward a real-time sim/game loop. Off by default; -DCVC_BUILD_EXAMPLES=ON.
+option(CVC_BUILD_EXAMPLES "Build cvcGL example programs" OFF)
+if(CVC_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
