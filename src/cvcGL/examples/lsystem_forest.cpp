@@ -965,25 +965,26 @@ void reposeTree(const Tree &tree, double t, std::vector<double> &woodBuf,
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  bool offscreen = false, noShadows = false;
+  bool offscreen = false, noShadows = false, verbose = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0;
   std::string png, captureStr, outDir;
   po::options_description desc("lsystem_forest — a pure-C++ cvcGL island demo\nOptions");
-  desc.add_options()("help,h", "show this help and exit")                                //
-      ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")         //
-      ("no-shadows", po::bool_switch(&noShadows), "disable tree shadows (a shadow map)") //
-      ("frames", po::value<int>(&frames)->default_value(0),                              //
-       "stop after N frames (0 = run until the window closes)")                          //
-      ("png", po::value<std::string>(&png)->default_value(""),                           //
-       "after the run, write the final frame to this PNG")                               //
-      ("capture", po::value<std::string>(&captureStr)->default_value("none"),            //
-       "cinematic capture path: none | orbit | fly (forces --offscreen)")                //
-      ("width", po::value<int>(&width)->default_value(1280), "render width in pixels")   //
-      ("height", po::value<int>(&height)->default_value(800), "render height in pixels") //
-      ("fps", po::value<double>(&fps)->default_value(30.0),                              //
-       "capture frames per second (drives the synthetic clock)")                         //
-      ("out", po::value<std::string>(&outDir)->default_value("frames"),                  //
+  desc.add_options()("help,h", "show this help and exit")                                   //
+      ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")            //
+      ("no-shadows", po::bool_switch(&noShadows), "disable tree shadows (a shadow map)")    //
+      ("verbose,v", po::bool_switch(&verbose), "show cvcGL debug logging (off by default)") //
+      ("frames", po::value<int>(&frames)->default_value(0),                                 //
+       "stop after N frames (0 = run until the window closes)")                             //
+      ("png", po::value<std::string>(&png)->default_value(""),                              //
+       "after the run, write the final frame to this PNG")                                  //
+      ("capture", po::value<std::string>(&captureStr)->default_value("none"),               //
+       "cinematic capture path: none | orbit | fly (forces --offscreen)")                   //
+      ("width", po::value<int>(&width)->default_value(1280), "render width in pixels")      //
+      ("height", po::value<int>(&height)->default_value(800), "render height in pixels")    //
+      ("fps", po::value<double>(&fps)->default_value(30.0),                                 //
+       "capture frames per second (drives the synthetic clock)")                            //
+      ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
   po::variables_map vm;
   try {
@@ -1015,6 +1016,11 @@ int main(int argc, char **argv) {
 
   // Own the app and inject it — no global/singleton context.
   cvc::app app;
+  // The scene's nodes log through THIS injected app (not a process-wide singleton),
+  // so we set the console verbosity right here: show only errors + warnings, unless
+  // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
+  // level L prints when L < log_verbosity (0=error, 1=warning, 2=info, 3+=debug).
+  app.properties("system.log_verbosity", verbose ? "6" : "2");
   SceneGraph sg(app, "forest");
 
   sg.addGraphics("terrain", buildTerrain(app));

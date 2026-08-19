@@ -7,7 +7,6 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/context.h>
 #include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
 #include <set>
@@ -430,7 +429,7 @@ void GeometryNode::texture_modified() {
 }
 
 void GeometryNode::setGeometry(const cvc::geometry &geom) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
 
   // CRITICAL: Entire method must run on main thread to avoid Qt threading errors
   // Even creating std::shared_ptr or setting member variables can trigger VTK
@@ -489,7 +488,7 @@ void GeometryNode::setGeometry(const cvc::geometry &geom) {
 }
 
 void GeometryNode::updateVertices(const std::vector<double> &xyz) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
 
   // Topology-preserving fast path (docs/RENDER_PERFORMANCE.md fix #3, route C):
   // overwrite the existing vtkPoints coordinates in place and mark modified, so
@@ -506,10 +505,10 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
     vtkPoints *pts = m_polyData->GetPoints();
     const size_t n = xyz.size() / 3;
     if (!pts || static_cast<size_t>(pts->GetNumberOfPoints()) != n) {
-      cvc::gl::context().log(0, "GeometryNode::updateVertices[" + getName() +
-                                    "]: point-count mismatch (" + std::to_string(n) + " given, " +
-                                    std::to_string(pts ? pts->GetNumberOfPoints() : 0) +
-                                    " in mesh) — ignoring; call setGeometry to change topology");
+      app().log(1, "GeometryNode::updateVertices[" + getName() + "]: point-count mismatch (" +
+                       std::to_string(n) + " given, " +
+                       std::to_string(pts ? pts->GetNumberOfPoints() : 0) +
+                       " in mesh) — ignoring; call setGeometry to change topology");
       return;
     }
     for (size_t i = 0; i < n; ++i)

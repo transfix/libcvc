@@ -36,6 +36,7 @@ prints a live FPS readout.
 |------|---------|
 | `--offscreen` | render without opening a window |
 | `--no-shadows` | disable the tree shadow map |
+| `--verbose` / `-v` | show cvcGL's per-frame debug logging (off by default — the console is quiet) |
 | `--frames N` | stop after N frames (0 = until the window closes) |
 | `--png FILE` | write the final frame to a PNG after the run |
 | `--capture orbit\|fly` | render a cinematic path offscreen to numbered PNGs (forces `--offscreen`) |
