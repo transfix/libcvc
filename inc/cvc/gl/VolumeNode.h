@@ -42,6 +42,14 @@ public:
   void setData(const cvc::volume &vol) { setVolume(vol); }
 
   void setVolume(const cvc::volume &vol);
+
+  // Lightweight in-place refresh of the voxel values: overwrite the scalars WITHOUT
+  // re-importing (no realloc, no scalar-range rescan, no transfer-function reset, no
+  // logging). `data` must match the current volume's voxel count and be laid out the
+  // same as the float volume last set via setVolume(). This is the per-frame
+  // animation fast path — orders of magnitude cheaper than setVolume(), which
+  // reallocates the image, rescans the range, and resets the transfer function.
+  void updateScalars(const std::vector<float> &data);
   bool hasVolume() const { return m_hasVolume; }
   const cvc::volume *getVolume() const { return m_volume.get(); }
 

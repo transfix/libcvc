@@ -151,6 +151,58 @@ void test_scattering_forwards() {
   std::printf("  ok: volumetric scattering / GI reach / anisotropy forward + round-trip\n");
 }
 
+// updateScalars() is the per-frame animation fast path: overwrite the voxels in
+// place (memcpy + Modified) WITHOUT re-importing. Its whole point is what it does
+// NOT do — no realloc, no scalar-range rescan, and crucially no setDefaultTransferFunction
+// — so a transfer function the caller set stays put across an update, where a full
+// setVolume would reset it. That contract is what this pins; that scalars actually
+// reach the GPU is exercised by the animated demo end to end.
+void test_updatescalars_is_the_cheap_path() {
+  SceneGraph sg;
+  const int M = 8;
+  const std::size_t NV = static_cast<std::size_t>(M) * M * M;
+  // A genuine 0..12 range so setVolume builds a normal ramp we can tell a custom
+  // function apart from.
+  std::vector<float> f(NV);
+  for (std::size_t i = 0; i < NV; ++i)
+    f[i] = static_cast<float>(i % 13);
+  cvc::volume v(cvc::gl::context(), reinterpret_cast<const unsigned char *>(f.data()),
+                cvc::dimension(M, M, M), cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
+  auto node = sg.addGraphics("keep", v);
+  auto *vn = dynamic_cast<VolumeNode *>(node.get());
+  assert(vn != nullptr);
+
+  // A deliberately non-default transfer function (red->blue, a distinctive opacity
+  // ramp) so it can't be confused with the ramp setVolume would install.
+  vn->setTransferFunction({0.0, 1.0, 0.0, 0.0, 12.0, 0.0, 0.2, 1.0}, {0.0, 0.05, 12.0, 0.85});
+  const auto customOpacity = vn->getTransferFunctionOpacityTable();
+  const auto customColor = vn->getTransferFunctionColorTable();
+  assert(!customOpacity.empty());
+
+  // The fast path: overwrite every voxel in place. The transfer function must be left
+  // byte-for-byte as set — updateScalars runs no setDefaultTransferFunction.
+  std::vector<float> g(NV, 5.0f);
+  vn->updateScalars(g);
+  assert(vn->getTransferFunctionOpacityTable() == customOpacity);
+  assert(vn->getTransferFunctionColorTable() == customColor);
+  std::printf("  ok: updateScalars leaves the transfer function untouched\n");
+
+  // Contrast: a full setVolume DOES reset the transfer function to the default ramp,
+  // so the custom one must NOT survive it. This is exactly the work updateScalars skips.
+  vn->setVolume(v);
+  assert(vn->getTransferFunctionOpacityTable() != customOpacity);
+  std::printf("  ok: setVolume resets the transfer function (the cost updateScalars avoids)\n");
+
+  // GUARD: a voxel-count mismatch is an honest no-op — rejected before any VTK work,
+  // so no crash, no partial memcpy, and the transfer function is left intact.
+  vn->setTransferFunction({0.0, 1.0, 0.0, 0.0, 12.0, 0.0, 0.2, 1.0}, {0.0, 0.05, 12.0, 0.85});
+  const auto restored = vn->getTransferFunctionOpacityTable();
+  std::vector<float> wrong(static_cast<std::size_t>(M) * M * (M - 1), 5.0f);
+  vn->updateScalars(wrong);
+  assert(vn->getTransferFunctionOpacityTable() == restored);
+  std::printf("  ok: updateScalars ignores a voxel-count mismatch\n");
+}
+
 } // namespace
 
 int main() {
@@ -159,6 +211,7 @@ int main() {
   test_real_range_still_ramps();
   test_inplace_fill_then_resetvolume();
   test_scattering_forwards();
+  test_updatescalars_is_the_cheap_path();
   std::printf("cvcgl_volume_range: OK\n");
   return 0;
 }

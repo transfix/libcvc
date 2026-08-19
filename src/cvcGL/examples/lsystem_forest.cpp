@@ -305,10 +305,8 @@ struct ModRec {
   int nOff;
 };
 struct Tree {
-  std::vector<ModRec> mods;
+  std::vector<ModRec> mods; // wOff/nOff index the MERGED forest buffers, not a per-tree one
   double phase = 0, sway = 0;
-  std::vector<double> woodBuf, needleBuf; // flat xyz, for updateVertices
-  std::shared_ptr<GeometryNode> woodNode, needleNode;
 };
 
 // Bark shader (verbatim GLSL from the latest master demo): vertical furrows around
@@ -355,16 +353,20 @@ void addBark(GeometryNode &node) {
 // The tree turtle stands on +Y; the world is Z-up.
 Mat4 treeUp() { return mRot(M_PI / 2.0, 1.0, 0.0, 0.0); }
 
-// Grow + merge one tree, add its wood + needle actors, install bark. Returns the
-// per-module re-pose records for the wind.
-Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px, double py,
-               double pz, const std::vector<Module> &mods, const CylTopo &cyl,
-               const std::vector<Vec3d> &nring) {
+// Grow one tree's geometry INTO the shared forest meshes (wg = wood, ng = needle),
+// recording per-module re-pose records whose offsets index those SHARED buffers.
+// The whole forest is merged to ONE wood actor + ONE needle actor (route C across
+// trees): the wind re-poses every tree into two big buffers uploaded once per frame,
+// not 64 tiny per-actor uploads — 64 draw calls collapse to 2 in both the main pass
+// and the shadow-map bake.
+Tree buildTree(cvc::app &app, double px, double py, double pz, const std::vector<Module> &mods,
+               const CylTopo &cyl, const std::vector<Vec3d> &nring, cvc::geometry &wg,
+               cvc::geometry &ng) {
   Tree tree;
   Mat4 tUp = treeUp();
   std::vector<Mat4> world(mods.size());
-  cvc::geometry wg(app), ng(app);
-  int wCur = 0, nCur = 0;
+  int wCur = static_cast<int>(wg.points().size()); // GLOBAL offsets into the merged forest mesh
+  int nCur = static_cast<int>(ng.points().size());
   for (size_t i = 0; i < mods.size(); ++i) {
     const Module &mod = mods[i];
     Mat4 hang = (mod.parent < 0) ? mMul(mTrans(px, py, pz), tUp) : mod.hang;
@@ -411,44 +413,22 @@ Tree buildTree(cvc::app &app, SceneGraph &sg, const std::string &name, double px
         ng.lines().push_back({base, static_cast<cvc::geometry::index_t>(base + 1 + t)});
       }
     }
-    wCur = wg.points().size();
-    nCur = ng.points().size();
+    wCur = static_cast<int>(wg.points().size());
+    nCur = static_cast<int>(ng.points().size());
     tree.mods.push_back(std::move(rec));
   }
-  // wood actor (per-vertex colour + bark)
-  sg.addGraphics(name, wg);
-  tree.woodNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(name));
-  tree.woodNode->setUseSingleColor(false);
-  // High material ambient softens the shadow map's self-shadowing on the thin
-  // trunks/needles: a fully self-shadowed sample still keeps this much light, so
-  // the aliased line-needle shadows read as a gentle dapple, not harsh dark speckle.
-  tree.woodNode->setAmbient(0.5);
-  tree.woodNode->setDiffuse(0.8);
-  addBark(*tree.woodNode);
-  tree.woodBuf.resize(wg.points().size() * 3);
-  for (size_t v = 0; v < wg.points().size(); ++v) {
-    tree.woodBuf[v * 3] = wg.points()[v][0];
-    tree.woodBuf[v * 3 + 1] = wg.points()[v][1];
-    tree.woodBuf[v * 3 + 2] = wg.points()[v][2];
-  }
-  // needle actor (single colour lines)
-  if (ng.points().size()) {
-    std::string nn = name + "_n";
-    sg.addGraphics(nn, ng);
-    tree.needleNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(nn));
-    tree.needleNode->setRenderMode(GeometryRenderMode::LINES);
-    tree.needleNode->setUseSingleColor(true);
-    tree.needleNode->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
-    tree.needleNode->setAmbient(0.55); // soften self-shadow speckle on the line needles
-    tree.needleNode->setDiffuse(0.75);
-    tree.needleBuf.resize(ng.points().size() * 3);
-    for (size_t v = 0; v < ng.points().size(); ++v) {
-      tree.needleBuf[v * 3] = ng.points()[v][0];
-      tree.needleBuf[v * 3 + 1] = ng.points()[v][1];
-      tree.needleBuf[v * 3 + 2] = ng.points()[v][2];
-    }
-  }
   return tree;
+}
+
+// Seed a flat [x,y,z,...] buffer from a merged mesh's bind-pose points.
+std::vector<double> flattenPoints(const cvc::geometry &g) {
+  std::vector<double> buf(g.points().size() * 3);
+  for (size_t v = 0; v < g.points().size(); ++v) {
+    buf[v * 3] = g.points()[v][0];
+    buf[v * 3 + 1] = g.points()[v][1];
+    buf[v * 3 + 2] = g.points()[v][2];
+  }
+  return buf;
 }
 
 // ── the afternoon sun (a flat-lit disc + faint halo, far out) ────────────────
@@ -583,14 +563,14 @@ cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
 // slab is thin in z relative to x/y, faded at all six faces so nothing is cut
 // square, and normalised on a high percentile so a few overlaps don't set the
 // scale. Empty sky is pinned EXACTLY transparent; only dense cores composite.
-constexpr int SKY_N = 84, SKY_NZ = 38;             // finer grid so the fBm fractal detail resolves
+constexpr int SKY_N = 60, SKY_NZ = 28; // finer grid for fBm detail, but sized for realtime
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0; // a deep slab, so puffs are round
 constexpr double SKY_HALF = 150.0;                 // overhangs the island a little
 constexpr double CLOUD_DRIFT = 3.0;                // world units / second (gentle)
 constexpr double CLOUD_MORPH_S = 60.0; // seconds per crossfade (slow, so it barely pulses)
 constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
-constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 11.4, CLOUD_STEP_DECAY = 0.9; // step/puff
-constexpr double CLOUD_PUFF0 = 12.3, CLOUD_PUFF_DECAY = 0.88; // scaled with SKY_N (keep the size)
+constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 8.1, CLOUD_STEP_DECAY = 0.9; // step/puff
+constexpr double CLOUD_PUFF0 = 8.8, CLOUD_PUFF_DECAY = 0.88;                   // scaled with SKY_N
 constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
 const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
 const char *cloudRule(char c) {
@@ -887,7 +867,7 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
 // exp(-k·τ) into a texture the terrain samples — identical to a per-fragment GPU
 // light pass for a directional light, but computed once per cloud update. Floored
 // so shaded ground still catches skylight rather than going black.
-constexpr int SHADOW_RES = 192;
+constexpr int SHADOW_RES = 96;        // soft shadow -> low-res map is plenty (was 192)
 constexpr double SHADOW_K = 0.06;     // optical-depth -> darkness (very gentle dapple)
 constexpr double SHADOW_FLOOR = 0.78; // shaded ground keeps most of its light
 
@@ -921,7 +901,7 @@ float sampleSky(const std::vector<float> &field, double wx, double wy, double wz
 void computeCloudShadow(const std::vector<float> &field, Vec3d sun,
                         std::vector<unsigned char> &rgb) {
   Vec3d L = vnorm(sun); // unit direction toward the sun (L.z > 0)
-  const int STEPS = 36;
+  const int STEPS = 22;
   rgb.resize((size_t)SHADOW_RES * SHADOW_RES * 3);
   for (int ty = 0; ty < SHADOW_RES; ++ty) {
     double y = -HALF + 2.0 * HALF * ty / (SHADOW_RES - 1);
@@ -944,8 +924,11 @@ void computeCloudShadow(const std::vector<float> &field, Vec3d sun,
   }
 }
 
-// Re-run the wind cascade and blit the posed vertices, one updateVertices each.
-void reposeTree(Tree &tree, double t) {
+// Re-run one tree's wind cascade, writing its posed vertices into the SHARED forest
+// buffers at this tree's offsets. No upload here — the caller re-poses every tree
+// and then uploads the two merged buffers ONCE (updateVertices) per frame.
+void reposeTree(const Tree &tree, double t, std::vector<double> &woodBuf,
+                std::vector<double> &needleBuf) {
   double a = tree.sway * std::sin(1.3 * t + tree.phase);
   Mat4 sway = mRot(a, 0.0, 1.0, 0.0); // TREE_AXIS = +Y (tree-local)
   std::vector<Mat4> world(tree.mods.size());
@@ -956,23 +939,20 @@ void reposeTree(Tree &tree, double t) {
     int wo = m.wOff;
     for (const Vec3d &p : m.localWood) {
       Vec3d w = xform(world[i], p);
-      tree.woodBuf[wo * 3] = w.x;
-      tree.woodBuf[wo * 3 + 1] = w.y;
-      tree.woodBuf[wo * 3 + 2] = w.z;
+      woodBuf[wo * 3] = w.x;
+      woodBuf[wo * 3 + 1] = w.y;
+      woodBuf[wo * 3 + 2] = w.z;
       ++wo;
     }
     int no = m.nOff;
     for (const Vec3d &p : m.localNeedle) {
       Vec3d w = xform(world[i], p);
-      tree.needleBuf[no * 3] = w.x;
-      tree.needleBuf[no * 3 + 1] = w.y;
-      tree.needleBuf[no * 3 + 2] = w.z;
+      needleBuf[no * 3] = w.x;
+      needleBuf[no * 3 + 1] = w.y;
+      needleBuf[no * 3 + 2] = w.z;
       ++no;
     }
   }
-  tree.woodNode->updateVertices(tree.woodBuf);
-  if (tree.needleNode)
-    tree.needleNode->updateVertices(tree.needleBuf);
 }
 
 } // namespace
@@ -1042,8 +1022,11 @@ int main(int argc, char **argv) {
   terrain->setDiffuse(0.85);
   addTerrainBump(*terrain);
 
-  // Plant an L-system forest on the dry land, each tree merged to ONE wood actor
-  // (+ ONE needle actor) with procedural bark, re-posed by the wind each frame.
+  // Plant an L-system forest on the dry land. Every tree's geometry is merged into
+  // ONE wood mesh + ONE needle mesh for the WHOLE forest (route C across trees):
+  // 32 trees -> 2 actors, so the per-frame wind is 2 vertex uploads and 2 draw
+  // calls (main pass + shadow bake), not 64. This is the single biggest realtime
+  // win — the per-actor upload/draw overhead dominated the frame.
   CylTopo cyl = cylTopo();
   std::vector<Vec3d> nring;
   for (int t = 0; t < NEEDLES; ++t) {
@@ -1055,6 +1038,7 @@ int main(int argc, char **argv) {
   std::mt19937 rng(20260817u);
   std::uniform_real_distribution<double> u01(0.0, 1.0);
   std::vector<Tree> forest;
+  cvc::geometry forestWood(app), forestNeedle(app); // the merged forest meshes
   const int MAX_TREES = 55;
   int planted = 0;
   for (int gy = -4; gy <= 4 && planted < MAX_TREES; ++gy)
@@ -1068,12 +1052,36 @@ int main(int argc, char **argv) {
       int maturity = MATURITY[rng() % 7];
       std::vector<Module> mods;
       expandTree(TREE_RULES[0], maturity, size, size, -1, 1, mods, tMicro, tTilt, tRoll);
-      Tree tr = buildTree(app, sg, "tree" + std::to_string(planted), x, y, h, mods, cyl, nring);
+      Tree tr = buildTree(app, x, y, h, mods, cyl, nring, forestWood, forestNeedle);
       tr.phase = u01(rng) * 2.0 * M_PI;
       tr.sway = 0.020 + 0.016 * u01(rng);
       forest.push_back(std::move(tr));
       ++planted;
     }
+
+  // One wood actor (per-vertex colour + procedural bark) and one needle actor for
+  // the whole forest. High material ambient softens the shadow map's self-shadowing
+  // on the thin trunks/line needles: a fully self-shadowed sample still keeps this
+  // much light, so aliased shadows read as a gentle dapple, not harsh dark speckle.
+  sg.addGraphics("forest_wood", forestWood);
+  auto woodNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("forest_wood"));
+  woodNode->setUseSingleColor(false);
+  woodNode->setAmbient(0.5);
+  woodNode->setDiffuse(0.8);
+  addBark(*woodNode);
+  std::vector<double> woodBuf = flattenPoints(forestWood);
+  std::shared_ptr<GeometryNode> needleNode;
+  std::vector<double> needleBuf;
+  if (forestNeedle.points().size()) {
+    sg.addGraphics("forest_needle", forestNeedle);
+    needleNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("forest_needle"));
+    needleNode->setRenderMode(GeometryRenderMode::LINES);
+    needleNode->setUseSingleColor(true);
+    needleNode->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
+    needleNode->setAmbient(0.55);
+    needleNode->setDiffuse(0.75);
+    needleBuf = flattenPoints(forestNeedle);
+  }
 
   // The sea: a volume filling the space between the seabed and a travelling wave,
   // translucent in the shallows and opaque offshore, so the water sits only in the
@@ -1239,7 +1247,13 @@ int main(int argc, char **argv) {
   int n = 0;
   double fpsLast = 0.0; // realtime FPS readout (interactive)
   long fpsFrames = 0;
-  const int VOL_STRIDE = 3; // refresh the sea every 3rd frame (upload is not free)
+  // Interactive update cadence, decoupled by how fast each thing actually moves:
+  // the wind ripples quickest, then the sea, the cloud drifts slowly, its ground
+  // shadow slower still. A capture refreshes everything EVERY frame (smooth, no
+  // stepping). The tree wind re-poses every other frame — imperceptibly stepped for
+  // a gentle sway and it roughly halves the wind's per-frame cost; the sea's stride
+  // also bounds how often its (not-free) transfer function is rebuilt for the glint.
+  const int WIND_STRIDE = 2, SEA_STRIDE = 4, CLOUD_STRIDE = 8, SHADOW_STRIDE = 16;
   while (!view.windowClosed()) {
     double t, dt;
     if (capturing) { // fixed synthetic clock -> real-time playback of the animation
@@ -1251,30 +1265,43 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
-    for (Tree &tr : forest) // wind: re-pose every tree (route C updateVertices)
-      reposeTree(tr, t);
-    // Interactive strides the two volume re-imports (staggered, for speed); a
-    // capture refreshes BOTH every frame so the cloud drift and swell are smooth,
-    // not stepped (the stutter reads as a pulse).
-    if (capturing || frame % VOL_STRIDE == 0) { // travelling wave; setVolume RESETS the TF
-      seaNode->setVolume(seaVolume(app, seaField(t)));
+    // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
+    // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
+    // sway is imperceptibly stepped at that cadence and it roughly halves the wind's
+    // cost; a capture re-poses every frame so nothing stutters.
+    if (capturing || frame % WIND_STRIDE == 0) {
+      for (Tree &tr : forest)
+        reposeTree(tr, t, woodBuf, needleBuf);
+      woodNode->updateVertices(woodBuf);
+      if (needleNode)
+        needleNode->updateVertices(needleBuf);
+    }
+    // The volumes refresh IN PLACE (updateScalars), NOT via setVolume — setVolume
+    // re-imports the whole field every call (realloc + full range rescan + transfer-
+    // function reset + heavy logging), which is what pinned the framerate at ~8 fps.
+    // The sea's transfer function is time-varying (the sun glint), so it is re-applied
+    // (cheap); the cloud's is constant, so only its scalars move.
+    const bool seaDue = capturing || frame % SEA_STRIDE == 0;
+    const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
+    const bool shadowDue = capturing || frame % SHADOW_STRIDE == 3;
+    if (seaDue) { // travelling wave
+      seaNode->updateScalars(seaField(t));
       std::vector<double> col, op;
       seaTransfer(col, op, t);
       seaNode->setTransferFunction(col, op);
     }
-    if (capturing || frame % VOL_STRIDE == 1) { // sky drift + morph
+    if (cloudDue || shadowDue) {
       double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
       double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
       std::vector<float> skyF = sky.field(shift, morph);
-      skyNode->setVolume(skyVolume(app, skyF));
-      std::vector<double> col, op;
-      skyTransfer(col, op);
-      skyNode->setTransferFunction(col, op);
-      // move the cloud's ground shadow with it — same field the volume shows
-      computeCloudShadow(skyF, sunDir(SUN_AZ, SUN_EL), shadowBuf);
-      cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
-                           cvc::image::data_type::u8, shadowBuf.data());
-      terrain->setTexture(shadowImg, false);
+      if (cloudDue)
+        skyNode->updateScalars(skyF); // sky drift + morph
+      if (shadowDue) {                // move the cloud's soft ground shadow with it
+        computeCloudShadow(skyF, sunDir(SUN_AZ, SUN_EL), shadowBuf);
+        cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                             cvc::image::data_type::u8, shadowBuf.data());
+        terrain->setTexture(shadowImg, false);
+      }
     }
     if (capture == Capture::Fly) {
       double s = frames > 1 ? double(frame) / (frames - 1) : 0.0;

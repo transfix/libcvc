@@ -278,6 +278,26 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   cvc::gl::context().log(0, "=================================\n");
 }
 
+void VolumeNode::updateScalars(const std::vector<float> &data) {
+  if (!m_imageData || data.empty())
+    return;
+  // Capture the scalars BY VALUE: runOnMainThread runs inline on the owner thread but
+  // MARSHALS to the event queue off it (see SceneNode), and a marshalled callback runs
+  // after this returns — a by-reference capture of the parameter would then dangle.
+  // The copy is still orders of magnitude cheaper than setVolume (no realloc, no range
+  // rescan, no transfer-function reset, no logging). Same pattern as updateVertices.
+  runOnMainThread([this, data]() {
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    if (n != data.size() || m_imageData->GetScalarType() != VTK_FLOAT)
+      return; // dimensions/type must match the volume last set via setVolume()
+    if (void *dst = m_imageData->GetScalarPointer())
+      std::memcpy(dst, data.data(), n * sizeof(float));
+    m_imageData->Modified(); // mapper re-uploads the changed field on next render
+  });
+}
+
 void VolumeNode::updateImageData(const cvc::volume &vol) {
   cvc::gl::context().log(0, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
 
