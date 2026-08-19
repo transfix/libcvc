@@ -20,11 +20,14 @@
 #include <vtkLight.h>
 #include <vtkMultiVolume.h>
 #include <vtkObjectFactory.h>
+#include <vtkOverlayPass.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
 #include <vtkShadowMapBakerPass.h>
 #include <vtkShadowMapPass.h>
+#include <vtkTranslucentPass.h>
+#include <vtkVolumetricPass.h>
 
 // Default ctor: delegate to the injected-app ctor with cvcGL's own process app.
 SceneGraph::SceneGraph(const std::string &statePrefix)
@@ -762,9 +765,24 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
 
+  // The shadow pass draws only the OPAQUE layer (with shadows). On its own it
+  // silently drops everything else — translucent geometry, volumes, 2-D overlays —
+  // so a scene with a VolumeNode (sea, cloud slab, any transfer-function volume)
+  // renders as if the volume weren't there the moment shadows are switched on.
+  // Follow it with the rest of VTK's standard layer order so the full scene draws:
+  // translucent geometry, then volumes (ray-cast over the shadowed opaque depth,
+  // so they are correctly occluded by terrain yet composite over open sky), then
+  // the 2-D overlay layer (captions, axis/grid labels).
+  vtkSmartPointer<vtkTranslucentPass> translucent = vtkSmartPointer<vtkTranslucentPass>::New();
+  vtkSmartPointer<vtkVolumetricPass> volumetric = vtkSmartPointer<vtkVolumetricPass>::New();
+  vtkSmartPointer<vtkOverlayPass> overlay = vtkSmartPointer<vtkOverlayPass>::New();
+
   vtkSmartPointer<vtkRenderPassCollection> passes = vtkSmartPointer<vtkRenderPassCollection>::New();
   passes->AddItem(baker);
   passes->AddItem(shadows);
+  passes->AddItem(translucent);
+  passes->AddItem(volumetric);
+  passes->AddItem(overlay);
   vtkSmartPointer<vtkSequencePass> seq = vtkSmartPointer<vtkSequencePass>::New();
   seq->SetPasses(passes);
   vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();

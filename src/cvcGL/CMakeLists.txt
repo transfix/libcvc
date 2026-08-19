@@ -136,6 +136,13 @@ add_executable(cvcgl_lighting test/cvcgl_lighting.cpp)
 target_link_libraries(cvcgl_lighting PRIVATE cvcGL)
 add_test(NAME cvcgl_lighting COMMAND cvcgl_lighting)
 
+# Shadows must not hide volumes: the shadow pass draws only the opaque layer, so
+# the sequence has to carry a volumetric pass or every VolumeNode vanishes the
+# moment shadows switch on. Structural check (no GPU) + offscreen render.
+add_executable(cvcgl_shadow_volume test/cvcgl_shadow_volume.cpp)
+target_link_libraries(cvcgl_shadow_volume PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_volume COMMAND cvcgl_shadow_volume)
+
 # Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
 # against the no-renderer teardown crash the Python lab would otherwise hit.
 add_executable(cvcgl_remove test/cvcgl_remove.cpp)
