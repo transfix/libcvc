@@ -20,6 +20,7 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/image/image.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -32,6 +33,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -57,28 +59,35 @@ double terrainH(double x, double y) {
   return h;
 }
 
+// Base terrain albedo at (x,y): grass, blending to rock on the peaks and sand at
+// the waterline. Shared by the mesh colours AND the cloud-shadow texture (which
+// carries albedo × shadow, so it reads correctly whether VTK modulates or replaces
+// the vertex colour with the texture).
+cvc::geometry::color_t terrainAlbedo(double x, double y) {
+  double h = terrainH(x, y);
+  const double rock[3] = {0.46, 0.45, 0.43}, grass[3] = {0.27, 0.44, 0.19},
+               sand[3] = {0.68, 0.62, 0.44};
+  double rockw = std::min(1.0, std::max(0.0, (h - 18.0) / 14.0));
+  double shore = std::max(0.0, 1.0 - std::fabs(h - SEA_LEVEL) / 4.5);
+  cvc::geometry::color_t c;
+  for (int k = 0; k < 3; ++k)
+    c[k] = (grass[k] * (1.0 - rockw) + rock[k] * rockw) * (1.0 - shore) + sand[k] * shore;
+  return c;
+}
+
 cvc::geometry buildTerrain(cvc::app &app) {
   cvc::geometry g(app);
   auto &pts = g.points();
   auto &cols = g.colors();
-  const cvc::geometry::color_t rock = {0.46, 0.45, 0.43};
-  const cvc::geometry::color_t grass = {0.27, 0.44, 0.19};
-  const cvc::geometry::color_t sand = {0.68, 0.62, 0.44};
+  auto &uvs = g.uvs(); // world (x,y) -> [0,1]^2, so the cloud-shadow texture aligns
   for (int j = 0; j < TN; ++j) {
     double y = -HALF + 2.0 * HALF * j / (TN - 1);
     for (int i = 0; i < TN; ++i) {
       double x = -HALF + 2.0 * HALF * i / (TN - 1);
       double h = terrainH(x, y);
       pts.push_back({x, y, h});
-      // shade by height: sand at the waterline, grass above, rock on the peaks
-      cvc::geometry::color_t c = grass;
-      double rockw = std::min(1.0, std::max(0.0, (h - 18.0) / 14.0));
-      for (int k = 0; k < 3; ++k)
-        c[k] = grass[k] * (1.0 - rockw) + rock[k] * rockw;
-      double shore = std::max(0.0, 1.0 - std::fabs(h - SEA_LEVEL) / 4.5);
-      for (int k = 0; k < 3; ++k)
-        c[k] = c[k] * (1.0 - shore) + sand[k] * shore;
-      cols.push_back(c);
+      uvs.push_back({(x + HALF) / (2.0 * HALF), (y + HALF) / (2.0 * HALF)});
+      cols.push_back(terrainAlbedo(x, y));
     }
   }
   auto &tris = g.tris();
@@ -694,6 +703,71 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.60, 0.075, 1.0, 0.200};
 }
 
+// ── cloud → ground shadow: a TRUE volumetric shadow, ray-marched along the sun ─
+// The scene's sun is DIRECTIONAL, so every shadow ray is parallel: the pattern the
+// cloud throws on the ground is just the cloud's along-sun optical depth, sheared.
+// So for each ground point we march the SAME density field the volume shows, up
+// the sun ray through the slab, accumulate optical depth τ, and store transmittance
+// exp(-k·τ) into a texture the terrain samples — identical to a per-fragment GPU
+// light pass for a directional light, but computed once per cloud update. Floored
+// so shaded ground still catches skylight rather than going black.
+constexpr int SHADOW_RES = 192;
+constexpr double SHADOW_K = 0.19;     // optical-depth -> darkness
+constexpr double SHADOW_FLOOR = 0.42; // shaded ground keeps at least this much light
+
+// Trilinear sample of a sky density field at a WORLD point (0 outside the slab).
+float sampleSky(const std::vector<float> &field, double wx, double wy, double wz) {
+  if (wz < SKY_BASE || wz > SKY_TOP)
+    return 0.0f;
+  double fx = (wx + SKY_HALF) / (2.0 * SKY_HALF) * (SKY_N - 1);
+  double fy = (wy + SKY_HALF) / (2.0 * SKY_HALF) * (SKY_N - 1);
+  double fz = (wz - SKY_BASE) / (SKY_TOP - SKY_BASE) * (SKY_NZ - 1);
+  if (fx < 0 || fx > SKY_N - 1 || fy < 0 || fy > SKY_N - 1)
+    return 0.0f;
+  int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
+  int x1 = std::min(x0 + 1, SKY_N - 1), y1 = std::min(y0 + 1, SKY_N - 1),
+      z1 = std::min(z0 + 1, SKY_NZ - 1);
+  double tx = fx - x0, ty = fy - y0, tz = fz - z0;
+  auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+  double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+  double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+  double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+  double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+  double c0 = c00 * (1 - ty) + c10 * ty, c1 = c01 * (1 - ty) + c11 * ty;
+  return (float)(c0 * (1 - tz) + c1 * tz);
+}
+
+// Bake albedo × cloud-shadow over the terrain footprint [-HALF,HALF]^2 into an RGB
+// buffer (SHADOW_RES^2) the terrain samples as its surface colour. Carrying the
+// albedo here (not just a grey shadow) keeps the terrain coloured whether VTK
+// modulates or replaces the vertex colour with the texture — and at texel rather
+// than vertex resolution, so the shading is finer than the mesh.
+void computeCloudShadow(const std::vector<float> &field, Vec3d sun,
+                        std::vector<unsigned char> &rgb) {
+  Vec3d L = vnorm(sun); // unit direction toward the sun (L.z > 0)
+  const int STEPS = 36;
+  rgb.resize((size_t)SHADOW_RES * SHADOW_RES * 3);
+  for (int ty = 0; ty < SHADOW_RES; ++ty) {
+    double y = -HALF + 2.0 * HALF * ty / (SHADOW_RES - 1);
+    for (int tx = 0; tx < SHADOW_RES; ++tx) {
+      double x = -HALF + 2.0 * HALF * tx / (SHADOW_RES - 1);
+      double z0 = terrainH(x, y);
+      double tEntry = (SKY_BASE - z0) / L.z, tExit = (SKY_TOP - z0) / L.z;
+      double ds = (tExit - tEntry) / STEPS;
+      double tau = 0.0;
+      for (int i = 0; i < STEPS; ++i) {
+        double t = tEntry + (i + 0.5) * ds;
+        tau += sampleSky(field, x + t * L.x, y + t * L.y, z0 + t * L.z) * ds;
+      }
+      double s = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * std::exp(-SHADOW_K * tau);
+      cvc::geometry::color_t a = terrainAlbedo(x, y);
+      size_t o = ((size_t)ty * SHADOW_RES + tx) * 3;
+      for (int k = 0; k < 3; ++k)
+        rgb[o + k] = (unsigned char)std::min(255.0, std::max(0.0, a[k] * s * 255.0));
+    }
+  }
+}
+
 // Re-run the wind cascade and blit the posed vertices, one updateVertices each.
 void reposeTree(Tree &tree, double t) {
   double a = tree.sway * std::sin(1.3 * t + tree.phase);
@@ -748,7 +822,11 @@ int main(int argc, char **argv) {
 
   sg.addGraphics("terrain", buildTerrain(app));
   auto terrain = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"));
-  terrain->setUseSingleColor(false);
+  // The surface colour comes from the cloud-shadow texture (albedo × shadow), so
+  // the mesh itself is flat white — the texture is the sole albedo whether VTK
+  // modulates or replaces the base colour with it.
+  terrain->setUseSingleColor(true);
+  terrain->setColor(1.0, 1.0, 1.0);
   addTerrainBump(*terrain);
 
   // Plant an L-system forest on the dry land, each tree merged to ONE wood actor
@@ -818,6 +896,26 @@ int main(int argc, char **argv) {
     skyTransfer(col, op);
     skyNode->setTransferFunction(col, op);
   }
+  // Volumetric self-shadowing: the GPU ray-caster casts secondary rays so the
+  // cloud shades itself — sunlit tops, dim undersides — reading as a solid body
+  // rather than flat fog. Forward-scattering (anisotropy > 0), as water droplets do.
+  // Strong forward scattering (silver lining) + LOCAL shadows sculpt a sunlit top
+  // and a shadowed underside while keeping the body bright. On so thin a field a
+  // higher blend / longer GI reach just dims the whole cloud uniformly toward a
+  // flat storm-grey instead of a directional gradient — tuned by eye.
+  skyNode->setVolumetricScattering(0.5);
+  skyNode->setGlobalIlluminationReach(0.3);
+  skyNode->setScatteringAnisotropy(0.85);
+
+  // The cloud's shadow on the ground: bake the initial transmittance into the
+  // terrain's texture (kept in sync with the drifting cloud each update below).
+  std::vector<unsigned char> shadowBuf;
+  computeCloudShadow(sky.field(0.0, 0.0), sunDir(SUN_AZ, SUN_EL), shadowBuf);
+  {
+    cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                         cvc::image::data_type::u8, shadowBuf.data());
+    terrain->setTexture(shadowImg, false);
+  }
 
   // Afternoon sun (warm) + a dim cool sky fill from the opposite side.
   sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.0);
@@ -872,10 +970,16 @@ int main(int argc, char **argv) {
     if (frame % VOL_STRIDE == 1) { // sky drift+morph, staggered so the two uploads never share a frame
       double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
       double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
-      skyNode->setVolume(skyVolume(app, sky.field(shift, morph)));
+      std::vector<float> skyF = sky.field(shift, morph);
+      skyNode->setVolume(skyVolume(app, skyF));
       std::vector<double> col, op;
       skyTransfer(col, op);
       skyNode->setTransferFunction(col, op);
+      // move the cloud's ground shadow with it — same field the volume shows
+      computeCloudShadow(skyF, sunDir(SUN_AZ, SUN_EL), shadowBuf);
+      cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                           cvc::image::data_type::u8, shadowBuf.data());
+      terrain->setTexture(shadowImg, false);
     }
     cam.update(dt);
     view.render();
