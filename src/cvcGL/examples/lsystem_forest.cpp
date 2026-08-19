@@ -8,10 +8,10 @@
 // The island: a heightfield terrain (matte + a procedural fragment bump map), an
 // L-system FOREST (each tree grown from the grammar, merged route-C to one wood +
 // one needle actor, wind re-posed every frame via updateVertices, procedural bark
-// on the wood), a SEA volume (depth under a travelling wave), the afternoon sun
-// (disc + a directional light) and striped shadows — all navigable with the
-// built-in CameraController. (The Python demo's cloud/sky volume is the one part
-// not yet ported; it needs the cloud L-system grammar.)
+// on the wood), a SEA volume (depth under a travelling wave), a drifting SKY of
+// L-system clouds (a 3-D turtle grows two density fields, crossfaded + scrolled so
+// the cloud evolves as it travels), the afternoon sun (disc + a directional light)
+// and striped shadows — all navigable with the built-in CameraController.
 //
 // Run (onscreen, navigable):   lsystem_forest
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <random>
 #include <string>
@@ -495,6 +496,204 @@ cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
                      cvc::bounding_box(-HALF, -HALF, SEA_FLOOR, HALF, HALF, SEA_TOP));
 }
 
+// ── the sky: a drifting, evolving cloud slab grown by an L-system 3-D turtle ──
+// A faithful C++ port of the Python demo's cloud volume. The turtle moves in 3-D
+// and deposits a Gaussian BALL per F (so a puff is round, not a column); two
+// independent skies are grown, then per frame crossfaded (the cloud changes SHAPE
+// as it travels) and sub-cell scrolled along +x (smooth drift at any speed). The
+// slab is thin in z relative to x/y, faded at all six faces so nothing is cut
+// square, and normalised on a high percentile so a few overlaps don't set the
+// scale. Empty sky is pinned EXACTLY transparent; only dense cores composite.
+constexpr int SKY_N = 48, SKY_NZ = 22;
+constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0; // a deep slab, so puffs are round
+constexpr double SKY_HALF = 150.0;                 // overhangs the island a little
+constexpr double CLOUD_DRIFT = 5.0;                // world units / second
+constexpr double CLOUD_MORPH_S = 26.0;             // seconds for a full crossfade
+constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
+constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 6.5, CLOUD_STEP_DECAY = 0.9;
+constexpr double CLOUD_PUFF0 = 7.0, CLOUD_PUFF_DECAY = 0.88;
+constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
+const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
+const char *cloudRule(char c) {
+  switch (c) {
+  case 'A': return "FF[+<B]^F[-<C]<F[+<C]vFA"; // anvil-ward drift, throws B/C fringes
+  case 'B': return "F[+<F]F<[-<F]vB";
+  case 'C': return "^<F[+<F][-<F]^<FC";
+  default:  return nullptr;
+  }
+}
+inline size_t skyIdx(int z, int y, int x) { // field is (nz, ny, nx), C order
+  return (static_cast<size_t>(z) * SKY_N + y) * SKY_N + x;
+}
+// numpy-style linear percentile of an already-sorted array.
+double percentileSorted(const std::vector<float> &a, double q) {
+  if (a.empty())
+    return 0.0;
+  double rank = (q / 100.0) * (a.size() - 1);
+  size_t lo = static_cast<size_t>(std::floor(rank));
+  if (lo + 1 >= a.size())
+    return a.back();
+  return a[lo] + (rank - lo) * (a[lo + 1] - a[lo]);
+}
+// Grow ONE 3-D cloud field: run the turtle, splat a Gaussian ball per F, normalise
+// on the 99.9th percentile, then fade at the faces (hanning^0.5 in x/y, sine in z).
+std::vector<float> walkClouds(std::mt19937 &rng) {
+  std::uniform_real_distribution<double> U(0.0, 1.0);
+  auto uni = [&](double a, double b) { return a + (b - a) * U(rng); };
+  const int N = SKY_N, NZ = SKY_NZ;
+  std::vector<float> field(static_cast<size_t>(NZ) * N * N, 0.0f);
+  // z is squashed: the slab is much thinner than it is wide, so a world-round puff
+  // spans far fewer cells vertically.
+  const double zscale = (double(N) / NZ) * ((SKY_TOP - SKY_BASE) / (2.0 * SKY_HALF));
+
+  double x = uni(0.25, 0.75) * N, y = uni(0.3, 0.7) * N, z = NZ * 0.42;
+  double head = uni(0.0, 360.0);
+  double step = CLOUD_STEP0, puff = CLOUD_PUFF0, climb = 0.0;
+  int depth = 0;
+  struct St { double x, y, z, head, step, puff, climb; int depth; };
+  std::vector<St> stack;
+  std::deque<char> todo(CLOUD_AXIOM, CLOUD_AXIOM + std::strlen(CLOUD_AXIOM));
+  int guard = 0;
+  while (!todo.empty() && guard < 4000) {
+    ++guard;
+    char c = todo.front();
+    todo.pop_front();
+    if (c == 'F') {
+      x = std::fmod(x + step * std::cos(head * M_PI / 180.0), double(N));
+      if (x < 0)
+        x += N; // Python % always lands in [0, N)
+      y = std::min(std::max(y + step * std::sin(head * M_PI / 180.0), 0.0), double(N - 1));
+      z = std::min(std::max(z + climb, 1.0), double(NZ - 2));
+      const double p2 = 2.0 * puff * puff;
+      for (int gz = 0; gz < NZ; ++gz) {
+        double dz = (gz - z) * zscale, dz2 = dz * dz;
+        for (int gy = 0; gy < N; ++gy) {
+          double dy = gy - y, dyz2 = dy * dy + dz2;
+          for (int gx = 0; gx < N; ++gx) {
+            double dx = std::fabs(gx - x);
+            dx = std::min(dx, double(N) - dx); // nearest image across the seam
+            field[skyIdx(gz, gy, gx)] += static_cast<float>(std::exp(-(dx * dx + dyz2) / p2));
+          }
+        }
+      }
+    } else if (c == '+') {
+      head += CLOUD_TURN;
+    } else if (c == '-') {
+      head -= CLOUD_TURN;
+    } else if (c == '<') {
+      puff *= CLOUD_PUFF_DECAY;
+    } else if (c == '^') {
+      climb += 0.55; // a turret climbs as it goes
+    } else if (c == 'v') {
+      climb -= 0.45; // a fringe sags away underneath
+    } else if (c == '[') {
+      stack.push_back({x, y, z, head, step, puff, climb, depth});
+    } else if (c == ']') {
+      if (!stack.empty()) {
+        St s = stack.back();
+        stack.pop_back();
+        x = s.x; y = s.y; z = s.z; head = s.head; step = s.step; puff = s.puff;
+        climb = s.climb; depth = s.depth;
+      }
+    } else if (cloudRule(c) && depth < CLOUD_DEPTH) {
+      ++depth;
+      step *= CLOUD_STEP_DECAY;
+      const char *r = cloudRule(c);
+      todo.insert(todo.begin(), r, r + std::strlen(r)); // list(rule) + todo
+    }
+  }
+  // Normalise on a high percentile, not the max: one overlap must not set the scale.
+  std::vector<float> sorted(field);
+  std::sort(sorted.begin(), sorted.end());
+  double m = percentileSorted(sorted, 99.9);
+  if (m > 0)
+    for (float &v : field)
+      v = std::min(1.0f, std::max(0.0f, v / static_cast<float>(m)));
+  // Fade at the slab faces (hanning^0.5 across x/y, a half-sine across z).
+  std::vector<double> w(N), zf(NZ);
+  for (int i = 0; i < N; ++i)
+    w[i] = std::sqrt(0.5 - 0.5 * std::cos(2.0 * M_PI * i / (N - 1)));
+  for (int k = 0; k < NZ; ++k)
+    zf[k] = std::sin(0.12 + (M_PI - 0.24) * k / (NZ - 1));
+  for (int gz = 0; gz < NZ; ++gz)
+    for (int gy = 0; gy < N; ++gy)
+      for (int gx = 0; gx < N; ++gx)
+        field[skyIdx(gz, gy, gx)] *= static_cast<float>(std::min(w[gy], w[gx]) * zf[gz]);
+  return field;
+}
+// Holds the grown cloud maps + a normalisation peak; samples a continuous field.
+struct SkyModel {
+  std::vector<std::vector<float>> maps;
+  double norm = 1.0;
+
+  // Density at a CONTINUOUS scroll offset (sub-cell) and crossfade position.
+  std::vector<float> raw(double shift, double morph) const {
+    const int N = SKY_N, NZ = SKY_NZ;
+    long mi = static_cast<long>(std::floor(morph));
+    int i = static_cast<int>(((mi % CLOUD_MAPS) + CLOUD_MAPS) % CLOUD_MAPS);
+    int j = (i + 1) % CLOUD_MAPS;
+    double u = morph - std::floor(morph);
+    u = u * u * (3.0 - 2.0 * u); // smoothstep the crossfade
+    long ks = static_cast<long>(std::floor(shift));
+    double f = shift - ks;
+    int k0 = static_cast<int>(((ks % N) + N) % N), k1 = (k0 + 1) % N;
+    const std::vector<float> &A = maps[i], &B = maps[j];
+    std::vector<float> out(static_cast<size_t>(NZ) * N * N);
+    for (int z = 0; z < NZ; ++z)
+      for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+          // crossfade the two skies, then blend adjacent integer x-rolls (np.roll
+          // axis=2: rolled[x] = vol[(x-k) mod N]).
+          int sx0 = ((x - k0) % N + N) % N, sx1 = ((x - k1) % N + N) % N;
+          auto mix = [&](int xx) {
+            return (1.0 - u) * A[skyIdx(z, y, xx)] + u * B[skyIdx(z, y, xx)];
+          };
+          double vol = (1.0 - f) * mix(sx0) + f * mix(sx1);
+          double lump = std::min(1.0, std::max(0.0, (vol - CLOUD_FLOOR) / (1.0 - CLOUD_FLOOR)));
+          out[skyIdx(z, y, x)] = static_cast<float>(lump * lump); // dense cores, empty fringes
+        }
+    return out;
+  }
+  std::vector<float> field(double shift, double morph) const {
+    std::vector<float> r = raw(shift, morph);
+    double inv = 1.0 / norm;
+    for (float &v : r)
+      v = static_cast<float>(v * inv);
+    return r;
+  }
+};
+SkyModel buildSky() {
+  SkyModel sky;
+  // A grown map can land its dense core near a faded face, leaving it nearly
+  // transparent once the floor is subtracted and squared — so the sky would fade
+  // in only as the morph reaches the other map. Seed 20 grows BOTH maps centred
+  // (worst-case field peak ~0.85), so cloud is visible from the very first frame.
+  std::mt19937 rng(20u);
+  for (int m = 0; m < CLOUD_MAPS; ++m)
+    sky.maps.push_back(walkClouds(rng));
+  double norm = 0.0; // sweep shift/morph; scale so the densest cloud lands near 1
+  for (int c = 0; c < SKY_N; c += 8)
+    for (double mo : {0.0, 0.5, 1.0}) {
+      std::vector<float> r = sky.raw(double(c), mo);
+      for (float v : r)
+        norm = std::max(norm, double(v));
+    }
+  sky.norm = norm > 0 ? norm : 1.0;
+  return sky;
+}
+cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
+  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
+                     cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+                     cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
+}
+// Empty sky must be EXACTLY invisible (alpha pinned flat at 0 up to CLOUD_EMPTY,
+// not ramped — a ramp still accumulates over the ~180 samples a ray takes through
+// the slab); cores must reach ~1 so a puff composites white, not as dirty smoke.
+void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
+  color = {0.0, 0.72, 0.76, 0.82, 0.45, 0.92, 0.94, 0.97, 1.0, 1.00, 1.00, 1.00};
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.60, 0.075, 1.0, 0.200};
+}
+
 // Re-run the wind cascade and blit the posed vertices, one updateVertices each.
 void reposeTree(Tree &tree, double t) {
   double a = tree.sway * std::sin(1.3 * t + tree.phase);
@@ -600,6 +799,26 @@ int main(int argc, char **argv) {
   seaNode->setSpecular(0.85);
   seaNode->setSpecularPower(70.0);
 
+  // The sky: a drifting, evolving cloud slab, high above the island. Unlike the
+  // sun (430 units out — pure scenery, added after framing) the cloud ceiling is
+  // part of the scene the eye takes in, so it IS folded into the framing bounds:
+  // the island then fills the lower frame with the clouds drifting overhead. Real
+  // voxels first, then the node, then the transfer function (same order as the sea).
+  SkyModel sky = buildSky();
+  auto skyNode = sg.addGraphics("forest_sky", skyVolume(app, sky.field(0.0, 0.0)));
+  // The billowed field HAS shape, so a directional light picks out the tops and
+  // leaves the undersides dim — most of what makes cloud read as volume, not fog.
+  // Ambient stays high so the shadowed side is grey-blue rather than black.
+  skyNode->setShading(true);
+  skyNode->setAmbient(0.55);
+  skyNode->setDiffuse(0.85);
+  skyNode->setSpecular(0.0); // cloud is not a specular surface
+  {
+    std::vector<double> col, op;
+    skyTransfer(col, op);
+    skyNode->setTransferFunction(col, op);
+  }
+
   // Afternoon sun (warm) + a dim cool sky fill from the opposite side.
   sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.0);
   sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.55);
@@ -649,6 +868,14 @@ int main(int argc, char **argv) {
       std::vector<double> col, op;
       seaTransfer(col, op, t);
       seaNode->setTransferFunction(col, op);
+    }
+    if (frame % VOL_STRIDE == 1) { // sky drift+morph, staggered so the two uploads never share a frame
+      double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
+      double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
+      skyNode->setVolume(skyVolume(app, sky.field(shift, morph)));
+      std::vector<double> col, op;
+      skyTransfer(col, op);
+      skyNode->setTransferFunction(col, op);
     }
     cam.update(dt);
     view.render();
