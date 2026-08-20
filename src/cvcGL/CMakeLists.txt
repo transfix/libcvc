@@ -209,6 +209,12 @@ add_executable(cvcgl_camera test/cvcgl_camera.cpp)
 target_link_libraries(cvcgl_camera PRIVATE cvcGL)
 add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
 
+# FpsHud: the on-screen FPS readout's cvc::state surface (enabled/toggle key/
+# update rate, two-way binding, key-sym normalization) — no window needed.
+add_executable(cvcgl_fps_hud test/cvcgl_fps_hud.cpp)
+target_link_libraries(cvcgl_fps_hud PRIVATE cvcGL)
+add_test(NAME cvcgl_fps_hud COMMAND cvcgl_fps_hud)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic

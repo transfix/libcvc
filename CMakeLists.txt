@@ -92,6 +92,27 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Emscripten disables C++ exception catching by default; cvc throws and catches
+# as part of its normal API surface, so JS-based EH must stay on everywhere.
+if(EMSCRIPTEN)
+  add_compile_options(-fexceptions)
+  add_link_options(-fexceptions)
+  # Boost's config only detects threading under -pthread, but a single-threaded
+  # wasm build must not use -pthread (SharedArrayBuffer + COOP/COEP). Emscripten
+  # ships the pthread API as single-threaded stubs, so force Boost onto it —
+  # the same define the wasm Boost bundle itself was compiled with
+  # (libcvc-deps recipes/boost/build-wasm.sh).
+  add_compile_definitions(BOOST_HAS_PTHREADS)
+  # Threaded variant: real std::thread/SharedArrayBuffer. Every static lib in
+  # the link must also be -pthread (a deps prefix built with CVC_WASM_THREADS=1)
+  # and the hosting page needs COOP/COEP headers (examples/wasm/serve.py).
+  option(CVC_WASM_PTHREADS "Emscripten: build with -pthread (needs -pthread deps + COOP/COEP hosting)" OFF)
+  if(CVC_WASM_PTHREADS)
+    add_compile_options(-pthread)
+    add_link_options(-pthread)
+  endif()
+endif()
+
 # MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and
 # force-include a tiny header that undoes UCRT's `snprintf -> _snprintf`
 # macro remap (see inc/cvc/utility/msvc_compat.h for rationale).

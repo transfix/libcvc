@@ -22,7 +22,9 @@
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
+#ifndef __EMSCRIPTEN__
 #include <boost/asio.hpp>
+#endif
 #include <boost/regex.hpp>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -41,6 +43,11 @@ CVC_DEF_EXCEPTION(network_error);
 // ---- Change History ----
 // 02/24/2012 -- Joe R. -- Creation.
 std::string get_local_ip_address() {
+#ifdef __EMSCRIPTEN__
+  // No raw sockets in the browser sandbox (and Boost.Asio is excluded from the
+  // wasm Boost bundle) — loopback is the only honest answer.
+  return "127.0.0.1";
+#else
   using namespace boost::asio;
 
   ip::address addr;
@@ -56,6 +63,7 @@ std::string get_local_ip_address() {
     throw cvc::network_error(e.what());
   }
   return addr.to_string();
+#endif
 }
 
 void calcGradient(app &ctx, std::vector<volume> &grad, const volume &vol, data_type vt) {

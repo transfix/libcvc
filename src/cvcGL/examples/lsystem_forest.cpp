@@ -16,7 +16,8 @@
 // and shadows — all navigable with the built-in CameraController.
 //
 // Run (onscreen, navigable):   lsystem_forest
-//   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
+//   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
+//   F toggles the FPS HUD (state forest.viewers.main.hud.*).
 // Verify (offscreen, headless): lsystem_forest --offscreen --frames 30 --png out.png
 // Cinematic capture (mp4-ready): lsystem_forest --capture fly --frames 1800 --fps 30 \
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
@@ -33,11 +34,16 @@
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/image/image.h>
+#ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
+#include <emscripten.h>
+#endif
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <deque>
@@ -110,6 +116,18 @@ cvc::geometry buildTerrain(cvc::app &app) {
   return g;
 }
 
+// The writable fragment-normal at the //VTK::Normal::Impl anchor differs by
+// mapper: desktop vtkOpenGLPolyDataMapper declares a local `normalVCVSOutput`
+// shadowing the varying; the GLES3 mapper (used under Emscripten/WebGL2)
+// instead declares `normalizedNormalVCVSOutput` and never shadows the varying,
+// so assigning `normalVCVSOutput` there is an ESSL 'can't modify an input'
+// error. Target the variant's actual local; desktop GLSL is unchanged.
+#ifdef __EMSCRIPTEN__
+#define CVC_FS_NORMAL "normalizedNormalVCVSOutput"
+#else
+#define CVC_FS_NORMAL "normalVCVSOutput"
+#endif
+
 // Procedural fragment bump map for the ground (verbatim GLSL from the Python demo:
 // value-noise height, normal perturbed by its surface gradient — Mikkelsen's
 // tangent-free method). Needs world-space vertexMC, hence disableCoordinateShiftScale.
@@ -140,11 +158,11 @@ void addTerrainBump(GeometryNode &node) {
                                     "    float h = groundH(gCoord);\n"
                                     "    vec3 sS = dFdx(vertexVC.xyz);\n"
                                     "    vec3 sT = dFdy(vertexVC.xyz);\n"
-                                    "    vec3 vn = normalVCVSOutput;\n"
+                                    "    vec3 vn = " CVC_FS_NORMAL ";\n"
                                     "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
                                     "    float det = dot(sS, R1);\n"
                                     "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
-                                    "    normalVCVSOutput = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.4*sg);\n"
                                     "  }\n");
 }
 
@@ -343,11 +361,11 @@ void addBark(GeometryNode &node) {
       "//VTK::Normal::Impl\n"
       "  {\n"
       "    float h = barkH(normalize(bNrm), bPos.z);\n"
-      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = normalVCVSOutput;\n"
+      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = " CVC_FS_NORMAL ";\n"
       "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
       "    float det = dot(sS, R1);\n"
       "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
-      "    normalVCVSOutput = normalize(abs(det)*vn - 1.2*sg);\n"
+      "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.2*sg);\n"
       "  }\n");
 }
 
@@ -1177,6 +1195,12 @@ int main(int argc, char **argv) {
   cvc::bounding_box b = sg.computeGraphicsBounds();
   cam.frameBounds(b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
 
+  // FPS readout drawn by the scene itself ('f' toggles; state
+  // forest.viewers.main.hud.*). Off for captures so frames stay clean.
+  cvc::gl::FpsHud hud(view);
+  if (offscreen)
+    hud.setEnabled(false);
+
   // The sun is added AFTER framing — folding a far billboard into the bounds would
   // shrink the island. It is repositioned relative to the camera every frame so it
   // reads as an infinite sun in the light's direction.
@@ -1348,12 +1372,23 @@ int main(int argc, char **argv) {
         fpsFrames = 0;
       }
     }
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+    // Single-threaded browser build: the scene's publisher has no worker
+    // thread, so drain it here at frame cadence.
+    sg.publisher().flush();
+#endif
+    // Yield to the browser event loop every frame (Asyncify) — input events
+    // fire and the canvas presents during this sleep.
+    emscripten_sleep(0);
+#endif
     ++frame;
     if (frames > 0 && ++n >= frames)
       break;
   }
   if (!png.empty())
     view.writePNG(png);
+  hud.detach();
   cam.detach(); // stop receiving events before teardown
   return 0;
 }
