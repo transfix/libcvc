@@ -262,9 +262,31 @@ int main(int argc, char **argv) {
   const double ground_rgb[3] = {0.18, 0.21, 0.25};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
+  // Drape the bundle's real satellite aerial over the ground (the ground_quad's UVs
+  // map [min,max] -> [0,1]; setTexture handles the top-left/bottom-left V flip).
+  cvc::image sat;
+  bool haveSat = false;
+  if (usedBundle) {
+    const std::string satpath = bundle + "/satellite.png";
+    if (std::filesystem::exists(satpath)) {
+      sat = cvc::read_image(satpath);
+      haveSat = sat.width() > 0 && sat.height() > 0;
+      if (haveSat)
+        std::printf("nav_finale: satellite %dx%d draped on the ground\n", sat.width(),
+                    sat.height());
+    }
+  }
   if (groundNode) {
-    groundNode->setAmbient(0.6);
-    groundNode->setDiffuse(0.5);
+    if (haveSat) {
+      groundNode->setUseSingleColor(true);
+      groundNode->setColor(1.0, 1.0, 1.0);
+      groundNode->setAmbient(0.85); // let the imagery read; keep it flat + bright
+      groundNode->setDiffuse(0.5);
+      groundNode->setTexture(sat, /*zeroCopy=*/false);
+    } else {
+      groundNode->setAmbient(0.6);
+      groundNode->setDiffuse(0.5);
+    }
   }
 
   navdemo::AgentGlyphs glyphs;
@@ -298,20 +320,29 @@ int main(int argc, char **argv) {
   sg.processEvents();
 
   // Precompute the minimap base: occupancy as a grey top-down raster.
-  const int MM = 168; // minimap pixels
+  const int MM = 180; // minimap pixels
   cvc::image mmbase(MM, MM, cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
   {
     unsigned char *p = mmbase.data();
+    const unsigned char *sd = haveSat ? sat.data() : nullptr;
+    const int sw = haveSat ? sat.width() : 0, sh = haveSat ? sat.height() : 0,
+              schn = haveSat ? sat.channels() : 0;
     for (int r = 0; r < MM; ++r)
       for (int c = 0; c < MM; ++c) {
-        // north-up: minimap top row -> occ row ny-1 (max_y), matching the agent plot.
-        const int oc = c * (nx - 1) / (MM - 1), orr = (MM - 1 - r) * (ny - 1) / (MM - 1);
-        const bool wall = occ[static_cast<std::size_t>(orr) * nx + oc] != 0;
-        unsigned char v = wall ? 90 : 32;
         const long i = (static_cast<long>(r) * MM + c) * 3;
-        p[i] = v;
-        p[i + 1] = v + 6;
-        p[i + 2] = v + 12;
+        if (haveSat) { // downsample the satellite (north-up: image row 0 = north = top)
+          const long si =
+              (static_cast<long>(r * (sh - 1) / (MM - 1)) * sw + c * (sw - 1) / (MM - 1)) * schn;
+          p[i] = static_cast<unsigned char>(0.7 * sd[si]);
+          p[i + 1] = static_cast<unsigned char>(0.7 * sd[si + 1]);
+          p[i + 2] = static_cast<unsigned char>(0.7 * sd[si + 2]);
+        } else { // occupancy grey (north-up: minimap top -> occ row ny-1 = max_y)
+          const int oc = c * (nx - 1) / (MM - 1), orr = (MM - 1 - r) * (ny - 1) / (MM - 1);
+          const unsigned char v = occ[static_cast<std::size_t>(orr) * nx + oc] ? 90 : 32;
+          p[i] = v;
+          p[i + 1] = v + 6;
+          p[i + 2] = v + 12;
+        }
       }
   }
 
@@ -401,12 +432,13 @@ int main(int argc, char **argv) {
           const double wx = pos[2 * i] / sc + cfg.cx, wy = pos[2 * i + 1] / sc + cfg.cy;
           if (act2now) { // predicted-path line to the chased target
             const double gx = tgt[2 * (i % NT)], gy = tgt[2 * (i % NT) + 1];
-            for (double u = 0; u <= 1.0; u += 0.05)
-              plot(wx + (gx - wx) * u, wy + (gy - wy) * u, 230, 220, 90, 0);
+            for (double u = 0; u <= 1.0; u += 0.02)
+              plot(wx + (gx - wx) * u, wy + (gy - wy) * u, 245, 235, 90, 1);
           }
+          plot(wx, wy, 12, 12, 12, 4); // dark halo so the dot reads on the aerial
           plot(wx, wy, static_cast<unsigned char>(color[3 * i] * 255),
                static_cast<unsigned char>(color[3 * i + 1] * 255),
-               static_cast<unsigned char>(color[3 * i + 2] * 255), 2);
+               static_cast<unsigned char>(color[3 * i + 2] * 255), 3);
         }
         if (act2now)
           for (int k = 0; k < NT; ++k)
