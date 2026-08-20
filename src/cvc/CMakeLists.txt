@@ -171,6 +171,7 @@ set(SOURCE_FILES
   nav/spatial.cpp
   nav/drive.cpp
   nav/coef_mlp.cpp
+  nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
   nav/sim_thread.cpp

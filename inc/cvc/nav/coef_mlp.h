@@ -75,6 +75,25 @@ public:
   // that navigates out of the box. Load a trained .cvcnav for learned behavior.
   static coef_mlp default_biased();
 
+  // Assemble a policy from explicit dense-layer weights — the torch-free trainer
+  // (cvc::nav::coef_trainer) bakes one from its trained params. `w[i]`/`b[i]` are
+  // layer i's row-major [rows[i]*cols[i]] / [rows[i]] weights; `act[i]` is 0
+  // (identity) or 1 (SiLU). `out_bias_raw` is the RAW basin bias (e.g. {1,3,4});
+  // softplus(net + log(expm1(out_bias))) is applied at forward, exactly as a
+  // loaded .cvcnav. Throws if the shapes do not chain in -> ... -> out.
+  static coef_mlp from_layers(int in, int out, const std::vector<int> &rows,
+                              const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
+                              const std::vector<std::vector<float>> &w,
+                              const std::vector<std::vector<float>> &b,
+                              const std::vector<float> &out_bias_raw);
+
+  // Serialize to the versioned `.cvcnav` (byte-identical layout to
+  // grl_snam.tools.coef_export.write_coef_mlp), so a policy trained in pure C++
+  // persists to the same file torch / the CPU / the CUDA forward all read.
+  // Writes the RAW out_bias (log(expm1) is re-folded at load). Throws on I/O
+  // failure. `meta` is optional provenance appended to the trailer.
+  void save(const std::string &path, const std::string &meta = std::string()) const;
+
   // feats: [n * in_features()] row-major; out: [n * out_features()] row-major
   // (alpha, beta, gamma). Threaded across the n independent agents
   // (num_threads <= 0 => hardware concurrency).

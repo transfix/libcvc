@@ -1,0 +1,258 @@
+/*
+  Copyright 2007-2011 The University of Texas at Austin
+
+        Authors: Joe Rivera <transfix@ices.utexas.edu>
+        Advisor: Chandrajit Bajaj <bajaj@cs.utexas.edu>
+
+  This file is part of VolMagick. LGPL 2.1 (see other headers).
+*/
+
+// nav_coef_train_test — the self-supervised CoefMLP trainer (cvc::nav::coef_train).
+//
+// The load-bearing test is GRADCHECK: the hand-written reverse-mode adjoints of
+// the differentiable rollout (bilinear-sample position VJP, MLP backward,
+// IPC-barrier derivative, rollout chain) must match a central finite-difference
+// of the loss to float32 tolerance. This is a torch-INDEPENDENT ground truth —
+// if the analytic gradient equals the numeric one, the backward is correct,
+// with no reference to torch's autograd. The rest exercises training end-to-end:
+// the loss falls, a trained policy drives, and it round-trips through .cvcnav.
+
+#include <cmath>
+#include <cstdint>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/sim_world.h>
+#include <gtest/gtest.h>
+#include <random>
+#include <string>
+#include <vector>
+#ifdef CVC_ENABLE_CUDA
+#include <cvc/nav/sim_world_cuda.h>
+#endif
+
+using cvc::nav::coef_trainer;
+using cvc::nav::train_config;
+using cvc::nav::training_scene;
+
+namespace {
+
+// A small, fast config for the numeric tests.
+train_config small_cfg() {
+  train_config c;
+  c.n = 16;
+  c.window = 4;
+  c.hidden = 16;
+  c.horizon = 8;
+  c.steps = 1;
+  c.seed = 0;
+  return c;
+}
+
+} // namespace
+
+TEST(NavCoefTrain, CityScenePortRasterizesBlocks) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  EXPECT_EQ(sc.rows, 48);
+  EXPECT_EQ(sc.cols, 48);
+  int obstacles = 0;
+  for (auto v : sc.occ)
+    obstacles += (v != 0);
+  EXPECT_GT(obstacles, 0);                           // the 3x3 blocks are there
+  EXPECT_LT(obstacles, (int)sc.occ.size() / 2);      // but it is mostly streets
+  EXPECT_GT((int)sc.free_cells.size(), 0);           // a reachable free component
+  EXPECT_EQ((int)sc.field_data.size(), 3 * 48 * 48); // SDF built
+}
+
+TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 24;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  coef_trainer tr(cfg, /*init_seed=*/1);
+  const int n = cfg.n, window = cfg.window, P = tr.num_params();
+
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+
+  std::vector<float> g;
+  const double L0 = tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), n, window, &g);
+  ASSERT_EQ((int)g.size(), P);
+  ASSERT_GT(L0, 0.0);
+
+  const std::vector<float> base = tr.params();
+  auto loss_at = [&](const std::vector<float> &p) {
+    tr.set_params(p);
+    const double L = tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), n, window, nullptr);
+    return L;
+  };
+
+  // (1) Gradient-direction two-sided FD — the robust aggregate gate. Along the
+  //     unit gradient direction u = g/|g|, the analytic directional derivative is
+  //     |g| (the largest possible signal, so float32 FD noise is negligible): the
+  //     loss must fall/rise at rate |g|. A wrong backward mispredicts this.
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i)
+    gnorm += static_cast<double>(g[i]) * g[i];
+  gnorm = std::sqrt(gnorm);
+  ASSERT_GT(gnorm, 1e-4);
+  const float eps = 3e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = static_cast<float>(g[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  const double dd_fd = (loss_at(pp) - loss_at(pm)) / (2.0 * eps);
+  const double dir_rel = std::fabs(dd_fd - gnorm) / (std::fabs(dd_fd) + gnorm + 1e-9);
+
+  // (2) Per-parameter check on the params with the LARGEST gradients — where the
+  //     central FD is well above the float32 noise floor, so any real backward
+  //     bug shows. (Tiny gradients are unavoidably FD-noise-dominated at float32
+  //     and are covered in aggregate by the direction check above.)
+  std::vector<int> idx(P);
+  for (int i = 0; i < P; ++i)
+    idx[i] = i;
+  std::sort(idx.begin(), idx.end(),
+            [&](int a, int b) { return std::fabs(g[a]) > std::fabs(g[b]); });
+  std::vector<float> params = base;
+  double worst_rel = 0.0;
+  int checked = 0;
+  for (int rank = 0; rank < 40 && rank < P; ++rank) {
+    const int i = idx[rank];
+    if (std::fabs(g[i]) < 1e-3)
+      break; // below here the FD is noise-dominated
+    const float orig = params[i];
+    params[i] = orig + eps;
+    const double Lp = loss_at(params);
+    params[i] = orig - eps;
+    const double Lm = loss_at(params);
+    params[i] = orig;
+    const double fd = (Lp - Lm) / (2.0 * eps);
+    const double rel = std::fabs(fd - g[i]) / (std::fabs(fd) + std::fabs(g[i]) + 1e-6);
+    worst_rel = std::max(worst_rel, rel);
+    ++checked;
+  }
+  tr.set_params(base);
+  std::printf("[gradcheck] params=%d |g|=%.4f dir_rel=%.3e checked=%d worst_rel=%.3e\n", P, gnorm,
+              dir_rel, checked, worst_rel);
+  EXPECT_LT(dir_rel, 2e-2)
+      << "analytic gradient fails the gradient-direction finite-difference check";
+  EXPECT_LT(worst_rel, 5e-2) << "a large-gradient parameter disagrees with finite differences";
+  EXPECT_GE(checked, 3) << "too few params cleared the FD noise floor to check per-param";
+}
+
+TEST(NavCoefTrain, TrainingReducesLoss) {
+  const training_scene sc = cvc::nav::city_scene(64);
+  train_config cfg;
+  cfg.n = 64;
+  cfg.hidden = 64;
+  cfg.horizon = 24;
+  cfg.window = 6;
+  cfg.steps = 60;
+  cfg.seed = 0;
+
+  // Fixed eval batch + fixed window from a fresh trainer -> the loss before vs
+  // after training. Self-supervised: the differentiable rollout is the only signal.
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), v(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 999, o.data(), goal.data());
+
+  coef_trainer tr(cfg, 3);
+  const double before =
+      tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), cfg.n, cfg.window, nullptr);
+  tr.train(sc, /*verbose=*/false);
+  const double after =
+      tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), cfg.n, cfg.window, nullptr);
+  std::printf("[train] window loss before=%.4f after=%.4f\n", before, after);
+  EXPECT_LT(after, before) << "self-supervised training did not reduce the rollout loss";
+}
+
+// Run a policy in the bicycle sim_world and report the reach fraction — the real
+// deployment metric (training optimizes the point-mass surrogate; a good policy
+// must transfer to the bicycle, exactly as coef_train.py evals with the Swarm).
+static double reach_rate(cvc::nav::coef_mlp policy, const training_scene &sc, int N, int ticks,
+                         unsigned seed) {
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = sc.rows;
+  cfg.cols = sc.cols;
+  cfg.min_x = sc.min_x;
+  cfg.min_y = sc.min_y;
+  cfg.max_x = sc.max_x;
+  cfg.max_y = sc.max_y;
+  cfg.scale = sc.scale;
+  cfg.veh.rr = sc.rr;
+  cfg.veh.d_hat = sc.d_hat;
+  cfg.veh.dt = sc.dt;
+  cfg.veh.vmax = sc.vmax;
+  cfg.veh.nsub = 2;
+  cfg.reach_tol = 0.15f; // the city story's reach_tol
+  cfg.freeze_sense = true;
+  cvc::nav::sim_world w =
+      cvc::nav::sim_world::from_occupancy(cfg, sc.occ.data(), std::move(policy), N, seed);
+  for (int t = 0; t < ticks; ++t)
+    w.step(0);
+  std::vector<std::uint8_t> reached(N);
+  w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
+  int r = 0;
+  for (int i = 0; i < N; ++i)
+    r += reached[i];
+  return static_cast<double>(r) / N;
+}
+
+static void mean_coeffs(const coef_trainer &tr, float &al, float &be, float &ga) {
+  // representative features: mid clearance, goal ~3 away, heading at goal, open.
+  float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  float c[3];
+  tr.coeffs(feat, 1, c);
+  al = c[0];
+  be = c[1];
+  ga = c[2];
+}
+
+TEST(NavCoefTrain, TrainedPolicyDrivesInSimWorld) {
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg;
+  cfg.n = 128;
+  cfg.hidden = 64;
+  cfg.horizon = 28;
+  cfg.window = 7;
+  cfg.steps = 150;
+  cfg.seed = 0; // default lr (2e-4) = the refinement regime
+  coef_trainer tr(cfg, 1);
+  const double untrained = reach_rate(tr.to_coef_mlp(), sc, 256, 400, 5);
+  tr.train(sc, /*verbose=*/false);
+  const double trained = reach_rate(tr.to_coef_mlp(), sc, 256, 400, 5);
+  const double basin = reach_rate(cvc::nav::coef_mlp::default_biased(), sc, 256, 400, 5);
+  std::printf("[reach] untrained=%.1f%%  trained=%.1f%%  basin=%.1f%%\n", 100 * untrained,
+              100 * trained, 100 * basin);
+  // Self-supervised training over the differentiable rollout produces a policy
+  // that DRIVES the bicycle sim_world (the surrogate transfers), and at the
+  // refinement learning rate it does not wreck the basin — it holds or improves.
+  EXPECT_GT(trained, 0.5) << "trained policy does not drive";
+  EXPECT_GT(trained, 0.9 * untrained) << "training degraded the policy (lr too hot?)";
+}
+
+TEST(NavCoefTrain, BakedPolicyRoundTripsThroughCvcnav) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 5;
+  coef_trainer tr(cfg, 2);
+  tr.train(sc, false);
+
+  cvc::nav::coef_mlp baked = tr.to_coef_mlp();
+  EXPECT_EQ(baked.in_features(), 5);
+  EXPECT_EQ(baked.out_features(), 3);
+
+  const std::string path = std::string(::testing::TempDir()) + "/trained.cvcnav";
+  baked.save(path);
+  cvc::nav::coef_mlp reloaded = cvc::nav::coef_mlp::load(path);
+
+  // Same coefficients out of the baked policy and the reloaded file (byte-stable).
+  float feat[5] = {0.4f, 8.0f, 0.6f, -0.3f, 0.2f};
+  float a[3], b[3];
+  baked.forward(feat, 1, a, 1);
+  reloaded.forward(feat, 1, b, 1);
+  for (int k = 0; k < 3; ++k)
+    EXPECT_NEAR(a[k], b[k], 1e-5f) << "coefficient " << k;
+  EXPECT_EQ(baked.arch_hash(), reloaded.arch_hash());
+}

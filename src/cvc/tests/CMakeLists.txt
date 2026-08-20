@@ -98,6 +98,7 @@ add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
 add_executable(nav_test nav_test.cpp)
+add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -166,6 +167,7 @@ set(TEST_TARGETS
   geometry_attributes_test
   utility_test
   nav_test
+  nav_coef_train_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -318,6 +320,13 @@ target_link_libraries(utility_test
 )
 
 target_link_libraries(nav_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coef_train_test
   PRIVATE
     cvc
     GTest::gtest
@@ -848,14 +857,16 @@ target_compile_features(model_test PRIVATE cxx_std_17)
 target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(nav_test PRIVATE cxx_std_17)
+target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
     CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
 endif()
-# Enable the device-resident sim_world_cuda parity test when CUDA is built.
+# Enable the CUDA parity tests (device-resident sim_world + CUDA trainer) when built.
 if(CVC_ENABLE_CUDA)
   target_compile_definitions(nav_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_coef_train_test PRIVATE CVC_ENABLE_CUDA)
 endif()
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)

@@ -192,6 +192,89 @@ coef_mlp coef_mlp::default_biased() {
   return m;
 }
 
+coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
+                               const std::vector<int> &cols, const std::vector<std::uint32_t> &act,
+                               const std::vector<std::vector<float>> &w,
+                               const std::vector<std::vector<float>> &b,
+                               const std::vector<float> &out_bias_raw) {
+  const int num_layers = static_cast<int>(rows.size());
+  if (static_cast<int>(cols.size()) != num_layers || static_cast<int>(act.size()) != num_layers ||
+      static_cast<int>(w.size()) != num_layers || static_cast<int>(b.size()) != num_layers)
+    throw std::runtime_error("cvc::nav::coef_mlp::from_layers: ragged layer arrays");
+  coef_mlp m;
+  m.fmt_ = kFormatVersion;
+  m.flags_ = kFlagSoftplusLogExpm1;
+  m.in_ = in;
+  m.out_ = out;
+  m.layers_.resize(num_layers);
+  std::vector<std::uint32_t> sa;
+  int prev = in;
+  for (int i = 0; i < num_layers; ++i) {
+    if (rows[i] <= 0 || cols[i] <= 0 || cols[i] != prev)
+      throw std::runtime_error("cvc::nav::coef_mlp::from_layers: layer dims inconsistent");
+    if (static_cast<int>(w[i].size()) != rows[i] * cols[i] ||
+        static_cast<int>(b[i].size()) != rows[i])
+      throw std::runtime_error("cvc::nav::coef_mlp::from_layers: weight size mismatch");
+    Layer &L = m.layers_[i];
+    L.rows = rows[i];
+    L.cols = cols[i];
+    L.act = act[i];
+    L.w = w[i];
+    L.b = b[i];
+    sa.push_back(static_cast<std::uint32_t>(rows[i]));
+    sa.push_back(static_cast<std::uint32_t>(cols[i]));
+    sa.push_back(act[i]);
+    prev = rows[i];
+  }
+  if (prev != out)
+    throw std::runtime_error("cvc::nav::coef_mlp::from_layers: last layer does not produce out");
+  if (static_cast<int>(out_bias_raw.size()) != out)
+    throw std::runtime_error("cvc::nav::coef_mlp::from_layers: out_bias length != out");
+  m.out_bias_off_.resize(out);
+  for (int i = 0; i < out; ++i)
+    m.out_bias_off_[i] = std::log(std::expm1(out_bias_raw[i]));
+  m.arch_hash_ = compute_arch_hash(in, out, sa);
+  return m;
+}
+
+void coef_mlp::save(const std::string &path, const std::string &meta) const {
+  std::ofstream f(path, std::ios::binary);
+  if (!f)
+    throw std::runtime_error("cvc::nav::coef_mlp::save: cannot open " + path);
+  auto w32 = [&](std::uint32_t v) { f.write(reinterpret_cast<const char *>(&v), 4); };
+  auto w64 = [&](std::uint64_t v) { f.write(reinterpret_cast<const char *>(&v), 8); };
+  auto wf = [&](const std::vector<float> &v) {
+    f.write(reinterpret_cast<const char *>(v.data()),
+            static_cast<std::streamsize>(v.size() * sizeof(float)));
+  };
+  f.write("CVNV", 4);
+  w32(fmt_);
+  w32(flags_);
+  w32(static_cast<std::uint32_t>(in_));
+  w32(static_cast<std::uint32_t>(out_));
+  w32(static_cast<std::uint32_t>(layers_.size()));
+  w64(arch_hash_);
+  for (const Layer &L : layers_) {
+    w32(static_cast<std::uint32_t>(L.rows));
+    w32(static_cast<std::uint32_t>(L.cols));
+    w32(L.act);
+    wf(L.w);
+    wf(L.b);
+  }
+  // The file stores the RAW out_bias; recover it from the folded offset
+  // (log(expm1(raw)) -> raw = softplus(off)) so save/load round-trips.
+  std::vector<float> raw(out_bias_off_.size());
+  for (std::size_t i = 0; i < raw.size(); ++i)
+    raw[i] = (flags_ & kFlagSoftplusLogExpm1) ? softplus(out_bias_off_[i]) : out_bias_off_[i];
+  w32(static_cast<std::uint32_t>(raw.size()));
+  wf(raw);
+  w32(static_cast<std::uint32_t>(meta.size()));
+  if (!meta.empty())
+    f.write(meta.data(), static_cast<std::streamsize>(meta.size()));
+  if (!f)
+    throw std::runtime_error("cvc::nav::coef_mlp::save: write failed for " + path);
+}
+
 coef_mlp::flat_layers coef_mlp::export_flat() const {
   flat_layers fl;
   fl.in = in_;
