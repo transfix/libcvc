@@ -1013,6 +1013,19 @@ if(APPLE)
   macro(gtest_discover_tests)
     _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
   endmacro()
+elseif(WIN32)
+  # Same 5 s-timeout failure mode as macOS, but here under nvcc CPU contention
+  # from the CUDA nav translation units (drive.cu / coef_train.cu): POST_BUILD
+  # discovery runs each freshly-built test exe at build time to list its cases,
+  # and on a saturated runner the exe finishes printing its --gtest_list_tests
+  # output but is killed before it *exits* within the 5 s default (observed on
+  # state_write_policy_test / state_brick_manifest_test — a timeout, not a real
+  # per-test hang; those exes exit promptly on an unloaded runner). Keep
+  # POST_BUILD (Windows relies on its build-time DLL-PATH setup for discovery)
+  # and just give it the same generous timeout.
+  macro(gtest_discover_tests)
+    _gtest_discover_tests(${ARGV} DISCOVERY_TIMEOUT 120)
+  endmacro()
 endif()
 
 gtest_discover_tests(app_test)
