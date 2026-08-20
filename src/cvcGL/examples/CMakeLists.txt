@@ -25,6 +25,11 @@ if(EMSCRIPTEN)
     -sSTACK_SIZE=2097152
     -sEXIT_RUNTIME=0
   )
+  if(CVC_WASM_PTHREADS)
+    # Pre-spawn workers so std::thread creation (the scene's state_publisher)
+    # doesn't stall waiting for a worker to boot on the busy main thread.
+    target_link_options(lsystem_forest PRIVATE -sPTHREAD_POOL_SIZE=4)
+  endif()
   # Keep the output dir directly servable: python3 -m http.server -d <here>.
   add_custom_command(TARGET lsystem_forest POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

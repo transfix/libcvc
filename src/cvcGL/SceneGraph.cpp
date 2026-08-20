@@ -38,9 +38,10 @@ SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
   // publish through it (SceneGraph::publisher()), coalesced off the render path.
   // Started eagerly, like the scene's pump, and drained in the destructor.
   // Single-threaded wasm cannot start the worker thread: writers still enqueue
-  // (bounded, coalesced) and the embedder drains via publisher().flush().
+  // (bounded, coalesced) and the embedder drains via publisher().flush(). A
+  // -pthread wasm build (CVC_WASM_PTHREADS) has real threads and starts it.
   m_publisher = std::make_unique<cvc::gl::state_publisher>(m_ctx);
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
   m_publisher->start();
 #endif
 

@@ -1,0 +1,93 @@
+schema_version: 1
+recipe:
+  name: cvcgl-examples
+  upstream_version: "3.2.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "cvcGL example programs as ready-to-run commands: the lsystem_forest island demo (native binary in bin/) and its WebAssembly browser build (share/cvcgl-examples/web/), plus a cvcgl-examples-web launcher that serves the wasm demo cross-origin-isolated and opens a browser."
+  homepage: https://github.com/transfix/libcvc
+  license: GPL-2.0-or-later
+  tags: [scientific, graphics, examples, vtk, wasm]
+
+# The examples are demos of cvcGL-as-a-toolkit, packaged separately from the
+# cvcgl SDK bundle the same way cvc-cli is packaged separately from libcvc: an
+# SDK consumer should not drag demo binaries in, and a demo user should not
+# need headers. Two kinds of matrix entry:
+#   * native (linux): builds src/cvcGL standalone against the installed libcvc
+#     SDK + VTK with CVC_BUILD_EXAMPLES=ON and installs bin/lsystem_forest,
+#     plus the bin/cvcgl-examples-web launcher.
+#   * wasm: cross-compiles the whole closure from the repo root with the
+#     Emscripten toolchain (there is no wasm libcvc bundle — the demo statically
+#     embeds the trimmed cvc core) and packages the browser build under
+#     share/cvcgl-examples/web/.
+# Install BOTH into one prefix to use the launcher:
+#   cvcpkg install cvcgl-examples --prefix ./deps
+#   cvcpkg install cvcgl-examples --platform wasm --arch wasm32 --link static --prefix ./deps
+#   ./deps/bin/cvcgl-examples-web
+
+source:
+  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # Native entries build examples/cvcGL against the installed SDK.
+    - name: libcvc
+      platforms: [linux]
+    - name: vtk
+      platforms: [linux]
+    - name: boost
+      platforms: [linux]
+    # Wasm column — static deps for the Emscripten cross-build (env-wasm.sh
+    # forces static; emsdk itself is auto-discovered from its cross_toolchain
+    # declaration, never listed here). NOTE: needs the rendering-enabled vtk
+    # wasm bundle (vtk 9.5.0+cvc.3, libcvc-deps feat/vtk-wasm-rendering) — the
+    # older compute-only wasm vtk does not link this demo.
+    - name: vtk
+      platforms: [wasm]
+    - name: boost
+      platforms: [wasm]
+    - name: zstd
+      platforms: [wasm]
+    - name: zlib
+      platforms: [wasm]
+    - name: cgal
+      platforms: [wasm]
+  runtime:
+    # The native binary links the installed libcvc + VTK + Boost shared libs
+    # (cvcGL itself is built static into the binary — no soname coupling to the
+    # cvcgl SDK bundle). The wasm bundle is a self-contained static .wasm with
+    # no runtime deps.
+    - name: libcvc
+      platforms: [linux]
+    - name: vtk
+      platforms: [linux]
+    - name: boost
+      platforms: [linux]
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  # linux only for now: macOS waits on a macOS VTK bundle (the same constraint
+  # that keeps the cvcgl SDK recipe off macOS).
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: wasm
+      host_platform: linux
+      script: build-wasm.sh
+
+package:
+  files:
+    - bin/lsystem_forest
+    - bin/cvcgl-examples-web
+    - share/cvcgl-examples/
+
+abi:
+  cxx_std: 17

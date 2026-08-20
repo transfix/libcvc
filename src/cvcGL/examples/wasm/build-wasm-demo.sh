@@ -18,10 +18,21 @@
 # Output: build-wasm/bin/{lsystem_forest.js,lsystem_forest.wasm,index.html}
 # Serve:  python3 -m http.server -d build-wasm/bin 8811
 # (Single-threaded build — no COOP/COEP headers required.)
+#
+# --pthread builds the threaded variant into build-wasm-mt/ instead. It needs
+# a deps prefix whose ENTIRE closure was built with CVC_WASM_THREADS=1
+# (Emscripten forbids mixing -pthread and non-pthread objects), and the page
+# must be served cross-origin isolated: use wasm/serve.py, not http.server.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+PTHREAD=OFF
 BUILD_DIR="${REPO_ROOT}/build-wasm"
+if [[ "${1:-}" == "--pthread" ]]; then
+    PTHREAD=ON
+    BUILD_DIR="${REPO_ROOT}/build-wasm-mt"
+fi
 
 : "${CVC_EMSDK_DIR:?point at the installed emsdk bundle}"
 : "${CVC_WASM_DEPS:?point at the wasm deps prefix (boost/zstd/vtk-with-rendering)}"
@@ -46,10 +57,16 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCVC_ENABLE_SDF=OFF \
     -DCVC_STATE_EXEC=OFF \
     -DCVC_BUILD_CVCGL=ON \
-    -DCVC_BUILD_EXAMPLES=ON
+    -DCVC_BUILD_EXAMPLES=ON \
+    -DCVC_WASM_PTHREADS=${PTHREAD}
 
 cmake --build "${BUILD_DIR}" --target lsystem_forest -j "$(nproc)"
 
 echo
 echo "Done: ${BUILD_DIR}/bin/lsystem_forest.{js,wasm}"
-echo "Serve with: python3 -m http.server -d ${BUILD_DIR}/bin 8811"
+if [[ "${PTHREAD}" == "ON" ]]; then
+    echo "Threaded build — serve cross-origin isolated:"
+    echo "  python3 $(dirname "${BASH_SOURCE[0]}")/serve.py -d ${BUILD_DIR}/bin 8822"
+else
+    echo "Serve with: python3 -m http.server -d ${BUILD_DIR}/bin 8811"
+fi

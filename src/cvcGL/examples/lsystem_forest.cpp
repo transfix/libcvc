@@ -16,7 +16,8 @@
 // and shadows — all navigable with the built-in CameraController.
 //
 // Run (onscreen, navigable):   lsystem_forest
-//   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
+//   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
+//   F toggles the FPS HUD (state forest.viewers.main.hud.*).
 // Verify (offscreen, headless): lsystem_forest --offscreen --frames 30 --png out.png
 // Cinematic capture (mp4-ready): lsystem_forest --capture fly --frames 1800 --fps 30 \
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
@@ -33,6 +34,7 @@
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -1193,6 +1195,12 @@ int main(int argc, char **argv) {
   cvc::bounding_box b = sg.computeGraphicsBounds();
   cam.frameBounds(b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
 
+  // FPS readout drawn by the scene itself ('f' toggles; state
+  // forest.viewers.main.hud.*). Off for captures so frames stay clean.
+  cvc::gl::FpsHud hud(view);
+  if (offscreen)
+    hud.setEnabled(false);
+
   // The sun is added AFTER framing — folding a far billboard into the bounds would
   // shrink the island. It is repositioned relative to the camera every frame so it
   // reads as an infinite sun in the light's direction.
@@ -1365,10 +1373,13 @@ int main(int argc, char **argv) {
       }
     }
 #ifdef __EMSCRIPTEN__
-    // Browser: yield to the event loop every frame (Asyncify) — input events
-    // fire and the canvas presents during this sleep. The scene's publisher has
-    // no worker thread here, so drain it at the same cadence.
+#ifndef __EMSCRIPTEN_PTHREADS__
+    // Single-threaded browser build: the scene's publisher has no worker
+    // thread, so drain it here at frame cadence.
     sg.publisher().flush();
+#endif
+    // Yield to the browser event loop every frame (Asyncify) — input events
+    // fire and the canvas presents during this sleep.
     emscripten_sleep(0);
 #endif
     ++frame;
@@ -1377,6 +1388,7 @@ int main(int argc, char **argv) {
   }
   if (!png.empty())
     view.writePNG(png);
+  hud.detach();
   cam.detach(); // stop receiving events before teardown
   return 0;
 }
