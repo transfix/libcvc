@@ -80,6 +80,14 @@ void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin = 6.0
 // reactive agents can't drive off the open edge (and it renders as an outer wall).
 void add_border(std::uint8_t *occ, int rows, int cols);
 
+// Rasterize a mesh's XY footprint into a rows*cols (ny*nx) uint8 occupancy grid
+// (occupied where any triangle projects onto the ground), over the [min,max] world
+// rect — the C++ analog of GRL-SNAM's building_occupancy. CPU scan-conversion of
+// every triangle projected to XY, then `inflate` passes of 4-connected dilation.
+// Grid convention: r->y (row 0 = min_y, bottom-up), c->x; index [r*nx + c].
+std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
+                                               int ny, int inflate = 0);
+
 } // namespace navdemo
 
 #endif // CVC_NAV_DEMO_NAV_COMMON_H

@@ -9,11 +9,30 @@ torch-free nav port. Same brain as the Python demos, rendered in real 3-D.
 |------|---------------|
 | **`nav_city_swarm`** | N vehicles reactively navigate a procedural "city" (the same `city_scene` the trainer uses); agents are coloured by belief group. The scalable hero — one merged glyph mesh streamed per frame, smooth into the thousands. |
 | **`nav_fog_ghost`** | the fog-of-war "ghost" story: one vehicle carries a stale belief map with a phantom wall reality lacks; it sets off detouring, senses the space is clear, and drives through. The belief is a live ground heatmap (red = believed wall, blue = open) — watch the ghost wall dissolve. |
-| `nav_finale` *(coming)* | 8 vehicles rendezvous then pursue moving goals on the real Austin bundle (3-D + a 2-D minimap overlay). |
+| **`nav_finale`** | the flagship: 8 vehicles enter blind from the west and rendezvous (Act 1), then split into pursuit packs chasing 4 moving targets (Act 2), on the **real Austin** bundle. 3-D only, with a live 2-D picture-in-picture minimap (agent positions + the line to each one's current target). |
 
 Both `nav_city_swarm` and `nav_fog_ghost` render **either** the default 3-D perspective
 **or** a top-down 2-D orthographic "matplotlib" map with `--ortho` — one codebase, both
-looks.
+looks. `nav_finale` is 3-D only (the 2-D view is the PiP minimap).
+
+### The Finale + the Austin bundle
+
+`nav_finale` loads a scene bundle at runtime and rasterizes its `buildings.glb` into the
+nav occupancy grid in C++ (`occupancy_from_model` — the C++ analog of GRL-SNAM's
+`building_occupancy`, CPU scan-conversion of the mesh footprint). The bundle is **never
+committed** — pass it with `--bundle`:
+
+```sh
+nav_finale --bundle /path/to/scenes/austin_south --capture fly --offscreen \
+    --frames 600 --out /tmp/finale
+ffmpeg -framerate 30 -i /tmp/finale/frame_%05d.png -c:v libx264 -pix_fmt yuv420p finale.mp4
+```
+
+A bundle is a directory with `terrain.json` (world bounds) + `buildings.glb`. With no
+`--bundle`, the Finale falls back to a synthetic city so the scenario still runs. The
+rasterized occupancy is internally consistent with the rendered mesh and the sim (all use
+the same world→cell mapping); it does not bit-match Python's cached `.occ.npy` because that
+is a pixel-grid GL render while ours is `sim_world`'s grid-node convention.
 
 Shared helpers are in `nav_common.{h,cpp}`: `occupancy_to_walls` (grid → blocky buildings),
 `AgentGlyphs` (**one** merged arrow mesh for all agents, streamed via

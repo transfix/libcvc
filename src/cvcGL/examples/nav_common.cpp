@@ -2,6 +2,7 @@
 
 #include "nav_common.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
@@ -157,6 +158,66 @@ void add_border(std::uint8_t *occ, int rows, int cols) {
     occ[static_cast<std::size_t>(r) * cols] = 1;
     occ[static_cast<std::size_t>(r) * cols + (cols - 1)] = 1;
   }
+}
+
+std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
+                                               int ny, int inflate) {
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(nx) * ny, 0);
+  if (nx < 2 || ny < 2 || b.max_x <= b.min_x || b.max_y <= b.min_y)
+    return occ;
+  const auto &pts = mesh.points();
+  const auto &tris = mesh.tris();
+  // world -> continuous cell coords (cell centres span [min,max]).
+  const double sx = (nx - 1) / (b.max_x - b.min_x), sy = (ny - 1) / (b.max_y - b.min_y);
+  for (const auto &tri : tris) {
+    double px[3], py[3];
+    for (int k = 0; k < 3; ++k) {
+      const auto &p = pts[tri[k]];
+      px[k] = (p[0] - b.min_x) * sx; // -> column
+      py[k] = (p[1] - b.min_y) * sy; // -> row
+    }
+    int c0 = static_cast<int>(std::floor(std::min({px[0], px[1], px[2]})));
+    int c1 = static_cast<int>(std::ceil(std::max({px[0], px[1], px[2]})));
+    int r0 = static_cast<int>(std::floor(std::min({py[0], py[1], py[2]})));
+    int r1 = static_cast<int>(std::ceil(std::max({py[0], py[1], py[2]})));
+    c0 = std::max(0, c0);
+    r0 = std::max(0, r0);
+    c1 = std::min(nx - 1, c1);
+    r1 = std::min(ny - 1, r1);
+    // Edge functions; fill any cell centre inside the projected triangle (either
+    // winding), so a solid roof/wall soup rasterizes to a filled footprint.
+    const double d = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2]);
+    if (std::fabs(d) < 1e-12)
+      continue;
+    const double inv = 1.0 / d;
+    for (int r = r0; r <= r1; ++r)
+      for (int c = c0; c <= c1; ++c) {
+        const double x = c, y = r; // grid-node sample (matches sim_world cell_to_on)
+        const double a = ((py[1] - py[2]) * (x - px[2]) + (px[2] - px[1]) * (y - py[2])) * inv;
+        const double be = ((py[2] - py[0]) * (x - px[2]) + (px[0] - px[2]) * (y - py[2])) * inv;
+        const double ga = 1.0 - a - be;
+        if (a >= -0.02 && be >= -0.02 && ga >= -0.02)
+          occ[static_cast<std::size_t>(r) * nx + c] = 1;
+      }
+  }
+  // 4-connected dilation.
+  for (int it = 0; it < inflate; ++it) {
+    std::vector<std::uint8_t> next = occ;
+    for (int r = 0; r < ny; ++r)
+      for (int c = 0; c < nx; ++c)
+        if (occ[static_cast<std::size_t>(r) * nx + c]) {
+          if (r > 0)
+            next[static_cast<std::size_t>(r - 1) * nx + c] = 1;
+          if (r < ny - 1)
+            next[static_cast<std::size_t>(r + 1) * nx + c] = 1;
+          if (c > 0)
+            next[static_cast<std::size_t>(r) * nx + (c - 1)] = 1;
+          if (c < nx - 1)
+            next[static_cast<std::size_t>(r) * nx + (c + 1)] = 1;
+        }
+    occ.swap(next);
+  }
+  return occ;
 }
 
 } // namespace navdemo
