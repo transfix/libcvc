@@ -33,9 +33,13 @@
 // renderer / game engine uses when N outgrows the CPU (drop thousands of
 // navigating agents into a cvcGL / lsystem_forest scene).
 //
-// Scope: the STATIC-map shared-belief case (a known map — no on-device
-// sense/rebuild). The field is built once on the host (one EDT) and uploaded;
-// after that the world never leaves the GPU. For fog-of-war (live belief) use
+// Scope: STATIC known maps — no on-device sense/rebuild. Belief is M planes via a
+// per-agent map_id (the GPU analog of sim_world's grouped belief under
+// freeze_sense): shared (M == 1, one map), or grouped/private (M planes, one
+// known map each — different groups can carry genuinely different intel). Each
+// plane's field is built once on the host (one EDT per plane) and uploaded as
+// [M,3,H,W]; after that the world never leaves the GPU and agent i always samples
+// plane map_id[i]. For fog-of-war (live belief that diverges as agents sense) use
 // sim_world (CPU). Float-equivalent to sim_world::step on the same config with
 // freeze_sense = true — the kernels share drive.cu's device math and the same
 // .cvcnav weights, and the carrot FSM is a per-agent transcription of
@@ -56,15 +60,22 @@ namespace nav {
 
 class sim_world_cuda {
 public:
-  // Same inputs as sim_world's ctor. The initial field is built on the HOST from
-  // `occ` (one EDT) and uploaded; the map is then static (no sense/rebuild).
-  // o/goal are [n*2] normalized (centered) start/goal, color is [n*3]. `model`
-  // is moved in. Throws std::runtime_error if CUDA is unavailable.
+  // Same inputs as sim_world's ctor. Each belief plane's field is built on the
+  // HOST (one EDT per plane) and uploaded; the maps are then static (no
+  // sense/rebuild). o/goal are [n*2] normalized (centered) start/goal, color is
+  // [n*3]. `model` is moved in. `map_id` (optional, [n]) selects each agent's
+  // plane and `n_planes` is the plane count M; when map_id != nullptr `occ` is
+  // [n_planes * rows*cols] (one known map per plane), otherwise it is the shared
+  // single map [rows*cols] (M forced to 1). Throws std::runtime_error if CUDA is
+  // unavailable.
   sim_world_cuda(const sim_world::config &cfg, const std::uint8_t *occ, coef_mlp model,
-                 const float *o, const float *goal, const float *color, int n);
+                 const float *o, const float *goal, const float *color, int n,
+                 const int *map_id = nullptr, int n_planes = 1);
 
   // Convenience factory mirroring sim_world::from_occupancy — scatter n_agents on
-  // free cells (occ == 0) with random colors, then upload. Deterministic in seed.
+  // free cells (occ == 0) with random colors, then upload the shared single map.
+  // Deterministic in seed. (Grouped/private belief needs per-plane maps — use the
+  // ctor with map_id + a [n_planes*rows*cols] occ block.)
   static sim_world_cuda from_occupancy(const sim_world::config &cfg, const std::uint8_t *occ,
                                        coef_mlp model, int n_agents, unsigned seed = 0);
 
@@ -79,6 +90,7 @@ public:
   void step();
 
   int size() const { return n_; }
+  int planes() const; // belief-plane count M (1 shared, >1 grouped/private)
   long tick() const { return gstep_; }
 
   // Pose-only device->host snapshot (this is the only D2H). pos in WORLD metres,

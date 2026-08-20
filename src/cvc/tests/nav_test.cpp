@@ -1175,4 +1175,162 @@ TEST(NavSimWorldCuda, TracesCpuSimWorld) {
   EXPECT_LE(std::abs(reached_cpu - reached_gpu), 2) << "reach count cpu vs gpu";
   EXPECT_GT(reached_gpu, 0);
 }
+
+// Grouped belief on the GPU twin, wiring gate: M planes seeded from IDENTICAL maps
+// must reproduce the shared (M==1) world bit-for-bit. Every agent samples its own
+// plane (map_id[i]*3*H*W offset into the [M,3,H,W] device block); if that offset
+// math is right, identical planes are indistinguishable from one shared plane, so
+// the two worlds must trace each other to the bit over a long roll (the GPU drive
+// is deterministic — no atomics on the drive path).
+TEST(NavSimWorldCuda, GroupedIdenticalPlanesMatchShared) {
+  if (!cvc::nav::sim_world_cuda::available())
+    GTEST_SKIP() << "no CUDA device";
+
+  const int R = 80, C = 80;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  const int N = 128;
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N);
+  cvc::nav::sim_world::scatter_free(cfg, occ.data(), N, 7, o.data(), goal.data(), color.data());
+
+  // Shared world: one plane. Grouped world: 3 IDENTICAL planes, agents round-
+  // robined across them. Both get the same agents + the same policy.
+  const int M = 3;
+  std::vector<std::uint8_t> occ_planes((std::size_t)M * R * C);
+  for (int m = 0; m < M; ++m)
+    std::copy(occ.begin(), occ.end(), occ_planes.begin() + (std::size_t)m * R * C);
+  std::vector<int> map_id(N);
+  for (int i = 0; i < N; ++i)
+    map_id[i] = i % M;
+
+  cvc::nav::sim_world_cuda shared(cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), o.data(),
+                                  goal.data(), color.data(), N);
+  cvc::nav::sim_world_cuda grouped(cfg, occ_planes.data(), cvc::nav::coef_mlp::default_biased(),
+                                   o.data(), goal.data(), color.data(), N, map_id.data(), M);
+  ASSERT_EQ(shared.planes(), 1);
+  ASSERT_EQ(grouped.planes(), M);
+
+  const int T = 200;
+  std::vector<float> ps(2 * N), pg(2 * N);
+  double maxdiff = 0.0;
+  for (int t = 0; t < T; ++t) {
+    shared.step();
+    grouped.step();
+  }
+  shared.snapshot(ps.data(), nullptr, nullptr, nullptr, nullptr);
+  grouped.snapshot(pg.data(), nullptr, nullptr, nullptr, nullptr);
+  for (int i = 0; i < 2 * N; ++i)
+    maxdiff = std::max(maxdiff, (double)std::abs(ps[i] - pg[i]));
+  std::printf("[diag] grouped-identical vs shared maxdiff=%.3e (T=%d, M=%d)\n", maxdiff, T, M);
+  EXPECT_EQ(maxdiff, 0.0) << "M identical planes must be bit-identical to shared belief";
+}
+
+// Grouped belief, per-plane isolation gate: two agents with the SAME start + goal
+// but DIFFERENT map_id must diverge because they sample genuinely different known
+// maps. Plane 0 carries a wall straddling the straight line to the goal; plane 1
+// is open. The open-map agent drives straight and gets close; the blocked-map
+// agent's reactive drive sees the wall in its own plane and peels off to follow
+// it — so at the horizon the open agent is clearly nearer its goal and the two
+// poses are far apart. This is what "per-agent belief" buys on the GPU.
+TEST(NavSimWorldCuda, GroupedDifferentPlanesRouteApart) {
+  if (!cvc::nav::sim_world_cuda::available())
+    GTEST_SKIP() << "no CUDA device";
+
+  const int R = 64, C = 64;
+  auto border = [&](std::vector<std::uint8_t> &g) {
+    for (int r = 0; r < R; ++r)
+      for (int c = 0; c < C; ++c)
+        if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+          g[r * C + c] = 1;
+  };
+  // Plane 0: a wall straddling the mid-column, leaving only narrow gaps top/bottom.
+  std::vector<std::uint8_t> blocked((std::size_t)R * C, 0), open((std::size_t)R * C, 0);
+  border(blocked);
+  border(open);
+  for (int r = 6; r < R - 6; ++r)
+    blocked[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  // Two planes [blocked, open]; two agents share start (left) + goal (right).
+  const int M = 2, N = 2;
+  std::vector<std::uint8_t> planes((std::size_t)M * R * C);
+  std::copy(blocked.begin(), blocked.end(), planes.begin());
+  std::copy(open.begin(), open.end(), planes.begin() + (std::size_t)R * C);
+
+  auto to_norm = [&](int r, int c, float &x, float &y) {
+    const double wx = cfg.min_x + (double)c / (C - 1) * (cfg.max_x - cfg.min_x);
+    const double wy = cfg.min_y + (double)r / (R - 1) * (cfg.max_y - cfg.min_y);
+    x = (float)((wx - cfg.cx) * cfg.scale);
+    y = (float)((wy - cfg.cy) * cfg.scale);
+  };
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N, 0.5f);
+  float sx, sy, gx, gy;
+  to_norm(R / 2, 8, sx, sy);
+  to_norm(R / 2, C - 8, gx, gy);
+  for (int i = 0; i < N; ++i) {
+    o[2 * i] = sx;
+    o[2 * i + 1] = sy;
+    goal[2 * i] = gx;
+    goal[2 * i + 1] = gy;
+  }
+  std::vector<int> map_id = {0, 1}; // agent 0 blocked-map, agent 1 open-map
+
+  cvc::nav::sim_world_cuda gpu(cfg, planes.data(), cvc::nav::coef_mlp::default_biased(), o.data(),
+                               goal.data(), color.data(), N, map_id.data(), M);
+  ASSERT_EQ(gpu.planes(), M);
+
+  const int T = 450;
+  for (int t = 0; t < T; ++t)
+    gpu.step();
+  std::vector<float> p(2 * N);
+  gpu.snapshot(p.data(), nullptr, nullptr, nullptr, nullptr);
+
+  auto dist_goal = [&](int i) {
+    const double dx = p[2 * i] - goal[2 * i], dy = p[2 * i + 1] - goal[2 * i + 1];
+    return std::sqrt(dx * dx + dy * dy);
+  };
+  const double d_blocked = dist_goal(0), d_open = dist_goal(1);
+  const double sep = std::sqrt(std::pow(p[0] - p[2], 2) + std::pow(p[1] - p[3], 2));
+  std::printf("[diag] different-planes: d_blocked=%.4f d_open=%.4f sep=%.4f\n", d_blocked, d_open,
+              sep);
+  for (int i = 0; i < 2 * N; ++i)
+    ASSERT_TRUE(std::isfinite(p[i]));
+  // The two agents see different maps, so they must end up apart, and the open-map
+  // agent (straight shot) must be clearly nearer its goal than the blocked one.
+  EXPECT_GT(sep, 0.05) << "same start+goal but different map_id must diverge";
+  EXPECT_LT(d_open, d_blocked) << "open-map agent should reach nearer the goal";
+}
 #endif

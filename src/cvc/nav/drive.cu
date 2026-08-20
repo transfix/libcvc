@@ -57,8 +57,10 @@ struct dev_veh {
 };
 
 // Bilinear sample (plane 0) + unit normal — mirrors drive.cpp sample_unit.
-__device__ inline void d_sample_unit(const dev_field &f, float onx, float ony, float &phi,
-                                     float &nxo, float &nyo) {
+// `plane` selects the belief plane in a [M,3,H,W] block (0 for the shared /
+// single-plane case); the phi/nx/ny slabs live at f.data + plane*3*H*W.
+__device__ inline void d_sample_unit(const dev_field &f, int plane, float onx, float ony,
+                                     float &phi, float &nxo, float &nyo) {
   const float wx = onx / f.S + f.cx, wy = ony / f.S + f.cy;
   const float gx = 2.0f * (wx - f.mnx) / (f.mxx - f.mnx) - 1.0f;
   const float gy = 2.0f * (wy - f.mny) / (f.mxy - f.mny) - 1.0f;
@@ -72,7 +74,8 @@ __device__ inline void d_sample_unit(const dev_field &f, float onx, float ony, f
   const int cx0 = min(max(ix0, 0), f.W - 1), cx1 = min(max(ix0 + 1, 0), f.W - 1);
   const int cy0 = min(max(iy0, 0), f.H - 1), cy1 = min(max(iy0 + 1, 0), f.H - 1);
   const long HW = (long)f.H * f.W;
-  const float *ph = f.data, *px = f.data + HW, *py = f.data + 2 * HW;
+  const float *base = f.data + (long)plane * 3 * HW;
+  const float *ph = base, *px = base + HW, *py = base + 2 * HW;
   const long a = (long)cy0 * f.W + cx0, b = (long)cy0 * f.W + cx1, c = (long)cy1 * f.W + cx0,
              d = (long)cy1 * f.W + cx1;
   phi = ph[a] * nw + ph[b] * ne + ph[c] * sw + ph[d] * se;
@@ -119,9 +122,9 @@ __device__ inline void d_mlp(const float *data, const int *rows, const int *cols
 }
 
 // One agent's bicycle rollout (nsub substeps) — mirrors drive.cpp bicycle_rollout.
-__device__ inline void d_bicycle(const dev_field &f, float &ox, float &oy, float &thi, float &spi,
-                                 float gx, float gy, float al, float be, float ga, const dev_veh &v,
-                                 float &minclr) {
+__device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float &oy, float &thi,
+                                 float &spi, float gx, float gy, float al, float be, float ga,
+                                 const dev_veh &v, float &minclr) {
   const float hdt = v.dt / (float)v.nsub;
   const float tan_dmax = tanf(v.delta_max);
   const float sp_min = v.allow_reverse ? -0.25f * v.vmax : 0.0f;
@@ -130,7 +133,7 @@ __device__ inline void d_bicycle(const dev_field &f, float &ox, float &oy, float
   minclr = 9.9f;
   for (int s = 0; s < v.nsub; ++s) {
     float phi, nx, ny;
-    d_sample_unit(f, ox, oy, phi, nx, ny);
+    d_sample_unit(f, plane, ox, oy, phi, nx, ny);
     const float d = phi - v.rr;
     minclr = fminf(minclr, d);
     const float ipc = d_ipc(d, v.d_hat);
@@ -208,30 +211,33 @@ __device__ inline void d_bicycle(const dev_field &f, float &ox, float &oy, float
   }
 }
 
-__global__ void sample_kernel(dev_field f, const float *on, int n, float *phi_out, float *nrm_out) {
+__global__ void sample_kernel(dev_field f, const int *map_id, const float *on, int n,
+                              float *phi_out, float *nrm_out) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n)
     return;
+  const int plane = map_id ? map_id[i] : 0;
   float phi, nx, ny;
-  d_sample_unit(f, on[2 * i], on[2 * i + 1], phi, nx, ny);
+  d_sample_unit(f, plane, on[2 * i], on[2 * i + 1], phi, nx, ny);
   phi_out[i] = phi;
   nrm_out[2 * i] = nx;
   nrm_out[2 * i + 1] = ny;
 }
 
-__global__ void drive_kernel(dev_field f, float *o, float *th, float *sp, const float *carrot,
-                             const float *wdata, const int *rows, const int *cols, const int *act,
-                             const long *w_off, const long *b_off, int num_layers,
-                             const float *out_bias_off, int in, int out, dev_veh v, int n,
-                             float *minclr) {
+__global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th, float *sp,
+                             const float *carrot, const float *wdata, const int *rows,
+                             const int *cols, const int *act, const long *w_off, const long *b_off,
+                             int num_layers, const float *out_bias_off, int in, int out, dev_veh v,
+                             int n, float *minclr) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n)
     return;
+  const int plane = map_id ? map_id[i] : 0;
   float ox = o[2 * i], oy = o[2 * i + 1], thi = th[i], spi = sp[i];
   const float cx = carrot[2 * i], cy = carrot[2 * i + 1];
   // coef_feats at o toward the carrot.
   float phi, nx, ny;
-  d_sample_unit(f, ox, oy, phi, nx, ny);
+  d_sample_unit(f, plane, ox, oy, phi, nx, ny);
   const float dgx = cx - ox, dgy = cy - oy;
   const float gd = sqrtf(dgx * dgx + dgy * dgy);
   const float inv = 1.0f / (gd + 1e-6f);
@@ -245,7 +251,7 @@ __global__ void drive_kernel(dev_field f, float *o, float *th, float *sp, const 
   float coef[8];
   d_mlp(wdata, rows, cols, act, w_off, b_off, num_layers, out_bias_off, in, out, feat, coef);
   float mc;
-  d_bicycle(f, ox, oy, thi, spi, cx, cy, coef[0], coef[1], coef[2], v, mc);
+  d_bicycle(f, plane, ox, oy, thi, spi, cx, cy, coef[0], coef[1], coef[2], v, mc);
   o[2 * i] = ox;
   o[2 * i + 1] = oy;
   th[i] = thi;
@@ -288,7 +294,7 @@ void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_ou
   cuda_check(cudaMemcpy(d_field, f.data, fsz, cudaMemcpyHostToDevice), "H2D field");
   cuda_check(cudaMemcpy(d_on, on, (size_t)2 * n * sizeof(float), cudaMemcpyHostToDevice), "H2D on");
   const int threads = 256, blocks = (n + threads - 1) / threads;
-  sample_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), d_on, n, d_phi, d_nrm);
+  sample_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_on, n, d_phi, d_nrm);
   cuda_check(cudaGetLastError(), "sample_kernel launch");
   cuda_check(cudaMemcpy(phi_out, d_phi, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost),
              "D2H phi");
@@ -360,9 +366,9 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   v.allow_reverse = vp.allow_reverse ? 1 : 0;
 
   const int threads = 128, blocks = (n + threads - 1) / threads;
-  drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), d_o, d_th, d_sp, d_car, d_w, d_rows,
-                                    d_cols, d_act, d_woff, d_boff, fl.num_layers, d_ob, fl.in,
-                                    fl.out, v, n, d_mc);
+  drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_car, d_w,
+                                    d_rows, d_cols, d_act, d_woff, d_boff, fl.num_layers, d_ob,
+                                    fl.in, fl.out, v, n, d_mc);
   cuda_check(cudaGetLastError(), "drive_kernel launch");
   auto D2H = [&](void *dst, const void *src, size_t bytes, const char *w) {
     cuda_check(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), w);
@@ -523,15 +529,16 @@ __global__ void retarget_kernel(int i, float gx, float gy, float *goal, const fl
 } // namespace
 
 struct sim_world_cuda::impl {
-  int n = 0, rows = 0, cols = 0;
+  int n = 0, rows = 0, cols = 0, M = 1;
   field_stack fs; // world<->grid constants; .data unused (device is d_field)
   dev_veh v;      // vehicle/integration params
   float reach_tol = 0.8f, a_max = 1.5f, dt = 0.06f;
   double scale = 1.0, cx = 0.0, cy = 0.0; // pose -> world for snapshot
   int in = 0, out = 0, num_layers = 0;
 
-  float *d_field = nullptr;                                   // [3*H*W]
-  float *d_w = nullptr, *d_ob = nullptr;                      // policy weights + out bias
+  float *d_field = nullptr;              // [M*3*H*W]: M static belief planes
+  int *d_map_id = nullptr;               // [n] agent -> plane in [0,M); null == shared (M==1)
+  float *d_w = nullptr, *d_ob = nullptr; // policy weights + out bias
   int *d_rows = nullptr, *d_cols = nullptr, *d_act = nullptr; // layer shapes/acts
   long *d_woff = nullptr, *d_boff = nullptr;                  // layer offsets
   float *d_o = nullptr, *d_goal = nullptr, *d_th = nullptr, *d_sp = nullptr, *d_color = nullptr;
@@ -544,14 +551,14 @@ struct sim_world_cuda::impl {
 
   ~impl() {
     for (void *p :
-         {(void *)d_field,      (void *)d_w,        (void *)d_ob,       (void *)d_rows,
-          (void *)d_cols,       (void *)d_act,      (void *)d_woff,     (void *)d_boff,
-          (void *)d_o,          (void *)d_goal,     (void *)d_th,       (void *)d_sp,
-          (void *)d_color,      (void *)d_stall,    (void *)d_mode,     (void *)d_hist_count,
-          (void *)d_turn,       (void *)d_dhit,     (void *)d_best,     (void *)d_init,
-          (void *)d_wall_entry, (void *)d_pos_hist, (void *)d_we_valid, (void *)d_tracking,
-          (void *)d_parked,     (void *)d_reached,  (void *)d_active,   (void *)d_phi,
-          (void *)d_nrm,        (void *)d_carrot,   (void *)d_minclr})
+         {(void *)d_field,      (void *)d_map_id,     (void *)d_w,        (void *)d_ob,
+          (void *)d_rows,       (void *)d_cols,       (void *)d_act,      (void *)d_woff,
+          (void *)d_boff,       (void *)d_o,          (void *)d_goal,     (void *)d_th,
+          (void *)d_sp,         (void *)d_color,      (void *)d_stall,    (void *)d_mode,
+          (void *)d_hist_count, (void *)d_turn,       (void *)d_dhit,     (void *)d_best,
+          (void *)d_init,       (void *)d_wall_entry, (void *)d_pos_hist, (void *)d_we_valid,
+          (void *)d_tracking,   (void *)d_parked,     (void *)d_reached,  (void *)d_active,
+          (void *)d_phi,        (void *)d_nrm,        (void *)d_carrot,   (void *)d_minclr})
       cudaFree(p);
   }
 };
@@ -563,7 +570,7 @@ bool sim_world_cuda::available() {
 
 sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t *occ,
                                coef_mlp model, const float *o, const float *goal,
-                               const float *color, int n)
+                               const float *color, int n, const int *map_id, int n_planes)
     : n_(n) {
   if (!available())
     throw std::runtime_error("cvc::nav::sim_world_cuda: no CUDA device");
@@ -573,20 +580,34 @@ sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t 
   s.rows = cfg.rows;
   s.cols = cfg.cols;
   const long hw = static_cast<long>(cfg.rows) * cfg.cols;
+  // M static belief planes. When map_id is given, `occ` is [M*hw] (one known map
+  // per plane) and agent i drives on plane map_id[i]; when null it is the shared
+  // single-map path (M == 1). Planes are static (no on-device sensing) — the GPU
+  // analog of CPU sim_world's grouped belief under freeze_sense, but capable of
+  // genuinely different per-group maps.
+  const int M = map_id ? std::max(1, n_planes) : 1;
+  s.M = M;
+  if (map_id)
+    for (int i = 0; i < n; ++i)
+      if (map_id[i] < 0 || map_id[i] >= M)
+        throw std::runtime_error("cvc::nav::sim_world_cuda: map_id out of range [0, n_planes)");
 
-  // 1. Build the field on the host (one EDT) and clip phi — identical to
-  //    sim_world::rebuild_field over the initial (static) map.
-  const sdf_field f =
-      build_sdf(occ, cfg.rows, cfg.cols, cfg.min_x, cfg.min_y, cfg.max_x, cfg.max_y, cfg.scale);
+  // 1. Build each plane's field on the host (one EDT per plane) and clip phi —
+  //    identical to sim_world::rebuild_field over that plane's (static) map.
   const float clip = static_cast<float>(2.0 * cfg.max_x * cfg.scale);
-  std::vector<float> field(3 * hw);
-  for (long i = 0; i < hw; ++i) {
-    field[i] = std::min(std::max(f.phi[i], -clip), clip);
-    field[hw + i] = f.normal_x[i];
-    field[2 * hw + i] = f.normal_y[i];
+  std::vector<float> field(static_cast<size_t>(M) * 3 * hw);
+  for (int m = 0; m < M; ++m) {
+    const sdf_field f = build_sdf(occ + static_cast<long>(m) * hw, cfg.rows, cfg.cols, cfg.min_x,
+                                  cfg.min_y, cfg.max_x, cfg.max_y, cfg.scale);
+    float *pl = field.data() + static_cast<size_t>(m) * 3 * hw;
+    for (long i = 0; i < hw; ++i) {
+      pl[i] = std::min(std::max(f.phi[i], -clip), clip);
+      pl[hw + i] = f.normal_x[i];
+      pl[2 * hw + i] = f.normal_y[i];
+    }
   }
 
-  s.fs.M = 1;
+  s.fs.M = M;
   s.fs.H = cfg.rows;
   s.fs.W = cfg.cols;
   s.fs.mnx = cfg.min_x;
@@ -641,8 +662,13 @@ sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t 
   auto ZERO = [&](void *d, size_t bytes, const char *w) { cuda_check(cudaMemset(d, 0, bytes), w); };
   const size_t fn = static_cast<size_t>(n);
 
-  MALLOC((void **)&s.d_field, 3 * hw * sizeof(float), "field");
-  H2D(s.d_field, field.data(), 3 * hw * sizeof(float), "H2D field");
+  const size_t fbytes = static_cast<size_t>(M) * 3 * hw * sizeof(float);
+  MALLOC((void **)&s.d_field, fbytes, "field");
+  H2D(s.d_field, field.data(), fbytes, "H2D field");
+  if (map_id) {
+    MALLOC((void **)&s.d_map_id, fn * sizeof(int), "map_id");
+    H2D(s.d_map_id, map_id, fn * sizeof(int), "H2D map_id");
+  }
   MALLOC((void **)&s.d_w, fl.data.size() * sizeof(float), "w");
   MALLOC((void **)&s.d_ob, fl.out_bias_off.size() * sizeof(float), "ob");
   MALLOC((void **)&s.d_rows, fl.num_layers * sizeof(int), "rows");
@@ -734,19 +760,21 @@ void sim_world_cuda::step() {
   const dev_field df = to_dev_field(s.fs, s.d_field);
   // sample (nrm for the carrot) -> carrot FSM -> fused drive -> reached/park.
   // All on the default stream: kernel k+1 sees kernel k's writes (serialized).
-  sample_kernel<<<B, T>>>(df, s.d_o, s.n, s.d_phi, s.d_nrm);
+  sample_kernel<<<B, T>>>(df, s.d_map_id, s.d_o, s.n, s.d_phi, s.d_nrm);
   carrot_kernel<<<B, T>>>(s.d_o, s.d_goal, s.d_th, s.d_sp, s.d_nrm, s.d_stall, s.d_mode, s.d_turn,
                           s.d_dhit, s.d_best, s.d_wall_entry, s.d_we_valid, s.d_tracking,
                           s.d_pos_hist, s.d_hist_count, s.d_parked, s.d_active, s.reach_tol,
                           s.a_max, s.dt, s.n, s.d_carrot);
-  drive_kernel<<<B, T>>>(df, s.d_o, s.d_th, s.d_sp, s.d_carrot, s.d_w, s.d_rows, s.d_cols, s.d_act,
-                         s.d_woff, s.d_boff, s.num_layers, s.d_ob, s.in, s.out, s.v, s.n,
-                         s.d_minclr);
+  drive_kernel<<<B, T>>>(df, s.d_map_id, s.d_o, s.d_th, s.d_sp, s.d_carrot, s.d_w, s.d_rows,
+                         s.d_cols, s.d_act, s.d_woff, s.d_boff, s.num_layers, s.d_ob, s.in, s.out,
+                         s.v, s.n, s.d_minclr);
   reached_park_kernel<<<B, T>>>(s.d_o, s.d_goal, s.reach_tol, s.d_reached, s.d_parked, s.d_active,
                                 s.n);
   cuda_check(cudaGetLastError(), "sim_world_cuda step launch");
   ++gstep_;
 }
+
+int sim_world_cuda::planes() const { return p_ ? p_->M : 1; }
 
 void sim_world_cuda::snapshot(float *pos_world, float *heading, float *speed, int *mode,
                               std::uint8_t *reached) const {
