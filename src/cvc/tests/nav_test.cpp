@@ -11,14 +11,17 @@
   libcvc's own CI without needing Python or pycvc.
 */
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #ifdef CVC_ENABLE_CUDA
 #include <cvc/nav/sim_world_cuda.h>
@@ -754,6 +757,145 @@ TEST(NavSimWorld, LoadsShippedPolicyAndDrives) {
   EXPECT_GT(reached, 0);
 }
 #endif
+
+// The live-sensing path (freeze_sense == false): with a prior belief that DISAGREES
+// with truth (a phantom wall the world does not have), an agent that senses the
+// region must update its belief, which re-composites the occupancy and REBUILDS the
+// field. Every other sim_world test freezes sense, so this exercises the
+// sense_batch -> composite_occupancy -> build_sdf trigger end to end.
+TEST(NavSimWorld, LiveSensingRebuildsTheField) {
+  const int R = 48, C = 48;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1) {
+        truth[r * C + c] = 1;
+        prior[r * C + c] = 1;
+      }
+  // A phantom vertical wall down the middle — in the PRIOR only (truth is open there).
+  for (int r = R / 4; r < 3 * R / 4; ++r)
+    prior[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.range_m = 200.0; // sense far enough to see the phantom-wall region
+  cfg.n_rays = 180;
+  cfg.sense_every = 1;      // sense every tick for a quick test
+  cfg.freeze_sense = false; // THE path under test
+
+  auto cell_on = [&](int r, int c, float &onx, float &ony) {
+    const double x = cfg.min_x + (double)c / (cfg.cols - 1) * (cfg.max_x - cfg.min_x);
+    const double y = cfg.min_y + (double)r / (cfg.rows - 1) * (cfg.max_y - cfg.min_y);
+    onx = (float)((x - cfg.cx) * cfg.scale);
+    ony = (float)((y - cfg.cy) * cfg.scale);
+  };
+  const int N = 8;
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N, 0.5f);
+  for (int i = 0; i < N; ++i) {
+    // agents just LEFT of the phantom wall, goals just RIGHT of it (they must
+    // cross where the phantom wall is believed to be -> they sense it away).
+    const int row = R / 4 + i * (R / 2) / N;
+    cell_on(row, C / 2 - 4, o[2 * i], o[2 * i + 1]);
+    cell_on(row, C / 2 + 6, goal[2 * i], goal[2 * i + 1]);
+  }
+  cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                            o.data(), goal.data(), color.data(), N);
+  const int v0 = world.field_version();
+  std::vector<float> pos0(2 * N), pos1(2 * N), hd(N), sp(N);
+  std::vector<int> md(N);
+  std::vector<std::uint8_t> rc(N);
+  world.snapshot(pos0.data(), hd.data(), sp.data(), md.data(), rc.data());
+  for (int t = 0; t < 60; ++t)
+    world.step(0);
+  world.snapshot(pos1.data(), hd.data(), sp.data(), md.data(), rc.data());
+
+  EXPECT_GT(world.field_version(), v0)
+      << "sensing the phantom wall away should re-composite + rebuild the field";
+  int moved = 0;
+  for (int i = 0; i < N; ++i) {
+    EXPECT_TRUE(std::isfinite(pos1[2 * i]) && std::isfinite(pos1[2 * i + 1]));
+    const float dx = pos1[2 * i] - pos0[2 * i], dy = pos1[2 * i + 1] - pos0[2 * i + 1];
+    if (std::sqrt(dx * dx + dy * dy) > 1.0f)
+      ++moved;
+  }
+  EXPECT_GT(moved, 0) << "agents should drive on the live-sensing path";
+}
+
+// The off-render-thread runtime (sim_thread): a worker advances a sim_world at a
+// fixed rate and publishes immutable snapshots read lock-free; commands
+// (retarget/pause/rate) apply at the top of a tick. This path is what a renderer
+// uses, so exercise start/read/commands/stop.
+TEST(NavSimThread, RunsLockFreeAndTakesCommands) {
+  const int R = 64, C = 64;
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  const int N = 64;
+  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
+      cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 3);
+
+  cvc::nav::sim_thread sim(world, 2000.0);
+  sim.start();
+
+  // Wait (bounded) for the first frames.
+  for (int i = 0; i < 3000 && sim.ticks() < 15; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_GE(sim.ticks(), 1);
+  ASSERT_NE(sim.read(), nullptr);
+
+  // Lock-free reads always return a WHOLE frame (immutable publish, never torn):
+  // every snapshot is internally consistent while the worker keeps stepping.
+  for (int i = 0; i < 5000; ++i) {
+    auto f = sim.read();
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->n, N);
+    EXPECT_EQ((int)f->pos.size(), 2 * N);
+    EXPECT_EQ((int)f->reached.size(), N);
+    EXPECT_TRUE(std::isfinite(f->pos[0]) && std::isfinite(f->pos[2 * N - 1]));
+  }
+
+  // A queued command applies without crashing / tearing.
+  sim.retarget(0, 0.5f, -0.5f);
+
+  // Pause halts progress (allow a couple in-flight ticks), resume restarts it.
+  sim.set_paused(true);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  const long tp = sim.ticks();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_LE(sim.ticks() - tp, 2) << "paused sim should stop advancing";
+  sim.set_paused(false);
+  for (int i = 0; i < 2000 && sim.ticks() <= tp + 2; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_GT(sim.ticks(), tp + 2) << "resumed sim should advance again";
+
+  sim.stop();
+  sim.stop(); // idempotent
+}
 
 #ifdef CVC_ENABLE_CUDA
 // The device-resident GPU twin (field + weights + all SoA columns stay on the
