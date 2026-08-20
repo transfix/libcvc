@@ -91,6 +91,15 @@ training_scene occupancy_scene(const std::uint8_t *occ, int rows, int cols, doub
                                float rr = 0.15f, float d_hat = 0.35f, float dt = 0.06f,
                                float vmax = 0.9f);
 
+// Which differentiable integrator the training rollout backprops through.
+//   surrogate — the smooth point-mass sdf_rollout (coef_train.py's choice); clean
+//               gradient, the default. State is (o, v).
+//   bicycle   — the FULL deployment kinematic-bicycle integrator, differentiated;
+//               closes the surrogate->deployment gap but has non-smooth governor
+//               branches. State is (o, th, sp).
+// Both share the SAME coef_feats -> CoefMLP -> loss; only the integrator differs.
+enum class rollout_kind { surrogate, bicycle };
+
 // Self-supervised training hyperparameters (mirror coef_train.py train()).
 struct train_config {
   int steps = 400;  // outer optimization steps (each a fresh agent batch)
@@ -108,6 +117,13 @@ struct train_config {
   float w_coll = 6.0f;    // collision-penalty weight
   float grad_clip = 5.0f; // global-norm gradient clip
   unsigned seed = 0;
+
+  rollout_kind rollout = rollout_kind::surrogate; // which integrator to train on
+  // Bicycle vehicle params (used only when rollout == bicycle); defaults are the
+  // SdfNavigator VEHICLE_DEFAULTS, so bicycle training matches deployment.
+  float veh_L = 0.035f, veh_delta_max = 0.6f, veh_a_max = 1.5f, veh_a_lat_max = 1.0f,
+        veh_k_steer = 0.8f;
+  bool veh_allow_reverse = true;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct

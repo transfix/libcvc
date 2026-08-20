@@ -142,6 +142,52 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
   EXPECT_GE(checked, 3) << "too few params cleared the FD noise floor to check per-param";
 }
 
+// Same gradient-direction gradcheck, but training through the FULL bicycle
+// integrator (train_config::rollout = bicycle). The bicycle's branch boundaries
+// make the FD noisier than the smooth surrogate, so the tolerance is looser; the
+// standalone per-op gradcheck (scratch) pins the bicycle adjoint tightly.
+TEST(NavCoefTrain, BicycleGradcheckMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 24;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  cfg.rollout = cvc::nav::rollout_kind::bicycle;
+  coef_trainer tr(cfg, 1);
+  const int n = cfg.n, window = cfg.window, P = tr.num_params();
+
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  for (int i = 0; i < n; ++i) // bicycle aux = (th aimed at goal, sp=0)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+
+  std::vector<float> g;
+  const double L0 = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, &g);
+  ASSERT_GT(L0, 0.0);
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i)
+    gnorm += (double)g[i] * g[i];
+  gnorm = std::sqrt(gnorm);
+  ASSERT_GT(gnorm, 1e-4);
+  const std::vector<float> base = tr.params();
+  const float eps = 2e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = (float)(g[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  tr.set_params(pp);
+  const double Lp = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr);
+  tr.set_params(pm);
+  const double Lm = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr);
+  tr.set_params(base);
+  const double dd_fd = (Lp - Lm) / (2.0 * eps);
+  const double dir_rel = std::fabs(dd_fd - gnorm) / (std::fabs(dd_fd) + gnorm + 1e-9);
+  std::printf("[bike-gradcheck] |g|=%.4f dir_rel=%.3e\n", gnorm, dir_rel);
+  EXPECT_LT(dir_rel, 5e-2) << "bicycle backward disagrees with finite differences";
+}
+
 TEST(NavCoefTrain, TrainingReducesLoss) {
   const training_scene sc = cvc::nav::city_scene(64);
   train_config cfg;
@@ -232,6 +278,32 @@ TEST(NavCoefTrain, TrainedPolicyDrivesInSimWorld) {
   EXPECT_GT(trained, 0.9 * untrained) << "training degraded the policy (lr too hot?)";
 }
 
+// Training through the BICYCLE integrator (the training rollout IS the deployment
+// integrator) trains STABLY and keeps the policy driving. The bicycle chases the
+// goal directly (the carrot FSM is a non-differentiable deployment wrapper), so
+// on the city scene it holds the hand-tuned basin rather than beating it, and its
+// governor landscape is far more sensitive than the surrogate's — it needs a much
+// lower lr (~1e-5 vs the surrogate's 2e-4; 2e-4 collapses it). The smooth
+// surrogate is the recommended default; the bicycle is here for matching the
+// deployment dynamics exactly when that is wanted.
+TEST(NavCoefTrain, BicycleTrainedPolicyDrives) {
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg;
+  cfg.n = 128;
+  cfg.hidden = 64;
+  cfg.horizon = 28;
+  cfg.window = 7;
+  cfg.steps = 150;
+  cfg.seed = 0;
+  cfg.lr = 1e-5f; // the bicycle needs a much smaller step than the surrogate
+  cfg.rollout = cvc::nav::rollout_kind::bicycle;
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, /*verbose=*/false);
+  const double reach = reach_rate(tr.to_coef_mlp(), sc, 256, 400, 5);
+  std::printf("[bike-reach] trained=%.1f%%\n", 100 * reach);
+  EXPECT_GT(reach, 0.5) << "bicycle training was unstable / broke navigation";
+}
+
 TEST(NavCoefTrain, BakedPolicyRoundTripsThroughCvcnav) {
   const training_scene sc = cvc::nav::city_scene(48);
   train_config cfg = small_cfg();
@@ -296,6 +368,45 @@ TEST(NavCoefTrain, CudaGradientMatchesCpu) {
   EXPECT_NEAR(Lc, Lg, 1e-3 * (std::fabs(Lc) + 1e-3)) << "CUDA loss disagrees with CPU";
   EXPECT_LT(rel, 5e-3) << "CUDA gradient disagrees with CPU";
   EXPECT_GT(cos, 0.9999) << "CUDA gradient points a different way than CPU";
+}
+
+// Same CUDA-vs-CPU gradient parity, but through the BICYCLE integrator — the
+// device path uses the same shared diff_rollout.h adjoint, so it must reproduce
+// the CPU bicycle gradient too.
+TEST(NavCoefTrain, CudaBicycleGradientMatchesCpu) {
+  if (!cvc::nav::train_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  const training_scene sc = cvc::nav::city_scene(64);
+  train_config cfg;
+  cfg.n = 96;
+  cfg.hidden = 64;
+  cfg.window = 7;
+  cfg.rollout = cvc::nav::rollout_kind::bicycle;
+  coef_trainer tr(cfg, 4);
+  const int n = cfg.n, window = cfg.window;
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 21, o.data(), goal.data());
+  for (int i = 0; i < n; ++i)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+
+  std::vector<float> gcpu, ggpu;
+  const double Lc = tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, &gcpu);
+  const double Lg = cvc::nav::loss_and_grad_cuda(sc, cfg, tr.params(), o.data(), aux.data(),
+                                                 goal.data(), n, window, &ggpu);
+  ASSERT_EQ(gcpu.size(), ggpu.size());
+  double num = 0.0, den = 0.0, dot = 0.0, ng = 0.0;
+  for (size_t i = 0; i < gcpu.size(); ++i) {
+    num += (double)(gcpu[i] - ggpu[i]) * (gcpu[i] - ggpu[i]);
+    den += (double)gcpu[i] * gcpu[i];
+    dot += (double)gcpu[i] * ggpu[i];
+    ng += (double)ggpu[i] * ggpu[i];
+  }
+  const double rel = std::sqrt(num) / (std::sqrt(den) + 1e-12);
+  const double cos = dot / (std::sqrt(den) * std::sqrt(ng) + 1e-12);
+  std::printf("[cuda-bike-grad] Lcpu=%.6f Lgpu=%.6f rel=%.3e cos=%.6f\n", Lc, Lg, rel, cos);
+  EXPECT_NEAR(Lc, Lg, 1e-3 * (std::fabs(Lc) + 1e-3)) << "CUDA bicycle loss disagrees with CPU";
+  EXPECT_LT(rel, 5e-3) << "CUDA bicycle gradient disagrees with CPU";
+  EXPECT_GT(cos, 0.9999) << "CUDA bicycle gradient points a different way than CPU";
 }
 
 // The FULLY DEVICE-RESIDENT CUDA training loop (field, params, Adam moments and

@@ -21,15 +21,19 @@
 */
 
 // coef_train.cpp — see coef_train.h. Self-supervised CoefMLP training with
-// hand-written reverse-mode adjoints (no libtorch). Built without -ffast-math so
-// the float32 forward tracks the deployment sample/rollout math; the backward is
-// validated by finite differences (nav_coef_train_test), so correctness is
-// self-contained, not a torch-parity claim.
+// hand-written reverse-mode adjoints (no libtorch). The differentiable rollout
+// primitives live in detail/diff_rollout.h (shared verbatim with the CUDA
+// trainer); this TU wraps them in the per-agent window loss+gradient, the Adam
+// loop, the scene source and the .cvcnav bake. The rollout integrator (point-mass
+// surrogate vs full bicycle) is selected by train_config::rollout; everything
+// else is identical. Built without -ffast-math so the float32 forward tracks the
+// deployment math; the backward is validated by a finite-difference gradcheck.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/detail/diff_rollout.h>
 #include <cvc/nav/grid_nav.h>
 #include <random>
 #include <stdexcept>
@@ -39,126 +43,20 @@ namespace cvc {
 namespace nav {
 
 namespace {
-
-inline float sigmoidf(float x) { return 1.0f / (1.0f + std::exp(-x)); }
-inline float siluf(float x) { return x * sigmoidf(x); }
-inline float silu_grad(float x) { // d/dx [x*sigmoid(x)]
-  const float s = sigmoidf(x);
-  return s + x * s * (1.0f - s);
+diff::field to_diff_field(const field_stack &fs) {
+  diff::field F;
+  F.data = fs.data;
+  F.H = fs.H;
+  F.W = fs.W;
+  F.S = static_cast<float>(fs.S);
+  F.cx = static_cast<float>(fs.cx);
+  F.cy = static_cast<float>(fs.cy);
+  F.mnx = static_cast<float>(fs.mnx);
+  F.mny = static_cast<float>(fs.mny);
+  F.mxx = static_cast<float>(fs.mxx);
+  F.mxy = static_cast<float>(fs.mxy);
+  return F;
 }
-inline float softplusf(float x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
-
-// IPC barrier derivative (ipc_dbdd, drive.cpp) and its d/dd.
-inline float ipc_dbdd(float d, float d_hat) {
-  const float dc = d < 1e-6f ? 1e-6f : d;
-  if (!(dc < d_hat))
-    return 0.0f;
-  return (d_hat - dc) * (2.0f * std::log(dc / d_hat) - d_hat / dc) + 1.0f;
-}
-inline float ipc_dbdd_grad(float d, float d_hat) {
-  if (d < 1e-6f)
-    return 0.0f; // clamp_min(1e-6): gradient killed
-  if (!(d < d_hat))
-    return 0.0f; // where(d < d_hat, ., 0)
-  const float A = d_hat - d;
-  const float B = 2.0f * std::log(d / d_hat) - d_hat / d;
-  const float dB = 2.0f / d + d_hat / (d * d);
-  return -B + A * dB; // d/dd [A*B + 1]
-}
-
-// A cached bilinear sample (drive.cpp sample_unit) with everything the position
-// VJP needs. `phi`, unit normal (`nx`,`ny`) are the forward outputs.
-struct Sample {
-  float phv[4], pxv[4], pyv[4]; // corner values (nw,ne,sw,se) per channel
-  float wx0, wx1, wy0, wy1;
-  bool clx, cly;  // ix/iy were clamped to the border
-  float Wf1, Hf1; // W-1, H-1
-  float cgx, cgy; // d gx/d onx, d gy/d ony
-  float rnx, rny; // raw normal (pre-renorm)
-  float r, mag;   // |raw|, |raw|+1e-6
-  float phi, nx, ny;
-};
-
-Sample sample_fwd(const field_stack &f, float onx, float ony) {
-  Sample s;
-  const float S = static_cast<float>(f.S);
-  const float mnx = static_cast<float>(f.mnx), mxx = static_cast<float>(f.mxx);
-  const float mny = static_cast<float>(f.mny), mxy = static_cast<float>(f.mxy);
-  const float wx = onx / S + static_cast<float>(f.cx);
-  const float wy = ony / S + static_cast<float>(f.cy);
-  const float gx = 2.0f * (wx - mnx) / (mxx - mnx) - 1.0f;
-  const float gy = 2.0f * (wy - mny) / (mxy - mny) - 1.0f;
-  s.cgx = 2.0f / ((mxx - mnx) * S);
-  s.cgy = 2.0f / ((mxy - mny) * S);
-  s.Wf1 = static_cast<float>(f.W - 1);
-  s.Hf1 = static_cast<float>(f.H - 1);
-  float ix = (gx + 1.0f) * 0.5f * s.Wf1;
-  float iy = (gy + 1.0f) * 0.5f * s.Hf1;
-  s.clx = (ix < 0.0f) || (ix > s.Wf1);
-  s.cly = (iy < 0.0f) || (iy > s.Hf1);
-  ix = std::min(std::max(ix, 0.0f), s.Wf1);
-  iy = std::min(std::max(iy, 0.0f), s.Hf1);
-  const int ix0 = static_cast<int>(std::floor(ix)), iy0 = static_cast<int>(std::floor(iy));
-  s.wx1 = ix - static_cast<float>(ix0);
-  s.wx0 = 1.0f - s.wx1;
-  s.wy1 = iy - static_cast<float>(iy0);
-  s.wy0 = 1.0f - s.wy1;
-  const int cx0 = std::min(std::max(ix0, 0), f.W - 1),
-            cx1 = std::min(std::max(ix0 + 1, 0), f.W - 1);
-  const int cy0 = std::min(std::max(iy0, 0), f.H - 1),
-            cy1 = std::min(std::max(iy0 + 1, 0), f.H - 1);
-  const long HW = static_cast<long>(f.H) * f.W;
-  const float *ph = f.data, *px = f.data + HW, *py = f.data + 2 * HW;
-  const long nw = static_cast<long>(cy0) * f.W + cx0, ne = static_cast<long>(cy0) * f.W + cx1;
-  const long sw = static_cast<long>(cy1) * f.W + cx0, se = static_cast<long>(cy1) * f.W + cx1;
-  s.phv[0] = ph[nw];
-  s.phv[1] = ph[ne];
-  s.phv[2] = ph[sw];
-  s.phv[3] = ph[se];
-  s.pxv[0] = px[nw];
-  s.pxv[1] = px[ne];
-  s.pxv[2] = px[sw];
-  s.pxv[3] = px[se];
-  s.pyv[0] = py[nw];
-  s.pyv[1] = py[ne];
-  s.pyv[2] = py[sw];
-  s.pyv[3] = py[se];
-  const float nwW = s.wx0 * s.wy0, neW = s.wx1 * s.wy0, swW = s.wx0 * s.wy1, seW = s.wx1 * s.wy1;
-  s.phi = s.phv[0] * nwW + s.phv[1] * neW + s.phv[2] * swW + s.phv[3] * seW;
-  s.rnx = s.pxv[0] * nwW + s.pxv[1] * neW + s.pxv[2] * swW + s.pxv[3] * seW;
-  s.rny = s.pyv[0] * nwW + s.pyv[1] * neW + s.pyv[2] * swW + s.pyv[3] * seW;
-  s.r = std::sqrt(s.rnx * s.rnx + s.rny * s.rny);
-  s.mag = s.r + 1e-6f;
-  s.nx = s.rnx / s.mag;
-  s.ny = s.rny / s.mag;
-  return s;
-}
-
-// VJP of sample_fwd: (dL/dphi, dL/dnx, dL/dny) -> (dL/donx, dL/dony).
-void sample_bwd(const Sample &s, float gphi, float gnx, float gny, float &gonx, float &gony) {
-  float grnx = 0.0f, grny = 0.0f;
-  if (s.r > 0.0f) {
-    const float mag2 = s.mag * s.mag;
-    const float dnx_drnx = (s.mag - s.rnx * s.rnx / s.r) / mag2;
-    const float dny_drny = (s.mag - s.rny * s.rny / s.r) / mag2;
-    const float dcross = -(s.rnx * s.rny) / (s.r * mag2); // dnx/drny == dny/drnx
-    grnx = gnx * dnx_drnx + gny * dcross;
-    grny = gnx * dcross + gny * dny_drny;
-  }
-  const float dphi_dix = s.wy0 * (s.phv[1] - s.phv[0]) + s.wy1 * (s.phv[3] - s.phv[2]);
-  const float dphi_diy = s.wx0 * (s.phv[2] - s.phv[0]) + s.wx1 * (s.phv[3] - s.phv[1]);
-  const float drnx_dix = s.wy0 * (s.pxv[1] - s.pxv[0]) + s.wy1 * (s.pxv[3] - s.pxv[2]);
-  const float drnx_diy = s.wx0 * (s.pxv[2] - s.pxv[0]) + s.wx1 * (s.pxv[3] - s.pxv[1]);
-  const float drny_dix = s.wy0 * (s.pyv[1] - s.pyv[0]) + s.wy1 * (s.pyv[3] - s.pyv[2]);
-  const float drny_diy = s.wx0 * (s.pyv[2] - s.pyv[0]) + s.wx1 * (s.pyv[3] - s.pyv[1]);
-  const float gix = gphi * dphi_dix + grnx * drnx_dix + grny * drny_dix;
-  const float giy = gphi * dphi_diy + grnx * drnx_diy + grny * drny_diy;
-  const float ggx = gix * (s.clx ? 0.0f : 0.5f * s.Wf1);
-  const float ggy = giy * (s.cly ? 0.0f : 0.5f * s.Hf1);
-  gonx = ggx * s.cgx;
-  gony = ggy * s.cgy;
-}
-
 } // namespace
 
 // ── training_scene ───────────────────────────────────────────────────────────
@@ -343,30 +241,27 @@ void coef_trainer::coeffs(const float *feat, int n, float *out) const {
   std::vector<float> a(h), b(h);
   for (int s = 0; s < n; ++s) {
     const float *x = feat + static_cast<std::size_t>(s) * 5;
-    // L0 (5->h, SiLU)
     for (int o = 0; o < h; ++o) {
       float acc = p_[off_b_[0] + o];
       const float *w = &p_[off_w_[0] + static_cast<std::size_t>(o) * 5];
       for (int i = 0; i < 5; ++i)
         acc += w[i] * x[i];
-      a[o] = siluf(acc);
+      a[o] = diff::siluf_(acc);
     }
-    // L1 (h->h, SiLU)
     for (int o = 0; o < h; ++o) {
       float acc = p_[off_b_[1] + o];
       const float *w = &p_[off_w_[1] + static_cast<std::size_t>(o) * h];
       for (int i = 0; i < h; ++i)
         acc += w[i] * a[i];
-      b[o] = siluf(acc);
+      b[o] = diff::siluf_(acc);
     }
-    // L2 (h->3, identity) + softplus(net + log(expm1(bias)))
     float *oo = out + static_cast<std::size_t>(s) * 3;
     for (int o = 0; o < 3; ++o) {
       float acc = p_[off_b_[2] + o];
       const float *w = &p_[off_w_[2] + static_cast<std::size_t>(o) * h];
       for (int i = 0; i < h; ++i)
         acc += w[i] * b[i];
-      oo[o] = softplusf(acc + std::log(std::expm1(bias_[o])));
+      oo[o] = diff::softplusf_(acc + std::log(std::expm1(bias_[o])));
     }
   }
 }
@@ -374,31 +269,33 @@ void coef_trainer::coeffs(const float *feat, int n, float *out) const {
 double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_in,
                                    const float *v_in, const float *goal, int n, int window,
                                    std::vector<float> *grad, float *o_out, float *v_out) const {
-  const field_stack fs = scene.field();
+  const diff::field F = to_diff_field(scene.field());
   const int h = hidden_;
-  const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax;
-  const float hdt = scene.dt; // nsub == 1 (training)
+  const bool bike = cfg_.rollout == rollout_kind::bicycle;
+  const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
+  diff::bike_veh bv;
+  bv.rr = rr;
+  bv.d_hat = d_hat;
+  bv.vmax = vmax;
+  bv.L = cfg_.veh_L;
+  bv.delta_max = cfg_.veh_delta_max;
+  bv.a_max = cfg_.veh_a_max;
+  bv.a_lat_max = cfg_.veh_a_lat_max;
+  bv.k_steer = cfg_.veh_k_steer;
+  bv.hdt = hdt;
+  bv.allow_reverse = cfg_.veh_allow_reverse ? 1 : 0;
   const float off_bias[3] = {std::log(std::expm1(bias_[0])), std::log(std::expm1(bias_[1])),
                              std::log(std::expm1(bias_[2]))};
   if (grad)
     grad->assign(p_.size(), 0.0f);
 
-  // Per-step forward cache for one agent's window.
   struct Step {
-    Sample cf; // coef_feats sample at o_t
+    diff::sample cf; // coef_feats sample at o_t
     float dx, dy, gd, inv, gdx, gdy;
     float feat[5];
-    std::vector<float> z0, a0, z1, a1; // MLP pre/post activations
+    std::vector<float> z0, a0, z1, a1;
     float raw[3], coef[3];
-    float ox, oy, vx, vy;   // step inputs (o_t, v_t)
-    Sample rl;              // rollout force sample at o_t
-    float d, ipc;           // rollout barrier
-    float ax, ay, vpx, vpy; // acceleration, pre-clamp velocity
-    float sp;
-    bool scaled;
-    float ox1, oy1, vx1, vy1; // step outputs (o_{t+1}, v_{t+1})
-    Sample coll;              // collision sample at o_{t+1}
-    float phi_new;
+    float ox, oy, auxx, auxy; // o_t, aux_t
   };
   std::vector<Step> st(window);
   for (int L = 0; L < window; ++L) {
@@ -411,13 +308,11 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
   double total_loss = 0.0;
   const double inv_n = 1.0 / n;
   const float coll_w = cfg_.w_coll / static_cast<float>(window);
-
-  // Per-param gradient accumulator (summed over agents, averaged at the end).
   std::vector<float> gacc(grad ? p_.size() : 0, 0.0f);
 
   for (int ag = 0; ag < n; ++ag) {
     float ox = o_in[2 * ag], oy = o_in[2 * ag + 1];
-    float vx = v_in[2 * ag], vy = v_in[2 * ag + 1];
+    float ax = v_in[2 * ag], ay = v_in[2 * ag + 1]; // aux (v, or th/sp)
     const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
 
     // ── forward window ──
@@ -425,11 +320,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       Step &S = st[t];
       S.ox = ox;
       S.oy = oy;
-      S.vx = vx;
-      S.vy = vy;
-
-      // coef_feats at o_t
-      S.cf = sample_fwd(fs, ox, oy);
+      S.auxx = ax;
+      S.auxy = ay;
+      S.cf = diff::sample_fwd(F, ox, oy);
       S.dx = gx - ox;
       S.dy = gy - oy;
       S.gd = std::sqrt(S.dx * S.dx + S.dy * S.dy);
@@ -441,15 +334,13 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       S.feat[2] = S.gdx;
       S.feat[3] = S.gdy;
       S.feat[4] = S.gdx * S.cf.nx + S.gdy * S.cf.ny;
-
-      // MLP forward (cache pre-activations)
       for (int o = 0; o < h; ++o) {
         float acc = p_[off_b_[0] + o];
         const float *w = &p_[off_w_[0] + static_cast<std::size_t>(o) * 5];
         for (int i = 0; i < 5; ++i)
           acc += w[i] * S.feat[i];
         S.z0[o] = acc;
-        S.a0[o] = siluf(acc);
+        S.a0[o] = diff::siluf_(acc);
       }
       for (int o = 0; o < h; ++o) {
         float acc = p_[off_b_[1] + o];
@@ -457,7 +348,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         for (int i = 0; i < h; ++i)
           acc += w[i] * S.a0[i];
         S.z1[o] = acc;
-        S.a1[o] = siluf(acc);
+        S.a1[o] = diff::siluf_(acc);
       }
       for (int o = 0; o < 3; ++o) {
         float acc = p_[off_b_[2] + o];
@@ -465,49 +356,28 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         for (int i = 0; i < h; ++i)
           acc += w[i] * S.a1[i];
         S.raw[o] = acc;
-        S.coef[o] = softplusf(acc + off_bias[o]);
+        S.coef[o] = diff::softplusf_(acc + off_bias[o]);
       }
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
 
-      // sdf_rollout one step (nsub == 1) — force sample at o_t
-      S.rl = sample_fwd(fs, ox, oy);
-      S.d = S.rl.phi - rr;
-      S.ipc = ipc_dbdd(S.d, d_hat);
-      const float Fbar_x = -(al * S.ipc) * S.rl.nx;
-      const float Fbar_y = -(al * S.ipc) * S.rl.ny;
-      const float Fgoal_x = -be * (ox - gx);
-      const float Fgoal_y = -be * (oy - gy);
-      S.ax = Fbar_x + Fgoal_x - ga * vx;
-      S.ay = Fbar_y + Fgoal_y - ga * vy;
-      S.vpx = vx + hdt * S.ax;
-      S.vpy = vy + hdt * S.ay;
-      S.sp = std::sqrt(S.vpx * S.vpx + S.vpy * S.vpy);
-      float vcx = S.vpx, vcy = S.vpy;
-      S.scaled = S.sp > vmax;
-      if (S.scaled) {
-        const float sc = vmax / S.sp;
-        vcx = S.vpx * sc;
-        vcy = S.vpy * sc;
-      }
-      S.vx1 = vcx;
-      S.vy1 = vcy;
-      S.ox1 = ox + hdt * vcx;
-      S.oy1 = oy + hdt * vcy;
+      float ox1, oy1, ax1, ay1;
+      if (bike)
+        diff::bike_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
+      else
+        diff::surr_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, ax1,
+                        ay1);
 
-      // collision sample at o_{t+1}
-      S.coll = sample_fwd(fs, S.ox1, S.oy1);
-      S.phi_new = S.coll.phi;
-      const float pen = rr - S.phi_new;
+      const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
+      const float pen = rr - cs.phi;
       if (pen > 0.0f)
         total_loss += static_cast<double>(coll_w) * pen * inv_n;
 
-      ox = S.ox1;
-      oy = S.oy1;
-      vx = S.vx1;
-      vy = S.vy1;
+      ox = ox1;
+      oy = oy1;
+      ax = ax1;
+      ay = ay1;
     }
 
-    // terminal goal distance
     const float fdx = ox - gx, fdy = oy - gy;
     const float Lgoal = std::sqrt(fdx * fdx + fdy * fdy);
     total_loss += static_cast<double>(Lgoal) * inv_n;
@@ -516,15 +386,14 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       o_out[2 * ag + 1] = oy;
     }
     if (v_out) {
-      v_out[2 * ag] = vx;
-      v_out[2 * ag + 1] = vy;
+      v_out[2 * ag] = ax;
+      v_out[2 * ag + 1] = ay;
     }
     if (!grad)
       continue;
 
     // ── backward window ──
-    // grad on the current step output (o_{t+1}, v_{t+1}); seeded at o_window.
-    float go_x = 0.0f, go_y = 0.0f, gv_x = 0.0f, gv_y = 0.0f;
+    float go_x = 0.0f, go_y = 0.0f, gaux_x = 0.0f, gaux_y = 0.0f; // grad on (o1, aux1)
     if (Lgoal > 1e-9f) {
       go_x = static_cast<float>(inv_n) * fdx / Lgoal;
       go_y = static_cast<float>(inv_n) * fdy / Lgoal;
@@ -533,66 +402,38 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       Step &S = st[t];
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
 
-      // collision term samples o_{t+1}: add its position grad to (go_x, go_y).
-      const float pen = rr - S.phi_new;
+      // collision term at o_{t+1} = the recomputable step output; but we stored
+      // only inputs, so recompute o_{t+1} via the step for its sample.
+      float ox1, oy1, ax1, ay1;
+      if (bike)
+        diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
+      else
+        diff::surr_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
+                        ox1, oy1, ax1, ay1);
+      const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
+      const float pen = rr - cs.phi;
       if (pen > 0.0f) {
-        const float gphi = -static_cast<float>(coll_w) * static_cast<float>(inv_n);
         float dox, doy;
-        sample_bwd(S.coll, gphi, 0.0f, 0.0f, dox, doy);
+        diff::sample_bwd(cs, -static_cast<float>(coll_w) * static_cast<float>(inv_n), 0.0f, 0.0f,
+                         dox, doy);
         go_x += dox;
         go_y += doy;
       }
 
-      // ── rollout backward ──
-      // o_{t+1} = o_t + hdt*v''  ;  v_{t+1} = v''
-      float gvpp_x = gv_x + hdt * go_x; // grad on clamped velocity v''
-      float gvpp_y = gv_y + hdt * go_y;
-      float god_x = go_x, god_y = go_y; // grad on o_t (direct), o appears in o'=o+hdt*v''
-      // speed clamp backward: v'' = v' or v'*vmax/sp
-      float gvp_x, gvp_y;
-      if (S.scaled) {
-        const float sp = S.sp, sp3 = sp * sp * sp;
-        const float dot = gvpp_x * S.vpx + gvpp_y * S.vpy;
-        gvp_x = vmax / sp * gvpp_x - vmax / sp3 * S.vpx * dot;
-        gvp_y = vmax / sp * gvpp_y - vmax / sp3 * S.vpy * dot;
-      } else {
-        gvp_x = gvpp_x;
-        gvp_y = gvpp_y;
-      }
-      // v' = v_t + hdt*a
-      const float ga_x = hdt * gvp_x, ga_y = hdt * gvp_y; // grad on acceleration
-      float gvt_x = gvp_x, gvt_y = gvp_y;                 // grad on v_t (from v'=v_t+hdt*a)
-      // a = Fbar + Fgoal - ga*v_t
-      float gFbar_x = ga_x, gFbar_y = ga_y;
-      float gFgoal_x = ga_x, gFgoal_y = ga_y;
-      float g_al = 0.0f, g_be = 0.0f, g_ga = 0.0f;
-      g_ga += -(ga_x * S.vx + ga_y * S.vy);
-      gvt_x += -ga * ga_x;
-      gvt_y += -ga * ga_y;
-      // Fgoal = -be*(o_t - goal)
-      g_be += -(gFgoal_x * (S.ox - gx) + gFgoal_y * (S.oy - gy));
-      god_x += -be * gFgoal_x;
-      god_y += -be * gFgoal_y;
-      // Fbar = -(al*ipc)*n
-      const float aip = al * S.ipc;
-      g_al += -S.ipc * (gFbar_x * S.rl.nx + gFbar_y * S.rl.ny);
-      float g_ipc = -al * (gFbar_x * S.rl.nx + gFbar_y * S.rl.ny);
-      float gnx = -aip * gFbar_x, gny = -aip * gFbar_y;
-      // ipc = ipc_dbdd(d) ; d = phi - rr
-      float gphi_force = g_ipc * ipc_dbdd_grad(S.d, d_hat);
-      // force sample at o_t: (gphi_force, gnx, gny) -> grad o_t
-      float sdox, sdoy;
-      sample_bwd(S.rl, gphi_force, gnx, gny, sdox, sdoy);
-      god_x += sdox;
-      god_y += sdoy;
+      // rollout backward: grad on (o1, aux1) -> grad on (o_t, aux_t) + (al,be,ga)
+      float gox, goy, gauxx, gauxy, g_al, g_be, g_ga;
+      if (bike)
+        diff::bike_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, go_x, go_y,
+                            gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
+      else
+        diff::surr_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
+                            go_x, go_y, gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
 
-      // ── MLP backward: (g_al,g_be,g_ga) -> params + grad feat ──
+      // MLP backward: (g_al,g_be,g_ga) -> gacc + grad feat
       float graw[3];
-      for (int o = 0; o < 3; ++o) {
-        const float gc = (o == 0 ? g_al : (o == 1 ? g_be : g_ga));
-        graw[o] = gc * sigmoidf(S.raw[o] + off_bias[o]); // softplus'
-      }
-      // L2: raw = W2*a1 + b2
+      graw[0] = g_al * diff::sigmoidf_(S.raw[0] + off_bias[0]);
+      graw[1] = g_be * diff::sigmoidf_(S.raw[1] + off_bias[1]);
+      graw[2] = g_ga * diff::sigmoidf_(S.raw[2] + off_bias[2]);
       std::vector<float> ga1(h, 0.0f);
       for (int o = 0; o < 3; ++o) {
         const std::size_t wb = off_w_[2] + static_cast<std::size_t>(o) * h;
@@ -602,11 +443,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         }
         gacc[off_b_[2] + o] += graw[o];
       }
-      // SiLU at z1
       std::vector<float> gz1(h);
       for (int i = 0; i < h; ++i)
-        gz1[i] = ga1[i] * silu_grad(S.z1[i]);
-      // L1: z1 = W1*a0 + b1
+        gz1[i] = ga1[i] * diff::silu_grad_(S.z1[i]);
       std::vector<float> ga0(h, 0.0f);
       for (int o = 0; o < h; ++o) {
         const std::size_t wb = off_w_[1] + static_cast<std::size_t>(o) * h;
@@ -617,15 +456,10 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         }
         gacc[off_b_[1] + o] += g;
       }
-      // SiLU at z0
-      std::vector<float> gz0(h);
-      for (int i = 0; i < h; ++i)
-        gz0[i] = ga0[i] * silu_grad(S.z0[i]);
-      // L0: z0 = W0*feat + b0
       float gfeat[5] = {0, 0, 0, 0, 0};
       for (int o = 0; o < h; ++o) {
         const std::size_t wb = off_w_[0] + static_cast<std::size_t>(o) * 5;
-        const float g = gz0[o];
+        const float g = ga0[o] * diff::silu_grad_(S.z0[o]);
         for (int i = 0; i < 5; ++i) {
           gacc[wb + i] += g * S.feat[i];
           gfeat[i] += g * p_[wb + i];
@@ -633,38 +467,32 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         gacc[off_b_[0] + o] += g;
       }
 
-      // ── coef_feats backward: gfeat -> grad o_t ──
-      float gphi_cf = gfeat[0];
-      float ggd = gfeat[1];
-      float ggdx = gfeat[2] + gfeat[4] * S.cf.nx;
-      float ggdy = gfeat[3] + gfeat[4] * S.cf.ny;
-      float gcfnx = gfeat[4] * S.gdx;
-      float gcfny = gfeat[4] * S.gdy;
-      // (dx,dy) grads from gd, gdx, gdy
-      float g_dx = 0.0f, g_dy = 0.0f;
+      // coef_feats backward: gfeat -> grad on o_t (add to the rollout's gox/goy)
+      float god_x = gox, god_y = goy;
+      const float gphi_cf = gfeat[0];
+      const float ggd = gfeat[1];
+      const float ggdx = gfeat[2] + gfeat[4] * S.cf.nx;
+      const float ggdy = gfeat[3] + gfeat[4] * S.cf.ny;
+      const float gcfnx = gfeat[4] * S.gdx, gcfny = gfeat[4] * S.gdy;
       const float gd_safe = S.gd > 1e-9f ? S.gd : 1e-9f;
-      g_dx += ggd * S.dx / gd_safe;
-      g_dy += ggd * S.dy / gd_safe;
       const float inv2 = S.inv * S.inv;
-      // gdx = dx*inv, inv=1/(gd+1e-6); d inv/d dx = -inv^2 * dx/gd
+      float g_dx = ggd * S.dx / gd_safe;
+      float g_dy = ggd * S.dy / gd_safe;
       g_dx += ggdx * (S.inv - S.dx * S.dx * inv2 / gd_safe);
       g_dy += ggdx * (-S.dx * S.dy * inv2 / gd_safe);
       g_dy += ggdy * (S.inv - S.dy * S.dy * inv2 / gd_safe);
       g_dx += ggdy * (-S.dx * S.dy * inv2 / gd_safe);
-      // dx = gx - o_t  -> d/do_t = -1
       god_x += -g_dx;
       god_y += -g_dy;
-      // coef_feats sample at o_t
       float cdox, cdoy;
-      sample_bwd(S.cf, gphi_cf, gcfnx, gcfny, cdox, cdoy);
+      diff::sample_bwd(S.cf, gphi_cf, gcfnx, gcfny, cdox, cdoy);
       god_x += cdox;
       god_y += cdoy;
 
-      // propagate to the previous step's output (o_t, v_t)
       go_x = god_x;
       go_y = god_y;
-      gv_x = gvt_x;
-      gv_y = gvt_y;
+      gaux_x = gauxx;
+      gaux_y = gauxy;
     }
   }
 
@@ -678,7 +506,6 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
 void coef_trainer::adam_step(const std::vector<float> &grad) {
   ++adam_t_;
   const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f, lr = cfg_.lr;
-  // global-norm gradient clip
   double sq = 0.0;
   for (float g : grad)
     sq += static_cast<double>(g) * g;
@@ -699,19 +526,29 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
 
 void coef_trainer::train(const training_scene &scene, bool verbose) {
   const int n = cfg_.n, horizon = cfg_.horizon, window = cfg_.window;
-  std::vector<float> o(2 * n), goal(2 * n), v(2 * n), o2(2 * n), v2(2 * n);
+  const bool bike = cfg_.rollout == rollout_kind::bicycle;
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n), o2(2 * n), a2(2 * n);
   std::vector<float> grad;
   for (int step = 0; step < cfg_.steps; ++step) {
     scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data());
-    std::fill(v.begin(), v.end(), 0.0f);
+    // Initial aux: surrogate v=0; bicycle (th aimed at the goal, sp=0).
+    for (int i = 0; i < n; ++i) {
+      if (bike) {
+        aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+        aux[2 * i + 1] = 0.0f;
+      } else {
+        aux[2 * i] = 0.0f;
+        aux[2 * i + 1] = 0.0f;
+      }
+    }
     double last = 0.0;
     for (int w0 = 0; w0 < horizon; w0 += window) {
       const int wl = std::min(window, horizon - w0);
-      last =
-          loss_and_grad(scene, o.data(), v.data(), goal.data(), n, wl, &grad, o2.data(), v2.data());
+      last = loss_and_grad(scene, o.data(), aux.data(), goal.data(), n, wl, &grad, o2.data(),
+                           a2.data());
       adam_step(grad);
       o.swap(o2);
-      v.swap(v2);
+      aux.swap(a2);
     }
     if (verbose && (step % 50 == 0 || step == cfg_.steps - 1))
       std::printf("  step %4d: window_loss %.4f\n", step, last);
