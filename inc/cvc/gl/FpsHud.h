@@ -91,8 +91,8 @@ protected:
   void handleStateChanged(const std::string &childState) override;
 
 private:
-  void seedState();        // write defaults with the change signal suppressed
-  void readAllFromState(); // pull every setting from state into members
+  void seedState();         // write defaults with the change signal suppressed
+  void readAllFromState();  // pull every setting from state into members
   void syncConfigToState(); // write config back (guarded against echo)
   void apply();             // push members to the text actor
   void frameRendered();     // EndEvent: accumulate timing, refresh the readout

@@ -8,10 +8,12 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cvc/gl/FpsHud.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
-
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkCoordinate.h>
@@ -21,10 +23,6 @@
 #include <vtkSmartPointer.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
-
-#include <atomic>
-#include <chrono>
-#include <cstdio>
 
 namespace cvc {
 namespace gl {
