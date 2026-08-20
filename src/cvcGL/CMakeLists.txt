@@ -53,10 +53,18 @@ vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 # X11 is used by CameraController for Quake-style pointer capture (warp the cursor
 # to centre each frame so mouse-look is continuous). Optional: without it, captured
 # look degrades to cursor-delta. Linux/X11 only.
+#
+# cvcGL is a STATIC archive, so its PRIVATE link deps propagate to consumers through
+# the exported INTERFACE_LINK_LIBRARIES. find_package(X11)'s ${X11_LIBRARIES} are
+# ABSOLUTE builder paths (e.g. .../py/lib/libX11.so) — baking those into
+# cvcGLTargets.cmake breaks any downstream consumer (volrover3) on another machine
+# with "missing and no known rule to make it". cvcGL only calls Xlib (XWarpPointer/
+# XFlush), so link libX11 BY NAME: the export then carries a relocatable "-lX11" the
+# consumer's own linker resolves, not a path from this builder.
 if(UNIX AND NOT APPLE)
   find_package(X11)
   if(X11_FOUND)
-    target_link_libraries(cvcGL PRIVATE ${X11_LIBRARIES})
+    target_link_libraries(cvcGL PRIVATE X11)
     target_include_directories(cvcGL PRIVATE ${X11_INCLUDE_DIR})
   endif()
 endif()
