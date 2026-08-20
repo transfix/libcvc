@@ -13,6 +13,7 @@
 %{
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_thread.h>
@@ -1463,6 +1464,60 @@ PyObject *nav_drive_step_cuda(PyObject *field, PyObject *on, PyObject *th, PyObj
   (void)weights_path;
   throw std::runtime_error("pycvc.nav_drive_step_cuda: this pycvc was built without CUDA");
 #endif
+}
+
+// Self-supervised training of the CoefMLP navigation policy from a scene's
+// occupancy (cvc::nav::coef_train) — NO torch, NO Python numerics. Trains and
+// writes the versioned .cvcnav to `out_path`; returns the final window loss.
+// `occ` is a (H,W) uint8/bool free/obstacle grid; `rollout` is 0 (surrogate) or
+// 1 (bicycle); `use_cuda` picks the device-resident GPU trainer when this pycvc
+// was built with CUDA and a device is present. The CPU path releases the GIL
+// during training. This is the OPT-IN native trainer behind GRL-SNAM's
+// GRL_SNAM_TRAIN_BACKEND flag; the torch coef_train.py stays canonical.
+double nav_train_coef_mlp(PyObject *occ, double min_x, double min_y, double max_x, double max_y,
+                          double scale, double rr, double d_hat, double dt, double vmax, int steps,
+                          int horizon, int n, int window, int hidden, double lr, double w_coll,
+                          double grad_clip, unsigned seed, int rollout, int use_cuda,
+                          const char *out_path)
+{
+  int rows, cols;
+  PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+  cvc::nav::training_scene sc = cvc::nav::occupancy_scene(
+      static_cast<const std::uint8_t *>(PyArray_DATA(a)), rows, cols, min_x, min_y, max_x, max_y,
+      scale, (float)rr, (float)d_hat, (float)dt, (float)vmax);
+  Py_DECREF(a);
+
+  cvc::nav::train_config cfg;
+  cfg.steps = steps;
+  cfg.horizon = horizon;
+  cfg.n = n;
+  cfg.window = window;
+  cfg.hidden = hidden;
+  cfg.lr = (float)lr;
+  cfg.w_coll = (float)w_coll;
+  cfg.grad_clip = (float)grad_clip;
+  cfg.seed = seed;
+  cfg.rollout =
+      rollout == 1 ? cvc::nav::rollout_kind::bicycle : cvc::nav::rollout_kind::surrogate;
+
+  bool used_cuda = false;
+#ifdef CVC_USING_CUDA
+  if (use_cuda && cvc::nav::train_cuda_available()) {
+    cvc::nav::coef_mlp policy = cvc::nav::train_coef_mlp_cuda(sc, cfg);
+    policy.save(out_path, "trained by pycvc.nav_train_coef_mlp (cuda)");
+    used_cuda = true;
+  }
+#else
+  (void)use_cuda;
+#endif
+  if (!used_cuda) {
+    cvc::nav::coef_trainer tr(cfg, 1);
+    Py_BEGIN_ALLOW_THREADS
+    tr.train(sc);
+    Py_END_ALLOW_THREADS
+    tr.to_coef_mlp().save(out_path, "trained by pycvc.nav_train_coef_mlp (cpu)");
+  }
+  return used_cuda ? 1.0 : 0.0; // which backend ran (weights are on disk at out_path)
 }
 
 } // namespace pycvc
