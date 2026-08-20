@@ -11,6 +11,7 @@
   libcvc's own CI without needing Python or pycvc.
 */
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>

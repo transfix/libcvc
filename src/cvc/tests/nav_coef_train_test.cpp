@@ -17,6 +17,7 @@
 // with no reference to torch's autograd. The rest exercises training end-to-end:
 // the loss falls, a trained policy drives, and it round-trips through .cvcnav.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
