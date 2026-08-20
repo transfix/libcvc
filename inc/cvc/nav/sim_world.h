@@ -105,6 +105,9 @@ public:
 
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
+  // Per-agent belief-plane id [n] (each in [0, M)) — lets a renderer colour agents
+  // by their group (shared: all 0; clustered: group id; private: 0..n-1).
+  const int *agent_planes() const { return map_id_.data(); }
   long tick() const { return gstep_; }
   int field_version() const { return field_ver_; }
 
