@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/SceneRenderer.h>
+#include <vtkCamera.h>
+#include <vtkRenderer.h>
 
 namespace navdemo {
 
@@ -132,6 +135,28 @@ void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, 
   eye[0] = focal[0] + dist * std::cos(elevation) * std::cos(azimuth);
   eye[1] = focal[1] + dist * std::cos(elevation) * std::sin(azimuth);
   eye[2] = focal[2] + dist * std::sin(elevation);
+}
+
+void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin) {
+  // Eye straight above the centre, looking down -z, +y up.
+  view.setCamera(b.cx(), b.cy(), 800.0, b.cx(), b.cy(), 0.0, 0.0, 1.0, 0.0, 30.0, 1.0, 4000.0);
+  vtkRenderer *r = view.renderer();
+  if (!r)
+    return;
+  vtkCamera *cam = r->GetActiveCamera();
+  cam->ParallelProjectionOn();
+  cam->SetParallelScale(0.5 * (b.max_y - b.min_y) + margin);
+}
+
+void add_border(std::uint8_t *occ, int rows, int cols) {
+  for (int c = 0; c < cols; ++c) {
+    occ[c] = 1;
+    occ[static_cast<std::size_t>(rows - 1) * cols + c] = 1;
+  }
+  for (int r = 0; r < rows; ++r) {
+    occ[static_cast<std::size_t>(r) * cols] = 1;
+    occ[static_cast<std::size_t>(r) * cols + (cols - 1)] = 1;
+  }
 }
 
 } // namespace navdemo

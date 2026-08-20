@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
   long frames = 0;
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png;
-  bool offscreen = false, fog = false, no_shadows = false;
+  bool offscreen = false, fog = false, no_shadows = false, ortho = false;
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
@@ -97,6 +97,7 @@ int main(int argc, char **argv) {
       "shared | grouped | private")("fog", po::bool_switch(&fog),
                                     "enable sensing so belief diverges (default: static map)")(
       "offscreen", po::bool_switch(&offscreen), "render offscreen (forced by --capture)")(
+      "ortho", po::bool_switch(&ortho), "top-down 2-D orthographic view (matplotlib-style)")(
       "no-shadows", po::bool_switch(&no_shadows),
       "disable shadow map")("frames", po::value<long>(&frames)->default_value(0),
                             "stop after N frames (0 = until closed)")(
@@ -121,8 +122,14 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(out);
   }
 
-  // 1. Occupancy from the pure-C++ "city" scene (same map the trainer uses).
+  // Ortho 2-D reads cleanest flat: force shadows off and a straight top-down camera.
+  if (ortho)
+    no_shadows = true;
+
+  // 1. Occupancy from the pure-C++ "city" scene (same map the trainer uses). Wall the
+  //    border so reactive agents can't drive off the open edge (city_scene has none).
   cvc::nav::training_scene ts = cvc::nav::city_scene(grid);
+  navdemo::add_border(ts.occ.data(), ts.rows, ts.cols);
   const navdemo::Bounds bounds{ts.min_x, ts.min_y, ts.max_x, ts.max_y};
   const double span = ts.max_x - ts.min_x;
   const double wall_h = 0.06 * span; // blocky buildings
@@ -178,8 +185,14 @@ int main(int argc, char **argv) {
   sg.addGraphics("walls", walls);
 
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
-  cvc::geometry ground = navdemo::ground_quad(bounds, 0.0, ground_rgb);
-  sg.addGraphics("ground", ground);
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
+  if (groundNode) {
+    groundNode->setUseSingleColor(true);
+    groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
+    groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
+    groundNode->setDiffuse(0.50);
+  }
 
   navdemo::AgentGlyphs glyphs;
   const double gsz = 0.02 * span;
@@ -207,6 +220,8 @@ int main(int argc, char **argv) {
 
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
+  if (ortho)
+    navdemo::set_ortho_topdown(view, bounds, 4.0); // fixed 2-D top-down map
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
@@ -243,7 +258,9 @@ int main(int argc, char **argv) {
       }
     }
 
-    if (capturing && capture == "fly") {
+    if (ortho) {
+      // fixed top-down map — camera set once, nothing to move
+    } else if (capturing && capture == "fly") {
       const double az = 0.6 + 0.15 * t;
       const double el = (34.0 - 12.0 * std::sin(0.25 * t)) * PI / 180.0;
       navdemo::orbit_camera(bounds, wall_h * 0.5, az, el, 1.4, eye, focal);

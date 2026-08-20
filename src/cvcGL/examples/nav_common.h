@@ -17,6 +17,7 @@
 namespace cvc {
 class app;
 }
+class SceneRenderer; // cvcGL (global namespace)
 
 namespace navdemo {
 
@@ -68,6 +69,16 @@ private:
 // Writes eye[3] and focal[3] (the centre) for SceneRenderer::setCamera.
 void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, double dist_scale,
                   double eye[3], double focal[3]);
+
+// Configure the renderer's camera as a fixed TOP-DOWN ORTHOGRAPHIC map (+y up,
+// looking straight down -z, parallel projection framing [min,max] + margin) — the
+// 2-D "matplotlib" view. Call once; the camera stays put. Pairs with flat lighting
+// (high ambient, shadows off) for a clean 2-D read.
+void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin = 6.0);
+
+// Stamp a 1-cell occupied border around a rows*cols occupancy grid in place, so
+// reactive agents can't drive off the open edge (and it renders as an outer wall).
+void add_border(std::uint8_t *occ, int rows, int cols);
 
 } // namespace navdemo
 
