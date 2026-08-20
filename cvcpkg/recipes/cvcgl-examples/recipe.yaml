@@ -2,11 +2,13 @@ schema_version: 1
 recipe:
   name: cvcgl-examples
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: the GRL-SNAM nav demos (nav_city_swarm / nav_fog_ghost /
+  # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "cvcGL example programs as ready-to-run commands: the lsystem_forest island demo (native binary in bin/) and its WebAssembly browser build (share/cvcgl-examples/web/), plus a cvcgl-examples-web launcher that serves the wasm demo cross-origin-isolated and opens a browser."
+  description: "cvcGL example programs as ready-to-run commands: the lsystem_forest island demo plus the GRL-SNAM navigation demos (nav_city_swarm / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively), as native binaries in bin/, the lsystem_forest WebAssembly browser build (share/cvcgl-examples/web/), and a cvcgl-examples-web launcher that serves the wasm demo cross-origin-isolated and opens a browser."
   homepage: https://github.com/transfix/libcvc
   license: GPL-2.0-or-later
   tags: [scientific, graphics, examples, vtk, wasm]
@@ -86,6 +88,9 @@ build:
 package:
   files:
     - bin/lsystem_forest
+    - bin/nav_city_swarm
+    - bin/nav_fog_ghost
+    - bin/nav_finale
     - bin/cvcgl-examples-web
     - share/cvcgl-examples/
 
