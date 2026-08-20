@@ -1097,10 +1097,15 @@ if(CVC_NAV_WEIGHTS_FILE)
 endif()
 
 # The pure-C++ nav swarm demo (the template a cvcGL scene copies to add agents).
-option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm demo" OFF)
+option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm + trainer demos" OFF)
 if(CVC_BUILD_NAV_EXAMPLE)
   add_executable(nav_swarm_demo ${PROJECT_SOURCE_DIR}/examples/nav_swarm_demo.cpp)
   target_link_libraries(nav_swarm_demo PRIVATE cvc)
+  add_executable(nav_train_demo ${PROJECT_SOURCE_DIR}/examples/nav_train_demo.cpp)
+  target_link_libraries(nav_train_demo PRIVATE cvc)
+  if(CVC_ENABLE_CUDA)
+    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
+  endif()
 endif()
 
 # Windows-specific batch file
