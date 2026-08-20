@@ -50,6 +50,29 @@ foreach(_demo nav_city_swarm nav_fog_ghost nav_finale)
   vtk_module_autoinit(TARGETS ${_demo} MODULES ${VTK_LIBRARIES})
 endforeach()
 
+if(EMSCRIPTEN)
+  # The procedural nav demos are wasm-capable too (nav_finale is native-only — it
+  # needs assimp + imagemagick + a runtime bundle, none of which the wasm toolchain
+  # has). Same Asyncify + growable-heap link options as lsystem_forest; each keeps
+  # its own while-loop and yields via emscripten_sleep.
+  foreach(_wt nav_city_swarm nav_fog_ghost)
+    target_link_options(${_wt} PRIVATE
+      -sASYNCIFY=1
+      -sASYNCIFY_STACK_SIZE=131072
+      -sALLOW_MEMORY_GROWTH=1
+      -sSTACK_SIZE=2097152
+      -sEXIT_RUNTIME=0
+    )
+    if(CVC_WASM_PTHREADS)
+      target_link_options(${_wt} PRIVATE -sPTHREAD_POOL_SIZE=4)
+    endif()
+    add_custom_command(TARGET ${_wt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/wasm/${_wt}.html
+        $<TARGET_FILE_DIR:${_wt}>/${_wt}.html)
+  endforeach()
+endif()
+
 # Install rules so the cvcgl-examples recipe packages the example binaries with no
 # hand-staging. $ORIGIN/../lib lets them find libcvcGL / libcvc / VTK / Boost in the
 # same cvcpkg prefix with NO LD_LIBRARY_PATH; INSTALL_RPATH_USE_LINK_PATH adds the
