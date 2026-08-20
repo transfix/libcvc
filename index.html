@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cvcGL &middot; WebAssembly examples</title>
+<meta name="description" content="Live browser builds of the cvcGL scene-graph examples — libcvc's VTK-based rendering, cross-compiled to WebAssembly.">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #10141a; color: #cdd6e0;
+         font: 16px/1.65 system-ui, sans-serif; }
+  a { color: #5aa9e6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
+  header h1 { font-size: 32px; margin: 0 0 4px; color: #e8eef4; }
+  header p.tag { margin: 0 0 32px; color: #8b98a5; font-size: 18px; }
+  h2 { font-size: 20px; color: #e8eef4; margin: 40px 0 12px;
+       border-bottom: 1px solid #232a33; padding-bottom: 8px; }
+  code, pre { font-family: ui-monospace, "SF Mono", Consolas, monospace;
+              font-size: 14px; }
+  code { background: #1a2029; padding: 1px 6px; border-radius: 4px; }
+  pre { background: #1a2029; border: 1px solid #232a33; border-radius: 8px;
+        padding: 14px 16px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  .card { display: flex; gap: 20px; background: #161b23; border: 1px solid #232a33;
+          border-radius: 12px; padding: 20px; margin: 20px 0; align-items: center; }
+  .card .thumb { flex: none; width: 190px; height: 120px; border-radius: 8px;
+                 background: linear-gradient(180deg, #3d6ea5 0%, #79a8d0 45%, #2b5d43 68%, #1d3a5f 100%);
+                 display: flex; align-items: center; justify-content: center;
+                 font-size: 42px; }
+  .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .card p { margin: 0 0 10px; color: #9aa7b4; font-size: 15px; }
+  .btn { display: inline-block; background: #5aa9e6; color: #0d1117; font-weight: 600;
+         padding: 7px 16px; border-radius: 6px; }
+  .btn:hover { text-decoration: none; filter: brightness(1.1); }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  td, th { border: 1px solid #232a33; padding: 8px 12px; text-align: left; }
+  th { background: #161b23; color: #e8eef4; }
+  footer { margin-top: 56px; color: #66727f; font-size: 14px;
+           border-top: 1px solid #232a33; padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>cvcGL &middot; WebAssembly examples</h1>
+  <p class="tag">The <a href="https://github.com/transfix/libcvc">libcvc</a> scene-graph
+  library, rendering live in your browser.</p>
+</header>
+
+<p><strong>cvcGL</strong> is libcvc's Qt-free scene graph: a reactive tree of
+geometry, volume and grid nodes over <code>cvc::state</code>, rendered by VTK.
+The same C++ example programs that open a desktop window compile, unchanged in
+any structural way, to WebAssembly — VTK 9.5's Emscripten backend renders into
+a WebGL2 canvas, and the browser build of each example lives on this site.</p>
+
+<h2>Examples</h2>
+<div class="card">
+  <div class="thumb">🌲</div>
+  <div>
+    <h3>lsystem_forest</h3>
+    <p>An island you can fly over: L-system-grown trees swaying in the wind
+    (procedural bark, merged to two actors), a travelling-wave sea and a
+    drifting L-system + fBm cloud volume — both GPU ray-cast — shadow maps,
+    and a quaternion orbit/fly camera. 100% procedural; no assets are
+    downloaded.</p>
+    <a class="btn" href="lsystem_forest/">Run it →</a>
+  </div>
+</div>
+
+<h2>How these builds work</h2>
+<p>Each example is a single self-contained <code>.wasm</code> (plus a small JS
+loader) produced by <code>emcmake</code> from the normal libcvc CMake tree:</p>
+<ul>
+  <li><strong>The whole stack is compiled to wasm</strong> — the trimmed
+  <code>cvc</code> core (state tree, geometry/volume types), cvcGL's scene
+  graph, VTK 9.5 with its rendering modules, Boost and zstd — all as static
+  archives from the <a href="https://cvcpkg.org">cvcpkg</a> wasm channel
+  (Emscripten SDK included: <code>cvcpkg install emsdk</code>).</li>
+  <li><strong>Rendering is VTK's own WebAssembly backend</strong>:
+  <code>vtkWebAssemblyOpenGLRenderWindow</code> draws with OpenGL&nbsp;ES&nbsp;3
+  into a WebGL2 canvas, and <code>vtkWebAssemblyRenderWindowInteractor</code>
+  feeds it browser mouse/keyboard events. The example keeps its own
+  simulation loop and yields to the browser each frame with Asyncify
+  (<code>emscripten_sleep</code>) — the same
+  <code>ProcessEvents()</code>-per-frame pattern the native build uses.</li>
+  <li><strong>Single-threaded on this site.</strong> GitHub Pages cannot send
+  the COOP/COEP headers SharedArrayBuffer needs, so these are the no-pthread
+  builds. A <code>-pthread</code> variant exists in the repo
+  (<code>build-wasm-demo.sh --pthread</code> + <code>serve.py</code> for
+  cross-origin-isolated hosting).</li>
+  <li><strong>Everything is <code>cvc::state</code></strong> — camera pose and
+  bindings, the FPS HUD, node poses — so the same scene is scriptable from
+  native C++, Python (pycvc), or a debugger attached to the state tree.</li>
+</ul>
+
+<h2>Porting notes (what WebGL2 actually required)</h2>
+<p>The port needed three real fixes, all upstreamed to the libcvc /
+libcvc-deps trees; details in the PRs:</p>
+<table>
+  <tr><th>Issue</th><th>Fix</th></tr>
+  <tr>
+    <td>Under GLES3, VTK swaps in a different polydata mapper whose lighting
+    normal is <code>normalizedNormalVCVSOutput</code>; custom
+    <code>//VTK::Normal::Impl</code> shader replacements that assign the
+    desktop name write to an <code>in</code> varying — an ESSL error that
+    NVIDIA's desktop compiler silently tolerates.</td>
+    <td>The example selects the mapper variant's writable normal at compile
+    time; desktop GLSL is unchanged.</td>
+  </tr>
+  <tr>
+    <td>VTK's volume ray-cast shader composer emits <code>mat4</code> globals
+    initialized from uniforms — illegal in ESSL&nbsp;3.00, killing every
+    shaded/scattering volume (the sea and the clouds).</td>
+    <td>A small VTK patch moves the assignments into an init helper called at
+    the top of the ray-cast setup.</td>
+  </tr>
+  <tr>
+    <td>Boost refuses to compile without <code>-pthread</code>, but a
+    single-threaded wasm build must not use it.</td>
+    <td>Build against Emscripten's single-threaded pthread stubs
+    (<code>BOOST_HAS_PTHREADS</code>), skip the scene's publisher thread, and
+    drain its queue from the frame loop.</td>
+  </tr>
+</table>
+
+<h2>Build it yourself</h2>
+<pre><code># toolchain + wasm deps straight from the cvcpkg catalog
+cvcpkg install emsdk --platform linux --prefix ./emsdk
+cvcpkg install boost zstd cgal --platform wasm --arch wasm32 --link static --prefix ./deps-wasm
+# vtk needs the rendering-enabled wasm build (libcvc-deps: recipes/vtk, >= 9.5.0+cvc.3)
+cvcpkg build vtk --platform wasm --local --prefix ./deps-wasm
+
+# then, from the libcvc repo root:
+CVC_EMSDK_DIR=$PWD/emsdk CVC_WASM_DEPS=$PWD/deps-wasm \
+  ./src/cvcGL/examples/wasm/build-wasm-demo.sh
+python3 -m http.server -d build-wasm/bin 8811</code></pre>
+
+<p>Or, once the bundles are published, as a package:</p>
+<pre><code>cvcpkg install cvcgl-examples --prefix ./deps
+cvcpkg install cvcgl-examples --platform wasm --arch wasm32 --link static --prefix ./deps
+./deps/bin/cvcgl-examples-web   # serves the demo and opens your browser</code></pre>
+
+<footer>
+  cvcGL is part of <a href="https://github.com/transfix/libcvc">libcvc</a>
+  (LGPL-2.1 library, GPL-2.0 examples) &middot; packages by
+  <a href="https://cvcpkg.org">cvcpkg</a>.
+</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lsystem_forest &middot; cvcGL WebAssembly</title>
+<meta name="description" content="cvcGL's lsystem_forest demo running live in the browser: an L-system island with wind, sea and cloud volumes, shadows and a fly camera — VTK 9.5 on WebGL2.">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #10141a; color: #cdd6e0;
+               font: 15px/1.6 system-ui, sans-serif; }
+  a { color: #5aa9e6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { padding: 10px 16px; display: flex; gap: 16px; align-items: baseline;
+           border-bottom: 1px solid #232a33; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; color: #e8eef4; font-weight: 600; }
+  header .keys { color: #8b98a5; font-size: 13px; }
+  header .keys b { color: #cdd6e0; font-weight: 600; }
+  header .back { margin-left: auto; font-size: 13px; }
+  #stage { position: relative; height: min(72vh, 820px); background: #000; }
+  canvas#canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                  display: block; outline: none; background: #000; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; gap: 12px;
+             background: #10141a; transition: opacity .4s; }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .spinner { width: 28px; height: 28px; border: 3px solid #232a33;
+             border-top-color: #5aa9e6; border-radius: 50%;
+             animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status { color: #8b98a5; font-size: 13px; }
+  #statusbar { padding: 5px 16px; border-bottom: 1px solid #232a33;
+               display: flex; justify-content: space-between; color: #8b98a5;
+               font-variant-numeric: tabular-nums; white-space: pre;
+               font-size: 13px; }
+  .about { max-width: 880px; margin: 0 auto; padding: 28px 24px 72px; }
+  .about h2 { font-size: 19px; color: #e8eef4; margin: 28px 0 10px;
+              border-bottom: 1px solid #232a33; padding-bottom: 7px; }
+  .about code { background: #1a2029; padding: 1px 6px; border-radius: 4px;
+                font-family: ui-monospace, "SF Mono", Consolas, monospace;
+                font-size: 13px; }
+  .about ul { padding-left: 22px; }
+  .about li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cvcGL &middot; lsystem_forest</h1>
+  <span class="keys"><b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
+    <b>WASD</b> + mouse fly &middot; <b>F</b> fps &middot; <b>Esc</b> release pointer</span>
+  <a class="back" href="../">&larr; all examples</a>
+</header>
+<div id="stage">
+  <canvas id="canvas" tabindex="0"></canvas>
+  <div id="overlay">
+    <div class="spinner"></div>
+    <div id="status">Loading lsystem_forest.wasm (~25&nbsp;MB)&hellip;</div>
+  </div>
+</div>
+<div id="statusbar"><span id="stdout"></span><span id="stderr"></span></div>
+
+<div class="about">
+<h2>What you are looking at</h2>
+<p>A 100% procedural island — nothing is downloaded except the program
+itself. On startup, the C++ demo grows every tree from an L-system grammar,
+sculpts the terrain heightfield, seeds the sea and a cloud density field, and
+then runs its simulation loop against the cvcGL scene graph:</p>
+<ul>
+  <li><strong>Forest</strong> — each tree is grown from the grammar, then all
+  wood and all needles are merged into just two VTK actors; the wind re-poses
+  every tree each frame and re-uploads the merged vertex buffers
+  (<code>updateVertices</code>), which is what makes hundreds of swaying trees
+  real-time.</li>
+  <li><strong>Sea &amp; clouds</strong> — two live volumes, GPU ray-cast under
+  WebGL2. The sea's scalars travel as a wave and its transfer function tracks
+  the sun glint; the cloud field drifts and morphs, and casts a soft shadow
+  texture onto the terrain.</li>
+  <li><strong>Materials</strong> — the terrain and bark use fragment-shader
+  bump maps injected through VTK's shader-replacement hooks (value-noise
+  height, normal perturbed by its surface gradient).</li>
+  <li><strong>Shadows</strong> — vtkShadowMapPass with a strided baker, running
+  under WebGL2's depth textures.</li>
+  <li><strong>Camera &amp; HUD</strong> — the built-in
+  <code>cvc::gl::CameraController</code> (turntable orbit / Quake-style fly)
+  and <code>cvc::gl::FpsHud</code> ('F'). Both are <code>cvc::state</code>
+  objects: every setting lives in the scene's state tree
+  (<code>forest.viewers.main.camera.*</code>, <code>…viewers.main.hud.*</code>)
+  and is two-way bound — a script write moves the camera; a key press shows up
+  in the tree.</li>
+</ul>
+
+<h2>How it runs in a browser</h2>
+<p>This is the desktop C++ program — <code>src/cvcGL/examples/lsystem_forest.cpp</code>
+in <a href="https://github.com/transfix/libcvc">libcvc</a> — cross-compiled
+with Emscripten. VTK 9.5's WebAssembly backend
+(<code>vtkWebAssemblyOpenGLRenderWindow</code>) renders OpenGL&nbsp;ES&nbsp;3
+into the canvas above, browser input reaches the same interactor the native
+window uses, and the demo's own while-loop yields to the browser each frame
+via Asyncify. The whole dependency closure — the trimmed cvc core, cvcGL, VTK,
+Boost, zstd — is statically linked into one <code>.wasm</code> by the
+<a href="https://cvcpkg.org">cvcpkg</a> wasm toolchain. This hosted build is
+single-threaded (GitHub Pages cannot serve the COOP/COEP headers threads
+need); a <code>-pthread</code> variant builds from the same tree.</p>
+
+<p>Build steps, porting notes and the package recipe are on the
+<a href="../">examples index</a>.</p>
+</div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const stdoutEl = document.getElementById('stdout');
+  const stderrEl = document.getElementById('stderr');
+  const canvas = document.getElementById('canvas');
+  canvas.addEventListener('click', () => canvas.focus());
+
+  var Module = {
+    canvas,
+    print: t => { stdoutEl.textContent = t.split('\r').pop(); },
+    printErr: t => { stderrEl.textContent = t; console.error(t); },
+    setStatus: t => { if (t) statusEl.textContent = t; },
+    onRuntimeInitialized() {
+      document.getElementById('overlay').classList.add('hidden');
+      canvas.focus();
+    },
+    onAbort: what => {
+      const o = document.getElementById('overlay');
+      o.classList.remove('hidden');
+      o.querySelector('.spinner').style.display = 'none';
+      statusEl.textContent = 'Aborted: ' + what;
+    },
+  };
+</script>
+<script src="lsystem_forest.js"></script>
+</body>
+</html>
