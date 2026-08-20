@@ -68,6 +68,30 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
     <a class="btn" href="lsystem_forest/">Run it →</a>
   </div>
 </div>
+<div class="card">
+  <div class="thumb" style="background: linear-gradient(160deg, #2b3a52 0%, #46618a 55%, #24406a 100%);">🐝</div>
+  <div>
+    <h3>nav_city_swarm</h3>
+    <p>The <a href="https://github.com/CVC-Lab/GRL-SNAM">GRL-SNAM</a> reactive swarm,
+    rendered natively: hundreds of vehicles cross a procedural block-city toward
+    per-agent goals with <em>no global plan</em>. Each samples a signed-distance
+    clearance field, a tiny CoefMLP emits its wall-barrier / goal-spring / damping
+    gains, and a carrot-follower steers — the <code>cvc::nav</code> runtime, no Python,
+    no libtorch.</p>
+    <a class="btn" href="nav_city_swarm/">Run it →</a>
+  </div>
+</div>
+<div class="card">
+  <div class="thumb" style="background: linear-gradient(120deg, #c0392b 0%, #6a2c8f 52%, #1f4e8f 100%);">👻</div>
+  <div>
+    <h3>nav_fog_ghost</h3>
+    <p>Fog of war: one vehicle believes a phantom wall its stale map shows but reality
+    lacks. It detours around the ghost, its sensor sweeps the space clear, the belief
+    flips, and it drives straight through. The ground is the agent's live SDF planning
+    field — watch the ghost trough dissolve as it senses.</p>
+    <a class="btn" href="nav_fog_ghost/">Run it →</a>
+  </div>
+</div>
 
 <h2>How these builds work</h2>
 <p>Each example is a single self-contained <code>.wasm</code> (plus a small JS
