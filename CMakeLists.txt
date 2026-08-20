@@ -92,6 +92,13 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Emscripten disables C++ exception catching by default; cvc throws and catches
+# as part of its normal API surface, so JS-based EH must stay on everywhere.
+if(EMSCRIPTEN)
+  add_compile_options(-fexceptions)
+  add_link_options(-fexceptions)
+endif()
+
 # MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and
 # force-include a tiny header that undoes UCRT's `snprintf -> _snprintf`
 # macro remap (see inc/cvc/utility/msvc_compat.h for rationale).

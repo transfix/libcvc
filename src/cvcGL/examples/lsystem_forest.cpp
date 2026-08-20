@@ -38,6 +38,9 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/image/image.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <deque>
@@ -1348,6 +1351,13 @@ int main(int argc, char **argv) {
         fpsFrames = 0;
       }
     }
+#ifdef __EMSCRIPTEN__
+    // Browser: yield to the event loop every frame (Asyncify) — input events
+    // fire and the canvas presents during this sleep. The scene's publisher has
+    // no worker thread here, so drain it at the same cadence.
+    sg.publisher().flush();
+    emscripten_sleep(0);
+#endif
     ++frame;
     if (frames > 0 && ++n >= frames)
       break;
