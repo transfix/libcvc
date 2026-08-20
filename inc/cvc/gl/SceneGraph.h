@@ -30,19 +30,18 @@ class app;
 class geometry;
 class volume;
 class state;
+namespace gl {
+class state_publisher;
+} // namespace gl
 } // namespace cvc
 
 class SceneGraph {
 public:
-  // Default: runs under cvcGL's own process-wide app (cvc::gl::context()).
-  // Preserved verbatim so existing consumers (VolRover) are unaffected.
-  SceneGraph(const std::string &statePrefix = "cvcgl");
-
-  // Injected-app ctor: run this scene under a HOST-provided cvc::app so its
-  // scene state lives in the host's state tree (cvc::state::instance(ctx)),
-  // sharing one context with Python / the host. The default ctor delegates
-  // here with cvc::gl::context(). `ctx` must outlive this SceneGraph.
-  SceneGraph(cvc::app &ctx, const std::string &statePrefix);
+  // Run this scene under a HOST-provided cvc::app so its scene state lives in the
+  // host's state tree (cvc::state::instance(ctx)), sharing one context with
+  // Python / the host. There is no default (singleton) ctor: every scene names
+  // the app it runs under. `ctx` must outlive this SceneGraph.
+  SceneGraph(cvc::app &ctx, const std::string &statePrefix = "cvcgl");
 
   ~SceneGraph();
 
@@ -53,6 +52,11 @@ public:
   // CameraController roots its state in this same tree so it shares the scene's
   // reactive state graph.
   cvc::app &appContext() const { return m_ctx; }
+
+  // This scene's state publisher — GraphicsNode poses publish through it so state
+  // writes are coalesced off the render path (see state_publisher). Owned by the
+  // scene and running under appContext(); never a process-wide singleton.
+  cvc::gl::state_publisher &publisher() { return *m_publisher; }
 
   void setRenderer(vtkRenderer *renderer);
 
@@ -255,6 +259,7 @@ private:
   vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker; // held so the interval is live
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
+  std::unique_ptr<cvc::gl::state_publisher> m_publisher; // scene-owned, runs under m_ctx
   std::string m_statePrefix;
   std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
 

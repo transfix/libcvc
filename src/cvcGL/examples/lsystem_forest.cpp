@@ -3,7 +3,8 @@
 // navigable with the built-in CameraController (orbit / Quake-fly / cinematic track).
 //
 // NO SINGLETON: owns an explicit cvc::app and injects it into the scene, so the
-// whole thing runs under one app the caller controls (cvc::gl::context() unused).
+// whole thing runs under one app the caller controls — logging, state and the
+// state publisher all flow through it (cvcGL has no process-wide context).
 //
 // The island: a heightfield terrain (matte + a procedural fragment bump map), an
 // L-system FOREST (each tree grown from the grammar, merged route-C to one wood +

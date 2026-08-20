@@ -12,7 +12,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/context.h>
+#include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
 #include <limits>
 #include <vtkCameraPass.h>
@@ -29,15 +29,17 @@
 #include <vtkTranslucentPass.h>
 #include <vtkVolumetricPass.h>
 
-// Default ctor: delegate to the injected-app ctor with cvcGL's own process app.
-SceneGraph::SceneGraph(const std::string &statePrefix)
-    : SceneGraph(cvc::gl::context(), statePrefix) {}
-
 SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
     : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix),
       m_ownerThread(std::this_thread::get_id()), m_gridNode(nullptr), m_axisNode(nullptr),
       m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
       m_renderNeeded(false) {
+  // This scene's own state publisher, running under the injected app — node poses
+  // publish through it (SceneGraph::publisher()), coalesced off the render path.
+  // Started eagerly, like the scene's pump, and drained in the destructor.
+  m_publisher = std::make_unique<cvc::gl::state_publisher>(m_ctx);
+  m_publisher->start();
+
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
@@ -65,6 +67,15 @@ SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
 SceneGraph::~SceneGraph() {
   // Process any remaining events before shutdown
   processEvents();
+
+  // Drain the publisher while the nodes are still alive and consistent: stop the
+  // worker, then flush queued poses to the state tree so none are dropped. Done
+  // here (not left to the member dtor) so the flush's valueChanged fires against
+  // live nodes, exactly like a normal flush, rather than mid-teardown.
+  if (m_publisher) {
+    m_publisher->stop();
+    m_publisher->flush();
+  }
 
   if (m_renderer) {
     for (auto &node : m_rootNodes) {

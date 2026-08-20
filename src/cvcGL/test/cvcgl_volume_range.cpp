@@ -25,7 +25,6 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/context.h>
 #include <cvc/volume/volume.h>
 #include <vector>
 
@@ -33,9 +32,9 @@ namespace {
 
 constexpr int N = 8;
 
-cvc::volume make_volume(float fill) {
+cvc::volume make_volume(cvc::app &app, float fill) {
   std::vector<float> data(static_cast<std::size_t>(N) * N * N, fill);
-  return cvc::volume(cvc::gl::context(), reinterpret_cast<const unsigned char *>(data.data()),
+  return cvc::volume(app, reinterpret_cast<const unsigned char *>(data.data()),
                      cvc::dimension(N, N, N), cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
 }
 
@@ -47,8 +46,9 @@ double top_opacity(const std::vector<double> &opacity) {
 
 // An empty (all-zero) volume must not come out opaque.
 void test_empty_volume_is_not_opaque() {
-  SceneGraph sg;
-  auto node = sg.addGraphics("empty", make_volume(0.0f));
+  cvc::app app;
+  SceneGraph sg(app);
+  auto node = sg.addGraphics("empty", make_volume(app, 0.0f));
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
   assert(vn != nullptr);
 
@@ -61,8 +61,9 @@ void test_empty_volume_is_not_opaque() {
 
 // A constant non-zero volume is degenerate too, and must be handled the same.
 void test_constant_volume_is_not_opaque() {
-  SceneGraph sg;
-  auto node = sg.addGraphics("flat", make_volume(4.0f));
+  cvc::app app;
+  SceneGraph sg(app);
+  auto node = sg.addGraphics("flat", make_volume(app, 4.0f));
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
   assert(vn != nullptr);
   auto opacity = vn->getTransferFunctionOpacityTable();
@@ -76,12 +77,13 @@ void test_constant_volume_is_not_opaque() {
 
 // A real range still produces the normal 0 -> 1 ramp.
 void test_real_range_still_ramps() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   std::vector<float> data(static_cast<std::size_t>(N) * N * N);
   for (std::size_t i = 0; i < data.size(); ++i)
     data[i] = static_cast<float>(i);
-  cvc::volume v(cvc::gl::context(), reinterpret_cast<const unsigned char *>(data.data()),
-                cvc::dimension(N, N, N), cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
+  cvc::volume v(app, reinterpret_cast<const unsigned char *>(data.data()), cvc::dimension(N, N, N),
+                cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
 
   auto node = sg.addGraphics("ramp", v);
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
@@ -96,8 +98,9 @@ void test_real_range_still_ramps() {
 // vol.min()/max() are still the cached [0, 0]; the node must use the uploaded
 // image data instead and pick up the real range.
 void test_inplace_fill_then_resetvolume() {
-  SceneGraph sg;
-  cvc::volume v = make_volume(0.0f);
+  cvc::app app;
+  SceneGraph sg(app);
+  cvc::volume v = make_volume(app, 0.0f);
   auto node = sg.addGraphics("late", v);
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
   assert(vn != nullptr);
@@ -130,8 +133,9 @@ void test_inplace_fill_then_resetvolume() {
 // vtkSmartVolumeMapper / vtkVolumeProperty. Defaults are 0 (a plain absorption
 // volume) so existing volumes are unchanged until a caller opts in.
 void test_scattering_forwards() {
-  SceneGraph sg;
-  auto node = sg.addGraphics("scat", make_volume(1.0f));
+  cvc::app app;
+  SceneGraph sg(app);
+  auto node = sg.addGraphics("scat", make_volume(app, 1.0f));
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
   assert(vn != nullptr);
 
@@ -158,7 +162,8 @@ void test_scattering_forwards() {
 // setVolume would reset it. That contract is what this pins; that scalars actually
 // reach the GPU is exercised by the animated demo end to end.
 void test_updatescalars_is_the_cheap_path() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   const int M = 8;
   const std::size_t NV = static_cast<std::size_t>(M) * M * M;
   // A genuine 0..12 range so setVolume builds a normal ramp we can tell a custom
@@ -166,8 +171,8 @@ void test_updatescalars_is_the_cheap_path() {
   std::vector<float> f(NV);
   for (std::size_t i = 0; i < NV; ++i)
     f[i] = static_cast<float>(i % 13);
-  cvc::volume v(cvc::gl::context(), reinterpret_cast<const unsigned char *>(f.data()),
-                cvc::dimension(M, M, M), cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
+  cvc::volume v(app, reinterpret_cast<const unsigned char *>(f.data()), cvc::dimension(M, M, M),
+                cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
   auto node = sg.addGraphics("keep", v);
   auto *vn = dynamic_cast<VolumeNode *>(node.get());
   assert(vn != nullptr);

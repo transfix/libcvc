@@ -137,7 +137,13 @@ void GraphicsNode::setPosition(double x, double y, double z) {
     std::ostringstream oss;
     oss << x << "," << y << "," << z;
     m_echoPosition = oss.str();
-    cvc::gl::state_publisher::instance().publish(m_pathPosition, m_echoPosition);
+    // Publish through THIS scene's publisher (no process-wide singleton). A node
+    // not yet attached to a scene has no publisher, so it writes state directly —
+    // the slow path, but such a node is not on the animation hot loop.
+    if (SceneGraph *sg = getSceneGraph())
+      sg->publisher().publish(m_pathPosition, m_echoPosition);
+    else
+      cvc::state::instance(app())(m_pathPosition).value(m_echoPosition);
   }
 
   updateTransform();

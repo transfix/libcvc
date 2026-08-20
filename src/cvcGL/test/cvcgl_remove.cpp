@@ -8,11 +8,13 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 
 int main() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
 
   cvc::geometry tri;
   cvc::geometry::point_t p;

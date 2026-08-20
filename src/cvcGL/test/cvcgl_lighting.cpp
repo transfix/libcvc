@@ -12,6 +12,7 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -39,7 +40,8 @@ cvc::geometry tri() {
 }
 
 void test_lights_are_scene_owned() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   sg.addGraphics("m", tri());
   const int sun = sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.05);
   const int fill = sg.addDirectionalLight(140.0, 55.0, 0.55, 0.66, 0.85, 0.35);
@@ -79,7 +81,8 @@ void test_lights_are_scene_owned() {
 }
 
 void test_shadow_toggle() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   sg.addGraphics("m", tri());
   sg.addDirectionalLight(-52.0, 34.0);
 
