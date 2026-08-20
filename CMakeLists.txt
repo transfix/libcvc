@@ -97,6 +97,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(EMSCRIPTEN)
   add_compile_options(-fexceptions)
   add_link_options(-fexceptions)
+  # Boost's config only detects threading under -pthread, but a single-threaded
+  # wasm build must not use -pthread (SharedArrayBuffer + COOP/COEP). Emscripten
+  # ships the pthread API as single-threaded stubs, so force Boost onto it —
+  # the same define the wasm Boost bundle itself was compiled with
+  # (libcvc-deps recipes/boost/build-wasm.sh).
+  add_compile_definitions(BOOST_HAS_PTHREADS)
 endif()
 
 # MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and

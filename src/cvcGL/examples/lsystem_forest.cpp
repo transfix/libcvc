@@ -39,6 +39,7 @@
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/image/image.h>
 #ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
 #endif
 #include <cvc/volume/bounding_box.h>
