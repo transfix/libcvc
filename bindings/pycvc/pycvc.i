@@ -809,6 +809,12 @@ namespace cvc {
 // those value types are already known to SWIG.
 %include "pycvc_algorithm.h"
 
+// ── Phase 2b: belief-space grid navigation (cvc::nav) ───────────────────
+// EDT / SDF / A* / line-of-sight / inflate / string-pull kernels for GRL-SNAM,
+// numpy in and out via the ArrayView typemap above. Free functions + the
+// NavSdfField view holder; all marshaling is inline in the .i.
+%include "pycvc_nav.i"
+
 // ── Phase 3: state access + push callbacks ──────────────────────────────
 // state_has/children/remove act on the shared root; state_observer is a
 // director base — a Python subclass overriding on_changed() is called by C++

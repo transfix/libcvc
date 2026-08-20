@@ -84,16 +84,19 @@ function(SetupCUDA TargetName)
     )
   endif()
   
-  # Debug vs Release settings
+  # Debug settings (device debug/line info).
   target_compile_options(${TargetName} PRIVATE
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:
       -G              # Generate debug info for device code
       -lineinfo       # Generate line number info
     >
-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:
-      --use_fast_math # Use fast math for better performance
-    >
   )
+  # NOTE: --use_fast_math is deliberately NOT applied target-wide here. It maps
+  # expf/sinf/etc. to their approximate intrinsics (via __CUDA_FAST_MATH__) and
+  # sets ftz/imprecise-div/sqrt, which cannot be undone per source — so a
+  # target-wide flag would silently break the float-equivalence contract of any
+  # cvc::nav parity .cu (docs/CVCNAV_CUDA_ASSESSMENT.md, verified). Volume
+  # rendering that wants fast math opts in per source (see src/cvc/CMakeLists.txt).
   
   message(STATUS "CUDA configuration complete for ${TargetName}")
 endfunction(SetupCUDA)

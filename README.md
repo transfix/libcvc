@@ -3,7 +3,7 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-20-orange.svg)](https://isocpp.org/)
 [![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-546%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-2240%20passing-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-38.0%25%20lines%20%7C%2049.0%25%20functions-yellow.svg)](docs/TESTING.md)
 
 ## Table of Contents
@@ -17,7 +17,7 @@
   - [Quick Build Verification](#quick-build-verification)
 - [Build Options](#build-options)
 - [Testing](#testing)
-- [Usage Example](#usage-example)
+- [Core APIs](#core-apis)
 - [Supported File Formats](#supported-file-formats)
 - [Documentation](#documentation)
 - [Project Structure](#project-structure)
@@ -31,7 +31,7 @@
 
 ## Overview
 
-A comprehensive computational visualization library from the Computational Visualization Center at UT Austin. libcvc provides the computational core functionality of the VolumeRover package, including volume processing, geometry manipulation, isosurfacing, and signed distance function calculations.
+A comprehensive computational visualization library from the Computational Visualization Center at UT Austin. libcvc provides the computational core functionality of the VolumeRover package, including volume processing, geometry manipulation, isosurfacing, and signed distance function calculations. Beyond the volume/geometry core it now also hosts a torch-free real-time **reactive swarm navigation** runtime (`cvc::nav`), a VTK-backed **3D scene graph + renderer** (`cvc::gl` / cvcGL), native **image and mesh/asset** loaders (`cvc::image`, `cvc::model`), a fixed-step **simulation clock** (`cvc::world_clock`), and a **federated distributed-state** replication layer.
 
 **Maintainer:** Joe Rivera - j@jriv.us
 
@@ -48,6 +48,9 @@ A comprehensive computational visualization library from the Computational Visua
   and `USAGE.md` §6. (The legacy `CVC_USING_XMLRPC` option is unrelated to this
   and is off by default.)
 - 🔬 **Image Filtering**: Bilateral filter, anisotropic diffusion, GDTV, contrast enhancement
+- 🧭 **Reactive Swarm Navigation** (`cvc::nav`): a torch-free, Python-free real-time reactive swarm runtime ported from GRL-SNAM — bit-identical grid kernels (exact EDT, 8-connected A*, footprint→SDF), a fused per-agent drive (`coef_feats` → `CoefMLP` → kinematic-bicycle rollout), a `sim_world` swarm with shared/grouped/private belief planes plus a device-resident CUDA twin, lock-free off-thread stepping, and a self-supervised policy trainer (CPU + CUDA, portable `.cvcnav` weights). See [`docs/NAV_TRAINING.md`](docs/NAV_TRAINING.md).
+- 🖼️ **3D Scene Graph & Assets**: a VTK-backed scene graph + persistent renderer (`cvc::gl` / cvcGL — geometry/volume/grid nodes, scene-owned lighting & shadows, offscreen/onscreen capture), a standalone 2D raster + codecs container (`cvc::image` — PNG/JPEG/WebP), and a PBR multi-mesh scene loader (`cvc::model` — OBJ/glTF/GLB/FBX/DAE/PLY via assimp)
+- ⏱️ **Simulation Clock** (`cvc::world_clock`): an authoritative fixed-step clock separating world time from wall time and render cadence — banks `advance(wall_dt)` into whole quanta and returns `{steps, alpha}` for interpolated rendering, with deterministic live/replay/paused modes
 - 🧮 **Scientific Computing**: Integration with FFTW, GSL, CGAL, Boost
 
 ## Quick Start
@@ -195,29 +198,26 @@ The dramatic slowdown in Debug builds is due to:
 
 libcvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 577 Tests (100% Passing)
+### Test Suite: 2,240 Google Test cases across 86 suites (100% passing)
 
-- **72 App Tests** — Core application framework, data/property management, threading
-- **158 State Tests** — State tree, hierarchies, signals, async operations, futures API, state_object pattern
-- **133 Voxels Tests** — Volume data operations, algorithms, CUDA GPU acceleration
-- **29 Volume Tests** — Spatial coordinates, interpolation, subvolumes, bounding boxes
-- **119 Geometry Tests** — Mesh operations, normals, I/O, SDF computation, isosurface extraction
-- **42 Volume-Ops Tests** — Filtering, contrast enhancement, anisotropic diffusion, GDTV
-- **24 HDF5 Tests** — .cvc file format round-trip and metadata
-- **Procedural Geometry Tests** — Templated/parameterized fixtures over generated meshes
+A default Linux + CUDA build compiles ~2,216 of them; the gRPC-transport suite and a
+few POSIX-only distributed-state suites are opt-in. The major families:
 
-### Code Coverage: 90.5% on Core Components
+- **Core framework** — `app_test` (72: context, data/property store, threading, signals), `state_test` + `state_list_test` (state tree, hierarchies, futures, `state_object` pattern)
+- **State execution DSL** (`cvc::state_exec`) — the largest family: parser/AST, tree-walking + stackless + async evaluators, scheduler, coordinator, builtins, codec (`state_exec_*`, 800+ cases)
+- **Distributed state replication** — transports (inproc/IPC/gRPC), change journal, delegation, cluster membership/sharding, blob store, links & telemetry (dozens of `state_*` suites)
+- **Volume / voxels** — `voxels_test` (136, incl. CUDA paths), `volume_test` (29), `volume_io_test` (25), `volume_ops_test` (42), `hdf5_test` (24)
+- **Geometry** — `geometry_test` (119), `geometry_attributes_test` (10), `algorithm_test` (10: SDF / isosurface, incl. a 256³ stress test)
+- **Navigation** (`cvc::nav`) — `nav_test` (41: kernels, drive, `sim_world` shared/grouped/private belief, `sim_thread`, CUDA twin) + `nav_coef_train_test` (10: torch-free trainer gradcheck)
+- **Simulation clock** — `world_clock_test` (33)
+- **Assets** — `image_test` (19), `model_test` (9)
 
-The actively tested core modules (app, state, voxels, volume, geometry) achieve excellent coverage:
+### Code Coverage
 
-- **state.cpp**: 92.75% (243/262 lines)
-- **voxels.cpp**: 92.17% (306/332 lines)  ⚡ Includes CUDA paths
-- **volume.cpp**: 91.18% (124/136 lines)
-- **app.cpp**: 89.82% (441/491 lines)
-- **geometry.cpp**: 79.00% (252/319 lines)
-- **Functions**: 94.7% (355/375 functions)
-
-See [docs/TESTING.md](docs/TESTING.md) for comprehensive testing documentation including coverage analysis
+The actively tested core modules (app, state, voxels, volume, geometry) carry the bulk
+of the coverage. Coverage is generated on demand with `lcov`/`gcov` from a
+`Debug + Coverage` build — see [docs/TESTING.md](docs/TESTING.md) for the current report
+and how to regenerate it.
 
 ### Quick Test Commands
 
@@ -250,7 +250,7 @@ cmake --build build --target check
 
 - ✅ **Multithreaded Operations** - Concurrent access with thread safety
 - ✅ **Futures API** - Async value retrieval with blocking/callbacks
-- ✅ **CUDA GPU Acceleration** - 17 comprehensive tests (device selection, memory migration, operations)
+- ✅ **CUDA GPU Acceleration** - device selection, memory migration, and GPU operations (voxels CUDA-guarded cases, plus the `cvc::nav` `drive.cu` / `sim_world_cuda` device path)
 - ✅ **Spatial Interpolation** - Trilinear interpolation and gradients
 - ✅ **Subvolume Operations** - Coordinate system transformations
 - ✅ **Edge Cases** - Boundary conditions, tiny/large volumes
@@ -259,14 +259,11 @@ cmake --build build --target check
 ### Documentation
 
 See **[docs/TESTING.md](docs/TESTING.md)** for comprehensive testing documentation:
-- 577 tests with 100% pass rate (72 app, 158 state, 133 voxels, 29 volume, 119 geometry, 42 volume-ops, 24 hdf5, plus procedural-geometry typed fixtures)
-- 90.5% coverage on core components
+- 2,240 Google Test cases across 86 suites (100% passing), with the full per-suite breakdown
+- Coverage details and how to regenerate the report
 - How to run tests (CTest, Google Test)
-- Test coverage details and analysis
-- Multithreaded testing (12 tests)
-- Futures API testing (11 tests)
-- State object pattern tests (11 tests)
-- CUDA GPU tests (20 tests)
+- Multithreaded, futures API, and `state_object` pattern testing
+- CUDA GPU tests
 - Adding new tests
 - CI/CD integration
 - Performance benchmarks
@@ -396,6 +393,48 @@ for (int i = 0; i < n_geometries; i++) {
 
 See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 
+### Reactive Swarm Navigation (`cvc::nav`)
+
+Drop thousands of vehicles that react to a map into a pure-C++ host — no libtorch, no
+Python. `sim_world::from_occupancy` scatters agents onto free cells; each `step()` runs
+sense → field rebuild → carrot FSM → fused drive, threaded across agents, and
+`snapshot()` hands world-space poses straight to a renderer. Belief is M planes selected
+per agent (shared / grouped / private); a device-resident `sim_world_cuda` twin runs the
+same math on the GPU when N outgrows the CPU.
+
+```cpp
+#include <cvc/nav/sim_world.h>
+using namespace cvc::nav;
+
+// occ: row-major rows*cols uint8 (0 = free cell, nonzero = wall/building)
+sim_world::config cfg;
+cfg.rows = R;  cfg.cols = C;
+cfg.min_x = -400; cfg.min_y = -400; cfg.max_x = 400; cfg.max_y = 400;
+cfg.scale = 0.02;          // world metres -> normalized
+cfg.freeze_sense = true;   // static known map; set false for discover-as-you-go fog
+
+// Scatter 2000 agents on free cells with the zero-setup bias policy (no .cvcnav
+// file needed). Swap in coef_mlp::load(coef_mlp::default_weights_path()) for a
+// trained policy. `mode` defaults to shared belief (M = 1).
+const int N = 2000;
+sim_world world = sim_world::from_occupancy(cfg, occ.data(),
+                                            coef_mlp::default_biased(), N, /*seed=*/42);
+
+std::vector<float> pos(2 * N), heading(N), speed(N);
+std::vector<int> mode(N);
+std::vector<std::uint8_t> reached(N);
+for (int t = 0; t < 400; ++t) {
+  world.step();  // sense -> rebuild -> carrot FSM -> fused drive; threaded internally
+  world.snapshot(pos.data(), heading.data(), speed.data(), mode.data(), reached.data());
+  // pos[] is WORLD metres, heading[] rad -> hand straight to a renderer
+}
+```
+
+The policy is trained torch-free (self-supervised, differentiable rollout with a
+finite-difference-checked adjoint) via `coef_train` / the `nav_train_demo` CLI, on CPU or
+CUDA, exporting the portable `.cvcnav` weight blob. See
+[docs/NAV_TRAINING.md](docs/NAV_TRAINING.md).
+
 ## Supported File Formats
 
 ### Volume Formats
@@ -410,7 +449,12 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 - OFF (Object File Format) - Read/Write
 - RAW/RAWN/RAWC/RAWNC (Raw geometry variants) - Read/Write
 - BUNNY (Stanford Bunny for testing/demos) - Read-only
-- OBJ (Wavefront OBJ via SDF) - Experimental
+
+### Mesh / Model Formats (`cvc::model`, assimp-backed)
+- OBJ, glTF, GLB, FBX, DAE (COLLADA), PLY — multi-mesh scenes with glTF-style PBR materials (base color, metallic/roughness/emissive, textures)
+
+### Image Formats (`cvc::image`)
+- PNG, JPEG, WebP — 2D rasters (GRAY / GRAY_ALPHA / RGB / RGBA × u8 / u16 / f32), registry-dispatched load/save
 
 ## Documentation
 
@@ -425,6 +469,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 - **[docs/THREAD_POOL.md](docs/THREAD_POOL.md)** - Thread pool overview, examples, and usage guide
 - **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API reference
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
+- **[docs/NAV_TRAINING.md](docs/NAV_TRAINING.md)** - `cvc::nav` self-supervised policy training (torch-free, CPU + CUDA; surrogate vs bicycle rollout)
 
 ### Testing Documentation
 
@@ -521,19 +566,52 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 libcvc/
 ├── CMakeLists.txt          # Root build configuration
 ├── CMake/                  # CMake helper modules
-├── inc/                    # Public headers
-│   ├── cvc/               # Main library headers
-│   └── xmlrpc/            # XMLRPC headers
-├── src/                    # Implementation
-│   ├── cvc/               # Main library
-│   │   ├── cvc-mesher/    # Meshing algorithms
-│   │   └── SDF/           # Distance functions
-│   └── xmlrpc/            # XMLRPC implementation
+├── inc/cvc/                # Public headers, one directory per module:
+│   ├── core/              #   cvc::app / cvc::state, state_exec DSL, world_clock, distributed state
+│   ├── volume/            #   VolMagick voxels/volume + I/O + filters
+│   ├── geometry/          #   triangle/volumetric meshes + I/O
+│   ├── utility/           #   algorithm.h (cvc::sdf, isosurface), CUDA utils
+│   ├── nav/               #   cvc::nav reactive swarm navigation + trainer
+│   ├── gl/                #   cvcGL VTK scene graph + renderer
+│   ├── image/             #   cvc::image raster + codecs
+│   └── model/             #   cvc::model PBR meshes (assimp)
+├── src/                    # Implementation (mirrors inc/cvc, + cvc/tests, cvc/SDF, xmlrpc)
 └── build_verify.sh         # Build verification script
 ```
 
 ## Version History
 
+- **3.3.0** (2026) - **Real-time navigation release**
+  - `cvc::nav` — a torch-free, Python-free reactive swarm-navigation
+    subsystem ported from GRL-SNAM: bit-identical grid kernels (EDT /
+    A* / SDF) with threaded batch variants, a fused per-agent drive,
+    a `sim_world` swarm with shared/grouped/private belief planes, a
+    device-resident `sim_world_cuda` GPU twin, and lock-free off-thread
+    stepping (`sim_thread`).
+  - A self-supervised, torch-free `CoefMLP` policy trainer (`coef_train`,
+    CPU + CUDA) with a finite-difference-checked differentiable rollout,
+    a surrogate/bicycle switch, the portable `.cvcnav` weight format, a
+    `nav_train_demo` CLI, and a `pycvc` binding.
+  - cvcGL extracted as a standalone VTK scene-graph library (persistent
+    `SceneRenderer`, scene-owned lighting/shadows); native `cvc::image`
+    (PNG/JPEG/WebP) and `cvc::model` (OBJ/glTF/GLB/FBX/DAE/PLY via assimp).
+  - `cvc::world_clock` fixed-quantum simulation clock; direct-wrap `pycvc`
+    Python bindings; module reorg onto the plain `cvc` namespace.
+- **3.2.4** (2026) - **Federated distributed-state subsystem**
+  - `cvc::state` replication Phases 7–10: writable transparent links,
+    expiring state, delta codec, per-node telemetry with a cluster
+    aggregator and routing feedback, and automatic cluster membership.
+  - File-backed blob store, volume/geometry streaming via brick manifests
+    with lazy hydration, and a `distributed_state_session` API.
+  - Cross-platform release-archive fixes (macOS dylib/zstd, MSVC
+    `_BitScanReverse64`, portable cmake exports).
+- **3.2.0–3.2.3** (2026) - **Self-contained release archives**
+  - Bundle all dependencies into the release archives (Linux RPATH,
+    Windows PDBs); enable SDF / Mesher / CGAL; static builds and nightly
+    artifacts; consume the `libcvc-deps` archive (dropping vendored
+    libiimod). First coverage-expansion pass (volume I/O + utility tests).
+- **3.1.1** (2026) - Bundle + verify the Windows runtime DLLs
+  (CUDA/OpenMP/FFTW/zlib) in CI.
 - **3.1.0** (2026) - **Singleton-less API release**
   - Removed the global `cvcapp` / `cvcstate` macros and the
     `cvc::app::instance()` / `cvc::state::instance()` zero-arg
@@ -580,8 +658,6 @@ This is a modernization of legacy research software. Contributions welcome:
 
 - Duplicate VolMagick code in mesher component (historical TODO)
 - Coverage race conditions in multithreaded tests (use `--ignore-errors negative` with lcov)
-- ✅ **Algorithm Tests** - 6 SDF/isosurface tests including 256³ stress test
-- ✅ **Volume & Voxels** - 157 combined tests for volumetric data structures
 
 ## License
 

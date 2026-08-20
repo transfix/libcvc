@@ -85,6 +85,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
+  ../../inc/cvc/nav/grid_nav.h
 )
 
 # Source files
@@ -166,6 +167,14 @@ set(SOURCE_FILES
   volume/volume_file_info.cpp
   volume/volume_ops.cpp
   volume/vtk_io.cpp
+  nav/grid_nav.cpp
+  nav/spatial.cpp
+  nav/drive.cpp
+  nav/coef_mlp.cpp
+  nav/coef_train.cpp
+  nav/belief_occupancy.cpp
+  nav/sim_world.cpp
+  nav/sim_thread.cpp
 )
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
@@ -606,8 +615,15 @@ endif(CVC_ENABLE_SDF)
 
 # Add CUDA source files if enabled
 if(CVC_ENABLE_CUDA)
-  list(APPEND SOURCE_FILES volume/voxels_kernels.cu)
-  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu")
+  list(APPEND SOURCE_FILES volume/voxels_kernels.cu nav/drive.cu nav/coef_train.cu)
+  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu, nav/drive.cu, nav/coef_train.cu")
+  # Volume rendering opts into fast math per source (it has no bit/float-equiv
+  # contract); the nav drive + trainer kernels MUST stay precise (float-equivalent
+  # to the CPU/torch reference) — no fast-math, no FMA contraction, IEEE div/sqrt.
+  set_source_files_properties(volume/voxels_kernels.cu PROPERTIES
+    COMPILE_OPTIONS "$<$<CONFIG:Release>:--use_fast_math>")
+  set_source_files_properties(nav/drive.cu nav/coef_train.cu PROPERTIES
+    COMPILE_OPTIONS "-fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
 endif()
 
 # ImageMagick support (for volume_ops image I/O)
@@ -1048,6 +1064,15 @@ install(FILES ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
 )
 
 # Generate config.h
+# cvc::nav policy data dir, baked into config.h so a default-installed build finds
+# $PREFIX/share/cvc/nav/coef_mlp.cvcnav (a relocated install falls back to a path
+# relative to the loaded library — see coef_mlp::default_weights_path).
+if(IS_ABSOLUTE "${CMAKE_INSTALL_DATADIR}")
+  set(CVC_NAV_DATADIR "${CMAKE_INSTALL_DATADIR}/cvc/nav")
+else()
+  set(CVC_NAV_DATADIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/cvc/nav")
+endif()
+
 # Use PROJECT_BINARY_DIR (not CMAKE_BINARY_DIR) so the generated header lands
 # under libcvc's own build tree when consumed via FetchContent/add_subdirectory.
 # Downstream projects can then add ${libcvc_BINARY_DIR}/inc to their include path.
@@ -1055,6 +1080,33 @@ configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/cvc/core/config.h.cmake
   ${PROJECT_BINARY_DIR}/inc/cvc/core/config.h
 )
+
+# Install a navigation policy to the canonical location when one is supplied
+# (trained + exported from GRL-SNAM via coef_export.py). Optional: an app can
+# always pass an explicit path to coef_mlp::load / sim_world.
+# Default to the reference policy shipped in the tree (exported from GRL-SNAM's
+# CoefMLP; retrain + re-export via grl_snam/tools/coef_train.py). A build can
+# override -DCVC_NAV_WEIGHTS_FILE=<path> to install its own trained policy.
+if(NOT CVC_NAV_WEIGHTS_FILE AND EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+  set(CVC_NAV_WEIGHTS_FILE "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+endif()
+if(CVC_NAV_WEIGHTS_FILE)
+  install(FILES "${CVC_NAV_WEIGHTS_FILE}"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/cvc/nav RENAME coef_mlp.cvcnav COMPONENT libcvc)
+  message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
+endif()
+
+# The pure-C++ nav swarm demo (the template a cvcGL scene copies to add agents).
+option(CVC_BUILD_NAV_EXAMPLE "Build the pure-C++ nav swarm + trainer demos" OFF)
+if(CVC_BUILD_NAV_EXAMPLE)
+  add_executable(nav_swarm_demo ${PROJECT_SOURCE_DIR}/examples/nav_swarm_demo.cpp)
+  target_link_libraries(nav_swarm_demo PRIVATE cvc)
+  add_executable(nav_train_demo ${PROJECT_SOURCE_DIR}/examples/nav_train_demo.cpp)
+  target_link_libraries(nav_train_demo PRIVATE cvc)
+  if(CVC_ENABLE_CUDA)
+    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
+  endif()
+endif()
 
 # Windows-specific batch file
 if(WIN32)

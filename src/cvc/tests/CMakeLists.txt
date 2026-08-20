@@ -97,6 +97,8 @@ add_executable(image_test image_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
+add_executable(nav_test nav_test.cpp)
+add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -164,6 +166,8 @@ set(TEST_TARGETS
   model_test
   geometry_attributes_test
   utility_test
+  nav_test
+  nav_coef_train_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -309,6 +313,20 @@ target_link_libraries(geometry_attributes_test
 )
 
 target_link_libraries(utility_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coef_train_test
   PRIVATE
     cvc
     GTest::gtest
@@ -838,6 +856,18 @@ target_compile_features(image_test PRIVATE cxx_std_17)
 target_compile_features(model_test PRIVATE cxx_std_17)
 target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
+target_compile_features(nav_test PRIVATE cxx_std_17)
+target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
+# Let the sim_world gtest load the shipped reference policy from the source tree.
+if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+  target_compile_definitions(nav_test PRIVATE
+    CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+endif()
+# Enable the CUDA parity tests (device-resident sim_world + CUDA trainer) when built.
+if(CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_coef_train_test PRIVATE CVC_ENABLE_CUDA)
+endif()
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
 target_compile_features(state_sync_adapter_test PRIVATE cxx_std_17)
@@ -983,6 +1013,19 @@ if(APPLE)
   macro(gtest_discover_tests)
     _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
   endmacro()
+elseif(WIN32)
+  # Same 5 s-timeout failure mode as macOS, but here under nvcc CPU contention
+  # from the CUDA nav translation units (drive.cu / coef_train.cu): POST_BUILD
+  # discovery runs each freshly-built test exe at build time to list its cases,
+  # and on a saturated runner the exe finishes printing its --gtest_list_tests
+  # output but is killed before it *exits* within the 5 s default (observed on
+  # state_write_policy_test / state_brick_manifest_test — a timeout, not a real
+  # per-test hang; those exes exit promptly on an unloaded runner). Keep
+  # POST_BUILD (Windows relies on its build-time DLL-PATH setup for discovery)
+  # and just give it the same generous timeout.
+  macro(gtest_discover_tests)
+    _gtest_discover_tests(${ARGV} DISCOVERY_TIMEOUT 120)
+  endmacro()
 endif()
 
 gtest_discover_tests(app_test)
@@ -1001,6 +1044,7 @@ gtest_discover_tests(image_test)
 gtest_discover_tests(model_test)
 gtest_discover_tests(geometry_attributes_test)
 gtest_discover_tests(utility_test)
+gtest_discover_tests(nav_test)
 gtest_discover_tests(state_change_journal_test)
 gtest_discover_tests(state_subscription_router_test)
 gtest_discover_tests(state_sync_adapter_test)
