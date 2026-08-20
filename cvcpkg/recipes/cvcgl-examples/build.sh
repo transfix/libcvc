@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # cvcpkg/recipes/cvcgl-examples/build.sh — build the cvcGL example programs as
 # commands. src/cvcGL is configured standalone against the installed libcvc SDK
-# + VTK (the cvcgl recipe pattern) with CVC_BUILD_EXAMPLES=ON; the example
-# binaries land in bin/, and the cvcgl-examples-web launcher + serve.py are
-# staged so the wasm bundle (share/cvcgl-examples/web/) is one command away.
+# + VTK (the cvcgl recipe pattern) with CVC_BUILD_EXAMPLES=ON; every example binary
+# (lsystem_forest + the nav_city_swarm / nav_fog_ghost / nav_finale GRL-SNAM nav
+# demos) lands in bin/ via the cvcgl-examples install component, and the
+# cvcgl-examples-web launcher + serve.py are staged so the wasm bundle
+# (share/cvcgl-examples/web/) is one command away.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
@@ -35,11 +37,11 @@ if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
 fi
 
 cmake "${CMAKE_ARGS[@]}"
-cmake --build "$CVC_BUILD_DIR" --target lsystem_forest -j "$CVC_JOBS"
-
-# examples/CMakeLists.txt has no install() rule — stage the binary by hand.
-install -d "$CVC_INSTALL_DIR/bin"
-install -m 755 "$CVC_BUILD_DIR/bin/lsystem_forest" "$CVC_INSTALL_DIR/bin/lsystem_forest"
+# Build every example (lsystem_forest + the three nav demos) and install just the
+# cvcgl-examples component: the bin/ executables, $ORIGIN-rpath'd by
+# examples/CMakeLists.txt (NOT the cvcGL SDK, which shares this build tree).
+cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
+cmake --install "$CVC_BUILD_DIR" --component cvcgl-examples
 
 # The web launcher: serve.py sends the COOP/COEP headers a -pthread wasm build
 # needs (harmless for the single-threaded one); the bin/ command finds the web
