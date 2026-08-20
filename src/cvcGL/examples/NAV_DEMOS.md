@@ -8,8 +8,12 @@ torch-free nav port. Same brain as the Python demos, rendered in real 3-D.
 | demo | what it shows |
 |------|---------------|
 | **`nav_city_swarm`** | N vehicles reactively navigate a procedural "city" (the same `city_scene` the trainer uses); agents are coloured by belief group. The scalable hero — one merged glyph mesh streamed per frame, smooth into the thousands. |
-| `nav_fog_ghost` *(coming)* | the fog-of-war "ghost" story: one vehicle, a stale belief map vs reality, sense → clear → replan, with the belief drawn as a ground texture. |
-| `nav_finale` *(coming)* | 8 vehicles rendezvous then pursue moving goals on the real Austin bundle. |
+| **`nav_fog_ghost`** | the fog-of-war "ghost" story: one vehicle carries a stale belief map with a phantom wall reality lacks; it sets off detouring, senses the space is clear, and drives through. The belief is a live ground heatmap (red = believed wall, blue = open) — watch the ghost wall dissolve. |
+| `nav_finale` *(coming)* | 8 vehicles rendezvous then pursue moving goals on the real Austin bundle (3-D + a 2-D minimap overlay). |
+
+Both `nav_city_swarm` and `nav_fog_ghost` render **either** the default 3-D perspective
+**or** a top-down 2-D orthographic "matplotlib" map with `--ortho` — one codebase, both
+looks.
 
 Shared helpers are in `nav_common.{h,cpp}`: `occupancy_to_walls` (grid → blocky buildings),
 `AgentGlyphs` (**one** merged arrow mesh for all agents, streamed via

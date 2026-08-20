@@ -18,7 +18,7 @@ vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
 add_library(nav_demo_common STATIC nav_common.cpp)
 target_link_libraries(nav_demo_common PUBLIC cvcGL)
 
-foreach(_demo nav_city_swarm)
+foreach(_demo nav_city_swarm nav_fog_ghost)
   add_executable(${_demo} ${_demo}.cpp)
   target_link_libraries(${_demo} PRIVATE nav_demo_common cvcGL ${VTK_LIBRARIES}
                         Boost::program_options)
