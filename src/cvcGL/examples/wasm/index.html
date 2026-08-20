@@ -79,6 +79,7 @@
     },
     setStatus: t => { if (t) statusEl.textContent = t; },
     onRuntimeInitialized() {
+      console.info('cvcGL demo: runtime initialized');
       document.getElementById('overlay').classList.add('hidden');
       canvas.focus();
     },
@@ -89,7 +90,47 @@
       statusEl.textContent = 'Aborted: ' + what;
     },
   };
+  // Fetch the wasm ourselves so (a) the spinner shows real download progress
+  // instead of sitting silent for 25 MB, (b) any HTTP failure surfaces as text
+  // instead of an eternal spinner, and (c) ?v= keyed to the page's own deploy
+  // time busts stale caches (a first visit mid-deploy can cache a 404 for 10
+  // minutes on GitHub Pages). Module.wasmBinary makes the emscripten loader
+  // skip its own fetch.
+  const V = Date.parse(document.lastModified) || 0;
+  const WASM_MB = 25; // decompressed size shown against a gzip transfer
+  async function boot() {
+    try {
+      const resp = await fetch('lsystem_forest.wasm?v=' + V, {cache: 'no-cache'});
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching lsystem_forest.wasm');
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let got = 0;
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+        const mb = got / 1048576;
+        statusEl.textContent = 'Downloading lsystem_forest.wasm — ' +
+          Math.min(99, Math.round(100 * mb / WASM_MB)) + '% (' + mb.toFixed(1) + ' MB)';
+      }
+      const buf = new Uint8Array(got);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      Module.wasmBinary = buf;
+      statusEl.textContent = 'Compiling\u2026';
+      const s = document.createElement('script');
+      s.src = 'lsystem_forest.js?v=' + V;
+      s.onerror = () => { throw new Error('failed to load lsystem_forest.js'); };
+      document.body.appendChild(s);
+    } catch (e) {
+      const o = document.getElementById('overlay');
+      o.querySelector('.spinner').style.display = 'none';
+      statusEl.textContent = 'Load failed: ' + (e && e.message || e) +
+        ' \u2014 try a hard reload (Ctrl+Shift+R)';
+    }
+  }
+  boot();
 </script>
-<script src="lsystem_forest.js"></script>
 </body>
 </html>
