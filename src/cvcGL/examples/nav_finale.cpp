@@ -225,15 +225,17 @@ int main(int argc, char **argv) {
   cfg.cx = 0.5 * (bounds.min_x + bounds.max_x);
   cfg.cy = 0.5 * (bounds.min_y + bounds.max_y);
   cfg.scale = sc;
-  cfg.veh.rr = 0.03f;
-  cfg.veh.d_hat = 0.08f;
+  // Vehicle params are in NORMALIZED units. Austin's normalized extent is ~±1 (span
+  // maps to 2 units), so the radius / barrier / arrive-radius must be a small fraction
+  // of that — a vehicle is metres, streets are tens of metres, on a 3 km map.
+  cfg.veh.rr = 0.006f;    // ~9 m vehicle radius
+  cfg.veh.d_hat = 0.020f; // ~30 m wall barrier — threads downtown streets
   cfg.veh.dt = 0.06f;
-  cfg.veh.vmax = 0.9f;
-  cfg.freeze_sense = false; // fog: each vehicle builds its own map
-  cfg.sense_every = 3;
-  cfg.range_m = 0.12 / sc; // ~12% of the map
+  cfg.veh.vmax = 0.35f;
+  cfg.freeze_sense = true; // the vehicles know the city map (prior == truth)
+  cfg.range_m = 200.0;
   cfg.n_rays = 200;
-  cfg.reach_tol = 1.2f;
+  cfg.reach_tol = 0.06f; // ~90 m arrive radius (NOT 1.2 — that is the whole map)
 
   std::vector<int> map_id(N);
   for (int i = 0; i < N; ++i)
@@ -290,9 +292,9 @@ int main(int argc, char **argv) {
   }
 
   navdemo::AgentGlyphs glyphs;
-  const double gsz = 0.012 * span;
+  const double gsz = 0.02 * span; // ~60 m arrows, readable from the fly camera
   auto agentNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("agents", glyphs.build(app, N, color.data(), gsz, 0.02 * span)));
+      sg.addGraphics("agents", glyphs.build(app, N, color.data(), gsz, 0.006 * span)));
   if (agentNode) {
     agentNode->setUseSingleColor(false);
     agentNode->setAmbient(0.7);
