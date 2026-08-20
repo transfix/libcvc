@@ -298,9 +298,10 @@ TEST(NavCoefTrain, CudaGradientMatchesCpu) {
   EXPECT_GT(cos, 0.9999) << "CUDA gradient points a different way than CPU";
 }
 
-// The CUDA trainer end-to-end produces a policy that DRIVES the bicycle sim_world
-// (self-supervised, on the GPU) — the training analogue of the sim_world_cuda
-// deployment parity.
+// The FULLY DEVICE-RESIDENT CUDA training loop (field, params, Adam moments and
+// scratch stay on the GPU the whole run; in-place device Adam; only the final
+// weights come back) produces a policy that DRIVES the bicycle sim_world
+// self-supervised — the training analogue of the sim_world_cuda deployment parity.
 TEST(NavCoefTrain, CudaTrainedPolicyDrives) {
   if (!cvc::nav::train_cuda_available())
     GTEST_SKIP() << "no CUDA device";

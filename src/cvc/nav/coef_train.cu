@@ -416,6 +416,39 @@ __global__ void train_kernel(dtfield F, const float *p, int h, float ob0, float 
   }
 }
 
+// Sum of squares of the gradient (for the global-norm clip), block-reduced then
+// atomically summed into out[0] (which the caller zeroes first).
+__global__ void grad_sqnorm_kernel(const float *g, int P, float *out) {
+  __shared__ float sh[256];
+  float acc = 0.0f;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < P; i += gridDim.x * blockDim.x)
+    acc += g[i] * g[i];
+  sh[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s)
+      sh[threadIdx.x] += sh[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    atomicAdd(out, sh[0]);
+}
+
+// In-place Adam update of the resident params (identical formula to
+// coef_trainer::adam_step; `gscale` folds the global-norm clip, bc1/bc2 the
+// bias correction). One thread per param.
+__global__ void adam_kernel(float *p, float *m, float *u, const float *g, int P, float lr, float b1,
+                            float b2, float eps, float bc1, float bc2, float gscale) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= P)
+    return;
+  const float gg = g[i] * gscale;
+  m[i] = b1 * m[i] + (1.0f - b1) * gg;
+  u[i] = b2 * u[i] + (1.0f - b2) * gg * gg;
+  const float mhat = m[i] / bc1, uhat = u[i] / bc2;
+  p[i] -= lr * mhat / (sqrtf(uhat) + eps);
+}
+
 void cuda_check(cudaError_t e, const char *what) {
   if (e != cudaSuccess)
     throw std::runtime_error(std::string("cvc::nav::coef_train CUDA: ") + what + ": " +
@@ -522,27 +555,123 @@ double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
   return total;
 }
 
+// FULLY DEVICE-RESIDENT training loop: the field, the params, the Adam moments
+// and all per-window scratch stay on the GPU across the ENTIRE run. Per outer
+// step only the fresh agent batch (o, goal) is uploaded; each window runs the
+// forward/backward kernel, an in-place device Adam (a one-float D2H for the
+// grad-clip norm, never the gradient itself), and pointer-swaps the pose
+// continuation. Only the final trained params come back to the host to bake the
+// coef_mlp — the training never round-trips through host memory (contrast the
+// per-call loss_and_grad_cuda, which re-uploads everything each window).
 coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cfg, bool verbose) {
   if (!train_cuda_available())
     throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: no CUDA device");
-  coef_trainer tr(cfg, /*init_seed=*/1); // host: init, Adam, bake (grads on GPU)
-  const int n = cfg.n, horizon = cfg.horizon, window = cfg.window;
-  std::vector<float> o(2 * n), goal(2 * n), vel(2 * n), o2(2 * n), v2(2 * n), grad;
+  const int h = cfg.hidden;
+  if (h > kMaxH)
+    throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: hidden > 64 unsupported");
+  coef_trainer tr(cfg, /*init_seed=*/1); // host: initial params + final bake only
+  const int n = cfg.n, horizon = cfg.horizon, window = cfg.window, P = tr.num_params();
+  const field_stack fs = scene.field();
+  const long hw = static_cast<long>(fs.H) * fs.W;
+
+  dtfield F;
+  F.H = fs.H;
+  F.W = fs.W;
+  F.S = (float)fs.S;
+  F.cx = (float)fs.cx;
+  F.cy = (float)fs.cy;
+  F.mnx = (float)fs.mnx;
+  F.mny = (float)fs.mny;
+  F.mxx = (float)fs.mxx;
+  F.mxy = (float)fs.mxy;
+  const float ob0 = std::log(std::expm1(1.0f)), ob1 = std::log(std::expm1(3.0f)),
+              ob2 = std::log(std::expm1(4.0f));
+
+  float *d_field, *d_p, *d_m, *d_u, *d_o, *d_v, *d_goal, *d_o2, *d_v2, *d_state, *d_loss, *d_grad,
+      *d_sq;
+  cuda_check(cudaMalloc(&d_field, 3 * hw * sizeof(float)), "malloc field");
+  cuda_check(cudaMalloc(&d_p, P * sizeof(float)), "malloc p");
+  cuda_check(cudaMalloc(&d_m, P * sizeof(float)), "malloc m");
+  cuda_check(cudaMalloc(&d_u, P * sizeof(float)), "malloc u");
+  cuda_check(cudaMalloc(&d_o, 2 * n * sizeof(float)), "malloc o");
+  cuda_check(cudaMalloc(&d_v, 2 * n * sizeof(float)), "malloc v");
+  cuda_check(cudaMalloc(&d_goal, 2 * n * sizeof(float)), "malloc goal");
+  cuda_check(cudaMalloc(&d_o2, 2 * n * sizeof(float)), "malloc o2");
+  cuda_check(cudaMalloc(&d_v2, 2 * n * sizeof(float)), "malloc v2");
+  cuda_check(cudaMalloc(&d_state, (long)n * window * 4 * sizeof(float)), "malloc state");
+  cuda_check(cudaMalloc(&d_loss, n * sizeof(float)), "malloc loss");
+  cuda_check(cudaMalloc(&d_grad, P * sizeof(float)), "malloc grad");
+  cuda_check(cudaMalloc(&d_sq, sizeof(float)), "malloc sq");
+
+  cuda_check(cudaMemcpy(d_field, fs.data, 3 * hw * sizeof(float), cudaMemcpyHostToDevice),
+             "H2D field");
+  cuda_check(cudaMemcpy(d_p, tr.params().data(), P * sizeof(float), cudaMemcpyHostToDevice),
+             "H2D p");
+  cuda_check(cudaMemset(d_m, 0, P * sizeof(float)), "memset m");
+  cuda_check(cudaMemset(d_u, 0, P * sizeof(float)), "memset u");
+  F.data = d_field;
+
+  std::vector<float> o(2 * n), goal(2 * n);
+  const float inv_n = 1.0f / n, coll_w = cfg.w_coll / static_cast<float>(window);
+  const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
+  long adam_t = 0;
+  const int T = 128, B = (n + T - 1) / T, PT = 256, PB = (P + PT - 1) / PT;
+
   for (int step = 0; step < cfg.steps; ++step) {
     scene.sample_starts_goals(n, cfg.seed + (unsigned)step, o.data(), goal.data());
-    std::fill(vel.begin(), vel.end(), 0.0f);
-    double last = 0.0;
+    cuda_check(cudaMemcpy(d_o, o.data(), 2 * n * sizeof(float), cudaMemcpyHostToDevice), "H2D o");
+    cuda_check(cudaMemcpy(d_goal, goal.data(), 2 * n * sizeof(float), cudaMemcpyHostToDevice),
+               "H2D goal");
+    cuda_check(cudaMemset(d_v, 0, 2 * n * sizeof(float)), "memset v");
     for (int w0 = 0; w0 < horizon; w0 += window) {
       const int wl = std::min(window, horizon - w0);
-      last = loss_and_grad_cuda(scene, cfg, tr.params(), o.data(), vel.data(), goal.data(), n, wl,
-                                &grad, o2.data(), v2.data());
-      tr.apply_grad(grad);
-      o.swap(o2);
-      vel.swap(v2);
+      cuda_check(cudaMemset(d_grad, 0, P * sizeof(float)), "memset grad");
+      train_kernel<<<B, T>>>(F, d_p, h, ob0, ob1, ob2, d_o, d_v, d_goal, scene.rr, scene.d_hat,
+                             scene.vmax, scene.dt, coll_w, wl, n, inv_n, d_state, d_loss, d_grad,
+                             d_o2, d_v2);
+      cuda_check(cudaMemset(d_sq, 0, sizeof(float)), "memset sq");
+      grad_sqnorm_kernel<<<32, 256>>>(d_grad, P, d_sq);
+      float sq = 0.0f;
+      cuda_check(cudaMemcpy(&sq, d_sq, sizeof(float), cudaMemcpyDeviceToHost), "D2H sq");
+      const float norm = std::sqrt(sq);
+      const float gscale =
+          (cfg.grad_clip > 0.0f && norm > cfg.grad_clip) ? cfg.grad_clip / norm : 1.0f;
+      ++adam_t;
+      const float bc1 = 1.0f - std::pow(b1, (float)adam_t);
+      const float bc2 = 1.0f - std::pow(b2, (float)adam_t);
+      adam_kernel<<<PB, PT>>>(d_p, d_m, d_u, d_grad, P, cfg.lr, b1, b2, eps, bc1, bc2, gscale);
+      std::swap(d_o, d_o2);
+      std::swap(d_v, d_v2);
     }
-    if (verbose && (step % 50 == 0 || step == cfg.steps - 1))
-      std::printf("  [cuda] step %4d: window_loss %.4f\n", step, last);
+    if (verbose && (step % 50 == 0 || step == cfg.steps - 1)) {
+      std::vector<float> hl(n);
+      cuda_check(cudaMemcpy(hl.data(), d_loss, n * sizeof(float), cudaMemcpyDeviceToHost),
+                 "D2H loss");
+      double L = 0.0;
+      for (float x : hl)
+        L += x;
+      std::printf("  [cuda-resident] step %4d: window_loss %.4f\n", step, L);
+    }
   }
+  cuda_check(cudaGetLastError(), "resident train loop");
+
+  std::vector<float> params(P);
+  cuda_check(cudaMemcpy(params.data(), d_p, P * sizeof(float), cudaMemcpyDeviceToHost), "D2H p");
+  tr.set_params(params);
+
+  cudaFree(d_field);
+  cudaFree(d_p);
+  cudaFree(d_m);
+  cudaFree(d_u);
+  cudaFree(d_o);
+  cudaFree(d_v);
+  cudaFree(d_goal);
+  cudaFree(d_o2);
+  cudaFree(d_v2);
+  cudaFree(d_state);
+  cudaFree(d_loss);
+  cudaFree(d_grad);
+  cudaFree(d_sq);
   return tr.to_coef_mlp();
 }
 
