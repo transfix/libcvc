@@ -114,6 +114,18 @@ cvc::geometry buildTerrain(cvc::app &app) {
   return g;
 }
 
+// The writable fragment-normal at the //VTK::Normal::Impl anchor differs by
+// mapper: desktop vtkOpenGLPolyDataMapper declares a local `normalVCVSOutput`
+// shadowing the varying; the GLES3 mapper (used under Emscripten/WebGL2)
+// instead declares `normalizedNormalVCVSOutput` and never shadows the varying,
+// so assigning `normalVCVSOutput` there is an ESSL 'can't modify an input'
+// error. Target the variant's actual local; desktop GLSL is unchanged.
+#ifdef __EMSCRIPTEN__
+#define CVC_FS_NORMAL "normalizedNormalVCVSOutput"
+#else
+#define CVC_FS_NORMAL "normalVCVSOutput"
+#endif
+
 // Procedural fragment bump map for the ground (verbatim GLSL from the Python demo:
 // value-noise height, normal perturbed by its surface gradient — Mikkelsen's
 // tangent-free method). Needs world-space vertexMC, hence disableCoordinateShiftScale.
@@ -144,11 +156,11 @@ void addTerrainBump(GeometryNode &node) {
                                     "    float h = groundH(gCoord);\n"
                                     "    vec3 sS = dFdx(vertexVC.xyz);\n"
                                     "    vec3 sT = dFdy(vertexVC.xyz);\n"
-                                    "    vec3 vn = normalVCVSOutput;\n"
+                                    "    vec3 vn = " CVC_FS_NORMAL ";\n"
                                     "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
                                     "    float det = dot(sS, R1);\n"
                                     "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
-                                    "    normalVCVSOutput = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.4*sg);\n"
                                     "  }\n");
 }
 
@@ -347,11 +359,11 @@ void addBark(GeometryNode &node) {
       "//VTK::Normal::Impl\n"
       "  {\n"
       "    float h = barkH(normalize(bNrm), bPos.z);\n"
-      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = normalVCVSOutput;\n"
+      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = " CVC_FS_NORMAL ";\n"
       "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
       "    float det = dot(sS, R1);\n"
       "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
-      "    normalVCVSOutput = normalize(abs(det)*vn - 1.2*sg);\n"
+      "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.2*sg);\n"
       "  }\n");
 }
 

@@ -67,7 +67,16 @@
     // The demo's FPS readout rewrites one stdout line with '\r' — mirror the
     // latest line into the footer instead of accumulating a log.
     print: t => { stdoutEl.textContent = t.split('\r').pop(); },
-    printErr: t => { stderrEl.textContent = t; console.error(t); },
+    printErr: t => {
+      stderrEl.textContent = t;
+      // Keep diagnostic lines findable after VTK's multi-hundred-line shader
+      // source dumps: retain anything that looks like an actual error.
+      if (/ERROR:|error|failed|vtkShaderProgram|vtkOpenGL|Aborted/i.test(t)) {
+        (window.__errlog = window.__errlog || []).push(t);
+        if (window.__errlog.length > 300) window.__errlog.shift();
+      }
+      console.error(t);
+    },
     setStatus: t => { if (t) statusEl.textContent = t; },
     onRuntimeInitialized() {
       document.getElementById('overlay').classList.add('hidden');
