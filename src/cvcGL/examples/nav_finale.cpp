@@ -30,6 +30,7 @@
 #include <cvc/model/model_file_io.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/grid_nav.h> // astar / simplify / inflate
 #include <cvc/nav/sim_world.h>
 #include <filesystem>
 #include <fstream>
@@ -89,11 +90,86 @@ std::vector<std::uint8_t> load_npy_u8(const std::string &path, int &side) {
   side = s;
   return data;
 }
+
+// Load a mesh (e.g. Humvee.glb) as a canonical vehicle instance template: length ->
+// +x (forward), width -> +y, height -> +z, centred in XY and resting on z=0, scaled
+// so the longest side is `target_len` metres. Robust to Y-up vs Z-up source (the
+// height axis is taken as the smallest extent). false if it can't be read.
+bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
+                           std::vector<std::uint32_t> &tris) {
+  if (!std::filesystem::exists(path))
+    return false;
+  cvc::model m = cvc::read_model(path);
+  cvc::geometry g = m.merged();
+  if (g.num_tris() == 0)
+    return false;
+  const auto &pts = g.points();
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &v : pts)
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], v[k]);
+      hi[k] = std::max(hi[k], v[k]);
+    }
+  const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
+  int up = 0; // height = smallest extent
+  for (int k = 1; k < 3; ++k)
+    if (ext[k] < ext[up])
+      up = k;
+  int fwd = (up + 1) % 3, side = (up + 2) % 3; // forward = longer of the remaining two
+  if (ext[side] > ext[fwd])
+    std::swap(fwd, side);
+  const double s = ext[fwd] > 1e-9 ? target_len / ext[fwd] : 1.0;
+  const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  verts.clear();
+  verts.reserve(pts.size() * 3);
+  for (const auto &v : pts) {
+    verts.push_back((v[fwd] - cf) * s);    // -> +x forward
+    verts.push_back((v[side] - cs) * s);   // -> +y side
+    verts.push_back((v[up] - lo[up]) * s); // -> +z up, resting on 0
+  }
+  tris.clear();
+  for (const auto &t : g.tris())
+    for (int k = 0; k < 3; ++k)
+      tris.push_back(static_cast<std::uint32_t>(t[k]));
+  return true;
+}
+
+// One agent's A* route: world waypoints + a cursor.
+struct Route {
+  std::vector<std::array<double, 2>> wp;
+  std::size_t idx = 0;
+};
+
+// Plan an A* route (string-pulled) over `planOcc` from world (sx,sy) to (gx,gy),
+// returned as world waypoints ending at the true goal. Straight-to-goal if blocked.
+Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
+                 const navdemo::Bounds &b, double sx, double sy, double gx, double gy) {
+  auto w2c = [&](double x, double y, int &r, int &c) {
+    c = static_cast<int>(std::lround((x - b.min_x) / (b.max_x - b.min_x) * (cols - 1)));
+    r = static_cast<int>(std::lround((y - b.min_y) / (b.max_y - b.min_y) * (rows - 1)));
+    c = std::max(0, std::min(cols - 1, c));
+    r = std::max(0, std::min(rows - 1, r));
+  };
+  int sr, sc, gr, gc;
+  w2c(sx, sy, sr, sc);
+  w2c(gx, gy, gr, gc);
+  Route rt;
+  const auto path = cvc::nav::astar(planOcc.data(), rows, cols, sr, sc, gr, gc);
+  if (path.size() >= 4) {
+    const auto sp = cvc::nav::simplify(planOcc.data(), rows, cols, path.data(),
+                                       static_cast<int>(path.size() / 2));
+    for (std::size_t i = 0; i + 1 < sp.size(); i += 2)
+      rt.wp.push_back({b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
+                       b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
+  }
+  rt.wp.push_back({gx, gy}); // always end at the true goal
+  return rt;
+}
 } // namespace
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  std::string bundle, capture = "fly", out = "frames", png;
+  std::string bundle, vehicle, capture = "fly", out = "frames", png;
   int width = 1280, height = 720, nx = 384;
   long frames = 0;
   double fps = 30.0, hz = 60.0;
@@ -104,6 +180,8 @@ int main(int argc, char **argv) {
                      "show this help")("bundle", po::value<std::string>(&bundle),
                                        "Austin bundle dir (terrain.json + buildings.glb)")(
       "grid", po::value<int>(&nx)->default_value(384), "occupancy resolution")(
+      "vehicle", po::value<std::string>(&vehicle),
+      "vehicle model .glb (default: <bundle>/../../shared/Humvee.glb; else an arrow)")(
       "offscreen", po::bool_switch(&offscreen))("no-shadows", po::bool_switch(&no_shadows))(
       "no-minimap", po::bool_switch(&no_minimap),
       "hide the 2-D PiP minimap")("frames", po::value<long>(&frames)->default_value(0))(
@@ -157,8 +235,9 @@ int main(int argc, char **argv) {
                     (unsigned long long)m.num_meshes(), (unsigned long long)cityMesh.num_tris(),
                     lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
       }
-      // inflate 1: fills sub-cell undersampling gaps + gives agents wall clearance.
-      occ = navdemo::occupancy_from_model(cityMesh, bounds, nx, ny, /*inflate=*/1);
+      // Raw building footprints for the sim (the reactive d_hat gives clearance); the
+      // A* planOcc below adds a light inflation of its own.
+      occ = navdemo::occupancy_from_model(cityMesh, bounds, nx, ny, /*inflate=*/0);
       usedBundle = true;
       // Validate against Python's cached occupancy if present (IoU).
       char npy[1024];
@@ -292,9 +371,22 @@ int main(int argc, char **argv) {
   }
 
   navdemo::AgentGlyphs glyphs;
-  const double gsz = 0.02 * span; // ~60 m arrows, readable from the fly camera
-  auto agentNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("agents", glyphs.build(app, N, color.data(), gsz, 0.006 * span)));
+  cvc::geometry agentGeom;
+  std::vector<double> hv;
+  std::vector<std::uint32_t> hvt;
+  std::string vpath = vehicle;
+  if (vpath.empty() && usedBundle)
+    vpath = bundle + "/../../shared/Humvee.glb"; // the bundle's sibling shared/ dir
+  const bool haveVehicle =
+      !vpath.empty() && load_vehicle_template(vpath, 0.02 * span, hv, hvt); // ~60 m marker
+  if (haveVehicle) {
+    std::printf("nav_finale: vehicle model %s -> %zu verts / %zu tris per agent\n", vpath.c_str(),
+                hv.size() / 3, hvt.size() / 3);
+    agentGeom = glyphs.build_template(app, N, color.data(), hv, hvt, 0.002 * span);
+  } else {
+    agentGeom = glyphs.build(app, N, color.data(), 0.02 * span, 0.006 * span);
+  }
+  auto agentNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents", agentGeom));
   if (agentNode) {
     agentNode->setUseSingleColor(false);
     agentNode->setAmbient(0.7);
@@ -332,12 +424,13 @@ int main(int argc, char **argv) {
     for (int r = 0; r < MM; ++r)
       for (int c = 0; c < MM; ++c) {
         const long i = (static_cast<long>(r) * MM + c) * 3;
-        if (haveSat) { // downsample the satellite (north-up: image row 0 = north = top)
+        if (haveSat) { // downsample the satellite (north-up: image row 0 = north = top),
+                       // dimmed so the route lines + vehicle dots read on top of it
           const long si =
               (static_cast<long>(r * (sh - 1) / (MM - 1)) * sw + c * (sw - 1) / (MM - 1)) * schn;
-          p[i] = static_cast<unsigned char>(0.7 * sd[si]);
-          p[i + 1] = static_cast<unsigned char>(0.7 * sd[si + 1]);
-          p[i + 2] = static_cast<unsigned char>(0.7 * sd[si + 2]);
+          p[i] = static_cast<unsigned char>(0.4 * sd[si]);
+          p[i + 1] = static_cast<unsigned char>(0.4 * sd[si + 1]);
+          p[i + 2] = static_cast<unsigned char>(0.4 * sd[si + 2]);
         } else { // occupancy grey (north-up: minimap top -> occ row ny-1 = max_y)
           const int oc = c * (nx - 1) / (MM - 1), orr = (MM - 1 - r) * (ny - 1) / (MM - 1);
           const unsigned char v = occ[static_cast<std::size_t>(orr) * nx + oc] ? 90 : 32;
@@ -362,11 +455,23 @@ int main(int argc, char **argv) {
   double eye[3], focal[3];
   long frame = 0;
 
+  // A* route spine: plan over a lightly-inflated occupancy (too much clearance seals
+  // off dense downtown so A* can't reach a goal there); the reactive drive supplies
+  // the real wall clearance while following the waypoints.
+  std::vector<std::uint8_t> planOcc = cvc::nav::inflate(occ.data(), ny, nx, 1);
+  std::vector<Route> routes(N);
+  world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data()); // initial poses
+  for (int i = 0; i < N; ++i) {
+    const double gx = goal[2 * i] / sc + cfg.cx, gy = goal[2 * i + 1] / sc + cfg.cy;
+    routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], gx, gy);
+  }
+
   while (!view.windowClosed()) {
     const double t = frame / fps;
     const bool act2now = frame >= act2;
 
-    // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one.
+    // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one, with
+    // its A* route replanned to the moving target periodically.
     if (act2now) {
       for (int k = 0; k < NT; ++k) {
         const double a = 2 * PI * k / NT + 0.25 * (t - act2 / fps);
@@ -374,16 +479,36 @@ int main(int argc, char **argv) {
         tgt[2 * k] = static_cast<float>(cfg.cx + rad * std::cos(a));
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
       }
-      for (int i = 0; i < N; ++i) {
-        float g2[2];
-        norm(tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1], g2);
-        world.retarget(i, g2[0], g2[1]);
+      if ((frame - act2) % 15 == 0)
+        for (int i = 0; i < N; ++i)
+          routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
+                                 tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1]);
+    }
+
+    // Follow the route: aim each vehicle at its current waypoint, advancing on arrival;
+    // sim_world's reactive drive handles local avoidance between waypoints.
+    for (int i = 0; i < N; ++i) {
+      Route &rt = routes[i];
+      const double arr = 0.02 * span;
+      while (rt.idx + 1 < rt.wp.size()) {
+        const double dx = rt.wp[rt.idx][0] - pos[2 * i], dy = rt.wp[rt.idx][1] - pos[2 * i + 1];
+        if (dx * dx + dy * dy < arr * arr)
+          ++rt.idx;
+        else
+          break;
       }
+      float w2[2];
+      norm(rt.wp[rt.idx][0], rt.wp[rt.idx][1], w2);
+      world.retarget(i, w2[0], w2[1]);
     }
 
     for (int s = 0; s < sub; ++s)
       world.step();
     world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
+    if (std::getenv("NAV_DBG") && frame % 20 == 0)
+      std::printf("[dbg] f%ld act2=%d a0=(%.0f,%.0f)->wp%zu/%zu a4=(%.0f,%.0f) spd0=%.3f\n", frame,
+                  static_cast<int>(act2now), pos[0], pos[1], routes[0].idx, routes[0].wp.size(),
+                  pos[8], pos[9], spd[0]);
     const auto &xyz = glyphs.pack(pos.data(), head.data());
     if (agentNode)
       agentNode->updateVertices(xyz);
@@ -404,38 +529,30 @@ int main(int argc, char **argv) {
                   &rgb[(static_cast<long>(H - r) * W) * 3], &fp[static_cast<long>(r) * W * 3]);
 
       if (minimap) {
+        // All compositing goes through nav_common's bounds-safe blit/plot, so an
+        // oversized minimap or an off-map agent can never overflow the frame buffer.
         const int pad = 12, x0 = W - MM - pad, y0 = pad;
-        const unsigned char *mp = mmbase.data();
-        for (int r = 0; r < MM; ++r)
-          for (int c = 0; c < MM; ++c) {
-            const long d = (static_cast<long>(y0 + r) * W + (x0 + c)) * 3;
-            const long sI = (static_cast<long>(r) * MM + c) * 3;
-            for (int ch = 0; ch < 3; ++ch)
-              fp[d + ch] = mp[sI + ch];
-          }
+        navdemo::blit_clamped(fp, W, H, mmbase.data(), MM, MM, 3, x0, y0);
         auto plot = [&](double wx, double wy, unsigned char R, unsigned char G, unsigned char B,
                         int rad) {
           const int c =
               static_cast<int>((wx - bounds.min_x) / (bounds.max_x - bounds.min_x) * (MM - 1));
           const int rr =
               static_cast<int>((bounds.max_y - wy) / (bounds.max_y - bounds.min_y) * (MM - 1));
-          for (int dy = -rad; dy <= rad; ++dy)
-            for (int dx = -rad; dx <= rad; ++dx) {
-              const int px = x0 + c + dx, py = y0 + rr + dy;
-              if (px < 0 || py < 0 || px >= W || py >= H)
-                continue;
-              const long d = (static_cast<long>(py) * W + px) * 3;
-              fp[d] = R;
-              fp[d + 1] = G;
-              fp[d + 2] = B;
-            }
+          navdemo::plot_disc(fp, W, H, x0 + c, y0 + rr, rad, R, G, B);
         };
         for (int i = 0; i < N; ++i) {
           const double wx = pos[2 * i] / sc + cfg.cx, wy = pos[2 * i + 1] / sc + cfg.cy;
-          if (act2now) { // predicted-path line to the chased target
-            const double gx = tgt[2 * (i % NT)], gy = tgt[2 * (i % NT) + 1];
-            for (double u = 0; u <= 1.0; u += 0.02)
-              plot(wx + (gx - wx) * u, wy + (gy - wy) * u, 245, 235, 90, 1);
+          { // predicted path = the remaining A* route waypoints
+            const Route &rt = routes[i];
+            double ax = wx, ay = wy;
+            for (std::size_t w = rt.idx; w < rt.wp.size(); ++w) {
+              const double qx = rt.wp[w][0], qy = rt.wp[w][1];
+              for (double u = 0; u <= 1.0; u += 0.04)
+                plot(ax + (qx - ax) * u, ay + (qy - ay) * u, 245, 235, 90, 1);
+              ax = qx;
+              ay = qy;
+            }
           }
           plot(wx, wy, 12, 12, 12, 4); // dark halo so the dot reads on the aerial
           plot(wx, wy, static_cast<unsigned char>(color[3 * i] * 255),

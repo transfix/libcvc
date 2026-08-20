@@ -48,20 +48,29 @@ cvc::geometry ground_quad(const Bounds &b, double z, const double rgb[3]);
 // GeometryNode::updateVertices — positions stream, colours/topology stay fixed.
 class AgentGlyphs {
 public:
-  // Build the merged geometry for `n` agents. `color` is [n*3] in [0,1] (may be
-  // null -> a default teal). Call once; N and the glyph are fixed for its life.
+  // Instance a flat-arrow glyph per agent (default). `color` is [n*3] in [0,1] (may
+  // be null -> a default teal). Call once; N and the mesh are fixed for its life.
   cvc::geometry build(cvc::app &app, int n, const float *color, double size = 6.0, double z = 0.6);
-  // Transform each glyph by (pos_world[i*2..], heading[i]) into a flat [x,y,z,...]
-  // buffer sized 3 * n * verts_per_glyph — hand straight to updateVertices().
+  // Instance an arbitrary TEMPLATE mesh per agent (e.g. a Humvee): `verts` is [3*V]
+  // in a canonical local frame (forward +x, up +z, resting on z >= 0), `tris` is
+  // [3*T] indices into V. Streams exactly like the arrow — one merged mesh, one
+  // updateVertices per frame.
+  cvc::geometry build_template(cvc::app &app, int n, const float *color,
+                               const std::vector<double> &verts,
+                               const std::vector<std::uint32_t> &tris, double z = 0.0);
+  // Transform each instance by (pos_world[i*2..], heading[i]) into a flat [x,y,z,...]
+  // buffer sized 3 * n * V — hand straight to updateVertices().
   const std::vector<double> &pack(const float *pos_world, const float *heading);
 
-  int point_count() const { return n_ * kVerts; }
+  int point_count() const { return n_ * v_; }
 
 private:
-  static constexpr int kVerts = 3; // triangle glyph
-  int n_ = 0;
-  double size_ = 6.0, z_ = 0.6;
-  std::vector<double> xyz_; // scratch, reused each pack()
+  cvc::geometry assemble(cvc::app &app, int n, const float *color);
+  int n_ = 0, v_ = 0;                   // agents, verts per instance
+  double z_ = 0.0;                      // height offset added to every local vert
+  std::vector<double> tmpl_;            // [3*V] local template verts (forward +x)
+  std::vector<std::uint32_t> tmplTris_; // [3*T] template triangle indices
+  std::vector<double> xyz_;             // scratch, reused each pack()
 };
 
 // Scripted capture camera: orbit an eye around the bbox centre (at world-z `zc`) at
@@ -87,6 +96,21 @@ void add_border(std::uint8_t *occ, int rows, int cols);
 // Grid convention: r->y (row 0 = min_y, bottom-up), c->x; index [r*nx + c].
 std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
                                                int ny, int inflate = 0);
+
+// Bounds-safe RGB compositing on a raw interleaved [dw*dh*3] u8 destination. EVERY
+// write is clipped to [0,dw) x [0,dh), so no input — an oversized source, an
+// off-screen centre, a negative origin — can write out of range. These back the
+// finale's 2-D picture-in-picture minimap; the clipping is what prevents the heap
+// overflow (and crash) when the minimap is larger than the frame it is drawn onto.
+
+// Paste `src` (interleaved [sw*sh*schan], schan 3 or 4) with its top-left at
+// (x0, y0), multiplying each channel by `dim`.
+void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, int sw, int sh,
+                  int schan, int x0, int y0, double dim = 1.0);
+
+// Fill a filled disc of radius `rad` centred at (cx, cy) with colour (r, g, b).
+void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsigned char r,
+               unsigned char g, unsigned char b);
 
 } // namespace navdemo
 

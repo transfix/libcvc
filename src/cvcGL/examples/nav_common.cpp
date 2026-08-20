@@ -77,51 +77,61 @@ cvc::geometry ground_quad(const Bounds &b, double z, const double rgb[3]) {
 }
 
 cvc::geometry AgentGlyphs::build(cvc::app &app, int n, const float *color, double size, double z) {
-  n_ = n;
-  size_ = size;
+  // Flat arrow pointing +x at heading 0 (tip forward, two swept-back tail corners),
+  // in a local z=0 frame (z_ adds the height). A REAL triangle so ensureNormals gets
+  // valid normals — updateVertices keeps normals at bind pose.
+  const double tip = size, back = -0.45 * size, half = 0.42 * size;
+  tmpl_ = {tip, 0.0, 0.0, back, half, 0.0, back, -half, 0.0};
+  tmplTris_ = {0, 1, 2};
   z_ = z;
+  return assemble(app, n, color);
+}
+
+cvc::geometry AgentGlyphs::build_template(cvc::app &app, int n, const float *color,
+                                          const std::vector<double> &verts,
+                                          const std::vector<std::uint32_t> &tris, double z) {
+  tmpl_ = verts;
+  tmplTris_ = tris;
+  z_ = z;
+  return assemble(app, n, color);
+}
+
+cvc::geometry AgentGlyphs::assemble(cvc::app &app, int n, const float *color) {
+  n_ = n;
+  v_ = static_cast<int>(tmpl_.size() / 3);
   cvc::geometry g(app);
   auto &pts = g.points();
   auto &cols = g.colors();
   auto &tris = g.tris();
-  pts.reserve(static_cast<std::size_t>(n) * kVerts);
-  cols.reserve(static_cast<std::size_t>(n) * kVerts);
-  tris.reserve(n);
-  // Bind-pose glyph = a REAL (non-degenerate) triangle in the z-plane so ensureNormals
-  // gets a valid +z normal. updateVertices leaves normals at bind pose, and every
-  // packed glyph stays coplanar (pure XY rotate+translate), so +z stays correct —
-  // a degenerate (all-coincident) bind pose would leave garbage normals -> unlit/black.
-  const double tip = size, back = -0.45 * size, half = 0.42 * size;
-  const double lx[3] = {tip, back, back};
-  const double ly[3] = {0.0, half, -half};
+  pts.reserve(static_cast<std::size_t>(n) * v_);
+  cols.reserve(static_cast<std::size_t>(n) * v_);
   for (int i = 0; i < n; ++i) {
-    const cvc::geometry::index_t base = static_cast<cvc::geometry::index_t>(i) * kVerts;
-    for (int k = 0; k < kVerts; ++k)
-      pts.push_back({lx[k], ly[k], z});
+    const cvc::geometry::index_t base = static_cast<cvc::geometry::index_t>(i) * v_;
+    for (int k = 0; k < v_; ++k)
+      pts.push_back({tmpl_[3 * k], tmpl_[3 * k + 1], tmpl_[3 * k + 2] + z_});
     const double r = color ? color[3 * i + 0] : 0.20;
     const double gg = color ? color[3 * i + 1] : 0.80;
     const double bb = color ? color[3 * i + 2] : 0.75;
-    for (int k = 0; k < kVerts; ++k)
+    for (int k = 0; k < v_; ++k)
       cols.push_back({r, gg, bb});
-    tris.push_back({base, base + 1, base + 2});
+    for (std::size_t t = 0; t + 2 < tmplTris_.size(); t += 3)
+      tris.push_back({base + tmplTris_[t], base + tmplTris_[t + 1], base + tmplTris_[t + 2]});
   }
-  xyz_.assign(static_cast<std::size_t>(n) * kVerts * 3, 0.0);
+  xyz_.assign(static_cast<std::size_t>(n) * v_ * 3, 0.0);
   return g;
 }
 
 const std::vector<double> &AgentGlyphs::pack(const float *pos_world, const float *heading) {
-  // Flat arrow pointing +x at heading 0: tip forward, two swept-back tail corners.
-  const double tip = size_, back = -0.45 * size_, half = 0.42 * size_;
-  const double lx[3] = {tip, back, back};
-  const double ly[3] = {0.0, half, -half};
+  // Yaw each instance about +z by its heading and translate to its world pose.
   for (int i = 0; i < n_; ++i) {
     const double ox = pos_world[2 * i], oy = pos_world[2 * i + 1];
     const double ch = std::cos(heading[i]), sh = std::sin(heading[i]);
-    for (int k = 0; k < kVerts; ++k) {
-      const std::size_t o = (static_cast<std::size_t>(i) * kVerts + k) * 3;
-      xyz_[o + 0] = ox + ch * lx[k] - sh * ly[k];
-      xyz_[o + 1] = oy + sh * lx[k] + ch * ly[k];
-      xyz_[o + 2] = z_;
+    for (int k = 0; k < v_; ++k) {
+      const double lx = tmpl_[3 * k], ly = tmpl_[3 * k + 1], lz = tmpl_[3 * k + 2];
+      const std::size_t o = (static_cast<std::size_t>(i) * v_ + k) * 3;
+      xyz_[o + 0] = ox + ch * lx - sh * ly;
+      xyz_[o + 1] = oy + sh * lx + ch * ly;
+      xyz_[o + 2] = z_ + lz;
     }
   }
   return xyz_;
@@ -160,6 +170,9 @@ void add_border(std::uint8_t *occ, int rows, int cols) {
   }
 }
 
+static std::vector<std::uint8_t> occ_dilated(std::vector<std::uint8_t> occ, int nx, int ny,
+                                             int inflate); // defined below
+
 std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
                                                int ny, int inflate) {
   std::vector<std::uint8_t> occ(static_cast<std::size_t>(nx) * ny, 0);
@@ -190,17 +203,61 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
     if (std::fabs(d) < 1e-12)
       continue;
     const double inv = 1.0 / d;
+    // Mark a node when its cell centre is inside the triangle. A tight test (not a
+    // conservative fatten) keeps the street gaps open — an over-filled occupancy seals
+    // dense downtown so A* can't route and the reactive drive is repelled everywhere.
     for (int r = r0; r <= r1; ++r)
       for (int c = c0; c <= c1; ++c) {
-        const double x = c, y = r; // grid-node sample (matches sim_world cell_to_on)
+        const double x = c, y = r;
         const double a = ((py[1] - py[2]) * (x - px[2]) + (px[2] - px[1]) * (y - py[2])) * inv;
         const double be = ((py[2] - py[0]) * (x - px[2]) + (px[0] - px[2]) * (y - py[2])) * inv;
-        const double ga = 1.0 - a - be;
-        if (a >= -0.02 && be >= -0.02 && ga >= -0.02)
+        if (a >= 0.0 && be >= 0.0 && 1.0 - a - be >= 0.0)
           occ[static_cast<std::size_t>(r) * nx + c] = 1;
       }
   }
-  // 4-connected dilation.
+  return occ_dilated(occ, nx, ny, inflate);
+}
+
+void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, int sw, int sh,
+                  int schan, int x0, int y0, double dim) {
+  if (!dst || !src || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 || schan < 3)
+    return;
+  for (int sr = 0; sr < sh; ++sr) {
+    const int py = y0 + sr;
+    if (py < 0 || py >= dh)
+      continue;
+    for (int sc = 0; sc < sw; ++sc) {
+      const int px = x0 + sc;
+      if (px < 0 || px >= dw)
+        continue;
+      const long s = (static_cast<long>(sr) * sw + sc) * schan;
+      const long d = (static_cast<long>(py) * dw + px) * 3;
+      dst[d] = static_cast<unsigned char>(dim * src[s]);
+      dst[d + 1] = static_cast<unsigned char>(dim * src[s + 1]);
+      dst[d + 2] = static_cast<unsigned char>(dim * src[s + 2]);
+    }
+  }
+}
+
+void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsigned char r,
+               unsigned char g, unsigned char b) {
+  if (!dst || dw <= 0 || dh <= 0)
+    return;
+  for (int dy = -rad; dy <= rad; ++dy)
+    for (int dx = -rad; dx <= rad; ++dx) {
+      const int px = cx + dx, py = cy + dy;
+      if (px < 0 || py < 0 || px >= dw || py >= dh)
+        continue;
+      const long d = (static_cast<long>(py) * dw + px) * 3;
+      dst[d] = r;
+      dst[d + 1] = g;
+      dst[d + 2] = b;
+    }
+}
+
+// 4-connected dilation of a rows*cols (ny*nx) occupancy `it` times.
+static std::vector<std::uint8_t> occ_dilated(std::vector<std::uint8_t> occ, int nx, int ny,
+                                             int inflate) {
   for (int it = 0; it < inflate; ++it) {
     std::vector<std::uint8_t> next = occ;
     for (int r = 0; r < ny; ++r)
