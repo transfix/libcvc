@@ -425,6 +425,7 @@ See [docs/SDF_LIBRARY.md](docs/SDF_LIBRARY.md) for complete documentation.
 - **[docs/THREAD_POOL.md](docs/THREAD_POOL.md)** - Thread pool overview, examples, and usage guide
 - **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API reference
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
+- **[docs/NAV_TRAINING.md](docs/NAV_TRAINING.md)** - `cvc::nav` self-supervised policy training (torch-free, CPU + CUDA; surrogate vs bicycle rollout)
 
 ### Testing Documentation
 
