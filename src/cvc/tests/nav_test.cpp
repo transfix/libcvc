@@ -831,6 +831,180 @@ TEST(NavSimWorld, LiveSensingRebuildsTheField) {
   EXPECT_GT(moved, 0) << "agents should drive on the live-sensing path";
 }
 
+namespace {
+// A bordered room with a bar to route around (shared by the belief-mode tests).
+std::vector<std::uint8_t> room_with_bar(int R, int C) {
+  std::vector<std::uint8_t> occ((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1)
+        occ[r * C + c] = 1;
+  for (int r = R / 3; r < 2 * R / 3; ++r)
+    occ[r * C + C / 2] = 1;
+  return occ;
+}
+cvc::nav::sim_world::config belief_cfg(int R, int C) {
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = -400;
+  cfg.min_y = -400;
+  cfg.max_x = 400;
+  cfg.max_y = 400;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  return cfg;
+}
+} // namespace
+
+namespace {
+// Build shared + grouped sim_worlds over the SAME occ and the SAME agents (one
+// scatter), step both, and return the max world-pose difference. With
+// freeze_sense on, every plane stays equal to the initial map, so an agent
+// sampling ITS plane must drive exactly as one sampling plane 0 — grouped belief
+// is bit-identical to shared here, which validates the whole M-plane sample/drive
+// wiring (map_id selects the right plane, the M-plane field is laid out right).
+double grouped_vs_shared_maxdiff(int R, int C, int N, const std::vector<int> &map_id, int M,
+                                 int ticks) {
+  const auto occ = room_with_bar(R, C);
+  const auto cfg = belief_cfg(R, C); // freeze_sense = true
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N);
+  cvc::nav::sim_world::scatter_free(cfg, occ.data(), N, 7, o.data(), goal.data(), color.data());
+  cvc::nav::sim_world shared(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
+                             o.data(), goal.data(), color.data(), N);
+  cvc::nav::sim_world grouped(cfg, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(),
+                              o.data(), goal.data(), color.data(), N, map_id.data(), M);
+  std::vector<float> ps(2 * N), pg(2 * N), hd(N), sp(N);
+  std::vector<int> md(N);
+  std::vector<std::uint8_t> rc(N);
+  double maxd = 0.0;
+  for (int t = 0; t < ticks; ++t) {
+    shared.step(0);
+    grouped.step(0);
+    shared.snapshot(ps.data(), hd.data(), sp.data(), md.data(), rc.data());
+    grouped.snapshot(pg.data(), hd.data(), sp.data(), md.data(), rc.data());
+    for (int i = 0; i < 2 * N; ++i)
+      maxd = std::max(maxd, (double)std::fabs(ps[i] - pg[i]));
+  }
+  return maxd;
+}
+} // namespace
+
+// Per-agent PRIVATE belief (M == N): each agent senses into / samples from its own
+// map — the fog-of-war twin. With identical (frozen) planes it must match shared
+// bit-for-bit, proving the M==N sample/drive wiring is correct.
+TEST(NavSimWorld, PrivateBeliefMatchesSharedWhenPlanesIdentical) {
+  const int N = 32;
+  std::vector<int> map_id(N);
+  for (int i = 0; i < N; ++i)
+    map_id[i] = i; // private: plane per agent
+  EXPECT_EQ(grouped_vs_shared_maxdiff(64, 64, N, map_id, N, 200), 0.0)
+      << "private belief diverged from shared on identical planes";
+}
+
+// CLUSTERED (group) belief (K groups) — same bit-identity check on identical planes.
+TEST(NavSimWorld, ClusteredBeliefMatchesSharedWhenPlanesIdentical) {
+  const int N = 32, K = 4;
+  std::vector<int> map_id(N);
+  for (int i = 0; i < N; ++i)
+    map_id[i] = i % K; // clustered into K groups
+  EXPECT_EQ(grouped_vs_shared_maxdiff(64, 64, N, map_id, K, 200), 0.0)
+      << "clustered belief diverged from shared on identical planes";
+}
+
+// The from_occupancy factory wires up each belief mode (plane count + drive).
+TEST(NavSimWorld, FromOccupancyBeliefModesDrive) {
+  const int R = 64, C = 64, N = 24;
+  const auto occ = room_with_bar(R, C);
+  using bm = cvc::nav::sim_world::belief_mode;
+  for (auto tc : {std::make_pair(bm::shared, 1), std::make_pair(bm::private_belief, N),
+                  std::make_pair(bm::clustered, 4)}) {
+    auto cfg = belief_cfg(R, C);
+    cvc::nav::sim_world w = cvc::nav::sim_world::from_occupancy(
+        cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), N, 7, tc.first, tc.second);
+    if (tc.first == bm::shared)
+      EXPECT_EQ(w.planes(), 1);
+    else if (tc.first == bm::private_belief)
+      EXPECT_EQ(w.planes(), N);
+    else
+      EXPECT_LE(w.planes(), tc.second); // clustered: <= K after densify
+    std::vector<float> p0(2 * N), p1(2 * N), hd(N), sp(N);
+    std::vector<int> md(N);
+    std::vector<std::uint8_t> rc(N);
+    w.snapshot(p0.data(), hd.data(), sp.data(), md.data(), rc.data());
+    for (int t = 0; t < 200; ++t)
+      w.step(0);
+    w.snapshot(p1.data(), hd.data(), sp.data(), md.data(), rc.data());
+    int moved = 0;
+    for (int i = 0; i < N; ++i) {
+      EXPECT_TRUE(std::isfinite(p1[2 * i]) && std::isfinite(p1[2 * i + 1]));
+      const float dx = p1[2 * i] - p0[2 * i], dy = p1[2 * i + 1] - p0[2 * i + 1];
+      if (std::sqrt(dx * dx + dy * dy) > 1.0f)
+        ++moved;
+    }
+    EXPECT_GT(moved, N / 2);
+  }
+}
+
+// The point of private belief: PLANES ARE ISOLATED. With a prior that has a
+// phantom wall truth lacks, an agent that senses the wall region frees it in ITS
+// plane only — an agent that never goes near it keeps believing the wall. So the
+// two agents' SDF fields diverge; one agent's sensing never touches the other's map.
+TEST(NavSimWorld, PrivateBeliefPlanesAreIsolated) {
+  const int R = 48, C = 48;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  for (int r = 0; r < R; ++r)
+    for (int c = 0; c < C; ++c)
+      if (r == 0 || c == 0 || r == R - 1 || c == C - 1) {
+        truth[r * C + c] = 1;
+        prior[r * C + c] = 1;
+      }
+  for (int r = R / 4; r < 3 * R / 4; ++r) // phantom wall — prior only
+    prior[r * C + C / 2] = 1;
+
+  cvc::nav::sim_world::config cfg = belief_cfg(R, C);
+  cfg.freeze_sense = false;
+  cfg.sense_every = 1;
+  cfg.range_m = 250.0;
+  cfg.n_rays = 200;
+
+  auto cell_on = [&](int r, int c, float &onx, float &ony) {
+    const double x = cfg.min_x + (double)c / (cfg.cols - 1) * (cfg.max_x - cfg.min_x);
+    const double y = cfg.min_y + (double)r / (cfg.rows - 1) * (cfg.max_y - cfg.min_y);
+    onx = (float)((x - cfg.cx) * cfg.scale);
+    ony = (float)((y - cfg.cy) * cfg.scale);
+  };
+  const int N = 2;
+  std::vector<float> o(2 * N), goal(2 * N), color(3 * N, 0.5f);
+  cell_on(R / 2, C / 2 - 4, o[0], o[1]); // agent 0: at the phantom wall
+  cell_on(R / 2, C / 2 + 6, goal[0], goal[1]);
+  cell_on(2, 2, o[2], o[3]); // agent 1: far corner, never near it
+  cell_on(4, 4, goal[2], goal[3]);
+  int map_id[2] = {0, 1}; // private: plane per agent
+
+  cvc::nav::sim_world w(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                        o.data(), goal.data(), color.data(), N, map_id, N);
+  ASSERT_EQ(w.planes(), 2);
+
+  for (int t = 0; t < 40; ++t)
+    w.step(0);
+
+  // Compare the two planes' phi channels: agent 0 freed the phantom wall, agent 1
+  // did not, so the fields must differ.
+  const long hw = (long)R * C;
+  const float *ph0 = w.field_data();          // plane 0, phi channel
+  const float *ph1 = w.field_data() + 3 * hw; // plane 1, phi channel
+  int differ = 0;
+  for (long i = 0; i < hw; ++i)
+    if (std::fabs(ph0[i] - ph1[i]) > 1e-3f)
+      ++differ;
+  EXPECT_GT(differ, 20) << "private belief planes did not diverge — sensing leaked across agents";
+}
+
 // The off-render-thread runtime (sim_thread): a worker advances a sim_world at a
 // fixed rate and publishes immutable snapshots read lock-free; commands
 // (retarget/pause/rate) apply at the top of a tick. This path is what a renderer

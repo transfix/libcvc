@@ -29,9 +29,11 @@
 // occupancy/field rebuild (belief_occupancy + build_sdf), the carrot FSM
 // (drive.carrot_step) and the fused drive (drive.drive_step). This is what a
 // renderer / game engine embeds to draw thousands of vehicles reacting to a live
-// map. Shared belief (M=1) — the thousands-of-agents deployment path; the
-// per-agent fog-of-war twin stays in Python. Float-equivalent to the torch
-// Swarm; gated behaviorally, not bit-for-bit (docs/CVCNAV_CPP_PORT_ROADMAP.md P6).
+// map. Belief is M planes via a per-agent map_id — shared (M=1, the
+// thousands-of-agents path), clustered (K groups), or private (M=N, the
+// fog-of-war twin) — mirroring the Python Swarm's belief_mode. Float-equivalent
+// to the torch Swarm; gated behaviorally, not bit-for-bit
+// (docs/CVCNAV_CPP_PORT_ROADMAP.md P6).
 
 #ifndef __CVC_NAV_SIM_WORLD_H__
 #define __CVC_NAV_SIM_WORLD_H__
@@ -46,6 +48,14 @@ namespace nav {
 
 class sim_world {
 public:
+  // How belief is grouped across agents (the C++ counterpart of the Python
+  // Swarm's belief_mode). shared = one plane all agents sense into / sample from
+  // (M == 1, the thousands-of-agents deployment path); clustered = K groups, one
+  // belief plane each; private = one plane per agent (M == N, the fog-of-war
+  // twin). Agents in different planes are isolated — one's sensing never touches
+  // another's map.
+  enum class belief_mode { shared, clustered, private_belief };
+
   struct config {
     int rows = 0, cols = 0;
     double min_x = 0, min_y = 0, max_x = 0, max_y = 0, cx = 0, cy = 0, scale = 1.0;
@@ -63,17 +73,24 @@ public:
 
   // truth / prior_occ are row-major rows*cols uint8; the initial field is built
   // from prior_occ. o/goal are [n*2] normalized (centered) start/goal; color is
-  // [n*3] (renderer passthrough). `model` is moved in.
+  // [n*3] (renderer passthrough). `model` is moved in. `map_id` (optional, [n])
+  // selects each agent's belief plane; `n_planes` is the plane count M. Pass
+  // map_id == nullptr for shared belief (M forced to 1). Every plane is seeded
+  // from prior_occ and diverges as its agents sense.
   sim_world(const config &cfg, const std::uint8_t *truth, const std::uint8_t *prior_occ,
-            coef_mlp model, const float *o, const float *goal, const float *color, int n);
+            coef_mlp model, const float *o, const float *goal, const float *color, int n,
+            const int *map_id = nullptr, int n_planes = 1);
 
   // Convenience factory: build a sim_world from one occupancy grid (used as both
   // the truth and the initial known map), auto-scattering `n_agents` starts +
   // goals on free cells (occ == 0) with random colors — the few-line path for a
   // pure-C++ host (e.g. a cvcGL scene rasterized to occupancy) to drop navigating
   // agents in. `model` is moved (use coef_mlp::default_biased() for zero-setup).
+  // `mode` picks the belief grouping: shared (M=1), private (M=n_agents), or
+  // clustered into `clusters` groups (k-means-lite on start positions).
   static sim_world from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
-                                  int n_agents, unsigned seed = 0);
+                                  int n_agents, unsigned seed = 0,
+                                  belief_mode mode = belief_mode::shared, int clusters = 1);
 
   // Scatter `n` starts + goals on free cells (occ == 0) with random colors,
   // seed-deterministic — the shared core of from_occupancy (reused by the CUDA
@@ -87,12 +104,14 @@ public:
   void step(int num_threads = 0);
 
   int size() const { return n_; }
+  int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
   long tick() const { return gstep_; }
   int field_version() const { return field_ver_; }
 
   // Renderer snapshot into caller buffers (any may be null): pose in WORLD
   // metres, heading (rad), speed (world m/s), FSM mode (0 seek / 1 wall),
-  // reached flag. `field_data()` is the shared [1,3,H,W] SDF texture (by ref).
+  // reached flag. `field_data()` is the [M,3,H,W] SDF texture block (by ref;
+  // plane m at m*3*H*W).
   void snapshot(float *pos_world, float *heading, float *speed, int *mode,
                 std::uint8_t *reached) const;
   const float *field_data() const { return field_.data(); }
@@ -109,22 +128,24 @@ public:
 
 private:
   config cfg_;
-  int n_ = 0, rows_ = 0, cols_ = 0;
+  int n_ = 0, rows_ = 0, cols_ = 0, M_ = 1;
   long gstep_ = 0;
   int field_ver_ = 0;
-  int last_version_ = 0;
 
   coef_mlp model_;
   std::vector<std::uint8_t> truth_;
+  std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
 
-  // shared belief (M=1) + dynamic layer
-  std::vector<float> logodds_; // rows*cols
+  // M belief planes (contiguous, plane m at offset m*rows*cols) + per-plane
+  // dynamic layer, occupancy raster, and version / last-rebuilt-version.
+  std::vector<float> logodds_; // [M*rows*cols]
   std::vector<std::uint8_t> lastvis_, everseen_;
-  std::int32_t version_ = 0;
-  std::vector<double> dyn_stamp_; // rows*cols, -inf where unmarked
-  std::vector<std::uint8_t> occ_; // current planning raster
+  std::vector<std::int32_t> version_; // [M]
+  std::vector<double> dyn_stamp_;     // [M*rows*cols], -inf where unmarked
+  std::vector<std::uint8_t> occ_;     // [M*rows*cols] current planning rasters
+  std::vector<int> last_version_;     // [M]
 
-  // shared SDF field [1,3,H,W]
+  // M SDF fields [M,3,H,W] (plane m at m*3*rows*cols).
   std::vector<float> field_;
 
   // SoA agent columns
@@ -134,7 +155,8 @@ private:
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
   field_stack field_view() const;
-  void rebuild_field();
+  void rebuild_all_fields(); // build every plane's SDF from its occ
+  void rebuild_plane(int m); // build plane m's SDF from occ_ plane m
 };
 
 } // namespace nav

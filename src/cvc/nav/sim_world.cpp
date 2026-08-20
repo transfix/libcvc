@@ -20,9 +20,12 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// sim_world.cpp — see sim_world.h. The step() mirrors grl_snam/swarm.py Swarm.step
-// (shared belief): sense (gated) -> occupancy/field rebuild -> carrot FSM -> fused
-// drive -> reached/park. Every heavy op is an already-parity-tested cvc::nav call.
+// sim_world.cpp — see sim_world.h. The step() mirrors grl_snam/swarm.py Swarm.step:
+// sense (gated) -> per-plane occupancy/field rebuild -> carrot FSM -> fused drive
+// -> reached/park. Belief is M planes (shared M=1 / clustered / private M=N) via a
+// per-agent map_id, exactly like the Python Swarm's grouped belief; sense_batch,
+// sdf_sample and drive_step all take map_id, so the only per-plane bookkeeping is
+// the M log-odds / occupancy / SDF blocks here.
 
 #include <algorithm>
 #include <cmath>
@@ -31,36 +34,50 @@
 #include <cvc/nav/sim_world.h>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 namespace cvc {
 namespace nav {
 
 sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::uint8_t *prior_occ,
-                     coef_mlp model, const float *o, const float *goal, const float *color, int n)
+                     coef_mlp model, const float *o, const float *goal, const float *color, int n,
+                     const int *map_id, int n_planes)
     : cfg_(cfg), n_(n), rows_(cfg.rows), cols_(cfg.cols), model_(std::move(model)) {
   const long hw = static_cast<long>(rows_) * cols_;
+  M_ = map_id ? std::max(1, n_planes) : 1;
+  map_id_.assign(n, 0);
+  if (map_id)
+    for (int i = 0; i < n; ++i) {
+      if (map_id[i] < 0 || map_id[i] >= M_)
+        throw std::runtime_error("cvc::nav::sim_world: map_id out of range [0, n_planes)");
+      map_id_[i] = map_id[i];
+    }
   truth_.assign(truth, truth + hw);
 
-  // Initial shared belief from the prior map: log-odds saturated to +/- l_clamp
-  // so to_occupancy(logodds) == prior_occ.
-  logodds_.resize(hw);
-  lastvis_.assign(hw, 0);
-  everseen_.assign(hw, 0);
-  for (long i = 0; i < hw; ++i)
-    logodds_[i] = prior_occ[i] ? static_cast<float>(cfg.l_clamp) : -static_cast<float>(cfg.l_clamp);
-  version_ = 0;
-  last_version_ = 0;
-  dyn_stamp_.assign(hw, -std::numeric_limits<double>::infinity());
+  // M belief planes, each seeded from the prior map (log-odds saturated to +/-
+  // l_clamp so to_occupancy(logodds) == prior_occ); they diverge as agents sense.
+  const long Mhw = static_cast<long>(M_) * hw;
+  logodds_.resize(Mhw);
+  lastvis_.assign(Mhw, 0);
+  everseen_.assign(Mhw, 0);
+  for (int m = 0; m < M_; ++m)
+    for (long i = 0; i < hw; ++i)
+      logodds_[static_cast<long>(m) * hw + i] =
+          prior_occ[i] ? static_cast<float>(cfg.l_clamp) : -static_cast<float>(cfg.l_clamp);
+  version_.assign(M_, 0);
+  last_version_.assign(M_, 0);
+  dyn_stamp_.assign(Mhw, -std::numeric_limits<double>::infinity());
 
-  // Initial occupancy + field.
-  occ_.resize(hw);
+  occ_.resize(Mhw);
   const unknown_policy pol =
       cfg.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
-  composite_occupancy(logodds_.data(), rows_, cols_, pol, cfg.p_thresh, cfg.band, dyn_stamp_.data(),
-                      0.0, cfg.ttl_s, occ_.data());
-  field_.resize(3 * hw);
-  rebuild_field();
+  for (int m = 0; m < M_; ++m)
+    composite_occupancy(logodds_.data() + static_cast<long>(m) * hw, rows_, cols_, pol,
+                        cfg.p_thresh, cfg.band, dyn_stamp_.data() + static_cast<long>(m) * hw, 0.0,
+                        cfg.ttl_s, occ_.data() + static_cast<long>(m) * hw);
+  field_.resize(static_cast<long>(M_) * 3 * hw);
+  rebuild_all_fields();
 
   // SoA agent columns.
   o_.assign(o, o + 2 * n);
@@ -122,16 +139,74 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
 }
 
 sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
-                                    int n, unsigned seed) {
+                                    int n, unsigned seed, belief_mode mode, int clusters) {
   std::vector<float> o(2 * n), goal(2 * n), color(3 * n);
   scatter_free(cfg, occ, n, seed, o.data(), goal.data(), color.data());
-  return sim_world(cfg, occ, occ, std::move(model), o.data(), goal.data(), color.data(), n);
+  if (mode == belief_mode::shared)
+    return sim_world(cfg, occ, occ, std::move(model), o.data(), goal.data(), color.data(), n);
+
+  std::vector<int> map_id(n, 0);
+  int M = 1;
+  if (mode == belief_mode::private_belief) {
+    for (int i = 0; i < n; ++i)
+      map_id[i] = i;
+    M = n;
+  } else { // clustered: k-means-lite on start positions, then densify labels
+    const int K = std::max(1, std::min(clusters, n));
+    std::mt19937 rng(seed + 1);
+    std::vector<int> idx(n);
+    for (int i = 0; i < n; ++i)
+      idx[i] = i;
+    std::shuffle(idx.begin(), idx.end(), rng);
+    std::vector<float> cen(2 * K);
+    for (int k = 0; k < K; ++k) {
+      cen[2 * k] = o[2 * idx[k]];
+      cen[2 * k + 1] = o[2 * idx[k] + 1];
+    }
+    for (int it = 0; it < 15; ++it) {
+      for (int i = 0; i < n; ++i) {
+        int bestk = 0;
+        float bestd = std::numeric_limits<float>::infinity();
+        for (int k = 0; k < K; ++k) {
+          const float dx = o[2 * i] - cen[2 * k], dy = o[2 * i + 1] - cen[2 * k + 1];
+          const float d = dx * dx + dy * dy;
+          if (d < bestd) {
+            bestd = d;
+            bestk = k;
+          }
+        }
+        map_id[i] = bestk;
+      }
+      std::vector<double> sx(K, 0), sy(K, 0);
+      std::vector<int> cnt(K, 0);
+      for (int i = 0; i < n; ++i) {
+        sx[map_id[i]] += o[2 * i];
+        sy[map_id[i]] += o[2 * i + 1];
+        ++cnt[map_id[i]];
+      }
+      for (int k = 0; k < K; ++k)
+        if (cnt[k]) {
+          cen[2 * k] = static_cast<float>(sx[k] / cnt[k]);
+          cen[2 * k + 1] = static_cast<float>(sy[k] / cnt[k]);
+        }
+    }
+    // Densify to a gapless [0, M): a cluster may end up empty.
+    std::vector<int> remap(K, -1);
+    M = 0;
+    for (int i = 0; i < n; ++i) {
+      if (remap[map_id[i]] < 0)
+        remap[map_id[i]] = M++;
+      map_id[i] = remap[map_id[i]];
+    }
+  }
+  return sim_world(cfg, occ, occ, std::move(model), o.data(), goal.data(), color.data(), n,
+                   map_id.data(), M);
 }
 
 field_stack sim_world::field_view() const {
   field_stack fs;
   fs.data = field_.data();
-  fs.M = 1;
+  fs.M = M_;
   fs.H = rows_;
   fs.W = cols_;
   fs.mnx = cfg_.min_x;
@@ -144,27 +219,32 @@ field_stack sim_world::field_view() const {
   return fs;
 }
 
-void sim_world::rebuild_field() {
-  const sdf_field f = build_sdf(occ_.data(), rows_, cols_, cfg_.min_x, cfg_.min_y, cfg_.max_x,
-                                cfg_.max_y, cfg_.scale);
+void sim_world::rebuild_plane(int m) {
+  const long hw = static_cast<long>(rows_) * cols_;
+  const sdf_field f = build_sdf(occ_.data() + static_cast<long>(m) * hw, rows_, cols_, cfg_.min_x,
+                                cfg_.min_y, cfg_.max_x, cfg_.max_y, cfg_.scale);
   // _finalize_field: clip phi to +/- 2*region_n (region = bounds max_x).
   const float clip = static_cast<float>(2.0 * cfg_.max_x * cfg_.scale);
-  const long hw = static_cast<long>(rows_) * cols_;
+  float *fp = field_.data() + static_cast<long>(m) * 3 * hw;
   for (long i = 0; i < hw; ++i) {
-    float p = f.phi[i];
-    p = std::min(std::max(p, -clip), clip);
-    field_[i] = p;
-    field_[hw + i] = f.normal_x[i];
-    field_[2 * hw + i] = f.normal_y[i];
+    fp[i] = std::min(std::max(f.phi[i], -clip), clip);
+    fp[hw + i] = f.normal_x[i];
+    fp[2 * hw + i] = f.normal_y[i];
   }
+}
+
+void sim_world::rebuild_all_fields() {
+  for (int m = 0; m < M_; ++m)
+    rebuild_plane(m);
   ++field_ver_;
 }
 
 void sim_world::step(int num_threads) {
+  const long hw = static_cast<long>(rows_) * cols_;
   if (!cfg_.freeze_sense && (gstep_ % cfg_.sense_every == 0)) {
-    // ── SENSE (all agents into the single shared plane) ──
+    // ── SENSE (each agent into its own plane map_id[i]) ──
     std::vector<double> pos(2 * n_), head(n_), rng(n_), fov(n_);
-    std::vector<int> nray(n_), amap(n_, 0);
+    std::vector<int> nray(n_);
     for (int i = 0; i < n_; ++i) {
       pos[2 * i] = o_[2 * i] / cfg_.scale + cfg_.cx;
       pos[2 * i + 1] = o_[2 * i + 1] / cfg_.scale + cfg_.cy;
@@ -179,38 +259,46 @@ void sim_world::step(int num_threads) {
     ag.range_m = rng.data();
     ag.fov_rad = fov.data();
     ag.n_rays = nray.data();
-    ag.agent_map = amap.data();
+    ag.agent_map = map_id_.data();
     ag.n = n_;
     belief_planes pl;
     pl.logodds = logodds_.data();
     pl.last_visible = lastvis_.data();
     pl.ever_seen = everseen_.data();
-    pl.version = &version_;
-    pl.K = 1;
+    pl.version = version_.data();
+    pl.K = M_;
     std::vector<std::int32_t> flips(n_);
     sense_batch(truth_.data(), rows_, cols_, cfg_.min_x, cfg_.min_y, cfg_.max_x, cfg_.max_y, ag,
                 nullptr, 0, nullptr, 0, pl, cfg_.l_occ, cfg_.l_free, cfg_.l_clamp, flips.data(),
                 num_threads);
 
-    // ── REBUILD the field iff the planning surface changed ──
+    // ── REBUILD each plane whose planning surface changed ──
     const double t_now = gstep_ * static_cast<double>(cfg_.veh.dt);
     const unknown_policy pol =
         cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
-    std::vector<std::uint8_t> occ2(static_cast<long>(rows_) * cols_);
-    composite_occupancy(logodds_.data(), rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
-                        dyn_stamp_.data(), t_now, cfg_.ttl_s, occ2.data());
-    if (version_ != last_version_ || occ2 != occ_) {
-      occ_.swap(occ2);
-      rebuild_field();
-      last_version_ = version_;
+    std::vector<std::uint8_t> occ2(hw);
+    bool any = false;
+    for (int m = 0; m < M_; ++m) {
+      const long off = static_cast<long>(m) * hw;
+      composite_occupancy(logodds_.data() + off, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
+                          dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
+      if (version_[m] != last_version_[m] ||
+          !std::equal(occ2.begin(), occ2.end(), occ_.begin() + off)) {
+        std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
+        rebuild_plane(m);
+        last_version_[m] = version_[m];
+        any = true;
+      }
     }
+    if (any)
+      ++field_ver_;
   }
 
   const field_stack fs = field_view();
 
-  // ── SAMPLE at the start-of-tick pose (for the carrot FSM's wall normal) ──
+  // ── SAMPLE at the start-of-tick pose (per-agent plane) for the carrot FSM ──
   std::vector<float> phi(n_), nrm(2 * n_);
-  sdf_sample(fs, o_.data(), n_, nullptr, phi.data(), nrm.data(), num_threads);
+  sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads);
 
   // ── CARROT FSM ──
   fsm_state s;
@@ -234,10 +322,10 @@ void sim_world::step(int num_threads) {
   carrot_step(o_.data(), goal_.data(), th_.data(), sp_.data(), phi.data(), nrm.data(), s, n_, cp,
               carrot.data(), num_threads);
 
-  // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle) ──
+  // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   std::vector<float> minclr(n_);
-  drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot.data(), model_, n_, nullptr, cfg_.veh,
-             minclr.data(), num_threads);
+  drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot.data(), model_, n_, map_id_.data(),
+             cfg_.veh, minclr.data(), num_threads);
 
   // ── METRICS + REACHED/PARK (single-goal) ──
   for (int i = 0; i < n_; ++i) {
@@ -285,12 +373,16 @@ void sim_world::retarget(int i, float gx_n, float gy_n) {
 }
 
 void sim_world::add_obstacle(int r0, int r1, int c0, int c1) {
+  const long hw = static_cast<long>(rows_) * cols_;
   const double t_now = gstep_ * static_cast<double>(cfg_.veh.dt);
   const int rr = (r0 + r1) / 2, cc = (c0 + c1) / 2;
   const int rad = std::max(1, std::max(std::abs(r1 - r0) / 2, std::abs(c1 - c0) / 2));
-  for (int r = std::max(0, rr - rad); r < std::min(rows_, rr + rad + 1); ++r)
-    for (int c = std::max(0, cc - rad); c < std::min(cols_, cc + rad + 1); ++c)
-      dyn_stamp_[static_cast<long>(r) * cols_ + c] = t_now;
+  // A real obstacle enters every plane's dynamic layer (all agents route around
+  // it once they sense it). It only takes effect on the sense/rebuild path.
+  for (int m = 0; m < M_; ++m)
+    for (int r = std::max(0, rr - rad); r < std::min(rows_, rr + rad + 1); ++r)
+      for (int c = std::max(0, cc - rad); c < std::min(cols_, cc + rad + 1); ++c)
+        dyn_stamp_[static_cast<long>(m) * hw + static_cast<long>(r) * cols_ + c] = t_now;
 }
 
 } // namespace nav
