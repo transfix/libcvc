@@ -66,8 +66,12 @@ class vtkRenderWindow; // VTK (global namespace)
 //
 class SceneRenderer {
 public:
-  // `offscreen == false` needs a display and produces a real window.
-  SceneRenderer(SceneGraph &scene, int width = 1024, int height = 768, bool offscreen = true);
+  // `offscreen == false` needs a display and produces a real window. `name`
+  // identifies this viewer in the state graph: a CameraController attached here
+  // roots its state at "<scene prefix>.viewers.<name>.camera", so it is obvious
+  // which viewer a camera belongs to.
+  SceneRenderer(SceneGraph &scene, int width = 1024, int height = 768, bool offscreen = true,
+                const std::string &name = "main");
   ~SceneRenderer();
 
   SceneRenderer(const SceneRenderer &) = delete;
@@ -110,6 +114,10 @@ public:
   // vtkmodules objects, so the scene is scriptable rather than opaque.
   vtkRenderer *renderer() const;
   vtkRenderWindow *renderWindow() const;
+
+  // The scene this draws, and this viewer's name in the state graph.
+  SceneGraph &scene() const;
+  const std::string &name() const;
 
   // Detach from the scene and release the GL context. Idempotent; the
   // destructor calls it. Exposed so a caller can decide WHEN the context dies

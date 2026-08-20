@@ -16,6 +16,7 @@
 // a number quoted in a commit message.
 #include <chrono>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -75,7 +76,8 @@ double time_ms(const std::vector<std::shared_ptr<GraphicsNode>> &nodes, int reps
 } // namespace
 
 int main() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   const cvc::geometry mesh = little_mesh();
 
   std::vector<std::shared_ptr<GraphicsNode>> roots, all;

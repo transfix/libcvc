@@ -3,6 +3,9 @@
 // It trades immediacy for throughput: a write is visible after the next flush,
 // not instantly. These pin the parts that must still hold — the value DOES
 // arrive, the last value wins, and an external write still reaches the node.
+//
+// The publisher is scene-owned (SceneGraph::publisher()), running under the
+// scene's app — there is no process-wide instance().
 #undef NDEBUG
 #include <cassert>
 #include <chrono>
@@ -12,7 +15,6 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/context.h>
 #include <cvc/gl/state_publisher.h>
 #include <string>
 #include <thread>
@@ -27,17 +29,18 @@ cvc::geometry dot() {
   return g;
 }
 
-std::string read(const std::string &path) {
-  return cvc::state::instance(cvc::gl::context())(path).value();
+std::string read(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
 }
 
 // A posed node's position must reach the state tree.
 void test_position_reaches_state() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   auto n = sg.addGraphics("pub1", dot());
   n->setPosition(3.0, 4.0, 5.0);
-  cvc::gl::state_publisher::instance().flush();
-  const std::string v = read(n->getState("position").fullName());
+  sg.publisher().flush();
+  const std::string v = read(app, n->getState("position").fullName());
   assert(v == "3,4,5");
   std::printf("  ok: a posed node's position reaches the state tree (%s)\n", v.c_str());
 }
@@ -45,16 +48,17 @@ void test_position_reaches_state() {
 // Animation: many writes between flushes collapse to the last one, and the
 // value stored is the LAST, not some earlier frame.
 void test_coalescing_keeps_the_last_value() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   auto n = sg.addGraphics("pub2", dot());
-  auto &pub = cvc::gl::state_publisher::instance();
+  auto &pub = sg.publisher();
   pub.flush();
   const std::uint64_t before = pub.coalesced();
   for (int i = 0; i < 200; ++i)
     n->setPosition(static_cast<double>(i), 0.0, 0.0);
   pub.flush();
   assert(pub.coalesced() > before); // writes really were superseded
-  const std::string v = read(n->getState("position").fullName());
+  const std::string v = read(app, n->getState("position").fullName());
   assert(v == "199,0,0");
   std::printf("  ok: 200 poses coalesced to the last value (%s)\n", v.c_str());
 }
@@ -62,13 +66,13 @@ void test_coalescing_keeps_the_last_value() {
 // The echo guard must not deafen the node to EXTERNAL writes — the dashboard
 // and scripts drive nodes this way.
 void test_external_write_still_moves_the_node() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   auto n = sg.addGraphics("pub3", dot());
   n->setPosition(1.0, 1.0, 1.0);
-  cvc::gl::state_publisher::instance().flush();
+  sg.publisher().flush();
 
-  cvc::state::instance(cvc::gl::context())(n->getState("position").fullName())
-      .value(std::string("9,8,7"));
+  cvc::state::instance(app)(n->getState("position").fullName()).value(std::string("9,8,7"));
   sg.processEvents(); // node handlers marshal to the owner thread
   auto w = n->getWorldTransform();
   assert(std::abs(w->GetElement(0, 3) - 9.0) < 1e-9);
@@ -78,23 +82,25 @@ void test_external_write_still_moves_the_node() {
 
 // The background flusher drains without anyone calling flush().
 void test_background_flush() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   auto n = sg.addGraphics("pub4", dot());
-  auto &pub = cvc::gl::state_publisher::instance();
-  assert(pub.running());
+  auto &pub = sg.publisher();
+  assert(pub.running()); // the scene starts its publisher
   n->setPosition(2.5, 0.0, 0.0);
   const std::string path = n->getState("position").fullName();
-  for (int i = 0; i < 100 && read(path) != "2.5,0,0"; ++i)
+  for (int i = 0; i < 100 && read(app, path) != "2.5,0,0"; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  assert(read(path) == "2.5,0,0");
+  assert(read(app, path) == "2.5,0,0");
   std::printf("  ok: the pooled worker drains the queue on its own\n");
 }
 
 // Back pressure: past the cap the queue must stop growing, and shedding must
-// not starve anyone — every path has to land EVENTUALLY.
+// not starve anyone — every path has to land EVENTUALLY. Exercised directly on
+// a standalone publisher (no scene needed) under its own app.
 void test_back_pressure_sheds_without_starving() {
-  auto &pub = cvc::gl::state_publisher::instance();
-  pub.flush();
+  cvc::app app;
+  cvc::gl::state_publisher pub(app);
   const std::size_t cap = 64;
   const std::size_t paths = 500; // deliberately far past the cap
   pub.set_max_pending(cap);
@@ -117,11 +123,68 @@ void test_back_pressure_sheds_without_starving() {
   }
   std::size_t landed = 0;
   for (std::size_t i = 0; i < paths; ++i)
-    if (!read("bp.p" + std::to_string(i)).empty())
+    if (!read(app, "bp.p" + std::to_string(i)).empty())
       ++landed;
   assert(landed == paths);
   std::printf("  ok: all %zu paths landed despite shedding (no starvation)\n", landed);
-  pub.set_max_pending(8192); // restore
+}
+
+// Two scenes under ONE app — the case the injected-app model exists for (split /
+// comparison views). Each owns its own publisher; constructing the second must not
+// interrupt or join the first's running worker (a shared pool key would deadlock
+// the second scene's ctor on the first's std-CV-parked worker). Both publish and
+// flush independently.
+void test_two_scenes_one_app() {
+  cvc::app app;
+  SceneGraph a(app, "sceneA");
+  SceneGraph b(app, "sceneB"); // must NOT hang on sceneA's worker
+  assert(a.publisher().running());
+  assert(b.publisher().running());
+  auto na = a.addGraphics("n", dot());
+  auto nb = b.addGraphics("n", dot());
+  na->setPosition(1.0, 2.0, 3.0);
+  nb->setPosition(4.0, 5.0, 6.0);
+  a.publisher().flush();
+  b.publisher().flush();
+  assert(read(app, na->getState("position").fullName()) == "1,2,3");
+  assert(read(app, nb->getState("position").fullName()) == "4,5,6");
+  std::printf("  ok: two scenes share one app without colliding publishers\n");
+}
+
+// Rapid create/destroy while the worker is parked mid-drain: ~SceneGraph -> stop()
+// must JOIN the worker before the publisher (and the nodes it would post to) are
+// freed. Deterministic with the join; a use-after-free without it.
+void test_teardown_joins_worker() {
+  cvc::app app;
+  for (int i = 0; i < 200; ++i) {
+    SceneGraph sg(app, "churn");
+    auto n = sg.addGraphics("n", dot());
+    n->setPosition(static_cast<double>(i), 0.0, 0.0); // give the worker something to drain
+    // destroyed here with the worker very likely still parked/mid-flush
+  }
+  std::printf("  ok: scene teardown joins its publisher worker (no UAF over churn)\n");
+}
+
+// A publisher's worker must NOT depend on a free app thread-pool slot. Shrink the
+// pool to ONE, then run two scenes: a pooled long-lived worker would let the first
+// scene pin the only slot forever, so the second scene's worker could never be
+// scheduled and its teardown (a mandatory join) would hang. Dedicated per-publisher
+// threads make the pool irrelevant.
+void test_publisher_independent_of_pool() {
+  cvc::app app;
+  app.setThreadPoolSize(1);
+  {
+    SceneGraph a(app, "poolA");
+    SceneGraph b(app, "poolB"); // must run + tear down despite the pool being size 1
+    assert(a.publisher().running());
+    assert(b.publisher().running());
+    auto n = b.addGraphics("n", dot());
+    n->setPosition(7.0, 0.0, 0.0);
+    b.publisher().flush();
+    assert(read(app, n->getState("position").fullName()) == "7,0,0");
+    // both scenes tear down here; neither may hang on a pool slot
+  }
+  std::printf("  ok: publisher is independent of the app pool (size 1, two scenes)\n");
 }
 
 } // namespace
@@ -132,6 +195,9 @@ int main() {
   test_external_write_still_moves_the_node();
   test_background_flush();
   test_back_pressure_sheds_without_starving();
+  test_two_scenes_one_app();
+  test_teardown_joins_worker();
+  test_publisher_independent_of_pool();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }

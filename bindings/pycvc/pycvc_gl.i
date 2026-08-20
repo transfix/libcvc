@@ -30,6 +30,7 @@
 #include <cvc/gl/NullGraphicNode.h> // the concrete empty node behind add_child_group
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/CameraController.h>
 #include <cvc/image/image.h> // GeometryNode::setTexture(const cvc::image&) — image %import'd from pycvc.i
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
@@ -591,6 +592,31 @@ def _typed_node(sg, name):
                                       static_cast<Py_ssize_t>($1.size()));
 }
 %include "cvc/gl/SceneRenderer.h"
+
+// ── CameraController: built-in orbit + Quake-fly navigation, fully cvc::state ──
+// Python constructs it from a wrapped SceneRenderer — CameraController(view) — so
+// no raw vtk handles cross the boundary; the (app, path) ctor covers headless use.
+// Being a state_object, every setting is ALSO reachable via
+// pycvc.state_set(app, "<scene prefix>.viewers.<name>.camera.<key>", ...) — the
+// wrapper is a convenience over the same reactive state. No singleton: the app is
+// taken from the injected viewer/scene (view.scene().appContext()).
+//
+// The raw vtk-pointer wiring (setCamera/setRenderer/setRenderWindow/attach) is done
+// by the SceneRenderer ctor, so it is hidden from Python (avoids marshalling live
+// vtk handles). getPose/getUpAxis use C-array out-params SWIG can't express well;
+// read the pose/up from state ("pose.eye.*", "up.*") instead.
+%ignore cvc::gl::CameraController::setCamera;
+%ignore cvc::gl::CameraController::setRenderer;
+%ignore cvc::gl::CameraController::setRenderWindow;
+%ignore cvc::gl::CameraController::attach;
+%ignore cvc::gl::CameraController::setScene; // raw SceneGraph* — the viewer ctor sets it
+%ignore cvc::gl::CameraController::getPose;
+%ignore cvc::gl::CameraController::getUpAxis;
+// Keep the injected viewer/app alive: ~state_object touches that app's state tree.
+%pythonappend cvc::gl::CameraController::CameraController %{
+    if args: self._pycvc_keepalive = args[0]
+%}
+%include "cvc/gl/CameraController.h"
 
 // ── Live-scene bridge: adopt an embedding host's SceneGraph ─────────────────
 // An embedding host (e.g. volrover3) hands its LIVE scene across as a PyCapsule

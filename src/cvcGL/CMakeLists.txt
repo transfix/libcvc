@@ -50,6 +50,17 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
+# X11 is used by CameraController for Quake-style pointer capture (warp the cursor
+# to centre each frame so mouse-look is continuous). Optional: without it, captured
+# look degrades to cursor-delta. Linux/X11 only.
+if(UNIX AND NOT APPLE)
+  find_package(X11)
+  if(X11_FOUND)
+    target_link_libraries(cvcGL PRIVATE ${X11_LIBRARIES})
+    target_include_directories(cvcGL PRIVATE ${X11_INCLUDE_DIR})
+  endif()
+endif()
+
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
   VERSION ${PROJECT_VERSION} SOVERSION 3)
 
@@ -125,6 +136,13 @@ add_executable(cvcgl_lighting test/cvcgl_lighting.cpp)
 target_link_libraries(cvcgl_lighting PRIVATE cvcGL)
 add_test(NAME cvcgl_lighting COMMAND cvcgl_lighting)
 
+# Shadows must not hide volumes: the shadow pass draws only the opaque layer, so
+# the sequence has to carry a volumetric pass or every VolumeNode vanishes the
+# moment shadows switch on. Structural check (no GPU) + offscreen render.
+add_executable(cvcgl_shadow_volume test/cvcgl_shadow_volume.cpp)
+target_link_libraries(cvcgl_shadow_volume PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_volume COMMAND cvcgl_shadow_volume)
+
 # Headless add + remove path (no VTK renderer). Guards SceneGraph::removeGraphics
 # against the no-renderer teardown crash the Python lab would otherwise hit.
 add_executable(cvcgl_remove test/cvcgl_remove.cpp)
@@ -175,3 +193,20 @@ target_link_libraries(cvcgl_transform_bench PRIVATE cvcGL)
 # on any machine rather than quoted from a commit message.
 add_executable(cvcgl_renderer_bench test/cvcgl_renderer_bench.cpp)
 target_link_libraries(cvcgl_renderer_bench PRIVATE cvcGL)
+
+# CameraController: orbit + Quake-fly navigation math (Z-up). Drives a bare
+# vtkCamera and asserts framing, the seamless orbit<->fly toggle, WASD/strafe/
+# vertical motion, mouse-look, and orbit-drag — no window needed.
+add_executable(cvcgl_camera test/cvcgl_camera.cpp)
+target_link_libraries(cvcgl_camera PRIVATE cvcGL)
+add_test(NAME cvcgl_camera COMMAND cvcgl_camera)
+
+# ── examples (opt-in, OFF by default) ──
+# Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
+# (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
+# track). What cvcGL-as-a-demo-toolkit is for: quick self-contained scenes that
+# scale toward a real-time sim/game loop. Off by default; -DCVC_BUILD_EXAMPLES=ON.
+option(CVC_BUILD_EXAMPLES "Build cvcGL example programs" OFF)
+if(CVC_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()

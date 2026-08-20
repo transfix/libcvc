@@ -1,6 +1,7 @@
 // One-shot-per-frame vs a renderer held open, same scene, same frame count.
 #include <chrono>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -54,7 +55,8 @@ static void oneShot(SceneGraph &sg, const char *path, int w, int h) {
 int main(int argc, char **argv) {
   const int N = argc > 1 ? atoi(argv[1]) : 40;
   const int W = 960, H = 540;
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   for (int i = 0; i < 40; ++i)
     addQuad(sg, (std::string("q") + std::to_string(i)).c_str(), 10 + i, i * 0.5);
   using clk = std::chrono::steady_clock;

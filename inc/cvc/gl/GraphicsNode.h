@@ -164,8 +164,10 @@ public:
   void setLabelColor(double r, double g, double b);
   void getLabelColor(double &r, double &g, double &b) const;
 
-  // Override visibility to sync with metadata
-  void setVisible(bool visible);
+  // Override visibility to sync with metadata. virtual so nodes that own extra
+  // actors (GridNode's planes + tick labels, AxisNode's axes) can hide ALL of
+  // them — the base only knows about the single getProp() actor + the label.
+  virtual void setVisible(bool visible);
 
   // Override update to handle transform changes
   void update() override;

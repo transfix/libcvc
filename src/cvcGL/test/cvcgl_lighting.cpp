@@ -12,6 +12,7 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -39,7 +40,8 @@ cvc::geometry tri() {
 }
 
 void test_lights_are_scene_owned() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   sg.addGraphics("m", tri());
   const int sun = sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.05);
   const int fill = sg.addDirectionalLight(140.0, 55.0, 0.55, 0.66, 0.85, 0.35);
@@ -79,7 +81,8 @@ void test_lights_are_scene_owned() {
 }
 
 void test_shadow_toggle() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   sg.addGraphics("m", tri());
   sg.addDirectionalLight(-52.0, 34.0);
 
@@ -87,6 +90,16 @@ void test_shadow_toggle() {
   assert(!sg.setShadowsEnabled(true));
   assert(!sg.shadowsEnabled());
   std::printf("  ok: shadows refuse honestly with no render target\n");
+
+  // Shadow quality knobs round-trip (interval + resolution), and the resolution is
+  // clamped off silly-small values. These hold whether or not shadows are live.
+  sg.setShadowUpdateInterval(3);
+  assert(sg.shadowUpdateInterval() == 3);
+  sg.setShadowResolution(2048);
+  assert(sg.shadowResolution() == 2048);
+  sg.setShadowResolution(1); // clamped up
+  assert(sg.shadowResolution() >= 64);
+  sg.setShadowResolution(1024);
 
   SceneRenderer sr(sg, 64, 64, true);
   const bool on = sg.setShadowsEnabled(true);

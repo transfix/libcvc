@@ -17,6 +17,7 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -54,9 +55,10 @@ namespace gl {
 // immediately reads) should call flush() first.
 class state_publisher {
 public:
-  // The shared publisher cvcGL's nodes use.
-  static state_publisher &instance();
-
+  // One publisher per scene, owned by its SceneGraph and constructed with the
+  // scene's app (SceneGraph::publisher()). There is deliberately no process-wide
+  // instance() — a node reaches its publisher through its SceneGraph, so scene
+  // state stays in the app the scene actually runs under, not a global.
   explicit state_publisher(cvc::app &ctx);
   ~state_publisher();
 
@@ -75,10 +77,13 @@ public:
   // world clock's rate keeps state updates in step with simulation ticks rather
   // than with however fast the renderer happens to be running.
   //
-  // The worker is drawn from the APP'S EXISTING THREAD POOL
-  // (app::startThreadPooled), not spawned here — cvc::app already owns a bounded
-  // pool, and a library quietly standing up its own threads alongside it is how
-  // a process ends up oversubscribed. One long-lived task, not one per write.
+  // The worker runs on the publisher's OWN dedicated thread, joined in stop().
+  // Deliberately NOT the app thread pool: a publisher's worker is long-lived (it
+  // runs for the scene's whole life), and one publisher exists per scene, so pinning
+  // a bounded-pool slot per scene would starve the pool and, past maxPoolSize live
+  // scenes, deadlock — a queued long-lived task can only run when another pool task
+  // returns, which a permanent worker never does. It is ONE mostly-idle thread per
+  // live scene (not one per write), joined deterministically at teardown.
   void start(double hz = 30.0);
   void stop();
   bool running() const { return m_running.load(); }
@@ -122,6 +127,7 @@ private:
   // eviction quietly fails and the "cap" stops capping anything.
   std::vector<std::string> m_keys;
   std::condition_variable m_wake;
+  std::thread m_thread; // the drain worker; joined in stop() so it never outlives us
   std::atomic<bool> m_running{false};
   std::atomic<std::uint64_t> m_written{0};
   std::atomic<std::uint64_t> m_coalesced{0};

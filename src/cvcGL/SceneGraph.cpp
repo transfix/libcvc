@@ -12,7 +12,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/context.h>
+#include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
 #include <limits>
 #include <vtkCameraPass.h>
@@ -20,21 +20,26 @@
 #include <vtkLight.h>
 #include <vtkMultiVolume.h>
 #include <vtkObjectFactory.h>
+#include <vtkOverlayPass.h>
 #include <vtkRenderPassCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
 #include <vtkShadowMapBakerPass.h>
 #include <vtkShadowMapPass.h>
-
-// Default ctor: delegate to the injected-app ctor with cvcGL's own process app.
-SceneGraph::SceneGraph(const std::string &statePrefix)
-    : SceneGraph(cvc::gl::context(), statePrefix) {}
+#include <vtkTranslucentPass.h>
+#include <vtkVolumetricPass.h>
 
 SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
     : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix),
       m_ownerThread(std::this_thread::get_id()), m_gridNode(nullptr), m_axisNode(nullptr),
       m_graphicsRoot(nullptr), m_nullGraphic(nullptr), m_multiVolumeRenderingEnabled(false),
       m_renderNeeded(false) {
+  // This scene's own state publisher, running under the injected app — node poses
+  // publish through it (SceneGraph::publisher()), coalesced off the render path.
+  // Started eagerly, like the scene's pump, and drained in the destructor.
+  m_publisher = std::make_unique<cvc::gl::state_publisher>(m_ctx);
+  m_publisher->start();
+
   // Create null graphic as THE root graphics node (all graphics go under this)
   // State path: {statePrefix}.graphics.root
   std::string rootStatePath = statePrefix + ".graphics.root";
@@ -62,6 +67,15 @@ SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
 SceneGraph::~SceneGraph() {
   // Process any remaining events before shutdown
   processEvents();
+
+  // Drain the publisher while the nodes are still alive and consistent: stop the
+  // worker, then flush queued poses to the state tree so none are dropped. Done
+  // here (not left to the member dtor) so the flush's valueChanged fires against
+  // live nodes, exactly like a normal flush, rather than mid-teardown.
+  if (m_publisher) {
+    m_publisher->stop();
+    m_publisher->flush();
+  }
 
   if (m_renderer) {
     for (auto &node : m_rootNodes) {
@@ -742,6 +756,13 @@ void SceneGraph::setShadowUpdateInterval(int frames) {
   requestRender();
 }
 
+void SceneGraph::setShadowResolution(int pixels) {
+  m_shadowResolution = pixels < 64 ? 64 : pixels;
+  if (m_shadowBaker)
+    m_shadowBaker->SetResolution(m_shadowResolution);
+  requestRender();
+}
+
 bool SceneGraph::setShadowsEnabled(bool enabled) {
   m_shadowsEnabled = false;
   if (!m_renderer)
@@ -758,13 +779,29 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   // view never gets set up.
   vtkSmartPointer<StridedShadowBaker> baker = vtkSmartPointer<StridedShadowBaker>::New();
   baker->Interval = m_shadowInterval;
-  m_shadowBaker = baker; // kept so setShadowUpdateInterval() can retune it live
+  baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
+  m_shadowBaker = baker;                    // kept so the interval/resolution stay live
   vtkSmartPointer<vtkShadowMapPass> shadows = vtkSmartPointer<vtkShadowMapPass>::New();
   shadows->SetShadowMapBakerPass(baker);
+
+  // The shadow pass draws only the OPAQUE layer (with shadows). On its own it
+  // silently drops everything else — translucent geometry, volumes, 2-D overlays —
+  // so a scene with a VolumeNode (sea, cloud slab, any transfer-function volume)
+  // renders as if the volume weren't there the moment shadows are switched on.
+  // Follow it with the rest of VTK's standard layer order so the full scene draws:
+  // translucent geometry, then volumes (ray-cast over the shadowed opaque depth,
+  // so they are correctly occluded by terrain yet composite over open sky), then
+  // the 2-D overlay layer (captions, axis/grid labels).
+  vtkSmartPointer<vtkTranslucentPass> translucent = vtkSmartPointer<vtkTranslucentPass>::New();
+  vtkSmartPointer<vtkVolumetricPass> volumetric = vtkSmartPointer<vtkVolumetricPass>::New();
+  vtkSmartPointer<vtkOverlayPass> overlay = vtkSmartPointer<vtkOverlayPass>::New();
 
   vtkSmartPointer<vtkRenderPassCollection> passes = vtkSmartPointer<vtkRenderPassCollection>::New();
   passes->AddItem(baker);
   passes->AddItem(shadows);
+  passes->AddItem(translucent);
+  passes->AddItem(volumetric);
+  passes->AddItem(overlay);
   vtkSmartPointer<vtkSequencePass> seq = vtkSmartPointer<vtkSequencePass>::New();
   seq->SetPasses(passes);
   vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();

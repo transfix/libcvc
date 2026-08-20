@@ -5,7 +5,6 @@
 #include <cvc/core/state.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/context.h>
 #include <cvc/volume/volume.h>
 #include <iomanip>
 #include <set>
@@ -28,7 +27,8 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
       m_opacityFunc(vtkSmartPointer<vtkPiecewiseFunction>::New()),
       m_volumeProperty(vtkSmartPointer<vtkVolumeProperty>::New()), m_dataMin(0.0), m_dataMax(1.0),
       m_shading(true), m_ambient(0.3), m_diffuse(0.6), m_specular(0.2), m_specularPower(10.0),
-      m_scalarOpacityUnitDistance(1.0), m_sampleDistance(0.5), m_autoAdjustSampleDistances(true) {
+      m_scalarOpacityUnitDistance(1.0), m_sampleDistance(0.5), m_autoAdjustSampleDistances(true),
+      m_volumetricScattering(0.0), m_giReach(0.0), m_scatteringAnisotropy(0.0) {
   // Initialize with empty 1x1x1 volume to avoid VTK errors before data is loaded
   m_imageData->SetDimensions(1, 1, 1);
   m_imageData->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -60,6 +60,12 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
   m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
   m_mapper->SetSampleDistance(m_sampleDistance);
 
+  // Volumetric scattering / self-shadowing (off by default — a plain absorption
+  // volume). vtkSmartVolumeMapper forwards these to its GPU ray-cast delegate.
+  m_mapper->SetVolumetricScatteringBlending(static_cast<float>(m_volumetricScattering));
+  m_mapper->SetGlobalIlluminationReach(static_cast<float>(m_giReach));
+  m_volumeProperty->SetScatteringAnisotropy(static_cast<float>(m_scatteringAnisotropy));
+
   m_vtkVolume->SetProperty(m_volumeProperty);
 
   // Initialize state tree with all rendering attributes
@@ -77,6 +83,11 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
     getState("scalar_opacity_unit_distance").value(m_scalarOpacityUnitDistance);
     getState("sample_distance").value(m_sampleDistance);
     getState("auto_adjust_sample_distances").value(m_autoAdjustSampleDistances ? 1 : 0);
+
+    // Volumetric scattering / self-shadowing
+    getState("volumetric_scattering").value(m_volumetricScattering);
+    getState("gi_reach").value(m_giReach);
+    getState("scattering_anisotropy").value(m_scatteringAnisotropy);
 
     // Data range (will be updated when volume is loaded)
     getState("data_min").value(m_dataMin);
@@ -127,74 +138,67 @@ void VolumeNode::applyClipPlanes(vtkPlaneCollection *planes) {
 }
 
 void VolumeNode::addToRenderer(vtkRenderer *renderer) {
-  cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");
+  app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Adding to renderer");
   GraphicsNode::addToRenderer(renderer);
 
   // Verify it was actually added and log detailed info
   if (renderer && renderer->GetVolumes()->IsItemPresent(m_vtkVolume)) {
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() +
-                                  "]: CONFIRMED - Volume is in renderer");
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() +
-                                  "]: Total volumes in renderer: " +
-                                  std::to_string(renderer->GetVolumes()->GetNumberOfItems()));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: CONFIRMED - Volume is in renderer");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Total volumes in renderer: " +
+                     std::to_string(renderer->GetVolumes()->GetNumberOfItems()));
 
     // Log volume property details
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume visibility: " +
-                                  std::to_string(m_vtkVolume->GetVisibility()));
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume pickable: " +
-                                  std::to_string(m_vtkVolume->GetPickable()));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() +
+                     "]: Volume visibility: " + std::to_string(m_vtkVolume->GetVisibility()));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() +
+                     "]: Volume pickable: " + std::to_string(m_vtkVolume->GetPickable()));
 
     // Log image data details
     int dims[3];
     m_imageData->GetDimensions(dims);
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() +
-                                  "]: Image data dimensions: [" + std::to_string(dims[0]) + ", " +
-                                  std::to_string(dims[1]) + ", " + std::to_string(dims[2]) + "]");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Image data dimensions: [" +
+                     std::to_string(dims[0]) + ", " + std::to_string(dims[1]) + ", " +
+                     std::to_string(dims[2]) + "]");
 
     double *bounds = m_vtkVolume->GetBounds();
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Volume bounds: [" +
-                                  std::to_string(bounds[0]) + ", " + std::to_string(bounds[1]) +
-                                  ", " + std::to_string(bounds[2]) + ", " +
-                                  std::to_string(bounds[3]) + ", " + std::to_string(bounds[4]) +
-                                  ", " + std::to_string(bounds[5]) + "]");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Volume bounds: [" +
+                     std::to_string(bounds[0]) + ", " + std::to_string(bounds[1]) + ", " +
+                     std::to_string(bounds[2]) + ", " + std::to_string(bounds[3]) + ", " +
+                     std::to_string(bounds[4]) + ", " + std::to_string(bounds[5]) + "]");
 
     // Log transfer function ranges
     double colorRange[2], opacityRange[2];
     m_colorFunc->GetRange(colorRange);
     m_opacityFunc->GetRange(opacityRange);
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Color TF range: [" +
-                                  std::to_string(colorRange[0]) + ", " +
-                                  std::to_string(colorRange[1]) + "]");
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity TF range: [" +
-                                  std::to_string(opacityRange[0]) + ", " +
-                                  std::to_string(opacityRange[1]) + "]");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Color TF range: [" +
+                     std::to_string(colorRange[0]) + ", " + std::to_string(colorRange[1]) + "]");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Opacity TF range: [" +
+                     std::to_string(opacityRange[0]) + ", " + std::to_string(opacityRange[1]) +
+                     "]");
 
     // Log opacity at a few sample points
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMin(" +
-                                  std::to_string(m_dataMin) +
-                                  "): " + std::to_string(m_opacityFunc->GetValue(m_dataMin)));
-    cvc::gl::context().log(
-        0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMid: " +
-               std::to_string(m_opacityFunc->GetValue((m_dataMin + m_dataMax) / 2.0)));
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMax(" +
-                                  std::to_string(m_dataMax) +
-                                  "): " + std::to_string(m_opacityFunc->GetValue(m_dataMax)));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMin(" +
+                     std::to_string(m_dataMin) +
+                     "): " + std::to_string(m_opacityFunc->GetValue(m_dataMin)));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMid: " +
+                     std::to_string(m_opacityFunc->GetValue((m_dataMin + m_dataMax) / 2.0)));
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Opacity at dataMax(" +
+                     std::to_string(m_dataMax) +
+                     "): " + std::to_string(m_opacityFunc->GetValue(m_dataMax)));
 
     // Log scalar range from image data
     double *scalarRange = m_imageData->GetScalarRange();
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() +
-                                  "]: Image data scalar range: [" + std::to_string(scalarRange[0]) +
-                                  ", " + std::to_string(scalarRange[1]) + "]");
+    app().log(3, "VolumeNode::addToRenderer[" + getName() + "]: Image data scalar range: [" +
+                     std::to_string(scalarRange[0]) + ", " + std::to_string(scalarRange[1]) + "]");
   } else {
-    cvc::gl::context().log(0, "VolumeNode::addToRenderer[" + getName() +
-                                  "]: WARNING - Volume NOT in renderer!");
+    app().log(1, "VolumeNode::addToRenderer[" + getName() + "]: WARNING - Volume NOT in renderer!");
   }
 }
 
 void VolumeNode::setVolume(const cvc::volume &vol) {
-  cvc::thread_info ti(cvc::gl::context(), BOOST_CURRENT_FUNCTION);
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
 
-  cvc::gl::context().log(0, "\n=== VolumeNode::setVolume[" + getName() + "] ===");
+  app().log(3, "\n=== VolumeNode::setVolume[" + getName() + "] ===");
 
   // Store the volume object
   m_volume = std::make_shared<cvc::volume>(vol);
@@ -223,30 +227,27 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   getState("data_min").value(m_dataMin);
   getState("data_max").value(m_dataMax);
 
-  cvc::gl::context().log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " +
-                                std::to_string(m_dataMax) + "]");
-  cvc::gl::context().log(0, "  Dimensions: [" + std::to_string(vol.XDim()) + ", " +
-                                std::to_string(vol.YDim()) + ", " + std::to_string(vol.ZDim()) +
-                                "]");
-  cvc::gl::context().log(
-      0, "  Bounding box: [" + std::to_string(vol.XMin()) + "," + std::to_string(vol.XMax()) +
-             "], [" + std::to_string(vol.YMin()) + "," + std::to_string(vol.YMax()) + "], [" +
-             std::to_string(vol.ZMin()) + "," + std::to_string(vol.ZMax()) + "]");
-  cvc::gl::context().log(0, "  Spans: [" + std::to_string(vol.XSpan()) + ", " +
-                                std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) +
-                                "]");
+  app().log(3,
+            "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
+  app().log(3, "  Dimensions: [" + std::to_string(vol.XDim()) + ", " + std::to_string(vol.YDim()) +
+                   ", " + std::to_string(vol.ZDim()) + "]");
+  app().log(3, "  Bounding box: [" + std::to_string(vol.XMin()) + "," + std::to_string(vol.XMax()) +
+                   "], [" + std::to_string(vol.YMin()) + "," + std::to_string(vol.YMax()) + "], [" +
+                   std::to_string(vol.ZMin()) + "," + std::to_string(vol.ZMax()) + "]");
+  app().log(3, "  Spans: [" + std::to_string(vol.XSpan()) + ", " + std::to_string(vol.YSpan()) +
+                   ", " + std::to_string(vol.ZSpan()) + "]");
 
   // Calculate appropriate scalar opacity unit distance based on volume diagonal
   double dx = vol.XSpan();
   double dy = vol.YSpan();
   double dz = vol.ZSpan();
   double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
-  cvc::gl::context().log(0, "  Diagonal: " + std::to_string(diagonal) +
-                                ", ScalarOpacityUnitDistance: " + std::to_string(diagonal / 100.0));
+  app().log(3, "  Diagonal: " + std::to_string(diagonal) +
+                   ", ScalarOpacityUnitDistance: " + std::to_string(diagonal / 100.0));
   m_volumeProperty->SetScalarOpacityUnitDistance(diagonal / 100.0);
 
   // Set transfer function using actual data range
-  cvc::gl::context().log(0, "  Setting default transfer function...");
+  app().log(3, "  Setting default transfer function...");
   setDefaultTransferFunction();
   updateTransferFunctions();
   updateMetadata(vol);
@@ -263,25 +264,44 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
     }
   }
 
-  cvc::gl::context().log(0, "=================================\n");
+  app().log(3, "=================================\n");
+}
+
+void VolumeNode::updateScalars(const std::vector<float> &data) {
+  if (!m_imageData || data.empty())
+    return;
+  // Capture the scalars BY VALUE: runOnMainThread runs inline on the owner thread but
+  // MARSHALS to the event queue off it (see SceneNode), and a marshalled callback runs
+  // after this returns — a by-reference capture of the parameter would then dangle.
+  // The copy is still orders of magnitude cheaper than setVolume (no realloc, no range
+  // rescan, no transfer-function reset, no logging). Same pattern as updateVertices.
+  runOnMainThread([this, data]() {
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    if (n != data.size() || m_imageData->GetScalarType() != VTK_FLOAT)
+      return; // dimensions/type must match the volume last set via setVolume()
+    if (void *dst = m_imageData->GetScalarPointer())
+      std::memcpy(dst, data.data(), n * sizeof(float));
+    m_imageData->Modified(); // mapper re-uploads the changed field on next render
+  });
 }
 
 void VolumeNode::updateImageData(const cvc::volume &vol) {
-  cvc::gl::context().log(0, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
+  app().log(3, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
 
   // Get dimensions
   int dims[3] = {static_cast<int>(vol.XDim()), static_cast<int>(vol.YDim()),
                  static_cast<int>(vol.ZDim())};
 
-  cvc::gl::context().log(0, "    CVC Volume bounds: X=[" + std::to_string(vol.XMin()) + ", " +
-                                std::to_string(vol.XMax()) + "]");
-  cvc::gl::context().log(0, "                       Y=[" + std::to_string(vol.YMin()) + ", " +
-                                std::to_string(vol.YMax()) + "]");
-  cvc::gl::context().log(0, "                       Z=[" + std::to_string(vol.ZMin()) + ", " +
-                                std::to_string(vol.ZMax()) + "]");
-  cvc::gl::context().log(0, "    CVC XSpan/YSpan/ZSpan: [" + std::to_string(vol.XSpan()) + ", " +
-                                std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) +
-                                "]");
+  app().log(3, "    CVC Volume bounds: X=[" + std::to_string(vol.XMin()) + ", " +
+                   std::to_string(vol.XMax()) + "]");
+  app().log(3, "                       Y=[" + std::to_string(vol.YMin()) + ", " +
+                   std::to_string(vol.YMax()) + "]");
+  app().log(3, "                       Z=[" + std::to_string(vol.ZMin()) + ", " +
+                   std::to_string(vol.ZMax()) + "]");
+  app().log(3, "    CVC XSpan/YSpan/ZSpan: [" + std::to_string(vol.XSpan()) + ", " +
+                   std::to_string(vol.YSpan()) + ", " + std::to_string(vol.ZSpan()) + "]");
 
   // CRITICAL FIX: Calculate spacing directly from bounding box, not from Span() methods
   // The Span() methods appear to return incorrect values for some volumes
@@ -289,15 +309,14 @@ void VolumeNode::updateImageData(const cvc::volume &vol) {
                        (vol.YMax() - vol.YMin()) / vol.YDim(),
                        (vol.ZMax() - vol.ZMin()) / vol.ZDim()};
 
-  cvc::gl::context().log(0, "    Calculated spacing: [" + std::to_string(spacing[0]) + ", " +
-                                std::to_string(spacing[1]) + ", " + std::to_string(spacing[2]) +
-                                "]");
+  app().log(3, "    Calculated spacing: [" + std::to_string(spacing[0]) + ", " +
+                   std::to_string(spacing[1]) + ", " + std::to_string(spacing[2]) + "]");
 
   // Get origin
   double origin[3] = {vol.XMin(), vol.YMin(), vol.ZMin()};
 
-  cvc::gl::context().log(0, "    Origin: [" + std::to_string(origin[0]) + ", " +
-                                std::to_string(origin[1]) + ", " + std::to_string(origin[2]) + "]");
+  app().log(3, "    Origin: [" + std::to_string(origin[0]) + ", " + std::to_string(origin[1]) +
+                   ", " + std::to_string(origin[2]) + "]");
 
   // Determine VTK scalar type
   int scalarType;
@@ -329,7 +348,7 @@ void VolumeNode::updateImageData(const cvc::volume &vol) {
     break;
   }
 
-  cvc::gl::context().log(0, "    Voxel type: " + scalarTypeName);
+  app().log(3, "    Voxel type: " + scalarTypeName);
 
   // Set up image data
   m_imageData->SetDimensions(dims);
@@ -345,17 +364,16 @@ void VolumeNode::updateImageData(const cvc::volume &vol) {
   size_t bytesPerVoxel = vol.voxelSize();
   size_t totalBytes = numVoxels * bytesPerVoxel;
 
-  cvc::gl::context().log(0, "    Total voxels: " + std::to_string(numVoxels) +
-                                ", bytes per voxel: " + std::to_string(bytesPerVoxel) +
-                                ", total bytes: " + std::to_string(totalBytes));
-  cvc::gl::context().log(0, "    CVC data pointer: " + std::string(cvcPtr ? "VALID" : "NULL"));
-  cvc::gl::context().log(0, "    VTK data pointer: " + std::string(vtkPtr ? "VALID" : "NULL"));
+  app().log(3, "    Total voxels: " + std::to_string(numVoxels) + ", bytes per voxel: " +
+                   std::to_string(bytesPerVoxel) + ", total bytes: " + std::to_string(totalBytes));
+  app().log(3, "    CVC data pointer: " + std::string(cvcPtr ? "VALID" : "NULL"));
+  app().log(3, "    VTK data pointer: " + std::string(vtkPtr ? "VALID" : "NULL"));
 
   if (cvcPtr && vtkPtr) {
     std::memcpy(vtkPtr, cvcPtr, totalBytes);
-    cvc::gl::context().log(0, "    \u2713 Data copied successfully");
+    app().log(3, "    \u2713 Data copied successfully");
   } else {
-    cvc::gl::context().log(0, "    \u2717 ERROR: Cannot copy data - null pointer!");
+    app().log(0, "    \u2717 ERROR: Cannot copy data - null pointer!");
   }
 
   m_imageData->Modified();
@@ -363,21 +381,19 @@ void VolumeNode::updateImageData(const cvc::volume &vol) {
 
 void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
                                      const std::vector<double> &opacityTable) {
-  cvc::gl::context().log(0, "\nVolumeNode::setTransferFunction[" + getName() +
-                                "]: " + std::to_string(colorTable.size() / 4) + " color pts, " +
-                                std::to_string(opacityTable.size() / 2) + " opacity pts");
+  app().log(3, "\nVolumeNode::setTransferFunction[" + getName() +
+                   "]: " + std::to_string(colorTable.size() / 4) + " color pts, " +
+                   std::to_string(opacityTable.size() / 2) + " opacity pts");
 
   // DEBUG: Log first few color values to see what we're getting
   if (colorTable.size() >= 8) {
-    cvc::gl::context().log(0, "  First 2 color points:");
-    cvc::gl::context().log(0, "    [0]: scalar=" + std::to_string(colorTable[0]) + ", rgb=(" +
-                                  std::to_string(colorTable[1]) + "," +
-                                  std::to_string(colorTable[2]) + "," +
-                                  std::to_string(colorTable[3]) + ")");
-    cvc::gl::context().log(0, "    [1]: scalar=" + std::to_string(colorTable[4]) + ", rgb=(" +
-                                  std::to_string(colorTable[5]) + "," +
-                                  std::to_string(colorTable[6]) + "," +
-                                  std::to_string(colorTable[7]) + ")");
+    app().log(3, "  First 2 color points:");
+    app().log(3, "    [0]: scalar=" + std::to_string(colorTable[0]) + ", rgb=(" +
+                     std::to_string(colorTable[1]) + "," + std::to_string(colorTable[2]) + "," +
+                     std::to_string(colorTable[3]) + ")");
+    app().log(3, "    [1]: scalar=" + std::to_string(colorTable[4]) + ", rgb=(" +
+                     std::to_string(colorTable[5]) + "," + std::to_string(colorTable[6]) + "," +
+                     std::to_string(colorTable[7]) + ")");
   }
 
   // Clear existing functions
@@ -400,9 +416,8 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
     m_opacityFunc->AddPoint(scalar, opacity);
 
     if (i < 3) { // Log first few points
-      cvc::gl::context().log(0, "  Opacity[" + std::to_string(i) +
-                                    "]: scalar=" + std::to_string(scalar) +
-                                    ", opacity=" + std::to_string(opacity));
+      app().log(3, "  Opacity[" + std::to_string(i) + "]: scalar=" + std::to_string(scalar) +
+                       ", opacity=" + std::to_string(opacity));
     }
   }
 
@@ -519,6 +534,14 @@ void VolumeNode::setScalarOpacityUnitDistance(double value) {
 
 void VolumeNode::setSampleDistance(double value) { getState("sample_distance").value(value); }
 
+void VolumeNode::setVolumetricScattering(double value) {
+  getState("volumetric_scattering").value(value);
+}
+void VolumeNode::setGlobalIlluminationReach(double value) { getState("gi_reach").value(value); }
+void VolumeNode::setScatteringAnisotropy(double value) {
+  getState("scattering_anisotropy").value(value);
+}
+
 void VolumeNode::setAutoAdjustSampleDistances(bool enabled) {
   getState("auto_adjust_sample_distances").value(enabled ? 1 : 0);
 }
@@ -526,10 +549,9 @@ void VolumeNode::setAutoAdjustSampleDistances(bool enabled) {
 void VolumeNode::updateTransferFunctions() {
   static int callCount = 0;
   if (callCount++ == 0) {
-    cvc::gl::context().log(0,
-                           "\nVolumeNode::updateTransferFunctions[" + getName() + "]: First call");
-    cvc::gl::context().log(0, "  Data range: [" + std::to_string(m_dataMin) + ", " +
-                                  std::to_string(m_dataMax) + "]");
+    app().log(3, "\nVolumeNode::updateTransferFunctions[" + getName() + "]: First call");
+    app().log(3, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) +
+                     "]");
   }
 
   m_colorFunc->Modified();
@@ -558,8 +580,8 @@ cvc::bounding_box VolumeNode::getBoundingBox() const {
 // automatically
 
 void VolumeNode::handleStateChanged(const std::string &childState) {
-  cvc::gl::context().log(2, str(boost::format("VolumeNode::handleStateChanged(%s) for '%s'") %
-                                childState % getName()));
+  app().log(3, str(boost::format("VolumeNode::handleStateChanged(%s) for '%s'") % childState %
+                   getName()));
 
   // Handle volume-specific state changes
   if (childState == "shading") {
@@ -617,6 +639,24 @@ void VolumeNode::handleStateChanged(const std::string &childState) {
       if (m_mapper) {
         m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
       }
+    });
+  } else if (childState == "volumetric_scattering") {
+    runOnMainThread([this]() {
+      m_volumetricScattering = getState("volumetric_scattering").value<double>();
+      if (m_mapper)
+        m_mapper->SetVolumetricScatteringBlending(static_cast<float>(m_volumetricScattering));
+    });
+  } else if (childState == "gi_reach") {
+    runOnMainThread([this]() {
+      m_giReach = getState("gi_reach").value<double>();
+      if (m_mapper)
+        m_mapper->SetGlobalIlluminationReach(static_cast<float>(m_giReach));
+    });
+  } else if (childState == "scattering_anisotropy") {
+    runOnMainThread([this]() {
+      m_scatteringAnisotropy = getState("scattering_anisotropy").value<double>();
+      if (m_volumeProperty)
+        m_volumeProperty->SetScatteringAnisotropy(static_cast<float>(m_scatteringAnisotropy));
     });
   } else if (childState == "data_min" || childState == "data_max") {
     runOnMainThread([this]() {

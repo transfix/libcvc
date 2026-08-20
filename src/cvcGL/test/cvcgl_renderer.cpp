@@ -18,6 +18,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -65,7 +66,8 @@ double frameDelta(const std::vector<unsigned char> &a, const std::vector<unsigne
 } // namespace
 
 int main() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   addQuad(sg, "ground", -50, -50, 50, 50, 0.0);
 
   SceneRenderer r(sg, 320, 240, /*offscreen=*/true);

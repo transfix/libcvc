@@ -74,6 +74,14 @@ vtkProp *AxisNode::getProp() { return m_axesActor; }
 
 void AxisNode::setAxisLength(double length) { getState("axis_length").value(length); }
 
+void AxisNode::setVisible(bool visible) {
+  GraphicsNode::setVisible(visible);
+  m_axesActor->SetVisibility(visible);
+  m_axesActor->GetXAxisCaptionActor2D()->SetVisibility(visible);
+  m_axesActor->GetYAxisCaptionActor2D()->SetVisibility(visible);
+  m_axesActor->GetZAxisCaptionActor2D()->SetVisibility(visible);
+}
+
 cvc::bounding_box AxisNode::getBoundingBox() const {
   // Axis doesn't contribute to scene bounds - it's just a visualization helper
   return cvc::bounding_box(0, 0, 0, 0, 0, 0);

@@ -6,7 +6,6 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/context.h>
 #include <sstream>
 
 template <typename F> double ms(int reps, F f) {
@@ -18,7 +17,8 @@ template <typename F> double ms(int reps, F f) {
 }
 
 int main() {
-  SceneGraph sg;
+  cvc::app app;
+  SceneGraph sg(app);
   cvc::geometry g;
   cvc::geometry::point_t p;
   p[0] = 0;

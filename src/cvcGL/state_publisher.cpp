@@ -11,29 +11,12 @@
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
-#include <cvc/gl/context.h>
 #include <cvc/gl/state_publisher.h>
 #include <utility>
 #include <vector>
 
 namespace cvc {
 namespace gl {
-
-state_publisher &state_publisher::instance() {
-  // Function-local static: constructed on first use, after cvc::gl::context()
-  // is usable, and destroyed in reverse order at exit.
-  static state_publisher pub(cvc::gl::context());
-  // Self-starting: a publisher nobody started is a queue that never drains, and
-  // the scene's state would silently stop matching the scene. Callers that want
-  // a different cadence call stop()/start(hz); callers that want it synchronous
-  // (tests, teardown) call flush().
-  static const bool started = [] {
-    pub.start();
-    return true;
-  }();
-  (void)started;
-  return pub;
-}
 
 state_publisher::state_publisher(cvc::app &ctx) : m_ctx(ctx) {}
 
@@ -110,29 +93,43 @@ void state_publisher::start(double hz) {
   if (m_running.exchange(true))
     return; // already running
   const double rate = hz > 0.0 ? hz : 30.0;
-  // Drawn from the app's pool rather than a thread of our own.
-  m_ctx.startThreadPooled("cvcgl.state_publisher", [this, rate]() { worker(rate); });
+  // Our own dedicated thread (see the header for why not the app pool).
+  m_thread = std::thread([this, rate]() { worker(rate); });
 }
 
 void state_publisher::stop() {
-  if (!m_running.exchange(false))
-    return;
+  m_running.store(false);
   m_wake.notify_all();
+  // JOIN before returning: the worker holds a raw `this`, so it must not run past
+  // our lifetime. join() is the whole synchronization — no hand-shake to race.
+  // Idempotent: both destructors call stop(); after the first join the thread is no
+  // longer joinable, so the second call skips it.
+  if (m_thread.joinable())
+    m_thread.join();
 }
 
 void state_publisher::worker(double hz) {
   const auto period = std::chrono::duration<double>(1.0 / hz);
-  while (m_running.load()) {
-    {
-      // Wait on the condition variable rather than sleeping, so stop() is
-      // immediate instead of costing up to a full period.
-      std::unique_lock<std::mutex> lock(m_mutex);
-      m_wake.wait_for(lock, std::chrono::duration_cast<std::chrono::milliseconds>(period),
-                      [this]() { return !m_running.load(); });
+  // A drain must never take the process down: an exception escaping this thread
+  // function would std::terminate (the app pool used to catch this for us). A failed
+  // write is logged and ends the worker — the scene's state simply stops updating.
+  try {
+    while (m_running.load()) {
+      {
+        // Wait on the condition variable rather than sleeping, so stop() is
+        // immediate instead of costing up to a full period.
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_wake.wait_for(lock, std::chrono::duration_cast<std::chrono::milliseconds>(period),
+                        [this]() { return !m_running.load(); });
+      }
+      flush();
     }
-    flush();
+    flush(); // drain whatever arrived during shutdown
+  } catch (const std::exception &e) {
+    m_ctx.log(1, std::string("state_publisher worker stopped on exception: ") + e.what());
+  } catch (...) {
+    m_ctx.log(1, "state_publisher worker stopped on unknown exception");
   }
-  flush(); // drain whatever arrived during shutdown
 }
 
 } // namespace gl

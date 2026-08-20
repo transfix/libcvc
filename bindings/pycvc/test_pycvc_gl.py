@@ -56,6 +56,25 @@ def test_build_scene():
     print("  ok: scene builds mesh + scalar field, counts/has correct")
 
 
+def test_volume_scattering():
+    # Volumetric self-shadowing controls are new cvcGL surface, auto-wrapped via
+    # %include; they drive the vtkSmartVolumeMapper for a cloud's sculpted tops/
+    # undersides. Defaults are 0 (a plain absorption volume); each setter round-
+    # trips through cvc::state so a Python demo (or a dialog) can drive it.
+    sg = pycvc_gl.SceneGraph(app)
+    vn = sg.addGraphics("cloud", _make_field())
+    assert vn.getVolumetricScattering() == 0.0
+    assert vn.getGlobalIlluminationReach() == 0.0
+    assert vn.getScatteringAnisotropy() == 0.0
+    vn.setVolumetricScattering(0.5)
+    vn.setGlobalIlluminationReach(0.3)
+    vn.setScatteringAnisotropy(0.85)
+    assert abs(vn.getVolumetricScattering() - 0.5) < 1e-9
+    assert abs(vn.getGlobalIlluminationReach() - 0.3) < 1e-9
+    assert abs(vn.getScatteringAnisotropy() - 0.85) < 1e-9
+    print("  ok: VolumeNode volumetric scattering / GI / anisotropy wrapped + round-trip")
+
+
 def test_update_ops_no_rebuild():
     # THE point of the direct wrap: get the node once, mutate it in place. The
     # node identity and the scene node-count are unchanged across many moves.
@@ -261,6 +280,7 @@ def test_scene_owned_lighting():
 
 if __name__ == "__main__":
     test_build_scene()
+    test_volume_scattering()
     test_update_ops_no_rebuild()
     test_remove()
     test_scene_teardown_no_crash()

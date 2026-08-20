@@ -20,7 +20,6 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/context.h>
 #include <string>
 #include <vtkNew.h>
 #include <vtkRenderer.h>
@@ -42,11 +41,11 @@ static cvc::geometry makeTri() {
   return tri;
 }
 
-// Count live "_stateChanged" handler threads in the shared app context. The
+// Count live "_stateChanged" handler threads in the scene's app context. The
 // hardened design never spawns any; this must stay 0 throughout.
-static std::size_t handlerThreadCount() {
+static std::size_t handlerThreadCount(cvc::app &app) {
   std::size_t n = 0;
-  for (auto &kv : cvc::gl::context().threads()) {
+  for (auto &kv : app.threads()) {
     if (kv.first.find("_stateChanged") != std::string::npos)
       ++n;
   }
@@ -54,13 +53,14 @@ static std::size_t handlerThreadCount() {
 }
 
 int main() {
+  cvc::app app;
   const cvc::geometry tri = makeTri();
 
   // Case A — the exact original crash repro: add, pump, remove, then destroy
   // without pumping again. The remove's/destroy's still-queued callbacks must
   // not dangle.
   {
-    SceneGraph sg;
+    SceneGraph sg(app);
     auto n = sg.addGraphics("tri", tri);
     assert(n);
     sg.processEvents();
@@ -74,7 +74,7 @@ int main() {
   // deterministic now (no threads), so a few hundred iterations is a firm guard;
   // the original defect faulted within the first iteration.
   for (int iter = 0; iter < 50; ++iter) {
-    SceneGraph sg;
+    SceneGraph sg(app);
     for (int k = 0; k < 6; ++k)
       sg.addGraphics("g" + std::to_string(k), tri);
     if (iter % 3 == 0)
@@ -82,7 +82,7 @@ int main() {
     for (int k = 0; k < 6; ++k)
       sg.removeGraphics("g" + std::to_string(k));
     // scene destroyed here with callbacks possibly still queued
-    assert(handlerThreadCount() == 0 && "scene nodes must not spawn handler threads");
+    assert(handlerThreadCount(app) == 0 && "scene nodes must not spawn handler threads");
   }
 
   // Case C — renderer-attached teardown (the shape Scene::show / render_png
@@ -90,7 +90,7 @@ int main() {
   // add/removeFromRenderer + setRenderer(nullptr) teardown paths under the
   // guarded pump. No display required.
   {
-    SceneGraph sg;
+    SceneGraph sg(app);
     vtkNew<vtkRenderer> renderer;
     sg.setRenderer(renderer);
     sg.addGraphics("a", tri);
@@ -102,7 +102,7 @@ int main() {
     // ~SceneGraph tears the rest down
   }
 
-  assert(handlerThreadCount() == 0);
+  assert(handlerThreadCount(app) == 0);
   std::printf("cvcGL teardown: OK (no handler threads, churn + renderer clean)\n");
   return 0;
 }
