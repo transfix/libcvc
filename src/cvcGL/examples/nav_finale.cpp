@@ -276,7 +276,11 @@ int main(int argc, char **argv) {
   // 2. Eight vehicles. Act 1: enter from the west edge (spread in y), rendezvous on
   //    an eastern staging line. Act 2: pursue 4 moving targets (2 chasers each).
   const int N = 8, NT = 4;
-  const double sc = 1.0 / (0.5 * span); // world -> normalized (centered)
+  // Use the SAME world->normalized scale as the working city_scene demo (0.05, i.e.
+  // 1 normalized unit = 20 m) so the vehicle's internal constants (wheelbase L,
+  // a_max, ...) — which are normalized and tuned at that scale — stay physical. A
+  // custom scale leaves those constants mis-sized and the drive governor clamps to 0.
+  const double sc = 0.05;
   auto norm = [&](double wx, double wy, float *o2) {
     o2[0] = static_cast<float>((wx - 0.5 * (bounds.min_x + bounds.max_x)) * sc);
     o2[1] = static_cast<float>((wy - 0.5 * (bounds.min_y + bounds.max_y)) * sc);
@@ -304,17 +308,18 @@ int main(int argc, char **argv) {
   cfg.cx = 0.5 * (bounds.min_x + bounds.max_x);
   cfg.cy = 0.5 * (bounds.min_y + bounds.max_y);
   cfg.scale = sc;
-  // Vehicle params are in NORMALIZED units. Austin's normalized extent is ~±1 (span
-  // maps to 2 units), so the radius / barrier / arrive-radius must be a small fraction
-  // of that — a vehicle is metres, streets are tens of metres, on a 3 km map.
-  cfg.veh.rr = 0.006f;    // ~9 m vehicle radius
-  cfg.veh.d_hat = 0.020f; // ~30 m wall barrier — threads downtown streets
+  // The city_scene demo's proven vehicle params (normalized; at scale 0.05 that is
+  // rr ~3 m, barrier ~7 m, arrive ~16 m). reach_tol (0.8 = 16 m) stays well under the
+  // route-follower's waypoint-advance radius (arr = 0.03*span m) so a vehicle never
+  // parks at an intermediate waypoint.
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
   cfg.veh.dt = 0.06f;
-  cfg.veh.vmax = 0.35f;
+  cfg.veh.vmax = 0.9f;
   cfg.freeze_sense = true; // the vehicles know the city map (prior == truth)
   cfg.range_m = 200.0;
   cfg.n_rays = 200;
-  cfg.reach_tol = 0.06f; // ~90 m arrive radius (NOT 1.2 — that is the whole map)
+  cfg.reach_tol = 0.8f;
 
   std::vector<int> map_id(N);
   for (int i = 0; i < N; ++i)
@@ -460,6 +465,7 @@ int main(int argc, char **argv) {
   // the real wall clearance while following the waypoints.
   std::vector<std::uint8_t> planOcc = cvc::nav::inflate(occ.data(), ny, nx, 1);
   std::vector<Route> routes(N);
+  std::vector<std::size_t> curWp(N, static_cast<std::size_t>(-1)); // last waypoint retargeted to
   world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data()); // initial poses
   for (int i = 0; i < N; ++i) {
     const double gx = goal[2 * i] / sc + cfg.cx, gy = goal[2 * i + 1] / sc + cfg.cy;
@@ -480,16 +486,19 @@ int main(int argc, char **argv) {
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
       }
       if ((frame - act2) % 15 == 0)
-        for (int i = 0; i < N; ++i)
+        for (int i = 0; i < N; ++i) {
           routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
                                  tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1]);
+          curWp[i] = static_cast<std::size_t>(-1); // force a retarget onto the new route
+        }
     }
 
-    // Follow the route: aim each vehicle at its current waypoint, advancing on arrival;
-    // sim_world's reactive drive handles local avoidance between waypoints.
+    // Follow the route: aim each vehicle at its current waypoint, advancing on arrival.
+    // Retarget ONLY when the waypoint changes — retargeting every frame resets the
+    // carrot FSM's escape/tracking state and the vehicle never gets moving.
     for (int i = 0; i < N; ++i) {
       Route &rt = routes[i];
-      const double arr = 0.02 * span;
+      const double arr = 0.03 * span;
       while (rt.idx + 1 < rt.wp.size()) {
         const double dx = rt.wp[rt.idx][0] - pos[2 * i], dy = rt.wp[rt.idx][1] - pos[2 * i + 1];
         if (dx * dx + dy * dy < arr * arr)
@@ -497,9 +506,12 @@ int main(int argc, char **argv) {
         else
           break;
       }
-      float w2[2];
-      norm(rt.wp[rt.idx][0], rt.wp[rt.idx][1], w2);
-      world.retarget(i, w2[0], w2[1]);
+      if (rt.idx != curWp[i]) {
+        float w2[2];
+        norm(rt.wp[rt.idx][0], rt.wp[rt.idx][1], w2);
+        world.retarget(i, w2[0], w2[1]);
+        curWp[i] = rt.idx;
+      }
     }
 
     for (int s = 0; s < sub; ++s)
