@@ -98,7 +98,12 @@ public:
   const float *field_data() const { return field_.data(); }
 
   // Live-scene edits (for the threading layer): retarget agent i (normalized
-  // goal) keeping its escape state; stamp a decaying obstacle box (cell rect).
+  // goal) keeping its escape state; stamp a decaying obstacle blob (a centered
+  // radius over the cell rect, matching Swarm.add_obstacle) into the dynamic
+  // layer. NOTE: the dynamic layer is only composited into the planning surface
+  // on a SENSE tick, so add_obstacle takes effect only when freeze_sense == false
+  // (the fog path). Under freeze_sense == true (the static-map deployment path)
+  // it is inert — rebuild the field from a fresh occupancy to change a static map.
   void retarget(int i, float gx_n, float gy_n);
   void add_obstacle(int r0, int r1, int c0, int c1);
 

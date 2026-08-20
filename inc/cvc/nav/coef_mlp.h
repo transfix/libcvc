@@ -54,6 +54,10 @@ public:
   // CoefMLP bias-toward-a-known-good-basin trick; the raw out_bias is stored and
   // log(expm1(.)) is folded once at load.
   static constexpr std::uint32_t kFlagSoftplusLogExpm1 = 1u << 0;
+  // Max layer dimension the CPU forward() supports (its stack activation arrays).
+  // load()/from_layers reject a wider net at the boundary rather than overflowing.
+  // The CUDA drive (drive.cu d_mlp) has a tighter cap (64) it guards separately.
+  static constexpr int kMaxWidth = 256;
 
   // Load from a `.cvcnav` file / an in-memory blob. Throws std::runtime_error on
   // a bad magic, an unsupported format version, or a truncated/short buffer.

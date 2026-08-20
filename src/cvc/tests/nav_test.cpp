@@ -18,6 +18,7 @@
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <vector>
 #ifdef CVC_ENABLE_CUDA
 #include <cvc/nav/sim_world_cuda.h>
@@ -686,6 +687,20 @@ TEST(NavSimWorld, DefaultBiasedPolicyGivesTheBasisCoefficients) {
   EXPECT_NEAR(out[0], 1.0f, 1e-4f); // alpha
   EXPECT_NEAR(out[1], 3.0f, 1e-4f); // beta
   EXPECT_NEAR(out[2], 4.0f, 1e-4f); // gamma
+}
+
+TEST(NavSimWorld, CoefMlpRejectsTooWideLayer) {
+  // A net wider than kMaxWidth must be rejected at the boundary, not overflow the
+  // forward's fixed stack arrays (the CUDA drive has a tighter 64 cap it guards).
+  const int W = cvc::nav::coef_mlp::kMaxWidth + 1;
+  std::vector<int> rows = {W, 3}, cols = {5, W};
+  std::vector<std::uint32_t> act = {1, 0};
+  std::vector<std::vector<float>> w = {std::vector<float>((std::size_t)W * 5),
+                                       std::vector<float>((std::size_t)3 * W)};
+  std::vector<std::vector<float>> b = {std::vector<float>(W), std::vector<float>(3)};
+  std::vector<float> ob = {1.0f, 3.0f, 4.0f};
+  EXPECT_THROW(cvc::nav::coef_mlp::from_layers(5, 3, rows, cols, act, w, b, ob),
+               std::runtime_error);
 }
 
 #ifdef CVC_NAV_SHIPPED_WEIGHTS

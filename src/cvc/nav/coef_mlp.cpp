@@ -133,6 +133,8 @@ void coef_mlp::build_from_bytes(const std::uint8_t *p, std::size_t n) {
     L.act = take<std::uint32_t>(p, end);
     if (L.rows <= 0 || L.cols <= 0 || L.cols != prev)
       throw std::runtime_error("cvc::nav::coef_mlp: layer dims inconsistent with the chain");
+    if (L.rows > kMaxWidth || L.cols > kMaxWidth)
+      throw std::runtime_error("cvc::nav::coef_mlp: layer width exceeds kMaxWidth (256)");
     take_floats(p, end, L.w, static_cast<std::size_t>(L.rows) * L.cols);
     take_floats(p, end, L.b, static_cast<std::size_t>(L.rows));
     shape_act.push_back(static_cast<std::uint32_t>(L.rows));
@@ -212,6 +214,9 @@ coef_mlp coef_mlp::from_layers(int in, int out, const std::vector<int> &rows,
   for (int i = 0; i < num_layers; ++i) {
     if (rows[i] <= 0 || cols[i] <= 0 || cols[i] != prev)
       throw std::runtime_error("cvc::nav::coef_mlp::from_layers: layer dims inconsistent");
+    if (rows[i] > kMaxWidth || cols[i] > kMaxWidth)
+      throw std::runtime_error(
+          "cvc::nav::coef_mlp::from_layers: layer width exceeds kMaxWidth (256)");
     if (static_cast<int>(w[i].size()) != rows[i] * cols[i] ||
         static_cast<int>(b[i].size()) != rows[i])
       throw std::runtime_error("cvc::nav::coef_mlp::from_layers: weight size mismatch");
@@ -336,10 +341,10 @@ std::string coef_mlp::default_weights_path() {
 void coef_mlp::forward(const float *feats, int n, float *out, int num_threads) const {
   detail::parallel_for(n, num_threads, [&](int s) {
     // Hidden width is small (<= 64 for the shipped net); keep activations on the
-    // stack. If a future net exceeds this, bump the cap.
-    constexpr int kMaxW = 256;
-    float a[kMaxW];
-    float b[kMaxW];
+    // stack. load()/from_layers reject any layer wider than kMaxWidth, so these
+    // fixed arrays never overflow.
+    float a[kMaxWidth];
+    float b[kMaxWidth];
     const float *x = feats + static_cast<std::size_t>(s) * in_;
     for (int i = 0; i < in_; ++i)
       a[i] = x[i];

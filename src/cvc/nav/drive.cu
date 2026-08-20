@@ -305,6 +305,14 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   if (n <= 0)
     return;
   const coef_mlp::flat_layers fl = model.export_flat();
+  // The device MLP (d_mlp) keeps activations in float a[64]/b[64] — reject a net
+  // whose any layer is wider than that rather than overflowing device memory.
+  const int kDeviceMaxWidth = 64;
+  if (fl.in > kDeviceMaxWidth)
+    throw std::runtime_error("cvc::nav::drive_step_cuda: input width > 64 unsupported on GPU");
+  for (int L = 0; L < fl.num_layers; ++L)
+    if (fl.rows[L] > kDeviceMaxWidth || fl.cols[L] > kDeviceMaxWidth)
+      throw std::runtime_error("cvc::nav::drive_step_cuda: layer width > 64 unsupported on GPU");
   const size_t fsz = (size_t)f.H * f.W * 3 * sizeof(float);
   float *d_field, *d_o, *d_th, *d_sp, *d_car, *d_mc, *d_w, *d_ob;
   int *d_rows, *d_cols, *d_act;
