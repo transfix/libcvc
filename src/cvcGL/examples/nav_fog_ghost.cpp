@@ -1,10 +1,16 @@
 // nav_fog_ghost — the fog-of-war "ghost" story from GRL-SNAM, in 3-D. One vehicle
-// carries a STALE belief map that says a wall blocks its path; reality has no such
-// wall. It sets off detouring around the phantom, senses the space is clear, and
-// replans straight through. The belief is drawn as a live ground heatmap of the
-// agent's planning field (its own SDF), so you watch the ghost wall dissolve as the
-// sensor sweeps it — the belief-vs-truth idea the whole project is built around,
-// rendered with no Python, no libtorch (cvc::nav sim_world + cvcGL).
+// carries a STALE belief map with a phantom wall across its path that reality lacks.
+// The phantom is a zero-clearance trough in the agent's signed-distance field, so the
+// reactive drive's wall-barrier term (alpha) deflects its carrot AROUND empty space and
+// it sets off detouring. As it advances, its sensor ray-casts the TRUE map into its
+// belief: the phantom cells accrue "free" evidence, the occupied bit flips, the SDF is
+// rebuilt WITHOUT the ghost (the rebuild IS the replan), the barrier vanishes, and the
+// drive straightens through. The ground is textured with the agent's own planning field
+// (phi, the SDF clearance field — NOT the raw log-odds belief grid), so you watch the
+// ghost trough dissolve as the sensor sweeps it. This is the reactive CORE only: one
+// agent, fixed goal, driven by the SDF gradient alone — GRL-SNAM's ghost also layers a
+// BeliefRoutePlanner (A*) over a log-odds grid; here the field gradient carries the
+// detour. Belief-vs-truth, rendered with no Python, no libtorch (cvc::nav + cvcGL).
 //
 //   nav_fog_ghost --capture orbit --offscreen --frames 400 --out /tmp/ghost && \
 //   ffmpeg -framerate 30 -i /tmp/ghost/frame_%05d.png -c:v libx264 -pix_fmt yuv420p ghost.mp4
@@ -133,8 +139,12 @@ int main(int argc, char **argv) {
   };
   border(truth);
   prior = truth; // phantom wall lives only in the belief
-  for (int r = R / 4; r < 3 * R / 4; ++r)
-    prior[static_cast<std::size_t>(r) * C + C / 2] = 1; // vertical bar at mid-column
+  // size_t loop counter + index math: no signed-overflow UB for the optimizer to
+  // exploit, so -Waggressive-loop-optimizations stays quiet (grid is a runtime value).
+  const std::size_t wall_lo = static_cast<std::size_t>(R) / 4;
+  const std::size_t wall_hi = static_cast<std::size_t>(R) * 3 / 4;
+  for (std::size_t r = wall_lo; r < wall_hi; ++r)
+    prior[r * C + C / 2] = 1; // vertical bar at mid-column
 
   cvc::nav::sim_world::config cfg;
   cfg.rows = R;

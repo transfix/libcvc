@@ -1,10 +1,18 @@
-// nav_finale — the GRL-SNAM "finale" in 3-D on the real Austin bundle: 8 vehicles
-// enter blind from the west, rendezvous on a staging line (Act 1), then split into
-// pursuit packs that chase 4 moving targets (Act 2) — all on cvc::nav's sim_world,
-// no Python, no libtorch. The city occupancy is rasterized in C++ straight from the
-// bundle's buildings.glb (occupancy_from_model, the C++ building_occupancy). A 2-D
-// picture-in-picture minimap in the corner shows every agent's position and the line
-// to the target it is currently chasing (its predicted heading).
+// nav_finale — the GRL-SNAM "finale" in 3-D on the real Austin bundle: 8 vehicles that
+// hold the KNOWN city map (freeze_sense — no fog in the finale) drive from the west edge
+// to a rendezvous staging line (Act 1), then split into pursuit packs chasing 4 orbiting
+// targets (Act 2) — all on cvc::nav's sim_world, no Python, no libtorch. This is the
+// "global A* spine + learned local control" architecture on a real city: grid_nav::astar
+// (string-pulled via simplify) over a lightly-inflated occupancy gives each vehicle a
+// coarse route; between waypoints the SAME reactive stack drives — sample phi -> coef_mlp
+// (alpha,beta,gamma) -> carrot bicycle — supplying the true wall clearance the coarse A*
+// deliberately omits. retarget() fires ONLY when a waypoint index changes (retargeting
+// every frame would reset the carrot FSM's escape state and the vehicle would never move).
+// map_id[i]=i gives per-vehicle belief planes, but with no sensing they stay identical
+// copies of the known map (structure for future fog, behaviourally inert here). The city
+// occupancy is rasterized in C++ straight from the bundle's buildings.glb
+// (occupancy_from_model, the C++ building_occupancy). A 2-D picture-in-picture minimap in
+// the corner shows every agent's position and the line to the target it is chasing.
 //
 // The bundle (terrain.json + buildings.glb) is passed at runtime and never vendored:
 //   nav_finale --bundle /path/to/scenes/austin_south --capture fly --offscreen \

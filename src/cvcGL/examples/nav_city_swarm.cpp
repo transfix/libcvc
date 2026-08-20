@@ -1,9 +1,16 @@
-// nav_city_swarm — a cvcGL demo of the cvc::nav reactive swarm: N vehicles navigate
-// a procedural "city" (the same city_scene the trainer uses), rendered with no Python
-// and no libtorch. The whole swarm runs on a sim_thread off the render thread; agents
-// are ONE merged glyph mesh streamed via GeometryNode::updateVertices, so it stays
-// smooth into the thousands. Belief is shared / grouped / private (agents coloured by
-// their belief group). Interactive window, or offscreen capture -> PNG frames -> mp4.
+// nav_city_swarm — a cvcGL demo of the cvc::nav reactive swarm: N vehicles cross a
+// procedural "city" (the same city_scene the trainer learns on) toward per-agent goals
+// with NO global plan — pure local reaction, no Python, no libtorch. Each agent, each
+// tick: sample the signed-distance clearance field phi -> a tiny CoefMLP (coef_mlp.h,
+// 5->64->64->3 SiLU) emits (alpha,beta,gamma) = wall-barrier / goal-spring / damping ->
+// a kinematic bicycle steers toward a "carrot" on the goal bearing, deflected by the
+// barrier, with a bug-style wall-follow escape on a stall (the carrot FSM, drive.h).
+// The whole swarm runs on a sim_thread off the render thread; agents are ONE merged
+// glyph mesh streamed via GeometryNode::updateVertices, so it stays smooth into the
+// thousands. --belief shared|grouped|private picks how many log-odds belief planes the
+// fleet keeps (agents coloured by plane), but the modes only DIVERGE under --fog: with
+// sensing off every plane equals the known map, so grouped/private just recolour the
+// same trajectories. Interactive window, or offscreen capture -> PNG frames -> mp4.
 //
 //   nav_city_swarm --agents 1500 --belief grouped --capture orbit --offscreen \
 //                  --frames 300 --out /tmp/city && \
