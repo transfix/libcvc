@@ -256,3 +256,67 @@ TEST(NavCoefTrain, BakedPolicyRoundTripsThroughCvcnav) {
     EXPECT_NEAR(a[k], b[k], 1e-5f) << "coefficient " << k;
   EXPECT_EQ(baked.arch_hash(), reloaded.arch_hash());
 }
+
+#ifdef CVC_ENABLE_CUDA
+// The CUDA trainer's per-window loss + gradient must match the CPU trainer's,
+// float-equivalently, on the same params/scene/batch — the device backward is a
+// transcription of the same hand-written adjoints (the CPU gradcheck is the
+// ground truth; this shows the GPU reproduces it).
+TEST(NavCoefTrain, CudaGradientMatchesCpu) {
+  if (!cvc::nav::train_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  const training_scene sc = cvc::nav::city_scene(64);
+  train_config cfg;
+  cfg.n = 96;
+  cfg.hidden = 64;
+  cfg.window = 7;
+  coef_trainer tr(cfg, 4);
+  const int n = cfg.n, window = cfg.window;
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 21, o.data(), goal.data());
+
+  std::vector<float> gcpu, ggpu;
+  const double Lc = tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), n, window, &gcpu);
+  const double Lg = cvc::nav::loss_and_grad_cuda(sc, cfg, tr.params(), o.data(), v.data(),
+                                                 goal.data(), n, window, &ggpu);
+  ASSERT_EQ(gcpu.size(), ggpu.size());
+
+  // relative L2 difference of the two gradient vectors + loss agreement
+  double num = 0.0, den = 0.0, dot = 0.0, ng = 0.0, nc = 0.0;
+  for (size_t i = 0; i < gcpu.size(); ++i) {
+    num += (double)(gcpu[i] - ggpu[i]) * (gcpu[i] - ggpu[i]);
+    den += (double)gcpu[i] * gcpu[i];
+    dot += (double)gcpu[i] * ggpu[i];
+    ng += (double)ggpu[i] * ggpu[i];
+    nc += (double)gcpu[i] * gcpu[i];
+  }
+  const double rel = std::sqrt(num) / (std::sqrt(den) + 1e-12);
+  const double cos = dot / (std::sqrt(nc) * std::sqrt(ng) + 1e-12);
+  std::printf("[cuda-grad] Lcpu=%.6f Lgpu=%.6f rel=%.3e cos=%.6f\n", Lc, Lg, rel, cos);
+  EXPECT_NEAR(Lc, Lg, 1e-3 * (std::fabs(Lc) + 1e-3)) << "CUDA loss disagrees with CPU";
+  EXPECT_LT(rel, 5e-3) << "CUDA gradient disagrees with CPU";
+  EXPECT_GT(cos, 0.9999) << "CUDA gradient points a different way than CPU";
+}
+
+// The CUDA trainer end-to-end produces a policy that DRIVES the bicycle sim_world
+// (self-supervised, on the GPU) — the training analogue of the sim_world_cuda
+// deployment parity.
+TEST(NavCoefTrain, CudaTrainedPolicyDrives) {
+  if (!cvc::nav::train_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg;
+  cfg.n = 128;
+  cfg.hidden = 64;
+  cfg.horizon = 28;
+  cfg.window = 7;
+  cfg.steps = 150;
+  cfg.seed = 0;
+  cvc::nav::coef_mlp trained = cvc::nav::train_coef_mlp_cuda(sc, cfg, /*verbose=*/false);
+  const double reach = reach_rate(trained, sc, 256, 400, 5);
+  const double basin = reach_rate(cvc::nav::coef_mlp::default_biased(), sc, 256, 400, 5);
+  std::printf("[cuda-reach] trained=%.1f%%  basin=%.1f%%\n", 100 * reach, 100 * basin);
+  EXPECT_GT(reach, 0.5) << "CUDA-trained policy does not drive";
+  EXPECT_GT(reach, 0.9 * basin) << "CUDA training degraded the policy";
+}
+#endif

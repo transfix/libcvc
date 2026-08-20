@@ -141,6 +141,10 @@ public:
   void set_params(const std::vector<float> &p) { p_ = p; }
   int num_params() const { return static_cast<int>(p_.size()); }
 
+  // One Adam step (global-norm clip) from an externally-computed gradient — lets
+  // the CUDA trainer reuse the host optimizer with device-computed gradients.
+  void apply_grad(const std::vector<float> &grad) { adam_step(grad); }
+
   // (alpha, beta, gamma) for a feature batch (frozen forward) — reach eval / debug.
   // feat[n*5] row-major -> out[n*3].
   void coeffs(const float *feat, int n, float *out) const;
@@ -169,11 +173,14 @@ coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cf
                              bool verbose = false);
 bool train_cuda_available();
 
-// One-window loss+grad on the GPU (exposed for the CUDA-vs-CPU gradient test).
-// Same contract as coef_trainer::loss_and_grad; `params` is the flat param vector.
+// One-window loss+grad on the GPU (exposed for the CUDA-vs-CPU gradient test and
+// reused by train_coef_mlp_cuda). Same contract as coef_trainer::loss_and_grad;
+// `params` is the flat param vector; `o_out`/`v_out` (optional) receive the
+// window-final state. `cfg.hidden`/`w_coll` set the architecture / loss weight.
 double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
                           const std::vector<float> &params, const float *o, const float *v,
-                          const float *goal, int n, int window, std::vector<float> *grad);
+                          const float *goal, int n, int window, std::vector<float> *grad,
+                          float *o_out = nullptr, float *v_out = nullptr);
 
 } // namespace nav
 } // namespace cvc
