@@ -245,6 +245,8 @@ void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsi
     return;
   for (int dy = -rad; dy <= rad; ++dy)
     for (int dx = -rad; dx <= rad; ++dx) {
+      if (dx * dx + dy * dy > rad * rad)
+        continue; // an actual disc, not its bounding square
       const int px = cx + dx, py = cy + dy;
       if (px < 0 || py < 0 || px >= dw || py >= dh)
         continue;

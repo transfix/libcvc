@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <boost/program_options.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -173,6 +174,33 @@ Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
   rt.wp.push_back({gx, gy}); // always end at the true goal
   return rt;
 }
+// A small downward-pointing pyramid (apex at the origin, square base up at +h)
+// — the pursuit-target marker. A silhouette deliberately distinct from every
+// vehicle glyph, so a hovering target can't be mistaken for a ninth agent.
+cvc::geometry target_marker(double half, double h, const double rgb[3]) {
+  cvc::geometry g;
+  auto add = [&](double x, double y, double z) {
+    g.points().push_back({x, y, z});
+    g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+  };
+  add(0, 0, 0); // apex, pointing down at the street
+  add(-half, -half, h);
+  add(half, -half, h);
+  add(half, half, h);
+  add(-half, half, h);
+  using I = cvc::geometry::index_t;
+  auto tri = [&](int a, int b, int c) {
+    g.tris().push_back({static_cast<I>(a), static_cast<I>(b), static_cast<I>(c)});
+  };
+  tri(0, 1, 2);
+  tri(0, 2, 3);
+  tri(0, 3, 4);
+  tri(0, 4, 1);
+  tri(1, 3, 2); // base cap
+  tri(1, 4, 3);
+  return g;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -411,6 +439,31 @@ int main(int argc, char **argv) {
     agentNode->setDiffuse(0.8);
   }
 
+  // Pursuit-target markers (Act 2): a downward pyramid hovering over the streets,
+  // labelled T1..T4, in the hue of a vehicle that chases it. Without these, Act 2
+  // read as "the vehicles got lost" — the thing being chased was never drawn.
+  const double tgtHover = 0.05 * span, tgtHalf = 0.022 * span;
+  std::vector<std::shared_ptr<GeometryNode>> targetNodes(NT);
+  for (int k = 0; k < NT; ++k) {
+    const double rgb[3] = {color[3 * k], color[3 * k + 1], color[3 * k + 2]};
+    char nm[24];
+    std::snprintf(nm, sizeof nm, "target_%d", k);
+    auto node = std::dynamic_pointer_cast<GeometryNode>(
+        sg.addGraphics(nm, target_marker(tgtHalf, 1.6 * tgtHalf, rgb)));
+    if (node) {
+      node->setUseSingleColor(false);
+      node->setAmbient(0.85);
+      node->setDiffuse(0.6);
+      char lb[8];
+      std::snprintf(lb, sizeof lb, "T%d", k + 1);
+      node->setLabelText(lb);
+      node->setShowLabel(true);
+      node->setVisible(false); // targets exist only in Act 2
+      node->setPosition(cfg.cx, cfg.cy, tgtHover);
+    }
+    targetNodes[k] = node;
+  }
+
   sg.addDirectionalLight(-40, 58, 1.0, 0.96, 0.88, 1.1);
   sg.addDirectionalLight(150, 32, 0.5, 0.58, 0.72, 0.45);
 
@@ -472,6 +525,9 @@ int main(int argc, char **argv) {
   std::vector<float> tgt(2 * NT); // current target world positions (Act 2)
   double eye[3], focal[3];
   long frame = 0;
+  bool targetsShown = false;
+  const auto tw0 = std::chrono::steady_clock::now(); // interactive wall clock
+  double lastT = 0.0;
 
   // A* route spine: plan over a lightly-inflated occupancy (too much clearance seals
   // off dense downtown so A* can't reach a goal there); the reactive drive supplies
@@ -486,7 +542,15 @@ int main(int argc, char **argv) {
   }
 
   while (!view.windowClosed()) {
-    const double t = frame / fps;
+    double t, dt;
+    if (capturing) {
+      t = frame / fps;
+      dt = 1.0 / fps;
+    } else {
+      t = std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count();
+      dt = t - lastT;
+      lastT = t;
+    }
     const bool act2now = frame >= act2;
 
     // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one, with
@@ -498,6 +562,15 @@ int main(int argc, char **argv) {
         tgt[2 * k] = static_cast<float>(cfg.cx + rad * std::cos(a));
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
       }
+      if (!targetsShown) { // Act 2 opens: reveal the hovering target markers
+        for (auto &n : targetNodes)
+          if (n)
+            n->setVisible(true);
+        targetsShown = true;
+      }
+      for (int k = 0; k < NT; ++k)
+        if (targetNodes[k])
+          targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1], tgtHover);
       if ((frame - act2) % 15 == 0)
         for (int i = 0; i < N; ++i) {
           routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
@@ -538,10 +611,17 @@ int main(int argc, char **argv) {
     if (agentNode)
       agentNode->updateVertices(xyz);
 
-    // Continuous camera: a slow high fly that drifts across the map.
-    const double az = 0.4 + 0.25 * std::sin(0.12 * t);
-    navdemo::orbit_camera(bounds, 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
-    view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 30);
+    if (capturing) {
+      // Scripted capture camera: a slow high fly that drifts across the map.
+      const double az = 0.4 + 0.25 * std::sin(0.12 * t);
+      navdemo::orbit_camera(bounds, 0.05 * span, az, 42.0 * PI / 180.0, 1.9, eye, focal);
+      view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 30);
+    } else {
+      // Interactive: the CameraController owns the camera (Tab orbit/fly, WASD +
+      // mouse). The scripted path above must never stomp it — that killed all
+      // mouse input in v1.
+      cam.update(dt);
+    }
 
     if (capturing) {
       view.render();
