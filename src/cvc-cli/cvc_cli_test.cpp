@@ -1580,16 +1580,29 @@ TEST_F(CvcCliTest, BackprojectMissingAnglesFileFails) {
 // Image I/O: vol2img / img2vol / rgba-merge
 // ===========================================================================
 
+// vol2img/img2vol are backed by cvc::vol_to_slices / slices_to_volume, which
+// are compiled only under CVC_ENABLE_IMAGEMAGICK (they use the Magick++ API
+// directly, not cvc::image's native PNG path). The Windows CI build has
+// ImageMagick off, so the command throws "ImageMagick support not enabled" and
+// exits 1 — skip there rather than assert success. (Guarding on the capability,
+// not the platform, so it also skips on any future ImageMagick-off build.)
 TEST_F(CvcCliTest, Vol2ImgExportsSlices) {
+#ifndef CVC_ENABLE_IMAGEMAGICK
+  GTEST_SKIP() << "vol2img needs ImageMagick (CVC_ENABLE_IMAGEMAGICK); not built here";
+#else
   std::string dir = path("slices");
   auto r = cvc("vol2img " + test_vol + " " + dir);
   EXPECT_EQ(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("Exported 4 slices"));
   EXPECT_TRUE(fs::exists(dir + "/slice_00000.png"));
   EXPECT_TRUE(fs::exists(dir + "/slice_00003.png"));
+#endif
 }
 
 TEST_F(CvcCliTest, Img2VolImportsSlices) {
+#ifndef CVC_ENABLE_IMAGEMAGICK
+  GTEST_SKIP() << "img2vol needs ImageMagick (CVC_ENABLE_IMAGEMAGICK); not built here";
+#else
   std::string dir = path("slices_rt");
   ASSERT_EQ(0, cvc("vol2img " + test_vol + " " + dir).exit_code);
 
@@ -1598,6 +1611,7 @@ TEST_F(CvcCliTest, Img2VolImportsSlices) {
   EXPECT_EQ(0, r.exit_code);
   EXPECT_TRUE(fs::exists(out));
   EXPECT_NE(std::string::npos, r.output.find("Imported 2 images"));
+#endif
 }
 
 TEST_F(CvcCliTest, RgbaMergeVolumes) {
