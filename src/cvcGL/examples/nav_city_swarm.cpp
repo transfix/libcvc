@@ -114,8 +114,9 @@ int main(int argc, char **argv) {
                             "stop after N frames (0 = until closed)")(
       "fps", po::value<double>(&fps)->default_value(30.0),
       "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
-      "capture", po::value<std::string>(&capture)->default_value("orbit"),
-      "none | orbit | fly")("width", po::value<int>(&width)->default_value(1280))(
+      "capture", po::value<std::string>(&capture)->default_value("none"),
+      "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"),
       "PNG frame directory")("png", po::value<std::string>(&png), "write a single final PNG here");
@@ -130,7 +131,11 @@ int main(int argc, char **argv) {
   const bool capturing = (capture != "none");
   if (capturing) {
     offscreen = true;
+    if (frames <= 0)
+      frames = 600; // a capture must end — 0 would render offscreen forever, looking hung
     std::filesystem::create_directories(out);
+    std::printf("nav_city_swarm: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
+                capture.c_str(), out.c_str());
   }
 
   // Ortho 2-D reads cleanest flat: force shadows off and a straight top-down camera.

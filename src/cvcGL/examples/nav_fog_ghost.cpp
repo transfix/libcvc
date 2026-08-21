@@ -108,8 +108,9 @@ int main(int argc, char **argv) {
                                                   po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))(
       "hz", po::value<double>(&hz)->default_value(60.0),
-      "sim tick rate")("capture", po::value<std::string>(&capture)->default_value("orbit"),
-                       "none | orbit | fly")("width", po::value<int>(&width)->default_value(1280))(
+      "sim tick rate")("capture", po::value<std::string>(&capture)->default_value("none"),
+                       "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
                                                                     po::value<std::string>(&png));
@@ -123,7 +124,11 @@ int main(int argc, char **argv) {
   const bool capturing = (capture != "none");
   if (capturing) {
     offscreen = true;
+    if (frames <= 0)
+      frames = 600; // a capture must end — 0 would render offscreen forever, looking hung
     std::filesystem::create_directories(out);
+    std::printf("nav_fog_ghost: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
+                capture.c_str(), out.c_str());
   }
   if (ortho)
     no_shadows = true;
@@ -261,6 +266,7 @@ int main(int argc, char **argv) {
   std::vector<float> pos(2), head(1), spd(1);
   std::vector<int> md(1);
   std::vector<std::uint8_t> rch(1);
+  bool reached_note = false;
   const int sub = std::max(1, static_cast<int>(hz / std::max(1.0, fps)));
 
   while (!view.windowClosed()) {
@@ -314,10 +320,15 @@ int main(int argc, char **argv) {
 #endif
     ++frame;
 #ifndef __EMSCRIPTEN__
-    if (rch[0] && frame > 30) // reached the goal — hold a beat then stop
+    if (capturing && rch[0] && frame > 30) // reached — hold a beat, then end the capture
       break;
     if (frames > 0 && frame >= frames)
       break;
+    if (rch[0] && !reached_note) { // interactive: announce, keep the window open
+      std::printf("nav_fog_ghost: goal reached — ghost wall dissolved. Window stays open "
+                  "(close it to exit).\n");
+      reached_note = true;
+    }
 #endif
     // Browser build loops forever (the agent parks at the goal); the camera stays live.
   }
