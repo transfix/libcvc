@@ -3,13 +3,18 @@
 // (Geom3DParser, RawivParser) and DistanceTransform construction + geometric
 // predicates.
 //
-// NOTE: cvc/core/app.h must be included before the SDF v2 headers because
-// reg3data.h defines an error() macro that conflicts with cvc headers.
-#include "DistanceTransform.h" // pulls in FaceVertSet3D.h, reg3data.h, RawivParser.h
-#include "Geom3DParser.h"
-#include "bufferedio.h"
-#include "mtxlib.h"
-
+// Include order matters here, and is enforced against clang-format. reg3data.h
+// (pulled in by DistanceTransform.h) defines a function-like macro `error(x)`.
+// boost/parameter/parameters.hpp — reached transitively through cvc/core/app.h
+// and gtest via boost.signals2 — contains a bare `error();` call, which that
+// macro clobbers into a syntax error. So the boost-pulling headers must be
+// parsed BEFORE the SDF v2 headers define the macro.
+//
+// The repo .clang-format is IncludeBlocks:Regroup with quoted includes sorted
+// ahead of angle-bracket ones, so it would hoist the SDF headers above the
+// cvc/boost includes and re-break the build — unless a non-include line splits
+// them into separate, individually-sorted blocks. The #undef barriers below do
+// exactly that (and are correct on their own merits). Do not merge these blocks.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +22,19 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
+
+#ifdef error
+#undef error // no-op here; keeps this block separate from the SDF block below
+#endif
+
+#include "DistanceTransform.h" // pulls in FaceVertSet3D.h, reg3data.h, RawivParser.h
+#include "Geom3DParser.h"
+#include "bufferedio.h"
+#include "mtxlib.h"
+
+#ifdef error
+#undef error // reg3data.h's error(x) macro must not leak into the test body
+#endif
 
 namespace {
 
