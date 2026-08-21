@@ -11,8 +11,9 @@
 
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal.h asserts it)
 #include <imgui.h>
-#include <map>
+#include <imgui_internal.h> // ImHashStr: stable per-path key into the context's storage
 #include <stdexcept>
 
 namespace cvc {
@@ -44,16 +45,30 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
   }
 }
 
-// Per-path edit cache for continuous widgets. Keyed by path so two widgets on
-// the same path stay consistent; entries are tiny and bounded by the UI's size.
-template <typename T> T &cache_for(const std::string &path, const T &seed, bool active) {
-  static std::map<std::string, T> cache;
-  auto it = cache.find(path);
-  if (it == cache.end())
-    it = cache.emplace(path, seed).first;
-  else if (!active)
-    it->second = seed; // not being dragged: follow state (scripts can move it)
-  return it->second;
+// Per-path edit cache for continuous widgets, held in the ImGui CONTEXT's own
+// storage (ImGui::GetStateStorage) rather than a file-static map: a static would
+// be a process-wide singleton shared by every viewer and every ImGui context,
+// and it would outlive them. This lives and dies with the context that owns the
+// widget, and two viewers cannot collide.
+//
+// The cache holds the in-progress edit; while the widget is NOT being dragged it
+// follows state, so an external write (script, config, replicated peer) moves
+// the widget. Returns a pointer into ImGui's storage, stable for the frame.
+float *cache_float(const std::string &path, float seed, bool active) {
+  ImGuiStorage *store = ImGui::GetStateStorage();
+  const ImGuiID key = ImHashStr(path.c_str(), path.size());
+  float *slot = store->GetFloatRef(key, seed);
+  if (!active)
+    *slot = seed;
+  return slot;
+}
+int *cache_int(const std::string &path, int seed, bool active) {
+  ImGuiStorage *store = ImGui::GetStateStorage();
+  const ImGuiID key = ImHashStr(path.c_str(), path.size());
+  int *slot = store->GetIntRef(key, seed);
+  if (!active)
+    *slot = seed;
+  return slot;
 }
 
 } // namespace
@@ -61,7 +76,7 @@ template <typename T> T &cache_for(const std::string &path, const T &seed, bool 
 bool SliderDouble(cvc::app &ctx, const char *label, const std::string &path, double lo, double hi,
                   double def, const char *fmt) {
   const double cur = read_or_seed<double>(ctx, path, def);
-  float &v = cache_for<float>(path, static_cast<float>(cur), ImGui::IsAnyItemActive());
+  float &v = *cache_float(path, static_cast<float>(cur), ImGui::IsAnyItemActive());
   const bool changed =
       ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
   if (ImGui::IsItemDeactivatedAfterEdit())
@@ -72,7 +87,7 @@ bool SliderDouble(cvc::app &ctx, const char *label, const std::string &path, dou
 bool DragDouble(cvc::app &ctx, const char *label, const std::string &path, double speed, double def,
                 const char *fmt) {
   const double cur = read_or_seed<double>(ctx, path, def);
-  float &v = cache_for<float>(path, static_cast<float>(cur), ImGui::IsAnyItemActive());
+  float &v = *cache_float(path, static_cast<float>(cur), ImGui::IsAnyItemActive());
   const bool changed = ImGui::DragFloat(label, &v, static_cast<float>(speed), 0.0f, 0.0f, fmt);
   if (ImGui::IsItemDeactivatedAfterEdit())
     write<double>(ctx, path, v);
@@ -81,7 +96,7 @@ bool DragDouble(cvc::app &ctx, const char *label, const std::string &path, doubl
 
 bool SliderInt(cvc::app &ctx, const char *label, const std::string &path, int lo, int hi, int def) {
   const int cur = read_or_seed<int>(ctx, path, def);
-  int &v = cache_for<int>(path, cur, ImGui::IsAnyItemActive());
+  int &v = *cache_int(path, cur, ImGui::IsAnyItemActive());
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
   if (ImGui::IsItemDeactivatedAfterEdit())
     write<int>(ctx, path, v);
