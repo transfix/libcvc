@@ -32,6 +32,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -474,6 +475,8 @@ int main(int argc, char **argv) {
   // ---------------- ImGui control panel -------------------------------------
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  // Phones have no mouse: pinch = zoom, two-finger drag = pan/turn.
+  cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
   bool uiPaused = false, uiRestart = false, ui2D = ortho, uiCaptions = true;
@@ -552,6 +555,7 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
+    touch.update(); // apply any pinch/two-finger gesture from this frame
 
 #ifdef CVC_ENABLE_IMGUI
     // ---- apply UI actions ---------------------------------------------------

@@ -158,8 +158,42 @@ public:
       m_controller->mouseWheel(-1.0);
   }
 
+  // ---- multi-touch gestures (desktop touchscreens) -------------------------
+  // vtkInteractorStyle declares these as EMPTY virtuals and only
+  // vtkInteractorStyleMultiTouchCamera overrides them, so without these a
+  // recognized pinch is silently dropped. VTK's recognizer reports an ABSOLUTE
+  // scale relative to the gesture start, so convert to relative steps.
+  // (In the browser VTK's recognizer never fires — its wasm interactor mis-feeds
+  // multi-touch — which is what cvc::gl::TouchGestures exists to work around.)
+  void OnStartPinch() override {
+    if (this->Interactor)
+      m_lastScale = this->Interactor->GetScale();
+  }
+  void OnPinch() override {
+    if (!m_controller || !this->Interactor)
+      return;
+    const double s = this->Interactor->GetScale();
+    if (s > 0.0 && m_lastScale > 0.0 && std::abs(s - m_lastScale) > 1e-6) {
+      m_controller->mouseWheel(4.0 * std::log2(s / m_lastScale));
+      m_lastScale = s;
+    }
+  }
+  void OnEndPinch() override { m_lastScale = 1.0; }
+  void OnPan() override {
+    if (!m_controller || !this->Interactor)
+      return;
+    double *t = this->Interactor->GetTranslation();
+    double *lt = this->Interactor->GetLastTranslation();
+    if (!t || !lt)
+      return;
+    m_controller->beginDrag();
+    m_controller->mouseLook(static_cast<int>(t[0] - lt[0]), static_cast<int>(t[1] - lt[1]));
+    m_controller->endDrag();
+  }
+
 private:
   cvc::gl::CameraController *m_controller = nullptr;
+  double m_lastScale = 1.0; // pinch: VTK reports absolute scale, we need relative
 };
 vtkStandardNewMacro(CvcCameraInteractorStyle);
 

@@ -38,6 +38,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -1212,6 +1213,8 @@ int main(int argc, char **argv) {
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  // Phones have no mouse: pinch = zoom, two-finger drag = pan/turn.
+  cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
   bool uiShadows = shadows;
@@ -1341,6 +1344,7 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
+    touch.update(); // apply any pinch/two-finger gesture from this frame
     // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
     // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
     // sway is imperceptibly stepped at that cadence and it roughly halves the wind's

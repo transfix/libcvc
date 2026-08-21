@@ -52,7 +52,7 @@
 <body>
 <header>
   <h1>cvcGL &middot; lsystem_forest</h1>
-  <span class="keys"><b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
+  <span class="keys"><b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
     <b>WASD</b> + mouse fly &middot; <b>F</b> fps &middot; <b>Esc</b> release pointer</span>
 </header>
 <div id="stage">
@@ -64,6 +64,21 @@
 </div>
 <footer><span id="stdout"></span><span id="stderr"></span></footer>
 <script>
+  // Fullscreen has to be requested from a real user-gesture handler on the
+  // DOM side: the wasm app drains its events inside requestAnimationFrame, so
+  // calling emscripten_request_fullscreen from there fails the browser's
+  // transient-activation check. Target the WRAPPER, not the canvas, so VTK's
+  // own canvas sizing keeps working, and nudge a resize when the state flips.
+  document.getElementById('fs').addEventListener('click', () => {
+    const el = document.getElementById('canvas-wrap');
+    if (!document.fullscreenElement)
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    else
+      document.exitFullscreen();
+  });
+  document.addEventListener('fullscreenchange',
+                            () => setTimeout(() => window.dispatchEvent(new Event('resize')), 60));
+
   const statusEl = document.getElementById('status');
   const stdoutEl = document.getElementById('stdout');
   const stderrEl = document.getElementById('stderr');
