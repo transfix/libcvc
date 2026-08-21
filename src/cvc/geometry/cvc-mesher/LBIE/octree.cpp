@@ -2577,7 +2577,34 @@ void Octree::func_val(geoframe& geofrm, const VolMagick::Volume& propVol) {
 	int propDimX = propVol.XDim();
 	int propDimY = propVol.YDim();
 	int propDimZ = propVol.ZDim();
-	
+
+	// The octree grid (dim/span/minext/orig_vol/oct_depth) is only populated by
+	// the DUALLIB extraction path, via collapse()/traverse_qef()/mesh_extract().
+	// The LIBISOCONTOUR and FASTCONTOURING paths build the geoframe directly and
+	// leave the octree grid empty (dim[] == 0), so the resample-through-the-octree
+	// logic below cannot run: resizing the property volume to a 0x0x0 grid throws
+	// cvc::null_dimension and terminates the program. When the octree grid is
+	// unavailable, sample the property volume directly in its own world
+	// coordinate system instead -- this matches the values the octree path would
+	// produce and works for every extraction method.
+	if(dim[0] <= 0 || dim[1] <= 0 || dim[2] <= 0) {
+		geofrm.funcs.resize(geofrm.numverts);
+		const double xmin = propVol.XMin(), xmax = propVol.XMax();
+		const double ymin = propVol.YMin(), ymax = propVol.YMax();
+		const double zmin = propVol.ZMin(), zmax = propVol.ZMax();
+		for(i = 0; i < geofrm.numverts; i++) {
+			// Clamp to the property volume's bounding box before interpolating:
+			// cvc::volume::interpolate() throws index_out_of_bounds for
+			// coordinates outside the bbox, and isosurface vertices can land
+			// exactly on (or a hair past) the volume extent.
+			double wx = std::min(std::max(double(geofrm.verts[i][0]), xmin), xmax);
+			double wy = std::min(std::max(double(geofrm.verts[i][1]), ymin), ymax);
+			double wz = std::min(std::max(double(geofrm.verts[i][2]), zmin), zmax);
+			geofrm.funcs[i][0] = float(propVol.interpolate(wx, wy, wz));
+		}
+		return;
+	}
+
 	// If property volume dimensions don't match octree dimensions, resize it
 	VolMagick::Volume resizedPropVol(propVol);
 	const VolMagick::Volume* propVolPtr = &propVol;
@@ -4857,6 +4884,17 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	nv = geofrm.numverts;
 	ntet = geofrm.numtris/4;
 
+	// Joe-Liu / minimal-volume smoothing operates on tetrahedra, which this
+	// mesher stores as groups of four triangle rows (see AddTetra), so
+	// ntet == numtris/4. When there are no tetrahedra to improve -- an empty
+	// mesh (e.g. a dual-tet/layer extraction that yielded nothing) or a mesh of
+	// a different element type (a hexahedral mesh has numtris == 0) -- there is
+	// nothing to do. Bail out before the loops below: otherwise minAspIndx below
+	// is left uninitialized and geofrm.triangles[4*minAspIndx] reads out of
+	// bounds and crashes.
+	if(ntet == 0)
+		return;
+
 	aspectArr = new double[ntet];
 
 	sum0 = 0;	sum1 = 0;	sum2 = 0;	sum3 = 0;
@@ -5456,7 +5494,10 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 void Octree::optimization(geoframe& geofrm) {
 
 	int i, j, v0, v1, v2, v3, v4, v5, v6, v7;
-	int index, maxIndex, minAspIndx, hexaIndx, a_vert;
+	// minAspIndx/hexaIndx are only assigned inside the per-hex quality loop and
+	// only when a worst-element condition triggers; initialize them so they are
+	// never read uninitialized (e.g. a mesh whose hexes are all well-shaped).
+	int index, maxIndex, minAspIndx = 0, hexaIndx = 0, a_vert;
 	//int my_list[200], nlist;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8, temp_i, temp_j;
 	float grad[3], step;
@@ -5468,6 +5509,15 @@ void Octree::optimization(geoframe& geofrm) {
 	//	FILE *output;
 
 	maxIndex = 20;
+
+	// Optimization-based improvement operates on hexahedra, which this mesher
+	// stores as groups of six quad rows (numquads/6 hexes). When there are no
+	// hexahedra -- an empty mesh, or a mesh of a different element type (a
+	// tetrahedral mesh has numquads == 0) -- there is nothing to do. Bail out
+	// before the loops below: otherwise minAspIndx/hexaIndx stay unset and
+	// geofrm.quads[6*hexaIndx][minAspIndx] reads out of bounds and crashes.
+	if(geofrm.numquads/6 == 0)
+		return;
 
 	conditionArr=0;
 	conditionArr = new float[geofrm.numverts];
