@@ -33,9 +33,14 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 #include <cvc/image/image.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/nav/coef_mlp.h>
@@ -240,7 +245,9 @@ int main(int argc, char **argv) {
     std::printf("nav_finale: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
                 capture.c_str(), out.c_str());
   }
-  const bool minimap = !no_minimap;
+  bool minimap = !no_minimap;
+  bool orthoNow = false;
+  bool act2now = false; // hoisted: the UI panel reports the current act
 
   // 1. Occupancy + a mesh to render. Real bundle if given; else a synthetic city.
   navdemo::Bounds bounds;
@@ -615,6 +622,49 @@ int main(int argc, char **argv) {
   std::vector<float> tgt(2 * NT); // current target world positions (Act 2)
   double eye[3], focal[3];
   long frame = 0;
+  // ---------------- ImGui control panel -------------------------------------
+  cvc::gl::ImGuiOverlay ui(view);
+  ui.attachCamera(cam);
+  bool uiPaused = false, ui2D = false, uiSpines = true, uiMinimap = minimap, uiCards = true;
+  bool uiForceAct2 = false, uiRestartActs = false;
+#ifdef CVC_ENABLE_IMGUI
+  ui.setDrawCallback([&] {
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("Sim")) {
+        ImGui::MenuItem("Paused", nullptr, &uiPaused);
+        if (ImGui::MenuItem("Jump to Act 2 (pursuit)"))
+          uiForceAct2 = true;
+        if (ImGui::MenuItem("Replay from Act 1"))
+          uiRestartActs = true;
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("2-D map", nullptr, &ui2D);
+        ImGui::MenuItem("Route spines", nullptr, &uiSpines);
+        ImGui::MenuItem("Minimap", nullptr, &uiMinimap);
+        ImGui::MenuItem("Act cards", nullptr, &uiCards);
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Camera")) {
+        namespace u = cvc::gl::ui;
+        const std::string cp = sg.getStatePrefix() + ".viewers.main.camera.settings.";
+        u::SliderDouble(app, "Look sens", cp + "mouse_sensitivity", 0.02, 2.0, 0.25);
+        u::SliderDouble(app, "Move speed", cp + "move_speed", 1.0, 800.0, 60.0);
+        ImGui::EndMenu();
+      }
+      ImGui::EndMainMenuBar();
+    }
+    ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Finale controls");
+    ImGui::Text("%d vehicles | %s", N, usedBundle ? "real Austin" : "synthetic city");
+    ImGui::Text("%s | frame %ld", act2now ? "ACT 2 - pursuit" : "ACT 1 - rendezvous", frame);
+    if (!usedBundle)
+      ImGui::TextDisabled("pass --bundle for the real Austin map");
+    ImGui::End();
+  });
+#endif
+
   bool targetsShown = false;
   double actFlipT = 0.0; // wall/capture time at the act break (for the card)
   const auto tw0 = std::chrono::steady_clock::now(); // interactive wall clock
@@ -642,7 +692,45 @@ int main(int argc, char **argv) {
       dt = t - lastT;
       lastT = t;
     }
-    const bool act2now = frame >= act2;
+#ifdef CVC_ENABLE_IMGUI
+    if (uiForceAct2) { // jump straight to the pursuit act
+      uiForceAct2 = false;
+      if (frame < act2)
+        frame = act2;
+    }
+    if (uiRestartActs) { // replay the two-act arc from the top
+      uiRestartActs = false;
+      frame = 0;
+      targetsShown = false;
+      for (auto &n : targetNodes)
+        if (n)
+          n->setVisible(false);
+      if (stagingNode)
+        stagingNode->setVisible(true);
+      if (engageNode)
+        engageNode->setVisible(false);
+    }
+    for (int i = 0; i < N; ++i)
+      if (spineNodes[i])
+        spineNodes[i]->setVisible(uiSpines);
+    if (ui2D != orthoNow) {
+      orthoNow = ui2D;
+      if (orthoNow)
+        navdemo::set_ortho_topdown(view, bounds, 10.0, &cam);
+      else {
+        cam.setMode(CameraController::Mode::Orbit);
+        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+      }
+    }
+    actCard.setVisible(uiCards);
+    minimap = uiMinimap;
+    if (uiPaused) {
+      view.processUIEvents();
+      view.render();
+      continue;
+    }
+#endif
+    act2now = frame >= act2;
 
     // Act 2: 4 targets orbit the map centre; each pair of vehicles chases one, with
     // its A* route replanned to the moving target periodically.
