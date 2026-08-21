@@ -1301,17 +1301,17 @@ TEST_F(DistanceTransformTest, DistanceToTriangleAndRayIntersect) {
   DistanceTransform dt(ctx, cube, dim);
 
   // Plane-projection branch: point straight out from the left face interior
-  Point3f near;
-  double d = dt.distance2Triangle(Point3f(-2, 0, 0.5f), 8, near);
+  Point3f nearest;
+  double d = dt.distance2Triangle(Point3f(-2, 0, 0.5f), 8, nearest);
   EXPECT_NEAR(d, 1.0, 1e-5);
-  EXPECT_NEAR(near[0], -1.0f, kEps);
+  EXPECT_NEAR(nearest[0], -1.0f, kEps);
 
   // Corner branch: closest point is vertex (-1,-1,-1)
-  d = dt.distance2Triangle(Point3f(-2, -2, -2), 8, near);
+  d = dt.distance2Triangle(Point3f(-2, -2, -2), 8, nearest);
   EXPECT_NEAR(d, std::sqrt(3.0), 1e-5);
 
   // Edge branch: projection falls outside, closest point on the diagonal edge
-  d = dt.distance2Triangle(Point3f(-2, 0.5f, 0.2f), 8, near);
+  d = dt.distance2Triangle(Point3f(-2, 0.5f, 0.2f), 8, nearest);
   EXPECT_NEAR(d, std::sqrt(1.045), 1e-4);
 
   // Ray crossing the left face at t=0.5
