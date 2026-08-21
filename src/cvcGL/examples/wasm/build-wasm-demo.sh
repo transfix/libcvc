@@ -60,10 +60,11 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCVC_BUILD_EXAMPLES=ON \
     -DCVC_WASM_PTHREADS=${PTHREAD}
 
-cmake --build "${BUILD_DIR}" --target lsystem_forest -j "$(nproc)"
+cmake --build "${BUILD_DIR}" \
+    --target lsystem_forest nav_city_swarm nav_fog_ghost -j "$(nproc)"
 
 echo
-echo "Done: ${BUILD_DIR}/bin/lsystem_forest.{js,wasm}"
+echo "Done: ${BUILD_DIR}/bin/{lsystem_forest,nav_city_swarm,nav_fog_ghost}.{js,wasm}"
 if [[ "${PTHREAD}" == "ON" ]]; then
     echo "Threaded build — serve cross-origin isolated:"
     echo "  python3 $(dirname "${BASH_SOURCE[0]}")/serve.py -d ${BUILD_DIR}/bin 8822"

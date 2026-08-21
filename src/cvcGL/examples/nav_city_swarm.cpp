@@ -32,6 +32,10 @@
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
+#include <emscripten.h>
+#endif
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -238,8 +242,16 @@ int main(int argc, char **argv) {
               belief.c_str(), M, grid, fog ? "fog" : "static-map", shadows ? "on" : "off");
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
+#ifndef __EMSCRIPTEN__
   cvc::nav::sim_thread sim(world, hz);
   sim.start();
+#else
+  // Single-threaded browser build: no sim_thread worker (GitHub Pages can't send
+  // the COOP/COEP headers a pthreads wasm build needs). Step the world inline each
+  // frame and read its world-metre snapshot directly — the same call sim_thread makes.
+  std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
+  (void)hz;
+#endif
 
   const auto t0 = std::chrono::steady_clock::now();
   double last = 0.0;
@@ -257,6 +269,7 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
 
+#ifndef __EMSCRIPTEN__
     if (auto snap = sim.read()) {
       if (snap->n == N) {
         const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
@@ -264,6 +277,15 @@ int main(int argc, char **argv) {
           agentNode->updateVertices(xyz);
       }
     }
+#else
+    world.step(0);
+    world.snapshot(emPos.data(), emHead.data(), nullptr, nullptr, nullptr);
+    {
+      const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
+      if (agentNode)
+        agentNode->updateVertices(xyz);
+    }
+#endif
 
     if (ortho) {
       // fixed top-down map — camera set once, nothing to move
@@ -288,15 +310,25 @@ int main(int argc, char **argv) {
       view.render();
     }
 
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+    sg.publisher().flush(); // no worker thread — drain publishes at frame cadence
+#endif
+    emscripten_sleep(0); // yield to the browser event loop (Asyncify)
+#endif
     ++frame;
     if (frames > 0 && frame >= frames)
       break;
   }
 
+#ifndef __EMSCRIPTEN__
   sim.stop();
+#endif
   cam.detach();
   if (!png.empty())
     view.writePNG(png);
+#ifndef __EMSCRIPTEN__
   std::printf("nav_city_swarm: done (%ld frames, sim ticks=%ld)\n", frame, sim.ticks());
+#endif
   return 0;
 }

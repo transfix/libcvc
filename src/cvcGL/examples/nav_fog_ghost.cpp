@@ -32,6 +32,10 @@
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
+#ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
+#include <emscripten.h>
+#endif
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -302,11 +306,20 @@ int main(int argc, char **argv) {
     } else {
       view.render();
     }
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+    sg.publisher().flush(); // no worker thread — drain publishes at frame cadence
+#endif
+    emscripten_sleep(0); // yield to the browser event loop (Asyncify)
+#endif
     ++frame;
+#ifndef __EMSCRIPTEN__
     if (rch[0] && frame > 30) // reached the goal — hold a beat then stop
       break;
     if (frames > 0 && frame >= frames)
       break;
+#endif
+    // Browser build loops forever (the agent parks at the goal); the camera stays live.
   }
 
   cam.detach();
