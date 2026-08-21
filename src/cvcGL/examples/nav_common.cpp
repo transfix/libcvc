@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <vtkCamera.h>
 #include <vtkRenderer.h>
@@ -247,15 +248,21 @@ void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, 
   eye[2] = focal[2] + dist * std::sin(elevation);
 }
 
-void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin) {
+void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin,
+                       cvc::gl::CameraController *cam) {
+  if (cam) {
+    // Interactive 2-D map: pan + zoom only, no rotation.
+    cam->frameMap(b.cx(), b.cy(), 0.5 * (b.max_y - b.min_y) + margin);
+    return;
+  }
   // Eye straight above the centre, looking down -z, +y up.
   view.setCamera(b.cx(), b.cy(), 800.0, b.cx(), b.cy(), 0.0, 0.0, 1.0, 0.0, 30.0, 1.0, 4000.0);
   vtkRenderer *r = view.renderer();
   if (!r)
     return;
-  vtkCamera *cam = r->GetActiveCamera();
-  cam->ParallelProjectionOn();
-  cam->SetParallelScale(0.5 * (b.max_y - b.min_y) + margin);
+  vtkCamera *vcam = r->GetActiveCamera();
+  vcam->ParallelProjectionOn();
+  vcam->SetParallelScale(0.5 * (b.max_y - b.min_y) + margin);
 }
 
 void add_border(std::uint8_t *occ, int rows, int cols) {

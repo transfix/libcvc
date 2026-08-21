@@ -36,7 +36,11 @@
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/image/image.h>
@@ -1198,6 +1202,35 @@ int main(int argc, char **argv) {
   // FPS readout drawn by the scene itself ('f' toggles; state
   // forest.viewers.main.hud.*). Off for captures so frames stay clean.
   cvc::gl::FpsHud hud(view);
+
+  // Dear ImGui overlay — real widgets, same code path native and in the browser.
+  // Everything the callback touches lives in this scope; ImGui is immediate-mode,
+  // so there is no widget tree to keep in sync.
+#ifdef CVC_ENABLE_IMGUI
+  cvc::gl::ImGuiOverlay ui(view);
+  bool uiShadows = shadows;
+  float uiWind = 1.0f;
+  ui.setDrawCallback([&] {
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("Scene")) {
+        if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
+          sg.setShadowsEnabled(uiShadows);
+        ImGui::EndMenu();
+      }
+      ImGui::EndMainMenuBar();
+    }
+    ImGui::SetNextWindowPos(ImVec2(12, 34), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("lsystem_forest");
+    ImGui::Text("%zu trees", forest.size());
+    ImGui::SliderFloat("wind", &uiWind, 0.0f, 3.0f);
+    ImGui::Checkbox("shadows", &uiShadows);
+    ImGui::Separator();
+    ImGui::TextDisabled("drag me / click a widget --");
+    ImGui::TextDisabled("the camera stays put");
+    ImGui::End();
+  });
+#endif
   if (offscreen)
     hud.setEnabled(false);
 

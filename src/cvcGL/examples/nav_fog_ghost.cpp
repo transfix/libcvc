@@ -377,7 +377,7 @@ int main(int argc, char **argv) {
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
   if (ortho)
-    navdemo::set_ortho_topdown(view, bounds, 4.0);
+    navdemo::set_ortho_topdown(view, bounds, 4.0, capturing ? nullptr : &cam);
 
   // On-screen story: a lower-third caption band + a corner status line. Every
   // claim goes on screen, not stdout.

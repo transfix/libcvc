@@ -48,6 +48,37 @@ target_include_directories(cvcGL PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
+
+# ---------------------------------------------------------------------------
+# Dear ImGui overlay (optional): real menus/panels/widgets drawn inside the VTK
+# render, native AND WebAssembly. The cvcpkg imgui bundle ships no CMake config,
+# so locate it by header/lib like the other config-less deps, and compile the
+# stock imgui_impl_opengl3 backend (shipped as SOURCE in the bundle's
+# include/imgui/backends) straight into cvcGL — there is no ImGui platform
+# backend: ImGuiOverlay feeds ImGuiIO from the VTK interactor itself, which is
+# what lets the same code path work in the browser (VTK owns the canvas).
+option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
+if(CVC_ENABLE_IMGUI)
+  find_path(CVC_IMGUI_INCLUDE_DIR imgui.h PATH_SUFFIXES imgui)
+  find_library(CVC_IMGUI_LIBRARY NAMES imgui)
+  if(CVC_IMGUI_INCLUDE_DIR AND CVC_IMGUI_LIBRARY
+     AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
+    target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
+    # PUBLIC: demos/consumers write ImGui::* in their draw callbacks.
+    target_include_directories(cvcGL PUBLIC "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>")
+    target_link_libraries(cvcGL PUBLIC "${CVC_IMGUI_LIBRARY}")
+    target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
+    if(EMSCRIPTEN) # WebGL2 loader for the browser build
+      set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"
+                                  PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_OPENGL_ES3)
+    endif()
+    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (${CVC_IMGUI_LIBRARY})")
+  else()
+    set(CVC_ENABLE_IMGUI OFF)
+    message(STATUS "cvcGL: imgui not found -- ImGuiOverlay compiles to no-ops")
+  endif()
+endif()
+
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
 # X11 is used by CameraController for Quake-style pointer capture (warp the cursor

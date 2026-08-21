@@ -26,9 +26,14 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene
@@ -206,28 +211,36 @@ int main(int argc, char **argv) {
   cfg.veh.d_hat = ts.d_hat;
   cfg.veh.dt = ts.dt;
   cfg.veh.vmax = ts.vmax;
-  const bool fogOn = !no_fog; // fog by default: belief modes only MEAN something with sensing
-  (void)fog;                  // legacy switch, absorbed by the fog-on default
+  bool fogOn = !no_fog; // fog by default: belief modes only MEAN something with sensing
+  (void)fog;            // legacy switch, absorbed by the fog-on default
   cfg.freeze_sense = !fogOn;
   cfg.reach_tol = 0.8f;
 
-  auto mode = cvc::nav::sim_world::belief_mode::shared;
-  int clusters = 1;
-  if (belief == "private")
-    mode = cvc::nav::sim_world::belief_mode::private_belief;
-  else if (belief == "grouped") {
-    mode = cvc::nav::sim_world::belief_mode::clustered;
-    clusters = std::max(2, agents / 64);
-  }
-
-  cvc::nav::sim_world world = cvc::nav::sim_world::from_occupancy(
-      cfg, ts.occ.data(), cvc::nav::coef_mlp::default_biased(), agents, /*seed=*/7, mode, clusters);
-  const int N = world.size();
+  // The sim lives behind a pointer so the UI can REBUILD it: agent count and
+  // belief mode are baked into sim_world at construction, so "restart with 2000
+  // agents / private belief" means constructing a new world, not mutating one.
+  unsigned simSeed = 7;
+  auto build_world = [&](int nAgents, const std::string &beliefMode, bool fogOnNow, unsigned seed) {
+    auto m = cvc::nav::sim_world::belief_mode::shared;
+    int k = 1;
+    if (beliefMode == "private")
+      m = cvc::nav::sim_world::belief_mode::private_belief;
+    else if (beliefMode == "grouped") {
+      m = cvc::nav::sim_world::belief_mode::clustered;
+      k = std::max(2, nAgents / 64);
+    }
+    cfg.freeze_sense = !fogOnNow;
+    return std::make_unique<cvc::nav::sim_world>(cvc::nav::sim_world::from_occupancy(
+        cfg, ts.occ.data(), cvc::nav::coef_mlp::default_biased(), nAgents, seed, m, k));
+  };
+  auto worldPtr = build_world(agents, belief, !no_fog, simSeed);
+  cvc::nav::sim_world &world = *worldPtr;
+  int N = world.size();
 
   // 2. Per-agent glyph colours: by belief group (grouped/private) so the grouping is
   //    visible; shared -> a rainbow by index.
   const int *grp = world.agent_planes();
-  const int M = world.planes();
+  int M = world.planes();
   std::vector<float> color(3 * N);
   for (int i = 0; i < N; ++i) {
     const double hue = (M > 1) ? static_cast<double>(grp[i]) / M : static_cast<double>(i) / N;
@@ -342,7 +355,7 @@ int main(int argc, char **argv) {
 
   SceneRenderer view(sg, width, height, offscreen, "main");
   // Shadows must be enabled AFTER the renderer exists (they attach to its passes).
-  const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
+  bool shadows = !no_shadows && sg.setShadowsEnabled(true);
   if (shadows) {
     sg.setShadowResolution(2048);
     sg.setShadowUpdateInterval(capturing ? 1 : 3);
@@ -363,7 +376,8 @@ int main(int argc, char **argv) {
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
   if (ortho)
-    navdemo::set_ortho_topdown(view, bounds, 4.0); // fixed 2-D top-down map
+    navdemo::set_ortho_topdown(view, bounds, 4.0,
+                               capturing ? nullptr : &cam); // fixed 2-D top-down map
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
@@ -374,8 +388,8 @@ int main(int argc, char **argv) {
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
 #ifndef __EMSCRIPTEN__
-  cvc::nav::sim_thread sim(world, hz);
-  sim.start();
+  auto sim = std::make_unique<cvc::nav::sim_thread>(world, hz);
+  sim->start();
 #else
   // Single-threaded browser build: no sim_thread worker (GitHub Pages can't send
   // the COOP/COEP headers a pthreads wasm build needs). Step the world inline each
@@ -388,6 +402,77 @@ int main(int argc, char **argv) {
 
   std::vector<unsigned char> rgbBuf; // agent state-restyle scratch
   long arrived = 0;
+
+  // ---------------- ImGui control panel -------------------------------------
+  // Everything the demo can do, live: parameters, view mode, camera feel, and a
+  // real RESTART (agent count and belief mode are baked into sim_world at
+  // construction, so changing them rebuilds the world and the N-sized meshes).
+  cvc::gl::ImGuiOverlay ui(view);
+  ui.attachCamera(cam);
+  bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
+  int uiAgents = N;
+  std::string uiBelief = belief;
+  bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true;
+  double uiHz = hz;
+#ifdef CVC_ENABLE_IMGUI
+  ui.setDrawCallback([&] {
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("Sim")) {
+        ImGui::MenuItem("Paused", "Space", &uiPaused);
+        if (ImGui::MenuItem("Step one frame", nullptr, false, uiPaused))
+          uiStep = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Restart"))
+          uiRestart = true;
+        if (ImGui::MenuItem("Restart (new seed)")) {
+          ++simSeed;
+          uiRestart = true;
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("2-D map", nullptr, &ui2D);
+        ImGui::MenuItem("Trails", nullptr, &uiTrails);
+        ImGui::MenuItem("Goals", nullptr, &uiGoals);
+        ImGui::MenuItem("Shadows", nullptr, &uiShadows);
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Camera")) {
+        namespace u = cvc::gl::ui;
+        const std::string cp = sg.getStatePrefix() + ".viewers.main.camera.settings.";
+        u::SliderDouble(app, "Look sens", cp + "mouse_sensitivity", 0.02, 2.0, 0.25);
+        u::SliderDouble(app, "Move speed", cp + "move_speed", 1.0, 400.0, 40.0);
+        ImGui::EndMenu();
+      }
+      ImGui::EndMainMenuBar();
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Swarm controls");
+    ImGui::Text("%d agents | %ld arrived | %.0f fps", N, arrived, ImGui::GetIO().Framerate);
+    ImGui::Separator();
+    ImGui::SliderInt("agents", &uiAgents, 32, 4000);
+    const char *modes[] = {"shared", "grouped", "private"};
+    int bi = (uiBelief == "private") ? 2 : (uiBelief == "grouped" ? 1 : 0);
+    if (ImGui::Combo("belief", &bi, modes, 3))
+      uiBelief = modes[bi];
+    ImGui::Checkbox("fog (sensing)", &uiFog);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(
+          "Off = every belief plane equals the known map, so belief modes only recolour.");
+    {
+      float hzf = static_cast<float>(uiHz);
+      if (ImGui::SliderFloat("sim Hz", &hzf, 10.0f, 240.0f, "%.0f"))
+        uiHz = hzf;
+    }
+    if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
+      uiRestart = true;
+    ImGui::TextDisabled("agents / belief / fog need a restart");
+    ImGui::End();
+  });
+#endif
+
   const auto t0 = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
@@ -403,6 +488,92 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
+
+#ifdef CVC_ENABLE_IMGUI
+    // ---- apply UI actions ---------------------------------------------------
+    if (uiShadows != shadows) { // live toggles
+      shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
+      uiShadows = shadows;
+    }
+    if (trailNode)
+      trailNode->setVisible(uiTrails);
+    if (goalsNode)
+      goalsNode->setVisible(uiGoals);
+    if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
+      ortho = ui2D;
+      if (ortho)
+        navdemo::set_ortho_topdown(view, bounds, 4.0, &cam);
+      else {
+        cam.setMode(CameraController::Mode::Orbit);
+        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
+      }
+    }
+    if (uiRestart) {
+      // Agent count / belief mode / fog are constructor-time properties of
+      // sim_world, so a restart rebuilds the world and every N-sized mesh.
+      uiRestart = false;
+      sim->stop();
+      sim.reset(); // join before the world it borrows changes underneath it
+      fogOn = uiFog;
+      belief = uiBelief;
+      *worldPtr = std::move(*build_world(uiAgents, uiBelief, uiFog, simSeed));
+      N = world.size();
+      grp = world.agent_planes();
+      M = world.planes();
+      color.assign(3 * N, 0.0f);
+      for (int i = 0; i < N; ++i) {
+        const double hue = (M > 1) ? static_cast<double>(grp[i]) / M : static_cast<double>(i) / N;
+        hsv2rgb(hue, 0.62, 0.96, &color[3 * i]);
+      }
+      if (agentNode)
+        agentNode->setGeometry(glyphs.build(app, N, color.data(), gsz, 0.6));
+      { // goals + trails are N-sized too
+        std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
+        world.goals_world(gw.data());
+        const double gh = 0.006 * span, ght = 1.7 * gh;
+        const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
+                                        ght, gh, gh, ght, -gh, gh,  ght};
+        const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
+                                               0, 4, 1, 1, 3, 2, 1, 4, 3};
+        if (goalsNode) {
+          goalsNode->setGeometry(
+              goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.012 * span));
+          goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
+          goalsNode->updateVertices(goalXyz);
+        }
+        trailLast.assign(static_cast<std::size_t>(2) * N, 0.0f);
+        world.snapshot(trailLast.data(), nullptr, nullptr, nullptr, nullptr);
+        trailWr.assign(N, 0);
+        trailXyz.assign(static_cast<std::size_t>(3) * 2 * TRAIL_K * N, 0.0);
+        cvc::geometry tg;
+        for (int i = 0; i < N; ++i)
+          for (int k = 0; k < TRAIL_K; ++k)
+            for (int e = 0; e < 2; ++e) {
+              const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
+              tg.points().push_back({trailLast[2 * i], trailLast[2 * i + 1], 0.35});
+              tg.colors().push_back(
+                  {0.45 * color[3 * i], 0.45 * color[3 * i + 1], 0.45 * color[3 * i + 2]});
+              trailXyz[3 * v] = trailLast[2 * i];
+              trailXyz[3 * v + 1] = trailLast[2 * i + 1];
+              trailXyz[3 * v + 2] = 0.35;
+              if (e == 1)
+                tg.lines().push_back({static_cast<cvc::geometry::index_t>(v - 1),
+                                      static_cast<cvc::geometry::index_t>(v)});
+            }
+        if (trailNode)
+          trailNode->setGeometry(tg);
+      }
+      arrived = 0;
+      frame = 0;
+      sim = std::make_unique<cvc::nav::sim_thread>(world, uiHz);
+      sim->start();
+      std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
+                  belief.c_str(), fogOn ? "on" : "off", simSeed);
+    }
+    if (sim)
+      sim->set_paused(uiPaused && !uiStep);
+    uiStep = false;
+#endif
 
     // Trails: append a ring-buffer segment per agent that moved (every 3rd frame,
     // one buffer upload for the whole fleet).
@@ -493,7 +664,7 @@ int main(int argc, char **argv) {
     };
 
 #ifndef __EMSCRIPTEN__
-    if (auto snap = sim.read()) {
+    if (auto snap = sim->read()) {
       if (snap->n == N) {
         const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
         if (agentNode)
@@ -557,13 +728,14 @@ int main(int argc, char **argv) {
   }
 
 #ifndef __EMSCRIPTEN__
-  sim.stop();
+  if (sim)
+    sim->stop();
 #endif
   cam.detach();
   if (!png.empty())
     view.writePNG(png);
 #ifndef __EMSCRIPTEN__
-  std::printf("nav_city_swarm: done (%ld frames, sim ticks=%ld)\n", frame, sim.ticks());
+  std::printf("nav_city_swarm: done (%ld frames, sim ticks=%ld)\n", frame, sim ? sim->ticks() : 0L);
 #endif
   return 0;
 }

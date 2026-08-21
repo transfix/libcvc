@@ -503,7 +503,12 @@ void CameraController::setMode(Mode m) {
 
 // Tab toggles the two interactive modes; Track is entered explicitly (it needs a
 // target). From Track, Tab returns to Orbit.
-void CameraController::toggleMode() { setMode(mode() == Mode::Orbit ? Mode::Fly : Mode::Orbit); }
+void CameraController::toggleMode() {
+  // Map is a deliberate 2-D lock: Tab must not tumble the view out of it.
+  if (mode() == Mode::Map)
+    return;
+  setMode(mode() == Mode::Orbit ? Mode::Fly : Mode::Orbit);
+}
 
 void CameraController::setScene(SceneGraph *scene) { m_impl->scene = scene; }
 
@@ -524,6 +529,25 @@ void CameraController::getUpAxis(double &x, double &y, double &z) const {
   x = m_impl->up.x;
   y = m_impl->up.y;
   z = m_impl->up.z;
+}
+
+void CameraController::frameMap(double cx, double cy, double halfHeight) {
+  Impl &s = *m_impl;
+  s.mode = Mode::Map;
+  s.held.clear();
+  setPointerCapture(false);
+  if (s.camera) {
+    // Straight down the +z axis, +y up — a north-up map.
+    s.camera->SetPosition(cx, cy, 1000.0);
+    s.camera->SetFocalPoint(cx, cy, 0.0);
+    s.camera->SetViewUp(0.0, 1.0, 0.0);
+    s.camera->ParallelProjectionOn();
+    s.camera->SetParallelScale(std::max(1e-3, halfHeight));
+    if (s.renderer)
+      s.renderer->ResetCameraClippingRange();
+  }
+  syncConfigToState();
+  syncPoseToState();
 }
 
 void CameraController::setOrbitCenter(double x, double y, double z) {
@@ -642,6 +666,29 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
     // Recenter the OS pointer so continuous look never stops at the edge.
     if (s.pointerCapture)
       recenterPointer();
+  } else if (s.mode == Mode::Map) {
+    // 2-D map: drag PANS the view; rotation is deliberately unreachable.
+    if (s.dragging && s.camera) {
+      // Convert pixel motion to world units through the parallel scale so the
+      // grabbed point stays under the cursor at any zoom.
+      int *sz = s.window ? s.window->GetSize() : nullptr;
+      const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
+      const double perPx = 2.0 * s.camera->GetParallelScale() / vh;
+      double pos[3], foc[3];
+      s.camera->GetPosition(pos);
+      s.camera->GetFocalPoint(foc);
+      // Screen right/up in world space (Map looks down -z with +y up).
+      const double dx = -dxPixels * perPx, dy = dyPixels * perPx;
+      pos[0] += dx;
+      foc[0] += dx;
+      pos[1] += dy;
+      foc[1] += dy;
+      s.camera->SetPosition(pos);
+      s.camera->SetFocalPoint(foc);
+      if (s.renderer)
+        s.renderer->ResetCameraClippingRange();
+      syncPoseToState();
+    }
   } else if (s.dragging) {
     s.orbitAzimuth -= dxPixels * s.sensitivity;
     s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation + dpitch));
@@ -653,7 +700,14 @@ void CameraController::mouseWheel(double steps) {
   Impl &s = *m_impl;
   if (s.mode == Mode::Fly)
     s.moveSpeed = std::max(1e-4, s.moveSpeed * std::pow(1.25, steps));
-  else {
+  else if (s.mode == Mode::Map) {
+    if (s.camera) { // zoom = parallel scale, the only 2-D zoom that means anything
+      s.camera->SetParallelScale(
+          std::max(1e-3, s.camera->GetParallelScale() * std::pow(0.9, steps)));
+      if (s.renderer)
+        s.renderer->ResetCameraClippingRange();
+    }
+  } else {
     s.orbitDistance = std::max(1e-4, s.orbitDistance * std::pow(0.9, steps));
     applyToCamera();
   }
@@ -684,6 +738,8 @@ void CameraController::setPoseMirrorHz(double hz) {
   m_impl->poseMirrorHz = hz;
   syncConfigToState();
 }
+
+void CameraController::releaseHeldKeys() { m_impl->held.clear(); }
 
 void CameraController::setPointerCapture(bool on) {
   Impl &s = *m_impl;
