@@ -45,6 +45,7 @@
 #include "DistanceTransform.h"
 #include "mtxlib.h"
 
+#include <algorithm>
 #include <set>
 #include <iostream>
 
@@ -290,7 +291,7 @@ void DistanceTransform::transform()
 			}
 			
 			// Update progress every 5% of X iterations
-			if (++x_iteration % (total_x_iterations / 20) == 0) {
+			if (++x_iteration % std::max(1, total_x_iterations / 20) == 0) {
 							_ctx.threadProgress(0.02 + 0.28 * (float(x_iteration) / float(total_x_iterations)));
 			}
 		}
@@ -322,7 +323,7 @@ void DistanceTransform::transform()
 			}
 			
 			// Update progress every 5% of Y iterations
-			if (++y_iteration % (total_y_iterations / 20) == 0) {
+			if (++y_iteration % std::max(1, total_y_iterations / 20) == 0) {
 							_ctx.threadProgress(0.30 + 0.30 * (float(y_iteration) / float(total_y_iterations)));
 			}
 		}
@@ -355,7 +356,7 @@ void DistanceTransform::transform()
 			}
 			
 			// Update progress every 5% of Z iterations
-			if (++z_iteration % (total_z_iterations / 20) == 0) {
+			if (++z_iteration % std::max(1, total_z_iterations / 20) == 0) {
 							_ctx.threadProgress(0.60 + 0.15 * (float(z_iteration) / float(total_z_iterations)));
 			}
 		}
@@ -398,7 +399,7 @@ void DistanceTransform::transform()
 		}
 		
 		// Update progress every k slice
-		if (k % (total_near_iterations / 15) == 0) {
+		if (k % std::max(1, total_near_iterations / 15) == 0) {
 					_ctx.threadProgress(0.75 + 0.15 * (float(k) / float(total_near_iterations)));
 		}
 	}
@@ -435,7 +436,7 @@ void DistanceTransform::transform()
 		}
 		
 		// Update progress every k slice
-		if (k % (total_update_iterations / 10) == 0) {
+		if (k % std::max(1, total_update_iterations / 10) == 0) {
 					_ctx.threadProgress(0.90 + 0.10 * (float(k) / float(total_update_iterations)));
 		}
 	}
