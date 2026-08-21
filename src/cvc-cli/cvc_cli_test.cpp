@@ -1167,3 +1167,140 @@ TEST_F(CvcCliTest, Integration_ExecMultiFileScript) {
   // area = 3.14159 * 25 = 78.53975
   EXPECT_NE(std::string::npos, r.output.find("78."));
 }
+
+// ===========================================================================
+// Regression tests for reproducible cvc CLI crashes (root-caused in the
+// library / CLI, not worked around here).
+// ===========================================================================
+
+// Bug 1: `sdf -a v2` on a small grid divided by zero (SIGFPE) in the
+// DistanceTransform progress reporting: e.g. dim[2] < 15 made
+// `k % (total_near_iterations / 15)` a modulo-by-zero. Small dims must work.
+TEST_F(CvcCliTest, Regression_SdfV2SmallDimsNoFpe) {
+  for (const char *dims : {"2,2,2", "4,4,4", "8,8,8", "8,4,2"}) {
+    std::string out = path(std::string("sdf_small_") + dims + ".rawiv");
+    auto r = cvc("sdf -i " + test_geo + " -o " + out + " -d " + dims + " -a v2");
+    EXPECT_EQ(0, r.exit_code) << "dims " << dims << ":\n" << r.output;
+    EXPECT_TRUE(fs::exists(out)) << "dims " << dims;
+  }
+}
+
+// Bug 1 (same root cause), reached through the `bunny --volume` shortcut.
+TEST_F(CvcCliTest, Regression_BunnyVolumeV2SmallDimNoFpe) {
+  std::string out = path("bunny_small.rawiv");
+  auto r = cvc("bunny --volume -d 8 -a v2 -o " + out);
+  EXPECT_EQ(0, r.exit_code) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+}
+
+// Bug 2: `iso -m libisocontour -p <vol>` aborted with an uncaught
+// cvc::null_dimension. The libisocontour / fastcontouring extraction paths
+// leave the octree grid empty (dim[] == 0), so func_val() tried to resize the
+// property volume to a 0x0x0 grid. Property interpolation must now succeed by
+// sampling the property volume directly.
+TEST_F(CvcCliTest, Regression_IsoLibisocontourWithPropertyVolume) {
+  std::string out = path("iso_lic_prop.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -m libisocontour -p " + test_vol);
+  EXPECT_EQ(0, r.exit_code) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Property interpolation complete"));
+}
+
+TEST_F(CvcCliTest, Regression_IsoFastContouringWithPropertyVolume) {
+  std::string out = path("iso_fc_prop.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -m fastcontouring -p " + test_vol);
+  EXPECT_EQ(0, r.exit_code) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+}
+
+// The duallib path (which does build the octree grid) must keep working.
+TEST_F(CvcCliTest, Regression_IsoDuallibWithPropertyVolume) {
+  std::string out = path("iso_dl_prop.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -p " + test_vol);
+  EXPECT_EQ(0, r.exit_code) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+}
+
+// Bugs 3-6 (one shared root cause): the quality-improvement routines assumed a
+// specific element type and left an index uninitialized when their element loop
+// ran zero times, then dereferenced it. joe-liu/minimal-vol are tet-only
+// (crashed on hex meshes and on empty dual-tet meshes); optimization is hex-only
+// (crashed on tet meshes). Every mesh command must survive every --improve
+// method (unsupported/empty combinations are now a no-op).
+TEST_F(CvcCliTest, Regression_MeshImproveMethodsNoCrash) {
+  std::string sdf_vol = path("improve_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  const char *methods[] = {"geo-flow", "edge-contract", "joe-liu", "minimal-vol", "optimization"};
+  const char *cmds[] = {"tetrahedralize", "hexahedralize", "tetrahedralize2"};
+  for (const char *cmd : cmds) {
+    for (const char *m : methods) {
+      std::string out = path(std::string(cmd) + "_" + m + ".off");
+      auto r = cvc(std::string(cmd) + " -i " + sdf_vol + " -o " + out + " -v 0.0 --improve " + m +
+                   " -q 1");
+      EXPECT_EQ(0, r.exit_code) << cmd << " --improve " << m << ":\n" << r.output;
+      EXPECT_TRUE(fs::exists(out)) << cmd << " --improve " << m;
+    }
+  }
+}
+
+// Bug 6: layer-mesh produces a dual-tet mesh that is empty for isovalues that
+// enclose no layer; joe-liu/minimal-vol/optimization crashed on the empty mesh.
+TEST_F(CvcCliTest, Regression_LayerMeshImproveMethodsNoCrash) {
+  std::string sdf_vol = path("layer_improve_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  for (const char *m : {"geo-flow", "edge-contract", "joe-liu", "minimal-vol", "optimization"}) {
+    std::string out = path(std::string("layer_improve_") + m + ".off");
+    auto r = cvc("layer-mesh -i " + sdf_vol + " -o " + out +
+                 " --isovalue-outer 0.02 --isovalue-inner -0.02 --improve " + m + " -q 1");
+    EXPECT_EQ(0, r.exit_code) << "layer-mesh --improve " << m << ":\n" << r.output;
+  }
+}
+
+#if !defined(_WIN32)
+// Bug 7: `serve` without --node-id auto-generated "node-<ticks>" and
+// `cluster-status` generated "status-<ticks>", and the default --cluster-id was
+// "cvc-cluster" -- all contain '-' and were rejected by the C-identifier
+// validation in distributed_state_session. serve was therefore unusable without
+// an explicit --node-id, and cluster-status was permanently broken (its report
+// code never ran). The auto/default ids are now valid C identifiers.
+TEST_F(CvcCliTest, Regression_ServeAutoNodeIdIsValidIdentifier) {
+  std::string sock = "/tmp/cvc_b7serve_" + std::to_string(::getpid()) + ".sock";
+  // Run serve with no --node-id and the default --cluster-id; SIGINT after 3s.
+  auto r = run_cmd("timeout -s INT 3 \"" + cvc_bin + "\" serve -l " + sock +
+                   " -t ipc --pump-interval 50 --root-path \"\"");
+  // The auto-generated node id and default cluster id must be accepted:
+  // no validation error, and the startup banner shows valid identifiers.
+  EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("node_")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("cluster: cvc_cluster")) << r.output;
+  ::unlink(sock.c_str());
+}
+
+// Bug 7 (end-to-end): with valid default ids, cluster-status connects to a
+// running server and prints its report -- exercising the code that used to be
+// dead because join() always threw on the invalid "status-<ticks>" node id.
+TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
+  std::string base = "/tmp/cvc_b7cs_" + std::to_string(::getpid());
+  std::string srv_sock = base + "_srv.sock";
+  std::string cs_sock = base + "_cs.sock";
+
+  // Start the server in the background under `timeout` so it self-terminates
+  // even if the test aborts; no --node-id, default --cluster-id.
+  std::string bg = "timeout -s INT 15 \"" + cvc_bin + "\" serve -l " + srv_sock +
+                   " -t ipc --pump-interval 50 --root-path \"\" >/dev/null 2>&1 &";
+  ASSERT_EQ(0, std::system(bg.c_str()));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+  // cluster-status has no --node-id flag; it must generate a valid one itself.
+  auto r = run_cmd("timeout 15 \"" + cvc_bin + "\" cluster-status -l " + cs_sock + " -t ipc -s " +
+                   srv_sock);
+  EXPECT_EQ(0, r.exit_code) << r.output;
+  EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Session status")) << r.output;
+
+  ::unlink(srv_sock.c_str());
+  ::unlink(cs_sock.c_str());
+}
+#endif // !_WIN32

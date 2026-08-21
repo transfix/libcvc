@@ -70,10 +70,6 @@ static cvc::app &cvc_app() {
   return app;
 }
 
-static std::string type_to_string(cvc::data_type t) {
-  return std::string(cvc::data_type_strings[t]);
-}
-
 static cvc::data_type string_to_type(const std::string &s) {
   static const struct {
     const char *alias;
@@ -1239,7 +1235,7 @@ static int cmd_serve(int argc, char **argv) {
                      "show help")("listen,l", po::value<std::string>()->required(),
                                   "listen address (socket path for ipc, host:port for grpc)")(
       "transport,t", po::value<std::string>()->default_value("grpc"), "transport: ipc or grpc")(
-      "cluster-id", po::value<std::string>()->default_value("cvc-cluster"), "cluster identifier")(
+      "cluster-id", po::value<std::string>()->default_value("cvc_cluster"), "cluster identifier")(
       "node-id", po::value<std::string>(), "node identifier (default: random UUID)")(
       "seed,s", po::value<std::vector<std::string>>()->multitoken(),
       "peer endpoint(s) to connect to for clustering")("root-path",
@@ -1278,9 +1274,10 @@ static int cmd_serve(int argc, char **argv) {
   if (vm.count("node-id")) {
     cfg.node_id = vm["node-id"].as<std::string>();
   } else {
-    // Generate a simple unique node ID
+    // Generate a simple unique node ID. Must be a valid C identifier
+    // (state::isValidStateName forbids '-'), so use an underscore separator.
     std::ostringstream oss;
-    oss << "node-" << std::chrono::steady_clock::now().time_since_epoch().count();
+    oss << "node_" << std::chrono::steady_clock::now().time_since_epoch().count();
     cfg.node_id = oss.str();
   }
 
@@ -1565,7 +1562,7 @@ static int cmd_cluster_status(int argc, char **argv) {
   desc.add_options()("help,h", "show help")("listen,l", po::value<std::string>()->required(),
                                             "listen address for temporary session")(
       "transport,t", po::value<std::string>()->default_value("grpc"), "transport: ipc or grpc")(
-      "cluster-id", po::value<std::string>()->default_value("cvc-cluster"), "cluster identifier")(
+      "cluster-id", po::value<std::string>()->default_value("cvc_cluster"), "cluster identifier")(
       "seed,s", po::value<std::vector<std::string>>()->multitoken()->required(),
       "peer endpoint(s) to connect to")("auth-token", po::value<std::string>(), "bearer token");
 
@@ -1581,8 +1578,10 @@ static int cmd_cluster_status(int argc, char **argv) {
   cvc::distributed_state_config cfg;
   cfg.cluster_id = vm["cluster-id"].as<std::string>();
   {
+    // Node id must be a valid C identifier (state::isValidStateName forbids
+    // '-'), so use an underscore separator.
     std::ostringstream oss;
-    oss << "status-" << std::chrono::steady_clock::now().time_since_epoch().count();
+    oss << "status_" << std::chrono::steady_clock::now().time_since_epoch().count();
     cfg.node_id = oss.str();
   }
   cfg.listen_address = vm["listen"].as<std::string>();
