@@ -40,15 +40,33 @@
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
            display: flex; justify-content: space-between; color: #8b98a5;
            font-variant-numeric: tabular-nums; white-space: pre; }
+  /* --- touch / fullscreen affordances --- */
+  header .spacer { flex: 1; }
+  button.fsbtn { font: inherit; color: #cdd6e0; background: #1a2029;
+                 border: 1px solid #2c3540; border-radius: 6px;
+                 padding: 4px 11px; cursor: pointer; flex: none; }
+  button.fsbtn:hover { background: #222b36; border-color: #3a4653; }
+  /* Touch devices: the mouse/keyboard legend is noise, the gestures are not. */
+  .touch-only { display: none; }
+  @media (hover: none), (pointer: coarse) {
+    .touch-only { display: inline; }
+    .mouse-only { display: none; }
+    header { padding: 6px 10px; gap: 8px; flex-wrap: wrap; }
+    header h1 { font-size: 13px; }
+  }
+  /* The canvas fills the screen in fullscreen; the wrapper is what we promote. */
+  #canvas-wrap:fullscreen { background: #000; }
+  #canvas-wrap:fullscreen canvas#canvas { width: 100vw; height: 100vh; }
 </style>
 </head>
 <body>
 <header>
   <h1>cvcGL &middot; nav_fog_ghost</h1>
   <span class="keys">one agent detours a phantom wall, then senses it's clear &middot;
-    <b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
-    <b>WASD</b> + mouse fly &middot; <b>Esc</b> release pointer &middot;
+    <b class="mouse-only">click</b><span class="mouse-only"> to focus &middot; </span><b class="mouse-only">Tab</b><span class="mouse-only"> orbit/fly &middot; </span><b class="mouse-only">WASD</b><span class="mouse-only"> + mouse fly &middot; </span><b class="mouse-only">Esc</b><span class="mouse-only"> release pointer</span><b class="touch-only">pinch</b><span class="touch-only"> zoom &middot; </span><b class="touch-only">two fingers</b><span class="touch-only"> pan &middot; </span><b class="touch-only">tap</b><span class="touch-only"> the menu to change anything</span> &middot;
     <a href="../">all examples</a></span>
+  <span class="spacer"></span>
+  <button class="fsbtn" id="fsbtn" type="button">&#x26F6; Fullscreen</button>
 </header>
 <div id="stage">
   <div id="canvas-wrap"><canvas id="canvas" tabindex="0"></canvas></div>
@@ -124,6 +142,39 @@
         ' — try a hard reload (Ctrl+Shift+R)';
     }
   }
+
+  // ---- Fullscreen -----------------------------------------------------------
+  // Must originate from this DOM click handler: the wasm side runs inside
+  // requestAnimationFrame, where transient activation has already lapsed and
+  // requestFullscreen() is rejected. Promote the WRAPPER so anything else we
+  // overlay on the canvas comes along.
+  (function () {
+    const btn = document.getElementById('fsbtn');
+    const wrap = document.getElementById('canvas-wrap');
+    if (!btn || !wrap) return;
+    const full = () => document.fullscreenElement || document.webkitFullscreenElement;
+    btn.addEventListener('click', () => {
+      if (full()) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else {
+        const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+        // iOS Safari has no Element.requestFullscreen; the video-only
+        // webkitEnterFullscreen does not apply to a canvas. Say so rather than
+        // failing silently.
+        if (!req) { btn.textContent = 'Fullscreen n/a'; return; }
+        Promise.resolve(req.call(wrap)).catch(e => console.warn('fullscreen:', e));
+      }
+    });
+    const sync = () => {
+      btn.innerHTML = full() ? '&#x26F6; Exit fullscreen' : '&#x26F6; Fullscreen';
+      // VTK reads the canvas size on resize; entering fullscreen changes the
+      // CSS box without firing one on every browser.
+      setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
+    };
+    document.addEventListener('fullscreenchange', sync);
+    document.addEventListener('webkitfullscreenchange', sync);
+  })();
+
   boot();
 </script>
 </body>

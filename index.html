@@ -80,7 +80,11 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
     (grouped belief, 12 planes) with <em>no global plan</em> — goal pyramids that sink
     on arrival, breadcrumb trails accumulating the street-flow, fleet fog coverage
     painted on the ground, state-coloured agents (white = escaping, green = arrived)
-    and a live arrivals HUD. The <code>cvc::nav</code> runtime — no Python, no libtorch.</p>
+    and a live arrivals HUD. The <code>cvc::nav</code> runtime — no Python, no libtorch.
+    Every parameter is live in the on-screen menu — agent count, belief mode, fog,
+    sensor range — and <strong>Apply&nbsp;/&nbsp;Restart</strong> rebuilds the world so you
+    can watch shared belief beat private belief on the same city. Press
+    <strong>2</strong> for the top-down view.</p>
     <a class="btn" href="nav_city_swarm/">Run it →</a>
   </div>
 </div>
@@ -93,10 +97,44 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
     cell</em> as the sensor clears it; the ground paints honest epistemics (never-seen
     black, remembered dim, in-view lit, belief as an LED grid), a blue plan line bows
     around the phantom vs the yellow driven trail, and a caption arc narrates the
-    detour, the discovery, and the payoff.</p>
+    detour, the discovery, and the payoff. The menu switches between three limited-belief
+    scenarios — <em>ghost</em> (a stale map lies), <em>dynamic</em> (the world changes after
+    the plan is made) and <em>traffic</em> (other vehicles the map never had) — and restarts
+    the run in place.</p>
     <a class="btn" href="nav_fog_ghost/">Run it →</a>
   </div>
 </div>
+
+<h2>Controls, menus and phones</h2>
+<p>Every demo above carries a real UI, not a text overlay. It is
+<a href="https://github.com/ocornut/imgui">Dear ImGui</a> composited into VTK's own
+framebuffer by <code>cvc::gl::ImGuiOverlay</code>, with widgets
+(<code>cvc::gl::ui</code>) bound straight to <code>cvc::state</code> paths — so a
+slider, a script and a replicated peer all write the same state node, and the
+menus work identically native and in the browser.</p>
+<ul>
+  <li><strong>Desktop</strong> — <code>click</code> to focus, <code>Tab</code> to
+  swap orbit/fly, <code>WASD</code>+mouse to fly, <code>Esc</code> to release the
+  pointer. The overlay only takes the mouse when the cursor is actually over a
+  widget, so the camera never fights the UI.</li>
+  <li><strong>Phones and tablets</strong> — <strong>pinch</strong> to zoom and
+  <strong>two fingers</strong> to pan, via <code>cvc::gl::TouchGestures</code>.
+  Single touches are deliberately left alone, so tapping a menu still works.
+  (VTK's own wasm interactor mis-feeds multi-touch — it registers one pointer for
+  two fingers, so its gesture recognizer never fires — which is why this layer
+  exists.)</li>
+  <li><strong>Fullscreen</strong> — the button in the header. It has to be an HTML
+  button: the wasm side runs inside <code>requestAnimationFrame</code>, where the
+  browser's transient-activation window has already closed and a fullscreen
+  request is refused.</li>
+  <li><strong>2-D map views</strong> fit the whole map to your viewport and re-fit
+  when you rotate the phone or enter fullscreen — a parallel projection's scale is
+  a half-<em>height</em>, so fitting only that crops the sides of every portrait
+  screen.</li>
+  <li><strong>Copy and paste</strong> work in text fields
+  (<code>cvc::gl::clipboard</code>: X11 selections, NSPasteboard, Win32, and
+  <code>navigator.clipboard</code> in the browser).</li>
+</ul>
 
 <h2>How these builds work</h2>
 <p>Each example is a single self-contained <code>.wasm</code> (plus a small JS
