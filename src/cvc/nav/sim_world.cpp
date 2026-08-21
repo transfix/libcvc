@@ -318,13 +318,15 @@ void sim_world::step(int num_threads) {
   cp.reach_tol = cfg_.reach_tol;
   cp.a_max = cfg_.veh.a_max;
   cp.dt = cfg_.veh.dt;
-  std::vector<float> carrot(2 * n_);
+  // carrot_ is a member so renderers can visualize each agent's live steering
+  // target (carrots_world) — the FSM's output, not just its consequence.
+  carrot_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   carrot_step(o_.data(), goal_.data(), th_.data(), sp_.data(), phi.data(), nrm.data(), s, n_, cp,
-              carrot.data(), num_threads);
+              carrot_.data(), num_threads);
 
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   std::vector<float> minclr(n_);
-  drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot.data(), model_, n_, map_id_.data(),
+  drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
              cfg_.veh, minclr.data(), num_threads);
 
   // ── METRICS + REACHED/PARK (single-goal) ──
@@ -355,6 +357,23 @@ void sim_world::snapshot(float *pos_world, float *heading, float *speed, int *mo
       mode[i] = mode_[i];
     if (reached)
       reached[i] = reached_[i];
+  }
+}
+
+void sim_world::goals_world(float *out) const {
+  for (int i = 0; i < n_; ++i) {
+    out[2 * i] = goal_[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
+    out[2 * i + 1] = goal_[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
+  }
+}
+
+void sim_world::carrots_world(float *out) const {
+  // Before the first step() the FSM hasn't run; fall back to the goals so a
+  // renderer's first frame points somewhere sensible.
+  const std::vector<float> &src = carrot_.empty() ? goal_ : carrot_;
+  for (int i = 0; i < n_; ++i) {
+    out[2 * i] = src[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
+    out[2 * i + 1] = src[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
   }
 }
 
