@@ -35,8 +35,11 @@ struct Bounds {
 // Merged extruded-box mesh for every occupied cell (occ != 0), each box centred on
 // its cell over the [min,max] world rect and spanning z in [0, height]. One
 // geometry -> one GeometryNode (blocky "buildings"/walls). Colour = wall_rgb[3].
+// vary > 0 gives each 4-connected BUILDING a hashed height in
+// [1-vary, 1+vary] x height and a subtle tint (a city, not a maze); faces are
+// flat-shaded and interior faces between occupied neighbours are culled.
 cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, const Bounds &b,
-                                 double height, const double wall_rgb[3]);
+                                 double height, const double wall_rgb[3], double vary = 0.0);
 
 // A single flat ground quad over the world rect at height z, colour rgb — the
 // terrain the agents drive on. (Textured later for the fog belief map.)

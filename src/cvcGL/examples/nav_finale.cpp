@@ -357,7 +357,8 @@ int main(int argc, char **argv) {
   } else {
     const double wall_rgb[3] = {0.58, 0.58, 0.64};
     sg.addGraphics("buildings",
-                   navdemo::occupancy_to_walls(occ.data(), ny, nx, bounds, 0.05 * span, wall_rgb));
+                   navdemo::occupancy_to_walls(occ.data(), ny, nx, bounds, 0.05 * span, wall_rgb,
+                                                     /*vary=*/0.45));
   }
   const double ground_rgb[3] = {0.18, 0.21, 0.25};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(

@@ -36,7 +36,7 @@ void push_box(cvc::geometry &g, double x0, double y0, double z0, double x1, doub
 } // namespace
 
 cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, const Bounds &b,
-                                 double height, const double wall_rgb[3]) {
+                                 double height, const double wall_rgb[3], double vary) {
   cvc::geometry g;
   if (rows < 2 || cols < 2)
     return g;
@@ -44,14 +44,113 @@ cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, co
   // each box is one cell wide/tall so occupied neighbours touch into solid walls.
   const double dx = (b.max_x - b.min_x) / (cols - 1);
   const double dy = (b.max_y - b.min_y) / (rows - 1);
+  const auto at = [&](int r, int c) -> bool {
+    return r >= 0 && c >= 0 && r < rows && c < cols &&
+           occ[static_cast<std::size_t>(r) * cols + c] != 0;
+  };
+
+  // With vary > 0, label 4-connected components so each BUILDING (not cell) gets
+  // one hashed height/tint — adjacent cells always share a component, so culled
+  // interior faces can never open a gap between different heights.
+  std::vector<std::int32_t> comp(static_cast<std::size_t>(rows) * cols, -1);
+  std::vector<std::uint32_t> seed; // component -> its seed cell (hash key)
+  if (vary > 0.0) {
+    std::vector<std::uint32_t> stack;
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        const std::size_t i = static_cast<std::size_t>(r) * cols + c;
+        if (!occ[i] || comp[i] >= 0)
+          continue;
+        const std::int32_t id = static_cast<std::int32_t>(seed.size());
+        seed.push_back(static_cast<std::uint32_t>(i));
+        comp[i] = id;
+        stack.assign(1, static_cast<std::uint32_t>(i));
+        while (!stack.empty()) {
+          const std::uint32_t j = stack.back();
+          stack.pop_back();
+          const int jr = static_cast<int>(j) / cols, jc = static_cast<int>(j) % cols;
+          const int nb[4][2] = {{jr - 1, jc}, {jr + 1, jc}, {jr, jc - 1}, {jr, jc + 1}};
+          for (auto &n : nb) {
+            if (!at(n[0], n[1]))
+              continue;
+            const std::size_t k = static_cast<std::size_t>(n[0]) * cols + n[1];
+            if (comp[k] < 0) {
+              comp[k] = id;
+              stack.push_back(static_cast<std::uint32_t>(k));
+            }
+          }
+        }
+      }
+  }
+  const auto hash01 = [](std::uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return (x & 0xffffffU) / static_cast<double>(0x1000000U);
+  };
+
+  // Emit UNSHARED verts per face (flat per-face normals from ensureNormals — the
+  // crisp-edged city look, not corner-averaged mush), and only EXPOSED faces:
+  // tops always, sides only against free space (interior faces between occupied
+  // neighbours are invisible and z-fight), bottoms never.
+  auto face_quad = [&](const double p0[3], const double p1[3], const double p2[3],
+                       const double p3[3], const double rgb[3]) {
+    auto &pts = g.points();
+    auto &cols_ = g.colors();
+    const cvc::geometry::index_t base = static_cast<cvc::geometry::index_t>(pts.size());
+    for (const double *p : {p0, p1, p2, p3}) {
+      pts.push_back({p[0], p[1], p[2]});
+      cols_.push_back({rgb[0], rgb[1], rgb[2]});
+    }
+    g.tris().push_back({base, static_cast<cvc::geometry::index_t>(base + 1),
+                        static_cast<cvc::geometry::index_t>(base + 2)});
+    g.tris().push_back({base, static_cast<cvc::geometry::index_t>(base + 2),
+                        static_cast<cvc::geometry::index_t>(base + 3)});
+  };
+
   for (int r = 0; r < rows; ++r) {
     const double yc = b.min_y + static_cast<double>(r) / (rows - 1) * (b.max_y - b.min_y);
     for (int c = 0; c < cols; ++c) {
-      if (!occ[static_cast<std::size_t>(r) * cols + c])
+      const std::size_t i = static_cast<std::size_t>(r) * cols + c;
+      if (!occ[i])
         continue;
       const double xc = b.min_x + static_cast<double>(c) / (cols - 1) * (b.max_x - b.min_x);
-      push_box(g, xc - 0.5 * dx, yc - 0.5 * dy, 0.0, xc + 0.5 * dx, yc + 0.5 * dy, height,
-               wall_rgb);
+      const double x0 = xc - 0.5 * dx, x1 = xc + 0.5 * dx;
+      const double y0 = yc - 0.5 * dy, y1 = yc + 0.5 * dy;
+      double h = height;
+      double rgb[3] = {wall_rgb[0], wall_rgb[1], wall_rgb[2]};
+      if (vary > 0.0 && comp[i] >= 0) {
+        const double u = hash01(seed[comp[i]]);
+        h = height * (1.0 - vary + 2.0 * vary * u); // per-building height
+        const double tint = 0.9 + 0.2 * hash01(seed[comp[i]] * 2654435761U);
+        for (double &v : rgb)
+          v = std::min(1.0, v * tint); // subtle per-building tint
+      }
+      const double t0[3] = {x0, y0, h}, t1[3] = {x1, y0, h}, t2[3] = {x1, y1, h},
+                   t3[3] = {x0, y1, h};
+      face_quad(t0, t1, t2, t3, rgb); // top (+z)
+      if (!at(r, c - 1)) {            // west (-x)
+        const double p0[3] = {x0, y0, 0}, p1[3] = {x0, y0, h}, p2[3] = {x0, y1, h},
+                     p3[3] = {x0, y1, 0};
+        face_quad(p0, p1, p2, p3, rgb);
+      }
+      if (!at(r, c + 1)) { // east (+x)
+        const double p0[3] = {x1, y0, 0}, p1[3] = {x1, y1, 0}, p2[3] = {x1, y1, h},
+                     p3[3] = {x1, y0, h};
+        face_quad(p0, p1, p2, p3, rgb);
+      }
+      if (!at(r - 1, c)) { // south (-y)
+        const double p0[3] = {x0, y0, 0}, p1[3] = {x1, y0, 0}, p2[3] = {x1, y0, h},
+                     p3[3] = {x0, y0, h};
+        face_quad(p0, p1, p2, p3, rgb);
+      }
+      if (!at(r + 1, c)) { // north (+y)
+        const double p0[3] = {x0, y1, 0}, p1[3] = {x0, y1, h}, p2[3] = {x1, y1, h},
+                     p3[3] = {x1, y1, 0};
+        face_quad(p0, p1, p2, p3, rgb);
+      }
     }
   }
   return g;

@@ -29,6 +29,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/sim_thread.h>
@@ -90,6 +91,33 @@ void hsv2rgb(double h, double s, double v, float out[3]) {
   out[0] = static_cast<float>(r);
   out[1] = static_cast<float>(g);
   out[2] = static_cast<float>(b);
+}
+
+// Fleet fog coverage on the ground: the union over ALL belief planes of what the
+// fleet has seen. Three tiers — never-seen near-black, remembered dim, currently
+// in some agent's view lit. With --belief grouped/private the coverage visibly
+// grows per group: "coverage shared, knowledge private" becomes a picture.
+void fill_fleet_fog(unsigned char *px, const cvc::nav::sim_world &w, int rows, int cols) {
+  const int M = w.planes();
+  for (long i = 0; i < static_cast<long>(rows) * cols; ++i) {
+    bool vis = false, seen = false;
+    for (int m = 0; m < M && !vis; ++m) {
+      vis = vis || w.last_visible(m)[i];
+      seen = seen || w.ever_seen(m)[i];
+    }
+    if (!vis)
+      for (int m = 0; m < M && !seen; ++m)
+        seen = w.ever_seen(m)[i] != 0;
+    unsigned char *p = px + 4 * i;
+    if (vis) {
+      p[0] = 62; p[1] = 68; p[2] = 78;
+    } else if (seen) {
+      p[0] = 40; p[1] = 44; p[2] = 50;
+    } else {
+      p[0] = 20; p[1] = 22; p[2] = 26;
+    }
+    p[3] = 255;
+  }
 }
 } // namespace
 
@@ -202,17 +230,25 @@ int main(int argc, char **argv) {
 
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
   cvc::geometry walls =
-      navdemo::occupancy_to_walls(ts.occ.data(), ts.rows, ts.cols, bounds, wall_h, wall_rgb);
+      navdemo::occupancy_to_walls(ts.occ.data(), ts.rows, ts.cols, bounds, wall_h, wall_rgb,
+                                  /*vary=*/0.45);
   sg.addGraphics("walls", walls);
 
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
+  cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   if (groundNode) {
     groundNode->setUseSingleColor(true);
-    groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
     groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
     groundNode->setDiffuse(0.50);
+    if (fogOn) { // the ground IS the fleet's fog coverage
+      fill_fleet_fog(fogTex.data(), world, ts.rows, ts.cols);
+      groundNode->setColor(1, 1, 1);
+      groundNode->setTexture(fogTex, /*zeroCopy=*/true);
+    } else {
+      groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
+    }
   }
 
   navdemo::AgentGlyphs glyphs;
@@ -248,6 +284,45 @@ int main(int argc, char **argv) {
       goalsNode->setAmbient(0.85);
       goalsNode->setDiffuse(0.55);
       goalsNode->updateVertices(goalXyz);
+    }
+  }
+
+  // Breadcrumb TRAILS: one merged LINES mesh, K segments per agent in a ring
+  // buffer, streamed every 3rd frame — the emergent street-flow accumulates on
+  // screen instead of evaporating every frame. Trail colour = agent hue, dimmed.
+  const int TRAIL_K = 12;
+  std::shared_ptr<GeometryNode> trailNode;
+  std::vector<double> trailXyz;
+  std::vector<float> trailLast(static_cast<std::size_t>(2) * N);
+  std::vector<int> trailWr(N, 0);
+  {
+    std::vector<float> sp0(static_cast<std::size_t>(2) * N);
+    world.snapshot(sp0.data(), nullptr, nullptr, nullptr, nullptr); // start poses
+    trailLast = sp0;
+    cvc::geometry tg;
+    trailXyz.resize(static_cast<std::size_t>(3) * 2 * TRAIL_K * N);
+    for (int i = 0; i < N; ++i)
+      for (int k = 0; k < TRAIL_K; ++k)
+        for (int e = 0; e < 2; ++e) {
+          const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
+          tg.points().push_back({sp0[2 * i], sp0[2 * i + 1], 0.35});
+          tg.colors().push_back({0.45 * color[3 * i], 0.45 * color[3 * i + 1],
+                                 0.45 * color[3 * i + 2]});
+          trailXyz[3 * v] = sp0[2 * i];
+          trailXyz[3 * v + 1] = sp0[2 * i + 1];
+          trailXyz[3 * v + 2] = 0.35;
+          if (e == 1)
+            tg.lines().push_back({static_cast<cvc::geometry::index_t>(v - 1),
+                                  static_cast<cvc::geometry::index_t>(v)});
+        }
+    trailNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("trails", tg));
+    if (trailNode) {
+      trailNode->setRenderMode(GeometryRenderMode::LINES);
+      trailNode->setUseSingleColor(false);
+      trailNode->setLineWidth(1.5);
+      trailNode->setAmbient(1.0);
+      trailNode->setDiffuse(0.0);
+      trailNode->setDepthOffset(1.0);
     }
   }
 
@@ -315,6 +390,42 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
 
+    // Trails: append a ring-buffer segment per agent that moved (every 3rd frame,
+    // one buffer upload for the whole fleet).
+    auto trail_update = [&](const float *p) {
+      if (!trailNode)
+        return;
+      for (int i = 0; i < N; ++i) {
+        const float mdx = p[2 * i] - trailLast[2 * i], mdy = p[2 * i + 1] - trailLast[2 * i + 1];
+        const float m2 = mdx * mdx + mdy * mdy;
+        if (m2 < 1.0f)
+          continue;
+        if (m2 > 9.0f) { // too far since the last sample — a chord would cut a
+          trailLast[2 * i] = p[2 * i]; // corner THROUGH a building; restart instead
+          trailLast[2 * i + 1] = p[2 * i + 1];
+          continue;
+        }
+        const int k = trailWr[i];
+        const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2;
+        trailXyz[3 * v] = trailLast[2 * i];
+        trailXyz[3 * v + 1] = trailLast[2 * i + 1];
+        trailXyz[3 * v + 2] = 0.35;
+        trailXyz[3 * (v + 1)] = p[2 * i];
+        trailXyz[3 * (v + 1) + 1] = p[2 * i + 1];
+        trailXyz[3 * (v + 1) + 2] = 0.35;
+        trailLast[2 * i] = p[2 * i];
+        trailLast[2 * i + 1] = p[2 * i + 1];
+        trailWr[i] = (k + 1) % TRAIL_K;
+      }
+      trailNode->updateVertices(trailXyz);
+    };
+
+    // Fleet fog coverage repaint (sense cadence, not per frame).
+    if (fogOn && groundNode && frame % 15 == 0) {
+      fill_fleet_fog(fogTex.data(), world, ts.rows, ts.cols);
+      groundNode->texture_modified();
+    }
+
     // State restyle (every 2nd frame, one buffer upload): cruising = agent hue,
     // wall-follow escape = white flash, arrived = calm green. Stalls and
     // successes stop looking identical to "the demo broke".
@@ -370,6 +481,7 @@ int main(int argc, char **argv) {
         if (agentNode)
           agentNode->updateVertices(xyz);
         restyle(snap->mode.data(), snap->reached.data());
+        trail_update(snap->pos.data());
       }
     }
 #else
@@ -380,6 +492,7 @@ int main(int argc, char **argv) {
       if (agentNode)
         agentNode->updateVertices(xyz);
       restyle(emMd.data(), emRch.data());
+      trail_update(emPos.data());
     }
 #endif
 
