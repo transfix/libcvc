@@ -190,12 +190,29 @@ protected:
 
   RunResult cvc(const std::string &args) { return run_cmd("\"" + cvc_bin + "\" " + args); }
 
+  // The coreutils timeout(1) binary, resolved once. Linux ships `timeout`;
+  // macOS ships neither `timeout` nor `gtimeout` unless coreutils is brew-
+  // installed. Empty string => no such binary on PATH; the serve/cluster
+  // tests below GTEST_SKIP in that case (see SKIP_WITHOUT_TIMEOUT).
+  static const std::string &timeout_cmd() {
+    static const std::string cmd = [] {
+      if (std::system("command -v timeout >/dev/null 2>&1") == 0)
+        return std::string("timeout");
+      if (std::system("command -v gtimeout >/dev/null 2>&1") == 0)
+        return std::string("gtimeout");
+      return std::string();
+    }();
+    return cmd;
+  }
+
   // Run the cvc binary under coreutils timeout(1), delivering SIGINT after
   // `seconds`. Long-running commands (serve) install a SIGINT handler and
-  // shut down cleanly; timeout(1) then reports exit code 124.
+  // shut down cleanly; timeout(1) then reports exit code 124. Callers must
+  // guard with SKIP_WITHOUT_TIMEOUT() first — this asserts the binary exists.
   RunResult cvc_timeout(int seconds, const std::string &args) {
+    const std::string &to = timeout_cmd();
     std::ostringstream oss;
-    oss << "timeout -s INT " << seconds << " \"" << cvc_bin << "\" " << args;
+    oss << to << " -s INT " << seconds << " \"" << cvc_bin << "\" " << args;
     return run_cmd(oss.str());
   }
 
@@ -204,6 +221,17 @@ protected:
   // Path for AF_UNIX sockets — must stay short (see sock_dir above).
   std::string spath(const std::string &name) const { return sock_dir + "/" + name; }
 };
+
+// Serve/cluster lifecycle tests drive a long-running `cvc serve` under
+// coreutils timeout(1) (SIGINT after N seconds -> exit 124). Stock macOS
+// runners ship no timeout(1)/gtimeout, so skip those tests there rather
+// than fail with exit 127 (command not found). Must be used at test scope:
+// GTEST_SKIP only returns from the enclosing function.
+#define SKIP_WITHOUT_TIMEOUT()                                                                     \
+  do {                                                                                             \
+    if (timeout_cmd().empty())                                                                     \
+      GTEST_SKIP() << "coreutils timeout(1)/gtimeout not on PATH (e.g. stock macOS runner)";       \
+  } while (0)
 
 // ===========================================================================
 // Help / version / basic dispatch
@@ -1854,6 +1882,7 @@ TEST_F(CvcCliTest, ServeTlsCertFileMissingFails) {
 #if !defined(_WIN32)
 
 TEST_F(CvcCliTest, ServeIpcRunAndShutdown) {
+  SKIP_WITHOUT_TIMEOUT();
   // Dummy PEM files: they are only read into strings by the CLI.
   std::string pem = path("fake.pem");
   {
@@ -1873,6 +1902,7 @@ TEST_F(CvcCliTest, ServeIpcRunAndShutdown) {
 }
 
 TEST_F(CvcCliTest, ServeExecCoordinatorRunAndShutdown) {
+  SKIP_WITHOUT_TIMEOUT();
   auto r = cvc_timeout(2, "serve -l " + spath("srv_exec.sock") +
                               " -t ipc --cluster-id testcluster --node-id node2"
                               " --pump-interval 20 --sync-mode authoritative --enable-exec");
@@ -1882,6 +1912,7 @@ TEST_F(CvcCliTest, ServeExecCoordinatorRunAndShutdown) {
 }
 
 TEST_F(CvcCliTest, ServeDelegateValidSpec) {
+  SKIP_WITHOUT_TIMEOUT();
   auto r = cvc_timeout(2, "serve -l " + spath("srv_del.sock") +
                               " -t ipc --cluster-id testcluster --node-id node3"
                               " --pump-interval 20 --delegate sub:remotecluster:" +
@@ -1892,6 +1923,7 @@ TEST_F(CvcCliTest, ServeDelegateValidSpec) {
 }
 
 TEST_F(CvcCliTest, ServeDelegateInvalidSpecFails) {
+  SKIP_WITHOUT_TIMEOUT();
   auto r = cvc_timeout(3, "serve -l " + spath("srv_bad.sock") +
                               " -t ipc --cluster-id testcluster --node-id node4"
                               " --pump-interval 20 --delegate badspec");
@@ -1900,6 +1932,7 @@ TEST_F(CvcCliTest, ServeDelegateInvalidSpecFails) {
 }
 
 TEST_F(CvcCliTest, ServeGeneratedNodeIdRejected) {
+  SKIP_WITHOUT_TIMEOUT();
   // Without --node-id the CLI generates "node-<ticks>", which the session
   // rejects ("violates C identifier rules") — the default is unusable
   // (library/CLI bug). The grpc branch of the transport parser is also
@@ -1914,12 +1947,13 @@ TEST_F(CvcCliTest, ServeGeneratedNodeIdRejected) {
 }
 
 TEST_F(CvcCliTest, ServeSeedPeerHandshake) {
+  SKIP_WITHOUT_TIMEOUT();
   // Start a short-lived peer server in the background, then run a second
   // server seeded with the peer's socket and verify it joins and shuts
   // down cleanly.
   std::string peer_sock = spath("peer_a.sock");
   std::string peer_log = path("peer_a.log");
-  std::string peer_cmd = "timeout -s INT 4 \"" + cvc_bin + "\" serve -l " + peer_sock +
+  std::string peer_cmd = timeout_cmd() + " -s INT 4 \"" + cvc_bin + "\" serve -l " + peer_sock +
                          " -t ipc --cluster-id testcluster --node-id peerseed"
                          " --pump-interval 20 > " +
                          peer_log + " 2>&1 &";
@@ -1969,6 +2003,7 @@ TEST_F(CvcCliTest, ClusterStatusGrpcTransportFails) {
 #if !defined(_WIN32)
 
 TEST_F(CvcCliTest, ClusterStatusRejectedNodeId) {
+  SKIP_WITHOUT_TIMEOUT();
   // cluster-status always generates a node id "status-<ticks>", which
   // violates the session's C identifier rules, so the command can never
   // connect (library/CLI bug). Exercise the config path up to the failed
