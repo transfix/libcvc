@@ -685,6 +685,8 @@ void CameraController::setPoseMirrorHz(double hz) {
   syncConfigToState();
 }
 
+void CameraController::releaseHeldKeys() { m_impl->held.clear(); }
+
 void CameraController::setPointerCapture(bool on) {
   Impl &s = *m_impl;
   s.pointerCapture = on;

@@ -139,6 +139,12 @@ public:
   void setPointerCapture(bool on);
   bool pointerCapture() const;
 
+  // Drop every currently-held movement key. Call when input focus leaves the
+  // viewport (e.g. a UI overlay takes the keyboard): a key pressed before the
+  // handoff and released after it would otherwise stay "held" forever and the
+  // camera would drift on its own.
+  void releaseHeldKeys();
+
   // Rebind a movement key (also settable via state "keys.<action>"). Actions:
   // "forward","backward","strafe_left","strafe_right","up","down","toggle_mode",
   // "sprint". Values are VTK key syms ("w","space","Control_L","Tab","Shift_L").

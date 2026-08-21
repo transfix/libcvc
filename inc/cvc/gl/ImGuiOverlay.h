@@ -58,6 +58,8 @@ namespace gl {
 //
 // Requires libcvc built with CVC_ENABLE_IMGUI=ON; without it the class still
 // exists but is inert (enabled() == false), so consuming code needs no #ifdef.
+class CameraController;
+
 class ImGuiOverlay {
 public:
   explicit ImGuiOverlay(SceneRenderer &viewer);
@@ -69,6 +71,18 @@ public:
   // Your UI. Called once per rendered frame between ImGui::NewFrame() and
   // Render(); just call ImGui::* inside it.
   void setDrawCallback(std::function<void()> draw);
+
+  // Cooperate with a fly/orbit camera. Optional, but fixes two real problems:
+  //  * while the camera holds POINTER CAPTURE (Quake fly warps the cursor to the
+  //    centre every frame) the absolute mouse position is meaningless, so ImGui
+  //    hit-testing would be garbage and stray clicks would hit random widgets —
+  //    the overlay stops consuming the mouse entirely until capture is released;
+  //  * when the UI TAKES the keyboard, any movement key still held is released
+  //    on the camera, otherwise a key pressed before the handoff and released
+  //    after it stays "held" and the camera drifts forever.
+  // The overlay keeps only a raw pointer; the camera must outlive it (declare
+  // the camera first, as in every cvcGL example).
+  void attachCamera(CameraController &cam);
 
   // Master switch (the overlay stops drawing AND stops capturing input).
   void setVisible(bool on);

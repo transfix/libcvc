@@ -12,6 +12,7 @@
 
 #ifdef CVC_ENABLE_IMGUI
 
+#include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <imgui.h>
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
@@ -63,6 +64,8 @@ struct ImGuiOverlay::Impl {
   bool ready = false;   // ImGui context created
   bool glReady = false; // GL backend initialized (deferred to first render)
   bool visible = true;  // caller intent
+  CameraController *cam = nullptr;
+  bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
   bool frameOpen = false;
   double lastTime = 0.0;
 
@@ -134,6 +137,11 @@ struct ImGuiOverlay::Impl {
   bool intercept(unsigned long eid) {
     if (!ready || !visible || !interactor)
       return false;
+    // Quake pointer capture: the cursor is warped to the centre each frame, so
+    // absolute positions are meaningless — hand everything to the camera and let
+    // ImGui idle until capture is released.
+    if (cam && cam->pointerCapture())
+      return false;
     ImGuiIO &io = ImGui::GetIO();
     int x = 0, y = 0;
     interactor->GetEventPosition(x, y);
@@ -172,6 +180,12 @@ struct ImGuiOverlay::Impl {
 
     const bool keyEvent = (eid == vtkCommand::KeyPressEvent || eid == vtkCommand::KeyReleaseEvent ||
                            eid == vtkCommand::CharEvent);
+    // Rising edge of "UI owns the keyboard": drop the camera's held keys so a
+    // key released while the UI has focus can't leave it drifting.
+    const bool wantsKeys = io.WantCaptureKeyboard;
+    if (cam && wantsKeys && !hadKeyboard)
+      cam->releaseHeldKeys();
+    hadKeyboard = wantsKeys;
     // Swallow the event only when ImGui actually wants it — otherwise the
     // CameraController must keep receiving everything it always did.
     return keyEvent ? io.WantCaptureKeyboard : io.WantCaptureMouse;
@@ -259,6 +273,7 @@ ImGuiOverlay::~ImGuiOverlay() {
 }
 
 void ImGuiOverlay::setDrawCallback(std::function<void()> draw) { m_impl->draw = std::move(draw); }
+void ImGuiOverlay::attachCamera(CameraController &cam) { m_impl->cam = &cam; }
 void ImGuiOverlay::setVisible(bool on) { m_impl->visible = on; }
 bool ImGuiOverlay::visible() const { return m_impl->visible; }
 bool ImGuiOverlay::enabled() const { return m_impl->ready; }
