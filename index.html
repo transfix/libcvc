@@ -25,10 +25,13 @@
   pre code { background: none; padding: 0; }
   .card { display: flex; gap: 20px; background: #161b23; border: 1px solid #232a33;
           border-radius: 12px; padding: 20px; margin: 20px 0; align-items: center; }
-  .card .thumb { flex: none; width: 190px; height: 120px; border-radius: 8px;
-                 background: linear-gradient(180deg, #3d6ea5 0%, #79a8d0 45%, #2b5d43 68%, #1d3a5f 100%);
-                 display: flex; align-items: center; justify-content: center;
-                 font-size: 42px; }
+  .card .thumb { flex: none; width: 260px; height: 144px; border-radius: 8px;
+                 overflow: hidden; background: #0d1117; border: 1px solid #232a33; }
+  .card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  @media (max-width: 720px) {
+    .card { flex-direction: column; align-items: stretch; }
+    .card .thumb { width: 100%; height: auto; aspect-ratio: 16 / 9; }
+  }
   .card h3 { margin: 0 0 6px; font-size: 18px; }
   .card p { margin: 0 0 10px; color: #9aa7b4; font-size: 15px; }
   .btn { display: inline-block; background: #5aa9e6; color: #0d1117; font-weight: 600;
@@ -57,7 +60,7 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
 
 <h2>Examples</h2>
 <div class="card">
-  <div class="thumb">🌲</div>
+  <div class="thumb"><img src="img/lsystem_forest.jpg" alt="lsystem_forest: a procedural island of L-system trees under a drifting volumetric cloud" loading="lazy"></div>
   <div>
     <h3>lsystem_forest</h3>
     <p>An island you can fly over: L-system-grown trees swaying in the wind
@@ -69,7 +72,7 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
   </div>
 </div>
 <div class="card">
-  <div class="thumb" style="background: linear-gradient(160deg, #2b3a52 0%, #46618a 55%, #24406a 100%);">🐝</div>
+  <div class="thumb"><img src="img/nav_city_swarm.jpg" alt="nav_city_swarm: hundreds of coloured vehicles crossing a procedural city under fog" loading="lazy"></div>
   <div>
     <h3>nav_city_swarm</h3>
     <p>The <a href="https://github.com/CVC-Lab/GRL-SNAM">GRL-SNAM</a> reactive swarm,
@@ -82,7 +85,7 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
   </div>
 </div>
 <div class="card">
-  <div class="thumb" style="background: linear-gradient(120deg, #c0392b 0%, #6a2c8f 52%, #1f4e8f 100%);">👻</div>
+  <div class="thumb"><img src="img/nav_fog_ghost.jpg" alt="nav_fog_ghost: an agent detouring a phantom wall, fog cone and belief grid on the ground" loading="lazy"></div>
   <div>
     <h3>nav_fog_ghost</h3>
     <p>Fog of war: one vehicle believes a phantom wall its stale map shows but reality
