@@ -522,6 +522,70 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
   });
 }
 
+void GeometryNode::updateColors(const std::vector<unsigned char> &rgb) {
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
+
+  // The color twin of updateVertices: overwrite the existing per-vertex uchar RGB
+  // scalar array in place and mark modified — one buffer re-upload, no rebuild of
+  // cells/normals/tcoords. Requires a mesh that already has per-vertex colors
+  // (setUseSingleColor(false) + colored setGeometry) with a matching point count.
+  runOnMainThread([this, rgb]() {
+    if (!m_polyData)
+      return;
+    auto *colors = vtkUnsignedCharArray::SafeDownCast(m_polyData->GetPointData()->GetScalars());
+    const size_t n = rgb.size() / 3;
+    if (!colors || colors->GetNumberOfComponents() != 3 ||
+        static_cast<size_t>(colors->GetNumberOfTuples()) != n) {
+      app().log(1, "GeometryNode::updateColors[" + getName() + "]: color-array mismatch (" +
+                       std::to_string(n) + " RGB tuples given, " +
+                       std::to_string(colors ? colors->GetNumberOfTuples() : 0) +
+                       " in mesh) — ignoring; needs a per-vertex-coloured mesh with the same "
+                       "point count");
+      return;
+    }
+    std::memcpy(colors->GetPointer(0), rgb.data(), rgb.size());
+    colors->Modified();
+    m_polyData->Modified();
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::setRenderLinesAsTubes(bool on) {
+  runOnMainThread([this, on]() {
+    if (!m_actor)
+      return;
+    m_actor->GetProperty()->SetRenderLinesAsTubes(on);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::setRenderPointsAsSpheres(bool on) {
+  runOnMainThread([this, on]() {
+    if (!m_actor)
+      return;
+    m_actor->GetProperty()->SetRenderPointsAsSpheres(on);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::setDepthOffset(double units) {
+  runOnMainThread([this, units]() {
+    if (!m_mapper)
+      return;
+    // Per-mapper RELATIVE coincident-topology offsets (VTK's global resolve mode
+    // defaults to polygon offset). Negative GL polygon-offset units are closer to
+    // the camera, so a positive `units` here pulls the node toward the viewer.
+    m_mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0.0, -units);
+    m_mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0.0, -units);
+    m_mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-units); // point form is units-only
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
 void GeometryNode::addVertexShaderReplacement(const std::string &original,
                                               const std::string &replacement) {
   runOnMainThread([this, original, replacement]() {
