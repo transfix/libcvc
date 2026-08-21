@@ -43,6 +43,7 @@
 #define CVC_POPEN(cmd, mode) _popen(cmd, mode)
 #define CVC_PCLOSE(fp) _pclose(fp)
 #else
+#include <csignal>
 #include <unistd.h>
 #define CVC_GETPID() ::getpid()
 #define CVC_POPEN(cmd, mode) popen(cmd, mode)
@@ -101,7 +102,58 @@ static std::string sq(const std::string &s) {
 #endif
 }
 
-// Create a smallvol synthetic volume (4x4x4 gradient) for testing.
+// Read an entire file into a string (empty string if it doesn't exist).
+static std::string slurp(const std::string &p) {
+  std::ifstream in(p, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+#if !defined(_WIN32)
+// Start `cvc serve` in the background, redirecting all of its std streams away
+// from the test's pipes (a child that keeps the test's stdout open can wedge the
+// test runner). stdin<-/dev/null, stdout+stderr->logf, PID captured to pidf.
+// Portable: no GNU-only `timeout`/`stdbuf` (absent on macOS). Returns pid or -1.
+static pid_t start_background_server(const std::string &cvc_bin, const std::string &sock,
+                                     const std::string &logf, const std::string &pidf,
+                                     const std::string &extra_args = "") {
+  std::string cmd = "\"" + cvc_bin + "\" serve -l " + sock + " -t ipc --pump-interval 50 " +
+                    extra_args + " > \"" + logf + "\" 2>&1 < /dev/null & echo $! > \"" + pidf +
+                    "\"";
+  if (std::system(cmd.c_str()) != 0)
+    return -1;
+  pid_t pid = -1;
+  std::ifstream(pidf) >> pid;
+  return pid;
+}
+
+// Poll for the server's AF_UNIX socket, up to ~`tries` * 50ms. Returns true if
+// it appeared. Callers that need the banner should stop_server() + slurp(logf).
+static bool wait_for_socket(const std::string &sock, int tries = 100) {
+  for (int i = 0; i < tries; ++i) {
+    if (fs::exists(sock))
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return false;
+}
+
+// Ask the server to stop (SIGINT -> clean shutdown, which also flushes its
+// buffered startup banner), then wait until it is actually gone so nothing
+// outlives the test; SIGKILL as a last resort.
+static void stop_server(pid_t pid) {
+  if (pid <= 0)
+    return;
+  ::kill(pid, SIGINT);
+  for (int i = 0; i < 200 && ::kill(pid, 0) == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  if (::kill(pid, 0) == 0)
+    ::kill(pid, SIGKILL);
+}
+#endif
+
+// Create a small synthetic volume (4x4x4 gradient) for testing.
 static void write_test_volume(const std::string &path) {
   cvc::app ctx;
   cvc::volume v(ctx, cvc::dimension(4, 4, 4), cvc::Float, cvc::bounding_box(0, 0, 0, 3, 3, 3));
@@ -190,48 +242,11 @@ protected:
 
   RunResult cvc(const std::string &args) { return run_cmd("\"" + cvc_bin + "\" " + args); }
 
-  // The coreutils timeout(1) binary, resolved once. Linux ships `timeout`;
-  // macOS ships neither `timeout` nor `gtimeout` unless coreutils is brew-
-  // installed. Empty string => no such binary on PATH; the serve/cluster
-  // tests below GTEST_SKIP in that case (see SKIP_WITHOUT_TIMEOUT).
-  static const std::string &timeout_cmd() {
-    static const std::string cmd = [] {
-      if (std::system("command -v timeout >/dev/null 2>&1") == 0)
-        return std::string("timeout");
-      if (std::system("command -v gtimeout >/dev/null 2>&1") == 0)
-        return std::string("gtimeout");
-      return std::string();
-    }();
-    return cmd;
-  }
-
-  // Run the cvc binary under coreutils timeout(1), delivering SIGINT after
-  // `seconds`. Long-running commands (serve) install a SIGINT handler and
-  // shut down cleanly; timeout(1) then reports exit code 124. Callers must
-  // guard with SKIP_WITHOUT_TIMEOUT() first — this asserts the binary exists.
-  RunResult cvc_timeout(int seconds, const std::string &args) {
-    const std::string &to = timeout_cmd();
-    std::ostringstream oss;
-    oss << to << " -s INT " << seconds << " \"" << cvc_bin << "\" " << args;
-    return run_cmd(oss.str());
-  }
-
   std::string path(const std::string &name) const { return test_dir + "/" + name; }
 
   // Path for AF_UNIX sockets — must stay short (see sock_dir above).
   std::string spath(const std::string &name) const { return sock_dir + "/" + name; }
 };
-
-// Serve/cluster lifecycle tests drive a long-running `cvc serve` under
-// coreutils timeout(1) (SIGINT after N seconds -> exit 124). Stock macOS
-// runners ship no timeout(1)/gtimeout, so skip those tests there rather
-// than fail with exit 127 (command not found). Must be used at test scope:
-// GTEST_SKIP only returns from the enclosing function.
-#define SKIP_WITHOUT_TIMEOUT()                                                                     \
-  do {                                                                                             \
-    if (timeout_cmd().empty())                                                                     \
-      GTEST_SKIP() << "coreutils timeout(1)/gtimeout not on PATH (e.g. stock macOS runner)";       \
-  } while (0)
 
 // ===========================================================================
 // Help / version / basic dispatch
@@ -1881,53 +1896,75 @@ TEST_F(CvcCliTest, ServeTlsCertFileMissingFails) {
 
 #if !defined(_WIN32)
 
+// These drive a long-running `cvc serve` via the portable background-server
+// helpers (start_background_server / wait_for_socket / stop_server): no GNU
+// `timeout`, so they run on macOS too. A clean SIGINT shutdown flushes serve's
+// block-buffered startup banner to the log, which we then read.
 TEST_F(CvcCliTest, ServeIpcRunAndShutdown) {
-  SKIP_WITHOUT_TIMEOUT();
   // Dummy PEM files: they are only read into strings by the CLI.
   std::string pem = path("fake.pem");
   {
     std::ofstream f(pem);
     f << "dummy pem\n";
   }
-  auto r = cvc_timeout(2, "serve -l " + spath("srv.sock") +
-                              " -t ipc --cluster-id testcluster --node-id node1"
-                              " --pump-interval 20 --sync-mode read-only --root-path scene"
-                              " --enforce-authority --enforce-write-policy --resolve-conflicts"
-                              " --auth-token tok123 --blob-store-path " +
-                              path("blobs") + " --tls-cert " + pem + " --tls-key " + pem +
-                              " --tls-ca " + pem + " --tls-require-client-auth");
-  EXPECT_EQ(124, r.exit_code); // timeout(1) delivered SIGINT
-  EXPECT_NE(std::string::npos, r.output.find("Server running."));
-  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+  std::string sock = spath("srv.sock");
+  std::string logf = path("srv.log"), pidf = path("srv.pid");
+  pid_t pid = start_background_server(
+      cvc_bin, sock, logf, pidf,
+      "--cluster-id testcluster --node-id node1 --sync-mode read-only --root-path scene"
+      " --enforce-authority --enforce-write-policy --resolve-conflicts --auth-token tok123"
+      " --blob-store-path " +
+          path("blobs") + " --tls-cert " + pem + " --tls-key " + pem + " --tls-ca " + pem +
+          " --tls-require-client-auth");
+  ASSERT_GT(pid, 0);
+  bool up = wait_for_socket(sock);
+  stop_server(pid);
+  std::string out = slurp(logf);
+  ::unlink(sock.c_str());
+  EXPECT_TRUE(up) << "server did not bind the socket; log:\n" << out;
+  EXPECT_NE(std::string::npos, out.find("Server running.")) << out;
+  EXPECT_NE(std::string::npos, out.find("Server stopped.")) << out;
 }
 
 TEST_F(CvcCliTest, ServeExecCoordinatorRunAndShutdown) {
-  SKIP_WITHOUT_TIMEOUT();
-  auto r = cvc_timeout(2, "serve -l " + spath("srv_exec.sock") +
-                              " -t ipc --cluster-id testcluster --node-id node2"
-                              " --pump-interval 20 --sync-mode authoritative --enable-exec");
-  EXPECT_EQ(124, r.exit_code);
-  EXPECT_NE(std::string::npos, r.output.find("exec coordinator: enabled"));
-  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+  std::string sock = spath("srv_exec.sock");
+  std::string logf = path("srv_exec.log"), pidf = path("srv_exec.pid");
+  pid_t pid = start_background_server(
+      cvc_bin, sock, logf, pidf,
+      "--cluster-id testcluster --node-id node2 --sync-mode authoritative --enable-exec");
+  ASSERT_GT(pid, 0);
+  bool up = wait_for_socket(sock);
+  stop_server(pid);
+  std::string out = slurp(logf);
+  ::unlink(sock.c_str());
+  EXPECT_TRUE(up) << out;
+  EXPECT_NE(std::string::npos, out.find("exec coordinator: enabled")) << out;
+  EXPECT_NE(std::string::npos, out.find("Server stopped.")) << out;
 }
 
 TEST_F(CvcCliTest, ServeDelegateValidSpec) {
-  SKIP_WITHOUT_TIMEOUT();
-  auto r = cvc_timeout(2, "serve -l " + spath("srv_del.sock") +
-                              " -t ipc --cluster-id testcluster --node-id node3"
-                              " --pump-interval 20 --delegate sub:remotecluster:" +
-                              path("remote.sock") + ":1");
-  EXPECT_EQ(124, r.exit_code);
-  EXPECT_NE(std::string::npos, r.output.find("delegated sub -> remotecluster"));
-  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+  std::string sock = spath("srv_del.sock");
+  std::string logf = path("srv_del.log"), pidf = path("srv_del.pid");
+  pid_t pid = start_background_server(cvc_bin, sock, logf, pidf,
+                                      "--cluster-id testcluster --node-id node3 --delegate "
+                                      "sub:remotecluster:" +
+                                          path("remote.sock") + ":1");
+  ASSERT_GT(pid, 0);
+  bool up = wait_for_socket(sock);
+  stop_server(pid);
+  std::string out = slurp(logf);
+  ::unlink(sock.c_str());
+  EXPECT_TRUE(up) << out;
+  EXPECT_NE(std::string::npos, out.find("delegated sub -> remotecluster")) << out;
+  EXPECT_NE(std::string::npos, out.find("Server stopped.")) << out;
 }
 
 TEST_F(CvcCliTest, ServeDelegateInvalidSpecFails) {
-  SKIP_WITHOUT_TIMEOUT();
-  auto r = cvc_timeout(3, "serve -l " + spath("srv_bad.sock") +
-                              " -t ipc --cluster-id testcluster --node-id node4"
-                              " --pump-interval 20 --delegate badspec");
-  EXPECT_EQ(1, r.exit_code);
+  // An invalid --delegate spec is rejected before the serve loop starts, so the
+  // command exits fast on its own — run it in the foreground (no background).
+  auto r = cvc("serve -l " + spath("srv_bad.sock") +
+               " -t ipc --cluster-id testcluster --node-id node4 --delegate badspec");
+  EXPECT_NE(0, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("Invalid delegation spec"));
 }
 
@@ -1938,33 +1975,29 @@ TEST_F(CvcCliTest, ServeDelegateInvalidSpecFails) {
 // covers the corrected behavior.
 
 TEST_F(CvcCliTest, ServeSeedPeerHandshake) {
-  SKIP_WITHOUT_TIMEOUT();
-  // Start a short-lived peer server in the background, then run a second
-  // server seeded with the peer's socket and verify it joins and shuts
-  // down cleanly.
+  // Start a peer server, then a second server seeded with the peer's socket,
+  // and verify the joiner records the seed and shuts down cleanly.
   std::string peer_sock = spath("peer_a.sock");
-  std::string peer_log = path("peer_a.log");
-  std::string peer_cmd = timeout_cmd() + " -s INT 4 \"" + cvc_bin + "\" serve -l " + peer_sock +
-                         " -t ipc --cluster-id testcluster --node-id peerseed"
-                         " --pump-interval 20 > " +
-                         peer_log + " 2>&1 &";
-  FILE *fp = CVC_POPEN(peer_cmd.c_str(), "r");
-  ASSERT_NE(nullptr, fp);
-  CVC_PCLOSE(fp);
+  std::string peer_log = path("peer_a.log"), peer_pid = path("peer_a.pid");
+  pid_t peer = start_background_server(cvc_bin, peer_sock, peer_log, peer_pid,
+                                       "--cluster-id testcluster --node-id peerseed");
+  ASSERT_GT(peer, 0);
+  ASSERT_TRUE(wait_for_socket(peer_sock)) << slurp(peer_log);
 
-  // Give the peer time to bind its socket
-  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-
-  auto r = cvc_timeout(2, "serve -l " + spath("peer_b.sock") +
-                              " -t ipc --cluster-id testcluster --node-id peerb"
-                              " --pump-interval 20 --seed " +
-                              peer_sock);
-  EXPECT_EQ(124, r.exit_code);
-  EXPECT_NE(std::string::npos, r.output.find("seeds:"));
-  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
-
-  // Let the background peer expire before TearDown removes its socket/log
-  std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+  std::string sock = spath("peer_b.sock");
+  std::string logf = path("peer_b.log"), pidf = path("peer_b.pid");
+  pid_t joiner = start_background_server(
+      cvc_bin, sock, logf, pidf, "--cluster-id testcluster --node-id peerb --seed " + peer_sock);
+  ASSERT_GT(joiner, 0);
+  bool up = wait_for_socket(sock);
+  stop_server(joiner);
+  std::string out = slurp(logf);
+  stop_server(peer);
+  ::unlink(sock.c_str());
+  ::unlink(peer_sock.c_str());
+  EXPECT_TRUE(up) << out;
+  EXPECT_NE(std::string::npos, out.find("seeds:")) << out;
+  EXPECT_NE(std::string::npos, out.find("Server stopped.")) << out;
 }
 
 #endif // !defined(_WIN32)
@@ -2099,43 +2132,66 @@ TEST_F(CvcCliTest, Regression_LayerMeshImproveMethodsNoCrash) {
 // an explicit --node-id, and cluster-status was permanently broken (its report
 // code never ran). The auto/default ids are now valid C identifiers.
 TEST_F(CvcCliTest, Regression_ServeAutoNodeIdIsValidIdentifier) {
-  SKIP_WITHOUT_TIMEOUT();
+  // Short /tmp socket path (AF_UNIX has a ~108-byte limit).
   std::string sock = "/tmp/cvc_b7serve_" + std::to_string(::getpid()) + ".sock";
-  // Run serve with no --node-id and the default --cluster-id; SIGINT after 3s.
-  auto r = run_cmd(timeout_cmd() + " -s INT 3 \"" + cvc_bin + "\" serve -l " + sock +
-                   " -t ipc --pump-interval 50 --root-path \"\"");
-  // The auto-generated node id and default cluster id must be accepted:
-  // no validation error, and the startup banner shows valid identifiers.
-  EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("node_")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("cluster: cvc_cluster")) << r.output;
+  std::string logf = path("serve_banner.log");
+  std::string pidf = path("serve.pid");
+
+  // Start serve with no --node-id and the default --cluster-id.
+  pid_t pid = start_background_server(cvc_bin, sock, logf, pidf);
+  ASSERT_GT(pid, 0);
+
+  // The server is up once it has bound the socket.
+  bool up = false;
+  for (int i = 0; i < 100 && !up; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    up = fs::exists(sock);
+  }
+
+  // Stopping via SIGINT flushes the buffered startup banner to logf on exit.
+  stop_server(pid);
+  std::string out = slurp(logf);
   ::unlink(sock.c_str());
+
+  EXPECT_TRUE(up) << "server did not bind the socket; log:\n" << out;
+  // The auto-generated node id and default cluster id must be accepted (no
+  // validation error) and the startup banner must show valid identifiers.
+  EXPECT_EQ(std::string::npos, out.find("violates C identifier")) << out;
+  EXPECT_NE(std::string::npos, out.find("node_")) << out;
+  EXPECT_NE(std::string::npos, out.find("cluster: cvc_cluster")) << out;
 }
 
 // Bug 7 (end-to-end): with valid default ids, cluster-status connects to a
 // running server and prints its report -- exercising the code that used to be
 // dead because join() always threw on the invalid "status-<ticks>" node id.
 TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
-  SKIP_WITHOUT_TIMEOUT();
   std::string base = "/tmp/cvc_b7cs_" + std::to_string(::getpid());
   std::string srv_sock = base + "_srv.sock";
   std::string cs_sock = base + "_cs.sock";
+  std::string srv_log = path("cs_server.log");
+  std::string pidf = path("cs_server.pid");
 
-  // Start the server in the background under `timeout` so it self-terminates
-  // even if the test aborts; no --node-id, default --cluster-id.
-  std::string bg = timeout_cmd() + " -s INT 15 \"" + cvc_bin + "\" serve -l " + srv_sock +
-                   " -t ipc --pump-interval 50 --root-path \"\" >/dev/null 2>&1 &";
-  ASSERT_EQ(0, std::system(bg.c_str()));
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  // Start the server in the background; no --node-id, default --cluster-id.
+  pid_t pid = start_background_server(cvc_bin, srv_sock, srv_log, pidf);
+  ASSERT_GT(pid, 0);
 
-  // cluster-status has no --node-id flag; it must generate a valid one itself.
-  auto r = run_cmd(timeout_cmd() + " 15 \"" + cvc_bin + "\" cluster-status -l " + cs_sock +
-                   " -t ipc -s " + srv_sock);
+  bool up = false;
+  for (int i = 0; i < 200 && !up; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    up = fs::exists(srv_sock);
+  }
+  ASSERT_TRUE(up) << "server did not start:\n" << slurp(srv_log);
+
+  // cluster-status self-terminates after printing (it has no --node-id flag, so
+  // it must generate a valid one itself). Run it directly.
+  auto r = cvc("cluster-status -l " + cs_sock + " -t ipc -s " + srv_sock);
+
+  stop_server(pid);
+  ::unlink(srv_sock.c_str());
+  ::unlink(cs_sock.c_str());
+
   EXPECT_EQ(0, r.exit_code) << r.output;
   EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
   EXPECT_NE(std::string::npos, r.output.find("Session status")) << r.output;
-
-  ::unlink(srv_sock.c_str());
-  ::unlink(cs_sock.c_str());
 }
 #endif // !_WIN32
