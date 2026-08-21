@@ -137,6 +137,7 @@ protected:
   std::string cvc_bin;
   std::string test_vol; // pre-created 4^3 rawiv
   std::string test_geo; // pre-created tetrahedron OFF
+  std::string sock_dir; // short /tmp dir for AF_UNIX sockets (~108-byte path limit)
 
   void SetUp() override {
     // Locate the cvc binary
@@ -164,6 +165,14 @@ protected:
     test_dir = (base / oss.str()).string();
     fs::create_directories(test_dir);
 
+#if !defined(_WIN32)
+    // The per-test tmpdir path is too deep for AF_UNIX socket binding
+    // (~108-byte limit), so IPC socket paths live in a short, equally
+    // unique /tmp directory instead.
+    sock_dir = (fs::path("/tmp") / oss.str()).string();
+    fs::create_directories(sock_dir);
+#endif
+
     // Pre-create small test data files that many tests share
     test_vol = path("test.rawiv");
     write_test_volume(test_vol);
@@ -175,13 +184,25 @@ protected:
   void TearDown() override {
     std::error_code ec;
     fs::remove_all(test_dir, ec);
+    if (!sock_dir.empty())
+      fs::remove_all(sock_dir, ec);
   }
 
-  RunResult cvc(const std::string &args) {
-    return run_cmd("\"" + cvc_bin + "\" " + args);
+  RunResult cvc(const std::string &args) { return run_cmd("\"" + cvc_bin + "\" " + args); }
+
+  // Run the cvc binary under coreutils timeout(1), delivering SIGINT after
+  // `seconds`. Long-running commands (serve) install a SIGINT handler and
+  // shut down cleanly; timeout(1) then reports exit code 124.
+  RunResult cvc_timeout(int seconds, const std::string &args) {
+    std::ostringstream oss;
+    oss << "timeout -s INT " << seconds << " \"" << cvc_bin << "\" " << args;
+    return run_cmd(oss.str());
   }
 
   std::string path(const std::string &name) const { return test_dir + "/" + name; }
+
+  // Path for AF_UNIX sockets — must stay short (see sock_dir above).
+  std::string spath(const std::string &name) const { return sock_dir + "/" + name; }
 };
 
 // ===========================================================================
@@ -1167,3 +1188,795 @@ TEST_F(CvcCliTest, Integration_ExecMultiFileScript) {
   // area = 3.14159 * 25 = 78.53975
   EXPECT_NE(std::string::npos, r.output.find("78."));
 }
+
+// ===========================================================================
+// Subcommand --help for the VolUtils wrapper commands
+// ===========================================================================
+
+TEST_F(CvcCliTest, SubtractHelp) {
+  auto r = cvc("subtract --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--output"));
+}
+
+TEST_F(CvcCliTest, ScaleHelp) {
+  auto r = cvc("scale --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--factor"));
+}
+
+TEST_F(CvcCliTest, ClipHelp) {
+  auto r = cvc("clip --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--threshold"));
+}
+
+TEST_F(CvcCliTest, NegateHelp) {
+  auto r = cvc("negate --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--output"));
+}
+
+TEST_F(CvcCliTest, BilateralHelp) {
+  auto r = cvc("bilateral --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--radiometric"));
+  EXPECT_NE(std::string::npos, r.output.find("--spatial"));
+}
+
+TEST_F(CvcCliTest, ContrastHelp) {
+  auto r = cvc("contrast --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--resistor"));
+}
+
+TEST_F(CvcCliTest, AnisotropicHelp) {
+  auto r = cvc("anisotropic --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--iterations"));
+}
+
+TEST_F(CvcCliTest, GdtvHelp) {
+  auto r = cvc("gdtv --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--lambda"));
+}
+
+TEST_F(CvcCliTest, ResizeHelp) {
+  auto r = cvc("resize --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--dims"));
+}
+
+TEST_F(CvcCliTest, DifferenceHelp) {
+  auto r = cvc("difference --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--output"));
+}
+
+TEST_F(CvcCliTest, ClampMinHelp) {
+  auto r = cvc("clamp-min --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--min"));
+}
+
+TEST_F(CvcCliTest, AverageHelp) {
+  auto r = cvc("average --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--input"));
+}
+
+TEST_F(CvcCliTest, ExtractHelp) {
+  auto r = cvc("extract --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--var"));
+}
+
+TEST_F(CvcCliTest, CompareHelp) {
+  auto r = cvc("compare --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--tolerance"));
+}
+
+// ===========================================================================
+// Info edge cases: line/quad geometry, unknown extension
+// ===========================================================================
+
+TEST_F(CvcCliTest, InfoLineGeometry) {
+  // cvc-raw geometry with a 2-index element = line segment
+  std::string raw = path("segments.raw");
+  {
+    std::ofstream f(raw);
+    f << "4 1\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n0 1\n";
+  }
+  auto r = cvc("info " + raw);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Lines:"));
+}
+
+TEST_F(CvcCliTest, InfoQuadGeometry) {
+  // cvc-raw geometry with a 4-index element = quad
+  std::string raw = path("quads.raw");
+  {
+    std::ofstream f(raw);
+    f << "4 1\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n0 1 2 3\n";
+  }
+  auto r = cvc("info " + raw);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Quads:"));
+}
+
+TEST_F(CvcCliTest, InfoUnknownExtensionFails) {
+  auto r = cvc("info " + path("mystery.xyz"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Unknown file type"));
+}
+
+TEST_F(CvcCliTest, ConvertUnknownTypeFails) {
+  auto r = cvc("convert " + test_vol + " " + path("bad.rawiv") + " -t Bogus");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Unknown voxel type"));
+}
+
+// ===========================================================================
+// Volume arithmetic: remaining error branches
+// ===========================================================================
+
+TEST_F(CvcCliTest, SubtractRequiresTwoInputs) {
+  auto r = cvc("subtract -i " + test_vol + " -o " + path("s.rawiv"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 2"));
+}
+
+TEST_F(CvcCliTest, SsimRequiresTwoInputs) {
+  auto r = cvc("ssim -i " + test_vol);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 2"));
+}
+
+// ===========================================================================
+// VolUtils wrappers: difference / clamp-min / average / extract / resize
+// ===========================================================================
+
+TEST_F(CvcCliTest, DifferenceVolumes) {
+  std::string out = path("diff_out.rawiv");
+  auto r = cvc("difference -i " + test_vol + " " + test_vol + " -o " + out);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, DifferenceRequiresTwoInputs) {
+  auto r = cvc("difference -i " + test_vol + " -o " + path("d.rawiv"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 2"));
+}
+
+TEST_F(CvcCliTest, ClampMinVolume) {
+  std::string out = path("clamp_out.rawiv");
+  auto r = cvc("clamp-min " + test_vol + " " + out + " -m 50");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, AverageVolumes) {
+  // Three inputs exercise the N-way pairwise fold
+  std::string out = path("avg_out.rawiv");
+  auto r = cvc("average -i " + test_vol + " " + test_vol + " " + test_vol + " -o " + out);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, AverageRequiresTwoInputs) {
+  auto r = cvc("average -i " + test_vol + " -o " + path("a.rawiv"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("at least 2"));
+}
+
+TEST_F(CvcCliTest, ExtractVariableTimestep) {
+  std::string out = path("extract_out.rawiv");
+  auto r = cvc("extract " + test_vol + " " + out + " --var 0 -t 0");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, ResizeVolume) {
+  std::string out = path("resize_out.rawiv");
+  auto r = cvc("resize " + test_vol + " " + out + " -d 8 8 8");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+
+  auto r2 = cvc("info " + out);
+  EXPECT_EQ(0, r2.exit_code);
+  EXPECT_NE(std::string::npos, r2.output.find("8 x 8 x 8"));
+}
+
+TEST_F(CvcCliTest, ResizeRequiresThreeDims) {
+  auto r = cvc("resize " + test_vol + " " + path("r.rawiv") + " -d 8 8");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 3"));
+}
+
+// ===========================================================================
+// Compare command (exact voxel diff with pass/fail exit code)
+// ===========================================================================
+
+TEST_F(CvcCliTest, CompareEqualVolumes) {
+  auto r = cvc("compare -i " + test_vol + " " + test_vol);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("OK: volumes match"));
+}
+
+TEST_F(CvcCliTest, CompareMismatchExitsNonzero) {
+  std::string neg = path("cmp_neg.rawiv");
+  ASSERT_EQ(0, cvc("negate " + test_vol + " " + neg).exit_code);
+  auto r = cvc("compare -i " + test_vol + " " + neg);
+  EXPECT_EQ(1, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("MISMATCH"));
+}
+
+TEST_F(CvcCliTest, CompareDimensionMismatchExitsNonzero) {
+  std::string small = path("cmp_small.rawiv");
+  ASSERT_EQ(0, cvc("downsample " + test_vol + " " + small + " -f 2").exit_code);
+  auto r = cvc("compare -i " + test_vol + " " + small);
+  EXPECT_EQ(1, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("dimensions differ"));
+}
+
+TEST_F(CvcCliTest, CompareRequiresTwoInputs) {
+  auto r = cvc("compare -i " + test_vol);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 2"));
+}
+
+// ===========================================================================
+// Noise filters (tiny 4^3 input)
+// ===========================================================================
+
+TEST_F(CvcCliTest, BilateralFilterVolume) {
+  std::string out = path("bilateral_out.rawiv");
+  auto r = cvc("bilateral " + test_vol + " " + out + " --radius 1");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, ContrastEnhancementVolume) {
+  std::string out = path("contrast_out.rawiv");
+  auto r = cvc("contrast " + test_vol + " " + out + " --resistor 0.9");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, AnisotropicDiffusionVolume) {
+  std::string out = path("aniso_out.rawiv");
+  auto r = cvc("anisotropic " + test_vol + " " + out + " -n 2");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, GdtvFilterVolume) {
+  std::string out = path("gdtv_out.rawiv");
+  auto r = cvc("gdtv " + test_vol + " " + out + " -n 1");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+// ===========================================================================
+// Rotate command (single angle and multi-rotation series)
+// ===========================================================================
+
+TEST_F(CvcCliTest, RotateSingleAngle) {
+  std::string out = path("rot_out.rawiv");
+  auto r = cvc("rotate " + test_vol + " " + out + " -a 90");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Rotated 90"));
+}
+
+TEST_F(CvcCliTest, RotateMultipleAngles) {
+  std::string base = path("rotseries");
+  auto r = cvc("rotate " + test_vol + " " + base + " -a 0 -n 2");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 2 rotations"));
+  EXPECT_TRUE(fs::exists(base + ".0000.rawiv"));
+  EXPECT_TRUE(fs::exists(base + ".0001.rawiv"));
+}
+
+// ===========================================================================
+// Projection / back-projection on a tiny volume
+// ===========================================================================
+
+TEST_F(CvcCliTest, ProjectVolume) {
+  std::string angles = path("angles.txt");
+  {
+    std::ofstream f(angles);
+    f << "0\n90\n";
+  }
+  std::string out = path("proj_out.rawiv");
+  auto r = cvc("project " + test_vol + " " + out + " -a " + angles);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Projected 2 angles"));
+}
+
+TEST_F(CvcCliTest, ProjectMissingAnglesFileFails) {
+  auto r = cvc("project " + test_vol + " " + path("p.rawiv") + " -a " + path("no_such_angles.txt"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Cannot open angles file"));
+}
+
+TEST_F(CvcCliTest, BackprojectVolume) {
+  std::string angles = path("angles.txt");
+  {
+    std::ofstream f(angles);
+    f << "0\n90\n";
+  }
+  std::string proj = path("bp_proj.rawiv");
+  ASSERT_EQ(0, cvc("project " + test_vol + " " + proj + " -a " + angles).exit_code);
+
+  std::string recon = path("bp_recon.rawiv");
+  auto r = cvc("backproject " + proj + " " + recon + " -a " + angles + " -d 4");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(recon));
+  EXPECT_NE(std::string::npos, r.output.find("Reconstructed 4^3"));
+
+  // Unfiltered variant
+  std::string recon2 = path("bp_recon_nf.rawiv");
+  auto r2 = cvc("backproject " + proj + " " + recon2 + " -a " + angles + " -d 4 --no-filter");
+  EXPECT_EQ(0, r2.exit_code);
+  EXPECT_TRUE(fs::exists(recon2));
+}
+
+TEST_F(CvcCliTest, BackprojectMissingAnglesFileFails) {
+  auto r = cvc("backproject " + test_vol + " " + path("b.rawiv") + " -a " +
+               path("no_such_angles.txt") + " -d 4");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Cannot open angles file"));
+}
+
+// ===========================================================================
+// Image I/O: vol2img / img2vol / rgba-merge
+// ===========================================================================
+
+TEST_F(CvcCliTest, Vol2ImgExportsSlices) {
+  std::string dir = path("slices");
+  auto r = cvc("vol2img " + test_vol + " " + dir);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Exported 4 slices"));
+  EXPECT_TRUE(fs::exists(dir + "/slice_00000.png"));
+  EXPECT_TRUE(fs::exists(dir + "/slice_00003.png"));
+}
+
+TEST_F(CvcCliTest, Img2VolImportsSlices) {
+  std::string dir = path("slices_rt");
+  ASSERT_EQ(0, cvc("vol2img " + test_vol + " " + dir).exit_code);
+
+  std::string out = path("img2vol_out.rawiv");
+  auto r = cvc("img2vol -i " + dir + "/slice_00000.png " + dir + "/slice_00001.png -o " + out);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Imported 2 images"));
+}
+
+TEST_F(CvcCliTest, RgbaMergeVolumes) {
+  std::string out = path("rgba_out.rawiv");
+  auto r = cvc("rgba-merge -i " + test_vol + " " + test_vol + " " + test_vol + " " + test_vol +
+               " -o " + out);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, RgbaMergeRequiresFourInputs) {
+  auto r = cvc("rgba-merge -i " + test_vol + " " + test_vol + " -o " + path("x.rawiv"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exactly 4"));
+}
+
+// ===========================================================================
+// SDF / iso option branches
+// ===========================================================================
+
+TEST_F(CvcCliTest, SdfWithExplicitBbox) {
+  std::string out = path("sdf_bbox.rawiv");
+  auto r = cvc("sdf -i " + test_geo + " -o " + out + " -d 16,16,16 -b 0,0,0,2,2,2 -a v2");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, IsoFastContouringCentralDiff) {
+  std::string out = path("iso_fc.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -m fastcontouring -n central-diff");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, IsoLibisocontourBsplineInterp) {
+  std::string out = path("iso_lic.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -m libisocontour -n bspline-interp");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+TEST_F(CvcCliTest, IsoWithPropertyVolume) {
+  // NOTE: only the default duallib method is used here; combining
+  // -m libisocontour with -p aborts (cvc::null_dimension, library bug).
+  std::string out = path("iso_prop.off");
+  auto r = cvc("iso -i " + test_vol + " -o " + out + " -v 100 -p " + test_vol);
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+}
+
+// ===========================================================================
+// Mesh extraction commands on a small tetrahedron SDF
+// ===========================================================================
+
+TEST_F(CvcCliTest, TetrahedralizeFromSdf) {
+  std::string sdf_vol = path("tet_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  std::string out = path("tet_mesh.off");
+  auto r = cvc("tetrahedralize -i " + sdf_vol + " -o " + out + " -v 0.0");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Wrote tetrahedral mesh"));
+
+  // With a property volume
+  std::string out_p = path("tet_mesh_prop.off");
+  auto rp = cvc("tetrahedralize -i " + sdf_vol + " -o " + out_p + " -v 0.0 -p " + sdf_vol);
+  EXPECT_EQ(0, rp.exit_code);
+  EXPECT_TRUE(fs::exists(out_p));
+}
+
+TEST_F(CvcCliTest, TetrahedralizeMethodAndImproveFlags) {
+  std::string sdf_vol = path("tet_sdf2.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  // NOTE: --improve optimization segfaults in tetrahedralize (library bug);
+  // the other four improvement methods are exercised below.
+  auto r1 = cvc("tetrahedralize -i " + sdf_vol + " -o " + path("t_gf.off") +
+                " -v 0.0 -m fastcontouring --improve geo-flow -n central-diff -q 1");
+  EXPECT_EQ(0, r1.exit_code);
+
+  auto r2 = cvc("tetrahedralize -i " + sdf_vol + " -o " + path("t_ec.off") +
+                " -v 0.0 --improve edge-contract -q 1");
+  EXPECT_EQ(0, r2.exit_code);
+
+  auto r3 = cvc("tetrahedralize -i " + sdf_vol + " -o " + path("t_jl.off") +
+                " -v 0.0 --improve joe-liu -q 1");
+  EXPECT_EQ(0, r3.exit_code);
+
+  auto r4 = cvc("tetrahedralize -i " + sdf_vol + " -o " + path("t_mv.off") +
+                " -v 0.0 --improve minimal-vol -q 1");
+  EXPECT_EQ(0, r4.exit_code);
+
+  auto r5 = cvc("tetrahedralize -i " + sdf_vol + " -o " + path("t_lic.off") +
+                " -v 0.0 -m libisocontour -n bspline-interp");
+  EXPECT_EQ(0, r5.exit_code);
+}
+
+TEST_F(CvcCliTest, HexahedralizeFromSdf) {
+  std::string sdf_vol = path("hex_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  std::string out = path("hex_mesh.off");
+  auto r = cvc("hexahedralize -i " + sdf_vol + " -o " + out + " -v 0.0");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Wrote hexahedral mesh"));
+
+  // With a property volume
+  std::string out_p = path("hex_mesh_prop.off");
+  auto rp = cvc("hexahedralize -i " + sdf_vol + " -o " + out_p + " -v 0.0 -p " + sdf_vol);
+  EXPECT_EQ(0, rp.exit_code);
+  EXPECT_TRUE(fs::exists(out_p));
+}
+
+TEST_F(CvcCliTest, HexahedralizeMethodAndImproveFlags) {
+  std::string sdf_vol = path("hex_sdf2.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  // NOTE: --improve joe-liu and minimal-vol segfault in hexahedralize
+  // (library bug); geo-flow, edge-contract and optimization are safe.
+  auto r1 = cvc("hexahedralize -i " + sdf_vol + " -o " + path("h_lic.off") +
+                " -v 0.0 -m libisocontour -n bspline-interp");
+  EXPECT_EQ(0, r1.exit_code);
+
+  auto r2 = cvc("hexahedralize -i " + sdf_vol + " -o " + path("h_gf.off") +
+                " -v 0.0 --improve geo-flow -q 1");
+  EXPECT_EQ(0, r2.exit_code);
+
+  auto r3 = cvc("hexahedralize -i " + sdf_vol + " -o " + path("h_ec.off") +
+                " -v 0.0 --improve edge-contract -q 1");
+  EXPECT_EQ(0, r3.exit_code);
+
+  auto r4 = cvc("hexahedralize -i " + sdf_vol + " -o " + path("h_opt.off") +
+                " -v 0.0 --improve optimization -q 1");
+  EXPECT_EQ(0, r4.exit_code);
+
+  auto r5 = cvc("hexahedralize -i " + sdf_vol + " -o " + path("h_fc.off") +
+                " -v 0.0 -m fastcontouring -n central-diff");
+  EXPECT_EQ(0, r5.exit_code);
+}
+
+TEST_F(CvcCliTest, Tetrahedralize2FromSdf) {
+  std::string sdf_vol = path("t2_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  std::string out = path("t2_mesh.off");
+  auto r = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + out + " -v 0.0");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Wrote dual-tet mesh"));
+
+  // NOTE: --improve joe-liu/minimal-vol/optimization segfault in
+  // tetrahedralize2 (library bug); geo-flow and edge-contract are safe.
+  auto r1 = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + path("t2_fc.off") +
+                " -v 0.0 -m fastcontouring -n central-diff");
+  EXPECT_EQ(0, r1.exit_code);
+
+  auto r2 = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + path("t2_gf.off") +
+                " -v 0.0 --improve geo-flow -q 1");
+  EXPECT_EQ(0, r2.exit_code);
+
+  auto r3 = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + path("t2_ec.off") +
+                " -v 0.0 --improve edge-contract -q 1");
+  EXPECT_EQ(0, r3.exit_code);
+
+  auto r4 = cvc("tetrahedralize2 -i " + sdf_vol + " -o " + path("t2_lic.off") +
+                " -v 0.0 -m libisocontour -n bspline-interp");
+  EXPECT_EQ(0, r4.exit_code);
+}
+
+TEST_F(CvcCliTest, LayerMeshFromSdf) {
+  std::string sdf_vol = path("lm_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+
+  std::string out = path("lm_mesh.off");
+  auto r = cvc("layer-mesh -i " + sdf_vol + " -o " + out +
+               " --isovalue-outer -0.1 --isovalue-inner 0.1");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Wrote layer mesh"));
+
+  // NOTE: --improve joe-liu/minimal-vol/optimization segfault in layer-mesh
+  // (library bug); geo-flow and edge-contract are safe.
+  auto r1 = cvc("layer-mesh -i " + sdf_vol + " -o " + path("lm_lic.off") +
+                " --isovalue-outer -0.1 --isovalue-inner 0.1 -m libisocontour -n bspline-interp");
+  EXPECT_EQ(0, r1.exit_code);
+
+  auto r2 = cvc("layer-mesh -i " + sdf_vol + " -o " + path("lm_gf.off") +
+                " --isovalue-outer -0.1 --isovalue-inner 0.1 --improve geo-flow -q 1");
+  EXPECT_EQ(0, r2.exit_code);
+
+  auto r3 = cvc("layer-mesh -i " + sdf_vol + " -o " + path("lm_ec.off") +
+                " --isovalue-outer -0.1 --isovalue-inner 0.1 --improve edge-contract -q 1");
+  EXPECT_EQ(0, r3.exit_code);
+
+  auto r4 = cvc("layer-mesh -i " + sdf_vol + " -o " + path("lm_fc.off") +
+                " --isovalue-outer -0.1 --isovalue-inner 0.1 -m fastcontouring -n central-diff");
+  EXPECT_EQ(0, r4.exit_code);
+}
+
+// ===========================================================================
+// Bunny --volume (small dims, v2 distance transform)
+// ===========================================================================
+
+TEST_F(CvcCliTest, BunnyVolumeSmallDims) {
+  // NOTE: 16 is the smallest safe cube here — the SDF v2 path hits a SIGFPE
+  // at -d 8 (library bug), and v1 takes ~2 minutes at 16^3.
+  std::string out = path("bunny_vol.rawiv");
+  auto r = cvc("bunny --volume -o " + out + " -d 16 -a v2 -p 0.2");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_NE(std::string::npos, r.output.find("Wrote bunny SDF volume"));
+}
+
+// ===========================================================================
+// State command: remaining operations and error branches
+// ===========================================================================
+
+TEST_F(CvcCliTest, StateGetSystemStart) {
+  // __system.start is initialized at app startup
+  auto r = cvc("state get __system.start");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_FALSE(r.output.empty());
+}
+
+TEST_F(CvcCliTest, StateGetUninitializedFails) {
+  auto r = cvc("state get some.random.uninitialized.path");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("not initialized"));
+}
+
+TEST_F(CvcCliTest, StateGetMissingPathFails) {
+  auto r = cvc("state get");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Path required"));
+}
+
+TEST_F(CvcCliTest, StateSetMissingPathFails) {
+  auto r = cvc("state set");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Path required"));
+}
+
+TEST_F(CvcCliTest, StateDeleteMissingPathFails) {
+  auto r = cvc("state delete");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Path required"));
+}
+
+TEST_F(CvcCliTest, StateSetMissingValueFails) {
+  auto r = cvc("state set foo.bar");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Value required"));
+}
+
+TEST_F(CvcCliTest, StateDeleteClearsValue) {
+  auto r = cvc("state delete foo.bar");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Cleared foo.bar"));
+}
+
+TEST_F(CvcCliTest, StateListFreshPathShowsNoChildren) {
+  auto r = cvc("state list some.fresh.leaf");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("(no children)"));
+}
+
+// ===========================================================================
+// Exec: resource-limit kill path
+// ===========================================================================
+
+TEST_F(CvcCliTest, ExecStepLimitKillsProcess) {
+  // One step is not enough for a nested arithmetic expression; the
+  // scheduler kills the process and the CLI exits nonzero.
+  auto r = cvc("exec -e " + sq("(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))") + " --max-steps 1");
+  EXPECT_EQ(1, r.exit_code);
+}
+
+// ===========================================================================
+// Serve command: error branches and short clean runs
+// ===========================================================================
+
+TEST_F(CvcCliTest, ServeUnknownTransportFails) {
+  auto r = cvc("serve -l " + path("x.sock") + " -t bogus --node-id nodex");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Unknown transport"));
+}
+
+TEST_F(CvcCliTest, ServeTlsCertFileMissingFails) {
+  auto r = cvc("serve -l " + path("x.sock") + " -t ipc --node-id nodex --tls-cert " +
+               path("no_such_cert.pem"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Cannot read file"));
+}
+
+#if !defined(_WIN32)
+
+TEST_F(CvcCliTest, ServeIpcRunAndShutdown) {
+  // Dummy PEM files: they are only read into strings by the CLI.
+  std::string pem = path("fake.pem");
+  {
+    std::ofstream f(pem);
+    f << "dummy pem\n";
+  }
+  auto r = cvc_timeout(2, "serve -l " + spath("srv.sock") +
+                              " -t ipc --cluster-id testcluster --node-id node1"
+                              " --pump-interval 20 --sync-mode read-only --root-path scene"
+                              " --enforce-authority --enforce-write-policy --resolve-conflicts"
+                              " --auth-token tok123 --blob-store-path " +
+                              path("blobs") + " --tls-cert " + pem + " --tls-key " + pem +
+                              " --tls-ca " + pem + " --tls-require-client-auth");
+  EXPECT_EQ(124, r.exit_code); // timeout(1) delivered SIGINT
+  EXPECT_NE(std::string::npos, r.output.find("Server running."));
+  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+}
+
+TEST_F(CvcCliTest, ServeExecCoordinatorRunAndShutdown) {
+  auto r = cvc_timeout(2, "serve -l " + spath("srv_exec.sock") +
+                              " -t ipc --cluster-id testcluster --node-id node2"
+                              " --pump-interval 20 --sync-mode authoritative --enable-exec");
+  EXPECT_EQ(124, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("exec coordinator: enabled"));
+  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+}
+
+TEST_F(CvcCliTest, ServeDelegateValidSpec) {
+  auto r = cvc_timeout(2, "serve -l " + spath("srv_del.sock") +
+                              " -t ipc --cluster-id testcluster --node-id node3"
+                              " --pump-interval 20 --delegate sub:remotecluster:" +
+                              path("remote.sock") + ":1");
+  EXPECT_EQ(124, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("delegated sub -> remotecluster"));
+  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+}
+
+TEST_F(CvcCliTest, ServeDelegateInvalidSpecFails) {
+  auto r = cvc_timeout(3, "serve -l " + spath("srv_bad.sock") +
+                              " -t ipc --cluster-id testcluster --node-id node4"
+                              " --pump-interval 20 --delegate badspec");
+  EXPECT_EQ(1, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Invalid delegation spec"));
+}
+
+TEST_F(CvcCliTest, ServeGeneratedNodeIdRejected) {
+  // Without --node-id the CLI generates "node-<ticks>", which the session
+  // rejects ("violates C identifier rules") — the default is unusable
+  // (library/CLI bug). The grpc branch of the transport parser is also
+  // exercised here; both runs fail fast.
+  auto r1 = cvc_timeout(10, "serve -l " + spath("srv_gen.sock") +
+                                " -t ipc --cluster-id testcluster --pump-interval 20");
+  EXPECT_NE(0, r1.exit_code);
+
+  auto r2 = cvc_timeout(10, "serve -l 127.0.0.1:39471 -t grpc --cluster-id testcluster"
+                            " --pump-interval 20");
+  EXPECT_NE(0, r2.exit_code);
+}
+
+TEST_F(CvcCliTest, ServeSeedPeerHandshake) {
+  // Start a short-lived peer server in the background, then run a second
+  // server seeded with the peer's socket and verify it joins and shuts
+  // down cleanly.
+  std::string peer_sock = spath("peer_a.sock");
+  std::string peer_log = path("peer_a.log");
+  std::string peer_cmd = "timeout -s INT 4 \"" + cvc_bin + "\" serve -l " + peer_sock +
+                         " -t ipc --cluster-id testcluster --node-id peerseed"
+                         " --pump-interval 20 > " +
+                         peer_log + " 2>&1 &";
+  FILE *fp = CVC_POPEN(peer_cmd.c_str(), "r");
+  ASSERT_NE(nullptr, fp);
+  CVC_PCLOSE(fp);
+
+  // Give the peer time to bind its socket
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+  auto r = cvc_timeout(2, "serve -l " + spath("peer_b.sock") +
+                              " -t ipc --cluster-id testcluster --node-id peerb"
+                              " --pump-interval 20 --seed " +
+                              peer_sock);
+  EXPECT_EQ(124, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("seeds:"));
+  EXPECT_NE(std::string::npos, r.output.find("Server stopped."));
+
+  // Let the background peer expire before TearDown removes its socket/log
+  std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+}
+
+#endif // !defined(_WIN32)
+
+// ===========================================================================
+// Cluster-status command
+// ===========================================================================
+
+TEST_F(CvcCliTest, ClusterStatusMissingSeedFails) {
+  auto r = cvc("cluster-status -l " + path("cs.sock") + " -t ipc");
+  EXPECT_NE(0, r.exit_code);
+}
+
+TEST_F(CvcCliTest, ClusterStatusUnknownTransportFails) {
+  auto r = cvc("cluster-status -l " + path("cs.sock") + " -t bogus -s " + path("seed.sock"));
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("Unknown transport"));
+}
+
+TEST_F(CvcCliTest, ClusterStatusGrpcTransportFails) {
+  // Default transport is grpc; the command fails fast either because gRPC
+  // support is compiled out or because the generated node id is rejected.
+  auto r = cvc("cluster-status -l 127.0.0.1:39473 -s 127.0.0.1:39474");
+  EXPECT_NE(0, r.exit_code);
+}
+
+#if !defined(_WIN32)
+
+TEST_F(CvcCliTest, ClusterStatusRejectedNodeId) {
+  // cluster-status always generates a node id "status-<ticks>", which
+  // violates the session's C identifier rules, so the command can never
+  // connect (library/CLI bug). Exercise the config path up to the failed
+  // join; the exit code must be nonzero either way.
+  auto r = cvc_timeout(10, "cluster-status -l " + spath("cs2.sock") +
+                               " -t ipc --cluster-id testcluster -s " + path("no_peer.sock") +
+                               " --auth-token tok123");
+  EXPECT_NE(0, r.exit_code);
+}
+
+#endif // !defined(_WIN32)
