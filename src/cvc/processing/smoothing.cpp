@@ -469,7 +469,8 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
           t += WeightedCenter[k] * VertexNormal_gf[i * 3 + k];
         }
         for (k = 0; k < 3; k++) {
-          NextVertices_gf[i * 3 + k] = Vertices_gf[i * 3 + k] + delta_t * WeightedCenter[k]; // mass center
+          NextVertices_gf[i * 3 + k] =
+              Vertices_gf[i * 3 + k] + delta_t * WeightedCenter[k]; // mass center
           // NextVertices_gf[i*3 + k] = Vertices_gf[i*3+k] + delta_t*(WeightedCenter[k] -
           // t*VertexNormal_gf[i*3 + k]);// tangent movement
         }
