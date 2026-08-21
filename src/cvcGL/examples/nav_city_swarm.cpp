@@ -399,6 +399,7 @@ int main(int argc, char **argv) {
   // the COOP/COEP headers a pthreads wasm build needs). Step the world inline each
   // frame and read its world-metre snapshot directly — the same call sim_thread makes.
   std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
+  bool simPausedEm = false;
   std::vector<int> emMd(N);
   std::vector<std::uint8_t> emRch(N);
   (void)hz;
@@ -521,8 +522,10 @@ int main(int argc, char **argv) {
       // Agent count / belief mode / fog are constructor-time properties of
       // sim_world, so a restart rebuilds the world and every N-sized mesh.
       uiRestart = false;
+#ifndef __EMSCRIPTEN__
       sim->stop();
       sim.reset(); // join before the world it borrows changes underneath it
+#endif
       fogOn = uiFog;
       belief = uiBelief;
       *worldPtr = std::move(*build_world(uiAgents, uiBelief, uiFog, simSeed));
@@ -574,13 +577,19 @@ int main(int argc, char **argv) {
       }
       arrived = 0;
       frame = 0;
+#ifndef __EMSCRIPTEN__
       sim = std::make_unique<cvc::nav::sim_thread>(world, uiHz);
       sim->start();
+#endif
       std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
                   belief.c_str(), fogOn ? "on" : "off", simSeed);
     }
+#ifndef __EMSCRIPTEN__
     if (sim)
       sim->set_paused(uiPaused && !uiStep);
+#else
+    simPausedEm = uiPaused && !uiStep; // browser build steps the world inline
+#endif
     uiStep = false;
 #endif
 
@@ -683,7 +692,8 @@ int main(int argc, char **argv) {
       }
     }
 #else
-    world.step(0);
+    if (!simPausedEm)
+      world.step(0);
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
       const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
