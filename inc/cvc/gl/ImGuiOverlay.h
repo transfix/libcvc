@@ -1,0 +1,94 @@
+#ifndef CVC_GL_IMGUI_OVERLAY_H
+#define CVC_GL_IMGUI_OVERLAY_H
+
+#include <functional>
+#include <memory>
+
+class SceneRenderer; // cvcGL (global namespace)
+
+namespace cvc {
+namespace gl {
+
+// --------------
+// ImGuiOverlay
+// --------------
+// Dear ImGui inside a cvcGL viewer: menus, panels, sliders, plots — real UI, in
+// the same code path natively and in WebAssembly.
+//
+// USAGE is one object plus one callback. Construct it on a SceneRenderer and set
+// a draw function; the function runs once per rendered frame, inside VTK's own
+// render pass, and you write plain immediate-mode ImGui in it:
+//
+//     cvc::gl::ImGuiOverlay ui(view);
+//     ui.setDrawCallback([&] {
+//       if (ImGui::BeginMainMenuBar()) {
+//         if (ImGui::BeginMenu("View")) {
+//           ImGui::MenuItem("Trails", nullptr, &showTrails);
+//           ImGui::EndMenu();
+//         }
+//         ImGui::EndMainMenuBar();
+//       }
+//       ImGui::Begin("Swarm");
+//       ImGui::SliderFloat("speed", &speed, 0.1f, 4.0f);
+//       ImGui::Text("arrived %ld/%d", arrived, N);
+//       ImGui::End();
+//     });
+//
+// HOW IT HOOKS IN (the vtkDearImGuiInjector pattern, BSD-3, by Jaswant
+// Panchumarti — the approach is his; this is a cvcGL-native reimplementation):
+//   * render: observers on the render window's StartEvent (ImGui NewFrame) and
+//     RenderEvent (draw the ImGui draw lists). Because the overlay is drawn
+//     INSIDE VTK's render, it appears in offscreen captures too — no separate
+//     compositing path.
+//   * input: an interceptor observer at priority 1.0 on the CURRENT
+//     vtkInteractorStyle, so events route VTK interactor -> ImGui -> the style.
+//     ImGui does NOT take the interactor's single style slot, so
+//     CameraController keeps working exactly as before; when ImGui wants the
+//     mouse/keyboard (io.WantCaptureMouse / WantCaptureKeyboard) the event is
+//     swallowed and the camera does not see it. That is why clicking a widget
+//     doesn't also orbit the scene.
+//   * backend: stock imgui_impl_opengl3 only. There is no ImGui "platform"
+//     backend (no GLFW/SDL) — ImGuiIO is fed from the VTK interactor directly,
+//     which is what makes the WebAssembly build work: VTK owns the canvas.
+//
+// WASM: the same code path. imgui_impl_opengl3 is compiled with
+// IMGUI_IMPL_OPENGL_ES3 under Emscripten (WebGL2). Mouse and rendering work;
+// KEYBOARD input does not reach the browser build today, so design UI to be
+// mouse-drivable (menus, sliders, buttons — not text entry).
+//
+// Requires libcvc built with CVC_ENABLE_IMGUI=ON; without it the class still
+// exists but is inert (enabled() == false), so consuming code needs no #ifdef.
+class ImGuiOverlay {
+public:
+  explicit ImGuiOverlay(SceneRenderer &viewer);
+  ~ImGuiOverlay(); // detaches observers and shuts ImGui down
+
+  ImGuiOverlay(const ImGuiOverlay &) = delete;
+  ImGuiOverlay &operator=(const ImGuiOverlay &) = delete;
+
+  // Your UI. Called once per rendered frame between ImGui::NewFrame() and
+  // Render(); just call ImGui::* inside it.
+  void setDrawCallback(std::function<void()> draw);
+
+  // Master switch (the overlay stops drawing AND stops capturing input).
+  void setVisible(bool on);
+  bool visible() const;
+
+  // False when libcvc was built without CVC_ENABLE_IMGUI, or setup failed
+  // (e.g. no GL context yet) — every method is then a safe no-op.
+  bool enabled() const;
+
+  // True while ImGui is consuming the pointer / keys — a host loop can use these
+  // to suppress its own hotkeys (the CAMERA is gated automatically).
+  bool wantsMouse() const;
+  bool wantsKeyboard() const;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
+};
+
+} // namespace gl
+} // namespace cvc
+
+#endif // CVC_GL_IMGUI_OVERLAY_H
