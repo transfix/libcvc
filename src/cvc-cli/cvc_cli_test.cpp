@@ -43,6 +43,7 @@
 #define CVC_POPEN(cmd, mode) _popen(cmd, mode)
 #define CVC_PCLOSE(fp) _pclose(fp)
 #else
+#include <csignal>
 #include <unistd.h>
 #define CVC_GETPID() ::getpid()
 #define CVC_POPEN(cmd, mode) popen(cmd, mode)
@@ -100,6 +101,44 @@ static std::string sq(const std::string &s) {
   return "'" + s + "'";
 #endif
 }
+
+// Read an entire file into a string (empty string if it doesn't exist).
+static std::string slurp(const std::string &p) {
+  std::ifstream in(p, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+#if !defined(_WIN32)
+// Start `cvc serve` in the background, redirecting all of its std streams away
+// from the test's pipes (a child that keeps the test's stdout open can wedge the
+// test runner). stdin<-/dev/null, stdout+stderr->logf, PID captured to pidf.
+// Portable: no GNU-only `timeout`/`stdbuf` (absent on macOS). Returns pid or -1.
+static pid_t start_background_server(const std::string &cvc_bin, const std::string &sock,
+                                     const std::string &logf, const std::string &pidf) {
+  std::string cmd = "\"" + cvc_bin + "\" serve -l " + sock + " -t ipc --pump-interval 50 > \"" +
+                    logf + "\" 2>&1 < /dev/null & echo $! > \"" + pidf + "\"";
+  if (std::system(cmd.c_str()) != 0)
+    return -1;
+  pid_t pid = -1;
+  std::ifstream(pidf) >> pid;
+  return pid;
+}
+
+// Ask the server to stop (SIGINT -> clean shutdown, which also flushes its
+// buffered startup banner), then wait until it is actually gone so nothing
+// outlives the test; SIGKILL as a last resort.
+static void stop_server(pid_t pid) {
+  if (pid <= 0)
+    return;
+  ::kill(pid, SIGINT);
+  for (int i = 0; i < 200 && ::kill(pid, 0) == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  if (::kill(pid, 0) == 0)
+    ::kill(pid, SIGKILL);
+}
+#endif
 
 // Create a small synthetic volume (4x4x4 gradient) for testing.
 static void write_test_volume(const std::string &path) {
@@ -1266,16 +1305,33 @@ TEST_F(CvcCliTest, Regression_LayerMeshImproveMethodsNoCrash) {
 // an explicit --node-id, and cluster-status was permanently broken (its report
 // code never ran). The auto/default ids are now valid C identifiers.
 TEST_F(CvcCliTest, Regression_ServeAutoNodeIdIsValidIdentifier) {
+  // Short /tmp socket path (AF_UNIX has a ~108-byte limit).
   std::string sock = "/tmp/cvc_b7serve_" + std::to_string(::getpid()) + ".sock";
-  // Run serve with no --node-id and the default --cluster-id; SIGINT after 3s.
-  auto r = run_cmd("timeout -s INT 3 \"" + cvc_bin + "\" serve -l " + sock +
-                   " -t ipc --pump-interval 50 --root-path \"\"");
-  // The auto-generated node id and default cluster id must be accepted:
-  // no validation error, and the startup banner shows valid identifiers.
-  EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("node_")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("cluster: cvc_cluster")) << r.output;
+  std::string logf = path("serve_banner.log");
+  std::string pidf = path("serve.pid");
+
+  // Start serve with no --node-id and the default --cluster-id.
+  pid_t pid = start_background_server(cvc_bin, sock, logf, pidf);
+  ASSERT_GT(pid, 0);
+
+  // The server is up once it has bound the socket.
+  bool up = false;
+  for (int i = 0; i < 100 && !up; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    up = fs::exists(sock);
+  }
+
+  // Stopping via SIGINT flushes the buffered startup banner to logf on exit.
+  stop_server(pid);
+  std::string out = slurp(logf);
   ::unlink(sock.c_str());
+
+  EXPECT_TRUE(up) << "server did not bind the socket; log:\n" << out;
+  // The auto-generated node id and default cluster id must be accepted (no
+  // validation error) and the startup banner must show valid identifiers.
+  EXPECT_EQ(std::string::npos, out.find("violates C identifier")) << out;
+  EXPECT_NE(std::string::npos, out.find("node_")) << out;
+  EXPECT_NE(std::string::npos, out.find("cluster: cvc_cluster")) << out;
 }
 
 // Bug 7 (end-to-end): with valid default ids, cluster-status connects to a
@@ -1285,22 +1341,30 @@ TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
   std::string base = "/tmp/cvc_b7cs_" + std::to_string(::getpid());
   std::string srv_sock = base + "_srv.sock";
   std::string cs_sock = base + "_cs.sock";
+  std::string srv_log = path("cs_server.log");
+  std::string pidf = path("cs_server.pid");
 
-  // Start the server in the background under `timeout` so it self-terminates
-  // even if the test aborts; no --node-id, default --cluster-id.
-  std::string bg = "timeout -s INT 15 \"" + cvc_bin + "\" serve -l " + srv_sock +
-                   " -t ipc --pump-interval 50 --root-path \"\" >/dev/null 2>&1 &";
-  ASSERT_EQ(0, std::system(bg.c_str()));
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  // Start the server in the background; no --node-id, default --cluster-id.
+  pid_t pid = start_background_server(cvc_bin, srv_sock, srv_log, pidf);
+  ASSERT_GT(pid, 0);
 
-  // cluster-status has no --node-id flag; it must generate a valid one itself.
-  auto r = run_cmd("timeout 15 \"" + cvc_bin + "\" cluster-status -l " + cs_sock + " -t ipc -s " +
-                   srv_sock);
+  bool up = false;
+  for (int i = 0; i < 200 && !up; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    up = fs::exists(srv_sock);
+  }
+  ASSERT_TRUE(up) << "server did not start:\n" << slurp(srv_log);
+
+  // cluster-status self-terminates after printing (it has no --node-id flag, so
+  // it must generate a valid one itself). Run it directly.
+  auto r = cvc("cluster-status -l " + cs_sock + " -t ipc -s " + srv_sock);
+
+  stop_server(pid);
+  ::unlink(srv_sock.c_str());
+  ::unlink(cs_sock.c_str());
+
   EXPECT_EQ(0, r.exit_code) << r.output;
   EXPECT_EQ(std::string::npos, r.output.find("violates C identifier")) << r.output;
   EXPECT_NE(std::string::npos, r.output.find("Session status")) << r.output;
-
-  ::unlink(srv_sock.c_str());
-  ::unlink(cs_sock.c_str());
 }
 #endif // !_WIN32
