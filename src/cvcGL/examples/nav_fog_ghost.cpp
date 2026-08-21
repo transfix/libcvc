@@ -29,6 +29,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ScreenTextHud.h>
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
@@ -48,29 +49,45 @@ using cvc::gl::CameraController;
 namespace {
 const double PI = std::acos(-1.0);
 
-// Map a planning-field clearance phi (SDF, normalized units) to an RGBA "belief"
-// colour: believed-occupied / near a wall -> hot red-orange (opaque), open space ->
-// cool blue (faint), so a phantom wall reads as a red band that fades as it clears.
-void phi_to_rgba(float phi, float clip, unsigned char out[4]) {
-  const float t = std::min(std::max(phi, 0.0f), clip) / clip;  // 0 = wall, 1 = wide open
-  const float r = 1.0f - t;                                    // red at walls
-  const float b = t;                                           // blue in the open
-  const float g = 0.55f * (1.0f - std::fabs(2.0f * t - 1.0f)); // green ridge mid-range
-  out[0] = static_cast<unsigned char>(r * 255);
-  out[1] = static_cast<unsigned char>(g * 255);
-  out[2] = static_cast<unsigned char>(b * 255);
-  out[3] = static_cast<unsigned char>((0.55f + 0.4f * (1.0f - t)) * 255); // walls opaque
-}
-
-// Refill the belief texture from the agent's planning field (plane 0 = phi). The
-// image is cols x rows; pixel (c, r) <- phi[r*cols + c]. setTexture already flips V.
-// `clip` is the phi value mapped to fully-open (blue) — the SDF's range is scene-
-// dependent (a small few, not tens), so it is measured once from the initial field.
-void fill_belief(unsigned char *px, const float *field, int rows, int cols, float clip) {
+// The GROUND IS THE FOG — the honest epistemic texture, replacing the old phi
+// rainbow (which coloured the whole floor with meaningless halos). Three fog
+// tiers per cell: never-seen near-black, remembered dim, currently-visible lit.
+// Belief paints on top as an LED grid: WALL red where belief & truth, GHOST
+// amber where belief & ~truth (the phantom — a wall the agent believes that
+// reality lacks). Cells are 3x3 texels with a 1px dark gutter so belief reads
+// as discretized KNOWLEDGE, not world. Pixel (3c+sx, 3r+sy) <- cell (r, c);
+// setTexture's V-flip handles orientation.
+constexpr int kCellPx = 3;
+void fill_epistemic(unsigned char *px, const cvc::nav::sim_world &w, int rows, int cols) {
+  const std::uint8_t *seen = w.ever_seen(0), *vis = w.last_visible(0);
+  const std::uint8_t *bel = w.belief_occ(0), *tru = w.truth();
+  const int W = kCellPx * cols;
   for (int r = 0; r < rows; ++r)
     for (int c = 0; c < cols; ++c) {
-      const float phi = field[static_cast<long>(r) * cols + c]; // plane 0
-      phi_to_rgba(phi, clip, px + (static_cast<long>(r) * cols + c) * 4);
+      const long i = static_cast<long>(r) * cols + c;
+      // Fog tier
+      unsigned char t[3] = {14, 15, 18}; // never seen: near-black
+      if (vis[i]) {
+        t[0] = 51; t[1] = 56; t[2] = 66; // in view right now: lit
+      } else if (seen[i]) {
+        t[0] = 33; t[1] = 36; t[2] = 41; // remembered: dim
+      }
+      // Belief LED
+      const bool occ = bel[i] != 0;
+      const bool ghost = occ && !tru[i];
+      const unsigned char led[3] = {static_cast<unsigned char>(ghost ? 242 : 217),
+                                    static_cast<unsigned char>(ghost ? 184 : 64),
+                                    static_cast<unsigned char>(ghost ? 64 : 56)};
+      for (int sy = 0; sy < kCellPx; ++sy)
+        for (int sx = 0; sx < kCellPx; ++sx) {
+          unsigned char *p = px + (static_cast<long>(kCellPx * r + sy) * W + kCellPx * c + sx) * 4;
+          const bool gutter = (sx == kCellPx - 1) || (sy == kCellPx - 1);
+          const unsigned char *col = (occ && !gutter) ? led : t;
+          p[0] = col[0];
+          p[1] = col[1];
+          p[2] = col[2];
+          p[3] = 255;
+        }
     }
 }
 
@@ -96,7 +113,7 @@ int main(int argc, char **argv) {
   int grid = 120, width = 1280, height = 720;
   long frames = 0;
   double fps = 30.0, hz = 60.0, speed = 0.5;
-  std::string capture = "orbit", out = "frames", png;
+  std::string capture = "orbit", out = "frames", png, viewMode = "map";
   bool offscreen = false, no_shadows = false, ortho = false;
 
   po::options_description desc("nav_fog_ghost — the fog-of-war ghost story in cvcGL");
@@ -110,6 +127,8 @@ int main(int argc, char **argv) {
       "hz", po::value<double>(&hz)->default_value(60.0),
       "sim tick rate")("speed", po::value<double>(&speed)->default_value(0.5),
                        "world speed as a multiple of real time (story pace)")(
+      "view", po::value<std::string>(&viewMode)->default_value("map"),
+      "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
                        "none (interactive window) | orbit | fly (offscreen PNG capture)")(
       "width", po::value<int>(&width)->default_value(1280))(
@@ -132,6 +151,11 @@ int main(int argc, char **argv) {
     std::printf("nav_fog_ghost: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
                 capture.c_str(), out.c_str());
   }
+  // The fixed top-down map is the honest DEFAULT view for the story (the 2-D
+  // demos' framing); --view 3d opts into the perspective orbit. Captures keep
+  // their scripted 3-D camera unless --ortho forces the map.
+  if (!ortho && !capturing)
+    ortho = (viewMode == "map");
   if (ortho)
     no_shadows = true;
 
@@ -193,28 +217,51 @@ int main(int argc, char **argv) {
   const double wall_rgb[3] = {0.42, 0.44, 0.50};
   sg.addGraphics("border", navdemo::occupancy_to_walls(truth.data(), R, C, bounds, 6.0, wall_rgb));
 
-  // Ground carries the live belief heatmap.
+  // Ground carries the live EPISTEMIC texture: fog tiers + the belief LED grid.
   const double ground_rgb[3] = {1, 1, 1};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
-  cvc::image belief(C, R, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  cvc::image belief(kCellPx * C, kCellPx * R, cvc::image::pixel_format::RGBA,
+                    cvc::image::data_type::u8);
   unsigned char *bpx = belief.data(); // own the buffer, then alias it via setTexture
-  // Measure the SDF's open-space extent once to scale the colourmap (phi maxes out
-  // at a small few in normalized units, scene-dependent).
-  float belief_clip = 1.5f;
-  {
-    const float *f = world.field_data();
-    for (long i = 0; i < static_cast<long>(R) * C; ++i)
-      belief_clip = std::max(belief_clip, f[i]);
-  }
-  fill_belief(bpx, world.field_data(), R, C, belief_clip);
+  fill_epistemic(bpx, world, R, C);
   if (groundNode) {
     groundNode->setUseSingleColor(true);
     groundNode->setColor(1, 1, 1);
-    groundNode->setAmbient(0.9); // the texture IS the story; keep it bright + flat
-    groundNode->setDiffuse(0.3);
+    groundNode->setAmbient(1.0); // the texture IS the story; flat, never shaded
+    groundNode->setDiffuse(0.0);
     groundNode->setTexture(belief, /*zeroCopy=*/true);
   }
+
+  // The GHOST itself, standing in the world: a translucent amber wall extruded
+  // from the phantom cells (belief & ~truth). It ERODES cell by cell as the
+  // sensor clears them — the premise finally has a 3-D body, and its dissolution
+  // is the story beat.
+  const double ghost_rgb[3] = {0.95, 0.72, 0.25};
+  auto ghost_cells = [&]() {
+    std::vector<std::uint8_t> g(static_cast<std::size_t>(R) * C, 0);
+    const std::uint8_t *bel = world.belief_occ(0), *tru = world.truth();
+    long n = 0;
+    for (long i = 0; i < static_cast<long>(R) * C; ++i)
+      if (bel[i] && !tru[i]) {
+        g[i] = 1;
+        ++n;
+      }
+    return std::make_pair(g, n);
+  };
+  auto [ghostOcc, ghostCount] = ghost_cells();
+  const long initialGhost = ghostCount;
+  auto ghostNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ghost", navdemo::occupancy_to_walls(ghostOcc.data(), R, C, bounds, 6.0,
+                                                          ghost_rgb)));
+  if (ghostNode) {
+    ghostNode->setUseSingleColor(false);
+    ghostNode->setAmbient(0.9);
+    ghostNode->setDiffuse(0.2);
+    ghostNode->setOpacity(0.45); // visibly a wall, visibly not solid
+  }
+  int lastFv = world.field_version();
+  long lastPaint = -1000;
 
   // The agent + its sensor ring.
   navdemo::AgentGlyphs glyph;
@@ -320,6 +367,24 @@ int main(int argc, char **argv) {
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 12.0);
   if (ortho)
     navdemo::set_ortho_topdown(view, bounds, 4.0);
+
+  // On-screen story: a lower-third caption band + a corner status line. Every
+  // claim goes on screen, not stdout.
+  cvc::gl::ScreenTextHud caption(view);
+  caption.setFontSize(19);
+  cvc::gl::ScreenTextHud status(view);
+  status.setCentered(false);
+  status.setPosition(0.015, 0.95);
+  status.setFontSize(13);
+  status.setColor(0.72, 0.78, 0.85);
+  {
+    char st[160];
+    std::snprintf(st, sizeof st,
+                  "fog-of-war ghost · cvc::nav reactive drive (learned CoefMLP) · belief %dx%d · "
+                  "speed %.2gx",
+                  R, C, speed);
+    status.setText(st);
+  }
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
@@ -338,7 +403,8 @@ int main(int argc, char **argv) {
   std::vector<std::uint8_t> rch(1);
   bool reached_note = false;
   navdemo::SimPacer pacer;
-  float cw[2] = {0, 0}; // live carrot (world)
+  float cw[2] = {0, 0};      // live carrot (world)
+  double ghostGoneT = -1.0;  // world time the last phantom cell cleared
 
   while (!view.windowClosed()) {
     double t, dt;
@@ -402,10 +468,49 @@ int main(int argc, char **argv) {
       }
     }
 
-    // Belief evolves as the agent senses — re-upload the heatmap in place.
-    fill_belief(bpx, world.field_data(), R, C, belief_clip);
-    if (groundNode)
-      groundNode->texture_modified();
+    const double worldT = world.tick() * cfg.veh.dt;
+
+    // Repaint the fog/belief ground only when a sense tick actually happened —
+    // per-frame smoothing of belief would be a lie (and wasted work).
+    if (world.tick() - lastPaint >= cfg.sense_every) {
+      fill_epistemic(bpx, world, R, C);
+      if (groundNode)
+        groundNode->texture_modified();
+      lastPaint = world.tick();
+    }
+
+    // Ghost erosion: on a belief flip (field-version bump), rebuild the amber
+    // wall from the surviving phantom cells; hide it when the last one clears.
+    // The visible pop at each rebuild IS the story beat.
+    if (world.field_version() != lastFv) {
+      lastFv = world.field_version();
+      auto [g2, n2] = ghost_cells();
+      if (n2 != ghostCount && ghostNode) {
+        ghostCount = n2;
+        // The discovery beat fires when the corridor BREAKS (half the phantom
+        // eroded) — the stubs beyond sensor range may honestly never clear.
+        if (ghostGoneT < 0.0 && n2 < initialGhost / 2)
+          ghostGoneT = worldT;
+        if (n2 == 0)
+          ghostNode->setVisible(false);
+        else
+          ghostNode->setGeometry(
+              navdemo::occupancy_to_walls(g2.data(), R, C, bounds, 6.0, ghost_rgb));
+        ghostOcc = std::move(g2);
+      }
+    }
+
+    // The 4-beat caption arc, driven by world time + events.
+    if (rch[0])
+      caption.setText("Straight to the goal — through a wall that was never there.");
+    else if (ghostGoneT >= 0.0 && worldT - ghostGoneT < 4.0)
+      caption.setText("SENSOR: nothing there. Replanned.");
+    else if (ghostGoneT >= 0.0)
+      caption.setText("");
+    else if (worldT > 5.0)
+      caption.setText("Belief is all it has — so it detours.");
+    else
+      caption.setText("MAP: wall ahead. TRUTH: open field.");
 
     if (ortho) {
       // fixed top-down map — camera set once
