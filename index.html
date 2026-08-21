@@ -73,11 +73,11 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
   <div>
     <h3>nav_city_swarm</h3>
     <p>The <a href="https://github.com/CVC-Lab/GRL-SNAM">GRL-SNAM</a> reactive swarm,
-    rendered natively: hundreds of vehicles cross a procedural block-city toward
-    per-agent goals with <em>no global plan</em>. Each samples a signed-distance
-    clearance field, a tiny CoefMLP emits its wall-barrier / goal-spring / damping
-    gains, and a carrot-follower steers — the <code>cvc::nav</code> runtime, no Python,
-    no libtorch.</p>
+    rendered natively: 800 vehicles cross a varied-height city <em>under fog</em>
+    (grouped belief, 12 planes) with <em>no global plan</em> — goal pyramids that sink
+    on arrival, breadcrumb trails accumulating the street-flow, fleet fog coverage
+    painted on the ground, state-coloured agents (white = escaping, green = arrived)
+    and a live arrivals HUD. The <code>cvc::nav</code> runtime — no Python, no libtorch.</p>
     <a class="btn" href="nav_city_swarm/">Run it →</a>
   </div>
 </div>
@@ -86,9 +86,11 @@ a WebGL2 canvas, and the browser build of each example lives on this site.</p>
   <div>
     <h3>nav_fog_ghost</h3>
     <p>Fog of war: one vehicle believes a phantom wall its stale map shows but reality
-    lacks. It detours around the ghost, its sensor sweeps the space clear, the belief
-    flips, and it drives straight through. The ground is the agent's live SDF planning
-    field — watch the ghost trough dissolve as it senses.</p>
+    lacks. The ghost stands as a translucent amber 3-D wall that <em>erodes cell by
+    cell</em> as the sensor clears it; the ground paints honest epistemics (never-seen
+    black, remembered dim, in-view lit, belief as an LED grid), a blue plan line bows
+    around the phantom vs the yellow driven trail, and a caption arc narrates the
+    detour, the discovery, and the payoff.</p>
     <a class="btn" href="nav_fog_ghost/">Run it →</a>
   </div>
 </div>
