@@ -28,6 +28,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ScreenTextHud.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/sim_thread.h>
@@ -98,15 +99,17 @@ int main(int argc, char **argv) {
   long frames = 0;
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png;
-  bool offscreen = false, fog = false, no_shadows = false, ortho = false;
+  bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false;
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
-      "agents", po::value<int>(&agents)->default_value(512), "number of vehicles")(
+      "agents", po::value<int>(&agents)->default_value(800), "number of vehicles")(
       "grid", po::value<int>(&grid)->default_value(96), "city occupancy resolution")(
-      "belief", po::value<std::string>(&belief)->default_value("shared"),
+      "belief", po::value<std::string>(&belief)->default_value("grouped"),
       "shared | grouped | private")("fog", po::bool_switch(&fog),
-                                    "enable sensing so belief diverges (default: static map)")(
+                                    "(legacy no-op; fog is on by default)")(
+      "no-fog", po::bool_switch(&no_fog),
+      "static known map, no sensing — the scale-benchmark path (try --agents 1500)")(
       "offscreen", po::bool_switch(&offscreen), "render offscreen (forced by --capture)")(
       "ortho", po::bool_switch(&ortho), "top-down 2-D orthographic view (matplotlib-style)")(
       "no-shadows", po::bool_switch(&no_shadows),
@@ -164,7 +167,9 @@ int main(int argc, char **argv) {
   cfg.veh.d_hat = ts.d_hat;
   cfg.veh.dt = ts.dt;
   cfg.veh.vmax = ts.vmax;
-  cfg.freeze_sense = !fog; // static known map by default (the thousands-of-agents path)
+  const bool fogOn = !no_fog; // fog by default: belief modes only MEAN something with sensing
+  (void)fog;                  // legacy switch, absorbed by the fog-on default
+  cfg.freeze_sense = !fogOn;
   cfg.reach_tol = 0.8f;
 
   auto mode = cvc::nav::sim_world::belief_mode::shared;
@@ -220,6 +225,32 @@ int main(int argc, char **argv) {
     agentNode->setDiffuse(0.85);
   }
 
+  // Every agent's DESTINATION, rendered: one merged mesh of hovering pyramids in
+  // each agent's hue (goals_world), packed once — N wandering triangles become N
+  // journeys. Without this the learned controller is indistinguishable from boids.
+  // An ARRIVED agent's pyramid sinks away, so clutter falls as progress accrues.
+  navdemo::AgentGlyphs goalGlyphs;
+  std::shared_ptr<GeometryNode> goalsNode;
+  std::vector<double> goalXyz;
+  {
+    const double gh = 0.006 * span, ght = 1.7 * gh;
+    const std::vector<double> pv = {0, 0, 0,   -gh, -gh, ght, gh, -gh, ght,
+                                    gh, gh, ght, -gh, gh, ght};
+    const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
+    cvc::geometry goalGeom =
+        goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.012 * span);
+    goalsNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("goals", goalGeom));
+    std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
+    world.goals_world(gw.data());
+    goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data()); // keep: arrived goals sink away
+    if (goalsNode) {
+      goalsNode->setUseSingleColor(false);
+      goalsNode->setAmbient(0.85);
+      goalsNode->setDiffuse(0.55);
+      goalsNode->updateVertices(goalXyz);
+    }
+  }
+
   sg.addDirectionalLight(-42, 58, 1.0, 0.96, 0.86, 1.15);  // warm key
   sg.addDirectionalLight(140, 30, 0.55, 0.62, 0.78, 0.50); // cool fill
 
@@ -234,6 +265,12 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.28, 0.40, 0.58);
   view.renderer()->SetBackground2(0.66, 0.78, 0.92);
 
+  cvc::gl::ScreenTextHud status(view); // corner status line — claims go on screen
+  status.setCentered(false);
+  status.setPosition(0.015, 0.95);
+  status.setFontSize(13);
+  status.setColor(0.75, 0.80, 0.86);
+
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
   if (ortho)
@@ -244,7 +281,7 @@ int main(int argc, char **argv) {
   sg.processEvents();
 
   std::printf("nav_city_swarm: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
-              belief.c_str(), M, grid, fog ? "fog" : "static-map", shadows ? "on" : "off");
+              belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
 #ifndef __EMSCRIPTEN__
@@ -255,9 +292,13 @@ int main(int argc, char **argv) {
   // the COOP/COEP headers a pthreads wasm build needs). Step the world inline each
   // frame and read its world-metre snapshot directly — the same call sim_thread makes.
   std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
+  std::vector<int> emMd(N);
+  std::vector<std::uint8_t> emRch(N);
   (void)hz;
 #endif
 
+  std::vector<unsigned char> rgbBuf; // agent state-restyle scratch
+  long arrived = 0;
   const auto t0 = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
@@ -274,23 +315,81 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
 
+    // State restyle (every 2nd frame, one buffer upload): cruising = agent hue,
+    // wall-follow escape = white flash, arrived = calm green. Stalls and
+    // successes stop looking identical to "the demo broke".
+    auto restyle = [&](const int *mode, const std::uint8_t *reach) {
+      long arr = 0;
+      for (int i = 0; i < N; ++i)
+        arr += reach[i] ? 1 : 0;
+      arrived = arr;
+      if (goalsNode && !goalXyz.empty() && frame % 5 == 0) {
+        const int GV = goalGlyphs.point_count() / N;
+        bool changed = false;
+        for (int i = 0; i < N; ++i)
+          if (reach[i]) {
+            double *p = goalXyz.data() + static_cast<std::size_t>(3) * GV * i;
+            if (p[2] > -1.0) { // not yet sunk
+              for (int v = 0; v < GV; ++v)
+                p[3 * v + 2] = -5.0;
+              changed = true;
+            }
+          }
+        if (changed)
+          goalsNode->updateVertices(goalXyz);
+      }
+      if (!agentNode || (frame % 2))
+        return;
+      const int V = glyphs.point_count() / N;
+      rgbBuf.resize(static_cast<std::size_t>(3) * N * V);
+      for (int i = 0; i < N; ++i) {
+        unsigned char r, g, b;
+        if (reach[i]) {
+          r = 110; g = 190; b = 130;
+        } else if (mode[i] == 1) {
+          r = 255; g = 255; b = 255;
+        } else {
+          r = static_cast<unsigned char>(color[3 * i] * 255);
+          g = static_cast<unsigned char>(color[3 * i + 1] * 255);
+          b = static_cast<unsigned char>(color[3 * i + 2] * 255);
+        }
+        unsigned char *p = rgbBuf.data() + static_cast<std::size_t>(3) * V * i;
+        for (int v = 0; v < V; ++v) {
+          p[3 * v] = r;
+          p[3 * v + 1] = g;
+          p[3 * v + 2] = b;
+        }
+      }
+      agentNode->updateColors(rgbBuf);
+    };
+
 #ifndef __EMSCRIPTEN__
     if (auto snap = sim.read()) {
       if (snap->n == N) {
         const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
         if (agentNode)
           agentNode->updateVertices(xyz);
+        restyle(snap->mode.data(), snap->reached.data());
       }
     }
 #else
     world.step(0);
-    world.snapshot(emPos.data(), emHead.data(), nullptr, nullptr, nullptr);
+    world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
       const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
       if (agentNode)
         agentNode->updateVertices(xyz);
+      restyle(emMd.data(), emRch.data());
     }
 #endif
+
+    if (frame % 15 == 0) { // HUD status line (throttled)
+      char st[200];
+      std::snprintf(st, sizeof st,
+                    "%d agents · belief %s (M=%d) · learned CoefMLP · fog %s · arrivals %ld/%d", N,
+                    belief.c_str(), M, fogOn ? "on" : "off", arrived, N);
+      status.setText(st);
+    }
 
     if (ortho) {
       // fixed top-down map — camera set once, nothing to move
