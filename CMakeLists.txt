@@ -298,6 +298,7 @@ if(CVC_ENABLE_COVERAGE)
         COMMAND ${LCOV_PATH} --remove coverage_filtered.info
           '*/test/*'
           '*/tests/*'
+          '*_test.cpp'
           '${CMAKE_SOURCE_DIR}/src/xmlrpc/*'
           '*/geometry/cvc-mesher/contour/*'
           --output-file coverage_filtered.info

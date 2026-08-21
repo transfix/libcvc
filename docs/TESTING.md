@@ -902,7 +902,7 @@ The gate and the reports measure the same, repo-only view. The filter
 is an allowlist of `src/` + `inc/` (a `/usr/*` blocklist would still
 count Boost/CGAL/HDF5 headers from the libcvc-deps prefix that are
 inlined into instrumented TUs), minus:
-- Test code (`*/test/*`, `*/tests/*`)
+- Test code (`*/test/*`, `*/tests/*`, `*_test.cpp`)
 - Vendored XmlRpc++ (`src/xmlrpc/`)
 - Vendored contour-spectrum code (`src/cvc/geometry/cvc-mesher/contour/`),
   per `docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md` §4 Option A

@@ -256,7 +256,13 @@ static void mean_coeffs(const coef_trainer &tr, float &al, float &be, float &ga)
   ga = c[2];
 }
 
-TEST(NavCoefTrain, TrainedPolicyDrivesInSimWorld) {
+// The two full train-then-drive tests below are convergence runs: minutes in
+// a Debug build (TrainedPolicyDrivesInSimWorld exceeds ctest's 300 s PR
+// timeout). The suite name matches CI's heavy-suite regex ("Convergence") so
+// they run where the other convergence suites run; the fast gradcheck /
+// round-trip tests above stay in every run and already cover coef_train.cpp
+// and diff_rollout.h.
+TEST(NavCoefTrainConvergence, TrainedPolicyDrivesInSimWorld) {
   const training_scene sc = cvc::nav::city_scene(96);
   train_config cfg;
   cfg.n = 128;
@@ -287,7 +293,7 @@ TEST(NavCoefTrain, TrainedPolicyDrivesInSimWorld) {
 // lower lr (~1e-5 vs the surrogate's 2e-4; 2e-4 collapses it). The smooth
 // surrogate is the recommended default; the bicycle is here for matching the
 // deployment dynamics exactly when that is wanted.
-TEST(NavCoefTrain, BicycleTrainedPolicyDrives) {
+TEST(NavCoefTrainConvergence, BicycleTrainedPolicyDrives) {
   const training_scene sc = cvc::nav::city_scene(96);
   train_config cfg;
   cfg.n = 128;
