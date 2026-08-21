@@ -239,6 +239,47 @@ void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, 
   }
 }
 
+cvc::geometry pyramid_marker(double half, double h, const double rgb[3]) {
+  cvc::geometry g;
+  auto add = [&](double x, double y, double z) {
+    g.points().push_back({x, y, z});
+    g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+  };
+  add(0, 0, 0); // apex, pointing down at the spot it marks
+  add(-half, -half, h);
+  add(half, -half, h);
+  add(half, half, h);
+  add(-half, half, h);
+  using I = cvc::geometry::index_t;
+  auto tri = [&](int a, int b, int c) {
+    g.tris().push_back({static_cast<I>(a), static_cast<I>(b), static_cast<I>(c)});
+  };
+  tri(0, 1, 2);
+  tri(0, 2, 3);
+  tri(0, 3, 4);
+  tri(0, 4, 1);
+  tri(1, 3, 2); // base cap
+  tri(1, 4, 3);
+  return g;
+}
+
+cvc::geometry disc_marker(double radius, double z, const double rgb[3], int seg) {
+  cvc::geometry g;
+  auto add = [&](double x, double y) {
+    g.points().push_back({x, y, z});
+    g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+  };
+  add(0, 0); // centre
+  for (int i = 0; i < seg; ++i) {
+    const double a = 2.0 * 3.14159265358979323846 * i / seg;
+    add(radius * std::cos(a), radius * std::sin(a));
+  }
+  using I = cvc::geometry::index_t;
+  for (int i = 0; i < seg; ++i)
+    g.tris().push_back({static_cast<I>(0), static_cast<I>(1 + i), static_cast<I>(1 + (i + 1) % seg)});
+  return g;
+}
+
 void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsigned char r,
                unsigned char g, unsigned char b) {
   if (!dst || dw <= 0 || dh <= 0)

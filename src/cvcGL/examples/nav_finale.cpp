@@ -174,33 +174,6 @@ Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
   rt.wp.push_back({gx, gy}); // always end at the true goal
   return rt;
 }
-// A small downward-pointing pyramid (apex at the origin, square base up at +h)
-// — the pursuit-target marker. A silhouette deliberately distinct from every
-// vehicle glyph, so a hovering target can't be mistaken for a ninth agent.
-cvc::geometry target_marker(double half, double h, const double rgb[3]) {
-  cvc::geometry g;
-  auto add = [&](double x, double y, double z) {
-    g.points().push_back({x, y, z});
-    g.colors().push_back({rgb[0], rgb[1], rgb[2]});
-  };
-  add(0, 0, 0); // apex, pointing down at the street
-  add(-half, -half, h);
-  add(half, -half, h);
-  add(half, half, h);
-  add(-half, half, h);
-  using I = cvc::geometry::index_t;
-  auto tri = [&](int a, int b, int c) {
-    g.tris().push_back({static_cast<I>(a), static_cast<I>(b), static_cast<I>(c)});
-  };
-  tri(0, 1, 2);
-  tri(0, 2, 3);
-  tri(0, 3, 4);
-  tri(0, 4, 1);
-  tri(1, 3, 2); // base cap
-  tri(1, 4, 3);
-  return g;
-}
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -449,7 +422,7 @@ int main(int argc, char **argv) {
     char nm[24];
     std::snprintf(nm, sizeof nm, "target_%d", k);
     auto node = std::dynamic_pointer_cast<GeometryNode>(
-        sg.addGraphics(nm, target_marker(tgtHalf, 1.6 * tgtHalf, rgb)));
+        sg.addGraphics(nm, navdemo::pyramid_marker(tgtHalf, 1.6 * tgtHalf, rgb)));
     if (node) {
       node->setUseSingleColor(false);
       node->setAmbient(0.85);

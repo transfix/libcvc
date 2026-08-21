@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options;
   int grid = 120, width = 1280, height = 720;
   long frames = 0;
-  double fps = 30.0, hz = 60.0;
+  double fps = 30.0, hz = 60.0, speed = 0.5;
   std::string capture = "orbit", out = "frames", png;
   bool offscreen = false, no_shadows = false, ortho = false;
 
@@ -108,7 +108,9 @@ int main(int argc, char **argv) {
                                                   po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))(
       "hz", po::value<double>(&hz)->default_value(60.0),
-      "sim tick rate")("capture", po::value<std::string>(&capture)->default_value("none"),
+      "sim tick rate")("speed", po::value<double>(&speed)->default_value(0.5),
+                       "world speed as a multiple of real time (story pace)")(
+      "capture", po::value<std::string>(&capture)->default_value("none"),
                        "none (interactive window) | orbit | fly (offscreen PNG capture)")(
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
@@ -171,7 +173,7 @@ int main(int argc, char **argv) {
   cfg.veh.vmax = 0.9f;
   cfg.freeze_sense = false; // FOG: sense + rebuild belief each sense tick
   cfg.sense_every = 2;
-  cfg.range_m = 55.0;
+  cfg.range_m = 35.0; // reads as a SENSOR, not a hula hoop spanning half the map
   cfg.n_rays = 240;
   cfg.reach_tol = 1.0f;
 
@@ -223,7 +225,7 @@ int main(int argc, char **argv) {
     agentNode->setAmbient(0.7);
     agentNode->setDiffuse(0.8);
   }
-  const double ring_rgb[3] = {0.98, 0.9, 0.4};
+  const double ring_rgb[3] = {0.30, 0.72, 0.95}; // FOV cyan (the 2-D demos' palette)
   auto ringNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("sensor", sensor_ring(cfg.range_m, 0.8, ring_rgb)));
   if (ringNode) {
@@ -231,7 +233,75 @@ int main(int argc, char **argv) {
     ringNode->setUseSingleColor(true);
     ringNode->setColor(ring_rgb[0], ring_rgb[1], ring_rgb[2]);
     ringNode->setLineWidth(2.0);
+    ringNode->setRenderLinesAsTubes(true);
+    ringNode->setAmbient(1.0); // flat overlay colour — never shaded to black
+    ringNode->setDiffuse(0.0);
   }
+
+  // Intent + history made visible (the 2-D demos' core vocabulary): an orange
+  // goal pyramid + green start pad, a thick blue PLAN line (agent -> carrot ->
+  // goal — the carrot IS the live plan, and it visibly bends around the phantom),
+  // and a growing yellow TRACK trail of where the agent has actually driven.
+  const double goal_rgb[3] = {1.00, 0.45, 0.20}, start_rgb[3] = {0.35, 0.85, 0.45};
+  const double route_rgb[3] = {0.35, 0.65, 1.00}, track_rgb[3] = {0.98, 0.85, 0.30};
+  const double gx = 80.0, gy = 6.0, sx = -80.0, sy = -6.0; // world (set above, normalized)
+  {
+    auto goalNode = std::dynamic_pointer_cast<GeometryNode>(
+        sg.addGraphics("goal", navdemo::pyramid_marker(4.5, 7.0, goal_rgb)));
+    if (goalNode) {
+      goalNode->setUseSingleColor(false);
+      goalNode->setAmbient(0.85);
+      goalNode->setDiffuse(0.6);
+      goalNode->setLabelText("GOAL");
+      goalNode->setShowLabel(true);
+      goalNode->setPosition(gx, gy, 9.0); // hovering, apex pointing at the spot
+    }
+    auto startNode = std::dynamic_pointer_cast<GeometryNode>(
+        sg.addGraphics("start", navdemo::disc_marker(3.5, 0.25, start_rgb)));
+    if (startNode) {
+      startNode->setUseSingleColor(false);
+      startNode->setAmbient(0.9);
+      startNode->setDiffuse(0.3);
+      startNode->setPosition(sx, sy, 0.0);
+    }
+  }
+  // Plan line: 2 preallocated segments (agent->carrot, carrot->goal), streamed.
+  auto make_lines = [&](const char *name, int segs, const double rgb[3], double width,
+                        double x0, double y0, double z0) {
+    cvc::geometry g;
+    for (int s = 0; s < segs; ++s) {
+      for (int e = 0; e < 2; ++e) {
+        g.points().push_back({x0, y0, z0});
+        g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+      }
+      g.lines().push_back({static_cast<cvc::geometry::index_t>(2 * s),
+                           static_cast<cvc::geometry::index_t>(2 * s + 1)});
+    }
+    auto node = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(name, g));
+    if (node) {
+      node->setRenderMode(GeometryRenderMode::LINES);
+      node->setUseSingleColor(true);
+      node->setColor(rgb[0], rgb[1], rgb[2]);
+      node->setLineWidth(width);
+      node->setRenderLinesAsTubes(true);
+      node->setDepthOffset(2.0); // decal-style: never z-fight the ground texture
+      node->setAmbient(1.0);     // flat overlay colour — never shaded to black
+      node->setDiffuse(0.0);
+    }
+    return node;
+  };
+  auto planNode = make_lines("plan", 2, route_rgb, 5.0, sx, sy, 0.7);
+  const int TRAIL_SEGS = 600;
+  auto trailNode = make_lines("track", TRAIL_SEGS, track_rgb, 3.0, sx, sy, 0.55);
+  std::vector<double> planXyz(static_cast<std::size_t>(3) * 4, 0.0);
+  std::vector<double> trailXyz(static_cast<std::size_t>(3) * 2 * TRAIL_SEGS, 0.0);
+  for (int s = 0; s < 2 * TRAIL_SEGS; ++s) { // all degenerate at the start pad
+    trailXyz[3 * s] = sx;
+    trailXyz[3 * s + 1] = sy;
+    trailXyz[3 * s + 2] = 0.55;
+  }
+  int trailLen = 0; // segments used so far
+  float trailLast[2] = {static_cast<float>(sx), static_cast<float>(sy)};
 
   sg.addDirectionalLight(-38, 60, 1.0, 0.97, 0.9, 1.1);
   sg.addDirectionalLight(150, 34, 0.5, 0.58, 0.72, 0.45);
@@ -267,7 +337,8 @@ int main(int argc, char **argv) {
   std::vector<int> md(1);
   std::vector<std::uint8_t> rch(1);
   bool reached_note = false;
-  const int sub = std::max(1, static_cast<int>(hz / std::max(1.0, fps)));
+  navdemo::SimPacer pacer;
+  float cw[2] = {0, 0}; // live carrot (world)
 
   while (!view.windowClosed()) {
     double t, dt;
@@ -281,7 +352,11 @@ int main(int argc, char **argv) {
     }
     view.processUIEvents();
 
-    for (int s = 0; s < sub; ++s)
+    // World time runs at `speed` x real time on ANY display rate (fixed-dt
+    // accumulator); a capture uses the same pacer with a synthetic 1/fps wall
+    // clock, so captured world pacing matches the live window deterministically.
+    const int nticks = pacer.ticks(dt, cfg.veh.dt, speed);
+    for (int s = 0; s < nticks; ++s)
       world.step();
 
     world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
@@ -290,6 +365,43 @@ int main(int argc, char **argv) {
       agentNode->updateVertices(xyz);
     if (ringNode)
       ringNode->setPosition(pos[0], pos[1], 0.0);
+
+    // The PLAN, live: agent -> carrot -> goal. The carrot is the FSM's steering
+    // target — the blue line visibly bows around the phantom while the agent
+    // believes in it, then snaps straight when the belief clears.
+    world.carrots_world(cw);
+    if (planNode) {
+      planXyz[0] = pos[0];
+      planXyz[1] = pos[1];
+      planXyz[2] = 0.7;
+      planXyz[3] = planXyz[6] = cw[0];
+      planXyz[4] = planXyz[7] = cw[1];
+      planXyz[5] = planXyz[8] = 0.7;
+      planXyz[9] = gx;
+      planXyz[10] = gy;
+      planXyz[11] = 0.7;
+      planNode->updateVertices(planXyz);
+    }
+    // The TRACK, growing: append a trail segment every 3rd frame once the agent
+    // has actually moved; the yellow history stays behind the vehicle over the
+    // blue intent, exactly the 2-D demos' plan-vs-track contrast.
+    if (trailNode && frame % 3 == 0 && trailLen < TRAIL_SEGS) {
+      const float mdx = pos[0] - trailLast[0], mdy = pos[1] - trailLast[1];
+      if (mdx * mdx + mdy * mdy > 0.35f) {
+        const std::size_t b = static_cast<std::size_t>(6) * trailLen;
+        trailXyz[b] = trailLast[0];
+        trailXyz[b + 1] = trailLast[1];
+        trailXyz[b + 2] = 0.55;
+        trailXyz[b + 3] = pos[0];
+        trailXyz[b + 4] = pos[1];
+        trailXyz[b + 5] = 0.55;
+        trailLast[0] = pos[0];
+        trailLast[1] = pos[1];
+        ++trailLen;
+        trailNode->updateVertices(trailXyz);
+      }
+    }
+
     // Belief evolves as the agent senses — re-upload the heatmap in place.
     fill_belief(bpx, world.field_data(), R, C, belief_clip);
     if (groundNode)
