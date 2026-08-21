@@ -35,6 +35,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ScreenTextHud.h>
 #include <cvc/image/image.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/nav/coef_mlp.h>
@@ -209,6 +210,20 @@ int main(int argc, char **argv) {
     std::cout << desc << "\n";
     return 0;
   }
+  // Auto-probe for a scene bundle when none is given: $CVC_NAV_BUNDLE, then
+  // ~/scenes/austin_south. The provenance goes on the HUD either way — the
+  // synthetic fallback must never silently impersonate the real city.
+  if (bundle.empty()) {
+    const char *envB = std::getenv("CVC_NAV_BUNDLE");
+    if (envB && std::filesystem::exists(std::string(envB) + "/terrain.json"))
+      bundle = envB;
+    else if (const char *home = std::getenv("HOME")) {
+      const std::string cand = std::string(home) + "/scenes/austin_south";
+      if (std::filesystem::exists(cand + "/terrain.json"))
+        bundle = cand;
+    }
+  }
+
   const bool capturing = (capture != "none");
   if (capturing) {
     offscreen = true;
@@ -306,10 +321,16 @@ int main(int argc, char **argv) {
     const double y = bounds.min_y + (0.22 + 0.56 * i / (N - 1)) * (bounds.max_y - bounds.min_y);
     norm(westX, y, &o[2 * i]);
     norm(stageX, y, &goal[2 * i]);
-    const double hue = static_cast<double>(i) / N;
-    color[3 * i] = static_cast<float>(0.5 + 0.5 * std::cos(2 * PI * hue));
-    color[3 * i + 1] = static_cast<float>(0.5 + 0.5 * std::cos(2 * PI * hue + 2.1));
-    color[3 * i + 2] = static_cast<float>(0.5 + 0.5 * std::cos(2 * PI * hue + 4.2));
+    // Pack hue families: vehicle i chases target i%NT in Act 2, so both chasers
+    // of a target share its hue family (the second slightly lighter). The target
+    // markers reuse color[k], keeping pack + target visually one team.
+    const double hue = static_cast<double>(i % NT) / NT;
+    const double lift = (i / NT) ? 0.30 : 0.0;
+    color[3 * i] = static_cast<float>(std::min(1.0, 0.5 + 0.5 * std::cos(2 * PI * hue) + lift));
+    color[3 * i + 1] =
+        static_cast<float>(std::min(1.0, 0.5 + 0.5 * std::cos(2 * PI * hue + 2.1) + lift));
+    color[3 * i + 2] =
+        static_cast<float>(std::min(1.0, 0.5 + 0.5 * std::cos(2 * PI * hue + 4.2) + lift));
   }
 
   cvc::nav::sim_world::config cfg;
@@ -398,7 +419,7 @@ int main(int argc, char **argv) {
   if (vpath.empty() && usedBundle)
     vpath = bundle + "/../../shared/Humvee.glb"; // the bundle's sibling shared/ dir
   const bool haveVehicle =
-      !vpath.empty() && load_vehicle_template(vpath, 0.02 * span, hv, hvt); // ~60 m marker
+      !vpath.empty() && load_vehicle_template(vpath, 15.0, hv, hvt); // real ~5 m Humvee x3 icon scale
   if (haveVehicle) {
     std::printf("nav_finale: vehicle model %s -> %zu verts / %zu tris per agent\n", vpath.c_str(),
                 hv.size() / 3, hvt.size() / 3);
@@ -438,6 +459,68 @@ int main(int argc, char **argv) {
     targetNodes[k] = node;
   }
 
+  // A small factory for preallocated streaming LINES overlays (flat colour,
+  // tubes, decal depth offset) — spines / staging / engagement all use it.
+  auto make_lines_node = [&](const std::string &name, int segs, const double rgb[3], double width,
+                             double z) {
+    cvc::geometry lg;
+    for (int k = 0; k < segs; ++k) {
+      for (int e = 0; e < 2; ++e) {
+        lg.points().push_back({cfg.cx, cfg.cy, z});
+        lg.colors().push_back({rgb[0], rgb[1], rgb[2]});
+      }
+      lg.lines().push_back({static_cast<cvc::geometry::index_t>(2 * k),
+                            static_cast<cvc::geometry::index_t>(2 * k + 1)});
+    }
+    auto node = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(name, lg));
+    if (node) {
+      node->setRenderMode(GeometryRenderMode::LINES);
+      node->setUseSingleColor(true);
+      node->setColor(rgb[0], rgb[1], rgb[2]);
+      node->setLineWidth(width);
+      node->setRenderLinesAsTubes(true);
+      node->setAmbient(1.0);
+      node->setDiffuse(0.0);
+      node->setDepthOffset(2.0);
+    }
+    return node;
+  };
+
+  // A* ROUTE SPINES: each vehicle's remaining global route as a polyline in its
+  // hue — the headline "A* spine + learned local control" architecture, visible.
+  // A replan to a moving target shows as the spine bending in place.
+  const int SPINE_SEGS = 48;
+  std::vector<std::shared_ptr<GeometryNode>> spineNodes(N);
+  std::vector<std::vector<double>> spineXyz(N);
+  for (int i = 0; i < N; ++i) {
+    const double rgb[3] = {0.85 * color[3 * i], 0.85 * color[3 * i + 1],
+                           0.85 * color[3 * i + 2]};
+    char nm[24];
+    std::snprintf(nm, sizeof nm, "spine_%d", i);
+    spineNodes[i] = make_lines_node(nm, SPINE_SEGS, rgb, 3.0, 3.0);
+    spineXyz[i].assign(static_cast<std::size_t>(3) * 2 * SPINE_SEGS, 0.0);
+  }
+
+  // The Act-1 STAGING LINE, drawn: a glowing north-south line at the rendezvous
+  // x — the previously invisible thing eight vehicles were converging on.
+  const double stage_rgb[3] = {0.95, 0.88, 0.45};
+  auto stagingNode = make_lines_node("staging", 1, stage_rgb, 4.0, 3.0);
+  if (stagingNode) {
+    std::vector<double> sx(12, 0.0);
+    sx[0] = stageX; sx[1] = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y); sx[2] = 3.0;
+    sx[3] = stageX; sx[4] = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y); sx[5] = 3.0;
+    // one segment -> 2 points; buffer is [3*2] but assign(12) covers reuse
+    sx.resize(6);
+    stagingNode->updateVertices(sx);
+  }
+
+  // Act-2 ENGAGEMENT LINES: pursuer -> target, thin, in the pack hue.
+  const double engage_rgb[3] = {0.9, 0.9, 0.9};
+  auto engageNode = make_lines_node("engage", N, engage_rgb, 1.5, 6.0);
+  if (engageNode)
+    engageNode->setVisible(false);
+  std::vector<double> engageXyz(static_cast<std::size_t>(3) * 2 * N, 0.0);
+
   sg.addDirectionalLight(-40, 58, 1.0, 0.96, 0.88, 1.1);
   sg.addDirectionalLight(150, 32, 0.5, 0.58, 0.72, 0.45);
 
@@ -450,6 +533,24 @@ int main(int argc, char **argv) {
   view.renderer()->GradientBackgroundOn();
   view.renderer()->SetBackground(0.20, 0.26, 0.36);
   view.renderer()->SetBackground2(0.55, 0.66, 0.82);
+
+  cvc::gl::ScreenTextHud actCard(view); // act title cards, top-centre
+  actCard.setPosition(0.5, 0.90);
+  actCard.setFontSize(22);
+  cvc::gl::ScreenTextHud status(view); // provenance + architecture, corner
+  status.setCentered(false);
+  status.setPosition(0.015, 0.03);
+  status.setFontSize(13);
+  status.setColor(0.85, 0.88, 0.92);
+  {
+    char st[220];
+    std::snprintf(st, sizeof st,
+                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map",
+                  N,
+                  usedBundle ? "real Austin (runtime bundle)"
+                             : "synthetic city — pass --bundle for real Austin");
+    status.setText(st);
+  }
 
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
@@ -500,6 +601,7 @@ int main(int argc, char **argv) {
   double eye[3], focal[3];
   long frame = 0;
   bool targetsShown = false;
+  double actFlipT = 0.0; // wall/capture time at the act break (for the card)
   const auto tw0 = std::chrono::steady_clock::now(); // interactive wall clock
   double lastT = 0.0;
 
@@ -536,15 +638,33 @@ int main(int argc, char **argv) {
         tgt[2 * k] = static_cast<float>(cfg.cx + rad * std::cos(a));
         tgt[2 * k + 1] = static_cast<float>(cfg.cy + rad * std::sin(a));
       }
-      if (!targetsShown) { // Act 2 opens: reveal the hovering target markers
+      if (!targetsShown) { // Act 2 opens: targets on, staging line off, chase on
         for (auto &n : targetNodes)
           if (n)
             n->setVisible(true);
+        if (stagingNode)
+          stagingNode->setVisible(false);
+        if (engageNode)
+          engageNode->setVisible(true);
+        actFlipT = t;
         targetsShown = true;
       }
       for (int k = 0; k < NT; ++k)
         if (targetNodes[k])
           targetNodes[k]->setPosition(tgt[2 * k], tgt[2 * k + 1], tgtHover);
+      if (engageNode) { // pursuer -> target, streamed
+        for (int i = 0; i < N; ++i) {
+          const double wx = pos[2 * i], wy = pos[2 * i + 1]; // snapshot pos IS world
+          const std::size_t b6 = static_cast<std::size_t>(6) * i;
+          engageXyz[b6] = wx;
+          engageXyz[b6 + 1] = wy;
+          engageXyz[b6 + 2] = 6.0;
+          engageXyz[b6 + 3] = tgt[2 * (i % NT)];
+          engageXyz[b6 + 4] = tgt[2 * (i % NT) + 1];
+          engageXyz[b6 + 5] = tgtHover * 0.8;
+        }
+        engageNode->updateVertices(engageXyz);
+      }
       if ((frame - act2) % 15 == 0)
         for (int i = 0; i < N; ++i) {
           routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
@@ -585,6 +705,42 @@ int main(int argc, char **argv) {
     if (agentNode)
       agentNode->updateVertices(xyz);
 
+    if (frame % 5 == 0) // route spines: vehicle -> remaining waypoints
+      for (int i = 0; i < N; ++i) {
+        if (!spineNodes[i])
+          continue;
+        std::vector<double> &X = spineXyz[i];
+        const Route &rt = routes[i];
+        double ax = pos[2 * i], ay = pos[2 * i + 1]; // snapshot pos IS world
+        std::size_t sseg = 0;
+        for (std::size_t w = rt.idx; w < rt.wp.size() && sseg < SPINE_SEGS; ++w, ++sseg) {
+          const std::size_t b6 = 6 * sseg;
+          X[b6] = ax;
+          X[b6 + 1] = ay;
+          X[b6 + 2] = 3.0;
+          X[b6 + 3] = rt.wp[w][0];
+          X[b6 + 4] = rt.wp[w][1];
+          X[b6 + 5] = 3.0;
+          ax = rt.wp[w][0];
+          ay = rt.wp[w][1];
+        }
+        for (; sseg < SPINE_SEGS; ++sseg) { // collapse unused segments
+          const std::size_t b6 = 6 * sseg;
+          X[b6] = X[b6 + 3] = ax;
+          X[b6 + 1] = X[b6 + 4] = ay;
+          X[b6 + 2] = X[b6 + 5] = 3.0;
+        }
+        spineNodes[i]->updateVertices(X);
+      }
+
+    // Act title cards (a few seconds each).
+    if (!act2now && t < 6.0)
+      actCard.setText("ACT 1 — RENDEZVOUS: eight vehicles converge on the staging line");
+    else if (act2now && t - actFlipT < 6.0)
+      actCard.setText("ACT 2 — PURSUIT: packs chase moving targets, routes retarget in place");
+    else
+      actCard.setText("");
+
     if (capturing) {
       // Scripted capture camera: a slow high fly that drifts across the map.
       const double az = 0.4 + 0.25 * std::sin(0.12 * t);
@@ -621,7 +777,7 @@ int main(int argc, char **argv) {
           navdemo::plot_disc(fp, W, H, x0 + c, y0 + rr, rad, R, G, B);
         };
         for (int i = 0; i < N; ++i) {
-          const double wx = pos[2 * i] / sc + cfg.cx, wy = pos[2 * i + 1] / sc + cfg.cy;
+          const double wx = pos[2 * i], wy = pos[2 * i + 1]; // snapshot pos IS world
           { // predicted path = the remaining A* route waypoints
             const Route &rt = routes[i];
             double ax = wx, ay = wy;
