@@ -60,7 +60,10 @@ namespace gl {
 class CameraController : public cvc::state_object<CameraController> {
 public:
   // Orbit (turntable), Fly (Quake), Track (cinematic follow of a scene actor).
-  enum class Mode { Orbit = 0, Fly = 1, Track = 2 };
+  // Map = a true 2-D map view: parallel projection straight down the up axis,
+  // drag PANS and the wheel ZOOMS, and rotation is impossible. For ortho
+  // "matplotlib" views where tumbling the camera only ever disorients.
+  enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3 };
 
   // Canonical: state at "<viewer.scene prefix>.viewers.<viewer.name>.camera",
   // rooted in the viewer's scene app, and auto-wired to the viewer's camera,
@@ -97,6 +100,10 @@ public:
   // Frame the whole scene: orbit center = box center, distance from its diagonal,
   // a pleasant 3/4 default view, auto move-speed. Seeds the fly pose too.
   void frameBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
+
+  // Map mode framing: look straight down at (cx, cy) with a half-height of
+  // `halfHeight` world units (the parallel scale). Sets Mode::Map.
+  void frameMap(double cx, double cy, double halfHeight);
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);

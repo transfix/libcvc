@@ -18,6 +18,11 @@ namespace cvc {
 class app;
 }
 class SceneRenderer; // cvcGL (global namespace)
+namespace cvc {
+namespace gl {
+class CameraController;
+}
+} // namespace cvc
 
 namespace navdemo {
 
@@ -116,7 +121,11 @@ void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, 
 // looking straight down -z, parallel projection framing [min,max] + margin) — the
 // 2-D "matplotlib" view. Call once; the camera stays put. Pairs with flat lighting
 // (high ambient, shadows off) for a clean 2-D read.
-void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin = 6.0);
+// Pass the viewer's CameraController to make the map INTERACTIVE the 2-D way:
+// drag pans, wheel zooms, and rotation is impossible (CameraController::Map).
+// Without it the camera is simply parked (scripted captures).
+void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin = 6.0,
+                       cvc::gl::CameraController *cam = nullptr);
 
 // Stamp a 1-cell occupied border around a rows*cols occupancy grid in place, so
 // reactive agents can't drive off the open edge (and it renders as an outer wall).

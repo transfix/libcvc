@@ -363,7 +363,8 @@ int main(int argc, char **argv) {
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
   if (ortho)
-    navdemo::set_ortho_topdown(view, bounds, 4.0); // fixed 2-D top-down map
+    navdemo::set_ortho_topdown(view, bounds, 4.0,
+                               capturing ? nullptr : &cam); // fixed 2-D top-down map
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);

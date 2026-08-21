@@ -568,7 +568,7 @@ int main(int argc, char **argv) {
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
   if (!capturing && viewMode == "map") // the honest 2-D map answer, interactively
-    navdemo::set_ortho_topdown(view, bounds, 10.0);
+    navdemo::set_ortho_topdown(view, bounds, 10.0, capturing ? nullptr : &cam);
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
