@@ -5,15 +5,17 @@ navigation scenarios natively: the exact `cvc::nav` runtime (`sim_world` / `sim_
 **no Python, no libtorch**) driving agents inside the cvcGL scene graph — the payoff of the
 torch-free nav port. Same brain as the Python demos, rendered in real 3-D.
 
+Every demo opens an **interactive window by default** (Tab = orbit/fly camera,
+WASD + mouse to fly); `--capture orbit|fly` renders offscreen PNG frames instead.
+Intent, history, sensing, and belief are all **drawn** — goals, routes, trails,
+sensor rings, fog tiers, captions — the same visual vocabulary as the original
+2-D matplotlib demos, in 3-D.
+
 | demo | what it shows |
 |------|---------------|
-| **`nav_city_swarm`** | N vehicles reactively navigate a procedural "city" (the same `city_scene` the trainer uses); agents are coloured by belief group. The scalable hero — one merged glyph mesh streamed per frame, smooth into the thousands. |
-| **`nav_fog_ghost`** | the fog-of-war "ghost" story: one vehicle carries a stale belief map with a phantom wall reality lacks; it detours around the ghost, senses the space is actually clear, and drives through. The ground heatmap is the agent's **SDF clearance field φ** (red = near a believed wall, blue = open) — watch the ghost trough dissolve as it senses. |
-| **`nav_finale`** | the flagship: 8 vehicles that already **hold the city map** drive in from the west edge and rendezvous (Act 1), then split into pursuit packs chasing 4 moving targets (Act 2), on the **real Austin** bundle. Global A\* spine + reactive local control; 3-D only, with a live 2-D picture-in-picture minimap (agent positions + the line to each one's current target). |
-
-Both `nav_city_swarm` and `nav_fog_ghost` render **either** the default 3-D perspective
-**or** a top-down 2-D orthographic "matplotlib" map with `--ortho` — one codebase, both
-looks. `nav_finale` is 3-D only (the 2-D view is the PiP minimap).
+| **`nav_city_swarm`** | 800 vehicles cross a varied-height procedural city under **fog** (default `--belief grouped`, M≈12 planes): every agent's **goal pyramid** is drawn (it sinks when reached), breadcrumb **trails** accumulate the street-flow, the ground is the **fleet's fog coverage**, agents recolour by state (white = wall-follow escape, green = arrived), and a HUD counts arrivals. `--no-fog --agents 1500` is the static-map scale-benchmark path. |
+| **`nav_fog_ghost`** | the fog-of-war "ghost" story, told on a top-down **map view by default** (`--view 3d` for perspective): the ground shows the agent's honest epistemics — never-seen near-black, remembered dim, in-view lit, belief as an LED grid (WALL red, GHOST amber) — while the phantom stands as a **translucent amber 3-D wall that erodes cell-by-cell** as the sensor clears it. Blue PLAN line (the live carrot) vs yellow TRACK trail, GOAL/start markers, a 4-beat caption arc, 0.5× story pacing. |
+| **`nav_finale`** | the flagship: 8 vehicles that already **hold the city map** converge on a drawn **staging line** (Act 1), then split into hue-matched **pursuit packs** chasing 4 hovering labelled targets (Act 2) — per-vehicle **A\* route spines** on the ground bend in place as routes retarget, engagement lines link pursuer to target, act cards narrate, and the PiP minimap draws true-position dots + route lines. Auto-probes `$CVC_NAV_BUNDLE` / `~/scenes/austin_south` for the real Austin bundle; the synthetic fallback says so on the HUD. `--view map` for a top-down ortho answer. |
 
 ## How the GRL-SNAM nav model works
 
@@ -84,28 +86,32 @@ cmake --build build --target nav_city_swarm
 
 ## Run
 
-Interactive window (Z-up; `Tab` = orbit/fly, `WASD`+mouse to fly):
+No arguments needed — every demo opens an interactive window:
 
 ```sh
-./build/bin/nav_city_swarm --agents 1000 --belief grouped
+./build/bin/nav_fog_ghost                 # the story demo (map view, captions)
+./build/bin/nav_city_swarm                # 800 agents, fog, grouped belief
+./build/bin/nav_finale                    # 2-act pursuit (auto-probes for the Austin bundle)
 ```
 
-Offscreen capture → PNG frames → mp4:
+Offscreen capture → PNG frames → mp4 (capture is explicit, prints where frames go,
+and always terminates — default 600 frames):
 
 ```sh
-./build/bin/nav_city_swarm --agents 1500 --belief private \
-    --capture orbit --offscreen --frames 300 --fps 30 --out /tmp/city
+./build/bin/nav_city_swarm --capture orbit --frames 300 --out /tmp/city
 ffmpeg -framerate 30 -i /tmp/city/frame_%05d.png -c:v libx264 -pix_fmt yuv420p city.mp4
 ```
 
-`nav_city_swarm` options: `--agents N`, `--grid G` (city resolution), `--belief
-shared|grouped|private` (agents are coloured by belief group), `--fog` (enable sensing so
-belief diverges; default is a static known map — the thousands-of-agents path), `--hz`
-(sim tick rate), plus the shared capture flags (`--capture none|orbit|fly`, `--offscreen`,
-`--frames`, `--fps`, `--out`, `--png`, `--width`, `--height`, `--no-shadows`).
+Notable options: `--belief shared|grouped|private`, `--no-fog` (static known map — the
+scale-benchmark path), `--agents N`, `--view map|3d` (fog_ghost defaults to map, finale
+to 3d), `--speed X` (fog_ghost story pace, default 0.5× real time via a fixed-dt pacer —
+world speed is display-rate independent), plus the shared capture flags (`--capture
+none|orbit|fly`, `--frames`, `--fps`, `--out`, `--png`, `--width`, `--height`,
+`--no-shadows`).
 
 The swarm runs on a `sim_thread` off the render thread; each frame the loop reads its
-latest lock-free snapshot and streams the poses into the one agent mesh.
+latest lock-free snapshot and streams poses (updateVertices) and state colours
+(updateColors) into the merged agent mesh.
 
 ### Installing / running
 
@@ -117,9 +123,9 @@ cvcpkg install cvcgl-examples          # drops lsystem_forest + the three nav de
 <prefix>/bin/nav_city_swarm --agents 1000 --belief grouped
 ```
 
-From a local build tree, `build-demos/run-demo.sh <demo> …` sets `LD_LIBRARY_PATH` so the
-fresh libs win over any stale installed libcvc — nothing else. Like every cvcGL example
-(`lsystem_forest` included), the demos render on the **GPU** by default.
+From a local build tree, run the binaries directly — the build sets an RPATH with the
+fresh build's lib dir first, so no wrapper or `LD_LIBRARY_PATH` is needed. Like every
+cvcGL example (`lsystem_forest` included), the demos render on the **GPU** by default.
 
 ### GPU / GLX troubleshooting
 
@@ -138,6 +144,6 @@ machine hasn't rebooted), GLX is down **system-wide** — for `glxinfo`, `lsyste
 these demos alike. **Reboot** to load the matching kernel module and the GPU renders again with
 no special env.
 
-As a last-resort stopgap while the GPU is down (e.g. capturing an offscreen preview before a
-reboot), `NAV_SOFTWARE=1 build-demos/run-demo.sh …` forces mesa llvmpipe (software, slow —
-fine for a quick check, not for deliverable mp4s).
+As a last-resort stopgap while the GPU is down (e.g. capturing an offscreen preview before
+a reboot), `LIBGL_ALWAYS_SOFTWARE=1 __GLX_VENDOR_LIBRARY_NAME=mesa ./build/bin/<demo> …`
+forces mesa llvmpipe (software, slow — fine for a quick check, not for deliverable mp4s).

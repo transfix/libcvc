@@ -35,8 +35,11 @@ struct Bounds {
 // Merged extruded-box mesh for every occupied cell (occ != 0), each box centred on
 // its cell over the [min,max] world rect and spanning z in [0, height]. One
 // geometry -> one GeometryNode (blocky "buildings"/walls). Colour = wall_rgb[3].
+// vary > 0 gives each 4-connected BUILDING a hashed height in
+// [1-vary, 1+vary] x height and a subtle tint (a city, not a maze); faces are
+// flat-shaded and interior faces between occupied neighbours are culled.
 cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, const Bounds &b,
-                                 double height, const double wall_rgb[3]);
+                                 double height, const double wall_rgb[3], double vary = 0.0);
 
 // A single flat ground quad over the world rect at height z, colour rgb — the
 // terrain the agents drive on. (Textured later for the fog belief map.)
@@ -71,6 +74,36 @@ private:
   std::vector<double> tmpl_;            // [3*V] local template verts (forward +x)
   std::vector<std::uint32_t> tmplTris_; // [3*T] template triangle indices
   std::vector<double> xyz_;             // scratch, reused each pack()
+};
+
+// A small pyramid marker: apex at the LOCAL origin pointing down, square base up
+// at +h — position it hovering and it points at a spot on the ground (goal /
+// pursuit-target markers; a silhouette deliberately distinct from every vehicle
+// glyph, so a marker can't be mistaken for another agent). Per-vertex rgb.
+cvc::geometry pyramid_marker(double half, double h, const double rgb[3]);
+
+// A flat disc (triangle fan) of `radius` at height z — start pads, arrival pads.
+cvc::geometry disc_marker(double radius, double z, const double rgb[3], int seg = 40);
+
+// Wall-clock -> fixed-dt sim pacing. Accumulate real seconds * speed and hand
+// back whole sim ticks to run this frame (capped so a hitch can't spiral).
+// Keeps world time honest on ANY display rate — fixed steps-per-frame made the
+// same story run twice as fast on a 60 Hz display as on a 30 fps capture.
+struct SimPacer {
+  double carry = 0.0;
+  int ticks(double wall_dt, double sim_dt, double speed, int cap = 8) {
+    if (!(wall_dt > 0.0) || !(sim_dt > 0.0))
+      return 0;
+    carry += wall_dt * speed;
+    int n = static_cast<int>(carry / sim_dt);
+    if (n > cap) {
+      n = cap; // dropped time, not a tick burst — a stall must not fast-forward
+      carry = 0.0;
+    } else {
+      carry -= n * sim_dt;
+    }
+    return n;
+  }
 };
 
 // Scripted capture camera: orbit an eye around the bbox centre (at world-z `zc`) at
@@ -110,6 +143,11 @@ void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, 
 
 // Fill a filled disc of radius `rad` centred at (cx, cy) with colour (r, g, b).
 void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsigned char r,
+               unsigned char g, unsigned char b);
+
+// Draw a 1-px Bresenham line from (x0, y0) to (x1, y1); every pixel clipped —
+// endpoints may be anywhere (routes to off-map targets just clip at the edge).
+void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y1, unsigned char r,
                unsigned char g, unsigned char b);
 
 } // namespace navdemo

@@ -70,6 +70,26 @@ public:
   // (vtkPolyDataNormals) is exactly the cost this path exists to avoid.
   void updateVertices(const std::vector<double> &xyz);
 
+  // The color twin of updateVertices: overwrite this mesh's per-vertex uchar RGB
+  // scalars in place ([r,g,b, ...], same point count as the current geometry) and
+  // mark modified — no mesh rebuild. Lets a renderer restyle a merged crowd mesh
+  // per frame (agent state colors, trail fading) for the cost of one buffer
+  // upload. A mismatch, or a single-color mesh with no per-vertex array, logs and
+  // no-ops. Direct like the shader replacements (a per-frame fast path), not
+  // state-bound.
+  void updateColors(const std::vector<unsigned char> &rgb);
+
+  // Render tuning (direct VTK property/mapper passthroughs, like the shader
+  // replacements). Tubes/spheres make line_width / point_size > 1 survive
+  // core-profile GL and WebGL, where raw wide lines/points are silently 1px.
+  void setRenderLinesAsTubes(bool on);
+  void setRenderPointsAsSpheres(bool on);
+  // Positive units pull this node toward the camera at equal depth (relative
+  // coincident-topology polygon/line/point offsets on the mapper) — kills
+  // z-fighting for route lines and belief decals laid on a ground/satellite quad
+  // without hand-tuned z epsilons.
+  void setDepthOffset(double units);
+
   // Inject GLSL into this mesh's shader (a passthrough to the actor's
   // vtkShaderProperty). `original` is a VTK shader anchor (e.g.
   // "//VTK::Normal::Impl") or a generated line; `replacement` is spliced in for

@@ -117,7 +117,30 @@ public:
   // plane m at m*3*H*W).
   void snapshot(float *pos_world, float *heading, float *speed, int *mode,
                 std::uint8_t *reached) const;
+  // Per-agent goal positions in WORLD metres ([n*2], snapshot's conversion) —
+  // lets a renderer draw where each agent is trying to go.
+  void goals_world(float *out) const;
+  // Per-agent live carrot (the FSM's current steering target) in WORLD metres
+  // ([n*2]); before the first step() it falls back to the goals. Watching the
+  // carrot deflect around obstacles IS the reactive drive, made visible.
+  void carrots_world(float *out) const;
   const float *field_data() const { return field_.data(); }
+
+  // Epistemic read surface ([rows*cols] rasters) — lets a renderer draw honest
+  // belief-vs-truth: truth() is the world as it IS; belief_occ(m) is plane m's
+  // current planning raster (belief & ~truth = a phantom the agents believe);
+  // ever_seen(m) / last_visible(m) are plane m's fog tiers (remembered vs in
+  // view right now). Plane pointers index m*rows*cols into the [M,H,W] blocks.
+  const std::uint8_t *truth() const { return truth_.data(); }
+  const std::uint8_t *belief_occ(int m) const {
+    return occ_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+  }
+  const std::uint8_t *ever_seen(int m) const {
+    return everseen_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+  }
+  const std::uint8_t *last_visible(int m) const {
+    return lastvis_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+  }
 
   // Live-scene edits (for the threading layer): retarget agent i (normalized
   // goal) keeping its escape state; stamp a decaying obstacle blob (a centered
@@ -153,6 +176,7 @@ private:
 
   // SoA agent columns
   std::vector<float> o_, goal_, th_, sp_, color_, wall_entry_, pos_hist_;
+  std::vector<float> carrot_; // [n*2] last tick's FSM steering target (for renderers)
   std::vector<int> stall_, mode_, hist_count_;
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
