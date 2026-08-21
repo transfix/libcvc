@@ -20,12 +20,25 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// spatial.cpp — the fixed-radius neighbour query declared in grid_nav.h, backed
-// by CGAL's Kd_tree (libcvc already links CGAL). Kept in its own translation
-// unit so grid_nav.cpp stays dependency-free STL. The inexact
-// Simple_cartesian<double> kernel is deliberate: no GMP/MPFR, and the query is
-// a plain squared-distance comparison, so the neighbour set matches the naive
-// dist^2 <= radius^2 test exactly.
+// spatial.cpp — the fixed-radius neighbour query declared in grid_nav.h. Two
+// implementations, selected at compile time so the contract (self excluded, indices
+// sorted ascending, exact dist^2 <= radius^2) is byte-identical either way:
+//
+//   * default — CGAL's Kd_tree (O(N log N) build + fast range queries), the fast
+//     path used in every normal libcvc build. The inexact Simple_cartesian<double>
+//     kernel is deliberate: header-only (no GMP/MPFR to link) and the query is a
+//     plain squared-distance comparison, so the neighbour set matches the naive test.
+//
+//   * DISABLE_CGAL — a CGAL-free STL fallback (naive O(N^2)) with identical output.
+//     Without this, DISABLE_CGAL was a misnomer: this TU still #include'd CGAL and
+//     only compiled because the build happened to have the headers on its path. The
+//     fallback lets a genuinely CGAL-free build (e.g. the lean wasm toolchain, or any
+//     -DDISABLE_CGAL build) drop the CGAL headers entirely.
+
+#include <cvc/nav/grid_nav.h>
+#include <vector>
+
+#ifndef DISABLE_CGAL
 
 #include <CGAL/Fuzzy_sphere.h>
 #include <CGAL/Kd_tree.h>
@@ -34,9 +47,7 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/property_map.h>
 #include <algorithm>
-#include <cvc/nav/grid_nav.h>
 #include <utility>
-#include <vector>
 
 namespace cvc {
 namespace nav {
@@ -90,3 +101,45 @@ neighbor_csr neighbors_within_radius(const double *positions, int n, double radi
 
 } // namespace nav
 } // namespace cvc
+
+#else // DISABLE_CGAL — CGAL-free STL fallback (byte-identical output)
+
+namespace cvc {
+namespace nav {
+
+neighbor_csr neighbors_within_radius(const double *positions, int n, double radius) {
+  neighbor_csr out;
+  out.offsets.assign(n + 1, 0);
+  if (n <= 0)
+    return out;
+
+  const double r2 = radius * radius;
+  // Naive fixed-radius search. Scanning j in increasing order leaves each point's
+  // neighbours already sorted ascending, and the exact `dx*dx + dy*dy <= r2` test with
+  // self excluded matches the Kd_tree path bit-for-bit. O(N^2) — the CGAL Kd_tree is
+  // the fast path; this keeps a CGAL-free build correct.
+  std::vector<std::vector<int>> per(n);
+  for (int i = 0; i < n; ++i) {
+    const double xi = positions[2 * i], yi = positions[2 * i + 1];
+    std::vector<int> &v = per[i];
+    for (int j = 0; j < n; ++j) {
+      if (j == i)
+        continue;
+      const double dx = positions[2 * j] - xi, dy = positions[2 * j + 1] - yi;
+      if (dx * dx + dy * dy <= r2)
+        v.push_back(j);
+    }
+  }
+
+  for (int i = 0; i < n; ++i)
+    out.offsets[i + 1] = out.offsets[i] + static_cast<int>(per[i].size());
+  out.indices.reserve(out.offsets[n]);
+  for (int i = 0; i < n; ++i)
+    out.indices.insert(out.indices.end(), per[i].begin(), per[i].end());
+  return out;
+}
+
+} // namespace nav
+} // namespace cvc
+
+#endif // DISABLE_CGAL
