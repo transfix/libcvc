@@ -157,6 +157,13 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
 
   vector<float> Vertices_gf;
   vector<float> VerticesBackup_gf;
+  // Scratch buffer for the position-update passes below: threads read
+  // neighbor positions out of Vertices_gf (left untouched for the whole
+  // parallel region) and write each vertex's new position here, so no
+  // thread ever reads a position another thread is concurrently
+  // overwriting. Swapped into Vertices_gf once the region's implicit
+  // barrier has passed.
+  vector<float> NextVertices_gf;
   vector<float> VertexNormal_gf;
   vector<int> FaceIndex_gi;
 
@@ -377,7 +384,7 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
 
       // calculate the normal for each vertex
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for private(k) schedule(static)
 #endif
       for (i = 0; i < NumVertices_i; i++) {
         for (k = 0; k < 3; k++)
@@ -411,6 +418,11 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
         }
       }
 
+      // Vertices_gf is read-only for the whole pass below (neighbor lookups
+      // read other threads' not-yet-updated positions); new positions are
+      // staged into NextVertices_gf and swapped in after the parallel
+      // region's implicit barrier. See NextVertices_gf's declaration.
+      NextVertices_gf = Vertices_gf;
 #ifdef _OPENMP
 #pragma omp parallel for private(itri, v0, v1, v2, k, Pt0, Pt1, Pt2, area, sum_0, sum_1,           \
                                      WeightedCenter, t) schedule(dynamic)
@@ -457,11 +469,12 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
           t += WeightedCenter[k] * VertexNormal_gf[i * 3 + k];
         }
         for (k = 0; k < 3; k++) {
-          Vertices_gf[i * 3 + k] += delta_t * WeightedCenter[k]; // mass center
-          // Vertices_gf[i*3 + k] += delta_t*(WeightedCenter[k] - t*VertexNormal_gf[i*3 + k]);//
-          // tangent movement
+          NextVertices_gf[i * 3 + k] = Vertices_gf[i * 3 + k] + delta_t * WeightedCenter[k]; // mass center
+          // NextVertices_gf[i*3 + k] = Vertices_gf[i*3+k] + delta_t*(WeightedCenter[k] -
+          // t*VertexNormal_gf[i*3 + k]);// tangent movement
         }
       }
+      Vertices_gf.swap(NextVertices_gf);
 
     } // end of index loop
   }
@@ -474,7 +487,7 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
 
       // calculate the normal for each vertex
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for private(k) schedule(static)
 #endif
       for (i = 0; i < NumVertices_i; i++) {
         for (k = 0; k < 3; k++)
@@ -508,6 +521,10 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
         }
       }
 
+      // See the analogous comment in the GEOMETRIC_FLOW pass above:
+      // Vertices_gf stays read-only through this parallel region; new
+      // positions land in NextVertices_gf and are swapped in afterward.
+      NextVertices_gf = Vertices_gf;
 #ifdef _OPENMP
 #pragma omp parallel for private(itri, v0, v1, v2, k, Pt0, Pt1, Pt2, AveCenter_f,                  \
                                      NumNeighborVertices_i) schedule(dynamic)
@@ -543,9 +560,10 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
         }
 
         for (k = 0; k < 3; k++) {
-          Vertices_gf[i * 3 + k] = AveCenter_f[k];
+          NextVertices_gf[i * 3 + k] = AveCenter_f[k];
         }
       }
+      Vertices_gf.swap(NextVertices_gf);
 
     } // end of index loop
   }
@@ -554,7 +572,7 @@ void smooth_geometry(cvc::app &ctx, cvc::geometry &geo, float delta, bool fix_bo
     thread_info ti(ctx, "PERTURB_2");
     // calculate the normal for each vertex
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for private(k) schedule(static)
 #endif
     for (i = 0; i < NumVertices_i; i++) {
       for (k = 0; k < 3; k++)
