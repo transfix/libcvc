@@ -8,6 +8,14 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
+# Line-coverage gate (percent), enforced by the "Enforce coverage gate"
+# step in package-linux / libcvc-debug. The number is computed over the
+# supported in-repo surface only: src/ + inc/, minus test code, the
+# vendored XmlRpc++ tree (src/xmlrpc) and the vendored contour-spectrum
+# tree (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A).
+env:
+  COVERAGE_MIN: '80'
+
 # Concurrency: split into two pools.
 #  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
 #    fast feedback.
@@ -302,8 +310,23 @@ jobs:
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
         run: |
           lcov --directory build --capture --output-file build/coverage.info --ignore-errors mismatch
-          lcov --remove build/coverage.info \
-            '/usr/*' '*/test/*' '*/tests/*' '*/_deps/*' '*/googletest/*' \
+          # Allowlist, not blocklist: --extract to workspace src/ + inc/.
+          # The old --remove of '/usr/*' still counted Boost/CGAL/HDF5
+          # headers from the libcvc-deps prefix ($HOME/libcvc-deps),
+          # which are inlined into instrumented TUs and diluted the
+          # numbers with third-party header coverage.
+          lcov --extract build/coverage.info \
+            "$GITHUB_WORKSPACE/src/*" "$GITHUB_WORKSPACE/inc/*" \
+            --output-file build/coverage_filtered.info \
+            --ignore-errors unused
+          # Drop test code itself plus vendored trees we don't ship as a
+          # supported API surface: XmlRpc++ (src/xmlrpc) and the
+          # UT-Austin contour-spectrum code
+          # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A).
+          lcov --remove build/coverage_filtered.info \
+            '*/test/*' '*/tests/*' \
+            "$GITHUB_WORKSPACE/src/xmlrpc/*" \
+            '*/geometry/cvc-mesher/contour/*' \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
           genhtml build/coverage_filtered.info \
@@ -315,7 +338,10 @@ jobs:
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          # Scoped by matrix entry: libcvc-debug and libcvc-debug-grpc
+          # both produce a report, and identically-named artifacts are
+          # indistinguishable in the run UI.
+          name: coverage-report-${{ matrix.name }}
           path: build/coverage_html/
           retention-days: 30
 
@@ -348,6 +374,29 @@ jobs:
           path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
           if-no-files-found: error
           retention-days: 30
+
+      # Last step on purpose: a failed gate still leaves the coverage
+      # HTML artifact and the packaged tarball uploaded above for
+      # debugging. Only the plain Debug entry gates — the grpc entry
+      # compiles a different surface (grpc-only TUs) and would report a
+      # second, conflicting number for the same commit.
+      - name: Enforce coverage gate
+        if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug' && matrix.enable_grpc != true
+        run: |
+          set -euo pipefail
+          summary=$(lcov --summary build/coverage_filtered.info)
+          echo "$summary"
+          pct=$(echo "$summary" | awk '/lines/ { sub(/%.*/, "", $2); print $2; exit }')
+          if [ -z "$pct" ]; then
+            echo "::error::Could not parse line coverage from lcov summary"
+            exit 1
+          fi
+          echo "Line coverage: ${pct}% (gate: >= ${COVERAGE_MIN}%)" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v p="$pct" -v min="$COVERAGE_MIN" 'BEGIN { exit !(p+0 < min+0) }'; then
+            echo "::error::Line coverage ${pct}% is below the required ${COVERAGE_MIN}%"
+            exit 1
+          fi
+          echo "Line coverage ${pct}% meets the ${COVERAGE_MIN}% gate."
 
   # ──────────────────────────── macOS packaging ────────────────────────────
   package-macos:

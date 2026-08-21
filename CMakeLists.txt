@@ -284,14 +284,25 @@ if(CVC_ENABLE_COVERAGE)
         COMMAND ${LCOV_PATH} --directory . --capture --output-file coverage.info --ignore-errors mismatch
         
         COMMAND ${CMAKE_COMMAND} -E echo "Filtering coverage data..."
-        COMMAND ${LCOV_PATH} --remove coverage.info 
-          '/usr/*' 
-          '*/test/*' 
-          '*/tests/*'
-          '*/_deps/*'
-          '*/googletest/*'
+        # Mirror ci.yml's "Generate coverage report" filter exactly, so
+        # local numbers are comparable to the CI coverage gate: an
+        # allowlist of repo sources (a blocklist still counts dep-prefix
+        # Boost/CGAL headers inlined into our TUs), minus test code and
+        # the vendored XmlRpc++ / contour-spectrum trees
+        # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A).
+        COMMAND ${LCOV_PATH} --extract coverage.info
+          '${CMAKE_SOURCE_DIR}/src/*'
+          '${CMAKE_SOURCE_DIR}/inc/*'
           --output-file coverage_filtered.info
-        
+          --ignore-errors unused
+        COMMAND ${LCOV_PATH} --remove coverage_filtered.info
+          '*/test/*'
+          '*/tests/*'
+          '${CMAKE_SOURCE_DIR}/src/xmlrpc/*'
+          '*/geometry/cvc-mesher/contour/*'
+          --output-file coverage_filtered.info
+          --ignore-errors unused
+
         COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML report..."
         COMMAND ${GENHTML_PATH} coverage_filtered.info 
           --output-directory coverage_html
