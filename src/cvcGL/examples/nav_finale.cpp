@@ -182,6 +182,7 @@ int main(int argc, char **argv) {
   std::string bundle, vehicle, capture = "fly", out = "frames", png, viewMode = "3d";
   int width = 1280, height = 720, nx = 384;
   long frames = 0;
+  double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
   bool offscreen = false, no_shadows = false, no_minimap = false;
 
@@ -201,6 +202,10 @@ int main(int argc, char **argv) {
       "3d (perspective, default) | map (fixed top-down ortho — the honest 2-D answer)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | fly | orbit (offscreen PNG capture)")(
+      "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
+      "look speed, degrees per pixel of mouse motion")(
+      "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
+      "fly speed in world units/s (0 = auto from scene bounds)")(
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
@@ -559,6 +564,9 @@ int main(int argc, char **argv) {
 
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+  cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
+  if (moveSpeed > 0.0)
+    cam.setMoveSpeed(moveSpeed);
   if (!capturing && viewMode == "map") // the honest 2-D map answer, interactively
     navdemo::set_ortho_topdown(view, bounds, 10.0);
   sg.setGridVisible(false);

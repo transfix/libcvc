@@ -116,6 +116,7 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options;
   int grid = 120, width = 1280, height = 720;
   long frames = 0;
+  double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0, speed = 0.5;
   std::string capture = "orbit", out = "frames", png, viewMode = "map";
   bool offscreen = false, no_shadows = false, ortho = false;
@@ -135,6 +136,10 @@ int main(int argc, char **argv) {
       "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
+      "look speed, degrees per pixel of mouse motion")(
+      "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
+      "fly speed in world units/s (0 = auto from scene bounds)")(
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
@@ -368,6 +373,9 @@ int main(int argc, char **argv) {
 
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 12.0);
+  cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
+  if (moveSpeed > 0.0)
+    cam.setMoveSpeed(moveSpeed);
   if (ortho)
     navdemo::set_ortho_topdown(view, bounds, 4.0);
 
