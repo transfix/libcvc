@@ -13,6 +13,7 @@
 #ifdef CVC_ENABLE_IMGUI
 
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/Clipboard.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <imgui.h>
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
@@ -218,6 +219,24 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   ImGuiIO &io = ImGui::GetIO();
   io.IniFilename = nullptr; // don't litter imgui.ini next to the binary
   ImGui::StyleColorsDark();
+
+  // Copy/paste. There is no ImGui platform backend under us (VTK owns the
+  // window), so nothing would supply these except on Windows, where imgui core
+  // already implements the Win32 clipboard — cvc::gl::clipboard forwards to it
+  // there and implements the rest (X11 selections, NSPasteboard, and in the
+  // browser writeText for copy + the page's paste events for read).
+  ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
+  pio.Platform_SetClipboardTextFn = [](ImGuiContext *, const char *text) {
+    cvc::gl::clipboard::set(text ? text : "");
+  };
+  pio.Platform_GetClipboardTextFn = [](ImGuiContext *) -> const char * {
+    // ImGui reads this immediately, so hand back storage that outlives the call
+    // but is replaced on the next paste.
+    static std::string buf;
+    buf = cvc::gl::clipboard::get();
+    return buf.c_str();
+  };
+
   m_impl->ready = true; // GL backend is initialized lazily (see ensureBackend)
 
   m_impl->beginCmd = vtkSmartPointer<vtkCallbackCommand>::New();
