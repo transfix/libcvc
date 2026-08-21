@@ -1106,7 +1106,7 @@ TEST_F(FCContourExtractorTest, SphereThroughVolumeBordersStaysInBounds) {
 
 TEST_F(FCContourExtractorTest, SetVolumeTwiceAndCopySemantics) {
   cvc::volume sphere = makeSphereVolume(ctx, 16, 0.5);
-  cvc::volume small = makeSphereVolume(ctx, 8, 0.5);
+  cvc::volume smallvol = makeSphereVolume(ctx, 8, 0.5);
 
   FC::ContourExtractor ex(ctx);
   ex.setVolume(sphere);
@@ -1115,7 +1115,7 @@ TEST_F(FCContourExtractorTest, SetVolumeTwiceAndCopySemantics) {
   ASSERT_FALSE(first.verts.empty());
 
   // swap in a smaller volume; edge buffers get reused/reallocated
-  ex.setVolume(small);
+  ex.setVolume(smallvol);
   EXPECT_EQ(ex.getVolume().XDim(), 8u);
   FC::TriSurf second = ex.extractContour(0.0);
   ASSERT_FALSE(second.verts.empty());

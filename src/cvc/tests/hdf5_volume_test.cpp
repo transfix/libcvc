@@ -295,24 +295,24 @@ TEST_F(Hdf5VolumeTest, OffsetWriteIntoCreatedFile) {
   ASSERT_NO_THROW(
       createVolumeFile(ctx, p, bb, dimension(8, 8, 8), std::vector<data_type>(1, Float)));
 
-  volume small = make_test_volume(ctx, 4, 4, 4, Float, 1.0);
-  ASSERT_NO_THROW(writeVolumeFile(ctx, small, p, 0, 0, 2, 2, 2));
+  volume smallvol = make_test_volume(ctx, 4, 4, 4, Float, 1.0);
+  ASSERT_NO_THROW(writeVolumeFile(ctx, smallvol, p, 0, 0, 2, 2, 2));
 
   volume full(ctx);
   ASSERT_NO_THROW(readVolumeFile(ctx, full, p));
   ASSERT_EQ(full.XDim(), 8u);
-  // The written window matches the small volume...
+  // The written window matches the smallvol volume...
   for (uint64 k = 0; k < 4; ++k)
     for (uint64 j = 0; j < 4; ++j)
       for (uint64 i = 0; i < 4; ++i)
-        ASSERT_NEAR(full(i + 2, j + 2, k + 2), small(i, j, k), 1e-4);
+        ASSERT_NEAR(full(i + 2, j + 2, k + 2), smallvol(i, j, k), 1e-4);
   // ...and untouched voxels keep the dataset fill value.
   EXPECT_NEAR(full(0, 0, 0), 0.0, 1e-9);
   EXPECT_NEAR(full(7, 7, 7), 0.0, 1e-9);
 
   volume_file_info info(ctx, p);
-  EXPECT_NEAR(info.min(), small.min(), 1e-9);
-  EXPECT_NEAR(info.max(), small.max(), 1e-9);
+  EXPECT_NEAR(info.min(), smallvol.min(), 1e-9);
+  EXPECT_NEAR(info.max(), smallvol.max(), 1e-9);
 }
 
 TEST_F(Hdf5VolumeTest, BoundingBoxReadFullAndSub) {
@@ -477,7 +477,7 @@ TEST_F(Hdf5VolumeTest, HierarchyDatasetsAfterWrite) {
   // (see bug notes on the ineffective std::exception dirty-probe catch).
   hdf5_utils::setAttribute(ctx, p, kDefaultDataSet, "dirty", 0);
 
-  // With a small maxdim the bounding-box read selects a coarser level.
+  // With a smallvol maxdim the bounding-box read selects a coarser level.
   std::string savedMaxdim = ctx.properties("volmagick.hdf5_io.maxdim");
   ctx.properties("volmagick.hdf5_io.maxdim", "4,4,4");
   volume coarse(ctx);

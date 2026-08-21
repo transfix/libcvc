@@ -48,7 +48,7 @@ using namespace cvc;
 
 namespace {
 
-// Build a small synthetic Float volume with a recognizable gradient pattern.
+// Build a smallvol synthetic Float volume with a recognizable gradient pattern.
 volume make_test_volume(app &ctx, unsigned int xdim = 8, unsigned int ydim = 8,
                         unsigned int zdim = 8) {
   volume v(ctx, dimension(xdim, ydim, zdim), Float,
@@ -350,19 +350,19 @@ TEST_F(VolumeIOExtraTest, RawivOffsetWriteAndOffsetRead) {
   createVolumeFile(ctx, p, bounding_box(0.0, 0.0, 0.0, 7.0, 7.0, 7.0), dimension(8, 8, 8),
                    std::vector<data_type>(1, Float));
 
-  volume small(ctx, dimension(4, 4, 4), Float, bounding_box(2.0, 2.0, 2.0, 5.0, 5.0, 5.0));
+  volume smallvol(ctx, dimension(4, 4, 4), Float, bounding_box(2.0, 2.0, 2.0, 5.0, 5.0, 5.0));
   for (unsigned int k = 0; k < 4; ++k)
     for (unsigned int j = 0; j < 4; ++j)
       for (unsigned int i = 0; i < 4; ++i)
-        small(i, j, k, 1.0 + i + 10.0 * j + 100.0 * k);
-  ASSERT_NO_THROW(writeVolumeFile(ctx, small, p, 0, 0, 2, 2, 2));
+        smallvol(i, j, k, 1.0 + i + 10.0 * j + 100.0 * k);
+  ASSERT_NO_THROW(writeVolumeFile(ctx, smallvol, p, 0, 0, 2, 2, 2));
 
   volume back(ctx);
   ASSERT_NO_THROW(readVolumeFile(ctx, back, p, 0, 0, 2, 2, 2, dimension(4, 4, 4)));
   ASSERT_EQ(back.XDim(), 4u);
-  EXPECT_NEAR(back(0, 0, 0), small(0, 0, 0), 1e-4);
-  EXPECT_NEAR(back(1, 2, 3), small(1, 2, 3), 1e-4);
-  EXPECT_NEAR(back(3, 3, 2), small(3, 3, 2), 1e-4);
+  EXPECT_NEAR(back(0, 0, 0), smallvol(0, 0, 0), 1e-4);
+  EXPECT_NEAR(back(1, 2, 3), smallvol(1, 2, 3), 1e-4);
+  EXPECT_NEAR(back(3, 3, 2), smallvol(3, 3, 2), 1e-4);
   // NOTE: the very last written scanline (here subvol (i,3,3)) is lost on
   // disk because rawiv_io::writeVolumeFile never fclose()s its FILE* (the
   // fclose sits inside an '#if 0' block), so the final buffered stdio write
@@ -398,12 +398,13 @@ TEST_F(VolumeIOExtraTest, RawivWriteSubvolumeBoundingBox) {
   std::string p = path("subwrite.rawiv");
   out.write(p);
 
-  volume small(ctx, dimension(4, 4, 4), Float, bounding_box(0.0, 0.0, 0.0, 3.0, 3.0, 3.0));
+  volume smallvol(ctx, dimension(4, 4, 4), Float, bounding_box(0.0, 0.0, 0.0, 3.0, 3.0, 3.0));
   for (unsigned int k = 0; k < 4; ++k)
     for (unsigned int j = 0; j < 4; ++j)
       for (unsigned int i = 0; i < 4; ++i)
-        small(i, j, k, 42.0);
-  ASSERT_NO_THROW(writeVolumeFile(ctx, small, p, 0, 0, bounding_box(1.0, 1.0, 1.0, 4.0, 4.0, 4.0)));
+        smallvol(i, j, k, 42.0);
+  ASSERT_NO_THROW(
+      writeVolumeFile(ctx, smallvol, p, 0, 0, bounding_box(1.0, 1.0, 1.0, 4.0, 4.0, 4.0)));
 
   volume in(ctx);
   in.read(p);
@@ -411,7 +412,7 @@ TEST_F(VolumeIOExtraTest, RawivWriteSubvolumeBoundingBox) {
 
   // out-of-bounds target box throws before any file modification
   EXPECT_THROW(
-      writeVolumeFile(ctx, small, p, 0, 0, bounding_box(-9.0, -9.0, -9.0, 20.0, 20.0, 20.0)),
+      writeVolumeFile(ctx, smallvol, p, 0, 0, bounding_box(-9.0, -9.0, -9.0, 20.0, 20.0, 20.0)),
       cvc::sub_volume_out_of_bounds);
 }
 
@@ -686,7 +687,7 @@ TEST_F(VolumeIOExtraTest, RawvCraftedHeaderErrors) {
   }
   // smaller than the potential header
   {
-    std::string p = path("small.rawv");
+    std::string p = path("smallvol.rawv");
     write_bytes(p, make_rawv_bytes(0xBAADBEEF, 2, 2, 2, 1, 1, {}, 4));
     EXPECT_THROW(volume_file_info(ctx, p), cvc::exception);
   }
@@ -937,12 +938,12 @@ TEST_F(VolumeIOExtraTest, MrcOffsetReadAndWrite) {
   ASSERT_EQ(sub.ZDim(), 4u);
 
   // offset write into the existing file
-  volume small(ctx, dimension(3, 3, 3), Float, bounding_box(1.0, 1.0, 1.0, 3.0, 3.0, 3.0));
+  volume smallvol(ctx, dimension(3, 3, 3), Float, bounding_box(1.0, 1.0, 1.0, 3.0, 3.0, 3.0));
   for (unsigned int k = 0; k < 3; ++k)
     for (unsigned int j = 0; j < 3; ++j)
       for (unsigned int i = 0; i < 3; ++i)
-        small(i, j, k, 7.0);
-  ASSERT_NO_THROW(writeVolumeFile(ctx, small, p, 0, 0, 1, 1, 1));
+        smallvol(i, j, k, 7.0);
+  ASSERT_NO_THROW(writeVolumeFile(ctx, smallvol, p, 0, 0, 1, 1, 1));
 
   volume back(ctx);
   back.read(p);
@@ -955,12 +956,13 @@ TEST_F(VolumeIOExtraTest, MrcWriteSubvolumeBoundingBox) {
   std::string p = path("subbox.mrc");
   out.write(p);
 
-  volume small(ctx, dimension(4, 4, 4), Float, bounding_box(0.0, 0.0, 0.0, 3.0, 3.0, 3.0));
+  volume smallvol(ctx, dimension(4, 4, 4), Float, bounding_box(0.0, 0.0, 0.0, 3.0, 3.0, 3.0));
   for (unsigned int k = 0; k < 4; ++k)
     for (unsigned int j = 0; j < 4; ++j)
       for (unsigned int i = 0; i < 4; ++i)
-        small(i, j, k, 9.0);
-  ASSERT_NO_THROW(writeVolumeFile(ctx, small, p, 0, 0, bounding_box(2.0, 2.0, 2.0, 5.0, 5.0, 5.0)));
+        smallvol(i, j, k, 9.0);
+  ASSERT_NO_THROW(
+      writeVolumeFile(ctx, smallvol, p, 0, 0, bounding_box(2.0, 2.0, 2.0, 5.0, 5.0, 5.0)));
 
   volume in(ctx);
   in.read(p);

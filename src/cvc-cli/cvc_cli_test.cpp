@@ -11,7 +11,7 @@
   Design notes:
   - SDF tests use the v2 (DistanceTransform) algorithm which is
     significantly faster than v1 for integration testing.
-  - Volume arithmetic tests create small synthetic data via the library
+  - Volume arithmetic tests create smallvol synthetic data via the library
     in SetUp() to avoid expensive SDF computation for simple ops.
   - The full pipeline tests (bunny -> SDF -> iso -> info) exercise the
     complete workflow and may take several minutes.
@@ -101,7 +101,7 @@ static std::string sq(const std::string &s) {
 #endif
 }
 
-// Create a small synthetic volume (4x4x4 gradient) for testing.
+// Create a smallvol synthetic volume (4x4x4 gradient) for testing.
 static void write_test_volume(const std::string &path) {
   cvc::app ctx;
   cvc::volume v(ctx, cvc::dimension(4, 4, 4), cvc::Float, cvc::bounding_box(0, 0, 0, 3, 3, 3));
@@ -113,7 +113,7 @@ static void write_test_volume(const std::string &path) {
   v.write(path);
 }
 
-// Create a small tetrahedron geometry for testing.
+// Create a smallvol tetrahedron geometry for testing.
 static void write_test_geometry(const std::string &path) {
   std::ofstream f(path);
   f << "OFF\n4 4 0\n"
@@ -173,7 +173,7 @@ protected:
     fs::create_directories(sock_dir);
 #endif
 
-    // Pre-create small test data files that many tests share
+    // Pre-create smallvol test data files that many tests share
     test_vol = path("test.rawiv");
     write_test_volume(test_vol);
 
@@ -1443,9 +1443,9 @@ TEST_F(CvcCliTest, CompareMismatchExitsNonzero) {
 }
 
 TEST_F(CvcCliTest, CompareDimensionMismatchExitsNonzero) {
-  std::string small = path("cmp_small.rawiv");
-  ASSERT_EQ(0, cvc("downsample " + test_vol + " " + small + " -f 2").exit_code);
-  auto r = cvc("compare -i " + test_vol + " " + small);
+  std::string smallvol = path("cmp_small.rawiv");
+  ASSERT_EQ(0, cvc("downsample " + test_vol + " " + smallvol + " -f 2").exit_code);
+  auto r = cvc("compare -i " + test_vol + " " + smallvol);
   EXPECT_EQ(1, r.exit_code);
   EXPECT_NE(std::string::npos, r.output.find("dimensions differ"));
 }
@@ -1634,7 +1634,7 @@ TEST_F(CvcCliTest, IsoWithPropertyVolume) {
 }
 
 // ===========================================================================
-// Mesh extraction commands on a small tetrahedron SDF
+// Mesh extraction commands on a smallvol tetrahedron SDF
 // ===========================================================================
 
 TEST_F(CvcCliTest, TetrahedralizeFromSdf) {
@@ -1785,7 +1785,7 @@ TEST_F(CvcCliTest, LayerMeshFromSdf) {
 }
 
 // ===========================================================================
-// Bunny --volume (small dims, v2 distance transform)
+// Bunny --volume (smallvol dims, v2 distance transform)
 // ===========================================================================
 
 TEST_F(CvcCliTest, BunnyVolumeSmallDims) {
@@ -2006,7 +2006,7 @@ TEST_F(CvcCliTest, ClusterStatusGrpcTransportSelected) {
 // library / CLI, not worked around here).
 // ===========================================================================
 
-// Bug 1: `sdf -a v2` on a small grid divided by zero (SIGFPE) in the
+// Bug 1: `sdf -a v2` on a smallvol grid divided by zero (SIGFPE) in the
 // DistanceTransform progress reporting: e.g. dim[2] < 15 made
 // `k % (total_near_iterations / 15)` a modulo-by-zero. Small dims must work.
 TEST_F(CvcCliTest, Regression_SdfV2SmallDimsNoFpe) {

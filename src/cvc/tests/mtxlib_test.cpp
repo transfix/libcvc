@@ -40,6 +40,21 @@ namespace {
 
 const float kEps = 1e-5f;
 
+// Mirror of DistanceTransform::MAX_FLOAT (== 1.0e12f, DistanceTransform.cpp:52),
+// the "unset distance" sentinel. We can't reference the member directly: it is
+// a non-exported `const static float` defined out-of-line inside cvc.dll, so on
+// Windows/MSVC the reference fails to link across the DLL boundary. It also is
+// NOT interchangeable with std::numeric_limits<float>::max(): transform1D's
+// parabola-envelope math is calibrated to this exact magnitude (z[] sentinels
+// are ±MAX_FLOAT), so feeding a larger value corrupts the envelope. Keep this
+// equal to the library constant.
+const float kLibMaxFloat = 1.0e12f;
+
+// A finite value between real distances (tiny, in these grids) and kLibMaxFloat,
+// used to detect the "unset" sentinel in results without depending on its exact
+// value.
+const float kSentinelFloor = kLibMaxFloat * 0.5f;
+
 std::string tmpPath(const char *name) { return ::testing::TempDir() + "mtxlib_test_" + name; }
 
 long fileSize(const std::string &path) {
@@ -1185,11 +1200,12 @@ TEST_F(DistanceTransformTest, CtorFromDimSetsUpGrid) {
     EXPECT_NEAR(orig[i], -2.0f, kEps);
     EXPECT_NEAR(span[i], 4.0f / 15.0f, kEps);
   }
-  // After construction, near-surface verts are 0 and the rest MAX_FLOAT.
+  // After construction, near-surface verts are 0 and the rest the large
+  // "unset" sentinel (MAX_FLOAT ~1e12; see kLibMaxFloat).
   float fmin, fmax;
   grid.getFuncMinMax(fmin, fmax);
   EXPECT_FLOAT_EQ(fmin, 0.0f);
-  EXPECT_FLOAT_EQ(fmax, DistanceTransform::MAX_FLOAT);
+  EXPECT_GT(fmax, kSentinelFloor);
 }
 
 TEST_F(DistanceTransformTest, CtorFromReg3Data) {
@@ -1317,12 +1333,12 @@ TEST_F(DistanceTransformTest, DistanceToTriangleAndRayIntersect) {
   // Ray crossing the left face at t=0.5
   double t = dt.rayTriangleIntersection(8, Point3f(-2, 0, 0.5f), Point3f(0, 0, 0.5f));
   EXPECT_NEAR(t, 0.5, 1e-5);
-  // Ray on one side of the plane -> no intersection
+  // Ray on one side of the plane -> no intersection (returns the sentinel)
   t = dt.rayTriangleIntersection(8, Point3f(-3, 0, 0.5f), Point3f(-2, 0, 0.5f));
-  EXPECT_FLOAT_EQ((float)t, DistanceTransform::MAX_FLOAT);
+  EXPECT_GT((float)t, kSentinelFloor);
   // Crossing the plane outside the triangle -> no intersection
   t = dt.rayTriangleIntersection(8, Point3f(-2, 0.5f, 0), Point3f(0, 0.5f, 0));
-  EXPECT_FLOAT_EQ((float)t, DistanceTransform::MAX_FLOAT);
+  EXPECT_GT((float)t, kSentinelFloor);
   // Begin exactly on the triangle -> 0
   t = dt.rayTriangleIntersection(8, Point3f(-1, 0, 0.5f), Point3f(1, 0, 0.5f));
   EXPECT_NEAR(t, 0.0, 1e-6);
@@ -1400,7 +1416,7 @@ TEST_F(DistanceTransformTest, NearestPlaneSelection) {
 TEST_F(DistanceTransformTest, Transform1DEnvelope) {
   int dim[3] = {16, 16, 16};
   DistanceTransform dt(ctx, cube, dim);
-  const float MAXF = DistanceTransform::MAX_FLOAT;
+  const float MAXF = kLibMaxFloat; // transform1D's "unset" input marker
 
   {
     // Single source at index 0: squared distances grow quadratically.
