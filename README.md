@@ -3,8 +3,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-20-orange.svg)](https://isocpp.org/)
 [![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2240%20passing-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-38.0%25%20lines%20%7C%2049.0%25%20functions-yellow.svg)](docs/TESTING.md)
+[![Tests](https://img.shields.io/badge/tests-2662%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-83.8%25%20lines%20%7C%2091.4%25%20functions-brightgreen.svg)](docs/TESTING.md)
 
 ## Table of Contents
 
@@ -198,7 +198,7 @@ The dramatic slowdown in Debug builds is due to:
 
 libcvc includes comprehensive unit tests using Google Test. Tests are **enabled by default**.
 
-### Test Suite: 2,240 Google Test cases across 86 suites (100% passing)
+### Test Suite: 2,662 Google Test cases across 86+ suites (100% passing)
 
 A default Linux + CUDA build compiles ~2,216 of them; the gRPC-transport suite and a
 few POSIX-only distributed-state suites are opt-in. The major families:
@@ -208,16 +208,21 @@ few POSIX-only distributed-state suites are opt-in. The major families:
 - **Distributed state replication** — transports (inproc/IPC/gRPC), change journal, delegation, cluster membership/sharding, blob store, links & telemetry (dozens of `state_*` suites)
 - **Volume / voxels** — `voxels_test` (136, incl. CUDA paths), `volume_test` (29), `volume_io_test` (25), `volume_ops_test` (42), `hdf5_test` (24)
 - **Geometry** — `geometry_test` (119), `geometry_attributes_test` (10), `algorithm_test` (10: SDF / isosurface, incl. a 256³ stress test)
-- **Navigation** (`cvc::nav`) — `nav_test` (41: kernels, drive, `sim_world` shared/grouped/private belief, `sim_thread`, CUDA twin) + `nav_coef_train_test` (10: torch-free trainer gradcheck)
+- **Navigation** (`cvc::nav`) — `nav_test` (41: kernels, drive, `sim_world` shared/grouped/private belief, `sim_thread`, CUDA twin) + `nav_coef_train_test` (10: torch-free trainer gradcheck; the two full train-then-drive convergence runs are opt-in, see `NavCoefTrainConvergence`)
 - **Simulation clock** — `world_clock_test` (33)
 - **Assets** — `image_test` (19), `model_test` (9)
+- **Mesher / SDF internals** — `lbie_mesher_test` (LBIE octree subdivision, quad/interval/tetra2 mesh types, quality-improve methods incl. `OPTIMIZATION`), `fastcontouring_math_test` (Quaternion/Matrix/Vector/Ray/ContourGeometry), `mtxlib_test` (SDF V2's vector/matrix library, `DistanceTransform` predicates)
+- **Volume I/O depth** — `hdf5_volume_test` (the HDF5 volume backend: multi-variable/timestep, `|object` addressing, subvolume reads), `volume_io_extra_test` (MRC/RAWV/RAWIV/VTK/Spider/cvcraw error paths and format edge cases)
+- **State execution gaps** — `state_exec_gaps_test` (evaluator/stackless-evaluator/async-scheduler error paths and object-model edge cases)
 
 ### Code Coverage
 
-The actively tested core modules (app, state, voxels, volume, geometry) carry the bulk
-of the coverage. Coverage is generated on demand with `lcov`/`gcov` from a
-`Debug + Coverage` build — see [docs/TESTING.md](docs/TESTING.md) for the current report
-and how to regenerate it.
+CI enforces an **80% line-coverage gate** on the supported surface (`src/` + `inc/`,
+minus tests and two vendored legacy trees) — see
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) and
+[docs/TESTING.md](docs/TESTING.md#code-coverage-analysis) for the exact filter. Coverage
+is generated with `lcov`/`gcov` from a `Debug + Coverage` build; run
+`./generate_coverage.sh` locally to regenerate the HTML report.
 
 ### Quick Test Commands
 
