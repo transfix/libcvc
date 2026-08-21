@@ -30,6 +30,17 @@ CMAKE_ARGS=(
   # cvcgl SDK bundle; libcvc/VTK/Boost stay shared from the deps prefix.
   -DBUILD_SHARED_LIBS=OFF
   -DCVC_BUILD_EXAMPLES=ON
+  # find_package(cvc) pulls CGAL in transitively, and CGAL_TweakFindBoost.cmake
+  # sets Boost_USE_STATIC_LIBS from the CGAL_Boost_USE_STATIC_LIBS cache option
+  # -- ON in the cvcpkg CGAL bundle.  cvcpkg ships Boost shared-only, so leaving
+  # that in place makes the examples' find_package(Boost COMPONENTS
+  # program_options) reject the very bundle installed beside it:
+  #   Could not find a configuration file for package "boost_program_options"
+  #   that exactly matches requested version "1.86.0"
+  #   ... boost_program_options-1.86.0-shared/...  version: 1.86.0 (shared)
+  # Setting the CGAL option (not Boost_USE_STATIC_LIBS, which CGAL overwrites as
+  # a normal variable) asks for the variant the toolchain actually ships.
+  -DCGAL_Boost_USE_STATIC_LIBS=OFF
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
