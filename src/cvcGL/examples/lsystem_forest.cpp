@@ -1009,6 +1009,9 @@ int main(int argc, char **argv) {
        "capture frames per second (drives the synthetic clock)")                            //
       ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
+  bool no_ui = false;
+  desc.add_options()("no-ui", po::bool_switch(&no_ui),
+                     "hide the ImGui overlay (default: hidden while capturing)");
   po::variables_map vm;
   try {
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -1208,6 +1211,9 @@ int main(int argc, char **argv) {
   // so there is no widget tree to keep in sync.
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
+  ui.attachCamera(cam);
+  // A capture is a deliverable: no control panel in the frames unless asked.
+  ui.setVisible(!no_ui && !capturing && !offscreen);
   bool uiShadows = shadows;
   float uiWind = 1.0f;
   ui.setDrawCallback([&] {

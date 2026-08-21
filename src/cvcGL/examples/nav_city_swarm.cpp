@@ -167,6 +167,9 @@ int main(int argc, char **argv) {
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"),
       "PNG frame directory")("png", po::value<std::string>(&png), "write a single final PNG here");
+  bool no_ui = false;
+  desc.add_options()("no-ui", po::bool_switch(&no_ui),
+                     "hide the ImGui overlay (default: hidden while capturing)");
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
   po::notify(vm);
@@ -409,6 +412,8 @@ int main(int argc, char **argv) {
   // construction, so changing them rebuilds the world and the N-sized meshes).
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  // A capture is a deliverable: no control panel in the frames unless asked.
+  ui.setVisible(!no_ui && !capturing);
   bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
