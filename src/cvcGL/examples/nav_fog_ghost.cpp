@@ -27,9 +27,14 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 #include <cvc/image/image.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
@@ -38,6 +43,9 @@
 #include <emscripten.h>
 #endif
 #include <filesystem>
+#ifdef CVC_ENABLE_IMGUI
+#include <unistd.h>
+#endif
 #include <iostream>
 #include <memory>
 #include <string>
@@ -118,7 +126,9 @@ int main(int argc, char **argv) {
   long frames = 0;
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0, speed = 0.5;
-  std::string capture = "orbit", out = "frames", png, viewMode = "map";
+  std::string capture = "orbit", out = "frames", png, viewMode = "map", scenario = "ghost";
+  int traffic_n = 5;
+  double sensorRange = 35.0;
   bool offscreen = false, no_shadows = false, ortho = false;
 
   po::options_description desc("nav_fog_ghost — the fog-of-war ghost story in cvcGL");
@@ -132,6 +142,11 @@ int main(int argc, char **argv) {
       "hz", po::value<double>(&hz)->default_value(60.0),
       "sim tick rate")("speed", po::value<double>(&speed)->default_value(0.5),
                        "world speed as a multiple of real time (story pace)")(
+      "scenario", po::value<std::string>(&scenario)->default_value("ghost"),
+      "ghost (stale map lies) | dynamic (world changes mid-run) | traffic (ghost + cross traffic)")(
+      "range", po::value<double>(&sensorRange)->default_value(35.0),
+      "sensor range in metres")("traffic", po::value<int>(&traffic_n)->default_value(5),
+                                "number of cross-traffic vehicles in the traffic scenario")(
       "view", po::value<std::string>(&viewMode)->default_value("map"),
       "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
@@ -182,13 +197,28 @@ int main(int argc, char **argv) {
           m[static_cast<std::size_t>(r) * C + c] = 1;
   };
   border(truth);
-  prior = truth; // phantom wall lives only in the belief
-  // size_t loop counter + index math: no signed-overflow UB for the optimizer to
-  // exploit, so -Waggressive-loop-optimizations stays quiet (grid is a runtime value).
+
+  // THREE limited-belief scenarios, all the same machinery, different lies:
+  //
+  //   ghost   — the map claims a wall that reality lacks. The agent detours
+  //             around nothing, senses the space is clear, and drives through.
+  //   dynamic — the map is RIGHT at first, then the world CHANGES: a blockage
+  //             appears mid-run (stamped into the live planning surface with
+  //             sim_world::add_obstacle) and the agent must notice and re-route.
+  //   traffic — the ghost lie, but with other vehicles crossing the same space,
+  //             so belief-vs-truth plays out against moving obstacles.
+  //
+  // The lie always lives in the BELIEF (prior_occ), never in `truth` — collision
+  // is always scored against truth, which is what keeps the demo honest.
   const std::size_t wall_lo = static_cast<std::size_t>(R) / 4;
   const std::size_t wall_hi = static_cast<std::size_t>(R) * 3 / 4;
-  for (std::size_t r = wall_lo; r < wall_hi; ++r)
-    prior[r * C + C / 2] = 1; // vertical bar at mid-column
+  auto phantom_bar = [&](std::vector<std::uint8_t> &m) {
+    for (std::size_t r = wall_lo; r < wall_hi; ++r)
+      m[r * C + C / 2] = 1; // vertical bar at mid-column
+  };
+  prior = truth;
+  if (scenario != "dynamic") // dynamic starts with an HONEST map
+    phantom_bar(prior);
 
   cvc::nav::sim_world::config cfg;
   cfg.rows = R;
@@ -206,17 +236,39 @@ int main(int argc, char **argv) {
   cfg.veh.vmax = 0.9f;
   cfg.freeze_sense = false; // FOG: sense + rebuild belief each sense tick
   cfg.sense_every = 2;
-  cfg.range_m = 35.0; // reads as a SENSOR, not a hula hoop spanning half the map
+  cfg.range_m = sensorRange; // reads as a SENSOR, not a hoop spanning half the map
   cfg.n_rays = 240;
   cfg.reach_tol = 1.0f;
 
-  // Single agent: start left, goal right — the straight line crosses the phantom bar.
-  const float o[2] = {static_cast<float>(-80.0 * SCALE), static_cast<float>(-6.0 * SCALE)};
-  const float goal[2] = {static_cast<float>(80.0 * SCALE), static_cast<float>(6.0 * SCALE)};
-  const float color[3] = {0.98f, 0.85f, 0.20f}; // the hero vehicle: gold
+  // Agent 0 is always the HERO (gold, left -> right through the lie). `traffic`
+  // adds cross-traffic that shares the hero's belief plane, so the peers are part
+  // of the world the hero is reasoning about.
+  const int NA = (scenario == "traffic") ? traffic_n + 1 : 1;
+  std::vector<float> o(2 * NA), goal(2 * NA), color(3 * NA);
+  o[0] = static_cast<float>(-80.0 * SCALE);
+  o[1] = static_cast<float>(-6.0 * SCALE);
+  goal[0] = static_cast<float>(80.0 * SCALE);
+  goal[1] = static_cast<float>(6.0 * SCALE);
+  color[0] = 0.98f;
+  color[1] = 0.85f;
+  color[2] = 0.20f; // hero: gold
+  for (int i = 1; i < NA; ++i) {
+    // Cross traffic: alternate top->bottom and bottom->top on staggered columns,
+    // so they sweep THROUGH the hero's corridor rather than trailing it.
+    const double frac = static_cast<double>(i) / (NA > 1 ? NA : 1);
+    const double x = -60.0 + 120.0 * frac;
+    const bool down = (i % 2) == 0;
+    o[2 * i] = static_cast<float>(x * SCALE);
+    o[2 * i + 1] = static_cast<float>((down ? 78.0 : -78.0) * SCALE);
+    goal[2 * i] = static_cast<float>(x * SCALE);
+    goal[2 * i + 1] = static_cast<float>((down ? -78.0 : 78.0) * SCALE);
+    color[3 * i] = 0.35f;
+    color[3 * i + 1] = 0.62f + 0.3f * static_cast<float>(frac);
+    color[3 * i + 2] = 0.95f; // traffic: cool blue
+  }
 
   cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
-                            o, goal, color, 1);
+                            o.data(), goal.data(), color.data(), NA);
 
   // 2. Scene.
   cvc::app app;
@@ -274,7 +326,7 @@ int main(int argc, char **argv) {
   // The agent + its sensor ring.
   navdemo::AgentGlyphs glyph;
   auto agentNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("agent", glyph.build(app, 1, color, 7.0, 1.2)));
+      sg.addGraphics("agent", glyph.build(app, NA, color.data(), 7.0, 1.2)));
   if (agentNode) {
     agentNode->setUseSingleColor(false);
     agentNode->setAmbient(0.7);
@@ -401,7 +453,10 @@ int main(int argc, char **argv) {
   sg.getGraphicsRoot()->setShowBBox(false);
   sg.processEvents();
 
-  std::printf("nav_fog_ghost: 1 agent, %dx%d fog belief, phantom wall in the prior\n", R, C);
+  std::printf("nav_fog_ghost: scenario=%s, %d vehicle%s, %dx%d belief, %s\n", scenario.c_str(), NA,
+              NA == 1 ? "" : "s", R, C,
+              scenario == "dynamic" ? "honest map that changes mid-run"
+                                    : "phantom wall in the prior");
 
   // 3. Run the sim on the render thread (single agent — cheap) so field_data() and
   //    the pose stay in lock-step with the belief texture we upload.
@@ -409,13 +464,77 @@ int main(int argc, char **argv) {
   double last = 0.0;
   long frame = 0;
   double eye[3], focal[3];
-  std::vector<float> pos(2), head(1), spd(1);
-  std::vector<int> md(1);
-  std::vector<std::uint8_t> rch(1);
+  std::vector<float> pos(2 * NA), head(NA), spd(NA);
+  std::vector<int> md(NA);
+  std::vector<std::uint8_t> rch(NA);
   bool reached_note = false;
+  // ---------------- ImGui control panel -------------------------------------
+  cvc::gl::ImGuiOverlay ui(view);
+  ui.attachCamera(cam);
+  bool uiPaused = false, uiRestart = false, ui2D = ortho, uiCaptions = true;
+  std::string uiScenario = scenario;
+  int uiTraffic = traffic_n;
+  double uiSpeed = speed, uiRange = cfg.range_m;
+#ifdef CVC_ENABLE_IMGUI
+  ui.setDrawCallback([&] {
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("Scenario")) {
+        const char *sc[] = {"ghost", "dynamic", "traffic"};
+        for (const char *n : sc)
+          if (ImGui::MenuItem(n, nullptr, uiScenario == n)) {
+            uiScenario = n;
+            uiRestart = true;
+          }
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Sim")) {
+        ImGui::MenuItem("Paused", nullptr, &uiPaused);
+        if (ImGui::MenuItem("Restart"))
+          uiRestart = true;
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("2-D map", nullptr, &ui2D);
+        ImGui::MenuItem("Captions", nullptr, &uiCaptions);
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Camera")) {
+        namespace u = cvc::gl::ui;
+        const std::string cp = sg.getStatePrefix() + ".viewers.main.camera.settings.";
+        u::SliderDouble(app, "Look sens", cp + "mouse_sensitivity", 0.02, 2.0, 0.25);
+        u::SliderDouble(app, "Move speed", cp + "move_speed", 1.0, 400.0, 40.0);
+        ImGui::EndMenu();
+      }
+      ImGui::EndMainMenuBar();
+    }
+    ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Belief controls");
+    ImGui::Text("scenario: %s", uiScenario.c_str());
+    ImGui::Text("world t %.1fs | %s", world.tick() * cfg.veh.dt, rch[0] ? "ARRIVED" : "en route");
+    ImGui::Separator();
+    {
+      float f = static_cast<float>(uiSpeed);
+      if (ImGui::SliderFloat("world speed", &f, 0.1f, 3.0f, "%.2fx"))
+        uiSpeed = f;
+      float r = static_cast<float>(uiRange);
+      if (ImGui::SliderFloat("sensor range", &r, 10.0f, 90.0f, "%.0f m"))
+        uiRange = r; // applies on restart
+      ImGui::SliderInt("traffic", &uiTraffic, 1, 16);
+    }
+    if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
+      uiRestart = true;
+    ImGui::TextDisabled("scenario / range / traffic need a restart");
+    ImGui::End();
+  });
+#endif
+
+  std::vector<std::string> restartArgs;
   navdemo::SimPacer pacer;
-  float cw[2] = {0, 0};     // live carrot (world)
-  double ghostGoneT = -1.0; // world time the last phantom cell cleared
+  std::vector<float> cwv(2 * NA, 0.0f); // live carrots (world); [0] = hero
+  double ghostGoneT = -1.0;             // world time the last phantom cell cleared
+  bool blockDropped = false;
+  double blockT = -1.0;
 
   while (!view.windowClosed()) {
     double t, dt;
@@ -428,6 +547,37 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
+
+#ifdef CVC_ENABLE_IMGUI
+    // ---- apply UI actions ---------------------------------------------------
+    speed = uiSpeed; // world pace: live
+    caption.setVisible(uiCaptions);
+    if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
+      ortho = ui2D;
+      if (ortho)
+        navdemo::set_ortho_topdown(view, bounds, 4.0, &cam);
+      else {
+        cam.setMode(CameraController::Mode::Orbit);
+        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 12.0);
+      }
+    }
+    if (uiRestart) {
+      // The scenario decides the agent COUNT, the prior map and the whole scene
+      // graph, so a scenario change is a fresh process rather than a surgical
+      // rebuild — the honest way to guarantee no stale belief/mesh survives.
+      uiRestart = false;
+      restartArgs = {"--scenario", uiScenario,          "--traffic", std::to_string(uiTraffic),
+                     "--view",     ui2D ? "map" : "3d", "--speed",   std::to_string(uiSpeed)};
+      // sensor range is a config field; carry it too.
+      restartArgs.push_back("--range");
+      restartArgs.push_back(std::to_string(uiRange));
+      break; // leave the loop; main() re-execs below
+    }
+    if (uiPaused) {
+      view.render();
+      continue; // frozen world, live camera + UI
+    }
+#endif
 
     // World time runs at `speed` x real time on ANY display rate (fixed-dt
     // accumulator); a capture uses the same pacer with a synthetic 1/fps wall
@@ -446,13 +596,13 @@ int main(int argc, char **argv) {
     // The PLAN, live: agent -> carrot -> goal. The carrot is the FSM's steering
     // target — the blue line visibly bows around the phantom while the agent
     // believes in it, then snaps straight when the belief clears.
-    world.carrots_world(cw);
+    world.carrots_world(cwv.data());
     if (planNode) {
       planXyz[0] = pos[0];
       planXyz[1] = pos[1];
       planXyz[2] = 0.7;
-      planXyz[3] = planXyz[6] = cw[0];
-      planXyz[4] = planXyz[7] = cw[1];
+      planXyz[3] = planXyz[6] = cwv[0];
+      planXyz[4] = planXyz[7] = cwv[1];
       planXyz[5] = planXyz[8] = 0.7;
       planXyz[9] = gx;
       planXyz[10] = gy;
@@ -480,6 +630,27 @@ int main(int argc, char **argv) {
     }
 
     const double worldT = world.tick() * cfg.veh.dt;
+
+    // `dynamic`: the world CHANGES under the agent. A few seconds in, a blockage is
+    // stamped across the corridor ahead of it (sim_world::add_obstacle writes the
+    // live dynamic layer, which is composited into the planning surface on the
+    // next SENSE tick — so the agent only "knows" once it senses, exactly like a
+    // real discovery). The stale-map lie and this are the two halves of limited
+    // belief: believing something that isn't there, and not yet knowing
+    // something that is.
+    if (scenario == "dynamic" && !blockDropped && worldT > 3.5) {
+      // add_obstacle stamps a CENTRED RADIUS over the cell rect, so it grows
+      // well beyond the literal rect — keep the rect thin and short or it swamps
+      // the map. It lands in the belief (truth is immutable from here), so the
+      // renderer draws it in GHOST amber: honest, since from the agent's side a
+      // new blockage and a believed wall are the same evidence.
+      const int rmid = static_cast<int>((wall_lo + wall_hi) / 2);
+      const int r0 = rmid - C / 12, r1 = rmid + C / 12;
+      const int c0 = C / 2, c1 = C / 2;
+      world.add_obstacle(r0, r1, c0, c1);
+      blockDropped = true;
+      blockT = worldT;
+    }
 
     // Repaint the fog/belief ground only when a sense tick actually happened —
     // per-frame smoothing of belief would be a lie (and wasted work).
@@ -511,8 +682,17 @@ int main(int argc, char **argv) {
       }
     }
 
-    // The 4-beat caption arc, driven by world time + events.
-    if (rch[0])
+    // The caption arc — scenario-specific, driven by world time + events.
+    if (scenario == "dynamic") {
+      if (rch[0])
+        caption.setText("Re-routed around a blockage that appeared after it set off.");
+      else if (blockDropped && worldT - blockT < 5.0)
+        caption.setText("THE WORLD CHANGED: the way ahead just closed.");
+      else if (blockDropped)
+        caption.setText("");
+      else
+        caption.setText("The map is honest — for now.");
+    } else if (rch[0])
       caption.setText("Straight to the goal — through a wall that was never there.");
     else if (ghostGoneT >= 0.0 && worldT - ghostGoneT < 4.0)
       caption.setText("SENSOR: nothing there. Replanned.");
@@ -565,5 +745,22 @@ int main(int argc, char **argv) {
   if (!png.empty())
     view.writePNG(png);
   std::printf("nav_fog_ghost: done (%ld frames, reached=%d)\n", frame, static_cast<int>(rch[0]));
+
+#ifdef CVC_ENABLE_IMGUI
+  if (!restartArgs.empty()) {
+    // Relaunch with the UI's settings. Everything above (window, scene graph,
+    // belief planes, glyph meshes) is torn down by leaving main, so the new
+    // scenario starts from a genuinely clean slate — no stale belief, no
+    // mismatched mesh sizes.
+    std::vector<char *> av;
+    av.push_back(argv[0]);
+    for (auto &a : restartArgs)
+      av.push_back(const_cast<char *>(a.c_str()));
+    av.push_back(nullptr);
+    std::fflush(nullptr);
+    execv("/proc/self/exe", av.data());
+    std::perror("nav_fog_ghost: restart exec failed"); // falls through to exit
+  }
+#endif
   return 0;
 }
