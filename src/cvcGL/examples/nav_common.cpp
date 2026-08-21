@@ -397,6 +397,41 @@ void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsi
     }
 }
 
+void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y1, unsigned char r,
+               unsigned char g, unsigned char b) {
+  if (!dst || dw <= 0 || dh <= 0)
+    return;
+  // Classic integer Bresenham; every pixel individually clipped so arbitrary
+  // endpoints (including far off-screen) are safe.
+  const int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  const int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  // Cap the walk so absurd endpoints can't spin for millions of steps.
+  long steps = static_cast<long>(dx) - dy + 1;
+  if (steps > 100000)
+    return;
+  int err = dx + dy;
+  int x = x0, y = y0;
+  for (;;) {
+    if (x >= 0 && y >= 0 && x < dw && y < dh) {
+      const long d = (static_cast<long>(y) * dw + x) * 3;
+      dst[d] = r;
+      dst[d + 1] = g;
+      dst[d + 2] = b;
+    }
+    if (x == x1 && y == y1)
+      break;
+    const int e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y += sy;
+    }
+  }
+}
+
 // 4-connected dilation of a rows*cols (ny*nx) occupancy `it` times.
 static std::vector<std::uint8_t> occ_dilated(std::vector<std::uint8_t> occ, int nx, int ny,
                                              int inflate) {

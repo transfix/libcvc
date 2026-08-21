@@ -82,6 +82,17 @@ TEST(NavCommonBlit, PlotDiscOutOfBoundsCentreAndHugeRadiusStayInBounds) {
   EXPECT_EQ(f.dst()[(static_cast<std::size_t>(20) * f.dw + 20) * 3 + 1], 20);
 }
 
+TEST(NavCommonBlit, PlotLineClipsAndWritesInBounds) {
+  Fenced f(48, 32);
+  navdemo::plot_line(f.dst(), f.dw, f.dh, -100, -50, 200, 90, 255, 0, 0); // crosses the frame
+  navdemo::plot_line(f.dst(), f.dw, f.dh, 5000, 5000, 6000, 6000, 0, 255, 0); // fully offscreen
+  EXPECT_TRUE(f.fences_intact());
+  navdemo::plot_line(f.dst(), f.dw, f.dh, 2, 2, 20, 2, 9, 8, 7); // in-bounds horizontal
+  EXPECT_TRUE(f.fences_intact());
+  EXPECT_EQ(f.dst()[(static_cast<std::size_t>(2) * f.dw + 2) * 3], 9);
+  EXPECT_EQ(f.dst()[(static_cast<std::size_t>(2) * f.dw + 20) * 3], 9);
+}
+
 // occupancy_from_model must always produce an nx*ny grid and never index out of it.
 TEST(NavCommonOccupancy, RasterizesTriangleWithinGrid) {
   navdemo::Bounds b{0, 0, 100, 100};

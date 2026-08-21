@@ -145,6 +145,11 @@ void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, 
 void plot_disc(unsigned char *dst, int dw, int dh, int cx, int cy, int rad, unsigned char r,
                unsigned char g, unsigned char b);
 
+// Draw a 1-px Bresenham line from (x0, y0) to (x1, y1); every pixel clipped —
+// endpoints may be anywhere (routes to off-map targets just clip at the edge).
+void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y1, unsigned char r,
+               unsigned char g, unsigned char b);
+
 } // namespace navdemo
 
 #endif // CVC_NAV_DEMO_NAV_COMMON_H

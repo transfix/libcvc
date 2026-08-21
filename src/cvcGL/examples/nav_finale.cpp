@@ -179,7 +179,7 @@ Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  std::string bundle, vehicle, capture = "fly", out = "frames", png;
+  std::string bundle, vehicle, capture = "fly", out = "frames", png, viewMode = "3d";
   int width = 1280, height = 720, nx = 384;
   long frames = 0;
   double fps = 30.0, hz = 60.0;
@@ -197,6 +197,8 @@ int main(int argc, char **argv) {
       "hide the 2-D PiP minimap")("frames", po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))(
       "hz", po::value<double>(&hz)->default_value(60.0))(
+      "view", po::value<std::string>(&viewMode)->default_value("3d"),
+      "3d (perspective, default) | map (fixed top-down ortho — the honest 2-D answer)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | fly | orbit (offscreen PNG capture)")(
       "width", po::value<int>(&width)->default_value(1280))(
@@ -554,6 +556,8 @@ int main(int argc, char **argv) {
 
   CameraController cam(view);
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, 0.05 * span);
+  if (!capturing && viewMode == "map") // the honest 2-D map answer, interactively
+    navdemo::set_ortho_topdown(view, bounds, 10.0);
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
@@ -778,15 +782,25 @@ int main(int argc, char **argv) {
         };
         for (int i = 0; i < N; ++i) {
           const double wx = pos[2 * i], wy = pos[2 * i + 1]; // snapshot pos IS world
-          { // predicted path = the remaining A* route waypoints
+          { // predicted path = the remaining A* route, as REAL lines in the pack hue
             const Route &rt = routes[i];
-            double ax = wx, ay = wy;
+            auto toPx = [&](double wx2, double wy2, int &px2, int &py2) {
+              px2 = x0 + static_cast<int>((wx2 - bounds.min_x) / (bounds.max_x - bounds.min_x) *
+                                          (MM - 1));
+              py2 = y0 + static_cast<int>((bounds.max_y - wy2) / (bounds.max_y - bounds.min_y) *
+                                          (MM - 1));
+            };
+            const unsigned char lr = static_cast<unsigned char>(90 + color[3 * i] * 165);
+            const unsigned char lg = static_cast<unsigned char>(90 + color[3 * i + 1] * 165);
+            const unsigned char lb = static_cast<unsigned char>(90 + color[3 * i + 2] * 165);
+            int ax_, ay_;
+            toPx(wx, wy, ax_, ay_);
             for (std::size_t w = rt.idx; w < rt.wp.size(); ++w) {
-              const double qx = rt.wp[w][0], qy = rt.wp[w][1];
-              for (double u = 0; u <= 1.0; u += 0.04)
-                plot(ax + (qx - ax) * u, ay + (qy - ay) * u, 245, 235, 90, 1);
-              ax = qx;
-              ay = qy;
+              int bx_, by_;
+              toPx(rt.wp[w][0], rt.wp[w][1], bx_, by_);
+              navdemo::plot_line(fp, W, H, ax_, ay_, bx_, by_, lr, lg, lb);
+              ax_ = bx_;
+              ay_ = by_;
             }
           }
           plot(wx, wy, 12, 12, 12, 4); // dark halo so the dot reads on the aerial
