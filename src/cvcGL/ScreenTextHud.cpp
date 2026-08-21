@@ -3,9 +3,8 @@
 // loop drives it (caption tables, status lines). FpsHud is the state-bound
 // overlay; this is the direct one.
 
-#include <cvc/gl/ScreenTextHud.h>
-
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ScreenTextHud.h>
 #include <vtkCoordinate.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
@@ -18,7 +17,7 @@ namespace gl {
 struct ScreenTextHud::Impl {
   vtkSmartPointer<vtkTextActor> actor;
   vtkSmartPointer<vtkRenderer> renderer;
-  bool visible = true;   // caller intent; AND'ed with hasText
+  bool visible = true; // caller intent; AND'ed with hasText
   bool hasText = false;
 
   void applyVisibility() { actor->SetVisibility(visible && hasText ? 1 : 0); }

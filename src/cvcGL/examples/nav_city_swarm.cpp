@@ -110,11 +110,17 @@ void fill_fleet_fog(unsigned char *px, const cvc::nav::sim_world &w, int rows, i
         seen = w.ever_seen(m)[i] != 0;
     unsigned char *p = px + 4 * i;
     if (vis) {
-      p[0] = 62; p[1] = 68; p[2] = 78;
+      p[0] = 62;
+      p[1] = 68;
+      p[2] = 78;
     } else if (seen) {
-      p[0] = 40; p[1] = 44; p[2] = 50;
+      p[0] = 40;
+      p[1] = 44;
+      p[2] = 50;
     } else {
-      p[0] = 20; p[1] = 22; p[2] = 26;
+      p[0] = 20;
+      p[1] = 22;
+      p[2] = 26;
     }
     p[3] = 255;
   }
@@ -270,8 +276,8 @@ int main(int argc, char **argv) {
   std::vector<double> goalXyz;
   {
     const double gh = 0.006 * span, ght = 1.7 * gh;
-    const std::vector<double> pv = {0, 0, 0,   -gh, -gh, ght, gh, -gh, ght,
-                                    gh, gh, ght, -gh, gh, ght};
+    const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
+                                    ght, gh, gh, ght, -gh, gh,  ght};
     const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
     cvc::geometry goalGeom =
         goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.012 * span);
@@ -306,8 +312,8 @@ int main(int argc, char **argv) {
         for (int e = 0; e < 2; ++e) {
           const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
           tg.points().push_back({sp0[2 * i], sp0[2 * i + 1], 0.35});
-          tg.colors().push_back({0.45 * color[3 * i], 0.45 * color[3 * i + 1],
-                                 0.45 * color[3 * i + 2]});
+          tg.colors().push_back(
+              {0.45 * color[3 * i], 0.45 * color[3 * i + 1], 0.45 * color[3 * i + 2]});
           trailXyz[3 * v] = sp0[2 * i];
           trailXyz[3 * v + 1] = sp0[2 * i + 1];
           trailXyz[3 * v + 2] = 0.35;
@@ -400,7 +406,7 @@ int main(int argc, char **argv) {
         const float m2 = mdx * mdx + mdy * mdy;
         if (m2 < 1.0f)
           continue;
-        if (m2 > 9.0f) { // too far since the last sample — a chord would cut a
+        if (m2 > 9.0f) {               // too far since the last sample — a chord would cut a
           trailLast[2 * i] = p[2 * i]; // corner THROUGH a building; restart instead
           trailLast[2 * i + 1] = p[2 * i + 1];
           continue;
@@ -456,9 +462,13 @@ int main(int argc, char **argv) {
       for (int i = 0; i < N; ++i) {
         unsigned char r, g, b;
         if (reach[i]) {
-          r = 110; g = 190; b = 130;
+          r = 110;
+          g = 190;
+          b = 130;
         } else if (mode[i] == 1) {
-          r = 255; g = 255; b = 255;
+          r = 255;
+          g = 255;
+          b = 255;
         } else {
           r = static_cast<unsigned char>(color[3 * i] * 255);
           g = static_cast<unsigned char>(color[3 * i + 1] * 255);

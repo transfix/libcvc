@@ -84,7 +84,7 @@ TEST(NavCommonBlit, PlotDiscOutOfBoundsCentreAndHugeRadiusStayInBounds) {
 
 TEST(NavCommonBlit, PlotLineClipsAndWritesInBounds) {
   Fenced f(48, 32);
-  navdemo::plot_line(f.dst(), f.dw, f.dh, -100, -50, 200, 90, 255, 0, 0); // crosses the frame
+  navdemo::plot_line(f.dst(), f.dw, f.dh, -100, -50, 200, 90, 255, 0, 0);     // crosses the frame
   navdemo::plot_line(f.dst(), f.dw, f.dh, 5000, 5000, 6000, 6000, 0, 255, 0); // fully offscreen
   EXPECT_TRUE(f.fences_intact());
   navdemo::plot_line(f.dst(), f.dw, f.dh, 2, 2, 20, 2, 9, 8, 7); // in-bounds horizontal

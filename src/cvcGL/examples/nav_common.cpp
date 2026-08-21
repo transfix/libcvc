@@ -375,7 +375,8 @@ cvc::geometry disc_marker(double radius, double z, const double rgb[3], int seg)
   }
   using I = cvc::geometry::index_t;
   for (int i = 0; i < seg; ++i)
-    g.tris().push_back({static_cast<I>(0), static_cast<I>(1 + i), static_cast<I>(1 + (i + 1) % seg)});
+    g.tris().push_back(
+        {static_cast<I>(0), static_cast<I>(1 + i), static_cast<I>(1 + (i + 1) % seg)});
   return g;
 }
 

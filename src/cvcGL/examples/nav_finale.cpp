@@ -381,7 +381,7 @@ int main(int argc, char **argv) {
     const double wall_rgb[3] = {0.58, 0.58, 0.64};
     sg.addGraphics("buildings",
                    navdemo::occupancy_to_walls(occ.data(), ny, nx, bounds, 0.05 * span, wall_rgb,
-                                                     /*vary=*/0.45));
+                                               /*vary=*/0.45));
   }
   const double ground_rgb[3] = {0.18, 0.21, 0.25};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
@@ -421,7 +421,8 @@ int main(int argc, char **argv) {
   if (vpath.empty() && usedBundle)
     vpath = bundle + "/../../shared/Humvee.glb"; // the bundle's sibling shared/ dir
   const bool haveVehicle =
-      !vpath.empty() && load_vehicle_template(vpath, 15.0, hv, hvt); // real ~5 m Humvee x3 icon scale
+      !vpath.empty() &&
+      load_vehicle_template(vpath, 15.0, hv, hvt); // real ~5 m Humvee x3 icon scale
   if (haveVehicle) {
     std::printf("nav_finale: vehicle model %s -> %zu verts / %zu tris per agent\n", vpath.c_str(),
                 hv.size() / 3, hvt.size() / 3);
@@ -495,8 +496,7 @@ int main(int argc, char **argv) {
   std::vector<std::shared_ptr<GeometryNode>> spineNodes(N);
   std::vector<std::vector<double>> spineXyz(N);
   for (int i = 0; i < N; ++i) {
-    const double rgb[3] = {0.85 * color[3 * i], 0.85 * color[3 * i + 1],
-                           0.85 * color[3 * i + 2]};
+    const double rgb[3] = {0.85 * color[3 * i], 0.85 * color[3 * i + 1], 0.85 * color[3 * i + 2]};
     char nm[24];
     std::snprintf(nm, sizeof nm, "spine_%d", i);
     spineNodes[i] = make_lines_node(nm, SPINE_SEGS, rgb, 3.0, 3.0);
@@ -509,8 +509,12 @@ int main(int argc, char **argv) {
   auto stagingNode = make_lines_node("staging", 1, stage_rgb, 4.0, 3.0);
   if (stagingNode) {
     std::vector<double> sx(12, 0.0);
-    sx[0] = stageX; sx[1] = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y); sx[2] = 3.0;
-    sx[3] = stageX; sx[4] = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y); sx[5] = 3.0;
+    sx[0] = stageX;
+    sx[1] = bounds.min_y + 0.15 * (bounds.max_y - bounds.min_y);
+    sx[2] = 3.0;
+    sx[3] = stageX;
+    sx[4] = bounds.max_y - 0.15 * (bounds.max_y - bounds.min_y);
+    sx[5] = 3.0;
     // one segment -> 2 points; buffer is [3*2] but assign(12) covers reuse
     sx.resize(6);
     stagingNode->updateVertices(sx);
@@ -547,8 +551,7 @@ int main(int argc, char **argv) {
   {
     char st[220];
     std::snprintf(st, sizeof st,
-                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map",
-                  N,
+                  "%d vehicles · %s · global A* spine + learned CoefMLP local drive · known map", N,
                   usedBundle ? "real Austin (runtime bundle)"
                              : "synthetic city — pass --bundle for real Austin");
     status.setText(st);

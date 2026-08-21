@@ -68,9 +68,13 @@ void fill_epistemic(unsigned char *px, const cvc::nav::sim_world &w, int rows, i
       // Fog tier
       unsigned char t[3] = {14, 15, 18}; // never seen: near-black
       if (vis[i]) {
-        t[0] = 51; t[1] = 56; t[2] = 66; // in view right now: lit
+        t[0] = 51;
+        t[1] = 56;
+        t[2] = 66; // in view right now: lit
       } else if (seen[i]) {
-        t[0] = 33; t[1] = 36; t[2] = 41; // remembered: dim
+        t[0] = 33;
+        t[1] = 36;
+        t[2] = 41; // remembered: dim
       }
       // Belief LED
       const bool occ = bel[i] != 0;
@@ -130,7 +134,7 @@ int main(int argc, char **argv) {
       "view", po::value<std::string>(&viewMode)->default_value("map"),
       "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
-                       "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "none (interactive window) | orbit | fly (offscreen PNG capture)")(
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"))("png",
@@ -251,9 +255,8 @@ int main(int argc, char **argv) {
   };
   auto [ghostOcc, ghostCount] = ghost_cells();
   const long initialGhost = ghostCount;
-  auto ghostNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ghost", navdemo::occupancy_to_walls(ghostOcc.data(), R, C, bounds, 6.0,
-                                                          ghost_rgb)));
+  auto ghostNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(
+      "ghost", navdemo::occupancy_to_walls(ghostOcc.data(), R, C, bounds, 6.0, ghost_rgb)));
   if (ghostNode) {
     ghostNode->setUseSingleColor(false);
     ghostNode->setAmbient(0.9);
@@ -313,8 +316,8 @@ int main(int argc, char **argv) {
     }
   }
   // Plan line: 2 preallocated segments (agent->carrot, carrot->goal), streamed.
-  auto make_lines = [&](const char *name, int segs, const double rgb[3], double width,
-                        double x0, double y0, double z0) {
+  auto make_lines = [&](const char *name, int segs, const double rgb[3], double width, double x0,
+                        double y0, double z0) {
     cvc::geometry g;
     for (int s = 0; s < segs; ++s) {
       for (int e = 0; e < 2; ++e) {
@@ -403,8 +406,8 @@ int main(int argc, char **argv) {
   std::vector<std::uint8_t> rch(1);
   bool reached_note = false;
   navdemo::SimPacer pacer;
-  float cw[2] = {0, 0};      // live carrot (world)
-  double ghostGoneT = -1.0;  // world time the last phantom cell cleared
+  float cw[2] = {0, 0};     // live carrot (world)
+  double ghostGoneT = -1.0; // world time the last phantom cell cleared
 
   while (!view.windowClosed()) {
     double t, dt;

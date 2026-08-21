@@ -363,7 +363,8 @@ void sim_world::snapshot(float *pos_world, float *heading, float *speed, int *mo
 void sim_world::goals_world(float *out) const {
   for (int i = 0; i < n_; ++i) {
     out[2 * i] = goal_[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
-    out[2 * i + 1] = goal_[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
+    out[2 * i + 1] =
+        goal_[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
   }
 }
 
