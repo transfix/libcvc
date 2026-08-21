@@ -23,13 +23,16 @@
 #include <cstdlib>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
-#include <vtkInteractorStyle.h>
 #include <vtkNew.h>
+#include <vtkOpenGLFramebufferObject.h>
+#include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLState.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 #include <vtkTimerLog.h>
 #include <vtkWeakPointer.h>
+#include <vtk_glad.h> // GL_DRAW_FRAMEBUFFER
 
 namespace cvc {
 namespace gl {
@@ -54,7 +57,6 @@ const unsigned long kKeyEvents[] = {vtkCommand::KeyPressEvent, vtkCommand::KeyRe
 struct ImGuiOverlay::Impl {
   vtkWeakPointer<vtkRenderWindow> window;
   vtkWeakPointer<vtkRenderWindowInteractor> interactor;
-  vtkWeakPointer<vtkInteractorStyle> style;
   vtkSmartPointer<vtkCallbackCommand> beginCmd, renderCmd, interceptCmd;
   std::function<void()> draw;
   ImGuiContext *ctx = nullptr;
@@ -75,14 +77,9 @@ struct ImGuiOverlay::Impl {
     if (!window)
       return false;
     window->MakeCurrent();
-    if (!window->IsCurrent()) {
-      if (std::getenv("CVC_IMGUI_DEBUG"))
-        std::fprintf(stderr, "[imgui] context not current at StartEvent\n");
+    if (!window->IsCurrent())
       return false;
-    }
     glReady = ImGui_ImplOpenGL3_Init();
-    if (std::getenv("CVC_IMGUI_DEBUG"))
-      std::fprintf(stderr, "[imgui] backend init %s\n", glReady ? "OK" : "FAILED");
     return glReady;
   }
 
@@ -110,15 +107,24 @@ struct ImGuiOverlay::Impl {
   // RenderEvent: VTK has drawn the scene — composite the ImGui draw lists on
   // top, inside the same render, so offscreen captures include the UI.
   void renderFrame() {
-    if (!frameOpen) {
-      if (std::getenv("CVC_IMGUI_DEBUG"))
-        std::fprintf(stderr, "[imgui] RenderEvent with no open frame\n");
+    if (!frameOpen)
       return;
-    }
-    if (std::getenv("CVC_IMGUI_DEBUG"))
-      std::fprintf(stderr, "[imgui] drawing frame\n");
     ImGui::Render();
+    // Draw into VTK's OWN render framebuffer: at RenderEvent the scene has been
+    // drawn there but not yet resolved/blitted out, so compositing here lands on
+    // top in the window AND in offscreen captures. Without this the draw goes to
+    // whatever happens to be bound and silently disappears. On wasm the same
+    // chain ends at the WebGL default framebuffer (FrameBlitMode BlitToCurrent),
+    // so this path is identical in the browser.
+    auto *oglWin = vtkOpenGLRenderWindow::SafeDownCast(window);
+    vtkOpenGLState *ostate = oglWin ? oglWin->GetState() : nullptr;
+    if (ostate)
+      ostate->PushFramebufferBindings();
+    if (oglWin && oglWin->GetRenderFramebuffer())
+      oglWin->GetRenderFramebuffer()->Bind(GL_DRAW_FRAMEBUFFER);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (ostate)
+      ostate->PopFramebufferBindings();
     frameOpen = false;
   }
 
@@ -179,16 +185,11 @@ struct ImGuiOverlay::Impl {
   }
   static void onIntercept(vtkObject *caller, unsigned long eid, void *cd, void *) {
     auto *self = static_cast<Impl *>(cd);
-    if (self->intercept(eid)) {
-      // AbortFlag stops lower-priority observers — i.e. VTK's interactor style
-      // (and with it CameraController) never sees this event.
-      if (auto *cmd = self->interceptCmd.Get())
-        cmd->SetAbortFlagOnExecute(1);
-      if (caller)
-        caller->InvokeEvent(vtkCommand::UserEvent); // no-op keeps `caller` used
-    } else if (auto *cmd = self->interceptCmd.Get()) {
-      cmd->SetAbortFlagOnExecute(0);
-    }
+    (void)caller;
+    // Abort => lower-priority observers (the interactor style, hence
+    // CameraController) never see this event. Only when ImGui wants it.
+    if (auto *cmd = self->interceptCmd.Get())
+      cmd->SetAbortFlagOnExecute(self->intercept(eid) ? 1 : 0);
   }
 };
 
@@ -219,19 +220,22 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // result frame has already been copied out.)
   m_impl->window->AddObserver(vtkCommand::RenderEvent, m_impl->renderCmd);
 
-  // Intercept on the CURRENT style (CameraController owns the style slot; we
-  // only observe it, at a priority above its own handling).
+  // Observe the INTERACTOR at priority 1.0 — NEVER the interactor style.
+  // vtkInteractorStyle::ProcessEvents is
+  //     if (HandleObservers && HasObserver(evt)) InvokeEvent(evt) else OnMouseMove()
+  // so merely REGISTERING an observer on the style diverts every event into the
+  // observer branch forever: OnMouseMove/OnLeftButtonDown are never called again
+  // and orbit/pan/zoom/fly die the moment an overlay is constructed. Observing
+  // the interactor leaves the style untouched; the camera is suppressed only by
+  // the abort flag, and only when ImGui actually wants the input.
   if (m_impl->interactor) {
-    m_impl->style = vtkInteractorStyle::SafeDownCast(m_impl->interactor->GetInteractorStyle());
-    if (m_impl->style) {
-      m_impl->interceptCmd = vtkSmartPointer<vtkCallbackCommand>::New();
-      m_impl->interceptCmd->SetCallback(&Impl::onIntercept);
-      m_impl->interceptCmd->SetClientData(m_impl.get());
-      for (unsigned long e : kMouseEvents)
-        m_impl->style->AddObserver(e, m_impl->interceptCmd, 1.0);
-      for (unsigned long e : kKeyEvents)
-        m_impl->style->AddObserver(e, m_impl->interceptCmd, 1.0);
-    }
+    m_impl->interceptCmd = vtkSmartPointer<vtkCallbackCommand>::New();
+    m_impl->interceptCmd->SetCallback(&Impl::onIntercept);
+    m_impl->interceptCmd->SetClientData(m_impl.get());
+    for (unsigned long e : kMouseEvents)
+      m_impl->interactor->AddObserver(e, m_impl->interceptCmd, 1.0);
+    for (unsigned long e : kKeyEvents)
+      m_impl->interactor->AddObserver(e, m_impl->interceptCmd, 1.0);
   }
 }
 
@@ -242,11 +246,11 @@ ImGuiOverlay::~ImGuiOverlay() {
     if (m_impl->renderCmd)
       m_impl->window->RemoveObservers(vtkCommand::RenderEvent, m_impl->renderCmd);
   }
-  if (m_impl->style && m_impl->interceptCmd) {
+  if (m_impl->interactor && m_impl->interceptCmd) {
     for (unsigned long e : kMouseEvents)
-      m_impl->style->RemoveObservers(e, m_impl->interceptCmd);
+      m_impl->interactor->RemoveObservers(e, m_impl->interceptCmd);
     for (unsigned long e : kKeyEvents)
-      m_impl->style->RemoveObservers(e, m_impl->interceptCmd);
+      m_impl->interactor->RemoveObservers(e, m_impl->interceptCmd);
   }
   if (m_impl->glReady)
     ImGui_ImplOpenGL3_Shutdown();
