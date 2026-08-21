@@ -36,7 +36,6 @@
 //     -DDISABLE_CGAL build) drop the CGAL headers entirely.
 
 #include <cvc/nav/grid_nav.h>
-
 #include <vector>
 
 #ifndef DISABLE_CGAL
