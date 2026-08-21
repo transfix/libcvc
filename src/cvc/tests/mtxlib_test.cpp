@@ -55,6 +55,13 @@ const float kLibMaxFloat = 1.0e12f;
 // value.
 const float kSentinelFloor = kLibMaxFloat * 0.5f;
 
+// Mirror of BufferedIO::NDB (== 1, bufferedio.cpp:11), the default buffer-block
+// count. Same Windows/MSVC reason as kLibMaxFloat: NDB is a non-exported
+// `const static int` inside cvc.dll, so the constructor's `buf_size = NDB`
+// default argument can't be evaluated from the test exe (LNK2019). Pass this
+// explicitly at every BufferedIO call so the default is never instantiated here.
+const int kNdb = 1;
+
 std::string tmpPath(const char *name) { return ::testing::TempDir() + "mtxlib_test_" + name; }
 
 long fileSize(const std::string &path) {
@@ -793,7 +800,7 @@ TEST(BufferedIOTest, WriteReadAllTypes) {
   double dv[4] = {3.14159265358979, -2.71828, 0.0, 1e100};
 
   {
-    BufferedIO w(p.c_str(), DiskIO::WRITE);
+    BufferedIO w(p.c_str(), DiskIO::WRITE, kNdb);
     EXPECT_EQ(w.mode(), DiskIO::WRITE);
     ASSERT_TRUE(w.open());
     EXPECT_TRUE(w.open()); // double open is a no-op returning true
@@ -811,7 +818,7 @@ TEST(BufferedIOTest, WriteReadAllTypes) {
   EXPECT_EQ(fileSize(p), 4096L);
 
   {
-    BufferedIO r(p.c_str()); // default READ mode
+    BufferedIO r(p.c_str(), DiskIO::READ, kNdb); // default READ mode
     ASSERT_TRUE(r.open());
     char rcv[3];
     unsigned char rucv[2];
@@ -855,7 +862,7 @@ TEST(BufferedIOTest, MultiBlockAndEofHandling) {
   for (int i = 0; i < N; i++)
     big[i] = i * 0.25;
   {
-    BufferedIO w(p.c_str(), DiskIO::WRITE);
+    BufferedIO w(p.c_str(), DiskIO::WRITE, kNdb);
     ASSERT_TRUE(w.open());
     w.put(big.data(), N); // exercises putraw's flush loop
     EXPECT_TRUE(w.close(false));
@@ -882,7 +889,7 @@ TEST(BufferedIOTest, PartialReadAtEof) {
   std::string p = tmpPath("bio_partial.bin");
   std::remove(p.c_str());
   {
-    BufferedIO w(p.c_str(), DiskIO::WRITE);
+    BufferedIO w(p.c_str(), DiskIO::WRITE, kNdb);
     ASSERT_TRUE(w.open());
     char ten[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     w.put(ten, 10);
@@ -890,7 +897,7 @@ TEST(BufferedIOTest, PartialReadAtEof) {
   }
   EXPECT_EQ(fileSize(p), 10L);
 
-  BufferedIO r(p.c_str());
+  BufferedIO r(p.c_str(), DiskIO::READ, kNdb);
   ASSERT_TRUE(r.open());
   char buf[20];
   EXPECT_EQ(r.get(buf, 20), 10); // returns what is available
@@ -909,13 +916,13 @@ TEST(BufferedIOTest, SeekReadAndWriteModes) {
     std::vector<char> pattern(SZ);
     for (int i = 0; i < SZ; i++)
       pattern[i] = (char)(i % 251);
-    BufferedIO w(p.c_str(), DiskIO::WRITE);
+    BufferedIO w(p.c_str(), DiskIO::WRITE, kNdb);
     ASSERT_TRUE(w.open());
     w.put(pattern.data(), SZ);
     EXPECT_TRUE(w.close(false));
   }
   {
-    BufferedIO r(p.c_str());
+    BufferedIO r(p.c_str(), DiskIO::READ, kNdb);
     ASSERT_TRUE(r.open());
     char b[16];
     EXPECT_EQ(r.get(b, 16), 16);
@@ -946,7 +953,7 @@ TEST(BufferedIOTest, SeekReadAndWriteModes) {
   std::string q = tmpPath("bio_seek_write.bin");
   std::remove(q.c_str());
   {
-    BufferedIO w(q.c_str(), DiskIO::WRITE);
+    BufferedIO w(q.c_str(), DiskIO::WRITE, kNdb);
     ASSERT_TRUE(w.open());
     char aaaa[4] = {'A', 'A', 'A', 'A'};
     w.put(aaaa, 4);
@@ -976,7 +983,7 @@ TEST(BufferedIOTest, SeekReadAndWriteModes) {
 TEST(BufferedIOTest, FilePointerCtorAndSetMode) {
   FILE *fp = tmpfile();
   ASSERT_NE(fp, nullptr);
-  BufferedIO io(fp, DiskIO::WRITE);
+  BufferedIO io(fp, DiskIO::WRITE, kNdb);
   int vals[4] = {10, 20, 30, 40};
   io.put(vals, 4);
   EXPECT_TRUE(io.setMode(DiskIO::READ)); // flush and switch to reading
@@ -998,7 +1005,7 @@ TEST(BufferedIOTest, ReopenFlushAndOpenFailure) {
   std::remove(pa.c_str());
   std::remove(pb.c_str());
 
-  BufferedIO w(pa.c_str(), DiskIO::WRITE);
+  BufferedIO w(pa.c_str(), DiskIO::WRITE, kNdb);
   ASSERT_TRUE(w.open());
   char abc[3] = {'a', 'b', 'c'};
   w.put(abc, 3);
@@ -1021,7 +1028,7 @@ TEST(BufferedIOTest, ReopenFlushAndOpenFailure) {
 
   {
     // READ-mode flush skips to the next disk-block boundary
-    BufferedIO r(pb.c_str());
+    BufferedIO r(pb.c_str(), DiskIO::READ, kNdb);
     ASSERT_TRUE(r.open());
     char b[4];
     EXPECT_EQ(r.get(b, 2), 2);
@@ -1040,9 +1047,9 @@ TEST(BufferedIOTest, ReopenFlushAndOpenFailure) {
   }
 
   // open() failure paths
-  BufferedIO badRead("/nonexistent_dir_mtxlib_test/x.bin");
+  BufferedIO badRead("/nonexistent_dir_mtxlib_test/x.bin", DiskIO::READ, kNdb);
   EXPECT_FALSE(badRead.open());
-  BufferedIO badWrite("/nonexistent_dir_mtxlib_test/y.bin", DiskIO::WRITE);
+  BufferedIO badWrite("/nonexistent_dir_mtxlib_test/y.bin", DiskIO::WRITE, kNdb);
   EXPECT_FALSE(badWrite.open());
 
   std::remove(pa.c_str());

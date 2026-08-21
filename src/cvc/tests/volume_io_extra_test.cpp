@@ -1150,8 +1150,11 @@ TEST_F(VolumeIOExtraTest, SplitRawFilename) {
   {
     auto t = volume_file_io::splitRawFilename("plain.rawiv");
     EXPECT_EQ(boost::get<0>(t), "plain.rawiv");
-    EXPECT_EQ(boost::get<1>(t), std::string(volume_file_io::CVC_VOLUME_GROUP) + "/" +
-                                    volume_file_io::DEFAULT_VOLUME_NAME);
+    // == volume_file_io::CVC_VOLUME_GROUP "/" DEFAULT_VOLUME_NAME. Spelled as a
+    // literal: those are non-exported static const members (volume_file_io.cpp),
+    // so referencing them from the test exe fails to link across cvc.dll on
+    // Windows/MSVC.
+    EXPECT_EQ(boost::get<1>(t), "/cvc/volumes/volume");
   }
   {
     // extra components are dropped
