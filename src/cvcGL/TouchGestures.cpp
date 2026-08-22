@@ -190,16 +190,19 @@ void TouchGestures::update() {
   cvcgl_touch_take(s.canvas.c_str(), g);
   const double scale = g[0], panX = g[1], panY = g[2];
 
-  // Pinch -> zoom. mouseWheel() already means "zoom" in every camera mode
-  // (parallel scale in Map, orbit distance in Orbit, fly speed in Fly), so the
-  // gesture maps onto the one control that is always correct. log2 keeps the
-  // response proportional: doubling the finger distance is a fixed number of
-  // steps regardless of where the pinch started.
+  // Pinch -> ZOOM, in every mode. mouseWheel() is the right call in Map
+  // (parallel scale) and Orbit (orbit distance), but in FLY it changes movement
+  // SPEED, which is not what a pinch means to anyone. In fly mode we translate
+  // the camera along its own view direction instead, which is what "zoom" means
+  // when there is no orbit centre to pull toward.
   if (scale > 0.0 && std::abs(scale - 1.0) > 1e-4) {
     double steps = s.pinchSteps * std::log2(scale);
     if (s.invertPinch)
       steps = -steps;
-    s.cam->mouseWheel(steps);
+    if (s.cam->mode() == CameraController::Mode::Fly)
+      s.cam->dolly(steps);
+    else
+      s.cam->mouseWheel(steps);
   }
 
   // Two-finger drag -> the same motion a mouse drag makes: pan on a 2-D map,

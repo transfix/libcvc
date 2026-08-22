@@ -36,8 +36,10 @@
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiBinding.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -1174,9 +1176,22 @@ int main(int argc, char **argv) {
     terrain->setTexture(shadowImg, false);
   }
 
-  // Afternoon sun (warm) + a dim cool sky fill from the opposite side.
-  sg.addDirectionalLight(-52.0, 34.0, 1.0, 0.94, 0.82, 1.15);
-  sg.addDirectionalLight(128.0, 52.0, 0.55, 0.66, 0.85, 0.70);
+  // STAGE RIG, not a sun. Two directional lights used to stand in for an
+  // afternoon sun and a sky fill, and they were the reason the shadows were
+  // mush: VTK bakes a directional light's shadow map with a parallel projection
+  // fitted to the WHOLE scene bounding box, and this scene's box includes the
+  // sea plane and a sun billboard 900 units out. Nearly every shadow texel was
+  // being spent on empty water.
+  //
+  // A spot is baked with a perspective projection whose view angle is its cone,
+  // so aiming the rig at the ISLAND concentrates the map where the trees are.
+  // The stage radius is the island, deliberately not the scene.
+  cvc::gl::StageLighting rig(sg);
+  rig.setStage(0.0, 0.0, 0.0, 120.0); // the island, not the sea and not the sky
+  rig.applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
+  // Keep the old warm-key/cool-fill feel, now as a rig rather than a sky.
+  rig.setKey(1.15, -52.0, 34.0, 34.0);
+  rig.setWarmth(0.45);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
   // A real sky, not a flat void: a vertical gradient background (hazy horizon at
@@ -1218,12 +1233,14 @@ int main(int argc, char **argv) {
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
   bool uiShadows = shadows;
+  bool uiLighting = true; // the StageLightingPanel window
   float uiWind = 1.0f;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {
         if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
           sg.setShadowsEnabled(uiShadows);
+        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
@@ -1234,10 +1251,11 @@ int main(int argc, char **argv) {
     ImGui::Text("%zu trees", forest.size());
     ImGui::SliderFloat("wind", &uiWind, 0.0f, 3.0f);
     ImGui::Checkbox("shadows", &uiShadows);
-    ImGui::Separator();
-    ImGui::TextDisabled("drag me / click a widget --");
-    ImGui::TextDisabled("the camera stays put");
     ImGui::End();
+
+    // The lighting controls are the LIBRARY's panel, not demo-local code — the
+    // same call lights any cvcGL scene.
+    cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
   });
 #endif
   if (offscreen)

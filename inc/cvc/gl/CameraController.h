@@ -91,6 +91,12 @@ public:
   // to / read from state "mode".
   void setMode(Mode m);
   Mode mode() const;
+
+  // Move the eye along its own view direction by `steps` (positive = forward).
+  // This is what "zoom" has to mean in FLY mode, where there is no orbit centre
+  // to pull toward and mouseWheel() adjusts movement SPEED instead. Step size
+  // scales with the current move speed, so it feels the same at any scale.
+  void dolly(double steps);
   void toggleMode();
 
   // World up axis (state "up"). Default +Z.

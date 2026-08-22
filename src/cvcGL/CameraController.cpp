@@ -803,6 +803,21 @@ void CameraController::mouseWheel(double steps) {
   syncConfigToState();
 }
 
+void CameraController::dolly(double steps) {
+  Impl &s = *m_impl;
+  if (s.mode != Mode::Fly) {
+    mouseWheel(steps); // orbit/map already zoom correctly through the wheel
+    return;
+  }
+  // Step along the view direction, scaled by move speed so the gesture feels
+  // the same in a room-sized scene and an island-sized one.
+  const Basis b = basisFromUp(s.up);
+  const Vec3 fwd = forwardVec(b, s.flyYaw, s.flyPitch);
+  s.flyPos = s.flyPos + fwd * (steps * s.moveSpeed * 0.35);
+  applyToCamera();
+  syncPoseToState();
+}
+
 void CameraController::beginDrag() { m_impl->dragging = true; }
 void CameraController::endDrag() { m_impl->dragging = false; }
 
