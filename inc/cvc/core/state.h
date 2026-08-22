@@ -155,12 +155,23 @@ public:
   typedef std::vector<nullary_func> init_func_vec;
   typedef std::vector<app_init_func> app_init_func_vec;
 
-  // Inline variable so every TU using this header gets its own
-  // definition. Avoids needing per-symbol __declspec(dllexport) on
-  // MSVC: WINDOWS_EXPORT_ALL_SYMBOLS auto-exports functions but not
-  // data members, so a .cpp-defined static const std::string would
-  // have no DLL export and downstream test TUs would fail to link.
-  inline static const std::string SEPARATOR{"."};
+  // MUST be a compile-time constant, NOT an inline std::string.
+  //
+  // As `inline static const std::string` this had a DYNAMIC initializer, and any
+  // translation unit outside libcvc that read it got an EMPTY string, because
+  // the initializer for that copy had not run yet. The failure was silent and
+  // total for everything built on top: stateName() computed
+  // prefix + "" + child = "prefixchild", so every state_object outside libcvc
+  // (all of cvcGL) wrote FLATTENED keys like "scene.lightingwarm_key" while
+  // subscribing to childChanged on "scene.lighting" — a SIBLING of where its
+  // own writes landed. Hence external state writes never drove any object, and
+  // absolute paths could not find a state_object's values.
+  //
+  // `constexpr const char*` has no dynamic initialization at all, so every TU
+  // and every shared object sees ".". It also preserves what the previous
+  // comment was reaching for — no MSVC data-member export is required, because a
+  // compile-time constant is materialised in each TU rather than exported.
+  static constexpr const char *SEPARATOR = ".";
   static init_func_vec _startup;
   static app_init_func_vec _appStartup;
 

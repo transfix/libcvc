@@ -844,21 +844,31 @@ vtkStandardNewMacro(StridedShadowBaker);
 void SceneGraph::syncShadowState() {
   if (m_applyingShadowState)
     return;
-  if (!m_shadowSettings) {
-    m_shadowSettings = std::make_unique<cvc::gl::ShadowSettings>(
-        m_ctx, cvc::gl::ShadowSettings::sceneStatePath(m_statePrefix),
-        [this](cvc::gl::ShadowSettings::Values v) {
-          m_applyingShadowState = true;
-          setShadowsEnabled(v.enabled);
-          setShadowResolution(v.resolution);
-          setShadowUpdateInterval(v.interval);
-          m_applyingShadowState = false;
-        });
-  }
+  // Capture the CURRENT values BEFORE creating the settings object. Its
+  // constructor seeds its own defaults, which fires handleStateChanged, which
+  // calls back into the setters — so building `v` afterwards would read values
+  // the seeding had already clobbered (a setShadowResolution(2048) landed as
+  // 1024, the default). The guard also covers construction, because that
+  // callback re-enters this function and would otherwise create a second
+  // settings object while the first is still being built.
   cvc::gl::ShadowSettings::Values v;
   v.enabled = m_shadowsEnabled;
   v.resolution = m_shadowResolution;
   v.interval = m_shadowInterval;
+
+  if (!m_shadowSettings) {
+    m_applyingShadowState = true;
+    m_shadowSettings = std::make_unique<cvc::gl::ShadowSettings>(
+        m_ctx, cvc::gl::ShadowSettings::sceneStatePath(m_statePrefix),
+        [this](cvc::gl::ShadowSettings::Values nv) {
+          m_applyingShadowState = true;
+          setShadowsEnabled(nv.enabled);
+          setShadowResolution(nv.resolution);
+          setShadowUpdateInterval(nv.interval);
+          m_applyingShadowState = false;
+        });
+    m_applyingShadowState = false;
+  }
   m_shadowSettings->set(v);
 }
 
