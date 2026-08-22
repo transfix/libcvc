@@ -160,6 +160,32 @@ void Text(cvc::app &ctx, const char *label, const std::string &path) {
   ImGui::Text("%s: %s", label, v.c_str());
 }
 
+namespace {
+// Commit-every-frame slider. The normal SliderDouble commits only on release,
+// which is right for most settings but wrong for lighting: dragging the key
+// azimuth with no visible change looks broken, and you cannot aim a light you
+// cannot see move. Safe here because the rig now rebuilds its lights in ONE
+// batched pass rather than one renderer-wide rebuild per light.
+bool SliderLive(cvc::app &ctx, const char *label, const std::string &path, double lo, double hi,
+                double def, const char *fmt = "%.3f") {
+  float v = static_cast<float>(read_or_seed<double>(ctx, path, def));
+  if (ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt)) {
+    write<double>(ctx, path, v);
+    return true;
+  }
+  return false;
+}
+bool SliderIntLive(cvc::app &ctx, const char *label, const std::string &path, int lo, int hi,
+                   int def) {
+  int v = read_or_seed<int>(ctx, path, def);
+  if (ImGui::SliderInt(label, &v, lo, hi)) {
+    write<int>(ctx, path, v);
+    return true;
+  }
+  return false;
+}
+} // namespace
+
 // ---- StageLightingPanel ----------------------------------------------------
 // Deliberately preset-first: most people want a LOOK, not sixteen sliders. The
 // tooltips carry the one non-obvious fact — that the cone is the shadow-map
@@ -222,6 +248,9 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
   bool giz = rig.gizmosVisible();
   if (ImGui::Checkbox("Show lights", &giz))
     rig.setGizmosVisible(giz);
+  if (giz)
+    SliderLive(rig.appContext(), "Beam alpha", rig.statePath() + ".gizmo_beam_alpha", 0.0, 1.0,
+               0.18, "%.2f");
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Draw each light as a fixture, an aim line and its CONE.\n"
                       "The cone is the shadow-map frustum VTK bakes, so it shows\n"
@@ -232,25 +261,50 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
   const std::string p = rig.statePath() + ".";
 
   if (ImGui::CollapsingHeader("Roles", ImGuiTreeNodeFlags_DefaultOpen)) {
-    SliderDouble(ctx, "Key", p + "key_intensity", 0.0, 2.5, 1.0);
-    SliderDouble(ctx, "Fill", p + "fill_intensity", 0.0, 1.5, 0.35);
-    SliderDouble(ctx, "Back", p + "back_intensity", 0.0, 2.0, 0.55);
-    SliderDouble(ctx, "Wash", p + "wash_intensity", 0.0, 2.0, 0.30);
-    SliderInt(ctx, "Wash lights", p + "wash_count", 0, 8, 4);
+    SliderLive(ctx, "Key", p + "key_intensity", 0.0, 2.5, 1.0);
+    SliderLive(ctx, "Fill", p + "fill_intensity", 0.0, 1.5, 0.35);
+    SliderLive(ctx, "Back", p + "back_intensity", 0.0, 2.0, 0.55);
+    SliderLive(ctx, "Wash", p + "wash_intensity", 0.0, 2.0, 0.30);
+    SliderIntLive(ctx, "Wash lights", p + "wash_count", 0, 8, 4);
   }
 
   if (ImGui::CollapsingHeader("Key angle & cone", ImGuiTreeNodeFlags_DefaultOpen)) {
-    SliderDouble(ctx, "Azimuth", p + "key_azimuth", -180.0, 180.0, -50.0);
-    SliderDouble(ctx, "Elevation", p + "key_elevation", 5.0, 85.0, 38.0);
-    SliderDouble(ctx, "Cone", p + "key_cone", 8.0, 70.0, 32.0);
+    SliderLive(ctx, "Azimuth", p + "key_azimuth", -180.0, 180.0, -50.0, "%.0f deg");
+    SliderLive(ctx, "Elevation", p + "key_elevation", 5.0, 85.0, 38.0, "%.0f deg");
+    SliderLive(ctx, "Cone", p + "key_cone", 8.0, 70.0, 32.0, "%.0f deg");
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("The cone IS the shadow-map frustum.\n"
                         "Narrower = sharper, because the same map covers less ground.");
   }
 
+  // Per-light switches. This is a DEBUGGING surface: turn lights off one at a
+  // time to attribute a shadow artifact to the light that casts it.
+  if (ImGui::CollapsingHeader("Lights (debug)")) {
+    const auto names = rig.lightNames();
+    if (names.empty())
+      ImGui::TextDisabled("rig is off");
+    for (const auto &n : names) {
+      bool on = rig.lightEnabled(n);
+      if (ImGui::Checkbox(n.c_str(), &on))
+        rig.setLightEnabled(n, on);
+      ImGui::SameLine();
+      ImGui::PushID(n.c_str());
+      if (ImGui::SmallButton("solo"))
+        rig.soloLight(n);
+      ImGui::PopID();
+    }
+    if (!names.empty() && ImGui::Button("All on"))
+      rig.soloLight("");
+    ImGui::TextDisabled("off = light AND its shadow map removed");
+  }
+
   if (ImGui::CollapsingHeader("Look")) {
-    SliderDouble(ctx, "Ambient", p + "ambient", 0.0, 0.8, 0.22);
-    SliderDouble(ctx, "Warm key", p + "warm_key", 0.0, 1.0, 0.35);
+    SliderLive(ctx, "Environment", p + "env_intensity", 0.0, 1.5, 0.30);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Shadow-free fill for everything OUTSIDE the cones.\nWater needs this: a "
+                        "highlight can only show where the surface is lit.");
+    SliderLive(ctx, "Ambient", p + "ambient", 0.0, 0.8, 0.22);
+    SliderLive(ctx, "Warm key", p + "warm_key", 0.0, 1.0, 0.35);
     SliderDouble(ctx, "Stage radius", p + "stage_radius", 1.0, 500.0, 10.0);
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("Size of the ACTING AREA, not of the scene.\n"

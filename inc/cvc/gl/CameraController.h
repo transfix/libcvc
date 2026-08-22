@@ -92,6 +92,20 @@ public:
   void setMode(Mode m);
   Mode mode() const;
 
+  // ---- panning (translating the view) --------------------------------------
+  // A drag with the MIDDLE button always pans: it slides the orbit centre in the
+  // screen plane, which is the "move the scene" gesture people expect from every
+  // other 3-D tool.
+  void beginPan();
+  void endPan();
+
+  // Make the PRIMARY drag pan instead of orbit (state "primary_drag_pans").
+  // TouchGestures turns this on for touch devices, so one finger translates and
+  // two fingers rotate — there is no middle button on a phone, and dragging the
+  // world around is the more useful of the two with a single finger.
+  void setPrimaryDragPans(bool on);
+  bool primaryDragPans() const;
+
   // Move the eye along its own view direction by `steps` (positive = forward).
   // This is what "zoom" has to mean in FLY mode, where there is no orbit centre
   // to pull toward and mouseWheel() adjusts movement SPEED instead. Step size
