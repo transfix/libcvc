@@ -606,17 +606,11 @@ protected:
 };
 
 TEST_F(AsyncEvalGapsTest, TimeoutExpires) {
-#if defined(_WIN32)
-  // The evaluator's wall-clock timeout does not interrupt a running script on
-  // Windows: this infinite loop is never cut off, so the test hangs to the
-  // ctest hard timeout instead of throwing. Skip on Windows (the interruption
-  // mechanism is a separate, platform-specific fix); the timeout path is still
-  // covered on Linux/macOS. TimeoutCompletesAndOnComplete below exercises the
-  // non-runaway path everywhere.
-  GTEST_SKIP() << "evaluator timeout does not interrupt a runaway script on Windows";
-#else
+  // Runs on all platforms now: the deadline is enforced per eval step inside
+  // check_interrupted_async (see async_evaluator.cpp), so a runaway script is
+  // cut off even on MSVC, where the coroutine runs to completion via symmetric
+  // transfer without returning to sync_evaluate's driving loop.
   EXPECT_THROW(ev->sync_evaluate_script("(while t 1)", nullptr, 0.05), evaluation_timeout);
-#endif
 }
 
 TEST_F(AsyncEvalGapsTest, TimeoutCompletesAndOnComplete) {

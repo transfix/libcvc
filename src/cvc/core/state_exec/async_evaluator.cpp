@@ -64,46 +64,29 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
                                        std::optional<double> timeout_sec,
                                        std::function<void(const value_t &)> on_complete) {
   std::lock_guard lk(eval_mu_);
-  auto t = evaluate(expr, env);
+
+  // Install the wall-clock deadline for this evaluation; check_interrupted_async
+  // enforces it at every step (works on all platforms — see task.h / deadline_).
+  // eval_mu_ is recursive, so a nested sync_evaluate must not clobber an outer
+  // deadline: keep the tighter of the two and restore the outer one on exit.
+  const std::optional<std::chrono::steady_clock::time_point> saved_deadline = deadline_;
   if (timeout_sec) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(*timeout_sec);
-    // Drive the coroutine via the same thread-local trampoline used by
-    // task<T>::sync_wait() (see task.h for the full pattern description).
-    // Each iteration resumes one coroutine step; the await_suspend /
-    // final_suspend handlers in task.h write the next handle into the
-    // trampoline slot and return noop_coroutine, keeping the native
-    // call stack flat even for deeply recursive evaluator scripts.
-    t.handle().promise().continuation_ = std::noop_coroutine();
-    detail::trampoline_next() = t.handle();
-    while (!t.done()) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        interrupt();
-        // Drive coroutine to propagate the interrupt
-        try {
-          while (!t.done()) {
-            auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
-            if (next == std::noop_coroutine())
-              next = t.handle();
-            next.resume();
-          }
-        } catch (...) {
-        }
-        reset_interrupt();
-        throw evaluation_timeout("evaluation exceeded timeout");
-      }
-      auto next = std::exchange(detail::trampoline_next(), std::noop_coroutine());
-      if (next == std::noop_coroutine())
-        next = t.handle();
-      next.resume();
-    }
-    auto &r = t.handle().promise().result_;
-    if (r.index() == 2)
-      std::rethrow_exception(std::get<2>(r));
-    auto result = std::move(std::get<1>(r));
-    if (on_complete)
-      on_complete(result);
-    return result;
+    const std::chrono::steady_clock::time_point d =
+        std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(*timeout_sec));
+    deadline_ = (saved_deadline && *saved_deadline < d) ? saved_deadline : std::optional{d};
   }
+  struct deadline_restore {
+    async_evaluator *self;
+    std::optional<std::chrono::steady_clock::time_point> prev;
+    ~deadline_restore() { self->deadline_ = prev; }
+  } restore{this, saved_deadline};
+
+  auto t = evaluate(expr, env);
+  // sync_wait drives the coroutine on both the trampoline (GCC/Clang) and the
+  // symmetric-transfer (MSVC) paths, and rethrows evaluation_timeout when the
+  // deadline fires mid-evaluation.
   auto result = t.sync_wait();
   if (on_complete)
     on_complete(result);
@@ -144,6 +127,13 @@ bool async_evaluator::is_paused() const { return paused_.load(std::memory_order_
 task<void> async_evaluator::check_interrupted_async() {
   if (interrupted_.load(std::memory_order_acquire))
     throw evaluation_interrupted("evaluation was interrupted");
+  // Enforce the wall-clock deadline here — every eval step co_awaits this — so
+  // a runaway script is cut off on every platform. (sync_evaluate used to check
+  // the deadline in its driving loop, but on MSVC the coroutine runs to
+  // completion via symmetric transfer without returning there, so an infinite
+  // script hung to the ctest hard timeout. See task.h and deadline_.)
+  if (deadline_ && std::chrono::steady_clock::now() >= *deadline_)
+    throw evaluation_timeout("evaluation exceeded timeout");
   if (paused_.load(std::memory_order_acquire)) {
     std::unique_lock lk(pause_mu_);
     pause_cv_.wait(lk, [this] { return !paused_.load(std::memory_order_acquire); });
