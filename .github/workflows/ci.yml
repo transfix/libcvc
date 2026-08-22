@@ -96,7 +96,7 @@ jobs:
           set -euo pipefail
           base="${{ steps.base.outputs.base }}"
           out=$(git clang-format --diff "$base" -- \
-                  '*.c' '*.cc' '*.cpp' '*.cxx' \
+                  '*.c' '*.cc' '*.cpp' '*.cxx' '*.m' '*.mm' \
                   '*.h' '*.hh' '*.hpp' '*.hxx' || true)
           if [ -z "$out" ] \
              || [ "$out" = "no modified files to format" ] \
@@ -198,6 +198,71 @@ jobs:
           build_type: Release
           link: shared
 
+      # ── VTK, for cvcGL ──
+      # cvcGL's tests are the only coverage the scene graph gets, and until this
+      # step existed they never ran anywhere: CVC_BUILD_CVCGL defaults OFF, no
+      # workflow set it, and src/CMakeLists.txt never adds the subdirectory — so
+      # none of the cvcgl_* add_test() calls was ever configured.
+      #
+      # VTK is NOT in the libcvc dependency closure the step above installs
+      # (libcvc itself does not need it; cvcGL does), so it has to be added
+      # explicitly or find_package(VTK REQUIRED) in src/cvcGL/CMakeLists.txt
+      # hard-fails. cvcpkg is on PATH here because the action pip-installs it.
+      #
+      # xorgproto is separate on purpose: cvcGL's find_package(VTK) re-runs
+      # VTK's FindX11, which needs X11/X.h, but xorgproto is only a *build* dep
+      # of the libx11/libxext recipes — so installing vtk pulls those libs at
+      # runtime without their protocol headers and X11_X11_INCLUDE_PATH goes
+      # unfound. Everything else (libx11/libxext/libxt/libglvnd/glu) rides along
+      # hermetically with the vtk bundle; there is nothing to apt-get.
+      - name: Install VTK for cvcGL
+        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            prefix="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install vtk xorgproto --prefix "$prefix" --config release --link shared
+
+      # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
+      # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at
+      # all. cvcgl_renderer and cvcgl_shadow_volume actually call render() and
+      # frameRGB(), and on a bare runner they SEGFAULT: the vtk bundle ships
+      # libglvnd, so GL *dispatch* resolves and the offscreen window constructs
+      # happily, but there is no *driver* behind it and the first real draw
+      # walks off a null vendor table. (cvcgl_shadow_volume's own header comment
+      # assumed a headless render would be a harmless no-op. It is not.)
+      #
+      # Mesa's llvmpipe is the driver; Xvfb is there because VTK probes GLX
+      # before EGL, so a display saves it from falling through a failing path
+      # first. Verified locally: both tests pass under LIBGL_ALWAYS_SOFTWARE=1
+      # with llvmpipe.
+      #
+      # Skipping the two instead would leave cvcGL's rendering permanently
+      # untested in CI, which is a smaller version of the problem this whole
+      # change exists to fix.
+      - name: Software OpenGL for the cvcGL render tests
+        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb libgl1-mesa-dri libglx-mesa0
+          Xvfb :99 -screen 0 1280x1024x24 &
+          for _ in $(seq 1 30); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          {
+            echo "DISPLAY=:99"
+            echo "LIBGL_ALWAYS_SOFTWARE=1"
+            echo "GALLIUM_DRIVER=llvmpipe"
+          } >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           # libcvc needs libiimod from the libcvc-deps bundle. Fall
@@ -216,6 +281,21 @@ jobs:
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
             coverage=ON
           fi
+          # Build cvcGL (and so run its 18 cvcgl_* tests) exactly where we are
+          # NOT measuring coverage. The gate extracts src/* against
+          # COVERAGE_MIN, so pulling src/cvcGL/*.cpp into a coverage job would
+          # add thousands of lines to the denominator that only the cvcgl_*
+          # tests exercise, and drag the percentage down for reasons that have
+          # nothing to do with the change under test. Keeping the two apart
+          # means the lcov filter, the local `coverage` target and
+          # docs/TESTING.md all stay as they are — three places that have to
+          # agree, and would otherwise have to be edited in lockstep.
+          # package-linux / libcvc-release is a gating job, so the tests still
+          # block a bad PR.
+          cvcgl=ON
+          if [ "$coverage" = "ON" ]; then
+            cvcgl=OFF
+          fi
           grpc=OFF
           if [ "${{ matrix.enable_grpc }}" = "true" ]; then
             grpc=ON
@@ -224,6 +304,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCVC_BUILD_TESTS=$tests \
+            -DCVC_BUILD_CVCGL=$cvcgl \
             -DCVC_ENABLE_COVERAGE=$coverage \
             -DCVC_ENABLE_CUDA=ON \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
@@ -244,6 +325,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A registered test is not a running test. The cvcgl_* targets sat in
+          # src/cvcGL/CMakeLists.txt behind add_test() for a long time while
+          # never being configured at all, and nothing said so — the suite just
+          # silently did not contain them. Assert they are present rather than
+          # trusting that a flag took effect, so the same failure cannot recur
+          # quietly. (Skipped where cvcGL is deliberately off: the coverage
+          # jobs.)
+          if [ "${{ matrix.build_type }}" != "Debug" ]; then
+            n_cvcgl=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: cvcgl_' || true)
+            echo "cvcgl_* tests registered with ctest: $n_cvcgl"
+            if [ "$n_cvcgl" -eq 0 ]; then
+              echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
+              exit 1
+            fi
+          fi
           # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites
           #   Performance                              : perf benchmarks (>200s in Debug)
@@ -451,6 +547,19 @@ jobs:
           build_type: Release
           link: shared
 
+      # VTK for cvcGL — see the long note in package-linux. No xorgproto here:
+      # there is no X11 on macOS, so VTK's FindX11 is not in the picture.
+      - name: Install VTK for cvcGL
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="${{ steps.libcvc-deps-macos.outputs.path }}"
+          if [ -z "$prefix" ]; then
+            prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install vtk --prefix "$prefix" --config release --link shared
+
       - name: Configure
         run: |
           # cvcpkg is the sole third-party prefix on macOS.
@@ -459,9 +568,11 @@ jobs:
             deps_path="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           export CMAKE_PREFIX_PATH="$deps_path"
+          # No coverage gate on macOS, so cvcGL is on for both build types.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DDISABLE_CGAL=OFF \
             -DCVC_ENABLE_MESHER=ON \
@@ -475,6 +586,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # cvcGL is on for both build types here (no coverage gate on macOS).
+          # Assert its tests actually registered — see the linux step.
+          n_cvcgl=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: cvcgl_' || true)
+          echo "cvcgl_* tests registered with ctest: $n_cvcgl"
+          if [ "$n_cvcgl" -eq 0 ]; then
+            echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
+            exit 1
+          fi
           # See linux ctest step for rationale, including why Debug pushes skip
           # the heavy set (they killed the hosted runner outright).
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
@@ -604,6 +723,19 @@ jobs:
           method: 'network'
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
+      # VTK for cvcGL — see the long note in package-linux. No xorgproto: no X11
+      # on Windows, so VTK's FindX11 never runs.
+      - name: Install VTK for cvcGL (Windows)
+        if: matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $prefix = '${{ steps.libcvc-deps-windows.outputs.path }}'
+          if (-not $prefix) {
+            $prefix = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          cvcpkg install vtk --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
+
       - name: Configure
         shell: pwsh
         run: |
@@ -617,11 +749,13 @@ jobs:
           # cvcpkg is the sole third-party prefix. No vcpkg toolchain
           # file, no aqt Qt6, no VTK source cache.
           $qtPrefix = if ($depsPath) { $depsPath } else { '' }
+          # No coverage gate on Windows, so cvcGL is on.
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type }} `
             -DCMAKE_PREFIX_PATH="$qtPrefix" `
             -DCVC_BUILD_TESTS=ON `
+            -DCVC_BUILD_CVCGL=ON `
             -DCVC_ENABLE_CUDA=ON `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DDISABLE_CGAL=OFF `
@@ -703,16 +837,37 @@ jobs:
           if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
           $extra += $buildBin
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          # Assert the cvcgl_* tests actually registered — see the linux step.
+          $nCvcgl = (ctest --test-dir build -N 2>$null | Select-String -Pattern 'Test\s+#\d+: cvcgl_').Count
+          Write-Host "cvcgl_* tests registered with ctest: $nCvcgl (2 excluded below: no GL driver on Windows)"
+          if ($nCvcgl -eq 0) {
+            Write-Host "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
+            exit 1
+          }
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
+          # The only two cvcGL tests that actually draw. A Windows runner offers
+          # nothing but the GDI generic OpenGL 1.1 software path, which VTK
+          # rejects, so both segfault the moment they issue a real draw — the
+          # same failure Linux had before Mesa's llvmpipe was installed there,
+          # and the same one macOS does NOT have (Apple always ships a usable
+          # GL). Every other cvcgl_* test only inspects scene and state and runs
+          # here normally, so this excludes two, not the suite.
+          #
+          # Fixing it properly means shipping a software GL for Windows
+          # (opengl32.sw.dll / mesa-dist-win) — a third-party binary and its own
+          # supply-chain question, which does not belong in the same change that
+          # first switches these tests on. Tracked as a follow-up.
+          $noGlRegex = '^(cvcgl_renderer|cvcgl_shadow_volume)$'
           if ('${{ github.event_name }}' -eq 'push') {
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600 `
+                  -E "$noGlRegex"
           } else {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
-                  -E "$stressRegex"
+                  -E "$stressRegex|$noGlRegex"
           }
 
       - name: Pack libcvc zip
