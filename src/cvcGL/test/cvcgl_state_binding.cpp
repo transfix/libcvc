@@ -101,15 +101,58 @@ int main() {
   check(H.rd("text") == "hello", "object -> state (setText)");
   hud.setFontSize(31);
   check(H.rd("font_size") == "31", "object -> state (setFontSize)");
+  // state -> object, through the HUD's own getters. This used to write through
+  // the peer and read back through the SAME peer ("state round-trips"), which
+  // only proved cvc::state stores what you put in it — ScreenTextHud was not in
+  // the loop at all, and deleting the body of handleStateChanged (killing the
+  // entire advertised two-way binding) left it green. Every setting is driven
+  // here, not just one: seven setters mirror seven keys, and a getter is the
+  // only way to see any of them arrive. Values are read once into a local, as
+  // above, so the value printed is the one that was tested.
   H.wr("font_size", 44);
-  check(H.rd("font_size") == "44", "state round-trips (font_size)");
+  const int fs = hud.fontSize();
+  check(fs == 44, "state -> object (font_size = " + std::to_string(fs) + ")");
+  H.wr("text", std::string("driven-from-state"));
+  const std::string txt = hud.text();
+  check(txt == "driven-from-state", "state -> object (text = '" + txt + "')");
+  H.wr("pos_x", 0.25);
+  H.wr("pos_y", 0.8);
+  double nx = 0, ny = 0;
+  hud.position(nx, ny);
+  check(std::fabs(nx - 0.25) < 1e-12 && std::fabs(ny - 0.8) < 1e-12,
+        "state -> object (position = " + std::to_string(nx) + ", " + std::to_string(ny) + ")");
+  H.wr("color_r", 0.1);
+  H.wr("color_g", 0.2);
+  H.wr("color_b", 0.3);
+  double cr = 0, cg = 0, cb = 0;
+  hud.color(cr, cg, cb);
+  check(std::fabs(cr - 0.1) < 1e-12 && std::fabs(cg - 0.2) < 1e-12 && std::fabs(cb - 0.3) < 1e-12,
+        "state -> object (color = " + std::to_string(cr) + ", " + std::to_string(cg) + ", " +
+            std::to_string(cb) + ")");
+  H.wr("opacity", 0.5);
+  const double op = hud.opacity();
+  check(std::fabs(op - 0.5) < 1e-12, "state -> object (opacity = " + std::to_string(op) + ")");
+  // Both directions on each flag: asserting only the non-default value means
+  // flipping a default silently turns the check vacuous.
+  H.wr("centered", 0);
+  check(!hud.centered(), "state -> object (centered off)");
+  H.wr("centered", 1);
+  check(hud.centered(), "state -> object (centered on)");
+  H.wr("visible", 0);
+  check(!hud.visible(), "state -> object (visible off)");
+  H.wr("visible", 1);
+  check(hud.visible(), "state -> object (visible on)");
   // Prove the SECOND overlay owns its own node. Checking only that the first was
   // not clobbered passes even if hud2 failed to bind state at all.
   cvc::gl::ScreenTextHud hud2(view, "status");
   hud2.setText("second");
   Peer H2(app, cvc::gl::ScreenTextHud::viewerStatePath("audit", "main", "status"));
   check(H2.rd("text") == "second", "second overlay owns its own node = '" + H2.rd("text") + "'");
-  check(H.rd("text") == "hello", "first overlay untouched = '" + H.rd("text") + "'");
+  // Read the first overlay's NODE, not its getter: the question here is whether
+  // hud2's writes landed in someone else's subtree, which is about state
+  // addressing, not about binding. Asserting through hud.text() would make an
+  // isolation failure and a binding failure indistinguishable.
+  check(H.rd("text") == "driven-from-state", "first overlay untouched = '" + H.rd("text") + "'");
 
   std::printf("== SceneGraph shadows (audit.shadows) ==\n");
   sg.setShadowResolution(2048);
