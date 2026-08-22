@@ -664,17 +664,40 @@ void StageLighting::apply() {
               intensity);
   };
 
-  // KEY — the light you actually read the form by.
+  // Same placement as spot(), but Kind::Fill — a positional light whose cone is
+  // at/above 90, which is precisely the condition VTK's LightCreatesShadow uses
+  // to leave a light OUT of the shadow bake. So this lights without adding a
+  // depth re-render, which is what "fill" is supposed to mean.
+  auto fill = [&](const std::string &name, double az, double el, double cone, double intensity,
+                  double r, double g, double b) {
+    if (intensity <= 0.0)
+      return;
+    double x, y, z;
+    orbitPoint(s.cx, s.cy, s.cz, dist, az, el, x, y, z);
+    makeLight(name, cvc::gl::LightNode::Kind::Fill, x, y, z, s.cx, s.cy, s.cz, cone, r, g, b,
+              intensity);
+  };
+
+  // KEY — the light you actually read the form by. The one true caster.
   spot("stage_key", s.keyAz, s.keyEl, s.keyCone, s.keyI, keyR, keyG, keyB);
-  // FILL — opposite side, lower, wider and softer.
-  spot("stage_fill", s.keyAz + 130.0, std::max(12.0, s.keyEl - 16.0),
-       std::min(60.0, s.keyCone * 1.5), s.fillI, filR, filG, filB);
-  // BACK — behind the subject and high, for the separating rim.
+  // FILL — opposite side, lower, wider and softer, and DELIBERATELY not a
+  // caster. It was a Spot with a cone under 90, which VTK's LightCreatesShadow
+  // accepts, so it silently baked a second shadow map: the counter-shadow that
+  // is the classic amateur-lighting tell, plus a full scene depth re-render per
+  // frame nobody asked for. Kind::Fill puts the cone at/above 90, which is
+  // exactly the rule VTK uses to exclude a light from the bake.
+  fill("stage_fill", s.keyAz + 130.0, std::max(12.0, s.keyEl - 16.0), 95.0, s.fillI, filR, filG,
+       filB);
+  // BACK — behind the subject and high, for the separating rim. Casts.
   spot("stage_back", s.keyAz + 180.0, std::min(72.0, s.keyEl + 26.0), s.keyCone * 1.1, s.backI, 1.0,
        1.0, 1.0);
 
-  // WASH — a ring of downlights over the acting area. Wide cones, aimed at the
-  // stage centre, so nothing goes black when it walks off the key.
+  // WASH — a ring of downlights over the acting area, aimed at the stage centre
+  // so nothing goes black when it walks off the key. Kind::Fill for the same
+  // reason as above, and here it also decides what the wash COSTS: as Spots at
+  // cone 55 every one of them baked its own shadow map, so raising the count
+  // multiplied the per-frame depth re-renders — the readout said "2 shadow
+  // casters" while VTK was baking seven.
   if (s.washCount > 0 && s.washI > 0.0) {
     const double h = s.cz + s.washHeight * R;
     const double ringR = 0.75 * R;
@@ -683,8 +706,8 @@ void StageLighting::apply() {
       const double a = 360.0 * i / s.washCount;
       const double x = s.cx + ringR * std::sin(a * kDeg);
       const double y = s.cy - ringR * std::cos(a * kDeg);
-      makeLight("stage_wash_" + std::to_string(i), cvc::gl::LightNode::Kind::Spot, x, y, h, s.cx,
-                s.cy, s.cz, 55.0, 1.0, 1.0, 1.0, per);
+      makeLight("stage_wash_" + std::to_string(i), cvc::gl::LightNode::Kind::Fill, x, y, h, s.cx,
+                s.cy, s.cz, 100.0, 1.0, 1.0, 1.0, per);
     }
   }
 

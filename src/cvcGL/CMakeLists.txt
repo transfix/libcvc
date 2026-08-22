@@ -281,6 +281,13 @@ add_executable(cvcgl_shadow_caster_growth test/cvcgl_shadow_caster_growth.cpp)
 target_link_libraries(cvcgl_shadow_caster_growth PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 
+# The rig used to advertise "2 shadow casters" while VTK baked seven: fill and
+# wash were Spots with cones under 90, which LightCreatesShadow accepts. Pins the
+# advertised count to the real one, and pins which roles may cast.
+add_executable(cvcgl_stage_caster_truth test/cvcgl_stage_caster_truth.cpp)
+target_link_libraries(cvcgl_stage_caster_truth PRIVATE cvcGL)
+add_test(NAME cvcgl_stage_caster_truth COMMAND cvcgl_stage_caster_truth)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic

@@ -340,6 +340,7 @@ void CameraController::seedState() {
   getState("settings.mouse_sensitivity").value(s.sensitivity);
   getState("settings.invert_pitch").value(s.invertPitch ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
+  getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -397,6 +398,7 @@ void CameraController::readAllFromState() {
   s.sensitivity = d("settings.mouse_sensitivity", s.sensitivity);
   s.invertPitch = i("settings.invert_pitch", s.invertPitch ? 1 : 0) != 0;
   s.pointerCapture = i("settings.pointer_capture", s.pointerCapture ? 1 : 0) != 0;
+  s.primaryDragPans = i("settings.primary_drag_pans", s.primaryDragPans ? 1 : 0) != 0;
   s.poseMirrorHz = d("settings.pose_mirror_hz", s.poseMirrorHz);
   s.kForward = str("keys.forward", s.kForward);
   s.kBackward = str("keys.backward", s.kBackward);
@@ -433,6 +435,7 @@ void CameraController::syncConfigToState() {
   getState("settings.mouse_sensitivity").value(s.sensitivity);
   getState("settings.invert_pitch").value(s.invertPitch ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
+  getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -857,7 +860,14 @@ void CameraController::endPan() {
 }
 void CameraController::setPrimaryDragPans(bool on) {
   m_impl->primaryDragPans = on;
+  // selfWrite, like every other config writer here. Without it this write
+  // echoes back through handleStateChanged -> readAllFromState ->
+  // applyToCamera, which re-reads a pose that is only mirrored at poseMirrorHz
+  // and so can undo motion applied in the same frame — which is exactly what
+  // made TouchGestures' old flag-flipping two-finger drag a no-op.
+  m_impl->selfWrite = true;
   getState("settings.primary_drag_pans").value(on ? 1 : 0);
+  m_impl->selfWrite = false;
 }
 bool CameraController::primaryDragPans() const { return m_impl->primaryDragPans; }
 
