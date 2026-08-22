@@ -8,6 +8,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/GridNode.h>
+#include <cvc/gl/LightNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
@@ -645,6 +646,25 @@ constexpr double kDeg = 3.14159265358979323846 / 180.0;
 constexpr double kSunDistance = 1.0e4;
 } // namespace
 
+std::shared_ptr<cvc::gl::LightNode> SceneGraph::addLight(const std::string &name) {
+  cvc::thread_info ti(m_ctx, BOOST_CURRENT_FUNCTION);
+  if (m_graphicsNodes.find(name) != m_graphicsNodes.end())
+    removeGraphics(name);
+  // Same factory the other nodes use, so the light gets a proper state path AND
+  // lands in the graphics child list — which is what the light traversal walks.
+  auto node = m_graphicsRoot->addGraphicsChild<cvc::gl::LightNode>(name);
+  m_graphicsNodes[name] = node;
+  removeNullGraphicIfPresent();
+  try {
+    m_graphicsRoot->getState("children").touch();
+  } catch (...) {
+  }
+  applyLights(); // a new light lights the scene immediately
+  return node;
+}
+
+void SceneGraph::lightsChanged() { applyLights(); }
+
 void SceneGraph::beginLightBatch() { ++m_lightBatchDepth; }
 
 void SceneGraph::endLightBatch() {
@@ -686,9 +706,43 @@ void SceneGraph::applyLights() {
     light->SetIntensity(l.intensity);
     m_renderer->AddLight(light);
   }
-  // With no lights of our own, hand the renderer back its default headlight
-  // rather than leaving the scene unlit.
-  if (m_lights.empty())
+  // LIGHTS THAT ARE NODES. Gathered from the graph, so a light is lit simply by
+  // being in the scene — and its position is the node's WORLD transform, which
+  // is what makes a light parented to a moving actor travel with it.
+  std::size_t nodeLights = 0, nodeLightsDefined = 0;
+  for (const auto &ln : getAllGraphicsOfType<cvc::gl::LightNode>()) {
+    if (!ln)
+      continue;
+    ++nodeLightsDefined;
+    if (!ln->isVisible()) // hiding a light turns it off, as expected
+      continue;
+    ++nodeLights;
+    double px, py, pz, tx, ty, tz, r, g, b;
+    ln->worldPosition(px, py, pz);
+    ln->target(tx, ty, tz);
+    ln->color(r, g, b);
+    vtkSmartPointer<vtkLight> light = vtkSmartPointer<vtkLight>::New();
+    light->SetLightTypeToSceneLight();
+    if (ln->kind() == cvc::gl::LightNode::Kind::Directional) {
+      light->SetPositional(false);
+      light->SetPosition(px, py, pz);
+      light->SetFocalPoint(tx, ty, tz);
+    } else {
+      light->SetPositional(true);
+      light->SetPosition(px, py, pz);
+      light->SetFocalPoint(tx, ty, tz);
+      light->SetConeAngle(ln->cone());
+    }
+    light->SetColor(r, g, b);
+    light->SetIntensity(ln->intensity());
+    m_renderer->AddLight(light);
+  }
+
+  // With NO lights defined at all, hand the renderer back its default headlight
+  // rather than leaving the scene unlit. But if the scene HAS light nodes and
+  // they are merely hidden, respect that: silently substituting a headlight for
+  // the light someone just switched off makes hiding look broken.
+  if (m_lights.empty() && nodeLightsDefined == 0)
     m_renderer->CreateLight();
   requestRender();
 }

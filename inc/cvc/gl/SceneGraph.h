@@ -33,6 +33,7 @@ class state;
 namespace gl {
 class state_publisher;
 class ShadowSettings;
+class LightNode;
 } // namespace gl
 } // namespace cvc
 
@@ -124,6 +125,17 @@ public:
   //
   // Wrap a batch of light edits in these and the rebuild happens ONCE at the
   // end. Nested begins are counted, so callers can compose safely.
+  // A LightNode changed and the renderer's light set must be rebuilt. Called by
+  // LightNode itself; honours the batch below, so moving a whole rig is one
+  // rebuild.
+  // Add a LIGHT as a scene-graph node. This is the way to make a light — it is
+  // registered like any other node, so it appears in the hierarchy, can be
+  // parented (parent it to a vehicle and the lamp rides along), carries its own
+  // state, and is switched off by hiding it.
+  std::shared_ptr<cvc::gl::LightNode> addLight(const std::string &name);
+
+  void lightsChanged();
+
   void beginLightBatch();
   void endLightBatch();
 
