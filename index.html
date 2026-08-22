@@ -1,9 +1,11 @@
 <!DOCTYPE html>
+<!-- cvcGL WebAssembly examples — GENERATED gallery. Edit templates/gallery.html.in
+     and templates/card.html.in, not this copy. Cards are one per discovered demo. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cvcGL &middot; WebAssembly examples</title>
+<title>cvcGL · WebAssembly examples</title>
 <meta name="description" content="Live browser builds of the cvcGL scene-graph examples — libcvc's VTK-based rendering, cross-compiled to WebAssembly.">
 <style>
   :root { color-scheme: dark; }
@@ -14,33 +16,22 @@
   a:hover { text-decoration: underline; }
   .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
   header h1 { font-size: 32px; margin: 0 0 4px; color: #e8eef4; }
-  header p.tag { margin: 0 0 32px; color: #8b98a5; font-size: 18px; }
-  h2 { font-size: 20px; color: #e8eef4; margin: 40px 0 12px;
-       border-bottom: 1px solid #232a33; padding-bottom: 8px; }
-  code, pre { font-family: ui-monospace, "SF Mono", Consolas, monospace;
-              font-size: 14px; }
-  code { background: #1a2029; padding: 1px 6px; border-radius: 4px; }
-  pre { background: #1a2029; border: 1px solid #232a33; border-radius: 8px;
-        padding: 14px 16px; overflow-x: auto; }
-  pre code { background: none; padding: 0; }
+  header p.tag { margin: 0 0 28px; color: #8b98a5; font-size: 18px; }
   .card { display: flex; gap: 20px; background: #161b23; border: 1px solid #232a33;
-          border-radius: 12px; padding: 20px; margin: 20px 0; align-items: center; }
-  .card .thumb { flex: none; width: 260px; height: 144px; border-radius: 8px;
+          border-radius: 12px; padding: 20px; margin: 18px 0; align-items: center; }
+  .card .thumb { flex: none; width: 260px; height: 146px; border-radius: 8px;
                  overflow: hidden; background: #0d1117; border: 1px solid #232a33; }
   .card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card h3 { margin: 0 0 6px; font-size: 19px; }
+  .card p { margin: 0 0 12px; color: #9aa7b4; font-size: 15px; }
+  .btn { display: inline-block; background: #5aa9e6; color: #0d1117; font-weight: 600;
+         padding: 7px 16px; border-radius: 6px; }
+  .btn:hover { text-decoration: none; filter: brightness(1.1); }
   @media (max-width: 720px) {
     .card { flex-direction: column; align-items: stretch; }
     .card .thumb { width: 100%; height: auto; aspect-ratio: 16 / 9; }
   }
-  .card h3 { margin: 0 0 6px; font-size: 18px; }
-  .card p { margin: 0 0 10px; color: #9aa7b4; font-size: 15px; }
-  .btn { display: inline-block; background: #5aa9e6; color: #0d1117; font-weight: 600;
-         padding: 7px 16px; border-radius: 6px; }
-  .btn:hover { text-decoration: none; filter: brightness(1.1); }
-  table { border-collapse: collapse; width: 100%; font-size: 15px; }
-  td, th { border: 1px solid #232a33; padding: 8px 12px; text-align: left; }
-  th { background: #161b23; color: #e8eef4; }
-  footer { margin-top: 56px; color: #66727f; font-size: 14px;
+  footer { margin-top: 48px; color: #66727f; font-size: 14px;
            border-top: 1px solid #232a33; padding-top: 16px; }
 </style>
 </head>
@@ -49,165 +40,36 @@
 <header>
   <h1>cvcGL &middot; WebAssembly examples</h1>
   <p class="tag">The <a href="https://github.com/transfix/libcvc">libcvc</a> scene-graph
-  library, rendering live in your browser.</p>
+  library, rendering live in your browser — VTK 9.5 cross-compiled to WebAssembly.</p>
 </header>
 
-<p><strong>cvcGL</strong> is libcvc's scene graph: a reactive tree of
-geometry, volume and grid nodes over <code>cvc::state</code>, rendered by VTK.
-The same C++ example programs that open a desktop window compile, unchanged in
-any structural way, to WebAssembly — VTK 9.5's Emscripten backend renders into
-a WebGL2 canvas, and the browser build of each example lives on this site.</p>
-
-<h2>Examples</h2>
 <div class="card">
-  <div class="thumb"><img src="img/lsystem_forest.jpg" alt="lsystem_forest: a procedural island of L-system trees under a drifting volumetric cloud" loading="lazy"></div>
+  <a class="thumb" href="lsystem_forest/"><img src="img/lsystem_forest.jpg" alt="lsystem_forest preview" loading="lazy"></a>
   <div>
-    <h3>lsystem_forest</h3>
-    <p>An island you can fly over: L-system-grown trees swaying in the wind
-    (procedural bark, merged to two actors), a travelling-wave sea and a
-    drifting L-system + fBm cloud volume — both GPU ray-cast — shadow maps,
-    and a quaternion orbit/fly camera. 100% procedural; no assets are
-    downloaded.</p>
-    <a class="btn" href="lsystem_forest/">Run it →</a>
-  </div>
-</div>
-<div class="card">
-  <div class="thumb"><img src="img/nav_city_swarm.jpg" alt="nav_city_swarm: hundreds of coloured vehicles crossing a procedural city under fog" loading="lazy"></div>
-  <div>
-    <h3>nav_city_swarm</h3>
-    <p>The <a href="https://github.com/CVC-Lab/GRL-SNAM">GRL-SNAM</a> reactive swarm,
-    rendered natively: 800 vehicles cross a varied-height city <em>under fog</em>
-    (grouped belief, 12 planes) with <em>no global plan</em> — goal pyramids that sink
-    on arrival, breadcrumb trails accumulating the street-flow, fleet fog coverage
-    painted on the ground, state-coloured agents (white = escaping, green = arrived)
-    and a live arrivals HUD. The <code>cvc::nav</code> runtime — no Python, no libtorch.
-    Every parameter is live in the on-screen menu — agent count, belief mode, fog,
-    sensor range — and <strong>Apply&nbsp;/&nbsp;Restart</strong> rebuilds the world so you
-    can watch shared belief beat private belief on the same city. Press
-    <strong>2</strong> for the top-down view.</p>
-    <a class="btn" href="nav_city_swarm/">Run it →</a>
-  </div>
-</div>
-<div class="card">
-  <div class="thumb"><img src="img/nav_fog_ghost.jpg" alt="nav_fog_ghost: an agent detouring a phantom wall, fog cone and belief grid on the ground" loading="lazy"></div>
-  <div>
-    <h3>nav_fog_ghost</h3>
-    <p>Fog of war: one vehicle believes a phantom wall its stale map shows but reality
-    lacks. The ghost stands as a translucent amber 3-D wall that <em>erodes cell by
-    cell</em> as the sensor clears it; the ground paints honest epistemics (never-seen
-    black, remembered dim, in-view lit, belief as an LED grid), a blue plan line bows
-    around the phantom vs the yellow driven trail, and a caption arc narrates the
-    detour, the discovery, and the payoff. The menu switches between three limited-belief
-    scenarios — <em>ghost</em> (a stale map lies), <em>dynamic</em> (the world changes after
-    the plan is made) and <em>traffic</em> (other vehicles the map never had) — and restarts
-    the run in place.</p>
-    <a class="btn" href="nav_fog_ghost/">Run it →</a>
+    <h3><a href="lsystem_forest/">lsystem_forest</a></h3>
+    <p>Fly over a procedural island: L-system trees swaying in the wind, a travelling-wave sea and a GPU ray-cast cloud volume, with shadow maps and a free orbit/fly camera. 100% procedural — nothing is downloaded.</p>
+    <a class="btn" href="lsystem_forest/">Run it &rarr;</a>
   </div>
 </div>
 
-<h2>Controls, menus and phones</h2>
-<p>Every demo above carries a real UI, not a text overlay. It is
-<a href="https://github.com/ocornut/imgui">Dear ImGui</a> composited into VTK's own
-framebuffer by <code>cvc::gl::ImGuiOverlay</code>, with widgets
-(<code>cvc::gl::ui</code>) bound straight to <code>cvc::state</code> paths — so a
-slider, a script and a replicated peer all write the same state node, and the
-menus work identically native and in the browser.</p>
-<ul>
-  <li><strong>Desktop</strong> — <code>click</code> to focus, <code>Tab</code> to
-  swap orbit/fly, <code>WASD</code>+mouse to fly, <code>Esc</code> to release the
-  pointer. The overlay only takes the mouse when the cursor is actually over a
-  widget, so the camera never fights the UI.</li>
-  <li><strong>Phones and tablets</strong> — <strong>pinch</strong> to zoom and
-  <strong>two fingers</strong> to pan, via <code>cvc::gl::TouchGestures</code>.
-  Single touches are deliberately left alone, so tapping a menu still works.
-  (VTK's own wasm interactor mis-feeds multi-touch — it registers one pointer for
-  two fingers, so its gesture recognizer never fires — which is why this layer
-  exists.)</li>
-  <li><strong>Fullscreen</strong> — the button in the header. It has to be an HTML
-  button: the wasm side runs inside <code>requestAnimationFrame</code>, where the
-  browser's transient-activation window has already closed and a fullscreen
-  request is refused.</li>
-  <li><strong>2-D map views</strong> fit the whole map to your viewport and re-fit
-  when you rotate the phone or enter fullscreen — a parallel projection's scale is
-  a half-<em>height</em>, so fitting only that crops the sides of every portrait
-  screen.</li>
-  <li><strong>Copy and paste</strong> work in text fields
-  (<code>cvc::gl::clipboard</code>: X11 selections, NSPasteboard, Win32, and
-  <code>navigator.clipboard</code> in the browser).</li>
-</ul>
+<div class="card">
+  <a class="thumb" href="nav_city_swarm/"><img src="img/nav_city_swarm.jpg" alt="nav_city_swarm preview" loading="lazy"></a>
+  <div>
+    <h3><a href="nav_city_swarm/">nav_city_swarm</a></h3>
+    <p>800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.</p>
+    <a class="btn" href="nav_city_swarm/">Run it &rarr;</a>
+  </div>
+</div>
 
-<h2>How these builds work</h2>
-<p>Each example is a single self-contained <code>.wasm</code> (plus a small JS
-loader) produced by <code>emcmake</code> from the normal libcvc CMake tree:</p>
-<ul>
-  <li><strong>The whole stack is compiled to wasm</strong> — the trimmed
-  <code>cvc</code> core (state tree, geometry/volume types), cvcGL's scene
-  graph, VTK 9.5 with its rendering modules, Boost and zstd — all as static
-  archives from the <a href="https://cvcpkg.org">cvcpkg</a> wasm channel
-  (Emscripten SDK included: <code>cvcpkg install emsdk</code>).</li>
-  <li><strong>Rendering is VTK's own WebAssembly backend</strong>:
-  <code>vtkWebAssemblyOpenGLRenderWindow</code> draws with OpenGL&nbsp;ES&nbsp;3
-  into a WebGL2 canvas, and <code>vtkWebAssemblyRenderWindowInteractor</code>
-  feeds it browser mouse/keyboard events. The example keeps its own
-  simulation loop and yields to the browser each frame with Asyncify
-  (<code>emscripten_sleep</code>) — the same
-  <code>ProcessEvents()</code>-per-frame pattern the native build uses.</li>
-  <li><strong>Single-threaded on this site.</strong> GitHub Pages cannot send
-  the COOP/COEP headers SharedArrayBuffer needs, so these are the no-pthread
-  builds. A <code>-pthread</code> variant exists in the repo
-  (<code>build-wasm-demo.sh --pthread</code> + <code>serve.py</code> for
-  cross-origin-isolated hosting).</li>
-  <li><strong>Everything is <code>cvc::state</code></strong> — camera pose and
-  bindings, the FPS HUD, node poses — so the same scene is scriptable from
-  native C++, Python (pycvc), or a debugger attached to the state tree.</li>
-</ul>
+<div class="card">
+  <a class="thumb" href="nav_fog_ghost/"><img src="img/nav_fog_ghost.jpg" alt="nav_fog_ghost preview" loading="lazy"></a>
+  <div>
+    <h3><a href="nav_fog_ghost/">nav_fog_ghost</a></h3>
+    <p>Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.</p>
+    <a class="btn" href="nav_fog_ghost/">Run it &rarr;</a>
+  </div>
+</div>
 
-<h2>Porting notes (what WebGL2 actually required)</h2>
-<p>The port needed three real fixes, all upstreamed to the libcvc /
-libcvc-deps trees; details in the PRs:</p>
-<table>
-  <tr><th>Issue</th><th>Fix</th></tr>
-  <tr>
-    <td>Under GLES3, VTK swaps in a different polydata mapper whose lighting
-    normal is <code>normalizedNormalVCVSOutput</code>; custom
-    <code>//VTK::Normal::Impl</code> shader replacements that assign the
-    desktop name write to an <code>in</code> varying — an ESSL error that
-    NVIDIA's desktop compiler silently tolerates.</td>
-    <td>The example selects the mapper variant's writable normal at compile
-    time; desktop GLSL is unchanged.</td>
-  </tr>
-  <tr>
-    <td>VTK's volume ray-cast shader composer emits <code>mat4</code> globals
-    initialized from uniforms — illegal in ESSL&nbsp;3.00, killing every
-    shaded/scattering volume (the sea and the clouds).</td>
-    <td>A small VTK patch moves the assignments into an init helper called at
-    the top of the ray-cast setup.</td>
-  </tr>
-  <tr>
-    <td>Boost refuses to compile without <code>-pthread</code>, but a
-    single-threaded wasm build must not use it.</td>
-    <td>Build against Emscripten's single-threaded pthread stubs
-    (<code>BOOST_HAS_PTHREADS</code>), skip the scene's publisher thread, and
-    drain its queue from the frame loop.</td>
-  </tr>
-</table>
-
-<h2>Build it yourself</h2>
-<pre><code># toolchain + wasm deps straight from the cvcpkg catalog
-cvcpkg install emsdk --platform linux --prefix ./emsdk
-cvcpkg install boost zstd cgal --platform wasm --arch wasm32 --link static --prefix ./deps-wasm
-# vtk needs the rendering-enabled wasm build (libcvc-deps: recipes/vtk, >= 9.5.0+cvc.3)
-cvcpkg build vtk --platform wasm --local --prefix ./deps-wasm
-
-# then, from the libcvc repo root:
-CVC_EMSDK_DIR=$PWD/emsdk CVC_WASM_DEPS=$PWD/deps-wasm \
-  ./src/cvcGL/examples/wasm/build-wasm-demo.sh
-python3 -m http.server -d build-wasm/bin 8811</code></pre>
-
-<p>Or, once the bundles are published, as a package:</p>
-<pre><code>cvcpkg install cvcgl-examples --prefix ./deps
-cvcpkg install cvcgl-examples --platform wasm --arch wasm32 --link static --prefix ./deps
-./deps/bin/cvcgl-examples-web   # serves the demo and opens your browser</code></pre>
 
 <footer>
   cvcGL is part of <a href="https://github.com/transfix/libcvc">libcvc</a>
