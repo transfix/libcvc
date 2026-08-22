@@ -97,9 +97,35 @@ public:
   int addSpotLight(double x, double y, double z, double tx, double ty, double tz,
                    double coneDeg = 30.0, double r = 1.0, double g = 1.0, double b = 1.0,
                    double intensity = 1.0);
+  // FILL — a positional light that deliberately casts NO shadow, for lighting
+  // the environment beyond the rig's cones (open water, sky, distant scenery).
+  //
+  // It works by turning VTK's shadow rule into a feature: LightCreatesShadow()
+  // drops any positional light whose cone reaches 90 degrees, so a wide fill is
+  // free in the shadow bake. This is the one place a cone >= 90 is correct, and
+  // why addSpotLight() clamps below 90 while this does not.
+  //
+  // Needed because a rig of tight cones leaves everything outside them
+  // completely unlit — which is invisible on matte ground but obvious on water,
+  // where the specular highlight simply vanishes at grazing view angles because
+  // the water it would land on receives no light at all.
+  int addFillLight(double x, double y, double z, double tx, double ty, double tz, double r = 1.0,
+                   double g = 1.0, double b = 1.0, double intensity = 0.25);
+
   void setLightPosition(int id, double x, double y, double z);
   void setLightTarget(int id, double tx, double ty, double tz);
   void setLightCone(int id, double coneDeg);
+
+  // BATCHING. Every add/remove/set below rebuilds the renderer's entire light
+  // set (VTK gives no way to mutate one light in place), and each rebuild makes
+  // the shadow baker re-bake a full-resolution map per casting light. A rig that
+  // replaces 14 lights therefore pays ~14x14 light rebuilds and a shadow storm —
+  // which is a multi-second freeze, not a hitch.
+  //
+  // Wrap a batch of light edits in these and the rebuild happens ONCE at the
+  // end. Nested begins are counted, so callers can compose safely.
+  void beginLightBatch();
+  void endLightBatch();
 
   void setLightColor(int id, double r, double g, double b);
   void setLightIntensity(int id, double intensity);
@@ -292,6 +318,8 @@ private:
   void syncShadowState(); // mirror the shadow setters into cvc::state
   std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
   bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state
+  int m_lightBatchDepth = 0;          // >0 defers applyLights()
+  bool m_lightsDirty = false;         // an edit happened while batching
   std::vector<LightDesc> m_lights;
   int m_nextLightId = 1;
   bool m_shadowsEnabled = false;

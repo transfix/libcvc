@@ -645,7 +645,22 @@ constexpr double kDeg = 3.14159265358979323846 / 180.0;
 constexpr double kSunDistance = 1.0e4;
 } // namespace
 
+void SceneGraph::beginLightBatch() { ++m_lightBatchDepth; }
+
+void SceneGraph::endLightBatch() {
+  if (m_lightBatchDepth > 0 && --m_lightBatchDepth == 0 && m_lightsDirty) {
+    m_lightsDirty = false;
+    applyLights();
+  }
+}
+
 void SceneGraph::applyLights() {
+  // Deferred inside a batch: rebuilding the whole light set per edit is what
+  // turns a rig update into a shadow-bake storm.
+  if (m_lightBatchDepth > 0) {
+    m_lightsDirty = true;
+    return;
+  }
   if (!m_renderer)
     return;
   m_renderer->RemoveAllLights();
@@ -712,6 +727,27 @@ int SceneGraph::addSpotLight(double x, double y, double z, double tx, double ty,
   d.ty = ty;
   d.tz = tz;
   d.cone = clampCone(coneDeg);
+  d.r = r;
+  d.g = g;
+  d.b = b;
+  d.intensity = intensity;
+  m_lights.push_back(d);
+  applyLights();
+  return d.id;
+}
+
+int SceneGraph::addFillLight(double x, double y, double z, double tx, double ty, double tz,
+                             double r, double g, double b, double intensity) {
+  LightDesc d;
+  d.id = m_nextLightId++;
+  d.kind = LightDesc::Kind::Spot;
+  d.px = x;
+  d.py = y;
+  d.pz = z;
+  d.tx = tx;
+  d.ty = ty;
+  d.tz = tz;
+  d.cone = 90.0; // >= 90 on purpose: VTK excludes it from the shadow bake
   d.r = r;
   d.g = g;
   d.b = b;
