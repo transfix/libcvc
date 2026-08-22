@@ -385,9 +385,11 @@ void StageLighting::setLightEnabled(const std::string &name, bool on) {
     return;
   // Visibility IS the switch: SceneGraph skips hidden LightNodes when it builds
   // the renderer's light set, so this removes the light AND its shadow map.
+  // setVisible() triggers that rebuild itself, and only on a real change — so no
+  // explicit lightsChanged() here. Adding one back would double every rebuild
+  // and re-bake a shadow map per caster for a toggle that changed nothing.
   if (auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(m_impl->scene->getGraphics(name)))
     ln->setVisible(on);
-  m_impl->scene->lightsChanged();
 }
 
 bool StageLighting::lightEnabled(const std::string &name) const {
@@ -399,8 +401,15 @@ bool StageLighting::lightEnabled(const std::string &name) const {
 }
 
 void StageLighting::soloLight(const std::string &name) {
+  // Batch the whole sweep: this touches every light in the rig, and unbatched
+  // that is one full light-set rebuild — plus a shadow bake per caster — per
+  // light rather than one for the lot.
+  if (m_impl->scene)
+    m_impl->scene->beginLightBatch();
   for (const auto &n : m_impl->nodes)
     setLightEnabled(n, name.empty() || n == name);
+  if (m_impl->scene)
+    m_impl->scene->endLightBatch();
 }
 
 int StageLighting::shadowCasterCount() const {
