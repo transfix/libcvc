@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<!-- cvcGL WebAssembly examples — GENERATED gallery. Edit templates/gallery.html.in
+     and templates/card.html.in, not this copy. Cards are one per discovered demo. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cvcGL · WebAssembly examples</title>
+<meta name="description" content="Live browser builds of the cvcGL scene-graph examples — libcvc's VTK-based rendering, cross-compiled to WebAssembly.">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #10141a; color: #cdd6e0;
+         font: 16px/1.65 system-ui, sans-serif; }
+  a { color: #5aa9e6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
+  header h1 { font-size: 32px; margin: 0 0 4px; color: #e8eef4; }
+  header p.tag { margin: 0 0 28px; color: #8b98a5; font-size: 18px; }
+  .card { display: flex; gap: 20px; background: #161b23; border: 1px solid #232a33;
+          border-radius: 12px; padding: 20px; margin: 18px 0; align-items: center; }
+  .card .thumb { flex: none; width: 260px; height: 146px; border-radius: 8px;
+                 overflow: hidden; background: #0d1117; border: 1px solid #232a33; }
+  .card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card h3 { margin: 0 0 6px; font-size: 19px; }
+  .card p { margin: 0 0 12px; color: #9aa7b4; font-size: 15px; }
+  .btn { display: inline-block; background: #5aa9e6; color: #0d1117; font-weight: 600;
+         padding: 7px 16px; border-radius: 6px; }
+  .btn:hover { text-decoration: none; filter: brightness(1.1); }
+  @media (max-width: 720px) {
+    .card { flex-direction: column; align-items: stretch; }
+    .card .thumb { width: 100%; height: auto; aspect-ratio: 16 / 9; }
+  }
+  footer { margin-top: 48px; color: #66727f; font-size: 14px;
+           border-top: 1px solid #232a33; padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>cvcGL &middot; WebAssembly examples</h1>
+  <p class="tag">The <a href="https://github.com/transfix/libcvc">libcvc</a> scene-graph
+  library, rendering live in your browser — VTK 9.5 cross-compiled to WebAssembly.</p>
+</header>
+
+{{CARDS}}
+
+<footer>
+  cvcGL is part of <a href="https://github.com/transfix/libcvc">libcvc</a>
+  (LGPL-2.1 library, GPL-2.0 examples) &middot; packages by
+  <a href="https://cvcpkg.org">cvcpkg</a>.
+</footer>
+</div>
+</body>
+</html>
