@@ -8,6 +8,7 @@
 #include <cvc/core/state.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/LightNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <stdexcept>
@@ -66,9 +67,13 @@ struct StageLighting::Impl {
   double warmth = 0.35;
 
   bool gizmos = false;
+  bool applying = false; // re-entry guard, see apply()
   double beamAlpha = 0.18;
   std::vector<Special> specials;
-  std::vector<int> ids; // every light this rig currently owns
+  // The rig's lights are NODES now, tracked by name so a rebuild can remove
+  // exactly what it created. Each is individually inspectable in the scene
+  // hierarchy, parentable, and scriptable through its own state path.
+  std::vector<std::string> nodes;
 
   // What apply() placed this pass, so the gizmos draw exactly the rig that is
   // actually lighting the scene rather than recomputing it.
@@ -99,8 +104,8 @@ StageLighting::StageLighting(SceneGraph &scene)
 StageLighting::~StageLighting() {
   // Drop our lights so a destroyed rig does not leave the scene lit by ghosts.
   if (m_impl->scene)
-    for (int id : m_impl->ids)
-      m_impl->scene->removeLight(id);
+    for (const auto &n : m_impl->nodes)
+      m_impl->scene->removeGraphics(n);
 }
 
 void StageLighting::seedState() {
@@ -526,6 +531,18 @@ void StageLighting::apply() {
   Impl &s = *m_impl;
   if (!s.scene)
     return;
+  // RE-ENTRY GUARD. Each rig light is a node now, and configuring one writes its
+  // state, which notifies the scene, which can land back here mid-rebuild —
+  // while `nodes` is being mutated and half the rig has been removed. That is a
+  // use-after-free waiting to happen (it corrupted the heap outright the first
+  // time). One rebuild at a time.
+  if (s.applying)
+    return;
+  s.applying = true;
+  struct Unset {
+    bool *f;
+    ~Unset() { *f = false; }
+  } unset{&s.applying};
 
   // ONE light rebuild for the whole rig. Without this, replacing ~14 lights
   // costs ~14x14 renderer-wide light rebuilds and a shadow re-bake per caster
@@ -536,9 +553,13 @@ void StageLighting::apply() {
     ~BatchEnd() { sg->endLightBatch(); }
   } batchEnd{s.scene};
 
-  for (int id : s.ids)
-    s.scene->removeLight(id);
-  s.ids.clear();
+  // Do NOT destroy and recreate the light nodes each rebuild. Node creation
+  // (state seeding, registration, bounds tracking, child-list touch) is orders
+  // of magnitude dearer than updating one — measured at 59 ms per edit, which
+  // would put the UI freeze straight back. Keep the previous set, reuse by name,
+  // and remove only what the new rig no longer uses.
+  std::vector<std::string> previous;
+  previous.swap(s.nodes);
   s.placed.clear();
   if (!s.on) {
     s.scene->removeGraphics("stage_gizmos");
@@ -556,22 +577,45 @@ void StageLighting::apply() {
   const double keyR = 1.0, keyG = 1.0 - 0.10 * w, keyB = 1.0 - 0.26 * w;
   const double filR = 1.0 - 0.22 * w, filG = 1.0 - 0.08 * w, filB = 1.0;
 
-  auto spot = [&](double az, double el, double cone, double intensity, double r, double g,
-                  double b) {
+  // Create one rig light as a scene-graph node. `name` is stable per role, so
+  // the hierarchy reads "stage_key", "stage_wash_2" rather than opaque ids.
+  auto makeLight = [&](const std::string &name, cvc::gl::LightNode::Kind kind, double px, double py,
+                       double pz, double tx, double ty, double tz, double cone, double r, double g,
+                       double b, double intensity) {
+    // Reuse the node if this role already exists; only create when it does not.
+    auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(s.scene->getGraphics(name));
+    if (!ln)
+      ln = s.scene->addLight(name);
+    if (!ln)
+      return;
+    ln->setKind(kind);
+    ln->setPosition(px, py, pz);
+    ln->setTarget(tx, ty, tz);
+    ln->setCone(cone);
+    ln->setColor(r, g, b);
+    ln->setIntensity(intensity);
+    s.nodes.push_back(name);
+    s.placed.push_back({px, py, pz, tx, ty, tz, cone, r, g, b});
+  };
+
+  auto spot = [&](const std::string &name, double az, double el, double cone, double intensity,
+                  double r, double g, double b) {
     if (intensity <= 0.0)
       return;
     double x, y, z;
     orbitPoint(s.cx, s.cy, s.cz, dist, az, el, x, y, z);
-    s.ids.push_back(s.scene->addSpotLight(x, y, z, s.cx, s.cy, s.cz, cone, r, g, b, intensity));
+    makeLight(name, cvc::gl::LightNode::Kind::Spot, x, y, z, s.cx, s.cy, s.cz, cone, r, g, b,
+              intensity);
   };
 
   // KEY — the light you actually read the form by.
-  spot(s.keyAz, s.keyEl, s.keyCone, s.keyI, keyR, keyG, keyB);
+  spot("stage_key", s.keyAz, s.keyEl, s.keyCone, s.keyI, keyR, keyG, keyB);
   // FILL — opposite side, lower, wider and softer.
-  spot(s.keyAz + 130.0, std::max(12.0, s.keyEl - 16.0), std::min(60.0, s.keyCone * 1.5), s.fillI,
-       filR, filG, filB);
+  spot("stage_fill", s.keyAz + 130.0, std::max(12.0, s.keyEl - 16.0),
+       std::min(60.0, s.keyCone * 1.5), s.fillI, filR, filG, filB);
   // BACK — behind the subject and high, for the separating rim.
-  spot(s.keyAz + 180.0, std::min(72.0, s.keyEl + 26.0), s.keyCone * 1.1, s.backI, 1.0, 1.0, 1.0);
+  spot("stage_back", s.keyAz + 180.0, std::min(72.0, s.keyEl + 26.0), s.keyCone * 1.1, s.backI, 1.0,
+       1.0, 1.0);
 
   // WASH — a ring of downlights over the acting area. Wide cones, aimed at the
   // stage centre, so nothing goes black when it walks off the key.
@@ -583,25 +627,31 @@ void StageLighting::apply() {
       const double a = 360.0 * i / s.washCount;
       const double x = s.cx + ringR * std::sin(a * kDeg);
       const double y = s.cy - ringR * std::cos(a * kDeg);
-      s.ids.push_back(s.scene->addSpotLight(x, y, h, s.cx, s.cy, s.cz, 55.0, 1.0, 1.0, 1.0, per));
-      s.placed.push_back({x, y, h, s.cx, s.cy, s.cz, 55.0, 0.65, 0.72, 0.80});
+      makeLight("stage_wash_" + std::to_string(i), cvc::gl::LightNode::Kind::Spot, x, y, h, s.cx,
+                s.cy, s.cz, 55.0, 1.0, 1.0, 1.0, per);
     }
   }
 
   // ENVIRONMENT — one wide, shadow-free fill from high above, so water and
   // scenery outside the cones still receive light (and so still show specular).
   if (s.envI > 0.0)
-    s.ids.push_back(s.scene->addFillLight(s.cx, s.cy, s.cz + 3.0 * R, s.cx, s.cy, s.cz, 0.92, 0.95,
-                                          1.0, s.envI));
+    makeLight("stage_env", cvc::gl::LightNode::Kind::Fill, s.cx, s.cy, s.cz + 3.0 * R, s.cx, s.cy,
+              s.cz, 95.0, 0.92, 0.95, 1.0, s.envI);
 
   // SPECIALS — placed and aimed by the caller.
+  int specialIdx = -1;
   for (const auto &sp : s.specials) {
+    ++specialIdx;
     if (!sp.live || sp.intensity <= 0.0)
       continue;
-    s.ids.push_back(s.scene->addSpotLight(sp.x, sp.y, sp.z, sp.tx, sp.ty, sp.tz, sp.cone, sp.r,
-                                          sp.g, sp.b, sp.intensity));
-    s.placed.push_back({sp.x, sp.y, sp.z, sp.tx, sp.ty, sp.tz, sp.cone, sp.r, sp.g, sp.b});
+    makeLight("stage_special_" + std::to_string(specialIdx), cvc::gl::LightNode::Kind::Spot, sp.x,
+              sp.y, sp.z, sp.tx, sp.ty, sp.tz, sp.cone, sp.r, sp.g, sp.b, sp.intensity);
   }
+
+  // Retire roles the new rig no longer has (e.g. the wash shrank).
+  for (const auto &old : previous)
+    if (std::find(s.nodes.begin(), s.nodes.end(), old) == s.nodes.end())
+      s.scene->removeGraphics(old);
 
   // ---- gizmos ---------------------------------------------------------------
   const char *kGizmoNodes[] = {"stage_gizmo_fixtures", "stage_gizmo_bulbs", "stage_gizmo_beams"};

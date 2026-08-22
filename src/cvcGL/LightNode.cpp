@@ -105,6 +105,8 @@ void LightNode::notifyScene() {
 }
 
 void LightNode::setKind(Kind k) {
+  if (k == m_impl->kind)
+    return;
   m_impl->kind = k;
   getState("kind").value(std::string(kindToString(k)));
   notifyScene();
@@ -113,6 +115,8 @@ LightNode::Kind LightNode::kind() const { return m_impl->kind; }
 
 void LightNode::setTarget(double x, double y, double z) {
   Impl &s = *m_impl;
+  if (x == s.tx && y == s.ty && z == s.tz)
+    return; // change-gated: a rig rebuild re-asserts the same values constantly
   s.tx = x;
   s.ty = y;
   s.tz = z;
@@ -128,6 +132,12 @@ void LightNode::target(double &x, double &y, double &z) const {
 }
 
 void LightNode::setCone(double deg) {
+  {
+    const double want = (m_impl->kind == Kind::Fill) ? std::max(90.0, std::min(179.0, deg))
+                                                     : std::max(0.5, std::min(89.5, deg));
+    if (want == m_impl->cone)
+      return;
+  }
   // Fill WANTS >= 90 (that is how it opts out of the shadow bake); a Spot must
   // stay below it or VTK drops the shadow entirely.
   m_impl->cone = (m_impl->kind == Kind::Fill) ? std::max(90.0, std::min(179.0, deg))
@@ -147,6 +157,8 @@ void LightNode::setDirection(double azimuthDeg, double elevationDeg) {
 
 void LightNode::setColor(double r, double g, double b) {
   Impl &s = *m_impl;
+  if (r == s.r && g == s.g && b == s.b)
+    return;
   s.r = r;
   s.g = g;
   s.b = b;
@@ -162,6 +174,8 @@ void LightNode::color(double &r, double &g, double &b) const {
 }
 
 void LightNode::setIntensity(double i) {
+  if (i == m_impl->intensity)
+    return;
   m_impl->intensity = i;
   getState("intensity").value(i);
   notifyScene();
