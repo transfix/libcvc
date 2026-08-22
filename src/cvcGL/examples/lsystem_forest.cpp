@@ -525,7 +525,12 @@ void addSun(cvc::app &app, SceneGraph &sg) {
 // ── the sea: a volume whose field is depth under a travelling wave ───────────
 constexpr int SEA_N = 56, SEA_NZ = 18;
 constexpr double SEA_FLOOR = SEA_LEVEL - 20.0, SEA_TOP = SEA_LEVEL + 5.0;
-constexpr double WAVE_AMP = 1.15; // overall wave height (reduced; crested multi-signal below)
+// Overall wave height. 1.15 read too still: the crested profile below pinches
+// peaks and broadens troughs, which flattens the apparent motion, so the
+// amplitude has to carry it. The four waves are normalised by their weight sum,
+// so peaks are bounded by this value — and SEA_TOP is SEA_LEVEL + 5.0, leaving
+// plenty of headroom inside the volume at 2.4.
+constexpr double WAVE_AMP = 2.40;
 
 // A choppier sea than a lone sine: four travelling waves at different headings,
 // wavelengths and INCOMMENSURATE speeds (so the combined period reads erratic, never
@@ -539,16 +544,29 @@ double seaSurface(double x, double y, double t) {
                            {-0.30, 0.95, 37.0, 0.93, 0.55},
                            {0.99, -0.16, 26.0, 1.37, 0.32},
                            {0.42, 0.91, 71.0, 0.40, 0.62}};
-  double h = 0.0, wsum = 0.0;
+  double h = 0.0, peak = 0.0;
   for (const Wave &w : W) {
     double k = 2.0 * M_PI / w.len;
     double s = 0.5 + 0.5 * std::sin(k * (w.hx * x + w.hy * y) - w.omega * t); // [0,1]
     h += w.amp * std::pow(s, 2.4); // crest: pinch peaks, broaden troughs
-    wsum += w.amp;
+    peak = w.amp > peak ? w.amp : peak;
   }
-  // h/wsum is the weighted-average crest (mean ~0.29); centre it so the calm water
-  // sits at SEA_LEVEL and crests poke up.
-  return SEA_LEVEL + WAVE_AMP * (h / wsum - 0.29);
+  // WAVE_AMP is a CEILING, not the height every wave reaches.
+  //
+  // This used to divide by the SUM of the weights, i.e. the weighted AVERAGE of
+  // the four crests — which is why the sea read flat and uniform: the surface
+  // could only approach WAVE_AMP if all four waves peaked at the same place and
+  // instant, which essentially never happens, so every crest came out the same
+  // muted height. Dividing by the LARGEST weight instead keeps each wave's own
+  // size: the dominant swell alone reaches the ceiling at its crest, the smaller
+  // components genuinely stay smaller, and when several do coincide the clamp
+  // holds the maximum rather than letting them stack past it.
+  double crest = h / (peak > 1e-9 ? peak : 1.0);
+  if (crest > 1.0)
+    crest = 1.0;
+  // Centre so calm water sits at SEA_LEVEL and crests poke up. pow(s,2.4)
+  // averages ~0.29 per wave, so the sum over weights/peak lands near 0.72.
+  return SEA_LEVEL + WAVE_AMP * (crest - 0.72);
 }
 
 std::vector<float> seaField(double t) {
