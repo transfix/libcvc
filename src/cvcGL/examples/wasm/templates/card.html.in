@@ -1,0 +1,8 @@
+<div class="card">
+  <a class="thumb" href="{{DEMO}}/"><img src="{{THUMB}}" alt="{{DEMO}} preview" loading="lazy"></a>
+  <div>
+    <h3><a href="{{DEMO}}/">{{TITLE}}</a></h3>
+    <p>{{BLURB}}</p>
+    <a class="btn" href="{{DEMO}}/">Run it &rarr;</a>
+  </div>
+</div>
