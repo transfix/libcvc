@@ -140,6 +140,7 @@ struct ImGuiOverlay::Impl {
   bool touchMode = false;
   bool panelsOpen = true; // the floating toggle drives this
   bool showToggle = true; // draw the floating show/hide button
+  bool sizedOnce = false; // first frame with a real DisplaySize
   bool frameOpen = false;
   double lastTime = 0.0;
 
@@ -177,6 +178,19 @@ struct ImGuiOverlay::Impl {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     frameOpen = true;
+    // On a SMALL viewport (a phone), start with the panels hidden. Finger-sized
+    // widgets on a 400px-wide screen would otherwise bury the scene the moment
+    // it loads — the UI has to be reachable, not permanently in the way. The
+    // toggle button is always there to bring it back. Decided once, on the
+    // first frame that has a real size, so a later resize does not fight the
+    // user's own choice.
+    if (!sizedOnce && io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+      sizedOnce = true;
+      const float shortSide =
+          io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
+      if (shortSide < 700.0f)
+        panelsOpen = false;
+    }
     // The toggle is drawn FIRST so it is always reachable, even when the panels
     // it hides would have covered this corner.
     if (showToggle) {

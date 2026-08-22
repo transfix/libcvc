@@ -135,6 +135,28 @@ public:
   void setEnabled(bool on);
   bool enabled() const;
 
+  // ---- gizmos: SEE the lights (state "show_gizmos") -------------------------
+  // Draw a physical representation of the rig into the scene: a marker where
+  // each light hangs, a line down its aim, and the light's CONE.
+  //
+  // The cone is the point. It is not decoration — it is exactly the frustum VTK
+  // bakes that light's shadow map with, so the wireframe shows you the volume
+  // the shadow map covers. If a subject sits outside a cone it cannot be
+  // shadowed by that light; if the cone is far wider than the subject, the map's
+  // texels are being spent on nothing and the shadow will look coarse. This is
+  // the fastest way to see why a shadow is missing or mushy.
+  //
+  // Gizmos are unlit LINES kept just under opaque, which puts them in the
+  // translucent bucket that the opaque shadow-map bake skips — so drawing them
+  // cannot change the lighting you are inspecting.
+  //
+  // CAVEAT: they ARE scene geometry, and a cone reaches well outside the acting
+  // area, so turning them on enlarges the scene bounds. Anything that frames
+  // itself on those bounds (a reset camera, an auto-fit) will pull back while
+  // gizmos are visible. Toggle them off before judging composition.
+  void setGizmosVisible(bool on);
+  bool gizmosVisible() const;
+
   // How many shadow-casting lights the rig currently has. Useful in a HUD: each
   // one costs a full scene depth re-render per bake.
   int shadowCasterCount() const;

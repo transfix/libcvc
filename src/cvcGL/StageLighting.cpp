@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <stdexcept>
@@ -16,6 +18,12 @@ namespace gl {
 
 namespace {
 constexpr double kDeg = 3.14159265358979323846 / 180.0;
+
+// A light as actually placed this pass — what the gizmos draw, so the wireframe
+// always shows the rig that is really lighting the scene.
+struct Placed {
+  double px, py, pz, tx, ty, tz, cone, r, g, b;
+};
 
 struct Special {
   double x = 0, y = 0, z = 0;
@@ -56,8 +64,13 @@ struct StageLighting::Impl {
   double ambient = 0.22;
   double warmth = 0.35;
 
+  bool gizmos = false;
   std::vector<Special> specials;
   std::vector<int> ids; // every light this rig currently owns
+
+  // What apply() placed this pass, so the gizmos draw exactly the rig that is
+  // actually lighting the scene rather than recomputing it.
+  std::vector<Placed> placed;
 };
 
 std::string StageLighting::sceneStatePath(const std::string &scenePrefix) {
@@ -102,6 +115,7 @@ void StageLighting::seedState() {
   getState("wash_height").value(s.washHeight);
   getState("ambient").value(s.ambient);
   getState("warm_key").value(s.warmth);
+  getState("show_gizmos").value(s.gizmos ? 1 : 0);
   getState("stage_x").value(s.cx);
   getState("stage_y").value(s.cy);
   getState("stage_z").value(s.cz);
@@ -123,6 +137,7 @@ void StageLighting::readAllFromState() {
     s.washHeight = getState("wash_height").value<double>();
     s.ambient = getState("ambient").value<double>();
     s.warmth = getState("warm_key").value<double>();
+    s.gizmos = getState("show_gizmos").value<int>() != 0;
     s.cx = getState("stage_x").value<double>();
     s.cy = getState("stage_y").value<double>();
     s.cz = getState("stage_z").value<double>();
@@ -360,6 +375,87 @@ int StageLighting::shadowCasterCount() const {
   return n;
 }
 
+void StageLighting::setGizmosVisible(bool on) {
+  m_impl->gizmos = on;
+  getState("show_gizmos").value(on ? 1 : 0);
+  apply();
+}
+bool StageLighting::gizmosVisible() const { return m_impl->gizmos; }
+
+namespace {
+// One merged LINES mesh showing every light: a cross at the fixture, a line
+// down its aim, and the CONE it throws — which is the same frustum VTK bakes
+// that light's shadow map with, so the wireframe is literally the shadow-map
+// volume.
+cvc::geometry build_gizmos(const std::vector<Placed> &lights) {
+  cvc::geometry g;
+  auto &pts = g.points();
+  auto &cols = g.colors();
+  auto &lines = g.lines();
+  auto add = [&](double x, double y, double z, double r, double gg, double b) {
+    pts.push_back({x, y, z});
+    cols.push_back({r, gg, b});
+    return static_cast<cvc::geometry::index_t>(pts.size() - 1);
+  };
+  auto seg = [&](cvc::geometry::index_t a, cvc::geometry::index_t b) { lines.push_back({a, b}); };
+
+  for (const auto &L : lights) {
+    double ax = L.tx - L.px, ay = L.ty - L.py, az = L.tz - L.pz;
+    const double len = std::sqrt(ax * ax + ay * ay + az * az);
+    if (len < 1e-9)
+      continue;
+    ax /= len;
+    ay /= len;
+    az /= len;
+    // Any two vectors perpendicular to the aim, for the cone's rim.
+    double ux = 0, uy = 0, uz = 1;
+    if (std::abs(az) > 0.9) {
+      ux = 1;
+      uz = 0;
+    }
+    double sx = uy * az - uz * ay, sy = uz * ax - ux * az, sz = ux * ay - uy * ax;
+    double sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+    sx /= sl;
+    sy /= sl;
+    sz /= sl;
+    double tx2 = ay * sz - az * sy, ty2 = az * sx - ax * sz, tz2 = ax * sy - ay * sx;
+
+    // The fixture: a small cross so the light reads as an object in the scene.
+    const double m = 0.02 * len;
+    const auto c0 = add(L.px, L.py, L.pz, L.r, L.g, L.b);
+    seg(c0, add(L.px + m, L.py, L.pz, L.r, L.g, L.b));
+    seg(c0, add(L.px - m, L.py, L.pz, L.r, L.g, L.b));
+    seg(c0, add(L.px, L.py + m, L.pz, L.r, L.g, L.b));
+    seg(c0, add(L.px, L.py - m, L.pz, L.r, L.g, L.b));
+    seg(c0, add(L.px, L.py, L.pz + m, L.r, L.g, L.b));
+    seg(c0, add(L.px, L.py, L.pz - m, L.r, L.g, L.b));
+    // The aim.
+    seg(c0, add(L.tx, L.ty, L.tz, L.r * 0.6, L.g * 0.6, L.b * 0.6));
+
+    // The cone == the shadow-map frustum. Rim circle at the target plane, plus
+    // spokes from the fixture so the volume reads in 3-D.
+    const double rad = len * std::tan(L.cone * kDeg);
+    const int SEG = 28;
+    cvc::geometry::index_t first = 0, prev = 0;
+    for (int i = 0; i < SEG; ++i) {
+      const double a = 2.0 * 3.14159265358979323846 * i / SEG;
+      const double ca = std::cos(a) * rad, sa = std::sin(a) * rad;
+      const auto idx = add(L.tx + sx * ca + tx2 * sa, L.ty + sy * ca + ty2 * sa,
+                           L.tz + sz * ca + tz2 * sa, L.r, L.g, L.b);
+      if (i == 0)
+        first = idx;
+      else
+        seg(prev, idx);
+      if (i % 7 == 0)
+        seg(c0, idx); // four spokes
+      prev = idx;
+    }
+    seg(prev, first);
+  }
+  return g;
+}
+} // namespace
+
 void StageLighting::apply() {
   Impl &s = *m_impl;
   if (!s.scene)
@@ -368,8 +464,11 @@ void StageLighting::apply() {
   for (int id : s.ids)
     s.scene->removeLight(id);
   s.ids.clear();
-  if (!s.on)
+  s.placed.clear();
+  if (!s.on) {
+    s.scene->removeGraphics("stage_gizmos");
     return;
+  }
 
   const double R = std::max(1e-3, s.radius);
   // Throw distance: far enough to clear the subject, close enough that the cone
@@ -410,6 +509,7 @@ void StageLighting::apply() {
       const double x = s.cx + ringR * std::sin(a * kDeg);
       const double y = s.cy - ringR * std::cos(a * kDeg);
       s.ids.push_back(s.scene->addSpotLight(x, y, h, s.cx, s.cy, s.cz, 55.0, 1.0, 1.0, 1.0, per));
+      s.placed.push_back({x, y, h, s.cx, s.cy, s.cz, 55.0, 0.65, 0.72, 0.80});
     }
   }
 
@@ -419,6 +519,27 @@ void StageLighting::apply() {
       continue;
     s.ids.push_back(s.scene->addSpotLight(sp.x, sp.y, sp.z, sp.tx, sp.ty, sp.tz, sp.cone, sp.r,
                                           sp.g, sp.b, sp.intensity));
+    s.placed.push_back({sp.x, sp.y, sp.z, sp.tx, sp.ty, sp.tz, sp.cone, sp.r, sp.g, sp.b});
+  }
+
+  // ---- gizmos ---------------------------------------------------------------
+  if (!s.gizmos) {
+    s.scene->removeGraphics("stage_gizmos");
+    return;
+  }
+  auto node = std::dynamic_pointer_cast<GeometryNode>(
+      s.scene->addGraphics("stage_gizmos", build_gizmos(s.placed)));
+  if (node) {
+    node->setRenderMode(GeometryRenderMode::LINES);
+    node->setUseSingleColor(false);
+    node->setLineWidth(1.5);
+    node->setAmbient(1.0); // flat overlay colour, never shaded by the rig itself
+    node->setDiffuse(0.0);
+    node->setSpecular(0.0);
+    // Just under opaque puts the gizmos in the TRANSLUCENT bucket, which the
+    // opaque shadow-map bake skips — so drawing the debug overlay cannot alter
+    // the shadows you are using it to debug.
+    node->setOpacity(0.99);
   }
 }
 

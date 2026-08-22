@@ -165,7 +165,19 @@ void Text(cvc::app &ctx, const char *label, const std::string &path) {
 // tooltips carry the one non-obvious fact — that the cone is the shadow-map
 // frustum, so narrowing it is what sharpens shadows.
 void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
+  // Honour `open` OURSELVES. ImGui::Begin(name, p_open) draws the close button
+  // and clears *p_open when it is clicked, but it does NOT skip the window on
+  // the next call — the caller is expected to. Callers reasonably assume a
+  // library panel handles its own close box, and when it did not, clicking X
+  // appeared to do nothing at all.
+  if (open && !*open)
+    return;
   if (ownWindow) {
+    // Offset from the top-left so this does not open exactly on top of the
+    // host demo's own window, which also defaults near the corner.
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 24.0f, vp->WorkPos.y + 120.0f),
+                            ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Stage lighting", open)) {
       ImGui::End();
@@ -206,6 +218,15 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Each shadow-casting light re-renders the whole scene\n"
                       "depth every bake. Fill and wash cast nothing on purpose.");
+
+  bool giz = rig.gizmosVisible();
+  if (ImGui::Checkbox("Show lights", &giz))
+    rig.setGizmosVisible(giz);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Draw each light as a fixture, an aim line and its CONE.\n"
+                      "The cone is the shadow-map frustum VTK bakes, so it shows\n"
+                      "exactly what that light can shadow - and whether the map\n"
+                      "is being spent on empty space.");
 
   cvc::app &ctx = rig.appContext();
   const std::string p = rig.statePath() + ".";
