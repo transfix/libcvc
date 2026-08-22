@@ -368,7 +368,7 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.28, 0.40, 0.58);
   view.renderer()->SetBackground2(0.66, 0.78, 0.92);
 
-  cvc::gl::ScreenTextHud status(view); // corner status line — claims go on screen
+  cvc::gl::ScreenTextHud status(view, "status"); // corner status line — claims go on screen
   status.setCentered(false);
   status.setPosition(0.015, 0.95);
   status.setFontSize(13);

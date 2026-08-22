@@ -556,10 +556,10 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.20, 0.26, 0.36);
   view.renderer()->SetBackground2(0.55, 0.66, 0.82);
 
-  cvc::gl::ScreenTextHud actCard(view); // act title cards, top-centre
+  cvc::gl::ScreenTextHud actCard(view, "act_card"); // act title cards, top-centre
   actCard.setPosition(0.5, 0.90);
   actCard.setFontSize(22);
-  cvc::gl::ScreenTextHud status(view); // provenance + architecture, corner
+  cvc::gl::ScreenTextHud status(view, "status"); // provenance + architecture, corner
   status.setCentered(false);
   status.setPosition(0.015, 0.03);
   status.setFontSize(13);

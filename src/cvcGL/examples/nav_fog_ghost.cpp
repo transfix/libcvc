@@ -451,9 +451,9 @@ int main(int argc, char **argv) {
 
   // On-screen story: a lower-third caption band + a corner status line. Every
   // claim goes on screen, not stdout.
-  cvc::gl::ScreenTextHud caption(view);
+  cvc::gl::ScreenTextHud caption(view, "caption");
   caption.setFontSize(19);
-  cvc::gl::ScreenTextHud status(view);
+  cvc::gl::ScreenTextHud status(view, "status");
   status.setCentered(false);
   status.setPosition(0.015, 0.95);
   status.setFontSize(13);

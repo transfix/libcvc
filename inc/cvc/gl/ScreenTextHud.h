@@ -1,6 +1,7 @@
 #ifndef CVC_GL_SCREEN_TEXT_HUD_H
 #define CVC_GL_SCREEN_TEXT_HUD_H
 
+#include <cvc/core/state_object.h>
 #include <memory>
 #include <string>
 
@@ -18,12 +19,21 @@ namespace gl {
 // scene renders: the native window, an offscreen capture, or the WebAssembly
 // canvas.
 //
-// Deliberately LEAN and DIRECT, unlike FpsHud: no state binding, no observers.
-// Captions are driven by the host frame loop (a caption table evaluated against
-// sim time), so a state round-trip per change would be overhead with no
-// scriptability payoff. FpsHud remains the state-bound overlay pattern; this is
-// the "just draw the words" one. Several instances coexist on one viewer (a
-// title card + a caption band + a status line), each owning its own actor.
+// EVERYTHING IS cvc::state, like FpsHud and CameraController: the text and every
+// setting live under "<scene prefix>.viewers.<viewer>.hud.<name>" and are
+// two-way bound, so a caption can be set (or read) from a script, a config file
+// or a replicated peer.
+//
+// This used to be deliberately unbound, on the grounds that captions are driven
+// by the host frame loop and a state write per change would be overhead. That
+// concern was real but the fix is narrower than dropping binding: every write
+// here is CHANGE-GATED, so calling setText() with the same string sixty times a
+// second — which is exactly how a caption table is evaluated — costs nothing
+// after the first. Only an actual change reaches the state tree.
+//
+// Several instances coexist on one viewer (a title card + a caption band + a
+// status line), each owning its own actor, so each needs its own NAME to get its
+// own state node. Pass one when you construct more than one per viewer.
 //
 // Position is in NORMALIZED VIEWPORT coordinates ([0,1] x [0,1], origin bottom
 // left), so placement survives window resizes and capture sizes. Text is
@@ -32,13 +42,21 @@ namespace gl {
 //
 // Call from the render/frame thread (the same thread that drives
 // SceneRenderer::render / processUIEvents), like every other per-frame call.
-class ScreenTextHud {
+class ScreenTextHud : public cvc::state_object<ScreenTextHud> {
 public:
   // Adds the overlay to the viewer's renderer. Defaults: centered at
   // (0.5, 0.06) — a lower-third caption band — font 18, warm white, shadowed
   // for readability on any scene, hidden until text is set.
-  explicit ScreenTextHud(SceneRenderer &viewer);
+  // `name` distinguishes several overlays on one viewer; it is the last element
+  // of the state path. Two overlays sharing a name would share state nodes.
+  explicit ScreenTextHud(SceneRenderer &viewer, const std::string &name = "text");
+  // Low-level: explicit app context + full state path (headless / custom).
+  ScreenTextHud(cvc::app &ctx, const std::string &statePath, SceneRenderer *viewer);
   ~ScreenTextHud(); // removes the actor from the renderer
+
+  // The canonical state path for one named overlay on a viewer.
+  static std::string viewerStatePath(const std::string &scenePrefix, const std::string &viewerName,
+                                     const std::string &name);
 
   ScreenTextHud(const ScreenTextHud &) = delete;
   ScreenTextHud &operator=(const ScreenTextHud &) = delete;
@@ -51,7 +69,14 @@ public:
   void setCentered(bool centered); // false = left-justified (status-line style)
   void setVisible(bool on);        // AND'ed with "has text"
 
+protected:
+  void handleStateChanged(const std::string &childState) override;
+
 private:
+  void seedState();
+  void readAllFromState();
+  void applyToActor();
+
   struct Impl;
   std::unique_ptr<Impl> m_impl;
 };
