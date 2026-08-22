@@ -13,6 +13,10 @@
 #                      interpreter column (python31X + numpy-cp31X).
 #   * pycvc-gl-cp31X — the scriptable-scene bindings per column (needs
 #                      cvcgl + VTK + vtk-python-cp31X + Python).
+#   * cvcgl-examples — the example COMMANDS (lsystem_forest + the nav demos +
+#                      the cvcgl-examples-web launcher), linux release only.
+#                      Built through the recipe's own build.sh so the workflow
+#                      and the remote builders cannot drift.
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -20,8 +24,9 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + pycvc-cp311/312/313 + pycvc-gl-cp311/312/313
-#               (release config; the 312/313 columns on x86_64 only).
+#   * Linux   — libcvc + cvcgl + cvcgl-examples + pycvc-cp311/312/313 +
+#               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
+#               x86_64 only; cvcgl-examples from the pyver-311 column only).
 #   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
@@ -176,6 +181,7 @@ jobs:
     outputs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
+      cvcgl_examples: ${{ steps.rev.outputs.cvcgl_examples }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -215,6 +221,7 @@ jobs:
           }
           emit libcvc         libcvc
           emit cvcgl          cvcgl
+          emit cvcgl-examples cvcgl_examples
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -618,6 +625,66 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping cvcgl publish"
+          fi
+
+      - name: Build, pack & publish cvcgl-examples [Linux]
+        # The example COMMANDS (lsystem_forest + the nav demos + the
+        # cvcgl-examples-web launcher), packaged apart from the cvcgl SDK the
+        # same way cvc-cli is packaged apart from libcvc.  Nothing else links
+        # them, so unlike cvcgl this runs only in the pyver-311 column.
+        #
+        # This invokes the recipe's own build.sh rather than repeating its
+        # cmake here: the recipe is what the remote builders run, and the two
+        # drifting apart is exactly how a recipe passes `cvcpkg validate` while
+        # being broken (see the -DCGAL_Boost_USE_STATIC_LIBS=OFF workaround it
+        # carries).  build.sh takes its prefixes from CVC_DEPS_PREFIX, and
+        # CMAKE_PREFIX_PATH is a LIST, so the three prefixes this job spreads
+        # its deps across are passed as one semicolon-separated value.
+        #
+        # The nav demos need cvc::nav, which only exists in libcvc >= the nav
+        # kernels (#198).  That resolves itself here because this job builds and
+        # installs libcvc from THIS tree into $STAGE first -- publishing the
+        # examples from anywhere else requires a libcvc republish beforehand.
+        #
+        # TODO: the recipe also has a `platform: wasm` entry (the browser build
+        # under share/cvcgl-examples/web/).  Publishing it needs emsdk + the
+        # wasm dep closure + a rendering-enabled wasm vtk on the catalog, so it
+        # is deliberately not wired up here yet.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-cvcgl-examples"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-cvcgl-examples"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/cvcgl-examples/build.sh
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/cvcgl-examples \
+            --from-prefix stage-cvcgl-examples \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl_examples }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish cvcgl-examples \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping cvcgl-examples publish"
           fi
 
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]

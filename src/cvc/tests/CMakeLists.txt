@@ -61,6 +61,7 @@ if(CVC_STATE_EXEC)
   add_executable(state_exec_bench_test state_exec_bench_test.cpp)
   add_executable(state_exec_integration_test state_exec_integration_test.cpp)
   add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
+  add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
   if(NOT WIN32)
     add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
   endif()
@@ -93,6 +94,7 @@ add_executable(volume_test volume_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
+add_executable(volume_io_extra_test volume_io_extra_test.cpp)
 add_executable(image_test image_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
@@ -162,6 +164,7 @@ set(TEST_TARGETS
   procedural_geometry_test
   volume_ops_test
   volume_io_test
+  volume_io_extra_test
   image_test
   model_test
   geometry_attributes_test
@@ -195,6 +198,7 @@ if(CVC_STATE_EXEC)
     state_exec_bench_test
     state_exec_integration_test
     state_exec_advanced_integration_test
+    state_exec_gaps_test
   )
   if(NOT WIN32)
     list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -220,8 +224,37 @@ endif()
 if(CVC_ENABLE_MESHER)
   add_executable(algorithm_test algorithm_test.cpp)
   list(APPEND TEST_TARGETS algorithm_test)
+
+  # Deep-drive tests for the LBIE octree mesher and the FastContouring
+  # module. These include mesher-internal headers (LBIE/, Mesher/,
+  # FastContouring/), which are PRIVATE include dirs of the cvc target,
+  # so the test targets add them explicitly.
+  add_executable(lbie_mesher_test lbie_mesher_test.cpp)
+  target_include_directories(lbie_mesher_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/cvc-mesher
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/cvc-mesher/LBIE
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/cvc-mesher/Mesher
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/cvc-mesher/FastContouring)
+  list(APPEND TEST_TARGETS lbie_mesher_test)
+
+  add_executable(fastcontouring_math_test fastcontouring_math_test.cpp)
+  target_include_directories(fastcontouring_math_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/cvc-mesher/FastContouring)
+  list(APPEND TEST_TARGETS fastcontouring_math_test)
 else()
   message(STATUS "Mesher disabled; skipping algorithm_test")
+endif()
+
+# mtxlib (SDF V2's self-contained vector/matrix library) and the other
+# SignDistanceFunction_v2 internals are compiled whenever SDF is enabled;
+# their headers are PRIVATE to the cvc target, so add the dir explicitly.
+if(CVC_ENABLE_SDF)
+  add_executable(mtxlib_test mtxlib_test.cpp)
+  target_include_directories(mtxlib_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/cvc/geometry/SDF/SignDistanceFunction_v2)
+  list(APPEND TEST_TARGETS mtxlib_test)
+else()
+  message(STATUS "SDF disabled; skipping mtxlib_test")
 endif()
 
 # Link against the CVC library and Google Test
@@ -270,6 +303,52 @@ if(TARGET algorithm_test)
       GTest::gtest_main
   )
   target_compile_features(algorithm_test PRIVATE cxx_std_17)
+endif()
+
+if(TARGET lbie_mesher_test)
+  target_link_libraries(lbie_mesher_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(lbie_mesher_test PRIVATE cxx_std_17)
+endif()
+
+if(TARGET fastcontouring_math_test)
+  target_link_libraries(fastcontouring_math_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(fastcontouring_math_test PRIVATE cxx_std_17)
+endif()
+
+if(TARGET mtxlib_test)
+  target_link_libraries(mtxlib_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(mtxlib_test PRIVATE cxx_std_17)
+endif()
+
+target_link_libraries(volume_io_extra_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+if(TARGET state_exec_gaps_test)
+  target_link_libraries(state_exec_gaps_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
 endif()
 
 target_link_libraries(procedural_geometry_test
@@ -983,6 +1062,21 @@ if(CVC_USING_HDF5 AND NOT CVC_HDF5_DISABLED)
   target_include_directories(hdf5_test PRIVATE ${HDF5_INCLUDE_DIRS})
   target_compile_features(hdf5_test PRIVATE cxx_std_14)
   list(APPEND TEST_TARGETS hdf5_test)
+
+  # Volume-level HDF5 backend tests (hdf5_io.cpp via volume::read/write,
+  # volume_file_info, |object addressing) — separate target so hdf5_test
+  # stays the low-level hdf5_utils suite.
+  add_executable(hdf5_volume_test hdf5_volume_test.cpp)
+  target_link_libraries(hdf5_volume_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+      ${HDF5_LIBRARIES}
+  )
+  target_include_directories(hdf5_volume_test PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_compile_features(hdf5_volume_test PRIVATE cxx_std_14)
+  list(APPEND TEST_TARGETS hdf5_volume_test)
 else()
   message(STATUS "HDF5 disabled; skipping hdf5_test")
 endif()
@@ -1028,116 +1122,149 @@ elseif(WIN32)
   endmacro()
 endif()
 
-gtest_discover_tests(app_test)
-gtest_discover_tests(state_test)
-gtest_discover_tests(voxels_test)
-gtest_discover_tests(volume_test)
+# ── Discovery drift guard, registration side ──────────────────────────────
+# nav_coef_train_test sat in TEST_TARGETS, compiled green, and never ran:
+# nothing called gtest_discover_tests() on it, and the TEST_TARGETS guard at
+# the bottom of this file only proves a target *builds* under `check`, not
+# that CTest knows about it. Route every discovery through this wrapper so
+# the guard can also prove each TEST_TARGETS entry is registered with CTest.
+# Plain-main() targets registered via add_test() append themselves to
+# CVC_REGISTERED_TESTS directly.
+function(cvc_discover_tests target)
+  gtest_discover_tests(${target} ${ARGN})
+  set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS ${target})
+endfunction()
+
+cvc_discover_tests(app_test)
+cvc_discover_tests(state_test)
+cvc_discover_tests(voxels_test)
+cvc_discover_tests(volume_test)
 if(TARGET geometry_test)
-  gtest_discover_tests(geometry_test)
+  cvc_discover_tests(geometry_test)
 endif()
 if(TARGET algorithm_test)
-  gtest_discover_tests(algorithm_test)
+  cvc_discover_tests(algorithm_test)
 endif()
-gtest_discover_tests(volume_ops_test)
-gtest_discover_tests(volume_io_test)
-gtest_discover_tests(image_test)
-gtest_discover_tests(model_test)
-gtest_discover_tests(geometry_attributes_test)
-gtest_discover_tests(utility_test)
-gtest_discover_tests(nav_test)
-gtest_discover_tests(state_change_journal_test)
-gtest_discover_tests(state_subscription_router_test)
-gtest_discover_tests(state_sync_adapter_test)
-gtest_discover_tests(state_blob_store_test)
-gtest_discover_tests(state_chunked_blob_test)
-gtest_discover_tests(state_compression_registry_test)
-gtest_discover_tests(state_codec_registry_test)
-gtest_discover_tests(state_replica_test)
-gtest_discover_tests(state_authority_map_test)
-gtest_discover_tests(state_cluster_shard_test)
-gtest_discover_tests(state_message_bus_test)
-gtest_discover_tests(state_peer_registry_test)
-gtest_discover_tests(state_write_policy_test)
-gtest_discover_tests(state_distributed_metrics_test)
-gtest_discover_tests(state_delegation_manager_test)
-gtest_discover_tests(state_distributed_admin_test)
-gtest_discover_tests(state_cluster_membership_test)
-gtest_discover_tests(state_distributed_bench_test)
-gtest_discover_tests(state_message_test)
-gtest_discover_tests(state_bounded_queue_test)
-gtest_discover_tests(state_transport_inproc_test)
+cvc_discover_tests(volume_ops_test)
+cvc_discover_tests(volume_io_test)
+cvc_discover_tests(image_test)
+cvc_discover_tests(model_test)
+cvc_discover_tests(geometry_attributes_test)
+cvc_discover_tests(utility_test)
+cvc_discover_tests(nav_test)
+cvc_discover_tests(nav_coef_train_test)
+cvc_discover_tests(volume_io_extra_test)
+if(TARGET lbie_mesher_test)
+  cvc_discover_tests(lbie_mesher_test)
+endif()
+if(TARGET fastcontouring_math_test)
+  cvc_discover_tests(fastcontouring_math_test)
+endif()
+if(TARGET mtxlib_test)
+  cvc_discover_tests(mtxlib_test)
+endif()
+if(TARGET hdf5_volume_test)
+  cvc_discover_tests(hdf5_volume_test)
+endif()
+if(TARGET state_exec_gaps_test)
+  cvc_discover_tests(state_exec_gaps_test)
+endif()
+cvc_discover_tests(state_change_journal_test)
+cvc_discover_tests(state_subscription_router_test)
+cvc_discover_tests(state_sync_adapter_test)
+cvc_discover_tests(state_blob_store_test)
+cvc_discover_tests(state_chunked_blob_test)
+cvc_discover_tests(state_compression_registry_test)
+cvc_discover_tests(state_codec_registry_test)
+cvc_discover_tests(state_replica_test)
+cvc_discover_tests(state_authority_map_test)
+cvc_discover_tests(state_cluster_shard_test)
+cvc_discover_tests(state_message_bus_test)
+cvc_discover_tests(state_peer_registry_test)
+cvc_discover_tests(state_write_policy_test)
+cvc_discover_tests(state_distributed_metrics_test)
+cvc_discover_tests(state_delegation_manager_test)
+cvc_discover_tests(state_distributed_admin_test)
+cvc_discover_tests(state_cluster_membership_test)
+cvc_discover_tests(state_distributed_bench_test)
+cvc_discover_tests(state_message_test)
+cvc_discover_tests(state_bounded_queue_test)
+cvc_discover_tests(state_transport_inproc_test)
 if(NOT WIN32)
-  gtest_discover_tests(state_transport_ipc_test)
-  gtest_discover_tests(state_reconnect_resilience_test)
+  cvc_discover_tests(state_transport_ipc_test)
+  cvc_discover_tests(state_reconnect_resilience_test)
 endif()
-gtest_discover_tests(state_blob_transport_integration_test)
-gtest_discover_tests(state_distributed_delegation_integration_test)
-gtest_discover_tests(state_link_test)
-gtest_discover_tests(state_send_message_test)
-gtest_discover_tests(state_link_cycles_test)
-gtest_discover_tests(state_expiry_test)
-gtest_discover_tests(state_interest_filter_test)
-gtest_discover_tests(state_link_mode_test)
-gtest_discover_tests(state_writable_link_test)
-gtest_discover_tests(state_transparent_link_index_test)
-gtest_discover_tests(state_sync_adapter_link_forwarding_test)
-gtest_discover_tests(state_cross_cluster_link_test)
-gtest_discover_tests(state_link_bench_test)
+cvc_discover_tests(state_blob_transport_integration_test)
+cvc_discover_tests(state_distributed_delegation_integration_test)
+cvc_discover_tests(state_link_test)
+cvc_discover_tests(state_send_message_test)
+cvc_discover_tests(state_link_cycles_test)
+cvc_discover_tests(state_expiry_test)
+cvc_discover_tests(state_interest_filter_test)
+cvc_discover_tests(state_link_mode_test)
+cvc_discover_tests(state_writable_link_test)
+cvc_discover_tests(state_transparent_link_index_test)
+cvc_discover_tests(state_sync_adapter_link_forwarding_test)
+cvc_discover_tests(state_cross_cluster_link_test)
+cvc_discover_tests(state_link_bench_test)
 if(CVC_STATE_EXEC)
-  gtest_discover_tests(state_exec_parser_test)
-  gtest_discover_tests(state_exec_types_test)
-  gtest_discover_tests(state_exec_builtins_test)
-  gtest_discover_tests(state_exec_evaluator_test)
-  gtest_discover_tests(state_exec_stackless_evaluator_test)
-  gtest_discover_tests(state_exec_codec_test)
-  gtest_discover_tests(state_exec_async_test)
-  gtest_discover_tests(state_exec_scheduler_test)
-  gtest_discover_tests(state_exec_intrinsics_test)
-  gtest_discover_tests(state_exec_coordinator_test)
-  gtest_discover_tests(state_exec_bench_test)
-  gtest_discover_tests(state_exec_integration_test)
-  gtest_discover_tests(state_exec_advanced_integration_test)
+  cvc_discover_tests(state_exec_parser_test)
+  cvc_discover_tests(state_exec_types_test)
+  cvc_discover_tests(state_exec_builtins_test)
+  cvc_discover_tests(state_exec_evaluator_test)
+  cvc_discover_tests(state_exec_stackless_evaluator_test)
+  cvc_discover_tests(state_exec_codec_test)
+  cvc_discover_tests(state_exec_async_test)
+  cvc_discover_tests(state_exec_scheduler_test)
+  cvc_discover_tests(state_exec_intrinsics_test)
+  cvc_discover_tests(state_exec_coordinator_test)
+  cvc_discover_tests(state_exec_bench_test)
+  cvc_discover_tests(state_exec_integration_test)
+  cvc_discover_tests(state_exec_advanced_integration_test)
   if(TARGET state_exec_multiprocess_test)
     # Forks real OS processes and replicates state over Unix-domain-socket IPC
     # with internal pump deadlines. Under `ctest --parallel` on a loaded CI
     # runner the forked children get starved and miss those windows, so
     # StateTreeReplication intermittently fails all `until-pass` retries.
     # RUN_SERIAL keeps this suite off the shared parallel scheduler.
-    gtest_discover_tests(state_exec_multiprocess_test PROPERTIES RUN_SERIAL TRUE)
+    cvc_discover_tests(state_exec_multiprocess_test PROPERTIES RUN_SERIAL TRUE)
   endif()
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
-  gtest_discover_tests(state_memory_manager_test)
+  cvc_discover_tests(state_memory_manager_test)
 endif()
-gtest_discover_tests(state_list_test)
-gtest_discover_tests(state_delta_codec_test)
-gtest_discover_tests(state_volume_codec_test)
-gtest_discover_tests(state_brick_manifest_test)
-gtest_discover_tests(state_data_hydrator_test)
-gtest_discover_tests(state_node_telemetry_test)
-gtest_discover_tests(state_telemetry_aggregator_test)
-gtest_discover_tests(file_state_blob_store_test)
-gtest_discover_tests(distributed_state_session_test)
-gtest_discover_tests(state_large_tree_bench_test)
-gtest_discover_tests(state_hash_partition_test)
-gtest_discover_tests(state_hybrid_time_test)
-gtest_discover_tests(world_clock_test)
-gtest_discover_tests(state_brick_frustum_test)
-gtest_discover_tests(state_conflict_ring_test)
-gtest_discover_tests(state_zstd_round_trip_test)
-gtest_discover_tests(state_session_status_test)
+cvc_discover_tests(state_list_test)
+cvc_discover_tests(state_delta_codec_test)
+cvc_discover_tests(state_volume_codec_test)
+cvc_discover_tests(state_brick_manifest_test)
+cvc_discover_tests(state_data_hydrator_test)
+cvc_discover_tests(state_node_telemetry_test)
+cvc_discover_tests(state_telemetry_aggregator_test)
+cvc_discover_tests(file_state_blob_store_test)
+cvc_discover_tests(distributed_state_session_test)
+cvc_discover_tests(state_large_tree_bench_test)
+cvc_discover_tests(state_hash_partition_test)
+cvc_discover_tests(state_hybrid_time_test)
+cvc_discover_tests(world_clock_test)
+cvc_discover_tests(state_brick_frustum_test)
+cvc_discover_tests(state_conflict_ring_test)
+cvc_discover_tests(state_zstd_round_trip_test)
+cvc_discover_tests(state_session_status_test)
 if(NOT WIN32)
   # Same fork()+IPC timing profile as state_exec_multiprocess_test — serialize
   # so the parallel scheduler can't starve its socket/replication windows.
-  gtest_discover_tests(state_multiprocess_ipc_test PROPERTIES RUN_SERIAL TRUE)
-  gtest_discover_tests(state_snapshot_protocol_test)
+  cvc_discover_tests(state_multiprocess_ipc_test PROPERTIES RUN_SERIAL TRUE)
+  cvc_discover_tests(state_snapshot_protocol_test)
 endif()
 if(TARGET state_transport_grpc_test)
-  gtest_discover_tests(state_transport_grpc_test)
+  cvc_discover_tests(state_transport_grpc_test)
 endif()
-# Note: procedural_geometry_test uses plain main(), not gtest
+# procedural_geometry_test uses plain main(), not gtest, so register it with
+# a direct add_test() and record it for the registration guard below.
+add_test(NAME procedural_geometry_test COMMAND procedural_geometry_test)
+set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_test)
 if(TARGET hdf5_test)
-  gtest_discover_tests(hdf5_test)
+  cvc_discover_tests(hdf5_test)
 endif()
 
 # ── TEST_TARGETS drift guard ──────────────────────────────────────────────
@@ -1183,6 +1310,21 @@ foreach(_cvc_target IN LISTS TEST_TARGETS)
       "TEST_TARGETS names '${_cvc_target}', but no such target is defined in "
       "${CMAKE_CURRENT_LIST_FILE}. Remove it, or move it under the if() guard "
       "that declares it.")
+  endif()
+endforeach()
+
+# Registration side: building under `check` is not enough — a target that no
+# one passes to cvc_discover_tests()/add_test() never runs under ctest, and
+# nothing else notices (nav_coef_train_test compiled green for weeks while
+# ctest ran none of its cases). Every TEST_TARGETS entry must be registered.
+get_property(_cvc_registered DIRECTORY PROPERTY CVC_REGISTERED_TESTS)
+foreach(_cvc_target IN LISTS TEST_TARGETS)
+  if(NOT _cvc_target IN_LIST _cvc_registered)
+    message(FATAL_ERROR
+      "Test target '${_cvc_target}' is never registered with CTest. Call "
+      "cvc_discover_tests(${_cvc_target}) (gtest binaries), or add_test() + "
+      "append to the CVC_REGISTERED_TESTS directory property (plain main()), "
+      "in ${CMAKE_CURRENT_LIST_FILE}.")
   endif()
 endforeach()
 

@@ -11,6 +11,7 @@
 #define CVC_STATE_EXEC_ASYNC_EVALUATOR_H
 
 #include <atomic>
+#include <chrono>
 #include <cvc/core/state_exec/evaluator.h>
 #include <cvc/core/state_exec/task.h>
 #include <cvc/core/state_exec/types.h>
@@ -102,6 +103,14 @@ private:
   std::mutex pause_mu_;
   std::condition_variable pause_cv_;
   std::recursive_mutex eval_mu_;
+
+  // Wall-clock deadline for the in-progress evaluation, checked per step in
+  // check_interrupted_async(). Only touched on the evaluating thread (under
+  // eval_mu_), so a plain optional is safe. Enforcing the deadline here — at
+  // every eval step — rather than in sync_evaluate's driving loop is what makes
+  // timeouts work on MSVC, where the coroutine runs to completion via symmetric
+  // transfer and never returns to the driving loop mid-evaluation (see task.h).
+  std::optional<std::chrono::steady_clock::time_point> deadline_;
 };
 
 } // namespace cvc::state_exec

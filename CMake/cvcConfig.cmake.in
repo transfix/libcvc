@@ -27,6 +27,24 @@ endif()
 
 if(@CVC_ENABLE_IMAGEMAGICK@)
   find_package(ImageMagick COMPONENTS Magick++ MagickCore QUIET)
+  # Windows: the stock FindImageMagick module uses NO_DEFAULT_PATH and so
+  # never searches CMAKE_PREFIX_PATH; the cvcpkg imagemagick bundle is
+  # innoextracted into the prefix (no registry entry / .pc). Mirror the
+  # prefix-searching fallback used when libcvc itself was built (see
+  # src/cvc/CMakeLists.txt) so consumers can resolve it too.
+  if(WIN32 AND NOT ImageMagick_FOUND)
+    find_path(ImageMagick_INCLUDE_DIR NAMES Magick++.h
+              PATH_SUFFIXES ImageMagick ImageMagick-7)
+    find_library(ImageMagick_Magickxx_LIBRARY NAMES Magick++ CORE_RL_Magick++_)
+    find_library(ImageMagick_MagickCore_LIBRARY NAMES MagickCore CORE_RL_MagickCore_)
+    if(ImageMagick_INCLUDE_DIR AND ImageMagick_Magickxx_LIBRARY
+       AND ImageMagick_MagickCore_LIBRARY)
+      set(ImageMagick_FOUND TRUE)
+      set(ImageMagick_INCLUDE_DIRS "${ImageMagick_INCLUDE_DIR}")
+      set(ImageMagick_LIBRARIES
+          "${ImageMagick_Magickxx_LIBRARY};${ImageMagick_MagickCore_LIBRARY}")
+    endif()
+  endif()
 endif()
 
 # When the assimp model loader is built in, cvcTargets.cmake puts

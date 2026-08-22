@@ -631,8 +631,8 @@ endif()
 # Quantum-depth and HDRI flags must match the installed library's build:
 # Q8 vs Q16, HDRI on/off. On Linux/macOS we ask pkg-config for the
 # canonical cflags, which include the right `MAGICKCORE_QUANTUM_DEPTH`
-# and `MAGICKCORE_HDRI_ENABLE` defines. On Windows our overlay vcpkg
-# port ships Q16-HDRI x64.
+# and `MAGICKCORE_HDRI_ENABLE` defines. On Windows the cvcpkg imagemagick
+# bundle ships the official Q16-HDRI x64 build.
 option(CVC_ENABLE_IMAGEMAGICK "Enable ImageMagick support for image I/O in volume_ops" ON)
 if(CVC_ENABLE_IMAGEMAGICK)
   set(CVC_IMAGEMAGICK_QUANTUM_DEPTH 16)
@@ -655,9 +655,32 @@ if(CVC_ENABLE_IMAGEMAGICK)
       endif()
     endif()
   else()
-    set(CVC_IMAGEMAGICK_HDRI_ENABLE 1)  # Q16-HDRI x64 from vcpkg overlay
+    set(CVC_IMAGEMAGICK_HDRI_ENABLE 1)  # official Q16-HDRI x64 build
   endif()
   find_package(ImageMagick COMPONENTS Magick++ MagickCore)
+  # Windows fallback: the stock FindImageMagick module searches only
+  # pkg-config hints and the ImageMagick registry key, both with
+  # NO_DEFAULT_PATH, so it never looks in CMAKE_PREFIX_PATH. The cvcpkg
+  # imagemagick bundle is innoextracted straight into the prefix (no
+  # registry entry, no .pc), so the module misses it and image I/O gets
+  # silently disabled on Windows. find_path/find_library DO honor
+  # CMAKE_PREFIX_PATH, so search the prefix directly for the staged
+  # headers and the canonical import-lib aliases the bundle provides.
+  if(WIN32 AND NOT ImageMagick_FOUND)
+    find_path(ImageMagick_INCLUDE_DIR NAMES Magick++.h
+              PATH_SUFFIXES ImageMagick ImageMagick-7)
+    find_library(ImageMagick_Magickxx_LIBRARY NAMES Magick++ CORE_RL_Magick++_)
+    find_library(ImageMagick_MagickCore_LIBRARY NAMES MagickCore CORE_RL_MagickCore_)
+    if(ImageMagick_INCLUDE_DIR AND ImageMagick_Magickxx_LIBRARY
+       AND ImageMagick_MagickCore_LIBRARY)
+      set(ImageMagick_FOUND TRUE)
+      set(ImageMagick_INCLUDE_DIRS "${ImageMagick_INCLUDE_DIR}")
+      set(ImageMagick_LIBRARIES
+          "${ImageMagick_Magickxx_LIBRARY};${ImageMagick_MagickCore_LIBRARY}")
+      message(STATUS "ImageMagick found via cvcpkg-prefix fallback: "
+                     "${ImageMagick_INCLUDE_DIR}")
+    endif()
+  endif()
   if(ImageMagick_FOUND)
     message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS} "
                    "(Q${CVC_IMAGEMAGICK_QUANTUM_DEPTH}, "

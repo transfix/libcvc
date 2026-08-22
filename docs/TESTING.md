@@ -885,18 +885,31 @@ The HTML report shows:
 
 ### Coverage Goals
 
-Recommended coverage targets:
-- **Core Libraries**: 80%+ line coverage ✅ (90.5% achieved)
+CI enforces a hard line-coverage gate: the `package-linux /
+libcvc-debug` job fails when line coverage of the supported in-repo
+surface drops below **`COVERAGE_MIN` (80%)**, set at the top of
+`.github/workflows/ci.yml`. A PR that adds enough untested code to
+drag the project below the gate cannot merge without also adding
+tests.
+
+Additional (advisory) targets:
 - **Critical Paths**: 100% coverage
-- **Utility Functions**: 70%+ coverage
-- **Overall Project**: 75%+ coverage
+- **New code in a PR**: cover what you add; don't rely on headroom
 
 ### Filtering Coverage
 
-The coverage report automatically excludes:
-- System headers (`/usr/*`)
-- Test files (`*/test/*`, `*/tests/*`)
-- Third-party dependencies (`*/_deps/*`, `*/googletest/*`)
+The gate and the reports measure the same, repo-only view. The filter
+is an allowlist of `src/` + `inc/` (a `/usr/*` blocklist would still
+count Boost/CGAL/HDF5 headers from the libcvc-deps prefix that are
+inlined into instrumented TUs), minus:
+- Test code (`*/test/*`, `*/tests/*`, `*_test.cpp`)
+- Vendored XmlRpc++ (`src/xmlrpc/`)
+- Vendored contour-spectrum code (`src/cvc/geometry/cvc-mesher/contour/`),
+  per `docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md` §4 Option A
+
+The local `coverage` CMake target applies the identical filter, so
+numbers from `./generate_coverage.sh` are directly comparable to the
+CI gate.
 
 ### Coverage with Specific Tests
 
