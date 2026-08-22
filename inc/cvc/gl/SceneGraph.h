@@ -300,7 +300,7 @@ public:
   void updateGrid(const cvc::bounding_box &bounds);
 
   // Compute combined bounding box of all graphics
-  cvc::bounding_box computeGraphicsBounds() const;
+  cvc::bounding_box computeGraphicsBounds() const; // public: lights are excluded
 
   // Compute combined bounding box of all volumes
   cvc::bounding_box computeVolumeBounds() const;
