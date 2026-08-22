@@ -227,6 +227,42 @@ jobs:
           fi
           cvcpkg install vtk xorgproto --prefix "$prefix" --config release --link shared
 
+      # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
+      # 11 of the 13 cvcgl_* tests only inspect scene/state and need no GL at
+      # all. cvcgl_renderer and cvcgl_shadow_volume actually call render() and
+      # frameRGB(), and on a bare runner they SEGFAULT: the vtk bundle ships
+      # libglvnd, so GL *dispatch* resolves and the offscreen window constructs
+      # happily, but there is no *driver* behind it and the first real draw
+      # walks off a null vendor table. (cvcgl_shadow_volume's own header comment
+      # assumed a headless render would be a harmless no-op. It is not.)
+      #
+      # Mesa's llvmpipe is the driver; Xvfb is there because VTK probes GLX
+      # before EGL, so a display saves it from falling through a failing path
+      # first. Verified locally: both tests pass under LIBGL_ALWAYS_SOFTWARE=1
+      # with llvmpipe.
+      #
+      # Skipping the two instead would leave cvcGL's rendering permanently
+      # untested in CI, which is a smaller version of the problem this whole
+      # change exists to fix.
+      - name: Software OpenGL for the cvcGL render tests
+        if: matrix.kind == 'libcvc' && matrix.build_type != 'Debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb libgl1-mesa-dri libglx-mesa0
+          Xvfb :99 -screen 0 1280x1024x24 &
+          for _ in $(seq 1 30); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          {
+            echo "DISPLAY=:99"
+            echo "LIBGL_ALWAYS_SOFTWARE=1"
+            echo "GALLIUM_DRIVER=llvmpipe"
+          } >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           # libcvc needs libiimod from the libcvc-deps bundle. Fall
