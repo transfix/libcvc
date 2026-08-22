@@ -595,8 +595,30 @@ void StageLighting::apply() {
   std::vector<std::string> previous;
   previous.swap(s.nodes);
   s.placed.clear();
+
+  // The three nodes the gizmos are drawn as. Named here because switching the
+  // rig off has to clear them too, not just the lights.
+  static const char *kGizmoNodes[] = {"stage_gizmo_fixtures", "stage_gizmo_bulbs",
+                                      "stage_gizmo_beams"};
+  // removeGraphics() LOGS "Graphics object 'x' not found" for a name that is not
+  // in the scene, which is the right thing when someone removes the wrong node
+  // by mistake — but here we routinely ask to drop nodes that were simply never
+  // built (gizmos off, beams not generated). Ask first, so a real mistake still
+  // shows up in the log and normal operation does not.
+  auto dropIfPresent = [&s](const std::string &n) {
+    if (s.scene->hasGraphics(n))
+      s.scene->removeGraphics(n);
+  };
+
   if (!s.on) {
-    s.scene->removeGraphics("stage_gizmos");
+    // Switching the rig OFF used to remove a node called "stage_gizmos" — a name
+    // nothing has created since the gizmos became three separate meshes, so it
+    // only ever logged "not found" — and then returned before the retire loop
+    // below, leaving every light of a supposedly-disabled rig lit in the scene.
+    for (const auto &old : previous)
+      dropIfPresent(old);
+    for (const char *n : kGizmoNodes)
+      dropIfPresent(n);
     return;
   }
 
@@ -685,13 +707,12 @@ void StageLighting::apply() {
   // Retire roles the new rig no longer has (e.g. the wash shrank).
   for (const auto &old : previous)
     if (std::find(s.nodes.begin(), s.nodes.end(), old) == s.nodes.end())
-      s.scene->removeGraphics(old);
+      dropIfPresent(old);
 
   // ---- gizmos ---------------------------------------------------------------
-  const char *kGizmoNodes[] = {"stage_gizmo_fixtures", "stage_gizmo_bulbs", "stage_gizmo_beams"};
   if (!s.gizmos) {
     for (const char *n : kGizmoNodes)
-      s.scene->removeGraphics(n);
+      dropIfPresent(n);
     return;
   }
   GizmoMeshes gm = build_gizmos(s.placed);

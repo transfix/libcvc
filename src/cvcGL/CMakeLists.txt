@@ -273,6 +273,14 @@ add_executable(cvcgl_state_binding test/cvcgl_state_binding.cpp)
 target_link_libraries(cvcgl_state_binding PRIVATE cvcGL)
 add_test(NAME cvcgl_state_binding COMMAND cvcgl_state_binding)
 
+# Adding a shadow-casting light between frames used to index past the end of the
+# baker's cached shadow-map vector and dereference garbage — which is why raising
+# the wash-light count died while lowering it was fine. Renders for real, so it
+# needs a working GL driver (CI supplies Mesa llvmpipe).
+add_executable(cvcgl_shadow_caster_growth test/cvcgl_shadow_caster_growth.cpp)
+target_link_libraries(cvcgl_shadow_caster_growth PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic

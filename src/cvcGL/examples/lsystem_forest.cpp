@@ -977,9 +977,12 @@ void computeCloudShadow(const std::vector<float> &field, Vec3d sun,
 // Re-run one tree's wind cascade, writing its posed vertices into the SHARED forest
 // buffers at this tree's offsets. No upload here — the caller re-poses every tree
 // and then uploads the two merged buffers ONCE (updateVertices) per frame.
+// `windScale` multiplies every tree's own sway amplitude, so the UI slider is one
+// global knob over a forest whose trees each keep their individual amplitude and
+// phase. 1.0 is the tuned default; 0 is dead calm.
 void reposeTree(const Tree &tree, double t, std::vector<double> &woodBuf,
-                std::vector<double> &needleBuf) {
-  double a = tree.sway * std::sin(1.3 * t + tree.phase);
+                std::vector<double> &needleBuf, double windScale = 1.0) {
+  double a = tree.sway * windScale * std::sin(1.3 * t + tree.phase);
   Mat4 sway = mRot(a, 0.0, 1.0, 0.0); // TREE_AXIS = +Y (tree-local)
   std::vector<Mat4> world(tree.mods.size());
   for (size_t i = 0; i < tree.mods.size(); ++i) {
@@ -1267,8 +1270,14 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("lsystem_forest");
     ImGui::Text("%zu trees", forest.size());
+    // Both of these used to be inert. The slider moved a float nothing read, and
+    // the checkbox flipped a bool without ever calling setShadowsEnabled — only
+    // the menu item applied it, so the two disagreed about the truth as soon as
+    // you touched the checkbox. Every control in this window now drives
+    // something, and shadows are applied from whichever of the two you use.
     ImGui::SliderFloat("wind", &uiWind, 0.0f, 3.0f);
-    ImGui::Checkbox("shadows", &uiShadows);
+    if (ImGui::Checkbox("shadows", &uiShadows))
+      sg.setShadowsEnabled(uiShadows);
     ImGui::End();
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
@@ -1387,7 +1396,7 @@ int main(int argc, char **argv) {
     // cost; a capture re-poses every frame so nothing stutters.
     if (capturing || frame % WIND_STRIDE == 0) {
       for (Tree &tr : forest)
-        reposeTree(tr, t, woodBuf, needleBuf);
+        reposeTree(tr, t, woodBuf, needleBuf, uiWind);
       woodNode->updateVertices(woodBuf);
       if (needleNode)
         needleNode->updateVertices(needleBuf);

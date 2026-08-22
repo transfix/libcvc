@@ -133,11 +133,14 @@ TouchGestures::TouchGestures(cvc::app &ctx, const std::string &statePath, Camera
   seedState();
 #ifdef __EMSCRIPTEN__
   cvcgl_touch_install(m_impl->canvas.c_str());
-  // On a phone ONE FINGER TRANSLATES the scene: there is no middle button, and
-  // dragging the world around is more useful than tumbling it. Two fingers still
-  // rotate (and pinch to zoom), so nothing is lost.
-  if (m_impl->cam)
-    m_impl->cam->setPrimaryDragPans(true);
+  // Deliberately NOT touching primaryDragPans here.
+  //
+  // It used to be forced true so one finger translated. But that flag belongs to
+  // the CAMERA, not to the touch layer — it is the same one the primary MOUSE
+  // drag reads — so setting it left the viewer unable to orbit at all: every
+  // drag, finger or mouse, panned. One finger now orbits (the camera's default)
+  // and two fingers translate, which is the gesture split people expect and
+  // matches the desktop rule that only the middle button pans.
 #endif
 }
 
@@ -214,14 +217,24 @@ void TouchGestures::update() {
   // orbit in 3-D. beginDrag/endDrag bracket it because Map-mode panning only
   // applies while the controller considers itself dragging.
   if (s.panEnabled && (std::abs(panX) > 0.5 || std::abs(panY) > 0.5)) {
-    // TWO fingers = the camera's primary drag motion (orbit in 3-D, pan on a
-    // map). One finger already pans on touch, so this stays the rotate gesture.
-    const bool wasPan = s.cam->primaryDragPans();
-    s.cam->setPrimaryDragPans(false);
-    s.cam->beginDrag();
-    s.cam->mouseLook(static_cast<int>(panX), static_cast<int>(panY));
-    s.cam->endDrag();
-    s.cam->setPrimaryDragPans(wasPan);
+    // TWO fingers TRANSLATE. A phone has no middle button, so this is the
+    // stand-in for the desktop's middle-drag pan; one finger is left to orbit.
+    //
+    // beginPan()/endPan() rather than toggling primaryDragPans around the drag.
+    // Both reach the same pan branch, but the flag is cvc::state-backed and its
+    // setter raises no self-write guard, so flipping it twice per gesture frame
+    // echoed through handleStateChanged -> readAllFromState -> applyToCamera,
+    // which re-read the pose from state (mirrored at only 15 Hz) and undid the
+    // delta the gesture had just applied. The pan bracket writes no state.
+    // NEGATE Y. The accumulator is built from DOM clientY, which grows
+    // DOWNWARD, but mouseLook() takes VTK display deltas, where y grows UPWARD
+    // (vtkRenderWindowInteractor::GetEventPosition is origin-bottom-left). Fed
+    // raw, a finger-drag up arrives as a negative dy and the scene translated
+    // the wrong way — the axis conventions are opposite, so one of the two has
+    // to be flipped and this is the boundary between them.
+    s.cam->beginPan();
+    s.cam->mouseLook(static_cast<int>(panX), -static_cast<int>(panY));
+    s.cam->endPan();
   }
 #endif
 }

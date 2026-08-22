@@ -20,10 +20,12 @@
 #include <vtkCameraPass.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkLight.h>
+#include <vtkLightCollection.h>
 #include <vtkMultiVolume.h>
 #include <vtkObjectFactory.h>
 #include <vtkOverlayPass.h>
 #include <vtkRenderPassCollection.h>
+#include <vtkRenderState.h>
 #include <vtkRenderer.h>
 #include <vtkSequencePass.h>
 #include <vtkShadowMapBakerPass.h>
@@ -919,8 +921,25 @@ public:
   int Interval = 1;
 
   void Render(const vtkRenderState *s) override {
-    if (Interval <= 1 || (m_counter % static_cast<unsigned long>(Interval)) == 0) {
-      this->Superclass::Render(s); // real bake
+    // Skipping a bake is only safe while the SET OF SHADOW CASTERS is unchanged.
+    //
+    // vtkShadowMapBakerPass sizes its ShadowMaps vector inside Render(), and
+    // only when NeedUpdate is set. SetUpToDate() clears NeedUpdate without
+    // resizing, so on a skipped frame the downstream vtkShadowMapPass walks the
+    // renderer's CURRENT light list while indexing the PREVIOUS bake's vector:
+    //
+    //     map = (*GetShadowMaps())[shadowingLightIndex];   // no bounds check
+    //     map->Activate();
+    //
+    // Add a caster (raise the wash count, un-hide a light, "All on") and that
+    // index runs past size() and dereferences garbage. REMOVE one and the loop
+    // just ends early with every index valid — which is exactly why decreasing
+    // the wash count looked fine and increasing it did not.
+    const std::size_t casters = countShadowCasters(s);
+    const bool due = (Interval <= 1) || (m_counter % static_cast<unsigned long>(Interval)) == 0;
+    if (due || casters != m_bakedCasters) {
+      this->Superclass::Render(s); // real bake, resizes ShadowMaps
+      m_bakedCasters = casters;
     } else {
       this->SetUpToDate(); // reuse the last-baked maps this frame
     }
@@ -930,8 +949,28 @@ public:
 protected:
   StridedShadowBaker() = default;
 
+  // What the downstream pass will count when it walks the light list: a light
+  // that is switched on AND satisfies LightCreatesShadow (positional with a
+  // cone below 90, or directional). Must match that predicate exactly, or the
+  // guard above protects the wrong number.
+  std::size_t countShadowCasters(const vtkRenderState *s) {
+    if (!s || !s->GetRenderer())
+      return 0;
+    vtkLightCollection *lc = s->GetRenderer()->GetLights();
+    if (!lc)
+      return 0;
+    std::size_t n = 0;
+    lc->InitTraversal();
+    while (vtkLight *l = lc->GetNextItem())
+      if (l->GetSwitch() && this->LightCreatesShadow(l))
+        ++n;
+    return n;
+  }
+
 private:
   unsigned long m_counter = 0;
+  // (std::size_t)-1 so the first frame always bakes rather than matching 0.
+  std::size_t m_bakedCasters = static_cast<std::size_t>(-1);
   StridedShadowBaker(const StridedShadowBaker &) = delete;
   void operator=(const StridedShadowBaker &) = delete;
 };
