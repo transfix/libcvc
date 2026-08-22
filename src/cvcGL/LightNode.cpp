@@ -100,8 +100,29 @@ void LightNode::handleStateChanged(const std::string &childState) {
 void LightNode::notifyScene() {
   // The scene rebuilds its whole light set from the graph; batching in
   // SceneGraph keeps that to one rebuild even when several lights change.
-  if (SceneGraph *sg = getSceneGraph())
+  //
+  // MARSHALLED to the owner thread, because this is reachable off it. A pose
+  // write goes through the scene's state_publisher, whose worker runs on its own
+  // thread; its flush fires childChanged, and SceneNode disables instance
+  // threading, so handleStateChanged — and therefore this — run on THAT thread.
+  // applyLights() would then call RemoveAllLights()/AddLight() on the
+  // vtkRenderer while the render thread may be inside vtkRenderer::Render().
+  // That crashes intermittently and in BOTH directions, which is what remained
+  // after the shadow-map sizing bug (which only bit when casters grew) was
+  // fixed. Deferring puts the rebuild between frames instead of inside one.
+  SceneGraph *sg = getSceneGraph();
+  if (!sg)
+    return;
+  if (sg->onOwnerThread()) {
     sg->lightsChanged();
+    return;
+  }
+  // Weak-guarded by SceneNode::runOnMainThread: if the node dies before the
+  // pump drains, the callback is dropped rather than left dangling.
+  runOnMainThread([this]() {
+    if (SceneGraph *s = getSceneGraph())
+      s->lightsChanged();
+  });
 }
 
 void LightNode::setVisible(bool visible) {
