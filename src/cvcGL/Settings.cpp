@@ -29,10 +29,12 @@ void ShadowSettings::seedState() {
 }
 
 void ShadowSettings::set(Values v) {
+  // Object -> state only. Do NOT invoke m_apply here: the caller is the object
+  // reporting what it already did, and calling back into it re-applies stale
+  // values (it re-enabled shadows immediately after setShadowsEnabled(false)).
+  // m_apply exists for the other direction, from handleStateChanged.
   m_v = v;
   seedState();
-  if (m_apply)
-    m_apply(m_v);
 }
 
 ShadowSettings::Values ShadowSettings::get() const { return m_v; }
@@ -71,10 +73,9 @@ void UiSettings::seedState() {
 }
 
 void UiSettings::set(Values v) {
+  // Object -> state only; see the note on ShadowSettings::set.
   m_v = v;
   seedState();
-  if (m_apply)
-    m_apply(m_v);
 }
 
 UiSettings::Values UiSettings::get() const { return m_v; }

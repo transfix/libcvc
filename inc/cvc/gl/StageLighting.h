@@ -109,6 +109,19 @@ public:
   void setBack(double intensity);
   // count = number of downlights in the overhead ring (0 disables the wash).
   void setWash(double intensity, int count, double heightScale);
+  // ENVIRONMENT fill: broad, shadow-free light for everything OUTSIDE the rig's
+  // cones — open water, sky, distant scenery (state "env_intensity").
+  //
+  // A rig of tight cones lights the stage beautifully and leaves the rest of the
+  // world pitch dark. On matte ground that reads as vignetting; on WATER it is
+  // conspicuous, because a specular highlight can only appear where the surface
+  // is actually lit, so at grazing view angles the highlight vanishes entirely —
+  // the water it would fall on is outside every cone. This fills that in without
+  // touching shadow quality: the fill uses a >= 90 degree cone, which VTK
+  // excludes from the shadow bake, so it costs nothing there.
+  void setEnvironment(double intensity);
+  double environment() const;
+
   // A flat term added to every material so shadowed sides are not pure black.
   // This is the renderer's ambient, not a light.
   void setAmbient(double a);
@@ -156,6 +169,24 @@ public:
   // gizmos are visible. Toggle them off before judging composition.
   void setGizmosVisible(bool on);
   bool gizmosVisible() const;
+
+  // How see-through the beam cone is (state "gizmo_beam_alpha", 0..1).
+  // 0 = invisible beam (fixtures only), 1 = solid. The default is low: the beam
+  // is a debugging aid laid over the scene, and an opaque one hides the very
+  // shadows you turned it on to look at.
+  void setGizmoBeamAlpha(double a);
+  double gizmoBeamAlpha() const;
+
+  // ---- per-light control (for debugging shadows) ---------------------------
+  // The rig's lights are scene nodes, so each can be switched independently.
+  // This is the fastest way to attribute a shadow artifact: kill lights one at a
+  // time until the striping stops, and the last one you turned off is the
+  // culprit. Names are the node names ("stage_key", "stage_wash_2", ...).
+  std::vector<std::string> lightNames() const;
+  void setLightEnabled(const std::string &name, bool on);
+  bool lightEnabled(const std::string &name) const;
+  // Solo: leave exactly one on. Empty string restores them all.
+  void soloLight(const std::string &name);
 
   // How many shadow-casting lights the rig currently has. Useful in a HUD: each
   // one costs a full scene depth re-render per bake.
