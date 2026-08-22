@@ -13,13 +13,19 @@
 #ifdef CVC_ENABLE_IMGUI
 
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/Clipboard.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/Settings.h>
 #include <imgui.h>
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
 #if defined(__EMSCRIPTEN__) && !defined(IMGUI_IMPL_OPENGL_ES3)
 #define IMGUI_IMPL_OPENGL_ES3
 #endif
 #include <backends/imgui_impl_opengl3.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <vtkCallbackCommand.h>
@@ -53,6 +59,69 @@ const unsigned long kMouseEvents[] = {vtkCommand::MouseMoveEvent,
                                       vtkCommand::LeaveEvent};
 const unsigned long kKeyEvents[] = {vtkCommand::KeyPressEvent, vtkCommand::KeyReleaseEvent,
                                     vtkCommand::CharEvent};
+
+// Is this a touch device? In the browser, ask the browser. Natively we assume
+// not: a desktop touchscreen still has a mouse, and doubling the UI for someone
+// with a mouse would be obnoxious. Callers can always override with setUiScale.
+bool detectTouchDevice() {
+#ifdef __EMSCRIPTEN__
+  return emscripten_run_script_int("(('ontouchstart' in window) || "
+                                   "(navigator.maxTouchPoints > 0)) ? 1 : 0") != 0;
+#else
+  return false;
+#endif
+}
+
+// A big, round, translucent show/hide button pinned to the bottom-right corner.
+//
+// ImGui has no round button, so this is an InvisibleButton (whose hit area is
+// its bounding square — a feature for fingers) with a circle drawn over it. It
+// lives in its own window because that is what makes ImGui claim the pointer
+// over it; a foreground draw-list would paint fine but let clicks fall through
+// to the camera. Zero window padding keeps the claimed rect exactly the size of
+// the button, so it steals as little of the scene as possible.
+bool floatingCircleToggle(const char *id, bool *open, float diameter, const char *glyph) {
+  const ImGuiViewport *vp = ImGui::GetMainViewport();
+  const float margin = ImGui::GetFontSize() * 0.75f; // scales with the UI
+  ImGui::SetNextWindowPos(
+      ImVec2(vp->WorkPos.x + vp->WorkSize.x - margin, vp->WorkPos.y + vp->WorkSize.y - margin),
+      ImGuiCond_Always, ImVec2(1.0f, 1.0f)); // pivot: the window's own corner
+  ImGui::SetNextWindowBgAlpha(0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  const ImGuiWindowFlags flags =
+      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+  bool clicked = false;
+  if (ImGui::Begin(id, nullptr, flags)) {
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##hit", ImVec2(diameter, diameter));
+    clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+    const bool hovered = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+    const ImVec2 c(p0.x + diameter * 0.5f, p0.y + diameter * 0.5f);
+    const float r = diameter * 0.5f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    // GetColorU32 with an alpha multiplier respects style.Alpha; a raw IM_COL32
+    // would not. Translucent so the scene still reads through the button.
+    const ImU32 fill = ImGui::GetColorU32(held      ? ImGuiCol_ButtonActive
+                                          : hovered ? ImGuiCol_ButtonHovered
+                                                    : ImGuiCol_Button,
+                                          held      ? 0.85f
+                                          : hovered ? 0.70f
+                                                    : 0.40f);
+    dl->AddCircleFilled(c, r, fill, 0);
+    dl->AddCircle(c, r, ImGui::GetColorU32(ImGuiCol_Border, 0.55f), 0,
+                  diameter * 0.03f > 1.0f ? diameter * 0.03f : 1.0f);
+    const ImVec2 ts = ImGui::CalcTextSize(glyph);
+    dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+                ImGui::GetColorU32(ImGuiCol_Text, 0.9f), glyph);
+  }
+  ImGui::End();
+  ImGui::PopStyleVar();
+  if (clicked && open)
+    *open = !*open;
+  return clicked;
+}
 } // namespace
 
 struct ImGuiOverlay::Impl {
@@ -66,6 +135,16 @@ struct ImGuiOverlay::Impl {
   bool visible = true;  // caller intent
   CameraController *cam = nullptr;
   bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
+  ImGuiStyle pristineStyle; // the unscaled style, captured once
+  bool haveStyle = false;
+  float appliedScale = -1.0f; // guard: applyScale is idempotent per value
+  float uiScale = 1.0f;
+  bool touchMode = false;
+  bool panelsOpen = true;               // the floating toggle drives this
+  bool showToggle = true;               // draw the floating show/hide button
+  bool sizedOnce = false;               // first frame with a real DisplaySize
+  std::unique_ptr<UiSettings> settings; // the state mirror
+  bool applyingState = false;           // re-entry guard
   bool frameOpen = false;
   double lastTime = 0.0;
 
@@ -103,7 +182,29 @@ struct ImGuiOverlay::Impl {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     frameOpen = true;
-    if (draw)
+    // On a SMALL viewport (a phone), start with the panels hidden. Finger-sized
+    // widgets on a 400px-wide screen would otherwise bury the scene the moment
+    // it loads — the UI has to be reachable, not permanently in the way. The
+    // toggle button is always there to bring it back. Decided once, on the
+    // first frame that has a real size, so a later resize does not fight the
+    // user's own choice.
+    if (!sizedOnce && io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+      sizedOnce = true;
+      const float shortSide =
+          io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
+      if (shortSide < 700.0f)
+        panelsOpen = false;
+    }
+    // The toggle is drawn FIRST so it is always reachable, even when the panels
+    // it hides would have covered this corner.
+    if (showToggle) {
+      const float d = 34.0f * (appliedScale > 0.0f ? appliedScale : 1.0f);
+      const bool was = panelsOpen;
+      floatingCircleToggle("##cvcgl_ui_toggle", &panelsOpen, d, panelsOpen ? "X" : "=");
+      if (panelsOpen != was)
+        syncSettings(); // the button is a setting change like any other
+    }
+    if (draw && panelsOpen)
       draw();
   }
 
@@ -131,6 +232,44 @@ struct ImGuiOverlay::Impl {
     frameOpen = false;
   }
 
+  // Mirror every UI setting into cvc::state, and let a state write drive us.
+  void syncSettings() {
+    if (!settings || applyingState)
+      return;
+    UiSettings::Values v;
+    v.visible = visible;
+    v.scale = uiScale;
+    v.touchMode = touchMode;
+    v.panelsOpen = panelsOpen;
+    v.toggleButton = showToggle;
+    settings->set(v);
+  }
+
+  // ---- scaling -------------------------------------------------------------
+  // Re-derive the whole style from the pristine copy at a new scale.
+  // ScaleAllSizes() multiplies IN PLACE (and truncates to integers), so calling
+  // it repeatedly compounds: five calls at 2x give FramePadding 128 instead of
+  // 8. Always start from the unscaled style.
+  void applyScale(float scale) {
+    if (!haveStyle || scale == appliedScale)
+      return;
+    appliedScale = scale;
+    ImGuiStyle &style = ImGui::GetStyle();
+    style = pristineStyle;
+    style.ScaleAllSizes(scale);
+    // ScaleAllSizes cannot grow this one: it defaults to (0,0) and 0 * scale is
+    // still 0. It is the slop around a widget's hit rect, which is exactly what
+    // a fingertip needs.
+    if (scale > 1.0f)
+      style.TouchExtraPadding = ImVec2(4.0f * scale, 4.0f * scale);
+    // Fonts are dynamic in 1.92 (re-baked at the final size), so this is both
+    // crisp and safe to change at runtime. io.FontGlobalScale is OBSOLETE and
+    // asserts against this field — do not use it.
+    style.FontScaleMain = scale;
+    // Fingers wobble; the 6px default drag threshold turns a tap into a drag.
+    ImGui::GetIO().MouseDragThreshold = scale > 1.0f ? 10.0f : 6.0f;
+  }
+
   // ---- input --------------------------------------------------------------
   // Feed ImGui the interactor's pointer state, then decide whether VTK's style
   // is allowed to see this event. Returning true ABORTS the style's handling.
@@ -143,6 +282,11 @@ struct ImGuiOverlay::Impl {
     if (cam && cam->pointerCapture())
       return false;
     ImGuiIO &io = ImGui::GetIO();
+    // Tag the source BEFORE the events it applies to: AddMouseSourceEvent is not
+    // an event, it is a latch stamped onto subsequent mouse events, and it is
+    // initialised once at context creation rather than per frame. Left unset,
+    // every event stays tagged with whatever was latched last.
+    io.AddMouseSourceEvent(touchMode ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
     int x = 0, y = 0;
     interactor->GetEventPosition(x, y);
     int *sz = interactor->GetSize();
@@ -155,6 +299,22 @@ struct ImGuiOverlay::Impl {
       break;
     case vtkCommand::LeftButtonReleaseEvent:
       io.AddMouseButtonEvent(0, false);
+      // A finger that lifts does not hover anywhere, but a mouse does — so
+      // without this the last touched widget stays hovered FOREVER, which keeps
+      // io.WantCaptureMouse true, which makes intercept() abort every event from
+      // here on: one tap and the camera is locked out permanently. Clearing the
+      // position is what the Android backend does for the same reason.
+      //
+      // This relies on io.ConfigInputTrickleEventQueue (default true): with
+      // trickling off, the clear collapses into the same frame as the release,
+      // the release lands on a non-hovered widget, and the tap is silently lost.
+      // Never turn trickling off here.
+      if (touchMode)
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+      break;
+    case vtkCommand::LeaveEvent:
+      // The pointer left the window — same reasoning, for the desktop build.
+      io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
       break;
     case vtkCommand::RightButtonPressEvent:
       io.AddMouseButtonEvent(1, true);
@@ -218,6 +378,64 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   ImGuiIO &io = ImGui::GetIO();
   io.IniFilename = nullptr; // don't litter imgui.ini next to the binary
   ImGui::StyleColorsDark();
+
+  // Be explicit about the font. AddFontDefault() is a HEURISTIC that picks the
+  // 13px bitmap ProggyClean below an expected size of 15 and the scalable
+  // ProggyForever at or above it — and it runs on the first frame, before any
+  // scale we set later. Left implicit we silently get the bitmap face, which is
+  // sharp at 13px and ugly at every other size. Ask for the vector face and give
+  // it a logical base size; final pixels = FontSizeBase * FontScaleMain, and
+  // ImGui 1.92 re-bakes glyphs at that exact size (no stretching, so scaling up
+  // stays crisp).
+  io.Fonts->AddFontDefaultVector();
+  ImGui::GetStyle().FontSizeBase = 16.0f;
+
+  // Remember the unscaled style: ScaleAllSizes multiplies IN PLACE and rounds,
+  // so it must never be applied twice. applyUiScale() always re-derives from
+  // this pristine copy rather than scaling the live style again.
+  m_impl->pristineStyle = ImGui::GetStyle();
+  m_impl->haveStyle = true;
+
+  // Touch devices get a bigger UI by default — the widget sizes that suit a
+  // mouse are unusable with a finger.
+  m_impl->touchMode = detectTouchDevice();
+  m_impl->uiScale = m_impl->touchMode ? 2.0f : 1.0f;
+  m_impl->applyScale(m_impl->uiScale);
+
+  // Every UI setting is reachable as cvc::state, like the camera and the HUD.
+  Impl *impl = m_impl.get();
+  m_impl->settings = std::make_unique<UiSettings>(
+      viewer.scene().appContext(),
+      UiSettings::viewerStatePath(viewer.scene().getStatePrefix(), viewer.name()),
+      [impl](UiSettings::Values v) {
+        impl->applyingState = true;
+        impl->visible = v.visible;
+        impl->touchMode = v.touchMode;
+        impl->panelsOpen = v.panelsOpen;
+        impl->showToggle = v.toggleButton;
+        impl->uiScale = static_cast<float>(v.scale);
+        impl->applyScale(impl->uiScale);
+        impl->applyingState = false;
+      });
+  m_impl->syncSettings();
+
+  // Copy/paste. There is no ImGui platform backend under us (VTK owns the
+  // window), so nothing would supply these except on Windows, where imgui core
+  // already implements the Win32 clipboard — cvc::gl::clipboard forwards to it
+  // there and implements the rest (X11 selections, NSPasteboard, and in the
+  // browser writeText for copy + the page's paste events for read).
+  ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
+  pio.Platform_SetClipboardTextFn = [](ImGuiContext *, const char *text) {
+    cvc::gl::clipboard::set(text ? text : "");
+  };
+  pio.Platform_GetClipboardTextFn = [](ImGuiContext *) -> const char * {
+    // ImGui reads this immediately, so hand back storage that outlives the call
+    // but is replaced on the next paste.
+    static std::string buf;
+    buf = cvc::gl::clipboard::get();
+    return buf.c_str();
+  };
+
   m_impl->ready = true; // GL backend is initialized lazily (see ensureBackend)
 
   m_impl->beginCmd = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -273,8 +491,39 @@ ImGuiOverlay::~ImGuiOverlay() {
 }
 
 void ImGuiOverlay::setDrawCallback(std::function<void()> draw) { m_impl->draw = std::move(draw); }
+
+void ImGuiOverlay::setUiScale(float scale) {
+  if (scale < 0.25f)
+    scale = 0.25f;
+  if (scale > 4.0f)
+    scale = 4.0f;
+  m_impl->uiScale = scale;
+  m_impl->applyScale(scale);
+  m_impl->syncSettings();
+}
+float ImGuiOverlay::uiScale() const { return m_impl->uiScale; }
+
+void ImGuiOverlay::setTouchMode(bool on) {
+  m_impl->touchMode = on;
+  setUiScale(on ? 2.0f : 1.0f); // also syncs
+}
+bool ImGuiOverlay::touchMode() const { return m_impl->touchMode; }
+
+void ImGuiOverlay::setToggleButtonEnabled(bool on) {
+  m_impl->showToggle = on;
+  m_impl->syncSettings();
+}
+bool ImGuiOverlay::toggleButtonEnabled() const { return m_impl->showToggle; }
+void ImGuiOverlay::setPanelsOpen(bool on) {
+  m_impl->panelsOpen = on;
+  m_impl->syncSettings();
+}
+bool ImGuiOverlay::panelsOpen() const { return m_impl->panelsOpen; }
 void ImGuiOverlay::attachCamera(CameraController &cam) { m_impl->cam = &cam; }
-void ImGuiOverlay::setVisible(bool on) { m_impl->visible = on; }
+void ImGuiOverlay::setVisible(bool on) {
+  m_impl->visible = on;
+  m_impl->syncSettings();
+}
 bool ImGuiOverlay::visible() const { return m_impl->visible; }
 bool ImGuiOverlay::enabled() const { return m_impl->ready; }
 bool ImGuiOverlay::wantsMouse() const {
@@ -300,6 +549,14 @@ void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
 void ImGuiOverlay::setVisible(bool) {}
 bool ImGuiOverlay::visible() const { return false; }
 bool ImGuiOverlay::enabled() const { return false; }
+void ImGuiOverlay::setUiScale(float) {}
+float ImGuiOverlay::uiScale() const { return 1.0f; }
+void ImGuiOverlay::setTouchMode(bool) {}
+bool ImGuiOverlay::touchMode() const { return false; }
+void ImGuiOverlay::setToggleButtonEnabled(bool) {}
+bool ImGuiOverlay::toggleButtonEnabled() const { return false; }
+void ImGuiOverlay::setPanelsOpen(bool) {}
+bool ImGuiOverlay::panelsOpen() const { return true; }
 bool ImGuiOverlay::wantsMouse() const { return false; }
 bool ImGuiOverlay::wantsKeyboard() const { return false; }
 

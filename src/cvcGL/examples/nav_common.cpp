@@ -9,6 +9,7 @@
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <vtkCamera.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
 namespace navdemo {
@@ -250,9 +251,13 @@ void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, 
 
 void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin,
                        cvc::gl::CameraController *cam) {
+  const double halfH = 0.5 * (b.max_y - b.min_y) + margin;
+  const double halfW = 0.5 * (b.max_x - b.min_x) + margin;
   if (cam) {
-    // Interactive 2-D map: pan + zoom only, no rotation.
-    cam->frameMap(b.cx(), b.cy(), 0.5 * (b.max_y - b.min_y) + margin);
+    // Interactive 2-D map: pan + zoom only, no rotation. Passing the half-width
+    // too fits the WHOLE map in a narrow viewport (a phone in portrait) instead
+    // of cropping its sides, and keeps it fitted across rotation/fullscreen.
+    cam->frameMap(b.cx(), b.cy(), halfH, halfW);
     return;
   }
   // Eye straight above the centre, looking down -z, +y up.
@@ -262,7 +267,13 @@ void set_ortho_topdown(SceneRenderer &view, const Bounds &b, double margin,
     return;
   vtkCamera *vcam = r->GetActiveCamera();
   vcam->ParallelProjectionOn();
-  vcam->SetParallelScale(0.5 * (b.max_y - b.min_y) + margin);
+  // Same width fit on the offscreen capture path (fixed frame, no controller).
+  // Ask the WINDOW, not the renderer: a renderer reports its size only once it
+  // has rendered, so at setup time it would answer with a stale default and the
+  // fit would silently fall back to a height-only crop.
+  const int *sz = view.renderWindow() ? view.renderWindow()->GetSize() : nullptr;
+  const double aspect = (sz && sz[0] > 0 && sz[1] > 0) ? static_cast<double>(sz[0]) / sz[1] : 1.0;
+  vcam->SetParallelScale(std::max(halfH, halfW / std::max(1e-6, aspect)));
 }
 
 void add_border(std::uint8_t *occ, int rows, int cols) {

@@ -9,6 +9,8 @@ class app;
 
 namespace gl {
 
+class StageLighting;
+
 // --------------------------
 // cvc::gl::ui — state-bound widgets
 // --------------------------
@@ -62,6 +64,21 @@ bool Combo(cvc::app &ctx, const char *label, const std::string &path,
 // Read-only display of whatever a state path currently holds (for values the
 // app owns and the UI should only report).
 void Text(cvc::app &ctx, const char *label, const std::string &path);
+
+// ---- composite panels ------------------------------------------------------
+// Ready-made control surfaces for the cvcGL objects an app is most likely to
+// want on screen. They are ordinary ImGui content: call them inside a window you
+// opened, or let them open their own.
+
+// Full control surface for a StageLighting rig — preset picker, key/fill/back/
+// wash intensities, key angle and cone, ambient, warmth, and a live count of the
+// rig's SHADOW-CASTING lights (each one costs a whole scene depth re-render per
+// bake, so it is worth having on screen while you tune).
+//
+// Every control writes the rig's cvc::state, so the same edits are reachable
+// from a script, a config file or a replicated peer. Pass ownWindow=false to
+// embed the controls in a window you already began.
+void StageLightingPanel(StageLighting &rig, bool *open = nullptr, bool ownWindow = true);
 
 } // namespace ui
 } // namespace gl

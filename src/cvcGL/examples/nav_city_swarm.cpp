@@ -31,6 +31,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -167,6 +168,9 @@ int main(int argc, char **argv) {
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"),
       "PNG frame directory")("png", po::value<std::string>(&png), "write a single final PNG here");
+  bool no_ui = false;
+  desc.add_options()("no-ui", po::bool_switch(&no_ui),
+                     "hide the ImGui overlay (default: hidden while capturing)");
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
   po::notify(vm);
@@ -364,7 +368,7 @@ int main(int argc, char **argv) {
   view.renderer()->SetBackground(0.28, 0.40, 0.58);
   view.renderer()->SetBackground2(0.66, 0.78, 0.92);
 
-  cvc::gl::ScreenTextHud status(view); // corner status line — claims go on screen
+  cvc::gl::ScreenTextHud status(view, "status"); // corner status line — claims go on screen
   status.setCentered(false);
   status.setPosition(0.015, 0.95);
   status.setFontSize(13);
@@ -387,14 +391,18 @@ int main(int argc, char **argv) {
               belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
-#ifndef __EMSCRIPTEN__
+#if CVC_NAV_DEMO_SIM_WORKER
   auto sim = std::make_unique<cvc::nav::sim_thread>(world, hz);
   sim->start();
 #else
-  // Single-threaded browser build: no sim_thread worker (GitHub Pages can't send
-  // the COOP/COEP headers a pthreads wasm build needs). Step the world inline each
-  // frame and read its world-metre snapshot directly — the same call sim_thread makes.
+  // Non-threaded browser build: no worker available, because a wasm thread needs
+  // SharedArrayBuffer and the browser only grants that on a cross-origin-isolated
+  // page (GitHub Pages cannot send COOP/COEP, so the gallery build lands here).
+  // Step the world inline each frame and read its world-metre snapshot directly —
+  // the same call sim_thread makes. Build with -DCVC_WASM_PTHREADS=ON, and serve
+  // the page cross-origin isolated, to get the worker branch above instead.
   std::vector<float> emPos(static_cast<std::size_t>(N) * 2), emHead(N);
+  bool simPausedEm = false;
   std::vector<int> emMd(N);
   std::vector<std::uint8_t> emRch(N);
   (void)hz;
@@ -409,6 +417,10 @@ int main(int argc, char **argv) {
   // construction, so changing them rebuilds the world and the N-sized meshes).
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  // Phones have no mouse: pinch = zoom, two-finger drag = pan/turn.
+  cvc::gl::TouchGestures touch(view, cam);
+  // A capture is a deliverable: no control panel in the frames unless asked.
+  ui.setVisible(!no_ui && !capturing);
   bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
@@ -488,6 +500,7 @@ int main(int argc, char **argv) {
       last = t;
     }
     view.processUIEvents();
+    touch.update(); // apply any pinch/two-finger gesture from this frame
 
 #ifdef CVC_ENABLE_IMGUI
     // ---- apply UI actions ---------------------------------------------------
@@ -512,8 +525,10 @@ int main(int argc, char **argv) {
       // Agent count / belief mode / fog are constructor-time properties of
       // sim_world, so a restart rebuilds the world and every N-sized mesh.
       uiRestart = false;
+#if CVC_NAV_DEMO_SIM_WORKER
       sim->stop();
       sim.reset(); // join before the world it borrows changes underneath it
+#endif
       fogOn = uiFog;
       belief = uiBelief;
       *worldPtr = std::move(*build_world(uiAgents, uiBelief, uiFog, simSeed));
@@ -565,13 +580,19 @@ int main(int argc, char **argv) {
       }
       arrived = 0;
       frame = 0;
+#if CVC_NAV_DEMO_SIM_WORKER
       sim = std::make_unique<cvc::nav::sim_thread>(world, uiHz);
       sim->start();
+#endif
       std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u)\n", N,
                   belief.c_str(), fogOn ? "on" : "off", simSeed);
     }
+#if CVC_NAV_DEMO_SIM_WORKER
     if (sim)
       sim->set_paused(uiPaused && !uiStep);
+#else
+    simPausedEm = uiPaused && !uiStep; // browser build steps the world inline
+#endif
     uiStep = false;
 #endif
 
@@ -663,7 +684,7 @@ int main(int argc, char **argv) {
       agentNode->updateColors(rgbBuf);
     };
 
-#ifndef __EMSCRIPTEN__
+#if CVC_NAV_DEMO_SIM_WORKER
     if (auto snap = sim->read()) {
       if (snap->n == N) {
         const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
@@ -674,7 +695,8 @@ int main(int argc, char **argv) {
       }
     }
 #else
-    world.step(0);
+    if (!simPausedEm)
+      world.step(0);
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
       const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
@@ -727,14 +749,14 @@ int main(int argc, char **argv) {
       break;
   }
 
-#ifndef __EMSCRIPTEN__
+#if CVC_NAV_DEMO_SIM_WORKER
   if (sim)
     sim->stop();
 #endif
   cam.detach();
   if (!png.empty())
     view.writePNG(png);
-#ifndef __EMSCRIPTEN__
+#if CVC_NAV_DEMO_SIM_WORKER
   std::printf("nav_city_swarm: done (%ld frames, sim ticks=%ld)\n", frame, sim ? sim->ticks() : 0L);
 #endif
   return 0;

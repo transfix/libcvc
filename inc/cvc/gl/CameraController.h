@@ -91,6 +91,12 @@ public:
   // to / read from state "mode".
   void setMode(Mode m);
   Mode mode() const;
+
+  // Move the eye along its own view direction by `steps` (positive = forward).
+  // This is what "zoom" has to mean in FLY mode, where there is no orbit centre
+  // to pull toward and mouseWheel() adjusts movement SPEED instead. Step size
+  // scales with the current move speed, so it feels the same at any scale.
+  void dolly(double steps);
   void toggleMode();
 
   // World up axis (state "up"). Default +Z.
@@ -103,7 +109,14 @@ public:
 
   // Map mode framing: look straight down at (cx, cy) with a half-height of
   // `halfHeight` world units (the parallel scale). Sets Mode::Map.
-  void frameMap(double cx, double cy, double halfHeight);
+  //
+  // Pass `halfWidth` > 0 to fit the whole RECT rather than just its height.
+  // VTK's parallel scale is a half-HEIGHT, so a plain height fit crops the sides
+  // on any viewport narrower than the map — which is every phone in portrait.
+  // With a half-width the controller keeps the rect framed across resizes too
+  // (rotation, entering fullscreen), re-fitting when the viewport aspect
+  // changes, until the user zooms and takes over.
+  void frameMap(double cx, double cy, double halfHeight, double halfWidth = 0.0);
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
@@ -173,6 +186,9 @@ private:
   void recenterPointer();              // X11 pointer warp for continuous captured look
   void resetTrack();                   // reset cinematic smoothing (ease in from current view)
   bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
+  double viewportAspect() const;       // renderer width/height, or 0 if unknown
+  double mapFitScale(double halfHeight, double halfWidth) const; // parallel scale fitting a rect
+  void refitMapIfResized(); // re-fit the map rect when the viewport changes shape
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

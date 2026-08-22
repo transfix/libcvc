@@ -158,8 +158,42 @@ public:
       m_controller->mouseWheel(-1.0);
   }
 
+  // ---- multi-touch gestures (desktop touchscreens) -------------------------
+  // vtkInteractorStyle declares these as EMPTY virtuals and only
+  // vtkInteractorStyleMultiTouchCamera overrides them, so without these a
+  // recognized pinch is silently dropped. VTK's recognizer reports an ABSOLUTE
+  // scale relative to the gesture start, so convert to relative steps.
+  // (In the browser VTK's recognizer never fires — its wasm interactor mis-feeds
+  // multi-touch — which is what cvc::gl::TouchGestures exists to work around.)
+  void OnStartPinch() override {
+    if (this->Interactor)
+      m_lastScale = this->Interactor->GetScale();
+  }
+  void OnPinch() override {
+    if (!m_controller || !this->Interactor)
+      return;
+    const double s = this->Interactor->GetScale();
+    if (s > 0.0 && m_lastScale > 0.0 && std::abs(s - m_lastScale) > 1e-6) {
+      m_controller->mouseWheel(4.0 * std::log2(s / m_lastScale));
+      m_lastScale = s;
+    }
+  }
+  void OnEndPinch() override { m_lastScale = 1.0; }
+  void OnPan() override {
+    if (!m_controller || !this->Interactor)
+      return;
+    double *t = this->Interactor->GetTranslation();
+    double *lt = this->Interactor->GetLastTranslation();
+    if (!t || !lt)
+      return;
+    m_controller->beginDrag();
+    m_controller->mouseLook(static_cast<int>(t[0] - lt[0]), static_cast<int>(t[1] - lt[1]));
+    m_controller->endDrag();
+  }
+
 private:
   cvc::gl::CameraController *m_controller = nullptr;
+  double m_lastScale = 1.0; // pinch: VTK reports absolute scale, we need relative
 };
 vtkStandardNewMacro(CvcCameraInteractorStyle);
 
@@ -192,6 +226,10 @@ struct CameraController::Impl {
   std::set<std::string> held;
   bool dragging = false;
   double poseMirrorAccum = 0.0;
+  // Map-mode fit: the rect frameMap() was asked to show, the aspect it was last
+  // fitted at, and whether the user has since zoomed (which ends auto-fitting).
+  double mapFitHalfW = 0.0, mapFitHalfH = 0.0, mapFitAspect = 0.0;
+  bool mapFitUserZoomed = false;
   std::atomic<bool> selfWrite{false};
   // track smoothing state (harvested from ChaseCamera)
   Vec3 trackP, trackPrev, trackV, trackHead, trackEye, trackFocal;
@@ -531,23 +569,72 @@ void CameraController::getUpAxis(double &x, double &y, double &z) const {
   z = m_impl->up.z;
 }
 
-void CameraController::frameMap(double cx, double cy, double halfHeight) {
+// The parallel scale that fits a (2*halfWidth x 2*halfHeight) rect in the
+// current viewport. VTK's parallel scale is the half-HEIGHT of the view, so
+// fitting the width means dividing by the aspect ratio; taking the max of the
+// two fits the whole rect (letterboxed) instead of cropping its sides.
+double CameraController::mapFitScale(double halfHeight, double halfWidth) const {
+  if (halfWidth <= 0.0)
+    return halfHeight;
+  const double aspect = viewportAspect();
+  if (aspect <= 0.0)
+    return halfHeight; // unknown yet: refitMapIfResized() corrects on frame 1
+  return std::max(halfHeight, halfWidth / aspect);
+}
+
+void CameraController::frameMap(double cx, double cy, double halfHeight, double halfWidth) {
   Impl &s = *m_impl;
   s.mode = Mode::Map;
   s.held.clear();
   setPointerCapture(false);
+  s.mapFitHalfH = halfHeight;
+  s.mapFitHalfW = halfWidth;
+  s.mapFitUserZoomed = false;
   if (s.camera) {
     // Straight down the +z axis, +y up — a north-up map.
     s.camera->SetPosition(cx, cy, 1000.0);
     s.camera->SetFocalPoint(cx, cy, 0.0);
     s.camera->SetViewUp(0.0, 1.0, 0.0);
     s.camera->ParallelProjectionOn();
-    s.camera->SetParallelScale(std::max(1e-3, halfHeight));
+    s.camera->SetParallelScale(std::max(1e-3, mapFitScale(halfHeight, halfWidth)));
     if (s.renderer)
       s.renderer->ResetCameraClippingRange();
   }
+  s.mapFitAspect = viewportAspect();
   syncConfigToState();
   syncPoseToState();
+}
+
+double CameraController::viewportAspect() const {
+  const Impl &s = *m_impl;
+  if (!s.renderer)
+    return 0.0;
+  // Prefer the window: a renderer only reports a real size once it has rendered,
+  // so before the first frame it answers with a default that would fit wrongly.
+  const int *sz = nullptr;
+  if (vtkRenderWindow *w = s.renderer->GetRenderWindow())
+    sz = w->GetSize();
+  if (!sz || sz[0] <= 0 || sz[1] <= 0)
+    sz = s.renderer->GetSize();
+  if (!sz || sz[0] <= 0 || sz[1] <= 0)
+    return 0.0;
+  return static_cast<double>(sz[0]) / static_cast<double>(sz[1]);
+}
+
+// Re-fit after the viewport changes shape — a phone rotating, entering
+// fullscreen, or any window resize. Without this the map crops the moment the
+// aspect narrows. Once the user zooms, the framing is theirs and we stop.
+void CameraController::refitMapIfResized() {
+  Impl &s = *m_impl;
+  if (s.mode != Mode::Map || s.mapFitHalfW <= 0.0 || s.mapFitUserZoomed || !s.camera)
+    return;
+  const double aspect = viewportAspect();
+  if (aspect <= 0.0 || std::abs(aspect - s.mapFitAspect) < 1e-4)
+    return;
+  s.mapFitAspect = aspect;
+  s.camera->SetParallelScale(std::max(1e-3, mapFitScale(s.mapFitHalfH, s.mapFitHalfW)));
+  if (s.renderer)
+    s.renderer->ResetCameraClippingRange();
 }
 
 void CameraController::setOrbitCenter(double x, double y, double z) {
@@ -579,6 +666,7 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
 // ---- per-frame ----
 void CameraController::update(double dtSeconds) {
   Impl &s = *m_impl;
+  refitMapIfResized(); // cheap: only does work when the viewport changed shape
   if (s.mode == Mode::Fly) {
     double fwd = (s.held_has(s.kForward) ? 1 : 0) - (s.held_has(s.kBackward) ? 1 : 0);
     double strafe = (s.held_has(s.kRight) ? 1 : 0) - (s.held_has(s.kLeft) ? 1 : 0);
@@ -701,7 +789,8 @@ void CameraController::mouseWheel(double steps) {
   if (s.mode == Mode::Fly)
     s.moveSpeed = std::max(1e-4, s.moveSpeed * std::pow(1.25, steps));
   else if (s.mode == Mode::Map) {
-    if (s.camera) { // zoom = parallel scale, the only 2-D zoom that means anything
+    if (s.camera) {              // zoom = parallel scale, the only 2-D zoom that means anything
+      s.mapFitUserZoomed = true; // their framing now — stop auto-fitting on resize
       s.camera->SetParallelScale(
           std::max(1e-3, s.camera->GetParallelScale() * std::pow(0.9, steps)));
       if (s.renderer)
@@ -712,6 +801,21 @@ void CameraController::mouseWheel(double steps) {
     applyToCamera();
   }
   syncConfigToState();
+}
+
+void CameraController::dolly(double steps) {
+  Impl &s = *m_impl;
+  if (s.mode != Mode::Fly) {
+    mouseWheel(steps); // orbit/map already zoom correctly through the wheel
+    return;
+  }
+  // Step along the view direction, scaled by move speed so the gesture feels
+  // the same in a room-sized scene and an island-sized one.
+  const Basis b = basisFromUp(s.up);
+  const Vec3 fwd = forwardVec(b, s.flyYaw, s.flyPitch);
+  s.flyPos = s.flyPos + fwd * (steps * s.moveSpeed * 0.35);
+  applyToCamera();
+  syncPoseToState();
 }
 
 void CameraController::beginDrag() { m_impl->dragging = true; }

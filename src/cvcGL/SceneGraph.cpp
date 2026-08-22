@@ -11,6 +11,7 @@
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
+#include <cvc/gl/Settings.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
@@ -651,11 +652,21 @@ void SceneGraph::applyLights() {
   for (const auto &l : m_lights) {
     vtkSmartPointer<vtkLight> light = vtkSmartPointer<vtkLight>::New();
     light->SetLightTypeToSceneLight();
-    light->SetPositional(false); // directional: only the direction matters
-    const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
-    light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
-                       -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
-    light->SetFocalPoint(0.0, 0.0, 0.0);
+    if (l.kind == LightDesc::Kind::Spot) {
+      // Positional + a cone under 90 degrees. Both matter: VTK's shadow baker
+      // skips any positional light whose cone reaches 90, and it is the cone
+      // that concentrates the shadow map onto the lit area.
+      light->SetPositional(true);
+      light->SetPosition(l.px, l.py, l.pz);
+      light->SetFocalPoint(l.tx, l.ty, l.tz);
+      light->SetConeAngle(l.cone);
+    } else {
+      light->SetPositional(false); // directional: only the direction matters
+      const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
+      light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
+                         -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
+      light->SetFocalPoint(0.0, 0.0, 0.0);
+    }
     light->SetColor(l.r, l.g, l.b);
     light->SetIntensity(l.intensity);
     m_renderer->AddLight(light);
@@ -669,10 +680,83 @@ void SceneGraph::applyLights() {
 
 int SceneGraph::addDirectionalLight(double azimuthDeg, double elevationDeg, double r, double g,
                                     double b, double intensity) {
-  LightDesc d{m_nextLightId++, azimuthDeg, elevationDeg, r, g, b, intensity};
+  LightDesc d;
+  d.id = m_nextLightId++;
+  d.kind = LightDesc::Kind::Directional;
+  d.az = azimuthDeg;
+  d.el = elevationDeg;
+  d.r = r;
+  d.g = g;
+  d.b = b;
+  d.intensity = intensity;
   m_lights.push_back(d);
   applyLights();
   return d.id;
+}
+
+namespace {
+// VTK drops a positional light with cone >= 90 from the shadow bake, so a cone
+// of "90" means no shadow rather than a wide one. Clamp instead of surprising.
+inline double clampCone(double deg) { return deg < 0.5 ? 0.5 : (deg > 89.5 ? 89.5 : deg); }
+} // namespace
+
+int SceneGraph::addSpotLight(double x, double y, double z, double tx, double ty, double tz,
+                             double coneDeg, double r, double g, double b, double intensity) {
+  LightDesc d;
+  d.id = m_nextLightId++;
+  d.kind = LightDesc::Kind::Spot;
+  d.px = x;
+  d.py = y;
+  d.pz = z;
+  d.tx = tx;
+  d.ty = ty;
+  d.tz = tz;
+  d.cone = clampCone(coneDeg);
+  d.r = r;
+  d.g = g;
+  d.b = b;
+  d.intensity = intensity;
+  m_lights.push_back(d);
+  applyLights();
+  return d.id;
+}
+
+void SceneGraph::setLightPosition(int id, double x, double y, double z) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.px = x;
+      l.py = y;
+      l.pz = z;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightTarget(int id, double tx, double ty, double tz) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.tx = tx;
+      l.ty = ty;
+      l.tz = tz;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightCone(int id, double coneDeg) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.cone = clampCone(coneDeg);
+      applyLights();
+      return;
+    }
+}
+
+bool SceneGraph::lightCastsShadow(int id) const {
+  for (const auto &l : m_lights)
+    if (l.id == id)
+      return l.kind == LightDesc::Kind::Directional || l.cone < 90.0;
+  return false;
 }
 
 void SceneGraph::setLightDirection(int id, double azimuthDeg, double elevationDeg) {
@@ -754,10 +838,45 @@ private:
 };
 vtkStandardNewMacro(StridedShadowBaker);
 
+// Shadow settings mirrored into cvc::state at "<prefix>.shadows". Created lazily
+// (the ctor runs before the renderer exists) and guarded against re-entry: a
+// state write calls the setter, which would otherwise write state again.
+void SceneGraph::syncShadowState() {
+  if (m_applyingShadowState)
+    return;
+  // Capture the CURRENT values BEFORE creating the settings object. Its
+  // constructor seeds its own defaults, which fires handleStateChanged, which
+  // calls back into the setters — so building `v` afterwards would read values
+  // the seeding had already clobbered (a setShadowResolution(2048) landed as
+  // 1024, the default). The guard also covers construction, because that
+  // callback re-enters this function and would otherwise create a second
+  // settings object while the first is still being built.
+  cvc::gl::ShadowSettings::Values v;
+  v.enabled = m_shadowsEnabled;
+  v.resolution = m_shadowResolution;
+  v.interval = m_shadowInterval;
+
+  if (!m_shadowSettings) {
+    m_applyingShadowState = true;
+    m_shadowSettings = std::make_unique<cvc::gl::ShadowSettings>(
+        m_ctx, cvc::gl::ShadowSettings::sceneStatePath(m_statePrefix),
+        [this](cvc::gl::ShadowSettings::Values nv) {
+          m_applyingShadowState = true;
+          setShadowsEnabled(nv.enabled);
+          setShadowResolution(nv.resolution);
+          setShadowUpdateInterval(nv.interval);
+          m_applyingShadowState = false;
+        });
+    m_applyingShadowState = false;
+  }
+  m_shadowSettings->set(v);
+}
+
 void SceneGraph::setShadowUpdateInterval(int frames) {
   m_shadowInterval = frames < 1 ? 1 : frames;
   if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker))
     b->Interval = m_shadowInterval;
+  syncShadowState();
   requestRender();
 }
 
@@ -765,6 +884,7 @@ void SceneGraph::setShadowResolution(int pixels) {
   m_shadowResolution = pixels < 64 ? 64 : pixels;
   if (m_shadowBaker)
     m_shadowBaker->SetResolution(m_shadowResolution);
+  syncShadowState();
   requestRender();
 }
 
@@ -775,6 +895,7 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   if (!enabled) {
     m_renderer->SetPass(nullptr);
     m_shadowBaker = nullptr;
+    syncShadowState();
     requestRender();
     return true;
   }
@@ -814,6 +935,7 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
 
   m_renderer->SetPass(cam);
   m_shadowsEnabled = true;
+  syncShadowState();
   requestRender();
   return true;
 }
