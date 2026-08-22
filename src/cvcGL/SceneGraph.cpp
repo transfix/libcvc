@@ -651,11 +651,21 @@ void SceneGraph::applyLights() {
   for (const auto &l : m_lights) {
     vtkSmartPointer<vtkLight> light = vtkSmartPointer<vtkLight>::New();
     light->SetLightTypeToSceneLight();
-    light->SetPositional(false); // directional: only the direction matters
-    const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
-    light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
-                       -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
-    light->SetFocalPoint(0.0, 0.0, 0.0);
+    if (l.kind == LightDesc::Kind::Spot) {
+      // Positional + a cone under 90 degrees. Both matter: VTK's shadow baker
+      // skips any positional light whose cone reaches 90, and it is the cone
+      // that concentrates the shadow map onto the lit area.
+      light->SetPositional(true);
+      light->SetPosition(l.px, l.py, l.pz);
+      light->SetFocalPoint(l.tx, l.ty, l.tz);
+      light->SetConeAngle(l.cone);
+    } else {
+      light->SetPositional(false); // directional: only the direction matters
+      const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
+      light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
+                         -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
+      light->SetFocalPoint(0.0, 0.0, 0.0);
+    }
     light->SetColor(l.r, l.g, l.b);
     light->SetIntensity(l.intensity);
     m_renderer->AddLight(light);
@@ -669,10 +679,83 @@ void SceneGraph::applyLights() {
 
 int SceneGraph::addDirectionalLight(double azimuthDeg, double elevationDeg, double r, double g,
                                     double b, double intensity) {
-  LightDesc d{m_nextLightId++, azimuthDeg, elevationDeg, r, g, b, intensity};
+  LightDesc d;
+  d.id = m_nextLightId++;
+  d.kind = LightDesc::Kind::Directional;
+  d.az = azimuthDeg;
+  d.el = elevationDeg;
+  d.r = r;
+  d.g = g;
+  d.b = b;
+  d.intensity = intensity;
   m_lights.push_back(d);
   applyLights();
   return d.id;
+}
+
+namespace {
+// VTK drops a positional light with cone >= 90 from the shadow bake, so a cone
+// of "90" means no shadow rather than a wide one. Clamp instead of surprising.
+inline double clampCone(double deg) { return deg < 0.5 ? 0.5 : (deg > 89.5 ? 89.5 : deg); }
+} // namespace
+
+int SceneGraph::addSpotLight(double x, double y, double z, double tx, double ty, double tz,
+                             double coneDeg, double r, double g, double b, double intensity) {
+  LightDesc d;
+  d.id = m_nextLightId++;
+  d.kind = LightDesc::Kind::Spot;
+  d.px = x;
+  d.py = y;
+  d.pz = z;
+  d.tx = tx;
+  d.ty = ty;
+  d.tz = tz;
+  d.cone = clampCone(coneDeg);
+  d.r = r;
+  d.g = g;
+  d.b = b;
+  d.intensity = intensity;
+  m_lights.push_back(d);
+  applyLights();
+  return d.id;
+}
+
+void SceneGraph::setLightPosition(int id, double x, double y, double z) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.px = x;
+      l.py = y;
+      l.pz = z;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightTarget(int id, double tx, double ty, double tz) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.tx = tx;
+      l.ty = ty;
+      l.tz = tz;
+      applyLights();
+      return;
+    }
+}
+
+void SceneGraph::setLightCone(int id, double coneDeg) {
+  for (auto &l : m_lights)
+    if (l.id == id) {
+      l.cone = clampCone(coneDeg);
+      applyLights();
+      return;
+    }
+}
+
+bool SceneGraph::lightCastsShadow(int id) const {
+  for (const auto &l : m_lights)
+    if (l.id == id)
+      return l.kind == LightDesc::Kind::Directional || l.cone < 90.0;
+  return false;
 }
 
 void SceneGraph::setLightDirection(int id, double azimuthDeg, double elevationDeg) {

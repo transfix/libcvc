@@ -6,6 +6,7 @@
 // to observers and replicated peers, so per-frame writes are not free.
 
 #include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/StageLighting.h>
 
 #ifdef CVC_ENABLE_IMGUI
 
@@ -159,6 +160,86 @@ void Text(cvc::app &ctx, const char *label, const std::string &path) {
   ImGui::Text("%s: %s", label, v.c_str());
 }
 
+// ---- StageLightingPanel ----------------------------------------------------
+// Deliberately preset-first: most people want a LOOK, not sixteen sliders. The
+// tooltips carry the one non-obvious fact — that the cone is the shadow-map
+// frustum, so narrowing it is what sharpens shadows.
+void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
+  if (ownWindow) {
+    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Stage lighting", open)) {
+      ImGui::End();
+      return;
+    }
+  }
+
+  ImGui::TextUnformatted("Preset");
+  const struct {
+    StageLighting::Preset p;
+    const char *label;
+    const char *tip;
+  } kPresets[] = {
+      {StageLighting::Preset::ThreePoint, "3-point", "Key + fill + back. The default."},
+      {StageLighting::Preset::Overhead, "Overhead", "Even wash from above; few hard shadows."},
+      {StageLighting::Preset::Dramatic, "Dramatic",
+       "Narrow hard key, little fill. Sharpest shadows: a tight\n"
+       "cone spends the whole shadow map on the subject."},
+      {StageLighting::Preset::Flat, "Flat", "Wash only - read the geometry, not the mood."},
+  };
+  for (int i = 0; i < 4; ++i) {
+    if (i)
+      ImGui::SameLine();
+    if (ImGui::Button(kPresets[i].label))
+      rig.applyPreset(kPresets[i].p);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", kPresets[i].tip);
+  }
+
+  ImGui::Separator();
+
+  bool on = rig.enabled();
+  if (ImGui::Checkbox("Rig on", &on))
+    rig.setEnabled(on);
+  ImGui::SameLine();
+  const int casters = rig.shadowCasterCount();
+  ImGui::TextDisabled("%d shadow caster%s", casters, casters == 1 ? "" : "s");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Each shadow-casting light re-renders the whole scene\n"
+                      "depth every bake. Fill and wash cast nothing on purpose.");
+
+  cvc::app &ctx = rig.appContext();
+  const std::string p = rig.statePath() + ".";
+
+  if (ImGui::CollapsingHeader("Roles", ImGuiTreeNodeFlags_DefaultOpen)) {
+    SliderDouble(ctx, "Key", p + "key_intensity", 0.0, 2.5, 1.0);
+    SliderDouble(ctx, "Fill", p + "fill_intensity", 0.0, 1.5, 0.35);
+    SliderDouble(ctx, "Back", p + "back_intensity", 0.0, 2.0, 0.55);
+    SliderDouble(ctx, "Wash", p + "wash_intensity", 0.0, 2.0, 0.30);
+    SliderInt(ctx, "Wash lights", p + "wash_count", 0, 8, 4);
+  }
+
+  if (ImGui::CollapsingHeader("Key angle & cone", ImGuiTreeNodeFlags_DefaultOpen)) {
+    SliderDouble(ctx, "Azimuth", p + "key_azimuth", -180.0, 180.0, -50.0);
+    SliderDouble(ctx, "Elevation", p + "key_elevation", 5.0, 85.0, 38.0);
+    SliderDouble(ctx, "Cone", p + "key_cone", 8.0, 70.0, 32.0);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("The cone IS the shadow-map frustum.\n"
+                        "Narrower = sharper, because the same map covers less ground.");
+  }
+
+  if (ImGui::CollapsingHeader("Look")) {
+    SliderDouble(ctx, "Ambient", p + "ambient", 0.0, 0.8, 0.22);
+    SliderDouble(ctx, "Warm key", p + "warm_key", 0.0, 1.0, 0.35);
+    SliderDouble(ctx, "Stage radius", p + "stage_radius", 1.0, 500.0, 10.0);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Size of the ACTING AREA, not of the scene.\n"
+                        "Sizing this to the whole scene is what makes shadows mushy.");
+  }
+
+  if (ownWindow)
+    ImGui::End();
+}
+
 } // namespace ui
 } // namespace gl
 } // namespace cvc
@@ -184,6 +265,7 @@ bool Combo(cvc::app &, const char *, const std::string &, const std::vector<std:
   return false;
 }
 void Text(cvc::app &, const char *, const std::string &) {}
+void StageLightingPanel(StageLighting &, bool *, bool) {}
 
 } // namespace ui
 } // namespace gl

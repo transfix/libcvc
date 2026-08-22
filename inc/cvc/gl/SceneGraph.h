@@ -68,17 +68,45 @@ public:
   // re-applies it to whatever renderer it is attached to, including a second
   // one.
   //
-  // Directional only, described the way you actually think about a sun:
+  // DIRECTIONAL — a sun, described the way you actually think about one:
   // azimuth (compass bearing, 0 = +Y, growing towards +X) and elevation
   // (degrees above the horizon). Returns an id for later edits.
+  //
+  // SHADOW COST, and why you may want a spot instead: VTK bakes a directional
+  // light's shadow map with a PARALLEL projection fitted to the WHOLE scene
+  // bounding box (vtkShadowMapBakerPass::BuildCameraLight — parallelScale =
+  // max(bboxWidth, bboxHeight)/2). One map is therefore stretched across
+  // everything in the scene, so a big scene with small detail gets a handful of
+  // shadow texels per object and the shadows read as mush. A wide sky dome or a
+  // distant billboard silently makes every shadow in the scene worse.
   int addDirectionalLight(double azimuthDeg, double elevationDeg, double r = 1.0, double g = 1.0,
                           double b = 1.0, double intensity = 1.0);
   void setLightDirection(int id, double azimuthDeg, double elevationDeg);
+
+  // SPOT — a positional light at (x, y, z) aimed at (tx, ty, tz), limited to a
+  // cone. This is the one that gives crisp shadows: VTK bakes a spot's shadow
+  // map with a PERSPECTIVE projection whose view angle is the cone, so the map's
+  // texels land only inside the lit cone instead of being spread over the scene.
+  // Narrow the cone at a subject and the shadow sharpens accordingly.
+  //
+  // coneDeg is the half-angle and MUST stay below 90: VTK's
+  // LightCreatesShadow() drops any positional light with cone >= 90 from the
+  // bake entirely, so a "cone" of 90+ silently means no shadow at all. Values
+  // are clamped into (0, 89.5] for you.
+  int addSpotLight(double x, double y, double z, double tx, double ty, double tz,
+                   double coneDeg = 30.0, double r = 1.0, double g = 1.0, double b = 1.0,
+                   double intensity = 1.0);
+  void setLightPosition(int id, double x, double y, double z);
+  void setLightTarget(int id, double tx, double ty, double tz);
+  void setLightCone(int id, double coneDeg);
+
   void setLightColor(int id, double r, double g, double b);
   void setLightIntensity(int id, double intensity);
   void removeLight(int id);
   void clearLights();
   std::size_t numLights() const;
+  // True when the light exists and is a shadow-casting kind (see the cone note).
+  bool lightCastsShadow(int id) const;
 
   // Shadow mapping, via VTK's shadow-map render passes. Returns false if there
   // is no render target yet, so a caller can fall back rather than silently
@@ -248,8 +276,14 @@ private:
   // Lights are kept as descriptions, not just vtkLights, so they can be
   // re-created against a renderer attached later (or a second one).
   struct LightDesc {
+    enum class Kind { Directional, Spot };
     int id;
-    double az, el, r, g, b, intensity;
+    Kind kind = Kind::Directional;
+    double az = 0, el = 45;        // Directional: where in the sky it hangs
+    double px = 0, py = 0, pz = 0; // Spot: position
+    double tx = 0, ty = 0, tz = 0; // Spot: what it is aimed at
+    double cone = 30.0;            // Spot: half-angle, < 90 or VTK drops the shadow
+    double r = 1, g = 1, b = 1, intensity = 1;
   };
   std::vector<LightDesc> m_lights;
   int m_nextLightId = 1;
