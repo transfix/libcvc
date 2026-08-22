@@ -18,7 +18,8 @@
 static int fails = 0;
 static void check(bool ok, const std::string &w) {
   std::printf("  %s  %s\n", ok ? "PASS" : "FAIL", w.c_str());
-  if (!ok) ++fails;
+  if (!ok)
+    ++fails;
 }
 
 // A peer state_object rooted at an arbitrary path, so we can read/write the same
@@ -26,27 +27,34 @@ static void check(bool ok, const std::string &w) {
 class Peer : public cvc::state_object<Peer> {
 public:
   Peer(cvc::app &c, const std::string &p) : cvc::state_object<Peer>(c, p) {}
-  std::string rd(const std::string &k) { try { return getState(k).value(); } catch (...) { return "<throw>"; } }
+  std::string rd(const std::string &k) {
+    try {
+      return getState(k).value();
+    } catch (...) {
+      return "<throw>";
+    }
+  }
   template <class T> void wr(const std::string &k, T v) { getState(k).value(v); }
 };
 
 int main() {
-  cvc::app app; app.properties("system.log_verbosity", "0");
+  cvc::app app;
+  app.properties("system.log_verbosity", "0");
   SceneGraph sg(app, "audit");
   SceneRenderer view(sg, 320, 240, true, "main");
 
   std::printf("== StageLighting (audit.lighting) ==\n");
   cvc::gl::StageLighting rig(sg);
   Peer L(app, rig.statePath());
-  for (const char *k : {"enabled","key_intensity","key_azimuth","key_elevation","key_cone",
-                        "fill_intensity","back_intensity","wash_intensity","wash_count",
-                        "wash_height","ambient","warm_key","show_gizmos",
-                        "stage_x","stage_y","stage_z","stage_radius"}) {
+  for (const char *k :
+       {"enabled", "key_intensity", "key_azimuth", "key_elevation", "key_cone", "fill_intensity",
+        "back_intensity", "wash_intensity", "wash_count", "wash_height", "ambient", "warm_key",
+        "show_gizmos", "stage_x", "stage_y", "stage_z", "stage_radius"}) {
     const std::string v = L.rd(k);
     check(!v.empty() && v != "<throw>", std::string("present: ") + k + " = " + v);
   }
   rig.setWarmth(0.77);
-  check(L.rd("warm_key").substr(0,4) == "0.77", "object -> state (setWarmth)");
+  check(L.rd("warm_key").substr(0, 4) == "0.77", "object -> state (setWarmth)");
   L.wr("show_gizmos", 1);
   check(rig.gizmosVisible(), "state -> object (show_gizmos)");
   L.wr("enabled", 0);
@@ -55,8 +63,8 @@ int main() {
   std::printf("== ScreenTextHud (audit.viewers.main.hud.caption) ==\n");
   cvc::gl::ScreenTextHud hud(view, "caption");
   Peer H(app, cvc::gl::ScreenTextHud::viewerStatePath("audit", "main", "caption"));
-  for (const char *k : {"text","pos_x","pos_y","font_size","color_r","color_g","color_b",
-                        "opacity","centered","visible"})
+  for (const char *k : {"text", "pos_x", "pos_y", "font_size", "color_r", "color_g", "color_b",
+                        "opacity", "centered", "visible"})
     check(H.rd(k) != "<throw>", std::string("present: ") + k + " = '" + H.rd(k) + "'");
   hud.setText("hello");
   check(H.rd("text") == "hello", "object -> state (setText)");
