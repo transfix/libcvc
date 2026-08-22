@@ -61,13 +61,28 @@ public:
   ScreenTextHud(const ScreenTextHud &) = delete;
   ScreenTextHud &operator=(const ScreenTextHud &) = delete;
 
+  // Every setter is CHANGE-GATED (see above) and writes through to state; every
+  // getter reads back the same setting whether it arrived through the setter or
+  // through state. That is what makes the binding two-way in a way you can
+  // actually observe: a caption pushed in by a script, a config file or a
+  // replicated peer is only reachable from C++ through these, and a test that
+  // reads state back out of state proves nothing about whether the overlay ever
+  // saw the change. Position and color are read through out-parameters, like
+  // StageLighting::stage.
   void setText(const std::string &text); // "" hides the overlay
+  const std::string &text() const;
   void setPosition(double nx, double ny);
+  void position(double &nx, double &ny) const;
   void setFontSize(int points);
+  int fontSize() const;
   void setColor(double r, double g, double b);
+  void color(double &r, double &g, double &b) const;
   void setOpacity(double alpha);
+  double opacity() const;
   void setCentered(bool centered); // false = left-justified (status-line style)
-  void setVisible(bool on);        // AND'ed with "has text"
+  bool centered() const;
+  void setVisible(bool on); // AND'ed with "has text"
+  bool visible() const;     // the caller's intent, NOT whether the actor draws
 
 protected:
   void handleStateChanged(const std::string &childState) override;

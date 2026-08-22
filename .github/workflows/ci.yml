@@ -810,6 +810,65 @@ jobs:
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
           cmake --build build --config ${{ matrix.build_type }} --parallel
 
+      # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
+      # A Windows runner has no GPU and offers only the GDI generic OpenGL 1.1
+      # path, which VTK rejects, so cvcgl_renderer and cvcgl_shadow_volume — the
+      # only two cvcgl_* tests that issue a real draw — segfaulted here. Same
+      # root cause Mesa's llvmpipe fixed in package-linux; macOS never had it.
+      #
+      # THIRD-PARTY BINARY, so it is pinned and verified. mesa-dist-win is the
+      # de-facto Windows Mesa build (it is what Mesa's own docs point at; there
+      # is no upstream Windows binary). Pinned to one release tag rather than
+      # "latest", and the archive's SHA-256 is checked before anything is
+      # unpacked — if the asset is ever replaced, this fails loudly instead of
+      # silently running different code. The MSVC build is the right one: libcvc
+      # here is MSVC too.
+      #
+      # BOTH DLLs are required. opengl32.dll is a ~140 KB loader stub; the
+      # actual gallium implementation (llvmpipe included) is the ~61 MB
+      # libgallium_wgl.dll beside it, and shipping only the stub gets you a DLL
+      # that loads and then cannot do anything. This mirrors what upstream's own
+      # perappdeploy.cmd copies for a desktop-GL app.
+      #
+      # They go in the test executables' OWN directory because Windows searches
+      # that first, so this overrides the system opengl32 for these processes
+      # only and nothing else on the runner is affected.
+      - name: Software OpenGL for the cvcGL render tests (Windows)
+        if: matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Invoke-WebRequest renders a progress bar per chunk, which costs far
+          # more than the transfer on a 67 MB file. Silencing it is the
+          # difference between seconds and minutes.
+          $ProgressPreference = 'SilentlyContinue'
+          $tag = '26.1.7'
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/mesa3d-$tag-release-msvc.7z"
+          $want = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
+          $arc = Join-Path $env:RUNNER_TEMP 'mesa.7z'
+          Invoke-WebRequest -Uri $url -OutFile $arc
+          $got = (Get-FileHash -Algorithm SHA256 -Path $arc).Hash.ToLower()
+          if ($got -ne $want) {
+            Write-Host "::error::mesa3d $tag checksum mismatch. expected $want got $got"
+            exit 1
+          }
+          $dest = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
+          if (-not (Test-Path $dest)) {
+            Write-Host "::error::expected test output dir not found: $dest"
+            exit 1
+          }
+          # -y overwrite, e flattens the x64/ prefix so both land in $dest.
+          7z e -y "-o$dest" $arc 'x64/opengl32.dll' 'x64/libgallium_wgl.dll'
+          foreach ($f in @('opengl32.dll', 'libgallium_wgl.dll')) {
+            $p = Join-Path $dest $f
+            if (-not (Test-Path $p)) {
+              Write-Host "::error::mesa $f did not land in $dest"
+              exit 1
+            }
+            Write-Host ("staged {0} ({1:N0} bytes)" -f $f, (Get-Item $p).Length)
+          }
+          "GALLIUM_DRIVER=llvmpipe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Run tests
         if: matrix.kind == 'libcvc'
         shell: pwsh
@@ -839,35 +898,21 @@ jobs:
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
           # Assert the cvcgl_* tests actually registered — see the linux step.
           $nCvcgl = (ctest --test-dir build -N 2>$null | Select-String -Pattern 'Test\s+#\d+: cvcgl_').Count
-          Write-Host "cvcgl_* tests registered with ctest: $nCvcgl (2 excluded below: no GL driver on Windows)"
+          Write-Host "cvcgl_* tests registered with ctest: $nCvcgl (all run; Mesa llvmpipe staged above)"
           if ($nCvcgl -eq 0) {
             Write-Host "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
             exit 1
           }
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
-          # The only two cvcGL tests that actually draw. A Windows runner offers
-          # nothing but the GDI generic OpenGL 1.1 software path, which VTK
-          # rejects, so both segfault the moment they issue a real draw — the
-          # same failure Linux had before Mesa's llvmpipe was installed there,
-          # and the same one macOS does NOT have (Apple always ships a usable
-          # GL). Every other cvcgl_* test only inspects scene and state and runs
-          # here normally, so this excludes two, not the suite.
-          #
-          # Fixing it properly means shipping a software GL for Windows
-          # (opengl32.sw.dll / mesa-dist-win) — a third-party binary and its own
-          # supply-chain question, which does not belong in the same change that
-          # first switches these tests on. Tracked as a follow-up.
-          $noGlRegex = '^(cvcgl_renderer|cvcgl_shadow_volume)$'
           if ('${{ github.event_name }}' -eq 'push') {
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600 `
-                  -E "$noGlRegex"
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
           } else {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
-                  -E "$stressRegex|$noGlRegex"
+                  -E "$stressRegex"
           }
 
       - name: Pack libcvc zip

@@ -1,7 +1,9 @@
 // ScreenTextHud — screen-space text overlay for cvcGL viewers (see the header).
-// A lean vtkTextActor wrapper: no state binding, no observers — the host frame
-// loop drives it (caption tables, status lines). FpsHud is the state-bound
-// overlay; this is the direct one.
+// A vtkTextActor wrapper bound to cvc::state in BOTH directions: the setters
+// write through (change-gated, so a caption table re-asserting the same string
+// every frame costs nothing), and handleStateChanged pulls the other way, so a
+// script, a config file or a replicated peer drives the same overlay. The
+// getters are how that second direction is observed from C++.
 
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
@@ -146,6 +148,12 @@ void ScreenTextHud::setText(const std::string &text) {
   getState("text").value(text);
 }
 
+// The getters read the MIRROR (Impl), which is what readAllFromState() fills —
+// so a setting that arrived from state reads back exactly like one that came
+// through a setter. Reading the actor instead would report VTK's coercion of
+// the value rather than what was asked for.
+const std::string &ScreenTextHud::text() const { return m_impl->text; }
+
 void ScreenTextHud::setPosition(double nx, double ny) {
   if (nx == m_impl->px && ny == m_impl->py)
     return;
@@ -156,6 +164,11 @@ void ScreenTextHud::setPosition(double nx, double ny) {
   getState("pos_y").value(ny);
 }
 
+void ScreenTextHud::position(double &nx, double &ny) const {
+  nx = m_impl->px;
+  ny = m_impl->py;
+}
+
 void ScreenTextHud::setFontSize(int points) {
   if (points == m_impl->fontSize)
     return;
@@ -163,6 +176,8 @@ void ScreenTextHud::setFontSize(int points) {
   m_impl->actor->GetTextProperty()->SetFontSize(points);
   getState("font_size").value(points);
 }
+
+int ScreenTextHud::fontSize() const { return m_impl->fontSize; }
 
 void ScreenTextHud::setColor(double r, double g, double b) {
   if (r == m_impl->r && g == m_impl->g && b == m_impl->b)
@@ -176,6 +191,12 @@ void ScreenTextHud::setColor(double r, double g, double b) {
   getState("color_b").value(b);
 }
 
+void ScreenTextHud::color(double &r, double &g, double &b) const {
+  r = m_impl->r;
+  g = m_impl->g;
+  b = m_impl->b;
+}
+
 void ScreenTextHud::setOpacity(double alpha) {
   if (alpha == m_impl->opacity)
     return;
@@ -183,6 +204,8 @@ void ScreenTextHud::setOpacity(double alpha) {
   m_impl->actor->GetTextProperty()->SetOpacity(alpha);
   getState("opacity").value(alpha);
 }
+
+double ScreenTextHud::opacity() const { return m_impl->opacity; }
 
 void ScreenTextHud::setCentered(bool centered) {
   if (centered == m_impl->centered)
@@ -196,6 +219,8 @@ void ScreenTextHud::setCentered(bool centered) {
     tp->SetJustificationToLeft();
 }
 
+bool ScreenTextHud::centered() const { return m_impl->centered; }
+
 void ScreenTextHud::setVisible(bool on) {
   if (on == m_impl->visible)
     return;
@@ -203,6 +228,11 @@ void ScreenTextHud::setVisible(bool on) {
   m_impl->applyVisibility();
   getState("visible").value(on ? 1 : 0);
 }
+
+// Caller intent, matching what setVisible() was last given. The actor is drawn
+// only when this AND hasText hold, so an empty caption reads visible() == true
+// while showing nothing — that is the documented contract, not a bug.
+bool ScreenTextHud::visible() const { return m_impl->visible; }
 
 } // namespace gl
 } // namespace cvc
