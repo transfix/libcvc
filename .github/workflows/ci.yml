@@ -96,7 +96,7 @@ jobs:
           set -euo pipefail
           base="${{ steps.base.outputs.base }}"
           out=$(git clang-format --diff "$base" -- \
-                  '*.c' '*.cc' '*.cpp' '*.cxx' \
+                  '*.c' '*.cc' '*.cpp' '*.cxx' '*.m' '*.mm' \
                   '*.h' '*.hh' '*.hpp' '*.hxx' || true)
           if [ -z "$out" ] \
              || [ "$out" = "no modified files to format" ] \

@@ -100,6 +100,17 @@ if(UNIX AND NOT APPLE)
   endif()
 endif()
 
+# macOS clipboard backend. Named EXPLICITLY because the file(GLOB "*.cpp") above
+# cannot see Objective-C++ — which is how Clipboard.cpp's __APPLE__ branch ended
+# up calling two extern "C" symbols that nothing defined, leaving libcvcGL
+# unlinkable on macOS until cvcGL was first built in CI. Link AppKit here rather
+# than relying on the -framework Cocoa that VTK's RenderingUI happens to drag
+# in, so this does not silently break if that transitive dependency changes.
+if(APPLE)
+  target_sources(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Clipboard_mac.mm")
+  target_link_libraries(cvcGL PRIVATE "-framework AppKit" "-framework Foundation")
+endif()
+
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
   VERSION ${PROJECT_VERSION} SOVERSION 3)
 
