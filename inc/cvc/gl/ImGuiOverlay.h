@@ -97,6 +97,40 @@ public:
   bool wantsMouse() const;
   bool wantsKeyboard() const;
 
+  // ---- scale, for fingers --------------------------------------------------
+  // Multiply the whole UI — fonts AND widget metrics (padding, scrollbars, grab
+  // sizes, hit slop). Defaults to 1.0 with a mouse and 2.0 on a touch device
+  // (detected in the browser via ontouchstart / maxTouchPoints), because widgets
+  // sized for a cursor are unusable with a fingertip.
+  //
+  // Text stays CRISP when scaled: ImGui 1.92 re-bakes glyphs at the final pixel
+  // size instead of stretching one baked size. Prefer a few discrete values
+  // (1.0 / 1.5 / 2.0) over a continuous slider — each distinct size bakes and
+  // uploads a new glyph atlas, which in the browser also costs a staging copy —
+  // and never animate it.
+  void setUiScale(float scale);
+  float uiScale() const;
+
+  // Touch mode changes INPUT handling as well as size. A lifted finger hovers
+  // nothing, unlike a mouse that stays where it was left, so on release the
+  // pointer is moved off-screen. Without that the last touched widget stays
+  // hovered forever, ImGui keeps reporting that it wants the mouse, and the
+  // camera never receives another event — one tap locks it out permanently.
+  void setTouchMode(bool on);
+  bool touchMode() const;
+
+  // ---- the floating show/hide button ---------------------------------------
+  // A large translucent circular button in the bottom-right corner that hides
+  // and restores your panels, so the UI never has to sit on the scene when you
+  // just want to look at it. On by default, and on a device with no keyboard it
+  // is the only practical way to get the UI back.
+  void setToggleButtonEnabled(bool on);
+  bool toggleButtonEnabled() const;
+  // Whether the panels (your draw callback) are currently shown. The button
+  // flips this; you may drive it yourself as well.
+  void setPanelsOpen(bool on);
+  bool panelsOpen() const;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> m_impl;
