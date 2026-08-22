@@ -32,6 +32,7 @@ class volume;
 class state;
 namespace gl {
 class state_publisher;
+class ShadowSettings;
 } // namespace gl
 } // namespace cvc
 
@@ -118,6 +119,9 @@ public:
   // ("'vertexVC' : undeclared identifier") because a normal-less mesh takes the
   // UNLIT shader path, so the declaration it references never appeared. With
   // normals present the program builds and the passes draw.
+  // Shadow settings are ALSO cvc::state, at "<scene prefix>.shadows"
+  // (enabled/resolution/interval), so they are scriptable like everything
+  // else; these setters and the state stay in sync in both directions.
   bool setShadowsEnabled(bool enabled);
   bool shadowsEnabled() const { return m_shadowsEnabled; }
 
@@ -285,6 +289,9 @@ private:
     double cone = 30.0;            // Spot: half-angle, < 90 or VTK drops the shadow
     double r = 1, g = 1, b = 1, intensity = 1;
   };
+  void syncShadowState(); // mirror the shadow setters into cvc::state
+  std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
+  bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state
   std::vector<LightDesc> m_lights;
   int m_nextLightId = 1;
   bool m_shadowsEnabled = false;

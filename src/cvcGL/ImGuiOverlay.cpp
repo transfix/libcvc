@@ -14,7 +14,9 @@
 
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/Clipboard.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/Settings.h>
 #include <imgui.h>
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
 #if defined(__EMSCRIPTEN__) && !defined(IMGUI_IMPL_OPENGL_ES3)
@@ -138,9 +140,11 @@ struct ImGuiOverlay::Impl {
   float appliedScale = -1.0f; // guard: applyScale is idempotent per value
   float uiScale = 1.0f;
   bool touchMode = false;
-  bool panelsOpen = true; // the floating toggle drives this
-  bool showToggle = true; // draw the floating show/hide button
-  bool sizedOnce = false; // first frame with a real DisplaySize
+  bool panelsOpen = true;               // the floating toggle drives this
+  bool showToggle = true;               // draw the floating show/hide button
+  bool sizedOnce = false;               // first frame with a real DisplaySize
+  std::unique_ptr<UiSettings> settings; // the state mirror
+  bool applyingState = false;           // re-entry guard
   bool frameOpen = false;
   double lastTime = 0.0;
 
@@ -195,7 +199,10 @@ struct ImGuiOverlay::Impl {
     // it hides would have covered this corner.
     if (showToggle) {
       const float d = 34.0f * (appliedScale > 0.0f ? appliedScale : 1.0f);
+      const bool was = panelsOpen;
       floatingCircleToggle("##cvcgl_ui_toggle", &panelsOpen, d, panelsOpen ? "X" : "=");
+      if (panelsOpen != was)
+        syncSettings(); // the button is a setting change like any other
     }
     if (draw && panelsOpen)
       draw();
@@ -223,6 +230,19 @@ struct ImGuiOverlay::Impl {
     if (ostate)
       ostate->PopFramebufferBindings();
     frameOpen = false;
+  }
+
+  // Mirror every UI setting into cvc::state, and let a state write drive us.
+  void syncSettings() {
+    if (!settings || applyingState)
+      return;
+    UiSettings::Values v;
+    v.visible = visible;
+    v.scale = uiScale;
+    v.touchMode = touchMode;
+    v.panelsOpen = panelsOpen;
+    v.toggleButton = showToggle;
+    settings->set(v);
   }
 
   // ---- scaling -------------------------------------------------------------
@@ -382,6 +402,23 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   m_impl->uiScale = m_impl->touchMode ? 2.0f : 1.0f;
   m_impl->applyScale(m_impl->uiScale);
 
+  // Every UI setting is reachable as cvc::state, like the camera and the HUD.
+  Impl *impl = m_impl.get();
+  m_impl->settings = std::make_unique<UiSettings>(
+      viewer.scene().appContext(),
+      UiSettings::viewerStatePath(viewer.scene().getStatePrefix(), viewer.name()),
+      [impl](UiSettings::Values v) {
+        impl->applyingState = true;
+        impl->visible = v.visible;
+        impl->touchMode = v.touchMode;
+        impl->panelsOpen = v.panelsOpen;
+        impl->showToggle = v.toggleButton;
+        impl->uiScale = static_cast<float>(v.scale);
+        impl->applyScale(impl->uiScale);
+        impl->applyingState = false;
+      });
+  m_impl->syncSettings();
+
   // Copy/paste. There is no ImGui platform backend under us (VTK owns the
   // window), so nothing would supply these except on Windows, where imgui core
   // already implements the Win32 clipboard — cvc::gl::clipboard forwards to it
@@ -462,21 +499,31 @@ void ImGuiOverlay::setUiScale(float scale) {
     scale = 4.0f;
   m_impl->uiScale = scale;
   m_impl->applyScale(scale);
+  m_impl->syncSettings();
 }
 float ImGuiOverlay::uiScale() const { return m_impl->uiScale; }
 
 void ImGuiOverlay::setTouchMode(bool on) {
   m_impl->touchMode = on;
-  setUiScale(on ? 2.0f : 1.0f);
+  setUiScale(on ? 2.0f : 1.0f); // also syncs
 }
 bool ImGuiOverlay::touchMode() const { return m_impl->touchMode; }
 
-void ImGuiOverlay::setToggleButtonEnabled(bool on) { m_impl->showToggle = on; }
+void ImGuiOverlay::setToggleButtonEnabled(bool on) {
+  m_impl->showToggle = on;
+  m_impl->syncSettings();
+}
 bool ImGuiOverlay::toggleButtonEnabled() const { return m_impl->showToggle; }
-void ImGuiOverlay::setPanelsOpen(bool on) { m_impl->panelsOpen = on; }
+void ImGuiOverlay::setPanelsOpen(bool on) {
+  m_impl->panelsOpen = on;
+  m_impl->syncSettings();
+}
 bool ImGuiOverlay::panelsOpen() const { return m_impl->panelsOpen; }
 void ImGuiOverlay::attachCamera(CameraController &cam) { m_impl->cam = &cam; }
-void ImGuiOverlay::setVisible(bool on) { m_impl->visible = on; }
+void ImGuiOverlay::setVisible(bool on) {
+  m_impl->visible = on;
+  m_impl->syncSettings();
+}
 bool ImGuiOverlay::visible() const { return m_impl->visible; }
 bool ImGuiOverlay::enabled() const { return m_impl->ready; }
 bool ImGuiOverlay::wantsMouse() const {

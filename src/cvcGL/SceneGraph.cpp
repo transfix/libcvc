@@ -11,6 +11,7 @@
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneNode.h>
+#include <cvc/gl/Settings.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/state_publisher.h>
 #include <cvc/volume/volume.h>
@@ -837,10 +838,35 @@ private:
 };
 vtkStandardNewMacro(StridedShadowBaker);
 
+// Shadow settings mirrored into cvc::state at "<prefix>.shadows". Created lazily
+// (the ctor runs before the renderer exists) and guarded against re-entry: a
+// state write calls the setter, which would otherwise write state again.
+void SceneGraph::syncShadowState() {
+  if (m_applyingShadowState)
+    return;
+  if (!m_shadowSettings) {
+    m_shadowSettings = std::make_unique<cvc::gl::ShadowSettings>(
+        m_ctx, cvc::gl::ShadowSettings::sceneStatePath(m_statePrefix),
+        [this](cvc::gl::ShadowSettings::Values v) {
+          m_applyingShadowState = true;
+          setShadowsEnabled(v.enabled);
+          setShadowResolution(v.resolution);
+          setShadowUpdateInterval(v.interval);
+          m_applyingShadowState = false;
+        });
+  }
+  cvc::gl::ShadowSettings::Values v;
+  v.enabled = m_shadowsEnabled;
+  v.resolution = m_shadowResolution;
+  v.interval = m_shadowInterval;
+  m_shadowSettings->set(v);
+}
+
 void SceneGraph::setShadowUpdateInterval(int frames) {
   m_shadowInterval = frames < 1 ? 1 : frames;
   if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker))
     b->Interval = m_shadowInterval;
+  syncShadowState();
   requestRender();
 }
 
@@ -848,6 +874,7 @@ void SceneGraph::setShadowResolution(int pixels) {
   m_shadowResolution = pixels < 64 ? 64 : pixels;
   if (m_shadowBaker)
     m_shadowBaker->SetResolution(m_shadowResolution);
+  syncShadowState();
   requestRender();
 }
 
@@ -858,6 +885,7 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   if (!enabled) {
     m_renderer->SetPass(nullptr);
     m_shadowBaker = nullptr;
+    syncShadowState();
     requestRender();
     return true;
   }
@@ -897,6 +925,7 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
 
   m_renderer->SetPass(cam);
   m_shadowsEnabled = true;
+  syncShadowState();
   requestRender();
   return true;
 }
