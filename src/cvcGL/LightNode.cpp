@@ -104,6 +104,16 @@ void LightNode::notifyScene() {
     sg->lightsChanged();
 }
 
+void LightNode::setVisible(bool visible) {
+  const bool was = isVisible();
+  GraphicsNode::setVisible(visible);
+  // Only rebuild on an actual change: applyLights() drops and recreates every
+  // vtkLight and re-bakes a shadow map per caster, which is far too expensive to
+  // spend on a no-op set.
+  if (was != visible)
+    notifyScene();
+}
+
 void LightNode::setKind(Kind k) {
   if (k == m_impl->kind)
     return;

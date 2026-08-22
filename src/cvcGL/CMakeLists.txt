@@ -246,6 +246,22 @@ add_executable(cvcgl_fps_hud test/cvcgl_fps_hud.cpp)
 target_link_libraries(cvcgl_fps_hud PRIVATE cvcGL)
 add_test(NAME cvcgl_fps_hud COMMAND cvcgl_fps_hud)
 
+# LightNode is a light that IS a scene node. The claim worth guarding is
+# PARENTING: a light hung under another node inherits that node's transform, so
+# a lamp on a vehicle travels with it. Also pins the two rules that are easy to
+# regress — a hidden light contributes no vtkLight, and lights that exist but are
+# hidden must NOT be papered over with the fallback headlight.
+add_executable(cvcgl_light_node test/cvcgl_light_node.cpp)
+target_link_libraries(cvcgl_light_node PRIVATE cvcGL)
+add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
+
+# Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
+# cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
+# silently flattening every state_object key in cvcGL — so it stays a gate.
+add_executable(cvcgl_state_binding test/cvcgl_state_binding.cpp)
+target_link_libraries(cvcgl_state_binding PRIVATE cvcGL)
+add_test(NAME cvcgl_state_binding COMMAND cvcgl_state_binding)
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic

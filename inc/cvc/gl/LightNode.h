@@ -82,6 +82,13 @@ public:
   // This is what makes parenting work, and what SceneGraph feeds to VTK.
   void worldPosition(double &x, double &y, double &z) const;
 
+  // Hiding a light must actually turn it off. The renderer's light set is
+  // rebuilt from the graph rather than mutated in place, so visibility — unlike
+  // a GeometryNode's, which VTK honours on the actor — only takes effect once
+  // the scene rebuilds. Overridden to trigger that rebuild, so setVisible()
+  // needs no accompanying lightsChanged() call to mean anything.
+  void setVisible(bool visible) override;
+
   // A light draws nothing itself (its gizmo, if any, is a separate node), so it
   // has no prop and contributes no bounds — a lamp hung far off stage must not
   // drag the scene's bounding box out with it.
