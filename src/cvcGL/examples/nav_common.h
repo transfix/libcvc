@@ -24,6 +24,24 @@ class CameraController;
 }
 } // namespace cvc
 
+// Does this build have a BACKGROUND SIM WORKER?
+//
+// Natively, always. In the browser, only when compiled -pthread
+// (-DCVC_WASM_PTHREADS=ON): a wasm worker shares memory through
+// SharedArrayBuffer, which the browser only hands out on a cross-origin-isolated
+// page (COOP: same-origin + COEP: require-corp). Without that the sim has to
+// step inline on the render thread.
+//
+// Gate on THIS, never on __EMSCRIPTEN__ alone — that is the trap this replaces.
+// `-pthread` sets __EMSCRIPTEN_PTHREADS__ but leaves __EMSCRIPTEN__ defined, so
+// an `#ifndef __EMSCRIPTEN__` guard keeps the sim on the main thread even in a
+// threaded build, and the whole point of the threaded build is lost silently.
+#if !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
+#define CVC_NAV_DEMO_SIM_WORKER 1
+#else
+#define CVC_NAV_DEMO_SIM_WORKER 0
+#endif
+
 namespace navdemo {
 
 // World rect an occupancy grid maps onto (matches sim_world::config bounds).
