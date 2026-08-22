@@ -839,21 +839,35 @@ jobs:
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
           # Assert the cvcgl_* tests actually registered — see the linux step.
           $nCvcgl = (ctest --test-dir build -N 2>$null | Select-String -Pattern 'Test\s+#\d+: cvcgl_').Count
-          Write-Host "cvcgl_* tests registered with ctest: $nCvcgl"
+          Write-Host "cvcgl_* tests registered with ctest: $nCvcgl (2 excluded below: no GL driver on Windows)"
           if ($nCvcgl -eq 0) {
             Write-Host "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
             exit 1
           }
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
+          # The only two cvcGL tests that actually draw. A Windows runner offers
+          # nothing but the GDI generic OpenGL 1.1 software path, which VTK
+          # rejects, so both segfault the moment they issue a real draw — the
+          # same failure Linux had before Mesa's llvmpipe was installed there,
+          # and the same one macOS does NOT have (Apple always ships a usable
+          # GL). Every other cvcgl_* test only inspects scene and state and runs
+          # here normally, so this excludes two, not the suite.
+          #
+          # Fixing it properly means shipping a software GL for Windows
+          # (opengl32.sw.dll / mesa-dist-win) — a third-party binary and its own
+          # supply-chain question, which does not belong in the same change that
+          # first switches these tests on. Tracked as a follow-up.
+          $noGlRegex = '^(cvcgl_renderer|cvcgl_shadow_volume)$'
           if ('${{ github.event_name }}' -eq 'push') {
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600 `
+                  -E "$noGlRegex"
           } else {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
-                  -E "$stressRegex"
+                  -E "$stressRegex|$noGlRegex"
           }
 
       - name: Pack libcvc zip
