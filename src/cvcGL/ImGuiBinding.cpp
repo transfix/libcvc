@@ -277,6 +277,27 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
                         "Narrower = sharper, because the same map covers less ground.");
   }
 
+  // Per-light switches. This is a DEBUGGING surface: turn lights off one at a
+  // time to attribute a shadow artifact to the light that casts it.
+  if (ImGui::CollapsingHeader("Lights (debug)")) {
+    const auto names = rig.lightNames();
+    if (names.empty())
+      ImGui::TextDisabled("rig is off");
+    for (const auto &n : names) {
+      bool on = rig.lightEnabled(n);
+      if (ImGui::Checkbox(n.c_str(), &on))
+        rig.setLightEnabled(n, on);
+      ImGui::SameLine();
+      ImGui::PushID(n.c_str());
+      if (ImGui::SmallButton("solo"))
+        rig.soloLight(n);
+      ImGui::PopID();
+    }
+    if (!names.empty() && ImGui::Button("All on"))
+      rig.soloLight("");
+    ImGui::TextDisabled("off = light AND its shadow map removed");
+  }
+
   if (ImGui::CollapsingHeader("Look")) {
     SliderLive(ctx, "Environment", p + "env_intensity", 0.0, 1.5, 0.30);
     if (ImGui::IsItemHovered())

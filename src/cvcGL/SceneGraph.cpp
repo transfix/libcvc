@@ -236,6 +236,15 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
         continue;
       }
 
+      // Skip LIGHTS. A light draws nothing, but it is a node with a transform,
+      // so its (empty) box lands at the light's position and drags the scene
+      // bounds out to it. The overhead fill sits at 3x the stage radius, which
+      // lifted the whole scene box — and with it the orbit centre that
+      // frameBounds() derives, so the camera sat raised and could not be brought
+      // back down.
+      if (std::dynamic_pointer_cast<cvc::gl::LightNode>(child))
+        continue;
+
       // Get combined bbox of this child (includes all its descendants in local space)
       cvc::bounding_box childBBox = child->getCombinedBoundingBox();
 

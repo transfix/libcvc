@@ -133,6 +133,11 @@ TouchGestures::TouchGestures(cvc::app &ctx, const std::string &statePath, Camera
   seedState();
 #ifdef __EMSCRIPTEN__
   cvcgl_touch_install(m_impl->canvas.c_str());
+  // On a phone ONE FINGER TRANSLATES the scene: there is no middle button, and
+  // dragging the world around is more useful than tumbling it. Two fingers still
+  // rotate (and pinch to zoom), so nothing is lost.
+  if (m_impl->cam)
+    m_impl->cam->setPrimaryDragPans(true);
 #endif
 }
 
@@ -209,9 +214,14 @@ void TouchGestures::update() {
   // orbit in 3-D. beginDrag/endDrag bracket it because Map-mode panning only
   // applies while the controller considers itself dragging.
   if (s.panEnabled && (std::abs(panX) > 0.5 || std::abs(panY) > 0.5)) {
+    // TWO fingers = the camera's primary drag motion (orbit in 3-D, pan on a
+    // map). One finger already pans on touch, so this stays the rotate gesture.
+    const bool wasPan = s.cam->primaryDragPans();
+    s.cam->setPrimaryDragPans(false);
     s.cam->beginDrag();
     s.cam->mouseLook(static_cast<int>(panX), static_cast<int>(panY));
     s.cam->endDrag();
+    s.cam->setPrimaryDragPans(wasPan);
   }
 #endif
 }

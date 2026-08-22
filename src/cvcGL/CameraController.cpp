@@ -149,6 +149,16 @@ public:
     if (m_controller)
       m_controller->endDrag();
   }
+  // Middle button = pan, the standard "move the scene" drag.
+  void OnMiddleButtonDown() override {
+    if (m_controller)
+      m_controller->beginPan();
+  }
+  void OnMiddleButtonUp() override {
+    if (m_controller)
+      m_controller->endPan();
+  }
+
   void OnMouseWheelForward() override {
     if (m_controller)
       m_controller->mouseWheel(1.0);
@@ -225,6 +235,8 @@ struct CameraController::Impl {
   // runtime (not state)
   std::set<std::string> held;
   bool dragging = false;
+  bool panning = false; // middle-button drag, or primary drag on touch
+  bool primaryDragPans = false;
   double poseMirrorAccum = 0.0;
   // Map-mode fit: the rect frameMap() was asked to show, the aspect it was last
   // fitted at, and whether the user has since zoomed (which ends auto-fitting).
@@ -777,6 +789,23 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
         s.renderer->ResetCameraClippingRange();
       syncPoseToState();
     }
+  } else if (s.dragging && (s.panning || s.primaryDragPans)) {
+    // PAN: slide the orbit centre across the screen plane. Scaled by orbit
+    // distance so the world tracks the cursor at any zoom, and by the vertical
+    // field of view so it is right for any lens.
+    if (s.camera) {
+      const Basis b = basisFromUp(s.up);
+      const Vec3 fwd = normalize(orbitOffset(b, s.orbitAzimuth, s.orbitElevation, 1.0) * -1.0);
+      const Vec3 right = normalize(cross(fwd, b.up));
+      const Vec3 up = normalize(cross(right, fwd));
+      int *sz = s.window ? s.window->GetSize() : nullptr;
+      const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
+      const double perPx =
+          2.0 * s.orbitDistance * std::tan(0.5 * s.camera->GetViewAngle() * kDeg2Rad) / vh;
+      s.orbitCenter = s.orbitCenter + right * (-dxPixels * perPx) + up * (-dyPixels * perPx);
+      applyToCamera();
+      syncConfigToState();
+    }
   } else if (s.dragging) {
     s.orbitAzimuth -= dxPixels * s.sensitivity;
     s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation + dpitch));
@@ -817,6 +846,20 @@ void CameraController::dolly(double steps) {
   applyToCamera();
   syncPoseToState();
 }
+
+void CameraController::beginPan() {
+  m_impl->panning = true;
+  m_impl->dragging = true;
+}
+void CameraController::endPan() {
+  m_impl->panning = false;
+  m_impl->dragging = false;
+}
+void CameraController::setPrimaryDragPans(bool on) {
+  m_impl->primaryDragPans = on;
+  getState("settings.primary_drag_pans").value(on ? 1 : 0);
+}
+bool CameraController::primaryDragPans() const { return m_impl->primaryDragPans; }
 
 void CameraController::beginDrag() { m_impl->dragging = true; }
 void CameraController::endDrag() { m_impl->dragging = false; }

@@ -378,6 +378,31 @@ void StageLighting::setEnabled(bool on) {
 
 bool StageLighting::enabled() const { return m_impl->on; }
 
+std::vector<std::string> StageLighting::lightNames() const { return m_impl->nodes; }
+
+void StageLighting::setLightEnabled(const std::string &name, bool on) {
+  if (!m_impl->scene)
+    return;
+  // Visibility IS the switch: SceneGraph skips hidden LightNodes when it builds
+  // the renderer's light set, so this removes the light AND its shadow map.
+  if (auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(m_impl->scene->getGraphics(name)))
+    ln->setVisible(on);
+  m_impl->scene->lightsChanged();
+}
+
+bool StageLighting::lightEnabled(const std::string &name) const {
+  if (!m_impl->scene)
+    return false;
+  if (auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(m_impl->scene->getGraphics(name)))
+    return ln->isVisible();
+  return false;
+}
+
+void StageLighting::soloLight(const std::string &name) {
+  for (const auto &n : m_impl->nodes)
+    setLightEnabled(n, name.empty() || n == name);
+}
+
 int StageLighting::shadowCasterCount() const {
   // Key, back and every special cast; fill and wash deliberately do not (a
   // second shadow from a fill light is the classic amateur-lighting tell, and

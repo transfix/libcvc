@@ -177,6 +177,17 @@ public:
   void setGizmoBeamAlpha(double a);
   double gizmoBeamAlpha() const;
 
+  // ---- per-light control (for debugging shadows) ---------------------------
+  // The rig's lights are scene nodes, so each can be switched independently.
+  // This is the fastest way to attribute a shadow artifact: kill lights one at a
+  // time until the striping stops, and the last one you turned off is the
+  // culprit. Names are the node names ("stage_key", "stage_wash_2", ...).
+  std::vector<std::string> lightNames() const;
+  void setLightEnabled(const std::string &name, bool on);
+  bool lightEnabled(const std::string &name) const;
+  // Solo: leave exactly one on. Empty string restores them all.
+  void soloLight(const std::string &name);
+
   // How many shadow-casting lights the rig currently has. Useful in a HUD: each
   // one costs a full scene depth re-render per bake.
   int shadowCasterCount() const;
