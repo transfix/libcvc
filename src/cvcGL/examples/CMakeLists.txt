@@ -12,6 +12,13 @@ add_executable(lsystem_forest lsystem_forest.cpp)
 target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
 
+# bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
+# ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
+# it needs only cvcGL (no nav helpers).
+add_executable(bunny_shadow bunny_shadow.cpp)
+target_link_libraries(bunny_shadow PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS bunny_shadow MODULES ${VTK_LIBRARIES})
+
 # cvc::nav demos — the reactive swarm rendered through cvcGL. nav symbols come from
 # cvc::cvc, which cvcGL PUBLIC-links. Shared helpers (occupancy walls, merged agent
 # glyph mesh, capture camera) live in nav_common.
@@ -31,7 +38,7 @@ endforeach()
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest nav_city_swarm nav_fog_ghost)
+  set(_wasm_demos lsystem_forest bunny_shadow nav_city_swarm nav_fog_ghost)
   foreach(_wt ${_wasm_demos})
     # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
     # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.
@@ -59,7 +66,7 @@ endif()
 # deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
 # $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
 # `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
-set(_cvcgl_example_bins lsystem_forest nav_city_swarm nav_fog_ghost nav_finale)
+set(_cvcgl_example_bins lsystem_forest bunny_shadow nav_city_swarm nav_fog_ghost nav_finale)
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
   INSTALL_RPATH_USE_LINK_PATH ON)
