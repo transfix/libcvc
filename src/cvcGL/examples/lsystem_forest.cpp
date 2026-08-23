@@ -22,6 +22,7 @@
 // Cinematic capture (mp4-ready): lsystem_forest --capture fly --frames 1800 --fps 30 \
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
 
+#define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
 #include <algorithm>
 #include <boost/program_options.hpp>
 #include <cctype>
@@ -1243,19 +1244,24 @@ int main(int argc, char **argv) {
   // forest.viewers.main.hud.*). Off for captures so frames stay clean.
   cvc::gl::FpsHud hud(view);
 
+  // Touch gestures work with or without the ImGui overlay (phones have no mouse:
+  // pinch = zoom, two-finger drag = pan/turn). Declared UNCONDITIONALLY — the
+  // render loop calls touch.update() and reads uiWind every frame regardless of
+  // whether the ImGui control panel was compiled in (a -DCVC_ENABLE_IMGUI=OFF
+  // build otherwise left both undeclared: the Windows/native no-UI build gap).
+  cvc::gl::TouchGestures touch(view, cam);
+  float uiWind = 1.0f; // wind strength; the ImGui "wind" slider drives it when built
+
   // Dear ImGui overlay — real widgets, same code path native and in the browser.
   // Everything the callback touches lives in this scope; ImGui is immediate-mode,
   // so there is no widget tree to keep in sync.
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
-  // Phones have no mouse: pinch = zoom, two-finger drag = pan/turn.
-  cvc::gl::TouchGestures touch(view, cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
   bool uiShadows = shadows;
   bool uiLighting = true; // the StageLightingPanel window
-  float uiWind = 1.0f;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {

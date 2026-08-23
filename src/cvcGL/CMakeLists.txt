@@ -24,6 +24,7 @@ endif()
 # generated cvcGLConfig.cmake (consumers get the same VTK closure).
 set(CVCGL_VTK_COMPONENTS
   CommonCore CommonDataModel CommonExecutionModel CommonTransforms
+  CommonSystem # vtkTimerLog (ImGuiOverlay frame timing) — MSVC link needs it explicit
   FiltersSources FiltersGeneral
   RenderingCore RenderingVolume RenderingVolumeOpenGL2 RenderingOpenGL2
   RenderingAnnotation RenderingFreeType
