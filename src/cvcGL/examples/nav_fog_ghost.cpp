@@ -369,6 +369,7 @@ int main(int argc, char **argv) {
   // and a growing yellow TRACK trail of where the agent has actually driven.
   const double goal_rgb[3] = {1.00, 0.45, 0.20}, start_rgb[3] = {0.35, 0.85, 0.45};
   const double route_rgb[3] = {0.35, 0.65, 1.00}, track_rgb[3] = {0.98, 0.85, 0.30};
+  const double spine_rgb[3] = {0.20, 0.90, 1.00}; // global A* route spine (cyan)
   const double gx = 80.0, gy = 6.0, sx = -80.0, sy = -6.0; // world (set above, normalized)
   {
     auto goalNode = std::dynamic_pointer_cast<GeometryNode>(
@@ -427,6 +428,61 @@ int main(int argc, char **argv) {
   }
   int trailLen = 0; // segments used so far
   float trailLast[2] = {static_cast<float>(sx), static_cast<float>(sy)};
+
+  // ── Global belief A* route ────────────────────────────────────────────────
+  // GRL-SNAM steers a REACTIVE local controller between the waypoints of a GLOBAL
+  // A* route planned on the agent's BELIEF occupancy. A purely reactive port
+  // (this demo, originally) drops the route and relies on the local SDF barrier
+  // alone — but that barrier's reach (rr + d_hat -> ~10 m) is far shorter than
+  // the sensor range (35 m), so the phantom is always sensed to "free" and its
+  // SDF trough rebuilt away BEFORE the agent is close enough to be deflected: it
+  // drives straight through the ghost. Planning on the belief restores the
+  // detour — the believed wall bends the global plan from t=0, and the first
+  // sense that clears it replans straight (the "SENSOR: nothing there" beat).
+  const double cellW = (bounds.max_x - bounds.min_x) / (C - 1);
+  const int planInfl = std::max(1, static_cast<int>(std::lround((cfg.veh.rr / SCALE) / cellW)));
+  navdemo::Route route;
+  std::size_t curWp = static_cast<std::size_t>(-1); // waypoint currently retargeted to
+  // Build a polyline geometry for the remaining route (agent -> each waypoint).
+  auto route_geom = [&](double ax, double ay, const navdemo::Route &rt) {
+    cvc::geometry g;
+    double px = ax, py = ay;
+    auto seg = [&](double x, double y) {
+      g.points().push_back({px, py, 0.72});
+      g.colors().push_back({spine_rgb[0], spine_rgb[1], spine_rgb[2]});
+      g.points().push_back({x, y, 0.72});
+      g.colors().push_back({spine_rgb[0], spine_rgb[1], spine_rgb[2]});
+      const auto n = static_cast<cvc::geometry::index_t>(g.points().size());
+      g.lines().push_back({static_cast<cvc::geometry::index_t>(n - 2),
+                           static_cast<cvc::geometry::index_t>(n - 1)});
+      px = x;
+      py = y;
+    };
+    for (const auto &w : rt.wp)
+      seg(w[0], w[1]);
+    if (rt.wp.empty())
+      seg(ax, ay); // degenerate placeholder so the node is always valid
+    return g;
+  };
+  auto routeNode =
+      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("route", route_geom(sx, sy, route)));
+  if (routeNode) {
+    routeNode->setRenderMode(GeometryRenderMode::LINES);
+    routeNode->setUseSingleColor(true);
+    routeNode->setColor(spine_rgb[0], spine_rgb[1], spine_rgb[2]);
+    routeNode->setLineWidth(4.0);
+    routeNode->setRenderLinesAsTubes(true);
+    routeNode->setDepthOffset(1.5); // above the ground texture, below the carrot
+    routeNode->setAmbient(1.0);
+    routeNode->setDiffuse(0.0);
+  }
+  // Replan the belief route from world (ax,ay) to the goal, resetting the cursor.
+  auto replan = [&](double ax, double ay) {
+    route = navdemo::plan_route(worldPtr->belief_occ(0), R, C, bounds, ax, ay, gx, gy, planInfl);
+    curWp = static_cast<std::size_t>(-1);
+    if (routeNode)
+      routeNode->setGeometry(route_geom(ax, ay, route));
+  };
 
   sg.addDirectionalLight(-38, 60, 1.0, 0.97, 0.9, 1.1);
   sg.addDirectionalLight(150, 34, 0.5, 0.58, 0.72, 0.45);
@@ -610,9 +666,12 @@ int main(int argc, char **argv) {
     blockT = -1.0;
     reached_note = false;
     pacer = navdemo::SimPacer{};
+    replan(sx, sy); // plan the belief route over the fresh world's belief plane
     std::printf("nav_fog_ghost: restarted — scenario=%s, %d vehicle%s, range %.0fm\n", scen.c_str(),
                 NA, NA == 1 ? "" : "s", range);
   };
+
+  replan(sx, sy); // initial belief route: the phantom bends it around from t=0
 
   while (!view.windowClosed()) {
     double t, dt;
@@ -658,6 +717,28 @@ int main(int argc, char **argv) {
       worldPtr->step();
 
     worldPtr->snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
+
+    // Follow the belief route: retarget the hero at its current waypoint,
+    // advancing on arrival. Retarget ONLY when the waypoint index changes — a
+    // per-frame retarget would reset the carrot pursuit every tick.
+    if (!route.wp.empty()) {
+      const double arr = 0.03 * (bounds.max_x - bounds.min_x); // waypoint-reach radius
+      if (curWp == static_cast<std::size_t>(-1)) {
+        curWp = 0;
+        worldPtr->retarget(0, static_cast<float>(route.wp[0][0] * SCALE),
+                           static_cast<float>(route.wp[0][1] * SCALE));
+      }
+      while (curWp + 1 < route.wp.size()) {
+        const double dx = pos[0] - route.wp[curWp][0], dy = pos[1] - route.wp[curWp][1];
+        if (dx * dx + dy * dy <= arr * arr) {
+          ++curWp;
+          worldPtr->retarget(0, static_cast<float>(route.wp[curWp][0] * SCALE),
+                             static_cast<float>(route.wp[curWp][1] * SCALE));
+        } else
+          break;
+      }
+    }
+
     const auto &xyz = glyph.pack(pos.data(), head.data());
     if (agentNode)
       agentNode->updateVertices(xyz);
@@ -675,8 +756,13 @@ int main(int argc, char **argv) {
       planXyz[3] = planXyz[6] = cwv[0];
       planXyz[4] = planXyz[7] = cwv[1];
       planXyz[5] = planXyz[8] = 0.7;
-      planXyz[9] = gx;
-      planXyz[10] = gy;
+      // Second segment ends at the current route waypoint, not the far goal — so
+      // the carrot line stays ON the belief route instead of cutting through the
+      // phantom (the cyan spine already shows the whole global detour).
+      const double ex = (curWp < route.wp.size()) ? route.wp[curWp][0] : gx;
+      const double ey = (curWp < route.wp.size()) ? route.wp[curWp][1] : gy;
+      planXyz[9] = ex;
+      planXyz[10] = ey;
       planXyz[11] = 0.7;
       planNode->updateVertices(planXyz);
     }
@@ -737,6 +823,10 @@ int main(int argc, char **argv) {
     // The visible pop at each rebuild IS the story beat.
     if (worldPtr->field_version() != lastFv) {
       lastFv = worldPtr->field_version();
+      // Belief changed (a phantom cell was sensed away) -> replan on the corrected
+      // belief. Early on the route bows around the ghost; once the corridor clears
+      // the A* returns straight and the agent commits through where the wall was.
+      replan(pos[0], pos[1]);
       auto [g2, n2] = ghost_cells();
       if (n2 != ghostCount && ghostNode) {
         ghostCount = n2;
