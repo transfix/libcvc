@@ -157,6 +157,25 @@ void add_border(std::uint8_t *occ, int rows, int cols);
 std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
                                                int ny, int inflate = 0);
 
+// One agent's global A* route over an occupancy grid: world waypoints + a cursor
+// into them (`idx` is the waypoint a follower is currently steering toward).
+struct Route {
+  std::vector<std::array<double, 2>> wp;
+  std::size_t idx = 0;
+};
+
+// Plan a string-pulled 8-connected A* route over `occ` (row-major rows*cols,
+// nonzero = blocked) from world (sx,sy) to (gx,gy), returned as world waypoints
+// that ALWAYS end at the true goal (so a blocked/unreachable plan still drives
+// straight at it). `inflate_cells` > 0 dilates the occupancy first so the route
+// keeps clearance from walls the reactive drive still hugs (too much clearance
+// seals narrow gaps). This is the C++ analog of GRL-SNAM's global belief-route
+// spine — the piece a purely reactive port drops; the finale and fog demos plan
+// on their BELIEF occupancy so a believed wall bends the global plan, and a
+// sense that clears it replans straight. grid convention: r->y (row 0 = min_y).
+Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
+                 double gx, double gy, int inflate_cells = 0);
+
 // Bounds-safe RGB compositing on a raw interleaved [dw*dh*3] u8 destination. EVERY
 // write is clipped to [0,dw) x [0,dh), so no input — an oversized source, an
 // off-screen centre, a negative origin — can write out of range. These back the

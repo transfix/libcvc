@@ -8,6 +8,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/nav/grid_nav.h> // astar / simplify / inflate — the shared route planner
 #include <vtkCamera.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
@@ -333,6 +334,43 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
       }
   }
   return occ_dilated(occ, nx, ny, inflate);
+}
+
+Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
+                 double gx, double gy, int inflate_cells) {
+  Route rt;
+  if (!occ || rows < 2 || cols < 2 || b.max_x <= b.min_x || b.max_y <= b.min_y) {
+    rt.wp.push_back({gx, gy});
+    return rt;
+  }
+  // Optionally dilate so the GLOBAL route keeps clearance from walls the local
+  // reactive barrier still hugs; the raw occupancy is what the SDF is built from.
+  std::vector<std::uint8_t> dil;
+  const std::uint8_t *planOcc = occ;
+  if (inflate_cells > 0) {
+    dil = cvc::nav::inflate(occ, rows, cols, inflate_cells);
+    planOcc = dil.data();
+  }
+  auto w2c = [&](double x, double y, int &r, int &c) {
+    c = static_cast<int>(std::lround((x - b.min_x) / (b.max_x - b.min_x) * (cols - 1)));
+    r = static_cast<int>(std::lround((y - b.min_y) / (b.max_y - b.min_y) * (rows - 1)));
+    c = std::max(0, std::min(cols - 1, c));
+    r = std::max(0, std::min(rows - 1, r));
+  };
+  int sr, sc, gr, gc;
+  w2c(sx, sy, sr, sc);
+  w2c(gx, gy, gr, gc);
+  const auto path = cvc::nav::astar(planOcc, rows, cols, sr, sc, gr, gc);
+  if (path.size() >= 4) {
+    const auto sp = cvc::nav::simplify(planOcc, rows, cols, path.data(),
+                                       static_cast<int>(path.size() / 2));
+    for (std::size_t i = 0; i + 1 < sp.size(); i += 2)
+      rt.wp.push_back(
+          {b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
+           b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
+  }
+  rt.wp.push_back({gx, gy}); // always end at the true goal
+  return rt;
 }
 
 void blit_clamped(unsigned char *dst, int dw, int dh, const unsigned char *src, int sw, int sh,
