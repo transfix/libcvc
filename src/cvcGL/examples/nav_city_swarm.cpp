@@ -31,6 +31,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -219,6 +220,11 @@ int main(int argc, char **argv) {
   (void)fog;            // legacy switch, absorbed by the fog-on default
   cfg.freeze_sense = !fogOn;
   cfg.reach_tol = 0.8f;
+  // Inter-agent separation: without it the vehicles pass straight through each
+  // other. A reactive carrot nudge away from peers within ~3 vehicle radii makes
+  // the swarm steer AROUND itself. Live-tunable below; sep_gain 0 turns it off.
+  cfg.sep_radius = 3.0f * static_cast<float>(ts.rr);
+  cfg.sep_gain = 1.5f * static_cast<float>(ts.rr);
 
   // The sim lives behind a pointer so the UI can REBUILD it: agent count and
   // belief mode are baked into sim_world at construction, so "restart with 2000
@@ -359,8 +365,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  sg.addDirectionalLight(-42, 58, 1.0, 0.96, 0.86, 1.15);  // warm key
-  sg.addDirectionalLight(140, 30, 0.55, 0.62, 0.78, 0.50); // cool fill
+  // Aimed STAGE RIG instead of two scene-spanning directional lights. A
+  // directional light's shadow map is baked over the whole scene bbox (ground +
+  // building height + air), so texels are wasted and vehicle shadows smear onto
+  // rooftops; a rig of aimed spots bakes a perspective map that lands texels on
+  // the city — the fix for the swarm demo's shadow artifacts, and the same live
+  // StageLightingPanel UI as lsystem_forest (see navdemo::make_stage_rig).
+  auto rig = navdemo::make_stage_rig(sg, bounds, wall_h);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
   // Shadows must be enabled AFTER the renderer exists (they attach to its passes).
@@ -431,7 +442,10 @@ int main(int argc, char **argv) {
   std::string uiBelief = belief;
   bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true;
   double uiHz = hz;
-  float uiTrailW = 1.5f; // live path (trail) line width
+  float uiTrailW = 1.5f;                              // live path (trail) line width
+  bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
+  float uiSepGain = 1.5f * static_cast<float>(ts.rr); // avoidance strength (live)
+  bool uiLighting = false;                            // the StageLightingPanel window
 #ifdef CVC_ENABLE_IMGUI
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
@@ -453,6 +467,7 @@ int main(int argc, char **argv) {
         ImGui::MenuItem("Trails", nullptr, &uiTrails);
         ImGui::MenuItem("Goals", nullptr, &uiGoals);
         ImGui::MenuItem("Shadows", nullptr, &uiShadows);
+        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
         ImGui::EndMenu();
       }
       if (ImGui::BeginMenu("Camera")) {
@@ -493,11 +508,24 @@ int main(int argc, char **argv) {
     ImGui::SameLine();
     ImGui::Checkbox("Shadows", &uiShadows);
     ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
+    ImGui::Checkbox("Avoid others", &uiSeparate); // inter-agent separation (live)
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Steer around neighbours instead of driving through them.");
+    if (uiSeparate) {
+      float g = uiSepGain / static_cast<float>(ts.rr); // shown as multiples of a vehicle radius
+      if (ImGui::SliderFloat("avoid strength", &g, 0.0f, 5.0f, "%.1f x rr"))
+        uiSepGain = g * static_cast<float>(ts.rr);
+    }
     ImGui::Separator();
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
     ImGui::TextDisabled("agents / belief / fog need a restart");
     ImGui::End();
+
+    // The library lighting panel — the same control surface as lsystem_forest,
+    // driving this scene's StageLighting rig (key/fill/back/wash, shadows,
+    // gizmos to debug the shadow cones).
+    cvc::gl::ui::StageLightingPanel(*rig, &uiLighting);
   });
 #endif
 
@@ -530,6 +558,9 @@ int main(int argc, char **argv) {
     }
     if (goalsNode)
       goalsNode->setVisible(uiGoals);
+    // Inter-agent avoidance: live-tuned each frame (0 gain = off, vehicles pass
+    // through each other again).
+    world.set_separation(uiSeparate ? cfg.sep_radius : 0.0f, uiSeparate ? uiSepGain : 0.0f);
     if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
       ortho = ui2D;
       if (ortho)
