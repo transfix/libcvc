@@ -14,14 +14,18 @@
 #include <cvc/geometry/geometry.h>
 #include <vector>
 
+#include <memory>
+
 namespace cvc {
 class app;
 }
 class SceneRenderer; // cvcGL (global namespace)
+class SceneGraph;    // cvcGL (global namespace)
 namespace cvc {
 namespace gl {
 class CameraController;
-}
+class StageLighting;
+} // namespace gl
 } // namespace cvc
 
 // Does this build have a BACKGROUND SIM WORKER?
@@ -98,6 +102,19 @@ private:
   std::vector<std::uint32_t> tmplTris_; // [3*T] template triangle indices
   std::vector<double> xyz_;             // scratch, reused each pack()
 };
+
+// Build a StageLighting rig aimed at a nav scene's acting area (its occupancy
+// bounds), instead of scene-spanning directional lights. This is the fix for the
+// city demos' shadow mush: VTK bakes a DIRECTIONAL light's shadow map with a
+// parallel projection fitted to the WHOLE scene bbox (ground + building height +
+// empty air), so texels are wasted and thin casters (vehicles) alias onto tall
+// receivers (rooftops). Aimed spots bake a perspective map that lands texels on
+// the subject — see cvc/gl/StageLighting.h. `subjectHeight` is the tallest
+// geometry (buildings); the stage is lifted to mid-height so the cones cover the
+// rooftops, not just the street. The rig is a live cvc::state object, so
+// cvc::gl::ui::StageLightingPanel(*rig, ...) drives it — the shared lighting UI.
+std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
+                                                       double subjectHeight = 0.0);
 
 // A small pyramid marker: apex at the LOCAL origin pointing down, square base up
 // at +h — position it hovering and it points at a spot on the ground (goal /

@@ -7,7 +7,9 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/StageLighting.h>
 #include <cvc/nav/grid_nav.h> // astar / simplify / inflate — the shared route planner
 #include <vtkCamera.h>
 #include <vtkRenderWindow.h>
@@ -334,6 +336,25 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
       }
   }
   return occ_dilated(occ, nx, ny, inflate);
+}
+
+std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
+                                                      double subjectHeight) {
+  auto rig = std::make_unique<cvc::gl::StageLighting>(sg);
+  // Acting area = the city footprint, lifted to mid-building height so the cones
+  // (and thus each light's shadow-map frustum) cover the rooftops, not only the
+  // street. radius = footprint half-diagonal — the subject IS the whole city.
+  rig->setStage(b.cx(), b.cy(), 0.5 * subjectHeight, b.radius());
+  rig->applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
+  // Keep the old warm-key / cool-fill feel (the two directional lights this
+  // replaces were a warm key from the SW-high and a cool fill from the NE).
+  rig->setKey(1.15, -42.0, 58.0, 62.0); // intensity, azimuth, elevation, cone(deg)
+  rig->setFill(0.55);
+  rig->setWarmth(0.35);
+  rig->setEnvironment(0.5); // lift open ground / map edges the cones don't reach
+  rig->setAmbient(0.32);
+  rig->apply();
+  return rig;
 }
 
 Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
