@@ -69,6 +69,16 @@ public:
     double l_occ = 2.2, l_free = -1.4, l_clamp = 8.0;
     bool optimistic = true; // unknown-space policy
     double p_thresh = 0.5, band = 0.15, ttl_s = 4.0;
+    // Inter-agent separation (optional swarm collision avoidance). Each tick,
+    // nudge every agent's carrot away from peers within `sep_radius` (normalized
+    // units, like o/goal) with strength `sep_gain`. Both default 0 = OFF, so
+    // single-agent, fog and finale runs are byte-unchanged. This is the swarm
+    // counterpart to the squad's peer stamping: mode-agnostic (per-agent,
+    // independent of the belief planes, which are shared in the scale path), via
+    // the neighbors_within_radius spatial hash (grid_nav.h). It steers the
+    // reactive drive AROUND neighbours instead of through them.
+    float sep_radius = 0.0f;
+    float sep_gain = 0.0f;
   };
 
   // truth / prior_occ are row-major rows*cols uint8; the initial field is built
@@ -151,6 +161,14 @@ public:
   // it is inert — rebuild the field from a fresh occupancy to change a static map.
   void retarget(int i, float gx_n, float gy_n);
   void add_obstacle(int r0, int r1, int c0, int c1);
+
+  // Live-tune the optional inter-agent separation (config.sep_radius/sep_gain);
+  // gain 0 disables it. Lets a host toggle/scale swarm collision avoidance at
+  // runtime without rebuilding the world.
+  void set_separation(float radius, float gain) {
+    cfg_.sep_radius = radius;
+    cfg_.sep_gain = gain;
+  }
 
 private:
   config cfg_;
