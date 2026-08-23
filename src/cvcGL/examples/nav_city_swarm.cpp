@@ -297,20 +297,25 @@ int main(int argc, char **argv) {
   std::shared_ptr<GeometryNode> goalsNode;
   std::vector<double> goalXyz;
   {
-    const double gh = 0.006 * span, ght = 1.7 * gh;
+    // A tall, slender BEACON per goal: apex on the ground (points at the exact
+    // spot) widening up to a small cap ABOVE the rooftops (buildings are
+    // wall_h = 0.06*span tall). The old 0.006*span pyramid capped at 0.022*span
+    // sat entirely below the skyline, so targets were invisible in the city.
+    const double gh = 0.010 * span; // cap half-width
+    const double ght = 2.2 * wall_h; // beacon height (~0.13*span): clears rooftops
     const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                     ght, gh, gh, ght, -gh, gh,  ght};
     const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
     cvc::geometry goalGeom =
-        goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.012 * span);
+        goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.0); // apex on the ground
     goalsNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("goals", goalGeom));
     std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
     world.goals_world(gw.data());
     goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data()); // keep: arrived goals sink away
     if (goalsNode) {
       goalsNode->setUseSingleColor(false);
-      goalsNode->setAmbient(0.85);
-      goalsNode->setDiffuse(0.55);
+      goalsNode->setAmbient(1.0); // emissive: the beacon glows in its agent's hue
+      goalsNode->setDiffuse(0.35);
       goalsNode->updateVertices(goalXyz);
     }
   }
@@ -426,6 +431,7 @@ int main(int argc, char **argv) {
   std::string uiBelief = belief;
   bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true;
   double uiHz = hz;
+  float uiTrailW = 1.5f; // live path (trail) line width
 #ifdef CVC_ENABLE_IMGUI
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
@@ -478,6 +484,16 @@ int main(int argc, char **argv) {
       if (ImGui::SliderFloat("sim Hz", &hzf, 10.0f, 240.0f, "%.0f"))
         uiHz = hzf;
     }
+    // ---- Display (all live, no restart) -------------------------------------
+    ImGui::Separator();
+    ImGui::TextDisabled("Display (live)");
+    ImGui::Checkbox("Paths", &uiTrails); // the driven breadcrumb trails
+    ImGui::SameLine();
+    ImGui::Checkbox("Targets", &uiGoals);
+    ImGui::SameLine();
+    ImGui::Checkbox("Shadows", &uiShadows);
+    ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
+    ImGui::Separator();
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
     ImGui::TextDisabled("agents / belief / fog need a restart");
@@ -508,8 +524,10 @@ int main(int argc, char **argv) {
       shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
       uiShadows = shadows;
     }
-    if (trailNode)
+    if (trailNode) {
       trailNode->setVisible(uiTrails);
+      trailNode->setLineWidth(uiTrailW);
+    }
     if (goalsNode)
       goalsNode->setVisible(uiGoals);
     if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
@@ -545,14 +563,14 @@ int main(int argc, char **argv) {
       { // goals + trails are N-sized too
         std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
         world.goals_world(gw.data());
-        const double gh = 0.006 * span, ght = 1.7 * gh;
+        const double gh = 0.010 * span, ght = 2.2 * wall_h; // beacon (matches initial build)
         const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                         ght, gh, gh, ght, -gh, gh,  ght};
         const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
                                                0, 4, 1, 1, 3, 2, 1, 4, 3};
         if (goalsNode) {
           goalsNode->setGeometry(
-              goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.012 * span));
+              goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
           goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
           goalsNode->updateVertices(goalXyz);
         }
