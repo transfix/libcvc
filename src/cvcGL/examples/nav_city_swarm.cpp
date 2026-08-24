@@ -19,12 +19,12 @@
 #include "nav_common.h"
 
 #include <boost/program_options.hpp>
-#include <cvc/core/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
 #include <cvc/core/app.h>
+#include <cvc/core/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -52,11 +52,11 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <vtkActor2D.h>          // skip 2D HUD/text when mirroring to PiP
-#include <vtkActorCollection.h>  // enumerate main-renderer props to mirror onto PiP
-#include <vtkCamera.h>           // PiP ortho camera
-#include <vtkLight.h>            // PiP needs its own lights (main renderer's are aimed at chase)
-#include <vtkMatrix4x4.h>        // follow-cam probe transform
+#include <vtkActor2D.h>         // skip 2D HUD/text when mirroring to PiP
+#include <vtkActorCollection.h> // enumerate main-renderer props to mirror onto PiP
+#include <vtkCamera.h>          // PiP ortho camera
+#include <vtkLight.h>           // PiP needs its own lights (main renderer's are aimed at chase)
+#include <vtkMatrix4x4.h>       // follow-cam probe transform
 #include <vtkNew.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
@@ -394,8 +394,7 @@ int main(int argc, char **argv) {
   }
   // Bundles use metre-scale world units; synthetic uses normalized units.
   const bool worldIsMetres = !bundle.empty();
-  const double gsz =
-      worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
+  const double gsz = worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
     haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
   if (haveVehicle)
@@ -440,19 +439,98 @@ int main(int argc, char **argv) {
     // so the flag flutters to the LEFT of the direction of travel.
     std::vector<double> fv = {
         // pole (8 verts)
-        -pr, -pr, 0.0,  pr, -pr, 0.0,  pr, pr, 0.0,  -pr, pr, 0.0,
-        -pr, -pr, ph,   pr, -pr, ph,   pr, pr, ph,   -pr, pr, ph,
+        -pr,
+        -pr,
+        0.0,
+        pr,
+        -pr,
+        0.0,
+        pr,
+        pr,
+        0.0,
+        -pr,
+        pr,
+        0.0,
+        -pr,
+        -pr,
+        ph,
+        pr,
+        -pr,
+        ph,
+        pr,
+        pr,
+        ph,
+        -pr,
+        pr,
+        ph,
         // flag panel (4 verts): a rectangle from the pole out to -y=-fw, at top
-        0.0, 0.0, ph - fh,   0.0, -fw, ph - fh,   0.0, -fw, ph,   0.0, 0.0, ph,
+        0.0,
+        0.0,
+        ph - fh,
+        0.0,
+        -fw,
+        ph - fh,
+        0.0,
+        -fw,
+        ph,
+        0.0,
+        0.0,
+        ph,
     };
     std::vector<std::uint32_t> ft = {
         // pole box (12 tris)
-        0,2,1, 0,3,2,  4,5,6, 4,6,7,  0,1,5, 0,5,4,  1,2,6, 1,6,5,
-        2,3,7, 2,7,6,  3,0,4, 3,4,7,
+        0,
+        2,
+        1,
+        0,
+        3,
+        2,
+        4,
+        5,
+        6,
+        4,
+        6,
+        7,
+        0,
+        1,
+        5,
+        0,
+        5,
+        4,
+        1,
+        2,
+        6,
+        1,
+        6,
+        5,
+        2,
+        3,
+        7,
+        2,
+        7,
+        6,
+        3,
+        0,
+        4,
+        3,
+        4,
+        7,
         // flag panel (2 tris, both winds — double-sided by drawing twice)
-        8,9,10,  8,10,11,   8,10,9,  8,11,10,
+        8,
+        9,
+        10,
+        8,
+        10,
+        11,
+        8,
+        10,
+        9,
+        8,
+        11,
+        10,
     };
-    (void)fh; (void)fw; // clang tidy: used only through fv above
+    (void)fh;
+    (void)fw; // clang tidy: used only through fv above
     cvc::geometry flagGeom = flagGlyphs.build_template(app, N, color.data(), fv, ft, /*z=*/0.0);
     flagNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("flags", flagGeom));
     if (flagNode) {
@@ -652,11 +730,11 @@ int main(int argc, char **argv) {
       } catch (...) {
       }
     };
-    st("back", gsz * 2.5);         // ~12 m behind a 4.7 m Humvee (intimate over-the-shoulder)
-    st("height", gsz * 1.2);       // ~5.7 m above
-    st("look_ahead", gsz * 1.2);   // aim slightly ahead of the vehicle
-    st("look_up", gsz * 0.4);      // aim a touch above ground plane
-    st("min_speed", 0.5);          // fall back to a static trail below 0.5 wu/s
+    st("back", gsz * 2.5);       // ~12 m behind a 4.7 m Humvee (intimate over-the-shoulder)
+    st("height", gsz * 1.2);     // ~5.7 m above
+    st("look_ahead", gsz * 1.2); // aim slightly ahead of the vehicle
+    st("look_up", gsz * 0.4);    // aim a touch above ground plane
+    st("min_speed", 0.5);        // fall back to a static trail below 0.5 wu/s
     // Faster catch-up: the DEFAULT cam_tau = 0.55 is a filmic slow ease that
     // takes ~50 frames to close on the target from a wide framed pose. Tighten
     // so the chase snaps into place within a second (~0.08 s tau -> ~30 frames
@@ -671,8 +749,8 @@ int main(int argc, char **argv) {
     } catch (const std::exception &e) {
       std::printf("nav_city_swarm: read-back threw: %s\n", e.what());
     }
-    std::printf("nav_city_swarm: Track configured (gsz=%.1f) at %s (back read=%.2f)\n",
-                gsz, tp.c_str(), back_check);
+    std::printf("nav_city_swarm: Track configured (gsz=%.1f) at %s (back read=%.2f)\n", gsz,
+                tp.c_str(), back_check);
   };
   // --follow N: cinematic Track camera. Seed the vtkCamera at the chase pose on
   // frame 0 so it's already framed behind the vehicle (instead of easing in for
@@ -1195,8 +1273,7 @@ int main(int argc, char **argv) {
       if (pipDotNode)
         pipDotNode->updateVertices(pipDotGlyphs.pack(emPos.data(), emHead.data()));
       if (followAgent >= 0 && followAgent < N)
-        set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], 0.0,
-                     emHead[followAgent]);
+        set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], 0.0, emHead[followAgent]);
       restyle(emMd.data(), emRch.data());
       trail_update(emPos.data());
     }
@@ -1225,8 +1302,9 @@ int main(int argc, char **argv) {
         auto wt = probeNode ? probeNode->getWorldTransform() : nullptr;
         double px = wt ? wt->GetElement(0, 3) : 0.0;
         double py = wt ? wt->GetElement(1, 3) : 0.0;
-        std::printf("nav_city_swarm: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
-                    frame, (int)cam.mode(), px, py, followAgent, dt);
+        std::printf(
+            "nav_city_swarm: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
+            frame, (int)cam.mode(), px, py, followAgent, dt);
       }
     } else if (capturing) { // orbit
       const double az = 0.7 + 0.30 * t;
