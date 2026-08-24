@@ -12,10 +12,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <memory>
 #include <string>
 #include <vector>
-
-#include <memory>
 
 namespace cvc {
 class app;

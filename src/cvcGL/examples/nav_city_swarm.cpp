@@ -174,7 +174,8 @@ int main(int argc, char **argv) {
       "city bundle dir (terrain.json + buildings.glb) for a REAL, much larger city (e.g. "
       "Austin); else $CVC_NAV_BUNDLE; else the synthetic city_scene")(
       "vehicle", po::value<std::string>(&vehicle),
-      "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat arrow)");
+      "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat "
+      "arrow)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -236,7 +237,8 @@ int main(int argc, char **argv) {
   }
   navdemo::add_border(occ.data(), rows, cols);
   const double span = bounds.max_x - bounds.min_x;
-  const double wall_h = 0.06 * span; // blocky fallback buildings (real mesh used when a bundle loads)
+  const double wall_h =
+      0.06 * span; // blocky fallback buildings (real mesh used when a bundle loads)
 
   cvc::nav::sim_world::config cfg;
   cfg.rows = rows;
@@ -302,8 +304,7 @@ int main(int argc, char **argv) {
   if (haveMesh) {
     // Real building geometry from the bundle's buildings.glb (true heights + shapes),
     // instead of blocks extruded from the occupancy grid.
-    auto wnode =
-        std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
+    auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
     if (wnode) {
       wnode->setUseSingleColor(true);
       wnode->setColor(wall_rgb[0], wall_rgb[1], wall_rgb[2]);
@@ -383,8 +384,8 @@ int main(int argc, char **argv) {
     // Size relative to the city, but CAPPED to a physical multiple of the vehicle
     // so a huge real city (Austin, +/-1500) isn't a forest of 400 giant spikes.
     const double phys = static_cast<double>(cfg.veh.rr) / scale; // vehicle radius, metres
-    const double gh = std::min(0.010 * span, 4.0 * phys);   // cap half-width
-    const double ght = std::min(2.2 * wall_h, 24.0 * phys); // beacon height (clears rooftops)
+    const double gh = std::min(0.010 * span, 4.0 * phys);        // cap half-width
+    const double ght = std::min(2.2 * wall_h, 24.0 * phys);      // beacon height (clears rooftops)
     const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                     ght, gh, gh, ght, -gh, gh,  ght};
     const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
@@ -681,8 +682,7 @@ int main(int argc, char **argv) {
         const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
                                                0, 4, 1, 1, 3, 2, 1, 4, 3};
         if (goalsNode) {
-          goalsNode->setGeometry(
-              goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
+          goalsNode->setGeometry(goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
           goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
           goalsNode->updateVertices(goalXyz);
         }

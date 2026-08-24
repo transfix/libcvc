@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
@@ -12,7 +13,6 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/model/model_file_io.h> // read_model (buildings.glb -> mesh)
 #include <cvc/nav/grid_nav.h>        // astar / simplify / inflate — the shared route planner
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -416,7 +416,7 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
 }
 
 std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
-                                                      double subjectHeight) {
+                                                       double subjectHeight) {
   auto rig = std::make_unique<cvc::gl::StageLighting>(sg);
   // Acting area = the city footprint, lifted to mid-building height so the cones
   // (and thus each light's shadow-map frustum) cover the rooftops, not only the
@@ -460,12 +460,11 @@ Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, d
   w2c(gx, gy, gr, gc);
   const auto path = cvc::nav::astar(planOcc, rows, cols, sr, sc, gr, gc);
   if (path.size() >= 4) {
-    const auto sp = cvc::nav::simplify(planOcc, rows, cols, path.data(),
-                                       static_cast<int>(path.size() / 2));
+    const auto sp =
+        cvc::nav::simplify(planOcc, rows, cols, path.data(), static_cast<int>(path.size() / 2));
     for (std::size_t i = 0; i + 1 < sp.size(); i += 2)
-      rt.wp.push_back(
-          {b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
-           b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
+      rt.wp.push_back({b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
+                       b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
   }
   rt.wp.push_back({gx, gy}); // always end at the true goal
   return rt;

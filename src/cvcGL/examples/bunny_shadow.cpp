@@ -23,7 +23,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <iostream>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -35,6 +34,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <iostream>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -116,8 +116,8 @@ int main(int argc, char **argv) {
   std::string png;
 
   po::options_description desc("bunny_shadow — a Stanford-bunny shadow/shader test in cvcGL");
-  desc.add_options()("help,h", "show this help")(
-      "width", po::value<int>(&width)->default_value(1280))(
+  desc.add_options()("help,h", "show this help")("width",
+                                                 po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "offscreen", po::bool_switch(&offscreen))("no-shadows", po::bool_switch(&no_shadows))(
       "no-ui", po::bool_switch(&no_ui))("frames", po::value<long>(&frames)->default_value(0))(
@@ -143,8 +143,7 @@ int main(int argc, char **argv) {
   const double S = 100.0; // bunny target height in world units
 
   // The subject: the bunny.
-  auto bunnyNode =
-      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("bunny", stand_bunny(S)));
+  auto bunnyNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("bunny", stand_bunny(S)));
   if (bunnyNode) {
     bunnyNode->setUseSingleColor(true);
     bunnyNode->setColor(0.85, 0.82, 0.88);
@@ -156,8 +155,8 @@ int main(int argc, char **argv) {
 
   // The receiver: a ground plane the shadow lands on.
   const double ground_rgb[3] = {0.32, 0.34, 0.38};
-  auto groundNode =
-      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("ground", ground(2.2 * S, ground_rgb)));
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", ground(2.2 * S, ground_rgb)));
   if (groundNode) {
     groundNode->setUseSingleColor(true);
     groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);

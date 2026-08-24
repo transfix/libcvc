@@ -369,7 +369,7 @@ int main(int argc, char **argv) {
   // and a growing yellow TRACK trail of where the agent has actually driven.
   const double goal_rgb[3] = {1.00, 0.45, 0.20}, start_rgb[3] = {0.35, 0.85, 0.45};
   const double route_rgb[3] = {0.35, 0.65, 1.00}, track_rgb[3] = {0.98, 0.85, 0.30};
-  const double spine_rgb[3] = {0.20, 0.90, 1.00}; // global A* route spine (cyan)
+  const double spine_rgb[3] = {0.20, 0.90, 1.00};          // global A* route spine (cyan)
   const double gx = 80.0, gy = 6.0, sx = -80.0, sy = -6.0; // world (set above, normalized)
   {
     auto goalNode = std::dynamic_pointer_cast<GeometryNode>(
@@ -453,8 +453,8 @@ int main(int argc, char **argv) {
       g.points().push_back({x, y, 0.72});
       g.colors().push_back({spine_rgb[0], spine_rgb[1], spine_rgb[2]});
       const auto n = static_cast<cvc::geometry::index_t>(g.points().size());
-      g.lines().push_back({static_cast<cvc::geometry::index_t>(n - 2),
-                           static_cast<cvc::geometry::index_t>(n - 1)});
+      g.lines().push_back(
+          {static_cast<cvc::geometry::index_t>(n - 2), static_cast<cvc::geometry::index_t>(n - 1)});
       px = x;
       py = y;
     };
