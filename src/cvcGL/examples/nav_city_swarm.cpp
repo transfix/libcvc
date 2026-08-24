@@ -462,6 +462,38 @@ int main(int argc, char **argv) {
     }
   }
 
+  // PiP OVERLAY DOTS: a big flat disc per agent in the agent's hue, sized so it
+  // reads as a visible pixel on the top-down ortho map (~1/40 of the city span).
+  // Uses AgentGlyphs (identical streaming model as the body/flags: build once,
+  // pack per frame, updateVertices) — only its scale and its renderer set differ.
+  // Attached ONLY to the PiP renderer (removed from main) so it doesn't pollute
+  // the chase view.
+  navdemo::AgentGlyphs pipDotGlyphs;
+  std::shared_ptr<GeometryNode> pipDotNode;
+  {
+    // Flat regular pentagon in the XY plane, ~40x the Humvee footprint so it
+    // shows at the ortho scale (3km map / 720px window ~ 4 m/px, so a 200 m
+    // marker is ~50 px — a clickable pixel target).
+    const double rr = std::max(gsz * 20.0, (bounds.max_x - bounds.min_x) * 0.008);
+    std::vector<double> pv;
+    std::vector<std::uint32_t> pt;
+    pv.reserve(5 * 3);
+    for (int k = 0; k < 5; ++k) {
+      const double a = k * (2.0 * PI / 5.0) - PI / 2.0; // pointer up
+      pv.push_back(rr * std::cos(a));
+      pv.push_back(rr * std::sin(a));
+      pv.push_back(0.0);
+    }
+    pt = {0, 1, 2, 0, 2, 3, 0, 3, 4}; // triangle fan
+    cvc::geometry dotGeom = pipDotGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.5);
+    pipDotNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("pip_dots", dotGeom));
+    if (pipDotNode) {
+      pipDotNode->setUseSingleColor(false);
+      pipDotNode->setAmbient(1.0); // flat, no shadow tint — reads as a UI marker
+      pipDotNode->setDiffuse(0.0);
+    }
+  }
+
   // Follow-cam PROBE: an invisible one-triangle node whose transform is set to
   // the selected agent's world pose each tick. CameraController::Mode::Track
   // resolves its target by node name -> node->getWorldTransform() (origin), so
@@ -695,9 +727,11 @@ int main(int argc, char **argv) {
     pipRenderer->AutomaticLightCreationOff();
     pipRenderer->RemoveAllLights();
     {
+      // Dim, ambient-only headlight so the satellite ground doesn't blow out
+      // and vehicle glyphs stay legible against it.
       auto hl = vtkSmartPointer<vtkLight>::New();
       hl->SetLightTypeToHeadlight();
-      hl->SetIntensity(1.1);
+      hl->SetIntensity(0.55);
       pipRenderer->AddLight(hl);
     }
     // Mirror the main renderer's 3-D props onto the PiP. Each vtkProp3D can live
@@ -710,6 +744,14 @@ int main(int argc, char **argv) {
     while (vtkProp *p = props->GetNextProp())
       if (!vtkActor2D::SafeDownCast(p))
         pipRenderer->AddViewProp(p);
+    // The pip_dots overlay is PiP-only: remove from main, keep on PiP.
+    if (pipDotNode) {
+      vtkProp *dotsProp = pipDotNode->prop();
+      if (dotsProp) {
+        main->RemoveViewProp(dotsProp);
+        pipRenderer->AddViewProp(dotsProp);
+      }
+    }
     view.renderWindow()->SetNumberOfLayers(2);
     view.renderWindow()->AddRenderer(pipRenderer);
   }
@@ -1130,6 +1172,8 @@ int main(int argc, char **argv) {
           agentNode->updateVertices(xyz);
         if (flagNode) // flags share the same pose stream, different template
           flagNode->updateVertices(flagGlyphs.pack(snap->pos.data(), snap->heading.data()));
+        if (pipDotNode) // PiP-only marker dots, same pose stream
+          pipDotNode->updateVertices(pipDotGlyphs.pack(snap->pos.data(), snap->heading.data()));
         if (followAgent >= 0 && followAgent < N) {
           const float *p = snap->pos.data() + 2 * followAgent;
           set_probe_at(p[0], p[1], 0.0, snap->heading[followAgent]);
@@ -1148,6 +1192,8 @@ int main(int argc, char **argv) {
         agentNode->updateVertices(xyz);
       if (flagNode)
         flagNode->updateVertices(flagGlyphs.pack(emPos.data(), emHead.data()));
+      if (pipDotNode)
+        pipDotNode->updateVertices(pipDotGlyphs.pack(emPos.data(), emHead.data()));
       if (followAgent >= 0 && followAgent < N)
         set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], 0.0,
                      emHead[followAgent]);
