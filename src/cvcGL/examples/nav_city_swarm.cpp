@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
 #include <cvc/core/app.h>
+#include <cvc/core/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -51,6 +52,14 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <vtkActor2D.h>         // skip 2D HUD/text when mirroring to PiP
+#include <vtkActorCollection.h> // enumerate main-renderer props to mirror onto PiP
+#include <vtkCamera.h>          // PiP ortho camera
+#include <vtkLight.h>           // PiP needs its own lights (main renderer's are aimed at chase)
+#include <vtkMatrix4x4.h>       // follow-cam probe transform
+#include <vtkNew.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::CameraController;
@@ -143,6 +152,7 @@ int main(int argc, char **argv) {
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false;
+  int followInit = -1; // agent index to follow at start (-1 = free camera)
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
@@ -161,7 +171,7 @@ int main(int argc, char **argv) {
       "fps", po::value<double>(&fps)->default_value(30.0),
       "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
-      "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
       "look speed, degrees per pixel of mouse motion")(
       "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
@@ -175,7 +185,8 @@ int main(int argc, char **argv) {
       "Austin); else $CVC_NAV_BUNDLE; else the synthetic city_scene")(
       "vehicle", po::value<std::string>(&vehicle),
       "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat "
-      "arrow)");
+      "arrow)")("follow", po::value<int>(&followInit)->default_value(-1),
+                "agent index to CHASE from start with the cinematic Track camera (-1 = free)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -359,9 +370,17 @@ int main(int argc, char **argv) {
   }
 
   navdemo::AgentGlyphs glyphs;
-  // Vehicle size relative to the city, capped to a physical multiple of the vehicle
-  // radius so Austin-scale worlds don't get absurdly large vehicles.
-  const double gsz = std::min(0.02 * span, 6.0 * (static_cast<double>(cfg.veh.rr) / scale));
+  // Vehicle size derived from real Humvee dimensions (M1097 length ~ 4.72 m).
+  // Bundled cities (e.g. Austin) use metre-scale world units — terrain.json's
+  // extents are in local metres — so gsz = kHumveeLenM directly. Synthetic
+  // city_scene lives on a normalized ±100 world with scale = 0.05; the trained
+  // vehicle radius rr = 0.15 world units is the same physical size the coef_mlp
+  // learned around, so the synthetic proxy uses ~2 * rr for a similar footprint.
+  //
+  // (Sanity: at ±100 span for city_scene, 2*rr = 0.3 world units feels small,
+  // but that's the WORLD the controller was trained on. This footprint keeps
+  // the visual proportion the same as the trained hitbox.)
+  constexpr double kHumveeLenM = 4.72; // M1097 length, metres
   // A real Humvee model per agent instead of a flat arrow, when one is available
   // (--vehicle, or <bundle>/../../shared/Humvee.glb). Instanced + streamed exactly
   // like the arrow: build_template -> pack -> updateVertices.
@@ -373,10 +392,15 @@ int main(int argc, char **argv) {
     if (std::filesystem::exists(cand))
       vehicle = cand;
   }
+  // Bundles use metre-scale world units; synthetic uses normalized units.
+  const bool worldIsMetres = !bundle.empty();
+  const double gsz = worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
     haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
   if (haveVehicle)
-    std::printf("nav_city_swarm: vehicle model %s (%zu tris)\n", vehicle.c_str(), vtris.size() / 3);
+    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s)\n",
+                vehicle.c_str(), vtris.size() / 3, gsz,
+                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)");
   // Build the per-agent instanced mesh (Humvee if loaded, else the flat arrow).
   auto build_agents = [&]() {
     return haveVehicle ? glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0)
@@ -393,6 +417,197 @@ int main(int argc, char **argv) {
     agentNode->setSpecular(0.2);
     agentNode->setSpecularPower(18.0);
   }
+
+  // Per-agent COLOR FLAG: a thin pole + rectangular flag flying above the vehicle,
+  // instanced + streamed like the body. This keeps identity legible when the body
+  // wears its real Humvee texture instead of a group tint, and reads from far away
+  // over the city — same trick as the goal beacons, at vehicle scale.
+  navdemo::AgentGlyphs flagGlyphs;
+  std::shared_ptr<GeometryNode> flagNode;
+  {
+    // Local frame: forward +x, up +z. Sizes are anchored to the VEHICLE (not the
+    // city) so the flag is proportional in chase-cam close-ups AND still legible
+    // from a wide orbit — enough headroom to clear vehicle geometry, but nothing
+    // that dwarfs the Humvee when the camera closes in. gsz IS the Humvee length
+    // in world units (see kHumveeLenM), so all these dimensions read like real
+    // metres given scale = 0.05 (1 m = 20 world units).
+    const double ph = gsz * 1.5;  // pole tall enough to clear roof + a bit
+    const double pr = gsz * 0.03; // pole thickness ~0.15 m (visible from orbit)
+    const double fw = gsz * 0.7;  // flag panel width ~ 3.3 m at Humvee scale
+    const double fh = gsz * 0.4;  // flag panel height ~ 1.9 m at Humvee scale
+    // pole (thin square column) + flag panel (double-sided quad), all in the -y half
+    // so the flag flutters to the LEFT of the direction of travel.
+    std::vector<double> fv = {
+        // pole (8 verts)
+        -pr,
+        -pr,
+        0.0,
+        pr,
+        -pr,
+        0.0,
+        pr,
+        pr,
+        0.0,
+        -pr,
+        pr,
+        0.0,
+        -pr,
+        -pr,
+        ph,
+        pr,
+        -pr,
+        ph,
+        pr,
+        pr,
+        ph,
+        -pr,
+        pr,
+        ph,
+        // flag panel (4 verts): a rectangle from the pole out to -y=-fw, at top
+        0.0,
+        0.0,
+        ph - fh,
+        0.0,
+        -fw,
+        ph - fh,
+        0.0,
+        -fw,
+        ph,
+        0.0,
+        0.0,
+        ph,
+    };
+    std::vector<std::uint32_t> ft = {
+        // pole box (12 tris)
+        0,
+        2,
+        1,
+        0,
+        3,
+        2,
+        4,
+        5,
+        6,
+        4,
+        6,
+        7,
+        0,
+        1,
+        5,
+        0,
+        5,
+        4,
+        1,
+        2,
+        6,
+        1,
+        6,
+        5,
+        2,
+        3,
+        7,
+        2,
+        7,
+        6,
+        3,
+        0,
+        4,
+        3,
+        4,
+        7,
+        // flag panel (2 tris, both winds — double-sided by drawing twice)
+        8,
+        9,
+        10,
+        8,
+        10,
+        11,
+        8,
+        10,
+        9,
+        8,
+        11,
+        10,
+    };
+    (void)fh;
+    (void)fw; // clang tidy: used only through fv above
+    cvc::geometry flagGeom = flagGlyphs.build_template(app, N, color.data(), fv, ft, /*z=*/0.0);
+    flagNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("flags", flagGeom));
+    if (flagNode) {
+      flagNode->setUseSingleColor(false);
+      flagNode->setAmbient(0.6); // stay legible in shadow, still shaded
+      flagNode->setDiffuse(0.7);
+    }
+  }
+
+  // PiP OVERLAY DOTS: a big flat disc per agent in the agent's hue, sized so it
+  // reads as a visible pixel on the top-down ortho map (~1/40 of the city span).
+  // Uses AgentGlyphs (identical streaming model as the body/flags: build once,
+  // pack per frame, updateVertices) — only its scale and its renderer set differ.
+  // Attached ONLY to the PiP renderer (removed from main) so it doesn't pollute
+  // the chase view.
+  navdemo::AgentGlyphs pipDotGlyphs;
+  std::shared_ptr<GeometryNode> pipDotNode;
+  {
+    // Flat regular pentagon in the XY plane, ~40x the Humvee footprint so it
+    // shows at the ortho scale (3km map / 720px window ~ 4 m/px, so a 200 m
+    // marker is ~50 px — a clickable pixel target).
+    const double rr = std::max(gsz * 20.0, (bounds.max_x - bounds.min_x) * 0.008);
+    std::vector<double> pv;
+    std::vector<std::uint32_t> pt;
+    pv.reserve(5 * 3);
+    for (int k = 0; k < 5; ++k) {
+      const double a = k * (2.0 * PI / 5.0) - PI / 2.0; // pointer up
+      pv.push_back(rr * std::cos(a));
+      pv.push_back(rr * std::sin(a));
+      pv.push_back(0.0);
+    }
+    pt = {0, 1, 2, 0, 2, 3, 0, 3, 4}; // triangle fan
+    cvc::geometry dotGeom = pipDotGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.5);
+    pipDotNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("pip_dots", dotGeom));
+    if (pipDotNode) {
+      pipDotNode->setUseSingleColor(false);
+      pipDotNode->setAmbient(1.0); // flat, no shadow tint — reads as a UI marker
+      pipDotNode->setDiffuse(0.0);
+    }
+  }
+
+  // Follow-cam PROBE: an invisible one-triangle node whose transform is set to
+  // the selected agent's world pose each tick. CameraController::Mode::Track
+  // resolves its target by node name -> node->getWorldTransform() (origin), so
+  // this proxy is what the cinematic follow camera reads. The probe is
+  // graphically invisible; only its transform matters.
+  cvc::geometry probeGeom(app);
+  {
+    auto &pts = probeGeom.points();
+    auto &tris = probeGeom.tris();
+    pts.push_back({0, 0, 0});
+    pts.push_back({0.01, 0, 0});
+    pts.push_back({0, 0.01, 0});
+    tris.push_back({0, 1, 2});
+  }
+  auto probeNode =
+      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("follow_probe", probeGeom));
+  vtkNew<vtkMatrix4x4> probeXform;
+  probeXform->Identity();
+  if (probeNode)
+    probeNode->setVisible(false); // pure transform holder for the follow camera
+  int followAgent = followInit;   // -1 = free camera, else agent index we're chasing
+  auto set_probe_at = [&](double x, double y, double z, double heading) {
+    // Rotation about +z, translation to (x,y,z). We only need translation for the
+    // Track target lookup, but keeping heading in the transform makes the camera
+    // sit BEHIND the vehicle nose (Track uses the local -x axis as "behind").
+    const double c = std::cos(heading), s = std::sin(heading);
+    probeXform->SetElement(0, 0, c);
+    probeXform->SetElement(0, 1, -s);
+    probeXform->SetElement(0, 3, x);
+    probeXform->SetElement(1, 0, s);
+    probeXform->SetElement(1, 1, c);
+    probeXform->SetElement(1, 3, y);
+    probeXform->SetElement(2, 3, z);
+    if (probeNode)
+      probeNode->setTransform(probeXform);
+  };
 
   // Every agent's DESTINATION, rendered: one merged mesh of hovering pyramids in
   // each agent's hue (goals_world), packed once — N wandering triangles become N
@@ -496,10 +711,66 @@ int main(int argc, char **argv) {
   status.setColor(0.75, 0.80, 0.86);
 
   CameraController cam(view);
+  cam.setScene(&sg); // Track mode resolves its target node in this scene
   cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
   cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
+  // Track (chase) mode is tuned by state keys under viewers.main.camera.track.*
+  // (see CameraController.h); its DEFAULTS are back=55 / height=40 world units,
+  // right for the ±100 training world. On a metre-scale bundle (Austin ±1500)
+  // those trail distances are microscopic against the vehicle and the camera
+  // degenerates. Set trail parameters PROPORTIONAL TO THE VEHICLE (gsz metres),
+  // so the chase-cam works the same on any city.
+  auto configure_track_params = [&]() {
+    const std::string tp = sg.getStatePrefix() + ".viewers.main.camera.track.";
+    auto st = [&](const std::string &k, double v) {
+      try {
+        cvc::state::instance(app)(tp + k).value(v);
+      } catch (...) {
+      }
+    };
+    st("back", gsz * 2.5);       // ~12 m behind a 4.7 m Humvee (intimate over-the-shoulder)
+    st("height", gsz * 1.2);     // ~5.7 m above
+    st("look_ahead", gsz * 1.2); // aim slightly ahead of the vehicle
+    st("look_up", gsz * 0.4);    // aim a touch above ground plane
+    st("min_speed", 0.5);        // fall back to a static trail below 0.5 wu/s
+    // Faster catch-up: the DEFAULT cam_tau = 0.55 is a filmic slow ease that
+    // takes ~50 frames to close on the target from a wide framed pose. Tighten
+    // so the chase snaps into place within a second (~0.08 s tau -> ~30 frames
+    // to converge at 30 fps EMA).
+    st("cam_tau", 0.08);
+    st("pos_tau", 0.06);
+    // Read back via the READ overload (value<T>() returns T; the writer overload
+    // takes const T& and clobbers).
+    double back_check = -1.0;
+    try {
+      back_check = cvc::state::instance(app)(tp + "back").value<double>();
+    } catch (const std::exception &e) {
+      std::printf("nav_city_swarm: read-back threw: %s\n", e.what());
+    }
+    std::printf("nav_city_swarm: Track configured (gsz=%.1f) at %s (back read=%.2f)\n", gsz,
+                tp.c_str(), back_check);
+  };
+  // --follow N: cinematic Track camera. Seed the vtkCamera at the chase pose on
+  // frame 0 so it's already framed behind the vehicle (instead of easing in for
+  // ~50 frames from the default wide orbit). Grab the initial agent pose from
+  // the world and both position the probe and seed the camera to match.
+  if (followInit >= 0 && followInit < N) {
+    std::vector<float> ip(static_cast<std::size_t>(2) * N), ih(N);
+    world.snapshot(ip.data(), ih.data(), nullptr, nullptr, nullptr);
+    const double ax = ip[2 * followInit], ay = ip[2 * followInit + 1];
+    const double ah = ih[followInit];
+    configure_track_params();
+    set_probe_at(ax, ay, 0.0, ah);
+    const double ch = std::cos(ah), sh = std::sin(ah);
+    const double back = gsz * 2.5, height = gsz * 1.2, la = gsz * 1.2;
+    const double ex = ax - ch * back, ey = ay - sh * back, ez = height;
+    const double fx = ax + ch * la, fy = ay + sh * la, fz = gsz * 0.4;
+    view.setCamera(ex, ey, ez, fx, fy, fz, 0, 0, 1, 45.0);
+    cam.setTrackTarget("follow_probe");
+    cam.setMode(CameraController::Mode::Track);
+  }
   if (ortho)
     navdemo::set_ortho_topdown(view, bounds, 4.0,
                                capturing ? nullptr : &cam); // fixed 2-D top-down map
@@ -507,6 +778,104 @@ int main(int argc, char **argv) {
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
   sg.processEvents();
+
+  // Picture-in-picture: an orthographic top-down overlay in the bottom-right
+  // corner. Uses a SECOND vtkRenderer on the same render window, sharing the
+  // main renderer's actors via AddViewProp (each vtkProp can live in multiple
+  // renderers — VTK handles that fine). Layer 1 draws over layer 0. Click a
+  // vehicle in the PiP to CHASE it (handled from the ImGui draw callback below).
+  vtkSmartPointer<vtkRenderer> pipRenderer = vtkSmartPointer<vtkRenderer>::New();
+  vtkSmartPointer<vtkCamera> pipCam = vtkSmartPointer<vtkCamera>::New();
+  {
+    const double halfH = 0.5 * (bounds.max_y - bounds.min_y);
+    const double halfW = 0.5 * (bounds.max_x - bounds.min_x);
+    const double cx = bounds.cx(), cy = bounds.cy();
+    pipCam->SetParallelProjection(true);
+    pipCam->SetParallelScale(std::max(halfH, halfW) * 1.05);
+    pipCam->SetPosition(cx, cy, wall_h * 5.0 + 500.0); // straight down
+    pipCam->SetFocalPoint(cx, cy, 0.0);
+    pipCam->SetViewUp(0.0, 1.0, 0.0);
+    pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
+    pipRenderer->SetActiveCamera(pipCam);
+    pipRenderer->SetViewport(0.72, 0.0, 1.0, 0.28); // bottom-right corner
+    pipRenderer->SetBackground(0.02, 0.03, 0.05);
+    pipRenderer->SetLayer(1);
+    // Own lighting so the top-down view is evenly lit regardless of the main
+    // scene's stage rig (which is aimed at the chase framing).
+    pipRenderer->AutomaticLightCreationOff();
+    pipRenderer->RemoveAllLights();
+    {
+      // Dim, ambient-only headlight so the satellite ground doesn't blow out
+      // and vehicle glyphs stay legible against it.
+      auto hl = vtkSmartPointer<vtkLight>::New();
+      hl->SetLightTypeToHeadlight();
+      hl->SetIntensity(0.55);
+      pipRenderer->AddLight(hl);
+    }
+    // Mirror the main renderer's 3-D props onto the PiP. Each vtkProp3D can live
+    // in multiple renderers — VTK handles that fine. SKIP 2-D actors (HUD text,
+    // FPS overlay): those are viewport-relative and would double-draw on top of
+    // the PiP looking like a bug.
+    vtkRenderer *main = view.renderer();
+    vtkPropCollection *props = main->GetViewProps();
+    props->InitTraversal();
+    while (vtkProp *p = props->GetNextProp())
+      if (!vtkActor2D::SafeDownCast(p))
+        pipRenderer->AddViewProp(p);
+    // The pip_dots overlay is PiP-only: remove from main, keep on PiP.
+    if (pipDotNode) {
+      vtkProp *dotsProp = pipDotNode->prop();
+      if (dotsProp) {
+        main->RemoveViewProp(dotsProp);
+        pipRenderer->AddViewProp(dotsProp);
+      }
+    }
+    view.renderWindow()->SetNumberOfLayers(2);
+    view.renderWindow()->AddRenderer(pipRenderer);
+  }
+  // Click-in-PiP → follow. We record the last click and, if it lands over the
+  // PiP viewport, ortho-unproject it to a world (x,y), then pick the nearest
+  // agent's position and set followAgent.
+  auto pip_click_to_follow = [&](double mouseX, double mouseY) {
+    // Convert normalized display coords -> the PiP viewport local coords -> world.
+    // Viewport is [0.72, 0.0, 1.0, 0.28]; mouseX/mouseY are 0..1 across the window.
+    if (mouseX < 0.72 || mouseX > 1.0 || mouseY < 0.0 || mouseY > 0.28)
+      return false;
+    const double u = (mouseX - 0.72) / (1.0 - 0.72); // 0..1 within PiP
+    const double v = mouseY / 0.28;                  // 0..1 within PiP (top->bottom)
+    // Ortho unproject: viewport center = (cx,cy), extent = parallelScale * aspect.
+    int *vs = view.renderWindow()->GetSize(); // {width, height} — VTK owns this buffer
+    const int pw = static_cast<int>((1.0 - 0.72) * vs[0]);
+    const int ph = static_cast<int>(0.28 * vs[1]);
+    const double aspect = ph > 0 ? static_cast<double>(pw) / ph : 1.0;
+    const double sy = pipCam->GetParallelScale();
+    const double sx = sy * aspect;
+    const double wx = bounds.cx() + (u - 0.5) * 2.0 * sx;
+    const double wy = bounds.cy() - (v - 0.5) * 2.0 * sy; // v grows downward in screen coords
+    // Nearest-agent lookup using the current snapshot (emPos is refreshed above).
+    // Cheap linear scan — for a few hundred agents, negligible.
+    std::vector<float> ep(static_cast<std::size_t>(2) * N);
+    world.snapshot(ep.data(), nullptr, nullptr, nullptr, nullptr);
+    int best = -1;
+    double bestD2 = 1e30;
+    for (int i = 0; i < N; ++i) {
+      const double dx = ep[2 * i] - wx, dy = ep[2 * i + 1] - wy;
+      const double d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = i;
+      }
+    }
+    if (best >= 0) {
+      followAgent = best;
+      configure_track_params();
+      cam.setTrackTarget("follow_probe");
+      cam.setMode(CameraController::Mode::Track);
+      std::printf("nav_city_swarm: PiP click -> follow agent %d (dist=%.1f)\n", best,
+                  std::sqrt(bestD2));
+    }
+    return true;
+  };
 
   std::printf("nav_city_swarm: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
               belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
@@ -545,7 +914,7 @@ int main(int argc, char **argv) {
   bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
-  bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true;
+  bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true, uiFlags = true;
   double uiHz = hz;
   float uiTrailW = 1.5f;                              // live path (trail) line width
   bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
@@ -571,6 +940,7 @@ int main(int argc, char **argv) {
         ImGui::MenuItem("2-D map", nullptr, &ui2D);
         ImGui::MenuItem("Trails", nullptr, &uiTrails);
         ImGui::MenuItem("Goals", nullptr, &uiGoals);
+        ImGui::MenuItem("Flags", nullptr, &uiFlags);
         ImGui::MenuItem("Shadows", nullptr, &uiShadows);
         ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
         ImGui::EndMenu();
@@ -610,6 +980,24 @@ int main(int argc, char **argv) {
     ImGui::Checkbox("Paths", &uiTrails); // the driven breadcrumb trails
     ImGui::SameLine();
     ImGui::Checkbox("Targets", &uiGoals);
+    ImGui::SameLine();
+    ImGui::Checkbox("Flags", &uiFlags);
+    // Cinematic follow-cam: pick an agent to CHASE with the smoothed Track camera
+    // (harvested from grl-snam's ChaseCamera). -1 = free camera.
+    if (ImGui::InputInt("Follow #", &followAgent)) {
+      if (followAgent >= N)
+        followAgent = N - 1;
+      if (followAgent < -1)
+        followAgent = -1;
+      if (followAgent >= 0) {
+        configure_track_params(); // vehicle-scaled trail so chase works on any city
+        cam.setTrackTarget("follow_probe");
+        cam.setMode(CameraController::Mode::Track);
+      } else if (cam.mode() == CameraController::Mode::Track) {
+        cam.setMode(CameraController::Mode::Orbit);
+        cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
+      }
+    }
     ImGui::SameLine();
     ImGui::Checkbox("Shadows", &uiShadows);
     ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
@@ -652,6 +1040,19 @@ int main(int argc, char **argv) {
     touch.update(); // apply any pinch/two-finger gesture from this frame
 
 #ifdef CVC_ENABLE_IMGUI
+    // Click in the PiP corner -> chase whichever agent is nearest the click.
+    if (!capturing) {
+      ImGuiIO &io = ImGui::GetIO();
+      if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
+        const double mx = io.MousePos.x / std::max(io.DisplaySize.x, 1.0f);
+        const double my = io.MousePos.y / std::max(io.DisplaySize.y, 1.0f);
+        // PiP viewport spans [0.72,0]..[1.0,0.28] but VTK's y=0 is at the
+        // BOTTOM and ImGui's y=0 is at the TOP — flip.
+        const double myVtk = 1.0 - my;
+        if (mx >= 0.72 && myVtk <= 0.28)
+          pip_click_to_follow(mx, 0.28 - myVtk);
+      }
+    }
     // ---- apply UI actions ---------------------------------------------------
     if (uiShadows != shadows) { // live toggles
       shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
@@ -663,6 +1064,8 @@ int main(int argc, char **argv) {
     }
     if (goalsNode)
       goalsNode->setVisible(uiGoals);
+    if (flagNode)
+      flagNode->setVisible(uiFlags);
     // Inter-agent avoidance: live-tuned each frame (0 gain = off, vehicles pass
     // through each other again).
     world.set_separation(uiSeparate ? cfg.sep_radius : 0.0f, uiSeparate ? uiSepGain : 0.0f);
@@ -845,6 +1248,14 @@ int main(int argc, char **argv) {
         const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
         if (agentNode)
           agentNode->updateVertices(xyz);
+        if (flagNode) // flags share the same pose stream, different template
+          flagNode->updateVertices(flagGlyphs.pack(snap->pos.data(), snap->heading.data()));
+        if (pipDotNode) // PiP-only marker dots, same pose stream
+          pipDotNode->updateVertices(pipDotGlyphs.pack(snap->pos.data(), snap->heading.data()));
+        if (followAgent >= 0 && followAgent < N) {
+          const float *p = snap->pos.data() + 2 * followAgent;
+          set_probe_at(p[0], p[1], 0.0, snap->heading[followAgent]);
+        }
         restyle(snap->mode.data(), snap->reached.data());
         trail_update(snap->pos.data());
       }
@@ -857,6 +1268,12 @@ int main(int argc, char **argv) {
       const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
       if (agentNode)
         agentNode->updateVertices(xyz);
+      if (flagNode)
+        flagNode->updateVertices(flagGlyphs.pack(emPos.data(), emHead.data()));
+      if (pipDotNode)
+        pipDotNode->updateVertices(pipDotGlyphs.pack(emPos.data(), emHead.data()));
+      if (followAgent >= 0 && followAgent < N)
+        set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], 0.0, emHead[followAgent]);
       restyle(emMd.data(), emRch.data());
       trail_update(emPos.data());
     }
@@ -877,6 +1294,18 @@ int main(int argc, char **argv) {
       const double el = (34.0 - 12.0 * std::sin(0.25 * t)) * PI / 180.0;
       navdemo::orbit_camera(bounds, wall_h * 0.5, az, el, 1.4, eye, focal);
       view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 32);
+    } else if (capturing && capture == "follow") {
+      // Cinematic Track camera CHASES the selected agent. cam.update(dt) advances
+      // the smoothed pose (position -> heading two-stage ease + critically-damped).
+      cam.update(dt);
+      if (frame < 3 || frame % 15 == 0) {
+        auto wt = probeNode ? probeNode->getWorldTransform() : nullptr;
+        double px = wt ? wt->GetElement(0, 3) : 0.0;
+        double py = wt ? wt->GetElement(1, 3) : 0.0;
+        std::printf(
+            "nav_city_swarm: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
+            frame, (int)cam.mode(), px, py, followAgent, dt);
+      }
     } else if (capturing) { // orbit
       const double az = 0.7 + 0.30 * t;
       navdemo::orbit_camera(bounds, wall_h * 0.5, az, 36.0 * PI / 180.0, 1.75, eye, focal);

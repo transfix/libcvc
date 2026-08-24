@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <vtkCamera.h>
 #include <vtkNew.h>
+#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
@@ -41,6 +42,21 @@ SceneRenderer::SceneRenderer(SceneGraph &scene, int width, int height, bool offs
     : m_impl(new impl) {
   if (width < 1 || height < 1)
     throw std::invalid_argument("SceneRenderer: width and height must be >= 1");
+
+  // Route VTK diagnostics through stderr instead of a Win32 message box, and
+  // silence WARN-level output. VTK's shadow-map pass logs "Could not create
+  // shader object" / "Hardware does not support the number of textures defined"
+  // ERR/WARN lines on some driver configs; those are cosmetic (VTK falls back
+  // and keeps rendering) and just spam the console. Done once per process.
+  static bool s_vtkOutputConfigured = false;
+  if (!s_vtkOutputConfigured) {
+    if (auto *ow = vtkOutputWindow::GetInstance()) {
+      ow->SetDisplayModeToAlwaysStdErr();
+      // Keep ERR (people probably want to know) but drop WARN.
+      ow->SetPromptUser(0);
+    }
+    s_vtkOutputConfigured = true;
+  }
 
   m_impl->scene = &scene;
   m_impl->name = name;
@@ -88,9 +104,20 @@ void SceneRenderer::close() {
   // crash at exit.
   if (m_impl->scene)
     m_impl->scene->setRenderer(nullptr);
+  // Tear down the interactor FIRST, while its render window is still live.
+  // Order matters on Windows: vtkWin32RenderWindowInteractor's destructor,
+  // fired after Finalize(), tries to touch its render window; that surfaces
+  // as a blank native window briefly popping up at exit (and, on some driver
+  // configs, "Could not create shader object" spam as VTK re-inits GL). Call
+  // TerminateApp() so any pending message loop actually quits, then null the
+  // interactor before finalizing the window.
+  if (m_impl->interactor) {
+    m_impl->interactor->TerminateApp();
+    m_impl->interactor->SetRenderWindow(nullptr);
+    m_impl->interactor = nullptr;
+  }
   if (m_impl->window)
     m_impl->window->Finalize();
-  m_impl->interactor = nullptr;
   m_impl->window = nullptr;
   m_impl->renderer = nullptr;
   m_impl->scene = nullptr;

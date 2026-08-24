@@ -55,6 +55,12 @@ public:
   void setSceneGraph(SceneGraph *sceneGraph);
   SceneGraph *getSceneGraph() const { return m_sceneGraph; }
 
+  // Public accessor for the node's primary VTK prop. Needed by callers that
+  // manage multiple vtkRenderers (e.g. a picture-in-picture overlay) and need
+  // to add or remove the node's actor from a second renderer directly. The
+  // protected getProp() below stays as the polymorphic implementation hook.
+  vtkProp *prop() { return getProp(); }
+
 protected:
   virtual vtkProp *getProp() = 0;
   virtual void handleStateChanged(const std::string &childState) override;
