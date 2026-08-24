@@ -320,6 +320,26 @@ int main(int argc, char **argv) {
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
   cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  // A real bundle ships an aerial photo of the same footprint as terrain.json, so
+  // with fog OFF the ground can BE the satellite image instead of flat asphalt.
+  // Kept at function scope: setTexture(zeroCopy) borrows these pixels.
+  cvc::image satTex;
+  bool haveSat = false;
+  if (!fogOn && !bundle.empty()) {
+    const std::string sp = bundle + "/satellite.png";
+    if (std::filesystem::exists(sp)) {
+      try {
+        satTex = cvc::read_image(sp).converted(cvc::image::pixel_format::RGBA,
+                                               cvc::image::data_type::u8);
+        haveSat = satTex.width() > 0 && satTex.height() > 0;
+        if (haveSat)
+          std::printf("nav_city_swarm: satellite %s (%dx%d)\n", sp.c_str(), satTex.width(),
+                      satTex.height());
+      } catch (const std::exception &e) { // a missing decoder must not kill the demo
+        std::fprintf(stderr, "nav_city_swarm: satellite load failed (%s)\n", e.what());
+      }
+    }
+  }
   if (groundNode) {
     groundNode->setUseSingleColor(true);
     groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
@@ -328,6 +348,11 @@ int main(int argc, char **argv) {
       fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->setColor(1, 1, 1);
       groundNode->setTexture(fogTex, /*zeroCopy=*/true);
+    } else if (haveSat) { // the ground IS the aerial photo
+      groundNode->setColor(1, 1, 1);
+      groundNode->setTexture(satTex, /*zeroCopy=*/true);
+      groundNode->setAmbient(0.85); // photo already carries its own shading
+      groundNode->setDiffuse(0.35);
     } else {
       groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
     }
