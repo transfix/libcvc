@@ -142,9 +142,8 @@ int main(int argc, char **argv) {
       "scenario", po::value<std::string>(&scenario)->default_value("ghost"),
       "ghost (stale map lies) | dynamic (a crosser appears mid-run, hero loops around)")(
       "range", po::value<double>(&sensorRange)->default_value(35.0),
-      "sensor range in metres")(
-      "view", po::value<std::string>(&viewMode)->default_value("map"),
-      "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
+      "sensor range in metres")("view", po::value<std::string>(&viewMode)->default_value("map"),
+                                "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
       "none (interactive window) | orbit | fly (offscreen PNG capture)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
