@@ -19,6 +19,7 @@
 #include "nav_common.h"
 
 #include <boost/program_options.hpp>
+#include <cvc/core/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -164,7 +165,7 @@ int main(int argc, char **argv) {
       "fps", po::value<double>(&fps)->default_value(30.0),
       "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
-      "none (interactive window) | orbit | fly (offscreen PNG capture)")(
+      "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
       "look speed, degrees per pixel of mouse motion")(
       "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
@@ -363,9 +364,17 @@ int main(int argc, char **argv) {
   }
 
   navdemo::AgentGlyphs glyphs;
-  // Vehicle size relative to the city, capped to a physical multiple of the vehicle
-  // radius so Austin-scale worlds don't get absurdly large vehicles.
-  const double gsz = std::min(0.02 * span, 6.0 * (static_cast<double>(cfg.veh.rr) / scale));
+  // Vehicle size derived from real Humvee dimensions (M1097 length ~ 4.72 m).
+  // Bundled cities (e.g. Austin) use metre-scale world units — terrain.json's
+  // extents are in local metres — so gsz = kHumveeLenM directly. Synthetic
+  // city_scene lives on a normalized ±100 world with scale = 0.05; the trained
+  // vehicle radius rr = 0.15 world units is the same physical size the coef_mlp
+  // learned around, so the synthetic proxy uses ~2 * rr for a similar footprint.
+  //
+  // (Sanity: at ±100 span for city_scene, 2*rr = 0.3 world units feels small,
+  // but that's the WORLD the controller was trained on. This footprint keeps
+  // the visual proportion the same as the trained hitbox.)
+  constexpr double kHumveeLenM = 4.72; // M1097 length, metres
   // A real Humvee model per agent instead of a flat arrow, when one is available
   // (--vehicle, or <bundle>/../../shared/Humvee.glb). Instanced + streamed exactly
   // like the arrow: build_template -> pack -> updateVertices.
@@ -377,10 +386,16 @@ int main(int argc, char **argv) {
     if (std::filesystem::exists(cand))
       vehicle = cand;
   }
+  // Bundles use metre-scale world units; synthetic uses normalized units.
+  const bool worldIsMetres = !bundle.empty();
+  const double gsz =
+      worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
     haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
   if (haveVehicle)
-    std::printf("nav_city_swarm: vehicle model %s (%zu tris)\n", vehicle.c_str(), vtris.size() / 3);
+    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s)\n",
+                vehicle.c_str(), vtris.size() / 3, gsz,
+                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)");
   // Build the per-agent instanced mesh (Humvee if loaded, else the flat arrow).
   auto build_agents = [&]() {
     return haveVehicle ? glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0)
@@ -405,11 +420,16 @@ int main(int argc, char **argv) {
   navdemo::AgentGlyphs flagGlyphs;
   std::shared_ptr<GeometryNode> flagNode;
   {
-    // Local frame: forward +x, up +z, canvas above the vehicle so it clears
-    // rooftops for LOW cameras but stays vehicle-attached in follow-cam.
-    const double ph = std::max(gsz * 2.0, 0.8 * wall_h); // pole height above roof
-    const double pr = std::max(gsz * 0.05, 0.03);        // pole thickness
-    const double fw = std::max(gsz * 1.2, 3.0), fh = std::max(gsz * 0.7, 1.8); // flag panel
+    // Local frame: forward +x, up +z. Sizes are anchored to the VEHICLE (not the
+    // city) so the flag is proportional in chase-cam close-ups AND still legible
+    // from a wide orbit — enough headroom to clear vehicle geometry, but nothing
+    // that dwarfs the Humvee when the camera closes in. gsz IS the Humvee length
+    // in world units (see kHumveeLenM), so all these dimensions read like real
+    // metres given scale = 0.05 (1 m = 20 world units).
+    const double ph = gsz * 1.5;  // pole tall enough to clear roof + a bit
+    const double pr = gsz * 0.03; // pole thickness ~0.15 m (visible from orbit)
+    const double fw = gsz * 0.7;  // flag panel width ~ 3.3 m at Humvee scale
+    const double fh = gsz * 0.4;  // flag panel height ~ 1.9 m at Humvee scale
     // pole (thin square column) + flag panel (double-sided quad), all in the -y half
     // so the flag flutters to the LEFT of the direction of travel.
     std::vector<double> fv = {
@@ -580,8 +600,58 @@ int main(int argc, char **argv) {
   cam.setMouseSensitivity(mouseSens); // --mouse-sensitivity / state settings.mouse_sensitivity
   if (moveSpeed > 0.0)
     cam.setMoveSpeed(moveSpeed);
-  // --follow N: seed the cinematic Track camera aimed at agent N's probe pose.
+  // Track (chase) mode is tuned by state keys under viewers.main.camera.track.*
+  // (see CameraController.h); its DEFAULTS are back=55 / height=40 world units,
+  // right for the ±100 training world. On a metre-scale bundle (Austin ±1500)
+  // those trail distances are microscopic against the vehicle and the camera
+  // degenerates. Set trail parameters PROPORTIONAL TO THE VEHICLE (gsz metres),
+  // so the chase-cam works the same on any city.
+  auto configure_track_params = [&]() {
+    const std::string tp = sg.getStatePrefix() + ".viewers.main.camera.track.";
+    auto st = [&](const std::string &k, double v) {
+      try {
+        cvc::state::instance(app)(tp + k).value(v);
+      } catch (...) {
+      }
+    };
+    st("back", gsz * 3.5);         // ~16.5 m behind a 4.7 m Humvee
+    st("height", gsz * 1.6);       // ~7.5 m above
+    st("look_ahead", gsz * 1.5);   // aim slightly ahead of the vehicle
+    st("look_up", gsz * 0.4);      // aim a touch above ground plane
+    st("min_speed", 0.5);          // fall back to a static trail below 0.5 wu/s
+    // Faster catch-up: the DEFAULT cam_tau = 0.55 is a filmic slow ease that
+    // takes ~50 frames to close on the target from a wide framed pose. Tighten
+    // so the chase snaps into place within a second (~0.08 s tau -> ~30 frames
+    // to converge at 30 fps EMA).
+    st("cam_tau", 0.08);
+    st("pos_tau", 0.06);
+    // Read back via the READ overload (value<T>() returns T; the writer overload
+    // takes const T& and clobbers).
+    double back_check = -1.0;
+    try {
+      back_check = cvc::state::instance(app)(tp + "back").value<double>();
+    } catch (const std::exception &e) {
+      std::printf("nav_city_swarm: read-back threw: %s\n", e.what());
+    }
+    std::printf("nav_city_swarm: Track configured (gsz=%.1f) at %s (back read=%.2f)\n",
+                gsz, tp.c_str(), back_check);
+  };
+  // --follow N: cinematic Track camera. Seed the vtkCamera at the chase pose on
+  // frame 0 so it's already framed behind the vehicle (instead of easing in for
+  // ~50 frames from the default wide orbit). Grab the initial agent pose from
+  // the world and both position the probe and seed the camera to match.
   if (followInit >= 0 && followInit < N) {
+    std::vector<float> ip(static_cast<std::size_t>(2) * N), ih(N);
+    world.snapshot(ip.data(), ih.data(), nullptr, nullptr, nullptr);
+    const double ax = ip[2 * followInit], ay = ip[2 * followInit + 1];
+    const double ah = ih[followInit];
+    configure_track_params();
+    set_probe_at(ax, ay, 0.0, ah);
+    const double ch = std::cos(ah), sh = std::sin(ah);
+    const double back = gsz * 3.5, height = gsz * 1.6, la = gsz * 1.5;
+    const double ex = ax - ch * back, ey = ay - sh * back, ez = height;
+    const double fx = ax + ch * la, fy = ay + sh * la, fz = gsz * 0.4;
+    view.setCamera(ex, ey, ez, fx, fy, fz, 0, 0, 1, 45.0);
     cam.setTrackTarget("follow_probe");
     cam.setMode(CameraController::Mode::Track);
   }
@@ -706,6 +776,7 @@ int main(int argc, char **argv) {
       if (followAgent < -1)
         followAgent = -1;
       if (followAgent >= 0) {
+        configure_track_params(); // vehicle-scaled trail so chase works on any city
         cam.setTrackTarget("follow_probe");
         cam.setMode(CameraController::Mode::Track);
       } else if (cam.mode() == CameraController::Mode::Track) {
@@ -993,6 +1064,17 @@ int main(int argc, char **argv) {
       const double el = (34.0 - 12.0 * std::sin(0.25 * t)) * PI / 180.0;
       navdemo::orbit_camera(bounds, wall_h * 0.5, az, el, 1.4, eye, focal);
       view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 32);
+    } else if (capturing && capture == "follow") {
+      // Cinematic Track camera CHASES the selected agent. cam.update(dt) advances
+      // the smoothed pose (position -> heading two-stage ease + critically-damped).
+      cam.update(dt);
+      if (frame < 3 || frame % 15 == 0) {
+        auto wt = probeNode ? probeNode->getWorldTransform() : nullptr;
+        double px = wt ? wt->GetElement(0, 3) : 0.0;
+        double py = wt ? wt->GetElement(1, 3) : 0.0;
+        std::printf("nav_city_swarm: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
+                    frame, (int)cam.mode(), px, py, followAgent, dt);
+      }
     } else if (capturing) { // orbit
       const double az = 0.7 + 0.30 * t;
       navdemo::orbit_camera(bounds, wall_h * 0.5, az, 36.0 * PI / 180.0, 1.75, eye, focal);
