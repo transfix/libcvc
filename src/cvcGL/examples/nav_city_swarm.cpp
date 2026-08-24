@@ -52,9 +52,11 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <vtkActorCollection.h> // enumerate main-renderer props to mirror onto PiP
-#include <vtkCamera.h>          // PiP ortho camera
-#include <vtkMatrix4x4.h>       // follow-cam probe transform
+#include <vtkActor2D.h>          // skip 2D HUD/text when mirroring to PiP
+#include <vtkActorCollection.h>  // enumerate main-renderer props to mirror onto PiP
+#include <vtkCamera.h>           // PiP ortho camera
+#include <vtkLight.h>            // PiP needs its own lights (main renderer's are aimed at chase)
+#include <vtkMatrix4x4.h>        // follow-cam probe transform
 #include <vtkNew.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
@@ -686,15 +688,28 @@ int main(int argc, char **argv) {
     pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
     pipRenderer->SetActiveCamera(pipCam);
     pipRenderer->SetViewport(0.72, 0.0, 1.0, 0.28); // bottom-right corner
-    pipRenderer->SetBackground(0.05, 0.06, 0.09);
+    pipRenderer->SetBackground(0.02, 0.03, 0.05);
     pipRenderer->SetLayer(1);
-    // Mirror all main-renderer props onto the PiP renderer. Each prop lives in
-    // both — the render pipeline handles that fine.
+    // Own lighting so the top-down view is evenly lit regardless of the main
+    // scene's stage rig (which is aimed at the chase framing).
+    pipRenderer->AutomaticLightCreationOff();
+    pipRenderer->RemoveAllLights();
+    {
+      auto hl = vtkSmartPointer<vtkLight>::New();
+      hl->SetLightTypeToHeadlight();
+      hl->SetIntensity(1.1);
+      pipRenderer->AddLight(hl);
+    }
+    // Mirror the main renderer's 3-D props onto the PiP. Each vtkProp3D can live
+    // in multiple renderers — VTK handles that fine. SKIP 2-D actors (HUD text,
+    // FPS overlay): those are viewport-relative and would double-draw on top of
+    // the PiP looking like a bug.
     vtkRenderer *main = view.renderer();
     vtkPropCollection *props = main->GetViewProps();
     props->InitTraversal();
     while (vtkProp *p = props->GetNextProp())
-      pipRenderer->AddViewProp(p);
+      if (!vtkActor2D::SafeDownCast(p))
+        pipRenderer->AddViewProp(p);
     view.renderWindow()->SetNumberOfLayers(2);
     view.renderWindow()->AddRenderer(pipRenderer);
   }
