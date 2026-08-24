@@ -125,7 +125,6 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0, speed = 0.5;
   std::string capture = "orbit", out = "frames", png, viewMode = "map", scenario = "ghost";
-  int traffic_n = 5;
   double sensorRange = 35.0;
   bool offscreen = false, no_shadows = false, ortho = false;
 
@@ -141,10 +140,9 @@ int main(int argc, char **argv) {
       "sim tick rate")("speed", po::value<double>(&speed)->default_value(0.5),
                        "world speed as a multiple of real time (story pace)")(
       "scenario", po::value<std::string>(&scenario)->default_value("ghost"),
-      "ghost (stale map lies) | dynamic (world changes mid-run) | traffic (ghost + cross traffic)")(
+      "ghost (stale map lies) | dynamic (a crosser appears mid-run, hero loops around)")(
       "range", po::value<double>(&sensorRange)->default_value(35.0),
-      "sensor range in metres")("traffic", po::value<int>(&traffic_n)->default_value(5),
-                                "number of cross-traffic vehicles in the traffic scenario")(
+      "sensor range in metres")(
       "view", po::value<std::string>(&viewMode)->default_value("map"),
       "map (top-down 2-D, the honest baseline) | 3d (perspective orbit)")(
       "capture", po::value<std::string>(&capture)->default_value("none"),
@@ -247,16 +245,19 @@ int main(int argc, char **argv) {
   // Build (or REBUILD) the scenario: the lie in the prior, the agent roster and a
   // fresh sim_world. Called once at startup and again on every restart — the
   // whole point being that a restart is this function, not a new process.
-  auto build_world = [&](const std::string &scen, double range, int ntraffic) {
+  auto build_world = [&](const std::string &scen, double range) {
     prior = truth;
     if (scen != "dynamic") // dynamic starts with an HONEST map
       phantom_bar(prior);
     cfg.range_m = static_cast<float>(range);
 
     // Agent 0 is always the HERO (gold, left -> right through the lie).
-    // `traffic` adds cross-traffic that shares the hero's belief plane, so the
-    // peers are part of the world the hero is reasoning about.
-    NA = (scen == "traffic") ? ntraffic + 1 : 1;
+    // `dynamic` adds ONE crossing vehicle (top -> bottom through the hero's
+    // corridor). Instead of the old add_obstacle static blob that gridlocked the
+    // hero, the crosser is a real second agent that shares belief with the hero,
+    // so the hero SEES it via inter-agent avoidance and loops around — the
+    // moving-crosser story the original Python demo showed.
+    NA = (scen == "dynamic") ? 2 : 1;
     std::vector<float> o(2 * NA), goal(2 * NA);
     color.assign(3 * NA, 0.0f);
     o[0] = static_cast<float>(-80.0 * SCALE);
@@ -266,19 +267,17 @@ int main(int argc, char **argv) {
     color[0] = 0.98f;
     color[1] = 0.85f;
     color[2] = 0.20f; // hero: gold
-    for (int i = 1; i < NA; ++i) {
-      // Cross traffic: alternate top->bottom and bottom->top on staggered
-      // columns, so they sweep THROUGH the hero's corridor rather than trail it.
-      const double frac = static_cast<double>(i) / (NA > 1 ? NA : 1);
-      const double x = -60.0 + 120.0 * frac;
-      const bool down = (i % 2) == 0;
-      o[2 * i] = static_cast<float>(x * SCALE);
-      o[2 * i + 1] = static_cast<float>((down ? 78.0 : -78.0) * SCALE);
-      goal[2 * i] = static_cast<float>(x * SCALE);
-      goal[2 * i + 1] = static_cast<float>((down ? -78.0 : 78.0) * SCALE);
-      color[3 * i] = 0.35f;
-      color[3 * i + 1] = 0.62f + 0.3f * static_cast<float>(frac);
-      color[3 * i + 2] = 0.95f; // traffic: cool blue
+    if (scen == "dynamic") {
+      // Crosser: starts ABOVE-left at (-10, 78) and drives DOWN to (-10, -78),
+      // so its path intersects the hero's mid-corridor track around x=-10 a few
+      // seconds in. Cool blue so it reads distinct from the gold hero.
+      o[2] = static_cast<float>(-10.0 * SCALE);
+      o[3] = static_cast<float>(78.0 * SCALE);
+      goal[2] = static_cast<float>(-10.0 * SCALE);
+      goal[3] = static_cast<float>(-78.0 * SCALE);
+      color[3] = 0.35f;
+      color[4] = 0.72f;
+      color[5] = 0.95f;
     }
     // Replacing the unique_ptr destroys the old world (and its belief planes)
     // before the new one exists — no stale belief can survive a restart.
@@ -286,7 +285,7 @@ int main(int argc, char **argv) {
                                                      cvc::nav::coef_mlp::default_biased(), o.data(),
                                                      goal.data(), color.data(), NA);
   };
-  build_world(scenario, sensorRange, traffic_n);
+  build_world(scenario, sensorRange);
 
   // 2. Scene.
   cvc::app app;
@@ -352,7 +351,7 @@ int main(int argc, char **argv) {
   }
   const double ring_rgb[3] = {0.30, 0.72, 0.95}; // FOV cyan (the 2-D demos' palette)
   auto ringNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("sensor", sensor_ring(cfg.range_m, 0.8, ring_rgb)));
+      sg.addGraphics("sensor", sensor_ring(cfg.range_m * SCALE, 0.8 * SCALE, ring_rgb)));
   if (ringNode) {
     ringNode->setRenderMode(GeometryRenderMode::LINES);
     ringNode->setUseSingleColor(true);
@@ -551,13 +550,12 @@ int main(int argc, char **argv) {
   ui.setVisible(!no_ui && !capturing);
   bool uiPaused = false, uiRestart = false, ui2D = ortho, uiCaptions = true;
   std::string uiScenario = scenario;
-  int uiTraffic = traffic_n;
   double uiSpeed = speed, uiRange = cfg.range_m;
 #ifdef CVC_ENABLE_IMGUI
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scenario")) {
-        const char *sc[] = {"ghost", "dynamic", "traffic"};
+        const char *sc[] = {"ghost", "dynamic"};
         for (const char *n : sc)
           if (ImGui::MenuItem(n, nullptr, uiScenario == n)) {
             uiScenario = n;
@@ -599,7 +597,6 @@ int main(int argc, char **argv) {
       float r = static_cast<float>(uiRange);
       if (ImGui::SliderFloat("sensor range", &r, 10.0f, 90.0f, "%.0f m"))
         uiRange = r; // applies on restart
-      ImGui::SliderInt("traffic", &uiTraffic, 1, 16);
     }
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
@@ -611,16 +608,14 @@ int main(int argc, char **argv) {
   navdemo::SimPacer pacer;
   std::vector<float> cwv(2 * NA, 0.0f); // live carrots (world); [0] = hero
   double ghostGoneT = -1.0;             // world time the last phantom cell cleared
-  bool blockDropped = false;
-  double blockT = -1.0;
 
   // Restart IN PLACE: rebuild the world, then resize/refresh everything that was
   // sized or seeded from it. Same process, same window, same GL context — the
   // scene graph, renderer and camera are all untouched, so this works identically
   // native and in the browser (where a process restart is not a thing that
   // exists).
-  auto restart_scenario = [&](const std::string &scen, double range, int ntraffic) {
-    build_world(scen, range, ntraffic); // replaces worldPtr; old belief planes die
+  auto restart_scenario = [&](const std::string &scen, double range) {
+    build_world(scen, range); // replaces worldPtr; old belief planes die
     scenario = scen;
 
     // Per-agent buffers follow the new roster size.
@@ -642,7 +637,7 @@ int main(int argc, char **argv) {
       ghostNode->setGeometry(
           navdemo::occupancy_to_walls(ghostOcc.data(), R, C, bounds, 6.0, ghost_rgb));
     if (ringNode)
-      ringNode->setGeometry(sensor_ring(cfg.range_m, 0.8, ring_rgb));
+      ringNode->setGeometry(sensor_ring(cfg.range_m * SCALE, 0.8 * SCALE, ring_rgb));
 
     // Story/anim state back to t=0 — otherwise a restart inherits the old run's
     // captions, trail and "the ghost cleared at t=..." conclusions.
@@ -662,8 +657,6 @@ int main(int argc, char **argv) {
     if (trailNode)
       trailNode->updateVertices(trailXyz);
     ghostGoneT = -1.0;
-    blockDropped = false;
-    blockT = -1.0;
     reached_note = false;
     pacer = navdemo::SimPacer{};
     replan(sx, sy); // plan the belief route over the fresh world's belief plane
@@ -701,7 +694,7 @@ int main(int argc, char **argv) {
     }
     if (uiRestart) {
       uiRestart = false;
-      restart_scenario(uiScenario, uiRange, uiTraffic);
+      restart_scenario(uiScenario, uiRange);
     }
     if (uiPaused) {
       view.render();
@@ -795,19 +788,8 @@ int main(int argc, char **argv) {
     // real discovery). The stale-map lie and this are the two halves of limited
     // belief: believing something that isn't there, and not yet knowing
     // something that is.
-    if (scenario == "dynamic" && !blockDropped && worldT > 3.5) {
-      // add_obstacle stamps a CENTRED RADIUS over the cell rect, so it grows
-      // well beyond the literal rect — keep the rect thin and short or it swamps
-      // the map. It lands in the belief (truth is immutable from here), so the
-      // renderer draws it in GHOST amber: honest, since from the agent's side a
-      // new blockage and a believed wall are the same evidence.
-      const int rmid = static_cast<int>((wall_lo + wall_hi) / 2);
-      const int r0 = rmid - C / 12, r1 = rmid + C / 12;
-      const int c0 = C / 2, c1 = C / 2;
-      worldPtr->add_obstacle(r0, r1, c0, c1);
-      blockDropped = true;
-      blockT = worldT;
-    }
+    // (dynamic scenario now shows a real CROSSING vehicle, not a static blob;
+    //  the hero senses it via inter-agent avoidance and loops around.)
 
     // Repaint the fog/belief ground only when a sense tick actually happened —
     // per-frame smoothing of belief would be a lie (and wasted work).
@@ -846,13 +828,9 @@ int main(int argc, char **argv) {
     // The caption arc — scenario-specific, driven by world time + events.
     if (scenario == "dynamic") {
       if (rch[0])
-        caption.setText("Re-routed around a blockage that appeared after it set off.");
-      else if (blockDropped && worldT - blockT < 5.0)
-        caption.setText("THE WORLD CHANGED: the way ahead just closed.");
-      else if (blockDropped)
-        caption.setText("");
+        caption.setText("Looped around a crosser and continued on to the goal.");
       else
-        caption.setText("The map is honest — for now.");
+        caption.setText("A CROSSER is coming through: hero senses it and adapts.");
     } else if (rch[0])
       caption.setText("Straight to the goal — through a wall that was never there.");
     else if (ghostGoneT >= 0.0 && worldT - ghostGoneT < 4.0)
