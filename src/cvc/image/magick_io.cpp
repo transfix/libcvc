@@ -22,12 +22,65 @@
 #include <mutex>
 #include <stdexcept>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <cstdlib>
+#include <string>
+#include <windows.h>
+#endif
+
 namespace cvc {
 namespace {
 
+#ifdef _WIN32
+// The cvcpkg ImageMagick bundle is EXTRACTED from the official installer, not
+// installed, so its module + config paths are absent from the registry and
+// ImageMagick reports "no decode delegate" for every read. Point it at our layout
+// relative to the loaded libcvc DLL (which sits in the same <prefix>\bin as the
+// ImageMagick DLLs): <prefix>\bin holds the CORE_RL_* libs AND the coder/filter
+// modules FLAT — a coder resolves its own CORE_RL_* deps in its directory, so the
+// modules must sit beside them — and <prefix>\share\imagemagick holds the .xml
+// config. Only set what the environment has not already overridden (a user wins).
+void set_magick_paths_win() {
+  HMODULE h = nullptr;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCSTR>(&set_magick_paths_win), &h);
+  if (!h)
+    return;
+  char buf[MAX_PATH];
+  const DWORD n = GetModuleFileNameA(h, buf, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH)
+    return;
+  std::string p(buf, n);
+  const auto slash = p.find_last_of("\\/");
+  if (slash == std::string::npos)
+    return;
+  const std::string bindir = p.substr(0, slash);
+  const std::string share = bindir + "\\..\\share\\imagemagick";
+  auto set_if_absent = [](const char *k, const std::string &v) {
+    if (!std::getenv(k))
+      _putenv_s(k, v.c_str());
+  };
+  set_if_absent("MAGICK_CONFIGURE_PATH", share);
+  set_if_absent("MAGICK_CODER_MODULE_PATH", bindir);
+  set_if_absent("MAGICK_FILTER_MODULE_PATH", bindir);
+}
+#endif
+
 void init_magick_once() {
   static std::once_flag once;
-  std::call_once(once, []() { Magick::InitializeMagick(nullptr); });
+  std::call_once(once, []() {
+#ifdef _WIN32
+    set_magick_paths_win();
+#endif
+    Magick::InitializeMagick(nullptr);
+  });
 }
 
 class magick_image_io : public image_file_io {

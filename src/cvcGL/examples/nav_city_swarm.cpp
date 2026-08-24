@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
@@ -31,6 +32,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
+#include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -139,7 +141,7 @@ int main(int argc, char **argv) {
   long frames = 0;
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
-  std::string belief = "shared", capture = "orbit", out = "frames", png;
+  std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false;
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
@@ -167,7 +169,13 @@ int main(int argc, char **argv) {
       "width", po::value<int>(&width)->default_value(1280))(
       "height", po::value<int>(&height)->default_value(720))(
       "out", po::value<std::string>(&out)->default_value("frames"),
-      "PNG frame directory")("png", po::value<std::string>(&png), "write a single final PNG here");
+      "PNG frame directory")("png", po::value<std::string>(&png), "write a single final PNG here")(
+      "bundle", po::value<std::string>(&bundle),
+      "city bundle dir (terrain.json + buildings.glb) for a REAL, much larger city (e.g. "
+      "Austin); else $CVC_NAV_BUNDLE; else the synthetic city_scene")(
+      "vehicle", po::value<std::string>(&vehicle),
+      "vehicle model .glb per agent (default: <bundle>/../../shared/Humvee.glb; else a flat "
+      "arrow)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -193,24 +201,55 @@ int main(int argc, char **argv) {
   if (ortho)
     no_shadows = true;
 
-  // 1. Occupancy from the pure-C++ "city" scene (same map the trainer uses). Wall the
-  //    border so reactive agents can't drive off the open edge (city_scene has none).
-  cvc::nav::training_scene ts = cvc::nav::city_scene(grid);
-  navdemo::add_border(ts.occ.data(), ts.rows, ts.cols);
-  const navdemo::Bounds bounds{ts.min_x, ts.min_y, ts.max_x, ts.max_y};
-  const double span = ts.max_x - ts.min_x;
-  const double wall_h = 0.06 * span; // blocky buildings
+  // 1. The city occupancy. Default: the pure-C++ "city_scene" the trainer learns on
+  //    (bordered so reactive agents can't drive off the open edge). A --bundle (or
+  //    $CVC_NAV_BUNDLE) swaps in a REAL, much larger city loaded at runtime
+  //    (terrain.json + buildings.glb, e.g. Austin at +/-1500 -- 30x larger). The
+  //    controller transfers because we keep scale 0.05, the trained metric, so the
+  //    coef_mlp's normalized vehicle constants stay physical (see nav_finale).
+  cvc::nav::training_scene ts = cvc::nav::city_scene(grid); // vehicle params + synthetic fallback
+  std::vector<std::uint8_t> occ = ts.occ;
+  navdemo::Bounds bounds{ts.min_x, ts.min_y, ts.max_x, ts.max_y};
+  int rows = ts.rows, cols = ts.cols;
+  double scale = ts.scale;
+  cvc::geometry cityMesh;
+  bool haveMesh = false;
+  if (bundle.empty())
+    if (const char *envB = std::getenv("CVC_NAV_BUNDLE"))
+      bundle = envB;
+  if (!bundle.empty()) {
+    navdemo::Bounds bb;
+    std::vector<std::uint8_t> bocc;
+    if (navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh)) {
+      bounds = bb;
+      occ = std::move(bocc);
+      rows = grid;
+      cols = grid;
+      scale = 0.05; // the trained world metric; keeps the coef_mlp constants physical
+      haveMesh = cityMesh.num_tris() > 0;
+      std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris\n",
+                  bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
+                  (unsigned long long)cityMesh.num_tris());
+    } else {
+      std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
+                  bundle.c_str());
+    }
+  }
+  navdemo::add_border(occ.data(), rows, cols);
+  const double span = bounds.max_x - bounds.min_x;
+  const double wall_h =
+      0.06 * span; // blocky fallback buildings (real mesh used when a bundle loads)
 
   cvc::nav::sim_world::config cfg;
-  cfg.rows = ts.rows;
-  cfg.cols = ts.cols;
-  cfg.min_x = ts.min_x;
-  cfg.min_y = ts.min_y;
-  cfg.max_x = ts.max_x;
-  cfg.max_y = ts.max_y;
-  cfg.cx = ts.cx;
-  cfg.cy = ts.cy;
-  cfg.scale = ts.scale;
+  cfg.rows = rows;
+  cfg.cols = cols;
+  cfg.min_x = bounds.min_x;
+  cfg.min_y = bounds.min_y;
+  cfg.max_x = bounds.max_x;
+  cfg.max_y = bounds.max_y;
+  cfg.cx = bounds.cx();
+  cfg.cy = bounds.cy();
+  cfg.scale = scale;
   cfg.veh.rr = ts.rr;
   cfg.veh.d_hat = ts.d_hat;
   cfg.veh.dt = ts.dt;
@@ -219,6 +258,11 @@ int main(int argc, char **argv) {
   (void)fog;            // legacy switch, absorbed by the fog-on default
   cfg.freeze_sense = !fogOn;
   cfg.reach_tol = 0.8f;
+  // Inter-agent separation: without it the vehicles pass straight through each
+  // other. A reactive carrot nudge away from peers within ~3 vehicle radii makes
+  // the swarm steer AROUND itself. Live-tunable below; sep_gain 0 turns it off.
+  cfg.sep_radius = 3.0f * static_cast<float>(ts.rr);
+  cfg.sep_gain = 1.5f * static_cast<float>(ts.rr);
 
   // The sim lives behind a pointer so the UI can REBUILD it: agent count and
   // belief mode are baked into sim_world at construction, so "restart with 2000
@@ -235,7 +279,7 @@ int main(int argc, char **argv) {
     }
     cfg.freeze_sense = !fogOnNow;
     return std::make_unique<cvc::nav::sim_world>(cvc::nav::sim_world::from_occupancy(
-        cfg, ts.occ.data(), cvc::nav::coef_mlp::default_biased(), nAgents, seed, m, k));
+        cfg, occ.data(), cvc::nav::coef_mlp::default_biased(), nAgents, seed, m, k));
   };
   auto worldPtr = build_world(agents, belief, !no_fog, simSeed);
   cvc::nav::sim_world &world = *worldPtr;
@@ -257,36 +301,97 @@ int main(int argc, char **argv) {
   SceneGraph sg(app, "city");
 
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
-  cvc::geometry walls =
-      navdemo::occupancy_to_walls(ts.occ.data(), ts.rows, ts.cols, bounds, wall_h, wall_rgb,
-                                  /*vary=*/0.45);
-  sg.addGraphics("walls", walls);
+  if (haveMesh) {
+    // Real building geometry from the bundle's buildings.glb (true heights + shapes),
+    // instead of blocks extruded from the occupancy grid.
+    auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
+    if (wnode) {
+      wnode->setUseSingleColor(true);
+      wnode->setColor(wall_rgb[0], wall_rgb[1], wall_rgb[2]);
+      wnode->setAmbient(0.3);
+      wnode->setDiffuse(0.85);
+    }
+  } else {
+    sg.addGraphics("walls", navdemo::occupancy_to_walls(occ.data(), rows, cols, bounds, wall_h,
+                                                        wall_rgb, /*vary=*/0.45));
+  }
 
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
       sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
   cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  // A real bundle ships an aerial photo of the same footprint as terrain.json, so
+  // with fog OFF the ground can BE the satellite image instead of flat asphalt.
+  // Kept at function scope: setTexture(zeroCopy) borrows these pixels.
+  cvc::image satTex;
+  bool haveSat = false;
+  if (!fogOn && !bundle.empty()) {
+    const std::string sp = bundle + "/satellite.png";
+    if (std::filesystem::exists(sp)) {
+      try {
+        satTex = cvc::read_image(sp).converted(cvc::image::pixel_format::RGBA,
+                                               cvc::image::data_type::u8);
+        haveSat = satTex.width() > 0 && satTex.height() > 0;
+        if (haveSat)
+          std::printf("nav_city_swarm: satellite %s (%dx%d)\n", sp.c_str(), satTex.width(),
+                      satTex.height());
+      } catch (const std::exception &e) { // a missing decoder must not kill the demo
+        std::fprintf(stderr, "nav_city_swarm: satellite load failed (%s)\n", e.what());
+      }
+    }
+  }
   if (groundNode) {
     groundNode->setUseSingleColor(true);
     groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
     groundNode->setDiffuse(0.50);
     if (fogOn) { // the ground IS the fleet's fog coverage
-      fill_fleet_fog(fogTex.data(), world, ts.rows, ts.cols);
+      fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->setColor(1, 1, 1);
       groundNode->setTexture(fogTex, /*zeroCopy=*/true);
+    } else if (haveSat) { // the ground IS the aerial photo
+      groundNode->setColor(1, 1, 1);
+      groundNode->setTexture(satTex, /*zeroCopy=*/true);
+      groundNode->setAmbient(0.85); // photo already carries its own shading
+      groundNode->setDiffuse(0.35);
     } else {
       groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
     }
   }
 
   navdemo::AgentGlyphs glyphs;
-  const double gsz = 0.02 * span;
-  cvc::geometry agentGeom = glyphs.build(app, N, color.data(), gsz, 0.6);
+  // Vehicle size relative to the city, capped to a physical multiple of the vehicle
+  // radius so Austin-scale worlds don't get absurdly large vehicles.
+  const double gsz = std::min(0.02 * span, 6.0 * (static_cast<double>(cfg.veh.rr) / scale));
+  // A real Humvee model per agent instead of a flat arrow, when one is available
+  // (--vehicle, or <bundle>/../../shared/Humvee.glb). Instanced + streamed exactly
+  // like the arrow: build_template -> pack -> updateVertices.
+  std::vector<double> vverts;
+  std::vector<std::uint32_t> vtris;
+  bool haveVehicle = false;
+  if (vehicle.empty() && !bundle.empty()) {
+    const std::string cand = bundle + "/../../shared/Humvee.glb";
+    if (std::filesystem::exists(cand))
+      vehicle = cand;
+  }
+  if (!vehicle.empty())
+    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
+  if (haveVehicle)
+    std::printf("nav_city_swarm: vehicle model %s (%zu tris)\n", vehicle.c_str(), vtris.size() / 3);
+  // Build the per-agent instanced mesh (Humvee if loaded, else the flat arrow).
+  auto build_agents = [&]() {
+    return haveVehicle ? glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0)
+                       : glyphs.build(app, N, color.data(), gsz, 0.6);
+  };
+  cvc::geometry agentGeom = build_agents();
   auto agentNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents", agentGeom));
   if (agentNode) {
     agentNode->setUseSingleColor(false); // per-vertex group colours
-    agentNode->setAmbient(0.55);
-    agentNode->setDiffuse(0.85);
+    // Shaded, not flat: low ambient + strong diffuse so the stage rig gives the
+    // vehicles real form (the flat arrow read as a paper cut-out).
+    agentNode->setAmbient(0.32);
+    agentNode->setDiffuse(0.9);
+    agentNode->setSpecular(0.2);
+    agentNode->setSpecularPower(18.0);
   }
 
   // Every agent's DESTINATION, rendered: one merged mesh of hovering pyramids in
@@ -297,20 +402,31 @@ int main(int argc, char **argv) {
   std::shared_ptr<GeometryNode> goalsNode;
   std::vector<double> goalXyz;
   {
-    const double gh = 0.006 * span, ght = 1.7 * gh;
+    // A tall, slender BEACON per goal: apex on the ground (points at the exact
+    // spot) widening up to a small cap ABOVE the rooftops (buildings are
+    // wall_h = 0.06*span tall). The old 0.006*span pyramid capped at 0.022*span
+    // sat entirely below the skyline, so targets were invisible in the city.
+    // Size relative to the city, but CAPPED to a physical multiple of the vehicle
+    // so a huge real city (Austin, +/-1500) isn't a forest of 400 giant spikes.
+    const double phys = static_cast<double>(cfg.veh.rr) / scale; // vehicle radius, metres
+    const double gh = std::min(0.010 * span, 4.0 * phys);        // cap half-width
+    const double ght = std::min(2.2 * wall_h, 24.0 * phys);      // beacon height (clears rooftops)
     const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                     ght, gh, gh, ght, -gh, gh,  ght};
     const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
     cvc::geometry goalGeom =
-        goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.012 * span);
+        goalGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.0); // apex on the ground
     goalsNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("goals", goalGeom));
     std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
     world.goals_world(gw.data());
     goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data()); // keep: arrived goals sink away
     if (goalsNode) {
       goalsNode->setUseSingleColor(false);
-      goalsNode->setAmbient(0.85);
-      goalsNode->setDiffuse(0.55);
+      // Shaded, not a flat glow: enough ambient to stay legible in shadow, but
+      // real diffuse so the beacon has form under the stage rig.
+      goalsNode->setAmbient(0.5);
+      goalsNode->setDiffuse(0.75);
+      goalsNode->setSpecular(0.15);
       goalsNode->updateVertices(goalXyz);
     }
   }
@@ -354,8 +470,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  sg.addDirectionalLight(-42, 58, 1.0, 0.96, 0.86, 1.15);  // warm key
-  sg.addDirectionalLight(140, 30, 0.55, 0.62, 0.78, 0.50); // cool fill
+  // Aimed STAGE RIG instead of two scene-spanning directional lights. A
+  // directional light's shadow map is baked over the whole scene bbox (ground +
+  // building height + air), so texels are wasted and vehicle shadows smear onto
+  // rooftops; a rig of aimed spots bakes a perspective map that lands texels on
+  // the city — the fix for the swarm demo's shadow artifacts, and the same live
+  // StageLightingPanel UI as lsystem_forest (see navdemo::make_stage_rig).
+  auto rig = navdemo::make_stage_rig(sg, bounds, wall_h);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
   // Shadows must be enabled AFTER the renderer exists (they attach to its passes).
@@ -426,6 +547,10 @@ int main(int argc, char **argv) {
   std::string uiBelief = belief;
   bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true;
   double uiHz = hz;
+  float uiTrailW = 1.5f;                              // live path (trail) line width
+  bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
+  float uiSepGain = 1.5f * static_cast<float>(ts.rr); // avoidance strength (live)
+  bool uiLighting = false;                            // the StageLightingPanel window
 #ifdef CVC_ENABLE_IMGUI
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
@@ -447,6 +572,7 @@ int main(int argc, char **argv) {
         ImGui::MenuItem("Trails", nullptr, &uiTrails);
         ImGui::MenuItem("Goals", nullptr, &uiGoals);
         ImGui::MenuItem("Shadows", nullptr, &uiShadows);
+        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
         ImGui::EndMenu();
       }
       if (ImGui::BeginMenu("Camera")) {
@@ -478,10 +604,33 @@ int main(int argc, char **argv) {
       if (ImGui::SliderFloat("sim Hz", &hzf, 10.0f, 240.0f, "%.0f"))
         uiHz = hzf;
     }
+    // ---- Display (all live, no restart) -------------------------------------
+    ImGui::Separator();
+    ImGui::TextDisabled("Display (live)");
+    ImGui::Checkbox("Paths", &uiTrails); // the driven breadcrumb trails
+    ImGui::SameLine();
+    ImGui::Checkbox("Targets", &uiGoals);
+    ImGui::SameLine();
+    ImGui::Checkbox("Shadows", &uiShadows);
+    ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
+    ImGui::Checkbox("Avoid others", &uiSeparate); // inter-agent separation (live)
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Steer around neighbours instead of driving through them.");
+    if (uiSeparate) {
+      float g = uiSepGain / static_cast<float>(ts.rr); // shown as multiples of a vehicle radius
+      if (ImGui::SliderFloat("avoid strength", &g, 0.0f, 5.0f, "%.1f x rr"))
+        uiSepGain = g * static_cast<float>(ts.rr);
+    }
+    ImGui::Separator();
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
     ImGui::TextDisabled("agents / belief / fog need a restart");
     ImGui::End();
+
+    // The library lighting panel — the same control surface as lsystem_forest,
+    // driving this scene's StageLighting rig (key/fill/back/wash, shadows,
+    // gizmos to debug the shadow cones).
+    cvc::gl::ui::StageLightingPanel(*rig, &uiLighting);
   });
 #endif
 
@@ -508,10 +657,15 @@ int main(int argc, char **argv) {
       shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
       uiShadows = shadows;
     }
-    if (trailNode)
+    if (trailNode) {
       trailNode->setVisible(uiTrails);
+      trailNode->setLineWidth(uiTrailW);
+    }
     if (goalsNode)
       goalsNode->setVisible(uiGoals);
+    // Inter-agent avoidance: live-tuned each frame (0 gain = off, vehicles pass
+    // through each other again).
+    world.set_separation(uiSeparate ? cfg.sep_radius : 0.0f, uiSeparate ? uiSepGain : 0.0f);
     if (ui2D != ortho) { // 2-D map <-> 3-D perspective, live
       ortho = ui2D;
       if (ortho)
@@ -541,18 +695,19 @@ int main(int argc, char **argv) {
         hsv2rgb(hue, 0.62, 0.96, &color[3 * i]);
       }
       if (agentNode)
-        agentNode->setGeometry(glyphs.build(app, N, color.data(), gsz, 0.6));
+        agentNode->setGeometry(build_agents());
       { // goals + trails are N-sized too
         std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
         world.goals_world(gw.data());
-        const double gh = 0.006 * span, ght = 1.7 * gh;
+        const double phys = static_cast<double>(cfg.veh.rr) / scale; // matches initial build
+        const double gh = std::min(0.010 * span, 4.0 * phys);
+        const double ght = std::min(2.2 * wall_h, 24.0 * phys);
         const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                         ght, gh, gh, ght, -gh, gh,  ght};
         const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
                                                0, 4, 1, 1, 3, 2, 1, 4, 3};
         if (goalsNode) {
-          goalsNode->setGeometry(
-              goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.012 * span));
+          goalsNode->setGeometry(goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
           goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
           goalsNode->updateVertices(goalXyz);
         }
@@ -628,7 +783,7 @@ int main(int argc, char **argv) {
 
     // Fleet fog coverage repaint (sense cadence, not per frame).
     if (fogOn && groundNode && frame % 15 == 0) {
-      fill_fleet_fog(fogTex.data(), world, ts.rows, ts.cols);
+      fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->texture_modified();
     }
 

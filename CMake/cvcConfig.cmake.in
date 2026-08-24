@@ -59,6 +59,24 @@ endif()
 # instead of surfacing as a confusing missing-target error two levels down.
 if(@CVC_ENABLE_ASSIMP@)
   find_dependency(assimp)
+  # The cvcpkg assimp bundle's exported target bakes an ABSOLUTE build-sandbox
+  # zlib path into assimp::assimp's INTERFACE_LINK_LIBRARIES (libz.so/.a on unix,
+  # zlib.lib on windows), so a consumer's link fails on a path that does not exist
+  # on this machine. Rewrite it to the relocatable ZLIB::ZLIB here so EVERY
+  # consumer (cvcGL, the examples, pycvc-gl, ...) links — this mirrors the same
+  # rewrite in libcvc's own build. Remove once the assimp recipe exports zlib as
+  # an imported target (libcvc-deps follow-up).
+  find_package(ZLIB QUIET)
+  get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
+  if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|cvcpkg-builder")
+    if(TARGET ZLIB::ZLIB)
+      string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill
+                           "${_cvc_assimp_ill}")
+    else()
+      string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+    endif()
+    set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
+  endif()
 endif()
 
 if(@CVC_ENABLE_FFTW@)

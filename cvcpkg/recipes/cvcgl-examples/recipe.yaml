@@ -40,11 +40,11 @@ depends:
   build:
     # Native entries build examples/cvcGL against the installed SDK.
     - name: libcvc
-      platforms: [linux]
+      platforms: [linux, windows]
     - name: vtk
-      platforms: [linux]
+      platforms: [linux, windows]
     - name: boost
-      platforms: [linux]
+      platforms: [linux, windows]
     # Wasm column — static deps for the Emscripten cross-build (env-wasm.sh
     # forces static; emsdk itself is auto-discovered from its cross_toolchain
     # declaration, never listed here). NOTE: needs the rendering-enabled vtk
@@ -66,21 +66,23 @@ depends:
     # cvcgl SDK bundle). The wasm bundle is a self-contained static .wasm with
     # no runtime deps.
     - name: libcvc
-      platforms: [linux]
+      platforms: [linux, windows]
     - name: vtk
-      platforms: [linux]
+      platforms: [linux, windows]
     - name: boost
-      platforms: [linux]
+      platforms: [linux, windows]
   host_tools:
     - cmake
     - ninja
 
 build:
-  # linux only for now: macOS waits on a macOS VTK bundle (the same constraint
-  # that keeps the cvcgl SDK recipe off macOS).
+  # linux + windows (VTK bundles exist for both); macOS waits on a macOS VTK
+  # bundle (the same constraint that keeps the cvcgl SDK recipe off macOS).
   matrix:
     - platform: linux
       script: build.sh
+    - platform: windows
+      script: build.ps1
     - platform: wasm
       host_platform: linux
       script: build-wasm.sh

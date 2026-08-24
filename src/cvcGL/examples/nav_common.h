@@ -12,16 +12,20 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace cvc {
 class app;
 }
 class SceneRenderer; // cvcGL (global namespace)
+class SceneGraph;    // cvcGL (global namespace)
 namespace cvc {
 namespace gl {
 class CameraController;
-}
+class StageLighting;
+} // namespace gl
 } // namespace cvc
 
 // Does this build have a BACKGROUND SIM WORKER?
@@ -99,6 +103,19 @@ private:
   std::vector<double> xyz_;             // scratch, reused each pack()
 };
 
+// Build a StageLighting rig aimed at a nav scene's acting area (its occupancy
+// bounds), instead of scene-spanning directional lights. This is the fix for the
+// city demos' shadow mush: VTK bakes a DIRECTIONAL light's shadow map with a
+// parallel projection fitted to the WHOLE scene bbox (ground + building height +
+// empty air), so texels are wasted and thin casters (vehicles) alias onto tall
+// receivers (rooftops). Aimed spots bake a perspective map that lands texels on
+// the subject — see cvc/gl/StageLighting.h. `subjectHeight` is the tallest
+// geometry (buildings); the stage is lifted to mid-height so the cones cover the
+// rooftops, not just the street. The rig is a live cvc::state object, so
+// cvc::gl::ui::StageLightingPanel(*rig, ...) drives it — the shared lighting UI.
+std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
+                                                       double subjectHeight = 0.0);
+
 // A small pyramid marker: apex at the LOCAL origin pointing down, square base up
 // at +h — position it hovering and it points at a spot on the ground (goal /
 // pursuit-target markers; a silhouette deliberately distinct from every vehicle
@@ -156,6 +173,44 @@ void add_border(std::uint8_t *occ, int rows, int cols);
 // Grid convention: r->y (row 0 = min_y, bottom-up), c->x; index [r*nx + c].
 std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
                                                int ny, int inflate = 0);
+
+// Load a city bundle (a directory with terrain.json for the world bounds +
+// buildings.glb for the geometry) into a nx*ny occupancy grid + bounds — the way
+// nav_finale drives a REAL Austin scene, generalized so nav_city_swarm can too.
+// Returns true on success (false = missing/empty bundle, caller falls back to the
+// synthetic city). `mesh`, if non-null, receives the merged building mesh so the
+// caller can render the true geometry instead of blocks extruded from occupancy.
+// Grid convention matches occupancy_from_model / sim_world (r->y, row 0 = min_y).
+bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr);
+
+// Load a mesh (.glb/.obj/...) as a canonical per-agent VEHICLE template for
+// AgentGlyphs::build_template: forward -> +x, width -> +y, height -> +z, centred
+// in XY, resting on z=0, scaled so the longest side is `target_len` metres. The
+// height axis is taken as the smallest extent (robust to Y-up vs Z-up sources).
+// Returns false if the mesh can't be read. Lets a demo render a real Humvee
+// instead of a flat arrow glyph (nav_finale's loader, generalized).
+bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
+                           std::vector<std::uint32_t> &tris);
+
+// One agent's global A* route over an occupancy grid: world waypoints + a cursor
+// into them (`idx` is the waypoint a follower is currently steering toward).
+struct Route {
+  std::vector<std::array<double, 2>> wp;
+  std::size_t idx = 0;
+};
+
+// Plan a string-pulled 8-connected A* route over `occ` (row-major rows*cols,
+// nonzero = blocked) from world (sx,sy) to (gx,gy), returned as world waypoints
+// that ALWAYS end at the true goal (so a blocked/unreachable plan still drives
+// straight at it). `inflate_cells` > 0 dilates the occupancy first so the route
+// keeps clearance from walls the reactive drive still hugs (too much clearance
+// seals narrow gaps). This is the C++ analog of GRL-SNAM's global belief-route
+// spine — the piece a purely reactive port drops; the finale and fog demos plan
+// on their BELIEF occupancy so a believed wall bends the global plan, and a
+// sense that clears it replans straight. grid convention: r->y (row 0 = min_y).
+Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
+                 double gx, double gy, int inflate_cells = 0);
 
 // Bounds-safe RGB compositing on a raw interleaved [dw*dh*3] u8 destination. EVERY
 // write is clipped to [0,dw) x [0,dh), so no input — an oversized source, an

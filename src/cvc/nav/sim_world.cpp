@@ -324,6 +324,42 @@ void sim_world::step(int num_threads) {
   carrot_step(o_.data(), goal_.data(), th_.data(), sp_.data(), phi.data(), nrm.data(), s, n_, cp,
               carrot_.data(), num_threads);
 
+  // ── INTER-AGENT SEPARATION (optional) ──
+  // Nudge each agent's carrot away from peers within sep_radius so a crowd
+  // steers AROUND itself instead of driving through. Reactive and per-agent, so
+  // it works in every belief mode (the shared-plane scale path can't stamp peers
+  // per agent). Off unless the host opts in (sep_gain > 0); the neighbour query
+  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius).
+  if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 1) {
+    std::vector<double> pw(static_cast<std::size_t>(2) * n_);
+    for (int i = 0; i < 2 * n_; ++i)
+      pw[i] = o_[i]; // separation works in the normalized frame (o_/carrot_)
+    const neighbor_csr csr = neighbors_within_radius(pw.data(), n_, cfg_.sep_radius);
+    const float R = cfg_.sep_radius;
+    for (int i = 0; i < n_; ++i) {
+      float sx = 0.0f, sy = 0.0f;
+      for (int k = csr.offsets[i]; k < csr.offsets[i + 1]; ++k) {
+        const int j = csr.indices[k];
+        float dx = o_[2 * i] - o_[2 * j], dy = o_[2 * i + 1] - o_[2 * j + 1];
+        float d2 = dx * dx + dy * dy;
+        if (d2 < 1e-10f) { // coincident: split deterministically by index
+          dx = (i < j) ? 1.0f : -1.0f;
+          dy = 0.0f;
+          d2 = 1.0f;
+        }
+        const float d = std::sqrt(d2);
+        float w = (R - d) / R; // 1 at contact -> 0 at the radius
+        if (w < 0.0f)
+          w = 0.0f;
+        const float inv = w * w / d; // quadratic falloff along the unit separation dir
+        sx += dx * inv;
+        sy += dy * inv;
+      }
+      carrot_[2 * i] += cfg_.sep_gain * sx;
+      carrot_[2 * i + 1] += cfg_.sep_gain * sy;
+    }
+  }
+
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   std::vector<float> minclr(n_);
   drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
