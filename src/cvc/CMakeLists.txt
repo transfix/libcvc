@@ -709,11 +709,14 @@ if(CVC_ENABLE_ASSIMP)
     # recipe exports zlib via an imported target (tracked libcvc-deps follow-up).
     find_package(ZLIB QUIET)
     get_target_property(_cvc_assimp_ill assimp::assimp INTERFACE_LINK_LIBRARIES)
-    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|cvcpkg-builder")
+    if(_cvc_assimp_ill AND "${_cvc_assimp_ill}" MATCHES "libz\\.|zlib\\.|cvcpkg-builder")
+      # Match the stale zlib entry in BOTH forms: unix libz.so/.a AND windows
+      # zlib.lib (the earlier "libz\\." pattern missed the windows filename, so the
+      # absolute cvcpkg-builder path survived and cvc.dll failed to link).
       if(TARGET ZLIB::ZLIB)
-        string(REGEX REPLACE "[^;]*libz\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "ZLIB::ZLIB" _cvc_assimp_ill "${_cvc_assimp_ill}")
       else()
-        string(REGEX REPLACE "[^;]*libz\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
+        string(REGEX REPLACE "[^;]*(libz|zlib)\\.[^;]*" "z" _cvc_assimp_ill "${_cvc_assimp_ill}")
       endif()
       set_target_properties(assimp::assimp PROPERTIES INTERFACE_LINK_LIBRARIES "${_cvc_assimp_ill}")
       message(STATUS "  (rewrote assimp's stale absolute zlib link to a relocatable target)")

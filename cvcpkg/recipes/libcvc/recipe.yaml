@@ -129,14 +129,15 @@ depends:
     # CMake rewrites assimp's exported absolute-zlib-path quirk to ZLIB::ZLIB.)
     #
     # Scoped to the platforms assimp is published for (linux/macos-arm64/freebsd/
-    # netbsd). It is NOT yet built for windows, and `cvcpkg install-deps` reads
-    # THIS recipe's closure to set up the build prefix — an unconditional assimp
-    # dep would fail the windows deps-install (no bundle) for both CI and publish.
-    # Where assimp is absent, find_package(assimp CONFIG) misses and CVC_ENABLE_
-    # ASSIMP flips OFF, so libcvc still builds (without the model loader) — add
-    # windows here once an assimp windows bundle is published.
+    # netbsd/windows). `cvcpkg install-deps` reads THIS recipe's closure to set up
+    # the build prefix, so an assimp dep on a platform without a bundle would fail
+    # the deps-install. Where assimp is absent, find_package(assimp CONFIG) misses
+    # and CVC_ENABLE_ASSIMP flips OFF, so libcvc still builds (without the model
+    # loader). Windows added now that an assimp windows bundle is published
+    # (assimp 6.0.5+cvc.2) — this is what lets read_model parse buildings.glb, i.e.
+    # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
     - name: assimp
-      platforms: [linux, macos, freebsd, netbsd]
+      platforms: [linux, macos, freebsd, netbsd, windows]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
