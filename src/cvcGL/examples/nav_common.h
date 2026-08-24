@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <string>
 #include <vector>
 
 #include <memory>
@@ -173,6 +174,25 @@ void add_border(std::uint8_t *occ, int rows, int cols);
 // Grid convention: r->y (row 0 = min_y, bottom-up), c->x; index [r*nx + c].
 std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const Bounds &b, int nx,
                                                int ny, int inflate = 0);
+
+// Load a city bundle (a directory with terrain.json for the world bounds +
+// buildings.glb for the geometry) into a nx*ny occupancy grid + bounds — the way
+// nav_finale drives a REAL Austin scene, generalized so nav_city_swarm can too.
+// Returns true on success (false = missing/empty bundle, caller falls back to the
+// synthetic city). `mesh`, if non-null, receives the merged building mesh so the
+// caller can render the true geometry instead of blocks extruded from occupancy.
+// Grid convention matches occupancy_from_model / sim_world (r->y, row 0 = min_y).
+bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr);
+
+// Load a mesh (.glb/.obj/...) as a canonical per-agent VEHICLE template for
+// AgentGlyphs::build_template: forward -> +x, width -> +y, height -> +z, centred
+// in XY, resting on z=0, scaled so the longest side is `target_len` metres. The
+// height axis is taken as the smallest extent (robust to Y-up vs Z-up sources).
+// Returns false if the mesh can't be read. Lets a demo render a real Humvee
+// instead of a flat arrow glyph (nav_finale's loader, generalized).
+bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
+                           std::vector<std::uint32_t> &tris);
 
 // One agent's global A* route over an occupancy grid: world waypoints + a cursor
 // into them (`idx` is the waypoint a follower is currently steering toward).

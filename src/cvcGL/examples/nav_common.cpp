@@ -10,7 +10,12 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/StageLighting.h>
-#include <cvc/nav/grid_nav.h> // astar / simplify / inflate — the shared route planner
+#include <cvc/model/model_file_io.h> // read_model (buildings.glb -> mesh)
+#include <cvc/nav/grid_nav.h>        // astar / simplify / inflate — the shared route planner
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <vtkCamera.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
@@ -336,6 +341,78 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
       }
   }
   return occ_dilated(occ, nx, ny, inflate);
+}
+
+bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
+                           std::vector<std::uint32_t> &tris) {
+  if (!std::filesystem::exists(path))
+    return false;
+  cvc::model m = cvc::read_model(path);
+  cvc::geometry g = m.merged();
+  if (g.num_tris() == 0)
+    return false;
+  const auto &pts = g.points();
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &v : pts)
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], v[k]);
+      hi[k] = std::max(hi[k], v[k]);
+    }
+  const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
+  int up = 0; // height = smallest extent
+  for (int k = 1; k < 3; ++k)
+    if (ext[k] < ext[up])
+      up = k;
+  int fwd = (up + 1) % 3, side = (up + 2) % 3; // forward = longer of the remaining two
+  if (ext[side] > ext[fwd])
+    std::swap(fwd, side);
+  const double s = ext[fwd] > 1e-9 ? target_len / ext[fwd] : 1.0;
+  const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  verts.clear();
+  verts.reserve(pts.size() * 3);
+  for (const auto &v : pts) {
+    verts.push_back((v[fwd] - cf) * s);    // -> +x forward
+    verts.push_back((v[side] - cs) * s);   // -> +y side
+    verts.push_back((v[up] - lo[up]) * s); // -> +z up, resting on 0
+  }
+  tris.clear();
+  for (const auto &t : g.tris())
+    for (int k = 0; k < 3; ++k)
+      tris.push_back(static_cast<std::uint32_t>(t[k]));
+  return true;
+}
+
+bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh) {
+  namespace fs = std::filesystem;
+  const std::string tj = dir + "/terrain.json", glb = dir + "/buildings.glb";
+  std::ifstream f(tj);
+  if (!f)
+    return false;
+  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  auto num = [&](const char *key, double &v) -> bool {
+    const auto k = s.find(key);
+    if (k == std::string::npos)
+      return false;
+    const auto colon = s.find(':', k);
+    if (colon == std::string::npos)
+      return false;
+    v = std::atof(s.c_str() + colon + 1);
+    return true;
+  };
+  if (!(num("\"min_x\"", bounds.min_x) && num("\"min_y\"", bounds.min_y) &&
+        num("\"max_x\"", bounds.max_x) && num("\"max_y\"", bounds.max_y)))
+    return false;
+  if (!fs::exists(glb))
+    return false;
+  cvc::model m = cvc::read_model(glb);
+  cvc::geometry city = m.merged();
+  if (city.num_tris() == 0)
+    return false;
+  occ = occupancy_from_model(city, bounds, nx, ny, /*inflate=*/0);
+  if (mesh)
+    *mesh = std::move(city);
+  return true;
 }
 
 std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
