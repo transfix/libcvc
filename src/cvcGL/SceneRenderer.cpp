@@ -88,9 +88,20 @@ void SceneRenderer::close() {
   // crash at exit.
   if (m_impl->scene)
     m_impl->scene->setRenderer(nullptr);
+  // Tear down the interactor FIRST, while its render window is still live.
+  // Order matters on Windows: vtkWin32RenderWindowInteractor's destructor,
+  // fired after Finalize(), tries to touch its render window; that surfaces
+  // as a blank native window briefly popping up at exit (and, on some driver
+  // configs, "Could not create shader object" spam as VTK re-inits GL). Call
+  // TerminateApp() so any pending message loop actually quits, then null the
+  // interactor before finalizing the window.
+  if (m_impl->interactor) {
+    m_impl->interactor->TerminateApp();
+    m_impl->interactor->SetRenderWindow(nullptr);
+    m_impl->interactor = nullptr;
+  }
   if (m_impl->window)
     m_impl->window->Finalize();
-  m_impl->interactor = nullptr;
   m_impl->window = nullptr;
   m_impl->renderer = nullptr;
   m_impl->scene = nullptr;
