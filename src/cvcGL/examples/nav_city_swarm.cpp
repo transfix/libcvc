@@ -52,8 +52,12 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <vtkMatrix4x4.h> // follow-cam probe transform
+#include <vtkActorCollection.h> // enumerate main-renderer props to mirror onto PiP
+#include <vtkCamera.h>          // PiP ortho camera
+#include <vtkMatrix4x4.h>       // follow-cam probe transform
 #include <vtkNew.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::CameraController;
@@ -614,9 +618,9 @@ int main(int argc, char **argv) {
       } catch (...) {
       }
     };
-    st("back", gsz * 3.5);         // ~16.5 m behind a 4.7 m Humvee
-    st("height", gsz * 1.6);       // ~7.5 m above
-    st("look_ahead", gsz * 1.5);   // aim slightly ahead of the vehicle
+    st("back", gsz * 2.5);         // ~12 m behind a 4.7 m Humvee (intimate over-the-shoulder)
+    st("height", gsz * 1.2);       // ~5.7 m above
+    st("look_ahead", gsz * 1.2);   // aim slightly ahead of the vehicle
     st("look_up", gsz * 0.4);      // aim a touch above ground plane
     st("min_speed", 0.5);          // fall back to a static trail below 0.5 wu/s
     // Faster catch-up: the DEFAULT cam_tau = 0.55 is a filmic slow ease that
@@ -648,7 +652,7 @@ int main(int argc, char **argv) {
     configure_track_params();
     set_probe_at(ax, ay, 0.0, ah);
     const double ch = std::cos(ah), sh = std::sin(ah);
-    const double back = gsz * 3.5, height = gsz * 1.6, la = gsz * 1.5;
+    const double back = gsz * 2.5, height = gsz * 1.2, la = gsz * 1.2;
     const double ex = ax - ch * back, ey = ay - sh * back, ez = height;
     const double fx = ax + ch * la, fy = ay + sh * la, fz = gsz * 0.4;
     view.setCamera(ex, ey, ez, fx, fy, fz, 0, 0, 1, 45.0);
@@ -662,6 +666,81 @@ int main(int argc, char **argv) {
   sg.setAxisVisible(false);
   sg.getGraphicsRoot()->setShowBBox(false);
   sg.processEvents();
+
+  // Picture-in-picture: an orthographic top-down overlay in the bottom-right
+  // corner. Uses a SECOND vtkRenderer on the same render window, sharing the
+  // main renderer's actors via AddViewProp (each vtkProp can live in multiple
+  // renderers — VTK handles that fine). Layer 1 draws over layer 0. Click a
+  // vehicle in the PiP to CHASE it (handled from the ImGui draw callback below).
+  vtkSmartPointer<vtkRenderer> pipRenderer = vtkSmartPointer<vtkRenderer>::New();
+  vtkSmartPointer<vtkCamera> pipCam = vtkSmartPointer<vtkCamera>::New();
+  {
+    const double halfH = 0.5 * (bounds.max_y - bounds.min_y);
+    const double halfW = 0.5 * (bounds.max_x - bounds.min_x);
+    const double cx = bounds.cx(), cy = bounds.cy();
+    pipCam->SetParallelProjection(true);
+    pipCam->SetParallelScale(std::max(halfH, halfW) * 1.05);
+    pipCam->SetPosition(cx, cy, wall_h * 5.0 + 500.0); // straight down
+    pipCam->SetFocalPoint(cx, cy, 0.0);
+    pipCam->SetViewUp(0.0, 1.0, 0.0);
+    pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
+    pipRenderer->SetActiveCamera(pipCam);
+    pipRenderer->SetViewport(0.72, 0.0, 1.0, 0.28); // bottom-right corner
+    pipRenderer->SetBackground(0.05, 0.06, 0.09);
+    pipRenderer->SetLayer(1);
+    // Mirror all main-renderer props onto the PiP renderer. Each prop lives in
+    // both — the render pipeline handles that fine.
+    vtkRenderer *main = view.renderer();
+    vtkPropCollection *props = main->GetViewProps();
+    props->InitTraversal();
+    while (vtkProp *p = props->GetNextProp())
+      pipRenderer->AddViewProp(p);
+    view.renderWindow()->SetNumberOfLayers(2);
+    view.renderWindow()->AddRenderer(pipRenderer);
+  }
+  // Click-in-PiP → follow. We record the last click and, if it lands over the
+  // PiP viewport, ortho-unproject it to a world (x,y), then pick the nearest
+  // agent's position and set followAgent.
+  auto pip_click_to_follow = [&](double mouseX, double mouseY) {
+    // Convert normalized display coords -> the PiP viewport local coords -> world.
+    // Viewport is [0.72, 0.0, 1.0, 0.28]; mouseX/mouseY are 0..1 across the window.
+    if (mouseX < 0.72 || mouseX > 1.0 || mouseY < 0.0 || mouseY > 0.28)
+      return false;
+    const double u = (mouseX - 0.72) / (1.0 - 0.72); // 0..1 within PiP
+    const double v = mouseY / 0.28;                  // 0..1 within PiP (top->bottom)
+    // Ortho unproject: viewport center = (cx,cy), extent = parallelScale * aspect.
+    int *vs = view.renderWindow()->GetSize(); // {width, height} — VTK owns this buffer
+    const int pw = static_cast<int>((1.0 - 0.72) * vs[0]);
+    const int ph = static_cast<int>(0.28 * vs[1]);
+    const double aspect = ph > 0 ? static_cast<double>(pw) / ph : 1.0;
+    const double sy = pipCam->GetParallelScale();
+    const double sx = sy * aspect;
+    const double wx = bounds.cx() + (u - 0.5) * 2.0 * sx;
+    const double wy = bounds.cy() - (v - 0.5) * 2.0 * sy; // v grows downward in screen coords
+    // Nearest-agent lookup using the current snapshot (emPos is refreshed above).
+    // Cheap linear scan — for a few hundred agents, negligible.
+    std::vector<float> ep(static_cast<std::size_t>(2) * N);
+    world.snapshot(ep.data(), nullptr, nullptr, nullptr, nullptr);
+    int best = -1;
+    double bestD2 = 1e30;
+    for (int i = 0; i < N; ++i) {
+      const double dx = ep[2 * i] - wx, dy = ep[2 * i + 1] - wy;
+      const double d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = i;
+      }
+    }
+    if (best >= 0) {
+      followAgent = best;
+      configure_track_params();
+      cam.setTrackTarget("follow_probe");
+      cam.setMode(CameraController::Mode::Track);
+      std::printf("nav_city_swarm: PiP click -> follow agent %d (dist=%.1f)\n", best,
+                  std::sqrt(bestD2));
+    }
+    return true;
+  };
 
   std::printf("nav_city_swarm: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
               belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
@@ -826,6 +905,19 @@ int main(int argc, char **argv) {
     touch.update(); // apply any pinch/two-finger gesture from this frame
 
 #ifdef CVC_ENABLE_IMGUI
+    // Click in the PiP corner -> chase whichever agent is nearest the click.
+    if (!capturing) {
+      ImGuiIO &io = ImGui::GetIO();
+      if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
+        const double mx = io.MousePos.x / std::max(io.DisplaySize.x, 1.0f);
+        const double my = io.MousePos.y / std::max(io.DisplaySize.y, 1.0f);
+        // PiP viewport spans [0.72,0]..[1.0,0.28] but VTK's y=0 is at the
+        // BOTTOM and ImGui's y=0 is at the TOP — flip.
+        const double myVtk = 1.0 - my;
+        if (mx >= 0.72 && myVtk <= 0.28)
+          pip_click_to_follow(mx, 0.28 - myVtk);
+      }
+    }
     // ---- apply UI actions ---------------------------------------------------
     if (uiShadows != shadows) { // live toggles
       shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
