@@ -31,6 +31,7 @@
 #endif
 #include <cstdlib>
 #include <string>
+#include <vector>
 #include <windows.h>
 #endif
 
@@ -61,7 +62,28 @@ void set_magick_paths_win() {
   const auto slash = p.find_last_of("\\/");
   if (slash == std::string::npos)
     return;
-  const std::string bindir = p.substr(0, slash);
+  // Search order: DLL's own directory (normal case: <prefix>\bin), then
+  // <prefix>\bin from the DLL's parent (in case cvc.dll got copied to
+  // build\bin\Release\ for CTest while the real coders live in deps\bin), then
+  // any CVC_DEPS_PREFIX\bin the environment names. Pick the first that contains
+  // at least one IM_MOD_RL_*.dll — an empty dir here becomes a MIFF-only Magick.
+  const std::string dllDir = p.substr(0, slash);
+  auto has_coder = [](const std::string &dir) -> bool {
+    WIN32_FIND_DATAA d;
+    HANDLE h = FindFirstFileA((dir + "\\IM_MOD_RL_*.dll").c_str(), &d);
+    if (h == INVALID_HANDLE_VALUE)
+      return false;
+    FindClose(h);
+    return true;
+  };
+  std::vector<std::string> cand{dllDir};
+  // If dllDir is <something>\build\bin\Release, walk up to try <something>\bin.
+  cand.push_back(dllDir + "\\..\\..\\..\\..\\deps\\bin");
+  if (const char *dp = std::getenv("CVC_DEPS_PREFIX"))
+    cand.push_back(std::string(dp) + "\\bin");
+  std::string bindir = dllDir; // fallback
+  for (const auto &c : cand)
+    if (has_coder(c)) { bindir = c; break; }
   const std::string share = bindir + "\\..\\share\\imagemagick";
   auto set_if_absent = [](const char *k, const std::string &v) {
     if (!std::getenv(k))
