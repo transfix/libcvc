@@ -83,7 +83,10 @@ void set_magick_paths_win() {
     cand.push_back(std::string(dp) + "\\bin");
   std::string bindir = dllDir; // fallback
   for (const auto &c : cand)
-    if (has_coder(c)) { bindir = c; break; }
+    if (has_coder(c)) {
+      bindir = c;
+      break;
+    }
   const std::string share = bindir + "\\..\\share\\imagemagick";
   auto set_if_absent = [](const char *k, const std::string &v) {
     if (!std::getenv(k))
