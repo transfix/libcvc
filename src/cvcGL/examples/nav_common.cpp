@@ -199,10 +199,14 @@ cvc::geometry AgentGlyphs::build(cvc::app &app, int n, const float *color, doubl
 
 cvc::geometry AgentGlyphs::build_template(cvc::app &app, int n, const float *color,
                                           const std::vector<double> &verts,
-                                          const std::vector<std::uint32_t> &tris, double z) {
+                                          const std::vector<std::uint32_t> &tris, double z,
+                                          const std::vector<float> *uvs) {
   tmpl_ = verts;
   tmplTris_ = tris;
   z_ = z;
+  tmplUvs_.clear();
+  if (uvs && uvs->size() * 3 == verts.size() * 2) // 2 UVs per 3-coord vert
+    tmplUvs_ = *uvs;
   return assemble(app, n, color);
 }
 
@@ -213,8 +217,11 @@ cvc::geometry AgentGlyphs::assemble(cvc::app &app, int n, const float *color) {
   auto &pts = g.points();
   auto &cols = g.colors();
   auto &tris = g.tris();
+  const bool haveUv = tmplUvs_.size() == static_cast<std::size_t>(v_) * 2;
   pts.reserve(static_cast<std::size_t>(n) * v_);
   cols.reserve(static_cast<std::size_t>(n) * v_);
+  if (haveUv)
+    g.uvs().reserve(static_cast<std::size_t>(n) * v_);
   for (int i = 0; i < n; ++i) {
     const cvc::geometry::index_t base = static_cast<cvc::geometry::index_t>(i) * v_;
     for (int k = 0; k < v_; ++k)
@@ -224,6 +231,9 @@ cvc::geometry AgentGlyphs::assemble(cvc::app &app, int n, const float *color) {
     const double bb = color ? color[3 * i + 2] : 0.75;
     for (int k = 0; k < v_; ++k)
       cols.push_back({r, gg, bb});
+    if (haveUv)
+      for (int k = 0; k < v_; ++k)
+        g.uvs().push_back({tmplUvs_[2 * k], tmplUvs_[2 * k + 1]});
     for (std::size_t t = 0; t + 2 < tmplTris_.size(); t += 3)
       tris.push_back({base + tmplTris_[t], base + tmplTris_[t + 1], base + tmplTris_[t + 2]});
   }
@@ -353,13 +363,23 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
 }
 
 bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris) {
+                           std::vector<std::uint32_t> &tris, std::vector<float> *out_uvs,
+                           cvc::image *out_texture) {
   if (!std::filesystem::exists(path))
     return false;
   cvc::model m = cvc::read_model(path);
   cvc::geometry g = m.merged();
   if (g.num_tris() == 0)
     return false;
+  // Grab the first material's base-color texture if the caller asked for one.
+  if (out_texture) {
+    *out_texture = cvc::image();
+    for (const auto &mat : m.materials)
+      if (mat.has_base_color_texture()) {
+        *out_texture = mat.base_color_texture;
+        break;
+      }
+  }
   const auto &pts = g.points();
   double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
   for (const auto &v : pts)
@@ -422,6 +442,18 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
   for (const auto &t : g.tris())
     for (int k = 0; k < 3; ++k)
       tris.push_back(static_cast<std::uint32_t>(t[k]));
+  // Forward per-vertex UVs when the model has them AND the caller wants them.
+  if (out_uvs) {
+    out_uvs->clear();
+    const auto &muvs = g.uvs();
+    if (muvs.size() == pts.size()) {
+      out_uvs->reserve(pts.size() * 2);
+      for (const auto &uv : muvs) {
+        out_uvs->push_back(static_cast<float>(uv[0]));
+        out_uvs->push_back(static_cast<float>(uv[1]));
+      }
+    }
+  }
   return true;
 }
 

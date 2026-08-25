@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <cvc/image/image.h> // vehicle template's base-color texture
 #include <memory>
 #include <string>
 #include <vector>
@@ -103,7 +104,8 @@ public:
   // updateVertices per frame.
   cvc::geometry build_template(cvc::app &app, int n, const float *color,
                                const std::vector<double> &verts,
-                               const std::vector<std::uint32_t> &tris, double z = 0.0);
+                               const std::vector<std::uint32_t> &tris, double z = 0.0,
+                               const std::vector<float> *uvs = nullptr);
   // Transform each instance by (pos_world[i*2..], heading[i]) into a flat [x,y,z,...]
   // buffer sized 3 * n * V — hand straight to updateVertices().
   const std::vector<double> &pack(const float *pos_world, const float *heading);
@@ -120,6 +122,7 @@ private:
   double z_ = 0.0;                      // height offset added to every local vert
   std::vector<double> tmpl_;            // [3*V] local template verts (forward +x)
   std::vector<std::uint32_t> tmplTris_; // [3*T] template triangle indices
+  std::vector<float> tmplUvs_;          // [2*V] per-vert UVs (optional; empty = no texture)
   std::vector<double> xyz_;             // scratch, reused each pack()
 };
 
@@ -212,7 +215,8 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
 // Returns false if the mesh can't be read. Lets a demo render a real Humvee
 // instead of a flat arrow glyph (nav_finale's loader, generalized).
 bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris);
+                           std::vector<std::uint32_t> &tris, std::vector<float> *uvs = nullptr,
+                           cvc::image *texture = nullptr);
 
 // One agent's global A* route over an occupancy grid: world waypoints + a cursor
 // into them (`idx` is the waypoint a follower is currently steering toward).

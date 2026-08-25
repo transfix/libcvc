@@ -396,6 +396,8 @@ int main(int argc, char **argv) {
   // like the arrow: build_template -> pack -> updateVertices.
   std::vector<double> vverts;
   std::vector<std::uint32_t> vtris;
+  std::vector<float> vuvs; // model UVs (empty when the glTF has no texcoords)
+  cvc::image vtexture;     // base-color texture (empty when the model has none)
   bool haveVehicle = false;
   if (vehicle.empty() && !bundle.empty()) {
     const std::string cand = bundle + "/../../shared/Humvee.glb";
@@ -406,15 +408,21 @@ int main(int argc, char **argv) {
   const bool worldIsMetres = !bundle.empty();
   const double gsz = worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
-    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
+    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris, &vuvs, &vtexture);
+  const bool haveVehicleTexture = haveVehicle && !vuvs.empty() && !vtexture.empty();
   if (haveVehicle)
-    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s)\n",
+    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s%s)\n",
                 vehicle.c_str(), vtris.size() / 3, gsz,
-                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)");
+                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)",
+                haveVehicleTexture ? " + baked texture" : "");
   // Build the per-agent instanced mesh (Humvee if loaded, else the flat arrow).
+  // When the model has UVs + a texture we pass UVs through so setTexture() below
+  // drapes the real Humvee texture; identity moves to the flag.
   auto build_agents = [&]() {
-    return haveVehicle ? glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0)
-                       : glyphs.build(app, N, color.data(), gsz, 0.6);
+    if (!haveVehicle)
+      return glyphs.build(app, N, color.data(), gsz, 0.6);
+    return glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0,
+                                 haveVehicleTexture ? &vuvs : nullptr);
   };
   cvc::geometry agentGeom = build_agents();
   auto agentNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents", agentGeom));
@@ -426,6 +434,11 @@ int main(int argc, char **argv) {
     agentNode->setDiffuse(0.9);
     agentNode->setSpecular(0.2);
     agentNode->setSpecularPower(18.0);
+    // Real baked Humvee texture when the glTF ships one — the group identity
+    // moves to the flag above the vehicle. VTK's texture path takes precedence
+    // over per-vertex colour scalars once setTexture is applied.
+    if (haveVehicleTexture)
+      agentNode->setTexture(vtexture, /*zeroCopy=*/false);
   }
 
   // Per-agent COLOR FLAG: a thin pole + rectangular flag flying above the vehicle,
