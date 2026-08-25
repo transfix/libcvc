@@ -3,6 +3,7 @@
 #include "nav_common.h"
 
 #include <algorithm>
+#include <cctype> // std::isspace in parse_terrain_grid
 #include <cmath>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -231,16 +232,24 @@ cvc::geometry AgentGlyphs::assemble(cvc::app &app, int n, const float *color) {
 }
 
 const std::vector<double> &AgentGlyphs::pack(const float *pos_world, const float *heading) {
+  return pack_z(pos_world, heading, nullptr);
+}
+
+const std::vector<double> &AgentGlyphs::pack_z(const float *pos_world, const float *heading,
+                                               const double *z_off) {
   // Yaw each instance about +z by its heading and translate to its world pose.
+  // If z_off is non-null, lift each instance's z by z_off[i] so a template
+  // built at local z=0 rests on real terrain.
   for (int i = 0; i < n_; ++i) {
     const double ox = pos_world[2 * i], oy = pos_world[2 * i + 1];
+    const double oz = z_off ? z_off[i] : 0.0;
     const double ch = std::cos(heading[i]), sh = std::sin(heading[i]);
     for (int k = 0; k < v_; ++k) {
       const double lx = tmpl_[3 * k], ly = tmpl_[3 * k + 1], lz = tmpl_[3 * k + 2];
       const std::size_t o = (static_cast<std::size_t>(i) * v_ + k) * 3;
       xyz_[o + 0] = ox + ch * lx - sh * ly;
       xyz_[o + 1] = oy + sh * lx + ch * ly;
-      xyz_[o + 2] = z_ + lz;
+      xyz_[o + 2] = oz + z_ + lz;
     }
   }
   return xyz_;
@@ -368,12 +377,46 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
     std::swap(fwd, side);
   const double s = ext[fwd] > 1e-9 ? target_len / ext[fwd] : 1.0;
   const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  // Auto-orient front vs rear along the forward axis. For a passenger vehicle
+  // (Humvee, sedan) the FRONT half usually has less vertex mass than the rear
+  // (rear cargo/cabin dominates the mesh), while the front's TOP is lower
+  // (hood < roof). Combine both signals: pick the direction that makes the
+  // FRONT half both lighter (fewer verts) AND lower (mean-z-of-top ~ hood).
+  // Falls back gracefully when signals disagree.
+  int front_sign = +1; // assume +axis is the nose
+  {
+    long n_pos = 0, n_neg = 0;
+    double sum_top_pos = 0.0, sum_top_neg = 0.0;
+    long tt_pos = 0, tt_neg = 0;
+    const double top_thresh = lo[up] + 0.6 * ext[up]; // upper 40% of height
+    for (const auto &v : pts) {
+      const double f = v[fwd] - cf;
+      const bool pos = f > 0;
+      if (pos) ++n_pos; else ++n_neg;
+      if (v[up] >= top_thresh) {
+        if (pos) { sum_top_pos += f; ++tt_pos; }
+        else     { sum_top_neg += f; ++tt_neg; }
+      }
+    }
+    // Front-is-lighter score: which half has FEWER verts?
+    const int lighter = (n_pos < n_neg) ? +1 : -1;
+    // Front-is-lower-top score: which side's top-verts sit closer to axis center?
+    // (Higher body/cabin mass on the rear side pulls its top centroid further out.)
+    int lower_top = 0;
+    if (tt_pos > 8 && tt_neg > 8) {
+      const double meanTopPos = sum_top_pos / tt_pos;
+      const double meanTopNeg = std::abs(sum_top_neg / tt_neg);
+      lower_top = (meanTopPos < meanTopNeg) ? +1 : -1;
+    }
+    // Combine: if both agree, use them. If they disagree, trust vertex-mass.
+    front_sign = (lower_top == 0) ? lighter : (lighter == lower_top ? lighter : lighter);
+  }
   verts.clear();
   verts.reserve(pts.size() * 3);
   for (const auto &v : pts) {
-    verts.push_back((v[fwd] - cf) * s);    // -> +x forward
-    verts.push_back((v[side] - cs) * s);   // -> +y side
-    verts.push_back((v[up] - lo[up]) * s); // -> +z up, resting on 0
+    verts.push_back((v[fwd] - cf) * s * front_sign); // -> +x forward (autodetected)
+    verts.push_back((v[side] - cs) * s);             // -> +y side
+    verts.push_back((v[up] - lo[up]) * s);           // -> +z up, resting on 0
   }
   tris.clear();
   for (const auto &t : g.tris())
@@ -382,8 +425,101 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
   return true;
 }
 
+double Terrain::sample(double x, double y) const {
+  if (empty())
+    return 0.0;
+  // Bilinear interpolation over the [rows x cols] elevation grid mapped onto
+  // bounds. grid[0] is the SW corner (min_x, min_y); rows step +y, cols step +x.
+  const double u = (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
+  const double v = (y - bounds.min_y) / (bounds.max_y - bounds.min_y);
+  const double fx = std::clamp(u, 0.0, 1.0) * (cols - 1);
+  const double fy = std::clamp(v, 0.0, 1.0) * (rows - 1);
+  const int i0 = static_cast<int>(std::floor(fx));
+  const int j0 = static_cast<int>(std::floor(fy));
+  const int i1 = std::min(i0 + 1, cols - 1);
+  const int j1 = std::min(j0 + 1, rows - 1);
+  const double tx = fx - i0, ty = fy - j0;
+  const double z00 = grid[j0 * cols + i0], z10 = grid[j0 * cols + i1];
+  const double z01 = grid[j1 * cols + i0], z11 = grid[j1 * cols + i1];
+  const double a = z00 * (1 - tx) + z10 * tx;
+  const double b = z01 * (1 - tx) + z11 * tx;
+  return a * (1 - ty) + b * ty;
+}
+
+cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
+  if (t.empty())
+    return ground_quad(t.bounds, 0.0, rgb);
+  cvc::geometry g;
+  auto &pts = g.points();
+  auto &cols = g.colors();
+  auto &uvs = g.uvs(); // UVs so a satellite texture drapes over the terrain
+  auto &tris = g.tris();
+  pts.reserve(static_cast<std::size_t>(t.rows) * t.cols);
+  cols.reserve(pts.capacity());
+  uvs.reserve(pts.capacity());
+  const double dx = (t.bounds.max_x - t.bounds.min_x) / (t.cols - 1);
+  const double dy = (t.bounds.max_y - t.bounds.min_y) / (t.rows - 1);
+  for (int j = 0; j < t.rows; ++j) {
+    const double y = t.bounds.min_y + j * dy;
+    const double v = static_cast<double>(j) / (t.rows - 1);
+    for (int i = 0; i < t.cols; ++i) {
+      const double x = t.bounds.min_x + i * dx;
+      const double u = static_cast<double>(i) / (t.cols - 1);
+      pts.push_back({x, y, t.grid[j * t.cols + i]});
+      cols.push_back({rgb[0], rgb[1], rgb[2]});
+      uvs.push_back({static_cast<float>(u), static_cast<float>(v)});
+    }
+  }
+  tris.reserve(static_cast<std::size_t>(2) * (t.rows - 1) * (t.cols - 1));
+  for (int j = 0; j + 1 < t.rows; ++j)
+    for (int i = 0; i + 1 < t.cols; ++i) {
+      const auto a = static_cast<cvc::geometry::index_t>(j * t.cols + i);
+      const auto b = static_cast<cvc::geometry::index_t>(a + 1);
+      const auto c = static_cast<cvc::geometry::index_t>(a + t.cols);
+      const auto d = static_cast<cvc::geometry::index_t>(c + 1);
+      tris.push_back({a, b, d});
+      tris.push_back({a, d, c});
+    }
+  return g;
+}
+
+// Parse the row-major "grid": [[...],[...],...] block from terrain.json into a
+// flat vector. Returns false if the block is missing/malformed — the caller
+// falls back to a flat ground plane.
+static bool parse_terrain_grid(const std::string &s, int rows, int cols,
+                               std::vector<double> &out) {
+  const auto gk = s.find("\"grid\"");
+  if (gk == std::string::npos)
+    return false;
+  const auto lb = s.find('[', gk);
+  if (lb == std::string::npos)
+    return false;
+  out.clear();
+  out.reserve(static_cast<std::size_t>(rows) * cols);
+  const char *p = s.c_str() + lb + 1;
+  const char *end = s.c_str() + s.size();
+  int depth = 1;
+  while (p < end && depth > 0) {
+    while (p < end && (std::isspace(static_cast<unsigned char>(*p)) || *p == ',' || *p == '['))
+      if (*p++ == '[')
+        ++depth;
+    if (p >= end || *p == ']') {
+      if (p < end)
+        --depth, ++p;
+      continue;
+    }
+    char *ep = nullptr;
+    const double v = std::strtod(p, &ep);
+    if (ep == p)
+      break;
+    out.push_back(v);
+    p = ep;
+  }
+  return out.size() == static_cast<std::size_t>(rows) * cols;
+}
+
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
-                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh) {
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh, Terrain *terrain) {
   namespace fs = std::filesystem;
   const std::string tj = dir + "/terrain.json", glb = dir + "/buildings.glb";
   std::ifstream f(tj);
@@ -403,6 +539,19 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
   if (!(num("\"min_x\"", bounds.min_x) && num("\"min_y\"", bounds.min_y) &&
         num("\"max_x\"", bounds.max_x) && num("\"max_y\"", bounds.max_y)))
     return false;
+  if (terrain) {
+    // Optional elevation grid — makes agents, walls, and beacons rest on real
+    // terrain instead of a flat plane. Missing/malformed grid is not fatal
+    // (bundle without elevation still works, just flat).
+    double rr = 0, cc = 0;
+    if (num("\"rows\"", rr) && num("\"cols\"", cc) && rr > 1 && cc > 1) {
+      terrain->rows = static_cast<int>(rr);
+      terrain->cols = static_cast<int>(cc);
+      terrain->bounds = bounds;
+      if (!parse_terrain_grid(s, terrain->rows, terrain->cols, terrain->grid))
+        *terrain = Terrain{}; // wipe partial parse
+    }
+  }
   if (!fs::exists(glb))
     return false;
   cvc::model m = cvc::read_model(glb);
