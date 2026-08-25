@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <cvc/image/image.h> // vehicle template's base-color texture
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +73,22 @@ cvc::geometry occupancy_to_walls(const std::uint8_t *occ, int rows, int cols, co
 // terrain the agents drive on. (Textured later for the fog belief map.)
 cvc::geometry ground_quad(const Bounds &b, double z, const double rgb[3]);
 
+// Heightmap from a bundle's terrain.json: row-major elevation samples over the
+// bundle's bounds. sample(x, y) bilinearly interpolates the elevation at any
+// world (x, y), so vehicles + goal beacons + city walls can rest on the ground
+// instead of at z = 0.
+struct Terrain {
+  int rows = 0, cols = 0;
+  Bounds bounds;
+  std::vector<double> grid; // rows*cols, elevation in world units (z metres)
+  bool empty() const { return rows <= 0 || cols <= 0 || grid.empty(); }
+  double sample(double x, double y) const;
+};
+
+// A tessellated ground mesh from a Terrain (rows*cols verts, 2*(rows-1)*(cols-1)
+// triangles, flat-shaded). If the terrain is empty, falls back to ground_quad.
+cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]);
+
 // One merged flat-arrow glyph per agent (points +x at heading 0, length `size`,
 // sitting at height `z`), per-vertex-coloured from sim_world's color[n*3]. Build the
 // mesh ONCE, then pack() each frame from the sim snapshot and feed the result to
@@ -87,10 +104,15 @@ public:
   // updateVertices per frame.
   cvc::geometry build_template(cvc::app &app, int n, const float *color,
                                const std::vector<double> &verts,
-                               const std::vector<std::uint32_t> &tris, double z = 0.0);
+                               const std::vector<std::uint32_t> &tris, double z = 0.0,
+                               const std::vector<float> *uvs = nullptr);
   // Transform each instance by (pos_world[i*2..], heading[i]) into a flat [x,y,z,...]
   // buffer sized 3 * n * V — hand straight to updateVertices().
   const std::vector<double> &pack(const float *pos_world, const float *heading);
+  // Same, but ALSO lift each instance's z by z_off[i] (e.g. terrain elevation at
+  // that agent's world (x,y)), so a flat-ground template rests on real terrain.
+  const std::vector<double> &pack_z(const float *pos_world, const float *heading,
+                                    const double *z_off);
 
   int point_count() const { return n_ * v_; }
 
@@ -100,6 +122,7 @@ private:
   double z_ = 0.0;                      // height offset added to every local vert
   std::vector<double> tmpl_;            // [3*V] local template verts (forward +x)
   std::vector<std::uint32_t> tmplTris_; // [3*T] template triangle indices
+  std::vector<float> tmplUvs_;          // [2*V] per-vert UVs (optional; empty = no texture)
   std::vector<double> xyz_;             // scratch, reused each pack()
 };
 
@@ -182,7 +205,8 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
 // caller can render the true geometry instead of blocks extruded from occupancy.
 // Grid convention matches occupancy_from_model / sim_world (r->y, row 0 = min_y).
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
-                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr);
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr,
+                      Terrain *terrain = nullptr);
 
 // Load a mesh (.glb/.obj/...) as a canonical per-agent VEHICLE template for
 // AgentGlyphs::build_template: forward -> +x, width -> +y, height -> +z, centred
@@ -191,7 +215,8 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
 // Returns false if the mesh can't be read. Lets a demo render a real Humvee
 // instead of a flat arrow glyph (nav_finale's loader, generalized).
 bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris);
+                           std::vector<std::uint32_t> &tris, std::vector<float> *uvs = nullptr,
+                           cvc::image *texture = nullptr);
 
 // One agent's global A* route over an occupancy grid: world waypoints + a cursor
 // into them (`idx` is the waypoint a follower is currently steering toward).

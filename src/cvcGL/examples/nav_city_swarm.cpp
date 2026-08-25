@@ -225,22 +225,27 @@ int main(int argc, char **argv) {
   double scale = ts.scale;
   cvc::geometry cityMesh;
   bool haveMesh = false;
+  navdemo::Terrain terrain; // real elevation from bundle's terrain.json (optional)
   if (bundle.empty())
     if (const char *envB = std::getenv("CVC_NAV_BUNDLE"))
       bundle = envB;
   if (!bundle.empty()) {
     navdemo::Bounds bb;
     std::vector<std::uint8_t> bocc;
-    if (navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh)) {
+    if (navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain)) {
       bounds = bb;
       occ = std::move(bocc);
       rows = grid;
       cols = grid;
       scale = 0.05; // the trained world metric; keeps the coef_mlp constants physical
       haveMesh = cityMesh.num_tris() > 0;
-      std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris\n",
+      std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
-                  (unsigned long long)cityMesh.num_tris());
+                  (unsigned long long)cityMesh.num_tris(),
+                  terrain.empty() ? ""
+                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) + "x" +
+                                     std::to_string(terrain.cols) + ")")
+                                        .c_str());
     } else {
       std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
                   bundle.c_str());
@@ -314,7 +319,16 @@ int main(int argc, char **argv) {
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
   if (haveMesh) {
     // Real building geometry from the bundle's buildings.glb (true heights + shapes),
-    // instead of blocks extruded from the occupancy grid.
+    // instead of blocks extruded from the occupancy grid. buildings.glb bakes each
+    // building's base at z=0 (relative to a flat plane), so with real terrain in
+    // play we lift every vertex by terrain.sample(x, y) so the buildings SIT on
+    // the ground instead of floating over the low bits and clipping into the high
+    // bits. Cheap: one bilinear sample per vertex, done once at load.
+    if (!terrain.empty()) {
+      auto &pts = cityMesh.points();
+      for (auto &p : pts)
+        p[2] += terrain.sample(p[0], p[1]);
+    }
     auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
     if (wnode) {
       wnode->setUseSingleColor(true);
@@ -328,8 +342,13 @@ int main(int argc, char **argv) {
   }
 
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
-  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ground", navdemo::ground_quad(bounds, 0.0, ground_rgb)));
+  // Real elevation from terrain.json when we have a bundle — a tessellated
+  // heightmap so the buildings sit on the ground and the vehicles drive over
+  // hills instead of clipping straight through them. Flat ground_quad fallback
+  // when no terrain (synthetic city_scene, or a bundle missing the grid).
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(
+      "ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                : navdemo::terrain_mesh(terrain, ground_rgb)));
   cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   // A real bundle ships an aerial photo of the same footprint as terrain.json, so
   // with fog OFF the ground can BE the satellite image instead of flat asphalt.
@@ -386,6 +405,8 @@ int main(int argc, char **argv) {
   // like the arrow: build_template -> pack -> updateVertices.
   std::vector<double> vverts;
   std::vector<std::uint32_t> vtris;
+  std::vector<float> vuvs; // model UVs (empty when the glTF has no texcoords)
+  cvc::image vtexture;     // base-color texture (empty when the model has none)
   bool haveVehicle = false;
   if (vehicle.empty() && !bundle.empty()) {
     const std::string cand = bundle + "/../../shared/Humvee.glb";
@@ -396,15 +417,21 @@ int main(int argc, char **argv) {
   const bool worldIsMetres = !bundle.empty();
   const double gsz = worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
-    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris);
+    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris, &vuvs, &vtexture);
+  const bool haveVehicleTexture = haveVehicle && !vuvs.empty() && !vtexture.empty();
   if (haveVehicle)
-    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s)\n",
+    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s%s)\n",
                 vehicle.c_str(), vtris.size() / 3, gsz,
-                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)");
+                worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)",
+                haveVehicleTexture ? " + baked texture" : "");
   // Build the per-agent instanced mesh (Humvee if loaded, else the flat arrow).
+  // When the model has UVs + a texture we pass UVs through so setTexture() below
+  // drapes the real Humvee texture; identity moves to the flag.
   auto build_agents = [&]() {
-    return haveVehicle ? glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0)
-                       : glyphs.build(app, N, color.data(), gsz, 0.6);
+    if (!haveVehicle)
+      return glyphs.build(app, N, color.data(), gsz, 0.6);
+    return glyphs.build_template(app, N, color.data(), vverts, vtris, /*z=*/0.0,
+                                 haveVehicleTexture ? &vuvs : nullptr);
   };
   cvc::geometry agentGeom = build_agents();
   auto agentNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents", agentGeom));
@@ -416,6 +443,11 @@ int main(int argc, char **argv) {
     agentNode->setDiffuse(0.9);
     agentNode->setSpecular(0.2);
     agentNode->setSpecularPower(18.0);
+    // Real baked Humvee texture when the glTF ships one — the group identity
+    // moves to the flag above the vehicle. VTK's texture path takes precedence
+    // over per-vertex colour scalars once setTexture is applied.
+    if (haveVehicleTexture)
+      agentNode->setTexture(vtexture, /*zeroCopy=*/false);
   }
 
   // Per-agent COLOR FLAG: a thin pole + rectangular flag flying above the vehicle,
@@ -761,12 +793,13 @@ int main(int argc, char **argv) {
     world.snapshot(ip.data(), ih.data(), nullptr, nullptr, nullptr);
     const double ax = ip[2 * followInit], ay = ip[2 * followInit + 1];
     const double ah = ih[followInit];
+    const double az = terrain.empty() ? 0.0 : terrain.sample(ax, ay);
     configure_track_params();
-    set_probe_at(ax, ay, 0.0, ah);
+    set_probe_at(ax, ay, az, ah);
     const double ch = std::cos(ah), sh = std::sin(ah);
     const double back = gsz * 2.5, height = gsz * 1.2, la = gsz * 1.2;
-    const double ex = ax - ch * back, ey = ay - sh * back, ez = height;
-    const double fx = ax + ch * la, fy = ay + sh * la, fz = gsz * 0.4;
+    const double ex = ax - ch * back, ey = ay - sh * back, ez = az + height;
+    const double fx = ax + ch * la, fy = ay + sh * la, fz = az + gsz * 0.4;
     view.setCamera(ex, ey, ez, fx, fy, fz, 0, 0, 1, 45.0);
     cam.setTrackTarget("follow_probe");
     cam.setMode(CameraController::Mode::Track);
@@ -879,6 +912,21 @@ int main(int argc, char **argv) {
 
   std::printf("nav_city_swarm: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
               belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
+
+  // Per-frame terrain elevation at each agent's (x,y). Populated once per
+  // snapshot, then reused by every pack_z() below (body, flags, pip dots).
+  // Shared across the worker AND inline sim branches, so declared BEFORE the
+  // #if. NULL-equivalent when terrain is empty — pack_z() then leaves z alone.
+  std::vector<double> zoff(N, 0.0);
+  auto sample_zoff = [&](const float *p) {
+    if (terrain.empty()) {
+      std::fill(zoff.begin(), zoff.end(), 0.0);
+    } else {
+      for (int i = 0; i < N; ++i)
+        zoff[i] = terrain.sample(p[2 * i], p[2 * i + 1]);
+    }
+  };
+  const double *zoff_ptr = &zoff[0];
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
 #if CVC_NAV_DEMO_SIM_WORKER
@@ -1245,16 +1293,18 @@ int main(int argc, char **argv) {
 #if CVC_NAV_DEMO_SIM_WORKER
     if (auto snap = sim->read()) {
       if (snap->n == N) {
-        const auto &xyz = glyphs.pack(snap->pos.data(), snap->heading.data());
+        sample_zoff(snap->pos.data()); // one bilinear terrain sample per agent
+        const auto &xyz = glyphs.pack_z(snap->pos.data(), snap->heading.data(), zoff_ptr);
         if (agentNode)
           agentNode->updateVertices(xyz);
         if (flagNode) // flags share the same pose stream, different template
-          flagNode->updateVertices(flagGlyphs.pack(snap->pos.data(), snap->heading.data()));
-        if (pipDotNode) // PiP-only marker dots, same pose stream
+          flagNode->updateVertices(
+              flagGlyphs.pack_z(snap->pos.data(), snap->heading.data(), zoff_ptr));
+        if (pipDotNode) // PiP-only marker dots, same pose stream (ortho — z irrelevant)
           pipDotNode->updateVertices(pipDotGlyphs.pack(snap->pos.data(), snap->heading.data()));
         if (followAgent >= 0 && followAgent < N) {
           const float *p = snap->pos.data() + 2 * followAgent;
-          set_probe_at(p[0], p[1], 0.0, snap->heading[followAgent]);
+          set_probe_at(p[0], p[1], zoff[followAgent], snap->heading[followAgent]);
         }
         restyle(snap->mode.data(), snap->reached.data());
         trail_update(snap->pos.data());
@@ -1265,15 +1315,17 @@ int main(int argc, char **argv) {
       world.step(0);
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
-      const auto &xyz = glyphs.pack(emPos.data(), emHead.data());
+      sample_zoff(emPos.data());
+      const auto &xyz = glyphs.pack_z(emPos.data(), emHead.data(), zoff_ptr);
       if (agentNode)
         agentNode->updateVertices(xyz);
       if (flagNode)
-        flagNode->updateVertices(flagGlyphs.pack(emPos.data(), emHead.data()));
+        flagNode->updateVertices(flagGlyphs.pack_z(emPos.data(), emHead.data(), zoff_ptr));
       if (pipDotNode)
         pipDotNode->updateVertices(pipDotGlyphs.pack(emPos.data(), emHead.data()));
       if (followAgent >= 0 && followAgent < N)
-        set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], 0.0, emHead[followAgent]);
+        set_probe_at(emPos[2 * followAgent], emPos[2 * followAgent + 1], zoff[followAgent],
+                     emHead[followAgent]);
       restyle(emMd.data(), emRch.data());
       trail_update(emPos.data());
     }
