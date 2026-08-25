@@ -412,10 +412,18 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
     for (const auto &v : pts) {
       const double f = v[fwd] - cf;
       const bool pos = f > 0;
-      if (pos) ++n_pos; else ++n_neg;
+      if (pos)
+        ++n_pos;
+      else
+        ++n_neg;
       if (v[up] >= top_thresh) {
-        if (pos) { sum_top_pos += f; ++tt_pos; }
-        else     { sum_top_neg += f; ++tt_neg; }
+        if (pos) {
+          sum_top_pos += f;
+          ++tt_pos;
+        } else {
+          sum_top_neg += f;
+          ++tt_neg;
+        }
       }
     }
     // Front-is-lighter score: which half has FEWER verts?
@@ -518,8 +526,7 @@ cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
 // Parse the row-major "grid": [[...],[...],...] block from terrain.json into a
 // flat vector. Returns false if the block is missing/malformed — the caller
 // falls back to a flat ground plane.
-static bool parse_terrain_grid(const std::string &s, int rows, int cols,
-                               std::vector<double> &out) {
+static bool parse_terrain_grid(const std::string &s, int rows, int cols, std::vector<double> &out) {
   const auto gk = s.find("\"grid\"");
   if (gk == std::string::npos)
     return false;

@@ -243,8 +243,8 @@ int main(int argc, char **argv) {
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
                   terrain.empty() ? ""
-                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) + "x" +
-                                     std::to_string(terrain.cols) + ")")
+                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) +
+                                     "x" + std::to_string(terrain.cols) + ")")
                                         .c_str());
     } else {
       std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
@@ -346,9 +346,9 @@ int main(int argc, char **argv) {
   // heightmap so the buildings sit on the ground and the vehicles drive over
   // hills instead of clipping straight through them. Flat ground_quad fallback
   // when no terrain (synthetic city_scene, or a bundle missing the grid).
-  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(
-      "ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
-                                : navdemo::terrain_mesh(terrain, ground_rgb)));
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
   cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   // A real bundle ships an aerial photo of the same footprint as terrain.json, so
   // with fog OFF the ground can BE the satellite image instead of flat asphalt.
