@@ -208,9 +208,6 @@ int main(int argc, char **argv) {
   //   dynamic — the map is RIGHT at first, then the world CHANGES: a blockage
   //             appears mid-run (stamped into the live planning surface with
   //             sim_world::add_obstacle) and the agent must notice and re-route.
-  //   traffic — the ghost lie, but with other vehicles crossing the same space,
-  //             so belief-vs-truth plays out against moving obstacles.
-  //
   // The lie always lives in the BELIEF (prior_occ), never in `truth` — collision
   // is always scored against truth, which is what keeps the demo honest.
   const std::size_t wall_lo = static_cast<std::size_t>(R) / 4;
@@ -600,7 +597,7 @@ int main(int argc, char **argv) {
     }
     if (ImGui::Button("Apply / Restart", ImVec2(-1, 0)))
       uiRestart = true;
-    ImGui::TextDisabled("scenario / range / traffic need a restart");
+    ImGui::TextDisabled("scenario / range need a restart");
     ImGui::End();
   });
 #endif
