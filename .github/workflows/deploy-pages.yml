@@ -1,0 +1,137 @@
+name: deploy gh-pages
+
+# Rebuild the cvcGL wasm demo gallery from libcvc master and push it to the
+# gh-pages branch (https://transfix.github.io/libcvc/). Mirrors the pattern in
+# cy-pca/cyberpcangel-cvcgl's nightly.yml — same self-hosted Linux runner
+# (catx-03) that already holds the emsdk + wasm-mt deps prefix at /opt/cvc-wasm/,
+# just a different deploy target: git push to gh-pages instead of ssh to
+# catx-00.tx.wtf.
+#
+# Auto-triggers on push to master (so a merged PR lands on pages within minutes)
+# plus workflow_dispatch for a manual re-run and a nightly safety-net cron.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild + push even if the gallery bytes are unchanged'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push to gh-pages
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
+      CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt
+      DEMOS: 'lsystem_forest nav_city_swarm nav_fog_ghost'
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Use the cvcpkg CMake on this runner
+        # System cmake is 3.22; libcvc's Boost 1.86 config lookup needs 3.24+
+        # (see nav-swarm-cinematic/PR #225 and the sister workflow's rationale).
+        run: echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
+
+      - name: Build the -pthread demos
+        run: ./src/cvcGL/examples/wasm/build-wasm-demo.sh --pthread
+
+      - name: Assemble the gallery
+        id: assemble
+        run: |
+          set -euo pipefail
+          bin=build-wasm-mt/bin
+          gallery=$(mktemp -d)
+          # Landing page + per-demo hosts (already generated next to the binaries
+          # by examples/wasm/build-pages.py, invoked from build-wasm-demo.sh).
+          if [ -d "build-wasm-mt/gallery" ]; then
+            cp -R build-wasm-mt/gallery/. "$gallery/"
+          else
+            # Fallback: hand-assemble from the built binaries + wasm/index.html
+            # template. build-pages.py is the source of truth; this is a safety net.
+            touch "$gallery/.nojekyll"
+            for d in $DEMOS; do
+              mkdir -p "$gallery/$d"
+              cp "$bin/$d.js" "$bin/$d.wasm" "$gallery/$d/"
+              [ -f "$bin/$d/index.html" ] && cp "$bin/$d/index.html" "$gallery/$d/"
+            done
+            [ -f "$bin/index.html" ] && cp "$bin/index.html" "$gallery/"
+          fi
+          # Ensure Jekyll processing is disabled (._filenames + emscripten paths).
+          touch "$gallery/.nojekyll"
+          echo "gallery=$gallery" >> "$GITHUB_OUTPUT"
+
+      - name: Push to gh-pages
+        id: push
+        run: |
+          set -euo pipefail
+          gallery="${{ steps.assemble.outputs.gallery }}"
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short HEAD)
+
+          # Fresh worktree of gh-pages so we don't touch the master checkout.
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages
+          workdir=$(mktemp -d)
+          git worktree add --detach "$workdir" origin/gh-pages
+          # Replace contents wholesale — the gallery is what we ship, not a diff.
+          shopt -s dotglob
+          rm -rf "$workdir"/*
+          cp -R "$gallery"/. "$workdir"/
+          shopt -u dotglob
+
+          cd "$workdir"
+          git config user.name "libcvc-pages"
+          git config user.email "pages@cyberpcangel.com"
+          git add -A
+          if git diff --cached --quiet; then
+            if [ "${{ inputs.force }}" != "true" ]; then
+              echo "gh-pages: no changes — skipping push."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # --force flag: land an empty commit anyway so the deploy time is fresh.
+            git commit --allow-empty -q -m "pages: rebuild from libcvc master ${short} (forced, no content change)"
+          else
+            git commit -q -m "pages: rebuild from libcvc master ${short}"
+          fi
+          git push origin HEAD:gh-pages
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify live
+        if: steps.push.outputs.changed == 'true'
+        run: |
+          # Curl on this runner has a libcurl symbol mismatch (same as sister
+          # workflow); use python's urllib. Give the pages CDN a beat to catch up.
+          sleep 30
+          python3 - <<'PY'
+          import os, sys, urllib.request
+          ok = True
+          for d in os.environ["DEMOS"].split():
+              url = f"https://transfix.github.io/libcvc/{d}/{d}.wasm"
+              try:
+                  req = urllib.request.Request(
+                      url, method="HEAD",
+                      headers={"Accept-Encoding": "identity"})
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      live = int(r.headers.get("Content-Length", -1))
+              except Exception as e:
+                  print(f"  {d}: FAIL ({e})")
+                  ok = False
+                  continue
+              print(f"  {d}: {live} bytes live at {url}")
+          sys.exit(0 if ok else 1)
+          PY
