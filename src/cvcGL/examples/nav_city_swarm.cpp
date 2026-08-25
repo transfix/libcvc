@@ -319,7 +319,16 @@ int main(int argc, char **argv) {
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
   if (haveMesh) {
     // Real building geometry from the bundle's buildings.glb (true heights + shapes),
-    // instead of blocks extruded from the occupancy grid.
+    // instead of blocks extruded from the occupancy grid. buildings.glb bakes each
+    // building's base at z=0 (relative to a flat plane), so with real terrain in
+    // play we lift every vertex by terrain.sample(x, y) so the buildings SIT on
+    // the ground instead of floating over the low bits and clipping into the high
+    // bits. Cheap: one bilinear sample per vertex, done once at load.
+    if (!terrain.empty()) {
+      auto &pts = cityMesh.points();
+      for (auto &p : pts)
+        p[2] += terrain.sample(p[0], p[1]);
+    }
     auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
     if (wnode) {
       wnode->setUseSingleColor(true);
