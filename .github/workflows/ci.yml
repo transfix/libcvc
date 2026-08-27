@@ -896,6 +896,17 @@ jobs:
           if ($env:QT_ROOT_DIR) { $extra += (Join-Path $env:QT_ROOT_DIR 'bin') }
           $extra += $buildBin
           $env:PATH = ($extra -join ';') + ';' + $env:PATH
+          # ImageMagick from cvcpkg is EXTRACTED, not INSTALLED — the coder/filter
+          # modules and its config live in the deps prefix's bin\ and
+          # share\imagemagick\. Point Magick at them here so it can decode PNG/JPEG
+          # in the ImageTest.* round-trip tests (else it falls back to MIFF-only).
+          if ($env:DEPS_PATH) {
+            $binDir  = $isDebug ? (Join-Path $env:DEPS_PATH 'debug\bin') : (Join-Path $env:DEPS_PATH 'bin')
+            $shareIm = Join-Path $env:DEPS_PATH 'share\imagemagick'
+            $env:MAGICK_CODER_MODULE_PATH  = $binDir
+            $env:MAGICK_FILTER_MODULE_PATH = $binDir
+            $env:MAGICK_CONFIGURE_PATH     = $shareIm
+          }
           # Assert the cvcgl_* tests actually registered — see the linux step.
           $nCvcgl = (ctest --test-dir build -N 2>$null | Select-String -Pattern 'Test\s+#\d+: cvcgl_').Count
           Write-Host "cvcgl_* tests registered with ctest: $nCvcgl (all run; Mesa llvmpipe staged above)"
