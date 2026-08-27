@@ -39,6 +39,16 @@ endforeach()
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
 if(EMSCRIPTEN)
   set(_wasm_demos lsystem_forest bunny_shadow nav_city_swarm nav_fog_ghost)
+  # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
+  # buildings.glb + satellite.png + Humvee.glb). When CVC_WASM_BUNDLE is set to
+  # a directory, its contents are preloaded into the emscripten virtual FS at
+  # /bundle, and the demo picks it up via the CVC_NAV_BUNDLE env / --bundle arg.
+  # If the var is empty (the default), the demo falls back to the synthetic city.
+  set(_nav_swarm_bundle_flags "")
+  if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
+    message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
+    set(_nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+  endif()
   foreach(_wt ${_wasm_demos})
     # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
     # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.
@@ -53,6 +63,9 @@ if(EMSCRIPTEN)
     if(CVC_WASM_PTHREADS)
       # Pre-spawn workers so std::thread creation doesn't stall on the busy main thread.
       target_link_options(${_wt} PRIVATE -sPTHREAD_POOL_SIZE=4)
+    endif()
+    if(_nav_swarm_bundle_flags AND "${_wt}" STREQUAL "nav_city_swarm")
+      target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
   endforeach()
   # One target builds them all; wasm/build-wasm-demo.sh drives it, then build-pages.py

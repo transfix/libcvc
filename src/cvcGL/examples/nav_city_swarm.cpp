@@ -229,6 +229,13 @@ int main(int argc, char **argv) {
   if (bundle.empty())
     if (const char *envB = std::getenv("CVC_NAV_BUNDLE"))
       bundle = envB;
+#ifdef __EMSCRIPTEN__
+  // Emscripten build: CMake --preload-file stashes the Austin bundle at /bundle
+  // in the virtual filesystem. Autodetect it so the browser demo picks it up
+  // with no user-visible env / argv machinery.
+  if (bundle.empty() && std::filesystem::exists("/bundle/terrain.json"))
+    bundle = "/bundle";
+#endif
   if (!bundle.empty()) {
     navdemo::Bounds bb;
     std::vector<std::uint8_t> bocc;
