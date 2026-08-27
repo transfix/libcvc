@@ -101,6 +101,7 @@ add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
 add_executable(nav_test nav_test.cpp)
 add_executable(nav_coef_train_test nav_coef_train_test.cpp)
+add_executable(nav_material_test nav_material_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -171,6 +172,7 @@ set(TEST_TARGETS
   utility_test
   nav_test
   nav_coef_train_test
+  nav_material_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -406,6 +408,13 @@ target_link_libraries(nav_test
 )
 
 target_link_libraries(nav_coef_train_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_test
   PRIVATE
     cvc
     GTest::gtest
@@ -937,6 +946,7 @@ target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(nav_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
@@ -1153,6 +1163,7 @@ cvc_discover_tests(geometry_attributes_test)
 cvc_discover_tests(utility_test)
 cvc_discover_tests(nav_test)
 cvc_discover_tests(nav_coef_train_test)
+cvc_discover_tests(nav_material_test)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)

@@ -16,6 +16,7 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/material.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <algorithm>
@@ -1520,5 +1521,381 @@ double nav_train_coef_mlp(PyObject *occ, double min_x, double min_y, double max_
   return used_cuda ? 1.0 : 0.0; // which backend ran (weights are on disk at out_path)
 }
 
+// ── material-aware navigation (cvc/nav/material.h) ──────────────────────────
+// NEW symbols (never a re-signatured existing one): GRL-SNAM keys its
+// HAS_MATERIAL capability off nav_witness_gate and HAS_MATERIAL_DRIVE off
+// nav_drive_step_material, so version skew degrades to the Python path.
+
+// (H,W) f32 raw risk + (H,W) u8 hard -> (6,H,W) f32 derived material planes
+// [r~, phi_m, grad_rx, grad_ry, grad_px, grad_py] — BIT-identical to
+// grl_snam.material.MaterialGrid._derive.
+ArrayView nav_material_build(PyObject *risk_raw, PyObject *hard, double cell_w, double scale,
+                             double sigma)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_material_build: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *ra = take(risk_raw, NPY_FLOAT, 2);
+  PyArrayObject *ha = take(hard, NPY_UINT8, 2);
+  const int rows = static_cast<int>(PyArray_DIM(ra, 0));
+  const int cols = static_cast<int>(PyArray_DIM(ra, 1));
+  if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols)
+    fail("pycvc.nav_material_build: risk and hard shapes differ");
+  // Pre-validate the kernel's own throwing precondition HERE: a C++ exception
+  // unwinding through Py_BEGIN_ALLOW_THREADS leaves the GIL unrestored.
+  const int radius = static_cast<int>(4.0 * sigma + 0.5);
+  if (sigma > 0.0 && (rows < radius + 1 || cols < radius + 1))
+    fail("pycvc.nav_material_build: grid smaller than blur radius + 1");
+  cvc::nav::material_planes mp;
+  const float *rd = static_cast<const float *>(PyArray_DATA(ra));
+  const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(ha));
+  Py_BEGIN_ALLOW_THREADS
+  mp = cvc::nav::material_build(rd, hd, rows, cols, cell_w, scale, sigma);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  std::vector<float> out = mp.stacked();
+  return pycvc_nav_view<float>(std::move(out), {6, (long)rows, (long)cols}, DType::Float32);
+}
+
+// Frame-wise feasibility witness (BIT-identical to grl_snam.material.witness_gate).
+// Positions are CONTINUOUS CELL coords (row, col f64). gate_hard must already
+// include occupancy; clear_m is its metres clearance plane. Returns (10,) f64:
+// [active, nominal, best, feasible_count, dir_r, dir_c, end_r, end_c,
+//  min_clearance_m, 0].
+ArrayView nav_witness_gate(PyObject *risk, PyObject *gate_hard, PyObject *clear_m, double pos_r,
+                           double pos_c, double goal_r, double goal_c, int horizon_cells,
+                           double hard_margin_m, int primitive_count, double improvement_margin,
+                           double material_trigger, double progress_slack_cells)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_witness_gate: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *ra = take(risk, NPY_FLOAT, 2);
+  PyArrayObject *ha = take(gate_hard, NPY_UINT8, 2);
+  PyArrayObject *ca = take(clear_m, NPY_FLOAT, 2);
+  const int rows = static_cast<int>(PyArray_DIM(ra, 0));
+  const int cols = static_cast<int>(PyArray_DIM(ra, 1));
+  if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols || PyArray_DIM(ca, 0) != rows ||
+      PyArray_DIM(ca, 1) != cols)
+    fail("pycvc.nav_witness_gate: risk/gate_hard/clear_m shapes differ");
+  cvc::nav::gate_params gp;
+  gp.primitive_count = primitive_count;
+  gp.horizon_cells = horizon_cells;
+  gp.hard_margin_m = hard_margin_m;
+  gp.improvement_margin = improvement_margin;
+  gp.material_trigger = material_trigger;
+  gp.progress_slack_cells = progress_slack_cells;
+  const cvc::nav::gate_decision g = cvc::nav::witness_gate(
+      static_cast<const float *>(PyArray_DATA(ra)),
+      static_cast<const std::uint8_t *>(PyArray_DATA(ha)),
+      static_cast<const float *>(PyArray_DATA(ca)), rows, cols, pos_r, pos_c, goal_r, goal_c, gp);
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  std::vector<double> out = {g.active ? 1.0 : 0.0,
+                             g.nominal_risk,
+                             g.best_risk,
+                             static_cast<double>(g.feasible_count),
+                             g.dir_r,
+                             g.dir_c,
+                             g.end_r,
+                             g.end_c,
+                             g.min_clearance_m,
+                             0.0};
+  return pycvc_nav_view<double>(std::move(out), {10}, DType::Float64);
+}
+
+// Batched witness gate over (N,2) f64 cell-coord positions/goals. Returns
+// (N,4) f64 [active, nominal, best, feasible_count]; byte-identical to N
+// serial gates. GIL released; threads across agents.
+ArrayView nav_witness_gate_batch(PyObject *risk, PyObject *gate_hard, PyObject *clear_m,
+                                 PyObject *pos_rc, PyObject *goal_rc, int horizon_cells,
+                                 double hard_margin_m, int primitive_count,
+                                 double improvement_margin, double material_trigger,
+                                 double progress_slack_cells, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_witness_gate_batch: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *ra = take(risk, NPY_FLOAT, 2);
+  PyArrayObject *ha = take(gate_hard, NPY_UINT8, 2);
+  PyArrayObject *ca = take(clear_m, NPY_FLOAT, 2);
+  PyArrayObject *pa = take(pos_rc, NPY_DOUBLE, 2);
+  PyArrayObject *ga = take(goal_rc, NPY_DOUBLE, 2);
+  const int rows = static_cast<int>(PyArray_DIM(ra, 0));
+  const int cols = static_cast<int>(PyArray_DIM(ra, 1));
+  const int N = static_cast<int>(PyArray_DIM(pa, 0));
+  if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols || PyArray_DIM(ca, 0) != rows ||
+      PyArray_DIM(ca, 1) != cols)
+    fail("pycvc.nav_witness_gate_batch: risk/gate_hard/clear_m shapes differ");
+  if (PyArray_DIM(pa, 1) != 2 || PyArray_DIM(ga, 0) != N || PyArray_DIM(ga, 1) != 2)
+    fail("pycvc.nav_witness_gate_batch: pos_rc/goal_rc must be (N,2)");
+  cvc::nav::gate_params gp;
+  gp.primitive_count = primitive_count;
+  gp.horizon_cells = horizon_cells;
+  gp.hard_margin_m = hard_margin_m;
+  gp.improvement_margin = improvement_margin;
+  gp.material_trigger = material_trigger;
+  gp.progress_slack_cells = progress_slack_cells;
+  std::vector<std::uint8_t> act(N);
+  std::vector<double> nom(N), best(N);
+  std::vector<std::int32_t> cnt(N);
+  const float *rd = static_cast<const float *>(PyArray_DATA(ra));
+  const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(ha));
+  const float *cd = static_cast<const float *>(PyArray_DATA(ca));
+  const double *pd = static_cast<const double *>(PyArray_DATA(pa));
+  const double *gd = static_cast<const double *>(PyArray_DATA(ga));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::witness_gate_batch(rd, hd, cd, rows, cols, pd, gd, N, gp, act.data(), nom.data(),
+                               best.data(), cnt.data(), num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  std::vector<double> out(static_cast<std::size_t>(N) * 4);
+  for (int i = 0; i < N; ++i) {
+    out[4 * i + 0] = act[i] ? 1.0 : 0.0;
+    out[4 * i + 1] = nom[i];
+    out[4 * i + 2] = best[i];
+    out[4 * i + 3] = static_cast<double>(cnt[i]);
+  }
+  return pycvc_nav_view<double>(std::move(out), {(long)N, 4}, DType::Float64);
+}
+
+// (M,6,H,W) f32 material stack sampled at (N,2) f32 normalized positions ->
+// (N,6) f32 [risk, phi_m, grad_rx, grad_ry, grad_px, grad_py]. FLOAT tier
+// (the sdf_sample op chain). GIL released.
+ArrayView nav_material_sample(PyObject *field, double min_x, double min_y, double max_x,
+                              double max_y, double cx, double cy, double scale, PyObject *on,
+                              int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_material_sample: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  if (PyArray_DIM(fa, 1) != 6)
+    fail("pycvc.nav_material_sample: field must be (M,6,H,W)");
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(oa, 1) != 2)
+    fail("pycvc.nav_material_sample: on must be (N,2)");
+  cvc::nav::material_stack ms;
+  ms.data = static_cast<const float *>(PyArray_DATA(fa));
+  ms.M = static_cast<int>(PyArray_DIM(fa, 0));
+  ms.H = static_cast<int>(PyArray_DIM(fa, 2));
+  ms.W = static_cast<int>(PyArray_DIM(fa, 3));
+  ms.mnx = min_x;
+  ms.mny = min_y;
+  ms.mxx = max_x;
+  ms.mxy = max_y;
+  ms.cx = cx;
+  ms.cy = cy;
+  ms.S = scale;
+  std::vector<float> risk(N), phi(N), gr(static_cast<std::size_t>(2) * N),
+      gp(static_cast<std::size_t>(2) * N);
+  const float *ond = static_cast<const float *>(PyArray_DATA(oa));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::material_sample(ms, ond, N, nullptr, risk.data(), phi.data(), gr.data(), gp.data(),
+                            num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  std::vector<float> out(static_cast<std::size_t>(N) * 6);
+  for (int i = 0; i < N; ++i) {
+    out[6 * i + 0] = risk[i];
+    out[6 * i + 1] = phi[i];
+    out[6 * i + 2] = gr[2 * i];
+    out[6 * i + 3] = gr[2 * i + 1];
+    out[6 * i + 4] = gp[2 * i];
+    out[6 * i + 5] = gp[2 * i + 1];
+  }
+  return pycvc_nav_view<float>(std::move(out), {(long)N, 6}, DType::Float32);
+}
+
+// nav_bicycle_rollout with the material coupling: extra inputs are the
+// (Mm,6,H,W) material stack (same world transform as the field), the [N]
+// EFFECTIVE lam_soft (gate already multiplied in) and [N] lam_hard columns,
+// and the barrier constants. Returns the same (o, th, sp, minclr) tuple.
+PyObject *nav_bicycle_rollout_material(PyObject *field, PyObject *on, PyObject *th, PyObject *sp,
+                                       PyObject *goal, PyObject *al, PyObject *be, PyObject *ga,
+                                       PyObject *mat_field, PyObject *lam_soft, PyObject *lam_hard,
+                                       double mat_k_sharp, double mat_d_hat_m, PyObject *map_id,
+                                       double min_x, double min_y, double max_x, double max_y,
+                                       double cx, double cy, double scale, double rr, double d_hat,
+                                       double dt, double vmax, double L, double delta_max,
+                                       double a_max, double a_lat_max, double k_steer, int nsub,
+                                       int allow_reverse, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_bicycle_rollout_material: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+  PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+  PyArrayObject *ta = take(th, NPY_FLOAT, 1);
+  PyArrayObject *sa = take(sp, NPY_FLOAT, 1);
+  PyArrayObject *gla = take(goal, NPY_FLOAT, 2);
+  PyArrayObject *aa = take(al, NPY_FLOAT, 1);
+  PyArrayObject *ba = take(be, NPY_FLOAT, 1);
+  PyArrayObject *gaa = take(ga, NPY_FLOAT, 1);
+  PyArrayObject *ma = take(mat_field, NPY_FLOAT, 4);
+  PyArrayObject *lsa = take(lam_soft, NPY_FLOAT, 1);
+  PyArrayObject *lha = take(lam_hard, NPY_FLOAT, 1);
+  const int M = static_cast<int>(PyArray_DIM(fa, 0));
+  const int N = static_cast<int>(PyArray_DIM(oa, 0));
+  if (PyArray_DIM(fa, 1) != 3)
+    fail("pycvc.nav_bicycle_rollout_material: field must be (M,3,H,W)");
+  if (PyArray_DIM(ma, 1) != 6)
+    fail("pycvc.nav_bicycle_rollout_material: mat_field must be (Mm,6,H,W)");
+  if (PyArray_DIM(oa, 1) != 2 || PyArray_DIM(ta, 0) != N || PyArray_DIM(sa, 0) != N ||
+      PyArray_DIM(gla, 0) != N || PyArray_DIM(gla, 1) != 2 || PyArray_DIM(aa, 0) != N ||
+      PyArray_DIM(ba, 0) != N || PyArray_DIM(gaa, 0) != N || PyArray_DIM(lsa, 0) != N ||
+      PyArray_DIM(lha, 0) != N)
+    fail("pycvc.nav_bicycle_rollout_material: pose / coeff / lambda arrays must all be length N");
+  const int Mm = static_cast<int>(PyArray_DIM(ma, 0));
+  const int *mid = nullptr;
+  if (map_id && map_id != Py_None) {
+    PyArrayObject *mia = take(map_id, NPY_INT32, 1);
+    if (PyArray_DIM(mia, 0) != N)
+      fail("pycvc.nav_bicycle_rollout_material: map_id must be (N,)");
+    const std::int32_t *m = static_cast<const std::int32_t *>(PyArray_DATA(mia));
+    for (int i = 0; i < N; ++i)
+      if (m[i] < 0 || m[i] >= M || (Mm > 1 && m[i] >= Mm))
+        fail("pycvc.nav_bicycle_rollout_material: map_id has an out-of-range plane index");
+    mid = m;
+  }
+  npy_intp d2[2] = {N, 2}, d1 = N;
+  PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *to = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *so = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *mc = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  if (!oo || !to || !so || !mc) {
+    Py_XDECREF(oo);
+    Py_XDECREF(to);
+    Py_XDECREF(so);
+    Py_XDECREF(mc);
+    fail("pycvc.nav_bicycle_rollout_material: output alloc failed");
+  }
+  float *ood = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(oo)));
+  float *tod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(to)));
+  float *sod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(so)));
+  float *mcd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mc)));
+  std::memcpy(ood, PyArray_DATA(oa), sizeof(float) * 2 * N);
+  std::memcpy(tod, PyArray_DATA(ta), sizeof(float) * N);
+  std::memcpy(sod, PyArray_DATA(sa), sizeof(float) * N);
+  cvc::nav::field_stack fs;
+  fs.data = static_cast<const float *>(PyArray_DATA(fa));
+  fs.M = M;
+  fs.H = static_cast<int>(PyArray_DIM(fa, 2));
+  fs.W = static_cast<int>(PyArray_DIM(fa, 3));
+  fs.mnx = min_x;
+  fs.mny = min_y;
+  fs.mxx = max_x;
+  fs.mxy = max_y;
+  fs.cx = cx;
+  fs.cy = cy;
+  fs.S = scale;
+  cvc::nav::material_stack ms;
+  ms.data = static_cast<const float *>(PyArray_DATA(ma));
+  ms.M = Mm;
+  ms.H = static_cast<int>(PyArray_DIM(ma, 2));
+  ms.W = static_cast<int>(PyArray_DIM(ma, 3));
+  ms.mnx = min_x;
+  ms.mny = min_y;
+  ms.mxx = max_x;
+  ms.mxy = max_y;
+  ms.cx = cx;
+  ms.cy = cy;
+  ms.S = scale;
+  cvc::nav::material_drive md;
+  md.stack = &ms;
+  md.lam_soft = static_cast<const float *>(PyArray_DATA(lsa));
+  md.lam_hard = static_cast<const float *>(PyArray_DATA(lha));
+  md.k_sharp = static_cast<float>(mat_k_sharp);
+  md.d_hat_m = static_cast<float>(mat_d_hat_m);
+  cvc::nav::veh_params v;
+  v.rr = static_cast<float>(rr);
+  v.d_hat = static_cast<float>(d_hat);
+  v.dt = static_cast<float>(dt);
+  v.vmax = static_cast<float>(vmax);
+  v.L = static_cast<float>(L);
+  v.delta_max = static_cast<float>(delta_max);
+  v.a_max = static_cast<float>(a_max);
+  v.a_lat_max = static_cast<float>(a_lat_max);
+  v.k_steer = static_cast<float>(k_steer);
+  v.nsub = nsub;
+  v.allow_reverse = allow_reverse != 0;
+  const float *gld = static_cast<const float *>(PyArray_DATA(gla));
+  const float *ald = static_cast<const float *>(PyArray_DATA(aa));
+  const float *bed = static_cast<const float *>(PyArray_DATA(ba));
+  const float *gad = static_cast<const float *>(PyArray_DATA(gaa));
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::bicycle_rollout_material(fs, ood, tod, sod, gld, ald, bed, gad, N, mid, v, md, mcd,
+                                     num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tuple = PyTuple_Pack(4, oo, to, so, mc);
+  Py_DECREF(oo);
+  Py_DECREF(to);
+  Py_DECREF(so);
+  Py_DECREF(mc);
+  return tuple;
+}
+
 } // namespace pycvc
+
 %}

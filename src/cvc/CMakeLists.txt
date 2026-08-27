@@ -170,12 +170,26 @@ set(SOURCE_FILES
   nav/grid_nav.cpp
   nav/spatial.cpp
   nav/drive.cpp
+  nav/material.cpp
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
   nav/sim_thread.cpp
 )
+
+# material.cpp is a BIT-identical twin of a Python reference whose gaussian
+# blur accumulates float64 with exp-derived weights: the compiler default
+# ffp-contract (fast on GCC, on for Clang) would FMA-contract it on targets
+# with FMA ISA (aarch64 macOS CI) and flip the f32-stored planes against the
+# cross-platform goldens. The other nav TUs rely on the no-flags convention;
+# this one gets the explicit flag (the CPU analog of the nav .cu precise-math
+# properties below).
+if(NOT MSVC)
+  set_source_files_properties(nav/material.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav/material.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
