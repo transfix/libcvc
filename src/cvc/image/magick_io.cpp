@@ -79,8 +79,9 @@ void set_magick_paths_win() {
   std::vector<std::string> cand{dllDir};
   // If dllDir is <something>\build\bin\Release, walk up to try <something>\bin.
   cand.push_back(dllDir + "\\..\\..\\..\\..\\deps\\bin");
-  if (const char *dp = std::getenv("CVC_DEPS_PREFIX"))
-    cand.push_back(std::string(dp) + "\\bin");
+  for (const char *var : {"CVC_DEPS_PREFIX", "LIBCVC_DEPS_PREFIX", "CVCPKG_PREFIX"})
+    if (const char *dp = std::getenv(var))
+      cand.push_back(std::string(dp) + "\\bin");
   std::string bindir = dllDir; // fallback
   for (const auto &c : cand)
     if (has_coder(c)) {
