@@ -207,6 +207,26 @@ void integrate_surrogate_material(
     const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
     float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads = 0);
 
+// VJP (reverse-mode adjoint) of integrate_surrogate_material — the P5 training
+// backward. Given upstream grads on the differentiable outputs (oT, vT,
+// min_clear, cum_risk, arc_length; hard_count is a step-function count and its
+// grad is identically zero, so it takes no seed), it produces grads w.r.t. the
+// learned coefficients (alphas, beta, gamma, lam_soft, lam_hard) — the leaves
+// coef_energy_net emits. o0/v0/goal/C/R/patch are data (no grad). Full
+// backward-through-time over the same forward (recomputed per agent); the
+// per-step force VJPs are the detail/material_rollout.h primitives, so a CUDA
+// twin reuses this exact adjoint. Validated by nav_material_rollout_grad_test
+// (finite-difference gradcheck — the torch-independent ground truth). Grad
+// buffers are ADDED into (zero them first if you want a fresh gradient).
+void integrate_surrogate_material_vjp(
+    const float *o0, const float *v0, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const float *g_oT, const float *g_vT,
+    const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
+    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
+
 namespace detail {
 // One 6-channel bilinear sample (implemented in material.cpp so it compiles
 // under -ffp-contract=off; called per substep by the material rollouts).
