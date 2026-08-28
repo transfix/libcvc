@@ -172,6 +172,7 @@ set(SOURCE_FILES
   nav/drive.cpp
   nav/material.cpp
   nav/coef_energy_net.cpp
+  nav/coef_energy_net_backward.cpp
   nav/material_rollout.cpp
   nav/coef_mlp.cpp
   nav/coef_train.cpp
@@ -188,10 +189,10 @@ set(SOURCE_FILES
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/material_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/material_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
