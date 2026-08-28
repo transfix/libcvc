@@ -1,26 +1,28 @@
 # L-System Laboratory — Design & Roadmap
 
-**Status:** Design approved for implementation. Target branch family `feat/lsystem-lab-*`, baselined on `origin/master` @ `10b7904`.
+**Status:** **Revision 2** — design approved for implementation, revised after an adversarial review pass and a rebase. Target branch family `feat/lsystem-lab-*`, baselined on `origin/master` @ **`8b6f426`** (was `10b7904`; `a33851f`, `e97d06c` and `8b6f426` have since merged).
 **Owner:** L-System Laboratory session.
 **Document path:** `docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md`
-**Last verified against the tree:** 2026-08-27, worktree `/home/joe/src/cvc/wt-libcvc-lsyslab`.
+**Last verified against the tree:** 2026-08-27, worktree `/home/joe/src/cvc/wt-libcvc-lsyslab`, rebased onto `8b6f426`.
+**What changed in revision 2:** see §17 (Revision history). The archipelago is now specified rather than asserted (§4.3a), the indoor clearance scheme is derived from one number rather than three contradictory ones (§6b.1a), hard classes carry ρ = 0 (§7.2a), the export frame confronts σ-in-cells (§7.1a), and the collision map is rebuilt for the post-merge world (§14).
 
 ---
 
 ## 0. Executive summary
 
 1. We are building **three new libcvc modules** — `cvc::lsys` (a real rewriting engine), `cvc::world` (terrain, surfaces, interiors, export) and `cvc::lod` (selection math) — plus **one new cvcGL example**, `lsystem_lab`, that is a thin client of them. `src/cvcGL/examples/lsystem_forest.cpp` is never touched.
-2. The world is a **multi-island archipelago** at 4096 m (default) / 8192 m (large) / 2048 m (wasm) extent, with mountains to **1420 m** that pierce a cloud deck based at **700 m**.
+2. The world is a **multi-island archipelago** at 4096 m (default) / 8192 m (large) / 2048 m (wasm) extent, with mountains to **1420 m** that pierce a cloud deck based at **700 m**. "Archipelago" is a *specified mechanism*, not an adjective: island seeding, per-island biome divergence, a **smooth-max** mask combination operator, channel/bridge widths and a **mandatory outdoor connectivity gate** are all in §4.3a and §7.8.
 3. Vegetation, rocks and buildings are **instances of a small archetype library** (≈64 baked archetypes), never unique meshes. 1.2 M authored instances; ≈28 k drawn per frame.
 4. The measured bottleneck of the predecessor demo is **per-frame CPU animation**, not triangles (24.8 fps shadows-on, 21.7 fps shadows-**off**, +18 % at 1/4 the pixels). Therefore the LOD ladder is ordered **animation → generation → update → draw calls → triangles**. The wind moves to a vertex shader; CPU sway is hard-capped at **24 plants at every world size**.
-5. Terrain surface classes (dirt/gravel/mud/grass/tile/carpet/…) are the **authored truth**. `risk_raw` (f32 [0,1]) and `hard` (u8) are a **derived, versioned, table-lookup projection** onto the concurrent GRL-SNAM material contract. We export the two contract *inputs* and nothing derived.
+5. Terrain surface classes (dirt/gravel/mud/grass/tile/carpet/…) are the **authored truth**. `risk_raw` (f32 [0,1]) and `hard` (u8) are a **derived, versioned, table-lookup projection** onto the (now merged) GRL-SNAM material contract. We export the two contract *inputs* and nothing derived. **Hard classes carry ρ = 0.00**, because the consumer penalises hard separately and a ρ = 1.00 wall bleeds through the consumer's blur into the corridor the agent must walk down (§7.2a).
 6. The class map is a **function**, not a stored image: one `raster(grid_spec)` call emits class / risk_raw / hard / occupancy / height together, so the material-vs-occupancy-vs-heightfield misalignment hazard is structurally unrepresentable.
-7. **Indoor scenarios are first-class.** One rewriting engine serves plant L-systems and building grammars (two derivation modes, one parser, one terminal record); floor-plan growth is a sibling module, not a grammar. Navigability is a **hard gate** with repair → resample → loud reject, run on every generated interior, every time.
+7. **Indoor scenarios are first-class.** One rewriting engine serves plant L-systems and building grammars (two derivation modes, one parser, one terminal record); floor-plan growth is a sibling module, not a grammar. Navigability is a **hard gate** with repair → resample → loud reject, run on every generated interior, every time. Every clearance number — door width, corridor width, gate minimum — is **derived from one authored quantity, `agent_radius_m`**, and snapped to the 0.5 m lattice at raster time (§6b.1a).
 8. The **Laboratory widget** is a seven-tab ImGui panel with a four-tier edit→regenerate loop: validate every keystroke, continuous re-interpretation ≤ 16 ms scoped to the focused specimen + 24 plants, debounced re-derivation at 180 ms, explicit build for anything expensive.
-9. **All library tests live under `src/cvc/tests/`**, because `CVC_BUILD_EXAMPLES` is `OFF` in every CI job (`src/cvcGL/CMakeLists.txt:290`) — a test registered in `examples/` never runs.
-10. Total pre-existing lines edited across the whole plan: **four** (two one-line `include()` extension points, one append at EOF of `src/cvcGL/CMakeLists.txt`, one append after line 84 of `src/cvcGL/examples/CMakeLists.txt`).
+9. **All library tests live under `src/cvc/tests/`.** `CVC_BUILD_EXAMPLES` defaults `OFF` (`src/cvcGL/CMakeLists.txt:290`) and **no workflow YAML sets it** (`grep -rn CVC_BUILD_EXAMPLES .github/` → zero hits), so a test registered in `examples/` never runs in *PR* CI. Examples *are* compiled post-merge, for wasm only, by `deploy-pages.yml` (which calls `build-wasm-demo.sh`, and that script sets `-DCVC_BUILD_EXAMPLES=ON`) — but that build sets `-DCVC_BUILD_TESTS=OFF` and runs no `ctest`, so `nav_common_test` has still never executed anywhere.
+10. Pre-existing lines edited across the whole plan: **four**, or **six** if the example is packaged and deployed (§14.2 re-derives this against the *current* files; the previous "four" was computed against pre-`#229` line numbers and omitted two list edits).
+11. **PR 1 is visual.** `cvc-lsys` renders an interpreted specimen to a self-contained **SVG** (and an OFF mesh) with no GL, no VTK and no new dependency, so the first landable PR is something you open and look at — while still being a pure library PR that the 80 % coverage gate can measure (§13, §13.1).
 
-**The pitch.** Build the rewriting engine, the world model and the LOD selection math as three real libcvc modules with no renderer dependency, so they can be tested against *published module counts from the botanical literature* rather than against themselves, and so GRL-SNAM gets a loadable, byte-verified training bundle three PRs in. Make the surface class map the authored truth and the contract rasters a derived projection with **zero C++ coupling** to the concurrent material work — we write files, we never call their API. Accept that the archetype library *is* the design, and that the measured bottleneck is CPU animation, so the wind becomes a vertex-shader function of world position and the CPU cascade is capped at a constant 24 plants no matter how large the world grows. Unify plant and building grammars behind one parser and one terminal record, but leave floor-plan growth as a sibling, and treat indoor navigability as a gate that fails loudly rather than a cost term that fails silently.
+**The pitch.** Build the rewriting engine, the world model and the LOD selection math as three real libcvc modules with no renderer dependency, so they can be tested against *published module counts from the botanical literature* rather than against themselves, and so GRL-SNAM gets a loadable, byte-verified training bundle three PRs in. Make the surface class map the authored truth and the contract rasters a derived projection whose **exported bytes have zero C++ coupling** to `cvc::nav::material` — `cvc::world` never links `cvc::nav`, the bundle is files. (The *Lab's preview overlays* are the one deliberate exception: now that `inc/cvc/nav/material.h` is merged and stable, the demo calls `material_build` / `witness_gate` **read-only** so that "what the consumer will see" is the consumer's actual arithmetic rather than a second, drifting copy of it. §14.4.) Accept that the archetype library *is* the design, and that the measured bottleneck is CPU animation, so the wind becomes a vertex-shader function of world position and the CPU cascade is capped at a constant 24 plants no matter how large the world grows. Unify plant and building grammars behind one parser and one terminal record, but leave floor-plan growth as a sibling, and treat navigability — **indoors and outdoors** — as a gate that fails loudly rather than a cost term that fails silently.
 
 **Headline numbers.**
 
@@ -38,6 +40,8 @@
 | GPU ray-cast volumes | 2 | 2 | 1 |
 | Target | ≥ 45 fps @ 1280×800, shadows on | ≥ 45 fps | ≥ 30 fps |
 | Export window (default) | 513 × 513 @ 0.5 m = 256.0 m | same | same |
+| Export lattice (indoor **and** outdoor) | 0.5 m/cell | same | same |
+| Outdoor window policy (v1) | single-island | single-island | single-island |
 
 ---
 
@@ -53,19 +57,20 @@ The Laboratory is the tool that closes that loop: an interactive procedural worl
 
 ### 1.2 Goals
 
-- **G1 — Reusable library.** A real libcvc module under `src/` + `inc/` with unit tests, consumable headlessly by GRL-SNAM world generation and later by volrover3 and pycvc. Subject to the 80 % line-coverage gate (`COVERAGE_MIN: '80'`, `.github/workflows/ci.yml:17`).
+- **G1 — Reusable library.** A real libcvc module under `src/` + `inc/` with unit tests, consumable headlessly by GRL-SNAM world generation and later by volrover3 and pycvc. Subject to the 80 % line-coverage gate (`COVERAGE_MIN: '80'`, `.github/workflows/ci.yml:17`, enforced at `ci.yml:479-495` on the Linux Debug non-gRPC job).
 - **G2 — Scale.** Multiple islands, mountains that pierce cloud, hundreds of thousands of generated plants/rocks/shrubs, at ≥ 45 fps natively.
 - **G3 — Live editing.** In-app editing of the L-systems in play — trees, terrain, clouds, **and building grammars** — with a latency budget per class of edit.
 - **G4 — Material marking.** Mark terrain regions as dirt / gravel / mud / grass / …, and interiors as concrete / tile / carpet / grating / …, through **one** registry, feeding the GRL-SNAM contract.
 - **G5 — Indoor scenarios.** Generate buildings with floors, rooms, corridors, doorways and stairwells. **An unreachable room is a broken training environment**, so navigability is validated, not hoped for.
+- **G5b — Outdoor solvability.** An archipelago's islands are, by construction, disconnected. **A disconnected episode is a broken training environment too**, so outdoor connectivity is gated with the same seriousness as indoor connectivity (§7.8), and the export window policy is an explicit, recorded decision rather than an accident of where the ROI rectangle landed.
 - **G6 — Training data product.** Headless batch generation, deterministic seeding, a documented bundle format, and a curriculum knob.
 - **G7 — Native-first, wasm-reduced.** Design the native ceiling honestly; ship a reduced wasm variant with a named knob table. Parity is not required.
-- **G8 — No collision.** Land alongside `feat/cvc-nav-material`, PR #223 and PR #229 without a merge conflict.
+- **G8 — No collision.** Land alongside PR #223 and PR #200 (the only open PRs as of the rebase) without a merge conflict, and on top of the now-merged `cvc::nav::material` (#230) and wasm (#229/#231) work.
 
 ### 1.3 Explicit non-goals
 
 - **Not** a networked LOD streaming system. Roadmap §22.1's `pyramid_builder` / `lod_index` / `CvcLod` gRPC service / W-TinyLFU eviction is phases 32–37 of a *client-server* design. Our world is procedural and regenerable from a ~200-byte seed; there is nothing to stream and nothing to invalidate. We claim only `inc/cvc/lod/select.h`.
-- **Not** a visibility subsystem. A separate concurrent design owns portals/PVS/occlusion. Our job is to **emit** the topology it needs (cells, portals, links) as first-class entities. We ship only the trivial consumer.
+- **Not** a visibility subsystem. A separate concurrent design owns portals / PVS / BVH / occlusion. Our job is to **emit** the topology it needs (cells, portals, links) as first-class entities, in a form precise enough to consume without a conversation — §6b.6 is written as a **seam specification for that design**, including winding, units, the `opaque`-vs-`traversable` split and id stability. We ship only the trivial consumer (current cell + 2 portal hops) and we design none of the renderer side here.
 - **Not** mesh decimation. LOD rungs come from re-deriving the grammar at a lower generation, which is coherent, memory-free and semantically meaningful. QEM is for *imported* meshes; we import none. Roadmap §26.4.2 can land `quadric_decimate` independently.
 - **Not** GPU instancing. `vtkOpenGLGlyph3DHelper::GlyphRender` gates the instanced path on `GLAD_GL_ARB_instanced_arrays` — a desktop ARB extension string WebGL2/GLES3 never advertises — so it degrades to one draw call per glyph in the browser. A native-only second path is the one that rots.
 - **Not** physics. *Arches*' authors state their rock piles are not physically stable; a visual fake is fine and physics is a different subsystem.
@@ -246,21 +251,153 @@ Island centres, radii and peaks are parameters in the `.lsys` header, not consta
 
 `large` adds **Shoal** (islet, r = 160 m, peak 90 m) carrying a second building cluster and the outdoor/indoor seam demo.
 
+### 4.3a The archipelago mechanism — seeding, combination, channels, biomes
+
+> **Why this section exists.** Revision 1 promised a "multi-island archipelago" in §0 and then specified exactly one radial falloff with one centre and one radius. Multiple separate islands were an explicit requirement, and separate islands have consequences — an overlap operator, a sea-level/channel story, per-island character, and (above all) a **connectivity gate**, because two islands separated by deep water are an unsolvable episode. All of that is specified here.
+
+#### 4.3a.1 The island record
+
+```cpp
+// inc/cvc/world/island.h
+namespace cvc::world {
+
+struct island_spec {
+  char          name[24];
+  double        cx, cy;            // centre, world metres
+  double        r_mask;            // Wyvill falloff radius, m  (mask == 0 beyond)
+  double        r_core;            // plateau radius where mask == 1 exactly; 0 => pure Wyvill
+  double        peak_m;            // target summit height
+  double        amp_m;             // ridged-multifractal amplitude for this island
+  double        peak_sigma_frac;   // Gaussian sigma as a fraction of r_mask (default 0.28)
+  double        freq_scale;        // per-island base-frequency multiplier (roughness character)
+  std::uint32_t biome_id;          // index into the biome table (section 16.4)
+  std::uint32_t grammar_set;       // which marking / vegetation / building grammars run here
+  std::uint64_t island_seed;       // hash4(master, stream::terrain, island_index, 0)
+};
+
+struct archipelago_spec {
+  std::vector<island_spec> islands;
+  double        sea_level_m       = 0.0;    // by definition (section 4.1)
+  double        shelf_m           = -9.0;
+  double        smax_k_m          = 40.0;   // smooth-max blend width, metres
+  double        separation_factor = 1.15;   // placement: min centre distance / (r_i + r_j)
+  double        channel_min_m     = 40.0;   // min open water between non-overlapping islands
+  double        bridge_min_m      = 12.0;   // min navigable width of a deliberate isthmus
+  bool          force_bridges     = false;  // see decision D9
+};
+}
+```
+
+#### 4.3a.2 Seeding and placement
+
+Two modes, both deterministic.
+
+**Authored (the default, and what the three shipped presets use).** The island table is written verbatim in the `.lsys` header. `standard` ships Anvil / Kestrel / Tern as tabulated in §4.3; `large` adds Shoal. This is the mode a scenario author uses, and it is the one every number in this document is computed against.
+
+**Seeded (`--islands N --seed S`).** Placement is **Mitchell best-candidate with radius-aware spacing** — a Poisson-disk variant that tolerates unequal radii, evaluated through the hashed RNG so it is order-independent and reproducible:
+
+```
+for i in 0 .. N-1:
+    r_i     = lerp(r_min, r_max, uni(master, terrain, island_id(i), 0))
+    accepted = false
+    for round in 0 .. 7:
+        sep = separation_factor * pow(0.95, round)
+        for attempt in 0 .. 63:
+            c = uniform point in the inner square, side = extent - 2*(r_i + margin_m)
+                (drawn as uni(master, terrain, island_id(i), 1 + 2*attempt + 64*round) x2)
+            if for all accepted j:  |c - c_j| >= sep * (r_i + r_j):
+                accept c; accepted = true; break
+        if accepted: break
+    if not accepted:
+        HARD FAIL with the island index, the radii in play and the final `sep`.
+        (A silent "N-1 islands" is exactly the kind of quiet degradation this
+         design refuses everywhere else.)
+```
+
+`element` is `island_id(i) = morton(i, 0)`, **never** the loop counter reused across rounds, so adding an island does not reshuffle the ones already placed (§5.2's insertion-stability rule applies here too, and is tested).
+
+`separation_factor` is the archipelago's shape knob:
+
+| value | result |
+|---|---|
+| `≥ 1.0` | masks never overlap. Islands are genuinely separate; the sea between them is at `shelf_m`. **Default 1.15.** |
+| `0.75 – 1.0` | masks overlap at their skirts. Smooth-max produces a **saddle**; whether that saddle breaks the surface is what §7.8 measures. |
+| `< 0.75` | a single lobed landmass with bays. Legal, and how `warehouse_flats`-style single-island scenarios are authored. |
+
+#### 4.3a.3 The combination operator — smooth-max, not sum
+
+Revision 1's `h = Σ_i mask_i · (…)` is wrong for overlapping islands: summing two Wyvill lobes **double-counts** in the overlap and raises a ridge exactly on the join — the highest ground in the world ends up between the islands. A hard `max` is correct in amplitude but is C⁰-discontinuous along the equidistant locus, which reads as a crease and, worse, produces a zero-width slope discontinuity that the FD8 flow accumulation turns into a fake river.
+
+We use the **polynomial smooth maximum**:
+
+```cpp
+// C1, exact-max outside the blend band, no transcendentals.
+inline double smax(double a, double b, double k) noexcept {
+  const double hgt = std::clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return std::lerp(a, b, hgt) + k * hgt * (1.0 - hgt);
+}
+```
+
+with `k = smax_k_m = 40.0` m. Properties that matter here, all unit-tested:
+
+- **Exactness away from the seam.** When `|a − b| ≥ k`, `smax(a,b,k) == max(a,b)` *bit-for-bit*. So a well-separated archipelago (`separation_factor ≥ 1.15`) evaluates **identically** to the per-island formula, and none of §4.3's tabulated peaks move.
+- **Bounded overshoot.** The blend adds at most `k/4 = 10 m` at the midpoint. A saddle can rise 10 m above the taller of the two contributions and no more, so a 40 m blend width can never manufacture a land bridge out of two islands whose skirts both sit at −20 m.
+- **C¹.** No crease, so no phantom drainage channel.
+- **Associative enough.** Folding left-to-right over the island list is order-dependent at the 4th decimal for three-way overlaps. We therefore **sort the island list by `(cx, cy, name)` once at load** and fold in that fixed order, so the result is a pure function of the set. Tested by shuffling the input table.
+
+The revised height function:
+
+```
+h(x,y) = smax_fold_i( mask_i(x,y) * ( ridged_mf(warp(x,y), freq_scale_i) * amp_i
+                                     + peak_gauss_i(x,y) ),  k = smax_k_m )
+         + shelf(x,y)
+         + delta.sample(x,y)
+```
+
+**Biome attribution is a partition, not a blend.** The island that owns a cell for *material and grammar* purposes is `argmax_i mask_i(x,y)` — the largest mask value, with ties (`|m_i − m_j| < 0.02`) broken by the sorted island index. Attribution is deliberately **not** smooth-maxed: a class raster must be crisp, because `risk_raw[i] == registry[klass[i]].rho` exactly is a load-bearing invariant (§7.3) and a blended biome would need a blended class, which is not representable in a `uint16` class map. Cells outside every mask are attributed to `void_unknown` / the shelf biome.
+
+#### 4.3a.4 Sea level, channels and bridges
+
+Sea level is `z = 0` by definition (§4.1). Everything else is derived and measured, not authored:
+
+- A **channel** between islands `i` and `j` is the connected set of `h < 0` cells separating their land components. Its **width** is `2 · min over the channel's medial axis of the distance transform to land` — i.e. the narrowest open-water crossing, in metres. This falls straight out of the same EDT the nav gate already runs.
+- A **land bridge** (isthmus) exists between `i` and `j` when their land components are 4-connected in the free set. Its **width** is the same statistic computed on land instead of water.
+- `channel_min_m` (default **40 m**) is the minimum open-water width the generator accepts between two islands whose masks do not overlap. A narrower channel is visually indistinguishable from a bridge and behaves as neither; the generator widens it by depressing the saddle to `−1.5 m` over a 3-cell feather.
+- `bridge_min_m` (default **12 m**) is the minimum navigable width of a *deliberate* bridge. A land bridge narrower than this, or narrower than `2·agent_radius_m + 1.0 m` (§6b.1a), is either widened or drowned, per the `force_bridges` policy.
+
+The two knobs are enforced in one pass, immediately after the delta grid is applied and **before** any class rasterisation, so the class map and the connectivity gate never disagree about where the water is.
+
+#### 4.3a.5 Per-island biomes and grammar divergence
+
+A `biome` is the record that makes islands *different* rather than merely *separate*. Each island names one; the biome parameterises four things:
+
+| what the biome overrides | mechanism |
+|---|---|
+| **Layer-0 classification predicates** (§7.4) | the biome supplies a predicate table that *replaces* the default; e.g. the braided-delta biome lowers the TWI mud threshold from 7.5 to 5.5 and raises the sand band from 3.0 m to 6.0 m |
+| **Species mix** (§16.3 vegetation scatter) | per-biome `density_per_ha`, `altitude_band_m` and `slope_max_deg` overrides, merged over the global table |
+| **Marking grammar set** (§6.6) | which of `river_network` / `trail_network` / `mudflat_region` run, and with what seeds |
+| **Building grammar set** (§6.7) | which shells are eligible and how many settlements are placed |
+
+Four biomes ship (full table in **§16.4**): `alpine_massif` (Anvil), `forested_rounded` (Kestrel), `braided_delta` (Tern), `barren_islet` (Shoal). The biome id is part of the island record, so it is part of the `.lsys` header, so it is part of the world hash — a biome edit is a Tier-2 change and is recorded in provenance.
+
+**Why this is worth the complexity:** three islands with one biome produce three worlds that are statistically the same world, and a training corpus built from them has one material distribution wearing three hats. Per-island biomes are what make the class-fraction histogram in §9.4 vary between bundles, which is the entire point of a corpus.
+
 ### 4.4 Terrain
 
 Terrain is **analytic and resolution-independent**: a pure function of world (x, y) plus a stored delta grid for erosion and authored edits.
 
 ```
-h(x,y) = sum_over_islands( mask_i(x,y) * ( ridged_mf(warp(x,y)) * amp_i
-                                          + peak_gauss_i(x,y) ) )
+h(x,y) = smax_fold_i( mask_i(x,y) * ( ridged_mf(warp(x,y), freq_scale_i) * amp_i
+                                     + peak_gauss_i(x,y) ),   k = smax_k_m )
          + shelf(x,y)
          + delta.sample(x,y)          // erosion + authored, bilinear
 ```
 
-- `ridged_mf`: Musgrave RidgedMultifractal, `H = 1.0, offset = 1.0, gain = 2.0, lacunarity = 2.0`, 9 octaves, base frequency 1/1400 m, amplitude scaled per island.
+- `smax_fold_i`: the C¹ polynomial smooth maximum of §4.3a.3, folded in the sorted island order, `k = 40 m`. **Not a sum** — summing double-counts in overlaps and raises the world's highest ridge exactly on the join between two islands.
+- `ridged_mf`: Musgrave RidgedMultifractal, `H = 1.0, offset = 1.0, gain = 2.0, lacunarity = 2.0`, 9 octaves, base frequency 1/1400 m × the island's `freq_scale`, amplitude scaled per island.
 - `warp`: one level of Quílez domain warp, distortion 0.30, frequency 1/2600 m.
-- `mask_i`: Wyvill compact falloff `(1 − d²/r²)³`, clamped.
-- `peak_gauss_i`: a Gaussian bump reaching the island's stated peak height, σ = 0.28·r.
+- `mask_i`: Wyvill compact falloff `(1 − d²/r²)³`, clamped, with an optional `r_core` plateau where it is exactly 1.
+- `peak_gauss_i`: a Gaussian bump reaching the island's stated peak height, σ = `peak_sigma_frac`·r (default 0.28).
 - `shelf`: a global −9 m offset outside all masks, giving a continental shelf that keeps the sea volume shallow.
 
 **Octave band-limiting is the terrain LOD.** Each chunk level `L` evaluates only octaves whose frequency is below the Nyquist of that level's sample spacing:
@@ -704,7 +841,65 @@ Indoor is not a footnote. It changes the world model (2.5D), the asset library (
 
 ### 6b.1 Walls occupy cells
 
-The decision that silently breaks a nav grid is zero-thickness walls between cells. **Give the wall a cell.** At 0.5 m resolution a 0.25 m wall rounds up to one cell, and the nav grid becomes a free byproduct of the same rasterisation that produces the mesh, through the same `raster_emitter`.
+The decision that silently breaks a nav grid is zero-thickness walls between cells. **Give the wall a cell.** At 0.5 m resolution a 0.25 m authored wall rounds up to exactly one cell, and the nav grid becomes a free byproduct of the same rasterisation that produces the mesh, through the same `raster_emitter`. The *mesh* keeps the authored 0.25 m thickness; the *raster* wall is one cell, always. Those are two different numbers on purpose and the code names them `wall_thickness_render_m` and `wall_cells` so nobody reconciles them by accident.
+
+### 6b.1a Clearance, reconciled — one authored number, one lattice
+
+> **The defect this repairs.** Revision 1 carried **three mutually unreconciled clearance numbers**: the gate demanded `min_path_width_cells = 3` (1.5 m at 0.5 m/cell), the architectural table specified `door_clear_width_m = 0.90` (IBC 32 in — **1.8 cells**, not representable, and *narrower* than the gate minimum) and `corridor_min_width_m = 1.12` (IBC 44 in — **2.24 cells**, also unrepresentable and also below the gate), and the consumer's hard-hazard margin is a fourth number again (1.0 m). Every interior the design generated would have been rejected by its own gate.
+
+**The scheme.** One lattice at `grid_m = 0.5` for indoor *and* outdoor (this is what makes §6b.5's "mixed single-storey is literally one 2D grid" true, and it is the reason not to give interiors a finer grid). The architectural widths are **authoring-space values**; they are **snapped up** to whole cells at raster time; and every clearance number is **derived from one authored quantity**:
+
+```
+agent_radius_m                      # THE authored number. Default 0.35 (person-scale).
+
+free_opening_m   = max(IBC_door_m,     2*agent_radius_m + 0.20)   # 0.20 m = shoulder slack
+corridor_m       = max(IBC_corridor_m, 2*agent_radius_m + 0.40)
+stair_width_m    = corridor_m
+
+opening_cells    = ceil(free_opening_m / grid_m)
+corridor_cells   = ceil(corridor_m     / grid_m)
+gate.min_path_width_cells = opening_cells      # DERIVED, never authored independently
+```
+
+with `IBC_door_m = 0.813` (32 in clear) and `IBC_corridor_m = 1.118` (44 in). Note the previous table's 0.90 / 1.12 were already rounded-up IBC values; we keep the *code* honest by carrying the exact conversions and letting `max()` do the work.
+
+**The arithmetic, at the two ends of the range.**
+
+| | person-scale agent | Austin-scale vehicle |
+|---|---|---|
+| `agent_radius_m` | **0.35** | **3.00** (`rr = 0.15` normalized ÷ `scale = 0.05`) |
+| `free_opening_m` | `max(0.813, 0.90) = ` **0.90** | `max(0.813, 6.20) = ` **6.20** |
+| `opening_cells` = `ceil(·/0.5)` | **2** → rasterised **1.00 m** | **13** → rasterised **6.50 m** |
+| `corridor_m` | `max(1.118, 1.10) = ` **1.118** | `max(1.118, 6.40) = ` **6.40** |
+| `corridor_cells` | **3** → rasterised **1.50 m** | **13** → rasterised **6.50 m** |
+| `gate.min_path_width_cells` | **2** | **13** |
+| passes its own gate? | `min(2, 3) = 2 ≥ 2` ✓ | `min(13, 13) = 13 ≥ 13` ✓ |
+| clears IBC? | 1.00 ≥ 0.813 ✓, 1.50 ≥ 1.118 ✓ | trivially ✓ |
+| which recipe | `office_3storey`, `bunker` | `warehouse` (racking aisles) |
+
+The two columns are not a coincidence — the `warehouse` recipe (B1) exists precisely because a 3 m-radius vehicle needs 6.5 m aisles, and the previous revision had no way to say that. **`agent_radius_m` is written into `scenario.json` and into the manifest**, so a bundle records the agent it was built for; loading a 0.35 m interior with a 3.0 m vehicle is a mismatch the adapter can and does detect.
+
+**Worked example — a generated corridor and door passing the gate.** `warehouse` interior, `agent_radius_m = 0.35`, `grid_m = 0.5`. `#` = `wall_interior` (hard, occupied), `.` = `concrete_floor` (free).
+
+```
+Corridor cross-section (one raster row), corridor_cells = 3:
+
+   col:    47    48    49    50    51
+         [ # ][ . ][ . ][ . ][ # ]        3 free cells  =  1.50 m free width
+                    ^ path
+   gate step 4:  free width along the path = 3 cells  >=  min_path_width_cells (2)   PASS
+
+Doorway in the corridor's end wall, opening_cells = 2:
+
+   col:    47    48    49    50    51
+         [ # ][ # ][ . ][ . ][ # ]        2 free cells  =  1.00 m free width
+   gate step 4:  free width at the pinch = 2 cells  >=  2                            PASS
+   flood fill from the entrance reaches the room beyond                              PASS
+```
+
+**The consumer-side consequence, stated rather than discovered.** At `cell_w = 0.5`, the one-sided EDT gives `phi_m` at the door's free cells = `1 cell × 0.5 = 0.50 m`. The consumer's `hard_margin_m` is **1.00 m** — both twins agree on that number at this cell size (§7.1a) — so `witness_gate` will report `feasible_count = 0` for any ray threaded through a doorway. **That is correct behaviour, not a bug.** The witness gate is a *soft-risk detour* activation witness; it never chooses the executed action, `lam_hard` is never gated, and A\*'s `hard_penalty = 25.0` is a finite surcharge rather than a prohibition. Doors remain traversable; what the gate declines to do is *certify a detour through one*. A consumer that wants indoor gating must set `gate.hard_margin_m ≤ 0.5` explicitly, and the manifest carries `gate_hard_margin_max_viable_m` so it can see the number without guessing (§7.5).
+
+**Propagated everywhere.** §6b.3 step 4, §16.3's interior block, the `bridge_min_m` floor in §4.3a.4 and the nav-gate report's `min_corridor_width_m` all read these derived values from one place, `interior_spec::derive_clearances(agent_radius_m, grid_m)`. There is a unit test that the derivation is self-consistent — `opening_cells * grid_m >= free_opening_m` and `gate.min_path_width_cells <= min(opening_cells, corridor_cells)` — for `agent_radius_m` swept over `[0.15, 4.0]`.
 
 ### 6b.2 Generation pipeline
 
@@ -727,7 +922,8 @@ The decision that silently breaks a nav grid is zero-thickness walls between cel
      narrow rectangular -> single straight run
      wide (2 flights)   -> U-shaped with a landing
      L-shaped           -> 90-degree turn with a quarter landing
-     Commercial: tread >= 0.28 m, riser <= 0.18 m, width >= 1.12 m.
+     Commercial: tread >= 0.28 m, riser <= 0.18 m, width >= stair_width_m
+     (== corridor_m, derived in 6b.1a; 1.118 m at agent_radius_m = 0.35).
      3.2 m storey => ~18 risers => ~5.0 m of run. Core budget 5.0 x 2.5 m min.
 6. NAVIGABILITY GATE  (section 6b.3)   <-- runs EVERY time, unconditionally
 7. CIRCULATION SKELETON -> hard keep-out
@@ -767,7 +963,11 @@ Algorithm, per storey:
    FAIL if any room's floor set is outside the entrance's component.
 3. For each (entrance, room-centroid) pair: cvc::nav::astar must return a path.
    FAIL if any returns empty.
-4. Min corridor width along every solution path >= 3 cells (1.5 m).
+4. Min free width along every solution path >= gate.min_path_width_cells,
+   which is DERIVED from agent_radius_m by 6b.1a (2 cells = 1.00 m at the
+   default 0.35 m agent; 13 cells = 6.50 m for the 3.0 m vehicle).
+   It is never authored independently of the door width, which is how
+   revision 1 ended up with a gate no generated interior could pass.
 5. Multi-storey: every stair landing must be passable on BOTH layers, and the
    upper-floor slab opening must be BLOCKED_FALL everywhere except the landing.
    (Forget the second half and agents walk off the stairwell edge into a hole
@@ -808,13 +1008,19 @@ Cost: EDT + flood fill + A\* over 64×64 = 4096 cells ≈ **< 1 ms**; a large 3-
 
 ```json
 {
+  "schema": "cvcworld.cells/1",
+  "frame": { "up": "+z", "units": "metres", "handedness": "right" },
   "storeys": [
     { "z": 0.0, "grid": "layer00/occupancy.npy",
-      "cells": [ {"id": 0, "kind": "lobby", "bounds_xy": [..], "z_floor": 0.0, "z_ceiling": 3.0,
-                  "portals": [0,1], "label": "entry"} ],
+      "cells": [ {"id": 0, "kind": "lobby", "label": "entry",
+                  "bounds_xy": [10.0, 2.0, 22.5, 14.0],
+                  "footprint": [[10.0,2.0],[22.5,2.0],[22.5,14.0],[10.0,14.0]],
+                  "z_floor": 0.0, "z_ceiling": 3.0,
+                  "portals": [0,1]} ],
       "portals": [ {"id": 0, "kind": "door", "a": 0, "b": 3,
-                    "p0": [12.5, 4.0, 0.0], "p1": [13.4, 4.0, 0.0],
-                    "height_m": 2.1, "width_m": 0.9, "traversable": true} ] },
+                    "p0": [12.5, 4.0, 0.0], "p1": [13.5, 4.0, 0.0],
+                    "height_m": 2.1, "width_m": 1.0,
+                    "traversable": true, "opaque": false} ] },
     { "z": 3.2, "grid": "layer01/occupancy.npy", "cells": [...], "portals": [...] }
   ],
   "links": [
@@ -826,7 +1032,16 @@ Cost: EDT + flood fill + A\* over 64×64 = 4096 cells ≈ **< 1 ms**; a large 3-
 }
 ```
 
-Note `portal::traversable`. **A window is a visibility portal but not a nav portal.** Conflating them is how a PVS system decides agents can walk through glass, and how a nav system decides a room is sealed when you can see straight through it.
+Note `portal::traversable` **and** `portal::opaque`, which are **two independent booleans and must stay independent**:
+
+| record | `traversable` | `opaque` | why |
+|---|---|---|---|
+| open doorway | true | false | walk and see |
+| closed steel door | false | true | neither |
+| window / `glass_pane` | **false** | **false** | **a window is a visibility portal but not a nav portal** |
+| curtained opening | true | true | walk but not see |
+
+Conflating them is how a PVS system decides agents can walk through glass, and how a nav system decides a room is sealed when you can see straight through it. Revision 1 carried only `traversable`, which forced the visibility consumer to infer opacity from `kind` — a string it does not own.
 
 ### 6b.5 The indoor/outdoor seam
 
@@ -835,19 +1050,54 @@ Note `portal::traversable`. **A window is a visibility portal but not a nav port
 - **v1 supports mixed indoor/outdoor scenarios when they are single-storey**, and this is nearly free: the terrain and the ground floor are coplanar on the same 0.5 m lattice, so it is *literally one 2D grid* — the interior is just a region whose classes happen to be `concrete_floor`/`wall_interior` instead of `grass`/`tree_trunk`. That is an honest, clean answer.
 - `scenario.json` carries `"scene_kind": "outdoor" | "indoor" | "mixed"`.
 
-### 6b.6 Emitted topology for the visibility system
+### 6b.6 Emitted topology — the seam specification for the visibility design
 
 Rooms are **cells** and doorways are **portals**, emitted as first-class generated entities. `cvc::world::cell_graph` (types in §6b.4) is written to `cells.json` and is drawable in the Lab (`Debug ▸ Show portals`) as coloured quads — which is also the fastest way to eyeball a broken interior.
 
-We ship only the trivial consumer (draw the current cell plus ≤ 2 portal hops). The real portal-flood / PVS runtime belongs to the concurrent visibility effort.
+> **This subsection is a contract, not a description.** A companion design owns cells / portals / PVS / BVH / occlusion culling and is being produced separately. Nothing in *this* document consumes the topology beyond a trivial draw. So the emission has to be specified precisely enough that the other design can be written against it without a conversation, and it is frozen here. **We design none of the renderer side.**
+
+**Frame and units.** World metres, Z-up, right-handed, the same frame as `heightfield::sample(x,y)` and the same origin as the render scene. `cells.json` states this explicitly in its `frame` block so a consumer never infers it.
+
+**Portal geometry.** A portal is a **planar convex quad**, given compactly as two floor-level endpoints plus a height:
+
+```
+p0, p1   : [x, y, z] world metres, the two ends of the portal's floor edge
+height_m : extrusion along +z
+
+quad = [ p0, p1, p1 + (0,0,height_m), p0 + (0,0,height_m) ]
+```
+
+**Winding is normative:** the quad is wound **counter-clockwise when viewed from cell `a`**, so its face normal `n = normalize((p1−p0) × (0,0,1))` points from `a` toward `b`. Every portal-flood implementation needs a consistent orientation, and every implementation that is not given one guesses. Portals are always planar and always vertical in v1; a future sloped portal (a stair opening viewed as a portal) would need a third point and is explicitly **not** emitted today.
+
+**Cell geometry.** `bounds_xy` is an AABB, kept because it is a cheap reject. `footprint` is the **CCW polygon ring in world metres** and is the authoritative shape, because floor-plan growth produces L-shapes and an AABB for an L-shaped room over-claims by up to 60 % of its area — which in a portal flood means over-drawing an entire neighbouring wing. `z_floor` / `z_ceiling` bound the cell vertically. Cells are guaranteed **simply connected** (no holes) and **non-overlapping in plan within a storey**; both are asserted by `world_cells_test`.
+
+**Identity and stability.** `cell::id` and `portal::id` are derived from the generator's `path_id` chain (§5.2), *not* from emission order. Regenerating a world after an unrelated edit — a different vegetation seed, a repainted mudflat — leaves every surviving cell and portal id unchanged. This is what lets an incremental PVS cache per id instead of recomputing per bundle, and it is tested by the insertion-stability suite (§12.2).
+
+**What we emit.** Cells, portals (with `traversable` **and** `opaque`), cross-storey links with asymmetric cost and a capability list, and the per-storey occupancy raster the cells index into.
+
+**What we deliberately do not emit, and will not add without a request from the visibility design:** no cell-to-cell visibility matrix, no PVS, no BVH, no occluder fusion, no anti-portals, no portal-to-portal sight-line precompute, no exterior cell decomposition (the outdoor world is culled by the flat 32×32 tile grid of §4.5/§8.8 and has no cell graph). The Lab ships **one** consumer: draw the current cell plus ≤ 2 portal hops, so interiors are not absurdly slow before the real runtime lands.
+
+**Versioning.** `cells.json` carries `"schema": "cvcworld.cells/1"`. Adding a field is a minor change and readers must ignore unknown keys; removing or re-meaning one bumps the major and the adapter refuses to load.
 
 ---
 
 ## 7. Material system
 
-### 7.1 The contract, verified against shipped code
+### 7.1 The contract, verified against merged code
 
-The concurrent session owns `grl_snam/material.py`. **Verified at `/home/joe/src/cvc/wt-grl-snam-material/grl_snam/material.py` on 2026-08-27**, and the actual API differs from the circulated brief in ways that matter:
+The material work is **no longer concurrent — it is in the tree.** `#230` merged as `8b6f426`. There are now **two** authoritative surfaces and they have different arities, which revision 1 conflated:
+
+**The C++ surface** — `inc/cvc/nav/material.h:93-94`, read directly:
+
+```cpp
+material_planes material_build(const float *risk_raw, const std::uint8_t *hard,
+                               int rows, int cols,
+                               double cell_w, double scale, double sigma);
+```
+
+It takes `rows, cols` **and** `cell_w` directly. It does **not** take `bounds` or `center`.
+
+**The Python surface** — `/home/joe/src/cvc/GRL-SNAM/grl_snam/material.py:224-234` and `:255-257`:
 
 ```python
 class MaterialGrid:
@@ -855,17 +1105,16 @@ class MaterialGrid:
         ...
         ny, nx = self.risk_raw.shape
         self.cell_w = (self.bounds[2] - self.bounds[0]) / (nx - 1)   # line 247
+        ...
+        planes = _native.material_build(self.risk_raw, self.hard,
+                                        self.cell_w, self.scale, self.sigma)
 ```
 
-and the native entry point is
+The binding's arity is `(risk, hard, cell_w, scale, sigma)` because numpy carries the shape; the C++ arity is `(risk, hard, rows, cols, cell_w, scale, sigma)` because a raw pointer does not. **Both are true at their own layer.** Revision 1 asserted the Python arity as "the" signature and that was half right in a way that would have mis-specified any C++ caller.
 
-```python
-planes = _native.material_build(self.risk_raw, self.hard, self.cell_w, self.scale, self.sigma)
-```
+**The consequence for the bundle: it must satisfy both.** A Python consumer needs `bounds` + `center` + the array shape; a C++ consumer needs `rows`, `cols`, `cell_w`. So the manifest carries **all of them**, plus `cell_w` *explicitly* — even though Python re-derives it — and the loader asserts the written `cell_w` equals `(max_x − min_x)/(cols − 1)` bit-for-bit (§12.3). Neither entry point ever has to guess, and a disagreement is loud.
 
-— i.e. **`material_build(risk, hard, cell_w, scale, sigma)`**, not `(risk, hard, rows, cols, bounds, scale, sigma)`.
-
-Three consequences, each a repair of a mistake every earlier draft made:
+Three further consequences, each a repair of a mistake every earlier draft made:
 
 **(a) `cell_w = extent / (n − 1)`, not `extent / n`.** Bounds are corner-inclusive sample centres. `planner.far_pair_in_free_space`'s `to_world` uses `c/(nx-1)` and `r/(ny-1)`; `MaterialField._to_grid` uses `(pos_world[:,1]-mny)/(mxy-mny)*(ny-1)`. A window written as "512 × 512 spanning 256.0 m" is read back as `cell_w = 0.50098 m`. Because `phi_hard_m = sqrt(edt2(hard)) * cell_w` is in **world metres** and feeds `d_hat_sdf_m` and the gate's `hard_margin_m` with no rescaling, that is a systematic, silent mis-scaling of the hard-hazard barrier in every world ever generated.
 
@@ -873,7 +1122,46 @@ Three consequences, each a repair of a mistake every earlier draft made:
 
 **(b) Row 0 = `min_y`.** Confirmed: `pos[:,0] = (pos_world[:,1] - mny)/(mxy - mny)*(ny-1)`. The research BEV builder (`bev.py`) uses `r = floor((y_max - y)/res)` — the opposite. **A mirrored risk field still looks completely plausible and poisons every training run undetectably.** Defence in depth (§7.6).
 
-**(c) Do not export consumer tuning constants.** The circulated brief states `lam_soft = 1.5, lam_hard = 2.0, k_sharp = 5.0, d_hat_sdf_m = 3.0`. The shipped defaults are `lam_soft = 0.5, lam_hard = 1.0, k_sharp = 1.25, d_hat_sdf_m = 12.0` (material.py:193-196), with an explicit comment that *"here lam_soft = 1.5 measurably LAUNCHES a vehicle off-world."* The brief was stale on day one. **The manifest carries grid facts, provenance hashes and raw statistics only — never the consumer's force constants.**
+**(c) Do not export consumer tuning constants *as configuration*.** The circulated brief states `lam_soft = 1.5, lam_hard = 2.0, k_sharp = 5.0, d_hat_sdf_m = 3.0`. The shipped Python defaults are `lam_soft = 0.5, lam_hard = 1.0, k_sharp = 1.25, d_hat_sdf_m = 12.0` (material.py `MaterialParams`), with an explicit comment that *"here lam_soft = 1.5 measurably LAUNCHES a vehicle off-world."* The brief was stale on day one. **The manifest carries grid facts, provenance hashes and raw statistics — and, new in revision 2, a clearly quarantined `consumer_frame_ref` block that is provenance and is never read back** (§7.1a, §7.5).
+
+### 7.1a The export frame — confronting σ-in-cells
+
+> **The defect this repairs.** Revision 1 picked 0.5 m/cell and moved on. But `sigma` is measured in **cells** (`material.h:168` "blur, in cells"; tap radius `int(4σ + 0.5)`, `material.cpp:159`), so the effective blur *in metres*, the effective hard margin (`2·cell_w` when the caller passes `≤ 0`) and the effective gate horizon (`horizon_m / cell_w`) **all move with the export resolution** — while the consumer's `lam_soft` / `lam_hard` / `d_hat_m` were behaviourally tuned in some other frame. Picking a cell size without saying which frame is a silent retune of somebody else's validated constants.
+
+**What the consumer's assumed frame actually is.** `GateParams`' own docstring states it, and it is worth quoting because it is the whole argument:
+
+> *"the source BEV was 0.5 m/cell, this sim's default story grid is ~2.1 m/cell"* … `horizon_m = 25.0` because *"25 m ≈ the source's 12 cells at the default 96-cell/±100 m story grid (the source's 6 m would be 3 cells here — myopic)"* … `hard_margin_m = None` ⇒ 2 grid cells, *"the source's margin (1.0 m at 0.5 m/cell)"*.
+
+And `MaterialParams` states the force-constant frame: `lam_soft = 0.5` was validated at ≈ **2.1 m/cell** with **σ = 1 cell ⇒ a 2.1 m blur length**, because *"the normalized-frame gradients are ~an order hotter"* than the source's pixel frame.
+
+**What changes at 0.5 m/cell.** `grad_r` is divided by `float32(cell_w · scale)` (`material.cpp:213`), so in the continuum limit it is *risk per metre ÷ scale* and is cell-size-independent. The coupling is entirely through the **blur length**: `risk = gaussian_blur(risk_raw, σ_cells)` smooths over `σ_cells · cell_w` metres, and the gradient magnitude at a material boundary is `O(1 / (σ_cells · cell_w))`. So:
+
+| quantity | consumer's tuned frame | our export at 0.5 m/cell, σ = 1 cell | ratio |
+|---|---|---|---|
+| blur length | 2.1 m | 0.5 m | **0.24×** |
+| ‖grad r~‖ at a class boundary | 1× | **4.2×** | 4.2× |
+| effective `lam_soft` | 0.5 | **≈ 2.1** | 4.2× |
+
+`lam_soft = 1.5` is documented to *launch a vehicle off-world*. **Exporting at 0.5 m/cell and telling the consumer "σ = 1.0" would ship every bundle in a regime the consumer's own code comments call catastrophic.** That is the concrete harm, and it is why this section exists.
+
+**The fix: σ is recorded as a length, not a count.** The manifest's new `frame` block carries a physical blur length `sigma_m` and derives the cell count from it:
+
+```
+sigma_m                  = 2.0            # scene_kind == "outdoor"  (~= the tuned 2.1 m)
+sigma_recommended_cells  = sigma_m / cell_w        # = 4.0 at cell_w = 0.5
+```
+
+For `scene_kind` `indoor` or `mixed`, `sigma_m = 0.5` (**σ = 1 cell**, the *source BEV* frame exactly), because a 2.0 m blur across a 1.5 m corridor destroys the feature it is supposed to smooth. The manifest then also carries `lam_soft_scale_hint = sigma_m / 2.1`, a **dimensionless ratio of recorded blur lengths** — 0.95 outdoors, 0.24 indoors. It is not a value of `lam_soft`; it is arithmetic the consumer would otherwise have to redo, and it goes stale only if the consumer changes its own blur length, which is recorded three lines above it.
+
+**Why 0.5 m/cell and not the consumer's 2.1 m.** Three independent reasons, all checkable:
+
+1. **It is the source frame.** The research BEV that every one of these formulas was ported from is 0.5 m/cell. Exporting there is exporting into the frame the method was invented in.
+2. **The twins agree on the hard margin at exactly this cell size, and nowhere else.** The C++ default is `hard_margin_m = 1.0` (fixed metres, `material.h:114`). The Python default is `None ⇒ 2·cell_w`. Those are the same number **iff `cell_w = 0.5`**. At 2.1 m/cell the Python twin uses 4.2 m and the C++ twin uses 1.0 m, and a bundle would behave differently depending on which language loaded it.
+3. **0.5 m is the coarsest lattice on which a door exists at all.** A 0.90 m opening is 0.43 cells at 2.1 m/cell. The entire indoor half of this design is unrepresentable in the consumer's story frame.
+
+**What must be recorded so this is auditable.** The `frame` block carries `rows`, `cols`, `bounds`, `center`, `cell_w`, `cell_h`, `cell_w_formula`, `row_order`, `scale`, `sigma_m`, `sigma_recommended_cells`, `blur_bleed_radius_m` (= `4·σ_cells·cell_w`, §7.2a), `gate_horizon_recommended_cells`, `gate_hard_margin_max_viable_m` and `agent_radius_m`. All of those are **grid facts**. Separately, a `consumer_frame_ref` block records the three numbers the recommendations were *derived from* (`reference_cell_w_m: 2.1`, `reference_sigma_m: 2.1`, `source_bev_cell_w_m: 0.5`) plus a hash of the `MaterialParams`/`material_config` defaults as of the generating commit. **`world_bundle.py` must never read `consumer_frame_ref`** — that is asserted by a test, and it is what keeps §7.1(c)'s principle intact: the block is forensics, so a bundle can be diagnosed a year later, and it is never configuration, so a bundle can never ship stale tuning.
+
+**One divergence the manifest exposes rather than hides.** The gate horizon is `horizon_cells` (integer **cells**, default **12**) in C++ and `horizon_m` (**metres**, default **25.0**) in Python. At our `cell_w = 0.5`, Python resolves to `round(25/0.5) = 50` cells while an unconfigured C++ caller uses **12 cells = 6.0 m** — which is precisely the *"myopic"* value GRL-SNAM's own docstring rejects. The manifest therefore carries `gate_horizon_recommended_cells = 50`, and §15.1 R17 names the divergence.
 
 ### 7.2 The registry — semantic classes are the authored truth
 
@@ -922,6 +1210,38 @@ public:
 **Ontology variants ship**, following the research repo's shape: `merged_default`, `soft_vegetation` (grass → 0.15, bush → 0.30), `strict_water_mud` (mud/puddle → 0.95). Swapping one re-runs the projection only (~2 ms for 513²), never a re-derivation. **This is the highest-value idea in the material design**: one authored class map yields N risk fields, so material-semantics ablations cost nothing.
 
 Full 32-class table in §16.2.
+
+### 7.2a Hard classes carry ρ = 0.00, and what to do about blur bleed
+
+> **The defect this repairs.** Revision 1 gave `wall_interior`, `glass_pane`, `void_fall`, `water_deep`, `cliff_rock`, `tree_trunk`, `boulder` and `fence_pole` **ρ = 1.00 *and*** flagged them `hard`. That double-counts, and — because `risk_raw` is **blurred** by the consumer — it actively poisons the free space next to every wall.
+
+**Decision: every `hard` class carries `ρ = 0.00`.** The `hard` raster carries them, and nothing else needs to.
+
+**Why the double-count is real.** The consumer penalises hard cells in *both* of the two places that act:
+
+1. **The planner.** `A*` adds `hard_penalty = 25.0` on a hard cell, on top of `risk_weight = 10.0 × risk`. A hard cell at ρ = 1.0 therefore costs `25 + 10 = 35`, of which 10 is a second, independently-tuned copy of "do not go here".
+2. **The force field.** `F_hard = −lam_hard · db · grad φ` with `db = −sigmoid(k_sharp·(d̂ − φ_m))`, and `φ_m` is built **from the `hard` plane alone** (`phi_m = sqrt(edt2_squared(hard)) · cell_w`). The barrier is already correctly signed, correctly scaled in metres, and ungated. It does not need `F_soft` helping.
+
+**Why the blur bleed is worse than the double-count.** `risk = gaussian_blur(risk_raw, σ)` uses taps `exp(−0.5/σ²·k²)` over radius `int(4σ + 0.5)` with reflect padding (`material.cpp:155-200`). Take a corridor at the person-scale default: 3 free cells wide, `wall_interior` cells at each side, `σ = 1 cell` (the indoor recommendation, §7.1a). The free centre cell is 2 cells from each wall centre. A ρ = 1.0 half-plane at distance `d` cells contributes ≈ `Q(d/σ)` (the Gaussian upper tail):
+
+| | ρ_hard = 1.00 | ρ_hard = 0.00 |
+|---|---|---|
+| contribution of each wall at 2 cells, σ = 1 | `Q(2) ≈ 0.023` each | 0 |
+| corridor-centre `r~` | `0.06 + 2(0.023) ≈ **0.11**` | `**0.06**` (its own `concrete_floor` ρ) |
+| the same at σ = 4 cells (the **outdoor** recommendation) | `Q(0.5) ≈ 0.309` each → `r~ ≈ **0.62**` | `**0.06**` |
+
+The σ = 4 row is the alarming one, and it is not hypothetical — it is what happens the moment an interior appears inside an *outdoor* export window (`scene_kind: "mixed"` at 4 cells, which is exactly why §7.1a makes `mixed` use σ = 1). **A corridor reading `r~ ≈ 0.62` is riskier than `mud` (0.80) is far, and `F_soft = −lam_soft·grad r~` points the agent *out of the corridor it must walk down*.** That is not a subtle miscalibration; it is a sign error in effect.
+
+**What is lost by ρ_hard = 0.** Nothing the consumer needs. "Keep a margin from walls" is exactly what `F_hard` provides, in metres, from `φ_m`, at the right steepness. The A\* surcharge is unchanged. The only thing that disappears is an uncalibrated soft halo, and that halo was the bug.
+
+**Blur bleed at material boundaries, generally.** The consumer's blur is isotropic and **occlusion-unaware**: a ρ = 0.85 puddle outside a warehouse raises the risk of the floor inside it, because the wall between them contributes nothing to the smoothing. Four mitigations, in order of how much they buy:
+
+1. **ρ_hard = 0.00** (above). This is the dominant case by a wide margin, because walls are the only thing that is both high-ρ-under-the-old-scheme and everywhere.
+2. **Bounded boundary contrast.** No two classes may sit adjacent across a single hard cell with `|ρ_a − ρ_b| > max_boundary_contrast` (default **0.60**). The registry validator checks this against the adjacency `raster()` actually produces (not against the class table in the abstract), and **warns** — naming the offending class pair and a sample cell — in the Lab and in `cvc-worldgen inspect`. It warns rather than errors because a legitimate world can contain a puddle next to concrete.
+3. **The bleed radius is published and drawn.** `blur_bleed_radius_m = 4·σ_cells·cell_w` goes in the manifest (2.0 m indoors, 8.0 m outdoors at the §7.1a recommendations) and the Surface tab draws it as a halo ring around the brush cursor, so an author *sees* that painting a puddle 1.5 m from a doorway will raise the doorway's risk before they commit the stroke.
+4. **`scene_kind` selects σ** (§7.1a), so interiors are never blurred at the outdoor length.
+
+**And an explicit non-mitigation.** We do **not** pre-blur, erode, or wall-mask `risk_raw` before export. The export is the RAW plane by contract (§7.5); any smoothing we applied would be invisible to the consumer, would compose with its own blur, and would break the "if their σ changes, no bundle is invalidated" property that is the entire reason the seam is a file.
 
 ### 7.3 The class map is a function, not an image
 
@@ -1009,7 +1329,7 @@ Ops are serialized in the `.lsys` header. Delete, reorder and per-op inspection 
 
 **One stroke appends exactly one `paint_op` on mouse-up**, never one per mouse-move sample.
 
-> **Feather vs blur.** `risk_raw` is the RAW plane; `MaterialGrid` applies its own separable σ = 1.0 blur on top. Brush feather is therefore *additional* smoothing. Default `feather_m = 0.0` so exported worlds are comparable to the research baseline; the Surface tab labels the slider "extra feather (on top of consumer σ=1.0)".
+> **Feather vs blur.** `risk_raw` is the RAW plane; the consumer applies its own separable blur on top, at the σ **this bundle recommends** — `sigma_recommended_cells`, which is 1.0 cell (0.5 m) for `indoor`/`mixed` and 4.0 cells (2.0 m) for `outdoor` (§7.1a). Brush feather is therefore *additional* smoothing. Default `feather_m = 0.0` so exported worlds are comparable to the research baseline; the Surface tab labels the slider "extra feather (on top of the consumer's σ = N cells)" with N filled in from the current `scene_kind`, and draws the `blur_bleed_radius_m` halo around the brush cursor so the bleed band is visible before the stroke lands.
 
 ### 7.5 Bundle format
 
@@ -1035,29 +1355,50 @@ We write **`risk_raw` and `hard` and nothing derived**. `risk`, `phi_hard_m`, `g
 
 ```json
 {
-  "format": "cvcworld/1",
+  "format": "cvcworld/2",
   "generated_utc": "2026-08-27T22:41:08Z",
-  "tool": { "name": "cvc-worldgen", "version": "1.0.0", "libcvc": "10b7904" },
+  "tool": { "name": "cvc-worldgen", "version": "1.0.0", "libcvc": "8b6f426" },
   "scene_kind": "mixed",
   "storeys": 1,
   "grid": {
     "rows": 513, "cols": 513,
     "bounds": [-128.0, -128.0, 128.0, 128.0],
+    "center": [1050.0, -1150.0],
     "cell_w": 0.5, "cell_h": 0.5,
     "cell_w_formula": "(max_x - min_x) / (cols - 1)",
     "row_order": "min_y_first",
-    "row_order_note": "row 0 is min_y. The research BEV builder is max_y-first; flip exactly once, in the adapter."
+    "row_order_note": "row 0 is min_y. The research BEV builder is max_y-first; flip exactly once, in the adapter.",
+    "cpp_note": "cvc::nav::material_build takes (rows, cols, cell_w, scale, sigma) directly; MaterialGrid takes (bounds, center, scale) and re-derives cell_w. Both are satisfied by this block."
+  },
+  "frame": {
+    "scale": 0.05,
+    "agent_radius_m": 0.35,
+    "sigma_m": 0.5,
+    "sigma_recommended_cells": 1.0,
+    "blur_bleed_radius_m": 2.0,
+    "lam_soft_scale_hint": 0.24,
+    "gate_horizon_recommended_cells": 50,
+    "gate_hard_margin_max_viable_m": 0.5,
+    "note": "sigma is expressed in CELLS by the consumer, so it is recorded here as a LENGTH and converted. See roadmap 7.1a. lam_soft_scale_hint is a dimensionless ratio of the two blur lengths recorded here, not a value of lam_soft."
+  },
+  "consumer_frame_ref": {
+    "_warning": "PROVENANCE ONLY. Never read this block into a config. world_bundle.py is tested not to.",
+    "reference_cell_w_m": 2.1,
+    "reference_sigma_m": 2.1,
+    "source_bev_cell_w_m": 0.5,
+    "material_params_defaults_hash": "b3:41ae…",
+    "material_config_defaults_hash": "b3:7c02…"
   },
   "meta": {
     "scale":  0.05,
     "center": [1050.0, -1150.0],
     "bounds": [-128.0, -128.0, 128.0, 128.0],
     "region": 128.0,
-    "rr":     6.0,
-    "d_hat":  12.0,
-    "dt":     0.1,
-    "vmax":   8.0,
-    "nsub":   1
+    "rr":     0.15,
+    "d_hat":  0.35,
+    "dt":     0.06,
+    "vmax":   0.9,
+    "nsub":   2
   },
   "endpoints": {
     "selection": "far_pair_in_free_space",
@@ -1070,12 +1411,13 @@ We write **`risk_raw` and `hard` and nothing derived**. `risk`, `phi_hard_m`, `g
   "material": {
     "ontology": "merged_default",
     "ontology_hash": "b3:9f1c…",
-    "sigma_recommended": 1.0,
-    "note": "risk_raw and hard are the RAW contract inputs. All derived planes (risk, phi_hard_m, gradients) belong to grl_snam.material.MaterialGrid. Force constants are deliberately NOT recorded here; they are consumer tuning and go stale."
+    "hard_class_rho": 0.0,
+    "max_boundary_contrast": 0.6,
+    "note": "risk_raw and hard are the RAW contract inputs. All derived planes (risk, phi_m, gradients) belong to cvc::nav::material_build / grl_snam.material.MaterialGrid. Hard classes carry rho = 0 by design (roadmap 7.2a): the consumer already penalizes hard via the A* surcharge and the phi_m barrier, and a rho=1 wall bleeds through the blur into the corridor."
   },
   "stats": {
     "class_fractions": { "grass": 0.41, "dirt": 0.09, "mud": 0.06, "…": 0.0 },
-    "risk_mean": 0.31, "risk_std": 0.24,
+    "risk_mean": 0.27, "risk_std": 0.22, "risk_max": 0.90,
     "hard_fraction": 0.062, "occupancy_fraction": 0.071,
     "observed_fraction": 1.0
   },
@@ -1085,11 +1427,17 @@ We write **`risk_raw` and `hard` and nothing derived**. `risk`, `phi_hard_m`, `g
     "bucket": 3,
     "note": "risk_detour is an UNVALIDATED candidate label. Raw statistics above are sufficient to recompute a better one without regenerating."
   },
-  "validation": { "passed": true, "components": 1, "repairs_applied": 0, "resamples": 0 }
+  "validation": {
+    "passed": true, "components": 1, "repairs_applied": 0, "resamples": 0,
+    "outdoor": { "policy": "single-island", "island": "Kestrel",
+                 "largest_component_fraction": 0.994, "channels_crossed": 0 }
+  }
 }
 ```
 
-The `meta` block is not optional. `SdfNavigator.__init__` reads `meta["scale"]`, `meta["center"]`, `meta["rr"]`, `meta["d_hat"]`, `meta["dt"]`, `meta["vmax"]`, `meta.get("nsub")`; `FogScenario.__init__` reads `meta["dt"]`; `nav.py:437-440` reads `meta["region"]` and `meta["bounds"]`. A bundle carrying only bounds + scale is `np.load`-able and **not** scenario-loadable, and that gap is the difference between "the test passes" and "a training run starts".
+**`meta` values are in the NORMALIZED frame, not metres.** This is a correction to revision 1, which wrote `rr: 6.0, d_hat: 12.0, vmax: 8.0, dt: 0.1, nsub: 1` — metre-flavoured numbers that `SdfNavigator` consumes in the same normalized frame as `VEHICLE_DEFAULTS["L"] = 0.035` (≈ 3 m wheelbase). A bundle written with `rr = 6.0` would give the vehicle a repulsion radius comparable to the entire half-region (`region · scale = 128 × 0.05 = 6.4`) and would be unusable. The canonical values, verified in `grl_snam/tools/austin.py:85-95` and `grl_snam/tools/material_demo.py:31-44`, are `scale = 0.05, rr = 0.15, d_hat = 0.35, dt = 0.06, nsub = 2, vmax = 0.9` — i.e. `rr/scale = 3.0 m` of vehicle radius and `d_hat/scale = 7.0 m` of geometry-SDF reach. Note also that `meta["d_hat"]` (**normalized**, the geometry barrier) and `MaterialParams.d_hat_sdf_m` (**12.0 metres**, the *material* barrier) are two different quantities; revision 1 copied the latter into the former.
+
+The `meta` block is not optional. `SdfNavigator.__init__` (`grl_snam/nav.py:37-66`) reads `meta["scale"]`, `meta["center"]`, `meta["rr"]`, `meta["d_hat"]`, `meta["dt"]`, `meta["vmax"]`, `meta.get("nsub", 1)`; `FogScenario.__init__` reads `meta["dt"]` (`scenario.py:137`) and `meta["region"]`/`meta["center"]` (`scenario.py:233-235`); the corner-goal picker at `nav.py:437-440` reads `meta["scale"]`, `meta["center"]`, `meta["region"]`, `meta["bounds"]`. A bundle carrying only bounds + scale is `np.load`-able and **not** scenario-loadable, and that gap is the difference between "the test passes" and "a training run starts".
 
 `endpoints` matters just as much. `planner.far_pair_in_free_space` draws both endpoints from the **largest inflated-free component**, and `austin.py:58-62` documents the trap verbatim: *"a cell can be free and still unreachable once the route is inflated, so a run drives most of the way and then reports no route."* The generator selects endpoints the same way and records the inflation it used.
 
@@ -1108,6 +1456,70 @@ Four independent layers, because this failure is undetectable by eye:
 - **Splat texture** per tile at rung-proportional resolution (T0: 512², T1: 256², T2: 128², T3/T4: vertex colour only), height-aware blend with `depth = 0.2`, triplanar with `p = 8` on slopes > 35°.
 - The predecessor bakes cloud transmittance into the terrain albedo at `SHADOW_RES = 96` with 202 752 CPU `sampleSky` calls per bake, single-threaded, every 16 frames. Replaced by a **projected cloud-shadow texture** derived from the CA coverage field, updated at 5 Hz, sampled in the fragment shader — O(1) in world size.
 - The **render** class raster is cached per tile at 2 m resolution. The **export** raster is always evaluated fresh at the requested `grid_spec`. They are allowed to disagree at sub-cell scale, deliberately, and a unit test asserts they agree at shared sample points. The render cache never leaves the renderer.
+
+### 7.8 The outdoor connectivity gate — mandatory, and the archipelago is why
+
+> **The defect this repairs.** Revision 1 gated interiors with real seriousness and gated the *outdoors* not at all. An archipelago makes that untenable: two islands separated by deep water are, to a ground agent, an **unsolvable episode**, and `water_deep` and `cliff_rock` are `hard`. A batch run that draws an ROI straddling a channel produces bundles that look perfect and cannot be finished.
+
+The outdoor gate runs on **every exported window, every time**, exactly like the interior gate, and shares its EDT and flood-fill machinery.
+
+```cpp
+// inc/cvc/world/cells.h  (alongside nav_gate_report)
+struct outdoor_gate_report {
+  bool   passed = false;
+  int    components = 0;
+  double largest_component_fraction = 0.0;
+  int    islands_in_window = 0;
+  int    channels_crossed = 0;         // open-water separations inside the window
+  double narrowest_channel_m = 0.0;
+  double narrowest_bridge_m  = 0.0;
+  int    bridges_forced = 0, resamples = 0;
+  std::string policy;                  // "single-island" | "forced-bridges" | "amphibious"
+  std::string failure_reason;          // empty on pass
+};
+
+outdoor_gate_report validate_outdoor(const raster_out&, const grid_spec&,
+                                     const archipelago_spec&, double inflate_m);
+```
+
+Algorithm:
+
+```
+1. Rasterise the export window at the export grid_spec (one raster() call, so the
+   gate can never disagree with the exported bytes about where the water is).
+2. free = !occupancy && !hard.
+3. Inflate the OBSTACLES by inflate_m (6.0 m, matching planner.far_pair_in_free_space
+   exactly), because "a cell can be free and still unreachable once the route is
+   inflated" -- austin.py:58-62, quoted verbatim in section 7.5.
+4. Label 4-connected components of the inflated-free set (4-connectivity, matching
+   the planner's neighbourhood, not 8).
+5. Record component count, largest_component_fraction, and the per-pair channel /
+   bridge widths of section 4.3a.4.
+6. Apply the POLICY (decision D9). Endpoints are ALWAYS drawn from ONE component,
+   so a written bundle is never internally unsolvable; the gate governs whether the
+   WORLD is accepted and how much of the window is wasted.
+7. FAILURE POLICY, mirroring the interior gate:
+     a. REPAIR: under `forced-bridges`, raise the narrowest disqualifying saddle to
+        +0.6 m over a 3-cell feather and paint it `sand`/`gravel`. Re-validate.
+        Up to 3 times. Under `single-island`, instead SHRINK the window to the
+        dominant island's mask union its shelf, and re-validate once.
+     b. RESAMPLE: bump the window's element id (and, in seeded placement mode, the
+        island-placement element) and regenerate. Up to 8 times.
+     c. HARD FAIL: refuse to write the bundle, record the seed, the policy and the
+        full outdoor_gate_report in provenance.json, and raise a red banner in the Lab.
+```
+
+Cost: one EDT + one labelling pass over 513² ≈ **3 ms** natively. It runs in the live preview too, and the Lab's World tab shows `components: 1 ✓` or `components: 3 — 62 % largest` in red.
+
+**Acceptance thresholds** (defaults; all in `archipelago_spec`):
+
+| policy | pass condition |
+|---|---|
+| `single-island` (**v1 default**) | `largest_component_fraction ≥ 0.98` **and** `channels_crossed == 0` |
+| `forced-bridges` | `components == 1` after repair, **and** `narrowest_bridge_m ≥ max(bridge_min_m, 2·agent_radius_m + 1.0)` |
+| `amphibious` | `components == 1` with `water_shallow` treated as free (requires the ontology change of D9 option 3) |
+
+The policy is **recorded in the manifest** (`validation.outdoor.policy`) and in `provenance.json`, because a corpus mixing policies silently mixes two different task definitions. **Which policy v1 ships is a user decision — D9 in §15.3.**
 
 ---
 
@@ -1362,7 +1774,9 @@ An optional `GeometryNode::swapGeometry()` (swap the polydata, keep the actor an
 
 `max_props = 48` is a **placeholder**. The evidence behind the "63-actor cliff" is two confounded data points: `examples/README.md:189-193` records 64 actors → 2 actors giving ~17 → 29 fps, in a scene where every one of those 64 actors was *also* doing a per-frame wind vertex upload *and* being drawn in both the main pass and the shadow bake. That is a per-actor cost curve with three variables, not a prop-count threshold.
 
-**PR L3 ships `src/cvcGL/test/cvcgl_prop_sweep.cpp`**, which sweeps fps against (a) prop count, (b) per-prop triangle count, (c) shadow-caster participation, (d) whether the prop receives a per-frame vertex upload, on the target machine, and **sets the default from the measurement.** The code must not inherit this document's 48 blindly. Registration goes at **EOF of `src/cvcGL/CMakeLists.txt` (after line 293)**, which is cold — #223's hunks are at ~24 and ~281-287. cvcGL tests *do* run in CI (18 `cvcgl_*` tests under Xvfb + llvmpipe, with a drift guard at `ci.yml:336-340` that errors if zero reach CTest), so this is a real gate.
+**PR L3 ships `src/cvcGL/test/cvcgl_prop_sweep.cpp`**, which sweeps fps against (a) prop count, (b) per-prop triangle count, (c) shadow-caster participation, (d) whether the prop receives a per-frame vertex upload, on the target machine, and **sets the default from the measurement.** The code must not inherit this document's 48 blindly. Registration goes at **EOF of `src/cvcGL/CMakeLists.txt` (after line 293, which is the file's real last line — `endif()` closing the `CVC_BUILD_EXAMPLES` guard)**. #223's hunks are at ~24 and ~281-287, so an EOF append is ≥ 6 lines clear of its last hunk and will not textually conflict with it — though see §14.2 on why "append at EOF" is not conflict-*proof* in general.
+
+cvcGL tests *do* run in CI: **16** `add_test(NAME cvcgl_*)` entries in `src/cvcGL/CMakeLists.txt` (lines 169, 175, 182, 188, 195, 201, 207, 212, 218, 224, 231, 253, 259, 268, 275, 283), executed under Xvfb + llvmpipe, with a drift guard at `ci.yml:334-342` that errors if zero reach CTest. **The number is 16, not 18** — and `ci.yml`'s own comments are stale in *both* directions, saying "13" at `ci.yml:231` and "18" at `ci.yml:284`. Three cvcGL executables are built and deliberately not registered (`cvcgl_state_probe` :236, `cvcgl_transform_bench` :242, `cvcgl_renderer_bench` :248); `enable_testing()` is at :166. Whatever the count is when L3 lands, the number in this document is not the authority — `grep -c 'add_test(NAME cvcgl_' src/cvcGL/CMakeLists.txt` is.
 
 ### 8.8 Culling
 
@@ -1514,7 +1928,8 @@ Surface ────────────────────────
                       [grating][wet_floor][debris][wall_int]
                       [glass_pane][door_closed][void_fall]
  Brush      size ▬▬▬●▬▬ 26.0 m    shape ( ● )( ▭ )( ╱ )( ⬚flood )
-            extra feather  0.0 m   (consumer already blurs at σ=1.0)
+            extra feather  0.0 m   (consumer blurs at σ=1.0 cells = 0.50 m;
+                                    bleed halo 2.0 m drawn on the cursor)
             mode ( Paint )( Erase→derived )( Sample/eyedropper )
  Show       ( Composite ▾ ) derived · grammar · authored · composite
                             risk_raw · hard · occupancy · phi_hard
@@ -1539,10 +1954,14 @@ Surface ────────────────────────
    class fractions ▁▃█▂▁▄▁▁  vs RELLIS reference ▁▄▆▃▁▃▁▁
  ─ Contract preview (the exact bytes that will be written) ─────
    class     uint16  (513,513)   32 classes present
-   risk_raw  float32 (513,513)   mean 0.31  σ 0.24  min 0.05 max 1.00
+   risk_raw  float32 (513,513)   mean 0.27  σ 0.22  min 0.00 max 0.90
+                                 (max 0.90 = water_shallow; hard classes are rho=0)
    hard      uint8   (513,513)   6.2 % set    hard ⊆ occupancy ✓
    cell_w    0.500000 m  (= 256.0 / 512)   row 0 = min_y ✓
-   [ preview risk_raw ] [ preview hard ] [ Validate ] [ Export… ]
+   frame     sigma_m 0.50 -> sigma 1.0 cells   bleed 2.0 m   scene_kind mixed
+             gate horizon 50 cells (25.0 m)    hard_margin viable <= 0.50 m
+   outdoor   components 1   largest 99.4 %     policy single-island (Kestrel)
+   [ preview risk_raw ] [ preview hard ] [ preview phi_m ] [ Validate ] [ Export… ]
 ```
 
 Three details that matter:
@@ -1557,7 +1976,7 @@ The **risk-detour path overlay** draws the planner's actual route over the curre
 
 > **Trap, surfaced in the UI:** the overlay's route is planned with `cvc::nav::astar(..., cost)` and **`simplify` is skipped when a cost field is present** — the line-of-sight shortcut ignores cost and would straighten the detour right back through the mud. `navdemo::plan_route` always simplifies; the Lab's overlay must not. Without this, painting mud and seeing no detour reads as "the material feature is broken" when the actual cause is post-hoc path smoothing.
 
-**World** — island table (centre, radius, peak, character), sea level, cloud base/top with a live **"peaks pierce by N m"** readout (red if ≤ 0), tile size, species mix table (species × density/ha × slope range × altitude range × min spacing), erosion controls with an `Apply to authored region` button and an estimated-seconds readout, settlement placement, and the export ROI rect picker with a live cell-count readout (`513 × 513 @ 0.5 m = 256.0 × 256.0 m`).
+**World** — the island table (name, centre, radius, `r_core`, peak, `freq_scale`, biome) with add/remove/reseed per row and a `Place N islands` button driving the §4.3a.2 sampler, a live **connectivity readout** (`components: 1 ✓` / `components: 3 — 62 % largest`, red on fail) with per-pair channel and bridge widths, the window-policy selector, sea level, cloud base/top with a live **"peaks pierce by N m"** readout (red if ≤ 0), tile size, species mix table (species × density/ha × slope range × altitude range × min spacing), erosion controls with an `Apply to authored region` button and an estimated-seconds readout, settlement placement, and the export ROI rect picker with a live cell-count readout (`513 × 513 @ 0.5 m = 256.0 × 256.0 m`).
 
 **Seeds**
 
@@ -1647,13 +2066,17 @@ Two tools, both under `option(CVC_BUILD_LSYS_TOOLS)` — see §12.4 for why thei
 
 ```
 cvc-lsys derive   <recipe.lsys> [--seed N] [--gen K] [--stats] [--dump-word]
+cvc-lsys svg      <recipe.lsys> --out tree.svg [--gen K] [--proj front|side|top]
+                                [--width 900] [--colour order|level|class]
 cvc-lsys mesh     <recipe.lsys> --out tree.off [--gen K] [--rung R]
 cvc-lsys validate <recipe.lsys>          # parse + gen_nested + module-count report
 
 cvc-worldgen build   --world archipelago.lsys --seed N --out world_a/
                      [--window cx cy half] [--cell 0.5] [--scale 0.05]
+                     [--agent-radius 0.35] [--scene-kind outdoor|indoor|mixed]
+                     [--window-policy single-island|forced-bridges|amphibious]
                      [--ontology merged_default] [--storeys 1]
-                     [--preset standard]
+                     [--preset standard] [--preview]
 cvc-worldgen sample  --world archipelago.lsys --seeds 1000..1400 --n 200
                      [--bucket 3] [--min-detour 1.25] [--require-gate-fires]
                      [--out dataset/] [--jobs 8]
@@ -1718,7 +2141,13 @@ def load_bundle(path, *, storey=0, ontology=None):
     """
 ```
 
-It returns a `MaterialGrid(risk_raw, hard, bounds, center, scale, sigma=1.0)` and the `meta` dict a `FogScenario` / `SdfNavigator` actually needs. The seam is a **file format**, not an ABI — which is why a signature change on `feat/cvc-nav-material` cannot break a single generated bundle.
+It returns a `MaterialGrid(risk_raw, hard, bounds, center, scale, sigma=manifest["frame"]["sigma_recommended_cells"])` and the `meta` dict a `FogScenario` / `SdfNavigator` actually needs — with `meta` values in the **normalized** frame (`rr = 0.15`, `d_hat = 0.35`, `vmax = 0.9`, `dt = 0.06`, `nsub = 2`), not metres. The seam is a **file format**, not an ABI — which is why a signature change in `cvc::nav::material` (and it has already changed once relative to the circulated brief) cannot break a single generated bundle.
+
+Three things the adapter must do and is tested on:
+
+1. Assert `manifest["grid"]["row_order"] == "min_y_first"`, and flip exactly once if a future format ever says otherwise.
+2. Reconstruct `cell_w` the consumer's way and compare **bit-for-bit** to the written `manifest["grid"]["cell_w"]`.
+3. **Never read `manifest["consumer_frame_ref"]`.** A grep test enforces it (§12.3). That block exists so a bundle can be *diagnosed*, not configured.
 
 ---
 
@@ -1818,12 +2247,15 @@ If the engine is wrong, these fail. They cannot rot the way a self-generated sna
 - **`hard ⊆ occupancy`** over a randomized world.
 - **Congruence** — `check_congruent` throws on any mismatch; every plane shares one `grid_spec`.
 - **Versioning** — every `paint_op` and every ontology edit bumps the version counter.
-- **Cross-language CI step** — a Python step loads a generated bundle, asserts dtypes / shapes / ranges / row order / `cell_w`, constructs `MaterialGrid(risk_raw, hard, bounds, center, scale)` and asserts `field().shape == (1, 6, 513, 513)`. **A contract tested only from the producing side is not tested.**
+- **Cross-language CI step** — a Python step loads a generated bundle, asserts dtypes / shapes / ranges / row order / `cell_w`, constructs `MaterialGrid(risk_raw, hard, bounds, center, scale, sigma=manifest["frame"]["sigma_recommended_cells"])` and asserts **`field().field.shape == (1, 6, 513, 513)`**. Note the double `.field`: `MaterialGrid.field()` (`material.py:276`) returns a **`MaterialField` object**, and the tensor is its `.field` attribute (`material.py:322-326`). Revision 1 asserted `field().shape`, which raises `AttributeError` — a test that fails for the wrong reason is not a contract test. **A contract tested only from the producing side is not tested.**
+- **Both-arities test** — the same bundle is loaded through the Python path (`bounds` + `center` → derived `cell_w`) and through a C++ path calling `cvc::nav::material_build(risk_raw, hard, rows, cols, cell_w, scale, sigma)` with the manifest's explicit `cell_w`, and the two `[1,6,H,W]` stacks are compared **bit-for-bit**. This is the test that proves the manifest satisfies both entry points (§7.1).
+- **`consumer_frame_ref` is never read** — a test greps `world_bundle.py` for the key and fails if it appears outside a comment. The block is forensics; the moment it becomes configuration, bundles start shipping stale tuning (§7.1a).
+- **Hard-class projection** — `registry[k].hard == true ⇒ registry[k].rho == 0.0` for every class in every ontology variant (§7.2a), asserted over the shipped registry and any YAML-loaded one.
 - **A\* cost test** — a route across a painted mud strip is longer in cells but lower in cost than the blind route, **with `simplify` skipped**; and the same route with `simplify` enabled is asserted to be *wrong*, so the trap is documented by a test.
 
 ### 12.4 The 80 % coverage gate
 
-`COVERAGE_MIN: '80'` (`.github/workflows/ci.yml:17`), aggregate line coverage over `src/*` + `inc/*`, on the Debug job which builds **without cvcGL** (the job forces `cvcgl=OFF` when coverage is on).
+`COVERAGE_MIN: '80'` (`.github/workflows/ci.yml:17`), aggregate **line** coverage, enforced at `ci.yml:479-495` under `if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug' && matrix.enable_grpc != true` by parsing `lcov --summary`. The allowlist is `$GITHUB_WORKSPACE/src/*` + `$GITHUB_WORKSPACE/inc/*` (`ci.yml:414-417`); the exclusions are `*/test/*`, `*/tests/*`, `*_test.cpp`, `src/xmlrpc/*` and `*/geometry/cvc-mesher/contour/*` (`ci.yml:422-427`). The job forces `cvcgl=OFF` when coverage is on (`ci.yml:295-298`), so `src/cvcGL/*` never enters the denominator. **Linux only** — macOS (`ci.yml:571`) and Windows (`ci.yml:752`) explicitly have no gate.
 
 Design decisions taken *for* the gate:
 
@@ -1831,22 +2263,26 @@ Design decisions taken *for* the gate:
 - `bundle.cpp` and every other I/O leaf takes an **injected `write_fn`** so disk-full and permission-denied paths are simulable. This is a module-wide rule from the first PR, not a retrofit for one file.
 - **The CLI `main()`s (`cvc-lsys`, `cvc-worldgen`) live in `src/cvc/tools/` behind `option(CVC_BUILD_LSYS_TOOLS)` and are added to the lcov exclusion list**, alongside the existing `src/xmlrpc` and mesher-contour-tree exclusions. Argument parsing, usage text and error-exit paths are the hardest lines in the change to cover and there is no reason to put them in the denominator. Adding one line to the lcov `--remove` set is a shared-file edit to `ci.yml` and is called out in §14.
 - **Every PR ships its tests in the same PR.** Never a "tests later" PR. Each PR description carries a locally-measured `lcov` number for its own files, gate ≥ 88 %.
-- **The current repo-wide baseline must be measured and recorded before PR L0a lands**, because the gate is an aggregate: "88 % on my files" is only sufficient if the existing number is known.
+- **The current repo-wide baseline must be measured and recorded before PR L0 lands**, because the gate is an aggregate: "88 % on my files" is only sufficient if the existing number is known.
 
 ### 12.5 Where tests live — a repaired mistake
 
-> **`CVC_BUILD_EXAMPLES` is `OFF` by default (`src/cvcGL/CMakeLists.txt:290`) and is not enabled in any CI job.** A test registered in `src/cvcGL/examples/CMakeLists.txt` — including the existing `nav_common_test` — **never builds and never runs in CI.** The repo has already been burned by this exact class of failure: the drift guard at `src/cvc/tests/CMakeLists.txt:1125` exists because *"nav_coef_train_test sat in TEST_TARGETS, compiled green, and never ran."*
+> **`CVC_BUILD_EXAMPLES` defaults `OFF` (`src/cvcGL/CMakeLists.txt:290`) and no workflow YAML sets it** — `grep -rn CVC_BUILD_EXAMPLES .github/` returns **zero hits**. A test registered in `src/cvcGL/examples/CMakeLists.txt` — including the existing `nav_common_test` at `:92-97` — **never builds and never runs in any PR job.** The repo has already been burned by this exact class of failure: the registration-side drift guard at `src/cvc/tests/CMakeLists.txt:1135` exists because *"nav_coef_train_test compiled green for weeks while ctest ran none of its cases."*
+>
+> **The one nuance, stated precisely because revision 1 over-claimed.** Examples *are* compiled in CI — for **wasm only, post-merge**. `deploy-pages.yml:51` runs `./src/cvcGL/examples/wasm/build-wasm-demo.sh --pthread`, and that script sets `-DCVC_BUILD_EXAMPLES=ON` (`build-wasm-demo.sh:64`). The same is true of the `cvcgl-examples` cvcpkg recipe (`build.sh:32`, `build.ps1:27`, `build-wasm.sh:39`) driven by `publish-cvcpkg.yml`. Neither is a PR gate: `deploy-pages.yml` triggers on **push to master**, a nightly cron, and dispatch. So a *native* build break in an example still lands silently on master and blocks no PR — the conclusion is unchanged, but "never compiled in CI" was imprecise and "OFF in every CI job" was wrong.
+>
+> **`nav_common_test` still never runs anywhere.** In the one workflow that builds examples, `build-wasm-demo.sh:50` sets `-DCVC_BUILD_TESTS=OFF`, so `GTest::gtest` is not a target, the `if(TARGET GTest::gtest)` guard at `:92` is false — and that workflow runs no `ctest` at all. The file is real (128 lines, 7 `TEST(` cases) and is dead weight. **Whether it would pass if enabled is UNKNOWN**, and that unknown is exactly what makes D5 (§15.3) a real decision rather than a formality.
 
 Consequently:
 
-| test kind | lives in | registered via | runs in CI? |
+| test kind | lives in | registered via | runs in PR CI? |
 |---|---|---|---|
-| `cvc::lsys` / `cvc::world` / `cvc::lod` unit tests | `src/cvc/tests/lsys_*.cpp`, `world_*.cpp`, `lod_*.cpp` | `include(lsys_tests.cmake)` — **one line** before the drift guard at 1270 | **yes** |
-| cvcGL-touching tests (prop sweep, shader-compile smoke) | `src/cvcGL/test/cvcgl_*.cpp` | append at **EOF of `src/cvcGL/CMakeLists.txt`** (line 293; cold) | **yes** — 18 `cvcgl_*` tests already run under Xvfb + llvmpipe, with a guard at `ci.yml:336-340` that errors if zero reach CTest |
+| `cvc::lsys` / `cvc::world` / `cvc::lod` unit tests | `src/cvc/tests/lsys_*.cpp`, `world_*.cpp`, `lod_*.cpp` | `include(lsys_tests.cmake)` — **one line** before the `TEST_TARGETS` drift guard at **1281** | **yes** |
+| cvcGL-touching tests (prop sweep, shader-compile smoke) | `src/cvcGL/test/cvcgl_*.cpp` | append at **EOF of `src/cvcGL/CMakeLists.txt`** (after line 293) | **yes** — **16** `cvcgl_*` tests already run under Xvfb + llvmpipe, with a guard at `ci.yml:334-342` that errors if zero reach CTest |
 | Lab UI *logic* tests | `src/cvc/tests/lab_dispatch_test.cpp` | same include | **yes** |
-| example smoke (`lsystem_lab --offscreen --frames 8`) | `src/cvcGL/examples/` | append after line 84 | **no** — flagged in §15 as needing a decision |
+| example smoke (`lsystem_lab --offscreen --frames 8`) | `src/cvcGL/examples/` | append after line **97** (EOF) | **no** — flagged as D5 in §15.3 |
 
-Because the include is textual in the same directory scope, new test targets land **inside** `BUILDSYSTEM_TARGETS` and are swept by the existing drift guards. The new module inherits the repo's own protection against tests that compile green and never run.
+Because the include is textual in the same directory scope, new test targets land **inside** `BUILDSYSTEM_TARGETS` (the property the guard at `src/cvc/tests/CMakeLists.txt:1295` reads) and are swept by *both* existing drift guards — the build-side one at 1281 and the registration-side one at 1135. The new module inherits the repo's own protection against tests that compile green and never run.
 
 ### 12.6 UI logic is tested; ImGui is not
 
@@ -1872,73 +2308,152 @@ What the widget PR adds on top: an **offscreen capture test** — because `ImGui
 
 ## 13. Implementation plan
 
-Thirteen PRs. Each independently mergeable, each demoable, each with its tests in the same PR.
+Twelve PRs. Each independently mergeable, **each demoable**, each with its tests in the same PR.
+
+### 13.1 Making PR 1 something you can look at
+
+> **The defect this repairs.** The fixed decision is *"a design doc AND a buildable first PR"* for a **visual** laboratory. Revision 1's PR 1 (`L0a`) demoed as `ctest -R lsys green` and a byte-exact file round-trip. That is a good library PR and a bad first PR for this project: nobody can see it.
+
+Three constraints make "PR 1 is the ImGui lab" impossible, and they are all real:
+
+1. **The coverage gate is aggregate.** ~11 000 new lines under `src/` + `inc/` enter an 80 % line denominator. A first PR that is mostly a cvcGL example ships library code with no tests attached to it and drags the aggregate down immediately (§12.4).
+2. **A cvcGL example is not built in PR CI at all** (§12.5). An examples-first PR 1 would deliver a demo that no job compiles, let alone runs.
+3. **The example needs terrain to render**, and terrain needs the noise stack, the tile grid and the LOD selector — that is `L2`'s worth of work sitting under any pixel.
+
+So PR 1 stays a library PR, and **the library is given a visual output that costs ~180 lines and adds no dependency**:
+
+```
+cvc-lsys svg  <recipe.lsys> --gen 10 --out pine.svg [--proj front|side|top]
+                            [--width 900] [--colour order|level|class]
+cvc-lsys mesh <recipe.lsys> --gen 10 --out pine.off
+```
+
+`cvc-lsys svg` runs `derive()` → `interpret()` into a **new fourth emitter, `svg_emitter`**, which orthographically projects each `terminal` (cylinders as tapered quads, cards as triangles, polygons as paths) and writes a self-contained SVG. It is:
+
+- **pure text** — no ImageMagick, no PNG codec, no GL, no VTK, and therefore no new dependency and no platform variance;
+- **openable in any browser**, so a PR reviewer clicks the file in the GitHub diff and sees the tree;
+- **trivially testable** — the SVG's element count is a deterministic function of the module count, so `lsys_svg_test` asserts the *published* module counts of §12.1 twice over, once through `stats_emitter` and once through the rendered element count;
+- **fully in the coverage denominator and cheap to cover**, unlike anything that touches a GL context.
+
+`--colour class` colours by `terminal::surface_class`, which makes the *material* half of the design visible in PR 1 as well.
+
+PR L1 gets the same treatment one level up: `cvc-worldgen build --preview` writes `class_preview.png`, `risk_preview.png` and `hard_preview.png` through `cvc::image` (`inc/cvc/image/image.h`, `write_image(img, path)` — already in `libcvc`, already linked, no new dependency), falling back to binary PPM when no PNG handler is registered. So **`cvc-worldgen build` produces something you look at, not only something you `np.load`.**
+
+The first *interactive* deliverable is still L3, unchanged, and that is stated rather than glossed: PR 1 is visual, not interactive, and the reason is the coverage gate plus the test-placement rule, not an oversight.
+
+### 13.2 The PR table
 
 | # | PR | Scope | New files | Shared files | Size | Demoable outcome | Depends on |
 |---|---|---|---|---|---|---|---|
-| **L0a** | `cvc::lsys` foundations | hashed RNG, expression VM, symbol table, parser, `.lsys` reader/writer, diagnostics | `inc/cvc/lsys/{rng,expr,symbol,grammar,parse,io}.h` + srcs; `src/cvc/lsys/lsys.cmake`; `src/cvc/tests/{lsys_rng,lsys_expr,lsys_parse}_test.cpp`; `src/cvc/tests/lsys_tests.cmake`; `src/cvc/tests/data/recipes/*.lsys` | `src/cvc/CMakeLists.txt` **+1 line** before `add_library(cvc` at 827; `src/cvc/tests/CMakeLists.txt` **+1 line** before the drift guard at 1270 | ~1 200 + 900 test | `ctest -R lsys` green; `.lsys` byte-exact round-trip incl. comments | — |
-| **L0b** | derivation + interpretation | both derivation modes, containment policy, context provider, `word`, `filter_level`, **`gen_nested` detection**, three emitters, `deriver` (resumable), `cvc-lsys` CLI | `inc/cvc/lsys/{module,derive,interp,scope,recipes}.h` + srcs; `src/cvc/tools/cvc_lsys_main.cpp`; `lsys_{derive,interp,recipes}_test.cpp` | **none** | ~1 700 + 1 100 test | `cvc-lsys mesh pine_monopodial.lsys --gen 10 --out tree.off` writes a real tree; **all published module counts assert** | L0a |
-| **L1** | `cvc::world` surfaces + bundle | 32-class registry + 3 ontology variants, `grid_spec`, three-layer `raster()`, `heightfield`, `.npy` writer, `bundle`, `cells.json` schema (multi-storey defined), `cvc-worldgen build`. **Completely headless.** | `inc/cvc/world/{units,grid,surface,raster,heightfield,bundle,cells,npy}.h` + srcs; `src/cvc/world/world.cmake`; `world_{surface,raster,bundle}_test.cpp`; `data/golden/tiny_bundle/`; python CI step | **none** (both includes exist) | ~2 000 + 1 400 test | **`cvc-worldgen build` writes a loadable bundle; the Python CI step constructs `MaterialGrid` and asserts `field().shape == (1,6,513,513)`. This PR unblocks GRL-SNAM.** | L0b |
-| **L2** | terrain, islands, tiling, LOD math | ridged multifractal + warp + masks, octave band-limiting, erosion passes, hydrology, tile grid, `cvc::lod::select` | `inc/cvc/world/{terrain,island,tile,scatter}.h`, `inc/cvc/lod/select.h` + srcs; `world_terrain_test.cpp`, `lod_select_test.cpp` | **none** | ~1 800 + 1 000 test | `cvc-worldgen build --preset large` produces a 3-island world; band-limit and hysteresis tests green | L1 |
-| **L3** | `lsystem_lab` skeleton + terrain render + **the measurement** | the example, `fixed_mesh`, chunk actors, frustum cull, camera/HUD/touch, ImGui shell (World/LOD/Stats tabs), shadow stage tracking, `cvcgl_prop_sweep` | `src/cvcGL/examples/lsystem_lab.cpp`, `lsyslab_render.{h,cpp}`, `lsyslab_ui.{h,cpp}`, `LSYSTEM_LAB.md`; `src/cvcGL/test/cvcgl_prop_sweep.cpp` | `src/cvcGL/examples/CMakeLists.txt` **append after line 84**; `src/cvcGL/CMakeLists.txt` **append at EOF (293)** | ~2 200 + 300 test | Fly a 4 km archipelago at ≥ 45 fps, rungs recolour, budget gauge live. **`max_props` default is set from the sweep, not from this doc.** | L2 |
+| **L0** | `cvc::lsys` — the whole engine, **and PR 1 is visual** | hashed RNG, expression VM, symbol table, parser, `.lsys` reader/writer, diagnostics, both derivation modes, containment policy, context provider, `word`, `filter_level`, **`gen_nested` detection**, **four** emitters (`stats`, `svg`, `mesh`, `raster`-stub), `deriver` (resumable), `cvc-lsys` CLI with `svg` / `mesh` / `derive` / `validate` | `inc/cvc/lsys/{rng,expr,symbol,grammar,parse,io,module,derive,interp,scope,recipes,svg}.h` + srcs; `src/cvc/lsys/lsys.cmake`; `src/cvc/tools/cvc_lsys_main.cpp`; `src/cvc/tests/{lsys_rng,lsys_expr,lsys_parse,lsys_derive,lsys_interp,lsys_recipes,lsys_svg}_test.cpp`; `src/cvc/tests/lsys_tests.cmake`; `src/cvc/tests/data/recipes/*.lsys` | `src/cvc/CMakeLists.txt` **+1 line** before `add_library(cvc` at **841**; `src/cvc/tests/CMakeLists.txt` **+1 line** before the `TEST_TARGETS` drift guard at **1281** | ~2 900 + 2 000 test | **`cvc-lsys svg pine_monopodial.lsys --gen 10 --out pine.svg` — open it in the PR diff and look at the tree.** Plus `--out tree.off`, `ctest -R lsys` green, byte-exact `.lsys` round-trip incl. comments, and **all published module counts assert** | — |
+| **L1** | `cvc::world` surfaces + bundle | 32-class registry + 3 ontology variants (**hard ⇒ ρ = 0**, §7.2a), `grid_spec`, three-layer `raster()`, `heightfield`, `.npy` writer, `bundle` with the `frame` + `consumer_frame_ref` blocks (§7.1a), `cells.json` schema `cvcworld.cells/1` incl. `opaque` + `footprint` (§6b.6), `cvc-worldgen build --preview`. **Completely headless.** | `inc/cvc/world/{units,grid,surface,raster,heightfield,bundle,cells,npy,preview}.h` + srcs; `src/cvc/world/world.cmake`; `world_{surface,raster,bundle,cells}_test.cpp`; `data/golden/tiny_bundle/`; python CI step | **none** (both includes exist) | ~2 300 + 1 600 test | **`cvc-worldgen build --preview` writes a loadable bundle *and* `class_preview.png` / `risk_preview.png`; the Python CI step constructs `MaterialGrid` and asserts `field().field.shape == (1,6,513,513)`; a C++ step calls `material_build` on the same bytes and compares bit-for-bit. This PR unblocks GRL-SNAM.** | L0 |
+| **L2** | terrain, **the archipelago**, tiling, LOD math | ridged multifractal + warp + masks, **smooth-max island combination + seeded placement + biome table (§4.3a)**, octave band-limiting, erosion passes, hydrology, tile grid, **`validate_outdoor` (§7.8)**, `cvc::lod::select` | `inc/cvc/world/{terrain,island,archipelago,biome,tile,scatter}.h`, `inc/cvc/lod/select.h` + srcs; `world_{terrain,archipelago,outdoor_gate}_test.cpp`, `lod_select_test.cpp` | **none** | ~2 200 + 1 300 test | `cvc-worldgen build --preset large --preview` produces a **4-island** world you can look at as a PNG; smooth-max exactness, placement determinism, band-limit, hysteresis and **outdoor-gate** tests green | L1 |
+| **L3** | `lsystem_lab` skeleton + terrain render + **the measurement** | the example, `fixed_mesh`, chunk actors, frustum cull, camera/HUD/touch, ImGui shell (World/LOD/Stats tabs), shadow stage tracking, `cvcgl_prop_sweep` | `src/cvcGL/examples/lsystem_lab.cpp`, `lsyslab_render.{h,cpp}`, `lsyslab_ui.{h,cpp}`, `LSYSTEM_LAB.md`; `src/cvcGL/test/cvcgl_prop_sweep.cpp` | `src/cvcGL/examples/CMakeLists.txt` **append after line 97 (EOF)**; `src/cvcGL/CMakeLists.txt` **append after line 293 (EOF)** | ~2 200 + 300 test | Fly a 4 km archipelago at ≥ 45 fps, rungs recolour, budget gauge live. **`max_props` default is set from the sweep, not from this doc.** | L2 |
 | **L4** | vegetation at scale + **GPU sway** | archetype library, stateless-hash placement, merged chunk actors, impostor atlas, budget solver wired to the loop, the A0–A4 animation ladder, the `tcoordMC` declaration fix + wasm shader smoke test | `inc/cvc/world/{archetype,mesh_emit}.h` + srcs; `world_archetype_test.cpp`; `src/cvcGL/test/cvcgl_sway_shader.cpp` | `src/cvcGL/CMakeLists.txt` (same EOF block) | ~1 700 + 800 test | **480 k plants at ≥ 45 fps with shadows on, and a wind slider that moves every visible tree at zero CPU cost beyond 60 m** | L3 |
 | **L5** | the Laboratory widget | all seven tabs, four-tier loop + Tier 1b, surface painting, undo/redo, seed padlocks + salt audit UI, gallery/fork, specimen preview, LOD debug, profiling, contract preview | `lsyslab_ui_*.cpp`; `src/cvc/tests/lab_dispatch_test.cpp` | **none** | ~2 400 + 400 test | Edit a production → forest regenerates in 180 ms without blanking; paint mud → `risk_raw` changes in the contract preview; export | L4 |
-| **L6** | interiors | scope-grammar shells, Lopes growth, BSP fallback, cells/portals/links, the nav gate with repair→resample→loud-reject, stair dispatch, prop placer with circulation keep-out, indoor materials end to end | `inc/cvc/world/{building,floorplan}.h` + srcs; `world_{cells,floorplan,navgate}_test.cpp` | **none** | ~2 100 + 1 300 test | Walk into a 3-storey office; every room reachable; **500-interior gate sweep asserts 100 % pass after repair** | L5 |
+| **L6** | interiors | scope-grammar shells, Lopes growth, BSP fallback, cells/portals/links, **`derive_clearances(agent_radius_m, grid_m)` (§6b.1a)**, the nav gate with repair→resample→loud-reject, stair dispatch, prop placer with circulation keep-out, indoor materials end to end | `inc/cvc/world/{building,floorplan,clearance}.h` + srcs; `world_{cells,floorplan,navgate,clearance}_test.cpp` | **none** | ~2 200 + 1 400 test | Walk into a 3-storey office; every room reachable; **500-interior gate sweep asserts 100 % pass after repair**, at `agent_radius_m` ∈ {0.35, 3.0} | L5 |
 | **L7** | clouds, sea, sun at scale | Dobashi CA, hash-tiled world-space cloud field, shell deck, projected cloud shadow, near/far sea, sun fixes | `inc/cvc/world/{cloud,sea,sky}.h` + srcs; `world_cloud_test.cpp`; `src/cvcGL/test/cvcgl_volume_depth.cpp` | `src/cvcGL/CMakeLists.txt` (same EOF block) | ~1 000 + 500 test | **Stand on a 1420 m summit above the deck; fly down through it.** Depth-interaction capture test retires R2 | L4 |
 | **L8** | batch generation + curriculum | `cvc-worldgen sample`, difficulty metrics, endpoint selection matching `far_pair_in_free_space`, dataset index, `rejected.csv`, `--jobs` | `inc/cvc/world/metrics.h` + src; `src/cvc/tools/cvc_worldgen_main.cpp`; `world_metrics_test.cpp` | `ci.yml` **+1 line** to the lcov `--remove` set for `src/cvc/tools/*` | ~900 + 600 test | `cvc-worldgen sample --n 200 --bucket 3 --min-detour 1.25` produces a curated dataset with an index | L6 |
-| **L9** | wasm reduced preset | `world_preset::wasm()`, read-only grammar path, time-sliced deriver, MEMFS export + browser download, gallery registration | `lsyslab_wasm.cpp`; a gallery thumbnail | `src/cvcGL/examples/CMakeLists.txt` **line 41** (`_wasm_demos`) — **inside PR #229's hunk, so L9 waits for #229**; `wasm/demos.json` (cold, optional) | ~500 | The Lab in a browser at `transfix.github.io/libcvc/lsystem_lab/` | L7, **#229 merged** |
-| **L10** | GRL-SNAM adapter (**different repo**) | `grl_snam/world_bundle.py` + `--bundle` on the training entry point | — | none in libcvc | ~120 + 80 test | A training run consumes a laboratory bundle end to end | L8 |
-| **L11** | pycvc bindings | SWIG `cvc::lsys::derive`, `cvc::world::raster`, the export path | `bindings/pycvc/lsys.i`, `world.i` | `bindings/pycvc/*.i` — **HOT, owned by `feat/cvc-nav-material`. Strictly last.** | ~400 + 300 test | In-process world generation from a training loop | L8, **material PR merged** |
+| **L9** | wasm reduced preset | `world_preset::wasm()`, read-only grammar path, time-sliced deriver, MEMFS export + browser download, gallery registration | `lsyslab_wasm.cpp`; a gallery thumbnail | `src/cvcGL/examples/CMakeLists.txt` **line 41** (`_wasm_demos`) — **now COLD; #229 merged**; `.github/workflows/deploy-pages.yml` **line 38** (`DEMOS:`) — required for the demo to actually deploy; `wasm/demos.json` (cold, optional) | ~500 | The Lab in a browser at `transfix.github.io/libcvc/lsystem_lab/` | L7 |
+| **L10** | GRL-SNAM adapter (**different repo**) | `grl_snam/world_bundle.py` + `--bundle` on the training entry point | — | none in libcvc | ~140 + 100 test | A training run consumes a laboratory bundle end to end | L8 |
+| **L11** | pycvc bindings | SWIG `cvc::lsys::derive`, `cvc::world::raster`, the export path | `bindings/pycvc/lsys.i`, `world.i` | `bindings/pycvc/*.i` — warm (the material work touched them, and it is now **merged**), so this is ordering discipline rather than a blocker | ~400 + 300 test | In-process world generation from a training loop | L8 |
 
-**Ordering:** L0a → L0b → L1 → L2 → L3 → L4 → (L5 ∥ L7) → L6 → L8 → (L9 ∥ L10) → L11.
+**Ordering:** L0 → L1 → L2 → L3 → L4 → (L5 ∥ L7) → L6 → L8 → (L9 ∥ L10) → L11.
 
-**L1 is the earliest point at which GRL-SNAM gets value.** L4 is the earliest point at which the "much larger scope" claim is visibly true.
+**L1 is the earliest point at which GRL-SNAM gets value.** L4 is the earliest point at which the "much larger scope" claim is visibly true. **L0 is the earliest point at which anyone sees a picture** (§13.1).
 
-**PR L0a is the foundational PR** the fixed constraints require: no GL, no VTK, no nav coupling, two one-line CMake inserts, `ctest -R lsys` green, and a byte-exact round-trip demo — genuinely landable by one session, and genuinely reviewable at 2 100 lines.
+**PR L0 is the foundational PR** the fixed constraints require: no GL, no VTK, no nav coupling, two one-line CMake inserts, `ctest -R lsys` green, published module counts asserted, a byte-exact round-trip — **and an SVG of a tree in the diff.** It is larger than revision 1's split L0a/L0b (≈ 4 900 lines with tests, versus 2 100 + 2 800), and that is a deliberate trade: an `L0a` that parses `.lsys` but cannot derive anything has no visual output *available* to it, so the split guaranteed a first PR nobody could see. If review size becomes the binding constraint, the correct split is **L0a = engine + `stats_emitter` + `svg_emitter` + CLI** (still visual) and **L0b = `mesh_emitter` + `scope`/building modes**, not the parse/derive split.
 
 ---
 
 ## 14. Collision avoidance with concurrent work
 
-### 14.1 What is live (verified 2026-08-27)
+### 14.1 What is live (re-verified 2026-08-27, post-rebase)
 
-Baseline `origin/master` = `10b7904`. Three open PRs:
+Baseline `origin/master` = **`8b6f426`**. `gh pr list --state open --repo transfix/libcvc` returns **two** PRs:
 
-| PR | branch | owns |
+| PR | branch | opened | owns |
+|---|---|---|---|
+| **#223** | `fix/cvcgl-caster-truth-and-pan-state` | 2026-08-22 | `inc/cvc/gl/CameraController.h`, `src/cvcGL/CameraController.cpp`, `src/cvcGL/StageLighting.cpp`, `src/cvcGL/CMakeLists.txt` **~24 and ~281-287** |
+| #200 | `fix/pin-windows-2022-in-release` | 2026-08-19 | `.github/workflows/release.yml` |
+
+**Three things revision 1 treated as pending have merged and are gone:**
+
+| commit | PR | what it means for us |
 |---|---|---|
-| **#229** | `wasm-austin-preload` | `src/cvcGL/examples/CMakeLists.txt` **lines 39-44 and 54-59** (incl. `_wasm_demos` at line 41), `nav_city_swarm.cpp`, `cvcpkg/recipes/cvcgl-examples/build-wasm.sh` |
-| #223 | `fix/cvcgl-caster-truth-and-pan-state` | `inc/cvc/gl/CameraController.h`, `src/cvcGL/CameraController.cpp`, `src/cvcGL/StageLighting.cpp`, `src/cvcGL/CMakeLists.txt` **~24 and ~281-287** |
-| #200 | `fix/pin-windows-2022-in-release` | `.github/workflows/release.yml` |
+| `a33851f` | **#229** | wasm imagemagick + assimp + Austin preload. `src/cvcGL/examples/CMakeLists.txt` is now **97 lines**, and `_wasm_demos` (line 41) / `_cvcgl_example_bins` (line **82**, not 69) are **cold**. The "L9 waits for #229" hazard is **retired**. |
+| `e97d06c` | **#231** | `build-wasm-demo.sh` matched to the recipe. |
+| `8b6f426` | **#230** | `cvc::nav` material-aware navigation. `inc/cvc/nav/material.h` and `src/cvc/nav/material.cpp` are **in the tree**, stable, and tested. `bindings/pycvc/*.i` is no longer contended. §7.1 and §7.1a are written against the merged header, not a description of it. |
 
-Plus the concurrent session `feat/cvc-nav-material`, which owns:
-`inc/cvc/nav/material.h`, `src/cvc/nav/material.cpp`, `src/cvc/tests/nav_material_test.cpp`, `src/cvc/nav/grid_nav.cpp`, `inc/cvc/nav/sim_world.h`, `src/cvc/nav/sim_world.cpp`, `inc/cvc/nav/drive.h`, `src/cvc/nav/drive.cpp`, `bindings/pycvc/*.i`, and edit sites in `src/cvc/CMakeLists.txt` (~88, ~170-177) and `src/cvc/tests/CMakeLists.txt` (~102, ~172, ~401, ~1155).
+**#223 is the one live collision.** It owns hunks at `src/cvcGL/CMakeLists.txt` ~24 and ~281-287, and line 283 is `add_test(NAME cvcgl_shadow_caster_growth …)` — i.e. it genuinely owns the region immediately above our EOF append point at 293.
 
-### 14.2 The shared-file matrix
+### 14.2 The shared-file matrix, re-derived against the current files
 
 | file | touched by | nature | rationale |
 |---|---|---|---|
-| `src/cvc/CMakeLists.txt` | L0a **only** | **+1 line**: `include(lsys/lsys.cmake)` immediately before `add_library(cvc` at **827** | ~650 lines below the material session's nav block at 170-178. The `.cmake` files do `list(APPEND SOURCE_FILES …)` / `INCLUDE_FILES`, so L0b/L1/L2/… grow the fragment, not the shared file. |
-| `src/cvc/tests/CMakeLists.txt` | L0a **only** | **+1 line**: `include(lsys_tests.cmake)` immediately before `# ── TEST_TARGETS drift guard ──` at **1270** | `cvc_discover_tests` is defined at 1133 and both drift guards run after 1270, so `add_executable` + `target_link_libraries` + `list(APPEND TEST_TARGETS)` + `cvc_discover_tests` are all legal there — **and the new targets land inside `BUILDSYSTEM_TARGETS`, so they inherit the existing never-ran guard.** |
-| `src/cvcGL/CMakeLists.txt` | L3, L4, L7 | **append at EOF (after line 293)** | #223 owns ~24 and ~281-287. Sources are `file(GLOB *.cpp)` at :35 and headers `install(DIRECTORY)` at :138, so new cvcGL source/header files need **no** CMake edit at all — only the new `add_executable`/`add_test` block does. |
-| `src/cvcGL/examples/CMakeLists.txt` | L3 | **append after line 84** (EOF) | Deliberately avoids `_wasm_demos` (41) and `_cvcgl_example_bins` (69), both inside #229's hunks. |
-| `src/cvcGL/examples/CMakeLists.txt` **line 41** | **L9 only** | one name appended to `_wasm_demos` | **Inside #229's hunk. L9 waits for #229 to merge.** |
-| `.github/workflows/ci.yml` | L8 | **+1 line** to the lcov `--remove` set for `src/cvc/tools/*` | Cold; the existing set already excludes `src/xmlrpc` and the mesher contour tree. |
+| `src/cvc/CMakeLists.txt` | L0 **only** | **+1 line**: `include(lsys/lsys.cmake)` immediately before `add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})` at **841** | The `.cmake` fragments do `list(APPEND SOURCE_FILES …)` / `INCLUDE_FILES`, so L1/L2/… grow the fragment, not the shared file. The nav block #230 edited is ~700 lines above. |
+| `src/cvc/tests/CMakeLists.txt` | L0 **only** | **+1 line**: `include(lsys_tests.cmake)` immediately before `# ── TEST_TARGETS drift guard ──` at **1281** | `cvc_discover_tests` is defined at **1143** and both guards run after 1281, so `add_executable` + `target_link_libraries` + `list(APPEND TEST_TARGETS)` + `cvc_discover_tests` are all legal there — **and the new targets land inside `BUILDSYSTEM_TARGETS` (read at 1295), so they inherit both the never-built and the never-registered guards.** |
+| `src/cvcGL/CMakeLists.txt` | L3, L4, L7 | **append after line 293 (EOF)** | Sources are `file(GLOB *.cpp)` at :35 and headers `install(DIRECTORY)` at :138, so new cvcGL source/header files need **no** CMake edit at all — only the new `add_executable`/`add_test` block does. #223's last hunk ends ~287, six lines clear. |
+| `src/cvcGL/examples/CMakeLists.txt` | L3 | **append after line 97 (EOF)**: `add_executable(lsystem_lab lsystem_lab.cpp)` + `target_link_libraries(… cvcGL ${VTK_LIBRARIES} Boost::program_options)` + `vtk_module_autoinit(…)` | **There is no GLOB in `examples/`** — a new example is invisible without this block. It does not have to touch any existing list, and nothing else is queued behind it. (If it wants the nav helpers it also links `nav_demo_common`, defined at :25.) |
+| `src/cvcGL/examples/CMakeLists.txt` **line 41** | **L9 only** | one name appended to `_wasm_demos` | **Now cold — #229 merged.** This single edit is all a wasm demo needs: `add_custom_target(wasm-demos DEPENDS ${_wasm_demos})` (:73) and `wasm/build-pages.py` auto-discovery follow, and the per-demo `target_link_options` loop (:52-70) applies automatically. |
+| `src/cvcGL/examples/CMakeLists.txt` **line 82** | **L3 or L9**, only if D6 says "package" | one name appended to `_cvcgl_example_bins` | That single list feeds **both** `set_target_properties(… INSTALL_RPATH "$ORIGIN/../lib" …)` (:83-85) **and** `install(TARGETS … COMPONENT cvcgl-examples)` (:86-87). Omitting it means `lsystem_lab` builds but is neither RPATH-fixed nor installed. |
+| `.github/workflows/deploy-pages.yml` **line 38** | **L9 only** | one name appended to `DEMOS:` | Used at `:67` and `:123` to assemble and verify the gallery. Without it the wasm Lab builds on catx-03 and is **not deployed**. Revision 1 missed this file entirely. |
+| `.github/workflows/ci.yml` | L8 | **+1 line** to the lcov `--remove` set (`ci.yml:422-427`) for `src/cvc/tools/*` | Cold; the set already excludes `src/xmlrpc/*` and the mesher contour tree. |
 | `src/cvcGL/examples/wasm/demos.json` | L9 | one string + one object | Cold; **optional** — `build-pages.py` discovers demos by scanning `bin/` for a `.js`+`.wasm` pair, so an unlisted demo still appears with defaults. |
-| `bindings/pycvc/*.i` | **L11 only** | new `.i` files + registration | **HOT.** Strictly after the material PR. |
+| `bindings/pycvc/*.i` | **L11 only** | new `.i` files + registration | Warm rather than hot now that #230 has merged. Still strictly last, because SWIG interface files are the least pleasant thing in this repo to rebase. |
 | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` | **never** | — | The fixed-capacity mesh needs no cvcGL API change (§8.6). This is why. |
 | `src/cvcGL/examples/lsystem_forest.cpp`, `examples/README.md` |**never** | — | Fixed user constraint. `lsystem_forest` stays as the fast smoke test and as the performance control for every measurement in this plan. |
-| `src/cvc/nav/**`, `inc/cvc/nav/**` | **never** | — | `feat/cvc-nav-material` owns them. We *read* `cvc::nav::astar(..., cost)` and `build_sdf` through their existing public API; we add nothing to that namespace. |
-| `docs/roadmap/**` | this document | new file | Cold (4 existing files, none pending). |
+| `src/cvc/nav/**`, `inc/cvc/nav/**` | **never** | — | We only ever **read** this namespace (§14.4). We add nothing to it, and `cvc::world` does not link it at all. |
+| `docs/roadmap/**` | this document | new file | Cold. |
 
-**Total pre-existing lines edited across all thirteen PRs: four** (`src/cvc/CMakeLists.txt` ×1, `src/cvc/tests/CMakeLists.txt` ×1, `ci.yml` ×1, `src/cvcGL/examples/CMakeLists.txt` line 41 ×1 in L9), plus three append-at-EOF blocks that cannot textually conflict.
+**The true shared-file cost.**
+
+| edit | PR | required? |
+|---|---|---|
+| `src/cvc/CMakeLists.txt:841` +1 | L0 | yes |
+| `src/cvc/tests/CMakeLists.txt:1281` +1 | L0 | yes |
+| `.github/workflows/ci.yml:422-427` +1 | L8 | yes |
+| `src/cvcGL/examples/CMakeLists.txt:41` (`_wasm_demos`) +1 name | L9 | yes, for a browser Lab |
+| `src/cvcGL/examples/CMakeLists.txt:82` (`_cvcgl_example_bins`) +1 name | L3/L9 | **only if D6 = package** |
+| `.github/workflows/deploy-pages.yml:38` (`DEMOS`) +1 name | L9 | **only if the wasm Lab is to be deployed** |
+
+**So: four pre-existing lines if the Lab is native-only-and-unpackaged; six if it is packaged and deployed.** Revision 1 said "four" and got there partly by luck — it counted the `_wasm_demos` edit, missed `_cvcgl_example_bins` and `deploy-pages.yml`, and used pre-`#229` line numbers throughout.
+
+Plus **two** append-at-EOF blocks (`src/cvcGL/CMakeLists.txt` after 293, `src/cvcGL/examples/CMakeLists.txt` after 97).
+
+> **Correction: "append at EOF cannot textually conflict" is false.** Two branches appending at the same EOF is the *canonical* three-way-merge conflict — git has no context after the last line to disambiguate with. The accurate claim is narrower and still useful: **appending at EOF cannot conflict with an edit that is not itself at EOF**, so our blocks are safe against #223's ~24 / ~281-287 hunks and against everything else currently open. They *will* conflict with each other if L3, L4 and L7 are ever developed in parallel rather than sequenced, and the resolution ("keep both hunks, in either order") is mechanical but not free. Sequence them, and re-check at every rebase.
 
 ### 14.3 Protocol
 
-1. **Work in a fresh worktree** branched off `origin/master` @ `10b7904`. Do not reuse `wt-libcvc-material`. `wt-libcvc-lsyslab` is ours and is already on `feat/lsystem-laboratory`.
-2. **Rebase early and often.** The two one-line includes are small and mechanically re-appliable if they ever do conflict.
-3. **Never** register a test in `src/cvcGL/CMakeLists.txt` near line 281 (#223's zone) or in `src/cvcGL/examples/CMakeLists.txt` lines 39-59 (#229's zone).
-4. **Never** call into `cvc::nav::material`. The coupling to the concurrent material work is a **versioned file format**, not a C++ API. We write `risk_raw` and `hard` as `.npy` and stop. If `material_build`'s signature changes — and it already has, relative to the circulated brief — not one generated bundle is invalidated.
+1. **Work in `wt-libcvc-lsyslab`**, branched off `origin/master` @ **`8b6f426`**. One worktree per session; never share a checkout.
+2. **Rebase early and often.** The two one-line includes are small and mechanically re-appliable if they ever do conflict. Re-run the line-number checks in §14.2 after every rebase — this document has now been wrong about them once.
+3. **Never** register a test in `src/cvcGL/CMakeLists.txt` near line 281 (#223's zone).
+4. **Sequence the EOF appends.** L3 → L4 → L7 in `src/cvcGL/CMakeLists.txt`; L3 → L9 in `src/cvcGL/examples/CMakeLists.txt`. See the correction above.
 5. If a new shared-file need appears mid-implementation, it goes in the PR description's shared-file table *before* the code is written, not after.
+
+### 14.4 Do we consume the C++ API, the file format, or both? — **Both, at different layers**
+
+> **The question revision 1 answered too bluntly.** Its rule was *"never call into `cvc::nav::material`."* That was the right instinct against an **unmerged, moving** header. `inc/cvc/nav/material.h` is now merged, stable, documented and covered by `nav_material_test`, so the rule deserves re-deciding rather than inheriting.
+
+**The decision, in two halves:**
+
+**(a) The bundle contract stays a file format. `cvc::world` never links `cvc::nav`.** Unchanged, and for unchanged reasons: we write `risk_raw` and `hard` as `.npy` plus a manifest, and nothing derived. If `material_build`'s blur, EDT convention, gradient normalisation, channel order or signature changes, **not one generated bundle is invalidated**. That property is worth more than any convenience, it is the reason a corpus has a long half-life, and it is enforced structurally — `world.cmake` does not add `cvc/nav` to anything, and there is a link-time test that `libcvc`'s world objects reference no `cvc::nav::` symbol.
+
+**(b) The Lab's preview overlays call `cvc::nav::material` directly, read-only.** `lsystem_lab` — the *demo*, not the library — calls `material_build(risk_raw, hard, rows, cols, cell_w, scale, sigma)` and `witness_gate(...)` to draw the Surface tab's `phi_hard` preview, the risk-detour route and the gate-fires indicator. Three reasons:
+
+1. **A preview that is not the consumer's arithmetic is a lie.** The whole value of the "contract preview" (§9.4) is that it shows what the trainer will see. Approximating it would make it a decoration.
+2. **The alternative is a second copy of a bit-identity function.** `material_build` exists specifically to be bit-identical to `MaterialGrid._derive` — pinned op order, `-ffp-contract=off`, a scipy-'reflect'-equivalent separable Gaussian. Reimplementing that inside `cvc::world` would create a second implementation whose entire specification is "match the first one", and it would drift.
+3. **It costs nothing to link.** `cvcGL` already PUBLIC-links `cvc::cvc`, which is where `cvc::nav` lives — the `nav_demo_common` comment in `examples/CMakeLists.txt:22-24` says so explicitly. There is no new dependency edge; the demos already have it.
+
+**The rule, stated so it can be enforced:**
+
+```
+cvc::world  (library, export path)  ->  MUST NOT reference cvc::nav.  Link-tested.
+lsystem_lab (demo, preview only)    ->  MAY call cvc::nav::material READ-ONLY.
+Nothing                              ->  writes to cvc::nav, or adds to that namespace.
+```
+
+And one test that makes the seam honest in both directions: **the Lab's in-memory preview planes and a `material_build` call on the *exported bytes* must agree bit-for-bit.** With (b) in place that test is nearly trivial — which is the point. Under revision 1's rule it was impossible to write at all.
 
 ---
 
@@ -1963,12 +2478,12 @@ Plus the concurrent session `feat/cvc-nav-material`, which owns:
 *Defence:* the replacement injects its own declaration at `//VTK::PositionVC::Dec`; a 1×1 dummy texture is the belt-and-braces alternative; and `cvcgl_sway_shader` asserts the program links **and that a probe vertex actually moves**, on both desktop GL and GLES3.
 
 **R5 — Tests that never run.**
-*Probability: high in any design that forgets it. Damage: catastrophic and invisible.* `CVC_BUILD_EXAMPLES` is `OFF` in every CI job; a test registered in `examples/` compiles green nowhere and runs nowhere.
-*Defence:* §12.5's placement table is a hard rule. All library tests go through the `src/cvc/tests/` include, which lands inside `BUILDSYSTEM_TARGETS` and inherits the repo's own drift guard. cvcGL tests go at EOF of `src/cvcGL/CMakeLists.txt`, where 18 `cvcgl_*` tests already run under Xvfb + llvmpipe with a guard that errors if zero reach CTest.
+*Probability: high in any design that forgets it. Damage: catastrophic and invisible.* `CVC_BUILD_EXAMPLES` defaults `OFF` and **no workflow sets it**; a test registered in `examples/` runs in no PR job. The one place examples *are* compiled — `deploy-pages.yml` → `build-wasm-demo.sh`, wasm-only, post-merge, on catx-03 — sets `-DCVC_BUILD_TESTS=OFF` and runs no `ctest`, so `nav_common_test` has still never executed anywhere. A **native** break in an example therefore lands silently on master and blocks no PR. (Revision 1's phrasing — "OFF in every CI job", "never compiled in CI" — was absolute and wrong in detail; the conclusion is unchanged.)
+*Defence:* §12.5's placement table is a hard rule. All library tests go through the `src/cvc/tests/` include, which lands inside `BUILDSYSTEM_TARGETS` and inherits **both** of the repo's drift guards. cvcGL tests go after line 293 of `src/cvcGL/CMakeLists.txt`, where **16** `cvcgl_*` tests already run under Xvfb + llvmpipe with a guard at `ci.yml:334-342` that errors if zero reach CTest.
 
 **R6 — The coverage gate.**
 *Probability: medium. Damage: blocking.* ~11 000 new lines under `src/` + `inc/` enter an **aggregate** 80 % denominator.
-*Defence:* the modules are GL-free and emitter-driven by design; `stats_emitter` exercises every derivation path with no geometry; `select.h` and `expr.h` are pure; I/O leaves take an injected `write_fn`; the CLI `main()`s are excluded via the lcov `--remove` set. Every PR ships its tests, gate ≥ 88 % on its own files. **The repo-wide baseline is measured and recorded before L0a lands.**
+*Defence:* the modules are GL-free and emitter-driven by design; `stats_emitter` exercises every derivation path with no geometry; `select.h` and `expr.h` are pure; I/O leaves take an injected `write_fn`; the CLI `main()`s are excluded via the lcov `--remove` set. Every PR ships its tests, gate ≥ 88 % on its own files. **The repo-wide baseline is measured and recorded before L0 lands.**
 *Residual:* `floorplan.cpp`'s repair heuristics are branchy and are the hardest legitimate lines in the change.
 
 **R7 — `gen_nested` is false for the recipes that matter most.**
@@ -1987,9 +2502,10 @@ Plus the concurrent session `feat/cvc-nav-material`, which owns:
 **R10 — Erosion bake time balloons.**
 *Probability: low, by design.* Erosion is Tier 3 and scoped to the authored region, never the world. The far field is analytic-only. The UI shows the tile count and estimated seconds before you press the button. Musgrave's own warning stands: *"budget more time for tuning than for implementation."*
 
-**R11 — wasm is never actually verified.**
-*Probability: certain if nobody plans for it. Damage: medium.* Nothing gates wasm in PR CI (`grep -i wasm .github/workflows/ci.yml` → zero hits), and `deploy-pages.yml` has never succeeded — it points at `/opt/cvc-wasm/emsdk/emsdk_env.sh`, which does not exist (the real toolchain is `/home/joe/src/cvc/emsdk-cvc`) — *and* it builds `--pthread` for a host that cannot send COOP/COEP (verified live: no such headers on `transfix.github.io`). Its "Verify live" step only does a `HEAD` for content-length and would pass on a gallery that cannot boot.
-*Defence:* PR L9 carries an explicit manual verification checklist (`build-wasm-demo.sh` + `serve.py`, Chrome + Firefox, clean console, measured fps, heap high-water via `performance.memory`, mouse-drivable panels, touch on a phone) with the numbers recorded in `LSYSTEM_LAB.md`, and states plainly that wasm is verified locally or not at all. **Fixing the deploy pipeline is out of scope** and is flagged as a separate task.
+**R11 — wasm is never actually verified *in a PR*.**
+*Probability: certain if nobody plans for it. Damage: medium.* Nothing gates wasm in PR CI (`grep -i wasm .github/workflows/ci.yml` → zero hits). `deploy-pages.yml` runs **post-merge only** — `push` to master, a nightly cron, and dispatch — so a wasm break in a PR is invisible until it is on master.
+*Correction to revision 1.* Revision 1 asserted that `deploy-pages.yml` "has never succeeded" because `/opt/cvc-wasm/emsdk/emsdk_env.sh` does not exist. **That diagnosis was drawn from the wrong machine.** `deploy-pages.yml:34` declares `runs-on: [self-hosted, Linux, X64]` — catx-03 — and the workflow's own header comment says that runner *"already holds the emsdk + wasm-mt deps prefix at `/opt/cvc-wasm/`"*, with `CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk` and `CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt` set at `:36-37`. The path exists there; it does not exist on this development box, which is what was actually checked. The claim is withdrawn. The COOP/COEP question about `--pthread` on `transfix.github.io` is **left open rather than asserted** — demos are currently live on gh-pages, so whatever the header situation is, it is not fatal.
+*Defence:* PR L9 carries an explicit manual verification checklist (`build-wasm-demo.sh` + `serve.py`, Chrome + Firefox, clean console, measured fps, heap high-water via `performance.memory`, mouse-drivable panels, touch on a phone) with the numbers recorded in `LSYSTEM_LAB.md`, and states plainly that **wasm is verified locally-plus-post-merge, never by a PR gate**. Adding a wasm PR gate is out of scope and is flagged as D8.
 
 **R12 — The 45 fps target at 480 k plants.**
 *Probability: medium.* The animation LOD removes the *known* bottleneck, but there is a second one I cannot measure from here: **the shadow bake re-renders the whole opaque scene per casting light and is not LOD-aware.** `vtkShadowMapBakerPass` sees whatever is in the renderer, and cvcGL has no per-pass visibility mask.
@@ -2008,14 +2524,26 @@ Plus the concurrent session `feat/cvc-nav-material`, which owns:
 *Defence:* the manifest carries enough raw statistics to recompute a better label retroactively without regenerating a world. The label is marked as a candidate in the manifest itself.
 
 **R16 — Merge races.**
-*Probability: low.* Four pre-existing lines, three EOF appends, explicit sequencing behind #223 (not needed — we removed the dependency), #229 (L9) and the material PR (L11).
-*Residual:* if `feat/cvc-nav-material` stalls indefinitely, only L11 stalls. Everything else ships.
+*Probability: low, and lower than in revision 1.* #229/#230/#231 have merged; only #223 and #200 remain open, and neither touches a file we edit except `src/cvcGL/CMakeLists.txt` at ~24 / ~281-287, well clear of our EOF append. Four (or six) pre-existing lines, two EOF appends.
+*Residual:* the EOF appends conflict **with each other** if L3/L4/L7 are developed in parallel (§14.2's correction). Sequence them.
+
+**R17 — The C++ and Python material twins disagree on two gate defaults.**
+*Probability: certain — it is already true. Damage: medium and silent.* `gate_params::horizon_cells` is **12 integer cells** in C++ (`material.h:112`) while `GateParams.horizon_m` is **25.0 metres** in Python (`material.py:159`), and `hard_margin_m` is a fixed **1.0 m** in C++ (`material.h:114`) while Python defaults to `None ⇒ 2·cell_w`. At our export `cell_w = 0.5` the margins coincide at 1.0 m — but the horizons do not: Python resolves to **50 cells (25 m)** and an unconfigured C++ caller uses **12 cells (6 m)**, which is exactly the value GRL-SNAM's own docstring calls *"myopic"*. A bundle would therefore gate differently depending on which language loaded it, and nothing would say so.
+*Defence:* the manifest publishes `frame.gate_horizon_recommended_cells = 50` and `frame.gate_hard_margin_max_viable_m`, the adapter asserts the value it configures, and §7.1a states the divergence in the open. **This is not ours to fix** — it is a note for the `cvc::nav` owner, and it is the clearest single argument for recording the frame rather than assuming it.
+
+**R18 — Blur bleed across walls survives ρ_hard = 0.**
+*Probability: medium. Damage: low-medium.* ρ_hard = 0 removes the dominant case, but the consumer's blur is still isotropic and occlusion-unaware, so an outdoor puddle within `blur_bleed_radius_m` of a door still raises indoor risk. At the outdoor recommendation (σ = 4 cells) that radius is **8.0 m**.
+*Defence:* `scene_kind` selects σ (indoor/mixed ⇒ 1 cell ⇒ 2.0 m), the bounded-contrast validator warns on the specific class pair, the radius is published and drawn as a halo around the brush. *Residual:* a genuinely mixed scene with a mudflat against a warehouse wall will have a slightly hot interior, and the honest answer is that this is a property of the consumer's blur, not of our export — which is why we do not silently pre-compensate for it.
+
+**R19 — The archipelago's outdoor gate rejects too much, or the window policy is wrong.**
+*Probability: medium.* A `single-island` policy (D9's recommendation) means the export window can never straddle a channel, which quietly caps the usable window at the smallest island's diameter — Tern is r = 390 m, so a 256 m window fits comfortably, but a 512 m window (decision D2) does **not** fit on Tern at all.
+*Defence:* `validate_outdoor` measures and reports it, `cvc-worldgen sample` records rejections in `rejected.csv` with the reason, and the window/island pairing is chosen by the generator rather than the user. *Residual:* D2 (window size) and D9 (window policy) interact, and they must be decided **together**; that interaction is called out in both entries.
 
 ### 15.2 What might genuinely not work, stated plainly
 
 - **The 45 fps figure is the number I am least sure of.** R12 names the specific unknown (the shadow bake) and the specific cheap mitigation. If both the shadow proxy and the animation LOD are insufficient, the honest answer is fewer visible instances, and the budget solver already makes that a one-slider change.
 - **CDLOD over an analytic height function has never been done in this codebase.** We ship skirts instead, deliberately, and morphing is a later phase that needs a second UV set which does not exist.
-- **The hedge and any future vine recipe need query modules fed from a spatial structure**, which means the interpreter runs interleaved with a BVH. That is real work and it is why those recipes sit in the later half of §6 rather than in L0b's test set.
+- **The hedge and any future vine recipe need query modules fed from a spatial structure**, which means the interpreter runs interleaved with a BVH. That is real work and it is why those recipes sit in the later half of §6 rather than in L0's test set.
 - **`fixed_mesh` capacity padding is triangle-only.** If a future asset genuinely needs line geometry, it gets a densely-packed non-padded actor and loses the capacity trick. Foliage-as-cards is what makes this a non-issue today.
 
 ### 15.3 Decisions that need the user
@@ -2026,26 +2554,57 @@ Plus the concurrent session `feat/cvc-nav-material`, which owns:
 Does v1 GRL-SNAM consume per-storey layered grids plus `links.json` (option A), or layer 0 only (option C)?
 This changes the **bundle schema**, not the renderer, so it must be settled while L1 is being written — not when L6 lands. Recommendation: **write the layered format now (cheap, tested), export `storeys: 1` by default, and have the trainer consume layer 0 in v1.** Mixed indoor/outdoor single-storey works today with zero contract change. If the answer is "yes, cross-floor episodes in v1", the Python side needs a layered planner and a link-cost model, which is outside both this design's and the material session's declared scope.
 
-**D2 — Default export window size.**
+**D2 — Default export window size. INTERACTS WITH D9.**
 This document uses **513 × 513 @ 0.5 m = 256.0 m**. If GRL-SNAM episodes routinely exceed ~250 m of travel, it should be **1025 × 1025 @ 0.5 m = 512.0 m** (4 MB/plane), and every batch-throughput number in §11.2 roughly quadruples. What is the typical episode extent?
+**New in revision 2:** under D9's recommended `single-island` policy a 512 m window **does not fit on Tern** (r = 390 m ⇒ ~780 m of land at most, but only ~250 m of it above the mud line) and would be rejected by the outdoor gate. Choosing 512 m therefore also means either dropping small islands from the sampling pool or accepting D9 option 2. Decide D2 and D9 together.
 
-**D3 — ρ values for the 17 classes with no RELLIS/DFC counterpart.**
-`gravel`, `sand`, `scree`, `snow`, `tall_grass` and all 12 indoor classes have defensible but **derived** risk values (§16.2). A domain review before the first large dataset is generated is cheap; afterwards it means either an in-place re-projection with a version bump (possible, since `class.npy` is retained) or invalidating a corpus. Who signs off?
+**D3 — ρ values for the classes with no RELLIS/DFC counterpart.**
+`gravel`, `sand`, `scree`, `snow`, `tall_grass` and the 8 non-hard indoor classes have defensible but **derived** risk values (§16.2). A domain review before the first large dataset is generated is cheap; afterwards it means either an in-place re-projection with a version bump (possible, since `class.npy` is retained) or invalidating a corpus. Who signs off?
+*Revision 2 narrows this:* the 11 `hard` classes no longer need a ρ review at all, because §7.2a sets them to 0.00 on structural grounds. That removes the classes whose ρ was least defensible (what *is* the soft risk of a wall?) and leaves a smaller, more answerable question.
 
 **D4 — Roadmap key casing.**
 §20.13.7 is camelCase, §22.1.6 is snake_case, same state path. We adopt **snake_case** at `lab.lod.*` and recommend correcting §20.13.7. **Needs a roadmap-owner ack.**
 
-**D5 — Should a CI job build `lsystem_lab`?**
-`CVC_BUILD_EXAMPLES` is `OFF` everywhere, so the example is never compiled in CI and a build break in it lands silently on `master`. Flipping `-DCVC_BUILD_EXAMPLES=ON` in the `package-linux` job would fix that — but it also switches on `nav_common_test` for the first time ever, which may not currently pass, and it is an edit to a shared workflow file that no PR in this plan budgets for. **Do we want the example gated, and who owns the fallout?**
+**D5 — Should a PR CI job build `lsystem_lab` natively?**
+`CVC_BUILD_EXAMPLES` defaults `OFF` and no workflow sets it, so the example is compiled in **no PR job** and a native build break lands silently on `master`. (It *is* compiled post-merge for wasm by `deploy-pages.yml`, which is a real but late signal.) Flipping `-DCVC_BUILD_EXAMPLES=ON` in the `package-linux` job would fix that — but it also switches on `nav_common_test` for the first time ever, and **whether that test passes is genuinely unknown**: it has never been built with `GTest::gtest` available and never run under `ctest` anywhere. It is also an edit to a shared workflow file that no PR in this plan budgets for. **Do we want the example gated, and who owns the `nav_common_test` fallout?**
 
 **D6 — Packaging.**
-Should `lsystem_lab` ship in the `cvcgl-examples` cvcpkg recipe? `bunny_shadow` is precedent for *not* packaging. Packaging requires a `cvc_revision` bump on a recipe with unmerged-adjacent history.
+Should `lsystem_lab` ship in the `cvcgl-examples` cvcpkg recipe?
+*Revision 2 corrects the premise.* Revision 1 said *"`bunny_shadow` is precedent for not packaging."* **That is false.** `_cvcgl_example_bins` at `src/cvcGL/examples/CMakeLists.txt:82` reads `lsystem_forest bunny_shadow nav_city_swarm nav_fog_ghost nav_finale` — `bunny_shadow` is in it, and it is also in `_wasm_demos` at line 41. **Every example currently built is also packaged**, so the precedent runs the other way and *not* packaging `lsystem_lab` would make it the sole exception. Packaging costs one name on line 82 (which feeds both the RPATH properties and the `install(TARGETS … COMPONENT cvcgl-examples)`) plus a `cvc_revision` bump on the recipe — and a recipe fix without a revision bump silently no-ops on published catalogs, so the bump is mandatory, not optional. **Recommendation: package it.**
 
 **D7 — Material event schedules.**
 `MaterialGrid.stamp_risk` / `stamp_hard` bump a version counter documented as *"the scenario's cue to re-cost and replan"*, and `FogScenario` already has an `Event` timeline. No part of this design exports a material **event schedule** — only a static raster. Does v1 training need mud-onset-style dynamic events? If so, the bundle needs an `events.json` schema, and that is a schema decision that belongs in L1 alongside D1.
 
-**D8 — Fixing `deploy-pages.yml`.**
-Out of scope here, genuinely broken two independent ways (§15.1 R11). Worth a separate PR. Does someone want it?
+**D8 — A wasm PR gate.**
+`deploy-pages.yml` is **not** broken (see §15.1 R11's correction — the emsdk diagnosis was drawn from the wrong machine), but it runs post-merge only, so wasm breaks reach `master` before anyone hears about them. Adding a wasm build to PR CI needs the self-hosted catx-03 runner, which PR jobs do not currently use. Out of scope here. Does someone want it?
+
+---
+
+> **The two decisions below are new in revision 2. Both change artifacts other people consume. This document recommends but does not pick.**
+
+**D9 — Cross-island traversal policy. NEEDS A DECISION BEFORE PR L2 MERGES (it sets the outdoor gate's pass condition, §7.8) AND INTERACTS WITH D2.**
+
+An archipelago's islands are disconnected by construction, and `water_deep` is `hard`. So what *is* an episode?
+
+| | option | what it means | cost | risk |
+|---|---|---|---|---|
+| **1** | **One island per episode** (`single-island`) | The export window is clipped to one island's mask ∪ its shelf. The gate requires `largest_component_fraction ≥ 0.98` and `channels_crossed == 0`. The archipelago is a **world-scale authoring and visual** feature; the *training window* is single-island. | Free. Already how `far_pair_in_free_space` behaves. | Caps the usable window at the smallest island's land diameter (§15.1 R19). A 512 m window would not fit on Tern. |
+| **2** | **Forced land bridges** (`forced-bridges`) | The generator guarantees an isthmus ≥ `max(bridge_min_m, 2·agent_radius_m + 1.0)` between every pair of islands whose windows are co-exported, by raising the smooth-max saddle to +0.6 m and painting it `sand`/`gravel`. Multi-island episodes become solvable. | One repair pass, ~3 ms. | The bridges read as causeways. It also makes the archipelago *topologically* one island, which arguably defeats the point of having several. |
+| **3** | **Amphibious ontology** (`amphibious`) | `water_shallow` stops being `hard` and becomes high-soft (ρ 0.90, `hard = false`); only `water_deep` stays hard. Fording is expensive but legal. | Free to implement. | **It changes exported `hard` bytes for every consumer**, and it asserts a vehicle capability (fording) that is a domain claim, not a rendering choice. Corpora built under different policies are not comparable. |
+
+**Recommendation: option 1 as the v1 default** (`--window-policy single-island`), with **option 2 available as an authored knob** (`--force-bridges`) because it costs one clamp and is genuinely useful for a "cross the isthmus" curriculum tier, and **option 3 explicitly deferred** because it changes `hard` semantics — which is exactly the kind of change §7.5's file-format seam exists to make loud rather than silent. Whichever is chosen is recorded in `manifest.validation.outdoor.policy` and in `provenance.json`, so a corpus can never mix policies undetectably.
+
+**D10 — The export frame: cell size, σ, and what the manifest records. NEEDS A DECISION BEFORE PR L1 FREEZES THE SCHEMA.**
+
+`sigma` is measured in **cells**, so choosing a cell size silently retunes the consumer's behaviourally-validated force constants (§7.1a). At 0.5 m/cell with σ = 1 cell, the effective `lam_soft` is ≈ 4.2× its tuned value — past the 1.5 the consumer's own comment says *"measurably LAUNCHES a vehicle off-world."*
+
+| | option | what it means | cost | risk |
+|---|---|---|---|---|
+| **A** | **0.5 m/cell fixed; σ recorded as a LENGTH; frame recorded in the manifest** | `cell_w = 0.5` (the source BEV frame). The manifest's `frame` block carries `sigma_m` (2.0 outdoor / 0.5 indoor+mixed), `sigma_recommended_cells`, `blur_bleed_radius_m`, `lam_soft_scale_hint`, `gate_horizon_recommended_cells`, `agent_radius_m`; a quarantined `consumer_frame_ref` block records the reference numbers for forensics and is **never read back** (tested). | ~30 lines of manifest + one adapter assert. | The consumer must actually read `sigma_recommended_cells` instead of hard-coding 1.0. |
+| **B** | **Match the consumer's story grid (~2.1 m/cell)** | Zero retune risk outdoors — the exported frame *is* the tuned frame. | Free. | **Kills the indoor half of the design.** A 0.90 m door is 0.43 cells. It also breaks the Python/C++ `hard_margin` coincidence (Python 4.2 m vs C++ 1.0 m). |
+| **C** | **Dual export: a 2.1 m/cell outdoor plane and a 0.5 m/cell indoor plane, congruent by construction** | Both frames, honestly. | Doubles bundle size, doubles gate work. | **Breaks the single-`grid_spec` invariant**, which is §0 item 6 and the structural reason a material/occupancy/heightfield misalignment is unrepresentable. That invariant is one of the two or three best properties of this design; spending it here would be a bad trade. |
+
+**Recommendation: option A.** Three independent reasons for 0.5 m specifically: it is the frame the method was ported *from*; it is the **only** cell size at which the C++ twin's fixed `hard_margin_m = 1.0` and the Python twin's `2·cell_w` fallback agree; and it is the coarsest lattice on which a door exists at all. And **yes, record a consumer-constants snapshot** — but under `consumer_frame_ref`, labelled provenance, asserted-unread. §7.1(c)'s rule ("never export consumer tuning") was aimed at *configuration*, and the twins already disagree in two places (R17), so a bundle that records nothing cannot be diagnosed after the fact.
 
 ---
 
@@ -2108,6 +2667,8 @@ Notes:
 
 `ρ` → `risk_raw`; `hard` → the `hard` raster; `nav` → the exported occupancy semantics; `veg` → scatter density multiplier. RF columns exist and are exported **zeroed** pending D3.
 
+> **Revision 2: every `hard` class carries ρ = 0.00.** Revision 1 gave the 11 hard classes ρ = 1.00 *and* the `hard` flag, which double-counts against the consumer's A\* `hard_penalty` and its `φ_m` barrier, and — because `risk_raw` is blurred — bleeds up to `blur_bleed_radius_m` into the free space next to every wall. See §7.2a for the arithmetic. The invariant `registry[k].hard ⇒ registry[k].rho == 0.0` is asserted for every ontology variant (§12.3). Consequently the maximum value in `risk_raw` under `merged_default` is **0.90** (`water_shallow`), not 1.00.
+
 **Outdoor (18)**
 
 | id | name | tier | ρ | hard | nav | albedo | veg |
@@ -2128,16 +2689,16 @@ Notes:
 | 13 | `mud` | high_soft | 0.80 | no | rough | 0.30 0.24 0.17 | 0.30 |
 | 14 | `puddle` | high_soft | 0.85 | no | rough | 0.24 0.28 0.30 | 0.00 |
 | 15 | `water_shallow` | high_soft | 0.90 | no | rough | 0.16 0.30 0.36 | 0.00 |
-| 16 | `water_deep` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.06 0.14 0.22 | 0.00 |
-| 17 | `cliff_rock` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.38 0.37 0.35 | 0.00 |
+| 16 | `water_deep` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.06 0.14 0.22 | 0.00 |
+| 17 | `cliff_rock` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.38 0.37 0.35 | 0.00 |
 
 **Outdoor obstacles (3)**
 
 | id | name | tier | ρ | hard | nav | albedo | veg |
 |---|---|---|---|---|---|---|---|
-| 18 | `tree_trunk` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.28 0.20 0.13 | 0.00 |
-| 19 | `boulder` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.42 0.41 0.39 | 0.00 |
-| 20 | `fence_pole` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.35 0.33 0.30 | 0.00 |
+| 18 | `tree_trunk` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.28 0.20 0.13 | 0.00 |
+| 19 | `boulder` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.42 0.41 0.39 | 0.00 |
+| 20 | `fence_pole` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.35 0.33 0.30 | 0.00 |
 
 **Indoor (12)**
 
@@ -2151,16 +2712,18 @@ Notes:
 | 26 | `metal_grating` | medium | 0.30 | no | rough | 0.44 0.45 0.47 | 0.0 |
 | 27 | `wet_floor` | high_soft | 0.65 | no | rough | 0.50 0.52 0.55 | 0.0 |
 | 28 | `debris_indoor` | high_soft | 0.70 | no | rough | 0.40 0.37 0.33 | 0.0 |
-| 29 | `wall_interior` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.82 0.80 0.76 | 0.0 |
-| 30 | `glass_pane` | hard_hazard | 1.00 | **yes** | blocked_wall | 0.62 0.72 0.78 | 0.0 |
-| 31 | `void_fall` | hard_hazard | 1.00 | **yes** | blocked_fall | 0.05 0.05 0.06 | 0.0 |
+| 29 | `wall_interior` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.82 0.80 0.76 | 0.0 |
+| 30 | `glass_pane` | hard_hazard | **0.00** | **yes** | blocked_wall | 0.62 0.72 0.78 | 0.0 |
+| 31 | `void_fall` | hard_hazard | **0.00** | **yes** | blocked_fall | 0.05 0.05 0.06 | 0.0 |
 
 Notes:
-- `glass_pane` is `hard` (an agent cannot walk through it) but its **portal record is `traversable: false` with `visibility: true`** — the visibility system must see through it while the nav system must not.
+- **All 11 `hard` classes carry ρ = 0.00** (§7.2a). The `hard` raster carries them; the consumer's A\* surcharge and `φ_m` barrier act on that raster; adding max soft risk on top double-counts and, through the consumer's blur, raises the risk of the corridor the agent has to walk down. Maximum `risk_raw` under `merged_default` is therefore **0.90**.
+- `glass_pane` is `hard` (an agent cannot walk through it) but its **portal record is `traversable: false, opaque: false`** — the visibility system must see through it while the nav system must not. Those are two independent booleans in the emitted schema (§6b.4).
 - `void_fall` is `hard` **and** occupied, which is how a stair opening on the upper storey is expressed. Forgetting the second half is how agents walk off a stairwell edge into a hole the grid calls floor.
 - Every `hard` class is also `occupancy`-set. `hard ⊆ occupancy` is asserted (§7.3).
-- `door_open` and `door_closed` are **not** classes; they are portal records whose `traversable` flag and whose underlying floor class (`concrete_floor` / `wall_interior`) carry the semantics. One raster, no special cases.
-- Ontology variants: `soft_vegetation` sets `grass → 0.15`, `tall_grass → 0.22`, `bush_cover → 0.30`. `strict_water_mud` sets `mud → 0.95`, `puddle → 0.95`, `water_shallow → 0.97`, `void_unknown → 0.60`.
+- `door_open` and `door_closed` are **not** classes; they are portal records whose `traversable` / `opaque` flags and whose underlying floor class (`concrete_floor` / `wall_interior`) carry the semantics. One raster, no special cases.
+- **Bounded boundary contrast** (§7.2a): no two classes may sit adjacent across a single hard cell with `|ρ_a − ρ_b| > 0.60`. The validator warns, naming the pair and a sample cell. `puddle` (0.85) beside `tile` (0.05) is a legitimate 0.80 and will warn; that is the intended behaviour, not a false positive.
+- Ontology variants: `soft_vegetation` sets `grass → 0.15`, `tall_grass → 0.22`, `bush_cover → 0.30`. `strict_water_mud` sets `mud → 0.95`, `puddle → 0.95`, `water_shallow → 0.97`, `void_unknown → 0.60`. **Neither variant touches a `hard` class** — they cannot, since the ρ = 0 invariant is asserted for every variant.
 
 ### 16.3 Default parameter sets
 
@@ -2199,9 +2762,19 @@ octaves_max      = 9
 base_frequency   = 1/1400 m
 warp_distortion  = 0.30
 warp_frequency   = 1/2600 m
-island_mask      = wyvill (1 - d^2/r^2)^3
+island_mask      = wyvill (1 - d^2/r^2)^3   # per island; r_core plateau optional
+island_combine   = smooth_max               # NOT sum; see section 4.3a.3
+smax_k_m         = 40.0                     # blend width; exact max when |a-b| >= k
+island_fold_order= sorted by (cx, cy, name) # so h() is a function of the SET
+biome_attribution= argmax_i mask_i          # a PARTITION, never a blend
 peak_sigma_frac  = 0.28
 shelf_m          = -9.0
+separation_factor = 1.15    # placement: min |c_i - c_j| / (r_i + r_j)
+placement_attempts = 64     # per relaxation round
+placement_rounds   = 8      # sep *= 0.95 per round, then HARD FAIL
+channel_min_m    = 40.0     # min open water between non-overlapping islands
+bridge_min_m     = 12.0     # min navigable isthmus width (also >= 2*agent_radius_m + 1.0)
+force_bridges    = false    # see decision D9
 erosion.thermal_iters      = 60      # T = 4/N, c = 0.5   [Olsen 2004]
 erosion.streampower_steps  = 30      # m = 0.45, n = 1    [Braun & Willett 2013]
 erosion.droplets           = 0       # off by default; expensive, marginal
@@ -2246,25 +2819,46 @@ class_multiplier      = registry[class].veg_density
 
 **Interior generation**
 
+All clearance numbers below are **derived**, not authored, from `agent_radius_m` + `grid_m` by `interior_spec::derive_clearances()` (§6b.1a). The two columns are the shipped presets.
+
 ```
-grid_m                 = 0.5
-wall_thickness_m       = 0.25        # rounds up to ONE cell -- walls occupy cells
+grid_m                 = 0.5         # indoor AND outdoor -- one lattice
+wall_thickness_render_m= 0.25        # MESH thickness
+wall_cells             = 1           # RASTER thickness -- walls occupy cells
 storey_height_m        = 3.2
-door_clear_width_m     = 0.90        # IBC 32 in
-corridor_min_width_m   = 1.12        # IBC 44 in
+
+agent_radius_m         = 0.35        # THE authored number   | 3.00 (vehicle preset)
+  IBC_door_m           = 0.813       # 32 in clear           | 0.813
+  IBC_corridor_m       = 1.118       # 44 in                 | 1.118
+  free_opening_m       = 0.90        # max(IBC, 2r+0.20)     | 6.20
+  corridor_m           = 1.118       # max(IBC, 2r+0.40)     | 6.40
+  opening_cells        = 2  (1.00 m) # ceil(0.90/0.5)        | 13 (6.50 m)
+  corridor_cells       = 3  (1.50 m) # ceil(1.118/0.5)       | 13 (6.50 m)
+  gate.min_path_width_cells = 2      # == opening_cells      | 13
+
 stair_tread_m          = 0.28        # IBC 11 in
 stair_riser_m          = 0.18        # IBC 7 in
-stair_width_m          = 1.12
+stair_width_m          = corridor_m  # 1.118 | 6.40
 core_min_m             = [5.0, 2.5]  # U-stair; 5.5 x 1.5 for a straight run
 elevator_cost_s        = 30.0
 stair_cost_up_s        = 14.0
 stair_cost_down_s      = 9.0
 gate.repair_attempts   = 3
 gate.resample_attempts = 8
-gate.min_path_width_cells = 3
 gate.upper_floor_unsupported_max = 0.0
 props.poisson_min_m    = 0.8
 props.circulation_keepout = true     # computed BEFORE props; hard
+```
+
+**Outdoor gate**
+
+```
+policy              = "single-island"   # | "forced-bridges" | "amphibious"  (decision D9)
+inflate_m           = 6.0               # matches planner.far_pair_in_free_space
+connectivity        = 4                 # matches the planner's neighbourhood
+min_largest_fraction = 0.98             # single-island pass condition
+repair_attempts     = 3
+resample_attempts   = 8
 ```
 
 **Export**
@@ -2272,44 +2866,117 @@ props.circulation_keepout = true     # computed BEFORE props; hard
 ```
 rows, cols        = 513, 513
 extent_m          = 256.0            # so cell_w == 256.0/512 == 0.5 EXACTLY
+cell_w            = 0.5              # WRITTEN EXPLICITLY: the C++ material_build takes
+                                     # cell_w directly; MaterialGrid re-derives it. Both
+                                     # must be satisfied, and the loader asserts they agree.
 cell_w_formula    = "(max_x - min_x) / (cols - 1)"
 row_order         = "min_y_first"
 scale             = 0.05             # normalized-frame scale, matches meta["scale"]
-sigma_recommended = 1.0              # the CONSUMER applies it; we ship risk_RAW
+agent_radius_m    = 0.35             # recorded, so a bundle knows who it was built for
+
+# sigma is a LENGTH here and a CELL COUNT at the consumer. See section 7.1a.
+sigma_m                     = 0.5    # scene_kind indoor|mixed  (the source BEV frame)
+                            = 2.0    # scene_kind outdoor       (~= the tuned 2.1 m)
+sigma_recommended_cells     = sigma_m / cell_w      # 1.0 indoor|mixed, 4.0 outdoor
+blur_bleed_radius_m         = 4 * sigma_recommended_cells * cell_w   # 2.0 | 8.0
+lam_soft_scale_hint         = sigma_m / 2.1         # 0.24 | 0.95  (a RATIO, not a constant)
+gate_horizon_recommended_cells = 50                 # == round(25.0 m / cell_w)
+gate_hard_margin_max_viable_m  = 0.5                # phi_m at a 2-cell doorway centre
+
 ontology          = "merged_default"
+max_boundary_contrast = 0.60
 storeys           = 1                # see decision D1
 endpoint_select   = "far_pair_in_free_space"
 endpoint_inflate_m = 6.0
-brush_feather_m   = 0.0              # consumer already blurs at sigma=1.0
+brush_feather_m   = 0.0              # the consumer blurs; extra feather is additive
 ```
 
-**Consumer constants — recorded here for reference only, deliberately NOT written to the manifest**
+**Consumer constants — recorded in the manifest ONLY under `consumer_frame_ref`, as provenance, never read back**
 
-Verified in `grl_snam/material.py:193-198` on 2026-08-27. Note these differ from the circulated brief, which was already stale:
+Verified in `/home/joe/src/cvc/GRL-SNAM/grl_snam/material.py` (`MaterialParams`, `GateParams`) and `inc/cvc/nav/material.h` (`material_config`, `gate_params`) on 2026-08-27. Note these differ from the circulated brief, which was already stale — **and note the two twins differ from each other in two places** (§15.1 R17):
 
 ```
-lam_soft      = 0.5    (brief said 1.5 -- code comment: "1.5 measurably LAUNCHES a vehicle")
-lam_hard      = 1.0    (brief said 2.0)
-k_sharp       = 1.25   (brief said 5.0; source metre values reachable via k_sharp=5, d_hat=3)
-d_hat_sdf_m   = 12.0   (brief said 3.0; re-widened to the source's CELL-relative reach)
-risk_weight   = 10.0   (A* surcharge per unit risk, grid-step units)
-hard_penalty  = 25.0   (finite: bias, not forbid -- physical blocking is occupancy's job)
-gate: primitive_count=16, horizon_m=25.0, hard_margin_m=None (== 2 cells),
-      improvement_margin=0.05, material_trigger=0.45, progress_slack_cells=0.5
+                       Python (MaterialParams)      C++ (material_config)
+lam_soft             = 0.5                          0.5f
+lam_hard             = 1.0                          1.0f
+k_sharp              = 1.25   (1/m)                 1.25f
+d_hat (material)     = 12.0   m  (d_hat_sdf_m)      12.0f  (d_hat_m)
+sigma                = 1.0    CELLS                 1.0    CELLS
+risk_weight          = 10.0   (A* surcharge/unit risk)     -- (planner-side)
+hard_penalty         = 25.0   (finite: bias, not forbid)   -- (planner-side)
+
+gate.primitive_count = 16                           16
+gate.horizon         = horizon_m 25.0 m  <-- DIVERGENT -->  horizon_cells 12
+gate.hard_margin_m   = None (=> 2*cell_w) <-- DIVERGENT --> 1.0 m fixed
+gate.improvement_margin  = 0.05                     0.05
+gate.material_trigger    = 0.45                     0.45
+gate.progress_slack_cells= 0.5                      0.5
+
+# Frame these were tuned in (GateParams / MaterialParams docstrings, verbatim):
+#   source BEV        0.5 m/cell, sigma 1 cell  => 0.5 m blur
+#   sim story grid   ~2.1 m/cell, sigma 1 cell  => 2.1 m blur   <-- lam_soft=0.5 validated HERE
+#   "lam_soft = 1.5 measurably LAUNCHES a vehicle off-world"
 ```
 
-**This is exactly why the manifest carries grid facts, provenance hashes and raw statistics only.** Force constants are consumer tuning; they move, and a bundle that records them ships stale.
+**The rule, restated.** Grid facts and derived recommendations go in `manifest.frame` and *are* read by the loader. The block above goes in `manifest.consumer_frame_ref`, is labelled provenance, and is **asserted-unread** by a test over `world_bundle.py`. Force constants move; a bundle that treats them as configuration ships stale. A bundle that records them as forensics can be diagnosed a year later — which, given the twins already disagree, is not a hypothetical need.
+
+### 16.4 The biome table
+
+Each `island_spec` names one biome (§4.3a.5). A biome overrides four things; everything it does not override falls through to the global defaults in §16.3.
+
+| | `alpine_massif` | `forested_rounded` | `braided_delta` | `barren_islet` |
+|---|---|---|---|---|
+| shipped on | Anvil | Kestrel | Tern | Shoal (`large`) |
+| `freq_scale` | 1.35 (rough, fractured) | 0.85 (smooth, rounded) | 0.55 (very smooth) | 1.10 |
+| `peak_sigma_frac` | 0.22 (sharp) | 0.34 (broad) | 0.42 (a swell) | 0.30 |
+| **Layer-0 overrides** | `h > 980 → snow` (default 1180); `slope > 36 → cliff_rock` (default 42); `slope > 24 → scree` | default table | `twi > 5.5 && slope < 6 → mud` (default 7.5); `abs(h) < 6.0 → sand` (default 3.0) | `h > 40 → bare_rock`; no `snow` rule |
+| **species overrides** | conifer `density_per_ha` 260, `altitude_band_m` [40, 900]; no broadleaf | broadleaf 220, conifer 140, fern 420 | `grass_tuft` 3400, fern 180; no conifer | `boulder` 90; all vegetation ×0.15 |
+| **marking grammars** | `trail_network` only | `river_network` + `trail_network` | `river_network` + `mudflat_region` + `trail_network` | none |
+| **building grammars** | none (or 1 × `bunker`) | 1 × `office_3storey` + 2 × `warehouse` | 1 × `warehouse` (the research station) | 1 × `warehouse` (the seam demo) |
+| expected `hard_fraction` | high (cliff) ≈ 0.14 | low ≈ 0.04 | very low ≈ 0.02 | medium ≈ 0.08 |
+| expected `risk_mean` | ≈ 0.31 (scree) | ≈ 0.22 | ≈ 0.38 (mud) | ≈ 0.19 |
+
+The last two rows are what makes the biome table worth having: **four biomes produce four visibly different material distributions**, so a corpus sampled across islands has a spread rather than one distribution wearing four hats. The Lab's class-fraction histogram (§9.4) plots the current window against both the RELLIS reference *and* the expected biome profile, so an island that has drifted off its own character is visible before 200 worlds are generated from it.
 
 ---
 
-### Closing: the four claims this design stands on
+### Closing: the five claims this design stands on
 
 1. **The bottleneck is per-frame CPU animation, so the ladder is animation → generation → update → draw calls → triangles.** The wind becomes a vertex-shader function of world position and CPU sway is capped at 24 plants at *every* world size — which means a 480 000-plant world does strictly less per-frame vertex work than the 32-tree demo it succeeds.
 
 2. **The archetype library is the design, not an optimization.** "Hundreds of thousands of plants" is only tractable as "hundreds of thousands of instances of ~64 archetypes". Once that is accepted, merging, impostors, memory and derivation caching all become easy simultaneously.
 
-3. **The class map is a function, not an image, and `risk_raw`/`hard` are a derived, versioned, file-based projection of it.** One `raster(grid_spec)` call emits every plane from one grid, so the material-vs-occupancy-vs-heightfield misalignment that would silently poison every training run is structurally unrepresentable — and because we export only the two raw contract inputs across a file boundary, the concurrent material work can change its blur, its EDT, its gradients or its signature without invalidating a single generated bundle.
+3. **The class map is a function, not an image, and `risk_raw`/`hard` are a derived, versioned, file-based projection of it.** One `raster(grid_spec)` call emits every plane from one grid, so the material-vs-occupancy-vs-heightfield misalignment that would silently poison every training run is structurally unrepresentable — and because we export only the two raw contract inputs across a file boundary, `cvc::nav::material` can change its blur, its EDT, its gradients or its signature without invalidating a single generated bundle. `cvc::world` does not link `cvc::nav`; only the Lab's *preview* calls it, read-only, so that "what the trainer will see" is the trainer's actual arithmetic.
 
-4. **Indoors, navigability is a gate that fails loudly, not a cost term that fails quietly.** Merrell's soft accessibility term fails 1-in-5 at three storeys; ProcTHOR's 10 000 navigable houses used a hard gate. So do we — repair, then resample, then refuse to write the bundle and record the seed.
+4. **Navigability is a gate that fails loudly, not a cost term that fails quietly — indoors *and* outdoors.** Merrell's soft accessibility term fails 1-in-5 at three storeys; ProcTHOR's 10 000 navigable houses used a hard gate. So do we — repair, then resample, then refuse to write the bundle and record the seed. And because an archipelago's islands are disconnected by construction, the same discipline applies to the outdoor window: a channel is as unsolvable as a sealed room.
 
-Everything else is staging discipline: three real libcvc modules with literature-validated oracles, tests that actually run in CI, thirteen PRs, and **four** pre-existing lines edited.
+5. **Every number that has to agree with another number is derived from it, not typed next to it.** The indoor clearances come from one `agent_radius_m` (so a gate that no interior can pass is unrepresentable), the blur is recorded as a length and converted to cells at the consumer's resolution (so choosing a cell size cannot silently retune somebody else's validated constants), and the hard classes carry ρ = 0 (so the `hard` plane is the *only* place hardness is expressed). Revision 1 got each of those three wrong in the same way: it wrote down two true numbers that could not both be true at once.
+
+Everything else is staging discipline: three real libcvc modules with literature-validated oracles, tests that actually run in CI, **twelve** PRs whose first one produces a picture, and **four** pre-existing lines edited (six if the Lab is packaged and deployed).
+
+---
+
+## 17. Revision history
+
+### Revision 2 — 2026-08-27, rebased onto `8b6f426`
+
+Revision 1 was written against `10b7904` and reviewed adversarially. This pass keeps its research, structure, tables, code sketches, citations and numbers, and repairs eight defects. Every claim below was re-verified against the tree at `8b6f426`, not against revision 1's description of it.
+
+| # | defect | what changed |
+|---|---|---|
+| **D1** | "Multi-island archipelago" was asserted in §0 and never specified — one radial falloff, one centre, one radius. | New **§4.3a** specifies seeding (authored + a radius-aware Mitchell/Poisson sampler through the hashed RNG), the `island_spec` / `archipelago_spec` records, the **smooth-max** combination operator (with the argument for why *sum* double-counts and *max* creases), `argmax` biome attribution as a partition, sea level / `channel_min_m` / `bridge_min_m`, and per-island biome divergence. §4.4's height formula now folds smooth-max. New **§16.4** ships four biomes with their Layer-0, species, grammar and expected-statistic overrides. New **§7.8** adds the **mandatory outdoor connectivity gate** (`validate_outdoor`, 4-connectivity, 6.0 m inflation matching `far_pair_in_free_space`, repair → resample → loud reject). The traversal policy is a user decision — **D9** in §15.3 with three concrete options; recommendation: `single-island` for v1, `forced-bridges` as an authored knob, `amphibious` deferred because it changes exported `hard` bytes. |
+| **D2** | Three unreconciled clearance numbers: gate 1.5 m, IBC door 0.90 m (1.8 cells), IBC corridor 1.12 m (2.24 cells). No generated interior could pass the design's own gate. | New **§6b.1a** derives every clearance from one authored `agent_radius_m` plus the 0.5 m lattice, snapping up at raster time. `gate.min_path_width_cells` is now **derived** (= `opening_cells`), so the gate can never demand more than a door provides. Arithmetic is shown at both ends of the range (0.35 m person → 2/3 cells; 3.0 m vehicle → 13/13 cells) with a worked raster of a corridor and door passing the gate. The consumer-side consequence — `phi_m = 0.50 m` at a doorway, below `hard_margin_m = 1.0 m`, so the witness gate never certifies a ray through a door — is stated as documented behaviour rather than left to be discovered. Propagated to §6b.3 step 4, §6b.2 step 5, §16.3 and the L6 PR row. |
+| **D3** | Hard classes carried ρ = 1.00 *and* the `hard` flag — double-counting against the A\* surcharge and the `φ_m` barrier, and bleeding through the consumer's blur into the corridors the agent must traverse. | New **§7.2a**: **every `hard` class carries ρ = 0.00**, with the double-count argument and the blur arithmetic (a 3-cell corridor reads `r~ ≈ 0.62` at σ = 4 cells under the old scheme, versus 0.06 now). Blur bleed is addressed generally: bounded boundary contrast (0.60, validator warns), a published-and-drawn `blur_bleed_radius_m`, `scene_kind`-selected σ, and an explicit refusal to pre-blur `risk_raw`. §16.2's table, its notes, the §9.4 contract preview and the manifest statistics all updated (max `risk_raw` is now 0.90). New risk **R18**. |
+| **D4** | 0.5 m/cell chosen without confronting that σ is in **cells**, so the export resolution silently retunes `lam_soft`. | New **§7.1a** quotes the consumer's own docstrings for its assumed frame (source BEV 0.5 m/cell; sim story grid ≈ 2.1 m/cell; `lam_soft = 0.5` validated there), shows that σ = 1 cell at 0.5 m/cell makes gradients **4.2× hotter** — an effective `lam_soft ≈ 2.1`, past the 1.5 the consumer's comment says *"LAUNCHES a vehicle off-world"* — and fixes it by recording σ as a **length**. The manifest gains a `frame` block (`sigma_m`, `sigma_recommended_cells`, `blur_bleed_radius_m`, `lam_soft_scale_hint`, `gate_horizon_recommended_cells`, `gate_hard_margin_max_viable_m`, `agent_radius_m`) and a quarantined, **asserted-unread** `consumer_frame_ref` provenance block. Three reasons for 0.5 m are given, including that it is the **only** cell size at which the C++ twin's fixed 1.0 m margin and the Python twin's `2·cell_w` agree. Recorded as user decision **D10** with options A/B/C; recommendation A. §7.1 now distinguishes the **C++ arity** (`rows, cols, cell_w, scale, sigma`) from the **Python binding arity**, which revision 1 conflated, and the manifest carries what *both* entry points need. New risk **R17** names the two live twin divergences (`horizon_cells` 12 vs `horizon_m` 25; `hard_margin_m` 1.0 vs `2·cell_w`). |
+| **D5** | Factual errors and stale line numbers. | **18 → 16** `add_test(NAME cvcgl_*)` (all 16 line numbers listed; `ci.yml`'s own comments noted as stale in both directions). **`bunny_shadow` IS packaged** — it is in `_cvcgl_example_bins`, so D6's premise was backwards and the recommendation flips to "package it". `_cvcgl_example_bins` is at line **82**, not 69; `examples/CMakeLists.txt` EOF is **97**, not 84; `add_library(cvc` is at **841**, not 827; the tests drift guard is at **1281**, not 1270; `cvc_discover_tests` is at **1143**, not 1133; the ctest drift guard is `ci.yml:334-342`. **"Append at EOF cannot textually conflict" is corrected** — it is the canonical conflict; the accurate narrower claim is stated and the appends are sequenced. The **emsdk diagnosis is withdrawn**: `deploy-pages.yml:34` runs on catx-03, which holds `/opt/cvc-wasm/emsdk`; revision 1 checked this box. `field().shape` → **`field().field.shape`** (a `MaterialField` object has no `.shape`). `meta` values corrected from metres to the **normalized** frame (`rr` 6.0 → **0.15**, `d_hat` 12.0 → **0.35**, `vmax` 8.0 → **0.9**, `dt` 0.1 → **0.06**, `nsub` 1 → **2**) — revision 1 had copied `MaterialParams.d_hat_sdf_m` into `meta["d_hat"]`, which is a different quantity. |
+| **D6** | PR 1 was not demoable, against a fixed decision that the deliverable is a design doc **and a buildable first PR** for a *visual* laboratory. | New **§13.1** restructures the head of the plan: `L0a`/`L0b` merge into a single **`L0`**, and the library gains an **`svg_emitter`** + `cvc-lsys svg` — pure text, no GL, no VTK, no new dependency, openable from the PR diff, and fully inside the coverage denominator. `L1` gains `cvc-worldgen build --preview` writing class/risk/hard PNGs through `cvc::image`. The three constraints that make an ImGui-first PR 1 impossible (aggregate coverage gate, examples not built in PR CI, terrain needed under any pixel) are stated rather than implied, and the correct fallback split is named if review size binds. |
+| **D7** | Portal/Cell/Link records were emitted with no consumer and no precision. | **§6b.6** is rewritten as a **seam specification** for the separate visibility design: frame and units, portal quad construction with **normative winding** (CCW viewed from cell `a`), cell `footprint` polygons alongside AABBs (an L-shaped room's AABB over-claims by up to 60 %), **`opaque` added as a second boolean independent of `traversable`** (revision 1 forced the consumer to infer opacity from a string it does not own), `path_id`-derived **id stability** so an incremental PVS can cache, a `cvcworld.cells/1` schema version, and an explicit list of what we deliberately do **not** emit. §1.3's non-goal updated. §6b.4's JSON updated. |
+| **D8** | The collision map assumed #229/#230 were open and material was concurrent. | **§14** rewritten. #229 (`a33851f`), #231 (`e97d06c`) and #230 (`8b6f426`) are merged; only **#223** and **#200** are open (`gh pr list`). The shared-file cost is **re-derived against the current files** and is **four**, or **six** if the Lab is packaged and deployed — the extra two being `_cvcgl_example_bins` (line 82) and, newly found, **`deploy-pages.yml:38`'s `DEMOS:` list**, without which a wasm Lab builds and is never deployed. New **§14.4** re-decides the "never call `cvc::nav::material`" rule now that the header is merged and stable: **both, at different layers** — the bundle contract stays file-based and `cvc::world` is link-tested not to reference `cvc::nav`, while `lsystem_lab`'s *preview* calls `material_build` / `witness_gate` read-only, because a preview that is not the consumer's arithmetic is a lie and the alternative is a second copy of a function whose entire specification is bit-identity. `cvcGL` already PUBLIC-links `cvc::cvc`, so this adds no dependency edge. |
+
+**Also changed:** §0 items 2, 5, 7, 9, 10 and a new item 11; the headline table gains export-lattice and window-policy rows; G5b (outdoor solvability) added and G8 rewritten; §12.3 gains four new contract tests (both-arities bit-identity, `consumer_frame_ref`-unread, hard-class ρ, and the corrected `field().field.shape`); §12.4 gains the exact lcov allowlist/exclusion and the Linux-only scope; §12.5's table and its preamble rewritten with the precise `CVC_BUILD_EXAMPLES` story (including that `nav_common_test` has still never executed *anywhere*, and that whether it would pass is **unknown**); risks R5, R11 and R16 corrected, R17/R18/R19 added; decisions D2, D3, D5, D6, D8 revised and D9/D10 added; §10.1's CLI and §9.4's World and Surface tabs updated; §16.3's terrain, interior and export blocks rewritten and an outdoor-gate block added; §16.4 (biome table) added.
+
+**Deliberately unchanged:** the literature basis and every citation, the L-system engine design and its `gen_nested` machinery, the hashed-RNG determinism discipline and the salt audit, the LOD ladder and its measured justification, the `fixed_mesh` capacity trick, the GPU-sway `tcoordMC` trap, the Laboratory's four-tier loop, the interior generation pipeline and its Merrell/ProcTHOR grounding, the performance budgets, and the file-format decoupling that is the reason a generated corpus outlives any consumer signature change.
+
+### Revision 1 — 2026-08-27, baselined on `10b7904`
+
+Initial design. Superseded in the eight areas above; retained everywhere else.
