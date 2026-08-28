@@ -686,11 +686,23 @@ if(CVC_ENABLE_IMAGEMAGICK)
   # silently disabled on Windows. find_path/find_library DO honor
   # CMAKE_PREFIX_PATH, so search the prefix directly for the staged
   # headers and the canonical import-lib aliases the bundle provides.
-  if(WIN32 AND NOT ImageMagick_FOUND)
+  if(NOT ImageMagick_FOUND)
+    # The stock FindImageMagick module misses several common bundle layouts:
+    #   * Windows: no .pc file / registry entry (cvcpkg-innoextract prefix)
+    #   * autotools static builds: libMagick++-7.Q16HDRI.a (the -7.Q16HDRI
+    #     suffix), which is the name the ImageMagick 7 autotools build uses
+    #     for both linux and wasm cross-compiles.
+    # Both cases: find_path/find_library DO honor CMAKE_PREFIX_PATH /
+    # CMAKE_FIND_ROOT_PATH, so probe the prefix directly for staged headers
+    # and every canonical libMagick++ / libMagickCore name we know about.
     find_path(ImageMagick_INCLUDE_DIR NAMES Magick++.h
               PATH_SUFFIXES ImageMagick ImageMagick-7)
-    find_library(ImageMagick_Magickxx_LIBRARY NAMES Magick++ CORE_RL_Magick++_)
-    find_library(ImageMagick_MagickCore_LIBRARY NAMES MagickCore CORE_RL_MagickCore_)
+    find_library(ImageMagick_Magickxx_LIBRARY
+                 NAMES Magick++ Magick++-7 Magick++-7.Q16HDRI
+                       Magick++-Q16HDRI Magick++-6.Q16HDRI CORE_RL_Magick++_)
+    find_library(ImageMagick_MagickCore_LIBRARY
+                 NAMES MagickCore MagickCore-7 MagickCore-7.Q16HDRI
+                       MagickCore-Q16HDRI MagickCore-6.Q16HDRI CORE_RL_MagickCore_)
     if(ImageMagick_INCLUDE_DIR AND ImageMagick_Magickxx_LIBRARY
        AND ImageMagick_MagickCore_LIBRARY)
       set(ImageMagick_FOUND TRUE)
