@@ -360,10 +360,62 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  // ── MATERIAL GATE (optional): frame-wise witness per agent vs its own goal ──
+  // The gate multiplies lam_soft ONLY; lam_hard is always on. Evaluated in
+  // CONTINUOUS CELL coords (world computed in f32 like the Python n2w, then
+  // widened) against the static gate surface (material hard | truth).
+  if (mat_on_) {
+    if (mat_cfg_.gate_enabled) {
+      std::vector<double> pos_rc(static_cast<std::size_t>(2) * n_),
+          goal_rc(static_cast<std::size_t>(2) * n_);
+      const double sx = (cols_ - 1) / (cfg_.max_x - cfg_.min_x);
+      const double sy = (rows_ - 1) / (cfg_.max_y - cfg_.min_y);
+      for (int i = 0; i < n_; ++i) {
+        const float wx = o_[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
+        const float wy =
+            o_[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
+        const float gwx =
+            goal_[2 * i] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cx);
+        const float gwy =
+            goal_[2 * i + 1] / static_cast<float>(cfg_.scale) + static_cast<float>(cfg_.cy);
+        pos_rc[2 * i] = (static_cast<double>(wy) - cfg_.min_y) * sy;
+        pos_rc[2 * i + 1] = (static_cast<double>(wx) - cfg_.min_x) * sx;
+        goal_rc[2 * i] = (static_cast<double>(gwy) - cfg_.min_y) * sy;
+        goal_rc[2 * i + 1] = (static_cast<double>(gwx) - cfg_.min_x) * sx;
+      }
+      gate_params gp = mat_cfg_.gate;
+      gp.hard_margin_m = mat_hard_margin_m_;
+      std::vector<double> nom(n_), best(n_);
+      std::vector<std::int32_t> cnt(n_);
+      // channel 0 of the [1,6,H,W] stack IS the risk plane (offset 0)
+      witness_gate_batch(mat_stack_.data(), mat_gate_hard_.data(), mat_clear_m_.data(), rows_,
+                         cols_, pos_rc.data(), goal_rc.data(), n_, gp, mat_gate_active_.data(),
+                         nom.data(), best.data(), cnt.data(), num_threads);
+    } else {
+      std::fill(mat_gate_active_.begin(), mat_gate_active_.end(), std::uint8_t(1));
+    }
+    for (int i = 0; i < n_; ++i) {
+      mat_lam_soft_[i] = mat_gate_active_[i] ? mat_cfg_.lam_soft : 0.0f;
+      mat_lam_hard_[i] = mat_cfg_.lam_hard;
+    }
+  }
+
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   std::vector<float> minclr(n_);
-  drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-             cfg_.veh, minclr.data(), num_threads);
+  if (mat_on_) {
+    const material_stack ms = material_view();
+    material_drive md;
+    md.stack = &ms;
+    md.lam_soft = mat_lam_soft_.data();
+    md.lam_hard = mat_lam_hard_.data();
+    md.k_sharp = mat_cfg_.k_sharp;
+    md.d_hat_m = mat_cfg_.d_hat_m;
+    drive_step_material(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_,
+                        map_id_.data(), cfg_.veh, md, minclr.data(), num_threads);
+  } else {
+    drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
+               cfg_.veh, minclr.data(), num_threads);
+  }
 
   // ── METRICS + REACHED/PARK (single-goal) ──
   for (int i = 0; i < n_; ++i) {
@@ -375,6 +427,50 @@ void sim_world::step(int num_threads) {
       parked_[i] = 1;
   }
   ++gstep_;
+}
+
+material_stack sim_world::material_view() const {
+  material_stack m;
+  m.data = mat_stack_.data();
+  m.M = 1;
+  m.H = rows_;
+  m.W = cols_;
+  m.mnx = cfg_.min_x;
+  m.mny = cfg_.min_y;
+  m.mxx = cfg_.max_x;
+  m.mxy = cfg_.max_y;
+  m.cx = cfg_.cx;
+  m.cy = cfg_.cy;
+  m.S = cfg_.scale;
+  return m;
+}
+
+void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
+                             const material_config &mc) {
+  if (!risk_raw || !hard) {
+    mat_on_ = false;
+    return;
+  }
+  mat_cfg_ = mc;
+  const double cell_w = (cfg_.max_x - cfg_.min_x) / (cols_ - 1);
+  const material_planes mp =
+      material_build(risk_raw, hard, rows_, cols_, cell_w, cfg_.scale, mc.sigma);
+  mat_stack_ = mp.stacked();
+  // Gate feasibility surface: material hard | TRUTH occupancy (the oracle
+  // setting), and its metres clearance plane — one EDT, at set time.
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  mat_gate_hard_.assign(hw, 0);
+  for (std::size_t i = 0; i < hw; ++i)
+    mat_gate_hard_[i] = (hard[i] || truth_[i]) ? 1 : 0;
+  const std::vector<double> d2 = edt2_squared(mat_gate_hard_.data(), rows_, cols_);
+  mat_clear_m_.resize(hw);
+  for (std::size_t i = 0; i < hw; ++i)
+    mat_clear_m_[i] = static_cast<float>(std::sqrt(d2[i]) * cell_w);
+  mat_hard_margin_m_ = mc.gate.hard_margin_m > 0.0 ? mc.gate.hard_margin_m : 2.0 * cell_w;
+  mat_lam_soft_.assign(n_, 0.0f);
+  mat_lam_hard_.assign(n_, 0.0f);
+  mat_gate_active_.assign(n_, 0);
+  mat_on_ = true;
 }
 
 void sim_world::snapshot(float *pos_world, float *heading, float *speed, int *mode,

@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/material.h>
 #include <vector>
 
 namespace cvc {
@@ -170,6 +171,21 @@ public:
     cfg_.sep_gain = gain;
   }
 
+  // ── material-aware navigation (cvc/nav/material.h) ────────────────────────
+  // COPIES the rasters, derives the material planes (material_build), and
+  // computes the witness gate's feasibility surface as material.hard | TRUTH
+  // occupancy (the oracle setting — matching the Python Swarm, which has no
+  // planner; the fog-of-war FogScenario gates against belief instead). Every
+  // subsequent step() evaluates the frame-wise gate per agent against its own
+  // goal and drives with the material forces. Default off = byte-unchanged
+  // runs (the sep_radius/sep_gain pattern).
+  void set_material(const float *risk_raw, const std::uint8_t *hard, const material_config &mc);
+  void clear_material() { mat_on_ = false; }
+  bool has_material() const { return mat_on_; }
+  // Last tick's per-agent gate decisions (renderer/telemetry hook); valid only
+  // while material is set.
+  const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }
+
 private:
   config cfg_;
   int n_ = 0, rows_ = 0, cols_ = 0, M_ = 1;
@@ -199,7 +215,18 @@ private:
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<std::uint8_t> we_valid_, tracking_, parked_, reached_, active_;
 
+  // material state (set_material; inert while mat_on_ == false)
+  bool mat_on_ = false;
+  material_config mat_cfg_;
+  std::vector<float> mat_stack_;                   // [1,6,H,W] derived planes
+  std::vector<std::uint8_t> mat_gate_hard_;        // hard | truth
+  std::vector<float> mat_clear_m_;                 // metres EDT of mat_gate_hard_
+  std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
+  std::vector<std::uint8_t> mat_gate_active_;      // [n]
+  double mat_hard_margin_m_ = 0.0;
+
   field_stack field_view() const;
+  material_stack material_view() const;
   void rebuild_all_fields(); // build every plane's SDF from its occ
   void rebuild_plane(int m); // build plane m's SDF from occ_ plane m
 };

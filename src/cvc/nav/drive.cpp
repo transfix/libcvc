@@ -33,6 +33,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/material.h>
 #include <vector>
 
 namespace cvc {
@@ -139,9 +140,17 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
   });
 }
 
-void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
-                     const float *al, const float *be, const float *ga, int n, const int *map_id,
-                     const veh_params &v, float *minclr_out, int num_threads) {
+namespace {
+
+// The rollout body, shared by the plain and material entry points. `mat` is
+// nullptr for the plain path — the guarded material blocks then never execute
+// and the float op sequence is EXACTLY the pre-material code (byte-identical;
+// asserted by NavMaterial.NullMaterialIsByteIdentical). With material, the
+// force joins the F-sum AND the steering bias — see material.h for why both.
+void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const float *goal,
+                  const float *al, const float *be, const float *ga, int n, const int *map_id,
+                  const veh_params &v, const material_drive *mat, float *minclr_out,
+                  int num_threads) {
   const float hdt = v.dt / static_cast<float>(v.nsub);
   const float tan_dmax = std::tan(v.delta_max);
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
@@ -168,8 +177,30 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
       const float Fbar_y = -(ali * ipc) * ny;
       const float Fgoal_x = -bei * (ox - gx);
       const float Fgoal_y = -bei * (oy - gy);
-      const float Fx = Fbar_x + Fgoal_x;
-      const float Fy = Fbar_y + Fgoal_y;
+      float Fx = Fbar_x + Fgoal_x;
+      float Fy = Fbar_y + Fgoal_y;
+
+      // Material forces (torch reference: sdf_nav._material_force). Sampled at
+      // the current pose AFTER the geometry sample, matching the Python order.
+      float Fmat_x = 0.0f, Fmat_y = 0.0f;
+      if (mat) {
+        const int mplane = (map_id && mat->stack->M > 1) ? map_id[i] : 0;
+        float mrisk, mphi, mgrx, mgry, mgpx, mgpy;
+        detail::material_sample_point(*mat->stack, mplane, ox, oy, mrisk, mphi, mgrx, mgry, mgpx,
+                                      mgpy);
+        (void)mrisk;
+        // db = -sigmoid(k * (d_hat_m - phi_m)); F_hard = ((-lam)*db)*grad.
+        const float db = -(1.0f / (1.0f + std::exp(-(mat->k_sharp * (mat->d_hat_m - mphi)))));
+        const float ls = mat->lam_soft[i], lh = mat->lam_hard[i];
+        const float fsx = -ls * mgrx;
+        const float fsy = -ls * mgry;
+        const float fhx = (-lh * db) * mgpx;
+        const float fhy = (-lh * db) * mgpy;
+        Fmat_x = fsx + fhx;
+        Fmat_y = fsy + fhy;
+        Fx = Fx + Fmat_x;
+        Fy = Fy + Fmat_y;
+      }
 
       const float ch = std::cos(thi), sh = std::sin(thi);
       // head = (ch, sh); left = (-sh, ch)
@@ -195,7 +226,14 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
       const float ipc_rep = ipc < 0.0f ? ipc : 0.0f; // clamp(max=0)
       const float Frep_x = -(ali * ipc_rep) * nx;
       const float Frep_y = -(ali * ipc_rep) * ny;
-      delta = delta + k_steer * std::tanh(Frep_x * (-sh) + Frep_y * ch); // F_rep . left
+      if (mat) {
+        // ((F_rep + F_mat) . left) — material steers, not only brakes.
+        const float sx = Frep_x + Fmat_x;
+        const float sy = Frep_y + Fmat_y;
+        delta = delta + k_steer * std::tanh(sx * (-sh) + sy * ch);
+      } else {
+        delta = delta + k_steer * std::tanh(Frep_x * (-sh) + Frep_y * ch); // F_rep . left
+      }
       delta = std::min(std::max(delta, -dmax), dmax);
 
       float kappa = std::fabs(std::tan(delta)) / L;
@@ -260,6 +298,22 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
     sp[i] = spi;
     minclr_out[i] = minclr;
   });
+}
+
+} // namespace
+
+void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
+                     const float *al, const float *be, const float *ga, int n, const int *map_id,
+                     const veh_params &v, float *minclr_out, int num_threads) {
+  rollout_impl(f, o, th, sp, goal, al, be, ga, n, map_id, v, nullptr, minclr_out, num_threads);
+}
+
+void bicycle_rollout_material(const field_stack &f, float *o, float *th, float *sp,
+                              const float *goal, const float *al, const float *be, const float *ga,
+                              int n, const int *map_id, const veh_params &v,
+                              const material_drive &mat, float *minclr_out, int num_threads) {
+  rollout_impl(f, o, th, sp, goal, al, be, ga, n, map_id, v, mat.stack ? &mat : nullptr, minclr_out,
+               num_threads);
 }
 
 void carrot_step(const float *o, const float *goal, const float *th, float *sp, const float *phi,
@@ -368,6 +422,23 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
   }
   bicycle_rollout(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, minclr_out,
                   num_threads);
+}
+
+void drive_step_material(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                         const coef_mlp &model, int n, const int *map_id, const veh_params &v,
+                         const material_drive &mat, float *minclr_out, int num_threads) {
+  std::vector<float> feat(static_cast<std::size_t>(n) * 5);
+  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads);
+  std::vector<float> coef(static_cast<std::size_t>(n) * 3);
+  model.forward(feat.data(), n, coef.data(), num_threads);
+  std::vector<float> al(n), be(n), ga(n);
+  for (int i = 0; i < n; ++i) {
+    al[i] = coef[3 * i + 0];
+    be[i] = coef[3 * i + 1];
+    ga[i] = coef[3 * i + 2];
+  }
+  bicycle_rollout_material(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, mat,
+                           minclr_out, num_threads);
 }
 
 } // namespace nav
