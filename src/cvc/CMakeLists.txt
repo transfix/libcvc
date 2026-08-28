@@ -171,6 +171,7 @@ set(SOURCE_FILES
   nav/spatial.cpp
   nav/drive.cpp
   nav/material.cpp
+  nav/coef_energy_net.cpp
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
@@ -186,9 +187,11 @@ set(SOURCE_FILES
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
