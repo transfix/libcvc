@@ -176,6 +176,7 @@ set(SOURCE_FILES
   nav/coef_energy_net_io.cpp
   nav/material_rollout.cpp
   nav/material_train.cpp
+  nav/geom_rollout.cpp
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
@@ -191,10 +192,10 @@ set(SOURCE_FILES
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp
+  set_source_files_properties(nav/material.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 

@@ -23,25 +23,23 @@
 //
 // Loss (stage 2, w_selectivity = 0):
 //   L = 0.3*w_traj*L_traj + 0.3*w_vel*L_vel + w_fric*L_fric + w_clear*L_clear
-//       + L_nav + w_lreg*L_lreg
+//       + w_multi*L_multi + L_nav + w_lreg*L_lreg
 //   L_nav = cvar(J, alpha),  J = w_goal*||oT-goal||^2 + w_len*arc + w_risk*cum_risk
 //                                + w_hard*hard_count
 // with cvar's quantile eta DETACHED (a constant per step) -> the per-agent tail
 // mask 1{J>eta}/((1-alpha)B). hard_count is a step-function count: its gradient
 // is identically zero, so it shifts J's value but seeds nothing.
 //
-// SCOPE: L_multi (multi_start_penalty) is DEFERRED to a follow-up — it is a
-// SEPARATE geometry rollout (surrogate_robust.integrate_surrogate_v2: EXPLICIT
-// Euler, no material) that backprops only into alphas/beta/gamma, so it needs
-// its own rollout adjoint rather than this material one. This module is the
-// material-path loss; adding L_multi is additive (its grads sum into
-// alphas/beta/gamma before backward_one).
+// L_multi (multi_start_penalty, geom_rollout.h) is a SEPARATE geometry rollout
+// (EXPLICIT Euler, no material) that backprops only into alphas/beta/gamma; its
+// grads sum into those seeds before backward_one. Set w_multi = 0 to drop it.
 
 #ifndef CVC_NAV_MATERIAL_TRAIN_H
 #define CVC_NAV_MATERIAL_TRAIN_H
 
 #include <cstdint>
 #include <cvc/nav/coef_energy_net.h>
+#include <cvc/nav/geom_rollout.h>
 #include <cvc/nav/material.h>
 
 namespace cvc {
@@ -73,8 +71,10 @@ struct material_loss_config {
   // aux + episode-cost weights (train_material.py TrainCfgMaterial defaults)
   float w_traj = 1.0f, w_vel = 0.5f, w_fric = 0.1f, w_clear = 5e-3f, w_lreg = 0.01f;
   float w_goal = 2.0f, w_len = 0.01f, w_risk = 1.0f, w_hard = 5.0f, cvar_alpha = 0.95f;
+  float w_multi = 0.5f;                            // multi-start robustness (L_multi)
   float lam_soft_max = 5.0f, lam_hard_max = 10.0f; // for the lreg normalization
   surrogate_material_params rollout;               // margin_factor/mass/d_hat_sdf/k_sharp
+  multi_start_params multi;                        // ms_h/ms_dt_mult/tau (margin/mass synced)
   int num_threads = 0;
 };
 

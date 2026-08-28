@@ -107,8 +107,19 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
   L_lreg *= -0.25 * invB;
   const double L_nav = eta + L_nav_tail * invB / (1.0 - (double)cfg.cvar_alpha);
 
-  const double L = 0.3 * cfg.w_traj * L_traj + 0.3 * cfg.w_vel * L_vel + cfg.w_fric * L_fric +
-                   cfg.w_clear * L_clear + L_nav + cfg.w_lreg * L_lreg;
+  double L = 0.3 * cfg.w_traj * L_traj + 0.3 * cfg.w_vel * L_vel + cfg.w_fric * L_fric +
+             cfg.w_clear * L_clear + L_nav + cfg.w_lreg * L_lreg;
+
+  // L_multi (multi-start geometry robustness) — forward value
+  if (cfg.w_multi != 0.0f && N > 0) {
+    multi_start_params mp = cfg.multi;
+    mp.margin_factor = cfg.rollout.margin_factor;
+    mp.mass = cfg.rollout.mass;
+    const double L_multi = multi_start_penalty(
+        alphas.data(), beta.data(), gamma.data(), b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, b.rr,
+        b.d_hat, b.dt, b.H, B, N, mp, nullptr, nullptr, nullptr, cfg.num_threads);
+    L += (double)cfg.w_multi * L_multi;
+  }
 
   if (cache) {
     cache->alphas = std::move(alphas);
@@ -193,6 +204,23 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     g_gamma[i] += g_gamma_dir[i];
     g_lam_soft[i] += g_lam_soft_dir[i];
     g_lam_hard[i] += g_lam_hard_dir[i];
+  }
+
+  // L_multi grads (geometry robustness) — add w_multi * dL_multi/d(alphas,beta,gamma)
+  if (cfg.w_multi != 0.0f && N > 0) {
+    multi_start_params mp = cfg.multi;
+    mp.margin_factor = cfg.rollout.margin_factor;
+    mp.mass = cfg.rollout.mass;
+    std::vector<float> gm_al(static_cast<std::size_t>(B) * N, 0.0f), gm_be(B, 0.0f), gm_ga(B, 0.0f);
+    multi_start_penalty(c.alphas.data(), c.beta.data(), c.gamma.data(), b.o0, b.v0, b.goal, b.C,
+                        b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, gm_al.data(),
+                        gm_be.data(), gm_ga.data(), cfg.num_threads);
+    for (std::size_t i = 0; i < gm_al.size(); ++i)
+      g_alphas[i] += cfg.w_multi * gm_al[i];
+    for (int i = 0; i < B; ++i) {
+      g_beta[i] += cfg.w_multi * gm_be[i];
+      g_gamma[i] += cfg.w_multi * gm_ga[i];
+    }
   }
 
   // ── model backward -> weight grads (per agent, accumulate) ──
