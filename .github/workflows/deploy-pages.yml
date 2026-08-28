@@ -57,12 +57,13 @@ jobs:
         run: |
           export PATH="/opt/cvc-wasm/cmake-cvcpkg/bin:$HOME/.local/bin:$PATH"
           command -v cvcpkg >/dev/null || { echo "cvcpkg not found; skipping"; exit 0; }
-          cvcpkg install \
-            zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc \
-            assimp imagemagick \
-            --prefix "$CVC_WASM_DEPS" \
-            --platform wasm --arch x86_64 --config release --link static \
-            --no-fallback-to-source || echo "  (some optional wasm bundles absent — build will fall back)"
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick; do
+            echo "=== $p ==="
+            cvcpkg install "$p" \
+              --prefix "$CVC_WASM_DEPS" \
+              --platform wasm --arch x86_64 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
+          done
           cvcpkg install scene-austin-south-web vehicle-humvee \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
