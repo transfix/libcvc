@@ -24,13 +24,15 @@ Three measured facts decide it.
 
 Head-to-head, same water body, same camera, PT with its float framebuffer already disabled:
 
-| hexes | tets | surface tris | PT ms | closed surface, 2 draws | **PT / surface** |
+| hexes | tets | surface tris | PT ms | closed surface, as measured (2 draws) | **PT / surface** |
 |---|---|---|---|---|---|
 | 2,000 | 12,000 | 2,400 | 4.18 | 1.24 | **3.4×** |
 | 16,928 | 101,568 | 11,408 | 40.35 | 1.26 | **31.9×** |
 | 40,960 | 245,760 | 21,504 | 103.45 | 1.47 | **70.5×** |
 
-The surface is **flat in body size** because it is fill-bound; PT is linear in cell count because it is CPU-bound. The gap widens without limit. A **million-triangle** two-draw surface costs 2.06 ms — 4.9 % of the `lsystem_forest` control frame.
+The surface is **flat in body size** because it is fill-bound; PT is linear in cell count because it is CPU-bound. The gap widens without limit. A **million-triangle** surface costs 2.06 ms as measured — 4.9 % of the `lsystem_forest` control frame.
+
+**These surface numbers were measured with the two-draw composite that §5.2 has since replaced with a single draw.** They are therefore an *upper bound* on what W1 actually costs, and every ratio in the table is a *lower bound* on PT's disadvantage. The verdict on tetrahedra is decided by the ratios, so it is unaffected by the mechanism change and is not reopened; the corrected single-draw budgets are in §7.1.
 
 And PT gives up, structurally and untunably: **all lighting** (`vtkVolumeProperty::SetShade` and every knob in `inc/cvc/gl/VolumeNode.h:64-100` is silently ignored), **all shadows** (`vtkShadowMapBakerPass` bakes through `vtkOpaquePass` only, so the Lab's tree shadows fall *through* the lake), **clipping planes** (`vtkUnstructuredGridVolumeMapper` has no `SetClippingPlanes`), **correct sorting on non-convex domains** (`vtkVisibilitySort.h:11-15` states subclasses need not be correct and that cycles can make an ordering *not exist*; a lake with an inlet or a peninsula is non-convex by construction), and **geometry near the camera** (`vtkOpenGLProjectedTetrahedraMapper.cxx:764-775` culls with `||` not `&&`, so any tet with a single vertex behind the near plane vanishes entirely).
 
@@ -41,7 +43,7 @@ And PT gives up, structurally and untunably: **all lighting** (`vtkVolumePropert
 | Tier | What | Where it runs | Cost |
 |---|---|---|---|
 | **W0** wet material | no geometry; class + albedo/roughness in the terrain splat | everywhere | 0 |
-| **W1** surface + absorption | closed clipped lid, per-vertex baked column, two-draw chromatic Beer–Lambert | **default** for lakes, ponds, pools | 28 µs CPU/actor + 0.40 ms/Mpx fill |
+| **W1** surface + absorption | closed clipped lid, per-vertex baked column, **single opaque draw**, chromatic Beer–Lambert over a shader-evaluated bed | **default** for lakes, ponds, pools | 28 µs CPU/actor + 0.26 ms/Mpx fill |
 | **W2** flow ribbon | W1 core + two-phase flow map | streams, rivers | same |
 | **W3** fall sheet + spray | constant thickness × erosion α, gravity-scaled scroll, billboards | waterfalls | same + particles |
 | **W4** bounded heterogeneous march | W1 shell + 32-step ray-march of a low-res 3-D σ texture between surface and bed | sediment plumes, thermoclines | ~0.3 ms fill |
@@ -118,7 +120,7 @@ Sixteen 48-tet puddles cost more than the entire forest while drawing essentiall
 
 | measurement | result |
 |---|---|
-| marginal CPU per translucent water actor, full water shader, 1280×800 | **28.2 µs/actor** (9-point least-squares, `ms == cpu_ms` at every N) — a second harness gives 5.1 µs; budget the conservative number, see §13 D-W7 |
+| marginal CPU per water actor, full water shader, 1280×800 | **28.2 µs/actor** (9-point least-squares, `ms == cpu_ms` at every N) — a second harness gives 5.1 µs; budget the conservative number, see §13 R2. *Measured on a translucent actor; the opaque actor W1 now uses pays the same per-prop traversal and skips the translucent sort, so 28.2 µs stays conservative.* |
 | full water fragment stack (2 ripple octaves + derivative blend, chord, per-channel `exp`, 3-tap chromatic caustics, Schlick, sky, 2 glint lobes, foam) at **100 % screen coverage**, 1280×800 | **0.19–0.20 ms** (two independent harnesses agree) |
 | the same at 1920×1200 full coverage | 0.46 ms → **0.20 ms/Mpx**, linear in pixels |
 | triangle cost: 512 → **524,288** triangles, one actor, full coverage | **+0.20 ms total** (≈ 0.4 ns/triangle) |
@@ -461,7 +463,10 @@ Baked `columnH` also makes the shoreline **immune to terrain LOD**: when a chunk
 | # | Addition | File | ~LoC | Tier | Verified anchor |
 |---|---|---|---|---|---|
 | 1 | `GeometryNode::setShaderUniform(name, float)` / `(name, const double v[3])` / `(name, const double m[16])` — passthrough to `vtkShaderProperty::GetFragmentCustomUniforms()->SetUniformf/3f/Matrix4x4` | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` | 45 | **W1, required** | `vtkShaderProperty.h:86-87` `vtkGetObjectMacro(FragmentCustomUniforms, vtkUniforms)`; `vtkUniforms.h:85,89,91` |
-| 2 | `cvc::gl::WaterNode : public GraphicsNode` — prop is a `vtkPropAssembly` holding **two** `vtkActor`s over **one** `vtkPolyData` (draws A and B of §5.3); `setWaterMesh()`, `setOptics()`, `setTier()` | new `inc/cvc/gl/WaterNode.h`, `src/cvcGL/WaterNode.cpp` | 380 | **W1, required** | `SceneNode::addToRenderer` is generic (`renderer->AddViewProp(getProp())`, `src/cvcGL/SceneNode.cpp:62-70`); `vtkPropAssembly` dispatches `RenderOpaque/Translucent/Volumetric/Overlay` to its parts **in order** |
+| 1b | `GeometryNode::setVertexAttribute(attrName, arrayName)` — passthrough to `vtkPolyDataMapper::MapDataArrayToVertexAttribute`, so the baked `columnH`/`shoreDist` point arrays reach the vertex shader | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` | 30 | **W1, required** | `vtkPolyDataMapper.h:173`; OpenGL impl `vtkOpenGLPolyDataMapper.h:143`; `RemoveVertexAttributeMapping` at `:157` |
+| 1c | `GeometryNode::setNamedTexture(name, const cvc::image&)` — passthrough to `vtkProperty::SetTexture(name, tex)` so the terrain-albedo, caustic and cloud-shadow maps are reachable as same-named `sampler2D`s. Distinct from the existing single-texture `setTexture()` | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` | 35 | **W1, required** | `vtkProperty.h:673` `SetTexture(const char*, vtkTexture*)`, `:740` `RemoveTexture`; existing texture plumbing at `src/cvcGL/GeometryNode.cpp:384` |
+| 2 | `cvc::gl::WaterNode : public GraphicsNode` — prop is **one opaque `vtkActor`** over one `vtkPolyData` and one stock `vtkPolyDataMapper` (§5.2.2); `setWaterMesh()`, `setOptics()`, `setTier()` | new `inc/cvc/gl/WaterNode.h`, `src/cvcGL/WaterNode.cpp` | 240 | **W1, required** | `SceneNode::addToRenderer` is generic (`renderer->AddViewProp(getProp())`, `src/cvcGL/SceneNode.cpp:62-70`). **No `vtkPropAssembly`, no second actor, no mapper subclass, no render pass, no GL state manipulation** — the node only builds polydata, binds attributes/textures/uniforms and installs shader replacements |
+| 2b | `StridedShadowBaker::Render` hides water actors around the bake — the opaque lid would otherwise cast a shadow ring outside every shoreline (§5.6). No new VTK surface; an edit inside a subclass cvcGL already owns | `src/cvcGL/SceneGraph.cpp` | 8 | **W1, required** | `vtkShadowMapBakerPass` has **no** exclusion key — `vtkShadowMapBakerPass.cxx:288-301` accepts every visible prop. The override already exists at `src/cvcGL/SceneGraph.cpp:916-947` |
 | 3 | `SceneGraph::buildPassChain(bool shadows)` — always constructs the chain; only `{baker, shadowMap}` are conditional | `src/cvcGL/SceneGraph.cpp` | 25 | W-T2 prerequisite | **Today `setShadowsEnabled(false)` does `m_renderer->SetPass(nullptr)` at `:1034`, so with shadows off there is no chain to insert anything into.** The chain is built at `:1064-1068`. Shadows-off is a shipped, measured mode (21.7 fps). |
 | 4 | `SceneGraph::addWater(name, const cvc::world::water_state&)` | `inc/cvc/gl/SceneGraph.h` | 60 | W1 | alongside the existing `addGraphics` overloads |
 | 5 | `cvc::gl::SceneCapturePass : public vtkFramebufferPass` — **with a depth restore**, exposing `colorTexture()` / `depthTexture()` | new `inc/cvc/gl/SceneCapturePass.h`, `.cpp` | 180 | **W-T2, optional** | `vtkFramebufferPass::Render` blits `GL_COLOR_BUFFER_BIT` **only**; using it unmodified silently strips depth from the sea volume, the cloud slab and the overlay. Restore with `vtkOpenGLRenderWindow::TextureDepthBlit` (`vtkOpenGLRenderWindow.h:484,487,490`) — a shader-quad copy VTK added precisely because browsers restrict depth-format blits, so **one code path serves native and wasm.** |
@@ -471,30 +476,88 @@ Baked `columnH` also makes the shoreline **immune to terrain LOD**: when a chunk
 
 **Explicitly NOT added, each for a measured reason:** `vtkUnstructuredGridVolumeRayCastMapper` and `vtkUnstructuredGridVolumeZSweepMapper` (both pure CPU software renderers; ZSweep is single-threaded across all 4,322 of its lines, and both silently drop to 1/100 resolution under load via `ImageSampleDistance` auto-degrade); `vtkMultiBlockUnstructuredGridVolumeMapper` (a `std::vector` of PT mappers — it *multiplies* the per-prop tax of §1.3); `vtkOpenGLFluidMapper` (particle input, wrong shape — but it is the best in-tree reference for correct multi-pass FBO work, crib its setup); depth peeling (123 ms exact vs 5.5 ms weighted-blended on the same scene [McGuire & Bavoil 2013]; a volume needs hundreds of layers); any OIT scheme (WebGL2 has no ROV, no image load/store, no per-pixel linked lists); `vtkLODActor` / `vtkLODProp3D` (rejected by Lab roadmap §1.3, and would need `RenderingLOD` added to a file another PR owns); planar reflection (§12).
 
-### 5.2 The default tier needs **no** capture pass, no new render pass, and no pass-chain surgery
+### 5.2 The default tier is **one opaque draw**: no blend trickery, no capture pass, no new render pass, no pass-chain surgery
 
-This is the design's central simplification and it falls straight out of §4.1. With a baked per-vertex column, the optical path length is analytic:
+#### 5.2.1 Why the two-draw composite was removed
+
+An earlier revision of this document rendered the lid **twice** — draw A under `glBlendFunc(GL_ZERO, GL_SRC_COLOR)` to multiply the framebuffer by the chromatic transmittance `T`, draw B additively for the surface radiance. **That mechanism cannot be built on VTK 9.5 and has been deleted.** Four independent blockers, each verified against the shipped headers at `/home/joe/src/cvc/wt-volrover-perf/deps-live/include/vtk-9.5` (`vtkVersionMacros.h:` `VTK_VERSION "9.5.0"`):
+
+| # | Blocker | Verification |
+|---|---|---|
+| 1 | **There is no per-actor, per-mapper or per-property blend-function API.** Nothing in VTK can ask for `(GL_ZERO, GL_SRC_COLOR)` on one actor. | `grep -rn "SetBlend"` over the whole 9.5 include tree matches only `vtkVolumeMapper.h`, `vtkUnstructuredGridVolumeMapper.h`, `vtkMultiBlockVolumeMapper.h`, `vtkMultiBlockUnstructuredGridVolumeMapper.h`, `vtkOpenGLSurfaceProbeVolumeMapper.h`, `vtkImageBlend.h`, `vtkImageSlabReslice.h` and two vendored `libharu` headers. **`vtkActor.h`, `vtkProperty.h`, `vtkMapper.h`, `vtkPolyDataMapper.h` and `vtkOpenGLPolyDataMapper.h` contain no blend API at all.** `vtkTexture::BlendingMode` (`vtkTexture.h:187-204`) is fixed-function *texture-environment* combining, not framebuffer blending, and is unrelated. |
+| 2 | **Translucent actors do not write depth.** The intended A-then-B ordering never establishes itself. | `vtkOpenGLActor.cxx:88` — `ostate->vtkglDepthMask(GL_FALSE); // transparency with alpha blending`, restored to `GL_TRUE` after `mapper->Render` at `:98`. The opaque branch instead sets `GL_TRUE` explicitly at `:52-56`. There *is* a per-actor escape hatch — `vtkOpenGLActor::GLDepthMaskOverride()` (`vtkOpenGLActor.h:52`), an information key honoured at `vtkOpenGLActor.cxx:70-85` — so blocker 2 alone is repairable. It does not rescue blockers 1 or 3. |
+| 3 | **The translucent path defaults to order-independent transparency**, which reorders and reweights fragments and destroys any two-draw composite. Disabling it is **renderer-global**. | `vtkRenderer.h:930-932` (`vtkSetMacro(UseOIT, bool)`), `:1168` `bool UseOIT = true;`. `SetUseOITOff()` is on `vtkRenderer`, so it silently changes every other translucent prop in the scene — the sea slab, the cloud slab, mist cards, captions. |
+| 4 | **Behaviour is path-dependent on an unrelated user toggle.** | `src/cvcGL/SceneGraph.cpp:1059` installs an explicit `vtkTranslucentPass` when shadows are **on**; with shadows **off**, `:1034` does `m_renderer->SetPass(nullptr)` and the stock OIT path runs instead. So the same water would composite one way with shadows on and another way with shadows off. |
+
+Blockers 1 and 3 are the fatal pair, and blocker 1 generalises into a constraint worth stating once, because it decides the whole section:
+
+> **The framebuffer-attenuation theorem.** VTK's translucent blend is `(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`. The only quantity a fragment can scale the destination by is the **scalar** `1 − a`. Chromatic Beer–Lambert needs a **per-channel** factor `T = exp(−σ∘L)` with `T.r ≠ T.g ≠ T.b`. Therefore **per-channel absorption of already-rendered scene colour is impossible without either blend-function control (absent, blocker 1) or a framebuffer read (a capture pass).**
+
+There is no third option. So W1 must choose which of the two properties to keep:
+
+- keep the **real rendered bed**, give up chromatic absorption → grey-scale water. Unacceptable; depth-tinting *is* the feature.
+- keep **chromatic absorption**, give up reading the framebuffer → **evaluate the bed in the water's own fragment shader**. This is what W1 now does.
+
+#### 5.2.2 The mechanism: one opaque actor, bed evaluated in-shader
+
+**W1 is a single `vtkActor` with `GetProperty()->SetOpacity(1.0)`, drawn on the stock opaque path.** Every VTK facility it uses is a shipped public API:
+
+| Need | API | Anchor |
+|---|---|---|
+| inject the water fragment stack | `vtkShaderProperty::AddFragmentShaderReplacement` / `AddVertexShaderReplacement` | `vtkShaderProperty.h:101-107`; already wrapped as `GeometryNode::addFragmentShaderReplacement` (`src/cvcGL/GeometryNode.cpp:599-607`) and **already shipping** in `src/cvcGL/examples/lsystem_forest.cpp:158-163` |
+| per-vertex baked `columnH`, `shoreDist` | `MapDataArrayToVertexAttribute(attrName, arrayName, fieldAssoc, comp)` | `vtkPolyDataMapper.h:173`; OpenGL impl `vtkOpenGLPolyDataMapper.h:143` |
+| optics, time, sun, camera scalars | `vtkShaderProperty::GetFragmentCustomUniforms()` → `vtkUniforms::SetUniformf/3f/Matrix4x4` | `vtkShaderProperty.h:86-87`; `vtkUniforms.h:84-113` |
+| bed albedo / normal / caustic / cloud-shadow maps | `vtkProperty::SetTexture(const char* name, vtkTexture*)` — the named texture is reachable from the replaced fragment source as a `sampler2D` of the same name | `vtkProperty.h:673`, `:740` `RemoveTexture` |
+
+The optical path length stays exactly as §4.1 derived it — analytic, from the baked column, no depth read:
 
 ```
 pathLen = columnH / max(-ray.z, 0.08)
 ```
 
-exact for a locally flat bed — and at a 2.5 m triangle the bed *is* locally flat. The bed point needed for caustics is `P_bed = wPos + ray*pathLen`, also analytic. **Nothing reads the framebuffer.**
+exact for a locally flat bed, and at a 2.5 m triangle the bed *is* locally flat. `P_bed = wPos + ray*pathLen` is analytic too. The single change is that the shader now also produces `C_bed` itself instead of inheriting it from the framebuffer:
 
-Per-channel Beer–Lambert against the *real, lit, shadowed, cloud-shaded* rendered terrain then comes out of **two draws of the same mesh** and the fixed-function blender:
+```
+C_bed = albedo(P_bed) ∘ ( sunColor · max(N_bed·L, 0) · shadowTerm(P_bed) + skyAmbient )
+```
 
-| draw | blend func | depth | fragment output | net effect |
-|---|---|---|---|---|
-| **A** | `(GL_ZERO, GL_SRC_COLOR)` | test on, write **off** | `T ∘ (1 − F)` | `dst ∘= T ∘ (1−F)` |
-| **B** | `(GL_ONE, GL_ONE)` | test on, write **on** | `L∞∘(1−T)(1−F) + R_sky·F + glint + foam` | `dst += surface radiance` |
+and the final, **opaque** fragment is the whole composite in one write:
 
-Result, exactly: `C_bed ∘ T (1−F) + L∞ ∘ (1−T)(1−F) + R_sky·F + glint`. Per-channel absorption, no scene-colour texture, no FBO, no MRT, no extension probes. Draw B writes depth, so the sea and cloud volumes downstream are correctly occluded by a lake surface — which also removes an artifact class the pass-based designs have to guard against.
+```
+C = C_bed ∘ T ∘ (1−F)  +  L∞ ∘ (1−T) ∘ (1−F)  +  R_sky·F  +  glint  +  foam
+```
 
-**[M3] says the second draw's geometry is free** (0.4 ns/triangle); the fill roughly doubles, to **≈ 0.40 ms per fully-covered megapixel**.
+which is **algebraically identical to what the two-draw scheme was trying to produce**, with `C_bed` supplied by evaluation rather than by the blender. Per-channel absorption is fully preserved, because `T` is a `vec3` multiplied inside the shader where no blend hardware is involved.
 
-Ordering guard: both draws are parts of one `vtkPropAssembly` in order, and the renderer must have depth peeling off — `SetUseDepthPeeling(false)`, `SetUseDepthPeelingForVolumes(false)`, asserted by a regression test that renders the sea plus a lake and checks the sea's pixels are not background. If depth peeling is ever required, the two draws are promoted into a `cvc::gl::WaterPass`, which is why addition #3 lands anyway.
+`albedo(P_bed)` is the Lab's existing terrain splat, bound as a named texture — the same 256×256-per-tile albedo bake the Lab already produces for its terrain shading, so W1 adds a texture *binding*, not a texture *bake*. `shadowTerm` is the Lab's projected cloud-shadow texture, already required by the caustics term in §5.3.
 
-What W1 gives up by not capturing: **screen-space refraction** and **caustics on the true depth-buffer bed** (they land on the analytic bed instead, which is correct to within the bed's local flatness) and **soft-depth mist fading**. All three are the W-T2 refinement in PR W7.
+#### 5.2.3 What this buys, immediately and structurally
+
+- **No blend-function control needed** — blocker 1 does not apply to an opaque draw.
+- **Depth is written normally.** `vtkOpenGLActor.cxx:52-56` takes the `opaque` branch and sets `vtkglDepthMask(GL_TRUE)` explicitly, so the sea and cloud volumes downstream are correctly occluded by a lake surface — the §5.6 guarantee is now *structural* rather than something a translucent draw had to be argued into.
+- **OIT is irrelevant.** No global `SetUseOITOff()`, so no side-effects on the sea slab, cloud slab, mist cards or captions. **The open question about global OIT is closed, not deferred.**
+- **No path-dependence on shadows.** Both `SceneGraph` configurations render opaque props identically, and the shader itself is bit-identical in both — see the ordering note below.
+- **No depth-peeling guard, and no `vtkPropAssembly`.** One actor, one mapper, one polydata. Risk **R1** is deleted rather than mitigated.
+- **Refraction, soft-depth mist and true-bed caustics remain exactly the W-T2 refinement they already were** (PR W7), and the capture pass's scope is unchanged. W-T2 now *additionally* upgrades `C_bed` from evaluated to real — see §5.2.5.
+
+**Fill cost.** The single draw does all the work the pair used to do, plus one albedo fetch and one lighting evaluation for the bed, and minus one full rasterisation of the lid. Net **≈ 0.26 ms per fully-covered megapixel**, down from the two-draw 0.40. Geometry halves outright (one rasterisation, [M3]'s 0.4 ns/triangle). The revised budgets are in §7.1.
+
+#### 5.2.4 The one ordering rule that replaces the old guard
+
+The water fragment stack is injected at `//VTK::Light::Impl` with `ReplaceFirst = true` — which is what `GeometryNode::addFragmentShaderReplacement` already passes (`src/cvcGL/GeometryNode.cpp:603`). This matters and must not be changed casually:
+
+`vtkOpenGLPolyDataMapper::BuildShaders` applies **user `ReplaceFirst` replacements before `ReplaceShaderValues`**, and the non-first ones after it. `vtkShadowMapPass` injects its shadow-factor code into `//VTK::Light::Dec` and `//VTK::Light::Impl` from inside `ReplaceShaderValues` (`vtkShadowMapPass.cxx:311-313`, re-emitting the anchor at `:370` and `:450`). Because water consumes the anchor **first**, it removes VTK's default lighting block *and* the shadow pass's injection together — so **the water program is byte-identical whether shadows are on or off.** That is the property the old design could not have, and it is why `cvcgl_water_shader` must assert the compiled source hash matches across both `SceneGraph` configurations.
+
+The consequence is stated plainly, not hidden: **VTK's shadow map never darkens the water, and the water shader cannot sample it.** The bed's tree-shadow term is therefore *not* available in W1 (§5.2.5, con 2, and D-W8).
+
+#### 5.2.5 What W1 gives up, honestly
+
+1. **Submerged non-bed geometry is hidden.** An opaque lid occludes anything between the surface and the bed — a fish, a submerged boulder actor, a sunken prop. The bed itself (terrain) is fine, because it is what the shader evaluates. For the island fly-through the demo actually renders there is no such geometry, but this is a real restriction and it is the strongest argument for D-W8 option B.
+2. **Tree and terrain shadows do not tint the bed through the water.** §5.2.4 explains why. The cloud-shadow term *is* available and is applied. This is a genuine regression against the two-draw design's intent, and it is the second argument for D-W8 option B.
+3. **The bed is the analytic heightfield, not the rendered terrain.** Bed lighting is re-evaluated rather than reused, so a change to terrain shading must be mirrored in the water shader or the two will drift at the shoreline. Bounded by sharing one GLSL include, and asserted by a shoreline-continuity golden.
+4. **Screen-space refraction and soft-depth mist** are absent, exactly as before — W-T2, PR W7.
+
+All four are repaired by the same thing: the **W-T2 capture pass**, which supplies the real, lit, shadowed, cloud-shaded framebuffer colour and depth as textures. With a capture in hand the shader reads `C_bed` instead of evaluating it, and cons 1–3 disappear together. **The capture pass is not new work invented to patch this section** — it is addition #5, already specified, already budgeted at 180 LoC, and already scheduled as PR W7. The mechanism change simply gives it three more reasons to exist. See **D-W8** for whether it should be pulled forward into W1.
 
 ### 5.3 The W1 / W2 fragment stack
 
@@ -534,29 +597,42 @@ vec3  T   = exp(-sig * (pathLen + sunPath));              // Beer-Lambert, per c
 // 3. Fresnel  [Schlick 1994], F0 = 0.0204 for eta = 1.333
 float F = uF0 + (1.0 - uF0) * pow(1.0 - max(dot(N, V), 0.0), 5.0);
 
-#ifdef CVC_WATER_DRAW_A                                    // blend ZERO, SRC_COLOR
-  gl_FragData[0] = vec4(T * (1.0 - F), 1.0);
-#else                                                      // blend ONE, ONE
-  vec3 col = uDeep * (1.0 - T) * (1.0 - F);
-  col += skyProbe(reflect(-V, N)) * F;                     // gradient probe, §12
-  vec3 H = normalize(uSunDirW + V);                        // two lobes: a single tight
-  col += uSunColor * F * (pow(max(dot(N,H),0.0), uGlintPow)      // one crawls and
-                        + 0.08*pow(max(dot(N,H),0.0), 20.0));    // flickers alone
-  // caustics on the ANALYTIC bed point -- zero extra pass, chromatically split,
-  // depth-faded, and modulated by the Lab's projected cloud-shadow texture.
-  vec3 pbed = wPos + ray * pathLen;
-  col += causticRGB(pbed.xy * uCausticScale, uTime)
-         * cloudShadow(pbed.xy) * exp(-sig.g * columnH) * uCausticK;
-  // shore foam: animated noise THRESHOLDED against the depth ramp. Never the raw ramp,
-  // which is a contour line and swims.
-  float shoreR = 1.0 - clamp(columnH / uFoamWidth, 0.0, 1.0);
-  col = mix(col, uFoamColor,
-            step(noise(wPos.xy*2.2 + uTime*0.10), pow(shoreR, 2.0)) * 0.65);
-  gl_FragData[0] = vec4(col, 1.0);
-#endif
+// 4. THE BED, evaluated -- NOT read from the framebuffer (§5.2.1 theorem).
+// Analytic bed point; albedo from the Lab's terrain splat bound as a named sampler2D
+// (vtkProperty::SetTexture, vtkProperty.h:673); bed normal from the same heightfield
+// gradient the terrain shader uses, so the two agree across the shoreline.
+vec3  pbed  = wPos + ray * pathLen;
+vec3  Nbed  = bedNormal(pbed.xy);                          // shared GLSL include
+vec3  Cbed  = texture(uTerrainAlbedo, pbed.xy * uSplatScale).rgb
+            * (uSunColor * max(dot(Nbed, uSunDirW), 0.0) * cloudShadow(pbed.xy)
+               + uSkyAmbient);
+// caustics land on the same analytic bed point -- zero extra pass, chromatically
+// split, depth-faded. Folded into the bed radiance, before absorption.
+Cbed += causticRGB(pbed.xy * uCausticScale, uTime)
+        * cloudShadow(pbed.xy) * exp(-sig.g * columnH) * uCausticK;
+
+// 5. ONE OPAQUE COMPOSITE. Chromatic absorption is a vec3 multiply in-shader:
+// no blend hardware is involved, so nothing here depends on VTK's blend func,
+// on the depth mask, on OIT, or on whether shadows are enabled.
+vec3 col = Cbed * T * (1.0 - F);                           // absorbed bed
+col += uDeep * (1.0 - T) * (1.0 - F);                      // in-scattered body colour
+col += skyProbe(reflect(-V, N)) * F;                       // gradient probe, §12
+vec3 H = normalize(uSunDirW + V);                          // two lobes: a single tight
+col += uSunColor * F * (pow(max(dot(N,H),0.0), uGlintPow)        // one crawls and
+                      + 0.08*pow(max(dot(N,H),0.0), 20.0));      // flickers alone
+// shore foam: animated noise THRESHOLDED against the depth ramp. Never the raw ramp,
+// which is a contour line and swims.
+float shoreR = 1.0 - clamp(columnH / uFoamWidth, 0.0, 1.0);
+col = mix(col, uFoamColor,
+          step(noise(wPos.xy*2.2 + uTime*0.10), pow(shoreR, 2.0)) * 0.65);
+gl_FragData[0] = vec4(col, 1.0);                           // alpha 1.0: OPAQUE actor
 ```
 
-Shoreline feathering is `alpha = 1 − exp(−k·columnH)` folded into draw A's `T` and draw B's radiance so no hard silhouette is ever written, combined with the **geometric skirt** — the boundary ring extended outward and dropped 0.60 m below the terrain, the same drop the Lab's terrain chunks use. Together they mean **there is no water silhouette against terrain at any LOD**.
+**Shoreline feathering without alpha.** An opaque actor cannot fade out, and it does not need to: the composite *self-feathers*. As `columnH → 0`, `pathLen → 0` and `T → 1`, so the in-scattered term vanishes and `col → Cbed·(1−F) + R_sky·F`, i.e. the water converges to **the very terrain colour it is drawn over**. The transition is continuous by construction rather than by blending, which is strictly better: it is immune to draw order, to OIT, and to LOD.
+
+The one term that does *not* self-cancel is Fresnel — at grazing angles `F` stays large and would leave a bright rim at the waterline — so `F`, the glint lobes and the sky probe are each scaled by the same `saturate(columnH/k)` ramp already used to flatten the normal. With that, the edge is invisible. Combined with the **geometric skirt** — the boundary ring extended outward and dropped 0.60 m below the terrain, the same drop the Lab's terrain chunks use — **there is no water silhouette against terrain at any LOD**.
+
+This is why the shoreline-continuity golden of §5.2.5 con 3 is load-bearing: it is what detects the water shader's `Cbed` drifting away from the terrain shader's own output.
 
 ### 5.4 Streams (W2)
 
@@ -592,11 +668,14 @@ Five stacked layers; **nothing here uses depth absorption**, because an aerated 
 
 ### 5.6 Composition and ordering
 
-- **Water vs opaque terrain:** free. Draws A and B depth-test against the opaque buffer.
-- **Water vs the sea volume and the cloud slab:** VTK does **not** depth-sort volumes against each other or against translucent props — `vtkRenderer.cxx:686-689` walks `PropArray` in insertion order. Draw B writes depth, so volumes rendered after water are correctly clipped. Registration order is **sea → water → clouds**, and it is asserted.
+- **Water vs opaque terrain:** free, and now genuinely trivial — water is an opaque prop in the same opaque pass, so the depth buffer resolves it with no ordering assumption whatsoever.
+- **Water vs the sea volume and the cloud slab:** VTK does **not** depth-sort volumes against each other or against translucent props — `vtkRenderer.cxx:686-689` walks `PropArray` in insertion order. The opaque water draw writes depth unconditionally (`vtkOpenGLActor.cxx:52-56` sets `vtkglDepthMask(GL_TRUE)` on the opaque branch), so volumes rendered after water are correctly clipped. Registration order is **sea → water → clouds**, and it is asserted.
+- **Water vs OIT and depth peeling:** no interaction at all. Water is not a translucent prop, so `vtkRenderer::UseOIT` (`vtkRenderer.h:1168`, default true) and the depth-peeling flags are free to keep their defaults. **No global renderer setting is changed by this design.**
 - **The sea-boundary invariant.** The Lab's near-field sea slab spans −40 → +8 m. A body whose `level_z ≤ sea_level + wave_amp` is **merged into the sea and is not an above-sea-level body**; asserted at build. A river delta is a W2 ribbon whose alpha fades to zero over its last few metres inside the sea polygon.
 - **Water on water** (a stream entering a lake, a fall into its pool) is order-dependent and blends wrong at grazing angles. Mitigation: fade the tributary's alpha to zero over its last few metres inside the receiving polygon — a per-vertex bake, free, and it works. It is still a fudge and §12 says so.
-- **Shadows.** Water is never a shadow caster (VTK bakes through `vtkOpaquePass` only) and the surface itself is never darkened by the shadow map. A tree shadow correctly falls *through* the surface onto the bed, which is opaque and shadowed normally, and draw A then attenuates that shadowed bed chromatically. **This is exactly right, and it is the defect the two-draw composite exists to fix** — tinting a *baked* albedo instead would make shadows visibly fade out with depth.
+- **Shadows — and one new obligation the opaque draw creates.** Making water opaque puts it into the shadow bake, which the translucent design got for free. **`vtkShadowMapBakerPass` has no exclusion key**: `vtkShadowMapBakerPass.cxx:287-301` walks `renderer->GetViewProps()` and accepts *every* prop with `GetVisibility()` true. An unexcluded lid would cast a shadow through its own skirt onto the terrain just outside the waterline — a dark ring at every shore.
+  The lever is already in the tree: cvcGL **already subclasses the baker** as `StridedShadowBaker` with a `Render(const vtkRenderState*)` override (`src/cvcGL/SceneGraph.cpp:916-947`). Water actors are hidden around the `Superclass::Render(s)` call and restored after — about 8 lines inside a class that exists, needing no new VTK surface. This is safe against that override's own caster-count guard, which counts *lights* (`countShadowCasters`, `:956`), not props. `cvcgl_water_depth` asserts a lake casts no shadow ring.
+  Water is also never a shadow **receiver**, and this is now structural rather than chosen: consuming `//VTK::Light::Impl` with `ReplaceFirst = true` removes `vtkShadowMapPass`'s injection along with VTK's default lighting (§5.2.4). The benefit is that the water program is identical shadows-on and shadows-off; **the cost is that the bed's tree-shadow term is unavailable in W1**, which is §5.2.5 con 2 and the substance of D-W8. The cloud-shadow term *is* applied to the bed, so large-scale light variation still reads correctly across a lake.
 
 ---
 
@@ -673,7 +752,23 @@ m_mapper->SetInputData(m_grid);                // one merged grid: disjoint comp
 
 > A closed watertight surface plus a **low-resolution 3-D texture** (or a depth-parameterised 1-D/2-D turbidity profile) sampled along the ray **between the front surface and the analytic bed**, ray-marched at 16–64 steps in the fragment shader.
 
-Genuinely heterogeneous absorption and scattering with **no sort, no connectivity, no preprocessing, no k-buffer, no OIT**. It composites correctly by construction — one ray, front-to-back, within one fragment. It runs in WebGL2 today. It degrades to pure Beer–Lambert when the field is uniform. It occupies the entire useful design space between W1 and W5. PROJECTED cost: ~0.3 ms of fill for a 64³ field marched 32 steps over 25 % coverage; measure in PR W8.
+Genuinely heterogeneous absorption and scattering with **no sort, no connectivity, no preprocessing, no k-buffer, no OIT**. It composites correctly by construction — one ray, front-to-back, within one fragment. It runs in WebGL2 today. It degrades to pure Beer–Lambert when the field is uniform. It occupies the entire useful design space between W1 and W5. PROJECTED cost: ~0.3 ms of fill for a 64³ field marched 32 steps over 25 % coverage; measure in PR W9.
+
+**W4 survives the §5.2 mechanism change, but the texture binding is not the obvious one, and a reviewer was right to flag it.**
+
+*What is closed:* `vtkProperty::SetTexture(name, vtkTexture*)` **cannot deliver a `sampler3D`.** `vtkOpenGLTexture::Load` only ever calls `CreateDepthFromRaw` (`vtkOpenGLTexture.cxx:306`) or `Create2DFromRaw` (`:317`); there is no 3-D branch anywhere in the class. So the addition 1c path of §5.2.2 is 2-D only, and a 3-D σ field cannot ride it.
+
+*What is open, and is the route W4 takes:* `vtkTextureObject` **does** support 3-D — `Create3D` and `Create3DFromRaw` (`vtkTextureObject.h:265`, `:272`) — together with `Activate()` (`:149`) and `GetTextureUnit()` (`:135`). The missing piece is a hook that runs per-frame with the live shader program in hand so the texture can be activated and its sampler uniform pointed at the right unit. That hook exists and needs **no subclass**:
+
+> `vtkOpenGLPolyDataMapper::UpdateShaders` fires `this->InvokeEvent(vtkCommand::UpdateShaderEvent, cellBO.Program)` (`vtkOpenGLPolyDataMapper.cxx:2907`), after all of VTK's own uniform setting. An observer on the mapper receives the `vtkShaderProgram*` as call data and may set anything it likes.
+
+This is a supported, in-tree pattern, not a discovered trick: **`vtkOpenGLSkybox` uses exactly it** — `mapper->AddObserver(vtkCommand::UpdateShaderEvent, this, &vtkOpenGLSkybox::UpdateUniforms)` (`vtkOpenGLSkybox.cxx:87`), whose callback then calls `program->SetUniform3f(...)`, `SetUniformMatrix(...)` and friends (`:90-108`).
+
+So W4 is: keep the stock `vtkPolyDataMapper` and the stock opaque actor of W1; add a small `WaterVolumeBinder : vtkCommand` that owns a `vtkTextureObject` built with `Create3DFromRaw`, and on each `UpdateShaderEvent` calls `tex->Activate()` then `program->SetUniformi("uSigmaField", tex->GetTextureUnit())`. The march itself is fragment code inside the same replacement block W1 already installs, bounded by the analytic `pathLen` W1 already computes.
+
+**W4 therefore becomes ~70 LoC of C++ plus the march GLSL — no mapper subclass, no render pass, and no change to the W1 actor.** It remains a strict superset of W1, and the claim that "the 3-D texture route is closed on the polydata path" is true only of `vtkTexture`, not of `vtkTextureObject`. The negative verdict on tetrahedra (§1.2, §6.3) is untouched by any of this.
+
+*wasm note:* WebGL2 has `TEXTURE_3D` in core, so the binder works under Emscripten unchanged; the field is dropped to 32³ there for heap reasons (§7.3).
 
 ---
 
@@ -685,17 +780,19 @@ Against **both** references: the Lab's own budget (roadmap §11.1: ≈ 21 ms tot
 
 | item | CPU ms | GPU/fill ms | basis |
 |---|---|---|---|
-| 3 merged water actors (lakes+ribbons / falls+mist / spare), draw A + draw B | **0.169** | ~0 | 3 × 28.2 µs × 2 draws, measured |
-| W1/W2 fragment stack at a realistic **25 %** coverage, 1280×800, two draws | ~0.01 | **0.102** | 0.256 Mpx × 0.40 ms/Mpx |
-| triangles (whole world's water ≪ 100 k tris) | 0 | ~0.04 | 0.4 ns/tri, measured |
+| 3 merged water actors (lakes+ribbons / falls+mist / spare), **one draw each** | **0.085** | ~0 | 3 × 28.2 µs × 1 draw, measured per-actor tax |
+| W1/W2 fragment stack at a realistic **25 %** coverage, 1280×800, single draw | ~0.01 | **0.067** | 0.256 Mpx × 0.26 ms/Mpx (§5.2.3) |
+| triangles (whole world's water ≪ 100 k tris) | 0 | ~0.02 | 0.4 ns/tri, measured; halved — one rasterisation |
 | wave animation | **0** | < 0.05 | Gerstner is a *vertex* shader; **there is no `updateVertices` for water, ever** |
 | flow-map animation | **0** | 0 | one `uTime` uniform |
 | W3 spray, ~200 soft billboards | ~0.02 | ~0.08 | PROJECTED |
 | uniform updates | ~0.003 | — | |
-| **W0–W3 total** | **≈ 0.20** | **≈ 0.27** | **0.47 ms** |
-| | | | **= 2.2 % of the Lab's 21 ms · 1.2 % of the 40.32 ms control** |
+| **W0–W3 total** | **≈ 0.12** | **≈ 0.22** | **0.34 ms** |
+| | | | **= 1.6 % of the Lab's 21 ms · 0.8 % of the 40.32 ms control** |
 
-Worst realistic case — camera at the water's edge, water covering **80 %** of a 1920×1200 frame: `0.169 + 1.84 Mpx × 0.40 = 0.91 ms`, still 4.3 % of the Lab budget.
+Worst realistic case — camera at the water's edge, water covering **80 %** of a 1920×1200 frame: `0.085 + 1.84 Mpx × 0.26 = 0.56 ms`, still **2.7 %** of the Lab budget.
+
+**The single-draw mechanism is cheaper than the two-draw one it replaces on every line** (0.34 ms vs 0.47 ms typical; 0.56 ms vs 0.91 ms worst case). It was adopted for correctness — the two-draw scheme cannot be built at all (§5.2.1) — but it happens also to be the faster design, because the bed evaluation it adds costs far less than the whole second rasterisation it removes.
 
 Optional tiers, added on top:
 
@@ -725,10 +822,13 @@ The wasm build is single-threaded by policy (`CMakeLists.txt:101`) and heap-capp
 
 | capability | native | WebGL2 | note |
 |---|---|---|---|
-| shader replacements on a translucent actor | ✅ | ✅ | **already proven live** — the terrain bump map at `transfix.github.io/libcvc` runs this exact path |
+| shader replacements on an **opaque** actor | ✅ | ✅ | **already proven live** — the terrain bump map at `transfix.github.io/libcvc` runs this exact path, on an opaque actor |
 | `vtkShaderProperty` custom uniforms | ✅ | ✅ | plain uniforms, no textures |
+| `MapDataArrayToVertexAttribute` (baked `columnH`) | ✅ | ✅ | a plain `in` attribute; ES 3.0 core |
+| named `sampler2D` via `vtkProperty::SetTexture` (terrain albedo for the bed) | ✅ | ✅ | 2-D only — see the W4 row and §6.4 |
+| `vtkTextureObject::Create3DFromRaw` + `UpdateShaderEvent` binder (**W4 only**) | ✅ | ✅ | `TEXTURE_3D` is WebGL2 core; field dropped to **32³** under Emscripten for heap |
 | `exp(vec3)`, `pow`, `reflect`, `dFdx/dFdy`, `fract`, constant-bound loops | ✅ | ✅ | ES 3.0 core |
-| `blendFuncSeparate`, depth-mask toggles (the two-draw composite) | ✅ | ✅ | **core WebGL2 — W1/W2/W3 are byte-identical GLSL modulo `CVC_FS_NORMAL`** |
+| *(was: `blendFuncSeparate` + depth-mask toggles for the two-draw composite)* | — | — | **No longer required by any tier.** W1/W2/W3 touch no blend state and no depth mask, so the GLSL is byte-identical across backends modulo `CVC_FS_NORMAL`, and the portability question this row used to carry is gone (§5.2) |
 | Gerstner in the vertex shader | 3 waves | 2 waves | ~20 ALU/vertex |
 | flow maps, two-phase + jitter | ✅ | ✅ | |
 | W-T2 capture | ✅ | ⚠️ | depth restore via `TextureDepthBlit` (one code path); colour at **half res**; never sample a texture bound to the current FBO (`INVALID_OPERATION`), and `copyTexImage2D` is forbidden for `DEPTH_COMPONENT` |
@@ -756,6 +856,8 @@ The wasm build is single-threaded by policy (`CMakeLists.txt:101`) and heap-capp
 | **L3** | body screen bbox < 32 px, or > ~1.2 km | **no actor** — folded into the terrain tile's splat texture as `water_shallow` / `water_deep` albedo | **none** |
 
 Bodies merge into **3 actors** by band. Cross-band transitions use the Lab's existing anti-popping rule: hashed-alpha dithered cross-fade [Wyman & McGuire 2017] at `//VTK::Color::Impl` (the *colour* anchor — the normal anchor is the GLES3 trap), over `lab.lod.fade_tau_s` expressed as a time constant `1 − exp(−dt/τ)` off the world clock, never a frame ratio.
+
+**This is unaffected by — and in fact suits — the opaque draw of §5.2.** Hashed-alpha is a *stochastic discard*, not a blend: it exists precisely so that geometry can cross-fade while staying on the opaque path with depth writes intact. The L3 rung folds the actor away entirely, so no band transition ever needs true transparency.
 
 **W5 has no LOD, and that is a first-class disqualifier, not a gap.** Measured: 48,600 tets cost 18.60 ms at full frame and 18.73 ms with the body shrunk to 6 % of its linear size. The only possible W5 "LOD" is swapping a prebuilt tet mesh, i.e. rebuilding the merged `vtkUnstructuredGrid` — ~4 ms of allocation at 37 k tets, which must be amortised or it is a hitch.
 
@@ -943,7 +1045,7 @@ RENDER (cvcGL, Xvfb + llvmpipe)
                           CVC_FS_NORMAL trap), modelled on cvcgl_sway_shader
   cvcgl_water_depth    -- sea volume pixels are non-background with water present
                           (the depth-peeling / volume-ordering regression)
-  cvcgl_water_budget   -- 3 actors x 2 draws, 25% coverage <= 0.6 ms, measured
+  cvcgl_water_budget   -- 3 actors x 1 draw, 25% coverage <= 0.45 ms, measured
 ```
 
 ---
@@ -956,20 +1058,20 @@ Slots after the Lab's `L2` (which ships terrain, erosion, hydrology retention an
 |---|---|---|---|---|---|---|---|
 | **W1** | `cvc::world` hydrology core | retain `filled`/`accum`; total-order Priority-Flood+ε; Kahn accumulation; depression hierarchy; Fill–Spill–Merge + LLE; area/depth filter | `inc/cvc/world/{water,hydrology}.h` + srcs; `world_hydrology_test.cpp` | `src/cvc/world/world.cmake`, `src/cvc/tests/CMakeLists.txt` (+1 line each) | `cvc-worldgen build --hydro --runoff 0.25` prints the lake inventory and writes `phi_preview.png`; sweep the slider from dry pans to full lakes | all FLOW/LAKES invariants; ≤ 60 ms at 512²; ≥ 80 % lines | L2 |
 | **W2** | shoreline + channels + falls | marching squares w/ asymptotic decider, DP simplify, CDT + Steiner; D8 channel extraction, Strahler, Q/w/d/v, Manning; three fall detectors + Emilien typing; carve with lake clamp | `src/cvc/world/{shoreline,channels,falls}.cpp`; `world_shoreline_test.cpp`, `world_channels_test.cpp` | none | `cvc-worldgen build --hydro --preview` draws lakes, a stream network and fall markers as a PNG | SHORELINE + NETWORK + CARVING invariants; Q unit trap pinned | W1 |
-| **W3** | `water_mesh` + `GeometryNode::setShaderUniform` | lake lid + skirt, ribbon sweep, fall sheet, merge; the 45-line uniform passthrough | `inc/cvc/world/water_mesh.h` + src; `world_water_mesh_test.cpp` | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` (2 files, warm) | `cvc-worldgen mesh --out lake.off` — open it in VolRover3 | MESH invariants (watertight, conforming, volume agreement) | W2 |
-| **W4** | **`WaterNode` + the W1 tier — the first "wow" frame** | `vtkPropAssembly` + two actors + two mappers over one polydata; the two-draw chromatic composite; the W1 shader; `SceneGraph::addWater`; depth-peeling guard | `inc/cvc/gl/WaterNode.h`, `src/cvcGL/WaterNode.cpp`; `src/cvcGL/test/cvcgl_water_shader.cpp`, `cvcgl_water_depth.cpp` | `inc/cvc/gl/SceneGraph.h`, `src/cvcGL/SceneGraph.cpp`; `src/cvcGL/CMakeLists.txt` **EOF append** | **`lsystem_lab --water`: depth-tinted lakes with foam shorelines, correct terrain occlusion, tree shadows attenuating chromatically through the water** | ≤ 0.030 ms/actor; ≤ 0.42 ms/Mpx at 2 draws; scene fps loss ≤ 3 % | W3, L3 |
+| **W3** | `water_mesh` + the `GeometryNode` passthroughs | lake lid + skirt, ribbon sweep, fall sheet, merge; the uniform passthrough (#1), the vertex-attribute passthrough (#1b) and the named-texture passthrough (#1c) — 110 lines total | `inc/cvc/world/water_mesh.h` + src; `world_water_mesh_test.cpp` | `inc/cvc/gl/GeometryNode.h`, `src/cvcGL/GeometryNode.cpp` (2 files, warm) | `cvc-worldgen mesh --out lake.off` — open it in VolRover3 | MESH invariants (watertight, conforming, volume agreement) | W2 |
+| **W4** | **`WaterNode` + the W1 tier — the first "wow" frame** | **one opaque actor, one stock mapper, one polydata**; the W1 shader with the in-shader bed (§5.2.2); `SceneGraph::addWater`; the `StridedShadowBaker` water-hiding fix (#2b) | `inc/cvc/gl/WaterNode.h`, `src/cvcGL/WaterNode.cpp`; `src/cvcGL/test/cvcgl_water_shader.cpp`, `cvcgl_water_depth.cpp` | `inc/cvc/gl/SceneGraph.h`, `src/cvcGL/SceneGraph.cpp`; `src/cvcGL/CMakeLists.txt` **EOF append** | **`lsystem_lab --water`: depth-tinted lakes with foam shorelines and correct terrain occlusion, identical with shadows on and off** | ≤ 0.030 ms/actor; ≤ 0.28 ms/Mpx at 1 draw; scene fps loss ≤ 3 %; **shader source hash identical shadows-on vs shadows-off**; no shadow ring at the shoreline | W3, L3 |
 | **W5** | **streams and falls** — W2/W3 tiers | two-phase flow map with per-pixel jitter; gravity-scaled scroll; erosion alpha; mist billboards; **wetness decal**; W0 fold into the terrain splat | `water_flow.glsl`, `waterfall.glsl` in `src/cvcGL/water_shader.cpp` | same EOF block | **`lsystem_lab --water --rivers`: a stream from a ridge, over a fall, into a lake, into the sea.** *The island's real hydrology is a radial drainage fan — this, not the lakes, is the shot the terrain actually produces.* | no reset pulse (per-pixel jitter golden); ≤ 0.10 ms for 6 falls | W4 |
 | **W6** | material + nav export + **the connectivity gate** | layer-0 hydrology predicates; `φ·v` classification onto the shipped registry; ford carving; `.npy`/`hydrology.json` export; feed `validate_outdoor` | `src/cvc/world/water_materials.cpp`, `water_connect.cpp`; `world_water_nav_test.cpp` | none | `nav_river_ford` — a swarm routes around a lake and *through* a ford; the deep reach is refused | **`components == 1` over the full runoff × ford matrix**; polygon-vs-field ±1 cell; hard ⇒ ρ = 0 | W5 |
 | **W7** | **W-T2 capture** — refraction, true-bed caustics, soft mist | `buildPassChain(bool shadows)` (the `SetPass(nullptr)` fix); `SceneCapturePass` with `TextureDepthBlit`; refraction with the mandatory rejection test and the `columnH` clamp | `inc/cvc/gl/SceneCapturePass.h`, `.cpp` | `src/cvcGL/SceneGraph.cpp` | shallow water refracts a submerged boulder; mist fades softly against the cliff | ≤ 0.30 ms at 1280×800; **shadows-OFF path still renders volumes** (the regression this PR could cause) | W5 |
 | **W8** | wasm parity + LOD ladder | `lod_flags`, actor merging, L3 fold into the tile splat, extension probes with graceful degrade, half-res capture | `src/cvc/world/water_lod.cpp` | `src/cvcGL/examples/CMakeLists.txt`, `deploy-pages.yml` | lakes and a river live at `transfix.github.io/libcvc/lsystem_lab/` | shader compiles on both backends; wasm fps ≥ 0.9× the no-water wasm baseline | W7 |
-| **W9** | **W4 bounded heterogeneous march** | 3-D σ texture, 32-step march between surface and analytic bed, turbidity authoring | `water_march.glsl`; `world_turbidity_test.cpp` | none | a sediment plume in a pond, and a thermocline in a deep lake | ≤ 0.4 ms fill; degrades to W1 when the field is uniform | W8 |
+| **W9** | **W4 bounded heterogeneous march** | 3-D σ field via `vtkTextureObject::Create3DFromRaw` bound by a ~70-line `WaterVolumeBinder : vtkCommand` on `vtkCommand::UpdateShaderEvent` (§6.4); 32-step march between surface and analytic bed; turbidity authoring | `water_march.glsl`, `water_volume_binder.cpp`; `world_turbidity_test.cpp` | none | a sediment plume in a pond, and a thermocline in a deep lake | ≤ 0.4 ms fill; degrades to W1 when the field is uniform; **no mapper subclass and no render pass** | W8 |
 | **W10** | **W5 `UnstructuredVolumeNode`** — the scivis capability | PT node; **`SetUseFloatingPointFrameBufferOff()`**; one merged grid; 2-component dependent TF; `CachedCellCenterDepthSort`; `max_tets` cap that refuses; hybrid PT-interior + W1-skin; `applyClipPlanes()` no-op; **compiled out of wasm at the CMake level** | `inc/cvc/gl/UnstructuredVolumeNode.h`, `.cpp`; `src/cvcGL/test/cvcgl_unstructured_volume.cpp` | same EOF block | **`water_column`** — an FEM/CFD tet field with a transfer function, paused camera, ~100 k tets at ~20 fps. **The deliverable that outlives this demo.** | refuses > `max_tets`; **the §1.3 FBO-off re-measurement lands here (D-W6)** | W9 |
 
 **Ordering:** W1 → W2 → W3 → W4 → W5 → W6 → W7 → W8 → (W9 ∥ W10).
 
 W1–W6 is a complete, shippable water system: generation, rendering, nav. W7–W10 are quality and capability, each independently revertible. **W10 can slip indefinitely without blocking anything**, which is exactly the right relationship to have with the tier that answers the user's question in the negative.
 
-**Note on demo ordering.** W4 lands lakes before W5 lands streams, because the two-draw composite and `WaterNode` must be proven on the simplest body. But the Lab's ridged-multifractal terrain produces a *radial drainage fan* far more readily than it produces a hero lake, so **W5, not W4, is the PR that produces the demo's real headline shot**, and a hero lake will need an authored basin primitive (see D-W1).
+**Note on demo ordering.** W4 lands lakes before W5 lands streams, because `WaterNode` and the single-draw composite must be proven on the simplest body. But the Lab's ridged-multifractal terrain produces a *radial drainage fan* far more readily than it produces a hero lake, so **W5, not W4, is the PR that produces the demo's real headline shot**, and a hero lake will need an authored basin primitive (see D-W1).
 
 ---
 
@@ -983,6 +1085,10 @@ W1–W6 is a complete, shippable water system: generation, rendering, nav. W7–
 | **`vtkMultiBlockUnstructuredGridVolumeMapper`** | A `std::vector` of PT mappers that sorts *blocks*; every block pays the full per-prop tax — it multiplies the problem | §5.1 |
 | **Caching PT's visibility sort as a performance strategy** | Sorting is 15–20 % of PT's cost. A perfect fix leaves PT 3–70× behind. Worth ~60 lines *only* to make the paused-inspection case free | §1.2 |
 | **A true-thickness pass** (two targets, or additive signed depth [van der Laan 2009]) | For a lake or river over an opaque bed the analytic exit is *exactly* equivalent, so it is pure waste. Waterfalls use a constant `sheet_thickness_m` — one uniform instead of a render pass | §2, §5.5 |
+| **The two-draw chromatic composite** — draw the lid twice, `(GL_ZERO, GL_SRC_COLOR)` then `(GL_ONE, GL_ONE)`, to get per-channel absorption from the fixed-function blender | **Cannot be built on VTK 9.5.** There is no per-actor/mapper/property blend-function API (`SetBlend*` appears on no actor, property or polydata-mapper header); translucent actors have depth writes forced off (`vtkOpenGLActor.cxx:88`); and the translucent path defaults to OIT, which reorders fragments and whose only off-switch is renderer-global (`vtkRenderer.h:930-932`, `:1168`). Behaviour would also flip between cvcGL's shadows-on and shadows-off pass chains (`src/cvcGL/SceneGraph.cpp:1034` vs `:1059`). Replaced by the single opaque draw of §5.2.2, which is both correct and cheaper | §5.2.1 |
+| **Making the two-draw scheme work by force** — `GLDepthMaskOverride` + `SetUseOITOff()` + a `vtkPropAssembly` | Repairs two blockers of four. `vtkOpenGLActor::GLDepthMaskOverride()` (`vtkOpenGLActor.h:52`) genuinely fixes the depth mask per-actor, and `SetUseOITOff()` fixes ordering — but **globally**, changing every other translucent prop in the scene, and blocker 1 (no blend-function API) has no workaround short of a mapper subclass that manipulates raw GL state. That subclass would then own blend, depth and OIT interactions for the life of the project, to reach an image the single draw produces exactly, for less | §5.2.1 |
+| **A `vtkOpenGLPolyDataMapper` subclass that sets GL state around the draw** | The only route to per-actor blend control, and cvcGL subclasses **no** mapper today (it subclasses a render *pass*, `StridedShadowBaker`, `src/cvcGL/SceneGraph.cpp:916`). It would couple water to `vtkOpenGLPolyDataMapper`'s protected internals across VTK upgrades, and — decisively — **it buys nothing**: the single-draw composite is algebraically identical (§5.2.2) and needs no GL state at all. Rejected as invasive *and* unnecessary, not merely invasive | §5.2.2 |
+| **A water-only `vtkRenderPass` inserted into cvcGL's chain** | Avoids the global-OIT question, but requires the `buildPassChain` fix (addition #3) as a hard prerequisite in W4 rather than W7, adds a pass whose interaction with the sea and cloud volumes must then be argued (R7), and still does not give per-actor blend control — a pass sets state for everything it draws. Kept in reserve as the escape hatch if D-W8 option B is ever taken, since the capture pass lands in that chain anyway | §5.2.3, D-W8 |
 | **Any OIT scheme** (per-pixel linked lists, HAVS k-buffer, adaptive/multi-layer alpha) | WebGL2 has no ROV/fragment interlock, no image load/store, no SSBOs, no fragment atomics; framebuffer feedback is `INVALID_OPERATION`. HAVS's own authors call the k-buffer "strictly speaking, unstable" | [Callahan 2005]; §5.1 |
 | **Depth peeling** | 123 ms exact vs 5.5 ms weighted-blended on the same scene. A volume needs hundreds of layers | [Everitt 2001]; [McGuire & Bavoil 2013] |
 | **FFT ocean** [Tessendorf 2004] | Phillips is a fetch-limited wind-sea spectrum; a pond has zero fetch and a stream is advective, not dispersive. 16 fragment passes per cascade on WebGL2 | §2 |
@@ -999,9 +1105,9 @@ W1–W6 is a complete, shippable water system: generation, rendering, nav. W7–
 
 1. **No heterogeneous interior until W9.** A sediment plume, a thermocline, an estuarine turbidity maximum — W1 cannot express any of it. W9 fixes it without tets.
 2. **Water-through-water is wrong**, order-dependent, and the alpha-fade mitigation is a dodge, not a fix.
-3. **Only opaque geometry tints the water.** Particles, foliage cards, the sea volume and other water are absent from any depth the shader can read, so they do not attenuate. Rarely noticed; genuinely wrong.
+3. **Nothing between the surface and the bed is visible at all.** The W1 lid is opaque, so a submerged boulder, a fish or a sunken prop is hidden rather than merely un-attenuated — a stronger restriction than the translucent design would have had, and the price of keeping chromatic absorption without a framebuffer read (§5.2.1). The island fly-through has no such geometry; W-T2 removes the restriction outright. See D-W8.
 4. **No planar reflection**, so a lake on a forested island reflects a sky gradient rather than the treeline. The largest concession, taken deliberately (§12 table, D-W3).
-5. **Shadows do not tint the water *surface*.** A tree shadow falls through onto the bed, which is arguably correct, but the surface itself is never darkened.
+5. **Neither the water surface nor its bed receives the shadow map.** Consuming `//VTK::Light::Impl` first removes `vtkShadowMapPass`'s injection along with VTK's lighting (§5.2.4). The gain is a shader that is provably identical shadows-on and shadows-off; the loss is that a tree's shadow does not darken the bed seen through the water. The cloud-shadow term is applied, so large-scale variation still reads. This is the sharpest regression against the previous revision's intent and is the substance of D-W8.
 6. **Generation is global and cannot be tiled.** One brush stroke can move a spill point kilometres away. Mitigated by the coarse-proxy-live / full-res-on-commit split the Lab already uses, plus the depression hierarchy's locality (an edit inside one leaf invalidates that leaf and its ancestors' sills, not the world).
 7. **Six tiers is real maintenance surface.** Bounded by W1/W2/W3 sharing one fragment core and by the tier-agreement test, but a reviewer should push back hard if a seventh is ever proposed.
 8. **Tiers cannot cross-fade**, which is why they are fixed at bake time and only `lod_flags` varies. If a user toggles scientific mode live, the body pops.
@@ -1016,7 +1122,8 @@ W1–W6 is a complete, shippable water system: generation, rendering, nav. W7–
 
 | # | Risk | Mitigation |
 |---|---|---|
-| **R1** | **The two-draw ordering assumption.** Draw A must precede draw B for the same fragment. `vtkPropAssembly` dispatches parts in order and `vtkRenderer` walks `PropArray` in insertion order — **with depth peeling off.** If anything enables peeling, water composites wrong. | Explicit `SetUseDepthPeeling(false)` + `SetUseDepthPeelingForVolumes(false)`, asserted by `cvcgl_water_depth`. Escape hatch: promote the two draws into `cvc::gl::WaterPass`, which needs the `buildPassChain` fix that PR W7 lands anyway. |
+| **R1** | ~~The two-draw ordering assumption.~~ **Deleted.** The mechanism it described could not be built on VTK 9.5 at all (§5.2.1) and has been replaced by a single opaque draw, which has no ordering assumption, no blend-state requirement, no depth-mask requirement and no interaction with OIT or depth peeling. **No global renderer setting is changed by the design.** | n/a — the risk is removed rather than mitigated. The residual is R8. |
+| **R8** | **The water shader's bed and the terrain shader's surface can drift apart.** W1 evaluates `C_bed` from the terrain albedo splat and heightfield rather than reading the rendered terrain (§5.2.5 con 3), so a change to terrain shading that is not mirrored in the water shader shows up as a discontinuity at the waterline. | The two share one GLSL include for `bedNormal` and the albedo fetch. `cvcgl_water_shore` is a golden that samples a band straddling the shoreline and asserts continuity within tolerance; it fails loudly the first time terrain shading changes alone. Fully retired if D-W8 option B is taken, since the capture then supplies the real terrain colour. |
 | **R2** | **The per-actor CPU tax is uncertain by 5.5×** (28.2 µs vs 5.1 µs from two harnesses). The merge-vs-split policy depends on it. | Budget the conservative 28.2 µs. `cvcgl_prop_sweep` (Lab PR L3) resolves it on the real machine and its curve, not this document's number, sets the policy. |
 | **R3** | **W5's fixed cost is unresolved below ~10 k tets** (§1.3), which is exactly where any shippable configuration sits. | PR W10 re-runs the sweep with `SetUseFloatingPointFrameBufferOff()` before `max_tets` is trusted. Until then W5 costs are quoted as ranges and the cap is set from the pessimistic end. |
 | **R4** | **The wasm GLES3 mapper has never been asked to compile this shader.** The `CVC_FS_NORMAL` trap fails the whole program silently and the actor is simply invisible. | `cvcgl_water_shader` compiles and links on **both** backends in PR W4, before any wasm work. |
@@ -1038,7 +1145,18 @@ W1–W6 is a complete, shippable water system: generation, rendering, nav. W7–
 
 **D-W6 — Is W10 worth building at all?** It is ~250 lines of cvcGL for a renderer this document recommends against using for water. Its justification is entirely the FEM/CFD reuse: the first unstructured path in cvcGL, usable for LBIE output, `cvc tetrahedralize` results, and any solver mesh that must not be resampled. **Recommendation: build it, last, and scope its demo as `water_column` (a real heterogeneous field with a transfer function and a parked camera) rather than as scenery.** If the FEM/CFD use case is not on the roadmap within a year, cut it — the honest answer to the original question does not require it to exist.
 
-**D-W7 — Does the demo need the capture pass at all?** W7 buys screen-space refraction, caustics on the true depth-buffer bed, and soft mist, for 0.27 ms and a pass-chain change. W1's analytic path already gives absorption, caustics on the analytic bed, Fresnel, glint, ripples and foam without any of that. **Recommendation: ship W1–W6 first and look at it.** If refraction is not missed, W7 can be deferred indefinitely and the renderer stays simpler.
+**D-W7 — Does the demo need the capture pass at all?** W7 buys screen-space refraction, caustics on the true depth-buffer bed, and soft mist, for 0.27 ms and a pass-chain change. W1's analytic path already gives absorption, caustics on the analytic bed, Fresnel, glint, ripples and foam without any of that. **Recommendation: ship W1–W6 first and look at it.** If refraction is not missed, W7 can be deferred indefinitely and the renderer stays simpler. *(D-W8 raises the stakes on this one: the capture now also buys the real shadowed bed and submerged geometry, so read the two together.)*
+
+**D-W8 — Evaluate the bed in-shader (W1 as specified), or pull the capture pass forward into W1?** *This is the one genuine decision the §5.2 rework creates, and it is a quality-versus-simplicity call rather than a technical one — both options are verified buildable.*
+
+The §5.2.1 theorem forces the choice: chromatic absorption of scene colour needs either blend-function control (does not exist in VTK) or a framebuffer read. So W1 either evaluates the bed or captures it.
+
+- **Option A — evaluate the bed in-shader (what §5.2 now specifies).** One opaque actor on the stock path. No render pass, no `buildPassChain` change, no global renderer settings, no OIT question, no depth-peeling guard, no path-dependence on shadows. ~240 LoC for `WaterNode` + 110 for the three `GeometryNode` passthroughs + 8 for the shadow-baker fix. **Costs 0.34 ms typical.** Gives up: submerged non-bed geometry, tree shadows on the bed, and exact agreement with terrain shading (§5.2.5 cons 1–3; risk R8).
+- **Option B — land `SceneCapturePass` in W1 instead of W7.** The shader reads the real, lit, shadowed, cloud-shaded framebuffer colour and depth, so `C_bed` is exact and cons 1–3 vanish together, along with R8 and the shoreline golden. Water can stay a single opaque draw — the capture supplies the bed, the blend hardware is still not involved — so none of the §5.2.1 blockers return. **Costs +180 LoC, +0.27 ms, the `buildPassChain` fix (addition #3) promoted from W7 into W4, and R7 (the sea/cloud depth-restore risk) moved forward with it.** It also delivers refraction and soft mist early, making D-W7 moot.
+
+**Recommendation: A, and hold B in reserve for W7 exactly as scheduled.** Three reasons. First, A is the only option with *no* pass-chain change, and `SetPass(nullptr)` at `src/cvcGL/SceneGraph.cpp:1034` means the shadows-off path has no chain to insert into — that fix (addition #3) is real work with a real regression surface (volumes silently vanishing), and W4 should not be the PR that takes it. Second, the three things A gives up are invisible in the demo this roadmap is actually driving: an island fly-through with no submerged props, where the bed under any lake deep enough to tint is already too dark for a tree shadow to read. Third, B is not foreclosed by A — it is a strict refinement of the same single-draw shader, swapping an evaluated `C_bed` for a sampled one, so taking A now costs nothing if B lands later.
+
+**Take B instead if** the Lab acquires submerged geometry (a boulder or wreck prop under a lake), or if the first `lsystem_lab --water` frame shows the shoreline discontinuity R8 warns about and the shared-include mitigation proves fragile. Both are visible within one PR of W4, which is early enough to change course cheaply.
 
 ---
 
@@ -1112,7 +1230,7 @@ Shallow-water dispersion `ω = √(g·k·tanh(k·h))` is what makes waves slow, 
 
 1. **Using an eye-Z difference instead of the reconstructed vertical column for the shoreline** — the foam band slides as the camera moves and you will chase it for a day. Baked `columnH` (§4.1) prevents it structurally.
 2. **Forgetting to clamp the refraction offset by depth** (W7) — the dry beach shows through the shallows in the wrong place.
-3. **Letting water write depth in draw A** — self-sampling, and every depth-derived effect silently degrades to noise. Draw A writes colour only; draw B writes depth.
+3. **Injecting the water stack at `//VTK::Light::Impl` with `ReplaceFirst = false`.** `vtkOpenGLPolyDataMapper::BuildShaders` applies non-first replacements *after* `ReplaceShaderValues`, by which point VTK's lighting has already consumed the anchor and the substitution silently matches nothing — the water shader compiles, links, and renders VTK's default lit surface with none of your code in it. `GeometryNode::addFragmentShaderReplacement` passes `true` (`src/cvcGL/GeometryNode.cpp:603`); do not "fix" it.
 
 ---
 

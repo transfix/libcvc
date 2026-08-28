@@ -1,17 +1,18 @@
 # L-System Laboratory — Design & Roadmap
 
-**Status:** **Revision 2** — design approved for implementation, revised after an adversarial review pass and a rebase. Target branch family `feat/lsystem-lab-*`, baselined on `origin/master` @ **`8b6f426`** (was `10b7904`; `a33851f`, `e97d06c` and `8b6f426` have since merged).
+**Status:** **Revision 2.1** — design approved for implementation, revised after an adversarial review pass and a rebase, then amended by the **connected-terrain decision (D9)**. Target branch family `feat/lsystem-lab-*`, baselined on `origin/master` @ **`8b6f426`** (was `10b7904`; `a33851f`, `e97d06c` and `8b6f426` have since merged).
 **Owner:** L-System Laboratory session.
 **Document path:** `docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md`
 **Last verified against the tree:** 2026-08-27, worktree `/home/joe/src/cvc/wt-libcvc-lsyslab`, rebased onto `8b6f426`.
 **What changed in revision 2:** see §17 (Revision history). The archipelago is now specified rather than asserted (§4.3a), the indoor clearance scheme is derived from one number rather than three contradictory ones (§6b.1a), hard classes carry ρ = 0 (§7.2a), the export frame confronts σ-in-cells (§7.1a), and the collision map is rebuilt for the post-merge world (§14).
+**What changed in revision 2.1:** the user decided **D9** — *"let the terrain be connected throughout."* The generator now **forces isthmuses** so the landmass is one component; `forced-bridges` is the v1 default, `single-island` survives only as an opt-in ablation, the binding gate criterion is **`components == 1`** (not a 0.98 area fraction), and the D2 × D9 window-size blocker **dissolves**. Propagated through §0, §1.2, §4.3a, §7.8, §9.4, §10.1, §11.2, §12.3, §13.2, §15.1 R19, §15.3 D2/D9, §16.3 and the closing claims. See §17.
 
 ---
 
 ## 0. Executive summary
 
 1. We are building **three new libcvc modules** — `cvc::lsys` (a real rewriting engine), `cvc::world` (terrain, surfaces, interiors, export) and `cvc::lod` (selection math) — plus **one new cvcGL example**, `lsystem_lab`, that is a thin client of them. `src/cvcGL/examples/lsystem_forest.cpp` is never touched.
-2. The world is a **multi-island archipelago** at 4096 m (default) / 8192 m (large) / 2048 m (wasm) extent, with mountains to **1420 m** that pierce a cloud deck based at **700 m**. "Archipelago" is a *specified mechanism*, not an adjective: island seeding, per-island biome divergence, a **smooth-max** mask combination operator, channel/bridge widths and a **mandatory outdoor connectivity gate** are all in §4.3a and §7.8.
+2. The world is a **multi-island archipelago** at 4096 m (default) / 8192 m (large) / 2048 m (wasm) extent, with mountains to **1420 m** that pierce a cloud deck based at **700 m**. "Archipelago" is a *specified mechanism*, not an adjective: island seeding, per-island biome divergence, a **smooth-max** mask combination operator, channel/bridge widths and a **mandatory outdoor connectivity gate** are all in §4.3a and §7.8. **The landmass is topologically connected** (decision **D9**, user, 2026-08-27 — *"let the terrain be connected throughout"*): a spanning set of **N − 1 forced isthmuses** joins the islands, so islands remain a *visual and biome* feature while every sampled (start, goal) pair is solvable by land. `validate_outdoor` **verifies** `components == 1` on the exported bytes; it never assumes it (§4.3a.4, §7.8).
 3. Vegetation, rocks and buildings are **instances of a small archetype library** (≈64 baked archetypes), never unique meshes. 1.2 M authored instances; ≈28 k drawn per frame.
 4. The measured bottleneck of the predecessor demo is **per-frame CPU animation**, not triangles (24.8 fps shadows-on, 21.7 fps shadows-**off**, +18 % at 1/4 the pixels). Therefore the LOD ladder is ordered **animation → generation → update → draw calls → triangles**. The wind moves to a vertex shader; CPU sway is hard-capped at **24 plants at every world size**.
 5. Terrain surface classes (dirt/gravel/mud/grass/tile/carpet/…) are the **authored truth**. `risk_raw` (f32 [0,1]) and `hard` (u8) are a **derived, versioned, table-lookup projection** onto the (now merged) GRL-SNAM material contract. We export the two contract *inputs* and nothing derived. **Hard classes carry ρ = 0.00**, because the consumer penalises hard separately and a ρ = 1.00 wall bleeds through the consumer's blur into the corridor the agent must walk down (§7.2a).
@@ -30,6 +31,8 @@
 |---|---|---|---|
 | World extent | 8192 m | 4096 m | 2048 m |
 | Islands | 4 | 3 | 1 |
+| Forced isthmuses (N − 1) | 3 | 2 | 0 |
+| Landmass components (gated) | **1** | **1** | **1** |
 | Max peak | 1420 m | 1420 m | 890 m |
 | Cloud deck base / top | 700 / 1150 m | 700 / 1150 m | 620 / 950 m |
 | Authored plant instances | 1 200 000 | 480 000 | 60 000 |
@@ -41,7 +44,7 @@
 | Target | ≥ 45 fps @ 1280×800, shadows on | ≥ 45 fps | ≥ 30 fps |
 | Export window (default) | 513 × 513 @ 0.5 m = 256.0 m | same | same |
 | Export lattice (indoor **and** outdoor) | 0.5 m/cell | same | same |
-| Outdoor window policy (v1) | single-island | single-island | single-island |
+| Outdoor connectivity policy (v1) | **forced-bridges** | **forced-bridges** | **forced-bridges** (trivial at 1 island) |
 
 ---
 
@@ -62,7 +65,7 @@ The Laboratory is the tool that closes that loop: an interactive procedural worl
 - **G3 — Live editing.** In-app editing of the L-systems in play — trees, terrain, clouds, **and building grammars** — with a latency budget per class of edit.
 - **G4 — Material marking.** Mark terrain regions as dirt / gravel / mud / grass / …, and interiors as concrete / tile / carpet / grating / …, through **one** registry, feeding the GRL-SNAM contract.
 - **G5 — Indoor scenarios.** Generate buildings with floors, rooms, corridors, doorways and stairwells. **An unreachable room is a broken training environment**, so navigability is validated, not hoped for.
-- **G5b — Outdoor solvability.** An archipelago's islands are, by construction, disconnected. **A disconnected episode is a broken training environment too**, so outdoor connectivity is gated with the same seriousness as indoor connectivity (§7.8), and the export window policy is an explicit, recorded decision rather than an accident of where the ROI rectangle landed.
+- **G5b — Outdoor solvability.** An archipelago's islands *would* be disconnected by construction. **A disconnected episode is a broken training environment too**, so the generator **forces isthmuses** until the landmass is one component (decision **D9**), outdoor connectivity is then **gated — verified, not assumed** — with the same seriousness as indoor connectivity (§7.8), and the connectivity policy is an explicit, recorded decision rather than an accident of where the ROI rectangle landed.
 - **G6 — Training data product.** Headless batch generation, deterministic seeding, a documented bundle format, and a curriculum knob.
 - **G7 — Native-first, wasm-reduced.** Design the native ceiling honestly; ship a reduced wasm variant with a named knob table. Parity is not required.
 - **G8 — No collision.** Land alongside PR #223 and PR #200 (the only open PRs as of the rebase) without a merge conflict, and on top of the now-merged `cvc::nav::material` (#230) and wasm (#229/#231) work.
@@ -254,6 +257,8 @@ Island centres, radii and peaks are parameters in the `.lsys` header, not consta
 ### 4.3a The archipelago mechanism — seeding, combination, channels, biomes
 
 > **Why this section exists.** Revision 1 promised a "multi-island archipelago" in §0 and then specified exactly one radial falloff with one centre and one radius. Multiple separate islands were an explicit requirement, and separate islands have consequences — an overlap operator, a sea-level/channel story, per-island character, and (above all) a **connectivity gate**, because two islands separated by deep water are an unsolvable episode. All of that is specified here.
+>
+> **Revision 2.1 adds the answer, not just the measurement.** Under decision **D9** the generator does not merely *detect* disconnection, it **removes** it: a spanning **bridge construction pass** (§4.3a.4) raises N − 1 saddles into navigable isthmuses before any raster is produced, so the landmass is one component by construction and `validate_outdoor` (§7.8) is a *verifier* over the exported bytes rather than a hopeful assertion. Islands stay distinct in silhouette, biome and grammar; they stop being distinct in the free-space graph.
 
 #### 4.3a.1 The island record
 
@@ -281,9 +286,15 @@ struct archipelago_spec {
   double        shelf_m           = -9.0;
   double        smax_k_m          = 40.0;   // smooth-max blend width, metres
   double        separation_factor = 1.15;   // placement: min centre distance / (r_i + r_j)
-  double        channel_min_m     = 40.0;   // min open water between non-overlapping islands
-  double        bridge_min_m      = 12.0;   // min navigable width of a deliberate isthmus
+  double        channel_min_m     = 40.0;   // min open water between UNBRIDGED island pairs
+  double        bridge_min_m      = 16.0;   // min navigable width of a deliberate isthmus.
+                                            // DERIVED, not typed: 2*inflate_m + 4.0 at the
+                                            // shipped inflate_m = 6.0. See section 4.3a.4.
+  double        bridge_crest_m    = 0.6;    // isthmus crest height above sea level
+  double        channel_depress_m = -1.5;   // depth an unbridged saddle is pushed to
+  int           bridge_feather_cells = 3;   // smoothstep flanks on both bridge and channel edits
   bool          force_bridges     = true;   // DECIDED: D9 option 2 (user, 2026-08-27)
+  // force_bridges == false is the SINGLE-ISLAND ABLATION, not a second default.
 };
 }
 ```
@@ -320,9 +331,11 @@ for i in 0 .. N-1:
 
 | value | result |
 |---|---|
-| `≥ 1.0` | masks never overlap. Islands are genuinely separate; the sea between them is at `shelf_m`. **Default 1.15.** |
-| `0.75 – 1.0` | masks overlap at their skirts. Smooth-max produces a **saddle**; whether that saddle breaks the surface is what §7.8 measures. |
+| `≥ 1.0` | masks never overlap. Islands are genuinely separate *in the mask field*; the sea between them is at `shelf_m`. **Default 1.15.** |
+| `0.75 – 1.0` | masks overlap at their skirts. Smooth-max produces a **saddle**; whether that saddle breaks the surface is what §4.3a.4 measures and §7.8 verifies. |
 | `< 0.75` | a single lobed landmass with bays. Legal, and how `warehouse_flats`-style single-island scenarios are authored. |
+
+> **`separation_factor` is a *terrain* knob, not a connectivity knob.** With `force_bridges = true` (the default) the bridge pass runs **after** placement and combination, so even the fully-separated `1.15` case ends up as one connected landmass — the isthmuses are added explicitly and are visible as causeways, exactly as D9 accepts. Lowering `separation_factor` changes how much of the join is *organic* (an overlapping skirt) versus *built* (a raised saddle); it never changes whether the world is connected. That is the gate's job.
 
 #### 4.3a.3 The combination operator — smooth-max, not sum
 
@@ -341,7 +354,7 @@ inline double smax(double a, double b, double k) noexcept {
 with `k = smax_k_m = 40.0` m. Properties that matter here, all unit-tested:
 
 - **Exactness away from the seam.** When `|a − b| ≥ k`, `smax(a,b,k) == max(a,b)` *bit-for-bit*. So a well-separated archipelago (`separation_factor ≥ 1.15`) evaluates **identically** to the per-island formula, and none of §4.3's tabulated peaks move.
-- **Bounded overshoot.** The blend adds at most `k/4 = 10 m` at the midpoint. A saddle can rise 10 m above the taller of the two contributions and no more, so a 40 m blend width can never manufacture a land bridge out of two islands whose skirts both sit at −20 m.
+- **Bounded overshoot.** The blend adds at most `k/4 = 10 m` at the midpoint. A saddle can rise 10 m above the taller of the two contributions and no more, so a 40 m blend width can never manufacture a land bridge out of two islands whose skirts both sit at −20 m. **This is exactly why D9's isthmuses are an explicit, measured construction (§4.3a.4) and not a side effect of widening `smax_k_m`** — the operator is bounded by design, and "turn `k` up until it connects" would trade a controlled 16 m causeway for an uncontrolled global change to every peak's shoulder.
 - **C¹.** No crease, so no phantom drainage channel.
 - **Associative enough.** Folding left-to-right over the island list is order-dependent at the 4th decimal for three-way overlaps. We therefore **sort the island list by `(cx, cy, name)` once at load** and fold in that fixed order, so the result is a pure function of the set. Tested by shuffling the input table.
 
@@ -356,16 +369,39 @@ h(x,y) = smax_fold_i( mask_i(x,y) * ( ridged_mf(warp(x,y), freq_scale_i) * amp_i
 
 **Biome attribution is a partition, not a blend.** The island that owns a cell for *material and grammar* purposes is `argmax_i mask_i(x,y)` — the largest mask value, with ties (`|m_i − m_j| < 0.02`) broken by the sorted island index. Attribution is deliberately **not** smooth-maxed: a class raster must be crisp, because `risk_raw[i] == registry[klass[i]].rho` exactly is a load-bearing invariant (§7.3) and a blended biome would need a blended class, which is not representable in a `uint16` class map. Cells outside every mask are attributed to `void_unknown` / the shelf biome.
 
-#### 4.3a.4 Sea level, channels and bridges
+#### 4.3a.4 Sea level, channels and bridges — the forced-isthmus construction
 
 Sea level is `z = 0` by definition (§4.1). Everything else is derived and measured, not authored:
 
 - A **channel** between islands `i` and `j` is the connected set of `h < 0` cells separating their land components. Its **width** is `2 · min over the channel's medial axis of the distance transform to land` — i.e. the narrowest open-water crossing, in metres. This falls straight out of the same EDT the nav gate already runs.
 - A **land bridge** (isthmus) exists between `i` and `j` when their land components are 4-connected in the free set. Its **width** is the same statistic computed on land instead of water.
-- `channel_min_m` (default **40 m**) is the minimum open-water width the generator accepts between two islands whose masks do not overlap. A narrower channel is visually indistinguishable from a bridge and behaves as neither; the generator widens it by depressing the saddle to `−1.5 m` over a 3-cell feather.
-- `bridge_min_m` (default **12 m**) is the minimum navigable width of a *deliberate* bridge. A land bridge narrower than this, or narrower than `2·agent_radius_m + 1.0 m` (§6b.1a), is either widened or drowned, per the `force_bridges` policy.
+- `channel_min_m` (default **40 m**) is the minimum open-water width the generator accepts between two islands **whose pair is not bridged**. A narrower channel is visually indistinguishable from a bridge and behaves as neither; the generator widens it by depressing the saddle to `channel_depress_m = −1.5 m` over a 3-cell feather.
+- `bridge_min_m` (default **16 m**) is the minimum navigable width of a *deliberate* bridge.
 
-The two knobs are enforced in one pass, immediately after the delta grid is applied and **before** any class rasterisation, so the class map and the connectivity gate never disagree about where the water is.
+> **A number revision 2.1 had to raise, and why.** The binding floor looks like the indoor one, `w_min = max(bridge_min_m, 2·agent_radius_m + 1.0)` (§6b.1a) — `2(0.35)+1.0 = 1.7 m`, `2(3.00)+1.0 = 7.0 m` — and on that reading revision 2's `bridge_min_m = 12.0` was comfortable. **It was not.** The outdoor gate (§7.8 step 3) inflates *obstacles* by `inflate_m = 6.0 m` before it labels components, because that is exactly what `planner.far_pair_in_free_space` does. Water is `hard`, so a 12 m isthmus with water on both flanks has `12 − 2(6) = 0 m` of inflated-free width: **the gate would sever the very bridge the generator just built, report `components == 2`, and reject a world that is visibly connected.** The floor is therefore a third term, and it dominates:
+>
+> ```
+> w_min = max( 2*agent_radius_m + 1.0,      # 1.7 m person, 7.0 m vehicle
+>              2*inflate_m + 4.0 )          # 16.0 m at inflate_m = 6.0   <-- GOVERNS
+> bridge_min_m = w_min                       # DERIVED. Default 16.0, not authored.
+> ```
+>
+> The `+4.0 m` slack is 8 cells at the 0.5 m export lattice: enough that the surviving inflated-free crossing is a corridor rather than a one-cell thread, so the EDT width measurement is stable and a single repaint cannot sever it. `bridge_min_m` is **derived from `inflate_m`**, exactly as `gate.min_path_width_cells` is derived from `agent_radius_m` — if anyone retunes the inflation to match a changed planner, the isthmus width follows automatically instead of silently going stale. This is closing claim 5 applied to the outdoors.
+>
+> Note the agent-radius term is not doing the work here and is not supposed to: obstacle inflation already *is* the planner's agent-clearance model. The term is kept so that an absurd agent (`agent_radius_m > 6.0`) still widens the bridge.
+
+**Which pairs get a bridge (`force_bridges == true`, the default).** Not all of them — that would produce `C(N,2)` causeways for a cosmetic gain. Build the island adjacency graph, weight each pair by the **length of open water on its bottleneck crossing** (metres of `h < 0` along the min-max path between the two land components, computed on the combined smooth-max field), and bridge exactly the **minimum spanning tree** — **N − 1 isthmuses**: 3 for `large`, 2 for `standard`, 0 for `wasm`. Every non-MST pair keeps its channel and is subject to `channel_min_m`. The MST is computed on the *sorted* island order (§4.3a.3), so it is a pure function of the island set, and ties are broken by the sorted pair index. Adding an island adds at most one bridge and never re-routes the existing ones unless the new island genuinely shortens a crossing — which is a property the insertion-stability suite (§12.2) tests.
+
+**How one bridge is produced.** The saddle raise, in four steps, all on the delta grid:
+
+1. **Find the saddle.** Take the bottleneck (min-max) path between the two land components on the smooth-max height field: the path that maximises its own minimum elevation. Its lowest point `h_sad` is the saddle; the path itself is the isthmus centreline. This is the *cheapest* place to build, which is why it is chosen and not a straight line between centres.
+2. **Raise it.** Add a capsule term to `delta` along the centreline: crest `bridge_crest_m = +0.6 m` above sea level, half-width `w_min/2 = 8.0 m`, with `smoothstep` flanks over `bridge_feather_cells = 3` cells falling back to the unmodified field. The added term is C¹, so it does not manufacture the crease (and the phantom FD8 river) §4.3a.3 exists to avoid. At the default `separation_factor = 1.15` the saddle sits on the shelf at ≈ −9 m, so the term lifts ≈ **9.6 m** of fill over a ≥ 40 m span — that *is* a causeway, and D9 accepts it as such.
+3. **Class it.** `+0.6 m` lands inside Layer-0's `abs(h) < 3.0 → sand` band (§7.4) — and inside `braided_delta`'s widened `abs(h) < 6.0` band too — so the isthmus classifies as `sand` (ρ 0.18, `hard = false`, `nav = rough`) with no special case. Note that between two non-overlapping masks every `mask_i` is 0, so **biome attribution on an isthmus falls through to the shelf biome** (§4.3a.3) and the *default* predicate table applies there regardless of which islands it joins — which is the right answer (a causeway should not inherit `alpine_massif`'s snow line) but is worth stating rather than discovering. The generator *also* emits an explicit `sand`/`gravel` paint over the crest at Layer 1, so the class is deterministic even if an author edits the Layer-0 predicate table out from under it.
+4. **Measure it.** Re-run the land EDT and record the achieved `narrowest_bridge_m`. If it is below `w_min` (a neighbouring cliff can eat one flank), widen the half-width by one cell and repeat, at most 3 times; then fail loudly. **The width is measured on the same raster the export writes, never assumed from the half-width that was requested.**
+
+**Ordering, and why it is one pass.** Bridge raises and channel deepenings are computed together, immediately after the erosion/authored delta grid is applied and **before** any class rasterisation, so the class map and the connectivity gate can never disagree about where the water is. Each saddle is claimed by exactly one of the two edits — MST pairs raise, non-MST pairs deepen — so the two knobs never fight over the same cells, and a bridged pair is never subsequently drowned by `channel_min_m`. The resulting relief between a built isthmus (+0.6 m) and an unbridged channel (−1.5 m) is 2.1 m, which is what reads visually as "causeway" versus "strait".
+
+**`force_bridges == false` (the single-island ablation).** No MST, no raises. Every saddle is subject to `channel_min_m` alone, a land bridge narrower than `w_min` is *drowned* rather than widened, and the export window is clipped to one island (§7.8). This is retained deliberately — a "cross the isthmus" curriculum needs a control arm in which the isthmus does not exist — and it is an opt-in knob, never a default.
 
 #### 4.3a.5 Per-island biomes and grammar divergence
 
@@ -1406,7 +1442,7 @@ We write **`risk_raw` and `hard` and nothing derived**. `risk`, `phi_hard_m`, `g
     "inflate_cells": 12,
     "start_world": [-98.4, -71.2],
     "goal_world":  [ 84.9,  93.6],
-    "component_fraction": 0.94
+    "component_fraction": 1.0
   },
   "material": {
     "ontology": "merged_default",
@@ -1429,17 +1465,25 @@ We write **`risk_raw` and `hard` and nothing derived**. `risk`, `phi_hard_m`, `g
   },
   "validation": {
     "passed": true, "components": 1, "repairs_applied": 0, "resamples": 0,
-    "outdoor": { "policy": "single-island", "island": "Kestrel",
-                 "largest_component_fraction": 0.994, "channels_crossed": 0 }
+    "outdoor": { "policy": "forced-bridges",
+                 "components": 1, "world_components": 1,
+                 "islands_in_window": 2, "islands_in_world": 3,
+                 "bridges_expected": 2, "bridges_verified": 2,
+                 "narrowest_bridge_m": 16.5, "bridge_min_required_m": 16.0,
+                 "largest_component_fraction": 1.0,
+                 "channels_crossed": 1, "narrowest_channel_m": 46.0,
+                 "bridges_forced": 0, "resamples": 0 }
   }
 }
 ```
+
+Two fields in `validation.outdoor` deserve a sentence each. **`world_components` is D9's binding criterion** and is a property of the *world*, not of this window; it is copied in so a bundle can be audited without regenerating the terrain. **`channels_crossed` is no longer a failure signal** under `forced-bridges` — a window that straddles a strait is fine precisely because a bridge exists somewhere in the landmass; the field is retained as a difficulty-relevant statistic (an episode that crosses a channel has to find the causeway) and is one of the raw numbers §10.3 keeps so a better curriculum label can be computed retroactively.
 
 **`meta` values are in the NORMALIZED frame, not metres.** This is a correction to revision 1, which wrote `rr: 6.0, d_hat: 12.0, vmax: 8.0, dt: 0.1, nsub: 1` — metre-flavoured numbers that `SdfNavigator` consumes in the same normalized frame as `VEHICLE_DEFAULTS["L"] = 0.035` (≈ 3 m wheelbase). A bundle written with `rr = 6.0` would give the vehicle a repulsion radius comparable to the entire half-region (`region · scale = 128 × 0.05 = 6.4`) and would be unusable. The canonical values, verified in `grl_snam/tools/austin.py:85-95` and `grl_snam/tools/material_demo.py:31-44`, are `scale = 0.05, rr = 0.15, d_hat = 0.35, dt = 0.06, nsub = 2, vmax = 0.9` — i.e. `rr/scale = 3.0 m` of vehicle radius and `d_hat/scale = 7.0 m` of geometry-SDF reach. Note also that `meta["d_hat"]` (**normalized**, the geometry barrier) and `MaterialParams.d_hat_sdf_m` (**12.0 metres**, the *material* barrier) are two different quantities; revision 1 copied the latter into the former.
 
 The `meta` block is not optional. `SdfNavigator.__init__` (`grl_snam/nav.py:37-66`) reads `meta["scale"]`, `meta["center"]`, `meta["rr"]`, `meta["d_hat"]`, `meta["dt"]`, `meta["vmax"]`, `meta.get("nsub", 1)`; `FogScenario.__init__` reads `meta["dt"]` (`scenario.py:137`) and `meta["region"]`/`meta["center"]` (`scenario.py:233-235`); the corner-goal picker at `nav.py:437-440` reads `meta["scale"]`, `meta["center"]`, `meta["region"]`, `meta["bounds"]`. A bundle carrying only bounds + scale is `np.load`-able and **not** scenario-loadable, and that gap is the difference between "the test passes" and "a training run starts".
 
-`endpoints` matters just as much. `planner.far_pair_in_free_space` draws both endpoints from the **largest inflated-free component**, and `austin.py:58-62` documents the trap verbatim: *"a cell can be free and still unreachable once the route is inflated, so a run drives most of the way and then reports no route."* The generator selects endpoints the same way and records the inflation it used.
+`endpoints` matters just as much. `planner.far_pair_in_free_space` draws both endpoints from the **largest inflated-free component**, and `austin.py:58-62` documents the trap verbatim: *"a cell can be free and still unreachable once the route is inflated, so a run drives most of the way and then reports no route."* The generator selects endpoints the same way and records the inflation it used. `endpoints.component_fraction` uses the **same denominator as `validation.outdoor.largest_component_fraction`** (§7.8 step 5) — the inflated-free set — so on any *written* bundle it reads exactly `1.0`, because the gate refuses to write one whose window has more than one component. A value below 1.0 in a bundle on disk is therefore a bug report, not a datum, and the adapter is entitled to say so loudly.
 
 ### 7.6 Defence against silent mirroring
 
@@ -1460,27 +1504,41 @@ Four independent layers, because this failure is undetectable by eye:
 ### 7.8 The outdoor connectivity gate — mandatory, and the archipelago is why
 
 > **The defect this repairs.** Revision 1 gated interiors with real seriousness and gated the *outdoors* not at all. An archipelago makes that untenable: two islands separated by deep water are, to a ground agent, an **unsolvable episode**, and `water_deep` and `cliff_rock` are `hard`. A batch run that draws an ROI straddling a channel produces bundles that look perfect and cannot be finished.
+>
+> **Revision 2.1 (D9).** The generator now *removes* the disconnection rather than only detecting it (§4.3a.4). That does **not** make this gate redundant — it makes it a **verifier**. Everything below is written on the assumption that the bridge pass can be wrong: a flank eaten by a cliff, an authored paint stroke that re-drowns a crest, an erosion pass that cuts a channel through a causeway, a window that crops the only isthmus. The gate's whole value is that it reads the **exported bytes** and never trusts the constructor.
 
-The outdoor gate runs on **every exported window, every time**, exactly like the interior gate, and shares its EDT and flood-fill machinery.
+The outdoor gate runs on **every exported window, every time**, exactly like the interior gate, and shares its EDT and flood-fill machinery. Under D9 it additionally carries a **whole-world** verdict, because the binding criterion the user set is connectivity of the *terrain*, not of one rectangle.
 
 ```cpp
 // inc/cvc/world/cells.h  (alongside nav_gate_report)
 struct outdoor_gate_report {
   bool   passed = false;
-  int    components = 0;
+  int    components = 0;               // in the EXPORT WINDOW
   double largest_component_fraction = 0.0;
+  int    world_components = 0;         // over the WHOLE WORLD (D9's binding criterion)
   int    islands_in_window = 0;
   int    channels_crossed = 0;         // open-water separations inside the window
   double narrowest_channel_m = 0.0;
-  double narrowest_bridge_m  = 0.0;
+  double narrowest_bridge_m  = 0.0;    // MEASURED on the exported bytes, never assumed
+  int    bridges_expected = 0;         // N-1 under forced-bridges; 0 otherwise
+  int    bridges_verified = 0;         // how many survived to the raster
   int    bridges_forced = 0, resamples = 0;
-  std::string policy;                  // "single-island" | "forced-bridges" | "amphibious"
+  std::string policy;                  // "forced-bridges" | "single-island" | "amphibious"
   std::string failure_reason;          // empty on pass
 };
 
+// Window verdict. Reads the exported planes; assumes nothing about how they were made.
 outdoor_gate_report validate_outdoor(const raster_out&, const grid_spec&,
                                      const archipelago_spec&, double inflate_m);
+
+// Whole-world verdict, run ONCE per world at generation time (not per window).
+// Rasterises the full extent on the COARSE CONNECTIVITY LATTICE (2.0 m) and
+// labels it; fills world_components, bridges_verified and narrowest_bridge_m.
+outdoor_gate_report validate_world(const world_model&, const archipelago_spec&,
+                                   double lattice_m = 2.0, double inflate_m = 6.0);
 ```
+
+**Why the world check runs on a 2 m lattice and why that is still sound.** The full `large` extent at the 0.5 m export lattice is 16 384² = 268 M cells — an EDT and a labelling pass nobody is going to run per world. At 2.0 m it is 4 096² = 16.8 M cells (4 096 cells across for `standard`, 1 024 for `wasm`), which is one EDT + one union-find in ≈ 150 ms (`large`) / ≈ 40 ms (`standard`), on a transient buffer that is freed the moment the verdict is recorded. Coarsening is **conservative in the direction that matters**: a cell is land on the coarse lattice only if *all* of its fine cells are free, so the coarse free set is a **subset** of the fine one and a coarse `components == 1` implies a fine `components == 1`. A 16 m isthmus is ≥ 8 coarse cells wide and survives comfortably; a 2 m sliver that only exists at 0.5 m is *not* counted, which is the correct bias — we would rather rebuild a bridge than certify a sliver. Each verified bridge's width is then re-measured on a **0.5 m strip crop** around its centreline, so the number reported in `narrowest_bridge_m` is always a fine-lattice measurement.
 
 Algorithm:
 
@@ -1494,32 +1552,48 @@ Algorithm:
 4. Label 4-connected components of the inflated-free set (4-connectivity, matching
    the planner's neighbourhood, not 8).
 5. Record component count, largest_component_fraction, and the per-pair channel /
-   bridge widths of section 4.3a.4.
-6. Apply the POLICY (decision D9). Endpoints are ALWAYS drawn from ONE component,
-   so a written bundle is never internally unsolvable; the gate governs whether the
-   WORLD is accepted and how much of the window is wasted.
+   bridge widths of section 4.3a.4. MEASURE narrowest_bridge_m from the land EDT;
+   never copy the half-width the constructor asked for.
+   DENOMINATOR, stated because it was ambiguous and two sections disagreed:
+     largest_component_fraction = |largest INFLATED-free component|
+                                / |INFLATED-free set|
+   -- so it is EXACTLY 1.0 whenever components == 1, and the two criteria can
+   never report different verdicts about the same window. It is NOT a fraction
+   of the window area and NOT a fraction of the uninflated free set.
+6. Apply the POLICY (decision D9, DECIDED: `forced-bridges`). Endpoints are ALWAYS
+   drawn from ONE component, so a written bundle is never internally unsolvable;
+   the gate governs whether the WORLD is accepted and how much of the window is
+   wasted.
 7. FAILURE POLICY, mirroring the interior gate:
-     a. REPAIR: under `forced-bridges`, raise the narrowest disqualifying saddle to
-        +0.6 m over a 3-cell feather and paint it `sand`/`gravel`. Re-validate.
-        Up to 3 times. Under `single-island`, instead SHRINK the window to the
-        dominant island's mask union its shelf, and re-validate once.
+     a. REPAIR: under `forced-bridges`, raise the narrowest disqualifying saddle
+        INSIDE THE WINDOW by the section-4.3a.4 construction (crest +0.6 m,
+        half-width w_min/2, 3-cell smoothstep feather, `sand`/`gravel` paint).
+        Because that edit lands in the shared delta grid, the repaired isthmus is
+        part of the WORLD, not a window-local patch -- so the window verdict and
+        the world verdict can never drift apart. Re-validate. Up to 3 times.
+        Under `single-island`, instead SHRINK the window to the dominant island's
+        mask union its shelf, and re-validate once.
      b. RESAMPLE: bump the window's element id (and, in seeded placement mode, the
         island-placement element) and regenerate. Up to 8 times.
      c. HARD FAIL: refuse to write the bundle, record the seed, the policy and the
         full outdoor_gate_report in provenance.json, and raise a red banner in the Lab.
 ```
 
-Cost: one EDT + one labelling pass over 513² ≈ **3 ms** natively. It runs in the live preview too, and the Lab's World tab shows `components: 1 ✓` or `components: 3 — 62 % largest` in red.
+Cost: one EDT + one labelling pass over 513² ≈ **3 ms** natively, per window. The whole-world pass (`validate_world`, 2 m lattice) is ≈ 40 ms `standard` / ≈ 150 ms `large`, **once per world**, and is inside the ≈ 2.4 s `cvc-worldgen build` budget of §11.2. The window gate runs in the live preview too, and the Lab's World tab shows `components: 1 ✓` or `components: 3 — 62 % largest` in red.
 
-**Acceptance thresholds** (defaults; all in `archipelago_spec`):
+**A window is a crop, so the two verdicts are not the same claim.** A world can be one connected landmass and an *export window* can still crop away the only isthmus and see two components. That is not a contradiction and it is not tolerated either: the window's own pass condition is `components == 1`, and repair (a) satisfies it by building an isthmus *inside* the window — which, because the raise goes into the shared delta grid, also becomes part of the world. Both verdicts are recorded separately in the manifest so a reader never has to infer one from the other.
+
+**Acceptance thresholds** (defaults; all in `archipelago_spec`). **`components == 1` is the binding criterion under D9** — the 0.98 area fraction survives only inside the single-island ablation, where by construction there is no isthmus to reach the last 2 % of a shelf across:
 
 | policy | pass condition |
 |---|---|
-| `single-island` (**v1 default**) | `largest_component_fraction ≥ 0.98` **and** `channels_crossed == 0` |
-| `forced-bridges` | `components == 1` after repair, **and** `narrowest_bridge_m ≥ max(bridge_min_m, 2·agent_radius_m + 1.0)` |
-| `amphibious` | `components == 1` with `water_shallow` treated as free (requires the ontology change of D9 option 3) |
+| `forced-bridges` (**v1 default — D9**) | `world_components == 1` **and** window `components == 1` after repair, **and** `narrowest_bridge_m ≥ w_min = max(2·agent_radius_m + 1.0, 2·inflate_m + 4.0)` (**= 16.0 m** at the shipped `inflate_m = 6.0`, for both agent presets — §4.3a.4), **and** `bridges_verified == bridges_expected == N − 1` |
+| `single-island` (**opt-in ablation**) | `largest_component_fraction ≥ 0.98` **and** `channels_crossed == 0`. This is a deliberately *weaker* criterion, admissible only because the window has been clipped to one island; it is **not** the D9 criterion and a corpus must not mix the two. |
+| `amphibious` (deferred) | `components == 1` with `water_shallow` treated as free (requires the ontology change of D9 option 3) |
 
-The policy is **recorded in the manifest** (`validation.outdoor.policy`) and in `provenance.json`, because a corpus mixing policies silently mixes two different task definitions. **Which policy v1 ships is a user decision — D9 in §15.3.**
+> **Reconciled, because it was contradictory.** Revision 2 stated the pass condition as `largest_component_fraction ≥ 0.98` here and as `components == 1` in the manifest and the Surface-tab preview. Those are different tests: a window with a 1.5 %-of-area islet stranded offshore passes the first and fails the second. Under D9 the second is correct and binding, and the fraction is retained **only** as the ablation's threshold and as a *diagnostic* (`largest_component_fraction` is still reported on every run, because "components: 3 — 62 % largest" tells an author far more than "components: 3").
+
+The policy is **recorded in the manifest** (`validation.outdoor.policy`) and in `provenance.json`, because a corpus mixing policies silently mixes two different task definitions. **D9 is DECIDED (user, 2026-08-27): `forced-bridges` is the v1 default.** See §15.3.
 
 ---
 
@@ -1960,7 +2034,8 @@ Surface ────────────────────────
    cell_w    0.500000 m  (= 256.0 / 512)   row 0 = min_y ✓
    frame     sigma_m 0.50 -> sigma 1.0 cells   bleed 2.0 m   scene_kind mixed
              gate horizon 50 cells (25.0 m)    hard_margin viable <= 0.50 m
-   outdoor   components 1   largest 99.4 %     policy single-island (Kestrel)
+   outdoor   components 1  world 1  largest 100 %   policy forced-bridges
+             bridges 2/2 verified   narrowest 16.5 m (>= 16.0 required)
    [ preview risk_raw ] [ preview hard ] [ preview phi_m ] [ Validate ] [ Export… ]
 ```
 
@@ -1976,7 +2051,7 @@ The **risk-detour path overlay** draws the planner's actual route over the curre
 
 > **Trap, surfaced in the UI:** the overlay's route is planned with `cvc::nav::astar(..., cost)` and **`simplify` is skipped when a cost field is present** — the line-of-sight shortcut ignores cost and would straighten the detour right back through the mud. `navdemo::plan_route` always simplifies; the Lab's overlay must not. Without this, painting mud and seeing no detour reads as "the material feature is broken" when the actual cause is post-hoc path smoothing.
 
-**World** — the island table (name, centre, radius, `r_core`, peak, `freq_scale`, biome) with add/remove/reseed per row and a `Place N islands` button driving the §4.3a.2 sampler, a live **connectivity readout** (`components: 1 ✓` / `components: 3 — 62 % largest`, red on fail) with per-pair channel and bridge widths, the window-policy selector, sea level, cloud base/top with a live **"peaks pierce by N m"** readout (red if ≤ 0), tile size, species mix table (species × density/ha × slope range × altitude range × min spacing), erosion controls with an `Apply to authored region` button and an estimated-seconds readout, settlement placement, and the export ROI rect picker with a live cell-count readout (`513 × 513 @ 0.5 m = 256.0 × 256.0 m`).
+**World** — the island table (name, centre, radius, `r_core`, peak, `freq_scale`, biome) with add/remove/reseed per row and a `Place N islands` button driving the §4.3a.2 sampler, a live **connectivity readout** (`components: 1 ✓ · world 1 ✓ · bridges 2/2` / `components: 3 — 62 % largest`, red on fail) with per-pair channel and bridge widths, the **connectivity-policy selector** (`forced-bridges` default; `single-island` marked *ablation*; `amphibious` greyed out and labelled "changes exported `hard` bytes — deferred, D9 option 3"), a `Debug ▸ Show isthmuses` overlay that draws each forced bridge's centreline and its measured narrowest width so a causeway that came out at 15.2 m is visible rather than merely rejected, sea level, cloud base/top with a live **"peaks pierce by N m"** readout (red if ≤ 0), tile size, species mix table (species × density/ha × slope range × altitude range × min spacing), erosion controls with an `Apply to authored region` button and an estimated-seconds readout, settlement placement, and the export ROI rect picker with a live cell-count readout (`513 × 513 @ 0.5 m = 256.0 × 256.0 m`).
 
 **Seeds**
 
@@ -2074,7 +2149,9 @@ cvc-lsys validate <recipe.lsys>          # parse + gen_nested + module-count rep
 cvc-worldgen build   --world archipelago.lsys --seed N --out world_a/
                      [--window cx cy half] [--cell 0.5] [--scale 0.05]
                      [--agent-radius 0.35] [--scene-kind outdoor|indoor|mixed]
-                     [--window-policy single-island|forced-bridges|amphibious]
+                     [--connectivity-policy forced-bridges|single-island|amphibious]
+                                                    # default forced-bridges (D9)
+                                                    # --window-policy is a deprecated alias
                      [--ontology merged_default] [--storeys 1]
                      [--preset standard] [--preview]
 cvc-worldgen sample  --world archipelago.lsys --seeds 1000..1400 --n 200
@@ -2082,6 +2159,8 @@ cvc-worldgen sample  --world archipelago.lsys --seeds 1000..1400 --n 200
                      [--out dataset/] [--jobs 8]
 cvc-worldgen inspect <bundle/>           # print manifest + validation + difficulty
 ```
+
+> **The flag is `--connectivity-policy`, not `--window-policy`.** Under D9 the policy governs the **terrain**, not the rectangle: `forced-bridges` changes how the world is *built* (an MST of isthmuses, §4.3a.4) and only then how a window is judged. Keeping the old name would have implied the choice was a per-export crop decision, which is exactly the misreading that let revision 2 carry two different pass conditions. `--window-policy` is accepted as a deprecated alias for one release and prints a one-line deprecation notice; the manifest key stays `validation.outdoor.policy` and its values are unchanged, so no bundle is invalidated by the rename.
 
 ### 10.2 Reproducibility
 
@@ -2107,6 +2186,8 @@ difficulty measure(const raster_out&, const grid_spec&,
 ```
 
 Endpoints come from the **largest inflated-free component** at `inflate_m = 6.0`, matching `planner.far_pair_in_free_space` exactly, and both the selection method and the inflation are recorded in the manifest (§7.5). A generator that draws endpoints from raw free space produces a curated dataset with a silent tail of episodes that fail in the last stretch — which reads as a policy failure, not a data bug.
+
+**Under D9 that component is the whole landmass**, which is the point of the decision: `far_pair_in_free_space` maximises separation inside one component, so with the islands joined it will happily place `start` on Tern and `goal` on Kestrel, and the episode is solvable *only* by finding the causeway. That is a strictly larger and more interesting endpoint distribution than the single-island policy could produce, and it is free — no change to the selector, which was already component-aware. It also means `inflate_m` is now load-bearing in two places at once (endpoint selection **and** the isthmus width floor of §4.3a.4), which is why `bridge_min_m` is derived from it rather than typed beside it.
 
 > `risk_detour` is an **unvalidated candidate label**. It is cheap, principled and computed from machinery that already exists, but whether a curriculum sorted by it improves training is an empirical question this design cannot answer. The manifest therefore carries enough raw statistics (class fractions, risk mean/σ, hard fraction, clearance percentiles, route lengths both ways) that a better label can be computed **retroactively without regenerating a single world**. Adding a statistic later invalidates the corpus; enumerate them now.
 
@@ -2184,6 +2265,9 @@ Three things the adapter must do and is tested on:
 | terrain chunk T4 (5², 5 octaves) | 0.02 ms | 0.05 ms | 2 |
 | class raster 513² (3 layers) | 4 ms | 12 ms | 1b/3 |
 | projection only (ontology swap) | 1.8 ms | 5 ms | 1b |
+| outdoor window gate, 513² (EDT + labelling) | 3 ms | 9 ms | always |
+| bridge MST + saddle raises (N − 1 isthmuses) | 6 ms | n/a (1 island ⇒ 0 bridges) | 3, per world |
+| **whole-world** connectivity verify, 2 m lattice, full extent | 40 ms `standard` / 150 ms `large` | 12 ms (wasm, 1024²) | 3, once per world |
 | nav gate, one 64×64 storey | 0.7 ms | 2 ms | always |
 | nav gate, 3-storey office | 12 ms | 34 ms | always |
 | Lopes floor plan, simple | 60 ms | 180 ms | 3 |
@@ -2191,7 +2275,11 @@ Three things the adapter must do and is tested on:
 | erosion, one 1024² region (all 4 passes) | 0.55 s | 1.6 s | 3 |
 | `.npy` bundle write (6 planes @ 513²) | 22 ms | 60 ms (MEMFS) | 3 |
 | **full `cvc-worldgen build`** | **≈ 2.4 s** | n/a | — |
-| **`cvc-worldgen sample --n 200 --jobs 8`** | **≈ 70 s** | n/a | — |
+| **`cvc-worldgen sample --n 200 --jobs 8`** | **≈ 71 s** | n/a | — |
+
+The three connectivity rows are new in revision 2.1 and are **inside** the ≈ 2.4 s `build` figure, which does not move: 46 ms of bridge construction plus world verify against a 2.4 s total is 1.9 %. The `sample` figure does move, but only just — 200 worlds × 46 ms ÷ 8 jobs ≈ **+1.2 s**, so ≈ 70 s becomes ≈ **71 s**, and that is the number carried in the table rather than left as a stale 70.
+
+The world verify's transient buffers are the only new allocation of any size: 16.8 M `uint8` occupancy plus a 32-bit EDT scratch ≈ **84 MB** for `large` (21 MB for `standard`, 5 MB for wasm), allocated inside `validate_world` and **freed before it returns**. It is deliberately absent from §11.3, which budgets *resident* memory for the running renderer; a generation-time peak that does not survive the call is a different quantity and conflating the two is how memory tables start lying.
 
 ### 11.3 Memory
 
@@ -2232,7 +2320,7 @@ If the engine is wrong, these fail. They cannot rot the way a self-generated sna
 ### 12.2 Determinism tests (the highest-value long-term suite)
 
 1. **Order independence** — permuting production order in the file produces an identical word.
-2. **Insertion stability** — adding an unrelated production, or a tree below sea level that gets skipped, leaves every other element byte-identical.
+2. **Insertion stability** — adding an unrelated production, or a tree below sea level that gets skipped, leaves every other element byte-identical. Extended in revision 2.1 to the archipelago: **adding an island leaves the other islands' placements, biomes and *existing forced isthmuses* unchanged** unless the new island genuinely shortens a spanning crossing, in which case exactly one MST edge moves and the report says which. The MST is computed in the sorted island order (§4.3a.3), so it is a pure function of the island set and not of table order — tested by shuffling the island table.
 3. **Stream isolation** — the salt audit: salting `sway`, `phase`, `size`, `param_jitter`, `cloud` leaves `class_map`, `risk_raw`, `hard`, `occupancy` **bit-identical**. Runs in CI on every PR.
 4. **Thread independence** — `cvc-worldgen build --jobs 1` and `--jobs 8` produce byte-identical bundles.
 5. **Rebuild determinism** — building the same world twice produces byte-identical `.npy` files.
@@ -2252,6 +2340,11 @@ If the engine is wrong, these fail. They cannot rot the way a self-generated sna
 - **`consumer_frame_ref` is never read** — a test greps `world_bundle.py` for the key and fails if it appears outside a comment. The block is forensics; the moment it becomes configuration, bundles start shipping stale tuning (§7.1a).
 - **Hard-class projection** — `registry[k].hard == true ⇒ registry[k].rho == 0.0` for every class in every ontology variant (§7.2a), asserted over the shipped registry and any YAML-loaded one.
 - **A\* cost test** — a route across a painted mud strip is longer in cells but lower in cost than the blind route, **with `simplify` skipped**; and the same route with `simplify` enabled is asserted to be *wrong*, so the trap is documented by a test.
+- **Whole-world connectivity (D9)** — for all three presets × 64 seeds, `validate_world` reports `world_components == 1`, `bridges_verified == islands − 1`, and `narrowest_bridge_m ≥ 2·inflate_m + 4.0`. This is the test that makes the user's decision an enforced property rather than a paragraph.
+- **The gate cannot sever its own bridge** — a regression test for the defect §4.3a.4 names: build a world, inflate obstacles by `inflate_m`, and assert every forced isthmus still carries a ≥ 8-cell inflated-free crossing. It is written as a *parameterised* test over `inflate_m ∈ {4, 6, 8}` so that retuning the inflation without retuning `bridge_min_m` fails loudly instead of quietly disconnecting every world.
+- **Coarse lattice is conservative** — over 32 random worlds, the 2 m connectivity labelling never reports fewer components than the 0.5 m labelling of the same extent. This is the assumption the whole-world check rests on, so it is measured, not asserted.
+- **The two connectivity criteria agree** — for every window of every generated world, `components == 1` ⟺ `largest_component_fraction == 1.0`. This is the machine-checked form of the reconciliation in §7.8, and it is what stops the two numbers drifting apart again.
+- **Ablation still works** — with `force_bridges = false`, the same worlds produce `bridges_verified == 0` and `single-island` windows that pass on `largest_component_fraction ≥ 0.98`. The ablation knob is covered, so it cannot rot while unused.
 
 ### 12.4 The 80 % coverage gate
 
@@ -2347,7 +2440,7 @@ The first *interactive* deliverable is still L3, unchanged, and that is stated r
 |---|---|---|---|---|---|---|---|
 | **L0** | `cvc::lsys` — the whole engine, **and PR 1 is visual** | hashed RNG, expression VM, symbol table, parser, `.lsys` reader/writer, diagnostics, both derivation modes, containment policy, context provider, `word`, `filter_level`, **`gen_nested` detection**, **four** emitters (`stats`, `svg`, `mesh`, `raster`-stub), `deriver` (resumable), `cvc-lsys` CLI with `svg` / `mesh` / `derive` / `validate` | `inc/cvc/lsys/{rng,expr,symbol,grammar,parse,io,module,derive,interp,scope,recipes,svg}.h` + srcs; `src/cvc/lsys/lsys.cmake`; `src/cvc/tools/cvc_lsys_main.cpp`; `src/cvc/tests/{lsys_rng,lsys_expr,lsys_parse,lsys_derive,lsys_interp,lsys_recipes,lsys_svg}_test.cpp`; `src/cvc/tests/lsys_tests.cmake`; `src/cvc/tests/data/recipes/*.lsys` | `src/cvc/CMakeLists.txt` **+1 line** before `add_library(cvc` at **841**; `src/cvc/tests/CMakeLists.txt` **+1 line** before the `TEST_TARGETS` drift guard at **1281** | ~2 900 + 2 000 test | **`cvc-lsys svg pine_monopodial.lsys --gen 10 --out pine.svg` — open it in the PR diff and look at the tree.** Plus `--out tree.off`, `ctest -R lsys` green, byte-exact `.lsys` round-trip incl. comments, and **all published module counts assert** | — |
 | **L1** | `cvc::world` surfaces + bundle | 32-class registry + 3 ontology variants (**hard ⇒ ρ = 0**, §7.2a), `grid_spec`, three-layer `raster()`, `heightfield`, `.npy` writer, `bundle` with the `frame` + `consumer_frame_ref` blocks (§7.1a), `cells.json` schema `cvcworld.cells/1` incl. `opaque` + `footprint` (§6b.6), `cvc-worldgen build --preview`. **Completely headless.** | `inc/cvc/world/{units,grid,surface,raster,heightfield,bundle,cells,npy,preview}.h` + srcs; `src/cvc/world/world.cmake`; `world_{surface,raster,bundle,cells}_test.cpp`; `data/golden/tiny_bundle/`; python CI step | **none** (both includes exist) | ~2 300 + 1 600 test | **`cvc-worldgen build --preview` writes a loadable bundle *and* `class_preview.png` / `risk_preview.png`; the Python CI step constructs `MaterialGrid` and asserts `field().field.shape == (1,6,513,513)`; a C++ step calls `material_build` on the same bytes and compares bit-for-bit. This PR unblocks GRL-SNAM.** | L0 |
-| **L2** | terrain, **the archipelago**, tiling, LOD math | ridged multifractal + warp + masks, **smooth-max island combination + seeded placement + biome table (§4.3a)**, octave band-limiting, erosion passes, hydrology, tile grid, **`validate_outdoor` (§7.8)**, `cvc::lod::select` | `inc/cvc/world/{terrain,island,archipelago,biome,tile,scatter}.h`, `inc/cvc/lod/select.h` + srcs; `world_{terrain,archipelago,outdoor_gate}_test.cpp`, `lod_select_test.cpp` | **none** | ~2 200 + 1 300 test | `cvc-worldgen build --preset large --preview` produces a **4-island** world you can look at as a PNG; smooth-max exactness, placement determinism, band-limit, hysteresis and **outdoor-gate** tests green | L1 |
+| **L2** | terrain, **the archipelago**, tiling, LOD math | ridged multifractal + warp + masks, **smooth-max island combination + seeded placement + biome table (§4.3a)**, octave band-limiting, erosion passes, hydrology, tile grid, **the forced-isthmus MST + saddle-raise pass (§4.3a.4)**, **`validate_outdoor` + `validate_world` (§7.8)**, `cvc::lod::select` | `inc/cvc/world/{terrain,island,archipelago,bridge,biome,tile,scatter}.h`, `inc/cvc/lod/select.h` + srcs; `world_{terrain,archipelago,bridge,outdoor_gate}_test.cpp`, `lod_select_test.cpp` | **none** | ~2 500 + 1 500 test | `cvc-worldgen build --preset large --preview` produces a **4-island, 3-isthmus, one-component** world you can look at as a PNG; smooth-max exactness, placement determinism, band-limit, hysteresis, **`world_components == 1` across all presets × 64 seeds**, and the **inflation-does-not-sever-the-bridge** regression all green | L1 |
 | **L3** | `lsystem_lab` skeleton + terrain render + **the measurement** | the example, `fixed_mesh`, chunk actors, frustum cull, camera/HUD/touch, ImGui shell (World/LOD/Stats tabs), shadow stage tracking, `cvcgl_prop_sweep` | `src/cvcGL/examples/lsystem_lab.cpp`, `lsyslab_render.{h,cpp}`, `lsyslab_ui.{h,cpp}`, `LSYSTEM_LAB.md`; `src/cvcGL/test/cvcgl_prop_sweep.cpp` | `src/cvcGL/examples/CMakeLists.txt` **append after line 97 (EOF)**; `src/cvcGL/CMakeLists.txt` **append after line 293 (EOF)** | ~2 200 + 300 test | Fly a 4 km archipelago at ≥ 45 fps, rungs recolour, budget gauge live. **`max_props` default is set from the sweep, not from this doc.** | L2 |
 | **L4** | vegetation at scale + **GPU sway** | archetype library, stateless-hash placement, merged chunk actors, impostor atlas, budget solver wired to the loop, the A0–A4 animation ladder, the `tcoordMC` declaration fix + wasm shader smoke test | `inc/cvc/world/{archetype,mesh_emit}.h` + srcs; `world_archetype_test.cpp`; `src/cvcGL/test/cvcgl_sway_shader.cpp` | `src/cvcGL/CMakeLists.txt` (same EOF block) | ~1 700 + 800 test | **480 k plants at ≥ 45 fps with shadows on, and a wind slider that moves every visible tree at zero CPU cost beyond 60 m** | L3 |
 | **L5** | the Laboratory widget | all seven tabs, four-tier loop + Tier 1b, surface painting, undo/redo, seed padlocks + salt audit UI, gallery/fork, specimen preview, LOD debug, profiling, contract preview | `lsyslab_ui_*.cpp`; `src/cvc/tests/lab_dispatch_test.cpp` | **none** | ~2 400 + 400 test | Edit a production → forest regenerates in 180 ms without blanking; paint mud → `risk_raw` changes in the contract preview; export | L4 |
@@ -2535,9 +2628,16 @@ And one test that makes the seam honest in both directions: **the Lab's in-memor
 *Probability: medium. Damage: low-medium.* ρ_hard = 0 removes the dominant case, but the consumer's blur is still isotropic and occlusion-unaware, so an outdoor puddle within `blur_bleed_radius_m` of a door still raises indoor risk. At the outdoor recommendation (σ = 4 cells) that radius is **8.0 m**.
 *Defence:* `scene_kind` selects σ (indoor/mixed ⇒ 1 cell ⇒ 2.0 m), the bounded-contrast validator warns on the specific class pair, the radius is published and drawn as a halo around the brush. *Residual:* a genuinely mixed scene with a mudflat against a warehouse wall will have a slightly hot interior, and the honest answer is that this is a property of the consumer's blur, not of our export — which is why we do not silently pre-compensate for it.
 
-**R19 — The archipelago's outdoor gate rejects too much, or the window policy is wrong.**
-*Probability: medium.* A `single-island` policy (D9's recommendation) means the export window can never straddle a channel, which quietly caps the usable window at the smallest island's diameter — Tern is r = 390 m, so a 256 m window fits comfortably, but a 512 m window (decision D2) does **not** fit on Tern at all.
-*Defence:* `validate_outdoor` measures and reports it, `cvc-worldgen sample` records rejections in `rejected.csv` with the reason, and the window/island pairing is chosen by the generator rather than the user. *Residual:* D2 (window size) and D9 (window policy) interact, and they must be decided **together**; that interaction is called out in both entries.
+**R19 — The forced isthmuses fail to materialise, or read as an obvious artifact.**
+*Probability: medium. Damage: medium.* **Revision 2.1 retires this risk's original body and replaces it.** As written in revision 2, R19 was *"a `single-island` policy caps the usable window at the smallest island's diameter — a 512 m window does not fit on Tern"*. **Under D9 that cap does not exist.** With the landmass forced connected, a window may straddle a channel because a bridge is always somewhere in the component, so window size is no longer bounded by any island's land diameter and the D2 × D9 interaction is **dissolved** (§15.3 D2).
+
+What is left is a different, smaller risk with three concrete failure modes:
+1. **A bridge does not survive to the raster.** A cliff eats one flank, an authored paint stroke re-drowns a crest, or an erosion pass cuts a channel through a causeway. Then `bridges_verified < bridges_expected` and the world is rejected.
+2. **A bridge survives but is too narrow after inflation.** This is the defect §4.3a.4 found and fixed by deriving `bridge_min_m = 2·inflate_m + 4.0 = 16.0 m`; the residual is that anyone retuning `inflate_m` without re-deriving would reintroduce it.
+3. **The causeways are visually obvious.** A 16 m-wide, +0.6 m crest raised ≈ 9.6 m out of the shelf is a built structure and looks like one. D9 accepts this explicitly; it is the stated cost of option 2.
+
+*Defence:* the bridge width is **measured on the exported bytes** and never assumed (§4.3a.4 step 4, §7.8 step 5); repair widens by one cell up to 3 times before failing loudly; `bridges_expected` / `bridges_verified` are both in the manifest so a silent 2-of-3 is impossible; the `inflate_m ∈ {4, 6, 8}` parameterised regression (§12.3) makes mode 2 fail in CI rather than in a corpus; and `cvc-worldgen sample` records every rejection in `rejected.csv` with the reason. For mode 3 the mitigations are cosmetic and cheap — the crest is `sand`/`gravel` rather than a texture seam, the flanks are a 3-cell smoothstep rather than a wall, and the MST keeps the count at N − 1 rather than C(N,2).
+*Residual:* a scenario author who wants island-isolated episodes must now ask for them (`--connectivity-policy single-island`), where before they got them by default. That is the intended direction of the decision, and the ablation is kept, covered by a test (§12.3), precisely so that asking for it still works.
 
 ### 15.2 What might genuinely not work, stated plainly
 
@@ -2554,9 +2654,12 @@ And one test that makes the seam honest in both directions: **the Lab's in-memor
 Does v1 GRL-SNAM consume per-storey layered grids plus `links.json` (option A), or layer 0 only (option C)?
 This changes the **bundle schema**, not the renderer, so it must be settled while L1 is being written — not when L6 lands. Recommendation: **write the layered format now (cheap, tested), export `storeys: 1` by default, and have the trainer consume layer 0 in v1.** Mixed indoor/outdoor single-storey works today with zero contract change. If the answer is "yes, cross-floor episodes in v1", the Python side needs a layered planner and a link-cost model, which is outside both this design's and the material session's declared scope.
 
-**D2 — Default export window size. INTERACTS WITH D9.**
+**D2 — Default export window size. THE D9 BLOCKER IS GONE; THIS IS NOW A FREE CHOICE.**
 This document uses **513 × 513 @ 0.5 m = 256.0 m**. If GRL-SNAM episodes routinely exceed ~250 m of travel, it should be **1025 × 1025 @ 0.5 m = 512.0 m** (4 MB/plane), and every batch-throughput number in §11.2 roughly quadruples. What is the typical episode extent?
-**New in revision 2:** under D9's recommended `single-island` policy a 512 m window **does not fit on Tern** (r = 390 m ⇒ ~780 m of land at most, but only ~250 m of it above the mud line) and would be rejected by the outdoor gate. Choosing 512 m therefore also means either dropping small islands from the sampling pool or accepting D9 option 2. Decide D2 and D9 together.
+
+**Revision 2 said:** *under D9's recommended `single-island` policy a 512 m window does not fit on Tern (r = 390 m ⇒ ~780 m of land at most, but only ~250 m of it above the mud line) and would be rejected by the outdoor gate; decide D2 and D9 together.*
+
+**Revision 2.1 withdraws that constraint, explicitly.** D9 is decided as `forced-bridges`, so the landmass is one component and **a window is no longer required to fit inside a single island**. A 512 m window centred on Tern may extend across the strait and onto Kestrel's shelf; the terrain under it is connected, the outdoor gate passes on `components == 1`, and nothing is rejected. The two decisions are therefore **decoupled**: D2 is now purely a question of episode extent versus bundle size and batch throughput, with no terrain-geometry blocker attached to it, and it can be answered on its own timetable. The only surviving coupling is arithmetic and benign — a 1025² window quadruples the per-window gate cost in §11.2 (3 ms → ~12 ms), which is noise against a 2.4 s build. **Remaining question, unchanged: what is the typical episode extent?**
 
 **D3 — ρ values for the classes with no RELLIS/DFC counterpart.**
 `gravel`, `sand`, `scree`, `snow`, `tall_grass` and the 8 non-hard indoor classes have defensible but **derived** risk values (§16.2). A domain review before the first large dataset is generated is cheap; afterwards it means either an in-place re-projection with a version bump (possible, since `class.npy` is retained) or invalidating a corpus. Who signs off?
@@ -2586,19 +2689,19 @@ Should `lsystem_lab` ship in the `cvcgl-examples` cvcpkg recipe?
 
 > **User decision, verbatim:** *"let the terrain be connected throughout."*
 >
-> The generated world is therefore **one connected landmass**: islands are joined by isthmuses ≥ `max(bridge_min_m, 2·agent_radius_m + 1.0)`, and `validate_outdoor` enforces `components == 1` over the whole world rather than per-window. The archipelago remains a **visual and biome** feature — distinct islands with distinct biomes — while being **topologically connected** for navigation, so every sampled (start, goal) pair is solvable by land.
+> The generated world is therefore **one connected landmass**: islands are joined by a spanning set of **N − 1** isthmuses of measured width ≥ `w_min = max(2·agent_radius_m + 1.0, 2·inflate_m + 4.0)` = **16.0 m**, and connectivity is **verified, not assumed** — `validate_world` enforces `world_components == 1` over the whole world and `validate_outdoor` enforces `components == 1` on each exported window (§7.8). The archipelago remains a **visual and biome** feature — distinct islands with distinct biomes — while being **topologically connected** for navigation, so every sampled (start, goal) pair is solvable by land.
 >
-> Consequences, propagated below: the §15.1 R19 window cap disappears (a window may straddle a channel because a bridge always exists), the **D2 × D9 interaction is dissolved** (a 512 m window is no longer blocked by a small island), and `single-island` survives only as an opt-in ablation knob for curricula that deliberately want island-isolated episodes. Option 3 (`amphibious`) stays deferred — it changes exported `hard` bytes.
+> Consequences, propagated below and throughout the document: the §15.1 R19 window cap disappears (a window may straddle a channel because a bridge always exists) and R19 is rewritten around the three ways a bridge can *fail* instead; the **D2 × D9 interaction is dissolved** (a 512 m window is no longer blocked by a small island), and D2 says so explicitly; the gate's binding criterion is **`components == 1`**, not the 0.98 area fraction revision 2 carried in §7.8, which is now the ablation's threshold only; `bridge_min_m` is **raised 12 → 16 m and derived from `inflate_m`**, because the gate's own 6 m obstacle inflation would otherwise sever a 12 m isthmus; and `single-island` survives only as an opt-in ablation knob for curricula that deliberately want island-isolated episodes. Option 3 (`amphibious`) stays deferred — it changes exported `hard` bytes.
 
-An archipelago's islands are disconnected by construction, and `water_deep` is `hard`. So what *is* an episode?
+**The question, as it stood before the decision.** An archipelago's islands would be disconnected by construction, and `water_deep` is `hard`. So what *is* an episode? The three options were:
 
 | | option | what it means | cost | risk |
 |---|---|---|---|---|
-| **1** | **One island per episode** (`single-island`) | The export window is clipped to one island's mask ∪ its shelf. The gate requires `largest_component_fraction ≥ 0.98` and `channels_crossed == 0`. The archipelago is a **world-scale authoring and visual** feature; the *training window* is single-island. | Free. Already how `far_pair_in_free_space` behaves. | Caps the usable window at the smallest island's land diameter (§15.1 R19). A 512 m window would not fit on Tern. |
-| **2** | **Forced land bridges** (`forced-bridges`) | The generator guarantees an isthmus ≥ `max(bridge_min_m, 2·agent_radius_m + 1.0)` between every pair of islands whose windows are co-exported, by raising the smooth-max saddle to +0.6 m and painting it `sand`/`gravel`. Multi-island episodes become solvable. | One repair pass, ~3 ms. | The bridges read as causeways. It also makes the archipelago *topologically* one island, which arguably defeats the point of having several. |
+| **1** | **One island per episode** (`single-island`) — **now the opt-in ablation** | The export window is clipped to one island's mask ∪ its shelf. The gate requires `largest_component_fraction ≥ 0.98` and `channels_crossed == 0`. The archipelago is a **world-scale authoring and visual** feature; the *training window* is single-island. | Free. Already how `far_pair_in_free_space` behaves. | Caps the usable window at the smallest island's land diameter. A 512 m window would not fit on Tern. **This cap is the reason it was not chosen.** |
+| **2** | **Forced land bridges** (`forced-bridges`) — **CHOSEN, v1 default** | The generator guarantees an isthmus of width ≥ `w_min = max(2·agent_radius_m + 1.0, 2·inflate_m + 4.0)` = **16.0 m** across a **minimum spanning tree** of island pairs (**N − 1** bridges, not all C(N,2)), by locating the bottleneck saddle, raising it to a `+0.6 m` crest with 3-cell smoothstep flanks in the delta grid, and painting it `sand`/`gravel`. Multi-island episodes become solvable and the whole landmass is one component. Full construction in **§4.3a.4**; verification in **§7.8**. | One MST + N − 1 saddle raises ≈ 6 ms, plus a 40–150 ms whole-world verify, once per world. | The bridges read as causeways (a ≈ 9.6 m fill out of the shelf at the default separation). It also makes the archipelago *topologically* one island — **which is exactly what the user asked for**: the islands remain distinct in silhouette, biome, grammar set and material distribution (§16.4), and stop being distinct only in the free-space graph. |
 | **3** | **Amphibious ontology** (`amphibious`) | `water_shallow` stops being `hard` and becomes high-soft (ρ 0.90, `hard = false`); only `water_deep` stays hard. Fording is expensive but legal. | Free to implement. | **It changes exported `hard` bytes for every consumer**, and it asserts a vehicle capability (fording) that is a domain claim, not a rendering choice. Corpora built under different policies are not comparable. |
 
-**DECIDED: option 2 as the v1 default** (`--window-policy forced-bridges`, `force_bridges = true`), with **option 1 demoted to an opt-in ablation knob** (`--window-policy single-island`) because it costs one clamp and is genuinely useful for a "cross the isthmus" curriculum tier, and **option 3 explicitly deferred** because it changes `hard` semantics — which is exactly the kind of change §7.5's file-format seam exists to make loud rather than silent. Whichever is chosen is recorded in `manifest.validation.outdoor.policy` and in `provenance.json`, so a corpus can never mix policies undetectably.
+**DECIDED: option 2 as the v1 default** (`--connectivity-policy forced-bridges`, `force_bridges = true`), with **option 1 demoted to an opt-in ablation knob** (`--connectivity-policy single-island`) because it costs one clamp and is genuinely useful for a "cross the isthmus" curriculum tier, and **option 3 explicitly deferred** because it changes `hard` semantics — which is exactly the kind of change §7.5's file-format seam exists to make loud rather than silent. Whichever is chosen is recorded in `manifest.validation.outdoor.policy` and in `provenance.json`, so a corpus can never mix policies undetectably.
 
 **D10 — The export frame: cell size, σ, and what the manifest records. NEEDS A DECISION BEFORE PR L1 FREEZES THE SCHEMA.**
 
@@ -2778,9 +2881,21 @@ shelf_m          = -9.0
 separation_factor = 1.15    # placement: min |c_i - c_j| / (r_i + r_j)
 placement_attempts = 64     # per relaxation round
 placement_rounds   = 8      # sep *= 0.95 per round, then HARD FAIL
-channel_min_m    = 40.0     # min open water between non-overlapping islands
-bridge_min_m     = 12.0     # min navigable isthmus width (also >= 2*agent_radius_m + 1.0)
-force_bridges    = true     # DECIDED: D9 option 2 (user, 2026-08-27)
+channel_min_m    = 40.0     # min open water between UNBRIDGED (non-MST) island pairs
+bridge_min_m     = 16.0     # DERIVED, not authored:
+                            #   max(2*agent_radius_m + 1.0, 2*inflate_m + 4.0)
+                            #   = max(1.7 | 7.0, 16.0) = 16.0 at inflate_m = 6.0
+                            # 12.0 (revision 2) was severed by the gate's own
+                            # obstacle inflation. See section 4.3a.4.
+bridge_crest_m   = 0.6      # isthmus crest above sea level -> Layer-0 `sand` band
+channel_depress_m = -1.5    # depth an unbridged saddle is pushed to
+bridge_feather_cells = 3    # smoothstep flanks, both bridges and channels
+bridge_topology  = mst      # N-1 isthmuses over the island adjacency graph,
+                            # weighted by metres of open water on the bottleneck
+                            # crossing; sorted island order, so it is a pure
+                            # function of the island SET
+force_bridges    = true     # DECIDED: D9 option 2 (user, 2026-08-27).
+                            # false == the single-island ABLATION, not a default.
 erosion.thermal_iters      = 60      # T = 4/N, c = 0.5   [Olsen 2004]
 erosion.streampower_steps  = 30      # m = 0.45, n = 1    [Braun & Willett 2013]
 erosion.droplets           = 0       # off by default; expensive, marginal
@@ -2860,9 +2975,17 @@ props.circulation_keepout = true     # computed BEFORE props; hard
 
 ```
 policy              = "forced-bridges"  # | "single-island" | "amphibious"  (D9: DECIDED)
-inflate_m           = 6.0               # matches planner.far_pair_in_free_space
+inflate_m           = 6.0               # matches planner.far_pair_in_free_space.
+                                        # ALSO drives bridge_min_m -- see 4.3a.4.
 connectivity        = 4                 # matches the planner's neighbourhood
-min_largest_fraction = 0.98             # single-island pass condition
+require_components  = 1                 # THE BINDING CRITERION under forced-bridges,
+                                        # for the window AND for the whole world
+min_largest_fraction = 0.98             # SINGLE-ISLAND ABLATION ONLY. Under
+                                        # forced-bridges the fraction is exactly 1.0
+                                        # whenever components == 1, so this knob is
+                                        # inert; it is not a second pass condition.
+world_lattice_m     = 2.0               # coarse lattice for the whole-world verify
+world_verify        = true              # run validate_world once per world
 repair_attempts     = 3
 resample_attempts   = 8
 ```
@@ -2954,9 +3077,9 @@ The last two rows are what makes the biome table worth having: **four biomes pro
 
 3. **The class map is a function, not an image, and `risk_raw`/`hard` are a derived, versioned, file-based projection of it.** One `raster(grid_spec)` call emits every plane from one grid, so the material-vs-occupancy-vs-heightfield misalignment that would silently poison every training run is structurally unrepresentable — and because we export only the two raw contract inputs across a file boundary, `cvc::nav::material` can change its blur, its EDT, its gradients or its signature without invalidating a single generated bundle. `cvc::world` does not link `cvc::nav`; only the Lab's *preview* calls it, read-only, so that "what the trainer will see" is the trainer's actual arithmetic.
 
-4. **Navigability is a gate that fails loudly, not a cost term that fails quietly — indoors *and* outdoors.** Merrell's soft accessibility term fails 1-in-5 at three storeys; ProcTHOR's 10 000 navigable houses used a hard gate. So do we — repair, then resample, then refuse to write the bundle and record the seed. And because an archipelago's islands are disconnected by construction, the same discipline applies to the outdoor window: a channel is as unsolvable as a sealed room.
+4. **Navigability is a gate that fails loudly, not a cost term that fails quietly — indoors *and* outdoors.** Merrell's soft accessibility term fails 1-in-5 at three storeys; ProcTHOR's 10 000 navigable houses used a hard gate. So do we — repair, then resample, then refuse to write the bundle and record the seed. And because an archipelago's islands *would* be disconnected by construction, the same discipline applies outdoors: a channel is as unsolvable as a sealed room. The user's answer (**D9**) is that the terrain is connected throughout, so the generator **builds** N − 1 isthmuses rather than hoping for them — and the gate then **measures** the result on the exported bytes, because a constructor that is trusted instead of checked is just a comment.
 
-5. **Every number that has to agree with another number is derived from it, not typed next to it.** The indoor clearances come from one `agent_radius_m` (so a gate that no interior can pass is unrepresentable), the blur is recorded as a length and converted to cells at the consumer's resolution (so choosing a cell size cannot silently retune somebody else's validated constants), and the hard classes carry ρ = 0 (so the `hard` plane is the *only* place hardness is expressed). Revision 1 got each of those three wrong in the same way: it wrote down two true numbers that could not both be true at once.
+5. **Every number that has to agree with another number is derived from it, not typed next to it.** The indoor clearances come from one `agent_radius_m` (so a gate that no interior can pass is unrepresentable), the blur is recorded as a length and converted to cells at the consumer's resolution (so choosing a cell size cannot silently retune somebody else's validated constants), the hard classes carry ρ = 0 (so the `hard` plane is the *only* place hardness is expressed), and the forced isthmus width is derived from the gate's own obstacle inflation, `bridge_min_m = 2·inflate_m + 4.0` (so the gate cannot sever the bridge the generator just built). Revision 1 got the first three wrong in the same way, and revision 2 got the fourth wrong in the same way again: each time, two true numbers were written down that could not both be true at once.
 
 Everything else is staging discipline: three real libcvc modules with literature-validated oracles, tests that actually run in CI, **twelve** PRs whose first one produces a picture, and **four** pre-existing lines edited (six if the Lab is packaged and deployed).
 
@@ -2964,13 +3087,38 @@ Everything else is staging discipline: three real libcvc modules with literature
 
 ## 17. Revision history
 
+### Revision 2.1 — 2026-08-27, amendment: the connected-terrain decision (D9)
+
+No rebase; same baseline `8b6f426`. This revision records **one user decision** and propagates it, plus the numeric contradictions that propagation exposed. Nothing was removed: the single-island behaviour survives as a covered ablation, and every table, budget and citation from revision 2 is intact.
+
+> **The decision, verbatim (user, 2026-08-27):** *"let the terrain be connected throughout."*
+
+**What it means.** D9 is decided as **option 2, `forced-bridges`, as the v1 default.** The archipelago stays an archipelago in silhouette, biome, grammar set and material distribution; it stops being one in the free-space graph. The generator builds a **minimum spanning tree of N − 1 isthmuses** and the gate **verifies** the result on the exported bytes.
+
+| # | change | where |
+|---|---|---|
+| **1** | **The mechanism is specified, not asserted.** How a bridge is produced — bottleneck (min-max) saddle location, a C¹ capsule raise into the delta grid at a `+0.6 m` crest with 3-cell smoothstep flanks, the `sand`/`gravel` paint, and a **measured** re-check of the achieved width — plus which pairs get one (an MST, so N − 1, not C(N,2)) and how bridge raises and `channel_min_m` deepenings are kept from fighting over the same saddle. | new §4.3a.4 body; `archipelago_spec` gains `bridge_crest_m`, `channel_depress_m`, `bridge_feather_cells`; §16.3 terrain block gains `bridge_topology = mst` |
+| **2** | **The gate's pass condition is reconciled.** Revision 2 stated it as `largest_component_fraction ≥ 0.98` in §7.8 and as `components == 1` in the manifest and the Surface-tab preview — **different tests**, since a window with a 1.5 %-of-area stranded islet passes the first and fails the second. Under D9 **`components == 1` is binding**; the 0.98 fraction is demoted to the single-island ablation's threshold and to a diagnostic. `largest_component_fraction`'s **denominator is now stated** (the inflated-free set), so it is exactly 1.0 whenever `components == 1` and the two can never disagree again. | §7.8 acceptance table + step 5; §16.3 outdoor-gate block (`require_components = 1`, `min_largest_fraction` annotated inert) |
+| **3** | **`bridge_min_m` raised 12.0 → 16.0 m, and derived rather than typed.** The gate inflates obstacles by `inflate_m = 6.0` before labelling, and water is `hard` — so a 12 m isthmus has `12 − 2(6) = 0 m` of inflated-free width and **the gate would have severed the bridge the generator just built.** The floor is now `w_min = max(2·agent_radius_m + 1.0, 2·inflate_m + 4.0) = 16.0 m`, derived from `inflate_m` so a retuned planner cannot silently disconnect every world. Chased through the struct, §4.3a.4, the §7.8 threshold table, the manifest example (`narrowest_bridge_m` 12.5 → 16.5, `bridge_min_required_m` 12.0 → 16.0), the Surface-tab preview and §16.3. | §4.3a.1, §4.3a.4, §7.5, §7.8, §9.4, §16.3, closing claim 5 |
+| **4** | **The whole-world verdict exists.** `validate_world` labels the full extent on a **2.0 m connectivity lattice** (coarsening is conservative: coarse-connected ⇒ fine-connected), reports `world_components`, `bridges_expected` / `bridges_verified` and a fine-lattice `narrowest_bridge_m`, and runs **once per world**, not per window. Window-vs-world is explained as a crop, and window repair builds its isthmus into the **shared delta grid** so the two verdicts can never drift. | §7.8 (`outdoor_gate_report` gains 4 fields; new `validate_world`) |
+| **5** | **R19 is rewritten.** Its old body — *"`single-island` caps the usable window at the smallest island's diameter; a 512 m window does not fit on Tern"* — **describes a cap that no longer exists.** Replaced with the three ways a forced bridge can actually fail (does not survive to the raster / too narrow after inflation / reads as an obvious causeway) and their defences. | §15.1 R19 |
+| **6** | **D2 × D9 is dissolved, explicitly.** Revision 2 required D2 (export window size) and D9 to be decided together, because a 512 m window did not fit on Tern. With the landmass connected, a window may straddle a strait, so **D2 is now a free choice** about episode extent and bundle size with no terrain-geometry blocker. The surviving coupling is arithmetic only (a 1025² window costs ~12 ms of gate instead of 3 ms). | §15.3 D2 |
+| **7** | **The CLI flag is renamed** `--window-policy` → **`--connectivity-policy`** (old name accepted as a deprecated alias for one release), because the policy governs the terrain, not the crop — and the old name is precisely the misreading that let two pass conditions coexist. The manifest key `validation.outdoor.policy` and its values are unchanged, so **no bundle is invalidated**. | §10.1, §9.4 |
+| **8** | **Six new tests**, so the decision is enforced rather than described: whole-world `components == 1` over 3 presets × 64 seeds; an **inflation-does-not-sever-the-bridge** regression parameterised over `inflate_m ∈ {4, 6, 8}`; coarse-lattice conservatism; `components == 1 ⟺ largest_component_fraction == 1.0`; and an ablation test so `force_bridges = false` cannot rot while unused. | §12.3; L2's row in §13.2 |
+| **9** | **Budgets chased.** New rows for the window gate (3 ms), the MST + raises (6 ms) and the world verify (40 ms `standard` / 150 ms `large`); `build` stays ≈ 2.4 s (the pass is 1.9 % of it) and `sample --n 200 --jobs 8` moves 70 s → **71 s** rather than being left stale. The world verify's ≈ 84 MB scratch is named as **transient** and deliberately kept out of the resident-memory table. | §11.2, §11.3 preamble |
+| **10** | **The ablation is preserved, not deleted.** `single-island` remains a first-class opt-in (`force_bridges = false`), keeps its own pass condition, is covered by a test, and is documented as genuinely useful — a "cross the isthmus" curriculum tier needs a control arm in which the isthmus does not exist. | §4.3a.4, §7.8, §15.3 D9 |
+
+**Also changed:** the status block and §0 items 2 and the headline table (new `Forced isthmuses (N − 1)` and `Landmass components (gated)` rows; the policy row flips to `forced-bridges`); **G5b** rewritten from *"islands are disconnected by construction"* to *forced-then-verified*; §4.3a's preamble; the `separation_factor` table gains a note that it is a **terrain** knob and not a connectivity knob; the smooth-max **bounded-overshoot** bullet now says why that bound is the reason isthmuses are an explicit construction rather than a larger `smax_k_m`; the manifest's `validation.outdoor` block and `endpoints.component_fraction` (0.94 → 1.0, with its denominator pinned to the gate's); §9.4's World tab (connectivity-policy selector, `Debug ▸ Show isthmuses` overlay) and contract preview; §10.3 (endpoints now legitimately span islands, which is a *larger* endpoint distribution, obtained for free); §4.3a.4 step 3 notes that an isthmus falls through to the **shelf biome** and therefore the default predicate table; and closing claims 4 and 5.
+
+**Deliberately unchanged:** everything else. No literature, budget, LOD, material, interior, engine, coverage or collision-map content was touched except where a number genuinely followed from the decision.
+
 ### Revision 2 — 2026-08-27, rebased onto `8b6f426`
 
 Revision 1 was written against `10b7904` and reviewed adversarially. This pass keeps its research, structure, tables, code sketches, citations and numbers, and repairs eight defects. Every claim below was re-verified against the tree at `8b6f426`, not against revision 1's description of it.
 
 | # | defect | what changed |
 |---|---|---|
-| **D1** | "Multi-island archipelago" was asserted in §0 and never specified — one radial falloff, one centre, one radius. | New **§4.3a** specifies seeding (authored + a radius-aware Mitchell/Poisson sampler through the hashed RNG), the `island_spec` / `archipelago_spec` records, the **smooth-max** combination operator (with the argument for why *sum* double-counts and *max* creases), `argmax` biome attribution as a partition, sea level / `channel_min_m` / `bridge_min_m`, and per-island biome divergence. §4.4's height formula now folds smooth-max. New **§16.4** ships four biomes with their Layer-0, species, grammar and expected-statistic overrides. New **§7.8** adds the **mandatory outdoor connectivity gate** (`validate_outdoor`, 4-connectivity, 6.0 m inflation matching `far_pair_in_free_space`, repair → resample → loud reject). The traversal policy is a user decision — **D9** in §15.3 with three concrete options; recommendation: `single-island` for v1, `forced-bridges` as an authored knob, `amphibious` deferred because it changes exported `hard` bytes. |
+| **D1** | "Multi-island archipelago" was asserted in §0 and never specified — one radial falloff, one centre, one radius. | New **§4.3a** specifies seeding (authored + a radius-aware Mitchell/Poisson sampler through the hashed RNG), the `island_spec` / `archipelago_spec` records, the **smooth-max** combination operator (with the argument for why *sum* double-counts and *max* creases), `argmax` biome attribution as a partition, sea level / `channel_min_m` / `bridge_min_m`, and per-island biome divergence. §4.4's height formula now folds smooth-max. New **§16.4** ships four biomes with their Layer-0, species, grammar and expected-statistic overrides. New **§7.8** adds the **mandatory outdoor connectivity gate** (`validate_outdoor`, 4-connectivity, 6.0 m inflation matching `far_pair_in_free_space`, repair → resample → loud reject). The traversal policy is a user decision — **D9** in §15.3 with three concrete options; recommendation: `single-island` for v1, `forced-bridges` as an authored knob, `amphibious` deferred because it changes exported `hard` bytes. *(**Superseded by revision 2.1**: the user decided `forced-bridges` as the v1 default and `single-island` as the ablation. Retained here as the historical record of what revision 2 recommended.)* |
 | **D2** | Three unreconciled clearance numbers: gate 1.5 m, IBC door 0.90 m (1.8 cells), IBC corridor 1.12 m (2.24 cells). No generated interior could pass the design's own gate. | New **§6b.1a** derives every clearance from one authored `agent_radius_m` plus the 0.5 m lattice, snapping up at raster time. `gate.min_path_width_cells` is now **derived** (= `opening_cells`), so the gate can never demand more than a door provides. Arithmetic is shown at both ends of the range (0.35 m person → 2/3 cells; 3.0 m vehicle → 13/13 cells) with a worked raster of a corridor and door passing the gate. The consumer-side consequence — `phi_m = 0.50 m` at a doorway, below `hard_margin_m = 1.0 m`, so the witness gate never certifies a ray through a door — is stated as documented behaviour rather than left to be discovered. Propagated to §6b.3 step 4, §6b.2 step 5, §16.3 and the L6 PR row. |
 | **D3** | Hard classes carried ρ = 1.00 *and* the `hard` flag — double-counting against the A\* surcharge and the `φ_m` barrier, and bleeding through the consumer's blur into the corridors the agent must traverse. | New **§7.2a**: **every `hard` class carries ρ = 0.00**, with the double-count argument and the blur arithmetic (a 3-cell corridor reads `r~ ≈ 0.62` at σ = 4 cells under the old scheme, versus 0.06 now). Blur bleed is addressed generally: bounded boundary contrast (0.60, validator warns), a published-and-drawn `blur_bleed_radius_m`, `scene_kind`-selected σ, and an explicit refusal to pre-blur `risk_raw`. §16.2's table, its notes, the §9.4 contract preview and the manifest statistics all updated (max `risk_raw` is now 0.90). New risk **R18**. |
 | **D4** | 0.5 m/cell chosen without confronting that σ is in **cells**, so the export resolution silently retunes `lam_soft`. | New **§7.1a** quotes the consumer's own docstrings for its assumed frame (source BEV 0.5 m/cell; sim story grid ≈ 2.1 m/cell; `lam_soft = 0.5` validated there), shows that σ = 1 cell at 0.5 m/cell makes gradients **4.2× hotter** — an effective `lam_soft ≈ 2.1`, past the 1.5 the consumer's comment says *"LAUNCHES a vehicle off-world"* — and fixes it by recording σ as a **length**. The manifest gains a `frame` block (`sigma_m`, `sigma_recommended_cells`, `blur_bleed_radius_m`, `lam_soft_scale_hint`, `gate_horizon_recommended_cells`, `gate_hard_margin_max_viable_m`, `agent_radius_m`) and a quarantined, **asserted-unread** `consumer_frame_ref` provenance block. Three reasons for 0.5 m are given, including that it is the **only** cell size at which the C++ twin's fixed 1.0 m margin and the Python twin's `2·cell_w` agree. Recorded as user decision **D10** with options A/B/C; recommendation A. §7.1 now distinguishes the **C++ arity** (`rows, cols, cell_w, scale, sigma`) from the **Python binding arity**, which revision 1 conflated, and the manifest carries what *both* entry points need. New risk **R17** names the two live twin divergences (`horizon_cells` 12 vs `horizon_m` 25; `hard_margin_m` 1.0 vs `2·cell_w`). |
