@@ -1,3 +1,7 @@
+// NOTE: do NOT run `clang-format -i` on this .i file. clang-format reads
+// the SWIG directives %{ / %} / %inline %{ as C operators and mangles them
+// (%{ -> % {), which breaks the SWIG parse. The CI clang-format leg
+// deliberately excludes *.i for this reason; keep it that way.
 // pycvc_nav.i — Python surface for cvc::nav (belief-space grid navigation).
 //
 // The compute lives in libcvc (inc/cvc/nav/grid_nav.h); this file only
@@ -10,7 +14,7 @@
 // contiguous dtype for the duration of the call and released before returning,
 // so no input array is pinned by a result.
 
-% {
+%{
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -97,10 +101,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
 }
 
 } // namespace
-%
-}
+%}
 
-% inline % {
+%inline %{
   namespace pycvc {
 
   // (H,W) uint8/bool occupancy -> (H,W) float64 squared Euclidean distance
@@ -1910,7 +1913,6 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     return tuple;
   }
 
-  } // namespace pycvc
+} // namespace pycvc
 
-  %
-}
+%}
