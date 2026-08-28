@@ -91,6 +91,28 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
                               float *eta_out = nullptr);
 
+// Cosine-annealed learning rate (torch CosineAnnealingLR): anneals lr0 -> eta_min
+// over t_max steps; lr(t) = eta_min + (lr0-eta_min)*0.5*(1+cos(pi*t/t_max)).
+float cosine_lr(float lr0, float eta_min, int t, int t_max);
+
+// Adam (beta1=0.9, beta2=0.999, eps=1e-8) with GLOBAL-norm gradient clipping over
+// all weight tensors (the coef_trainer optimizer, applied to the whole model).
+// Moments are keyed like the model's params; step() updates the weights in place.
+class material_adam {
+public:
+  explicit material_adam(const coef_energy_net &model, float grad_clip = 5.0f);
+  // One update: global-norm-clip `grad` (as produced by material_loss_and_grad),
+  // then bias-corrected Adam at learning rate `lr`.
+  void step(coef_energy_net &model, const coef_energy_net::param_grads &grad, float lr);
+  long steps() const { return t_; }
+
+private:
+  float b1_ = 0.9f, b2_ = 0.999f, eps_ = 1e-8f, grad_clip_ = 5.0f;
+  long t_ = 0;
+  coef_energy_net::param_grads m_, u_;
+  std::vector<std::string> names_;
+};
+
 } // namespace nav
 } // namespace cvc
 

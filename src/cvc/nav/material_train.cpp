@@ -206,5 +206,45 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
   return L;
 }
 
+float cosine_lr(float lr0, float eta_min, int t, int t_max) {
+  if (t_max <= 0)
+    return lr0;
+  const double pi = 3.14159265358979323846;
+  const int tt = t < t_max ? t : t_max;
+  const float c = 0.5f * (1.0f + (float)std::cos(pi * (double)tt / (double)t_max));
+  return eta_min + (lr0 - eta_min) * c;
+}
+
+material_adam::material_adam(const coef_energy_net &model, float grad_clip)
+    : grad_clip_(grad_clip), m_(model.zero_grads()), u_(model.zero_grads()),
+      names_(model.param_names()) {}
+
+void material_adam::step(coef_energy_net &model, const coef_energy_net::param_grads &grad,
+                         float lr) {
+  ++t_;
+  // global gradient norm over all weight tensors
+  double sq = 0.0;
+  for (const auto &nm : names_)
+    for (float g : grad.at(nm))
+      sq += (double)g * g;
+  const float norm = (float)std::sqrt(sq);
+  const float gscale = (grad_clip_ > 0.0f && norm > grad_clip_) ? grad_clip_ / norm : 1.0f;
+  const float bc1 = 1.0f - std::pow(b1_, (float)t_);
+  const float bc2 = 1.0f - std::pow(b2_, (float)t_);
+  for (const auto &nm : names_) {
+    std::vector<float> &w = model.mutable_param(nm);
+    const std::vector<float> &gv = grad.at(nm);
+    std::vector<float> &mv = m_.at(nm);
+    std::vector<float> &uv = u_.at(nm);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      const float g = gv[i] * gscale;
+      mv[i] = b1_ * mv[i] + (1.0f - b1_) * g;
+      uv[i] = b2_ * uv[i] + (1.0f - b2_) * g * g;
+      const float mhat = mv[i] / bc1, uhat = uv[i] / bc2;
+      w[i] -= lr * mhat / (std::sqrt(uhat) + eps_);
+    }
+  }
+}
+
 } // namespace nav
 } // namespace cvc
