@@ -40,14 +40,21 @@ endforeach()
 if(EMSCRIPTEN)
   set(_wasm_demos lsystem_forest bunny_shadow nav_city_swarm nav_fog_ghost)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
-  # buildings.glb + satellite.png + Humvee.glb). When CVC_WASM_BUNDLE is set to
-  # a directory, its contents are preloaded into the emscripten virtual FS at
-  # /bundle, and the demo picks it up via the CVC_NAV_BUNDLE env / --bundle arg.
-  # If the var is empty (the default), the demo falls back to the synthetic city.
+  # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
+  # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
+  # exists (installed by the vehicle-humvee cvcpkg bundle), that dir is preloaded
+  # to /shared so the demo's <bundle>/../../shared/Humvee.glb autopath resolves.
+  # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
+  # synthetic city.
   set(_nav_swarm_bundle_flags "")
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
     message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
-    set(_nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
+    if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
+      message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
+      list(APPEND _nav_swarm_bundle_flags "--preload-file=${_parent}/shared@/shared")
+    endif()
   endif()
   foreach(_wt ${_wasm_demos})
     # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
