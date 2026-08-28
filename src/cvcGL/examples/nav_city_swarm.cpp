@@ -151,7 +151,8 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
-  bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false;
+  bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
+       lite = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
@@ -166,7 +167,10 @@ int main(int argc, char **argv) {
       "offscreen", po::bool_switch(&offscreen), "render offscreen (forced by --capture)")(
       "ortho", po::bool_switch(&ortho), "top-down 2-D orthographic view (matplotlib-style)")(
       "no-shadows", po::bool_switch(&no_shadows),
-      "disable shadow map")("frames", po::value<long>(&frames)->default_value(0),
+      "disable shadow map")("lite", po::bool_switch(&lite),
+                            "prefer the bundle's low-poly buildings_flat.glb "
+                            "(4x fewer tris, faster shadow pass)")(
+      "frames", po::value<long>(&frames)->default_value(0),
                             "stop after N frames (0 = until closed)")(
       "fps", po::value<double>(&fps)->default_value(30.0),
       "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
@@ -241,7 +245,8 @@ int main(int argc, char **argv) {
     std::vector<std::uint8_t> bocc;
     bool loaded = false;
     try {
-      loaded = navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain);
+      loaded = navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain,
+                                         /*prefer_flat=*/lite);
     } catch (const std::exception &e) {
       std::fprintf(stderr, "nav_city_swarm: bundle load threw: %s -> using synthetic city\n",
                    e.what());
@@ -1064,7 +1069,21 @@ int main(int argc, char **argv) {
     ImGui::Checkbox("Flags", &uiFlags);
     // Cinematic follow-cam: pick an agent to CHASE with the smoothed Track camera
     // (harvested from grl-snam's ChaseCamera). -1 = free camera.
-    if (ImGui::InputInt("Follow #", &followAgent)) {
+    // Two ways to pick: type an index in the InputInt (click the number and
+    // type — the +/- buttons on the side are for step, not the only entry), or
+    // drag the SliderInt.  "Release" jumps back to the free (Orbit) camera.
+    const int followBefore = followAgent;
+    ImGui::PushItemWidth(80);
+    ImGui::InputInt("##followidx", &followAgent);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::PushItemWidth(-90);
+    ImGui::SliderInt("Follow #", &followAgent, -1, N - 1);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::Button("Release"))
+      followAgent = -1;
+    if (followAgent != followBefore) {
       if (followAgent >= N)
         followAgent = N - 1;
       if (followAgent < -1)
@@ -1078,7 +1097,6 @@ int main(int argc, char **argv) {
         cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
       }
     }
-    ImGui::SameLine();
     ImGui::Checkbox("Shadows", &uiShadows);
     ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
     ImGui::Checkbox("Avoid others", &uiSeparate); // inter-agent separation (live)
@@ -1160,12 +1178,18 @@ int main(int argc, char **argv) {
     }
     if (uiRestart) {
       // Agent count / belief mode / fog are constructor-time properties of
-      // sim_world, so a restart rebuilds the world and every N-sized mesh.
+      // sim_world, so a restart rebuilds the world; but the N-sized meshes
+      // (agents/goals/trails) only need REBUILDING when N or the palette
+      // (belief plane count M) actually changes — otherwise updateVertices
+      // in the frame loop repopulates them without a setGeometry swap, which
+      // is what caused the whole-scene flash on Apply/Restart at same-N.
       uiRestart = false;
 #if CVC_NAV_DEMO_SIM_WORKER
       sim->stop();
       sim.reset(); // join before the world it borrows changes underneath it
 #endif
+      const int prevN = N;
+      const int prevM = M;
       fogOn = uiFog;
       belief = uiBelief;
       *worldPtr = std::move(*build_world(uiAgents, uiBelief, uiFog, simSeed));
@@ -1177,7 +1201,8 @@ int main(int argc, char **argv) {
         const double hue = (M > 1) ? static_cast<double>(grp[i]) / M : static_cast<double>(i) / N;
         hsv2rgb(hue, 0.62, 0.96, &color[3 * i]);
       }
-      if (agentNode)
+      const bool rebuild_meshes = (N != prevN) || (M != prevM);
+      if (rebuild_meshes && agentNode)
         agentNode->setGeometry(build_agents());
       { // goals + trails are N-sized too
         std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
@@ -1190,7 +1215,8 @@ int main(int argc, char **argv) {
         const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
                                                0, 4, 1, 1, 3, 2, 1, 4, 3};
         if (goalsNode) {
-          goalsNode->setGeometry(goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
+          if (rebuild_meshes)
+            goalsNode->setGeometry(goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
           goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
           goalsNode->updateVertices(goalXyz);
         }
@@ -1198,23 +1224,38 @@ int main(int argc, char **argv) {
         world.snapshot(trailLast.data(), nullptr, nullptr, nullptr, nullptr);
         trailWr.assign(N, 0);
         trailXyz.assign(static_cast<std::size_t>(3) * 2 * TRAIL_K * N, 0.0);
-        cvc::geometry tg;
-        for (int i = 0; i < N; ++i)
-          for (int k = 0; k < TRAIL_K; ++k)
-            for (int e = 0; e < 2; ++e) {
-              const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
-              tg.points().push_back({trailLast[2 * i], trailLast[2 * i + 1], 0.35});
-              tg.colors().push_back(
-                  {0.45 * color[3 * i], 0.45 * color[3 * i + 1], 0.45 * color[3 * i + 2]});
-              trailXyz[3 * v] = trailLast[2 * i];
-              trailXyz[3 * v + 1] = trailLast[2 * i + 1];
-              trailXyz[3 * v + 2] = 0.35;
-              if (e == 1)
-                tg.lines().push_back({static_cast<cvc::geometry::index_t>(v - 1),
-                                      static_cast<cvc::geometry::index_t>(v)});
-            }
-        if (trailNode)
-          trailNode->setGeometry(tg);
+        if (rebuild_meshes) {
+          cvc::geometry tg;
+          for (int i = 0; i < N; ++i)
+            for (int k = 0; k < TRAIL_K; ++k)
+              for (int e = 0; e < 2; ++e) {
+                const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
+                tg.points().push_back({trailLast[2 * i], trailLast[2 * i + 1], 0.35});
+                tg.colors().push_back(
+                    {0.45 * color[3 * i], 0.45 * color[3 * i + 1], 0.45 * color[3 * i + 2]});
+                trailXyz[3 * v] = trailLast[2 * i];
+                trailXyz[3 * v + 1] = trailLast[2 * i + 1];
+                trailXyz[3 * v + 2] = 0.35;
+                if (e == 1)
+                  tg.lines().push_back({static_cast<cvc::geometry::index_t>(v - 1),
+                                        static_cast<cvc::geometry::index_t>(v)});
+              }
+          if (trailNode)
+            trailNode->setGeometry(tg);
+        } else {
+          // Same N: seed trailXyz from current positions; frame loop's
+          // trail_update overwrites entries as agents move without a mesh swap.
+          for (int i = 0; i < N; ++i)
+            for (int k = 0; k < TRAIL_K; ++k)
+              for (int e = 0; e < 2; ++e) {
+                const std::size_t v = (static_cast<std::size_t>(i) * TRAIL_K + k) * 2 + e;
+                trailXyz[3 * v] = trailLast[2 * i];
+                trailXyz[3 * v + 1] = trailLast[2 * i + 1];
+                trailXyz[3 * v + 2] = 0.35;
+              }
+          if (trailNode)
+            trailNode->updateVertices(trailXyz);
+        }
       }
       arrived = 0;
       frame = 0;

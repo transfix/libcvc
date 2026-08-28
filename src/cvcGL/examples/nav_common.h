@@ -204,9 +204,12 @@ std::vector<std::uint8_t> occupancy_from_model(const cvc::geometry &mesh, const 
 // synthetic city). `mesh`, if non-null, receives the merged building mesh so the
 // caller can render the true geometry instead of blocks extruded from occupancy.
 // Grid convention matches occupancy_from_model / sim_world (r->y, row 0 = min_y).
+// prefer_flat=true tries buildings_flat.glb (the low-poly extrusion) first and
+// falls back to buildings.glb — 4x fewer tris, keeps VTK's shadow pass fast on
+// laptop GPUs.
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
                       std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr,
-                      Terrain *terrain = nullptr);
+                      Terrain *terrain = nullptr, bool prefer_flat = false);
 
 // Load a mesh (.glb/.obj/...) as a canonical per-agent VEHICLE template for
 // AgentGlyphs::build_template: forward -> +x, width -> +y, height -> +z, centred
