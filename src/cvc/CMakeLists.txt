@@ -1010,11 +1010,42 @@ if(CVC_ENABLE_IMAGEMAGICK)
   # raw-libs FindImageMagick path). Missing packages are silently skipped so
   # this stays correct on any platform where the delegate isn't present.
   if(NOT (TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore))
-    foreach(_im_delegate bzip2 libjpeg libpng libwebp libtiff-4 freetype2 libxml-2.0 liblzma lerc libwebpmux libwebpdecoder libsharpyuv libbrotlidec libbrotlicommon)
-      string(MAKE_C_IDENTIFIER "_im_dep_${_im_delegate}" _im_var)
-      pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_im_delegate})
-      if(${_im_var}_FOUND)
-        target_link_libraries(cvc PUBLIC PkgConfig::${_im_var})
+    # Prefer pkg-config (has the exact link line for a hermetic delegate), but
+    # in cross-compile (emcmake) it isn't always available / correctly rooted,
+    # so fall back to find_library — which DOES honor CMAKE_FIND_ROOT_PATH.
+    # NAME:libname pairs: pkg-config module + library basename.
+    foreach(_pair
+        "bzip2|bz2"
+        "libjpeg|jpeg"
+        "libpng|png16"
+        "libwebp|webp"
+        "libwebpmux|webpmux"
+        "libwebpdecoder|webpdecoder"
+        "libsharpyuv|sharpyuv"
+        "libtiff-4|tiff"
+        "freetype2|freetype"
+        "libxml-2.0|xml2"
+        "liblzma|lzma"
+        "lerc|Lerc"
+        "libbrotlidec|brotlidec"
+        "libbrotlicommon|brotlicommon")
+      string(REPLACE "|" ";" _p "${_pair}")
+      list(GET _p 0 _pcmod)
+      list(GET _p 1 _libname)
+      string(MAKE_C_IDENTIFIER "_im_dep_${_pcmod}" _im_var)
+      set(_pc_found FALSE)
+      if(PkgConfig_FOUND)
+        pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
+        if(${_im_var}_FOUND)
+          target_link_libraries(cvc PUBLIC PkgConfig::${_im_var})
+          set(_pc_found TRUE)
+        endif()
+      endif()
+      if(NOT _pc_found)
+        find_library(${_im_var}_LIB NAMES ${_libname})
+        if(${_im_var}_LIB)
+          target_link_libraries(cvc PUBLIC ${${_im_var}_LIB})
+        endif()
       endif()
     endforeach()
   endif()
