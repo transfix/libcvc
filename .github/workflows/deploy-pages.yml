@@ -61,7 +61,7 @@ jobs:
             zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc \
             assimp imagemagick \
             --prefix "$CVC_WASM_DEPS" \
-            --platform wasm --arch wasm32 --config release --link static \
+            --platform wasm --arch x86_64 --config release --link static \
             --no-fallback-to-source || echo "  (some optional wasm bundles absent — build will fall back)"
           cvcpkg install scene-austin-south-web vehicle-humvee \
             --prefix "$CVC_WASM_DEPS" \
