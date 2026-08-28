@@ -27,7 +27,14 @@ recipe:
   # break downstream, so every downstream rebuilds + republishes against it — the
   # whole family (libcvc/cvcgl/pycvc/pycvc-gl) bumps together to a consistent,
   # tested-together set.
-  cvc_revision: 3
+  # Bumped 3 -> 4: coordinated FAMILY republish for the material-aware navigation
+  # work (GRL-SNAM #31/#34-37, libcvc #230-247). libcvc gained new cvc::nav
+  # symbols — the material force field / witness gate / material-coupled drive, the
+  # torch-free CoefEnergyNetMaterial forward+backward, and the self-supervised
+  # material trainer (coef_energy_net / material_train / material_rollout) — so the
+  # bundle content changed and must supersede +cvc.3. The whole family
+  # (libcvc/cvcgl/pycvc/pycvc-gl) rebuilds + republishes against it.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

@@ -6,7 +6,11 @@ recipe:
   # numpy-cp312 + vtk-python-cp312. New catalog name — revision starts at 1.
   name: pycvc-gl-cp312
   upstream_version: "3.2.4"
-  cvc_revision: 1
+  # Bumped 1 -> 2: family republish against libcvc +cvc.4 / cvcgl +cvc.5 /
+  # pycvc-cp312 +cvc.2 (material-aware nav). The scene module source is unchanged;
+  # it rebuilds so the tested-together family stays revision-consistent and the
+  # GRL-SNAM CI closure ships a pycvc that carries the material bindings.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

@@ -18,6 +18,23 @@
 // pycvc's app / geometry / volume types across without re-wrapping them.
 %module(directors="1", dirprot="1") pycvc_gl
 
+// Windows: register <prefix>/bin (cvc.dll, cvcGL.dll + closure) before the
+// `import _pycvc_gl` in the generated proxy — Python 3.8+ ignores PATH for
+// extension-module deps. pycvc_gl is a PACKAGE, so its __init__.py sits at
+// <prefix>/Lib/site-packages/pycvc_gl/, i.e. <prefix>/bin is ../../../bin (one
+// level deeper than pycvc.py). No-op off Windows (POSIX uses RPATH).
+%pythonbegin %{
+import os as _os, sys as _sys
+if _sys.platform == "win32":
+    try:
+        _cvc_bin = _os.path.normpath(
+            _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "bin"))
+        if _os.path.isdir(_cvc_bin):
+            _os.add_dll_directory(_cvc_bin)
+    except (OSError, AttributeError, NameError):
+        pass
+%}
+
 %{
 #include <cvc/core/exception.h> // the %import'd %exception block catches cvc::exception
 #include <any>

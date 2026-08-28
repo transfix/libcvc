@@ -1043,14 +1043,22 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
         if(${_im_var}_FOUND)
-          target_link_libraries(cvc PUBLIC PkgConfig::${_im_var})
+          # PRIVATE (like PkgConfig::ZSTD below): these are ImageMagick codec
+          # delegates baked into the shared cvc.dll — implementation only. Linking
+          # them PUBLIC leaked the build-local PkgConfig::_im_dep_* imported targets
+          # into the exported cvcTargets.cmake, where downstream find_package(cvc)
+          # fails ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
+          # never recreates them.
+          target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
           set(_pc_found TRUE)
         endif()
       endif()
       if(NOT _pc_found)
         find_library(${_im_var}_LIB NAMES ${_libname})
         if(${_im_var}_LIB)
-          target_link_libraries(cvc PUBLIC ${${_im_var}_LIB})
+          # PRIVATE for the same reason, and to keep the absolute find_library path
+          # out of the exported interface.
+          target_link_libraries(cvc PRIVATE ${${_im_var}_LIB})
         endif()
       endif()
     endforeach()
