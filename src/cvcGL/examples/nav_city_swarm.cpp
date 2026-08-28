@@ -20,6 +20,7 @@
 
 #include <boost/program_options.hpp>
 #include <chrono>
+#include <future>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
@@ -1254,23 +1255,39 @@ int main(int argc, char **argv) {
         cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
       }
     }
-    if (uiRestart) {
-      // Agent count / belief mode / fog are constructor-time properties of
-      // sim_world, so a restart rebuilds the world; but the N-sized meshes
-      // (agents/goals/trails) only need REBUILDING when N or the palette
-      // (belief plane count M) actually changes — otherwise updateVertices
-      // in the frame loop repopulates them without a setGeometry swap, which
-      // is what caused the whole-scene flash on Apply/Restart at same-N.
+    // Async world rebuild: kick off build_world on a helper thread the moment
+    // uiRestart flips, keep rendering the CURRENT world's snapshots while it
+    // runs, then hot-swap on the frame the future is ready. Old flow blocked
+    // the render loop for the entire construction (grid + SDF + agent scatter
+    // = 300-800 ms on Austin), which is what the "restart flicker" reported.
+    // The swap itself still stops the sim, moves the world, and rebuilds the
+    // N-sized meshes when N/M changed — that lands in a few frames rather
+    // than half a second.
+    static std::future<std::unique_ptr<cvc::nav::sim_world>> pendingWorld;
+    if (uiRestart && !pendingWorld.valid()) {
       uiRestart = false;
+      const int reqAgents = uiAgents;
+      const std::string reqBelief = uiBelief;
+      const bool reqFog = uiFog;
+      const std::uint32_t reqSeed = simSeed;
+      pendingWorld = std::async(std::launch::async, [=]() {
+        return build_world(reqAgents, reqBelief, reqFog, reqSeed);
+      });
+      std::printf("nav_city_swarm: rebuilding world (%d agents, %s, fog=%s, seed=%u) async\n",
+                  reqAgents, reqBelief.c_str(), reqFog ? "on" : "off", reqSeed);
+    }
+    if (pendingWorld.valid() &&
+        pendingWorld.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      auto newWorld = pendingWorld.get();
 #if CVC_NAV_DEMO_SIM_WORKER
       sim->stop();
       sim.reset(); // join before the world it borrows changes underneath it
 #endif
       const int prevN = N;
       const int prevM = M;
-      fogOn = uiFog;
       belief = uiBelief;
-      *worldPtr = std::move(*build_world(uiAgents, uiBelief, uiFog, simSeed));
+      fogOn = uiFog;
+      *worldPtr = std::move(*newWorld);
       N = world.size();
       grp = world.agent_planes();
       M = world.planes();

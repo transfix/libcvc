@@ -640,15 +640,16 @@ std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bou
   rig->setWarmth(0.35);
   rig->setEnvironment(0.5); // lift open ground / map edges the cones don't reach
   rig->setAmbient(0.32);
-  // ThreePoint's default wash is 4 spot lights and each one adds a shadow-map
-  // sampler to the fragment stage; combined with the ground satellite texture,
-  // a Humvee albedo, the fog overlay and the key/fill/back spots the shader
-  // uniform-sampler count blows past the driver limit on GPUs with
-  // GL_MAX_TEXTURE_IMAGE_UNITS = 16 (integrated GPUs, most laptop iGPUs),
-  // producing "Hardware does not support the number of textures defined" +
-  // "Could not create shader object" spam once the shadow pass rebinds. Drop
-  // wash to 0 here — the nav scenes are outdoor+aerial anyway, the wash was
-  // filling stage corners we do not have.
+  // Texture-unit budget on 16-unit iGPUs: every shadow-casting spot adds a
+  // shadow-map sampler to the fragment stage. StageLighting's setBack is a
+  // Kind::Spot (cone < 90) which VTK's LightCreatesShadow accepts, so it
+  // baked a second shadow map on top of key; combined with satellite +
+  // Humvee albedo + fog overlay + ImGui atlas + VTK's internal 2-D pass
+  // textures, the shader link fails at runtime with "Hardware does not
+  // support the number of textures defined". Kill back AND wash entirely on
+  // the nav scenes — aerial city footprints don't need stage separation, and
+  // key + fill is enough to see form.
+  rig->setBack(0.0);
   rig->setWash(0.0, 0, 1.0);
   rig->apply();
   return rig;
