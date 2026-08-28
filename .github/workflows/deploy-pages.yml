@@ -31,10 +31,16 @@ permissions:
 
 jobs:
   build-and-deploy:
-    runs-on: [self-hosted, Linux, X64]
+    # cy-pca label so this lands on catx-03 (the ONLY runner with the emsdk
+    # + wasm-deps prefix at /opt/cvc-wasm). Without the label it hits the
+    # generic fleet where emsdk_env.sh is missing.
+    runs-on: [self-hosted, Linux, X64, cy-pca]
     env:
       CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
       CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt
+      # scene-austin-south-web + vehicle-humvee land here; the wasm build's
+      # CMake --preload-file bakes this dir into nav_city_swarm.data.
+      CVC_WASM_BUNDLE: /opt/cvc-wasm/deps-wasm-mt/share/cvc-scenes/austin_south
       DEMOS: 'lsystem_forest nav_city_swarm nav_fog_ghost'
     steps:
       - name: Checkout master
@@ -47,19 +53,36 @@ jobs:
         # (see nav-swarm-cinematic/PR #225 and the sister workflow's rationale).
         run: echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
 
-      - name: Build the -pthread demos
-        run: ./src/cvcGL/examples/wasm/build-wasm-demo.sh --pthread
+      - name: Install fresh wasm dep closure + scene bundles
+        run: |
+          export PATH="/opt/cvc-wasm/cmake-cvcpkg/bin:$HOME/.local/bin:$PATH"
+          command -v cvcpkg >/dev/null || { echo "cvcpkg not found; skipping"; exit 0; }
+          cvcpkg install \
+            zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc \
+            assimp imagemagick \
+            --prefix "$CVC_WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source || echo "  (some optional wasm bundles absent — build will fall back)"
+          cvcpkg install scene-austin-south-web vehicle-humvee \
+            --prefix "$CVC_WASM_DEPS" \
+            --platform any --config release --link shared \
+            --no-fallback-to-source || echo "  (scene bundles absent — wasm demo falls back to synthetic)"
+
+      - name: Build the non-pthread demos
+        # Non-pthread: matches the single-threaded wasm dep bundles + does not
+        # need SharedArrayBuffer / COOP/COEP on the deploy target.
+        run: ./src/cvcGL/examples/wasm/build-wasm-demo.sh
 
       - name: Assemble the gallery
         id: assemble
         run: |
           set -euo pipefail
-          bin=build-wasm-mt/bin
+          bin=build-wasm/bin
           gallery=$(mktemp -d)
           # Landing page + per-demo hosts (already generated next to the binaries
           # by examples/wasm/build-pages.py, invoked from build-wasm-demo.sh).
-          if [ -d "build-wasm-mt/gallery" ]; then
-            cp -R build-wasm-mt/gallery/. "$gallery/"
+          if [ -d "build-wasm/gallery" ]; then
+            cp -R build-wasm/gallery/. "$gallery/"
           else
             # Fallback: hand-assemble from the built binaries + wasm/index.html
             # template. build-pages.py is the source of truth; this is a safety net.
@@ -67,6 +90,8 @@ jobs:
             for d in $DEMOS; do
               mkdir -p "$gallery/$d"
               cp "$bin/$d.js" "$bin/$d.wasm" "$gallery/$d/"
+              # emscripten --preload-file emits <demo>.data next to js/wasm
+              [ -f "$bin/$d.data" ] && cp "$bin/$d.data" "$gallery/$d/"
               [ -f "$bin/$d/index.html" ] && cp "$bin/$d/index.html" "$gallery/$d/"
             done
             [ -f "$bin/index.html" ] && cp "$bin/index.html" "$gallery/"
