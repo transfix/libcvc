@@ -1025,7 +1025,11 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "libwebpdecoder|webpdecoder"
         "libsharpyuv|sharpyuv"
         "libtiff-4|tiff"
-        "freetype2|freetype"
+        # freetype omitted: VTK ships vtkfreetype-9.5 with the same symbols,
+        # linking cvcpkg's libfreetype in the same closure causes wasm-ld
+        # duplicate-symbol errors (FT_GlyphLoader_CreateExtra, ft_mem_realloc,
+        # ...). ImageMagick uses freetype only for text rendering; on wasm
+        # embedded texture PNG/JPEG decoding is the code path we care about.
         "libxml-2.0|xml2"
         "liblzma|lzma"
         "lerc|Lerc"
