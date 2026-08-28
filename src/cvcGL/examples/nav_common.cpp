@@ -551,9 +551,22 @@ static bool parse_terrain_grid(const std::string &s, int rows, int cols,
 }
 
 bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
-                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh, Terrain *terrain) {
+                      std::vector<std::uint8_t> &occ, cvc::geometry *mesh, Terrain *terrain,
+                      bool prefer_flat) {
   namespace fs = std::filesystem;
-  const std::string tj = dir + "/terrain.json", glb = dir + "/buildings.glb";
+  const std::string tj = dir + "/terrain.json";
+  // Real Austin bundles ship a low-poly buildings_flat.glb (~6 MB, flat-shaded
+  // extrusions from the footprint polygons) alongside the full detail
+  // buildings.glb (~26 MB, per-vertex normals + smoothed corners). The full
+  // mesh is ~500k tris on Austin south — enough to drop VTK's shadow-map pass
+  // to 15-20 fps on a laptop GPU. Callers pass prefer_flat=true (--lite on the
+  // demos) to load the lower-poly variant when present.
+  std::string glb = dir + "/buildings.glb";
+  if (prefer_flat) {
+    const std::string flat = dir + "/buildings_flat.glb";
+    if (fs::exists(flat))
+      glb = flat;
+  }
   std::ifstream f(tj);
   if (!f)
     return false;
