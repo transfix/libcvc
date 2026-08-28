@@ -302,6 +302,26 @@ TEST(NavMaterialRollout, NullMaterialIsByteIdentical) {
   EXPECT_EQ(std::memcmp(mc1.data(), mc2.data(), w.N * 4), 0);
 }
 
+TEST(NavMaterialRollout, FusedDriveStepNullMaterialMatchesPlainDriveStep) {
+  // drive_step_material with a null material stack must be byte-identical to
+  // the plain drive_step (same coef_feats -> model.forward -> rollout, no
+  // material forces). The default-biased policy needs no weight file.
+  rollout_world w;
+  const coef_mlp model = coef_mlp::default_biased();
+  std::vector<float> o1 = w.o, th1 = w.th, sp1 = w.sp, mc1(w.N);
+  std::vector<float> o2 = w.o, th2 = w.th, sp2 = w.sp, mc2(w.N);
+  // carrot doubles as the goal target here (drive_step samples/steers to it).
+  drive_step(w.fs, o1.data(), th1.data(), sp1.data(), w.goal.data(), model, w.N, nullptr, w.v,
+             mc1.data(), 1);
+  material_drive md; // stack == nullptr
+  drive_step_material(w.fs, o2.data(), th2.data(), sp2.data(), w.goal.data(), model, w.N, nullptr,
+                      w.v, md, mc2.data(), 1);
+  EXPECT_EQ(std::memcmp(o1.data(), o2.data(), o1.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(th1.data(), th2.data(), w.N * 4), 0);
+  EXPECT_EQ(std::memcmp(sp1.data(), sp2.data(), w.N * 4), 0);
+  EXPECT_EQ(std::memcmp(mc1.data(), mc2.data(), w.N * 4), 0);
+}
+
 TEST(NavMaterialRollout, MaterialForcesChangeTheTrajectory) {
   rollout_world w;
   // one material plane: constant risk gradient pushing -x, no hazard nearby
