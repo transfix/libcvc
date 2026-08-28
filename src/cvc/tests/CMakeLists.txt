@@ -104,6 +104,7 @@ add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
+add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -177,6 +178,7 @@ set(TEST_TARGETS
   nav_material_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
+  nav_coef_energy_grad_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -433,6 +435,13 @@ target_link_libraries(nav_coef_energy_test
 )
 
 target_link_libraries(nav_material_rollout_grad_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coef_energy_grad_test
   PRIVATE
     cvc
     GTest::gtest
@@ -967,6 +976,7 @@ target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
@@ -1186,6 +1196,7 @@ cvc_discover_tests(nav_coef_train_test)
 cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
+cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)

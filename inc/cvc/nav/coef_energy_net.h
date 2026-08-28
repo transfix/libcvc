@@ -93,6 +93,33 @@ public:
   float lam_hard_max() const { return lam_hard_max_; }
   float mu_lat_max() const { return mu_lat_max_; }
 
+  // ── P5 training backward (torch-free) ──────────────────────────────────────
+  // Per-weight gradients, keyed by the same names as the loaded tensors.
+  using param_grads = std::map<std::string, std::vector<float>>;
+
+  // A param_grads with every weight tensor present and zeroed — the accumulator
+  // backward_one adds into.
+  param_grads zero_grads() const;
+
+  // Reverse-mode adjoint of forward_one. Given upstream grads on the outputs
+  // (g_alphas[n_obs], and the scalar coefficient grads), ADDS the weight
+  // gradients into `grads` (obs_feats/goal_feats/risk_patch are data — no input
+  // grad is returned). Recomputes the forward internally (caches activations,
+  // then one reverse pass), composing the detail/nn_ops.h op VJPs in the
+  // POST-norm transformer order. Validated by nav_coef_energy_grad_test (per-op
+  // FD gradchecks + an end-to-end model gradcheck). mu_lat is unused in training
+  // (pass 0). Thread-safe over agents (const; writes only into `grads`).
+  void backward_one(const float *obs_feats, const std::uint8_t *obs_mask, int n_obs,
+                    const float *goal_feats, const float *risk_patch, int patch_p,
+                    const float *g_alphas, float g_beta, float g_gamma, float g_lam_soft,
+                    float g_lam_hard, float g_mu_lat, param_grads &grads) const;
+
+  // Weight access for the optimizer (P5 training) and the gradcheck. Names come
+  // from param_names(); throws if a name is unknown.
+  std::vector<std::string> param_names() const;
+  const std::vector<float> &param(const std::string &name) const;
+  std::vector<float> &mutable_param(const std::string &name);
+
 private:
   struct tensor {
     std::vector<int> dims;
