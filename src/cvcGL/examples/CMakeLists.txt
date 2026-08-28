@@ -64,6 +64,12 @@ if(EMSCRIPTEN)
       -sASYNCIFY=1
       -sASYNCIFY_STACK_SIZE=131072
       -sALLOW_MEMORY_GROWTH=1
+      # Austin's buildings mesh produces a ~140 MB vtkFloatArray for
+      # colors/normals; the default 2 GB ceiling reachable via growth
+      # sometimes lands short of it once VTK's other buffers pile on.
+      # Bump the hard cap so wasm32 can grow into the full 4 GB address
+      # space rather than throwing "Unable to allocate ..." mid-scene.
+      -sMAXIMUM_MEMORY=4GB
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
     )
