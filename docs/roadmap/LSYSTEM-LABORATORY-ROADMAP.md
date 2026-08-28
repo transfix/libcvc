@@ -283,7 +283,7 @@ struct archipelago_spec {
   double        separation_factor = 1.15;   // placement: min centre distance / (r_i + r_j)
   double        channel_min_m     = 40.0;   // min open water between non-overlapping islands
   double        bridge_min_m      = 12.0;   // min navigable width of a deliberate isthmus
-  bool          force_bridges     = false;  // see decision D9
+  bool          force_bridges     = true;   // DECIDED: D9 option 2 (user, 2026-08-27)
 };
 }
 ```
@@ -2582,7 +2582,13 @@ Should `lsystem_lab` ship in the `cvcgl-examples` cvcpkg recipe?
 
 > **The two decisions below are new in revision 2. Both change artifacts other people consume. This document recommends but does not pick.**
 
-**D9 — Cross-island traversal policy. NEEDS A DECISION BEFORE PR L2 MERGES (it sets the outdoor gate's pass condition, §7.8) AND INTERACTS WITH D2.**
+**D9 — Cross-island traversal policy. DECIDED 2026-08-27 (user): OPTION 2, `forced-bridges`, is the v1 DEFAULT.**
+
+> **User decision, verbatim:** *"let the terrain be connected throughout."*
+>
+> The generated world is therefore **one connected landmass**: islands are joined by isthmuses ≥ `max(bridge_min_m, 2·agent_radius_m + 1.0)`, and `validate_outdoor` enforces `components == 1` over the whole world rather than per-window. The archipelago remains a **visual and biome** feature — distinct islands with distinct biomes — while being **topologically connected** for navigation, so every sampled (start, goal) pair is solvable by land.
+>
+> Consequences, propagated below: the §15.1 R19 window cap disappears (a window may straddle a channel because a bridge always exists), the **D2 × D9 interaction is dissolved** (a 512 m window is no longer blocked by a small island), and `single-island` survives only as an opt-in ablation knob for curricula that deliberately want island-isolated episodes. Option 3 (`amphibious`) stays deferred — it changes exported `hard` bytes.
 
 An archipelago's islands are disconnected by construction, and `water_deep` is `hard`. So what *is* an episode?
 
@@ -2592,7 +2598,7 @@ An archipelago's islands are disconnected by construction, and `water_deep` is `
 | **2** | **Forced land bridges** (`forced-bridges`) | The generator guarantees an isthmus ≥ `max(bridge_min_m, 2·agent_radius_m + 1.0)` between every pair of islands whose windows are co-exported, by raising the smooth-max saddle to +0.6 m and painting it `sand`/`gravel`. Multi-island episodes become solvable. | One repair pass, ~3 ms. | The bridges read as causeways. It also makes the archipelago *topologically* one island, which arguably defeats the point of having several. |
 | **3** | **Amphibious ontology** (`amphibious`) | `water_shallow` stops being `hard` and becomes high-soft (ρ 0.90, `hard = false`); only `water_deep` stays hard. Fording is expensive but legal. | Free to implement. | **It changes exported `hard` bytes for every consumer**, and it asserts a vehicle capability (fording) that is a domain claim, not a rendering choice. Corpora built under different policies are not comparable. |
 
-**Recommendation: option 1 as the v1 default** (`--window-policy single-island`), with **option 2 available as an authored knob** (`--force-bridges`) because it costs one clamp and is genuinely useful for a "cross the isthmus" curriculum tier, and **option 3 explicitly deferred** because it changes `hard` semantics — which is exactly the kind of change §7.5's file-format seam exists to make loud rather than silent. Whichever is chosen is recorded in `manifest.validation.outdoor.policy` and in `provenance.json`, so a corpus can never mix policies undetectably.
+**DECIDED: option 2 as the v1 default** (`--window-policy forced-bridges`, `force_bridges = true`), with **option 1 demoted to an opt-in ablation knob** (`--window-policy single-island`) because it costs one clamp and is genuinely useful for a "cross the isthmus" curriculum tier, and **option 3 explicitly deferred** because it changes `hard` semantics — which is exactly the kind of change §7.5's file-format seam exists to make loud rather than silent. Whichever is chosen is recorded in `manifest.validation.outdoor.policy` and in `provenance.json`, so a corpus can never mix policies undetectably.
 
 **D10 — The export frame: cell size, σ, and what the manifest records. NEEDS A DECISION BEFORE PR L1 FREEZES THE SCHEMA.**
 
@@ -2774,7 +2780,7 @@ placement_attempts = 64     # per relaxation round
 placement_rounds   = 8      # sep *= 0.95 per round, then HARD FAIL
 channel_min_m    = 40.0     # min open water between non-overlapping islands
 bridge_min_m     = 12.0     # min navigable isthmus width (also >= 2*agent_radius_m + 1.0)
-force_bridges    = false    # see decision D9
+force_bridges    = true     # DECIDED: D9 option 2 (user, 2026-08-27)
 erosion.thermal_iters      = 60      # T = 4/N, c = 0.5   [Olsen 2004]
 erosion.streampower_steps  = 30      # m = 0.45, n = 1    [Braun & Willett 2013]
 erosion.droplets           = 0       # off by default; expensive, marginal
@@ -2853,7 +2859,7 @@ props.circulation_keepout = true     # computed BEFORE props; hard
 **Outdoor gate**
 
 ```
-policy              = "single-island"   # | "forced-bridges" | "amphibious"  (decision D9)
+policy              = "forced-bridges"  # | "single-island" | "amphibious"  (D9: DECIDED)
 inflate_m           = 6.0               # matches planner.far_pair_in_free_space
 connectivity        = 4                 # matches the planner's neighbourhood
 min_largest_fraction = 0.98             # single-island pass condition
