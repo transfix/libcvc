@@ -476,3 +476,90 @@ TEST(NavMaterialSimWorld, MaterialAvoidanceAndDeterminism) {
   ASSERT_EQ(mat.second.size(), mat2.second.size());
   EXPECT_EQ(std::memcmp(mat.second.data(), mat2.second.data(), mat.second.size() * 4), 0);
 }
+
+// ── obstacle-list surrogate rollout (integrate_surrogate_material) ───────────
+
+TEST(NavMaterialRollout, SurrogateIntegratorMovesTowardGoalAndGates) {
+  // One agent, no obstacles, a goal spring: it should move toward the goal;
+  // a zero-horizon twin must not move at all.
+  const int B = 2, N = 0, Hp = 9, Wp = 9;
+  std::vector<float> o = {0.0f, 0.0f, 0.0f, 0.0f}, v(2 * B, 0.0f);
+  std::vector<float> goal = {5.0f, 0.0f, 5.0f, 0.0f};
+  std::vector<float> patch(static_cast<std::size_t>(B) * 6 * Hp * Wp, 0.0f); // no risk/hazard
+  std::vector<float> R, alphas;                                              // N=0
+  std::vector<std::uint8_t> mask;
+  std::vector<float> beta = {1.0f, 1.0f}, gamma = {0.2f, 0.2f}, ls = {0.0f, 0.0f},
+                     lh = {0.0f, 0.0f}, rr = {0.15f, 0.15f}, d_hat = {2.0f, 2.0f},
+                     dt = {0.05f, 0.05f};
+  std::vector<int> H = {40, 0}; // agent 1 has zero horizon
+  surrogate_material_params p;
+  std::vector<float> mc(B), cr(B), hc(B), al(B);
+  integrate_surrogate_material(o.data(), v.data(), goal.data(), nullptr, R.data(), mask.data(),
+                               alphas.data(), beta.data(), gamma.data(), ls.data(), lh.data(),
+                               patch.data(), rr.data(), d_hat.data(), dt.data(), H.data(), B, N, Hp,
+                               Wp, p, mc.data(), cr.data(), hc.data(), al.data(), 1);
+  EXPECT_GT(o[0], 0.5f);  // agent 0 moved toward +x goal
+  EXPECT_GT(al[0], 0.0f); // and covered arc length
+  EXPECT_EQ(o[2], 0.0f);  // agent 1 (H=0) frozen
+  EXPECT_EQ(o[3], 0.0f);
+  EXPECT_EQ(al[1], 0.0f);
+}
+
+TEST(NavMaterialRollout, SurrogateIntegratorThreadDeterminism) {
+  std::mt19937 rng(9);
+  std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+  const int B = 24, N = 4, Hp = 11, Wp = 11;
+  std::vector<float> o(2 * B), v(2 * B), goal(2 * B), C(B * N * 2), R(B * N), alphas(B * N),
+      beta(B), gamma(B), ls(B), lh(B), patch(static_cast<std::size_t>(B) * 6 * Hp * Wp), rr(B),
+      d_hat(B), dt(B);
+  std::vector<std::uint8_t> mask(B * N);
+  std::vector<int> H(B);
+  for (auto &x : o)
+    x = 4.0f * u(rng);
+  for (auto &x : v)
+    x = 0.2f * u(rng);
+  for (auto &x : goal)
+    x = 4.0f * u(rng);
+  for (auto &x : C)
+    x = 5.0f * u(rng);
+  for (auto &x : R)
+    x = 1.5f + u(rng);
+  for (auto &x : alphas)
+    x = 1.0f + u(rng);
+  for (auto &x : mask)
+    x = u(rng) > -0.5f ? 1 : 0;
+  for (auto &x : beta)
+    x = 1.0f + u(rng);
+  for (auto &x : gamma)
+    x = 0.5f + 0.3f * u(rng);
+  for (auto &x : ls)
+    x = 2.0f + u(rng);
+  for (auto &x : lh)
+    x = 4.0f + u(rng);
+  for (auto &x : patch)
+    x = u(rng);
+  for (auto &x : rr)
+    x = 1.5f;
+  for (auto &x : d_hat)
+    x = 2.5f;
+  for (auto &x : dt)
+    x = 0.02f;
+  for (auto &x : H)
+    x = 3 + (rng() % 5);
+  surrogate_material_params p;
+
+  auto run = [&](int threads, std::vector<float> &oo, std::vector<float> &mc) {
+    oo = o;
+    std::vector<float> vv = v, cr(B), hc(B), al(B);
+    mc.assign(B, 0);
+    integrate_surrogate_material(oo.data(), vv.data(), goal.data(), C.data(), R.data(), mask.data(),
+                                 alphas.data(), beta.data(), gamma.data(), ls.data(), lh.data(),
+                                 patch.data(), rr.data(), d_hat.data(), dt.data(), H.data(), B, N,
+                                 Hp, Wp, p, mc.data(), cr.data(), hc.data(), al.data(), threads);
+  };
+  std::vector<float> o1, m1, o8, m8;
+  run(1, o1, m1);
+  run(8, o8, m8);
+  EXPECT_EQ(std::memcmp(o1.data(), o8.data(), o1.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(m1.data(), m8.data(), B * 4), 0);
+}
