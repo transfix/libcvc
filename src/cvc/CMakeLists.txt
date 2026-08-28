@@ -1001,6 +1001,23 @@ if(CVC_ENABLE_IMAGEMAGICK)
   else()
     target_link_libraries(cvc PUBLIC ${ImageMagick_LIBRARIES})
   endif()
+  # FindImageMagick returns only libMagick++ / libMagickCore, but a static
+  # ImageMagick calls straight into libbz2 / libjpeg / libpng / libwebp / libtiff
+  # / libfreetype / libxml2 / liblzma / libsharpyuv / libbrotli etc. — pkg-config
+  # is the source of truth for that closure, config-mode targets already carry it
+  # via INTERFACE_LINK_LIBRARIES. Probe pkg-config against the SAME prefix for
+  # static delegates only if the imported targets weren't set (i.e. only the
+  # raw-libs FindImageMagick path). Missing packages are silently skipped so
+  # this stays correct on any platform where the delegate isn't present.
+  if(NOT (TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore))
+    foreach(_im_delegate bzip2 libjpeg libpng libwebp libtiff-4 freetype2 libxml-2.0 liblzma lerc libwebpmux libwebpdecoder libsharpyuv libbrotlidec libbrotlicommon)
+      string(MAKE_C_IDENTIFIER "_im_dep_${_im_delegate}" _im_var)
+      pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_im_delegate})
+      if(${_im_var}_FOUND)
+        target_link_libraries(cvc PUBLIC PkgConfig::${_im_var})
+      endif()
+    endforeach()
+  endif()
 endif()
 
 # Assimp linking. PUBLIC so tests inherit the CVC_ENABLE_ASSIMP define (as with
