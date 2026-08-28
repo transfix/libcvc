@@ -252,11 +252,20 @@ int main(int argc, char **argv) {
     }
     if (loaded) {
       bounds = bb;
-      occ = std::move(bocc);
       rows = grid;
       cols = grid;
       scale = 0.05; // the trained world metric; keeps the coef_mlp constants physical
       haveMesh = cityMesh.num_tris() > 0;
+      if (!bocc.empty()) {
+        occ = std::move(bocc);
+      } else {
+        // Buildings mesh failed to load (e.g. wasm assimp glTF quirk) but terrain
+        // + satellite are still real — keep the existing (synthetic) occupancy
+        // rescaled to the real bounds so the swarm has some walls to avoid.
+        // occ retains its ts.occ contents from before the bundle load.
+        std::fprintf(stderr,
+                     "  no buildings mesh — using synthetic occupancy over the real Austin bounds\n");
+      }
       std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
