@@ -120,6 +120,14 @@ public:
   const std::vector<float> &param(const std::string &name) const;
   std::vector<float> &mutable_param(const std::string &name);
 
+  // Serialize to the .cvcnm container — the exact byte layout load_from_memory
+  // reads and GRL-SNAM matnet_export.py writes (magic "CVNM", the hyperparams,
+  // then name-keyed f32 tensors). The arch_hash is preserved (the architecture
+  // is unchanged by training). Round-trips: load_from_memory(serialize()) has
+  // byte-identical weights. Used to checkpoint a C++-trained policy.
+  std::vector<unsigned char> serialize() const;
+  void save(const std::string &path) const;
+
 private:
   struct tensor {
     std::vector<int> dims;

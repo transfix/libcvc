@@ -173,6 +173,7 @@ set(SOURCE_FILES
   nav/material.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
+  nav/coef_energy_net_io.cpp
   nav/material_rollout.cpp
   nav/material_train.cpp
   nav/coef_mlp.cpp
