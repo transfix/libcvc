@@ -227,6 +227,34 @@ void integrate_surrogate_material_vjp(
     const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
     float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
 
+// ── CUDA twins (defined in material_rollout.cu; CVC_ENABLE_CUDA only) ─────────
+// The GPU transcription of the two rollout functions above: one thread per
+// agent, reusing the SAME detail/material_rollout.h CVC_HD primitives, so the
+// CPU finite-difference gradcheck covers the device adjoint too. Same signatures
+// and semantics as the host versions (all pointers are HOST memory; the wrappers
+// copy to/from the device). Validated float-equivalent + grad-parity against the
+// CPU by nav_material_rollout_cuda_test. Gated by material_rollout_cuda_available()
+// (built with CUDA AND a device present); the wrappers throw otherwise.
+// Horizon cap: max(H) must be <= 64 (the device backward stores the trajectory in
+// per-thread local memory).
+bool material_rollout_cuda_available();
+
+void integrate_surrogate_material_cuda(
+    float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
+    const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
+    const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
+    const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    float *min_clear, float *cum_risk, float *hard_count, float *arc_length);
+
+void integrate_surrogate_material_vjp_cuda(
+    const float *o0, const float *v0, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const float *g_oT, const float *g_vT,
+    const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
+    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard);
+
 namespace detail {
 // One 6-channel bilinear sample (implemented in material.cpp so it compiles
 // under -ffp-contract=off; called per substep by the material rollouts).
