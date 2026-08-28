@@ -179,6 +179,34 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
                          const coef_mlp &model, int n, const int *map_id, const veh_params &v,
                          const material_drive &mat, float *minclr_out, int num_threads = 0);
 
+// ── obstacle-list material surrogate rollout ────────────────────────────────
+// The faithful torch-free port of the source method's differentiable
+// integrator (GRL-SNAM material_nav.integrate_surrogate_material): explicit
+// obstacle discs (C,R) with per-obstacle IPC barriers, a 6-channel local patch
+// (r~, phi, dr~/dx, dr~/dy, dphi/dx, dphi/dy) centred at the rollout start and
+// bilinearly resampled at the CURRENT position each step, the soft/hard
+// material forces, and semi-implicit Euler. This is the representation the
+// learned coef_energy_net was trained on (per-obstacle alphas + lam_soft/
+// lam_hard), and the forward the P5 training backward differentiates.
+//
+// B agents; N padded obstacles per agent (mask nonzero = valid); patch
+// (B,6,Hp,Wp). o/v (B,2) are updated IN PLACE (o0/v0 -> oT/vT). The loop runs
+// to max(H) with a per-agent active gate (matching the vectorized reference,
+// including its min_clear updates at frozen positions past H[b]).
+struct surrogate_material_params {
+  float margin_factor = 0.5f;
+  float mass = 1.0f;
+  float d_hat_sdf = 3.0f; // metres
+  float k_sharp = 5.0f;   // 1/m
+};
+
+void integrate_surrogate_material(
+    float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
+    const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
+    const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
+    const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads = 0);
+
 namespace detail {
 // One 6-channel bilinear sample (implemented in material.cpp so it compiles
 // under -ffp-contract=off; called per substep by the material rollouts).

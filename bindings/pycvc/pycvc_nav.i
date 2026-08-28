@@ -1,3 +1,7 @@
+// NOTE: do NOT run `clang-format -i` on this .i file. clang-format reads
+// the SWIG directives %{ / %} / %inline %{ as C operators and mangles them
+// (%{ -> % {), which breaks the SWIG parse. The CI clang-format leg
+// deliberately excludes *.i for this reason; keep it that way.
 // pycvc_nav.i — Python surface for cvc::nav (belief-space grid navigation).
 //
 // The compute lives in libcvc (inc/cvc/nav/grid_nav.h); this file only
@@ -10,7 +14,7 @@
 // contiguous dtype for the duration of the call and released before returning,
 // so no input array is pinned by a result.
 
-% {
+%{
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +23,7 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
@@ -97,10 +102,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
 }
 
 } // namespace
-%
-}
+%}
 
-% inline % {
+%inline %{
   namespace pycvc {
 
   // (H,W) uint8/bool occupancy -> (H,W) float64 squared Euclidean distance
@@ -1910,7 +1914,197 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     return tuple;
   }
 
-  } // namespace pycvc
+// Learned material coefficient network forward (cvc::nav::coef_energy_net).
+// Batched over n agents with ragged obstacle lists. Inputs: weights_path
+// (.cvcnm), obs_feats (total,6) f32, obs_mask (total,) u8, obs_offsets (n+1,)
+// i32, goal_feats (n,4) f32, risk_patch (n,2,P,P) f32. Returns tuple
+// (alphas (total,), beta (n,), gamma (n,), lam_soft (n,), lam_hard (n,),
+// mu_lat (n,)) f32. Float-equivalent to the torch CoefEnergyNetMaterial (math
+// attention path). GIL released across the compute.
+PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyObject *obs_mask,
+                             PyObject *obs_offsets, PyObject *goal_feats, PyObject *risk_patch,
+                             int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_matnet_forward: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *ofa = take(obs_feats, NPY_FLOAT, 2);
+  PyArrayObject *oma = take(obs_mask, NPY_UINT8, 1);
+  PyArrayObject *oo = take(obs_offsets, NPY_INT32, 1);
+  PyArrayObject *gfa = take(goal_feats, NPY_FLOAT, 2);
+  PyArrayObject *rpa = take(risk_patch, NPY_FLOAT, 4);
+  const int total = static_cast<int>(PyArray_DIM(ofa, 0));
+  const int n = static_cast<int>(PyArray_DIM(gfa, 0));
+  const int P = static_cast<int>(PyArray_DIM(rpa, 2));
+  if (PyArray_DIM(ofa, 1) != 6 || PyArray_DIM(oma, 0) != total || PyArray_DIM(oo, 0) != n + 1 ||
+      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != n || PyArray_DIM(rpa, 1) != 2 ||
+      PyArray_DIM(rpa, 3) != P)
+    fail("pycvc.nav_matnet_forward: shape mismatch (obs (T,6) mask (T,) offs (n+1,) goal (n,4) "
+         "patch (n,2,P,P))");
+  const int *offs = static_cast<const int *>(PyArray_DATA(oo));
+  if (offs[0] != 0 || offs[n] != total)
+    fail("pycvc.nav_matnet_forward: obs_offsets must start at 0 and end at total");
 
-  %
+  cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(weights_path);
+  if (model.patch_size() != P)
+    fail("pycvc.nav_matnet_forward: risk_patch P does not match the model's patch_size");
+
+  npy_intp dt = total, dn = n;
+  PyObject *al = PyArray_SimpleNew(1, &dt, NPY_FLOAT);
+  PyObject *be = PyArray_SimpleNew(1, &dn, NPY_FLOAT);
+  PyObject *ga = PyArray_SimpleNew(1, &dn, NPY_FLOAT);
+  PyObject *ls = PyArray_SimpleNew(1, &dn, NPY_FLOAT);
+  PyObject *lh = PyArray_SimpleNew(1, &dn, NPY_FLOAT);
+  PyObject *ml = PyArray_SimpleNew(1, &dn, NPY_FLOAT);
+  if (!al || !be || !ga || !ls || !lh || !ml) {
+    Py_XDECREF(al);
+    Py_XDECREF(be);
+    Py_XDECREF(ga);
+    Py_XDECREF(ls);
+    Py_XDECREF(lh);
+    Py_XDECREF(ml);
+    fail("pycvc.nav_matnet_forward: output alloc failed");
+  }
+  auto D = [](PyObject *o) {
+    return static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+  };
+  const float *ofd = static_cast<const float *>(PyArray_DATA(ofa));
+  const std::uint8_t *omd = static_cast<const std::uint8_t *>(PyArray_DATA(oma));
+  const float *gfd = static_cast<const float *>(PyArray_DATA(gfa));
+  const float *rpd = static_cast<const float *>(PyArray_DATA(rpa));
+  Py_BEGIN_ALLOW_THREADS
+  model.forward_batch(ofd, omd, offs, n, gfd, rpd, P, D(al), D(be), D(ga), D(ls), D(lh), D(ml),
+                      num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(6, al, be, ga, ls, lh, ml);
+  Py_DECREF(al);
+  Py_DECREF(be);
+  Py_DECREF(ga);
+  Py_DECREF(ls);
+  Py_DECREF(lh);
+  Py_DECREF(ml);
+  return tup;
 }
+
+// Obstacle-list material surrogate rollout (cvc::nav::integrate_surrogate_material).
+// The faithful torch-free integrator of the source material method (per-obstacle
+// IPC barriers + soft/hard material forces + semi-implicit Euler). B agents, N
+// padded obstacles (masked), 6-channel patch (B,6,Hp,Wp). Returns fresh
+// (oT (B,2), vT (B,2), min_clear (B,), cum_risk (B,), hard_count (B,),
+// arc_length (B,)) f32. GIL released.
+PyObject *nav_integrate_surrogate_material(
+    PyObject *o0, PyObject *v0, PyObject *goal, PyObject *C, PyObject *R, PyObject *mask,
+    PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft, PyObject *lam_hard,
+    PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt, PyObject *H,
+    double margin_factor, double mass, double d_hat_sdf, double k_sharp, int num_threads = 0)
+{
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_integrate_surrogate_material: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *o0a = take(o0, NPY_FLOAT, 2);
+  PyArrayObject *v0a = take(v0, NPY_FLOAT, 2);
+  PyArrayObject *ga = take(goal, NPY_FLOAT, 2);
+  PyArrayObject *Ca = take(C, NPY_FLOAT, 3);
+  PyArrayObject *Ra = take(R, NPY_FLOAT, 2);
+  PyArrayObject *ma = take(mask, NPY_UINT8, 2);
+  PyArrayObject *aa = take(alphas, NPY_FLOAT, 2);
+  PyArrayObject *ba = take(beta, NPY_FLOAT, 1);
+  PyArrayObject *gma = take(gamma, NPY_FLOAT, 1);
+  PyArrayObject *lsa = take(lam_soft, NPY_FLOAT, 1);
+  PyArrayObject *lha = take(lam_hard, NPY_FLOAT, 1);
+  PyArrayObject *pa = take(rollout_patch, NPY_FLOAT, 4);
+  PyArrayObject *rra = take(rr, NPY_FLOAT, 1);
+  PyArrayObject *dha = take(d_hat, NPY_FLOAT, 1);
+  PyArrayObject *dta = take(dt, NPY_FLOAT, 1);
+  PyArrayObject *Ha = take(H, NPY_INT32, 1);
+  const int B = static_cast<int>(PyArray_DIM(o0a, 0));
+  const int N = static_cast<int>(PyArray_DIM(Ca, 1));
+  const int Hp = static_cast<int>(PyArray_DIM(pa, 2));
+  const int Wp = static_cast<int>(PyArray_DIM(pa, 3));
+  if (PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(v0a, 0) != B || PyArray_DIM(ga, 0) != B ||
+      PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 || PyArray_DIM(Ra, 0) != B ||
+      PyArray_DIM(Ra, 1) != N || PyArray_DIM(ma, 0) != B || PyArray_DIM(ma, 1) != N ||
+      PyArray_DIM(aa, 0) != B || PyArray_DIM(aa, 1) != N || PyArray_DIM(ba, 0) != B ||
+      PyArray_DIM(gma, 0) != B || PyArray_DIM(lsa, 0) != B || PyArray_DIM(lha, 0) != B ||
+      PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 1) != 6 || PyArray_DIM(rra, 0) != B ||
+      PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B || PyArray_DIM(Ha, 0) != B)
+    fail("pycvc.nav_integrate_surrogate_material: shape mismatch");
+
+  npy_intp d2[2] = {B, 2}, d1 = B;
+  PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *vo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+  PyObject *mco = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *cro = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *hco = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  PyObject *alo = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+  if (!oo || !vo || !mco || !cro || !hco || !alo) {
+    Py_XDECREF(oo);
+    Py_XDECREF(vo);
+    Py_XDECREF(mco);
+    Py_XDECREF(cro);
+    Py_XDECREF(hco);
+    Py_XDECREF(alo);
+    fail("pycvc.nav_integrate_surrogate_material: output alloc failed");
+  }
+  auto D = [](PyObject *o) {
+    return static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+  };
+  std::memcpy(D(oo), PyArray_DATA(o0a), sizeof(float) * 2 * B);
+  std::memcpy(D(vo), PyArray_DATA(v0a), sizeof(float) * 2 * B);
+  cvc::nav::surrogate_material_params p;
+  p.margin_factor = static_cast<float>(margin_factor);
+  p.mass = static_cast<float>(mass);
+  p.d_hat_sdf = static_cast<float>(d_hat_sdf);
+  p.k_sharp = static_cast<float>(k_sharp);
+  Py_BEGIN_ALLOW_THREADS
+  cvc::nav::integrate_surrogate_material(
+      D(oo), D(vo), static_cast<const float *>(PyArray_DATA(ga)),
+      static_cast<const float *>(PyArray_DATA(Ca)), static_cast<const float *>(PyArray_DATA(Ra)),
+      static_cast<const std::uint8_t *>(PyArray_DATA(ma)),
+      static_cast<const float *>(PyArray_DATA(aa)), static_cast<const float *>(PyArray_DATA(ba)),
+      static_cast<const float *>(PyArray_DATA(gma)), static_cast<const float *>(PyArray_DATA(lsa)),
+      static_cast<const float *>(PyArray_DATA(lha)), static_cast<const float *>(PyArray_DATA(pa)),
+      static_cast<const float *>(PyArray_DATA(rra)), static_cast<const float *>(PyArray_DATA(dha)),
+      static_cast<const float *>(PyArray_DATA(dta)),
+      static_cast<const int *>(PyArray_DATA(Ha)), B, N, Hp, Wp, p, D(mco), D(cro), D(hco), D(alo),
+      num_threads);
+  Py_END_ALLOW_THREADS
+  for (PyArrayObject *h : hold)
+    Py_DECREF(h);
+  PyObject *tup = PyTuple_Pack(6, oo, vo, mco, cro, hco, alo);
+  Py_DECREF(oo);
+  Py_DECREF(vo);
+  Py_DECREF(mco);
+  Py_DECREF(cro);
+  Py_DECREF(hco);
+  Py_DECREF(alo);
+  return tup;
+}
+
+} // namespace pycvc
+
+%}
