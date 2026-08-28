@@ -239,6 +239,31 @@ int main(int argc, char **argv) {
   // with no user-visible env / argv machinery.
   if (bundle.empty() && std::filesystem::exists("/bundle/terrain.json"))
     bundle = "/bundle";
+#else
+  // Native fallback probes: without --bundle / $CVC_NAV_BUNDLE, look for an
+  // Austin bundle in the places one would expect a cvcpkg-installed prefix or
+  // an in-tree dev checkout to keep it, so the demo isn't just a black screen
+  // when a user forgets the flag. First hit wins; the chosen path is logged.
+  if (bundle.empty()) {
+    for (const char *p : {"deps/share/cvc-scenes/austin_south",
+                          "../deps/share/cvc-scenes/austin_south",
+                          "share/cvc-scenes/austin_south",
+                          "platoon-sim/scene_viewer/exports/scenes/austin_south",
+                          "../platoon-sim/scene_viewer/exports/scenes/austin_south",
+                          "scenes/austin_south",
+                          "../scenes/austin_south"}) {
+      if (std::filesystem::exists(std::string(p) + "/terrain.json")) {
+        bundle = p;
+        std::printf("nav_city_swarm: no --bundle given, autodetected %s\n", bundle.c_str());
+        break;
+      }
+    }
+    if (bundle.empty())
+      std::fprintf(stderr,
+                   "nav_city_swarm: no --bundle given and no known local Austin bundle found; "
+                   "falling back to the synthetic city (no terrain, no satellite, no buildings). "
+                   "Pass --bundle <dir> to load one.\n");
+  }
 #endif
   if (!bundle.empty()) {
     navdemo::Bounds bb;
@@ -754,6 +779,34 @@ int main(int argc, char **argv) {
     }
   }
 
+  // FOLLOWED-VEHICLE PATH: a dedicated LINES node showing ONLY the chased
+  // agent's ring buffer, in a bright accent (yellow) at 3x line width so it
+  // stands out against the dim fleet trails. Same TRAIL_K slots, drawn on top
+  // via a larger depth offset. Only visible while chaseOn — hidden otherwise.
+  std::shared_ptr<GeometryNode> pathNode;
+  std::vector<double> pathXyz(static_cast<std::size_t>(3) * 2 * TRAIL_K, 0.0);
+  {
+    cvc::geometry pg;
+    for (int k = 0; k < TRAIL_K; ++k)
+      for (int e = 0; e < 2; ++e) {
+        pg.points().push_back({0.0, 0.0, 0.35});
+        pg.colors().push_back({1.0, 0.85, 0.10}); // saturated yellow
+        if (e == 1)
+          pg.lines().push_back({static_cast<cvc::geometry::index_t>(2 * k),
+                                static_cast<cvc::geometry::index_t>(2 * k + 1)});
+      }
+    pathNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("chase_path", pg));
+    if (pathNode) {
+      pathNode->setRenderMode(GeometryRenderMode::LINES);
+      pathNode->setUseSingleColor(false);
+      pathNode->setLineWidth(4.0);   // 2.7x the fleet trails
+      pathNode->setAmbient(1.0);
+      pathNode->setDiffuse(0.0);
+      pathNode->setDepthOffset(2.0); // above the fleet trails
+      pathNode->setVisible(false);   // shown only while chase cam is on
+    }
+  }
+
   // Aimed STAGE RIG instead of two scene-spanning directional lights. A
   // directional light's shadow map is baked over the whole scene bbox (ground +
   // building height + air), so texels are wasted and vehicle shadows smear onto
@@ -1067,36 +1120,48 @@ int main(int argc, char **argv) {
     ImGui::Checkbox("Targets", &uiGoals);
     ImGui::SameLine();
     ImGui::Checkbox("Flags", &uiFlags);
-    // Cinematic follow-cam: pick an agent to CHASE with the smoothed Track camera
-    // (harvested from grl-snam's ChaseCamera). -1 = free camera.
-    // Two ways to pick: type an index in the InputInt (click the number and
-    // type — the +/- buttons on the side are for step, not the only entry), or
-    // drag the SliderInt.  "Release" jumps back to the free (Orbit) camera.
-    const int followBefore = followAgent;
-    ImGui::PushItemWidth(80);
-    ImGui::InputInt("##followidx", &followAgent);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::PushItemWidth(-90);
-    ImGui::SliderInt("Follow #", &followAgent, -1, N - 1);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    if (ImGui::Button("Release"))
-      followAgent = -1;
-    if (followAgent != followBefore) {
-      if (followAgent >= N)
-        followAgent = N - 1;
-      if (followAgent < -1)
-        followAgent = -1;
-      if (followAgent >= 0) {
-        configure_track_params(); // vehicle-scaled trail so chase works on any city
+    // Cinematic chase cam (harvested from grl-snam's ChaseCamera). Explicit
+    // Checkbox on/off — no more "-1 == off" magic. When on, an index typable
+    // in the InputInt AND draggable on the slider picks the agent to CHASE;
+    // unchecking snaps the camera back to Orbit and re-frames the whole city.
+    static bool chaseOn = false;
+    // Keep chaseOn in sync with followAgent for external mutators (e.g. the
+    // PiP click-to-follow, which sets followAgent directly).
+    if (followAgent >= 0)
+      chaseOn = true;
+    else if (followAgent < 0)
+      chaseOn = false;
+    if (ImGui::Checkbox("Chase cam", &chaseOn)) {
+      if (chaseOn) {
+        if (followAgent < 0)
+          followAgent = 0;
+        configure_track_params();
         cam.setTrackTarget("follow_probe");
         cam.setMode(CameraController::Mode::Track);
-      } else if (cam.mode() == CameraController::Mode::Track) {
+      } else {
+        followAgent = -1;
         cam.setMode(CameraController::Mode::Orbit);
         cam.frameBounds(bounds.min_x, bounds.min_y, 0.0, bounds.max_x, bounds.max_y, wall_h);
       }
     }
+    if (chaseOn) {
+      ImGui::SameLine();
+      ImGui::PushItemWidth(60);
+      const int followBefore = followAgent;
+      ImGui::InputInt("##chaseidx", &followAgent, 1, 10);
+      ImGui::PopItemWidth();
+      ImGui::SameLine();
+      ImGui::PushItemWidth(-90);
+      ImGui::SliderInt("##chaseslider", &followAgent, 0, N - 1);
+      ImGui::PopItemWidth();
+      if (followAgent < 0)
+        followAgent = 0;
+      if (followAgent >= N)
+        followAgent = N - 1;
+      if (followAgent != followBefore)
+        configure_track_params();
+    }
+    ImGui::SameLine();
     ImGui::Checkbox("Shadows", &uiShadows);
     ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
     ImGui::Checkbox("Avoid others", &uiSeparate); // inter-agent separation (live)
@@ -1159,6 +1224,19 @@ int main(int argc, char **argv) {
     if (trailNode) {
       trailNode->setVisible(uiTrails);
       trailNode->setLineWidth(uiTrailW);
+    }
+    // Highlighted path for the chased vehicle: extract that agent's slice from
+    // the shared trailXyz ring buffer (which trail_update writes each frame)
+    // and upload just those K segments to the dedicated pathNode.
+    if (pathNode) {
+      const bool showPath = (followAgent >= 0 && followAgent < N && uiTrails);
+      pathNode->setVisible(showPath);
+      if (showPath) {
+        const std::size_t base = static_cast<std::size_t>(followAgent) * TRAIL_K * 2 * 3;
+        for (std::size_t j = 0; j < static_cast<std::size_t>(TRAIL_K) * 2 * 3; ++j)
+          pathXyz[j] = trailXyz[base + j];
+        pathNode->updateVertices(pathXyz);
+      }
     }
     if (goalsNode)
       goalsNode->setVisible(uiGoals);
