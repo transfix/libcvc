@@ -427,9 +427,14 @@ int main(int argc, char **argv) {
   cvc::image vtexture;     // base-color texture (empty when the model has none)
   bool haveVehicle = false;
   if (vehicle.empty() && !bundle.empty()) {
-    const std::string cand = bundle + "/../../shared/Humvee.glb";
-    if (std::filesystem::exists(cand))
-      vehicle = cand;
+    // Try inside the bundle first (a scene that ships its own vehicle), then the
+    // sibling shared/ convention (vehicle-humvee cvcpkg + platoon-sim layout).
+    const std::string candIn = bundle + "/Humvee.glb";
+    const std::string candSib = bundle + "/../../shared/Humvee.glb";
+    if (std::filesystem::exists(candIn))
+      vehicle = candIn;
+    else if (std::filesystem::exists(candSib))
+      vehicle = candSib;
   }
   // Bundles use metre-scale world units; synthetic uses normalized units.
   const bool worldIsMetres = !bundle.empty();
