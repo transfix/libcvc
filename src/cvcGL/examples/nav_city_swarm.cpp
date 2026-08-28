@@ -239,7 +239,18 @@ int main(int argc, char **argv) {
   if (!bundle.empty()) {
     navdemo::Bounds bb;
     std::vector<std::uint8_t> bocc;
-    if (navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain)) {
+    bool loaded = false;
+    try {
+      loaded = navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain);
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "nav_city_swarm: bundle load threw: %s -> using synthetic city\n",
+                   e.what());
+      loaded = false;
+    } catch (...) {
+      std::fprintf(stderr, "nav_city_swarm: bundle load raised unknown -> using synthetic city\n");
+      loaded = false;
+    }
+    if (loaded) {
       bounds = bb;
       occ = std::move(bocc);
       rows = grid;
