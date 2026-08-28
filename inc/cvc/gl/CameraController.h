@@ -99,10 +99,17 @@ public:
   void beginPan();
   void endPan();
 
-  // Make the PRIMARY drag pan instead of orbit (state "primary_drag_pans").
-  // TouchGestures turns this on for touch devices, so one finger translates and
-  // two fingers rotate — there is no middle button on a phone, and dragging the
-  // world around is the more useful of the two with a single finger.
+  // Make the PRIMARY drag pan instead of orbit. Two-way bound at state
+  // "settings.primary_drag_pans" — note the "settings." prefix; the bare
+  // "primary_drag_pans" this once documented never existed, and the key was
+  // written but never read back, so it was inert from the state tree.
+  //
+  // Default OFF, and TouchGestures deliberately does NOT set it: forcing it on
+  // there made every drag pan, mouse included, because this is the camera's
+  // flag rather than a touch-only one, and orbit became unreachable. The
+  // gesture split is one finger / left-drag ORBITS, two fingers / middle-drag
+  // TRANSLATES — TouchGestures gets the second by bracketing the drag with
+  // beginPan()/endPan(), not by toggling this.
   void setPrimaryDragPans(bool on);
   bool primaryDragPans() const;
 
