@@ -584,16 +584,32 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
         *terrain = Terrain{}; // wipe partial parse
     }
   }
-  if (!fs::exists(glb))
-    return false;
-  cvc::model m = cvc::read_model(glb);
-  cvc::geometry city = m.merged();
-  if (city.num_tris() == 0)
-    return false;
-  occ = occupancy_from_model(city, bounds, nx, ny, /*inflate=*/0);
-  if (mesh)
-    *mesh = std::move(city);
-  return true;
+  // buildings.glb -> occupancy + optional wall mesh. Failure here (missing file
+  // OR a wasm assimp-side glTF version rejection) still returns true when
+  // terrain was parsed: the demo renders real terrain + satellite with a
+  // synthetic occupancy fallback rather than dropping the whole bundle.
+  if (fs::exists(glb)) {
+    try {
+      cvc::model m = cvc::read_model(glb);
+      cvc::geometry city = m.merged();
+      if (city.num_tris() > 0) {
+        occ = occupancy_from_model(city, bounds, nx, ny, /*inflate=*/0);
+        if (mesh)
+          *mesh = std::move(city);
+        return true;
+      }
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "  buildings.glb load failed: %s (continuing without wall mesh)\n",
+                   e.what());
+    } catch (...) {
+      std::fprintf(stderr, "  buildings.glb load raised unknown (continuing without wall mesh)\n");
+    }
+  }
+  // No mesh -> mark occ empty; the caller falls back to city_scene occupancy.
+  // Terrain (parsed above from terrain.json) is still returned to *terrain, so
+  // even without the buildings mesh the demo gets the real Austin ground.
+  occ.clear();
+  return terrain && !terrain->empty(); // true if we at least have real terrain
 }
 
 std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bounds &b,
