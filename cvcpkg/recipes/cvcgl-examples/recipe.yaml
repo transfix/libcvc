@@ -12,7 +12,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL example programs as ready-to-run commands: the lsystem_forest island demo plus the GRL-SNAM navigation demos (nav_city_swarm / nav_fog_ghost / nav_finale — the torch-free cvc::nav reactive swarm rendered natively), as native binaries in bin/, the lsystem_forest WebAssembly browser build (share/cvcgl-examples/web/), and a cvcgl-examples-web launcher that serves the wasm demo cross-origin-isolated and opens a browser."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, graphics, examples, vtk, wasm]
 
 # The examples are demos of cvcGL-as-a-toolkit, packaged separately from the

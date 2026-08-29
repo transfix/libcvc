@@ -25,9 +25,6 @@
 /*   modify it under the terms of the GNU Lesser General Public              */
 /*   License as published by the Free Software Foundation; either            */
 /*   version 2.1 of the License, or (at your option) any later version.      */
-/*   Specifically, this library is free for academic or personal non-profit  */
-/*   use, with due acknowledgement. Any or all personal profit / industrial  */
-/*   use needs to get a proper license approved from us.                     */
 /*                                                                           */
 /*   This library is distributed in the hope that it will be useful,         */
 /*   but WITHOUT ANY WARRANTY; without even the implied warranty of          */

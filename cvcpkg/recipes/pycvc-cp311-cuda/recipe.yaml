@@ -14,7 +14,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-cp311-cuda — the pycvc SWIG bindings (cvc::geometry / cvc::volume facades, zero-copy numpy views) for CPython 3.11 (cp311), built against the CUDA/GPU libcvc-cuda SDK, so Volume.enable_cuda() migrates voxels into CUDA unified memory and grid()/__cuda_array_interface__ expose the same buffer host- and device-side. Same Python API as the CPU `pycvc-cp311` package."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, numpy, scientific, volumetric, cuda, gpu]
 
 # The GPU build of the pycvc bindings — IDENTICAL sources to the CPU
