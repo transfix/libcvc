@@ -99,6 +99,24 @@ double world_error_for_switch_radius(double radius_m, const view_params &vp) noe
   return radius_m * vp.desired_pixel_error / k;
 }
 
+double impostor_switch_radius_m(double radius_m, double impostor_px,
+                                const view_params &vp) noexcept {
+  // A zero-width object has already collapsed to a billboard at any distance.
+  if (!(radius_m > 0.0))
+    return 0.0;
+  // A non-positive width threshold means "never switch".
+  if (!(impostor_px > 0.0))
+    return kInf;
+  const double k = k_px(vp);
+  // A degenerate camera projects nothing; do not silently turn the whole world
+  // into impostors -- treat it as "never switch", matching switch_radius_m's
+  // refusal to declare a rung affordable under a non-positive error budget.
+  if (!(k > 0.0))
+    return kInf;
+  // width_px = 2 * k_px * r / d; solve width_px == impostor_px for d.
+  return 2.0 * k * radius_m / impostor_px;
+}
+
 double bound_distance_m(const double centre[3], double radius_m, const view_params &vp) noexcept {
   const double dx = centre[0] - vp.eye[0];
   const double dy = centre[1] - vp.eye[1];

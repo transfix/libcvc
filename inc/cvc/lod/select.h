@@ -159,6 +159,27 @@ double switch_radius_m(double world_error_m, const view_params &) noexcept;
 // preset, and it is an easy mistake to make because it still looks correct.
 double world_error_for_switch_radius(double radius_m, const view_params &) noexcept;
 
+// The distance beyond which a bounding sphere of radius `radius_m` projects to a
+// WIDTH narrower than `impostor_px` -- the mesh -> impostor REPRESENTATION
+// switch. Section 6.1 makes this a width threshold, not an error one, "because a
+// billboard has no meaningful geometric error", so it is a separate crossover
+// from switch_radius_m and the two are used together: pick the rung by error out
+// to here, then draw a camera-facing card past it. Width is 2*radius, so the
+// crossover is where 2 * k_px * r / d == impostor_px; the roadmap's default
+// `impostor_px` is 32.
+//
+// This is the second and last selection decision the module owns, so a consumer
+// (the agent LOD of RENDER_PERF phase 2, the A3 vegetation card of section 8.4)
+// never re-derives the 2x. An impostor CAN instead be encoded as the coarsest
+// rung of the ladder with an authored error via world_error_for_switch_radius();
+// use that when the impostor competes for the triangle budget like any rung, and
+// use this when the switch is purely a screen-size decision.
+//
+// Returns 0 for a non-positive radius (a zero-width object is always an
+// impostor) and +inf if `impostor_px` is non-positive or the camera is
+// degenerate (the switch never fires).
+double impostor_switch_radius_m(double radius_m, double impostor_px, const view_params &) noexcept;
+
 // Bound-NEAREST distance from the eye to a bounding sphere, floored at
 // `z_near` (VISIBILITY-AND-LOD-ROADMAP section 6.1). Using the centre instead
 // over-refines big groups and under-refines small ones; using the raw nearest

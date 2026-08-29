@@ -122,6 +122,43 @@ TEST(LodSelect, BoundDistanceIsNearestNotCentre) {
   EXPECT_NEAR(bound_distance_m(here, 90.0, vp), vp.z_near, 1e-9);
 }
 
+TEST(LodSelect, ScreenRadiusFallsWithDistance) {
+  const view_params vp = balanced_view();
+  // A 10.5 m tree (the roadmap's measured mean) at 100 m and at 400 m.
+  const double near_px = screen_radius_px(10.5, 100.0, vp);
+  const double far_px = screen_radius_px(10.5, 400.0, vp);
+  EXPECT_GT(near_px, far_px);
+  EXPECT_NEAR(near_px / far_px, 4.0, 1e-9); // strictly 1/d
+  EXPECT_NEAR(screen_radius_px(10.5, 100.0, vp), 10.5 * k_px(vp) / 100.0, 1e-9);
+  EXPECT_TRUE(std::isinf(screen_radius_px(10.5, 0.0, vp)));
+}
+
+TEST(LodSelect, ImpostorSwitchIsAWidthCrossover) {
+  const view_params vp = balanced_view();
+  const double r = 10.5;           // tree radius
+  const double impostor_px = 32.0; // section 6.1's default
+
+  const double d = impostor_switch_radius_m(r, impostor_px, vp);
+  // At the crossover the projected WIDTH (2 * radius in px) is exactly the
+  // threshold; beyond it the mesh is narrower than the billboard, so switch.
+  EXPECT_NEAR(2.0 * screen_radius_px(r, d, vp), impostor_px, 1e-9);
+  EXPECT_LT(2.0 * screen_radius_px(r, d * 1.01, vp), impostor_px);
+  EXPECT_GT(2.0 * screen_radius_px(r, d * 0.99, vp), impostor_px);
+
+  // It is a WIDTH decision, distinct from the error-based rung crossover: the
+  // roadmap's tree switches representation at ~342 m (width = 32 px), well
+  // outside the L0/L1 error boundary. Here we only assert the two are different
+  // numbers, i.e. the module really does own two independent decisions.
+  EXPECT_NE(d, switch_radius_m(world_error_for_switch_radius(140.0, vp), vp));
+
+  // Edge cases.
+  EXPECT_EQ(impostor_switch_radius_m(0.0, impostor_px, vp), 0.0); // zero width: always
+  EXPECT_TRUE(std::isinf(impostor_switch_radius_m(r, 0.0, vp)));  // no threshold: never
+  view_params degenerate = vp;
+  degenerate.tan_half_fov = 0.0;
+  EXPECT_TRUE(std::isinf(impostor_switch_radius_m(r, impostor_px, degenerate)));
+}
+
 // --- Ladder validity -------------------------------------------------------
 
 TEST(LodSelect, LadderMonotonicity) {
