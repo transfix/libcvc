@@ -99,6 +99,16 @@ void set_magick_paths_win() {
 }
 #endif
 
+// Static ImageMagick builds link every coder as a .o into libMagickCore, but
+// RegisterStaticModules() is only called from inside MagickCore/magick.c's
+// GetMagickInfo("*", ...) path — Magick::InitializeMagick alone doesn't force
+// it, so a caller asking specifically for "png" hits the coder registry empty
+// and dies with "NoDecodeDelegateForThisImageFormat PNG". Every embedded glTF
+// texture load on the wasm demo tripped this. Declare the function directly
+// (the header lives under MagickCore/ which isn't on Magick++'s include path
+// via <Magick++.h> alone) and call it explicitly after Genesis.
+extern "C" void RegisterStaticModules(void);
+
 void init_magick_once() {
   static std::once_flag once;
   std::call_once(once, []() {
@@ -106,6 +116,10 @@ void init_magick_once() {
     set_magick_paths_win();
 #endif
     Magick::InitializeMagick(nullptr);
+    // Populate the coder registry in a static/wasm build. Harmless in the
+    // dynamic-modules build (falls through the same MAGICKCORE_BUILD_MODULES
+    // #ifdef and does nothing).
+    RegisterStaticModules();
   });
 }
 
