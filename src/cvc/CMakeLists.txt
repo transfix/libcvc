@@ -86,6 +86,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
+  ../../inc/cvc/lod/select.h
 )
 
 # Source files
@@ -183,6 +184,7 @@ set(SOURCE_FILES
   nav/belief_occupancy.cpp
   nav/sim_world.cpp
   nav/sim_thread.cpp
+  lod/select.cpp
 )
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian

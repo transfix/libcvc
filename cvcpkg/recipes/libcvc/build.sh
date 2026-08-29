@@ -28,7 +28,11 @@ CMAKE_ARGS=(
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
   -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS"
-  -DCVC_BUILD_TESTS=OFF
+  # Test gate (default OFF): `CVC_BUILD_TESTS=ON cvcpkg build libcvc ...`
+  # builds the Google Test suite (into the build tree) and runs it after the
+  # build. OFF by default so the packaging/release path stays fast and
+  # network-light (Google Test is fetched via FetchContent).
+  -DCVC_BUILD_TESTS="${CVC_BUILD_TESTS:-OFF}"
   # The `cvc` CLI ships as its own package (the cvc-cli / cvc-cli-cuda recipes)
   # so it lands deliberately in a user's PATH instead of riding along with the
   # SDK bundle. Keep it OUT of the libcvc bundle.
@@ -56,4 +60,13 @@ fi
 
 cmake "${CMAKE_ARGS[@]}"
 cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
+
+# Build-and-run tests, never install them: no test target has an install()
+# rule and package.files selects only lib/ and include/, so nothing test-
+# related reaches CVC_INSTALL_DIR or the published bundle. Running before the
+# install step keeps a failed suite from staging a bundle at all.
+case "$(printf %s "${CVC_BUILD_TESTS:-OFF}" | tr "[:upper:]" "[:lower:]")" in
+  on|1|true|yes) ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" ;;
+esac
+
 cmake --install "$CVC_BUILD_DIR"

@@ -51,6 +51,7 @@ A comprehensive computational visualization library from the Computational Visua
 - 🧭 **Reactive Swarm Navigation** (`cvc::nav`): a torch-free, Python-free real-time reactive swarm runtime ported from GRL-SNAM — bit-identical grid kernels (exact EDT, 8-connected A*, footprint→SDF), a fused per-agent drive (`coef_feats` → `CoefMLP` → kinematic-bicycle rollout), a `sim_world` swarm with shared/grouped/private belief planes plus a device-resident CUDA twin, lock-free off-thread stepping, and a self-supervised policy trainer (CPU + CUDA, portable `.cvcnav` weights). Terrain SEMANTICS ride along: per-cell material risk + hard hazards with a feasibility-witness gate ([`docs/NAV_MATERIAL.md`](docs/NAV_MATERIAL.md)). See [`docs/NAV_TRAINING.md`](docs/NAV_TRAINING.md).
 - 🖼️ **3D Scene Graph & Assets**: a VTK-backed scene graph + persistent renderer (`cvc::gl` / cvcGL — geometry/volume/grid nodes, scene-owned lighting & shadows, offscreen/onscreen capture), a standalone 2D raster + codecs container (`cvc::image` — PNG/JPEG/WebP), and a PBR multi-mesh scene loader (`cvc::model` — OBJ/glTF/GLB/FBX/DAE/PLY via assimp)
 - ⏱️ **Simulation Clock** (`cvc::world_clock`): an authoritative fixed-step clock separating world time from wall time and render cadence — banks `advance(wall_dt)` into whole quanta and returns `{steps, alpha}` for interpolated rendering, with deterministic live/replay/paused modes
+- 🔭 **Level-of-Detail selection** (`cvc::lod`): single-process, allocation-free LOD math shared by the cvcGL nav demos and the L-System Laboratory — hysteretic rung selection by screen-space error, a width-based mesh↔impostor switch, and a greedy triangle/prop/memory budget solver that is a pure (headless-exact) function of its inputs. See [`docs/LOD_API.md`](docs/LOD_API.md).
 - 🧮 **Scientific Computing**: Integration with FFTW, GSL, CGAL, Boost
 
 ## Quick Start
@@ -440,6 +441,31 @@ finite-difference-checked adjoint) via `coef_train` / the `nav_train_demo` CLI, 
 CUDA, exporting the portable `.cvcnav` weight blob. See
 [docs/NAV_TRAINING.md](docs/NAV_TRAINING.md).
 
+### Level of Detail (`cvc::lod`)
+
+Header-only-to-call selection math for keeping a large scene inside a frame
+budget — used by the cvcGL nav demos and the L-System Laboratory. No VTK, no GL,
+no allocation on the hot path.
+
+```cpp
+#include <cvc/lod/select.h>
+using namespace cvc::lod;
+
+view_params view = preset_view(quality_preset::balanced);   // 2.0 px error budget
+view.eye[0] = cam.x; view.eye[1] = cam.y; view.eye[2] = cam.z;
+
+// Per visible group: nearest-bound distance -> hysteretic rung (0 = finest).
+double dist = bound_distance_m(tile.centre, tile.radius_m, view);
+tile.rung   = select_rung(dist, tile.world_error_m, tile.nrungs, tile.rung, view);
+
+// Fit the whole grid to a triangle / prop / memory budget (headless-exact).
+plan p = solve(candidates, preset_budget(budget_profile::desktop_default));
+```
+
+Measured 3.7–6.0× fewer triangles on the Austin bundle; `solve()` for a
+1024-tile grid runs in ~3.5 µs/frame. Full reference, presets, and the
+`lab.lod.*` state-tree knobs: **[docs/LOD_API.md](docs/LOD_API.md)**.
+
 ## Supported File Formats
 
 ### Volume Formats
@@ -475,6 +501,7 @@ CUDA, exporting the portable `.cvcnav` weight blob. See
 - **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API reference
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
 - **[docs/NAV_TRAINING.md](docs/NAV_TRAINING.md)** - `cvc::nav` self-supervised policy training (torch-free, CPU + CUDA; surrogate vs bicycle rollout)
+- **[docs/LOD_API.md](docs/LOD_API.md)** - `cvc::lod` level-of-detail selection math: rung selection, budget solver, presets, and the user-facing knobs
 
 ### Testing Documentation
 
