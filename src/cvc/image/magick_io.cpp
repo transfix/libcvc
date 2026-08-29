@@ -133,12 +133,10 @@ void init_magick_once() {
     // Populate the coder registry in a static/wasm build. Harmless in the
     // dynamic-modules build (falls through the same MAGICKCORE_BUILD_MODULES
     // #ifdef and does nothing).
+    std::fprintf(stderr, "cvc::init_magick_once: InitializeMagick done, "
+                         "registering coders\n");
     RegisterStaticModules();
-    // Belt-and-braces: force-observe each Register* return value through a
-    // volatile sink so wasm-ld / wasm-opt cannot elide the call (which
-    // happened with the plain "(void)RegisterPNGImage();" form — the wasm
-    // came out byte-identical to the version without these calls, and the
-    // coder registry stayed empty at runtime).
+    std::fprintf(stderr, "cvc::init_magick_once: RegisterStaticModules -> ok\n");
     using RegFn = std::size_t (*)(void);
     static volatile RegFn keep[] = {
       &RegisterPNGImage,  &RegisterJPEGImage, &RegisterTIFFImage, &RegisterWEBPImage,
@@ -147,7 +145,9 @@ void init_magick_once() {
     volatile std::size_t magick_reg_sink = 0;
     for (auto &fn : keep)
       magick_reg_sink += fn();
-    (void)magick_reg_sink;
+    std::fprintf(stderr,
+                 "cvc::init_magick_once: individual Register* returned sink=%zu\n",
+                 static_cast<std::size_t>(magick_reg_sink));
   });
 }
 
