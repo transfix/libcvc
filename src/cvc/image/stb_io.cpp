@@ -66,10 +66,12 @@ public:
     return out;
   }
 
-  bool write(const image & /*img*/, const std::string & /*path*/, int /*quality*/) const override {
-    // stb_image is read-only in this handler; write requests bounce to the
-    // next handler (magick_image_io) via image.cpp's registry search.
-    return false;
+  void write(const image & /*img*/, const std::string &path, int /*quality*/) const override {
+    // stb_image is read-only in this handler; refuse writes so callers fall
+    // back to whatever write handler image.cpp finds (magick_image_io on
+    // native, nothing on wasm — the wasm demos never write images).
+    throw std::runtime_error(std::string("cvc::image stb write '") + path +
+                             "': not supported (read-only fast path)");
   }
 
 private:

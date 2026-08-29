@@ -219,13 +219,17 @@ namespace cvc {
 void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
 
 // Register the built-in image handlers. Called once (lazily) from image.cpp.
-// magick_image_io first, stb_image_io last — image.cpp's for_read walks the
-// registry and takes the LAST matching handler, so stb wins for png/jpg/bmp/
-// tga/gif and formats it does not cover fall back to Magick++.
+// Order matters:
+//   for_read walks the registry and takes the FIRST can_read match, so stb
+//     must be added FIRST to beat magick on png/jpg/bmp/tga/gif reads (the
+//     ImageMagick libtool-dup-static-state trap on wasm makes those reads
+//     throw NoDecodeDelegate — see src/cvc/image/stb_io.cpp).
+//   for_write_ext walks and takes the LAST extension match, so magick must
+//     be added LAST to keep write() working — stb is read-only.
 void register_default_image_handlers() {
+  register_stb_image_handler();
 #ifdef CVC_ENABLE_IMAGEMAGICK
   image_file_io::add(image_file_io::ptr(new magick_image_io()));
 #endif
-  register_stb_image_handler();
 }
 } // namespace cvc
