@@ -1,7 +1,9 @@
 schema_version: 1
 recipe:
   name: cvcgl-cuda
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"

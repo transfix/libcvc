@@ -6,7 +6,9 @@ recipe:
   # pycvc-gl-cp311 SUPERSEDES the published bare `pycvc-gl`; it is a NEW
   # catalog name, so its revision restarts at 1.
   name: pycvc-gl-cp311
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
