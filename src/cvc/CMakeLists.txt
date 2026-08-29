@@ -101,6 +101,7 @@ set(SOURCE_FILES
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
+  image/stb_io.cpp
   model/model.cpp
   model/model_file_io.cpp
   model/assimp_io.cpp
