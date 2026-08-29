@@ -141,6 +141,20 @@ public:
                           const float *risk_patch, int patch_p, float *alphas_out, float *beta,
                           float *gamma, float *lam_soft, float *lam_hard, float *mu_lat) const;
 
+  // Batched device backward, the CUDA twin of backward_one accumulated over the
+  // ragged batch: one block per agent recomputes the forward (activations to
+  // per-agent device scratch) then reverses, atomicAdd-ing every agent's weight
+  // gradients into the SAME `grads` accumulator (add into it; zero it first for a
+  // fresh gradient). Upstream grads: g_alphas [total] (obs_offsets layout),
+  // g_beta/.../g_mu_lat [n]. FLOAT tier vs CPU backward_one (rel<5e-3 / cos>0.9999
+  // — the atomicAdd sum order differs from the CPU's sequential accumulate);
+  // validated by nav_coef_energy_cuda_test. Throws without a CUDA device.
+  void backward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
+                           const int *obs_offsets, int n, const float *goal_feats,
+                           const float *risk_patch, int patch_p, const float *g_alphas,
+                           const float *g_beta, const float *g_gamma, const float *g_lam_soft,
+                           const float *g_lam_hard, const float *g_mu_lat, param_grads &grads) const;
+
 private:
   struct tensor {
     std::vector<int> dims;
