@@ -115,13 +115,13 @@ extern "C" void RegisterStaticModules(void);
 // that DCE misreads as unreachable). Referencing each Register* here
 // via a volatile pointer forces the linker to keep the coder .o for
 // each format the demos need.
-extern "C" void RegisterPNGImage(void);
-extern "C" void RegisterJPEGImage(void);
-extern "C" void RegisterTIFFImage(void);
-extern "C" void RegisterWEBPImage(void);
-extern "C" void RegisterBMPImage(void);
-extern "C" void RegisterGIFImage(void);
-extern "C" void RegisterMIFFImage(void);
+extern "C" std::size_t RegisterPNGImage(void);
+extern "C" std::size_t RegisterJPEGImage(void);
+extern "C" std::size_t RegisterTIFFImage(void);
+extern "C" std::size_t RegisterWEBPImage(void);
+extern "C" std::size_t RegisterBMPImage(void);
+extern "C" std::size_t RegisterGIFImage(void);
+extern "C" std::size_t RegisterMIFFImage(void);
 
 void init_magick_once() {
   static std::once_flag once;
@@ -138,13 +138,13 @@ void init_magick_once() {
     // wasm linker cannot DCE-strip the coder .o's. Each one is idempotent
     // (RegisterMagickInfo re-registers under the same key), so double calling
     // is safe.
-    RegisterPNGImage();
-    RegisterJPEGImage();
-    RegisterTIFFImage();
-    RegisterWEBPImage();
-    RegisterBMPImage();
-    RegisterGIFImage();
-    RegisterMIFFImage();
+    (void)RegisterPNGImage();
+    (void)RegisterJPEGImage();
+    (void)RegisterTIFFImage();
+    (void)RegisterWEBPImage();
+    (void)RegisterBMPImage();
+    (void)RegisterGIFImage();
+    (void)RegisterMIFFImage();
   });
 }
 
