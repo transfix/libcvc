@@ -128,6 +128,19 @@ public:
   std::vector<unsigned char> serialize() const;
   void save(const std::string &path) const;
 
+  // ── CUDA twin (defined in coef_energy_net.cu; CVC_ENABLE_CUDA only) ──────────
+  // Batched device forward, float-equivalent to forward_batch (same ragged
+  // obs_offsets layout: obs_feats [total*6] / obs_mask [total] / alphas_out
+  // [total]; goal_feats [n*4]; risk_patch [n*2*P*P]; beta/.../mu_lat [n]). One
+  // CUDA block per agent, d_tok threads cooperating; the CNN activations live in
+  // per-agent device scratch. Validated vs the CPU forward by
+  // nav_coef_energy_cuda_test (FLOAT tier). Throws if built without CUDA or no
+  // device is present (guard with coef_energy_cuda_available()).
+  void forward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
+                          const int *obs_offsets, int n, const float *goal_feats,
+                          const float *risk_patch, int patch_p, float *alphas_out, float *beta,
+                          float *gamma, float *lam_soft, float *lam_hard, float *mu_lat) const;
+
 private:
   struct tensor {
     std::vector<int> dims;
@@ -142,6 +155,10 @@ private:
   float lam_soft_max_ = 5.0f, lam_hard_max_ = 10.0f, mu_lat_max_ = 5.0f, eps_ = 1e-5f;
   std::uint64_t arch_hash_ = 0;
 };
+
+// True when this build has CUDA AND a device is present (so forward_batch_cuda
+// will run). Mirrors material_rollout_cuda_available().
+bool coef_energy_cuda_available();
 
 } // namespace nav
 } // namespace cvc
