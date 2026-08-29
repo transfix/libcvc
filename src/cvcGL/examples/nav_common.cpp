@@ -640,6 +640,17 @@ std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bou
   rig->setWarmth(0.35);
   rig->setEnvironment(0.5); // lift open ground / map edges the cones don't reach
   rig->setAmbient(0.32);
+  // Texture-unit budget on 16-unit iGPUs: every shadow-casting spot adds a
+  // shadow-map sampler to the fragment stage. StageLighting's setBack is a
+  // Kind::Spot (cone < 90) which VTK's LightCreatesShadow accepts, so it
+  // baked a second shadow map on top of key; combined with satellite +
+  // Humvee albedo + fog overlay + ImGui atlas + VTK's internal 2-D pass
+  // textures, the shader link fails at runtime with "Hardware does not
+  // support the number of textures defined". Kill back AND wash entirely on
+  // the nav scenes — aerial city footprints don't need stage separation, and
+  // key + fill is enough to see form.
+  rig->setBack(0.0);
+  rig->setWash(0.0, 0, 1.0);
   rig->apply();
   return rig;
 }

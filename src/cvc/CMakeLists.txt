@@ -101,6 +101,7 @@ set(SOURCE_FILES
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
+  image/stb_io.cpp
   model/model.cpp
   model/model_file_io.cpp
   model/assimp_io.cpp
@@ -1022,6 +1023,7 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "libpng|png16"
         "libwebp|webp"
         "libwebpmux|webpmux"
+        "libwebpdemux|webpdemux"
         "libwebpdecoder|webpdecoder"
         "libsharpyuv|sharpyuv"
         "libtiff-4|tiff"

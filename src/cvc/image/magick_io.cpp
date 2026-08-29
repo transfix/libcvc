@@ -19,6 +19,8 @@
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
 #include <Magick++.h>
+#include <cstdio>
+#include <list>
 #include <mutex>
 #include <stdexcept>
 
@@ -99,6 +101,50 @@ void set_magick_paths_win() {
 }
 #endif
 
+// ── wasm-only coder bootstrap ────────────────────────────────────────────
+//
+// Emscripten links a STATIC ImageMagick whose coders are .o members of
+// libMagickCore. RegisterStaticModules() is only reached from inside
+// MagickCore/magick.c's GetMagickInfo("*", ...) path — Magick::InitializeMagick
+// alone doesn't force it — so a caller asking specifically for "png" hits an
+// empty coder registry and dies with "NoDecodeDelegateForThisImageFormat PNG".
+// Every embedded glTF texture load on the wasm demo tripped this.
+//
+// This block is __EMSCRIPTEN__-only ON PURPOSE. It was originally applied to
+// every platform (#262 for RegisterStaticModules, #263 for the per-coder
+// entrypoints) and broke all three native platforms:
+//
+//   * linux/macos link a DYNAMIC-MODULES ImageMagick, where the coders are
+//     already registered by Genesis. Calling the Register* entrypoints again
+//     duplicates those registry entries, and IM then resolves neither the
+//     extension nor its own MIFF fallback — ImageTest.PngRoundTrip and
+//     JpegRoundTripDimensions failed with
+//     "NoEncodeDelegateForThisImageFormat `MIFF'". (#268's commit message
+//     already fingered "duplicate stubs" as the root cause.)
+//   * windows links against the IM DLL's import library, which does not export
+//     the per-coder Register*Image symbols at all, so cvc.dll failed to link
+//     with 7x LNK2001 + LNK1120.
+//
+// Guarding on __EMSCRIPTEN__ keeps the wasm fix — the only build that needs
+// it — and leaves every native build on the coder registry Genesis populates.
+#ifdef __EMSCRIPTEN__
+extern "C" void RegisterStaticModules(void);
+// Also declare the individual coder Register* entrypoints — under
+// -Wl,--gc-sections + wasm-ld's whole-program DCE, calling only
+// RegisterStaticModules() sometimes still lets the linker drop png.o
+// (its call site inside static.o is behind a big function-pointer table
+// that DCE misreads as unreachable). Referencing each Register* here
+// via a volatile pointer forces the linker to keep the coder .o for
+// each format the demos need.
+extern "C" std::size_t RegisterPNGImage(void);
+extern "C" std::size_t RegisterJPEGImage(void);
+extern "C" std::size_t RegisterTIFFImage(void);
+extern "C" std::size_t RegisterWEBPImage(void);
+extern "C" std::size_t RegisterBMPImage(void);
+extern "C" std::size_t RegisterGIFImage(void);
+extern "C" std::size_t RegisterMIFFImage(void);
+#endif // __EMSCRIPTEN__
+
 void init_magick_once() {
   static std::once_flag once;
   std::call_once(once, []() {
@@ -106,6 +152,23 @@ void init_magick_once() {
     set_magick_paths_win();
 #endif
     Magick::InitializeMagick(nullptr);
+#ifdef __EMSCRIPTEN__
+    // wasm only — see the block above. On a native build Genesis has already
+    // populated the coder registry, and re-registering duplicates its entries.
+    RegisterStaticModules();
+    // Force-observe each Register* return value through a volatile sink so
+    // wasm-ld / wasm-opt cannot elide the call (plain "(void)RegisterPNGImage()"
+    // was being DCEd in the wasm build).
+    using RegFn = std::size_t (*)(void);
+    static volatile RegFn keep[] = {
+      &RegisterPNGImage,  &RegisterJPEGImage, &RegisterTIFFImage, &RegisterWEBPImage,
+      &RegisterBMPImage,  &RegisterGIFImage,  &RegisterMIFFImage,
+    };
+    volatile std::size_t magick_reg_sink = 0;
+    for (auto &fn : keep)
+      magick_reg_sink += fn();
+    (void)magick_reg_sink;
+#endif // __EMSCRIPTEN__
   });
 }
 
@@ -174,10 +237,18 @@ private:
 #endif // CVC_ENABLE_IMAGEMAGICK
 
 namespace cvc {
+void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
+
 // Register the built-in image handlers. Called once (lazily) from image.cpp.
-// When ImageMagick is disabled this registers nothing — read/write_image then
-// raise "no handler" until another handler (e.g. stb) is added.
+// Order matters:
+//   for_read walks the registry and takes the FIRST can_read match, so stb
+//     must be added FIRST to beat magick on png/jpg/bmp/tga/gif reads (the
+//     ImageMagick libtool-dup-static-state trap on wasm makes those reads
+//     throw NoDecodeDelegate — see src/cvc/image/stb_io.cpp).
+//   for_write_ext walks and takes the LAST extension match, so magick must
+//     be added LAST to keep write() working — stb is read-only.
 void register_default_image_handlers() {
+  register_stb_image_handler();
 #ifdef CVC_ENABLE_IMAGEMAGICK
   image_file_io::add(image_file_io::ptr(new magick_image_io()));
 #endif
