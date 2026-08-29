@@ -108,6 +108,20 @@ void set_magick_paths_win() {
 // (the header lives under MagickCore/ which isn't on Magick++'s include path
 // via <Magick++.h> alone) and call it explicitly after Genesis.
 extern "C" void RegisterStaticModules(void);
+// Also declare the individual coder Register* entrypoints — under
+// -Wl,--gc-sections + wasm-ld's whole-program DCE, calling only
+// RegisterStaticModules() sometimes still lets the linker drop png.o
+// (its call site inside static.o is behind a big function-pointer table
+// that DCE misreads as unreachable). Referencing each Register* here
+// via a volatile pointer forces the linker to keep the coder .o for
+// each format the demos need.
+extern "C" void RegisterPNGImage(void);
+extern "C" void RegisterJPEGImage(void);
+extern "C" void RegisterTIFFImage(void);
+extern "C" void RegisterWEBPImage(void);
+extern "C" void RegisterBMPImage(void);
+extern "C" void RegisterGIFImage(void);
+extern "C" void RegisterMIFFImage(void);
 
 void init_magick_once() {
   static std::once_flag once;
@@ -120,6 +134,17 @@ void init_magick_once() {
     // dynamic-modules build (falls through the same MAGICKCORE_BUILD_MODULES
     // #ifdef and does nothing).
     RegisterStaticModules();
+    // Belt-and-braces: also call the individual Register* entrypoints so the
+    // wasm linker cannot DCE-strip the coder .o's. Each one is idempotent
+    // (RegisterMagickInfo re-registers under the same key), so double calling
+    // is safe.
+    RegisterPNGImage();
+    RegisterJPEGImage();
+    RegisterTIFFImage();
+    RegisterWEBPImage();
+    RegisterBMPImage();
+    RegisterGIFImage();
+    RegisterMIFFImage();
   });
 }
 
