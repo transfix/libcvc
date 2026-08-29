@@ -216,12 +216,16 @@ private:
 #endif // CVC_ENABLE_IMAGEMAGICK
 
 namespace cvc {
+void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
+
 // Register the built-in image handlers. Called once (lazily) from image.cpp.
-// When ImageMagick is disabled this registers nothing — read/write_image then
-// raise "no handler" until another handler (e.g. stb) is added.
+// magick_image_io first, stb_image_io last — image.cpp's for_read walks the
+// registry and takes the LAST matching handler, so stb wins for png/jpg/bmp/
+// tga/gif and formats it does not cover fall back to Magick++.
 void register_default_image_handlers() {
 #ifdef CVC_ENABLE_IMAGEMAGICK
   image_file_io::add(image_file_io::ptr(new magick_image_io()));
 #endif
+  register_stb_image_handler();
 }
 } // namespace cvc
