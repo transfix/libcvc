@@ -637,14 +637,14 @@ endif(CVC_ENABLE_SDF)
 
 # Add CUDA source files if enabled
 if(CVC_ENABLE_CUDA)
-  list(APPEND SOURCE_FILES volume/voxels_kernels.cu nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu)
-  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu, nav/drive.cu, nav/coef_train.cu, nav/material_rollout.cu, nav/coef_energy_net.cu")
+  list(APPEND SOURCE_FILES volume/voxels_kernels.cu nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu nav/material_train.cu)
+  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu, nav/drive.cu, nav/coef_train.cu, nav/material_rollout.cu, nav/coef_energy_net.cu, nav/material_train.cu")
   # Volume rendering opts into fast math per source (it has no bit/float-equiv
   # contract); the nav drive + trainer kernels MUST stay precise (float-equivalent
   # to the CPU/torch reference) — no fast-math, no FMA contraction, IEEE div/sqrt.
   set_source_files_properties(volume/voxels_kernels.cu PROPERTIES
     COMPILE_OPTIONS "$<$<CONFIG:Release>:--use_fast_math>")
-  set_source_files_properties(nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu PROPERTIES
+  set_source_files_properties(nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu nav/material_train.cu PROPERTIES
     COMPILE_OPTIONS "-fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
 endif()
 
