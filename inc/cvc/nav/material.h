@@ -132,10 +132,18 @@ gate_decision witness_gate(const float *risk, const std::uint8_t *gate_hard, con
 
 // Batched gate over n agents; outputs are SoA columns. Byte-identical to n
 // serial witness_gate calls (and to the Python batch reference).
+//
+// Grouped material planes (P2a): risk/gate_hard/clear_m are [M,rows,cols] stacks
+// (plane m at m*rows*cols); map_id[i] selects agent i's plane. map_id == nullptr
+// => plane 0 for all (M == 1, the back-compat single-plane case), so old callers
+// are unchanged. With map_id it is byte-identical to per-plane serial
+// witness_gate — the agents mapped to one plane read the same rasters a single
+// serial call over that plane would.
 void witness_gate_batch(const float *risk, const std::uint8_t *gate_hard, const float *clear_m,
                         int rows, int cols, const double *pos_rc, const double *goal_rc, int n,
                         const gate_params &p, std::uint8_t *active_out, double *nominal_out,
-                        double *best_out, std::int32_t *count_out, int num_threads = 0);
+                        double *best_out, std::int32_t *count_out, int num_threads = 0,
+                        const int *map_id = nullptr);
 
 // ── material coupling for the drive ─────────────────────────────────────────
 // Optional per-rollout material forces. stack == nullptr => NO material: the

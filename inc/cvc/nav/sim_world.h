@@ -179,7 +179,13 @@ public:
   // subsequent step() evaluates the frame-wise gate per agent against its own
   // goal and drives with the material forces. Default off = byte-unchanged
   // runs (the sep_radius/sep_gain pattern).
-  void set_material(const float *risk_raw, const std::uint8_t *hard, const material_config &mc);
+  // `planes` == 1 (default): one shared material plane — every agent samples it
+  // regardless of its belief plane (the current behavior, back-compat). `planes`
+  // > 1: `risk_raw`/`hard` are [planes,H,W] stacks and one material + gate plane
+  // is built per group; each agent indexes its material plane by the SAME map_id
+  // as its belief plane, so every map_id must be < `planes` (throws otherwise).
+  void set_material(const float *risk_raw, const std::uint8_t *hard, const material_config &mc,
+                    int planes = 1);
   void clear_material() { mat_on_ = false; }
   bool has_material() const { return mat_on_; }
   // Last tick's per-agent gate decisions (renderer/telemetry hook); valid only
@@ -217,10 +223,12 @@ private:
 
   // material state (set_material; inert while mat_on_ == false)
   bool mat_on_ = false;
+  int mat_planes_ = 1;                             // material/gate plane count (P2a)
   material_config mat_cfg_;
-  std::vector<float> mat_stack_;                   // [1,6,H,W] derived planes
-  std::vector<std::uint8_t> mat_gate_hard_;        // hard | truth
-  std::vector<float> mat_clear_m_;                 // metres EDT of mat_gate_hard_
+  std::vector<float> mat_stack_;                   // [mat_planes_,6,H,W] derived planes
+  std::vector<float> mat_risk_;                    // [mat_planes_,H,W] contiguous risk (ch 0) for the gate
+  std::vector<std::uint8_t> mat_gate_hard_;        // [mat_planes_,H,W] hard | truth
+  std::vector<float> mat_clear_m_;                 // [mat_planes_,H,W] metres EDT of mat_gate_hard_
   std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
   std::vector<std::uint8_t> mat_gate_active_;      // [n]
   double mat_hard_margin_m_ = 0.0;

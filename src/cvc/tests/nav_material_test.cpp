@@ -233,6 +233,66 @@ TEST(NavMaterialGate, BatchMatchesSerialBytesAcrossThreadCounts) {
   }
 }
 
+// P2a: grouped material planes. risk/gate_hard/clear_m are [M,H,W] and each agent
+// gates against its own plane (map_id[i]); the batch must be byte-identical to a
+// serial witness_gate on each agent's own plane, and nullptr map_id must collapse
+// to plane 0 (back-compat).
+TEST(NavMaterialGate, GroupedPlanesBatchMatchesPerPlaneSerial) {
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> ur(0.0f, 1.0f);
+  const int rows = 31, cols = 27, N = 40, M = 3;
+  const std::size_t hw = static_cast<std::size_t>(rows) * cols;
+  std::vector<float> risk(M * hw), clear(M * hw);
+  std::vector<std::uint8_t> hard(M * hw);
+  for (auto &v : risk)
+    v = ur(rng);
+  for (auto &v : clear)
+    v = 4.0f * ur(rng);
+  for (auto &v : hard)
+    v = ur(rng) < 0.05f ? 1 : 0;
+  std::vector<double> pos(2 * N), goal(2 * N);
+  std::vector<int> map_id(N);
+  for (int i = 0; i < N; ++i) {
+    pos[2 * i] = (rows - 1) * ur(rng);
+    pos[2 * i + 1] = (cols - 1) * ur(rng);
+    goal[2 * i] = (rows - 1) * ur(rng);
+    goal[2 * i + 1] = (cols - 1) * ur(rng);
+    map_id[i] = static_cast<int>(rng() % static_cast<unsigned>(M));
+  }
+  gate_params p;
+  for (int threads : {1, 4, 8}) {
+    std::vector<std::uint8_t> act(N);
+    std::vector<double> nom(N), best(N);
+    std::vector<std::int32_t> cnt(N);
+    witness_gate_batch(risk.data(), hard.data(), clear.data(), rows, cols, pos.data(), goal.data(),
+                       N, p, act.data(), nom.data(), best.data(), cnt.data(), threads,
+                       map_id.data());
+    for (int i = 0; i < N; ++i) {
+      const std::size_t off = static_cast<std::size_t>(map_id[i]) * hw;
+      const gate_decision g =
+          witness_gate(risk.data() + off, hard.data() + off, clear.data() + off, rows, cols,
+                       pos[2 * i], pos[2 * i + 1], goal[2 * i], goal[2 * i + 1], p);
+      EXPECT_EQ(act[i] != 0, g.active)
+          << "agent " << i << " plane " << map_id[i] << " threads " << threads;
+      EXPECT_EQ(std::memcmp(&nom[i], &g.nominal_risk, 8), 0);
+      EXPECT_EQ(std::memcmp(&best[i], &g.best_risk, 8), 0);
+      EXPECT_EQ(cnt[i], g.feasible_count);
+    }
+  }
+  // nullptr map_id == plane 0 for all (back-compat with the single-plane callers).
+  std::vector<std::uint8_t> act(N);
+  std::vector<double> nom(N), best(N);
+  std::vector<std::int32_t> cnt(N);
+  witness_gate_batch(risk.data(), hard.data(), clear.data(), rows, cols, pos.data(), goal.data(), N,
+                     p, act.data(), nom.data(), best.data(), cnt.data(), 0, nullptr);
+  for (int i = 0; i < N; ++i) {
+    const gate_decision g = witness_gate(risk.data(), hard.data(), clear.data(), rows, cols,
+                                         pos[2 * i], pos[2 * i + 1], goal[2 * i], goal[2 * i + 1], p);
+    EXPECT_EQ(act[i] != 0, g.active) << "back-compat agent " << i;
+    EXPECT_EQ(cnt[i], g.feasible_count);
+  }
+}
+
 namespace {
 
 // A tiny field + agent set for the rollout tests.
