@@ -286,8 +286,9 @@ TEST(NavMaterialGate, GroupedPlanesBatchMatchesPerPlaneSerial) {
   witness_gate_batch(risk.data(), hard.data(), clear.data(), rows, cols, pos.data(), goal.data(), N,
                      p, act.data(), nom.data(), best.data(), cnt.data(), 0, nullptr);
   for (int i = 0; i < N; ++i) {
-    const gate_decision g = witness_gate(risk.data(), hard.data(), clear.data(), rows, cols,
-                                         pos[2 * i], pos[2 * i + 1], goal[2 * i], goal[2 * i + 1], p);
+    const gate_decision g =
+        witness_gate(risk.data(), hard.data(), clear.data(), rows, cols, pos[2 * i], pos[2 * i + 1],
+                     goal[2 * i], goal[2 * i + 1], p);
     EXPECT_EQ(act[i] != 0, g.active) << "back-compat agent " << i;
     EXPECT_EQ(cnt[i], g.feasible_count);
   }

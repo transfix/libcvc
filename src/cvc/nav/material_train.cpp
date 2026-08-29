@@ -175,7 +175,8 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
   const int B = b.B, N = b.N, P = b.P;
   (void)use_cuda;
   fwd_cache c;
-  const double L = compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda);
+  const double L =
+      compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda);
   if (eta_out)
     *eta_out = (float)c.eta;
 

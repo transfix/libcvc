@@ -13,6 +13,8 @@
 // reduction order, device float vs CPU double → the FLOAT tier). Auto-skips
 // without a device.
 
+#include "coef_energy_test_model.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -21,8 +23,6 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
-
-#include "coef_energy_test_model.h"
 
 using namespace cvc::nav;
 

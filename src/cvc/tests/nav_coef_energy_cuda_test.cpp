@@ -10,16 +10,16 @@
 // Auto-skips without a device. The numpy-vs-CPU parity is covered cross-language
 // (GRL-SNAM test_matnet_parity); here we pin CUDA == CPU on this box.
 
+#include "coef_energy_test_model.h"
+
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/nav/coef_energy_net.h>
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
-
-#include "coef_energy_test_model.h"
 
 using namespace cvc::nav;
 
@@ -192,11 +192,11 @@ TEST(NavCoefEnergyCuda, BackwardMatchesCpu) {
   std::mt19937 mrng(321);
   coef_energy_net net = cvc_test::build_test_model(mrng, P);
 
-  check_backward(net, P, 321, {0, 1, 3, 5, 2, 4}, 1, "ragged");   // generic + a T=1 agent
-  check_backward(net, P, 777, {0, 0, 0}, 0, "all-t1");            // every agent no-obstacle
-  check_backward(net, P, 909, {3, 2}, 2, "all-masked");           // agent 0's keys all padded
-  check_backward(net, P, 101, {6, 1, 0, 4}, 1, "wide");           // larger max_obs + singleton + T=1
-  check_backward(net, P, 55, {1}, 0, "single");                   // single-agent, single obstacle
+  check_backward(net, P, 321, {0, 1, 3, 5, 2, 4}, 1, "ragged"); // generic + a T=1 agent
+  check_backward(net, P, 777, {0, 0, 0}, 0, "all-t1");          // every agent no-obstacle
+  check_backward(net, P, 909, {3, 2}, 2, "all-masked");         // agent 0's keys all padded
+  check_backward(net, P, 101, {6, 1, 0, 4}, 1, "wide");         // larger max_obs + singleton + T=1
+  check_backward(net, P, 55, {1}, 0, "single");                 // single-agent, single obstacle
 }
 
 #endif // CVC_ENABLE_CUDA

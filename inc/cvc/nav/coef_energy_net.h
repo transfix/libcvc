@@ -153,7 +153,8 @@ public:
                            const int *obs_offsets, int n, const float *goal_feats,
                            const float *risk_patch, int patch_p, const float *g_alphas,
                            const float *g_beta, const float *g_gamma, const float *g_lam_soft,
-                           const float *g_lam_hard, const float *g_mu_lat, param_grads &grads) const;
+                           const float *g_lam_hard, const float *g_mu_lat,
+                           param_grads &grads) const;
 
 private:
   struct tensor {

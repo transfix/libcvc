@@ -27,11 +27,11 @@ namespace nav {
 
 namespace {
 
-constexpr int DT = 64;    // d_tok
-constexpr int NH = 4;     // nhead
+constexpr int DT = 64;      // d_tok
+constexpr int NH = 4;       // nhead
 constexpr int HD = DT / NH; // 16
-constexpr int NL = 2;     // num_layers
-constexpr int FF = 128;   // FFN hidden / obs_enc.0 width
+constexpr int NL = 2;       // num_layers
+constexpr int FF = 128;     // FFN hidden / obs_enc.0 width
 
 void cuda_check(cudaError_t e, const char *what) {
   if (e != cudaSuccess)
@@ -41,20 +41,20 @@ void cuda_check(cudaError_t e, const char *what) {
 
 // Device weight pointers (all borrowed, uploaded once by the host wrapper).
 struct DW {
-  const float *ge0w, *ge0b, *ge2w, *ge2b;   // goal_enc 4->64->64
-  const float *oe0w, *oe0b, *oe2w, *oe2b;   // obs_enc  6->128->64
-  const float *inw[NL], *inb[NL];           // self_attn.in_proj  [192,64]/[192]
-  const float *outw[NL], *outb[NL];         // self_attn.out_proj [64,64]/[64]
-  const float *l1w[NL], *l1b[NL];           // linear1 [128,64]/[128]
-  const float *l2w[NL], *l2b[NL];           // linear2 [64,128]/[64]
-  const float *n1w[NL], *n1b[NL], *n2w[NL], *n2b[NL]; // norms [64]
-  const float *a0w, *a0b, *a2w, *a2b;       // alpha_head 64->64->1
-  const float *b0w, *b0b, *b2w, *b2b;       // beta_head
-  const float *g0w, *g0b, *g2w, *g2b;       // gamma_head
+  const float *ge0w, *ge0b, *ge2w, *ge2b;                     // goal_enc 4->64->64
+  const float *oe0w, *oe0b, *oe2w, *oe2b;                     // obs_enc  6->128->64
+  const float *inw[NL], *inb[NL];                             // self_attn.in_proj  [192,64]/[192]
+  const float *outw[NL], *outb[NL];                           // self_attn.out_proj [64,64]/[64]
+  const float *l1w[NL], *l1b[NL];                             // linear1 [128,64]/[128]
+  const float *l2w[NL], *l2b[NL];                             // linear2 [64,128]/[64]
+  const float *n1w[NL], *n1b[NL], *n2w[NL], *n2b[NL];         // norms [64]
+  const float *a0w, *a0b, *a2w, *a2b;                         // alpha_head 64->64->1
+  const float *b0w, *b0b, *b2w, *b2b;                         // beta_head
+  const float *g0w, *g0b, *g2w, *g2b;                         // gamma_head
   const float *r0w, *r0b, *r2w, *r2b, *r4w, *r4b, *r8w, *r8b; // risk CNN
-  const float *ls0w, *ls0b, *ls2w, *ls2b;   // lam_soft_head 128->64->1
-  const float *lh0w, *lh0b, *lh2w, *lh2b;   // lam_hard_head
-  const float *ml0w, *ml0b, *ml2w, *ml2b;   // mu_lat_head
+  const float *ls0w, *ls0b, *ls2w, *ls2b;                     // lam_soft_head 128->64->1
+  const float *lh0w, *lh0b, *lh2w, *lh2b;                     // lam_hard_head
+  const float *ml0w, *ml0b, *ml2w, *ml2b;                     // mu_lat_head
 };
 
 __device__ inline float drelu(float x) { return x > 0.0f ? x : 0.0f; }
@@ -103,7 +103,7 @@ __device__ inline void relu_inplace(float *x, int n) {
 
 // Post-norm LayerNorm over the last dim (DT), per row: y = ((x-mu)/sqrt(var+eps))*g + b.
 __device__ inline void layernorm_rows(const float *x, int rows, const float *g, const float *b,
-                                       float eps, float *y, float *red) {
+                                      float eps, float *y, float *red) {
   const int t = threadIdx.x; // channel 0..63
   for (int r = 0; r < rows; ++r) {
     const float xv = x[r * DT + t];
@@ -120,8 +120,8 @@ __device__ inline void layernorm_rows(const float *x, int rows, const float *g, 
 // outputs (threads stride by 64). x/out in device global; weights global. Matches
 // the CPU conv2d then relu. Caller syncs after.
 __device__ inline void conv_relu_s(const float *x, int Cin, int H, int W, const float *wt,
-                                    const float *b, int Cout, int stride, float *out, int Ho,
-                                    int Wo) {
+                                   const float *b, int Cout, int stride, float *out, int Ho,
+                                   int Wo) {
   for (int idx = threadIdx.x; idx < Cout * Ho * Wo; idx += DT) {
     const int oc = idx / (Ho * Wo);
     const int rem = idx - oc * (Ho * Wo);
@@ -170,8 +170,8 @@ __device__ inline float scalar_head(const float *h0w, const float *h0b, const fl
 //   risk_ctx[64] mat[128]
 __global__ void ce_fwd_k(const float *obs_feats, const unsigned char *obs_mask,
                          const int *obs_offsets, const float *goal_feats, const float *risk_patch,
-                         int P, int max_T, float eps, float ls_max, float lh_max, float ml_max, DW w,
-                         float *scratch, long scratch_stride, float *alphas_out, float *beta,
+                         int P, int max_T, float eps, float ls_max, float lh_max, float ml_max,
+                         DW w, float *scratch, long scratch_stride, float *alphas_out, float *beta,
                          float *gamma, float *lam_soft, float *lam_hard, float *mu_lat) {
   const int agent = blockIdx.x;
   const int t = threadIdx.x;
@@ -180,14 +180,14 @@ __global__ void ce_fwd_k(const float *obs_feats, const unsigned char *obs_mask,
   const int T = 1 + n_obs;
 
   extern __shared__ float smem[];
-  float *tok = smem;                 // [max_T*64]
-  float *qkv = tok + max_T * DT;      // [max_T*192]
-  float *cbuf = qkv + max_T * 3 * DT; // [max_T*64]
-  float *ff = cbuf + max_T * DT;      // [max_T*128]
-  float *red = ff + max_T * FF;       // [64]
-  float *pooled = red + DT;           // [1024]
+  float *tok = smem;                     // [max_T*64]
+  float *qkv = tok + max_T * DT;         // [max_T*192]
+  float *cbuf = qkv + max_T * 3 * DT;    // [max_T*64]
+  float *ff = cbuf + max_T * DT;         // [max_T*128]
+  float *red = ff + max_T * FF;          // [64]
+  float *pooled = red + DT;              // [1024]
   float *risk_ctx = pooled + 64 * 4 * 4; // [64]
-  float *mat = risk_ctx + DT;         // [128]
+  float *mat = risk_ctx + DT;            // [128]
 
   // ── tokens: goal_enc (row 0) then obs_enc (rows 1..n_obs) ──────────────────
   // goal token: Linear(4->64) relu Linear(64->64). Use ff[0:64] as the hidden.
@@ -376,8 +376,8 @@ bool coef_energy_cuda_available() {
 void coef_energy_net::forward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
                                          const int *obs_offsets, int n, const float *goal_feats,
                                          const float *risk_patch, int patch_p, float *alphas_out,
-                                         float *beta, float *gamma, float *lam_soft, float *lam_hard,
-                                         float *mu_lat) const {
+                                         float *beta, float *gamma, float *lam_soft,
+                                         float *lam_hard, float *mu_lat) const {
   if (!coef_energy_cuda_available())
     throw std::runtime_error("coef_energy_net::forward_batch_cuda: no CUDA device");
   if (patch_p != patch_size_)
@@ -416,8 +416,8 @@ void coef_energy_net::forward_batch_cuda(const float *obs_feats, const std::uint
   const int *d_off = static_cast<const int *>(up(obs_offsets, (std::size_t)(n + 1) * sizeof(int)));
   const float *d_goal =
       static_cast<const float *>(up(goal_feats, (std::size_t)n * 4 * sizeof(float)));
-  const float *d_risk = static_cast<const float *>(
-      up(risk_patch, (std::size_t)n * 2 * P * P * sizeof(float)));
+  const float *d_risk =
+      static_cast<const float *>(up(risk_patch, (std::size_t)n * 2 * P * P * sizeof(float)));
 
   DW w{};
   w.ge0w = up_w("goal_enc.0.weight");
@@ -483,15 +483,14 @@ void coef_energy_net::forward_batch_cuda(const float *obs_feats, const std::uint
   float *d_lh = static_cast<float *>(dmalloc((std::size_t)n * sizeof(float)));
   float *d_ml = static_cast<float *>(dmalloc((std::size_t)n * sizeof(float)));
   const long scratch_stride = 2L * 16 * P * P;
-  float *d_scratch =
-      static_cast<float *>(dmalloc((std::size_t)n * scratch_stride * sizeof(float)));
+  float *d_scratch = static_cast<float *>(dmalloc((std::size_t)n * scratch_stride * sizeof(float)));
 
   const std::size_t smem =
       ((std::size_t)max_T * (DT + 3 * DT + DT + FF) + DT + 1024 + DT + 2 * DT) * sizeof(float);
   if (smem > 48u * 1024u)
-    cuda_check(cudaFuncSetAttribute(ce_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    (int)smem),
-               "set max shared");
+    cuda_check(
+        cudaFuncSetAttribute(ce_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem),
+        "set max shared");
   ce_fwd_k<<<n, DT, smem>>>(d_obs, d_mask, d_off, d_goal, d_risk, P, max_T, eps_, lam_soft_max_,
                             lam_hard_max_, mu_lat_max_, w, d_scratch, scratch_stride, d_alpha,
                             d_beta, d_gamma, d_ls, d_lh, d_ml);
@@ -793,30 +792,30 @@ __device__ inline void d_mha_bwd(const float *x, int T, const float *w_in, const
 __host__ __device__ inline long bwd_scratch_floats(int T, int P, int no) {
   const int H2 = (P + 2 - 3) / 2 + 1, H3 = (H2 + 2 - 3) / 2 + 1;
   long f = 0;
-  f += 64 + 64;                 // zg1, zg1r
-  f += (long)no * 128 * 2;      // zo1, zo1r
-  f += (long)T * 64 * 3;        // tin0, tin1, tokensF
-  f += (long)T * 64 * 2 * 2;    // attnres[2], ln1[2]  wait counted below
-  f += (long)T * 128 * 2 * 2;   // ff1[2], ff1r[2]
-  f += (long)T * 64 * 2;        // ff2res[2]
-  f += (long)T * 64 * 2;        // attnres[2] (grouped)
-  f += 16L * P * P * 2;         // c0, c0r
-  f += 32L * H2 * H2 * 2;       // c1, c1r
-  f += 64L * H3 * H3 * 2;       // c2, c2r
-  f += 1024 + 64 + 64;          // pooled, risk1, risk1r
+  f += 64 + 64;               // zg1, zg1r
+  f += (long)no * 128 * 2;    // zo1, zo1r
+  f += (long)T * 64 * 3;      // tin0, tin1, tokensF
+  f += (long)T * 64 * 2 * 2;  // attnres[2], ln1[2]  wait counted below
+  f += (long)T * 128 * 2 * 2; // ff1[2], ff1r[2]
+  f += (long)T * 64 * 2;      // ff2res[2]
+  f += (long)T * 64 * 2;      // attnres[2] (grouped)
+  f += 16L * P * P * 2;       // c0, c0r
+  f += 32L * H2 * H2 * 2;     // c1, c1r
+  f += 64L * H3 * H3 * 2;     // c2, c2r
+  f += 1024 + 64 + 64;        // pooled, risk1, risk1r
   // reverse (reused/transient)
-  f += (long)T * 64 * 6;        // g_tok, g_ff2res, g_ln1, g_attnres, g_attn, g_tin
-  f += (long)T * 128 * 2;       // g_ff1r, g_ff1
-  f += 128 + 64 + 128;          // g_mat, g_risk1, matbuf
-  f += (long)no * 64 * 4;       // a1, a1r, g_a1, g_a1r
-  f += (long)T * 192 * 2;       // qkv, gqkv
-  f += (long)T * 64 * 2;        // ctx, gctx
-  f += (long)4 * T * T;         // P (NH*T*T)
-  f += 64 + 64;                 // h1, h1r
-  f += 1024;                    // g_pooled
+  f += (long)T * 64 * 6;  // g_tok, g_ff2res, g_ln1, g_attnres, g_attn, g_tin
+  f += (long)T * 128 * 2; // g_ff1r, g_ff1
+  f += 128 + 64 + 128;    // g_mat, g_risk1, matbuf
+  f += (long)no * 64 * 4; // a1, a1r, g_a1, g_a1r
+  f += (long)T * 192 * 2; // qkv, gqkv
+  f += (long)T * 64 * 2;  // ctx, gctx
+  f += (long)4 * T * T;   // P (NH*T*T)
+  f += 64 + 64;           // h1, h1r
+  f += 1024;              // g_pooled
   f += 16L * P * P + 32L * H2 * H2 + 64L * H3 * H3; // g_c0(=g_c0r reuse chain, alloc max)
   f += 16L * P * P + 32L * H2 * H2 + 64L * H3 * H3; // g_c0r/g_c1/... second set
-  return f + 256;               // margin
+  return f + 256;                                   // margin
 }
 
 // One agent per block. Recompute forward (cache activations into per-agent
@@ -832,29 +831,59 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   const int H2 = (P + 2 - 3) / 2 + 1, H3 = (H2 + 2 - 3) / 2 + 1;
   __shared__ float red[64];
   float *sp = scratch + (long)agent * stride;
-#define BUMP(nm, n) float *nm = sp; sp += (n)
-  BUMP(zg1, 64); BUMP(zg1r, 64);
-  BUMP(zo1, (long)no * 128); BUMP(zo1r, (long)no * 128);
-  BUMP(tin0, (long)T * 64); BUMP(tin1, (long)T * 64); BUMP(tokF, (long)T * 64);
-  BUMP(ar0, (long)T * 64); BUMP(ar1, (long)T * 64);
-  BUMP(l10, (long)T * 64); BUMP(l11, (long)T * 64);
-  BUMP(f10, (long)T * 128); BUMP(f11, (long)T * 128);
-  BUMP(f1r0, (long)T * 128); BUMP(f1r1, (long)T * 128);
-  BUMP(fr0, (long)T * 64); BUMP(fr1, (long)T * 64);
-  BUMP(c0, 16L * P * P); BUMP(c0r, 16L * P * P);
-  BUMP(c1, 32L * H2 * H2); BUMP(c1r, 32L * H2 * H2);
-  BUMP(c2, 64L * H3 * H3); BUMP(c2r, 64L * H3 * H3);
-  BUMP(pooled, 1024); BUMP(risk1, 64); BUMP(risk1r, 64);
-  BUMP(gtok, (long)T * 64); BUMP(gmat, 128); BUMP(grisk1, 64); BUMP(matbuf, 128);
-  BUMP(gff2res, (long)T * 64); BUMP(gln1, (long)T * 64); BUMP(gff1r, (long)T * 128);
-  BUMP(gff1, (long)T * 128); BUMP(gar, (long)T * 64); BUMP(gattn, (long)T * 64);
+#define BUMP(nm, n)                                                                                \
+  float *nm = sp;                                                                                  \
+  sp += (n)
+  BUMP(zg1, 64);
+  BUMP(zg1r, 64);
+  BUMP(zo1, (long)no * 128);
+  BUMP(zo1r, (long)no * 128);
+  BUMP(tin0, (long)T * 64);
+  BUMP(tin1, (long)T * 64);
+  BUMP(tokF, (long)T * 64);
+  BUMP(ar0, (long)T * 64);
+  BUMP(ar1, (long)T * 64);
+  BUMP(l10, (long)T * 64);
+  BUMP(l11, (long)T * 64);
+  BUMP(f10, (long)T * 128);
+  BUMP(f11, (long)T * 128);
+  BUMP(f1r0, (long)T * 128);
+  BUMP(f1r1, (long)T * 128);
+  BUMP(fr0, (long)T * 64);
+  BUMP(fr1, (long)T * 64);
+  BUMP(c0, 16L * P * P);
+  BUMP(c0r, 16L * P * P);
+  BUMP(c1, 32L * H2 * H2);
+  BUMP(c1r, 32L * H2 * H2);
+  BUMP(c2, 64L * H3 * H3);
+  BUMP(c2r, 64L * H3 * H3);
+  BUMP(pooled, 1024);
+  BUMP(risk1, 64);
+  BUMP(risk1r, 64);
+  BUMP(gtok, (long)T * 64);
+  BUMP(gmat, 128);
+  BUMP(grisk1, 64);
+  BUMP(matbuf, 128);
+  BUMP(gff2res, (long)T * 64);
+  BUMP(gln1, (long)T * 64);
+  BUMP(gff1r, (long)T * 128);
+  BUMP(gff1, (long)T * 128);
+  BUMP(gar, (long)T * 64);
+  BUMP(gattn, (long)T * 64);
   BUMP(gtin, (long)T * 64);
-  BUMP(a1, (long)no * 64); BUMP(a1r, (long)no * 64);
-  BUMP(qkv, (long)T * 192); BUMP(gqkv, (long)T * 192);
-  BUMP(ctx, (long)T * 64); BUMP(gctx, (long)T * 64);
-  BUMP(Pw, 4L * T * T); BUMP(h1, 64); BUMP(h1r, 64);
+  BUMP(a1, (long)no * 64);
+  BUMP(a1r, (long)no * 64);
+  BUMP(qkv, (long)T * 192);
+  BUMP(gqkv, (long)T * 192);
+  BUMP(ctx, (long)T * 64);
+  BUMP(gctx, (long)T * 64);
+  BUMP(Pw, 4L * T * T);
+  BUMP(h1, 64);
+  BUMP(h1r, 64);
   BUMP(gpool, 1024);
-  BUMP(gcA, 16L * P * P); BUMP(gcB, 32L * H2 * H2); BUMP(gcC, 64L * H3 * H3);
+  BUMP(gcA, 16L * P * P);
+  BUMP(gcB, 32L * H2 * H2);
+  BUMP(gcC, 64L * H3 * H3);
 #undef BUMP
 
   // ── forward recompute (cache) ──────────────────────────────────────────────
@@ -904,37 +933,55 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
       const float *qi = qkv + (long)i * 192 + h * HD;
       float sc[64], mx = -INFINITY;
       for (int j = 0; j < T; ++j) {
-        if (j > 0 && obs_mask[o0 + j - 1] == 0) { sc[j] = -INFINITY; continue; }
+        if (j > 0 && obs_mask[o0 + j - 1] == 0) {
+          sc[j] = -INFINITY;
+          continue;
+        }
         const float *kj = qkv + (long)j * 192 + 64 + h * HD;
         float s = 0.f;
-        for (int c = 0; c < HD; ++c) s += qi[c] * kj[c];
+        for (int c = 0; c < HD; ++c)
+          s += qi[c] * kj[c];
         sc[j] = s * scale;
-        if (sc[j] > mx) mx = sc[j];
+        if (sc[j] > mx)
+          mx = sc[j];
       }
       float den = 0.f;
-      for (int j = 0; j < T; ++j) { if (sc[j] == -INFINITY) { sc[j] = 0.f; continue; } float e = expf(sc[j] - mx); sc[j] = e; den += e; }
+      for (int j = 0; j < T; ++j) {
+        if (sc[j] == -INFINITY) {
+          sc[j] = 0.f;
+          continue;
+        }
+        float e = expf(sc[j] - mx);
+        sc[j] = e;
+        den += e;
+      }
       float *ci = ctx + (long)i * 64 + h * HD, invd = 1.f / den;
       for (int j = 0; j < T; ++j) {
-        if (sc[j] == 0.f) continue;
+        if (sc[j] == 0.f)
+          continue;
         float pv = sc[j] * invd;
         const float *vj = qkv + (long)j * 192 + 128 + h * HD;
-        for (int c = 0; c < HD; ++c) ci[c] += pv * vj[c];
+        for (int c = 0; c < HD; ++c)
+          ci[c] += pv * vj[c];
       }
     }
     __syncthreads();
     lin(ctx, T, 64, ow[L], ob[L], 64, arL[L]); // attn
     __syncthreads();
-    for (int idx = t; idx < T * 64; idx += DT) arL[L][idx] += tinL[L][idx]; // residual
+    for (int idx = t; idx < T * 64; idx += DT)
+      arL[L][idx] += tinL[L][idx]; // residual
     __syncthreads();
     layernorm_rows(arL[L], T, n1w[L], n1b[L], eps, l1L[L], red);
     __syncthreads();
     lin(l1L[L], T, 64, l1w[L], l1b[L], 128, f1L[L]);
     __syncthreads();
-    for (int idx = t; idx < T * 128; idx += DT) f1rL[L][idx] = drelu(f1L[L][idx]);
+    for (int idx = t; idx < T * 128; idx += DT)
+      f1rL[L][idx] = drelu(f1L[L][idx]);
     __syncthreads();
     lin(f1rL[L], T, 128, l2w[L], l2b[L], 64, frL[L]);
     __syncthreads();
-    for (int idx = t; idx < T * 64; idx += DT) frL[L][idx] += l1L[L][idx]; // residual
+    for (int idx = t; idx < T * 64; idx += DT)
+      frL[L][idx] += l1L[L][idx]; // residual
     __syncthreads();
     layernorm_rows(frL[L], T, n2w[L], n2b[L], eps, outL[L], red);
     __syncthreads();
@@ -943,21 +990,31 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   // CNN forward
   conv_relu_s(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, w.r0b, 16, 1, c0r, P, P);
   __syncthreads();
-  for (int idx = t; idx < 16 * P * P; idx += DT) c0[idx] = c0r[idx]; // pre-relu unavailable; store post
+  for (int idx = t; idx < 16 * P * P; idx += DT)
+    c0[idx] = c0r[idx]; // pre-relu unavailable; store post
   __syncthreads();
   conv_relu_s(c0r, 16, P, P, w.r2w, w.r2b, 32, 2, c1r, H2, H2);
   __syncthreads();
-  for (int idx = t; idx < 32 * H2 * H2; idx += DT) c1[idx] = c1r[idx];
+  for (int idx = t; idx < 32 * H2 * H2; idx += DT)
+    c1[idx] = c1r[idx];
   __syncthreads();
   conv_relu_s(c1r, 32, H2, H2, w.r4w, w.r4b, 64, 2, c2r, H3, H3);
   __syncthreads();
-  for (int idx = t; idx < 64 * H3 * H3; idx += DT) c2[idx] = c2r[idx];
+  for (int idx = t; idx < 64 * H3 * H3; idx += DT)
+    c2[idx] = c2r[idx];
   __syncthreads();
   for (int idx = t; idx < 64 * 16; idx += DT) {
     const int c = idx / 16, bn = idx - c * 16, bi = bn / 4, bj = bn % 4;
-    const int r0 = (bi * H3) / 4, r1 = ((bi + 1) * H3 + 3) / 4, cc0 = (bj * H3) / 4, cc1 = ((bj + 1) * H3 + 3) / 4;
-    float acc = 0.f; int cnt = 0; const float *xc = c2r + (long)c * H3 * H3;
-    for (int r = r0; r < r1; ++r) for (int cc = cc0; cc < cc1; ++cc) { acc += xc[r * H3 + cc]; ++cnt; }
+    const int r0 = (bi * H3) / 4, r1 = ((bi + 1) * H3 + 3) / 4, cc0 = (bj * H3) / 4,
+              cc1 = ((bj + 1) * H3 + 3) / 4;
+    float acc = 0.f;
+    int cnt = 0;
+    const float *xc = c2r + (long)c * H3 * H3;
+    for (int r = r0; r < r1; ++r)
+      for (int cc = cc0; cc < cc1; ++cc) {
+        acc += xc[r * H3 + cc];
+        ++cnt;
+      }
     pooled[(c * 4 + bi) * 4 + bj] = acc / (float)cnt;
   }
   __syncthreads();
@@ -967,7 +1024,8 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   __syncthreads();
 
   // ── reverse ────────────────────────────────────────────────────────────────
-  for (int i = t; i < 128; i += DT) gmat[i] = 0.f;
+  for (int i = t; i < 128; i += DT)
+    gmat[i] = 0.f;
   __syncthreads();
   // lam heads: mat = [risk1r ; ctxF]. Dedicated 128-float buffer — must NOT reuse
   // gtok, which is only T*64 floats (T=1 for a no-obstacle agent overflows into gmat).
@@ -975,38 +1033,47 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   mat[t] = risk1r[t];
   mat[64 + t] = ctxF[t];
   __syncthreads();
-  d_head_bwd(w.ls0w, w.ls0b, w.ls2w, w.ls2b, mat, 128, g_lam_soft[agent], 1, ls_max, gmat, g.ls0w, g.ls0b, g.ls2w, g.ls2b, h1, h1r);
-  d_head_bwd(w.lh0w, w.lh0b, w.lh2w, w.lh2b, mat, 128, g_lam_hard[agent], 1, lh_max, gmat, g.lh0w, g.lh0b, g.lh2w, g.lh2b, h1, h1r);
-  d_head_bwd(w.ml0w, w.ml0b, w.ml2w, w.ml2b, mat, 128, g_mu_lat[agent], 1, ml_max, gmat, g.ml0w, g.ml0b, g.ml2w, g.ml2b, h1, h1r);
+  d_head_bwd(w.ls0w, w.ls0b, w.ls2w, w.ls2b, mat, 128, g_lam_soft[agent], 1, ls_max, gmat, g.ls0w,
+             g.ls0b, g.ls2w, g.ls2b, h1, h1r);
+  d_head_bwd(w.lh0w, w.lh0b, w.lh2w, w.lh2b, mat, 128, g_lam_hard[agent], 1, lh_max, gmat, g.lh0w,
+             g.lh0b, g.lh2w, g.lh2b, h1, h1r);
+  d_head_bwd(w.ml0w, w.ml0b, w.ml2w, w.ml2b, mat, 128, g_mu_lat[agent], 1, ml_max, gmat, g.ml0w,
+             g.ml0b, g.ml2w, g.ml2b, h1, h1r);
   __syncthreads();
   // g_risk1r = gmat[0:64] ; g_ctx = gmat[64:128]
-  grisk1[t] = gmat[t];       // temporarily g_risk1r
+  grisk1[t] = gmat[t]; // temporarily g_risk1r
   float g_ctx_t = gmat[64 + t];
   __syncthreads();
   // beta/gamma on ctxF accumulate into g_ctx (use gtin[0:64] as g_ctx buffer)
-  for (int i = t; i < 64; i += DT) gtin[i] = 0.f;
+  for (int i = t; i < 64; i += DT)
+    gtin[i] = 0.f;
   __syncthreads();
   gtin[t] = g_ctx_t; // seed g_ctx with the lam contribution
   __syncthreads();
-  d_head_bwd(w.b0w, w.b0b, w.b2w, w.b2b, ctxF, 64, g_beta[agent], 0, 0.f, gtin, g.b0w, g.b0b, g.b2w, g.b2b, h1, h1r);
-  d_head_bwd(w.g0w, w.g0b, w.g2w, w.g2b, ctxF, 64, g_gamma[agent], 0, 0.f, gtin, g.g0w, g.g0b, g.g2w, g.g2b, h1, h1r);
+  d_head_bwd(w.b0w, w.b0b, w.b2w, w.b2b, ctxF, 64, g_beta[agent], 0, 0.f, gtin, g.b0w, g.b0b, g.b2w,
+             g.b2b, h1, h1r);
+  d_head_bwd(w.g0w, w.g0b, w.g2w, w.g2b, ctxF, 64, g_gamma[agent], 0, 0.f, gtin, g.g0w, g.g0b,
+             g.g2w, g.g2b, h1, h1r);
   __syncthreads();
   // g_tokF: row0 = g_ctx (gtin), rows 1.. from alpha head
-  for (int idx = t; idx < T * 64; idx += DT) gtok[idx] = 0.f;
+  for (int idx = t; idx < T * 64; idx += DT)
+    gtok[idx] = 0.f;
   __syncthreads();
   gtok[t] = gtin[t]; // row 0
   __syncthreads();
   if (no > 0) {
     lin(tokF + 64, no, 64, w.a0w, w.a0b, 64, a1);
     __syncthreads();
-    for (int idx = t; idx < no * 64; idx += DT) a1r[idx] = drelu(a1[idx]);
+    for (int idx = t; idx < no * 64; idx += DT)
+      a1r[idx] = drelu(a1[idx]);
     __syncthreads();
     // g_a2[i] = mask? g_alphas[i]*sigmoid(a2[i]) : 0 ; then linear.2 bwd, relu, linear.0 bwd
     // recompute a2 + g_a2 into a per-obstacle value; use gqkv[0:no] as g_a2 scratch
     if (t == 0)
       for (int i = 0; i < no; ++i) {
         float a2 = w.a2b[0];
-        for (int k = 0; k < 64; ++k) a2 += a1r[i * 64 + k] * w.a2w[k];
+        for (int k = 0; k < 64; ++k)
+          a2 += a1r[i * 64 + k] * w.a2w[k];
         gqkv[i] = obs_mask[o0 + i] ? g_alphas[o0 + i] * dsig(a2) : 0.f;
       }
     __syncthreads();
@@ -1017,48 +1084,61 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
       atomicAdd(&g.a2w[k], gqkv[i] * a1r[idx]);
     }
     if (t == 0)
-      for (int i = 0; i < no; ++i) atomicAdd(&g.a2b[0], gqkv[i]);
+      for (int i = 0; i < no; ++i)
+        atomicAdd(&g.a2b[0], gqkv[i]);
     __syncthreads();
     // relu bwd -> gff1 ; then linear.0 bwd into gtok[64:]
-    for (int idx = t; idx < no * 64; idx += DT) gff1[idx] = (a1[idx] > 0.f) ? gff1r[idx] : 0.f;
+    for (int idx = t; idx < no * 64; idx += DT)
+      gff1[idx] = (a1[idx] > 0.f) ? gff1r[idx] : 0.f;
     __syncthreads();
     d_lin_bwd(tokF + 64, no, 64, w.a0w, 64, gff1, gtok + 64, g.a0w, g.a0b);
     __syncthreads();
   }
   // reverse transformer
-  for (int idx = t; idx < T * 64; idx += DT) gtin[idx] = gtok[idx]; // g_cur = g_tokF
+  for (int idx = t; idx < T * 64; idx += DT)
+    gtin[idx] = gtok[idx]; // g_cur = g_tokF
   __syncthreads();
   for (int L = NL - 1; L >= 0; --L) {
-    for (int idx = t; idx < T * 64; idx += DT) gff2res[idx] = 0.f;
+    for (int idx = t; idx < T * 64; idx += DT)
+      gff2res[idx] = 0.f;
     __syncthreads();
     d_ln_bwd(frL[L], T, n2w[L], gtin, gff2res, g.n2w[L], g.n2b[L], eps, red);
     __syncthreads();
     // g_ln1 = g_ff2res (residual) ; g_ff2 = g_ff2res
-    for (int idx = t; idx < T * 64; idx += DT) gln1[idx] = gff2res[idx];
-    for (int idx = t; idx < T * 128; idx += DT) gff1r[idx] = 0.f;
+    for (int idx = t; idx < T * 64; idx += DT)
+      gln1[idx] = gff2res[idx];
+    for (int idx = t; idx < T * 128; idx += DT)
+      gff1r[idx] = 0.f;
     __syncthreads();
     d_lin_bwd(f1rL[L], T, 128, l2w[L], 64, gff2res, gff1r, g.l2w[L], g.l2b[L]);
     __syncthreads();
-    for (int idx = t; idx < T * 128; idx += DT) gff1[idx] = (f1L[L][idx] > 0.f) ? gff1r[idx] : 0.f;
+    for (int idx = t; idx < T * 128; idx += DT)
+      gff1[idx] = (f1L[L][idx] > 0.f) ? gff1r[idx] : 0.f;
     __syncthreads();
     d_lin_bwd(l1L[L], T, 64, l1w[L], 128, gff1, gln1, g.l1w[L], g.l1b[L]); // accumulate into gln1
     __syncthreads();
-    for (int idx = t; idx < T * 64; idx += DT) gar[idx] = 0.f;
+    for (int idx = t; idx < T * 64; idx += DT)
+      gar[idx] = 0.f;
     __syncthreads();
     d_ln_bwd(arL[L], T, n1w[L], gln1, gar, g.n1w[L], g.n1b[L], eps, red);
     __syncthreads();
     // g_attn = g_ar ; g_tin(next) = g_ar (residual) ; mha_bwd accumulates into it
-    for (int idx = t; idx < T * 64; idx += DT) { gattn[idx] = gar[idx]; gtok[idx] = gar[idx]; }
+    for (int idx = t; idx < T * 64; idx += DT) {
+      gattn[idx] = gar[idx];
+      gtok[idx] = gar[idx];
+    }
     __syncthreads();
     d_mha_bwd(tinL[L], T, inw[L], inb[L], ow[L], obs_mask, o0, gattn, gtok, g.inw[L], g.inb[L],
               g.outw[L], g.outb[L], qkv, Pw, ctx, gqkv, gctx);
     __syncthreads();
-    for (int idx = t; idx < T * 64; idx += DT) gtin[idx] = gtok[idx]; // g_cur
+    for (int idx = t; idx < T * 64; idx += DT)
+      gtin[idx] = gtok[idx]; // g_cur
     __syncthreads();
   }
   // encoders: g_cur row0 -> goal_enc ; rows1.. -> obs_enc
   {
-    for (int i = t; i < 64; i += DT) gattn[i] = 0.f; // g_zg1r
+    for (int i = t; i < 64; i += DT)
+      gattn[i] = 0.f; // g_zg1r
     __syncthreads();
     d_lin_bwd(zg1r, 1, 64, w.ge2w, 64, gtin, gattn, g.ge2w, g.ge2b);
     __syncthreads();
@@ -1069,11 +1149,13 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
     __syncthreads();
   }
   if (no > 0) {
-    for (int idx = t; idx < no * 128; idx += DT) gff1r[idx] = 0.f; // g_zo1r
+    for (int idx = t; idx < no * 128; idx += DT)
+      gff1r[idx] = 0.f; // g_zo1r
     __syncthreads();
     d_lin_bwd(zo1r, no, 128, w.oe2w, 64, gtin + 64, gff1r, g.oe2w, g.oe2b);
     __syncthreads();
-    for (int idx = t; idx < no * 128; idx += DT) gff1[idx] = (zo1[idx] > 0.f) ? gff1r[idx] : 0.f;
+    for (int idx = t; idx < no * 128; idx += DT)
+      gff1[idx] = (zo1[idx] > 0.f) ? gff1r[idx] : 0.f;
     __syncthreads();
     d_lin_bwd(obs_feats + (long)o0 * 6, no, 6, w.oe0w, 128, gff1, nullptr, g.oe0w, g.oe0b);
     __syncthreads();
@@ -1082,39 +1164,48 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   float g_r1 = (risk1[t] > 0.f) ? grisk1[t] : 0.f;
   grisk1[t] = g_r1; // g_risk1
   __syncthreads();
-  for (int i = t; i < 1024; i += DT) gpool[i] = 0.f;
+  for (int i = t; i < 1024; i += DT)
+    gpool[i] = 0.f;
   __syncthreads();
   d_lin_bwd(pooled, 1, 1024, w.r8w, 64, grisk1, gpool, g.r8w, g.r8b);
   __syncthreads();
-  for (int i = t; i < 64 * H3 * H3; i += DT) gcC[i] = 0.f;
+  for (int i = t; i < 64 * H3 * H3; i += DT)
+    gcC[i] = 0.f;
   __syncthreads();
   d_pool_bwd(64, H3, H3, gpool, gcC); // g_c2r
   __syncthreads();
-  for (int i = t; i < 64 * H3 * H3; i += DT) gcC[i] = (c2[i] > 0.f) ? gcC[i] : 0.f; // relu -> g_c2
+  for (int i = t; i < 64 * H3 * H3; i += DT)
+    gcC[i] = (c2[i] > 0.f) ? gcC[i] : 0.f; // relu -> g_c2
   __syncthreads();
-  for (int i = t; i < 32 * H2 * H2; i += DT) gcB[i] = 0.f;
+  for (int i = t; i < 32 * H2 * H2; i += DT)
+    gcB[i] = 0.f;
   __syncthreads();
   d_conv_bwd(c1r, 32, H2, H2, w.r4w, 64, 2, H3, H3, gcC, gcB, g.r4w, g.r4b); // g_c1r
   __syncthreads();
-  for (int i = t; i < 32 * H2 * H2; i += DT) gcB[i] = (c1[i] > 0.f) ? gcB[i] : 0.f; // g_c1
+  for (int i = t; i < 32 * H2 * H2; i += DT)
+    gcB[i] = (c1[i] > 0.f) ? gcB[i] : 0.f; // g_c1
   __syncthreads();
-  for (int i = t; i < 16 * P * P; i += DT) gcA[i] = 0.f;
+  for (int i = t; i < 16 * P * P; i += DT)
+    gcA[i] = 0.f;
   __syncthreads();
   d_conv_bwd(c0r, 16, P, P, w.r2w, 32, 2, H2, H2, gcB, gcA, g.r2w, g.r2b); // g_c0r
   __syncthreads();
-  for (int i = t; i < 16 * P * P; i += DT) gcA[i] = (c0[i] > 0.f) ? gcA[i] : 0.f; // g_c0
+  for (int i = t; i < 16 * P * P; i += DT)
+    gcA[i] = (c0[i] > 0.f) ? gcA[i] : 0.f; // g_c0
   __syncthreads();
-  d_conv_bwd(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, 16, 1, P, P, gcA, nullptr, g.r0w, g.r0b);
+  d_conv_bwd(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, 16, 1, P, P, gcA, nullptr, g.r0w,
+             g.r0b);
 }
 
 } // namespace
 
 void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
                                           const int *obs_offsets, int n, const float *goal_feats,
-                                          const float *risk_patch, int patch_p, const float *g_alphas,
-                                          const float *g_beta, const float *g_gamma,
-                                          const float *g_lam_soft, const float *g_lam_hard,
-                                          const float *g_mu_lat, param_grads &grads) const {
+                                          const float *risk_patch, int patch_p,
+                                          const float *g_alphas, const float *g_beta,
+                                          const float *g_gamma, const float *g_lam_soft,
+                                          const float *g_lam_hard, const float *g_mu_lat,
+                                          param_grads &grads) const {
   if (!coef_energy_cuda_available())
     throw std::runtime_error("coef_energy_net::backward_batch_cuda: no CUDA device");
   if (patch_p != patch_size_)
@@ -1153,7 +1244,8 @@ void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uin
   };
 
   const float *d_obs = static_cast<const float *>(up(obs_feats, (std::size_t)total * 6 * 4));
-  const unsigned char *d_mask = static_cast<const unsigned char *>(up(obs_mask, (std::size_t)total));
+  const unsigned char *d_mask =
+      static_cast<const unsigned char *>(up(obs_mask, (std::size_t)total));
   const int *d_off = static_cast<const int *>(up(obs_offsets, (std::size_t)(n + 1) * 4));
   const float *d_goal = static_cast<const float *>(up(goal_feats, (std::size_t)n * 4 * 4));
   const float *d_risk = static_cast<const float *>(up(risk_patch, (std::size_t)n * 2 * P * P * 4));
@@ -1169,41 +1261,73 @@ void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uin
 #define WB(field, name)                                                                            \
   w.field = up_w(name);                                                                            \
   g.field = gbuf(name)
-  WB(ge0w, "goal_enc.0.weight"); WB(ge0b, "goal_enc.0.bias");
-  WB(ge2w, "goal_enc.2.weight"); WB(ge2b, "goal_enc.2.bias");
-  WB(oe0w, "obs_enc.0.weight"); WB(oe0b, "obs_enc.0.bias");
-  WB(oe2w, "obs_enc.2.weight"); WB(oe2b, "obs_enc.2.bias");
+  WB(ge0w, "goal_enc.0.weight");
+  WB(ge0b, "goal_enc.0.bias");
+  WB(ge2w, "goal_enc.2.weight");
+  WB(ge2b, "goal_enc.2.bias");
+  WB(oe0w, "obs_enc.0.weight");
+  WB(oe0b, "obs_enc.0.bias");
+  WB(oe2w, "obs_enc.2.weight");
+  WB(oe2b, "obs_enc.2.bias");
   for (int L = 0; L < NL; ++L) {
     const std::string p = "fuser.layers." + std::to_string(L) + ".";
-    w.inw[L] = up_w(p + "self_attn.in_proj_weight"); g.inw[L] = gbuf(p + "self_attn.in_proj_weight");
-    w.inb[L] = up_w(p + "self_attn.in_proj_bias"); g.inb[L] = gbuf(p + "self_attn.in_proj_bias");
-    w.outw[L] = up_w(p + "self_attn.out_proj.weight"); g.outw[L] = gbuf(p + "self_attn.out_proj.weight");
-    w.outb[L] = up_w(p + "self_attn.out_proj.bias"); g.outb[L] = gbuf(p + "self_attn.out_proj.bias");
-    w.l1w[L] = up_w(p + "linear1.weight"); g.l1w[L] = gbuf(p + "linear1.weight");
-    w.l1b[L] = up_w(p + "linear1.bias"); g.l1b[L] = gbuf(p + "linear1.bias");
-    w.l2w[L] = up_w(p + "linear2.weight"); g.l2w[L] = gbuf(p + "linear2.weight");
-    w.l2b[L] = up_w(p + "linear2.bias"); g.l2b[L] = gbuf(p + "linear2.bias");
-    w.n1w[L] = up_w(p + "norm1.weight"); g.n1w[L] = gbuf(p + "norm1.weight");
-    w.n1b[L] = up_w(p + "norm1.bias"); g.n1b[L] = gbuf(p + "norm1.bias");
-    w.n2w[L] = up_w(p + "norm2.weight"); g.n2w[L] = gbuf(p + "norm2.weight");
-    w.n2b[L] = up_w(p + "norm2.bias"); g.n2b[L] = gbuf(p + "norm2.bias");
+    w.inw[L] = up_w(p + "self_attn.in_proj_weight");
+    g.inw[L] = gbuf(p + "self_attn.in_proj_weight");
+    w.inb[L] = up_w(p + "self_attn.in_proj_bias");
+    g.inb[L] = gbuf(p + "self_attn.in_proj_bias");
+    w.outw[L] = up_w(p + "self_attn.out_proj.weight");
+    g.outw[L] = gbuf(p + "self_attn.out_proj.weight");
+    w.outb[L] = up_w(p + "self_attn.out_proj.bias");
+    g.outb[L] = gbuf(p + "self_attn.out_proj.bias");
+    w.l1w[L] = up_w(p + "linear1.weight");
+    g.l1w[L] = gbuf(p + "linear1.weight");
+    w.l1b[L] = up_w(p + "linear1.bias");
+    g.l1b[L] = gbuf(p + "linear1.bias");
+    w.l2w[L] = up_w(p + "linear2.weight");
+    g.l2w[L] = gbuf(p + "linear2.weight");
+    w.l2b[L] = up_w(p + "linear2.bias");
+    g.l2b[L] = gbuf(p + "linear2.bias");
+    w.n1w[L] = up_w(p + "norm1.weight");
+    g.n1w[L] = gbuf(p + "norm1.weight");
+    w.n1b[L] = up_w(p + "norm1.bias");
+    g.n1b[L] = gbuf(p + "norm1.bias");
+    w.n2w[L] = up_w(p + "norm2.weight");
+    g.n2w[L] = gbuf(p + "norm2.weight");
+    w.n2b[L] = up_w(p + "norm2.bias");
+    g.n2b[L] = gbuf(p + "norm2.bias");
   }
-  WB(a0w, "alpha_head.0.weight"); WB(a0b, "alpha_head.0.bias");
-  WB(a2w, "alpha_head.2.weight"); WB(a2b, "alpha_head.2.bias");
-  WB(b0w, "beta_head.0.weight"); WB(b0b, "beta_head.0.bias");
-  WB(b2w, "beta_head.2.weight"); WB(b2b, "beta_head.2.bias");
-  WB(g0w, "gamma_head.0.weight"); WB(g0b, "gamma_head.0.bias");
-  WB(g2w, "gamma_head.2.weight"); WB(g2b, "gamma_head.2.bias");
-  WB(r0w, "risk_enc.net.0.weight"); WB(r0b, "risk_enc.net.0.bias");
-  WB(r2w, "risk_enc.net.2.weight"); WB(r2b, "risk_enc.net.2.bias");
-  WB(r4w, "risk_enc.net.4.weight"); WB(r4b, "risk_enc.net.4.bias");
-  WB(r8w, "risk_enc.net.8.weight"); WB(r8b, "risk_enc.net.8.bias");
-  WB(ls0w, "lam_soft_head.0.weight"); WB(ls0b, "lam_soft_head.0.bias");
-  WB(ls2w, "lam_soft_head.2.weight"); WB(ls2b, "lam_soft_head.2.bias");
-  WB(lh0w, "lam_hard_head.0.weight"); WB(lh0b, "lam_hard_head.0.bias");
-  WB(lh2w, "lam_hard_head.2.weight"); WB(lh2b, "lam_hard_head.2.bias");
-  WB(ml0w, "mu_lat_head.0.weight"); WB(ml0b, "mu_lat_head.0.bias");
-  WB(ml2w, "mu_lat_head.2.weight"); WB(ml2b, "mu_lat_head.2.bias");
+  WB(a0w, "alpha_head.0.weight");
+  WB(a0b, "alpha_head.0.bias");
+  WB(a2w, "alpha_head.2.weight");
+  WB(a2b, "alpha_head.2.bias");
+  WB(b0w, "beta_head.0.weight");
+  WB(b0b, "beta_head.0.bias");
+  WB(b2w, "beta_head.2.weight");
+  WB(b2b, "beta_head.2.bias");
+  WB(g0w, "gamma_head.0.weight");
+  WB(g0b, "gamma_head.0.bias");
+  WB(g2w, "gamma_head.2.weight");
+  WB(g2b, "gamma_head.2.bias");
+  WB(r0w, "risk_enc.net.0.weight");
+  WB(r0b, "risk_enc.net.0.bias");
+  WB(r2w, "risk_enc.net.2.weight");
+  WB(r2b, "risk_enc.net.2.bias");
+  WB(r4w, "risk_enc.net.4.weight");
+  WB(r4b, "risk_enc.net.4.bias");
+  WB(r8w, "risk_enc.net.8.weight");
+  WB(r8b, "risk_enc.net.8.bias");
+  WB(ls0w, "lam_soft_head.0.weight");
+  WB(ls0b, "lam_soft_head.0.bias");
+  WB(ls2w, "lam_soft_head.2.weight");
+  WB(ls2b, "lam_soft_head.2.bias");
+  WB(lh0w, "lam_hard_head.0.weight");
+  WB(lh0b, "lam_hard_head.0.bias");
+  WB(lh2w, "lam_hard_head.2.weight");
+  WB(lh2b, "lam_hard_head.2.bias");
+  WB(ml0w, "mu_lat_head.0.weight");
+  WB(ml0b, "mu_lat_head.0.bias");
+  WB(ml2w, "mu_lat_head.2.weight");
+  WB(ml2b, "mu_lat_head.2.bias");
 #undef WB
 
   const long stride = bwd_scratch_floats(1 + max_obs, P, max_obs);
@@ -1217,8 +1341,9 @@ void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uin
   for (auto &kv : gmap) {
     std::vector<float> &dst = grads.at(kv.first);
     std::vector<float> tmp(dst.size());
-    cuda_check(cudaMemcpy(tmp.data(), kv.second, dst.size() * sizeof(float), cudaMemcpyDeviceToHost),
-               "D2H grad");
+    cuda_check(
+        cudaMemcpy(tmp.data(), kv.second, dst.size() * sizeof(float), cudaMemcpyDeviceToHost),
+        "D2H grad");
     for (std::size_t i = 0; i < dst.size(); ++i)
       dst[i] += tmp[i];
   }

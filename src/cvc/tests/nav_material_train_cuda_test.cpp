@@ -13,6 +13,9 @@
 // so grads are compared by cosine + a loose rel, and the loss by rel. Auto-skips
 // without a device.
 
+#include "coef_energy_test_model.h"
+#include "material_batch_fixture.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -22,9 +25,6 @@
 #include <random>
 #include <string>
 #include <vector>
-
-#include "coef_energy_test_model.h"
-#include "material_batch_fixture.h"
 
 using namespace cvc::nav;
 
@@ -50,8 +50,8 @@ TEST(NavMaterialTrainCuda, LossAndGradMatchesCpu) {
   const double Ld = material_loss_and_grad(model, mb, cfg, gd, &eta_d, /*use_cuda=*/true);
 
   const double Lrel = std::fabs(Lc - Ld) / (std::fabs(Lc) + 1e-6);
-  std::printf("[material-train-cuda] L_cpu=%.6f L_gpu=%.6f rel=%.3e  eta_c=%.4f eta_d=%.4f\n", Lc, Ld,
-              Lrel, eta_c, eta_d);
+  std::printf("[material-train-cuda] L_cpu=%.6f L_gpu=%.6f rel=%.3e  eta_c=%.4f eta_d=%.4f\n", Lc,
+              Ld, Lrel, eta_c, eta_d);
   EXPECT_LT(Lrel, 2e-3) << "loss";
 
   float worst_rel = 0.0f, worst_cos = 1.0f;

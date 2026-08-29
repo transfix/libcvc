@@ -390,9 +390,9 @@ void sim_world::step(int num_threads) {
       // Per-plane gate: risk/gate_hard/clear_m are [mat_planes_,H,W]; each agent
       // gates against its own material plane via map_id (nullptr => plane 0 in the
       // shared case). mat_risk_ is the contiguous channel-0 risk view.
-      witness_gate_batch(mat_risk_.data(), mat_gate_hard_.data(), mat_clear_m_.data(), rows_,
-                         cols_, pos_rc.data(), goal_rc.data(), n_, gp, mat_gate_active_.data(),
-                         nom.data(), best.data(), cnt.data(), num_threads,
+      witness_gate_batch(mat_risk_.data(), mat_gate_hard_.data(), mat_clear_m_.data(), rows_, cols_,
+                         pos_rc.data(), goal_rc.data(), n_, gp, mat_gate_active_.data(), nom.data(),
+                         best.data(), cnt.data(), num_threads,
                          mat_planes_ > 1 ? map_id_.data() : nullptr);
     } else {
       std::fill(mat_gate_active_.begin(), mat_gate_active_.end(), std::uint8_t(1));
@@ -477,8 +477,8 @@ void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
   mat_clear_m_.assign(static_cast<std::size_t>(planes) * hw, 0.0f);
   for (int m = 0; m < planes; ++m) {
     const std::size_t roff = static_cast<std::size_t>(m) * hw;
-    const material_planes mp = material_build(risk_raw + roff, hard + roff, rows_, cols_, cell_w,
-                                              cfg_.scale, mc.sigma);
+    const material_planes mp =
+        material_build(risk_raw + roff, hard + roff, rows_, cols_, cell_w, cfg_.scale, mc.sigma);
     const std::vector<float> stacked = mp.stacked(); // [1,6,H,W]
     std::copy(stacked.begin(), stacked.end(),
               mat_stack_.begin() + static_cast<std::size_t>(m) * 6 * hw);

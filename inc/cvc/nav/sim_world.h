@@ -225,12 +225,12 @@ private:
 
   // material state (set_material; inert while mat_on_ == false)
   bool mat_on_ = false;
-  int mat_planes_ = 1;                             // material/gate plane count (P2a)
+  int mat_planes_ = 1; // material/gate plane count (P2a)
   material_config mat_cfg_;
-  std::vector<float> mat_stack_;                   // [mat_planes_,6,H,W] derived planes
-  std::vector<float> mat_risk_;                    // [mat_planes_,H,W] contiguous risk (ch 0) for the gate
-  std::vector<std::uint8_t> mat_gate_hard_;        // [mat_planes_,H,W] hard | truth
-  std::vector<float> mat_clear_m_;                 // [mat_planes_,H,W] metres EDT of mat_gate_hard_
+  std::vector<float> mat_stack_;            // [mat_planes_,6,H,W] derived planes
+  std::vector<float> mat_risk_;             // [mat_planes_,H,W] contiguous risk (ch 0) for the gate
+  std::vector<std::uint8_t> mat_gate_hard_; // [mat_planes_,H,W] hard | truth
+  std::vector<float> mat_clear_m_;          // [mat_planes_,H,W] metres EDT of mat_gate_hard_
   std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
   std::vector<std::uint8_t> mat_gate_active_;      // [n]
   double mat_hard_margin_m_ = 0.0;

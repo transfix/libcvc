@@ -27,8 +27,8 @@ inline float U(std::mt19937 &rng, float lo, float hi) {
 // Owns all batch arrays; `view()` hands out a material_batch of borrowed spans.
 struct Batch {
   int B, N, P, Hp, Wp;
-  std::vector<float> obs_feats, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat,
-      dt, o_tgt, v_tgt, gamma_o;
+  std::vector<float> obs_feats, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr,
+      d_hat, dt, o_tgt, v_tgt, gamma_o;
   std::vector<std::uint8_t> obs_mask;
   std::vector<int> H;
   cvc::nav::material_batch view() const {
