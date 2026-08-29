@@ -51,27 +51,49 @@ struct fwd_cache {
 // Run the model + rollout + loss; if `cache` non-null, fill it. `frozen_eta`
 // (NaN => compute from J) fixes the detached CVaR quantile.
 double compute_loss(const coef_energy_net &model, const material_batch &b,
-                    const material_loss_config &cfg, float frozen_eta, fwd_cache *cache) {
+                    const material_loss_config &cfg, float frozen_eta, fwd_cache *cache,
+                    bool use_cuda) {
   const int B = b.B, N = b.N, P = b.P;
+  (void)use_cuda;
 
-  // model forward (per agent)
+  // model forward (per agent, or one device batch — the padded batch is a ragged
+  // batch with uniform obs_offsets[i] = i*N).
   std::vector<float> alphas(static_cast<std::size_t>(B) * N, 0.0f), beta(B), gamma(B), lam_soft(B),
       lam_hard(B), mu_lat(B);
-  for (int i = 0; i < B; ++i)
-    model.forward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
-                      b.goal_feats + static_cast<std::size_t>(i) * 4,
-                      b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
-                      alphas.data() + static_cast<std::size_t>(i) * N, &beta[i], &gamma[i],
-                      &lam_soft[i], &lam_hard[i], &mu_lat[i]);
+#ifdef CVC_USING_CUDA
+  if (use_cuda && coef_energy_cuda_available()) {
+    std::vector<int> off(B + 1);
+    for (int i = 0; i <= B; ++i)
+      off[i] = i * N;
+    model.forward_batch_cuda(b.obs_feats, b.obs_mask, off.data(), B, b.goal_feats, b.risk_patch, P,
+                             alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
+                             lam_hard.data(), mu_lat.data());
+  } else
+#endif
+    for (int i = 0; i < B; ++i)
+      model.forward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
+                        b.goal_feats + static_cast<std::size_t>(i) * 4,
+                        b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
+                        alphas.data() + static_cast<std::size_t>(i) * N, &beta[i], &gamma[i],
+                        &lam_soft[i], &lam_hard[i], &mu_lat[i]);
 
   // rollout forward (o/v are updated in place from o0/v0)
   std::vector<float> oT(b.o0, b.o0 + 2 * B), vT(b.v0, b.v0 + 2 * B);
   std::vector<float> min_clear(B), cum_risk(B), hard_count(B), arc(B);
-  integrate_surrogate_material(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(),
-                               beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(),
-                               b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp,
-                               cfg.rollout, min_clear.data(), cum_risk.data(), hard_count.data(),
-                               arc.data(), cfg.num_threads);
+#ifdef CVC_USING_CUDA
+  if (use_cuda && material_rollout_cuda_available())
+    integrate_surrogate_material_cuda(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask,
+                                      alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
+                                      lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B,
+                                      N, b.Hp, b.Wp, cfg.rollout, min_clear.data(), cum_risk.data(),
+                                      hard_count.data(), arc.data());
+  else
+#endif
+    integrate_surrogate_material(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(),
+                                 beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(),
+                                 b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp,
+                                 cfg.rollout, min_clear.data(), cum_risk.data(), hard_count.data(),
+                                 arc.data(), cfg.num_threads);
 
   // episode cost J and CVaR quantile
   std::vector<double> J(B);
@@ -144,15 +166,16 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
 
 double material_loss(const coef_energy_net &model, const material_batch &b,
                      const material_loss_config &cfg, float frozen_eta) {
-  return compute_loss(model, b, cfg, frozen_eta, nullptr);
+  return compute_loss(model, b, cfg, frozen_eta, nullptr, /*use_cuda=*/false);
 }
 
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out) {
+                              float *eta_out, bool use_cuda) {
   const int B = b.B, N = b.N, P = b.P;
+  (void)use_cuda;
   fwd_cache c;
-  const double L = compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c);
+  const double L = compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda);
   if (eta_out)
     *eta_out = (float)c.eta;
 
@@ -192,12 +215,22 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
   // ── rollout backward -> grads on the model outputs ──
   std::vector<float> g_alphas(static_cast<std::size_t>(B) * N, 0.0f), g_beta(B, 0.0f),
       g_gamma(B, 0.0f), g_lam_soft(B, 0.0f), g_lam_hard(B, 0.0f);
-  integrate_surrogate_material_vjp(
-      b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
-      c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
-      b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
-      g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
-      g_lam_hard.data(), cfg.num_threads);
+#ifdef CVC_USING_CUDA
+  if (use_cuda && material_rollout_cuda_available())
+    integrate_surrogate_material_vjp_cuda(
+        b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
+        c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
+        b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
+        g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
+        g_lam_hard.data());
+  else
+#endif
+    integrate_surrogate_material_vjp(
+        b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
+        c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
+        b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
+        g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
+        g_lam_hard.data(), cfg.num_threads);
 
   // add the direct (non-rollout) model-output grads
   for (int i = 0; i < B; ++i) {
@@ -223,13 +256,24 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     }
   }
 
-  // ── model backward -> weight grads (per agent, accumulate) ──
-  for (int i = 0; i < B; ++i)
-    model.backward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
-                       b.goal_feats + static_cast<std::size_t>(i) * 4,
-                       b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
-                       g_alphas.data() + static_cast<std::size_t>(i) * N, g_beta[i], g_gamma[i],
-                       g_lam_soft[i], g_lam_hard[i], 0.0f, grads);
+  // ── model backward -> weight grads (per agent, accumulate; or one device batch) ──
+#ifdef CVC_USING_CUDA
+  if (use_cuda && coef_energy_cuda_available()) {
+    std::vector<int> off(B + 1);
+    for (int i = 0; i <= B; ++i)
+      off[i] = i * N;
+    const std::vector<float> g_mu_lat(B, 0.0f); // mu_lat is unused in training
+    model.backward_batch_cuda(b.obs_feats, b.obs_mask, off.data(), B, b.goal_feats, b.risk_patch, P,
+                              g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
+                              g_lam_hard.data(), g_mu_lat.data(), grads);
+  } else
+#endif
+    for (int i = 0; i < B; ++i)
+      model.backward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
+                         b.goal_feats + static_cast<std::size_t>(i) * 4,
+                         b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
+                         g_alphas.data() + static_cast<std::size_t>(i) * N, g_beta[i], g_gamma[i],
+                         g_lam_soft[i], g_lam_hard[i], 0.0f, grads);
 
   return L;
 }

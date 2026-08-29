@@ -87,9 +87,17 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 // Loss + weight gradients (ADDED into `grads`; zero it first for a fresh
 // gradient). Returns the scalar loss and, via `eta_out` (optional), the CVaR
 // quantile it used (feed that back as material_loss's frozen_eta for gradcheck).
+//
+// `use_cuda` routes the four heavy ops — the model forward/backward and the
+// surrogate rollout forward/VJP — through their device twins (forward_batch_cuda,
+// integrate_surrogate_material_cuda/_vjp_cuda, backward_batch_cuda), keeping the
+// loss / seed-grad / multi-start glue on the CPU. Float-equivalent to the CPU path
+// (validated by nav_material_train_cuda_test). It silently falls back to the CPU
+// ops when the build has no CUDA or no device is present, so it is always safe to
+// pass true; the multi-start term (L_multi) stays on the CPU regardless.
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out = nullptr);
+                              float *eta_out = nullptr, bool use_cuda = false);
 
 // Cosine-annealed learning rate (torch CosineAnnealingLR): anneals lr0 -> eta_min
 // over t_max steps; lr(t) = eta_min + (lr0-eta_min)*0.5*(1+cos(pi*t/t_max)).
