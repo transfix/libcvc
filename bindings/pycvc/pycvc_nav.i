@@ -1001,6 +1001,79 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     Py_RETURN_NONE;
   }
 
+  // ── material on the sim_world (P2b) ─────────────────────────────────────────
+  // risk/hard are [planes,H,W] (planes==1 shared; >1 one plane per belief group,
+  // keyed per agent by the SAME map_id as belief). The material_config is passed
+  // as scalars, matching the sim_world_create style.
+  PyObject *nav_sim_world_set_material(PyObject *handle, PyObject *risk, PyObject *hard, int planes,
+                                       double lam_soft, double lam_hard, double k_sharp,
+                                       double d_hat_m, double sigma, int gate_enabled,
+                                       int primitive_count, int horizon_cells, double hard_margin_m,
+                                       double improvement_margin, double material_trigger,
+                                       double progress_slack_cells) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (planes < 1)
+      throw std::invalid_argument("pycvc.nav_sim_world_set_material: planes must be >= 1");
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const char *msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 1, 3, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_sim_world_set_material: risk/hard had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *r = take(risk, NPY_FLOAT);
+    PyArrayObject *h = take(hard, NPY_UINT8);
+    const npy_intp want =
+        static_cast<npy_intp>(planes) * sw->rows() * sw->cols();
+    if (PyArray_SIZE(r) != want || PyArray_SIZE(h) != want)
+      fail("pycvc.nav_sim_world_set_material: risk/hard must hold planes*rows*cols elements");
+    cvc::nav::material_config mc;
+    mc.lam_soft = static_cast<float>(lam_soft);
+    mc.lam_hard = static_cast<float>(lam_hard);
+    mc.k_sharp = static_cast<float>(k_sharp);
+    mc.d_hat_m = static_cast<float>(d_hat_m);
+    mc.sigma = sigma;
+    mc.gate_enabled = gate_enabled != 0;
+    mc.gate.primitive_count = primitive_count;
+    mc.gate.horizon_cells = horizon_cells;
+    mc.gate.hard_margin_m = hard_margin_m;
+    mc.gate.improvement_margin = improvement_margin;
+    mc.gate.material_trigger = material_trigger;
+    mc.gate.progress_slack_cells = progress_slack_cells;
+    const float *rd = static_cast<const float *>(PyArray_DATA(r));
+    const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(h));
+    Py_BEGIN_ALLOW_THREADS sw->set_material(rd, hd, mc, planes);
+    Py_END_ALLOW_THREADS for (PyArrayObject *a : hold) Py_DECREF(a);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_clear_material(PyObject *handle) {
+    sim_world_from(handle)->clear_material();
+    Py_RETURN_NONE;
+  }
+
+  // Last tick's per-agent gate decision [n] bool (valid only while material set).
+  PyObject *nav_sim_world_material_gate_active(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const int N = sw->size();
+    npy_intp d1 = N;
+    PyObject *out = PyArray_SimpleNew(1, &d1, NPY_BOOL);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_material_gate_active: alloc failed");
+    const std::uint8_t *g = sw->material_gate_active();
+    std::uint8_t *dst = static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)));
+    for (int i = 0; i < N; ++i)
+      dst[i] = g[i];
+    return out;
+  }
+
   // ── sim_thread: run a sim_world off the render thread ───────────────────────
   // The C++ worker is a real thread that never touches the GIL (it runs only
   // cvc::nav kernels), so it advances genuinely concurrently with Python. The

@@ -19,6 +19,25 @@
 // pycvc::state_observer (Phase 3 state push callbacks).
 %module(directors="1") pycvc
 
+// On Windows, register the extension module's sibling DLL directory
+// (<prefix>/bin holds cvc.dll and its whole dependency closure) BEFORE the
+// `import _pycvc` in the generated proxy. Python 3.8+ no longer searches PATH
+// for an extension module's dependencies, so a self-contained binding must add
+// the directory itself — the same pattern torch/vtk follow. pycvc.py installs
+// to <prefix>/Lib/site-packages, so <prefix>/bin is ../../bin from here. No-op
+// off Windows (POSIX resolves via RPATH / LD_LIBRARY_PATH).
+%pythonbegin %{
+import os as _os, sys as _sys
+if _sys.platform == "win32":
+    try:
+        _cvc_bin = _os.path.normpath(
+            _os.path.join(_os.path.dirname(__file__), "..", "..", "bin"))
+        if _os.path.isdir(_cvc_bin):
+            _os.add_dll_directory(_cvc_bin)
+    except (OSError, AttributeError, NameError):
+        pass
+%}
+
 %{
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>

@@ -106,6 +106,9 @@ add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
+add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
+add_executable(nav_material_adam_cuda_test nav_material_adam_cuda_test.cpp)
+add_executable(nav_material_train_cuda_test nav_material_train_cuda_test.cpp)
 add_executable(nav_material_train_test nav_material_train_test.cpp)
 add_executable(nav_material_optim_test nav_material_optim_test.cpp)
 add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
@@ -187,6 +190,9 @@ set(TEST_TARGETS
   nav_material_optim_test
   nav_geom_rollout_grad_test
   nav_material_rollout_cuda_test
+  nav_coef_energy_cuda_test
+  nav_material_adam_cuda_test
+  nav_material_train_cuda_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -457,6 +463,27 @@ target_link_libraries(nav_coef_energy_grad_test
 )
 
 target_link_libraries(nav_material_rollout_cuda_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coef_energy_cuda_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_adam_cuda_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_material_train_cuda_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1014,6 +1041,9 @@ target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
+target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_adam_cuda_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_train_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_optim_test PRIVATE cxx_std_17)
 target_compile_features(nav_geom_rollout_grad_test PRIVATE cxx_std_17)
@@ -1027,6 +1057,9 @@ if(CVC_ENABLE_CUDA)
   target_compile_definitions(nav_test PRIVATE CVC_ENABLE_CUDA)
   target_compile_definitions(nav_coef_train_test PRIVATE CVC_ENABLE_CUDA)
   target_compile_definitions(nav_material_rollout_cuda_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_coef_energy_cuda_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_material_adam_cuda_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(nav_material_train_cuda_test PRIVATE CVC_ENABLE_CUDA)
 endif()
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
@@ -1239,6 +1272,9 @@ cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
+cvc_discover_tests(nav_coef_energy_cuda_test)
+cvc_discover_tests(nav_material_adam_cuda_test)
+cvc_discover_tests(nav_material_train_cuda_test)
 cvc_discover_tests(nav_material_train_test)
 cvc_discover_tests(nav_material_optim_test)
 cvc_discover_tests(nav_geom_rollout_grad_test)

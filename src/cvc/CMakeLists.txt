@@ -638,14 +638,14 @@ endif(CVC_ENABLE_SDF)
 
 # Add CUDA source files if enabled
 if(CVC_ENABLE_CUDA)
-  list(APPEND SOURCE_FILES volume/voxels_kernels.cu nav/drive.cu nav/coef_train.cu nav/material_rollout.cu)
-  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu, nav/drive.cu, nav/coef_train.cu, nav/material_rollout.cu")
+  list(APPEND SOURCE_FILES volume/voxels_kernels.cu nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu nav/material_train.cu)
+  message(STATUS "CUDA enabled for libcvc - including voxels_kernels.cu, nav/drive.cu, nav/coef_train.cu, nav/material_rollout.cu, nav/coef_energy_net.cu, nav/material_train.cu")
   # Volume rendering opts into fast math per source (it has no bit/float-equiv
   # contract); the nav drive + trainer kernels MUST stay precise (float-equivalent
   # to the CPU/torch reference) — no fast-math, no FMA contraction, IEEE div/sqrt.
   set_source_files_properties(volume/voxels_kernels.cu PROPERTIES
     COMPILE_OPTIONS "$<$<CONFIG:Release>:--use_fast_math>")
-  set_source_files_properties(nav/drive.cu nav/coef_train.cu nav/material_rollout.cu PROPERTIES
+  set_source_files_properties(nav/drive.cu nav/coef_train.cu nav/material_rollout.cu nav/coef_energy_net.cu nav/material_train.cu PROPERTIES
     COMPILE_OPTIONS "-fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
 endif()
 
@@ -1045,14 +1045,22 @@ if(CVC_ENABLE_IMAGEMAGICK)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
         if(${_im_var}_FOUND)
-          target_link_libraries(cvc PUBLIC PkgConfig::${_im_var})
+          # PRIVATE (like PkgConfig::ZSTD below): these are ImageMagick codec
+          # delegates baked into the shared cvc.dll — implementation only. Linking
+          # them PUBLIC leaked the build-local PkgConfig::_im_dep_* imported targets
+          # into the exported cvcTargets.cmake, where downstream find_package(cvc)
+          # fails ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
+          # never recreates them.
+          target_link_libraries(cvc PRIVATE PkgConfig::${_im_var})
           set(_pc_found TRUE)
         endif()
       endif()
       if(NOT _pc_found)
         find_library(${_im_var}_LIB NAMES ${_libname})
         if(${_im_var}_LIB)
-          target_link_libraries(cvc PUBLIC ${${_im_var}_LIB})
+          # PRIVATE for the same reason, and to keep the absolute find_library path
+          # out of the exported interface.
+          target_link_libraries(cvc PRIVATE ${${_im_var}_LIB})
         endif()
       endif()
     endforeach()

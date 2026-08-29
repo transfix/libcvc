@@ -87,9 +87,17 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 // Loss + weight gradients (ADDED into `grads`; zero it first for a fresh
 // gradient). Returns the scalar loss and, via `eta_out` (optional), the CVaR
 // quantile it used (feed that back as material_loss's frozen_eta for gradcheck).
+//
+// `use_cuda` routes the four heavy ops — the model forward/backward and the
+// surrogate rollout forward/VJP — through their device twins (forward_batch_cuda,
+// integrate_surrogate_material_cuda/_vjp_cuda, backward_batch_cuda), keeping the
+// loss / seed-grad / multi-start glue on the CPU. Float-equivalent to the CPU path
+// (validated by nav_material_train_cuda_test). It silently falls back to the CPU
+// ops when the build has no CUDA or no device is present, so it is always safe to
+// pass true; the multi-start term (L_multi) stays on the CPU regardless.
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out = nullptr);
+                              float *eta_out = nullptr, bool use_cuda = false);
 
 // Cosine-annealed learning rate (torch CosineAnnealingLR): anneals lr0 -> eta_min
 // over t_max steps; lr(t) = eta_min + (lr0-eta_min)*0.5*(1+cos(pi*t/t_max)).
@@ -112,6 +120,45 @@ private:
   coef_energy_net::param_grads m_, u_;
   std::vector<std::string> names_;
 };
+
+// CUDA-resident twin of material_adam (defined in material_train.cu; CVC_ENABLE_CUDA
+// only). Same math — global-norm-clipped, bias-corrected Adam over the whole model
+// — but the weights and the (m,u) moments stay on the DEVICE across steps: the
+// weights are flattened + uploaded once at construction, each step() uploads only
+// the flattened grad and runs the norm + update on device (coef_train.cu's
+// grad_sqnorm_kernel + adam_kernel), and sync_to() downloads the trained weights
+// back into a model. This is the optimizer half of a device-resident training loop;
+// pair it with backward_batch_cuda for the model grads. Float-equivalent to
+// material_adam (the norm reduction order differs from the CPU's sequential sum),
+// validated by nav_material_adam_cuda_test. Throws without a CUDA device (guard with
+// material_train_cuda_available()).
+class material_adam_cuda {
+public:
+  explicit material_adam_cuda(const coef_energy_net &model, float grad_clip = 5.0f);
+  ~material_adam_cuda();
+  material_adam_cuda(const material_adam_cuda &) = delete;
+  material_adam_cuda &operator=(const material_adam_cuda &) = delete;
+  // One update from host grads (as produced by material_loss_and_grad or downloaded
+  // from backward_batch_cuda): upload flattened grad, clip, bias-corrected Adam. The
+  // device weights are updated in place — call sync_to to read them back.
+  void step(const coef_energy_net::param_grads &grad, float lr);
+  // Download the current device weights into `model`'s tensors (unflatten).
+  void sync_to(coef_energy_net &model) const;
+  long steps() const { return t_; }
+
+private:
+  float b1_ = 0.9f, b2_ = 0.999f, eps_ = 1e-8f, grad_clip_ = 5.0f;
+  long t_ = 0;
+  int P_ = 0; // total flattened param count
+  std::vector<std::string> names_;
+  std::vector<int> off_; // [names_.size()+1] flatten offsets
+  // device buffers (raw — no CUDA types in this header)
+  float *d_p_ = nullptr, *d_m_ = nullptr, *d_u_ = nullptr, *d_g_ = nullptr, *d_sq_ = nullptr;
+};
+
+// True when this build has CUDA AND a device is present. Mirrors
+// coef_energy_cuda_available() / train_cuda_available().
+bool material_train_cuda_available();
 
 } // namespace nav
 } // namespace cvc

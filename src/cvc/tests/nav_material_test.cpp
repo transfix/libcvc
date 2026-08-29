@@ -233,6 +233,67 @@ TEST(NavMaterialGate, BatchMatchesSerialBytesAcrossThreadCounts) {
   }
 }
 
+// P2a: grouped material planes. risk/gate_hard/clear_m are [M,H,W] and each agent
+// gates against its own plane (map_id[i]); the batch must be byte-identical to a
+// serial witness_gate on each agent's own plane, and nullptr map_id must collapse
+// to plane 0 (back-compat).
+TEST(NavMaterialGate, GroupedPlanesBatchMatchesPerPlaneSerial) {
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> ur(0.0f, 1.0f);
+  const int rows = 31, cols = 27, N = 40, M = 3;
+  const std::size_t hw = static_cast<std::size_t>(rows) * cols;
+  std::vector<float> risk(M * hw), clear(M * hw);
+  std::vector<std::uint8_t> hard(M * hw);
+  for (auto &v : risk)
+    v = ur(rng);
+  for (auto &v : clear)
+    v = 4.0f * ur(rng);
+  for (auto &v : hard)
+    v = ur(rng) < 0.05f ? 1 : 0;
+  std::vector<double> pos(2 * N), goal(2 * N);
+  std::vector<int> map_id(N);
+  for (int i = 0; i < N; ++i) {
+    pos[2 * i] = (rows - 1) * ur(rng);
+    pos[2 * i + 1] = (cols - 1) * ur(rng);
+    goal[2 * i] = (rows - 1) * ur(rng);
+    goal[2 * i + 1] = (cols - 1) * ur(rng);
+    map_id[i] = static_cast<int>(rng() % static_cast<unsigned>(M));
+  }
+  gate_params p;
+  for (int threads : {1, 4, 8}) {
+    std::vector<std::uint8_t> act(N);
+    std::vector<double> nom(N), best(N);
+    std::vector<std::int32_t> cnt(N);
+    witness_gate_batch(risk.data(), hard.data(), clear.data(), rows, cols, pos.data(), goal.data(),
+                       N, p, act.data(), nom.data(), best.data(), cnt.data(), threads,
+                       map_id.data());
+    for (int i = 0; i < N; ++i) {
+      const std::size_t off = static_cast<std::size_t>(map_id[i]) * hw;
+      const gate_decision g =
+          witness_gate(risk.data() + off, hard.data() + off, clear.data() + off, rows, cols,
+                       pos[2 * i], pos[2 * i + 1], goal[2 * i], goal[2 * i + 1], p);
+      EXPECT_EQ(act[i] != 0, g.active)
+          << "agent " << i << " plane " << map_id[i] << " threads " << threads;
+      EXPECT_EQ(std::memcmp(&nom[i], &g.nominal_risk, 8), 0);
+      EXPECT_EQ(std::memcmp(&best[i], &g.best_risk, 8), 0);
+      EXPECT_EQ(cnt[i], g.feasible_count);
+    }
+  }
+  // nullptr map_id == plane 0 for all (back-compat with the single-plane callers).
+  std::vector<std::uint8_t> act(N);
+  std::vector<double> nom(N), best(N);
+  std::vector<std::int32_t> cnt(N);
+  witness_gate_batch(risk.data(), hard.data(), clear.data(), rows, cols, pos.data(), goal.data(), N,
+                     p, act.data(), nom.data(), best.data(), cnt.data(), 0, nullptr);
+  for (int i = 0; i < N; ++i) {
+    const gate_decision g =
+        witness_gate(risk.data(), hard.data(), clear.data(), rows, cols, pos[2 * i], pos[2 * i + 1],
+                     goal[2 * i], goal[2 * i + 1], p);
+    EXPECT_EQ(act[i] != 0, g.active) << "back-compat agent " << i;
+    EXPECT_EQ(cnt[i], g.feasible_count);
+  }
+}
+
 namespace {
 
 // A tiny field + agent set for the rollout tests.
@@ -475,6 +536,86 @@ TEST(NavMaterialSimWorld, MaterialAvoidanceAndDeterminism) {
   const auto mat2 = run(true);
   ASSERT_EQ(mat.second.size(), mat2.second.size());
   EXPECT_EQ(std::memcmp(mat.second.data(), mat2.second.data(), mat.second.size() * 4), 0);
+}
+
+// P2a end-to-end: two agents, same start/goal. A private-belief (M=2) world with
+// two IDENTICAL material planes must trace byte-for-byte the same as a shared
+// (M=1) world with one material plane — proving the [M,6,H,W] material stack, the
+// map_id-keyed gate, and material_view().M are all wired consistently.
+TEST(NavMaterialSimWorld, GroupedIdenticalPlanesMatchShared) {
+  const int n = 48;
+  std::vector<std::uint8_t> occ(n * n, 0);
+  sim_world::config cfg;
+  cfg.rows = n;
+  cfg.cols = n;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.05;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  std::vector<float> risk(n * n, 0.0f);
+  std::vector<std::uint8_t> hard(n * n, 0);
+  const int cr = 25, cc = 24, rad2 = 16;
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      if ((r - cr) * (r - cr) + (c - cc) * (c - cc) <= rad2) {
+        hard[r * n + c] = 1;
+        risk[r * n + c] = 1.0f;
+      }
+  // Two identical material planes [2,H,W].
+  const std::size_t hw = static_cast<std::size_t>(n) * n;
+  std::vector<float> risk2(2 * hw);
+  std::vector<std::uint8_t> hard2(2 * hw);
+  std::memcpy(risk2.data(), risk.data(), hw * sizeof(float));
+  std::memcpy(risk2.data() + hw, risk.data(), hw * sizeof(float));
+  std::memcpy(hard2.data(), hard.data(), hw);
+  std::memcpy(hard2.data() + hw, hard.data(), hw);
+
+  const float o0[4] = {-2.25f, 0.0f, -2.25f, 0.0f}; // 2 agents, coincident start
+  const float g0[4] = {2.25f, 0.0f, 2.25f, 0.0f};
+  const float col[6] = {1, 1, 1, 1, 1, 1};
+
+  auto run = [&](bool grouped) {
+    material_config mc;
+    mc.gate.horizon_cells = 8;
+    std::vector<float> trace;
+    float pos[4], head[2], spd[2];
+    int mode[2];
+    std::uint8_t reach[2];
+    if (grouped) {
+      const int mid[2] = {0, 1};
+      sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 2, mid, 2);
+      w.set_material(risk2.data(), hard2.data(), mc, 2);
+      for (int t = 0; t < 400; ++t) {
+        w.step(4);
+        w.snapshot(pos, head, spd, mode, reach);
+        for (int k = 0; k < 4; ++k)
+          trace.push_back(pos[k]);
+      }
+    } else {
+      sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 2);
+      w.set_material(risk.data(), hard.data(), mc, 1);
+      for (int t = 0; t < 400; ++t) {
+        w.step(4);
+        w.snapshot(pos, head, spd, mode, reach);
+        for (int k = 0; k < 4; ++k)
+          trace.push_back(pos[k]);
+      }
+    }
+    return trace;
+  };
+
+  const auto shared = run(false);
+  const auto grouped = run(true);
+  ASSERT_EQ(shared.size(), grouped.size());
+  EXPECT_EQ(std::memcmp(shared.data(), grouped.data(), shared.size() * 4), 0)
+      << "grouped identical-plane material diverged from shared";
 }
 
 // ── obstacle-list surrogate rollout (integrate_surrogate_material) ───────────

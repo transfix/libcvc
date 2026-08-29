@@ -128,6 +128,34 @@ public:
   std::vector<unsigned char> serialize() const;
   void save(const std::string &path) const;
 
+  // ── CUDA twin (defined in coef_energy_net.cu; CVC_ENABLE_CUDA only) ──────────
+  // Batched device forward, float-equivalent to forward_batch (same ragged
+  // obs_offsets layout: obs_feats [total*6] / obs_mask [total] / alphas_out
+  // [total]; goal_feats [n*4]; risk_patch [n*2*P*P]; beta/.../mu_lat [n]). One
+  // CUDA block per agent, d_tok threads cooperating; the CNN activations live in
+  // per-agent device scratch. Validated vs the CPU forward by
+  // nav_coef_energy_cuda_test (FLOAT tier). Throws if built without CUDA or no
+  // device is present (guard with coef_energy_cuda_available()).
+  void forward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
+                          const int *obs_offsets, int n, const float *goal_feats,
+                          const float *risk_patch, int patch_p, float *alphas_out, float *beta,
+                          float *gamma, float *lam_soft, float *lam_hard, float *mu_lat) const;
+
+  // Batched device backward, the CUDA twin of backward_one accumulated over the
+  // ragged batch: one block per agent recomputes the forward (activations to
+  // per-agent device scratch) then reverses, atomicAdd-ing every agent's weight
+  // gradients into the SAME `grads` accumulator (add into it; zero it first for a
+  // fresh gradient). Upstream grads: g_alphas [total] (obs_offsets layout),
+  // g_beta/.../g_mu_lat [n]. FLOAT tier vs CPU backward_one (rel<5e-3 / cos>0.9999
+  // — the atomicAdd sum order differs from the CPU's sequential accumulate);
+  // validated by nav_coef_energy_cuda_test. Throws without a CUDA device.
+  void backward_batch_cuda(const float *obs_feats, const std::uint8_t *obs_mask,
+                           const int *obs_offsets, int n, const float *goal_feats,
+                           const float *risk_patch, int patch_p, const float *g_alphas,
+                           const float *g_beta, const float *g_gamma, const float *g_lam_soft,
+                           const float *g_lam_hard, const float *g_mu_lat,
+                           param_grads &grads) const;
+
 private:
   struct tensor {
     std::vector<int> dims;
@@ -142,6 +170,10 @@ private:
   float lam_soft_max_ = 5.0f, lam_hard_max_ = 10.0f, mu_lat_max_ = 5.0f, eps_ = 1e-5f;
   std::uint64_t arch_hash_ = 0;
 };
+
+// True when this build has CUDA AND a device is present (so forward_batch_cuda
+// will run). Mirrors material_rollout_cuda_available().
+bool coef_energy_cuda_available();
 
 } // namespace nav
 } // namespace cvc

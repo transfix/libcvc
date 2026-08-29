@@ -300,12 +300,17 @@ gate_decision witness_gate(const float *risk, const std::uint8_t *gate_hard, con
 void witness_gate_batch(const float *risk, const std::uint8_t *gate_hard, const float *clear_m,
                         int rows, int cols, const double *pos_rc, const double *goal_rc, int n,
                         const gate_params &p, std::uint8_t *active_out, double *nominal_out,
-                        double *best_out, std::int32_t *count_out, int num_threads) {
+                        double *best_out, std::int32_t *count_out, int num_threads,
+                        const int *map_id) {
   // Agents are independent; the batch is n serial gates fanned across threads,
-  // byte-identical to the serial loop by construction.
+  // byte-identical to the serial loop by construction. Each agent gates against
+  // its own material plane (map_id[i]); map_id == nullptr collapses to plane 0.
+  const std::size_t plane_sz = static_cast<std::size_t>(rows) * cols;
   detail::parallel_for(n, num_threads, [&](int i) {
-    const gate_decision g = witness_gate(risk, gate_hard, clear_m, rows, cols, pos_rc[2 * i],
-                                         pos_rc[2 * i + 1], goal_rc[2 * i], goal_rc[2 * i + 1], p);
+    const std::size_t off = map_id ? static_cast<std::size_t>(map_id[i]) * plane_sz : 0;
+    const gate_decision g =
+        witness_gate(risk + off, gate_hard + off, clear_m + off, rows, cols, pos_rc[2 * i],
+                     pos_rc[2 * i + 1], goal_rc[2 * i], goal_rc[2 * i + 1], p);
     active_out[i] = g.active ? 1 : 0;
     nominal_out[i] = g.nominal_risk;
     best_out[i] = g.best_risk;

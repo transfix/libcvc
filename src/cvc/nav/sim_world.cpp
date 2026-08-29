@@ -387,10 +387,13 @@ void sim_world::step(int num_threads) {
       gp.hard_margin_m = mat_hard_margin_m_;
       std::vector<double> nom(n_), best(n_);
       std::vector<std::int32_t> cnt(n_);
-      // channel 0 of the [1,6,H,W] stack IS the risk plane (offset 0)
-      witness_gate_batch(mat_stack_.data(), mat_gate_hard_.data(), mat_clear_m_.data(), rows_,
-                         cols_, pos_rc.data(), goal_rc.data(), n_, gp, mat_gate_active_.data(),
-                         nom.data(), best.data(), cnt.data(), num_threads);
+      // Per-plane gate: risk/gate_hard/clear_m are [mat_planes_,H,W]; each agent
+      // gates against its own material plane via map_id (nullptr => plane 0 in the
+      // shared case). mat_risk_ is the contiguous channel-0 risk view.
+      witness_gate_batch(mat_risk_.data(), mat_gate_hard_.data(), mat_clear_m_.data(), rows_, cols_,
+                         pos_rc.data(), goal_rc.data(), n_, gp, mat_gate_active_.data(), nom.data(),
+                         best.data(), cnt.data(), num_threads,
+                         mat_planes_ > 1 ? map_id_.data() : nullptr);
     } else {
       std::fill(mat_gate_active_.begin(), mat_gate_active_.end(), std::uint8_t(1));
     }
@@ -432,7 +435,7 @@ void sim_world::step(int num_threads) {
 material_stack sim_world::material_view() const {
   material_stack m;
   m.data = mat_stack_.data();
-  m.M = 1;
+  m.M = mat_planes_;
   m.H = rows_;
   m.W = cols_;
   m.mnx = cfg_.min_x;
@@ -446,26 +449,48 @@ material_stack sim_world::material_view() const {
 }
 
 void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
-                             const material_config &mc) {
+                             const material_config &mc, int planes) {
   if (!risk_raw || !hard) {
     mat_on_ = false;
     return;
   }
+  if (planes < 1)
+    throw std::runtime_error("cvc::nav::sim_world::set_material: planes must be >= 1");
+  // With per-plane material, agents index their plane by the SAME map_id as their
+  // belief plane, so every map_id must be a valid material-plane index.
+  if (planes > 1)
+    for (int i = 0; i < n_; ++i)
+      if (map_id_[i] >= planes)
+        throw std::runtime_error("cvc::nav::sim_world::set_material: agent map_id >= planes");
+  mat_planes_ = planes;
   mat_cfg_ = mc;
   const double cell_w = (cfg_.max_x - cfg_.min_x) / (cols_ - 1);
-  const material_planes mp =
-      material_build(risk_raw, hard, rows_, cols_, cell_w, cfg_.scale, mc.sigma);
-  mat_stack_ = mp.stacked();
-  // Gate feasibility surface: material hard | TRUTH occupancy (the oracle
-  // setting), and its metres clearance plane — one EDT, at set time.
   const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
-  mat_gate_hard_.assign(hw, 0);
-  for (std::size_t i = 0; i < hw; ++i)
-    mat_gate_hard_[i] = (hard[i] || truth_[i]) ? 1 : 0;
-  const std::vector<double> d2 = edt2_squared(mat_gate_hard_.data(), rows_, cols_);
-  mat_clear_m_.resize(hw);
-  for (std::size_t i = 0; i < hw; ++i)
-    mat_clear_m_[i] = static_cast<float>(std::sqrt(d2[i]) * cell_w);
+  // One [1,6,H,W] derived stack + a contiguous channel-0 risk view + a gate/
+  // clearance surface PER plane, concatenated. Plane m reads risk_raw/hard at
+  // m*hw; its gate feasibility surface is (that plane's hard) | TRUTH occupancy
+  // (the oracle setting; truth is shared across planes), and its metres clearance
+  // plane is one EDT of that — computed here, at set time.
+  mat_stack_.assign(static_cast<std::size_t>(planes) * 6 * hw, 0.0f);
+  mat_risk_.assign(static_cast<std::size_t>(planes) * hw, 0.0f);
+  mat_gate_hard_.assign(static_cast<std::size_t>(planes) * hw, 0);
+  mat_clear_m_.assign(static_cast<std::size_t>(planes) * hw, 0.0f);
+  for (int m = 0; m < planes; ++m) {
+    const std::size_t roff = static_cast<std::size_t>(m) * hw;
+    const material_planes mp =
+        material_build(risk_raw + roff, hard + roff, rows_, cols_, cell_w, cfg_.scale, mc.sigma);
+    const std::vector<float> stacked = mp.stacked(); // [1,6,H,W]
+    std::copy(stacked.begin(), stacked.end(),
+              mat_stack_.begin() + static_cast<std::size_t>(m) * 6 * hw);
+    std::copy(stacked.begin(), stacked.begin() + hw, mat_risk_.begin() + roff); // ch 0 = risk
+    std::uint8_t *gh = mat_gate_hard_.data() + roff;
+    for (std::size_t i = 0; i < hw; ++i)
+      gh[i] = (hard[roff + i] || truth_[i]) ? 1 : 0;
+    const std::vector<double> d2 = edt2_squared(gh, rows_, cols_);
+    float *cm = mat_clear_m_.data() + roff;
+    for (std::size_t i = 0; i < hw; ++i)
+      cm[i] = static_cast<float>(std::sqrt(d2[i]) * cell_w);
+  }
   mat_hard_margin_m_ = mc.gate.hard_margin_m > 0.0 ? mc.gate.hard_margin_m : 2.0 * cell_w;
   mat_lam_soft_.assign(n_, 0.0f);
   mat_lam_hard_.assign(n_, 0.0f);

@@ -15,7 +15,10 @@ recipe:
   # per-vertex colors as direct uchar (faithful colors, texture-ready), grew the
   # GraphicsNode API (transforms/bounds/parenting/metadata/callbacks) + world-bounds
   # recompute, and rebuilds against libcvc +cvc.3. Part of the family republish.
-  cvc_revision: 4
+  # Bumped 4 -> 5: family republish against libcvc +cvc.4 (material-aware nav).
+  # cvcGL source is unchanged; it rebuilds against the new libcvc so the
+  # tested-together family stays revision-consistent.
+  cvc_revision: 5
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
