@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
   # Bumped 1 -> 2: republish from post-#136 master. cvcGL gained the injected-app
   # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
   # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
@@ -15,7 +15,9 @@ recipe:
   # per-vertex colors as direct uchar (faithful colors, texture-ready), grew the
   # GraphicsNode API (transforms/bounds/parenting/metadata/callbacks) + world-bounds
   # recompute, and rebuilds against libcvc +cvc.3. Part of the family republish.
-  cvc_revision: 4
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

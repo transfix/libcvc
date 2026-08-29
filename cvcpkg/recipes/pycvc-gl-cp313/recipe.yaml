@@ -6,7 +6,9 @@ recipe:
   # numpy-cp313 + vtk-python-cp313. New catalog name — revision starts at 1.
   # NO cp313t column: SWIG-generated modules are not free-threaded-safe.
   name: pycvc-gl-cp313
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
