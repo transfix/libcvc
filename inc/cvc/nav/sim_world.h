@@ -116,6 +116,8 @@ public:
 
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
+  int rows() const { return rows_; }
+  int cols() const { return cols_; }
   // Per-agent belief-plane id [n] (each in [0, M)) — lets a renderer colour agents
   // by their group (shared: all 0; clustered: group id; private: 0..n-1).
   const int *agent_planes() const { return map_id_.data(); }

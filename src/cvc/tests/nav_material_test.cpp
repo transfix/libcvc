@@ -537,6 +537,86 @@ TEST(NavMaterialSimWorld, MaterialAvoidanceAndDeterminism) {
   EXPECT_EQ(std::memcmp(mat.second.data(), mat2.second.data(), mat.second.size() * 4), 0);
 }
 
+// P2a end-to-end: two agents, same start/goal. A private-belief (M=2) world with
+// two IDENTICAL material planes must trace byte-for-byte the same as a shared
+// (M=1) world with one material plane — proving the [M,6,H,W] material stack, the
+// map_id-keyed gate, and material_view().M are all wired consistently.
+TEST(NavMaterialSimWorld, GroupedIdenticalPlanesMatchShared) {
+  const int n = 48;
+  std::vector<std::uint8_t> occ(n * n, 0);
+  sim_world::config cfg;
+  cfg.rows = n;
+  cfg.cols = n;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.05;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+
+  std::vector<float> risk(n * n, 0.0f);
+  std::vector<std::uint8_t> hard(n * n, 0);
+  const int cr = 25, cc = 24, rad2 = 16;
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      if ((r - cr) * (r - cr) + (c - cc) * (c - cc) <= rad2) {
+        hard[r * n + c] = 1;
+        risk[r * n + c] = 1.0f;
+      }
+  // Two identical material planes [2,H,W].
+  const std::size_t hw = static_cast<std::size_t>(n) * n;
+  std::vector<float> risk2(2 * hw);
+  std::vector<std::uint8_t> hard2(2 * hw);
+  std::memcpy(risk2.data(), risk.data(), hw * sizeof(float));
+  std::memcpy(risk2.data() + hw, risk.data(), hw * sizeof(float));
+  std::memcpy(hard2.data(), hard.data(), hw);
+  std::memcpy(hard2.data() + hw, hard.data(), hw);
+
+  const float o0[4] = {-2.25f, 0.0f, -2.25f, 0.0f}; // 2 agents, coincident start
+  const float g0[4] = {2.25f, 0.0f, 2.25f, 0.0f};
+  const float col[6] = {1, 1, 1, 1, 1, 1};
+
+  auto run = [&](bool grouped) {
+    material_config mc;
+    mc.gate.horizon_cells = 8;
+    std::vector<float> trace;
+    float pos[4], head[2], spd[2];
+    int mode[2];
+    std::uint8_t reach[2];
+    if (grouped) {
+      const int mid[2] = {0, 1};
+      sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 2, mid, 2);
+      w.set_material(risk2.data(), hard2.data(), mc, 2);
+      for (int t = 0; t < 400; ++t) {
+        w.step(4);
+        w.snapshot(pos, head, spd, mode, reach);
+        for (int k = 0; k < 4; ++k)
+          trace.push_back(pos[k]);
+      }
+    } else {
+      sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 2);
+      w.set_material(risk.data(), hard.data(), mc, 1);
+      for (int t = 0; t < 400; ++t) {
+        w.step(4);
+        w.snapshot(pos, head, spd, mode, reach);
+        for (int k = 0; k < 4; ++k)
+          trace.push_back(pos[k]);
+      }
+    }
+    return trace;
+  };
+
+  const auto shared = run(false);
+  const auto grouped = run(true);
+  ASSERT_EQ(shared.size(), grouped.size());
+  EXPECT_EQ(std::memcmp(shared.data(), grouped.data(), shared.size() * 4), 0)
+      << "grouped identical-plane material diverged from shared";
+}
+
 // ── obstacle-list surrogate rollout (integrate_surrogate_material) ───────────
 
 TEST(NavMaterialRollout, SurrogateIntegratorMovesTowardGoalAndGates) {
