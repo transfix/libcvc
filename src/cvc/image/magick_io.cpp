@@ -19,6 +19,8 @@
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
 #include <Magick++.h>
+#include <cstdio>
+#include <list>
 #include <mutex>
 #include <stdexcept>
 
@@ -148,6 +150,21 @@ void init_magick_once() {
     std::fprintf(stderr,
                  "cvc::init_magick_once: individual Register* returned sink=%zu\n",
                  static_cast<std::size_t>(magick_reg_sink));
+    // Diagnose: enumerate what ImageMagick actually thinks it can decode.
+    try {
+      std::list<Magick::CoderInfo> ci;
+      Magick::coderInfoList(&ci, Magick::CoderInfo::TrueMatch,
+                            Magick::CoderInfo::AnyMatch, Magick::CoderInfo::AnyMatch);
+      std::fprintf(stderr, "cvc::init_magick_once: coderInfoList=%zu\n", ci.size());
+      std::size_t shown = 0;
+      for (auto &c : ci) {
+        std::fprintf(stderr, "  %s (%s)\n", c.name().c_str(),
+                     c.isReadable() ? "R" : "-");
+        if (++shown >= 20) break;
+      }
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "cvc::init_magick_once: coderInfoList threw: %s\n", e.what());
+    }
   });
 }
 
