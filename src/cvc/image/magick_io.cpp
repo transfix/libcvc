@@ -134,17 +134,20 @@ void init_magick_once() {
     // dynamic-modules build (falls through the same MAGICKCORE_BUILD_MODULES
     // #ifdef and does nothing).
     RegisterStaticModules();
-    // Belt-and-braces: also call the individual Register* entrypoints so the
-    // wasm linker cannot DCE-strip the coder .o's. Each one is idempotent
-    // (RegisterMagickInfo re-registers under the same key), so double calling
-    // is safe.
-    (void)RegisterPNGImage();
-    (void)RegisterJPEGImage();
-    (void)RegisterTIFFImage();
-    (void)RegisterWEBPImage();
-    (void)RegisterBMPImage();
-    (void)RegisterGIFImage();
-    (void)RegisterMIFFImage();
+    // Belt-and-braces: force-observe each Register* return value through a
+    // volatile sink so wasm-ld / wasm-opt cannot elide the call (which
+    // happened with the plain "(void)RegisterPNGImage();" form — the wasm
+    // came out byte-identical to the version without these calls, and the
+    // coder registry stayed empty at runtime).
+    using RegFn = std::size_t (*)(void);
+    static volatile RegFn keep[] = {
+      &RegisterPNGImage,  &RegisterJPEGImage, &RegisterTIFFImage, &RegisterWEBPImage,
+      &RegisterBMPImage,  &RegisterGIFImage,  &RegisterMIFFImage,
+    };
+    volatile std::size_t magick_reg_sink = 0;
+    for (auto &fn : keep)
+      magick_reg_sink += fn();
+    (void)magick_reg_sink;
   });
 }
 
