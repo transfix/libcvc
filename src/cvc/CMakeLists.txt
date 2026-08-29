@@ -1022,6 +1022,7 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "libpng|png16"
         "libwebp|webp"
         "libwebpmux|webpmux"
+        "libwebpdemux|webpdemux"
         "libwebpdecoder|webpdecoder"
         "libsharpyuv|sharpyuv"
         "libtiff-4|tiff"
