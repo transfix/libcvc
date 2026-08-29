@@ -35,7 +35,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "Center for Computational Visualization core C++ library — volumetric data structures, distributed state, geometry & image processing, DSL runtime."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, state, dsl, geometry]
 
 # Declares the `libcvc` provider slot so the CUDA peer libcvc-cuda (which also

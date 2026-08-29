@@ -2,7 +2,7 @@
 
 [![CMake](https://img.shields.io/badge/CMake-3.15+-blue.svg)](https://cmake.org/)
 [![C++](https://img.shields.io/badge/C++-20-orange.svg)](https://isocpp.org/)
-[![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green.svg)](LICENSE)
+[![License: LGPL v2.1](https://img.shields.io/badge/license-LGPL%20v2.1-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-2662%20passing-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-83.8%25%20lines%20%7C%2091.4%25%20functions-brightgreen.svg)](docs/TESTING.md)
 
@@ -666,7 +666,11 @@ This is a modernization of legacy research software. Contributions welcome:
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
+libcvc is licensed under the **GNU Lesser General Public License, version 2.1**
+(LGPL-2.1). See [LICENSE](LICENSE) for the full text.
+
+The bundled XmlRpc++ sources under `inc/xmlrpc/` and `src/xmlrpc/` are
+Copyright (c) 2002-2003 Chris Morley and are used under LGPL-2.1-or-later.
 
 ## Credits
 

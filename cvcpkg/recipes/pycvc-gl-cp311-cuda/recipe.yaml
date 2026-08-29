@@ -14,7 +14,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-gl-cp311-cuda — the pycvc.gl scriptable scene bindings (over cvcGL + VTK) for CPython 3.11 (cp311), built against the CUDA stack (libcvc-cuda + the single cvcgl), so the volume facade it compiles exposes GPU behavior (enable_cuda / __cuda_array_interface__). Same Python API as the CPU `pycvc-gl-cp311`; depends on the core `pycvc-cp311-cuda` module."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, vtk, scene, scientific, volumetric, cuda, gpu]
 
 # The GPU build of the pycvc scene bindings — identical sources to the CPU

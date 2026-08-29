@@ -15,7 +15,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-cp313 — SWIG Python bindings for libcvc, the CPython 3.13 (cp313) column: cvc::geometry / cvc::volume facades with zero-copy numpy views (and CUDA unified-memory when built against libcvc-cuda). The core, VTK-free bindings; the scriptable-scene bindings are the separate pycvc-gl-cp313 recipe."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, numpy, scientific, volumetric]
 
 # pycvc is deliberately its OWN package, separate from libcvc: a plain libcvc

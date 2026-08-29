@@ -23,7 +23,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL — the Qt-free VTK scene-graph library extracted from volrover3: a reactive SceneGraph of GraphicsNode/GeometryNode/VolumeNode over cvc::state that renders cvc::geometry / cvc::volume via VTK. Ships libcvcGL.a + headers + a cmake package config; provides the cvcGL cmake package (cvc::cvcGL target). Consumed by pycvc-gl and other non-Qt scene consumers."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, scene, vtk, graphics]
 
 # cvcGL is its OWN package, separate from libcvc: a plain libcvc bundle is a

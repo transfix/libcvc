@@ -10,7 +10,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "cvc — the unified command-line tool for libcvc: volume / geometry / image processing and the absorbed VolUtils capabilities (resample, filters, region stats, edge detection, format conversion, …) plus cvc::state distributed-session admin, exposed as subcommands of a single `cvc` executable. A thin Boost.program_options frontend over the installed libcvc SDK."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, cli, geometry, tools]
 
 # cvc-cli is its OWN package, separate from libcvc, so the `cvc` tool lands

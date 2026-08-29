@@ -14,7 +14,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "Center for Computational Visualization core C++ library (CUDA / GPU build) — volume voxels in CUDA unified memory for on-device zero-copy, same API as the CPU `libcvc` package."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, state, dsl, geometry, cuda, gpu]
 
 # Virtual-package selection (cvcpkg capability-provider resolution):

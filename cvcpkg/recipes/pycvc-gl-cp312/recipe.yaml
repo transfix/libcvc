@@ -14,7 +14,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-gl-cp312 — the pycvc.gl scriptable scene bindings (over cvcGL + VTK) for CPython 3.12 (cp312): a headless-scriptable VTK scene (Scene.add_geometry/add_volume/show/render_png) used by the grl-snam lab. Ships only the scene module and DEPENDS on the core `pycvc-cp312` package; the two install side by side."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, vtk, scene, scientific, volumetric]
 
 # pycvc-gl builds ONLY the scene module (CVC_BUILD_PYCVC_CORE=OFF,

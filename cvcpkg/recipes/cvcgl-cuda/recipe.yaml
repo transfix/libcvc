@@ -10,7 +10,7 @@ recipe:
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL (CUDA/GPU build) — the Qt-free VTK scene-graph library built against the CUDA libcvc-cuda SDK, so its GPU-only code paths (GL <-> CUDA interop: mapping a volume's CUDA unified/device buffer into a GL 3D texture for on-device volume rendering) compile in. Same cmake package (cvc::cvcGL) and same API as the CPU `cvcgl` package."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, scene, vtk, graphics, cuda, gpu]
 
 # The GPU build of cvcGL — identical sources to the CPU `cvcgl` recipe, built
