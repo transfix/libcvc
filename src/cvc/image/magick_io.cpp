@@ -101,14 +101,33 @@ void set_magick_paths_win() {
 }
 #endif
 
-// Static ImageMagick builds link every coder as a .o into libMagickCore, but
-// RegisterStaticModules() is only called from inside MagickCore/magick.c's
-// GetMagickInfo("*", ...) path — Magick::InitializeMagick alone doesn't force
-// it, so a caller asking specifically for "png" hits the coder registry empty
-// and dies with "NoDecodeDelegateForThisImageFormat PNG". Every embedded glTF
-// texture load on the wasm demo tripped this. Declare the function directly
-// (the header lives under MagickCore/ which isn't on Magick++'s include path
-// via <Magick++.h> alone) and call it explicitly after Genesis.
+// ── wasm-only coder bootstrap ────────────────────────────────────────────
+//
+// Emscripten links a STATIC ImageMagick whose coders are .o members of
+// libMagickCore. RegisterStaticModules() is only reached from inside
+// MagickCore/magick.c's GetMagickInfo("*", ...) path — Magick::InitializeMagick
+// alone doesn't force it — so a caller asking specifically for "png" hits an
+// empty coder registry and dies with "NoDecodeDelegateForThisImageFormat PNG".
+// Every embedded glTF texture load on the wasm demo tripped this.
+//
+// This block is __EMSCRIPTEN__-only ON PURPOSE. It was originally applied to
+// every platform (#262 for RegisterStaticModules, #263 for the per-coder
+// entrypoints) and broke all three native platforms:
+//
+//   * linux/macos link a DYNAMIC-MODULES ImageMagick, where the coders are
+//     already registered by Genesis. Calling the Register* entrypoints again
+//     duplicates those registry entries, and IM then resolves neither the
+//     extension nor its own MIFF fallback — ImageTest.PngRoundTrip and
+//     JpegRoundTripDimensions failed with
+//     "NoEncodeDelegateForThisImageFormat `MIFF'". (#268's commit message
+//     already fingered "duplicate stubs" as the root cause.)
+//   * windows links against the IM DLL's import library, which does not export
+//     the per-coder Register*Image symbols at all, so cvc.dll failed to link
+//     with 7x LNK2001 + LNK1120.
+//
+// Guarding on __EMSCRIPTEN__ keeps the wasm fix — the only build that needs
+// it — and leaves every native build on the coder registry Genesis populates.
+#ifdef __EMSCRIPTEN__
 extern "C" void RegisterStaticModules(void);
 // Also declare the individual coder Register* entrypoints — under
 // -Wl,--gc-sections + wasm-ld's whole-program DCE, calling only
@@ -124,6 +143,7 @@ extern "C" std::size_t RegisterWEBPImage(void);
 extern "C" std::size_t RegisterBMPImage(void);
 extern "C" std::size_t RegisterGIFImage(void);
 extern "C" std::size_t RegisterMIFFImage(void);
+#endif // __EMSCRIPTEN__
 
 void init_magick_once() {
   static std::once_flag once;
@@ -132,9 +152,9 @@ void init_magick_once() {
     set_magick_paths_win();
 #endif
     Magick::InitializeMagick(nullptr);
-    // Populate the coder registry in a static/wasm build. Harmless in the
-    // dynamic-modules build (falls through the same MAGICKCORE_BUILD_MODULES
-    // #ifdef and does nothing).
+#ifdef __EMSCRIPTEN__
+    // wasm only — see the block above. On a native build Genesis has already
+    // populated the coder registry, and re-registering duplicates its entries.
     RegisterStaticModules();
     // Force-observe each Register* return value through a volatile sink so
     // wasm-ld / wasm-opt cannot elide the call (plain "(void)RegisterPNGImage()"
@@ -148,6 +168,7 @@ void init_magick_once() {
     for (auto &fn : keep)
       magick_reg_sink += fn();
     (void)magick_reg_sink;
+#endif // __EMSCRIPTEN__
   });
 }
 
