@@ -255,11 +255,12 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
           const float bd = bphi - v.body_rr;
           const float bipc = ipc_dbdd(bd, d_hat);
-          Fbar_x += -(ali * bipc) * bnx;
-          Fbar_y += -(ali * bipc) * bny;
+          const float alg = v.body_gain == 1.0f ? ali : ali * v.body_gain;
+          Fbar_x += -(alg * bipc) * bnx;
+          Fbar_y += -(alg * bipc) * bny;
           const float brep = bipc < 0.0f ? bipc : 0.0f;
-          Frep_x += -(ali * brep) * bnx;
-          Frep_y += -(ali * brep) * bny;
+          Frep_x += -(alg * brep) * bnx;
+          Frep_y += -(alg * brep) * bny;
           if (bd < d) {
             d = bd;
             nx = bnx;

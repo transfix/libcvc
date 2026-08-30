@@ -205,6 +205,38 @@ TEST(NavDriveRefinements, BarrierIsTheSumOverDiscs) {
   EXPECT_NEAR(ra.sp[0], rb.sp[0], 1e-6f);
 }
 
+TEST(NavDriveRefinements, BodyGainCancelsTheKTimesBarrier) {
+  // body_gain = 1/K makes K COINCIDENT discs exactly one disc again. That is
+  // the whole point of the knob: the summed barrier multiplies the learned `al`
+  // by the disc count, and uncorrected that cost the grl-snam city story its
+  // entire reach (45% -> 0% at matched radius) while IMPROVING both standoff
+  // and collision rate. Gain-corrected it recovers to 35% and keeps both.
+  const world w;
+  const float one_off[1] = {0.0f};
+  const float three_off[3] = {0.0f, 0.0f, 0.0f};
+  veh_params one = base_veh();
+  one.body_offsets = one_off;
+  one.n_body = 1;
+  one.body_rr = 0.012f;
+  veh_params three = one;
+  three.body_offsets = three_off;
+  three.n_body = 3;
+  three.body_gain = 1.0f / 3.0f;
+  // al below the a_max clamp: saturated, 1x and 3x the barrier are identical
+  // and the comparison would be vacuous. be = ga = 0 isolates the barrier.
+  const result ra = roll(w, one, 3, 2.30f, 0.0f, 0.10f, 2.30f, 0.2f, 0.0f, 0.0f);
+  const result rb = roll(w, three, 3, 2.30f, 0.0f, 0.10f, 2.30f, 0.2f, 0.0f, 0.0f);
+  EXPECT_NEAR(ra.o[0], rb.o[0], 1e-6f);
+
+  // ...and the UNCORRECTED sum must genuinely differ, or the knob is
+  // decorative. Compared on position: with no goal spring the speed is set by
+  // the governor alone and is identical either way.
+  veh_params raw = three;
+  raw.body_gain = 1.0f;
+  const result rc = roll(w, raw, 3, 2.30f, 0.0f, 0.10f, 2.30f, 0.2f, 0.0f, 0.0f);
+  EXPECT_GT(std::fabs(rc.o[0] - ra.o[0]), 1e-6f);
+}
+
 // ── steering lock ───────────────────────────────────────────────────────────
 
 TEST(NavDriveRefinements, InnerWheelLockWidensTheTurningCircle) {

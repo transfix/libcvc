@@ -752,7 +752,8 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                                 double a_max, double a_lat_max, double k_steer, int nsub,
                                 int allow_reverse, int num_threads = 0,
                                 PyObject *body_offsets = nullptr, double body_rr = 0.0,
-                                double track_width = 0.0, PyObject *grip = nullptr) {
+                                double body_gain = 1.0, double track_width = 0.0,
+                                PyObject *grip = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -840,6 +841,7 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     // Optional vehicle refinements; absent (None / 0) leaves the legacy drive
     // bit-for-bit. The arrays are borrowed for the call, kept alive by `hold`.
     v.body_rr = static_cast<float>(body_rr);
+    v.body_gain = static_cast<float>(body_gain);
     v.track_width = static_cast<float>(track_width);
     if (body_offsets && body_offsets != Py_None) {
       PyArrayObject *boa = take(body_offsets, NPY_FLOAT, 1);
@@ -1768,8 +1770,8 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
       double max_x, double max_y, double cx, double cy, double scale, double rr, double d_hat,
       double dt, double vmax, double L, double delta_max, double a_max, double a_lat_max,
       double k_steer, int nsub, int allow_reverse, int num_threads = 0,
-      PyObject *body_offsets = nullptr, double body_rr = 0.0, double track_width = 0.0,
-      PyObject *grip = nullptr) {
+      PyObject *body_offsets = nullptr, double body_rr = 0.0, double body_gain = 1.0,
+      double track_width = 0.0, PyObject *grip = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -1882,6 +1884,7 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     // Optional vehicle refinements; absent (None / 0) leaves the legacy drive
     // bit-for-bit. The arrays are borrowed for the call, kept alive by `hold`.
     v.body_rr = static_cast<float>(body_rr);
+    v.body_gain = static_cast<float>(body_gain);
     v.track_width = static_cast<float>(track_width);
     if (body_offsets && body_offsets != Py_None) {
       PyArrayObject *boa = take(body_offsets, NPY_FLOAT, 1);
