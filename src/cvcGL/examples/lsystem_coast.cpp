@@ -1,75 +1,108 @@
-/*
-  Copyright 2026 The University of Texas at Austin
-
-  This file is part of libcvc.
-
-  libcvc is free software; you can redistribute it and/or
-  modify it under the terms of the GNU Lesser General Public
-  License version 2.1 as published by the Free Software Foundation.
-*/
-
-// lsystem_coast — a trial cvcGL island+ocean demo that hosts the GPU FFT-ocean
-// core (OceanFFT), the port target from docs/roadmap/OCEAN-AND-VOLUMETRIC-
-// TERRAIN-NOTES.md. It is a SEPARATE demo from lsystem_forest on purpose:
-// lsystem_forest is the untouched performance control (Lab roadmap §1.3).
+// lsystem_coast — a pure-C++ cvcGL island + GPU FFT-ocean demo. It is the full
+// lsystem_forest island scene (heightfield terrain, L-system forest, drifting fBm
+// clouds, camera-relative sun, StageLighting rig, shadows, CameraController + ImGui
+// controls) with the crude wave-volume sea REPLACED by a real spectral ocean: the
+// ABYSSAL-style GPU FFT ocean core (OceanFFT), the port target from
+// docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md. lsystem_forest stays the
+// untouched performance control (Lab roadmap §1.3); coast is where the water lives.
 //
-// Phase status (see the notes):
-//   * OceanFFT runs the real JONSWAP spectrum + butterfly IFFT (3 cascades).
-//   * DEFAULT (GPU no-readback): the ocean is a STATIC grid whose shader samples
-//     the OceanFFT displacement textures and displaces + shades on the GPU (a
-//     Fresnel water BRDF). No per-frame CPU readback / updateVertices — the
-//     WebGL2-viable path. GeometryNode::setShaderTexture binds the live textures.
-//   * --cpu: a fallback that reads OceanFFT back and CPU-displaces the grid via
-//     updateVertices/updateColors (native only — the readback is not a WebGL2 op).
+// NO SINGLETON: owns an explicit cvc::app and injects it into the scene, so the
+// whole thing runs under one app the caller controls — logging, state and the
+// state publisher all flow through it (cvcGL has no process-wide context).
+//
+// The ocean: 3 JONSWAP cascades (swell + wind-waves + ripples) run as a fragment-
+// shader butterfly IFFT (OceanFFT, WebGL2-portable — no compute shaders), summed on
+// a STATIC grid whose vertex shader samples the live displacement textures and whose
+// fragment shader runs a Fresnel water BRDF: sky reflection, sun glint, Jacobian
+// (wave-fold) foam, a depth-tinted shallow band, and animated SHORE FOAM that hugs
+// the waterline and washes up/down the beach as the swell rises and falls. Driven by
+// cvc::world_clock; every lever lives in the state tree at coast.water.* / coast.clock.*
+// (scriptable from Python and live in the ImGui "Water" panel). No per-frame CPU
+// readback / updateVertices — the WASM-viable path (GeometryNode::setShaderTexture).
+//
+// The rest of the island (verbatim from lsystem_forest): a heightfield terrain
+// (matte + procedural fragment bump map), an L-system FOREST on the dry land (merged
+// route-C to one wood + one needle actor, wind re-posed each frame), a drifting SKY
+// of L-system + fBm clouds (casts a soft ground dapple), a gradient sky with a
+// camera-relative sun, a StageLighting rig, and shadows.
+//
+// Run (onscreen, navigable):   lsystem_coast
+//   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
+//   F toggles the FPS HUD (state coast.viewers.main.hud.*).
+// Verify (offscreen, headless): lsystem_coast --offscreen --frames 30 --png out.png
+// Cinematic capture (mp4-ready): lsystem_coast --capture fly --frames 1800 --fps 30 \
+//   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
 
+#define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
 #include "OceanFFT.h"
 
 #include <algorithm>
 #include <boost/program_options.hpp>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/StageLighting.h>
+#include <cvc/gl/TouchGestures.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/VolumeNode.h>
+#include <cvc/image/image.h>
+#ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
+#include <emscripten.h>
+#endif
+#include <cvc/volume/bounding_box.h>
+#include <cvc/volume/volume.h>
+#include <deque>
+#include <filesystem>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 #include <vtkCamera.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 
+using cvc::gl::CameraController;
+
 namespace {
 
-constexpr double ISLAND_HALF = 120.0; // island terrain spans [-ISLAND_HALF, ISLAND_HALF]
-constexpr int ISLAND_N = 72;          // island mesh resolution (verts per side)
-constexpr double OCEAN_HALF = 220.0;  // ocean extends past the island to the horizon
-constexpr int OCEAN_N = 224;          // ocean grid resolution (verts per side)
-constexpr int FFT_N = 256;            // OceanFFT working resolution (ABYSSAL default)
-constexpr double SEA_LEVEL = 0.0;     // wave amplitude / choppiness / tile now live in state
-constexpr double PEAK = 34.0, SHELF = -9.0;
-constexpr double PI = 3.14159265358979323846;
-constexpr double SUN_AZ = -52.0; // sun azimuth (deg, 0 = +Y toward +X) — matches the key light
-constexpr double SUN_EL = 34.0;  // sun elevation (deg)
+constexpr double HALF = 120.0; // terrain spans [-HALF, HALF]
+constexpr int TN = 96;         // heightfield resolution
+constexpr double PEAK = 34.0, SHELF = -9.0, SEA_LEVEL = 0.0;
 
-// A simple island dome that drops below sea level at the rim (so there is a real
-// shoreline for the ocean to meet), plus two octaves of relief.
-double islandH(double x, double y) {
+// Island heightfield: a central dome that drops below sea level at the rim, plus
+// two octaves of relief (matches the Python demo's base terrain before patches).
+double terrainH(double x, double y) {
   double r2 = x * x + y * y;
-  double h = PEAK * std::exp(-r2 / (0.34 * ISLAND_HALF * ISLAND_HALF)) + SHELF;
+  double h = PEAK * std::exp(-r2 / (0.34 * HALF * HALF)) + SHELF;
   h += 4.5 * std::sin(x * 0.045) * std::cos(y * 0.041);
   h += 2.2 * std::sin(x * 0.11 + 1.3) * std::sin(y * 0.097);
   return h;
 }
 
-cvc::geometry::color_t islandAlbedo(double x, double y) {
-  double h = islandH(x, y);
+// Base terrain albedo at (x,y): grass, blending to rock on the peaks and sand at
+// the waterline. Shared by the mesh colours AND the cloud-shadow texture (which
+// carries albedo × shadow, so it reads correctly whether VTK modulates or replaces
+// the vertex colour with the texture).
+cvc::geometry::color_t terrainAlbedo(double x, double y) {
+  double h = terrainH(x, y);
   const double rock[3] = {0.46, 0.45, 0.43}, grass[3] = {0.27, 0.44, 0.19},
                sand[3] = {0.68, 0.62, 0.44};
   double rockw = std::min(1.0, std::max(0.0, (h - 18.0) / 14.0));
@@ -80,48 +113,454 @@ cvc::geometry::color_t islandAlbedo(double x, double y) {
   return c;
 }
 
-cvc::geometry buildIsland(cvc::app &app) {
+cvc::geometry buildTerrain(cvc::app &app) {
   cvc::geometry g(app);
   auto &pts = g.points();
   auto &cols = g.colors();
-  for (int j = 0; j < ISLAND_N; ++j) {
-    double y = -ISLAND_HALF + 2.0 * ISLAND_HALF * j / (ISLAND_N - 1);
-    for (int i = 0; i < ISLAND_N; ++i) {
-      double x = -ISLAND_HALF + 2.0 * ISLAND_HALF * i / (ISLAND_N - 1);
-      pts.push_back({x, y, islandH(x, y)});
-      cols.push_back(islandAlbedo(x, y));
+  auto &uvs = g.uvs(); // world (x,y) -> [0,1]^2, so the cloud-shadow texture aligns
+  for (int j = 0; j < TN; ++j) {
+    double y = -HALF + 2.0 * HALF * j / (TN - 1);
+    for (int i = 0; i < TN; ++i) {
+      double x = -HALF + 2.0 * HALF * i / (TN - 1);
+      double h = terrainH(x, y);
+      pts.push_back({x, y, h});
+      uvs.push_back({(x + HALF) / (2.0 * HALF), (y + HALF) / (2.0 * HALF)});
+      cols.push_back(terrainAlbedo(x, y));
     }
   }
   auto &tris = g.tris();
-  for (int j = 0; j < ISLAND_N - 1; ++j)
-    for (int i = 0; i < ISLAND_N - 1; ++i) {
-      cvc::geometry::index_t v = j * ISLAND_N + i;
-      tris.push_back({v, static_cast<cvc::geometry::index_t>(v + 1),
-                      static_cast<cvc::geometry::index_t>(v + ISLAND_N)});
+  for (int j = 0; j < TN - 1; ++j)
+    for (int i = 0; i < TN - 1; ++i) {
+      cvc::geometry::index_t v = j * TN + i;
+      tris.push_back({v, v + 1, static_cast<cvc::geometry::index_t>(v + TN)});
       tris.push_back({static_cast<cvc::geometry::index_t>(v + 1),
-                      static_cast<cvc::geometry::index_t>(v + ISLAND_N + 1),
-                      static_cast<cvc::geometry::index_t>(v + ISLAND_N)});
+                      static_cast<cvc::geometry::index_t>(v + TN + 1),
+                      static_cast<cvc::geometry::index_t>(v + TN)});
     }
   return g;
 }
 
-// A flat ocean grid at z = SEA_LEVEL. Its (x,y) are fixed; z is rewritten each
-// frame from the FFT displacement. `baseXY` captures the lattice so the render
-// loop only has to supply z.
-cvc::geometry buildOcean(cvc::app &app, std::vector<double> &baseXY) {
+// The writable fragment-normal at the //VTK::Normal::Impl anchor differs by
+// mapper: desktop vtkOpenGLPolyDataMapper declares a local `normalVCVSOutput`
+// shadowing the varying; the GLES3 mapper (used under Emscripten/WebGL2)
+// instead declares `normalizedNormalVCVSOutput` and never shadows the varying,
+// so assigning `normalVCVSOutput` there is an ESSL 'can't modify an input'
+// error. Target the variant's actual local; desktop GLSL is unchanged.
+#ifdef __EMSCRIPTEN__
+#define CVC_FS_NORMAL "normalizedNormalVCVSOutput"
+#else
+#define CVC_FS_NORMAL "normalVCVSOutput"
+#endif
+
+// Procedural fragment bump map for the ground (verbatim GLSL from the Python demo:
+// value-noise height, normal perturbed by its surface gradient — Mikkelsen's
+// tangent-free method). Needs world-space vertexMC, hence disableCoordinateShiftScale.
+const char *GROUND_GLSL =
+    "float ghash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+    "float gnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  float a=ghash(i), b=ghash(i+vec2(1.,0.)), c=ghash(i+vec2(0.,1.)), d=ghash(i+vec2(1.,1.));\n"
+    "  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);\n"
+    "}\n"
+    "float groundH(vec3 p){\n"
+    "  vec2 q = p.xy * 0.35;\n"
+    "  float f = 0.0, a = 0.5, fr = 1.0;\n"
+    "  for (int i = 0; i < 5; i++){ f += a*gnoise(q*fr); a *= 0.5; fr *= 2.03; }\n"
+    "  return f;\n"
+    "}\n";
+
+void addTerrainBump(GeometryNode &node) {
+  node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+  node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
+  node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
+                                  "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Dec", std::string("//VTK::Normal::Dec\nin vec3 gCoord;\n") + GROUND_GLSL);
+  node.addFragmentShaderReplacement("//VTK::Normal::Impl",
+                                    "//VTK::Normal::Impl\n"
+                                    "  {\n"
+                                    "    float h = groundH(gCoord);\n"
+                                    "    vec3 sS = dFdx(vertexVC.xyz);\n"
+                                    "    vec3 sT = dFdy(vertexVC.xyz);\n"
+                                    "    vec3 vn = " CVC_FS_NORMAL ";\n"
+                                    "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+                                    "    float det = dot(sS, R1);\n"
+                                    "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+                                    "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.4*sg);\n"
+                                    "  }\n");
+}
+
+// ── L-system trees (a faithful C++ port of the Python demo's tree grammar) ────
+// Each tree is grown from the grammar into a module hierarchy, merged into ONE
+// wood mesh + ONE needle mesh (route C), and re-posed every frame by re-running
+// the wind cascade over the merged vertices (GeometryNode::updateVertices) — one
+// actor per mesh, wind intact. Procedural bark rides on the wood normals.
+
+struct Vec3d {
+  double x = 0, y = 0, z = 0;
+};
+struct Mat4 { // row-major 4x4, as GraphicsNode/setTransform takes
+  double m[16];
+  double &at(int r, int c) { return m[r * 4 + c]; }
+  double at(int r, int c) const { return m[r * 4 + c]; }
+};
+Mat4 mIdent() {
+  Mat4 M{};
+  for (int i = 0; i < 4; ++i)
+    M.at(i, i) = 1.0;
+  return M;
+}
+Mat4 mMul(const Mat4 &a, const Mat4 &b) {
+  Mat4 r{};
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j) {
+      double s = 0;
+      for (int k = 0; k < 4; ++k)
+        s += a.at(i, k) * b.at(k, j);
+      r.at(i, j) = s;
+    }
+  return r;
+}
+Mat4 mRot(double ang, double x, double y, double z) {
+  double c = std::cos(ang), s = std::sin(ang), k = 1.0 - c;
+  Mat4 M = mIdent();
+  M.at(0, 0) = c + k * x * x;
+  M.at(0, 1) = k * x * y - s * z;
+  M.at(0, 2) = k * x * z + s * y;
+  M.at(1, 0) = k * x * y + s * z;
+  M.at(1, 1) = c + k * y * y;
+  M.at(1, 2) = k * y * z - s * x;
+  M.at(2, 0) = k * x * z - s * y;
+  M.at(2, 1) = k * y * z + s * x;
+  M.at(2, 2) = c + k * z * z;
+  return M;
+}
+Mat4 mTrans(double x, double y, double z) {
+  Mat4 M = mIdent();
+  M.at(0, 3) = x;
+  M.at(1, 3) = y;
+  M.at(2, 3) = z;
+  return M;
+}
+Vec3d xform(const Mat4 &M, Vec3d p) { // p @ R^T + t  ==  R@p + t
+  return {M.at(0, 0) * p.x + M.at(0, 1) * p.y + M.at(0, 2) * p.z + M.at(0, 3),
+          M.at(1, 0) * p.x + M.at(1, 1) * p.y + M.at(1, 2) * p.z + M.at(1, 3),
+          M.at(2, 0) * p.x + M.at(2, 1) * p.y + M.at(2, 2) * p.z + M.at(2, 3)};
+}
+
+const char *TREE_RULES[5] = {"FF[RL1][RR2][RRR3]F[RL3][RR1][RRR2]RFLR0", "FL[T[RF]2]R[TRFL]RTFL4",
+                             "FL[TRF3]RFLRTFL2", "FL[TFL2RFL]R[T[RFLF3]]RTFL2",
+                             "FL[TRFL4]RFLRTFL4"};
+constexpr double YROTATE = 10.0, TILT = 120.0, MICRO_TILT = 1.0e-4;
+constexpr double T_SCALE = 0.9, T_RADSCALE = 0.6, T_LENGTH = 5.0, T_RADIUS = 0.7;
+constexpr int BASE_TRI = 5, NEEDLES = 9;
+constexpr double LEAF_LEN = 4.0, LEAF_RAD = 1.0;
+constexpr int SWAY_LEVELS = 2;
+const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
+const Vec3d C_WOOD_LIGHT{0.6549, 0.4901, 0.2392}, C_WOOD_DARK{0.3607, 0.2510, 0.2000};
+const Vec3d C_NEEDLE{0.1373, 0.5568, 0.1373};
+
+struct Seg {
+  Mat4 m;
+  double len, rad;
+};
+struct Leaf {
+  Mat4 m;
+  double sc;
+};
+struct Module {
+  int parent;
+  int level;
+  Mat4 hang;
+  std::vector<Seg> segs;
+  std::vector<Leaf> leaves;
+};
+
+int expandTree(const std::string &rule, int depth, double scale, double radscale, int parent,
+               int level, std::vector<Module> &out, const Mat4 &tMicro, const Mat4 &tTilt,
+               const Mat4 &tRoll) {
+  int me = static_cast<int>(out.size());
+  out.push_back(Module{parent, level, mIdent(), {}, {}});
+  Mat4 cur = mIdent();
+  std::vector<Mat4> stack;
+  double segLen = T_LENGTH * scale, segRad = T_RADIUS * radscale;
+  Mat4 step = mTrans(0.0, segLen, 0.0);
+  for (char ch : rule) {
+    if (ch == 'F') {
+      cur = mMul(cur, tMicro);
+      out[me].segs.push_back({cur, segLen, segRad});
+      cur = mMul(cur, step);
+    } else if (ch == '[') {
+      stack.push_back(cur);
+    } else if (ch == ']') {
+      cur = stack.back();
+      stack.pop_back();
+    } else if (ch == 'L') {
+      out[me].leaves.push_back({cur, scale});
+    } else if (ch == 'R') {
+      cur = mMul(cur, tRoll);
+    } else if (ch == 'T') {
+      cur = mMul(cur, tTilt);
+    } else if (std::isdigit((unsigned char)ch) && depth > 1) {
+      int child = expandTree(TREE_RULES[ch - '0'], depth - 1, scale * T_SCALE,
+                             radscale * T_RADSCALE, me, level + 1, out, tMicro, tTilt, tRoll);
+      out[child].hang = cur;
+    }
+  }
+  return me;
+}
+
+// The unit cylinder (_CYL) ring + triangle topology + per-vertex wood colour.
+struct CylTopo {
+  std::vector<Vec3d> ringUnit; // BASE_TRI points on the unit circle in XZ
+  std::vector<cvc::geometry::index_t> tris;
+  std::vector<Vec3d> colors; // 2*BASE_TRI+2 per-vertex wood colours
+};
+CylTopo cylTopo() {
+  CylTopo c;
+  for (int i = 0; i < BASE_TRI; ++i) {
+    double a = i * 2.0 * M_PI / BASE_TRI;
+    c.ringUnit.push_back({std::cos(a), 0.0, std::sin(a)});
+  }
+  for (int i = 0; i < BASE_TRI; ++i) {
+    int b0 = 1 + i, b1 = 1 + (i + 1) % BASE_TRI;
+    int t0 = BASE_TRI + 2 + i, t1 = BASE_TRI + 2 + (i + 1) % BASE_TRI;
+    int idx[12] = {0, b0, b1, BASE_TRI + 1, t1, t0, b0, t1, b1, b0, t0, t1};
+    for (int k = 0; k < 12; ++k)
+      c.tris.push_back(idx[k]);
+  }
+  c.colors.push_back(C_WOOD_LIGHT);
+  for (int i = 0; i < BASE_TRI; ++i)
+    c.colors.push_back(C_WOOD_DARK);
+  c.colors.push_back(C_WOOD_LIGHT);
+  for (int i = 0; i < BASE_TRI; ++i)
+    c.colors.push_back(C_WOOD_DARK);
+  return c;
+}
+
+struct ModRec {
+  int parent;
+  Mat4 hang;
+  bool swayer;
+  std::vector<Vec3d> localWood; // module-frame wood verts
+  int wOff;
+  std::vector<Vec3d> localNeedle;
+  int nOff;
+};
+struct Tree {
+  std::vector<ModRec> mods; // wOff/nOff index the MERGED forest buffers, not a per-tree one
+  double phase = 0, sway = 0;
+};
+
+// Bark shader (verbatim GLSL from the latest master demo): vertical furrows around
+// the branch (angle of the bind-pose normal) + axial variation, perturbing the
+// normal by the height's surface gradient. Keeps the per-vertex wood colour.
+const char *BARK_GLSL =
+    "float bhash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }\n"
+    "float bnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(bhash(i), bhash(i+vec2(1,0)), f.x),\n"
+    "             mix(bhash(i+vec2(0,1)), bhash(i+vec2(1,1)), f.x), f.y);\n"
+    "}\n"
+    "float barkH(vec3 nrm, float z){\n"
+    "  float ang = atan(nrm.y, nrm.x);\n"
+    "  float f = 0.0;\n"
+    "  f += 0.6*sin(ang*10.0 + 1.5*sin(z*0.7));\n"
+    "  f += 0.3*sin(ang*23.0 + z*0.4);\n"
+    "  f += 0.3*bnoise(vec2(ang*4.0, z*1.2));\n"
+    "  return f;\n"
+    "}\n";
+void addBark(GeometryNode &node) {
+  node.disableCoordinateShiftScale();
+  node.addVertexShaderReplacement("//VTK::Normal::Dec",
+                                  "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
+  node.addVertexShaderReplacement(
+      "//VTK::PositionVC::Impl",
+      "//VTK::PositionVC::Impl\n  bNrm = normalMC; bPos = vertexMC.xyz;");
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Dec",
+      std::string("//VTK::Normal::Dec\nin vec3 bNrm;\nin vec3 bPos;\n") + BARK_GLSL);
+  node.addFragmentShaderReplacement(
+      "//VTK::Normal::Impl",
+      "//VTK::Normal::Impl\n"
+      "  {\n"
+      "    float h = barkH(normalize(bNrm), bPos.z);\n"
+      "    vec3 sS = dFdx(vertexVC.xyz), sT = dFdy(vertexVC.xyz), vn = " CVC_FS_NORMAL ";\n"
+      "    vec3 R1 = cross(sT, vn), R2 = cross(vn, sS);\n"
+      "    float det = dot(sS, R1);\n"
+      "    vec3 sg = sign(det) * (dFdx(h)*R1 + dFdy(h)*R2);\n"
+      "    " CVC_FS_NORMAL " = normalize(abs(det)*vn - 1.2*sg);\n"
+      "  }\n");
+}
+
+// The tree turtle stands on +Y; the world is Z-up.
+Mat4 treeUp() { return mRot(M_PI / 2.0, 1.0, 0.0, 0.0); }
+
+// Grow one tree's geometry INTO the shared forest meshes (wg = wood, ng = needle),
+// recording per-module re-pose records whose offsets index those SHARED buffers.
+// The whole forest is merged to ONE wood actor + ONE needle actor (route C across
+// trees): the wind re-poses every tree into two big buffers uploaded once per frame,
+// not 64 tiny per-actor uploads — 64 draw calls collapse to 2 in both the main pass
+// and the shadow-map bake.
+Tree buildTree(cvc::app &app, double px, double py, double pz, const std::vector<Module> &mods,
+               const CylTopo &cyl, const std::vector<Vec3d> &nring, cvc::geometry &wg,
+               cvc::geometry &ng) {
+  Tree tree;
+  Mat4 tUp = treeUp();
+  std::vector<Mat4> world(mods.size());
+  int wCur = static_cast<int>(wg.points().size()); // GLOBAL offsets into the merged forest mesh
+  int nCur = static_cast<int>(ng.points().size());
+  for (size_t i = 0; i < mods.size(); ++i) {
+    const Module &mod = mods[i];
+    Mat4 hang = (mod.parent < 0) ? mMul(mTrans(px, py, pz), tUp) : mod.hang;
+    world[i] = (mod.parent < 0) ? hang : mMul(world[mod.parent], hang);
+    ModRec rec;
+    rec.parent = mod.parent;
+    rec.hang = hang;
+    rec.swayer = mod.level <= SWAY_LEVELS;
+    rec.wOff = wCur;
+    rec.nOff = nCur;
+    // wood: one _CYL per segment, in the module's local frame
+    for (const Seg &s : mod.segs) {
+      Vec3d loc[2 * BASE_TRI + 2];
+      loc[0] = {0, 0, 0};
+      loc[BASE_TRI + 1] = {0, s.len, 0};
+      for (int r = 0; r < BASE_TRI; ++r) {
+        loc[1 + r] = {cyl.ringUnit[r].x * s.rad, 0.0, cyl.ringUnit[r].z * s.rad};
+        loc[BASE_TRI + 2 + r] = {cyl.ringUnit[r].x * s.rad, s.len, cyl.ringUnit[r].z * s.rad};
+      }
+      cvc::geometry::index_t base = wg.points().size();
+      for (int v = 0; v < 2 * BASE_TRI + 2; ++v) {
+        Vec3d p = xform(s.m, loc[v]); // module-frame vertex
+        rec.localWood.push_back(p);
+        Vec3d w = xform(world[i], p); // bind-pose world vertex
+        wg.points().push_back({w.x, w.y, w.z});
+        wg.colors().push_back({cyl.colors[v].x, cyl.colors[v].y, cyl.colors[v].z});
+      }
+      for (size_t k = 0; k < cyl.tris.size(); k += 3)
+        wg.tris().push_back({base + cyl.tris[k], base + cyl.tris[k + 1], base + cyl.tris[k + 2]});
+    }
+    // needles: one star per leaf
+    for (const Leaf &lf : mod.leaves) {
+      cvc::geometry::index_t base = ng.points().size();
+      Vec3d root = xform(lf.m, {0, 0, 0});
+      rec.localNeedle.push_back({0, 0, 0});
+      ng.points().push_back(
+          {xform(world[i], root).x, xform(world[i], root).y, xform(world[i], root).z});
+      for (int t = 0; t < NEEDLES; ++t) {
+        Vec3d tip{nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc, nring[t].z * LEAF_RAD * lf.sc};
+        Vec3d pm = xform(lf.m, tip);
+        rec.localNeedle.push_back(pm);
+        Vec3d w = xform(world[i], pm);
+        ng.points().push_back({w.x, w.y, w.z});
+        ng.lines().push_back({base, static_cast<cvc::geometry::index_t>(base + 1 + t)});
+      }
+    }
+    wCur = static_cast<int>(wg.points().size());
+    nCur = static_cast<int>(ng.points().size());
+    tree.mods.push_back(std::move(rec));
+  }
+  return tree;
+}
+
+// Seed a flat [x,y,z,...] buffer from a merged mesh's bind-pose points.
+std::vector<double> flattenPoints(const cvc::geometry &g) {
+  std::vector<double> buf(g.points().size() * 3);
+  for (size_t v = 0; v < g.points().size(); ++v) {
+    buf[v * 3] = g.points()[v][0];
+    buf[v * 3 + 1] = g.points()[v][1];
+    buf[v * 3 + 2] = g.points()[v][2];
+  }
+  return buf;
+}
+
+// ── the afternoon sun (a flat-lit disc + faint halo, far out) ────────────────
+constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
+constexpr double SUN_REF_DIST = 900.0; // reference distance for the sun's angular size
+constexpr double SUN_DISC_R = 26.0;    // disc radius at SUN_REF_DIST (~1.6° angular)
+constexpr double SUN_DEPTH_CAP =
+    150.0; // max sun-direction depth — keeps the sun within the
+           // shadow-map depth range so it never self-shadows the island
+Vec3d vnorm(Vec3d a) {
+  double l = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  return l > 1e-12 ? Vec3d{a.x / l, a.y / l, a.z / l} : Vec3d{0, 0, 1};
+}
+Vec3d vcross(Vec3d a, Vec3d b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+Vec3d sunDir(double azDeg, double elDeg) {
+  double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
+  return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
+}
+cvc::geometry discGeom(cvc::app &app, Vec3d c, Vec3d normal, double radius, int seg = 48) {
+  Vec3d n = vnorm(normal);
+  Vec3d up = std::fabs(n.z) < 0.9 ? Vec3d{0, 0, 1} : Vec3d{1, 0, 0};
+  Vec3d u = vnorm(vcross(n, up));
+  Vec3d v = vcross(n, u);
+  cvc::geometry g(app);
+  g.points().push_back({c.x, c.y, c.z});
+  for (int i = 0; i < seg; ++i) {
+    double th = i * 2.0 * M_PI / seg;
+    g.points().push_back({c.x + radius * (std::cos(th) * u.x + std::sin(th) * v.x),
+                          c.y + radius * (std::cos(th) * u.y + std::sin(th) * v.y),
+                          c.z + radius * (std::cos(th) * u.z + std::sin(th) * v.z)});
+  }
+  for (int i = 0; i < seg; ++i)
+    g.tris().push_back({0, static_cast<cvc::geometry::index_t>(1 + i),
+                        static_cast<cvc::geometry::index_t>(1 + (i + 1) % seg)});
+  return g;
+}
+// Sun disc + halo, built at the ORIGIN facing back down the sun ray. main()
+// repositions them to (cameraEye + sunDir·SUN_CAM_DIST) every frame, so the sun
+// sits a constant distance AHEAD of the camera in the fixed world sun direction —
+// effectively at infinity: always in the sky where the light comes from, and never
+// able to drift between the camera and the island (the old fixed-world disc did,
+// eclipsing the scene as the camera came around). Flat-lit (ambient only), so it
+// is a bright disc from any angle and is immune to shadows.
+void addSun(cvc::app &app, SceneGraph &sg) {
+  Vec3d d = sunDir(SUN_AZ, SUN_EL);
+  Vec3d face{-d.x, -d.y, -d.z}; // faces back toward the camera
+  sg.addGraphics("sun", discGeom(app, {0, 0, 0}, face, SUN_DISC_R));
+  auto disc = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun"));
+  disc->setColor(1.0, 0.97, 0.88);
+  disc->setAmbient(1.0);
+  disc->setDiffuse(0.0);
+  disc->setSpecular(0.0);
+  // Opacity just under 1 puts the disc in the TRANSLUCENT bucket, so the opaque
+  // shadow-map bake skips it (an opaque billboard 900 units away would stretch the
+  // light's depth range and self-shadow the island to black). Visually still solid.
+  disc->setOpacity(0.99);
+  sg.addGraphics("sun_halo", discGeom(app, {0, 0, 0}, face, SUN_DISC_R * 3.4));
+  auto halo = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun_halo"));
+  halo->setColor(1.0, 0.90, 0.72);
+  halo->setAmbient(1.0);
+  halo->setDiffuse(0.0);
+  halo->setSpecular(0.0);
+  halo->setOpacity(0.22);
+}
+
+// ── the ocean: a GPU spectral FFT sea (OceanFFT) on a static grid ────────────
+// The crude wave-volume sea is replaced by a real ABYSSAL-style FFT ocean. The sea
+// is a STATIC flat grid at z = SEA_LEVEL that extends past the island to the horizon;
+// its vertex shader samples the live OceanFFT displacement textures (bound via
+// GeometryNode::setShaderTexture) and displaces on the GPU, and its fragment shader
+// runs the water BRDF. No CPU readback / per-frame updateVertices — the WASM path.
+constexpr double OCEAN_HALF = 220.0; // ocean overhangs the island out to the horizon
+constexpr int OCEAN_N = 224;         // ocean grid resolution (verts per side)
+constexpr int FFT_N = 256;           // OceanFFT working resolution (ABYSSAL default)
+
+// A flat ocean grid at z = SEA_LEVEL. Its (x,y) are fixed; the GPU displaces z (and
+// choppy x/y) from the FFT textures each frame — the mesh itself never changes.
+cvc::geometry buildOcean(cvc::app &app) {
   cvc::geometry g(app);
   auto &pts = g.points();
   auto &cols = g.colors();
-  baseXY.clear();
-  baseXY.reserve(static_cast<size_t>(OCEAN_N) * OCEAN_N * 2);
   for (int j = 0; j < OCEAN_N; ++j) {
     double y = -OCEAN_HALF + 2.0 * OCEAN_HALF * j / (OCEAN_N - 1);
     for (int i = 0; i < OCEAN_N; ++i) {
       double x = -OCEAN_HALF + 2.0 * OCEAN_HALF * i / (OCEAN_N - 1);
       pts.push_back({x, y, SEA_LEVEL});
-      cols.push_back({0.05, 0.20, 0.32}); // deep-water blue (Phase 1 replaces with optics)
-      baseXY.push_back(x);
-      baseXY.push_back(y);
+      cols.push_back({0.05, 0.20, 0.32}); // fallback colour if the BRDF is unavailable
     }
   }
   auto &tris = g.tris();
@@ -138,12 +577,9 @@ cvc::geometry buildOcean(cvc::app &app, std::vector<double> &baseXY) {
 }
 
 // ── GPU ocean shaders (no-readback path) ──────────────────────────────────────
-// The sea is a STATIC flat grid; its vertex shader samples the 3 OceanFFT
-// displacement textures (bound live via GeometryNode::setShaderTexture) and
-// displaces on the GPU; its fragment shader runs the water BRDF. No CPU readback,
-// no per-frame updateVertices/Colors. Uniforms/samplers are declared here and set
-// each draw via setShaderUniform*/setShaderTexture. World XY comes from vertexMC
-// (disableCoordinateShiftScale). textureLod is used (vertex-stage texture fetch).
+// Vertex shader: sum the 3 cascade displacement textures (each tiled at its own
+// metre scale) and displace a mutable copy of vertexMC (immutable `in` under
+// disableCoordinateShiftScale). World XY comes straight from vertexMC.
 const char *OCEAN_VS_DEC =
     "//VTK::PositionVC::Dec\n"
     "out vec3 vWorldPos;\n"
@@ -161,9 +597,6 @@ const char *OCEAN_VS_DEC =
     "float oHt(vec2 w){ return "
     "uWeight0*textureLod(uDisp0,w/uTile0,0.0).y+uWeight1*textureLod(uDisp1,w/"
     "uTile1,0.0).y+uWeight2*textureLod(uDisp2,w/uTile2,0.0).y; }\n";
-// Full replacement of the position impl: vertexMC is an immutable `in` (with
-// shift-scale disabled), so displace a mutable COPY and drive gl_Position /
-// vertexVCVSOutput from it — replicating VTK's own two lines with the copy.
 const char *OCEAN_VS_IMPL =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 owxy = dispMC.xy;\n"
@@ -178,13 +611,34 @@ const char *OCEAN_VS_IMPL =
     "  vWorldPos = dispMC.xyz;\n"
     "  vOceanN = oN;\n"
     "  vOceanJac = od.w;\n";
-const char *OCEAN_FS_DEC = "//VTK::Normal::Dec\n"
-                           "in vec3 vWorldPos;\n"
-                           "in vec3 vOceanN;\n"
-                           "in float vOceanJac;\n"
-                           "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n";
-// Consumes //VTK::Light::Impl (VTK's lighting is replaced): writes the final
-// water colour to gl_FragData[0] directly.
+// Fragment shader: a Fresnel water BRDF + a depth-tinted shallow band + animated
+// shore foam. coastH() is the island heightfield terrainH() ported to GLSL, so the
+// shader knows the seabed at any world (x,y) and can compute the LOCAL water depth
+// (surface z − seabed) — the waterline is depth 0, and because the surface z rises
+// and falls with the swell, the thin-water band (and its foam) washes up and down
+// the beach as the waves roll in. onoise() breaks the foam edge into surf.
+const char *OCEAN_FS_DEC =
+    "//VTK::Normal::Dec\n"
+    "in vec3 vWorldPos;\n"
+    "in vec3 vOceanN;\n"
+    "in float vOceanJac;\n"
+    "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n"
+    "uniform float uTime; uniform float uShore;\n"
+    // island seabed: terrainH(x,y) in GLSL (PEAK=34, SHELF=-9, 0.34*HALF*HALF=4896).
+    "float coastH(vec2 p){\n"
+    "  float h = 34.0*exp(-dot(p,p)/4896.0) - 9.0;\n"
+    "  h += 4.5*sin(p.x*0.045)*cos(p.y*0.041);\n"
+    "  h += 2.2*sin(p.x*0.11+1.3)*sin(p.y*0.097);\n"
+    "  return h;\n"
+    "}\n"
+    "float ohash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
+    "float onoise(vec2 p){\n"
+    "  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(ohash(i),ohash(i+vec2(1,0)),f.x),\n"
+    "             mix(ohash(i+vec2(0,1)),ohash(i+vec2(1,1)),f.x), f.y);\n"
+    "}\n";
+// Consumes //VTK::Light::Impl (VTK's lighting is replaced): writes the final water
+// colour to gl_FragData[0] directly.
 const char *OCEAN_FS_LIGHT =
     "  vec3 N = normalize(vOceanN);\n"
     "  vec3 Vd = normalize(uCamPos - vWorldPos);\n"
@@ -195,140 +649,690 @@ const char *OCEAN_FS_LIGHT =
     "  vec3 Rr = 2.0*NdotV*N - Vd;\n"
     "  float skyT = clamp(0.5+0.5*Rr.z, 0.0, 1.0);\n"
     "  float glint = pow(max(dot(Rr, uSunDir), 0.0), 200.0)*1.8;\n"
-    "  vec3 deep = vec3(0.015,0.085,0.130)*lit;\n"
-    "  vec3 sky = mix(vec3(0.62,0.66,0.70), vec3(0.24,0.44,0.72), skyT);\n"
+    "  vec3 deep = vec3(0.05,0.22,0.38)*lit;\n"
+    "  vec3 sky = mix(vec3(0.66,0.72,0.78), vec3(0.26,0.50,0.80), skyT);\n"
     "  vec3 col = mix(deep, sky, Fr) + glint*vec3(1.0,0.96,0.88);\n"
+    // Local water depth = surface z − seabed. Shallow water is TRANSLUCENT: the sandy
+    // bottom shows through, attenuated by depth (Beer–Lambert clarity), so the shoals
+    // read a bright sandy turquoise that deepens to open blue offshore.
+    "  float depth = vWorldPos.z - coastH(vWorldPos.xy);\n"
+    "  float clarity = exp(-max(depth,0.0)*0.20);\n"
+    "  vec3 sand = vec3(0.66,0.64,0.50);\n"
+    "  vec3 shoal = mix(vec3(0.12,0.46,0.54), sand, clarity*0.55);\n"
+    "  col = mix(col, shoal, clarity*0.85);\n"
+    // Jacobian (wave-fold) foam on the open sea.
     "  float foam = clamp((uFoamBias - vOceanJac)/0.85, 0.0, 1.0); foam=foam*foam*(3.0-2.0*foam);\n"
-    "  col = mix(col, vec3(0.92,0.95,0.96), foam);\n"
+    // shore foam: a bright, noisy band right at the waterline, washing up the beach.
+    "  float band = 1.0 - smoothstep(0.0, 1.8, abs(depth));\n"
+    "  float nz = onoise(vWorldPos.xy*0.4 + vec2(uTime*0.6, uTime*0.35));\n"
+    "  float shoreFoam = clamp(band*(0.55+0.75*nz)*step(-0.4, depth)*uShore, 0.0, 1.0);\n"
+    "  foam = max(foam, shoreFoam);\n"
+    "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
+
+// ── the sky: a drifting, evolving cloud slab grown by an L-system 3-D turtle ──
+// A faithful C++ port of the Python demo's cloud volume. The turtle moves in 3-D
+// and deposits a Gaussian BALL per F (so a puff is round, not a column); two
+// independent skies are grown, then per frame crossfaded (the cloud changes SHAPE
+// as it travels) and sub-cell scrolled along +x (smooth drift at any speed). The
+// slab is thin in z relative to x/y, faded at all six faces so nothing is cut
+// square, and normalised on a high percentile so a few overlaps don't set the
+// scale. Empty sky is pinned EXACTLY transparent; only dense cores composite.
+constexpr int SKY_N = 60, SKY_NZ = 28; // finer grid for fBm detail, but sized for realtime
+constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0; // a deep slab, so puffs are round
+constexpr double SKY_HALF = 150.0;                 // overhangs the island a little
+constexpr double CLOUD_DRIFT = 3.0;                // world units / second (gentle)
+constexpr double CLOUD_MORPH_S = 60.0; // seconds per crossfade (slow, so it barely pulses)
+constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
+constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 8.1, CLOUD_STEP_DECAY = 0.9; // step/puff
+constexpr double CLOUD_PUFF0 = 8.8, CLOUD_PUFF_DECAY = 0.88;                   // scaled with SKY_N
+constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
+const char *CLOUD_AXIOM = "[A][+++++A][-----A][++++++++++A][----------A][+++++++++++++++A]";
+const char *cloudRule(char c) {
+  switch (c) {
+  case 'A':
+    return "FF[+<B]^F[-<C]<F[+<C]vFA"; // anvil-ward drift, throws B/C fringes
+  case 'B':
+    return "F[+<F]F<[-<F]vB";
+  case 'C':
+    return "^<F[+<F][-<F]^<FC";
+  default:
+    return nullptr;
+  }
+}
+inline size_t skyIdx(int z, int y, int x) { // field is (nz, ny, nx), C order
+  return (static_cast<size_t>(z) * SKY_N + y) * SKY_N + x;
+}
+// numpy-style linear percentile of an already-sorted array.
+double percentileSorted(const std::vector<float> &a, double q) {
+  if (a.empty())
+    return 0.0;
+  double rank = (q / 100.0) * (a.size() - 1);
+  size_t lo = static_cast<size_t>(std::floor(rank));
+  if (lo + 1 >= a.size())
+    return a.back();
+  return a[lo] + (rank - lo) * (a[lo + 1] - a[lo]);
+}
+// ── 3-D value-noise fBm, for the clouds' fractal fluff ────────────────────────
+// A cheap integer-lattice hash -> smooth trilinear value noise -> a few octaves.
+// Summing octaves (each finer + fainter) gives fractal Brownian motion: the same
+// billowing detail at every scale, which is what turns a smooth blob into a
+// cauliflower cloud with wispy edges.
+double vhash3(int x, int y, int z) {
+  unsigned h = static_cast<unsigned>(x * 374761393 + y * 668265263 + z * 1274126177);
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return ((h ^ (h >> 16)) & 0xffffffu) / double(0x1000000);
+}
+double vnoise3(double x, double y, double z) {
+  int xi = (int)std::floor(x), yi = (int)std::floor(y), zi = (int)std::floor(z);
+  double fx = x - xi, fy = y - yi, fz = z - zi;
+  auto sm = [](double t) { return t * t * (3.0 - 2.0 * t); };
+  fx = sm(fx);
+  fy = sm(fy);
+  fz = sm(fz);
+  auto L = [](double a, double b, double t) { return a + (b - a) * t; };
+  double x00 = L(vhash3(xi, yi, zi), vhash3(xi + 1, yi, zi), fx);
+  double x10 = L(vhash3(xi, yi + 1, zi), vhash3(xi + 1, yi + 1, zi), fx);
+  double x01 = L(vhash3(xi, yi, zi + 1), vhash3(xi + 1, yi, zi + 1), fx);
+  double x11 = L(vhash3(xi, yi + 1, zi + 1), vhash3(xi + 1, yi + 1, zi + 1), fx);
+  return L(L(x00, x10, fy), L(x01, x11, fy), fz);
+}
+double fbm3(double x, double y, double z, int octaves) {
+  double f = 0.0, amp = 0.5, tot = 0.0, fr = 1.0;
+  for (int i = 0; i < octaves; ++i) {
+    f += amp * vnoise3(x * fr, y * fr, z * fr);
+    tot += amp;
+    amp *= 0.5;
+    fr *= 2.02;
+  }
+  return f / tot; // [0,1]
+}
+// Grow ONE 3-D cloud field: run the turtle, splat a Gaussian ball per F, normalise
+// on the 99.9th percentile, then fade at the faces (hanning^0.5 in x/y, sine in z).
+std::vector<float> walkClouds(std::mt19937 &rng) {
+  std::uniform_real_distribution<double> U(0.0, 1.0);
+  auto uni = [&](double a, double b) { return a + (b - a) * U(rng); };
+  const int N = SKY_N, NZ = SKY_NZ;
+  std::vector<float> field(static_cast<size_t>(NZ) * N * N, 0.0f);
+  // z is squashed: the slab is much thinner than it is wide, so a world-round puff
+  // spans far fewer cells vertically.
+  const double zscale = (double(N) / NZ) * ((SKY_TOP - SKY_BASE) / (2.0 * SKY_HALF));
+
+  double x = uni(0.25, 0.75) * N, y = uni(0.3, 0.7) * N, z = NZ * 0.42;
+  double head = uni(0.0, 360.0);
+  double step = CLOUD_STEP0, puff = CLOUD_PUFF0, climb = 0.0;
+  int depth = 0;
+  struct St {
+    double x, y, z, head, step, puff, climb;
+    int depth;
+  };
+  std::vector<St> stack;
+  std::deque<char> todo(CLOUD_AXIOM, CLOUD_AXIOM + std::strlen(CLOUD_AXIOM));
+  int guard = 0;
+  while (!todo.empty() && guard < 4000) {
+    ++guard;
+    char c = todo.front();
+    todo.pop_front();
+    if (c == 'F') {
+      x = std::fmod(x + step * std::cos(head * M_PI / 180.0), double(N));
+      if (x < 0)
+        x += N; // Python % always lands in [0, N)
+      y = std::min(std::max(y + step * std::sin(head * M_PI / 180.0), 0.0), double(N - 1));
+      z = std::min(std::max(z + climb, 1.0), double(NZ - 2));
+      const double p2 = 2.0 * puff * puff;
+      for (int gz = 0; gz < NZ; ++gz) {
+        double dz = (gz - z) * zscale, dz2 = dz * dz;
+        for (int gy = 0; gy < N; ++gy) {
+          double dy = gy - y, dyz2 = dy * dy + dz2;
+          for (int gx = 0; gx < N; ++gx) {
+            double dx = std::fabs(gx - x);
+            dx = std::min(dx, double(N) - dx); // nearest image across the seam
+            field[skyIdx(gz, gy, gx)] += static_cast<float>(std::exp(-(dx * dx + dyz2) / p2));
+          }
+        }
+      }
+    } else if (c == '+') {
+      head += CLOUD_TURN;
+    } else if (c == '-') {
+      head -= CLOUD_TURN;
+    } else if (c == '<') {
+      puff *= CLOUD_PUFF_DECAY;
+    } else if (c == '^') {
+      climb += 0.55; // a turret climbs as it goes
+    } else if (c == 'v') {
+      climb -= 0.45; // a fringe sags away underneath
+    } else if (c == '[') {
+      stack.push_back({x, y, z, head, step, puff, climb, depth});
+    } else if (c == ']') {
+      if (!stack.empty()) {
+        St s = stack.back();
+        stack.pop_back();
+        x = s.x;
+        y = s.y;
+        z = s.z;
+        head = s.head;
+        step = s.step;
+        puff = s.puff;
+        climb = s.climb;
+        depth = s.depth;
+      }
+    } else if (cloudRule(c) && depth < CLOUD_DEPTH) {
+      ++depth;
+      step *= CLOUD_STEP_DECAY;
+      const char *r = cloudRule(c);
+      todo.insert(todo.begin(), r, r + std::strlen(r)); // list(rule) + todo
+    }
+  }
+  // Normalise on a high percentile, not the max: one overlap must not set the scale.
+  std::vector<float> sorted(field);
+  std::sort(sorted.begin(), sorted.end());
+  double m = percentileSorted(sorted, 99.9);
+  if (m > 0)
+    for (float &v : field)
+      v = std::min(1.0f, std::max(0.0f, v / static_cast<float>(m)));
+  // Fade at the slab faces (hanning^0.5 across x/y, a half-sine across z), and in
+  // the same pass modulate the density with fractal (fBm) noise so the smooth
+  // Gaussian base billows into cauliflower lumps and frays into wisps at the edges
+  // — the fluffy, self-similar texture of a real cumulus rather than a soft blob.
+  std::vector<double> w(N), zf(NZ);
+  for (int i = 0; i < N; ++i)
+    w[i] = std::sqrt(0.5 - 0.5 * std::cos(2.0 * M_PI * i / (N - 1)));
+  for (int k = 0; k < NZ; ++k)
+    zf[k] = std::sin(0.12 + (M_PI - 0.24) * k / (NZ - 1));
+  for (int gz = 0; gz < NZ; ++gz)
+    for (int gy = 0; gy < N; ++gy)
+      for (int gx = 0; gx < N; ++gx) {
+        float &v = field[skyIdx(gz, gy, gx)];
+        v *= static_cast<float>(std::min(w[gy], w[gx]) * zf[gz]);
+        if (v > 0.0f) {
+          double d = fbm3(gx * 0.30, gy * 0.30, gz * 0.62, 5); // [0,1] fractal detail
+          v = static_cast<float>(std::min(1.0, std::max(0.0, v * (0.32 + 1.5 * d))));
+        }
+      }
+  // Cheap BAKED top-light: march each voxel toward the sun, accumulate the cloud
+  // density in the way, and thin the voxel by that shadow. The sunlit crowns keep
+  // full density (solid + white); the self-shadowed undersides drop toward a floor
+  // (softer, more translucent, a cool wash of sky through them) — a real sense of
+  // depth WITHOUT VTK's volume gradient-shade, which grays this fractal field.
+  {
+    Vec3d sd = sunDir(SUN_AZ, SUN_EL); // toward the sun (world)
+    double ux = sd.x * N / (2.0 * SKY_HALF), uy = sd.y * N / (2.0 * SKY_HALF),
+           uz = sd.z * NZ / (SKY_TOP - SKY_BASE); // sun step in grid cells
+    double ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    auto samp = [&](double cx, double cy, double cz) -> double {
+      if (cx < 0 || cx > N - 1 || cy < 0 || cy > N - 1 || cz < 0 || cz > NZ - 1)
+        return 0.0;
+      int x0 = (int)cx, y0 = (int)cy, z0 = (int)cz;
+      int x1 = std::min(x0 + 1, N - 1), y1 = std::min(y0 + 1, N - 1), z1 = std::min(z0 + 1, NZ - 1);
+      double tx = cx - x0, ty = cy - y0, tz = cz - z0;
+      auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+      double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+      double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+      double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+      double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+      return (c00 * (1 - ty) + c10 * ty) * (1 - tz) + (c01 * (1 - ty) + c11 * ty) * tz;
+    };
+    const int LSTEPS = 7;
+    const double LK = 0.95, LFLOOR = 0.72,
+                 LSTEP = 1.6; // floor kept high: shade without fraying apart
+    std::vector<float> lit(field.size());
+    for (int gz = 0; gz < NZ; ++gz)
+      for (int gy = 0; gy < N; ++gy)
+        for (int gx = 0; gx < N; ++gx) {
+          size_t o = skyIdx(gz, gy, gx);
+          double v = field[o];
+          if (v <= 0.0) {
+            lit[o] = 0.0f;
+            continue;
+          }
+          double tau = 0.0;
+          for (int s = 1; s <= LSTEPS; ++s)
+            tau += samp(gx + ux * s * LSTEP, gy + uy * s * LSTEP, gz + uz * s * LSTEP) * LSTEP;
+          lit[o] = static_cast<float>(v * (LFLOOR + (1.0 - LFLOOR) * std::exp(-LK * tau)));
+        }
+    field.swap(lit);
+  }
+  return field;
+}
+// Holds the grown cloud maps + a normalisation peak; samples a continuous field.
+struct SkyModel {
+  std::vector<std::vector<float>> maps;
+  double norm = 1.0;
+
+  // Density at a CONTINUOUS scroll offset (sub-cell) and crossfade position.
+  std::vector<float> raw(double shift, double morph) const {
+    const int N = SKY_N, NZ = SKY_NZ;
+    long mi = static_cast<long>(std::floor(morph));
+    int i = static_cast<int>(((mi % CLOUD_MAPS) + CLOUD_MAPS) % CLOUD_MAPS);
+    int j = (i + 1) % CLOUD_MAPS;
+    double u = morph - std::floor(morph);
+    u = u * u * (3.0 - 2.0 * u); // smoothstep the crossfade
+    long ks = static_cast<long>(std::floor(shift));
+    double f = shift - ks;
+    int k0 = static_cast<int>(((ks % N) + N) % N), k1 = (k0 + 1) % N;
+    const std::vector<float> &A = maps[i], &B = maps[j];
+    std::vector<float> out(static_cast<size_t>(NZ) * N * N);
+    for (int z = 0; z < NZ; ++z)
+      for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+          // crossfade the two skies, then blend adjacent integer x-rolls (np.roll
+          // axis=2: rolled[x] = vol[(x-k) mod N]).
+          int sx0 = ((x - k0) % N + N) % N, sx1 = ((x - k1) % N + N) % N;
+          auto mix = [&](int xx) {
+            return (1.0 - u) * A[skyIdx(z, y, xx)] + u * B[skyIdx(z, y, xx)];
+          };
+          double vol = (1.0 - f) * mix(sx0) + f * mix(sx1);
+          double lump = std::min(1.0, std::max(0.0, (vol - CLOUD_FLOOR) / (1.0 - CLOUD_FLOOR)));
+          out[skyIdx(z, y, x)] = static_cast<float>(lump * lump); // dense cores, empty fringes
+        }
+    return out;
+  }
+  std::vector<float> field(double shift, double morph) const {
+    std::vector<float> r = raw(shift, morph);
+    double inv = 1.0 / norm;
+    for (float &v : r)
+      v = static_cast<float>(v * inv);
+    return r;
+  }
+};
+SkyModel buildSky() {
+  SkyModel sky;
+  // A grown map can land its dense core near a faded face, leaving it nearly
+  // transparent once the floor is subtracted and squared — so the sky would fade
+  // in only as the morph reaches the other map. Seed 20 grows BOTH maps centred
+  // (worst-case field peak ~0.85), so cloud is visible from the very first frame.
+  std::mt19937 rng(20u);
+  for (int m = 0; m < CLOUD_MAPS; ++m)
+    sky.maps.push_back(walkClouds(rng));
+  double norm = 0.0; // sweep shift/morph; scale so the densest cloud lands near 1
+  for (int c = 0; c < SKY_N; c += 8)
+    for (double mo : {0.0, 0.5, 1.0}) {
+      std::vector<float> r = sky.raw(double(c), mo);
+      for (float v : r)
+        norm = std::max(norm, double(v));
+    }
+  sky.norm = norm > 0 ? norm : 1.0;
+  return sky;
+}
+cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
+  return cvc::volume(
+      app, reinterpret_cast<const unsigned char *>(field.data()),
+      cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+      cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
+}
+// Empty sky must be EXACTLY invisible (alpha pinned flat at 0 up to CLOUD_EMPTY,
+// not ramped — a ramp still accumulates over the ~180 samples a ray takes through
+// the slab); cores must reach ~1 so a puff composites white, not as dirty smoke.
+void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
+  // Cool blue-grey at the low (self-shadowed / thin) end, warming to pure white at
+  // the dense, sunlit cores — so the baked top-light reads as cool shaded undersides
+  // under bright crowns rather than a flat white slab.
+  color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
+}
+
+// ── cloud → ground shadow: a volumetric shadow, ray-marched through the slab ─────
+// For each ground point we march the SAME density field the volume shows, up
+// through the slab, accumulate optical depth τ, and store transmittance exp(-k·τ)
+// into a texture the terrain samples — a per-fragment directional light pass for the
+// cloud, computed once per cloud update. Floored so shaded ground still catches
+// skylight rather than going black.
+//
+// The march is NOT along the true sun (elevation 34°): that low an angle throws the
+// shadow ~145 units — clear off the 120-unit island, onto the untextured sea, so the
+// ground under the cloud read as unshadowed. We march a STEEPER pseudo-sun instead
+// (same azimuth, high elevation), which lands the shadow on the island just off nadir
+// beneath the cloud. That is where the eye expects a cloud's shadow, and it is the
+// usual stylisation — a small, honest lie about the sun angle for a legible shadow.
+constexpr int SHADOW_RES = 96;          // soft shadow -> low-res map is plenty (was 192)
+constexpr double SHADOW_PROJ_EL = 66.0; // steeper than the sun's 34° so it lands on-island
+constexpr double SHADOW_K = 0.13;       // optical-depth -> darkness (a soft, clear patch)
+constexpr double SHADOW_FLOOR = 0.55;   // shaded ground keeps 55% of its light
+
+// Trilinear sample of a sky density field at a WORLD point (0 outside the slab).
+float sampleSky(const std::vector<float> &field, double wx, double wy, double wz) {
+  if (wz < SKY_BASE || wz > SKY_TOP)
+    return 0.0f;
+  double fx = (wx + SKY_HALF) / (2.0 * SKY_HALF) * (SKY_N - 1);
+  double fy = (wy + SKY_HALF) / (2.0 * SKY_HALF) * (SKY_N - 1);
+  double fz = (wz - SKY_BASE) / (SKY_TOP - SKY_BASE) * (SKY_NZ - 1);
+  if (fx < 0 || fx > SKY_N - 1 || fy < 0 || fy > SKY_N - 1)
+    return 0.0f;
+  int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
+  int x1 = std::min(x0 + 1, SKY_N - 1), y1 = std::min(y0 + 1, SKY_N - 1),
+      z1 = std::min(z0 + 1, SKY_NZ - 1);
+  double tx = fx - x0, ty = fy - y0, tz = fz - z0;
+  auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
+  double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
+  double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
+  double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
+  double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
+  double c0 = c00 * (1 - ty) + c10 * ty, c1 = c01 * (1 - ty) + c11 * ty;
+  return (float)(c0 * (1 - tz) + c1 * tz);
+}
+
+// Bake albedo × cloud-shadow over the terrain footprint [-HALF,HALF]^2 into an RGB
+// buffer (SHADOW_RES^2) the terrain samples as its surface colour. Carrying the
+// albedo here (not just a grey shadow) keeps the terrain coloured whether VTK
+// modulates or replaces the vertex colour with the texture — and at texel rather
+// than vertex resolution, so the shading is finer than the mesh.
+void computeCloudShadow(const std::vector<float> &field, Vec3d sun,
+                        std::vector<unsigned char> &rgb) {
+  Vec3d L = vnorm(sun); // unit direction toward the sun (L.z > 0)
+  const int STEPS = 22;
+  rgb.resize((size_t)SHADOW_RES * SHADOW_RES * 3);
+  for (int ty = 0; ty < SHADOW_RES; ++ty) {
+    double y = -HALF + 2.0 * HALF * ty / (SHADOW_RES - 1);
+    for (int tx = 0; tx < SHADOW_RES; ++tx) {
+      double x = -HALF + 2.0 * HALF * tx / (SHADOW_RES - 1);
+      double z0 = terrainH(x, y);
+      double tEntry = (SKY_BASE - z0) / L.z, tExit = (SKY_TOP - z0) / L.z;
+      double ds = (tExit - tEntry) / STEPS;
+      double tau = 0.0;
+      for (int i = 0; i < STEPS; ++i) {
+        double t = tEntry + (i + 0.5) * ds;
+        tau += sampleSky(field, x + t * L.x, y + t * L.y, z0 + t * L.z) * ds;
+      }
+      double s = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * std::exp(-SHADOW_K * tau);
+      cvc::geometry::color_t a = terrainAlbedo(x, y);
+      size_t o = ((size_t)ty * SHADOW_RES + tx) * 3;
+      for (int k = 0; k < 3; ++k)
+        rgb[o + k] = (unsigned char)std::min(255.0, std::max(0.0, a[k] * s * 255.0));
+    }
+  }
+}
+
+// Re-run one tree's wind cascade, writing its posed vertices into the SHARED forest
+// buffers at this tree's offsets. No upload here — the caller re-poses every tree
+// and then uploads the two merged buffers ONCE (updateVertices) per frame.
+// `windScale` multiplies every tree's own sway amplitude, so the UI slider is one
+// global knob over a forest whose trees each keep their individual amplitude and
+// phase. 1.0 is the tuned default; 0 is dead calm.
+void reposeTree(const Tree &tree, double t, std::vector<double> &woodBuf,
+                std::vector<double> &needleBuf, double windScale = 1.0) {
+  double a = tree.sway * windScale * std::sin(1.3 * t + tree.phase);
+  Mat4 sway = mRot(a, 0.0, 1.0, 0.0); // TREE_AXIS = +Y (tree-local)
+  std::vector<Mat4> world(tree.mods.size());
+  for (size_t i = 0; i < tree.mods.size(); ++i) {
+    const ModRec &m = tree.mods[i];
+    Mat4 local = m.swayer ? mMul(m.hang, sway) : m.hang;
+    world[i] = (m.parent < 0) ? local : mMul(world[m.parent], local);
+    int wo = m.wOff;
+    for (const Vec3d &p : m.localWood) {
+      Vec3d w = xform(world[i], p);
+      woodBuf[wo * 3] = w.x;
+      woodBuf[wo * 3 + 1] = w.y;
+      woodBuf[wo * 3 + 2] = w.z;
+      ++wo;
+    }
+    int no = m.nOff;
+    for (const Vec3d &p : m.localNeedle) {
+      Vec3d w = xform(world[i], p);
+      needleBuf[no * 3] = w.x;
+      needleBuf[no * 3 + 1] = w.y;
+      needleBuf[no * 3 + 2] = w.z;
+      ++no;
+    }
+  }
+}
 
 } // namespace
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  bool offscreen = false, verbose = false, useCpu = false;
+  bool offscreen = false, noShadows = false, verbose = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0;
-  std::string png;
-  std::vector<std::string> sets;
-  po::options_description desc("lsystem_coast — a cvcGL island + GPU FFT-ocean trial\nOptions");
-  desc.add_options()("help,h", "show this help and exit")                                    //
-      ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")             //
-      ("verbose,v", po::bool_switch(&verbose), "show cvcGL debug logging")                   //
-      ("cpu", po::bool_switch(&useCpu),                                                      //
-       "use the CPU readback ocean path (default: GPU no-readback shader path)")             //
-      ("frames", po::value<int>(&frames)->default_value(0),                                  //
-       "stop after N frames (0 = until the window closes)")                                  //
-      ("png", po::value<std::string>(&png)->default_value(""), "write the final frame here") //
-      ("width", po::value<int>(&width)->default_value(1280), "render width")                 //
-      ("height", po::value<int>(&height)->default_value(800), "render height")               //
-      ("fps", po::value<double>(&fps)->default_value(30.0), "synthetic clock rate")          //
-      ("set", po::value<std::vector<std::string>>(&sets)->composing(),                       //
-       "override a state knob coast.<key>=<value>, e.g. --set water.wind_speed=20 "
-       "(repeatable; keys under coast.water.* and coast.clock.*)");
+  std::string png, captureStr, outDir;
+  po::options_description desc(
+      "lsystem_coast — a pure-C++ cvcGL island + GPU FFT-ocean demo\nOptions");
+  desc.add_options()("help,h", "show this help and exit")                                   //
+      ("offscreen", po::bool_switch(&offscreen), "render offscreen (no window)")            //
+      ("no-shadows", po::bool_switch(&noShadows), "disable tree shadows (a shadow map)")    //
+      ("verbose,v", po::bool_switch(&verbose), "show cvcGL debug logging (off by default)") //
+      ("frames", po::value<int>(&frames)->default_value(0),                                 //
+       "stop after N frames (0 = run until the window closes)")                             //
+      ("png", po::value<std::string>(&png)->default_value(""),                              //
+       "after the run, write the final frame to this PNG")                                  //
+      ("capture", po::value<std::string>(&captureStr)->default_value("none"),               //
+       "cinematic capture path: none | orbit | fly (forces --offscreen)")                   //
+      ("width", po::value<int>(&width)->default_value(1280), "render width in pixels")      //
+      ("height", po::value<int>(&height)->default_value(800), "render height in pixels")    //
+      ("fps", po::value<double>(&fps)->default_value(30.0),                                 //
+       "capture frames per second (drives the synthetic clock)")                            //
+      ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
+       "capture output directory for the numbered PNGs");
+  bool no_ui = false;
+  desc.add_options()("no-ui", po::bool_switch(&no_ui),
+                     "hide the ImGui overlay (default: hidden while capturing)");
   po::variables_map vm;
   try {
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
   } catch (const std::exception &e) {
-    std::fprintf(stderr, "error: %s\n", e.what());
+    std::cerr << "error: " << e.what() << "\n\n" << desc << "\n";
     return 2;
   }
   if (vm.count("help")) {
     std::cout << desc << "\n";
     return 0;
   }
-  if (!png.empty() && frames == 0)
-    frames = 1;             // a --png with no frame count still needs at least one frame
-  const bool gpu = !useCpu; // GPU no-readback path by default (the WASM-viable one)
-
-  cvc::app app;
-  app.properties("system.log_verbosity", verbose ? "6" : "2");
-
-  // Apply any --set overrides to the state tree BEFORE the knobs are seeded, so
-  // a supplied value wins over the default (knob() only defaults when empty).
-  for (const std::string &kv : sets) {
-    const auto eq = kv.find('=');
-    if (eq == std::string::npos) {
-      std::fprintf(stderr, "ignoring --set '%s' (want coast.<key>=<value>)\n", kv.c_str());
-      continue;
-    }
-    const std::string key = kv.substr(0, eq), val = kv.substr(eq + 1);
-    cvc::state::instance(app)("coast." + key).value(val);
-    std::printf("state override: coast.%s = %s\n", key.c_str(), val.c_str());
+  enum class Capture { None, Orbit, Fly } capture = Capture::None;
+  if (captureStr == "orbit")
+    capture = Capture::Orbit;
+  else if (captureStr == "fly")
+    capture = Capture::Fly;
+  else if (captureStr != "none") {
+    std::cerr << "unknown --capture '" << captureStr << "' (want none | orbit | fly)\n";
+    return 2;
+  }
+  const bool capturing = capture != Capture::None;
+  if (capturing) {
+    offscreen = true; // a capture path always renders offscreen to numbered PNGs
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
   }
 
+  // Own the app and inject it — no global/singleton context.
+  cvc::app app;
+  // The scene's nodes log through THIS injected app (not a process-wide singleton),
+  // so we set the console verbosity right here: show only errors + warnings, unless
+  // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
+  // level L prints when L < log_verbosity (0=error, 1=warning, 2=info, 3+=debug).
+  app.properties("system.log_verbosity", verbose ? "6" : "2");
   SceneGraph sg(app, "coast");
 
-  sg.addGraphics("island", buildIsland(app));
-  auto island = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("island"));
-  island->setUseSingleColor(false);
+  sg.addGraphics("terrain", buildTerrain(app));
+  auto terrain = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"));
+  // The surface colour comes from the cloud-shadow texture (albedo × shadow), so
+  // the mesh itself is flat white — the texture is the sole albedo whether VTK
+  // modulates or replaces the base colour with it.
+  terrain->setUseSingleColor(true);
+  terrain->setColor(1.0, 1.0, 1.0);
+  terrain->setAmbient(0.45); // keep the ground bright where the sun / cloud shade it
+  terrain->setDiffuse(0.85);
+  addTerrainBump(*terrain);
 
-  std::vector<double> oceanXY;
-  sg.addGraphics("ocean", buildOcean(app, oceanXY));
-  auto ocean = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("ocean"));
-  ocean->setUseSingleColor(false);
-  // The ocean is CPU-shaded: a full water BRDF (Fresnel sky-reflection + sun
-  // glint + foam) is baked into the vertex colours each frame, because VTK's
-  // Phong lighting cannot express Fresnel or reflection. So VTK lighting is
-  // disabled on the sea (ambient shows the colour as authored). GeometryNode::
-  // updateNormals remains the path for VTK-LIT deformed meshes; the sea owns its
-  // shading and instead uses the CPU normals directly in the BRDF below.
-  ocean->setAmbient(1.0);
-  ocean->setDiffuse(0.0);
-  ocean->setSpecular(0.0);
+  // Plant an L-system forest on the dry land. Every tree's geometry is merged into
+  // ONE wood mesh + ONE needle mesh for the WHOLE forest (route C across trees):
+  // 32 trees -> 2 actors, so the per-frame wind is 2 vertex uploads and 2 draw
+  // calls (main pass + shadow bake), not 64. This is the single biggest realtime
+  // win — the per-actor upload/draw overhead dominated the frame.
+  CylTopo cyl = cylTopo();
+  std::vector<Vec3d> nring;
+  for (int t = 0; t < NEEDLES; ++t) {
+    double a = t * 2.0 * M_PI / NEEDLES;
+    nring.push_back({std::cos(a), 0.0, std::sin(a)});
+  }
+  Mat4 tMicro = mRot(TILT * MICRO_TILT, 0, 0, 1), tTilt = mRot(TILT, 0, 0, 1),
+       tRoll = mRot(YROTATE, 0, 1, 0);
+  std::mt19937 rng(20260817u);
+  std::uniform_real_distribution<double> u01(0.0, 1.0);
+  std::vector<Tree> forest;
+  cvc::geometry forestWood(app), forestNeedle(app); // the merged forest meshes
+  const int MAX_TREES = 55;
+  int planted = 0;
+  for (int gy = -4; gy <= 4 && planted < MAX_TREES; ++gy)
+    for (int gx = -4; gx <= 4 && planted < MAX_TREES; ++gx) {
+      double x = gx * 24.0 + (u01(rng) - 0.5) * 16.0;
+      double y = gy * 24.0 + (u01(rng) - 0.5) * 16.0;
+      double h = terrainH(x, y);
+      if (h < SEA_LEVEL + 1.5)
+        continue;
+      double size = 0.32 + 0.43 * u01(rng);
+      int maturity = MATURITY[rng() % 7];
+      std::vector<Module> mods;
+      expandTree(TREE_RULES[0], maturity, size, size, -1, 1, mods, tMicro, tTilt, tRoll);
+      Tree tr = buildTree(app, x, y, h, mods, cyl, nring, forestWood, forestNeedle);
+      tr.phase = u01(rng) * 2.0 * M_PI;
+      tr.sway = 0.020 + 0.016 * u01(rng);
+      forest.push_back(std::move(tr));
+      ++planted;
+    }
 
-  // The island stays VTK-lit: a sun (key) + a wide fill.
-  sg.addDirectionalLight(SUN_AZ, SUN_EL, 1.0, 0.96, 0.9, 1.15);
-  sg.addFillLight(0.0, 0.0, 400.0, 0.0, 0.0, 0.0, 0.6, 0.7, 0.85, 0.35);
+  // One wood actor (per-vertex colour + procedural bark) and one needle actor for
+  // the whole forest. High material ambient softens the shadow map's self-shadowing
+  // on the thin trunks/line needles: a fully self-shadowed sample still keeps this
+  // much light, so aliased shadows read as a gentle dapple, not harsh dark speckle.
+  sg.addGraphics("coast_wood", forestWood);
+  auto woodNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_wood"));
+  woodNode->setUseSingleColor(false);
+  woodNode->setAmbient(0.5);
+  woodNode->setDiffuse(0.8);
+  addBark(*woodNode);
+  std::vector<double> woodBuf = flattenPoints(forestWood);
+  std::shared_ptr<GeometryNode> needleNode;
+  std::vector<double> needleBuf;
+  if (forestNeedle.points().size()) {
+    sg.addGraphics("coast_needle", forestNeedle);
+    needleNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_needle"));
+    needleNode->setRenderMode(GeometryRenderMode::LINES);
+    needleNode->setUseSingleColor(true);
+    needleNode->setColor(C_NEEDLE.x, C_NEEDLE.y, C_NEEDLE.z);
+    needleNode->setAmbient(0.55);
+    needleNode->setDiffuse(0.75);
+    needleBuf = flattenPoints(forestNeedle);
+  }
+
+  // The ocean (a GPU FFT sea) is added AFTER the camera is framed on the island —
+  // its grid spans out to the horizon (±OCEAN_HALF), and folding that into the
+  // framing bounds would shrink the island. See the "ocean" block below the camera.
+
+  // The sky: a drifting, evolving cloud slab, high above the island. Unlike the
+  // sun (430 units out — pure scenery, added after framing) the cloud ceiling is
+  // part of the scene the eye takes in, so it IS folded into the framing bounds:
+  // the island then fills the lower frame with the clouds drifting overhead. Real
+  // voxels first, then the node, then the transfer function (same order as the sea).
+  SkyModel sky = buildSky();
+  auto skyNode = sg.addGraphics("coast_sky", skyVolume(app, sky.field(0.0, 0.0)));
+  // The billowed field HAS shape, so a directional light picks out the tops and
+  // leaves the undersides dim — most of what makes cloud read as volume, not fog.
+  // Ambient stays high so the shadowed side is grey-blue rather than black.
+  // DIFFUSE shading, not volumetric scattering: the fractal (fBm) detail baked into
+  // the field gives the density sharp gradients, so a plain directional diffuse term
+  // picks out the fluffy billows — bright cauliflower tops, gently shaded hollows —
+  // WITHOUT the dark rim the multi-scatter model draped around every blob. Ambient
+  // is high so the cloud stays bright and white (a fair-weather cumulus, not a storm
+  // cloud) and never gets a black outline. No scattering (0) => no self-shadow crust.
+  skyNode->setShading(false);
+  skyNode->setAmbient(0.95);
+  skyNode->setDiffuse(0.35);
+  skyNode->setSpecular(0.0);
+  skyNode->setVolumetricScattering(0.0);
+  {
+    std::vector<double> col, op;
+    skyTransfer(col, op);
+    skyNode->setTransferFunction(col, op);
+  }
+
+  // The cloud's shadow on the ground: bake the initial transmittance into the
+  // terrain's texture (kept in sync with the drifting cloud each update below).
+  std::vector<unsigned char> shadowBuf;
+  computeCloudShadow(sky.field(0.0, 0.0), sunDir(SUN_AZ, SHADOW_PROJ_EL), shadowBuf);
+  {
+    cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                         cvc::image::data_type::u8, shadowBuf.data());
+    terrain->setTexture(shadowImg, false);
+  }
+
+  // STAGE RIG, not a sun. Two directional lights used to stand in for an
+  // afternoon sun and a sky fill, and they were the reason the shadows were
+  // mush: VTK bakes a directional light's shadow map with a parallel projection
+  // fitted to the WHOLE scene bounding box, and this scene's box includes the
+  // sea plane and a sun billboard 900 units out. Nearly every shadow texel was
+  // being spent on empty water.
+  //
+  // A spot is baked with a perspective projection whose view angle is its cone,
+  // so aiming the rig at the ISLAND concentrates the map where the trees are.
+  // The stage radius is the island, deliberately not the scene.
+  cvc::gl::StageLighting rig(sg);
+  rig.setStage(0.0, 0.0, 0.0, 120.0); // the island, not the sea and not the sky
+  rig.applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
+  // Keep the old warm-key/cool-fill feel, now as a rig rather than a sky.
+  rig.setKey(1.15, -52.0, 34.0, 34.0);
+  rig.setWarmth(0.45);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
+  // A real sky, not a flat void: a vertical gradient background (hazy horizon at
+  // the bottom, deep blue at the zenith). Done on the renderer rather than as a
+  // sky sphere on purpose — an enclosing sky sphere would occlude the directional
+  // light in the shadow-map pass and plunge the whole island into shadow. The sun
+  // itself is a camera-relative disc (below), so the two together read as sky.
   view.renderer()->GradientBackgroundOn();
-  view.renderer()->SetBackground(0.66, 0.71, 0.74);  // horizon
-  view.renderer()->SetBackground2(0.23, 0.44, 0.80); // zenith
-  view.setCamera(0.0, -252.0, 58.0, 0.0, 12.0, 2.0, 0.0, 0.0, 1.0, 40.0, 1.0, 5000.0);
+  view.renderer()->SetBackground(0.66, 0.71, 0.74);  // horizon (screen bottom)
+  view.renderer()->SetBackground2(0.23, 0.44, 0.80); // zenith (screen top)
 
-  // Draw one frame FIRST so the GL context is fully initialised — vtkTextureObject
-  // only knows the context supports float render targets after the window's
-  // OpenGLInit has run (otherwise Create2DFromRaw reports IF=0 and we would
-  // wrongly fall back to a flat sea).
-  view.render();
+  // Tree-cast shadows on (--no-shadows to drop them). A high-res map keeps the thin
+  // trunks/needles from tearing badly; the trees' high material ambient (set above)
+  // softens the residual self-shadow speckle that a shadow map always gets on line/
+  // thin geometry. Capture re-bakes EVERY frame so the wind-blown shadows don't snap.
+  const bool shadows = !noShadows && sg.setShadowsEnabled(true);
+  if (shadows) {
+    sg.setShadowResolution(2048);
+    sg.setShadowUpdateInterval(capturing ? 1 : 3);
+  }
 
-  // Declutter AFTER the first frame: adding graphics re-runs updateGrid, which
-  // would otherwise re-show the world-bounds grid/axis over the scene.
+  // Built-in navigation, framed on the island.
+  CameraController cam(view);
+  cvc::bounding_box b = sg.computeGraphicsBounds();
+  cam.frameBounds(b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
+
+  // ── the ocean: a GPU spectral FFT sea (OceanFFT), added AFTER framing ────────
+  // Added here, past frameBounds, so its ±OCEAN_HALF grid (out to the horizon)
+  // doesn't shrink the island in the frame. Hide the lab decorations first so the
+  // GL-init render below doesn't flash them, then render ONCE so the window's
+  // OpenGLInit has run — vtkTextureObject only reports float-RT support after that
+  // (otherwise Create2DFromRaw sees IF=0 and we would wrongly fall back to a flat sea).
   sg.setGridVisible(false);
   sg.setAxisVisible(false);
-  view.renderer()->ResetCameraClippingRange();
+  sg.getGraphicsRoot()->setShowBBox(false);
+  view.render();
 
-  // ── Water knobs + world clock, all in the state tree (scriptable & live) ────
-  // Every lever lives at coast.water.* / coast.clock.*, so it is settable from
-  // Python (cvc.state) or any state consumer and takes effect on the next frame.
+  // Water knobs live in the state tree at coast.water.* / coast.clock.* — scriptable
+  // from Python (cvc.state) and driven live by the ImGui "Water" panel; the loop reads
+  // them each frame. knob() seeds a default only when the key is empty (so a value set
+  // before this point — e.g. from a script — wins).
   auto knob = [&](const char *path, double def) -> double {
-    cvc::state &n = cvc::state::instance(app)(path);
-    if (n.value().empty())
-      n.value(def);
-    return n.value<double>();
+    cvc::state &nd = cvc::state::instance(app)(path);
+    if (nd.value().empty())
+      nd.value(def);
+    return nd.value<double>();
   };
 
-  // A 3-cascade spectral FFT ocean (ABYSSAL-style, non-harmonic tiles): each
-  // cascade is an independent OceanFFT at a different tile size, summed for
-  // multi-scale detail (swell + wind waves + ripples). Global state knobs scale
-  // ALL cascades — each cascade's wind = coast.water.wind_speed * its factor.
+  // 3 JONSWAP cascades (swell + wind-waves + ripples) at non-harmonic tile sizes,
+  // summed for multi-scale detail. Global knobs scale ALL cascades — each cascade's
+  // wind = coast.water.wind_speed × its factor.
   struct Cascade {
     std::unique_ptr<OceanFFT> fft;
-    double tile;
-    double windFactor;
-    double weight;
-    std::vector<float> disp;
+    double tile, windFactor, weight;
   };
   std::vector<Cascade> cascades;
   const struct {
     double tile, windF, weight;
-  } CASC[] = {
-      {251.0, 1.00, 1.00}, // swell
-      {83.0, 0.80, 0.55},  // wind waves
-      {29.0, 0.60, 0.32},  // ripples
-  };
+  } CASC[] = {{251.0, 1.00, 1.00}, {83.0, 0.80, 0.55}, {29.0, 0.60, 0.32}};
   for (const auto &c : CASC) {
     Cascade cc;
     cc.fft = std::make_unique<OceanFFT>(FFT_N);
@@ -336,7 +1340,7 @@ int main(int argc, char **argv) {
     cc.windFactor = c.windF;
     cc.weight = c.weight;
     cc.fft->tileSize_m = static_cast<float>(c.tile);
-    cc.fft->windSpeed = static_cast<float>(knob("coast.water.wind_speed", 11.0) * c.windF);
+    cc.fft->windSpeed = static_cast<float>(knob("coast.water.wind_speed", 9.0) * c.windF);
     cc.fft->fetch_m = static_cast<float>(knob("coast.water.fetch", 120000.0));
     cc.fft->depth_m = static_cast<float>(knob("coast.water.depth", 1000.0));
     cc.fft->windDirX = static_cast<float>(knob("coast.water.wind_dir_x", 1.0));
@@ -345,9 +1349,10 @@ int main(int argc, char **argv) {
     cascades.push_back(std::move(cc));
   }
   knob("coast.water.wave_amp", 1.2);   // vertical scale (raw FFT height is metres)
-  knob("coast.water.choppiness", 1.0); // horizontal displacement scale
-  knob("coast.water.foam_bias", 0.55); // Jacobian threshold below which foam appears
-  knob("coast.clock.scale", 1.0);      // world seconds per wall second (0 pauses)
+  knob("coast.water.choppiness", 1.0); // horizontal (Gerstner) displacement scale
+  knob("coast.water.foam_bias", 0.48); // Jacobian threshold below which wave foam appears
+  knob("coast.water.shore_foam", 1.0); // shoreline surf intensity (0 disables it)
+  knob("coast.clock.scale", 1.0);      // world seconds per wall second (0 pauses the sea)
   knob("coast.clock.paused", 0.0);
 
   auto *ow = vtkOpenGLRenderWindow::SafeDownCast(view.renderWindow());
@@ -355,18 +1360,19 @@ int main(int argc, char **argv) {
   for (auto &c : cascades)
     oceanReady = oceanReady && c.fft->init(ow);
   if (oceanReady) {
-    const bool st = cascades[0].fft->selfTest();
+    const bool stpass = cascades[0].fft->selfTest();
     std::printf("OceanFFT self-test: %s (%zu-cascade spectral FFT at %dx%d)\n",
-                st ? "PASS" : "FAIL", cascades.size(), FFT_N, FFT_N);
+                stpass ? "PASS" : "FAIL", cascades.size(), FFT_N, FFT_N);
   } else {
     std::printf("OceanFFT unavailable (no float render targets?) — rendering a flat sea.\n");
   }
 
-  // GPU no-readback path: bind the cascade displacement textures live and install
-  // the displace + BRDF shaders, so the sea is posed and shaded entirely on the
-  // GPU — no per-frame CPU readback / updateVertices (the WASM-friendly path).
-  if (gpu && oceanReady) {
-    ocean->setUseSingleColor(true);       // colour comes from the BRDF, not vertex colours
+  // The ocean grid + GPU displace/BRDF shaders (no per-frame CPU readback — the
+  // WASM-viable path). The cascade displacement textures are bound live.
+  sg.addGraphics("ocean", buildOcean(app));
+  auto ocean = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("ocean"));
+  ocean->setUseSingleColor(true); // colour comes from the BRDF, not the vertex colours
+  if (oceanReady) {
     ocean->disableCoordinateShiftScale(); // vertexMC.xy == world xy
     const char *dispName[3] = {"uDisp0", "uDisp1", "uDisp2"};
     const char *tileName[3] = {"uTile0", "uTile1", "uTile2"};
@@ -380,202 +1386,336 @@ int main(int argc, char **argv) {
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Impl", OCEAN_VS_IMPL);
     ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", OCEAN_FS_DEC);
     ocean->addFragmentShaderReplacement("//VTK::Light::Impl", OCEAN_FS_LIGHT);
-    std::printf("ocean: GPU no-readback path (%zu cascades, displace + BRDF in-shader)\n",
-                cascades.size());
+  } else {
+    ocean->setColor(0.05, 0.20, 0.32); // a flat blue fallback sea
+    ocean->setAmbient(0.6);
+    ocean->setDiffuse(0.5);
   }
 
-  // World clock: the waves advance in WORLD time (correct speed regardless of
-  // frame rate; honours coast.clock.scale/.paused; deterministic in a fixed-frame
-  // capture). cvc::world_clock is the authoritative sim clock; publish its time.
+  // A world clock drives the ocean by WORLD time (correct wave speed at any frame
+  // rate; honours coast.clock.scale/.paused; deterministic under a fixed-frame
+  // capture). The trees/clouds keep the demo's own animation clock `t`; the sea's
+  // scale/pause knobs default to 1.0/off, so by default it stays in step with them.
   cvc::world_clock clock;
-  auto wallPrev = std::chrono::steady_clock::now();
-  const bool deterministic = frames > 0; // fixed-frame capture -> reproducible
-  double lastWind = knob("coast.water.wind_speed", 11.0),
+  double lastWind = knob("coast.water.wind_speed", 9.0),
          lastFetch = knob("coast.water.fetch", 120000.0),
          lastDepth = knob("coast.water.depth", 1000.0),
          lastWdx = knob("coast.water.wind_dir_x", 1.0),
          lastWdz = knob("coast.water.wind_dir_z", 0.55);
 
-  // Sun direction (toward the sun), matching the key light, for the water BRDF.
-  const double azr = SUN_AZ * PI / 180.0, elr = SUN_EL * PI / 180.0;
-  const double sunx = std::sin(azr) * std::cos(elr), suny = std::cos(azr) * std::cos(elr),
-               sunz = std::sin(elr);
+  // FPS readout drawn by the scene itself ('f' toggles; state
+  // coast.viewers.main.hud.*). Off for captures so frames stay clean.
+  cvc::gl::FpsHud hud(view);
 
-  const size_t oceanVerts = static_cast<size_t>(OCEAN_N) * OCEAN_N;
-  long frame = 0;
-  std::vector<double> xyz(oceanVerts * 3);
-  std::vector<unsigned char> rgb(oceanVerts * 3);
+  // Touch gestures work with or without the ImGui overlay (phones have no mouse:
+  // pinch = zoom, two-finger drag = pan/turn). Declared UNCONDITIONALLY — the
+  // render loop calls touch.update() and reads uiWind every frame regardless of
+  // whether the ImGui control panel was compiled in (a -DCVC_ENABLE_IMGUI=OFF
+  // build otherwise left both undeclared: the Windows/native no-UI build gap).
+  cvc::gl::TouchGestures touch(view, cam);
+  float uiWind = 1.0f; // wind strength; the ImGui "wind" slider drives it when built
 
-  while (!view.windowClosed()) {
-    // Live per-frame knobs.
-    const double waveAmp = knob("coast.water.wave_amp", 1.2);
-    const double choppy = knob("coast.water.choppiness", 1.0);
-    const float foamBias = static_cast<float>(knob("coast.water.foam_bias", 0.55));
-    for (auto &c : cascades)
-      c.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
-
-    // Spectrum knobs: rebuild ALL cascades only when one actually changes.
-    const double wind = knob("coast.water.wind_speed", 11.0),
-                 fch = knob("coast.water.fetch", 120000.0), dep = knob("coast.water.depth", 1000.0),
-                 wdx = knob("coast.water.wind_dir_x", 1.0),
-                 wdz = knob("coast.water.wind_dir_z", 0.55);
-    if (oceanReady && (wind != lastWind || fch != lastFetch || dep != lastDepth || wdx != lastWdx ||
-                       wdz != lastWdz)) {
-      for (auto &c : cascades) {
-        c.fft->windSpeed = static_cast<float>(wind * c.windFactor);
-        c.fft->fetch_m = static_cast<float>(fch);
-        c.fft->depth_m = static_cast<float>(dep);
-        c.fft->windDirX = static_cast<float>(wdx);
-        c.fft->windDirZ = static_cast<float>(wdz);
-        c.fft->rebuildSpectrum();
+  // Dear ImGui overlay — real widgets, same code path native and in the browser.
+  // Everything the callback touches lives in this scope; ImGui is immediate-mode,
+  // so there is no widget tree to keep in sync.
+#ifdef CVC_ENABLE_IMGUI
+  cvc::gl::ImGuiOverlay ui(view);
+  ui.attachCamera(cam);
+  // A capture is a deliverable: no control panel in the frames unless asked.
+  ui.setVisible(!no_ui && !capturing && !offscreen);
+  bool uiShadows = shadows;
+  bool uiLighting = true; // the StageLightingPanel window
+  // "Ocean" panel mirrors, seeded from the state knobs. The sliders write straight
+  // back to the state tree (coast.water.* / coast.clock.*), so ImGui, Python and the
+  // render loop all agree on one source of truth.
+  float uiOceanWind = static_cast<float>(knob("coast.water.wind_speed", 9.0));
+  float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
+  float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
+  float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
+  float uiShore = static_cast<float>(knob("coast.water.shore_foam", 1.0));
+  float uiClock = static_cast<float>(knob("coast.clock.scale", 1.0));
+  bool uiPaused = knob("coast.clock.paused", 0.0) > 0.5;
+  ui.setDrawCallback([&] {
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("Scene")) {
+        if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
+          sg.setShadowsEnabled(uiShadows);
+        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
+        ImGui::EndMenu();
       }
-      lastWind = wind;
-      lastFetch = fch;
-      lastDepth = dep;
-      lastWdx = wdx;
-      lastWdz = wdz;
+      ImGui::EndMainMenuBar();
     }
+    ImGui::SetNextWindowPos(ImVec2(12, 34), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("lsystem_coast");
+    ImGui::Text("%zu trees", forest.size());
+    // Every control drives something and shadows are applied from whichever of the
+    // menu item or this checkbox you use (they stay in agreement).
+    ImGui::SliderFloat("tree wind", &uiWind, 0.0f, 3.0f);
+    if (ImGui::Checkbox("shadows", &uiShadows))
+      sg.setShadowsEnabled(uiShadows);
 
-    // Advance the world clock and drive the ocean by WORLD time.
+    // The water controls write straight to the state tree; the render loop reads
+    // those knobs each frame (and rebuilds the FFT spectrum only when wind changes).
+    ImGui::SeparatorText("Ocean");
+    auto wput = [&](const char *path, double v) { cvc::state::instance(app)(path).value(v); };
+    if (ImGui::SliderFloat("wind speed", &uiOceanWind, 0.0f, 28.0f, "%.1f m/s"))
+      wput("coast.water.wind_speed", uiOceanWind);
+    if (ImGui::SliderFloat("wave height", &uiWaveAmp, 0.0f, 3.0f))
+      wput("coast.water.wave_amp", uiWaveAmp);
+    if (ImGui::SliderFloat("choppiness", &uiChop, 0.0f, 2.0f))
+      wput("coast.water.choppiness", uiChop);
+    if (ImGui::SliderFloat("wave foam", &uiFoam, 0.0f, 1.2f))
+      wput("coast.water.foam_bias", uiFoam);
+    if (ImGui::SliderFloat("shore foam", &uiShore, 0.0f, 2.0f))
+      wput("coast.water.shore_foam", uiShore);
+    if (ImGui::SliderFloat("time scale", &uiClock, 0.0f, 4.0f))
+      wput("coast.clock.scale", uiClock);
+    if (ImGui::Checkbox("pause waves", &uiPaused))
+      wput("coast.clock.paused", uiPaused ? 1.0 : 0.0);
+    ImGui::End();
+
+    // The lighting controls are the LIBRARY's panel, not demo-local code — the
+    // same call lights any cvcGL scene.
+    cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
+  });
+#endif
+  if (offscreen)
+    hud.setEnabled(false);
+
+  // The sun is added AFTER framing — folding a far billboard into the bounds would
+  // shrink the island. It is repositioned relative to the camera every frame so it
+  // reads as an infinite sun in the light's direction.
+  addSun(app, sg);
+  auto sunNode = sg.getGraphics("sun");
+  auto sunHalo = sg.getGraphics("sun_halo");
+  const Vec3d sdir = sunDir(SUN_AZ, SUN_EL);
+  // Place the sun along the sun ray FROM the eye, but CAP its sun-direction depth
+  // (its coordinate along sdir) at SUN_DEPTH_CAP. A sun billboard farther out in
+  // sdir would push the shadow-map's depth range past the scene, leaving the
+  // island at the far end with no depth precision — it then self-shadows to black.
+  // Capping keeps the sun within the scene's depth span (so it never darkens it),
+  // holds its angular size constant via scale, and hides it when the camera looks
+  // away from the sun (dd <= 0). Never occludes the island (it is up the sun ray).
+  auto placeSky = [&](const Vec3d &eye) {
+    const double eDotS = eye.x * sdir.x + eye.y * sdir.y + eye.z * sdir.z;
+    const double dd = std::min(SUN_REF_DIST, SUN_DEPTH_CAP - eDotS);
+    const bool vis = dd > 1.0;
+    sunNode->setVisible(vis);
+    sunHalo->setVisible(vis);
+    if (!vis)
+      return;
+    const double sc = dd / SUN_REF_DIST; // angular size stays SUN_DISC_R / SUN_REF_DIST
+    sunNode->setScale(sc, sc, sc);
+    sunHalo->setScale(sc, sc, sc);
+    sunNode->setPosition(eye.x + sdir.x * dd, eye.y + sdir.y * dd, eye.z + sdir.z * dd);
+    sunHalo->setPosition(eye.x + sdir.x * dd, eye.y + sdir.y * dd, eye.z + sdir.z * dd);
+  };
+
+  // This is an island, not a lab bench: hide cvcGL's default grid, axis, AND the
+  // scene bounding box (the root NullGraphic shows its yellow bbox by default).
+  sg.setGridVisible(false);
+  sg.setAxisVisible(false);
+  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.processEvents();
+
+  std::printf("lsystem_coast: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",
+              offscreen ? "offscreen" : "onscreen", TN, TN, shadows ? "on" : "unavailable");
+
+  // Cinematic capture paths (--capture) drive the camera over --frames at a fixed
+  // synthetic dt (so cloud drift / sea / wind play back at real time regardless of
+  // render speed), writing a numbered PNG per frame to --out:
+  //   orbit — a slow 360° turntable around the island.
+  //   fly   — a scripted Catmull-Rom flight: in low over the sea, close fly-bys,
+  //           then a rising reveal (eye keyframes below; the target stays near the
+  //           centre so the island is framed throughout).
+  const std::vector<Vec3d> flyEye = {{-270, -240, 50}, {-160, -80, 42}, {-40, 90, 70},
+                                     {110, 120, 95},   {190, -30, 120}, {60, -210, 165}};
+  const std::vector<Vec3d> flyTgt = {{0, 0, 42}, {0, 0, 42}, {0, 0, 45},
+                                     {0, 0, 48}, {0, 0, 50}, {0, 0, 58}};
+  auto crInterp = [](const std::vector<Vec3d> &p, double s) { // Catmull-Rom, ends clamped
+    int m = (int)p.size();
+    double x = s * (m - 1);
+    int i = std::min((int)std::floor(x), m - 2);
+    if (i < 0)
+      i = 0;
+    double u = x - i, u2 = u * u, u3 = u2 * u;
+    auto seg = [&](double a, double b, double c, double d) {
+      return 0.5 * (2 * b + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u2 +
+                    (-a + 3 * b - 3 * c + d) * u3);
+    };
+    const Vec3d &p0 = p[std::max(i - 1, 0)], &p1 = p[i], &p2 = p[i + 1],
+                &p3 = p[std::min(i + 2, m - 1)];
+    return Vec3d{seg(p0.x, p1.x, p2.x, p3.x), seg(p0.y, p1.y, p2.y, p3.y),
+                 seg(p0.z, p1.z, p2.z, p3.z)};
+  };
+  // Orbit drives the CameraController's azimuth through the state tree; read the
+  // framed starting azimuth so the turn begins from the default 3/4 view.
+  const std::string azPath = CameraController::viewerStatePath("coast", "main") + ".orbit.azimuth";
+  double orbitAz0 = 0.0;
+  if (capture == Capture::Orbit) {
+    try {
+      orbitAz0 = cvc::state::instance(app)(azPath).value<double>();
+    } catch (...) {
+    }
+  }
+
+  auto start = std::chrono::steady_clock::now();
+  double last = 0.0;
+  long frame = 0;
+  int n = 0;
+  double fpsLast = 0.0; // realtime FPS readout (interactive)
+  long fpsFrames = 0;
+  // Interactive update cadence, decoupled by how fast each thing actually moves: the
+  // wind ripples quickest, the cloud drifts slowly, its ground shadow slower still. A
+  // capture refreshes everything EVERY frame (smooth, no stepping). The tree wind
+  // re-poses every other frame — imperceptibly stepped for a gentle sway, and it
+  // roughly halves the wind's per-frame cost. The GPU ocean evolves every frame (its
+  // FFT is a handful of fragment passes — cheap — and any stride would stutter it).
+  const int WIND_STRIDE = 2, CLOUD_STRIDE = 8, SHADOW_STRIDE = 16;
+  while (!view.windowClosed()) {
+    double t, dt;
+    if (capturing) { // fixed synthetic clock -> real-time playback of the animation
+      t = frame / fps;
+      dt = 1.0 / fps;
+    } else {
+      t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+      dt = t - last;
+      last = t;
+    }
+    view.processUIEvents();
+    touch.update(); // apply any pinch/two-finger gesture from this frame
+    // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
+    // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
+    // sway is imperceptibly stepped at that cadence and it roughly halves the wind's
+    // cost; a capture re-poses every frame so nothing stutters.
+    if (capturing || frame % WIND_STRIDE == 0) {
+      for (Tree &tr : forest)
+        reposeTree(tr, t, woodBuf, needleBuf, uiWind);
+      woodNode->updateVertices(woodBuf);
+      if (needleNode)
+        needleNode->updateVertices(needleBuf);
+    }
+    // The cloud volume refreshes IN PLACE (updateScalars), NOT via setVolume —
+    // setVolume re-imports the whole field every call (realloc + full range rescan +
+    // transfer-function reset + heavy logging), which is what pinned the framerate at
+    // ~8 fps. Its transfer function is constant, so only its scalars move. (The sea is
+    // no longer a volume — it is the GPU FFT ocean, evolved below.)
+    const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
+    const bool shadowDue = capturing || frame % SHADOW_STRIDE == 3;
+
+    // Ocean: advance the world clock and evolve the FFT cascades on the GPU (no
+    // readback), then push the live uniforms — the mesh shader displaces + shades
+    // straight from the bound displacement textures.
     clock.set_scale(knob("coast.clock.scale", 1.0));
     clock.set_mode(knob("coast.clock.paused", 0.0) > 0.5 ? cvc::world_clock::mode::paused
                                                          : cvc::world_clock::mode::live);
-    double wallDt;
-    if (deterministic) {
-      wallDt = 1.0 / fps;
-    } else {
-      const auto now = std::chrono::steady_clock::now();
-      wallDt = std::chrono::duration<double>(now - wallPrev).count();
-      wallPrev = now;
-    }
-    clock.advance(wallDt);
+    clock.advance(dt);
     const double wt = clock.t();
     cvc::state::instance(app)("coast.clock.t").value(wt);
-
-    // Live camera position for the water BRDF's view-dependent Fresnel + glint.
-    double camp[3] = {0, 0, 0};
-    if (view.renderer() && view.renderer()->GetActiveCamera())
-      view.renderer()->GetActiveCamera()->GetPosition(camp);
-
-    if (gpu && oceanReady) {
-      // GPU path: evolve the cascades on the GPU (no readback) and push the live
-      // uniforms; the mesh shader displaces + shades from the bound disp textures.
-      for (auto &c : cascades)
+    if (oceanReady) {
+      // Rebuild the spectrum only when a spectrum knob actually changes (not free).
+      const double wind = knob("coast.water.wind_speed", 9.0),
+                   fch = knob("coast.water.fetch", 120000.0),
+                   dep = knob("coast.water.depth", 1000.0),
+                   wdx = knob("coast.water.wind_dir_x", 1.0),
+                   wdz = knob("coast.water.wind_dir_z", 0.55);
+      if (wind != lastWind || fch != lastFetch || dep != lastDepth || wdx != lastWdx ||
+          wdz != lastWdz) {
+        for (auto &c : cascades) {
+          c.fft->windSpeed = static_cast<float>(wind * c.windFactor);
+          c.fft->fetch_m = static_cast<float>(fch);
+          c.fft->depth_m = static_cast<float>(dep);
+          c.fft->windDirX = static_cast<float>(wdx);
+          c.fft->windDirZ = static_cast<float>(wdz);
+          c.fft->rebuildSpectrum();
+        }
+        lastWind = wind;
+        lastFetch = fch;
+        lastDepth = dep;
+        lastWdx = wdx;
+        lastWdz = wdz;
+      }
+      for (auto &c : cascades) {
+        c.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
         c.fft->step(wt);
-      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(waveAmp));
-      ocean->setShaderUniformf("uChop", static_cast<float>(choppy));
+      }
+      double camp[3] = {0, 0, 0};
+      if (view.renderer() && view.renderer()->GetActiveCamera())
+        view.renderer()->GetActiveCamera()->GetPosition(camp);
+      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(knob("coast.water.wave_amp", 1.2)));
+      ocean->setShaderUniformf("uChop", static_cast<float>(knob("coast.water.choppiness", 1.0)));
       ocean->setShaderUniform3f("uCamPos", static_cast<float>(camp[0]), static_cast<float>(camp[1]),
                                 static_cast<float>(camp[2]));
-      ocean->setShaderUniform3f("uSunDir", static_cast<float>(sunx), static_cast<float>(suny),
-                                static_cast<float>(sunz));
-      ocean->setShaderUniformf("uFoamBias", foamBias);
-    } else if (oceanReady) {
-      // Evolve + read back every cascade for this frame.
-      bool ok = true;
-      for (auto &c : cascades) {
-        c.fft->step(wt);
-        c.disp = c.fft->readbackDisplacement();
-        ok = ok && c.disp.size() == static_cast<size_t>(FFT_N) * FFT_N * 4;
-      }
-      if (ok) {
-        // Sum the cascades at a world position (each tiled at its own metre scale):
-        // weighted displacement, and the min Jacobian (most-folded cascade -> foam).
-        auto sampleSum = [&](double wx, double wy, double &oDx, double &oH, double &oDz,
-                             double &oJac) {
-          oDx = oH = oDz = 0.0;
-          oJac = 1e9;
-          for (const auto &c : cascades) {
-            const int fx =
-                ((static_cast<int>(std::floor(wx / c.tile * FFT_N)) % FFT_N) + FFT_N) % FFT_N;
-            const int fy =
-                ((static_cast<int>(std::floor(wy / c.tile * FFT_N)) % FFT_N) + FFT_N) % FFT_N;
-            const size_t b = (static_cast<size_t>(fy) * FFT_N + fx) * 4;
-            oDx += c.weight * c.disp[b + 0];
-            oH += c.weight * c.disp[b + 1];
-            oDz += c.weight * c.disp[b + 2];
-            oJac = std::min(oJac, static_cast<double>(c.disp[b + 3]));
-          }
-        };
-        auto sumH = [&](double wx, double wy) {
-          double h = 0.0;
-          for (const auto &c : cascades) {
-            const int fx =
-                ((static_cast<int>(std::floor(wx / c.tile * FFT_N)) % FFT_N) + FFT_N) % FFT_N;
-            const int fy =
-                ((static_cast<int>(std::floor(wy / c.tile * FFT_N)) % FFT_N) + FFT_N) % FFT_N;
-            h += c.weight * c.disp[(static_cast<size_t>(fy) * FFT_N + fx) * 4 + 1];
-          }
-          return h;
-        };
-        const double delta = 1.3; // world metres for the normal's central differences
-        for (size_t k = 0; k < oceanVerts; ++k) {
-          const double wx = oceanXY[k * 2 + 0], wy = oceanXY[k * 2 + 1];
-          double dX, H, dZ, jac;
-          sampleSum(wx, wy, dX, H, dZ, jac);
-
-          // Choppy (Gerstner-like) horizontal displacement + vertical height.
-          xyz[k * 3 + 0] = wx + choppy * dX;
-          xyz[k * 3 + 1] = wy + choppy * dZ;
-          xyz[k * 3 + 2] = SEA_LEVEL + waveAmp * H;
-
-          // Smooth normal from the SUMMED-height gradient (world-space central
-          // differences). z-up surface z=f(x,y): n = normalize(-df/dx, -df/dy, 1).
-          const double gx =
-              -waveAmp * (sumH(wx + delta, wy) - sumH(wx - delta, wy)) / (2.0 * delta);
-          const double gy =
-              -waveAmp * (sumH(wx, wy + delta) - sumH(wx, wy - delta)) / (2.0 * delta);
-          const double nl = std::sqrt(gx * gx + gy * gy + 1.0);
-          const double Nx = gx / nl, Ny = gy / nl, Nz = 1.0 / nl;
-
-          // ── CPU water BRDF: deep body + Fresnel sky reflection + sun glint + foam ──
-          const double px = xyz[k * 3 + 0], py = xyz[k * 3 + 1], pz = xyz[k * 3 + 2];
-          double vx = camp[0] - px, vy = camp[1] - py, vz = camp[2] - pz;
-          const double vl = std::sqrt(vx * vx + vy * vy + vz * vz) + 1e-9;
-          vx /= vl;
-          vy /= vl;
-          vz /= vl; // view direction (toward camera)
-          const double NdotV = std::max(Nx * vx + Ny * vy + Nz * vz, 0.0);
-          const double F = 0.02 + 0.98 * std::pow(1.0 - NdotV, 5.0); // Fresnel, F0~=0.02
-          const double NdotL = std::max(Nx * sunx + Ny * suny + Nz * sunz, 0.0);
-          const double lit = 0.30 + 0.70 * NdotL; // deep-water body lambert term
-          // reflected view ray -> a sky gradient and a sharp sun glint
-          const double Rx = 2.0 * NdotV * Nx - vx, Ry = 2.0 * NdotV * Ny - vy,
-                       Rz = 2.0 * NdotV * Nz - vz;
-          const double skyT = std::clamp(0.5 + 0.5 * Rz, 0.0, 1.0);
-          const double glint =
-              std::pow(std::max(Rx * sunx + Ry * suny + Rz * sunz, 0.0), 200.0) * 1.8;
-          const double deepR = 0.015 * lit, deepG = 0.085 * lit, deepB = 0.130 * lit;
-          const double skyR = 0.62 * (1 - skyT) + 0.24 * skyT;
-          const double skyG = 0.66 * (1 - skyT) + 0.44 * skyT;
-          const double skyB = 0.70 * (1 - skyT) + 0.72 * skyT;
-          double cr = deepR * (1 - F) + skyR * F + glint * 1.00;
-          double cg = deepG * (1 - F) + skyG * F + glint * 0.96;
-          double cb = deepB * (1 - F) + skyB * F + glint * 0.88;
-          double foam = std::clamp(
-              (static_cast<double>(foamBias) - static_cast<double>(jac)) / 0.85, 0.0, 1.0);
-          foam = foam * foam * (3.0 - 2.0 * foam); // smoothstep
-          cr += (0.92 - cr) * foam;
-          cg += (0.95 - cg) * foam;
-          cb += (0.96 - cb) * foam;
-          rgb[k * 3 + 0] = static_cast<unsigned char>(std::clamp(cr * 255.0, 0.0, 255.0));
-          rgb[k * 3 + 1] = static_cast<unsigned char>(std::clamp(cg * 255.0, 0.0, 255.0));
-          rgb[k * 3 + 2] = static_cast<unsigned char>(std::clamp(cb * 255.0, 0.0, 255.0));
-        }
-        ocean->updateVertices(xyz);
-        ocean->updateColors(rgb);
+      ocean->setShaderUniform3f("uSunDir", static_cast<float>(sdir.x), static_cast<float>(sdir.y),
+                                static_cast<float>(sdir.z));
+      ocean->setShaderUniformf("uFoamBias",
+                               static_cast<float>(knob("coast.water.foam_bias", 0.48)));
+      ocean->setShaderUniformf("uShore", static_cast<float>(knob("coast.water.shore_foam", 1.0)));
+      ocean->setShaderUniformf("uTime", static_cast<float>(wt));
+    }
+    if (cloudDue || shadowDue) {
+      double shift = t * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
+      double morph = t / CLOUD_MORPH_S * CLOUD_MAPS;
+      std::vector<float> skyF = sky.field(shift, morph);
+      if (cloudDue)
+        skyNode->updateScalars(skyF); // sky drift + morph
+      if (shadowDue) {                // move the cloud's soft ground shadow with it
+        computeCloudShadow(skyF, sunDir(SUN_AZ, SHADOW_PROJ_EL), shadowBuf);
+        cvc::image shadowImg(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
+                             cvc::image::data_type::u8, shadowBuf.data());
+        terrain->setTexture(shadowImg, false);
       }
     }
-
-    view.processUIEvents();
-    view.render();
+    if (capture == Capture::Fly) {
+      double s = frames > 1 ? double(frame) / (frames - 1) : 0.0;
+      s = s * s * (3.0 - 2.0 * s); // ease in/out over the whole flight
+      Vec3d e = crInterp(flyEye, s), tg = crInterp(flyTgt, s);
+      view.setCamera(e.x, e.y, e.z, tg.x, tg.y, tg.z, 0, 0, 1, 42.0, 1.0, 4000.0);
+      placeSky(e);
+    } else {
+      if (capture == Capture::Orbit && frames > 0) // one full slow turn over the run
+        cvc::state::instance(app)(azPath).value(orbitAz0 + 360.0 * double(frame) / frames);
+      cam.update(dt);
+      double ep[3], fp[3], upv[3];
+      cam.getPose(ep, fp, upv);
+      placeSky({ep[0], ep[1], ep[2]});
+      view.renderer()->ResetCameraClippingRange(); // reach the sun billboard
+    }
+    if (capturing) {
+      char path[1024];
+      std::snprintf(path, sizeof path, "%s/frame_%05ld.png", outDir.c_str(), frame);
+      view.writePNG(path);
+    } else {
+      view.render();
+      // Realtime FPS readout (interactive only) — averaged over ~1 s.
+      ++fpsFrames;
+      if (t - fpsLast >= 1.0) {
+        std::printf("\r%.1f fps  (%zu trees, shadows %s, %dx%d)          ",
+                    fpsFrames / (t - fpsLast), forest.size(), shadows ? "on" : "off", width,
+                    height);
+        std::fflush(stdout);
+        fpsLast = t;
+        fpsFrames = 0;
+      }
+    }
+#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN_PTHREADS__
+    // Single-threaded browser build: the scene's publisher has no worker
+    // thread, so drain it here at frame cadence.
+    sg.publisher().flush();
+#endif
+    // Yield to the browser event loop every frame (Asyncify) — input events
+    // fire and the canvas presents during this sleep.
+    emscripten_sleep(0);
+#endif
     ++frame;
-    if (frames > 0 && frame >= frames)
+    if (frames > 0 && ++n >= frames)
       break;
   }
-
-  if (!png.empty()) {
+  if (!png.empty())
     view.writePNG(png);
-    std::printf("wrote %s\n", png.c_str());
-  }
+  hud.detach();
+  cam.detach(); // stop receiving events before teardown
   return 0;
 }
