@@ -93,6 +93,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/vis/visible_set.h
   ../../inc/cvc/vis/reference.h
   ../../inc/cvc/vis/grid_index.h
+  ../../inc/cvc/vis/mesh_tiler.h
 )
 
 # Source files
@@ -194,6 +195,7 @@ set(SOURCE_FILES
   vis/types.cpp
   vis/reference.cpp
   vis/grid_index.cpp
+  vis/mesh_tiler.cpp
 )
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian
