@@ -60,9 +60,18 @@ BINARYEN_ROOT = "${CVC_EMSDK_DIR}/upstream"
 EMSCRIPTEN_ROOT = "${CVC_EMSDK_DIR}/upstream/emscripten"
 CACHE = "${_em_cache}"
 EOF_EMCFG
-    mkdir -p "${_em_cache}"
+    # Seed once from the shared cache so the sysroot is internally consistent: a
+    # from-scratch cache builds fresh libc++ headers that then clash with the
+    # shared install's older <math.h> (isinf macro breaks std::isinf in <complex>).
+    # Copying also brings the shared cache's prebuilt libs, so no slow rebuild.
+    if [ ! -e "${_em_cache}/.cvc-seeded" ]; then
+        rm -rf "${_em_cache}"
+        mkdir -p "${_em_cache}"
+        cp -a "${CVC_EMSDK_DIR}/upstream/emscripten/cache/." "${_em_cache}/" 2>/dev/null || true
+        touch "${_em_cache}/.cvc-seeded"
+    fi
     export EM_CONFIG="${_em_cfg}"
-    echo "build-wasm-demo: shared emsdk cache not writable by $(id -un); using per-user EM_CONFIG=${_em_cfg}"
+    echo "build-wasm-demo: shared emsdk cache not writable by $(id -un); using seeded per-user cache ${_em_cache}"
 fi
 
 emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
