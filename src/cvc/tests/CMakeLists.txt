@@ -114,6 +114,8 @@ add_executable(nav_material_optim_test nav_material_optim_test.cpp)
 add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
 add_executable(lod_select_test lod_select_test.cpp)
 add_executable(lod_select_bench_test lod_select_bench_test.cpp)
+add_executable(vis_frustum_test vis_frustum_test.cpp)
+add_executable(vis_oracle_test vis_oracle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
 # add_executable() calls above so the two blocks can be diffed by eye; the
@@ -197,6 +199,8 @@ set(TEST_TARGETS
   nav_material_train_cuda_test
   lod_select_test
   lod_select_bench_test
+  vis_frustum_test
+  vis_oracle_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -523,6 +527,20 @@ target_link_libraries(lod_select_test
 )
 
 target_link_libraries(lod_select_bench_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(vis_frustum_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(vis_oracle_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1298,6 +1316,8 @@ cvc_discover_tests(nav_material_optim_test)
 cvc_discover_tests(nav_geom_rollout_grad_test)
 cvc_discover_tests(lod_select_test)
 cvc_discover_tests(lod_select_bench_test)
+cvc_discover_tests(vis_frustum_test)
+cvc_discover_tests(vis_oracle_test)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)
