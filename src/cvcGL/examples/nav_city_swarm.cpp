@@ -66,6 +66,19 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
+// Force the discrete GPU on hybrid (Optimus / PowerXpress) laptops. Without this
+// an OpenGL app defaults to the integrated GPU -- measured here: the whole demo
+// ran on the Intel Iris Xe while the RTX 3050 Ti sat at 2%. These exported
+// symbols are read by the NVIDIA/AMD drivers at process start and must live in
+// the executable module at global scope. (Verified: the chase cam went 336 ->
+// 93 ms/frame once it landed on the discrete GPU.)
+#ifdef _WIN32
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 using cvc::gl::CameraController;
 
 namespace {
