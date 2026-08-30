@@ -52,6 +52,21 @@ cmake "${CMAKE_ARGS[@]}"
 # cvcgl-examples component: the bin/ executables, $ORIGIN-rpath'd by
 # examples/CMakeLists.txt (NOT the cvcGL SDK, which shares this build tree).
 cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
+
+# ABI guard: the demos link the SHARED libcvc from the deps prefix but were
+# compiled against the in-tree cvc/nav headers. Run the headless nav_abi_smoke
+# against that libcvc BEFORE installing, so a stale/lagging libcvc (its
+# sim_world layout out of sync with these headers) fails HERE with a clear
+# message instead of shipping demos that segfault at launch. `set -e` turns a
+# non-zero exit into a recipe failure. Native builds only (the exe must run).
+smoke="$CVC_BUILD_DIR/examples/nav_abi_smoke"
+if [[ -x "$smoke" ]]; then
+  echo "cvcgl-examples: running nav_abi_smoke (libcvc ABI guard)"
+  LD_LIBRARY_PATH="${CVC_DEPS_PREFIX:-}/lib:${CVC_DEPS_PREFIX:-}/bin:${LD_LIBRARY_PATH:-}" \
+  DYLD_LIBRARY_PATH="${CVC_DEPS_PREFIX:-}/lib:${DYLD_LIBRARY_PATH:-}" \
+    "$smoke"
+fi
+
 cmake --install "$CVC_BUILD_DIR" --component cvcgl-examples
 
 # The web launcher: serve.py sends the COOP/COEP headers a -pthread wasm build

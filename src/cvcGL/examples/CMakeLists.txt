@@ -42,6 +42,20 @@ foreach(_demo nav_city_swarm nav_fog_ghost nav_finale)
   vtk_module_autoinit(TARGETS ${_demo} MODULES ${VTK_LIBRARIES})
 endforeach()
 
+# Headless ABI/consistency guard (no GL). The nav demos compile against the
+# in-tree cvc/nav headers but link the SHARED libcvc from the deps prefix; if that
+# libcvc is older than the headers, sim_world's by-value return from
+# from_occupancy() corrupts the caller (sim_world embeds config+material_config by
+# value) and the demos segfault at startup. nav_abi_smoke exercises exactly that
+# path and asserts a sane read-back; the cvcgl-examples recipe runs it after the
+# build so a stale libcvc fails loudly here instead of shipping a broken demo. It
+# links only cvc::cvc (no cvcGL/VTK/GL), is native-only (it must run), and is not
+# installed — it is a build-time check.
+if(NOT EMSCRIPTEN)
+  add_executable(nav_abi_smoke nav_abi_smoke.cpp)
+  target_link_libraries(nav_abi_smoke PRIVATE cvc::cvc)
+endif()
+
 # ---- WebAssembly demo builds -------------------------------------------------
 # The browser-capable examples. nav_finale is native-only (it needs assimp +
 # imagemagick + a runtime bundle the wasm toolchain lacks). Add a new browser demo
