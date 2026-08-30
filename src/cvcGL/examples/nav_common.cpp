@@ -265,6 +265,52 @@ const std::vector<double> &AgentGlyphs::pack_z(const float *pos_world, const flo
   return xyz_;
 }
 
+const std::vector<double> &AgentGlyphs::pack_lod(const float *pos_world, const float *heading,
+                                                 const double *z_off, const std::uint32_t *idx,
+                                                 int count) {
+  if (count < 0)
+    count = 0;
+  if (count > n_)
+    count = n_; // never exceed this node's fixed capacity
+
+  // Used slots: transform the selected agent's template into slot s.
+  for (int s = 0; s < count; ++s) {
+    const int i = static_cast<int>(idx[s]);
+    const double ox = pos_world[2 * i], oy = pos_world[2 * i + 1];
+    const double oz = z_off ? z_off[i] : 0.0;
+    const double ch = std::cos(heading[i]), sh = std::sin(heading[i]);
+    for (int k = 0; k < v_; ++k) {
+      const double lx = tmpl_[3 * k], ly = tmpl_[3 * k + 1], lz = tmpl_[3 * k + 2];
+      const std::size_t o = (static_cast<std::size_t>(s) * v_ + k) * 3;
+      xyz_[o + 0] = ox + ch * lx - sh * ly;
+      xyz_[o + 1] = oy + sh * lx + ch * ly;
+      xyz_[o + 2] = oz + z_ + lz;
+    }
+  }
+
+  // Unused slots: collapse to a single degenerate point so every triangle has
+  // zero area and is discarded by the rasterizer. Park it at the first used
+  // agent's position (not the origin) so the merged actor's bounding box stays
+  // tight -- a loose bbox makes the shadow map fit the wrong volume and the
+  // frustum culler pessimistic (the fixed_mesh discipline from the LOD roadmap).
+  double px = 0.0, py = 0.0, pz = 0.0;
+  if (count > 0) {
+    const int i0 = static_cast<int>(idx[0]);
+    px = pos_world[2 * i0];
+    py = pos_world[2 * i0 + 1];
+    pz = (z_off ? z_off[i0] : 0.0) + z_;
+  }
+  for (int s = count; s < n_; ++s) {
+    for (int k = 0; k < v_; ++k) {
+      const std::size_t o = (static_cast<std::size_t>(s) * v_ + k) * 3;
+      xyz_[o + 0] = px;
+      xyz_[o + 1] = py;
+      xyz_[o + 2] = pz;
+    }
+  }
+  return xyz_;
+}
+
 void orbit_camera(const Bounds &b, double zc, double azimuth, double elevation, double dist_scale,
                   double eye[3], double focal[3]) {
   focal[0] = b.cx();
