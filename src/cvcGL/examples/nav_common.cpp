@@ -458,10 +458,18 @@ bool load_vehicle_template(const std::string &path, double target_len, std::vect
     for (const auto &v : pts) {
       const double f = v[fwd] - cf;
       const bool pos = f > 0;
-      if (pos) ++n_pos; else ++n_neg;
+      if (pos)
+        ++n_pos;
+      else
+        ++n_neg;
       if (v[up] >= top_thresh) {
-        if (pos) { sum_top_pos += f; ++tt_pos; }
-        else     { sum_top_neg += f; ++tt_neg; }
+        if (pos) {
+          sum_top_pos += f;
+          ++tt_pos;
+        } else {
+          sum_top_neg += f;
+          ++tt_neg;
+        }
       }
     }
     // Front-is-lighter score: which half has FEWER verts?
@@ -564,8 +572,7 @@ cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
 // Parse the row-major "grid": [[...],[...],...] block from terrain.json into a
 // flat vector. Returns false if the block is missing/malformed — the caller
 // falls back to a flat ground plane.
-static bool parse_terrain_grid(const std::string &s, int rows, int cols,
-                               std::vector<double> &out) {
+static bool parse_terrain_grid(const std::string &s, int rows, int cols, std::vector<double> &out) {
   const auto gk = s.find("\"grid\"");
   if (gk == std::string::npos)
     return false;
@@ -702,7 +709,8 @@ std::unique_ptr<cvc::gl::StageLighting> make_stage_rig(SceneGraph &sg, const Bou
 }
 
 Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
-                 double gx, double gy, int inflate_cells) {
+                 double gx, double gy, int inflate_cells, double standoff_cells,
+                 double standoff_gamma) {
   Route rt;
   if (!occ || rows < 2 || cols < 2 || b.max_x <= b.min_x || b.max_y <= b.min_y) {
     rt.wp.push_back({gx, gy});
@@ -725,10 +733,21 @@ Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, d
   int sr, sc, gr, gc;
   w2c(sx, sy, sr, sc);
   w2c(gx, gy, gr, gc);
-  const auto path = cvc::nav::astar(planOcc, rows, cols, sr, sc, gr, gc);
+  std::vector<double> surcharge;
+  if (standoff_cells > 0.0)
+    surcharge = cvc::nav::clearance_cost(planOcc, rows, cols, standoff_cells, standoff_gamma);
+  const auto path = cvc::nav::astar(planOcc, rows, cols, sr, sc, gr, gc,
+                                    surcharge.empty() ? nullptr : surcharge.data());
   if (path.size() >= 4) {
-    const auto sp =
-        cvc::nav::simplify(planOcc, rows, cols, path.data(), static_cast<int>(path.size() / 2));
+    // NO string-pull when a standoff surcharge is in play: line of sight cuts
+    // every corner the surcharge paid to round, taking the route back to the
+    // walls (measured 6.40 -> 1.00 cells of clearance, i.e. all the way back to
+    // the shortest path). Keep the A* cells as the waypoints.
+    std::vector<int> sp;
+    if (surcharge.empty())
+      sp = cvc::nav::simplify(planOcc, rows, cols, path.data(), static_cast<int>(path.size() / 2));
+    else
+      sp = path;
     for (std::size_t i = 0; i + 1 < sp.size(); i += 2)
       rt.wp.push_back({b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
                        b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
