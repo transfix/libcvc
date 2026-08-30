@@ -43,6 +43,28 @@ fi
 # shellcheck disable=SC1091
 source "${CVC_EMSDK_DIR}/emsdk_env.sh"
 
+# On a shared self-hosted runner host the emsdk's cache dir can be owned by a
+# different user than the one running this job; emcc then can't write it and the
+# build dies at "Check if compiler accepts -pthread - no" / "Could NOT find
+# Threads". If the shared cache is not writable, point emcc at a per-user cache
+# via a private EM_CONFIG. This MUST come after emsdk_env.sh, which clears
+# EM_CONFIG. No-op when the shared cache is already writable (e.g. the owner).
+if [ ! -w "${CVC_EMSDK_DIR}/upstream/emscripten/cache" ]; then
+    _em_cfg="${HOME}/.emscripten-cvcgl"
+    _em_cache="${HOME}/.emscripten-cache-cvcgl"
+    _em_node="$(ls -d "${CVC_EMSDK_DIR}"/node/*/bin/node 2>/dev/null | head -1)"
+    cat > "${_em_cfg}" <<EOF_EMCFG
+NODE_JS = "${_em_node}"
+LLVM_ROOT = "${CVC_EMSDK_DIR}/upstream/bin"
+BINARYEN_ROOT = "${CVC_EMSDK_DIR}/upstream"
+EMSCRIPTEN_ROOT = "${CVC_EMSDK_DIR}/upstream/emscripten"
+CACHE = "${_em_cache}"
+EOF_EMCFG
+    mkdir -p "${_em_cache}"
+    export EM_CONFIG="${_em_cfg}"
+    echo "build-wasm-demo: shared emsdk cache not writable by $(id -un); using per-user EM_CONFIG=${_em_cfg}"
+fi
+
 emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_FIND_ROOT_PATH="${CVC_WASM_DEPS}" \
