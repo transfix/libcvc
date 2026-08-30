@@ -43,7 +43,23 @@ namespace detail {
 
 // Run fn(i) for i in [0, n) across `num_threads` workers (<=0 => hardware
 // concurrency). The calling thread participates, so num_threads==1 runs inline.
-template <class F> void parallel_for(int n, int num_threads, F &&fn) {
+// `min_items_per_thread` is the caller's estimate of how much work an item is
+// worth. This pool is spawned and joined ON EVERY CALL -- measured at ~180us per
+// worker on a 20-core box, so ~3.5ms of pure std::thread churn -- which is a
+// bargain for an A* batch (each item is a whole search) and ruinous for a
+// per-tick kernel whose items are microseconds. Passing a large value keeps
+// small fan-outs inline.
+//
+// Measured on the fused drive (nav_drive_step, 192^2 field, one f32 sample +
+// a 5-64-64-3 MLP + one bicycle step per agent), auto-threaded vs inline:
+//
+//     agents      5       8      64     256    1024    4096   16384
+//     auto     3.86    6.94   16.34   13.02   19.77   21.55   38.81  ms
+//     inline   0.41    0.91    2.52    2.36    9.24   20.37   76.75  ms
+//
+// Inline wins by ~9x at demo sizes and does not lose until ~4k agents. The
+// default of 1 is the historical behaviour, so no existing caller moves.
+template <class F> void parallel_for(int n, int num_threads, F &&fn, int min_items_per_thread = 1) {
   if (n <= 0)
     return;
   int nt = num_threads > 0 ? num_threads : static_cast<int>(std::thread::hardware_concurrency());
@@ -51,6 +67,10 @@ template <class F> void parallel_for(int n, int num_threads, F &&fn) {
     nt = 1;
   if (nt > n)
     nt = n;
+  if (min_items_per_thread > 1) {
+    const int afford = n / min_items_per_thread;
+    nt = afford < 1 ? 1 : (nt < afford ? nt : afford);
+  }
   if (nt == 1) {
     for (int i = 0; i < n; ++i)
       fn(i);
