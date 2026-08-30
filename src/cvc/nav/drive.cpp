@@ -176,7 +176,8 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 }
 
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
-                float *feat_out, int num_threads, const friction_field *grip) {
+                float *feat_out, int num_threads, const friction_field *grip, float mu_lookahead,
+                int mu_probes) {
   const bool has_grip = grip != nullptr && grip->data != nullptr;
   const std::size_t stride = has_grip ? 6 : 5;
   detail::parallel_for(n, num_threads, [&](int i) {
@@ -195,8 +196,19 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
     fo[3] = gdy;
     fo[4] = gdx * nx + gdy * ny; // gdir . unit_normal
     if (has_grip) {
+      // Worst grip from here to the carrot: min over the probe, inclusive of
+      // `on`, clamped so it never reaches past the carrot. An unbounded probe
+      // would make every agent in the world permanently believe it is on ice.
       const int gplane = (map_id && grip->M > 1) ? map_id[i] : 0;
-      fo[5] = sample_grip(*grip, gplane, on[2 * i], on[2 * i + 1]);
+      const float reach = gd < mu_lookahead ? gd : mu_lookahead;
+      float worst = sample_grip(*grip, gplane, on[2 * i], on[2 * i + 1]);
+      const int P = mu_probes < 1 ? 1 : mu_probes;
+      for (int k = 1; k <= P; ++k) {
+        const float t = (static_cast<float>(k) / static_cast<float>(P)) * reach;
+        const float m = sample_grip(*grip, gplane, on[2 * i] + t * gdx, on[2 * i + 1] + t * gdy);
+        worst = m < worst ? m : worst;
+      }
+      fo[5] = worst;
     }
   });
 }
@@ -541,7 +553,8 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
     throw std::runtime_error(
         "cvc::nav::drive_step: model takes 6 features but veh_params.grip is null");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
-  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr);
+  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
+             v.mu_lookahead, v.mu_probes);
   std::vector<float> coef(static_cast<std::size_t>(n) * 3);
   model.forward(feat.data(), n, coef.data(), num_threads);
   std::vector<float> al(n), be(n), ga(n);
@@ -568,7 +581,8 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
     throw std::runtime_error(
         "cvc::nav::drive_step_material: model takes 6 features but veh_params.grip is null");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
-  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr);
+  coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
+             v.mu_lookahead, v.mu_probes);
   std::vector<float> coef(static_cast<std::size_t>(n) * 3);
   model.forward(feat.data(), n, coef.data(), num_threads);
   std::vector<float> al(n), be(n), ga(n);
