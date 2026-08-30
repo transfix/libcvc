@@ -62,6 +62,21 @@ struct field_stack {
   double S = 1.0;                            // world -> normalized scale
 };
 
+// A single-plane grip raster (grl_snam.material.FrictionField). `mu == 1` is the
+// REFERENCE DRY surface the vehicle constants are already quoted against, so a
+// null `data` and a uniform-1 plane are both exactly the pre-grip rollout. Same
+// [M][H][W] layout and world<->grid constants as `field_stack`, one channel:
+// element (m,r,c) at (m*H + r)*W + c. Deliberately separate from the material
+// stack because risk and grip are independent surface properties — ice is
+// innocuous to look at and lethal to drive on, rubble is the reverse.
+struct friction_field {
+  const float *data = nullptr; // [M*H*W], borrowed
+  int M = 0, H = 0, W = 0;
+  double mnx = 0, mny = 0, mxx = 0, mxy = 0; // world bounds
+  double cx = 0, cy = 0;                     // world center
+  double S = 1.0;                            // world -> normalized scale
+};
+
 // Sample the field at `n` normalized positions `on` ([n*2], (x,y) interleaved,
 // float32 to match torch); agent i samples plane `map_id[i]` (pass map_id ==
 // nullptr for the shared case = plane 0 for all). Writes phi_out[n] and the
@@ -78,16 +93,67 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 // gdir = (goal-o)/(|goal-o|+1e-6). Samples the field at each `on` (agent i ->
 // plane map_id[i]). `goal` is [n*2] normalized (the carrot). Writes feat_out
 // [n*5] row-major.
+// Passing `grip` appends the sampled mu as a SIXTH feature (stride 6 instead of
+// 5), matching sdf_nav.coef_feats(friction=...). Without it the drive can only
+// discover ice by standing on it, so anticipation has to reach the coefficients
+// — and they cannot anticipate what they cannot see. A 6-feature net is not a
+// retrain from scratch: sdf_nav.widen_coef_mlp lifts a trained 5-feature net to
+// one whose mu column is zero, which is output-identical at init.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
-                float *feat_out, int num_threads = 0);
+                float *feat_out, int num_threads = 0, const friction_field *grip = nullptr);
 
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
 // VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.
+//
+// The three optional refinements below are each inert at their defaults — a zero
+// count, a zero width, a null pointer — so an unmodified caller gets the legacy
+// trace bit-for-bit and every stored .cvcnav weight stays valid. They live in
+// this struct rather than behind new entry points so `bicycle_rollout`,
+// `bicycle_rollout_material` and `drive_step` all pick them up unchanged.
 struct veh_params {
   float rr = 0, d_hat = 0, dt = 0, vmax = 0.9f; // meta / kw
   float L = 0.035f, delta_max = 0.6f, a_max = 1.5f, a_lat_max = 1.0f, k_steer = 0.8f;
   int nsub = 1;
   bool allow_reverse = true;
+
+  // FOOTPRINT. `n_body == 0` = the legacy single disc of radius `rr` at the
+  // rear axle. Otherwise `n_body` discs of radius `body_rr` at the longitudinal
+  // offsets in `body_offsets` (normalized, along the heading, from the rear
+  // axle); a car is {0, L/2, L} at body_rr ~ half-width. Clearance is the MIN
+  // over discs and the barrier force their SUM, so the nose is pushed off a
+  // wall the rear axle cannot see. `rr` is then unused by the drive, and the
+  // governor / creep / nose-blocked margins switch to `body_rr` — sizing them
+  // for a body 12x too fat is what made the tighter footprint worthless.
+  //
+  // NOT a drop-in: the SUM is a K-times gain on the learned `al`, which was fit
+  // for one sample point. It does not break the vehicle, it makes it TIMID —
+  // more standoff, fewer collisions, longer to arrive. Measured on the grl-snam
+  // city story (5 seeds x 4 agents), three discs vs one at matched radius:
+  // reach 45% -> 0% at a 700-tick budget and 75% -> 30% at 1600 (so the
+  // ordering is not a budget artifact), mean clearance 2.92 m -> 3.65 m, and
+  // penetration 3.5 -> 2.8 at r=0.075 — i.e. consistently SAFER per unit of
+  // driving. Scale `al` by the disc count, or retune the barrier, before
+  // reading anything into a footprint run.
+  const float *body_offsets = nullptr; // [n_body], borrowed
+  int n_body = 0;
+  float body_rr = 0.0f;
+
+  // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
+  // angle; on a real Ackermann axle the INNER wheel reaches the mechanical lock
+  // first, so the achievable virtual angle is atan(L/(L/tan(delta_max)+t/2)).
+  // At t = 0.6 L that is 14% less steer and a 20% larger R_min.
+  float track_width = 0.0f;
+
+  // GRIP. Null = mu == 1 everywhere. Both actuator limits are friction-limited
+  // in reality, so `a_max` and `a_lat_max` scale together with the sampled mu:
+  // on ice the corner cap and the stopping governor collapse at the same time.
+  // This is understeer-as-a-curvature-limit, NOT a sideslip skid — a kinematic
+  // bicycle has no lateral velocity state, so the vehicle runs wide rather than
+  // fishtailing, and it therefore carries MORE speed through a corner it fails
+  // to take, not less. mu is sampled at the CURRENT pose, so a vehicle entering
+  // ice at speed genuinely cannot brake in time; that is the intended failure
+  // mode. See docs/MATERIAL_NAV.md "Grip" in the grl-snam repo.
+  const friction_field *grip = nullptr;
 };
 
 // Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,

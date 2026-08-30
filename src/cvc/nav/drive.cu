@@ -50,10 +50,26 @@ struct dev_field {
   float S, cx, cy, mnx, mny, mxx, mxy;
 };
 
+// Device view of a single-plane grip raster. `data == nullptr` => mu == 1.
+struct dev_grip {
+  const float *data = nullptr;
+  int M = 0, H = 0, W = 0;
+  float S = 1.0f, cx = 0, cy = 0, mnx = 0, mny = 0, mxx = 0, mxy = 0;
+};
+
 struct dev_veh {
   float rr, d_hat, dt, vmax, L, delta_max, a_max, a_lat_max, k_steer;
   int nsub;
   int allow_reverse;
+  // The optional refinements. These carry in-class initializers ON PURPOSE:
+  // every construction site here is a bare `dev_veh v;` followed by field
+  // assignments, so without them the pointers would be indeterminate and the
+  // kernel would dereference garbage. Zero/null is the legacy path bit-for-bit.
+  const float *body_offsets = nullptr; // device [n_body]
+  int n_body = 0;
+  float body_rr = 0.0f;
+  float track_width = 0.0f;
+  dev_grip grip;
 };
 
 // Bilinear sample (plane 0) + unit normal — mirrors drive.cpp sample_unit.
@@ -84,6 +100,27 @@ __device__ inline void d_sample_unit(const dev_field &f, int plane, float onx, f
   const float mag = sqrtf(rnx * rnx + rny * rny) + 1e-6f;
   nxo = rnx / mag;
   nyo = rny / mag;
+}
+
+// Bilinear sample of a single-plane grip raster — mirrors drive.cpp
+// sample_grip, using the same float-stored bounds convention as dev_field.
+__device__ inline float d_sample_grip(const dev_grip &g, int plane, float onx, float ony) {
+  const float wx = onx / g.S + g.cx;
+  const float wy = ony / g.S + g.cy;
+  const float gx = 2.0f * (wx - g.mnx) / (g.mxx - g.mnx) - 1.0f;
+  const float gy = 2.0f * (wy - g.mny) / (g.mxy - g.mny) - 1.0f;
+  const float Wf1 = (float)(g.W - 1), Hf1 = (float)(g.H - 1);
+  const float ix = fminf(fmaxf((gx + 1.0f) * 0.5f * Wf1, 0.0f), Wf1);
+  const float iy = fminf(fmaxf((gy + 1.0f) * 0.5f * Hf1, 0.0f), Hf1);
+  const int ix0 = (int)floorf(ix), iy0 = (int)floorf(iy);
+  const float wx1 = ix - (float)ix0, wx0 = 1.0f - wx1;
+  const float wy1 = iy - (float)iy0, wy0 = 1.0f - wy1;
+  const int cx0 = min(max(ix0, 0), g.W - 1), cx1 = min(max(ix0 + 1, 0), g.W - 1);
+  const int cy0 = min(max(iy0, 0), g.H - 1), cy1 = min(max(iy0 + 1, 0), g.H - 1);
+  const long HW = (long)g.H * g.W;
+  const float *pl = g.data + (long)plane * HW;
+  return pl[(long)cy0 * g.W + cx0] * (wx0 * wy0) + pl[(long)cy0 * g.W + cx1] * (wx1 * wy0) +
+         pl[(long)cy1 * g.W + cx0] * (wx0 * wy1) + pl[(long)cy1 * g.W + cx1] * (wx1 * wy1);
 }
 
 __device__ inline float d_ipc(float dd, float d_hat) {
@@ -126,22 +163,72 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
                                  float &spi, float gx, float gy, float al, float be, float ga,
                                  const dev_veh &v, float &minclr) {
   const float hdt = v.dt / (float)v.nsub;
-  const float tan_dmax = tanf(v.delta_max);
+  // track_width == 0 returns delta_max unchanged, so tan_dmax and every
+  // threshold built from it stay bit-identical on the legacy path.
+  const float dmax = v.track_width > 0.0f
+                         ? atanf(v.L / (v.L / tanf(v.delta_max) + 0.5f * v.track_width))
+                         : v.delta_max;
+  const float tan_dmax = tanf(dmax);
   const float sp_min = v.allow_reverse ? -0.25f * v.vmax : 0.0f;
   const float v_creep_cap = 0.5f * sqrtf(v.a_lat_max * v.L / tan_dmax);
-  const float dmax = v.delta_max;
+  const bool has_fp = v.n_body > 0 && v.body_offsets != nullptr;
+  const bool has_grip = v.grip.data != nullptr;
   minclr = 9.9f;
   for (int s = 0; s < v.nsub; ++s) {
-    float phi, nx, ny;
-    d_sample_unit(f, plane, ox, oy, phi, nx, ny);
-    const float d = phi - v.rr;
-    minclr = fminf(minclr, d);
-    const float ipc = d_ipc(d, v.d_hat);
-    const float Fbar_x = -(al * ipc) * nx, Fbar_y = -(al * ipc) * ny;
-    const float Fx = Fbar_x - be * (ox - gx), Fy = Fbar_y - be * (oy - gy);
+    // Hoisted above the sample: the footprint places its discs along the
+    // heading. Value-identical to computing it after.
     const float ch = cosf(thi), sh = sinf(thi);
+    float nx, ny, d, gov_rr;
+    float Fbar_x, Fbar_y, Frep_x = 0.0f, Frep_y = 0.0f;
+    if (!has_fp) {
+      float phi;
+      d_sample_unit(f, plane, ox, oy, phi, nx, ny);
+      d = phi - v.rr;
+      const float ipc = d_ipc(d, v.d_hat);
+      Fbar_x = -(al * ipc) * nx;
+      Fbar_y = -(al * ipc) * ny;
+      const float ipc_rep = ipc < 0.0f ? ipc : 0.0f;
+      Frep_x = -(al * ipc_rep) * nx;
+      Frep_y = -(al * ipc_rep) * ny;
+      gov_rr = v.rr;
+    } else {
+      // MIN clearance over discs (its normal drives the governor), SUM force.
+      d = 3.0e38f;
+      nx = 0.0f;
+      ny = 0.0f;
+      Fbar_x = 0.0f;
+      Fbar_y = 0.0f;
+      for (int b = 0; b < v.n_body; ++b) {
+        const float off = v.body_offsets[b];
+        float bphi, bnx, bny;
+        d_sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
+        const float bd = bphi - v.body_rr;
+        const float bipc = d_ipc(bd, v.d_hat);
+        Fbar_x += -(al * bipc) * bnx;
+        Fbar_y += -(al * bipc) * bny;
+        const float brep = bipc < 0.0f ? bipc : 0.0f;
+        Frep_x += -(al * brep) * bnx;
+        Frep_y += -(al * brep) * bny;
+        if (bd < d) {
+          d = bd;
+          nx = bnx;
+          ny = bny;
+        }
+      }
+      gov_rr = v.body_rr;
+    }
+    minclr = fminf(minclr, d);
+    // Both actuator limits are grip-limited, so both scale with mu together.
+    float a_max_e = v.a_max, a_lat_e = v.a_lat_max, creep_cap = v_creep_cap;
+    if (has_grip) {
+      const float mu = d_sample_grip(v.grip, v.grip.M > 1 ? plane : 0, ox, oy);
+      a_max_e = v.a_max * mu;
+      a_lat_e = v.a_lat_max * mu;
+      creep_cap = 0.5f * sqrtf(a_lat_e * (v.L / tan_dmax));
+    }
+    const float Fx = Fbar_x - be * (ox - gx), Fy = Fbar_y - be * (oy - gy);
     float a_long = (Fx * ch + Fy * sh) - ga * spi;
-    a_long = fminf(fmaxf(a_long, -v.a_max), v.a_max);
+    a_long = fminf(fmaxf(a_long, -a_max_e), a_max_e);
     const float tgx = gx - ox, tgy = gy - oy;
     float L_d = sqrtf(tgx * tgx + tgy * tgy);
     if (L_d < 1e-6f)
@@ -155,29 +242,32 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
       L_d_eff = 4.0f * v.L;
     L_d_eff = fminf(L_d, L_d_eff);
     float delta = behind ? turn_sign * dmax : atan2f(2.0f * v.L * sin_a, L_d_eff);
-    const float ipc_rep = ipc < 0.0f ? ipc : 0.0f;
-    const float Frep_x = -(al * ipc_rep) * nx, Frep_y = -(al * ipc_rep) * ny;
+    // F_rep computed with the sample above (summed per disc when footprinted).
     delta = delta + v.k_steer * tanhf(Frep_x * (-sh) + Frep_y * ch);
     delta = fminf(fmaxf(delta, -dmax), dmax);
     float kappa = fabsf(tanf(delta)) / v.L;
     const float kfloor = tan_dmax / (v.L * 400.0f);
     if (kappa < kfloor)
       kappa = kfloor;
-    const float v_corner = sqrtf(v.a_lat_max / kappa);
-    float ds = d - 0.5f * v.rr;
+    const float v_corner = sqrtf(a_lat_e / kappa);
+    float ds = d - 0.5f * gov_rr;
     if (ds < 0.0f)
       ds = 0.0f;
-    const float v_stop = sqrtf(2.0f * v.a_max * ds);
+    // +1e-24f mirrors the torch reference (which needs it so sqrt'(0) does not
+    // NaN its backward pass); matching keeps the residual at zero. Legacy form
+    // preserved exactly on the untouched path.
+    const float v_stop =
+        (has_fp || has_grip) ? sqrtf(2.0f * a_max_e * ds + 1e-24f) : sqrtf(2.0f * v.a_max * ds);
     const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
     float approach = -(nx * ch + ny * sh) * motion_sign;
     approach = fminf(fmaxf(approach, 0.0f), 1.0f);
     const float v_stop_dir = approach > 0.05f ? v_stop / fmaxf(approach, 0.05f) : v.vmax;
     float v_lim = fminf(v.vmax, fminf(v_corner, v_stop_dir));
     const bool hard_steer = fabsf(delta) >= 0.7f * dmax;
-    const bool can_move = d > 0.25f * v.rr;
+    const bool can_move = d > 0.25f * gov_rr;
     const float v_floor = (hard_steer && can_move) ? 0.08f : 0.0f;
     v_lim = fmaxf(v_lim, v_floor);
-    const float v_creep = fminf(0.5f * v_corner, v_creep_cap);
+    const float v_creep = fminf(0.5f * v_corner, creep_cap);
     if (behind) {
       float fbh = Fbar_x * ch + Fbar_y * sh;
       if (fbh > 0.0f)
@@ -189,21 +279,21 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
       a_long = fmaxf(a_long, (0.08f - spi) / hdt);
     if (v.allow_reverse) {
       const float head_on = fminf(fmaxf(-(nx * ch + ny * sh), 0.0f), 1.0f);
-      const bool nose_blocked = behind && (head_on > 0.6f) && (d < 0.5f * v.rr + 0.02f);
+      const bool nose_blocked = behind && (head_on > 0.6f) && (d < 0.5f * gov_rr + 0.02f);
       if (nose_blocked) {
         a_long = (-0.10f - spi) / hdt;
         delta = -delta;
       }
     }
-    a_long = fminf(fmaxf(a_long, -v.a_max), v.a_max);
+    a_long = fminf(fmaxf(a_long, -a_max_e), a_max_e);
     a_long = fminf(a_long, (v_lim - spi) / hdt);
-    a_long = fminf(fmaxf(a_long, -v.a_max), v.a_max);
+    a_long = fminf(fmaxf(a_long, -a_max_e), a_max_e);
     spi = spi + hdt * a_long;
     spi = fminf(fmaxf(spi, sp_min), v.vmax);
     float sp2 = spi * spi;
     if (sp2 < 1e-9f)
       sp2 = 1e-9f;
-    const float d_cap = atanf(v.a_lat_max * v.L / sp2);
+    const float d_cap = atanf(a_lat_e * v.L / sp2);
     delta = fminf(fmaxf(delta, -d_cap), d_cap);
     thi = thi + hdt * (spi / v.L) * tanf(delta);
     ox = ox + hdt * spi * cosf(thi);
@@ -316,6 +406,12 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   const int kDeviceMaxWidth = 64;
   if (fl.in > kDeviceMaxWidth)
     throw std::runtime_error("cvc::nav::drive_step_cuda: input width > 64 unsupported on GPU");
+  // drive_kernel builds the 5-feature vector inline in registers; a grip-widened
+  // net wants a 6th column the kernel does not assemble. Refuse rather than feed
+  // the first layer a short vector — the arithmetic would succeed and be wrong.
+  if (fl.in != 5)
+    throw std::runtime_error("cvc::nav::drive_step_cuda: the fused kernel builds 5 features "
+                             "inline; a 6-feature (grip-widened) net needs the CPU drive_step");
   for (int L = 0; L < fl.num_layers; ++L)
     if (fl.rows[L] > kDeviceMaxWidth || fl.cols[L] > kDeviceMaxWidth)
       throw std::runtime_error("cvc::nav::drive_step_cuda: layer width > 64 unsupported on GPU");
@@ -364,6 +460,34 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   v.k_steer = vp.k_steer;
   v.nsub = vp.nsub;
   v.allow_reverse = vp.allow_reverse ? 1 : 0;
+  v.track_width = vp.track_width;
+  v.body_rr = vp.body_rr;
+
+  // The optional refinements need their own device buffers. Both stay null when
+  // unused, which is the legacy kernel path bit-for-bit.
+  float *d_boff_body = nullptr, *d_grip = nullptr;
+  if (vp.n_body > 0 && vp.body_offsets) {
+    cuda_check(cudaMalloc(&d_boff_body, (size_t)vp.n_body * sizeof(float)), "malloc body_offsets");
+    H2D(d_boff_body, vp.body_offsets, (size_t)vp.n_body * sizeof(float), "H2D body_offsets");
+    v.body_offsets = d_boff_body;
+    v.n_body = vp.n_body;
+  }
+  if (vp.grip && vp.grip->data) {
+    const size_t gsz = (size_t)vp.grip->M * vp.grip->H * vp.grip->W * sizeof(float);
+    cuda_check(cudaMalloc(&d_grip, gsz), "malloc grip");
+    H2D(d_grip, vp.grip->data, gsz, "H2D grip");
+    v.grip.data = d_grip;
+    v.grip.M = vp.grip->M;
+    v.grip.H = vp.grip->H;
+    v.grip.W = vp.grip->W;
+    v.grip.S = (float)vp.grip->S;
+    v.grip.cx = (float)vp.grip->cx;
+    v.grip.cy = (float)vp.grip->cy;
+    v.grip.mnx = (float)vp.grip->mnx;
+    v.grip.mny = (float)vp.grip->mny;
+    v.grip.mxx = (float)vp.grip->mxx;
+    v.grip.mxy = (float)vp.grip->mxy;
+  }
 
   const int threads = 128, blocks = (n + threads - 1) / threads;
   drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_car, d_w,
@@ -390,6 +514,8 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   cudaFree(d_act);
   cudaFree(d_woff);
   cudaFree(d_boff);
+  cudaFree(d_boff_body); // cudaFree(nullptr) is a documented no-op
+  cudaFree(d_grip);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +749,16 @@ sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t 
   s.reach_tol = cfg.reach_tol;
   s.a_max = cfg.veh.a_max;
   s.dt = cfg.veh.dt;
+  // The optional vehicle refinements are NOT plumbed into the device-resident
+  // world yet: they need per-world device buffers with this object's lifetime,
+  // not the per-call ones drive_step_cuda allocates. Refuse rather than run a
+  // GPU world that honours fewer constraints than the CPU/torch reference —
+  // that is a silent divergence, and no parity gate would catch it because the
+  // gates hand both paths the same config.
+  if (cfg.veh.n_body > 0 || cfg.veh.track_width > 0.0f || cfg.veh.grip)
+    throw std::runtime_error("cvc::nav::sim_world_cuda: body_offsets / track_width / grip are not "
+                             "supported by the device-resident world yet; use the CPU sim_world "
+                             "or drive_step_cuda");
   s.v.rr = cfg.veh.rr;
   s.v.d_hat = cfg.veh.d_hat;
   s.v.dt = cfg.veh.dt;
