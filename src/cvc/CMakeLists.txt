@@ -87,6 +87,11 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/lod/select.h
+  ../../inc/cvc/vis/types.h
+  ../../inc/cvc/vis/scene_view.h
+  ../../inc/cvc/vis/view_params.h
+  ../../inc/cvc/vis/visible_set.h
+  ../../inc/cvc/vis/reference.h
 )
 
 # Source files
@@ -185,6 +190,8 @@ set(SOURCE_FILES
   nav/sim_world.cpp
   nav/sim_thread.cpp
   lod/select.cpp
+  vis/types.cpp
+  vis/reference.cpp
 )
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian
