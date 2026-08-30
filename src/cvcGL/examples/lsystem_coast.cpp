@@ -1421,6 +1421,13 @@ int main(int argc, char **argv) {
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
   ui.attachCamera(cam);
+  // The overlay creates its Dear ImGui context INSIDE libcvc. This .exe links its
+  // own static copy of imgui (imgui exports no symbols), so its ImGui::* calls use a
+  // SEPARATE, uninitialised context — the first ImGui::Begin below would dereference
+  // a null GImGui and crash. Adopt the overlay's context so the whole process shares
+  // one. (cvc::gl::ui::* widgets already run inside libcvc, but the window + menu bar
+  // here are raw ImGui::* from this module, so they need the shared context.)
+  ImGui::SetCurrentContext(ui.imguiContext());
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
   bool uiShadows = shadows;

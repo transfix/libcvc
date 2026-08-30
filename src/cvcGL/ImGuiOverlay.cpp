@@ -491,6 +491,7 @@ ImGuiOverlay::~ImGuiOverlay() {
 }
 
 void ImGuiOverlay::setDrawCallback(std::function<void()> draw) { m_impl->draw = std::move(draw); }
+ImGuiContext *ImGuiOverlay::imguiContext() const { return m_impl->ctx; }
 
 void ImGuiOverlay::setUiScale(float scale) {
   if (scale < 0.25f)
@@ -546,6 +547,7 @@ struct ImGuiOverlay::Impl {};
 ImGuiOverlay::ImGuiOverlay(SceneRenderer &) : m_impl(new Impl) {}
 ImGuiOverlay::~ImGuiOverlay() = default;
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
+ImGuiContext *ImGuiOverlay::imguiContext() const { return nullptr; }
 void ImGuiOverlay::setVisible(bool) {}
 bool ImGuiOverlay::visible() const { return false; }
 bool ImGuiOverlay::enabled() const { return false; }
