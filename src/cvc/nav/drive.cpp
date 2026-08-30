@@ -152,7 +152,12 @@ inline float ipc_dbdd(float d, float d_hat) {
 
 } // namespace
 
-#ifndef CVC_ENABLE_CUDA
+// CVC_USING_CUDA, not CVC_ENABLE_CUDA: the latter is a CMake variable, and the
+// PUBLIC compile define the cvc target actually gets is CVC_USING_CUDA
+// (src/cvc/CMakeLists.txt). Guarding on the wrong name meant BOTH this TU and
+// drive.cu defined the symbol, which links fine on macOS (no CUDA, so drive.cu
+// is never compiled) and fails on every platform that has it.
+#ifndef CVC_USING_CUDA
 // Without a CUDA build there is no device path at all; drive.cu supplies the
 // real probe when there is.
 bool drive_cuda_available() { return false; }
