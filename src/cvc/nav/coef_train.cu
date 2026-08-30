@@ -57,8 +57,8 @@ constexpr int kMaxH = 64; // hidden width cap (stack activation arrays)
 __global__ void train_kernel(diff::field F, const float *p, int h, float ob0, float ob1, float ob2,
                              const float *o_in, const float *aux_in, const float *goal,
                              diff::bike_veh bv, float coll_w, int window, int n, float inv_n,
-                             int rollout, float *state, float *d_loss, float *grad, float *o_out,
-                             float *aux_out) {
+                             float region_n, float d_safe, int rollout, float *state, float *d_loss,
+                             float *grad, float *o_out, float *aux_out) {
   const int ag = blockIdx.x * blockDim.x + threadIdx.x;
   if (ag >= n)
     return;
@@ -115,16 +115,17 @@ __global__ void train_kernel(diff::field F, const float *p, int h, float ob0, fl
       diff::surr_step(F, ox, oy, axx, axy, gx, gy, coef[0], coef[1], coef[2], rr, d_hat, vmax, hdt,
                       ox1, oy1, ax1, ay1);
     diff::sample cs = diff::sample_fwd(F, ox1, oy1);
-    const float pen = rr - cs.phi;
+    // Margin shortfall, matching coef_train.cpp and sdf_nav's train_bicycle.
+    const float pen = d_safe - (cs.phi - rr);
     if (pen > 0.0f)
-      loss += (double)coll_w * pen * inv_n;
+      loss += (double)coll_w * pen * (1.0f / d_safe) * inv_n;
     ox = ox1;
     oy = oy1;
     axx = ax1;
     axy = ay1;
   }
   const float fdx = ox - gx, fdy = oy - gy, Lgoal = sqrtf(fdx * fdx + fdy * fdy);
-  loss += (double)Lgoal * inv_n;
+  loss += (double)(Lgoal / region_n) * inv_n;
   d_loss[ag] = (float)loss;
   if (o_out) {
     o_out[2 * ag] = ox;
@@ -138,8 +139,8 @@ __global__ void train_kernel(diff::field F, const float *p, int h, float ob0, fl
   // ── backward (recompute per step) ──
   float go_x = 0.0f, go_y = 0.0f, gaux_x = 0.0f, gaux_y = 0.0f;
   if (Lgoal > 1e-9f) {
-    go_x = inv_n * fdx / Lgoal;
-    go_y = inv_n * fdy / Lgoal;
+    go_x = inv_n * fdx / (Lgoal * region_n);
+    go_y = inv_n * fdy / (Lgoal * region_n);
   }
   for (int t = window - 1; t >= 0; --t) {
     const float otx = st[t * 4 + 0], oty = st[t * 4 + 1], atx = st[t * 4 + 2], aty = st[t * 4 + 3];
@@ -184,10 +185,11 @@ __global__ void train_kernel(diff::field F, const float *p, int h, float ob0, fl
       diff::surr_step(F, otx, oty, atx, aty, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1,
                       ax1, ay1);
     diff::sample cs = diff::sample_fwd(F, ox1, oy1);
-    const float pen = rr - cs.phi;
+    const float pen = d_safe - (cs.phi - rr);
     if (pen > 0.0f) {
       float dox, doy;
-      diff::sample_bwd(cs, -coll_w * inv_n, 0.0f, 0.0f, dox, doy);
+      // d(pen/d_safe)/d(phi) = -1/d_safe.
+      diff::sample_bwd(cs, -coll_w * (1.0f / d_safe) * inv_n, 0.0f, 0.0f, dox, doy);
       go_x += dox;
       go_y += doy;
     }
@@ -389,9 +391,11 @@ double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
 
   const diff::field F = to_diff_field(fs, d_field);
   const float inv_n = 1.0f / n, coll_w = cfg.w_coll / static_cast<float>(window);
+  const float region_n = static_cast<float>(0.5 * (scene.max_x - scene.min_x) * scene.scale);
+  const float d_safe = cfg.d_safe > 0.0f ? cfg.d_safe : scene.d_hat;
   const int T = 128, B = (n + T - 1) / T;
   train_kernel<<<B, T>>>(F, d_p, h, ob0, ob1, ob2, d_o, d_v, d_goal, bv, coll_w, window, n, inv_n,
-                         rollout, d_state, d_loss, d_grad, d_oout, d_vout);
+                         region_n, d_safe, rollout, d_state, d_loss, d_grad, d_oout, d_vout);
   cuda_check(cudaGetLastError(), "train_kernel launch");
 
   std::vector<float> hloss(n);
@@ -470,6 +474,8 @@ coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cf
 
   std::vector<float> o(2 * n), goal(2 * n), aux(2 * n);
   const float inv_n = 1.0f / n, coll_w = cfg.w_coll / static_cast<float>(window);
+  const float region_n = static_cast<float>(0.5 * (scene.max_x - scene.min_x) * scene.scale);
+  const float d_safe = cfg.d_safe > 0.0f ? cfg.d_safe : scene.d_hat;
   const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
   long adam_t = 0;
   const int T = 128, B = (n + T - 1) / T, PT = 256, PB = (P + PT - 1) / PT;
@@ -493,7 +499,7 @@ coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cf
       const int wl = std::min(window, horizon - w0);
       cuda_check(cudaMemset(d_grad, 0, P * sizeof(float)), "memset grad");
       train_kernel<<<B, T>>>(F, d_p, h, ob0, ob1, ob2, d_o, d_v, d_goal, bv, coll_w, wl, n, inv_n,
-                             rollout, d_state, d_loss, d_grad, d_o2, d_v2);
+                             region_n, d_safe, rollout, d_state, d_loss, d_grad, d_o2, d_v2);
       cuda_check(cudaMemset(d_sq, 0, sizeof(float)), "memset sq");
       grad_sqnorm_kernel<<<32, 256>>>(d_grad, P, d_sq);
       float sq = 0.0f;
