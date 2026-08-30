@@ -93,14 +93,24 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 // gdir = (goal-o)/(|goal-o|+1e-6). Samples the field at each `on` (agent i ->
 // plane map_id[i]). `goal` is [n*2] normalized (the carrot). Writes feat_out
 // [n*5] row-major.
-// Passing `grip` appends the sampled mu as a SIXTH feature (stride 6 instead of
-// 5), matching sdf_nav.coef_feats(friction=...). Without it the drive can only
-// discover ice by standing on it, so anticipation has to reach the coefficients
-// — and they cannot anticipate what they cannot see. A 6-feature net is not a
-// retrain from scratch: sdf_nav.widen_coef_mlp lifts a trained 5-feature net to
-// one whose mu column is zero, which is output-identical at init.
+// Passing `grip` appends a SIXTH feature (stride 6 instead of 5), matching
+// sdf_nav.coef_feats(friction=...): the WORST grip between `on` and the carrot —
+// min of mu over `mu_probes` samples out to `mu_lookahead`, never past the
+// carrot, inclusive of `on`.
+//
+// It looks AHEAD, not underfoot, and that distinction is the whole feature.
+// Sampling mu at `on` reports the surface the vehicle is standing ON and never
+// the one it is about to hit, so it cannot support anticipation even in
+// principle — measured: training learned nothing from it. The dynamics already
+// react to current mu (a_max/a_lat_max scale by it); the coefficients need the
+// part the dynamics cannot see yet. Min rather than mean because a short ice
+// patch about to be crossed should read as ice, not as mostly-dry.
+//
+// A 6-feature net is not a retrain from scratch: sdf_nav.widen_coef_mlp lifts a
+// trained 5-feature net to one whose mu column is zero, output-identical at init.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
-                float *feat_out, int num_threads = 0, const friction_field *grip = nullptr);
+                float *feat_out, int num_threads = 0, const friction_field *grip = nullptr,
+                float mu_lookahead = 0.3f, int mu_probes = 3);
 
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
 // VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.
@@ -164,6 +174,10 @@ struct veh_params {
   // ice at speed genuinely cannot brake in time; that is the intended failure
   // mode. See docs/MATERIAL_NAV.md "Grip" in the grl-snam repo.
   const friction_field *grip = nullptr;
+  // Probe shape for the sixth coef_feats feature; must match
+  // sdf_nav.coef_feats's defaults or native and torch see different features.
+  float mu_lookahead = 0.3f;
+  int mu_probes = 3;
 };
 
 // Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,

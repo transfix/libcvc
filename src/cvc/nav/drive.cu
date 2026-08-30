@@ -71,6 +71,8 @@ struct dev_veh {
   float body_gain = 1.0f;
   float track_width = 0.0f;
   dev_grip grip;
+  float mu_lookahead = 0.3f;
+  int mu_probes = 3;
 };
 
 // Bilinear sample (plane 0) + unit normal — mirrors drive.cpp sample_unit.
@@ -344,8 +346,19 @@ __global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th
   // so it can anticipate a transition instead of discovering it underfoot. `in`
   // comes from the MODEL, so a 5-input net never sees this slot and the host
   // guarantees v.grip is non-null whenever in == 6.
-  if (in > 5)
-    feat[5] = d_sample_grip(v.grip, v.grip.M > 1 ? plane : 0, ox, oy);
+  if (in > 5) {
+    // Worst grip from here to the carrot -- the same probe drive.cpp runs, or
+    // the GPU would hand the net a different sixth feature than the CPU does.
+    const int gp = v.grip.M > 1 ? plane : 0;
+    const float reach = fminf(gd, v.mu_lookahead);
+    float worst = d_sample_grip(v.grip, gp, ox, oy);
+    const int P = v.mu_probes < 1 ? 1 : v.mu_probes;
+    for (int k = 1; k <= P; ++k) {
+      const float t = ((float)k / (float)P) * reach;
+      worst = fminf(worst, d_sample_grip(v.grip, gp, ox + t * gdx, oy + t * gdy));
+    }
+    feat[5] = worst;
+  }
   float coef[8];
   d_mlp(wdata, rows, cols, act, w_off, b_off, num_layers, out_bias_off, in, out, feat, coef);
   float mc;
@@ -393,6 +406,8 @@ inline void fill_dev_veh(const veh_params &vp, dev_veh &v) {
   v.track_width = vp.track_width;
   v.body_rr = vp.body_rr;
   v.body_gain = vp.body_gain;
+  v.mu_lookahead = vp.mu_lookahead;
+  v.mu_probes = vp.mu_probes;
 }
 
 // Device buffers for the optional refinements; both stay null when unused,
