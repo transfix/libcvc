@@ -18,9 +18,9 @@
 
 #include "nav_common.h"
 
+#include <algorithm> // std::nth_element / clamp / min / max for --lod partition
 #include <boost/program_options.hpp>
 #include <chrono>
-#include <future>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_NAV_BUNDLE)
@@ -36,6 +36,9 @@
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/lod/select.h> // agent distance-LOD selection (--lod)
+#include <future>
+#include <utility> // std::pair (lod score list)
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -153,8 +156,9 @@ int main(int argc, char **argv) {
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
-       lite = false;
+       lite = false, lod = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
+  int nearCap = 64;    // --lod: max full-detail (Humvee) agents; the rest are far arrows
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
@@ -171,12 +175,17 @@ int main(int argc, char **argv) {
       "disable shadow map")("lite", po::bool_switch(&lite),
                             "prefer the bundle's low-poly buildings_flat.glb "
                             "(4x fewer tris, faster shadow pass)")(
+      "lod", po::bool_switch(&lod),
+      "agent distance-LOD: a capped near-node of full Humvees + a far-node of "
+      "arrows, partitioned every frame by on-screen size via cvc::lod")(
+      "near-cap", po::value<int>(&nearCap)->default_value(64),
+      "max full-detail (Humvee) agents under --lod; the rest draw as far arrows")(
       "frames", po::value<long>(&frames)->default_value(0),
-                            "stop after N frames (0 = until closed)")(
-      "fps", po::value<double>(&fps)->default_value(30.0),
-      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
-      "capture", po::value<std::string>(&capture)->default_value("none"),
-      "none (interactive window) | orbit | fly | follow (chase --follow N)")(
+      "stop after N frames (0 = until closed)")("fps", po::value<double>(&fps)->default_value(30.0),
+                                                "capture frame rate")(
+      "hz", po::value<double>(&hz)->default_value(60.0),
+      "sim tick rate")("capture", po::value<std::string>(&capture)->default_value("none"),
+                       "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
       "look speed, degrees per pixel of mouse motion")(
       "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
@@ -246,13 +255,11 @@ int main(int argc, char **argv) {
   // an in-tree dev checkout to keep it, so the demo isn't just a black screen
   // when a user forgets the flag. First hit wins; the chosen path is logged.
   if (bundle.empty()) {
-    for (const char *p : {"deps/share/cvc-scenes/austin_south",
-                          "../deps/share/cvc-scenes/austin_south",
-                          "share/cvc-scenes/austin_south",
-                          "platoon-sim/scene_viewer/exports/scenes/austin_south",
-                          "../platoon-sim/scene_viewer/exports/scenes/austin_south",
-                          "scenes/austin_south",
-                          "../scenes/austin_south"}) {
+    for (const char *p :
+         {"deps/share/cvc-scenes/austin_south", "../deps/share/cvc-scenes/austin_south",
+          "share/cvc-scenes/austin_south", "platoon-sim/scene_viewer/exports/scenes/austin_south",
+          "../platoon-sim/scene_viewer/exports/scenes/austin_south", "scenes/austin_south",
+          "../scenes/austin_south"}) {
       if (std::filesystem::exists(std::string(p) + "/terrain.json")) {
         bundle = p;
         std::printf("nav_city_swarm: no --bundle given, autodetected %s\n", bundle.c_str());
@@ -294,15 +301,16 @@ int main(int argc, char **argv) {
         // + satellite are still real — keep the existing (synthetic) occupancy
         // rescaled to the real bounds so the swarm has some walls to avoid.
         // occ retains its ts.occ contents from before the bundle load.
-        std::fprintf(stderr,
-                     "  no buildings mesh — using synthetic occupancy over the real Austin bounds\n");
+        std::fprintf(
+            stderr,
+            "  no buildings mesh — using synthetic occupancy over the real Austin bounds\n");
       }
       std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
                   terrain.empty() ? ""
-                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) + "x" +
-                                     std::to_string(terrain.cols) + ")")
+                                  : (std::string(" (terrain ") + std::to_string(terrain.rows) +
+                                     "x" + std::to_string(terrain.cols) + ")")
                                         .c_str());
     } else {
       std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
@@ -404,9 +412,9 @@ int main(int argc, char **argv) {
   // heightmap so the buildings sit on the ground and the vehicles drive over
   // hills instead of clipping straight through them. Flat ground_quad fallback
   // when no terrain (synthetic city_scene, or a bundle missing the grid).
-  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(
-      "ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
-                                : navdemo::terrain_mesh(terrain, ground_rgb)));
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
   cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   // A real bundle ships an aerial photo of the same footprint as terrain.json, so
   // with fog OFF the ground can BE the satellite image instead of flat asphalt.
@@ -511,6 +519,51 @@ int main(int argc, char **argv) {
     // over per-vertex colour scalars once setTexture is applied.
     if (haveVehicleTexture)
       agentNode->setTexture(vtexture, /*zeroCopy=*/false);
+  }
+
+  // --- Agent distance LOD (--lod) ------------------------------------------
+  // The Austin demo is bottlenecked on the per-frame agent-body pack (N x an
+  // 8k-tri Humvee, transformed and deep-copied through updateVertices every
+  // frame). Split the body into a CAPPED near-node of full Humvees plus a
+  // far-node of cheap arrows, partitioned each frame by on-screen size via
+  // cvc::lod. The per-frame vertex upload then scales with the near budget, not
+  // the whole swarm: enormous at a zoomed-out fly-over (few/no near agents),
+  // bounded at a chase cam. Only meaningful when a real vehicle mesh loaded
+  // (else the "near" glyph is already the cheap arrow). Opt-in so the default
+  // path is untouched.
+  const bool useLod = lod && haveVehicle;
+  const int NEAR_CAP = std::max(1, std::min(N, nearCap));
+  navdemo::AgentGlyphs nearGlyphs, farGlyphs;
+  std::shared_ptr<GeometryNode> nearNode, farNode;
+  std::vector<unsigned char> agentColorU8; // per-agent rgb, for the far-arrow colour gather
+  if (useLod) {
+    agentNode->setVisible(false); // replaced by the near + far nodes
+    cvc::geometry nearGeom =
+        nearGlyphs.build_template(app, NEAR_CAP, color.data(), vverts, vtris,
+                                  /*z=*/0.0, haveVehicleTexture ? &vuvs : nullptr);
+    nearNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents_near", nearGeom));
+    if (nearNode) {
+      nearNode->setUseSingleColor(false);
+      nearNode->setAmbient(0.32);
+      nearNode->setDiffuse(0.9);
+      nearNode->setSpecular(0.2);
+      nearNode->setSpecularPower(18.0);
+      if (haveVehicleTexture)
+        nearNode->setTexture(vtexture, /*zeroCopy=*/false);
+    }
+    cvc::geometry farGeom = farGlyphs.build(app, N, color.data(), gsz, 0.6);
+    farNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents_far", farGeom));
+    if (farNode) {
+      farNode->setUseSingleColor(false); // per-vertex group colour, re-gathered each frame
+      farNode->setAmbient(0.40);
+      farNode->setDiffuse(0.85);
+    }
+    agentColorU8.resize(color.size());
+    for (std::size_t i = 0; i < color.size(); ++i)
+      agentColorU8[i] =
+          static_cast<unsigned char>(std::lround(std::clamp(color[i], 0.0f, 1.0f) * 255.0f));
+    std::printf("nav_city_swarm: agent LOD on — near-cap %d Humvees + %d far arrows\n", NEAR_CAP,
+                N);
   }
 
   // Per-agent COLOR FLAG: a thin pole + rectangular flag flying above the vehicle,
@@ -800,7 +853,7 @@ int main(int argc, char **argv) {
     if (pathNode) {
       pathNode->setRenderMode(GeometryRenderMode::LINES);
       pathNode->setUseSingleColor(false);
-      pathNode->setLineWidth(4.0);   // 2.7x the fleet trails
+      pathNode->setLineWidth(4.0); // 2.7x the fleet trails
       pathNode->setAmbient(1.0);
       pathNode->setDiffuse(0.0);
       pathNode->setDepthOffset(2.0); // above the fleet trails
@@ -1186,6 +1239,79 @@ int main(int argc, char **argv) {
   });
 #endif
 
+  // Agent-body pack, shared by the worker and inline sim branches. Non-LOD: the
+  // original single-node pack. LOD: partition agents by projected size (cvc::lod)
+  // into a capped near-Humvee node + a far-arrow node so the per-frame vertex
+  // upload scales with the near budget, not the whole swarm.
+  std::vector<std::pair<float, int>> lodScore;
+  std::vector<std::uint32_t> nearIdx, farIdx;
+  std::vector<unsigned char> farRgb;
+  const int vFar = useLod ? farGlyphs.verts_per_instance() : 0;
+  if (useLod) {
+    lodScore.reserve(N);
+    nearIdx.reserve(N);
+    farIdx.reserve(N);
+    farRgb.assign(static_cast<std::size_t>(N) * vFar * 3, 0);
+  }
+  const double agentR = 0.5 * gsz; // vehicle bounding radius ~ half its length
+  auto pack_bodies = [&](const float *pos, const float *head, const double *zo) {
+    if (!useLod) {
+      if (agentNode)
+        agentNode->updateVertices(glyphs.pack_z(pos, head, zo));
+      return;
+    }
+    // Eye + fov from the live camera (last render). The camera moves slowly, so
+    // a one-frame lag in the partition is invisible.
+    cvc::lod::view_params vp = cvc::lod::preset_view(cvc::lod::quality_preset::balanced);
+    vp.viewport_h_px = height;
+    if (vtkRenderer *r = view.renderer()) {
+      if (vtkCamera *cam3 = r->GetActiveCamera()) {
+        cam3->GetPosition(vp.eye);
+        vp.tan_half_fov = std::tan(0.5 * cam3->GetViewAngle() * PI / 180.0);
+      }
+    }
+    // Score each agent by projected radius; the largest above a floor go near
+    // (full Humvee), the rest far (arrow).
+    lodScore.clear();
+    for (int i = 0; i < N; ++i) {
+      const double c[3] = {pos[2 * i], pos[2 * i + 1], zo ? zo[i] : 0.0};
+      const double d = cvc::lod::bound_distance_m(c, agentR, vp);
+      lodScore.push_back({static_cast<float>(cvc::lod::screen_radius_px(agentR, d, vp)), i});
+    }
+    if (static_cast<int>(lodScore.size()) > NEAR_CAP)
+      std::nth_element(lodScore.begin(), lodScore.begin() + NEAR_CAP, lodScore.end(),
+                       [](const auto &a, const auto &b) { return a.first > b.first; });
+    const float near_px = 16.0f; // below ~16 px radius an arrow reads the same as a Humvee
+    nearIdx.clear();
+    farIdx.clear();
+    for (int s = 0; s < static_cast<int>(lodScore.size()); ++s) {
+      if (s < NEAR_CAP && lodScore[s].first >= near_px)
+        nearIdx.push_back(static_cast<std::uint32_t>(lodScore[s].second));
+      else
+        farIdx.push_back(static_cast<std::uint32_t>(lodScore[s].second));
+    }
+    if (nearNode)
+      nearNode->updateVertices(
+          nearGlyphs.pack_lod(pos, head, zo, nearIdx.data(), static_cast<int>(nearIdx.size())));
+    if (farNode) {
+      farNode->updateVertices(
+          farGlyphs.pack_lod(pos, head, zo, farIdx.data(), static_cast<int>(farIdx.size())));
+      // Re-gather far-arrow colours by slot so group identity survives the
+      // partition (cheap: N * vFar uchar triples, no transform).
+      const int fc = static_cast<int>(farIdx.size());
+      for (int s = 0; s < fc; ++s) {
+        const int a = farIdx[s];
+        for (int k = 0; k < vFar; ++k) {
+          const std::size_t o = (static_cast<std::size_t>(s) * vFar + k) * 3;
+          farRgb[o] = agentColorU8[3 * a];
+          farRgb[o + 1] = agentColorU8[3 * a + 1];
+          farRgb[o + 2] = agentColorU8[3 * a + 2];
+        }
+      }
+      farNode->updateColors(farRgb);
+    }
+  };
+
   const auto t0 = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
@@ -1270,9 +1396,8 @@ int main(int argc, char **argv) {
       const std::string reqBelief = uiBelief;
       const bool reqFog = uiFog;
       const std::uint32_t reqSeed = simSeed;
-      pendingWorld = std::async(std::launch::async, [=]() {
-        return build_world(reqAgents, reqBelief, reqFog, reqSeed);
-      });
+      pendingWorld = std::async(
+          std::launch::async, [=]() { return build_world(reqAgents, reqBelief, reqFog, reqSeed); });
       std::printf("nav_city_swarm: rebuilding world (%d agents, %s, fog=%s, seed=%u) async\n",
                   reqAgents, reqBelief.c_str(), reqFog ? "on" : "off", reqSeed);
     }
@@ -1429,7 +1554,12 @@ int main(int argc, char **argv) {
         if (changed)
           goalsNode->updateVertices(goalXyz);
       }
-      if (!agentNode || (frame % 2))
+      // Under --lod the body recolour is skipped: agentNode is hidden and the
+      // near/far LOD nodes carry their own colour (Humvee texture + far-arrow
+      // group tint), so this full-swarm updateColors would be pure waste and
+      // would undo the pack win. (v1 trade-off: LOD bodies don't show the
+      // reached/mode recolour; the flags and the belief minimap still do.)
+      if (!agentNode || useLod || (frame % 2))
         return;
       const int V = glyphs.point_count() / N;
       rgbBuf.resize(static_cast<std::size_t>(3) * N * V);
@@ -1462,9 +1592,7 @@ int main(int argc, char **argv) {
     if (auto snap = sim->read()) {
       if (snap->n == N) {
         sample_zoff(snap->pos.data()); // one bilinear terrain sample per agent
-        const auto &xyz = glyphs.pack_z(snap->pos.data(), snap->heading.data(), zoff_ptr);
-        if (agentNode)
-          agentNode->updateVertices(xyz);
+        pack_bodies(snap->pos.data(), snap->heading.data(), zoff_ptr);
         if (flagNode) // flags share the same pose stream, different template
           flagNode->updateVertices(
               flagGlyphs.pack_z(snap->pos.data(), snap->heading.data(), zoff_ptr));
@@ -1484,9 +1612,7 @@ int main(int argc, char **argv) {
     world.snapshot(emPos.data(), emHead.data(), nullptr, emMd.data(), emRch.data());
     {
       sample_zoff(emPos.data());
-      const auto &xyz = glyphs.pack_z(emPos.data(), emHead.data(), zoff_ptr);
-      if (agentNode)
-        agentNode->updateVertices(xyz);
+      pack_bodies(emPos.data(), emHead.data(), zoff_ptr);
       if (flagNode)
         flagNode->updateVertices(flagGlyphs.pack_z(emPos.data(), emHead.data(), zoff_ptr));
       if (pipDotNode)
