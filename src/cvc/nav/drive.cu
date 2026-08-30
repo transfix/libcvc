@@ -769,17 +769,20 @@ struct sim_world_cuda::impl {
   unsigned char *d_we_valid = nullptr, *d_tracking = nullptr, *d_parked = nullptr;
   unsigned char *d_reached = nullptr, *d_active = nullptr;
   float *d_phi = nullptr, *d_nrm = nullptr, *d_carrot = nullptr, *d_minclr = nullptr; // scratch
+  // per-world buffers for the optional vehicle refinements; null when unused
+  float *d_body_offsets = nullptr, *d_grip = nullptr;
 
   ~impl() {
     for (void *p :
-         {(void *)d_field,      (void *)d_map_id,     (void *)d_w,        (void *)d_ob,
-          (void *)d_rows,       (void *)d_cols,       (void *)d_act,      (void *)d_woff,
-          (void *)d_boff,       (void *)d_o,          (void *)d_goal,     (void *)d_th,
-          (void *)d_sp,         (void *)d_color,      (void *)d_stall,    (void *)d_mode,
-          (void *)d_hist_count, (void *)d_turn,       (void *)d_dhit,     (void *)d_best,
-          (void *)d_init,       (void *)d_wall_entry, (void *)d_pos_hist, (void *)d_we_valid,
-          (void *)d_tracking,   (void *)d_parked,     (void *)d_reached,  (void *)d_active,
-          (void *)d_phi,        (void *)d_nrm,        (void *)d_carrot,   (void *)d_minclr})
+         {(void *)d_field,        (void *)d_map_id,     (void *)d_w,        (void *)d_ob,
+          (void *)d_rows,         (void *)d_cols,       (void *)d_act,      (void *)d_woff,
+          (void *)d_boff,         (void *)d_o,          (void *)d_goal,     (void *)d_th,
+          (void *)d_sp,           (void *)d_color,      (void *)d_stall,    (void *)d_mode,
+          (void *)d_hist_count,   (void *)d_turn,       (void *)d_dhit,     (void *)d_best,
+          (void *)d_init,         (void *)d_wall_entry, (void *)d_pos_hist, (void *)d_we_valid,
+          (void *)d_tracking,     (void *)d_parked,     (void *)d_reached,  (void *)d_active,
+          (void *)d_phi,          (void *)d_nrm,        (void *)d_carrot,   (void *)d_minclr,
+          (void *)d_body_offsets, (void *)d_grip})
       cudaFree(p);
   }
 };
@@ -844,27 +847,7 @@ sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t 
   s.reach_tol = cfg.reach_tol;
   s.a_max = cfg.veh.a_max;
   s.dt = cfg.veh.dt;
-  // The optional vehicle refinements are NOT plumbed into the device-resident
-  // world yet: they need per-world device buffers with this object's lifetime,
-  // not the per-call ones drive_step_cuda allocates. Refuse rather than run a
-  // GPU world that honours fewer constraints than the CPU/torch reference —
-  // that is a silent divergence, and no parity gate would catch it because the
-  // gates hand both paths the same config.
-  if (cfg.veh.n_body > 0 || cfg.veh.track_width > 0.0f || cfg.veh.grip)
-    throw std::runtime_error("cvc::nav::sim_world_cuda: body_offsets / track_width / grip are not "
-                             "supported by the device-resident world yet; use the CPU sim_world "
-                             "or drive_step_cuda");
-  s.v.rr = cfg.veh.rr;
-  s.v.d_hat = cfg.veh.d_hat;
-  s.v.dt = cfg.veh.dt;
-  s.v.vmax = cfg.veh.vmax;
-  s.v.L = cfg.veh.L;
-  s.v.delta_max = cfg.veh.delta_max;
-  s.v.a_max = cfg.veh.a_max;
-  s.v.a_lat_max = cfg.veh.a_lat_max;
-  s.v.k_steer = cfg.veh.k_steer;
-  s.v.nsub = cfg.veh.nsub;
-  s.v.allow_reverse = cfg.veh.allow_reverse ? 1 : 0;
+  fill_dev_veh(cfg.veh, s.v);
 
   // 2. Host-side agent init (th, best, init) — identical to sim_world's ctor.
   std::vector<float> th(n), best(n), init(n), turn(n, 1.0f);
@@ -896,6 +879,9 @@ sim_world_cuda::sim_world_cuda(const sim_world::config &cfg, const std::uint8_t 
   const size_t fbytes = static_cast<size_t>(M) * 3 * hw * sizeof(float);
   MALLOC((void **)&s.d_field, fbytes, "field");
   H2D(s.d_field, field.data(), fbytes, "H2D field");
+  // The refinements need buffers with THIS object's lifetime, not the per-call
+  // ones drive_step_cuda allocates; impl's destructor frees them with the rest.
+  upload_refinements(cfg.veh, s.v, s.d_body_offsets, s.d_grip, H2D);
   if (map_id) {
     MALLOC((void **)&s.d_map_id, fn * sizeof(int), "map_id");
     H2D(s.d_map_id, map_id, fn * sizeof(int), "H2D map_id");
