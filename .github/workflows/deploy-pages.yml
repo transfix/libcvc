@@ -114,10 +114,11 @@ jobs:
           workdir=$(mktemp -d)
           git worktree add --detach "$workdir" origin/gh-pages
           # Replace contents wholesale — the gallery is what we ship, not a diff.
-          shopt -s dotglob
-          rm -rf "$workdir"/*
+          # Wipe every top-level entry (dotfiles included) EXCEPT the worktree's
+          # own .git pointer file; deleting it detaches the worktree and the
+          # git commands below die with "fatal: not in a git directory".
+          find "$workdir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -R "$gallery"/. "$workdir"/
-          shopt -u dotglob
 
           cd "$workdir"
           git config user.name "libcvc-pages"
