@@ -230,6 +230,11 @@ void carrot_step(const float *o, const float *goal, const float *th, float *sp, 
 
 // GPU bilinear sample of plane 0 at `n` normalized positions, float-equivalent to
 // sdf_sample. Writes phi_out[n] + unit normal_out[n*2]. Runs on the default GPU.
+// True when a CUDA device is actually present, so a test or a host can skip the
+// GPU path instead of dying in cudaMalloc. Mirrors
+// material_rollout_cuda_available(); compiled to `false` without CVC_ENABLE_CUDA.
+bool drive_cuda_available();
+
 void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_out,
                      float *normal_out);
 

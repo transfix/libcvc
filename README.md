@@ -501,6 +501,7 @@ Measured 3.7–6.0× fewer triangles on the Austin bundle; `solve()` for a
 - **[docs/THREAD_POOL_API.md](docs/THREAD_POOL_API.md)** - Thread pool API reference
 - **[docs/CUDA_GUIDE.md](docs/CUDA_GUIDE.md)** - CUDA usage guide
 - **[docs/NAV_TRAINING.md](docs/NAV_TRAINING.md)** - `cvc::nav` self-supervised policy training (torch-free, CPU + CUDA; surrogate vs bicycle rollout)
+- **[docs/NAV_VEHICLE.md](docs/NAV_VEHICLE.md)** - `cvc::nav` optional vehicle refinements: multi-disc footprint (+ the `body_gain` correction it needs), inner-wheel steering lock, and a material grip field
 - **[docs/LOD_API.md](docs/LOD_API.md)** - `cvc::lod` level-of-detail selection math: rung selection, budget solver, presets, and the user-facing knobs
 
 ### Testing Documentation
