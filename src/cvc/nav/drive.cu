@@ -340,6 +340,12 @@ __global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th
   feat[2] = gdx;
   feat[3] = gdy;
   feat[4] = gdx * nx + gdy * ny;
+  // Sixth feature: the sampled grip, for a net widened by sdf_nav.widen_coef_mlp
+  // so it can anticipate a transition instead of discovering it underfoot. `in`
+  // comes from the MODEL, so a 5-input net never sees this slot and the host
+  // guarantees v.grip is non-null whenever in == 6.
+  if (in > 5)
+    feat[5] = d_sample_grip(v.grip, v.grip.M > 1 ? plane : 0, ox, oy);
   float coef[8];
   d_mlp(wdata, rows, cols, act, w_off, b_off, num_layers, out_bias_off, in, out, feat, coef);
   float mc;
@@ -537,12 +543,15 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   const int kDeviceMaxWidth = 64;
   if (fl.in > kDeviceMaxWidth)
     throw std::runtime_error("cvc::nav::drive_step_cuda: input width > 64 unsupported on GPU");
-  // drive_kernel builds the 5-feature vector inline in registers; a grip-widened
-  // net wants a 6th column the kernel does not assemble. Refuse rather than feed
-  // the first layer a short vector — the arithmetic would succeed and be wrong.
-  if (fl.in != 5)
-    throw std::runtime_error("cvc::nav::drive_step_cuda: the fused kernel builds 5 features "
-                             "inline; a 6-feature (grip-widened) net needs the CPU drive_step");
+  // drive_kernel assembles the feature vector inline in registers, so it must be
+  // told which width the model wants; 6 is the grip-widened net and needs a grip
+  // field to fill the sixth column. Refuse anything else rather than feed the
+  // first layer a short vector — that arithmetic would succeed and be wrong.
+  if (fl.in != 5 && fl.in != 6)
+    throw std::runtime_error("cvc::nav::drive_step_cuda: coef_mlp input width must be 5 or 6");
+  if (fl.in == 6 && !(vp.grip && vp.grip->data))
+    throw std::runtime_error(
+        "cvc::nav::drive_step_cuda: model takes 6 features but veh_params.grip is null");
   for (int L = 0; L < fl.num_layers; ++L)
     if (fl.rows[L] > kDeviceMaxWidth || fl.cols[L] > kDeviceMaxWidth)
       throw std::runtime_error("cvc::nav::drive_step_cuda: layer width > 64 unsupported on GPU");
