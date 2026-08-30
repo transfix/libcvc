@@ -102,6 +102,7 @@ add_executable(utility_test utility_test.cpp)
 add_executable(nav_test nav_test.cpp)
 add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 add_executable(nav_drive_refinements_test nav_drive_refinements_test.cpp)
+add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -190,6 +191,7 @@ set(TEST_TARGETS
   nav_test
   nav_coef_train_test
   nav_drive_refinements_test
+  nav_clearance_cost_test
   nav_material_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
