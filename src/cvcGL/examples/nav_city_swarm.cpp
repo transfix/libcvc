@@ -358,6 +358,10 @@ int main(int argc, char **argv) {
   // the swarm steer AROUND itself. Live-tunable below; sep_gain 0 turns it off.
   cfg.sep_radius = 3.0f * static_cast<float>(ts.rr);
   cfg.sep_gain = 1.5f * static_cast<float>(ts.rr);
+  // Start every vehicle on one edge of the map and put every goal on the opposite
+  // edge — a deliberate cross-map migration instead of a random scatter that
+  // reads as a tangled mess.
+  cfg.spawn_layout = cvc::nav::sim_world::config::spawn::opposed;
 
   // The sim lives behind a pointer so the UI can REBUILD it: agent count and
   // belief mode are baked into sim_world at construction, so "restart with 2000
@@ -396,45 +400,15 @@ int main(int argc, char **argv) {
   SceneGraph sg(app, "city");
 
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
-  if (haveMesh) {
-    // Real building geometry from the bundle's buildings.glb (true heights + shapes),
-    // instead of blocks extruded from the occupancy grid. buildings.glb bakes each
-    // building's base at z=0 (relative to a flat plane), so with real terrain in
-    // play we lift every vertex by terrain.sample(x, y) so the buildings SIT on
-    // the ground instead of floating over the low bits and clipping into the high
-    // bits. Cheap: one bilinear sample per vertex, done once at load.
-    if (!terrain.empty()) {
-      auto &pts = cityMesh.points();
-      for (auto &p : pts)
-        p[2] += terrain.sample(p[0], p[1]);
-    }
-    auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
-    if (wnode) {
-      wnode->setUseSingleColor(true);
-      wnode->setColor(wall_rgb[0], wall_rgb[1], wall_rgb[2]);
-      wnode->setAmbient(0.3);
-      wnode->setDiffuse(0.85);
-    }
-  } else {
-    sg.addGraphics("walls", navdemo::occupancy_to_walls(occ.data(), rows, cols, bounds, wall_h,
-                                                        wall_rgb, /*vary=*/0.45));
-  }
-
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
-  // Real elevation from terrain.json when we have a bundle — a tessellated
-  // heightmap so the buildings sit on the ground and the vehicles drive over
-  // hills instead of clipping straight through them. Flat ground_quad fallback
-  // when no terrain (synthetic city_scene, or a bundle missing the grid).
-  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
-                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
-  cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
-  // A real bundle ships an aerial photo of the same footprint as terrain.json, so
-  // with fog OFF the ground can BE the satellite image instead of flat asphalt.
-  // Kept at function scope: setTexture(zeroCopy) borrows these pixels.
+
+  // ---- The bundle's aerial photo: the demo's headline ground AND building tint.
+  // Load it whenever the bundle ships one (previously gated on fog-off, which hid
+  // it by default). Kept at function scope: setTexture's zeroCopy path borrows
+  // these pixels for the ground's lifetime.
   cvc::image satTex;
   bool haveSat = false;
-  if (!fogOn && !bundle.empty()) {
+  if (!bundle.empty()) {
     const std::string sp = bundle + "/satellite.png";
     if (std::filesystem::exists(sp)) {
       try {
@@ -449,21 +423,81 @@ int main(int argc, char **argv) {
       }
     }
   }
+  // Sample the aerial photo at a world (x, y) -> RGB in [0,1]. Top-left-origin
+  // image over [min,max] on each axis; V flipped to match the ground UVs.
+  auto sat_rgb = [&](double x, double y, double &r, double &g, double &b) {
+    const int W = satTex.width(), H = satTex.height();
+    double u = (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
+    double v = (y - bounds.min_y) / (bounds.max_y - bounds.min_y);
+    u = std::min(std::max(u, 0.0), 1.0);
+    v = std::min(std::max(v, 0.0), 1.0);
+    const int px = std::min(W - 1, static_cast<int>(u * W));
+    const int py = std::min(H - 1, static_cast<int>((1.0 - v) * H));
+    const unsigned char *p = satTex.data() + (static_cast<std::size_t>(py) * W + px) * 4;
+    r = p[0] / 255.0;
+    g = p[1] / 255.0;
+    b = p[2] / 255.0;
+  };
+
+  if (haveMesh) {
+    // Real building geometry from buildings.glb (true heights + shapes). glb bakes
+    // bases at z=0, so lift every vertex by terrain.sample() to sit them on the
+    // ground; and when we have the satellite, tint each vertex by the aerial photo
+    // at its footprint so the city reads as real Austin instead of a flat grey
+    // block model. One sample per vertex, once at load.
+    auto &pts = cityMesh.points();
+    if (!terrain.empty())
+      for (auto &p : pts)
+        p[2] += terrain.sample(p[0], p[1]);
+    if (haveSat) {
+      auto &cols = cityMesh.colors();
+      cols.resize(pts.size());
+      for (std::size_t i = 0; i < pts.size(); ++i) {
+        double r, g, b;
+        sat_rgb(pts[i][0], pts[i][1], r, g, b);
+        // Bias toward the photo but keep a grey floor so shaded facades still read.
+        cols[i] = {0.30 + 0.70 * r, 0.30 + 0.70 * g, 0.32 + 0.68 * b};
+      }
+    }
+    auto wnode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings", cityMesh));
+    if (wnode) {
+      wnode->setUseSingleColor(!haveSat); // per-vertex satellite tint when we have it
+      if (!haveSat)
+        wnode->setColor(wall_rgb[0], wall_rgb[1], wall_rgb[2]);
+      wnode->setAmbient(0.35);
+      wnode->setDiffuse(0.80);
+      wnode->setSpecular(0.10);
+    }
+  } else {
+    sg.addGraphics("walls", navdemo::occupancy_to_walls(occ.data(), rows, cols, bounds, wall_h,
+                                                        wall_rgb, /*vary=*/0.45));
+  }
+
+  // Real elevation from terrain.json when we have a bundle — a tessellated
+  // heightmap so the buildings sit on the ground and the vehicles drive over
+  // hills instead of clipping straight through them. Flat ground_quad fallback
+  // when no terrain (synthetic city_scene, or a bundle missing the grid).
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", terrain.empty() ? navdemo::ground_quad(bounds, 0.0, ground_rgb)
+                                               : navdemo::terrain_mesh(terrain, ground_rgb)));
+  cvc::image fogTex(grid, grid, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   if (groundNode) {
     groundNode->setUseSingleColor(true);
-    groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
-    groundNode->setDiffuse(0.50);
-    if (fogOn) { // the ground IS the fleet's fog coverage
-      fill_fleet_fog(fogTex.data(), world, rows, cols);
-      groundNode->setColor(1, 1, 1);
-      groundNode->setTexture(fogTex, /*zeroCopy=*/true);
-    } else if (haveSat) { // the ground IS the aerial photo
+    if (haveSat) { // the ground IS the aerial photo (default when the bundle ships one)
       groundNode->setColor(1, 1, 1);
       groundNode->setTexture(satTex, /*zeroCopy=*/true);
       groundNode->setAmbient(0.85); // photo already carries its own shading
       groundNode->setDiffuse(0.35);
+    } else if (fogOn) { // fallback: the ground IS the fleet's fog coverage
+      fill_fleet_fog(fogTex.data(), world, rows, cols);
+      groundNode->setColor(1, 1, 1);
+      groundNode->setTexture(fogTex, /*zeroCopy=*/true);
+      groundNode->setAmbient(0.65); // soften the shadow-map boundary on the big flat ground
+      groundNode->setDiffuse(0.50);
     } else {
       groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
+      groundNode->setAmbient(0.65);
+      groundNode->setDiffuse(0.50);
     }
   }
 
@@ -785,8 +819,8 @@ int main(int argc, char **argv) {
     // Size relative to the city, but CAPPED to a physical multiple of the vehicle
     // so a huge real city (Austin, +/-1500) isn't a forest of 400 giant spikes.
     const double phys = static_cast<double>(cfg.veh.rr) / scale; // vehicle radius, metres
-    const double gh = std::min(0.010 * span, 4.0 * phys);        // cap half-width
-    const double ght = std::min(2.2 * wall_h, 24.0 * phys);      // beacon height (clears rooftops)
+    const double gh = std::min(0.006 * span, 2.5 * phys);        // cap half-width
+    const double ght = std::min(1.2 * wall_h, 22.0 * phys);      // beacon height (clears rooftops)
     const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                     ght, gh, gh, ght, -gh, gh,  ght};
     const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3};
@@ -795,7 +829,14 @@ int main(int argc, char **argv) {
     goalsNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("goals", goalGeom));
     std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
     world.goals_world(gw.data());
-    goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data()); // keep: arrived goals sink away
+    // Sit each beacon's apex on the ground: lift it by the terrain height at the
+    // goal (as the buildings and agents are), or with real elevation the goals
+    // sink through the floor. Goals are static, so this is sampled once here.
+    std::vector<double> goalZoff(N, 0.0);
+    if (!terrain.empty())
+      for (int i = 0; i < N; ++i)
+        goalZoff[i] = terrain.sample(gw[2 * i], gw[2 * i + 1]);
+    goalXyz = goalGlyphs.pack_z(gw.data(), zeroHead.data(), goalZoff.data());
     if (goalsNode) {
       goalsNode->setUseSingleColor(false);
       // Shaded, not a flat glow: enough ambient to stay legible in shadow, but
@@ -1468,8 +1509,8 @@ int main(int argc, char **argv) {
         std::vector<float> gw(static_cast<std::size_t>(2) * N), zeroHead(N, 0.0f);
         world.goals_world(gw.data());
         const double phys = static_cast<double>(cfg.veh.rr) / scale; // matches initial build
-        const double gh = std::min(0.010 * span, 4.0 * phys);
-        const double ght = std::min(2.2 * wall_h, 24.0 * phys);
+        const double gh = std::min(0.006 * span, 2.5 * phys);
+        const double ght = std::min(1.2 * wall_h, 22.0 * phys);
         const std::vector<double> pv = {0,   0,  0,  -gh, -gh, ght, gh, -gh,
                                         ght, gh, gh, ght, -gh, gh,  ght};
         const std::vector<std::uint32_t> pt = {0, 1, 2, 0, 2, 3, 0, 3, 4,
@@ -1477,7 +1518,11 @@ int main(int argc, char **argv) {
         if (goalsNode) {
           if (rebuild_meshes)
             goalsNode->setGeometry(goalGlyphs.build_template(app, N, color.data(), pv, pt, 0.0));
-          goalXyz = goalGlyphs.pack(gw.data(), zeroHead.data());
+          std::vector<double> goalZoff(N, 0.0); // sit beacons on the terrain (see initial build)
+          if (!terrain.empty())
+            for (int i = 0; i < N; ++i)
+              goalZoff[i] = terrain.sample(gw[2 * i], gw[2 * i + 1]);
+          goalXyz = goalGlyphs.pack_z(gw.data(), zeroHead.data(), goalZoff.data());
           goalsNode->updateVertices(goalXyz);
         }
         trailLast.assign(static_cast<std::size_t>(2) * N, 0.0f);
@@ -1565,8 +1610,9 @@ int main(int argc, char **argv) {
       trailNode->updateVertices(trailXyz);
     };
 
-    // Fleet fog coverage repaint (sense cadence, not per frame).
-    if (fogOn && groundNode && frame % 15 == 0) {
+    // Fleet fog coverage repaint (sense cadence, not per frame). Skipped when the
+    // ground is the satellite photo — the fog belief still shows in the minimap.
+    if (fogOn && !haveSat && groundNode && frame % 15 == 0) {
       fill_fleet_fog(fogTex.data(), world, rows, cols);
       groundNode->texture_modified();
     }
