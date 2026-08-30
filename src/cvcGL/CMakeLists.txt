@@ -168,6 +168,24 @@ add_executable(cvcgl_smoke test/cvcgl_smoke.cpp)
 target_link_libraries(cvcgl_smoke PRIVATE cvcGL)
 add_test(NAME cvcgl_smoke COMMAND cvcgl_smoke)
 
+# Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
+# invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
+# violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
+# live wind-knob response. Compiles OceanFFT.cpp (it lives in examples/, has no
+# cvc dependency) and runs against an offscreen GL context. SKIPs (rc 0) if the
+# context has no float render targets.
+add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp examples/OceanFFT.cpp)
+target_include_directories(cvcgl_ocean_fft PRIVATE examples)
+target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
+add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
+
+# GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
+# to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
+# from the light and checks the brightness responds, plus the no-op-on-mismatch guard.
+add_executable(cvcgl_update_normals test/cvcgl_update_normals.cpp)
+target_link_libraries(cvcgl_update_normals PRIVATE cvcGL)
+add_test(NAME cvcgl_update_normals COMMAND cvcgl_update_normals)
+
 # Guards the "solid opaque block" volume bug: a stale cached min/max after an
 # in-place voxel edit, and a degenerate range collapsing the transfer function.
 add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
