@@ -301,6 +301,63 @@ TEST(NavDriveRefinements, GripIsSampledNotGlobal) {
   EXPECT_NE(on_ice, on_dry);
 }
 
+// Normalized x of grid column `c` (the field is metres, coef_feats is not).
+float col_xn(int c) { return static_cast<float>((kMin + c * (kMax - kMin) / (kN - 1)) * kScale); }
+
+// mu = 0.2 everywhere right of xn = 0, dry left of it. A half-plane rather than
+// a band because one cell here is 0.156 normalized: anything narrower is eaten
+// by the bilinear sample and the test would be measuring interpolation.
+std::vector<float> ice_right_half() {
+  std::vector<float> patch(kN * kN, 1.0f);
+  for (int r = 0; r < kN; ++r)
+    for (int c = 0; c < kN; ++c)
+      if (col_xn(c) >= 0.0f)
+        patch[r * kN + c] = 0.2f;
+  return patch;
+}
+
+TEST(NavDriveRefinements, GripFeatureLooksAheadNotUnderfoot) {
+  // The whole point of the sixth feature. Standing on dry ground with ice
+  // between here and the carrot must read ICE; sampling underfoot reports 1.0
+  // and cannot support anticipation even in principle.
+  const world w;
+  const std::vector<float> patch = ice_right_half();
+  const friction_field g = grip_of(patch);
+  const int map_id[1] = {0};
+  std::vector<float> feat(6, 0.0f);
+
+  // At xn = -0.2 the vehicle stands on dry ground; the default 0.3 lookahead
+  // reaches xn = +0.1, which is ice.
+  const float on[2] = {-0.2f, 0.0f};
+  const float ahead[2] = {0.8f, 0.0f};
+  coef_feats(w.fs, on, ahead, 1, map_id, feat.data(), 1, &g);
+  EXPECT_NEAR(feat[5], 0.2f, 1e-5f);
+
+  // Same spot, carrot the other way: the ice is behind it and must not read.
+  const float behind[2] = {-0.9f, 0.0f};
+  coef_feats(w.fs, on, behind, 1, map_id, feat.data(), 1, &g);
+  EXPECT_NEAR(feat[5], 1.0f, 1e-5f);
+}
+
+TEST(NavDriveRefinements, GripFeatureNeverProbesPastTheCarrot) {
+  // The probe is clamped to the carrot. Ice beyond the goal is not this step's
+  // problem, and reading it would slow the vehicle for nothing.
+  const world w;
+  const std::vector<float> patch = ice_right_half();
+  const friction_field g = grip_of(patch);
+  const int map_id[1] = {0};
+  std::vector<float> feat(6, 0.0f);
+
+  // Same start as the test above, where an unclamped 0.3 probe reaches ice and
+  // reads 0.2. The carrot must stay clear of the ice by more than one cell
+  // (0.156 normalized) or the bilinear sample bleeds and the test measures
+  // interpolation instead of the clamp.
+  const float on[2] = {-0.2f, 0.0f};
+  const float near_goal[2] = {-0.18f, 0.0f};
+  coef_feats(w.fs, on, near_goal, 1, map_id, feat.data(), 1, &g);
+  EXPECT_NEAR(feat[5], 1.0f, 1e-5f);
+}
+
 // ── CPU / CUDA parity ───────────────────────────────────────────────────────
 
 #ifdef CVC_ENABLE_CUDA
