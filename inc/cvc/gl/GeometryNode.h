@@ -1,9 +1,12 @@
 #ifndef GEOMETRYNODE_H
 #define GEOMETRYNODE_H
 
+#include <array>
 #include <boost/shared_array.hpp>
 #include <cvc/gl/GraphicsNode.h>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -11,7 +14,10 @@ class vtkActor;
 class vtkPolyDataMapper;
 class vtkPolyData;
 class vtkTexture;
+class vtkTextureObject;
 class vtkImageData;
+class vtkCallbackCommand;
+class vtkObject;
 
 namespace cvc {
 class geometry;
@@ -79,6 +85,15 @@ public:
   // state-bound.
   void updateColors(const std::vector<unsigned char> &rgb);
 
+  // The normal twin of updateVertices/updateColors: overwrite this mesh's
+  // per-vertex normals in place ([nx,ny,nz, ...], unit-length, same point count as
+  // the current geometry) and mark modified — one buffer upload, no mesh rebuild.
+  // Lets a CPU-deformed surface (e.g. an FFT ocean posed by updateVertices) shade
+  // correctly per frame without a per-frame vtkPolyDataNormals pass. Requires a
+  // mesh that already carries normals — setGeometry's ensureNormals() provides
+  // them for any triangle mesh. A point-count/array mismatch logs and no-ops.
+  void updateNormals(const std::vector<double> &xyz);
+
   // Render tuning (direct VTK property/mapper passthroughs, like the shader
   // replacements). Tubes/spheres make line_width / point_size > 1 survive
   // core-profile GL and WebGL, where raw wide lines/points are silently 1px.
@@ -101,6 +116,19 @@ public:
   void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
   void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
   void clearShaderReplacements();
+
+  // ── Custom shader inputs (for procedural nodes such as the FFT ocean) ────────
+  // Register a uniform / texture that is set on this mesh's shader program every
+  // draw (via the mapper's UpdateShaderEvent). YOU declare the uniform/sampler in
+  // a shader replacement (`uniform float name;` etc.); these just push the value.
+  // A uniform (or sampler) that ends up optimised out of the linked program is
+  // skipped. Textures are vtkTextureObjects — NOT owned; the caller keeps them
+  // alive. This is what lets a mesh sample a live render-to-texture field (e.g.
+  // an OceanFFT displacement map) directly on the GPU with NO CPU readback.
+  void setShaderUniformf(const std::string &name, float v);
+  void setShaderUniformi(const std::string &name, int v);
+  void setShaderUniform3f(const std::string &name, float x, float y, float z);
+  void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
@@ -184,6 +212,18 @@ private:
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
 
   boost::signals2::connection m_dataConnection;
+
+  // Custom shader inputs set on the program via the mapper's UpdateShaderEvent
+  // (see setShaderUniform*/setShaderTexture). Textures are not owned; refs held.
+  std::map<std::string, float> m_uniformsF;
+  std::map<std::string, int> m_uniformsI;
+  std::map<std::string, std::array<float, 3>> m_uniforms3F;
+  std::map<std::string, vtkSmartPointer<vtkTextureObject>> m_shaderTextures;
+  vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
+  bool m_shaderTexObserverInstalled = false;
+  void ensureShaderTexObserver();
+  static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
+                             void *callData);
 };
 
 #endif // GEOMETRYNODE_H

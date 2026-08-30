@@ -12,7 +12,9 @@
 #include <set>
 #include <sstream>
 #include <vtkActor.h>
+#include <vtkCallbackCommand.h>
 #include <vtkCellArray.h>
+#include <vtkCommand.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
@@ -26,9 +28,12 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkShaderProgram.h>
 #include <vtkShaderProperty.h>
 #include <vtkTexture.h>
+#include <vtkTextureObject.h>
 #include <vtkTransform.h>
+#include <vtkUniforms.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
 
@@ -74,7 +79,15 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
   }
 }
 
-GeometryNode::~GeometryNode() { m_dataConnection.disconnect(); }
+GeometryNode::~GeometryNode() {
+  m_dataConnection.disconnect();
+  // Detach the UpdateShaderEvent binder: the ref-counted mapper/actor can outlive
+  // this node (still registered with a renderer), and a later draw would fire the
+  // callback into freed member maps (see setShaderTexture). Mirrors the FpsHud /
+  // ImGuiOverlay observer-teardown pattern.
+  if (m_shaderTexObserverInstalled && m_mapper && m_shaderTexCb)
+    m_mapper->RemoveObserver(m_shaderTexCb);
+}
 
 void GeometryNode::applyTransformToVTK() {
   // Use generic helper to apply world transform
@@ -551,6 +564,37 @@ void GeometryNode::updateColors(const std::vector<unsigned char> &rgb) {
   });
 }
 
+void GeometryNode::updateNormals(const std::vector<double> &xyz) {
+  cvc::thread_info ti(app(), BOOST_CURRENT_FUNCTION);
+
+  // The normal twin of updateVertices: overwrite the existing per-vertex normals
+  // in place and mark modified — one buffer re-upload, no rebuild of cells /
+  // colours / tcoords. For a CPU-deformed surface (an FFT ocean) whose normals
+  // must track the displacement so it shades and reflects correctly, without a
+  // per-frame vtkPolyDataNormals pass. `xyz` is flat [nx,ny,nz, ...], unit-length,
+  // with the SAME point count as the current geometry; a mismatch logs and no-ops.
+  runOnMainThread([this, xyz]() {
+    if (!m_polyData)
+      return;
+    vtkDataArray *normals = m_polyData->GetPointData()->GetNormals();
+    const size_t n = xyz.size() / 3;
+    if (!normals || normals->GetNumberOfComponents() != 3 ||
+        static_cast<size_t>(normals->GetNumberOfTuples()) != n) {
+      app().log(1, "GeometryNode::updateNormals[" + getName() + "]: normal-array mismatch (" +
+                       std::to_string(n) + " given, " +
+                       std::to_string(normals ? normals->GetNumberOfTuples() : 0) +
+                       " in mesh) — ignoring; needs a mesh that already carries normals");
+      return;
+    }
+    for (size_t i = 0; i < n; ++i)
+      normals->SetTuple3(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+    normals->Modified();
+    m_polyData->Modified();
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
 void GeometryNode::setRenderLinesAsTubes(bool on) {
   runOnMainThread([this, on]() {
     if (!m_actor)
@@ -620,8 +664,88 @@ void GeometryNode::clearShaderReplacements() {
 
 void GeometryNode::disableCoordinateShiftScale() {
   runOnMainThread([this]() {
-    if (auto *m = vtkOpenGLPolyDataMapper::SafeDownCast(m_mapper))
-      m->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
+    // SetVBOShiftScaleMethod is virtual on vtkPolyDataMapper, so dispatch straight to
+    // whichever concrete mapper the object factory handed us. The previous code cast to
+    // vtkOpenGLPolyDataMapper — correct on desktop GL, but on GLES3/WebGL2 (wasm) the
+    // factory returns vtkOpenGLLowMemoryPolyDataMapper, which is a vtkPolyDataMapper but
+    // NOT a vtkOpenGLPolyDataMapper. There the cast silently failed, leaving shift-scale
+    // ON, so world-space-vertexMC shaders (the GPU FFT ocean, the ground/bark detail)
+    // received coordinates scaled to ~[-1,1] and rendered dead flat / wrong.
+    if (m_mapper)
+      m_mapper->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+// ── Custom shader inputs ──────────────────────────────────────────────────────
+void GeometryNode::setShaderUniformf(const std::string &name, float v) {
+  runOnMainThread([this, name, v]() {
+    m_uniformsF[name] = v;
+    ensureShaderTexObserver();
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+void GeometryNode::setShaderUniformi(const std::string &name, int v) {
+  runOnMainThread([this, name, v]() {
+    m_uniformsI[name] = v;
+    ensureShaderTexObserver();
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y, float z) {
+  runOnMainThread([this, name, x, y, z]() {
+    m_uniforms3F[name] = {x, y, z};
+    ensureShaderTexObserver();
+    if (m_sceneGraph)
+      m_sceneGraph->requestRender();
+  });
+}
+
+void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, void *callData) {
+  auto *self = static_cast<GeometryNode *>(clientData);
+  auto *program = static_cast<vtkShaderProgram *>(callData);
+  if (!self || !program)
+    return;
+  // Push registered uniforms + bind registered textures for THIS shader program.
+  // Uniforms optimised out of a given program (e.g. the depth-only shadow shader)
+  // are simply not found and skipped.
+  for (auto &kv : self->m_uniformsF)
+    if (program->IsUniformUsed(kv.first.c_str()))
+      program->SetUniformf(kv.first.c_str(), kv.second);
+  for (auto &kv : self->m_uniformsI)
+    if (program->IsUniformUsed(kv.first.c_str()))
+      program->SetUniformi(kv.first.c_str(), kv.second);
+  for (auto &kv : self->m_uniforms3F)
+    if (program->IsUniformUsed(kv.first.c_str()))
+      program->SetUniform3f(kv.first.c_str(), kv.second.data());
+  for (auto &kv : self->m_shaderTextures) {
+    if (kv.second && program->IsUniformUsed(kv.first.c_str())) {
+      kv.second->Activate();
+      program->SetUniformi(kv.first.c_str(), kv.second->GetTextureUnit());
+    }
+  }
+}
+
+void GeometryNode::ensureShaderTexObserver() {
+  if (m_shaderTexObserverInstalled || !m_mapper)
+    return;
+  m_shaderTexCb = vtkSmartPointer<vtkCallbackCommand>::New();
+  m_shaderTexCb->SetClientData(this);
+  m_shaderTexCb->SetCallback(&GeometryNode::onUpdateShader);
+  m_mapper->AddObserver(vtkCommand::UpdateShaderEvent, m_shaderTexCb);
+  m_shaderTexObserverInstalled = true;
+}
+
+void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {
+  runOnMainThread([this, name, tex]() {
+    if (tex)
+      m_shaderTextures[name] = tex;
+    else
+      m_shaderTextures.erase(name);
+    ensureShaderTexObserver();
     if (m_sceneGraph)
       m_sceneGraph->requestRender();
   });

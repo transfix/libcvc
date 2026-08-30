@@ -5,6 +5,8 @@
 #include <memory>
 
 class SceneRenderer; // cvcGL (global namespace)
+struct ImGuiContext; // Dear ImGui (global namespace) — forward-declared so this
+                     // header stays imgui-free for consumers that don't draw UI.
 
 namespace cvc {
 namespace gl {
@@ -71,6 +73,18 @@ public:
   // Your UI. Called once per rendered frame between ImGui::NewFrame() and
   // Render(); just call ImGui::* inside it.
   void setDrawCallback(std::function<void()> draw);
+
+  // The overlay's Dear ImGui context (nullptr if libcvc was built without
+  // CVC_ENABLE_IMGUI or setup failed). The overlay CREATES the context inside
+  // libcvc, so a program in ANOTHER binary module (a demo .exe that links its own
+  // static copy of imgui — the usual case, because imgui exports no symbols) has a
+  // SEPARATE, uninitialised ImGui context: its ImGui::* calls would dereference a
+  // null GImGui and crash. Adopt this context once, right after construction, so
+  // the whole process shares one:
+  //     ImGui::SetCurrentContext(ui.imguiContext());
+  // (Only needed for raw ImGui::* calls from your own module; the cvc::gl::ui::*
+  // widgets already run inside libcvc's context.)
+  ImGuiContext *imguiContext() const;
 
   // Cooperate with a fly/orbit camera. Optional, but fixes two real problems:
   //  * while the camera holds POINTER CAPTURE (Quake fly warps the cursor to the
