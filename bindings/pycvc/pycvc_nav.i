@@ -750,7 +750,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                                 double max_y, double cx, double cy, double scale, double rr,
                                 double d_hat, double dt, double vmax, double L, double delta_max,
                                 double a_max, double a_lat_max, double k_steer, int nsub,
-                                int allow_reverse, int num_threads = 0) {
+                                int allow_reverse, int num_threads = 0,
+                                PyObject *body_offsets = nullptr, double body_rr = 0.0,
+                                double track_width = 0.0, PyObject *grip = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -835,6 +837,36 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     v.k_steer = static_cast<float>(k_steer);
     v.nsub = nsub;
     v.allow_reverse = allow_reverse != 0;
+    // Optional vehicle refinements; absent (None / 0) leaves the legacy drive
+    // bit-for-bit. The arrays are borrowed for the call, kept alive by `hold`.
+    v.body_rr = static_cast<float>(body_rr);
+    v.track_width = static_cast<float>(track_width);
+    if (body_offsets && body_offsets != Py_None) {
+      PyArrayObject *boa = take(body_offsets, NPY_FLOAT, 1);
+      v.body_offsets = static_cast<const float *>(PyArray_DATA(boa));
+      v.n_body = static_cast<int>(PyArray_DIM(boa, 0));
+      if (v.n_body > 0 && !(v.body_rr > 0.0f))
+        fail("nav_bicycle_rollout: body_offsets needs a positive body_rr");
+    }
+    cvc::nav::friction_field gf;
+    if (grip && grip != Py_None) {
+      // The grip raster shares the FIELD's world frame — same bounds, center and
+      // scale. Anything else would need its own seven constants on an already
+      // long signature, and every caller builds both from one scenario anyway.
+      PyArrayObject *gpa = take(grip, NPY_FLOAT, 2);
+      gf.data = static_cast<const float *>(PyArray_DATA(gpa));
+      gf.M = 1;
+      gf.H = static_cast<int>(PyArray_DIM(gpa, 0));
+      gf.W = static_cast<int>(PyArray_DIM(gpa, 1));
+      gf.mnx = min_x;
+      gf.mny = min_y;
+      gf.mxx = max_x;
+      gf.mxy = max_y;
+      gf.cx = cx;
+      gf.cy = cy;
+      gf.S = scale;
+      v.grip = &gf;
+    }
     const float *gld = static_cast<const float *>(PyArray_DATA(gla));
     const float *ald = static_cast<const float *>(PyArray_DATA(aa));
     const float *bed = static_cast<const float *>(PyArray_DATA(ba));
@@ -1735,7 +1767,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
       double mat_k_sharp, double mat_d_hat_m, PyObject *map_id, double min_x, double min_y,
       double max_x, double max_y, double cx, double cy, double scale, double rr, double d_hat,
       double dt, double vmax, double L, double delta_max, double a_max, double a_lat_max,
-      double k_steer, int nsub, int allow_reverse, int num_threads = 0) {
+      double k_steer, int nsub, int allow_reverse, int num_threads = 0,
+      PyObject *body_offsets = nullptr, double body_rr = 0.0, double track_width = 0.0,
+      PyObject *grip = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -1845,6 +1879,36 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     v.k_steer = static_cast<float>(k_steer);
     v.nsub = nsub;
     v.allow_reverse = allow_reverse != 0;
+    // Optional vehicle refinements; absent (None / 0) leaves the legacy drive
+    // bit-for-bit. The arrays are borrowed for the call, kept alive by `hold`.
+    v.body_rr = static_cast<float>(body_rr);
+    v.track_width = static_cast<float>(track_width);
+    if (body_offsets && body_offsets != Py_None) {
+      PyArrayObject *boa = take(body_offsets, NPY_FLOAT, 1);
+      v.body_offsets = static_cast<const float *>(PyArray_DATA(boa));
+      v.n_body = static_cast<int>(PyArray_DIM(boa, 0));
+      if (v.n_body > 0 && !(v.body_rr > 0.0f))
+        fail("nav_bicycle_rollout: body_offsets needs a positive body_rr");
+    }
+    cvc::nav::friction_field gf;
+    if (grip && grip != Py_None) {
+      // The grip raster shares the FIELD's world frame — same bounds, center and
+      // scale. Anything else would need its own seven constants on an already
+      // long signature, and every caller builds both from one scenario anyway.
+      PyArrayObject *gpa = take(grip, NPY_FLOAT, 2);
+      gf.data = static_cast<const float *>(PyArray_DATA(gpa));
+      gf.M = 1;
+      gf.H = static_cast<int>(PyArray_DIM(gpa, 0));
+      gf.W = static_cast<int>(PyArray_DIM(gpa, 1));
+      gf.mnx = min_x;
+      gf.mny = min_y;
+      gf.mxx = max_x;
+      gf.mxy = max_y;
+      gf.cx = cx;
+      gf.cy = cy;
+      gf.S = scale;
+      v.grip = &gf;
+    }
     const float *gld = static_cast<const float *>(PyArray_DATA(gla));
     const float *ald = static_cast<const float *>(PyArray_DATA(aa));
     const float *bed = static_cast<const float *>(PyArray_DATA(ba));
