@@ -305,6 +305,11 @@ TEST(NavDriveRefinements, GripIsSampledNotGlobal) {
 
 #ifdef CVC_ENABLE_CUDA
 TEST(NavDriveRefinements, CudaMatchesCpuWithEveryRefinement) {
+  // A CUDA-enabled BUILD is not a CUDA-capable MACHINE: CI compiles some jobs
+  // with CVC_ENABLE_CUDA on runners that have no GPU, where the first cudaMalloc
+  // throws. Skip like the other *_cuda_test files do.
+  if (!cvc::nav::drive_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
   // The device drive must move like the CPU one WITH the refinements on. Not
   // bit-exact — the .cu stores world bounds as float where the CPU keeps them
   // double — but inside the ~1e-5 float-equivalence contract the port is held

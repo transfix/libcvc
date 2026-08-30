@@ -449,6 +449,11 @@ __global__ void bicycle_kernel(dev_field f, const int *map_id, float *o, float *
 
 } // namespace
 
+bool drive_cuda_available() {
+  int c = 0;
+  return cudaGetDeviceCount(&c) == cudaSuccess && c > 0;
+}
+
 void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_out,
                      float *normal_out) {
   if (n <= 0)

@@ -152,6 +152,12 @@ inline float ipc_dbdd(float d, float d_hat) {
 
 } // namespace
 
+#ifndef CVC_ENABLE_CUDA
+// Without a CUDA build there is no device path at all; drive.cu supplies the
+// real probe when there is.
+bool drive_cuda_available() { return false; }
+#endif
+
 void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id, float *phi_out,
                 float *normal_out, int num_threads) {
   detail::parallel_for(n, num_threads, [&](int i) {
