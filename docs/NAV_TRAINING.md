@@ -160,7 +160,8 @@ Drop it in the canonical install location `$PREFIX/share/cvc/nav/coef_mlp.cvcnav
 | `window` | 7 | truncated-BPTT window (detach + Adam step every `window`) |
 | `hidden` | 64 | CoefMLP hidden width (≤ 64) |
 | `lr` | 2e-4 | Adam step — the *refinement* rate. `1e-3` (coef_train.py's never-run default) collapses navigation; bicycle needs ~`1e-5` |
-| `w_coll` | 6.0 | collision-penalty weight |
+| `w_coll` | 3.0 | the safety-for-reach dial — see [the loss](#the-loss-and-why-both-terms-are-normalized) |
+| `d_safe` | 0.0 | clearance below which the penalty engages; 0 = use the scene's `d_hat` |
 | `grad_clip` | 5.0 | global-norm gradient clip |
 | `rollout` | `surrogate` | see [the switch](#the-rollout-switch-surrogate-vs-bicycle) |
 
@@ -168,7 +169,10 @@ Drop it in the canonical install location `$PREFIX/share/cvc/nav/coef_mlp.cvcnav
 
 Per truncated-BPTT window, the graph is: `coef_feats(o) → CoefMLP → rollout step →
 sample(o') for the collision term`, chained through the state, with the loss
-`|goal − o_final| + w_coll · Σ relu(rr − phi)`. The reverse pass is hand-written
+
+    |goal − o_final| / region_n  +  w_coll · Σ relu(d_safe − (phi − rr)) / d_safe
+
+described below. The reverse pass is hand-written
 adjoints (no autograd engine): the bilinear-sample **position VJP**, the MLP
 backward (Linear/SiLU/softplus), the IPC-barrier derivative, and the rollout step's
 own adjoint — surrogate or the full bicycle. Adam with global-norm clipping; the
@@ -177,6 +181,36 @@ window is detached every `window` steps to bound the graph.
 The differentiable primitives are `__host__ __device__` in
 `cvc/nav/detail/diff_rollout.h`, so the CPU trainer and the CUDA kernel compile the
 **same** adjoint source — the device backward is correct by construction.
+
+## The loss, and why both terms are normalized
+
+Both terms are O(1) so `w_coll` expresses a **preference**, not a unit
+conversion. That is load-bearing rather than cosmetic. The original form —
+`|goal − o| + w_coll · Σ relu(rr − phi)` — could not train this at all:
+
+* **Units.** Goal distance spans the world (~5.5 normalized); the penalty was a
+  breach depth bounded by `rr` = 0.15. ~36× apart before anything else.
+* **Sparsity.** A breach depth is nonzero only for an agent *already inside*
+  geometry — **0.00%** of a batch of free-space starts. Averaging divided the
+  term by another ~100×.
+
+Together that put the collision term at **0.2–0.7% of the loss**, so the
+optimiser minimised goal distance alone — and since slowing costs goal distance,
+it was correctly learning *not to slow down*. Balancing it would have needed
+`w_coll` ≈ 3,700 on ice and ≈ 55,000 on dry: when no constant works across
+conditions, the *terms* are wrong, not the weight.
+
+So the penalty is a **margin shortfall**, nonzero for anything merely *near*
+geometry (21% of random starts against 0.00%), and goal distance is divided by
+the world half-extent. Measured on the torch reference over three seeds,
+`w_coll` 1–3 improves on the shipped policy in reach *and* penetration, 10 is
+bimodal, and 30 cuts penetration ~94% for two thirds of the reach.
+
+This must stay in step with `sdf_nav`'s `train_bicycle`. A native trainer
+descending a different objective from the torch reference is the same class of
+divergence the rollout parity gates exist to prevent — and one they cannot
+catch, since they hand both paths the same params and compare *traces*, not
+losses.
 
 ## Correctness: the gradcheck
 
