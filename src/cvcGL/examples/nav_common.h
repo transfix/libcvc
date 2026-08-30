@@ -114,6 +114,20 @@ public:
   const std::vector<double> &pack_z(const float *pos_world, const float *heading,
                                     const double *z_off);
 
+  // LOD pack: transform only the `count` agents named by `idx[0..count)` into the
+  // first `count` slots (each at its own world pose from pos_world/heading/z_off,
+  // indexed by the agent id in idx[]), and COLLAPSE every remaining slot to a
+  // degenerate point so it rasterizes to nothing. `count` is clamped to this
+  // glyph's capacity (n_). This is how the distance-LOD demo keeps a bounded
+  // budget of expensive near-glyphs (a small-capacity Humvee node) separate from
+  // the cheap far-glyphs (a large-capacity arrow node): each frame the selector
+  // partitions agents by on-screen size and hands each node its own index list.
+  // Point count is unchanged (n_ * v_), so updateVertices() still matches.
+  const std::vector<double> &pack_lod(const float *pos_world, const float *heading,
+                                      const double *z_off, const std::uint32_t *idx, int count);
+
+  int capacity() const { return n_; }
+  int verts_per_instance() const { return v_; }
   int point_count() const { return n_ * v_; }
 
 private:
