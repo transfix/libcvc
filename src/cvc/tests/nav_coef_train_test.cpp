@@ -158,10 +158,24 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
 // integrator (train_config::rollout = bicycle). The bicycle's branch boundaries
 // make the FD noisier than the smooth surrogate, so the tolerance is looser; the
 // standalone per-op gradcheck (scratch) pins the bicycle adjoint tightly.
+//
+// n is deliberately LARGE here. When the collision term was a breach depth it
+// was nonzero for ~0% of a batch, so this check effectively measured the smooth
+// goal term alone and n=24 sufficed. The margin-shortfall penalty is active for
+// any agent near geometry, so an eps-sized FD step now flips samples across the
+// relu and the barrier branches, and each flip is a genuine non-differentiability
+// the analytic gradient cannot see. That noise averages down like 1/sqrt(n);
+// a WRONG gradient would not. Measured on this scene at eps=2e-3:
+//
+//     n     24      64      128     256     512
+//     rel   6.0e-2  3.4e-2  3.1e-2  1.5e-2  8.4e-3
+//
+// so n=256 sits ~3x under the tolerance. If this starts failing, sweep n before
+// suspecting the adjoint: a real gradient bug does not shrink with batch size.
 TEST(NavCoefTrain, BicycleGradcheckMatchesFiniteDifference) {
   const training_scene sc = cvc::nav::city_scene(48);
   train_config cfg = small_cfg();
-  cfg.n = 24;
+  cfg.n = 256;
   cfg.window = 6;
   cfg.horizon = 6;
   cfg.rollout = cvc::nav::rollout_kind::bicycle;

@@ -114,7 +114,17 @@ struct train_config {
   // scene, sim_world reach) 2e-4 refines the basin and IMPROVES reach; 1e-3
   // (coef_train.py's never-validated default) collapses it. Lower is safer.
   float lr = 2e-4f;
-  float w_coll = 6.0f;    // collision-penalty weight
+  // The safety-for-reach dial, NOT a hyperparameter to tune away. Both loss
+  // terms are normalized to O(1) (goal distance by the world half-extent, the
+  // penalty by d_safe), so this expresses a preference directly. Measured on
+  // the torch reference over three seeds: 1-3 improves on the seed in reach AND
+  // penetration, 10 is bimodal, 30 cuts penetration ~94% for two thirds of the
+  // reach. It was 6.0 when the terms were unnormalized and the collision term
+  // was 0.2-0.7% of the loss -- at which point no value of this worked.
+  float w_coll = 3.0f;
+  // Clearance below which the penalty engages, in normalized units. 0 = use the
+  // scene's d_hat, matching train_bicycle's default.
+  float d_safe = 0.0f;
   float grad_clip = 5.0f; // global-norm gradient clip
   unsigned seed = 0;
 

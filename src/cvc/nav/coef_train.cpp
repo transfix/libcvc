@@ -308,6 +308,16 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
   double total_loss = 0.0;
   const double inv_n = 1.0 / n;
   const float coll_w = cfg_.w_coll / static_cast<float>(window);
+  // Both loss terms are normalized to O(1) so w_coll is a PREFERENCE and not a
+  // unit conversion. Must match sdf_nav / coef_train.py's train_bicycle: a
+  // native trainer optimising a different objective from the torch reference is
+  // the same class of divergence the rollout parity gates exist to prevent, and
+  // no gate would catch it -- both paths would be internally consistent while
+  // descending different hills.
+  const float region_n =
+      static_cast<float>(0.5 * (scene.max_x - scene.min_x) * scene.scale); // world half-extent
+  const float d_safe = cfg_.d_safe > 0.0f ? cfg_.d_safe : d_hat;
+  const float inv_d_safe = 1.0f / d_safe;
   std::vector<float> gacc(grad ? p_.size() : 0, 0.0f);
 
   for (int ag = 0; ag < n; ++ag) {
@@ -368,9 +378,12 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                         ay1);
 
       const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
-      const float pen = rr - cs.phi;
+      // Margin shortfall, not breach depth. A breach depth is nonzero only for
+      // an agent already INSIDE geometry -- ~0% of a free-space batch -- so it
+      // averaged to nothing and no weight could rescue it.
+      const float pen = d_safe - (cs.phi - rr);
       if (pen > 0.0f)
-        total_loss += static_cast<double>(coll_w) * pen * inv_n;
+        total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
 
       ox = ox1;
       oy = oy1;
@@ -380,7 +393,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
 
     const float fdx = ox - gx, fdy = oy - gy;
     const float Lgoal = std::sqrt(fdx * fdx + fdy * fdy);
-    total_loss += static_cast<double>(Lgoal) * inv_n;
+    total_loss += static_cast<double>(Lgoal / region_n) * inv_n;
     if (o_out) {
       o_out[2 * ag] = ox;
       o_out[2 * ag + 1] = oy;
@@ -395,8 +408,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     // ── backward window ──
     float go_x = 0.0f, go_y = 0.0f, gaux_x = 0.0f, gaux_y = 0.0f; // grad on (o1, aux1)
     if (Lgoal > 1e-9f) {
-      go_x = static_cast<float>(inv_n) * fdx / Lgoal;
-      go_y = static_cast<float>(inv_n) * fdy / Lgoal;
+      go_x = static_cast<float>(inv_n) * fdx / (Lgoal * region_n);
+      go_y = static_cast<float>(inv_n) * fdy / (Lgoal * region_n);
     }
     for (int t = window - 1; t >= 0; --t) {
       Step &S = st[t];
@@ -411,11 +424,12 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         diff::surr_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
                         ox1, oy1, ax1, ay1);
       const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
-      const float pen = rr - cs.phi;
+      const float pen = d_safe - (cs.phi - rr);
       if (pen > 0.0f) {
         float dox, doy;
-        diff::sample_bwd(cs, -static_cast<float>(coll_w) * static_cast<float>(inv_n), 0.0f, 0.0f,
-                         dox, doy);
+        // d(pen/d_safe)/d(phi) = -1/d_safe, so the seed is the old one scaled.
+        diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
+                         0.0f, 0.0f, dox, doy);
         go_x += dox;
         go_y += doy;
       }
