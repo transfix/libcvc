@@ -125,18 +125,19 @@ struct veh_params {
   // governor / creep / nose-blocked margins switch to `body_rr` — sizing them
   // for a body 12x too fat is what made the tighter footprint worthless.
   //
-  // NOT a drop-in: the SUM is a K-times gain on the learned `al`, which was fit
-  // for one sample point. It does not break the vehicle, it makes it TIMID —
-  // more standoff, fewer collisions, longer to arrive. Measured on the grl-snam
-  // city story (5 seeds x 4 agents), three discs vs one at matched radius:
-  // reach 45% -> 0% at a 700-tick budget and 75% -> 30% at 1600 (so the
-  // ordering is not a budget artifact), mean clearance 2.92 m -> 3.65 m, and
-  // penetration 3.5 -> 2.8 at r=0.075 — i.e. consistently SAFER per unit of
-  // driving. Scale `al` by the disc count, or retune the barrier, before
-  // reading anything into a footprint run.
+  // SET `body_gain` WITH THIS (see below). The SUM is a K-times gain on the
+  // learned `al`, which was fit for one sample point; uncorrected it does not
+  // break the vehicle, it makes it TIMID — more standoff, fewer collisions,
+  // longer to arrive, so it misses any fixed budget.
   const float *body_offsets = nullptr; // [n_body], borrowed
   int n_body = 0;
   float body_rr = 0.0f;
+  // Scales the SUMMED barrier. 1/n_body cancels the K-times gain the sum puts
+  // on the learned `al` (fit for ONE sample point) and is what you almost
+  // always want: measured on the grl-snam city story, three discs at the legacy
+  // radius go 0% -> 35% reach at gain 1/3 while KEEPING the lower collision
+  // rate (2.8 vs the legacy disc's 2.9) and the extra 0.7 m of standoff.
+  float body_gain = 1.0f;
 
   // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
   // angle; on a real Ackermann axle the INNER wheel reaches the mechanical lock

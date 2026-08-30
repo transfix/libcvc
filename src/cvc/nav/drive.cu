@@ -68,6 +68,7 @@ struct dev_veh {
   const float *body_offsets = nullptr; // device [n_body]
   int n_body = 0;
   float body_rr = 0.0f;
+  float body_gain = 1.0f;
   float track_width = 0.0f;
   dev_grip grip;
 };
@@ -204,11 +205,12 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
         d_sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
         const float bd = bphi - v.body_rr;
         const float bipc = d_ipc(bd, v.d_hat);
-        Fbar_x += -(al * bipc) * bnx;
-        Fbar_y += -(al * bipc) * bny;
+        const float alg = v.body_gain == 1.0f ? al : al * v.body_gain;
+        Fbar_x += -(alg * bipc) * bnx;
+        Fbar_y += -(alg * bipc) * bny;
         const float brep = bipc < 0.0f ? bipc : 0.0f;
-        Frep_x += -(al * brep) * bnx;
-        Frep_y += -(al * brep) * bny;
+        Frep_x += -(alg * brep) * bnx;
+        Frep_y += -(alg * brep) * bny;
         if (bd < d) {
           d = bd;
           nx = bnx;
@@ -384,6 +386,7 @@ inline void fill_dev_veh(const veh_params &vp, dev_veh &v) {
   v.allow_reverse = vp.allow_reverse ? 1 : 0;
   v.track_width = vp.track_width;
   v.body_rr = vp.body_rr;
+  v.body_gain = vp.body_gain;
 }
 
 // Device buffers for the optional refinements; both stay null when unused,
