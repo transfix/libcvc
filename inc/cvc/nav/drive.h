@@ -223,6 +223,17 @@ void carrot_step(const float *o, const float *goal, const float *th, float *sp, 
 void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_out,
                      float *normal_out);
 
+// GPU bicycle rollout with GIVEN coefficients — the device twin of the CPU
+// `bicycle_rollout`, float-equivalent to it and to sdf_nav.bicycle_rollout.
+// Updates o[n*2], th[n], sp[n] in place and writes minclr_out[n]. Shared field
+// (plane 0). `drive_step_cuda` fuses coef_feats + the MLP + this; the unfused
+// entry point exists so the vehicle math can be validated against the torch
+// reference WITHOUT a trained net in the comparison — which the CPU side always
+// had and the GPU side did not, leaving the device rollout unattestable.
+void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, const float *goal,
+                          const float *al, const float *be, const float *ga, int n,
+                          const veh_params &v, float *minclr_out);
+
 // GPU fused drive tick (sample -> coef_feats -> coef_mlp -> bicycle nsub), one
 // thread per agent, float-equivalent to drive_step. Updates o[n*2], th[n], sp[n]
 // in place and writes minclr_out[n]. Shared field (plane 0).
