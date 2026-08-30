@@ -1277,17 +1277,44 @@ int main(int argc, char **argv) {
     // a one-frame lag in the partition is invisible.
     cvc::lod::view_params vp = cvc::lod::preset_view(cvc::lod::quality_preset::balanced);
     vp.viewport_h_px = height;
+    // Six frustum planes for off-screen agent culling. cvc::vis owns the proper
+    // culler, but the deps prefix here predates that module, so the demo inlines
+    // a minimal test: normalize each plane (so d is a true distance) and cull an
+    // agent only when its bounding sphere is fully behind some plane. All six
+    // planes are tested, so plane ORDER is irrelevant (no near/far trap).
+    double fp[6][4];
+    bool haveFr = false;
     if (vtkRenderer *r = view.renderer()) {
       if (vtkCamera *cam3 = r->GetActiveCamera()) {
         cam3->GetPosition(vp.eye);
         vp.tan_half_fov = std::tan(0.5 * cam3->GetViewAngle() * PI / 180.0);
+        double p24[24];
+        cam3->GetFrustumPlanes(r->GetTiledAspectRatio(), p24);
+        for (int pl = 0; pl < 6; ++pl) {
+          const double *P = p24 + 4 * pl;
+          const double len = std::sqrt(P[0] * P[0] + P[1] * P[1] + P[2] * P[2]);
+          const double inv = len > 0.0 ? 1.0 / len : 1.0;
+          for (int k = 0; k < 4; ++k)
+            fp[pl][k] = P[k] * inv;
+        }
+        haveFr = true;
       }
     }
-    // Score each agent by projected radius; the largest above a floor go near
-    // (full Humvee), the rest far (arrow).
+    auto in_frustum = [&](const double c[3]) {
+      for (int pl = 0; pl < 6; ++pl)
+        if (fp[pl][0] * c[0] + fp[pl][1] * c[1] + fp[pl][2] * c[2] + fp[pl][3] < -agentR)
+          return false; // fully behind this plane
+      return true;
+    };
+    // Score each IN-FRUSTUM agent by projected radius; off-screen agents are
+    // dropped entirely (not packed into either node). This is the chase-cam win:
+    // a close camera sees a fraction of the swarm, so most agents cost nothing.
+    // The largest on-screen agents go near (full Humvee), the rest far (arrow).
     lodScore.clear();
     for (int i = 0; i < N; ++i) {
       const double c[3] = {pos[2 * i], pos[2 * i + 1], zo ? zo[i] : 0.0};
+      if (haveFr && !in_frustum(c))
+        continue; // off-screen: culled
       const double d = cvc::lod::bound_distance_m(c, agentR, vp);
       lodScore.push_back({static_cast<float>(cvc::lod::screen_radius_px(agentR, d, vp)), i});
     }
