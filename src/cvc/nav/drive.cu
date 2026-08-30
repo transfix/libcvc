@@ -369,6 +369,75 @@ void cuda_check(cudaError_t e, const char *what) {
     throw std::runtime_error(std::string("cvc::nav CUDA: ") + what + ": " + cudaGetErrorString(e));
 }
 
+// The scalar half of dev_veh, shared by the fused and unfused entry points.
+inline void fill_dev_veh(const veh_params &vp, dev_veh &v) {
+  v.rr = vp.rr;
+  v.d_hat = vp.d_hat;
+  v.dt = vp.dt;
+  v.vmax = vp.vmax;
+  v.L = vp.L;
+  v.delta_max = vp.delta_max;
+  v.a_max = vp.a_max;
+  v.a_lat_max = vp.a_lat_max;
+  v.k_steer = vp.k_steer;
+  v.nsub = vp.nsub;
+  v.allow_reverse = vp.allow_reverse ? 1 : 0;
+  v.track_width = vp.track_width;
+  v.body_rr = vp.body_rr;
+}
+
+// Device buffers for the optional refinements; both stay null when unused,
+// which is the legacy kernel path bit-for-bit. The caller frees them
+// (cudaFree(nullptr) is a documented no-op, so it needs no guard).
+template <class H2DFn>
+void upload_refinements(const veh_params &vp, dev_veh &v, float *&d_body, float *&d_grip,
+                        H2DFn &&H2D) {
+  if (vp.n_body > 0 && vp.body_offsets) {
+    cuda_check(cudaMalloc(&d_body, (size_t)vp.n_body * sizeof(float)), "malloc body_offsets");
+    H2D(d_body, vp.body_offsets, (size_t)vp.n_body * sizeof(float), "H2D body_offsets");
+    v.body_offsets = d_body;
+    v.n_body = vp.n_body;
+  }
+  if (vp.grip && vp.grip->data) {
+    const size_t gsz = (size_t)vp.grip->M * vp.grip->H * vp.grip->W * sizeof(float);
+    cuda_check(cudaMalloc(&d_grip, gsz), "malloc grip");
+    H2D(d_grip, vp.grip->data, gsz, "H2D grip");
+    v.grip.data = d_grip;
+    v.grip.M = vp.grip->M;
+    v.grip.H = vp.grip->H;
+    v.grip.W = vp.grip->W;
+    v.grip.S = (float)vp.grip->S;
+    v.grip.cx = (float)vp.grip->cx;
+    v.grip.cy = (float)vp.grip->cy;
+    v.grip.mnx = (float)vp.grip->mnx;
+    v.grip.mny = (float)vp.grip->mny;
+    v.grip.mxx = (float)vp.grip->mxx;
+    v.grip.mxy = (float)vp.grip->mxy;
+  }
+}
+
+// Bicycle rollout with GIVEN coefficients — the device twin of the CPU
+// bicycle_rollout. drive_kernel fuses coef_feats + the MLP + this; keeping an
+// unfused entry point lets the vehicle math be validated against torch without
+// dragging a trained net through the comparison, which is what the CPU side has
+// always had and the GPU side did not.
+__global__ void bicycle_kernel(dev_field f, const int *map_id, float *o, float *th, float *sp,
+                               const float *goal, const float *al, const float *be, const float *ga,
+                               dev_veh v, int n, float *minclr) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n)
+    return;
+  const int plane = map_id ? map_id[i] : 0;
+  float ox = o[2 * i], oy = o[2 * i + 1], thi = th[i], spi = sp[i];
+  float mc = 9.9f;
+  d_bicycle(f, plane, ox, oy, thi, spi, goal[2 * i], goal[2 * i + 1], al[i], be[i], ga[i], v, mc);
+  o[2 * i] = ox;
+  o[2 * i + 1] = oy;
+  th[i] = thi;
+  sp[i] = spi;
+  minclr[i] = mc;
+}
+
 } // namespace
 
 void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_out,
@@ -394,6 +463,65 @@ void sdf_sample_cuda(const field_stack &f, const float *on, int n, float *phi_ou
   cudaFree(d_on);
   cudaFree(d_phi);
   cudaFree(d_nrm);
+}
+
+void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, const float *goal,
+                          const float *al, const float *be, const float *ga, int n,
+                          const veh_params &vp, float *minclr_out) {
+  if (n <= 0)
+    return;
+  const size_t fsz = (size_t)f.H * f.W * 3 * sizeof(float); // plane 0
+  float *d_field = nullptr, *d_o = nullptr, *d_th = nullptr, *d_sp = nullptr, *d_goal = nullptr;
+  float *d_al = nullptr, *d_be = nullptr, *d_ga = nullptr, *d_mc = nullptr;
+  float *d_body = nullptr, *d_grip = nullptr;
+  const size_t fn = (size_t)n * sizeof(float), f2n = (size_t)2 * n * sizeof(float);
+  cuda_check(cudaMalloc(&d_field, fsz), "malloc field");
+  cuda_check(cudaMalloc(&d_o, f2n), "malloc o");
+  cuda_check(cudaMalloc(&d_th, fn), "malloc th");
+  cuda_check(cudaMalloc(&d_sp, fn), "malloc sp");
+  cuda_check(cudaMalloc(&d_goal, f2n), "malloc goal");
+  cuda_check(cudaMalloc(&d_al, fn), "malloc al");
+  cuda_check(cudaMalloc(&d_be, fn), "malloc be");
+  cuda_check(cudaMalloc(&d_ga, fn), "malloc ga");
+  cuda_check(cudaMalloc(&d_mc, fn), "malloc minclr");
+  auto H2D = [&](void *dst, const void *src, size_t bytes, const char *w) {
+    cuda_check(cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice), w);
+  };
+  H2D(d_field, f.data, fsz, "H2D field");
+  H2D(d_o, o, f2n, "H2D o");
+  H2D(d_th, th, fn, "H2D th");
+  H2D(d_sp, sp, fn, "H2D sp");
+  H2D(d_goal, goal, f2n, "H2D goal");
+  H2D(d_al, al, fn, "H2D al");
+  H2D(d_be, be, fn, "H2D be");
+  H2D(d_ga, ga, fn, "H2D ga");
+
+  dev_veh v;
+  fill_dev_veh(vp, v);
+  upload_refinements(vp, v, d_body, d_grip, H2D);
+
+  const int threads = 128, blocks = (n + threads - 1) / threads;
+  bicycle_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_goal,
+                                      d_al, d_be, d_ga, v, n, d_mc);
+  cuda_check(cudaGetLastError(), "bicycle_kernel launch");
+  auto D2H = [&](void *dst, const void *src, size_t bytes, const char *w) {
+    cuda_check(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), w);
+  };
+  D2H(o, d_o, f2n, "D2H o");
+  D2H(th, d_th, fn, "D2H th");
+  D2H(sp, d_sp, fn, "D2H sp");
+  D2H(minclr_out, d_mc, fn, "D2H minclr");
+  cudaFree(d_field);
+  cudaFree(d_o);
+  cudaFree(d_th);
+  cudaFree(d_sp);
+  cudaFree(d_goal);
+  cudaFree(d_al);
+  cudaFree(d_be);
+  cudaFree(d_ga);
+  cudaFree(d_mc);
+  cudaFree(d_body); // cudaFree(nullptr) is a documented no-op
+  cudaFree(d_grip);
 }
 
 void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
@@ -449,45 +577,9 @@ void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const
   H2D(d_boff, fl.b_off.data(), fl.num_layers * sizeof(long), "H2D boff");
 
   dev_veh v;
-  v.rr = vp.rr;
-  v.d_hat = vp.d_hat;
-  v.dt = vp.dt;
-  v.vmax = vp.vmax;
-  v.L = vp.L;
-  v.delta_max = vp.delta_max;
-  v.a_max = vp.a_max;
-  v.a_lat_max = vp.a_lat_max;
-  v.k_steer = vp.k_steer;
-  v.nsub = vp.nsub;
-  v.allow_reverse = vp.allow_reverse ? 1 : 0;
-  v.track_width = vp.track_width;
-  v.body_rr = vp.body_rr;
-
-  // The optional refinements need their own device buffers. Both stay null when
-  // unused, which is the legacy kernel path bit-for-bit.
+  fill_dev_veh(vp, v);
   float *d_boff_body = nullptr, *d_grip = nullptr;
-  if (vp.n_body > 0 && vp.body_offsets) {
-    cuda_check(cudaMalloc(&d_boff_body, (size_t)vp.n_body * sizeof(float)), "malloc body_offsets");
-    H2D(d_boff_body, vp.body_offsets, (size_t)vp.n_body * sizeof(float), "H2D body_offsets");
-    v.body_offsets = d_boff_body;
-    v.n_body = vp.n_body;
-  }
-  if (vp.grip && vp.grip->data) {
-    const size_t gsz = (size_t)vp.grip->M * vp.grip->H * vp.grip->W * sizeof(float);
-    cuda_check(cudaMalloc(&d_grip, gsz), "malloc grip");
-    H2D(d_grip, vp.grip->data, gsz, "H2D grip");
-    v.grip.data = d_grip;
-    v.grip.M = vp.grip->M;
-    v.grip.H = vp.grip->H;
-    v.grip.W = vp.grip->W;
-    v.grip.S = (float)vp.grip->S;
-    v.grip.cx = (float)vp.grip->cx;
-    v.grip.cy = (float)vp.grip->cy;
-    v.grip.mnx = (float)vp.grip->mnx;
-    v.grip.mny = (float)vp.grip->mny;
-    v.grip.mxx = (float)vp.grip->mxx;
-    v.grip.mxy = (float)vp.grip->mxy;
-  }
+  upload_refinements(vp, v, d_boff_body, d_grip, H2D);
 
   const int threads = 128, blocks = (n + threads - 1) / threads;
   drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_car, d_w,
