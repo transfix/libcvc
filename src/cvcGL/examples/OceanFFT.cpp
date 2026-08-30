@@ -28,11 +28,20 @@ constexpr unsigned int kGL_DEPTH_TEST = 0x0B71;
 constexpr float kTAU = 6.28318530718f;
 constexpr float kG = 9.80665f;
 
-// The quad VAO binds attribute `ndCoordIn`; own VS + integer-coord texelFetch so
-// no interpolated varying can mismatch VTK's internal quad shader.
-const char *kQuadVS = "//VTK::System::Dec\n"
-                      "in vec4 ndCoordIn;\n"
-                      "void main() { gl_Position = ndCoordIn; }\n";
+// Own VS + integer-coord texelFetch so no interpolated varying can mismatch VTK's
+// internal quad shader. vtkOpenGLQuadHelper's VAO UNCONDITIONALLY binds both
+// ndCoordIn AND texCoordIn (vtkOpenGLQuadHelper.cxx), so a VS that omits texCoordIn
+// makes it log "Error binding texCoordIn to VAO" (a vtkOpenGLVertexArrayObject ERR)
+// on every pass — harmless but noisy. Declare texCoordIn and give it a use the
+// compiler cannot fold away (a *1e-30 term, far below float precision against the
+// ±1 ndCoords, so the full-screen quad is unchanged) so the attribute stays live and
+// the VAO binds cleanly. The FFT passes still read nothing from it (texelFetch by
+// gl_FragCoord).
+const char *kQuadVS =
+    "//VTK::System::Dec\n"
+    "in vec4 ndCoordIn;\n"
+    "in vec2 texCoordIn;\n"
+    "void main() { gl_Position = ndCoordIn + vec4(texCoordIn * 1e-30, 0.0, 0.0); }\n";
 
 // ── one-time h0: JONSWAP spectrum with conjugate symmetry ────────────────────
 const char *kH0FS =
