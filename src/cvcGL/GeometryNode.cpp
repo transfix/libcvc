@@ -664,8 +664,15 @@ void GeometryNode::clearShaderReplacements() {
 
 void GeometryNode::disableCoordinateShiftScale() {
   runOnMainThread([this]() {
-    if (auto *m = vtkOpenGLPolyDataMapper::SafeDownCast(m_mapper))
-      m->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
+    // SetVBOShiftScaleMethod is virtual on vtkPolyDataMapper, so dispatch straight to
+    // whichever concrete mapper the object factory handed us. The previous code cast to
+    // vtkOpenGLPolyDataMapper — correct on desktop GL, but on GLES3/WebGL2 (wasm) the
+    // factory returns vtkOpenGLLowMemoryPolyDataMapper, which is a vtkPolyDataMapper but
+    // NOT a vtkOpenGLPolyDataMapper. There the cast silently failed, leaving shift-scale
+    // ON, so world-space-vertexMC shaders (the GPU FFT ocean, the ground/bark detail)
+    // received coordinates scaled to ~[-1,1] and rendered dead flat / wrong.
+    if (m_mapper)
+      m_mapper->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
     if (m_sceneGraph)
       m_sceneGraph->requestRender();
   });
