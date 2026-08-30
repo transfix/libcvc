@@ -120,7 +120,6 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
       free_cells.push_back(static_cast<int>(i));
 
   std::mt19937 rng(seed);
-  std::uniform_int_distribution<int> pick(0, static_cast<int>(free_cells.size()) - 1);
   std::uniform_real_distribution<float> col(0.2f, 1.0f);
   auto cell_to_on = [&](int cell, float &onx, float &ony) {
     const int r = cell / cfg.cols, c = cell % cfg.cols;
@@ -129,9 +128,34 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
     onx = static_cast<float>((x - cfg.cx) * cfg.scale);
     ony = static_cast<float>((y - cfg.cy) * cfg.scale);
   };
+
+  // Start/goal pools. `scattered` (default) draws both from every free cell.
+  // `opposed` clusters starts into a band on the low-x edge and goals into the
+  // high-x edge, so the swarm crosses the map instead of tangling in place; if a
+  // band comes out empty (a degenerate/tiny map) it falls back to the full set.
+  const std::vector<int> *starts = &free_cells;
+  const std::vector<int> *goals = &free_cells;
+  std::vector<int> start_band, goal_band;
+  if (cfg.spawn_layout == config::spawn::opposed && cfg.cols > 1) {
+    const int lo = static_cast<int>(cfg.cols * 0.30); // starts: outer ~30% low-x
+    const int hi = static_cast<int>(cfg.cols * 0.70); // goals:  outer ~30% high-x
+    for (int cell : free_cells) {
+      const int c = cell % cfg.cols;
+      if (c < lo)
+        start_band.push_back(cell);
+      else if (c >= hi)
+        goal_band.push_back(cell);
+    }
+    if (!start_band.empty())
+      starts = &start_band;
+    if (!goal_band.empty())
+      goals = &goal_band;
+  }
+  std::uniform_int_distribution<int> pick_start(0, static_cast<int>(starts->size()) - 1);
+  std::uniform_int_distribution<int> pick_goal(0, static_cast<int>(goals->size()) - 1);
   for (int i = 0; i < n; ++i) {
-    cell_to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
-    cell_to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
+    cell_to_on((*starts)[pick_start(rng)], o[2 * i], o[2 * i + 1]);
+    cell_to_on((*goals)[pick_goal(rng)], goal[2 * i], goal[2 * i + 1]);
     color[3 * i] = col(rng);
     color[3 * i + 1] = col(rng);
     color[3 * i + 2] = col(rng);
