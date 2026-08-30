@@ -132,11 +132,20 @@ struct veh_params {
   const float *body_offsets = nullptr; // [n_body], borrowed
   int n_body = 0;
   float body_rr = 0.0f;
-  // Scales the SUMMED barrier. 1/n_body cancels the K-times gain the sum puts
-  // on the learned `al` (fit for ONE sample point) and is what you almost
-  // always want: measured on the grl-snam city story, three discs at the legacy
-  // radius go 0% -> 35% reach at gain 1/3 while KEEPING the lower collision
-  // rate (2.8 vs the legacy disc's 2.9) and the extra 0.7 m of standoff.
+  // Scales the SUMMED barrier. 1/n_body cancels the K-times gain the sum puts on
+  // the learned `al` (fit for ONE sample point). USE FULL RADIUS WITH 1/n.
+  // Measured on the grl-snam city story, 5 seeds x 4 agents:
+  //
+  //   arm                    reach@700  reach@1600  pen/agent  clearance
+  //   disc 0.150 (legacy)       45%         75%        2.9      2.92 m
+  //   fp3 0.150, gain 1          0%         30%        2.8      3.65 m
+  //   fp3 0.150, gain 1/3       35%         60%        2.8      3.65 m
+  //   fp3 0.075, gain 1/3       50%         60%        7.2      2.59 m
+  //
+  // Gain-corrected it keeps the lower collision rate AND ~0.7 m more standoff.
+  // The last row is the trap: smaller discs look best at a tight budget, but by
+  // 1600 ticks they reach the SAME as full radius with 2.5x the collisions —
+  // the extra reach was only ever borrowed from safety.
   float body_gain = 1.0f;
 
   // STEERING LOCK. 0 = none. The bicycle's `delta` is the virtual centre-wheel
