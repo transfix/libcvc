@@ -59,10 +59,16 @@
 #include <vtkActor2D.h>         // skip 2D HUD/text when mirroring to PiP
 #include <vtkActorCollection.h> // enumerate main-renderer props to mirror onto PiP
 #include <vtkCamera.h>          // PiP ortho camera
+#include <vtkCellArray.h>       // build/read polydata for LOD decimation
+#include <vtkIdList.h>          //   "
 #include <vtkLight.h>           // PiP needs its own lights (main renderer's are aimed at chase)
 #include <vtkMatrix4x4.h>       // follow-cam probe transform
 #include <vtkNew.h>
+#include <vtkPoints.h>   //   "
+#include <vtkPolyData.h> //   "
 #include <vtkPropCollection.h>
+#include <vtkQuadricClustering.h> // fast far-LOD for the big buildings mesh
+#include <vtkQuadricDecimation.h> // bake decimated Humvee LOD rungs
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
@@ -159,6 +165,112 @@ void fill_fleet_fog(unsigned char *px, const cvc::nav::sim_world &w, int rows, i
     p[3] = 255;
   }
 }
+
+// Decimate a flat triangle mesh to roughly (1 - reduction) of its triangles via
+// VTK's quadric-error metric, which preserves the silhouette — the right tool
+// for keeping a Humvee recognizable at a fraction of its 8k tris. Output is a
+// fresh flat vert/tri mesh; UVs/normals are dropped (the coarse rungs are
+// flat-shaded a vehicle olive, and group identity rides the flag above each
+// agent). Returns false if decimation collapsed the mesh.
+bool decimate_mesh(const std::vector<double> &verts, const std::vector<std::uint32_t> &tris,
+                   double reduction, std::vector<double> &outVerts,
+                   std::vector<std::uint32_t> &outTris) {
+  const vtkIdType nv = static_cast<vtkIdType>(verts.size() / 3);
+  vtkNew<vtkPoints> pts;
+  pts->SetNumberOfPoints(nv);
+  for (vtkIdType i = 0; i < nv; ++i)
+    pts->SetPoint(i, verts[3 * i], verts[3 * i + 1], verts[3 * i + 2]);
+  vtkNew<vtkCellArray> cells;
+  for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
+    const vtkIdType tri[3] = {static_cast<vtkIdType>(tris[t]), static_cast<vtkIdType>(tris[t + 1]),
+                              static_cast<vtkIdType>(tris[t + 2])};
+    cells->InsertNextCell(3, tri);
+  }
+  vtkNew<vtkPolyData> pd;
+  pd->SetPoints(pts);
+  pd->SetPolys(cells);
+  vtkNew<vtkQuadricDecimation> dec;
+  dec->SetInputData(pd);
+  dec->SetTargetReduction(reduction);
+  dec->Update();
+  vtkPolyData *out = dec->GetOutput();
+  outVerts.clear();
+  outTris.clear();
+  if (!out || !out->GetPoints() || out->GetNumberOfPolys() < 4)
+    return false;
+  vtkPoints *op = out->GetPoints();
+  const vtkIdType on = op->GetNumberOfPoints();
+  outVerts.resize(static_cast<std::size_t>(on) * 3);
+  for (vtkIdType i = 0; i < on; ++i) {
+    double p[3];
+    op->GetPoint(i, p);
+    outVerts[3 * i] = p[0];
+    outVerts[3 * i + 1] = p[1];
+    outVerts[3 * i + 2] = p[2];
+  }
+  vtkCellArray *polys = out->GetPolys();
+  polys->InitTraversal();
+  vtkNew<vtkIdList> ids;
+  while (polys->GetNextCell(ids))
+    if (ids->GetNumberOfIds() == 3)
+      for (int j = 0; j < 3; ++j)
+        outTris.push_back(static_cast<std::uint32_t>(ids->GetId(j)));
+  return !outTris.empty();
+}
+
+// Fast far-LOD for a LARGE mesh (the ~1M-tri buildings). vtkQuadricDecimation is
+// priority-queue based and far too slow for a million triangles at load;
+// vtkQuadricClustering bins vertices into a spatial grid and collapses each cell in
+// a single linear pass, which is what we want for a distant city silhouette. The
+// grid divisions set the coarseness. Colours are NOT carried through here — the
+// caller re-tints the output from the satellite, which is exact rather than the
+// clustering's averaged scalars. Returns false if the result collapsed.
+bool decimate_clustered(const std::vector<double> &verts, const std::vector<std::uint32_t> &tris,
+                        int divX, int divY, int divZ, std::vector<double> &outVerts,
+                        std::vector<std::uint32_t> &outTris) {
+  const vtkIdType nv = static_cast<vtkIdType>(verts.size() / 3);
+  vtkNew<vtkPoints> pts;
+  pts->SetNumberOfPoints(nv);
+  for (vtkIdType i = 0; i < nv; ++i)
+    pts->SetPoint(i, verts[3 * i], verts[3 * i + 1], verts[3 * i + 2]);
+  vtkNew<vtkCellArray> cells;
+  for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
+    const vtkIdType tri[3] = {static_cast<vtkIdType>(tris[t]), static_cast<vtkIdType>(tris[t + 1]),
+                              static_cast<vtkIdType>(tris[t + 2])};
+    cells->InsertNextCell(3, tri);
+  }
+  vtkNew<vtkPolyData> pd;
+  pd->SetPoints(pts);
+  pd->SetPolys(cells);
+  vtkNew<vtkQuadricClustering> qc;
+  qc->SetInputData(pd);
+  qc->SetNumberOfDivisions(divX, divY, divZ);
+  qc->CopyCellDataOff();
+  qc->Update();
+  vtkPolyData *out = qc->GetOutput();
+  outVerts.clear();
+  outTris.clear();
+  if (!out || !out->GetPoints() || out->GetNumberOfPolys() < 4)
+    return false;
+  vtkPoints *op = out->GetPoints();
+  const vtkIdType on = op->GetNumberOfPoints();
+  outVerts.resize(static_cast<std::size_t>(on) * 3);
+  for (vtkIdType i = 0; i < on; ++i) {
+    double p[3];
+    op->GetPoint(i, p);
+    outVerts[3 * i] = p[0];
+    outVerts[3 * i + 1] = p[1];
+    outVerts[3 * i + 2] = p[2];
+  }
+  vtkCellArray *polys = out->GetPolys();
+  polys->InitTraversal();
+  vtkNew<vtkIdList> ids;
+  while (polys->GetNextCell(ids))
+    if (ids->GetNumberOfIds() == 3)
+      for (int j = 0; j < 3; ++j)
+        outTris.push_back(static_cast<std::uint32_t>(ids->GetId(j)));
+  return !outTris.empty();
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -169,9 +281,9 @@ int main(int argc, char **argv) {
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
-       lite = false, lod = false;
+       lite = false, lod = false, noLod = false, buildingLod = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
-  int nearCap = 64;    // --lod: max full-detail (Humvee) agents; the rest are far arrows
+  int nearCap = 10;    // --lod: full-detail (rung 0) Humvee budget; coarser rungs fill the rest
 
   po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
@@ -189,10 +301,16 @@ int main(int argc, char **argv) {
                             "prefer the bundle's low-poly buildings_flat.glb "
                             "(4x fewer tris, faster shadow pass)")(
       "lod", po::bool_switch(&lod),
-      "agent distance-LOD: a capped near-node of full Humvees + a far-node of "
-      "arrows, partitioned every frame by on-screen size via cvc::lod")(
-      "near-cap", po::value<int>(&nearCap)->default_value(64),
-      "max full-detail (Humvee) agents under --lod; the rest draw as far arrows")(
+      "force agent distance-LOD on (it is ON by default; kept for compatibility). LOD "
+      "is a 4-rung chain of quadric-decimated Humvees picked per-agent via cvc::lod")(
+      "no-lod", po::bool_switch(&noLod),
+      "disable agent distance-LOD (perf control: every agent drawn at full Humvee detail)")(
+      "building-lod", po::bool_switch(&buildingLod),
+      "swap the buildings mesh to a coarse clustered skyline from altitude. OFF by "
+      "default: on a discrete GPU the full mesh renders free and looks far better; "
+      "this helps only when the buildings are GPU-bound (weak/integrated GPU)")(
+      "near-cap", po::value<int>(&nearCap)->default_value(10),
+      "full-detail (rung 0) Humvee budget under --lod; coarser decimated rungs fill the rest")(
       "frames", po::value<long>(&frames)->default_value(0),
       "stop after N frames (0 = until closed)")("fps", po::value<double>(&fps)->default_value(30.0),
                                                 "capture frame rate")(
@@ -439,6 +557,12 @@ int main(int argc, char **argv) {
     b = p[2] / 255.0;
   };
 
+  // Building LOD: the full mesh up close, a fast clustered far mesh from altitude.
+  // Both live in the main scene; the render loop toggles their visibility by camera
+  // height so distant/fly-over views draw the cheap silhouette and close-ups the
+  // full detail. The PiP mirrors whichever is visible, so it gets the cheap mesh
+  // from altitude for free.
+  std::shared_ptr<GeometryNode> fullBuildings, farBuildings;
   if (haveMesh) {
     // Real building geometry from buildings.glb (true heights + shapes). glb bakes
     // bases at z=0, so lift every vertex by terrain.sample() to sit them on the
@@ -467,6 +591,70 @@ int main(int argc, char **argv) {
       wnode->setAmbient(0.35);
       wnode->setDiffuse(0.80);
       wnode->setSpecular(0.10);
+    }
+    fullBuildings = wnode;
+
+    // Far-LOD twin: cluster the ~1M-tri mesh down to a coarse skyline for distant
+    // views, re-tinted from the satellite (exact, not the clustering's averaged
+    // scalars) so it never reverts to the grey block model. cityMesh is already
+    // terrain-lifted here, so the far mesh sits on the ground too. Hidden until the
+    // loop raises the camera. Opt-in (--building-lod): the full mesh is GPU-cheap
+    // and looks better, so the default demo keeps it.
+    if (buildingLod) {
+      const auto &fp = cityMesh.points();
+      const auto &ft = cityMesh.tris();
+      std::vector<double> fv(fp.size() * 3);
+      for (std::size_t i = 0; i < fp.size(); ++i) {
+        fv[3 * i] = fp[i][0];
+        fv[3 * i + 1] = fp[i][1];
+        fv[3 * i + 2] = fp[i][2];
+      }
+      std::vector<std::uint32_t> fi(ft.size() * 3);
+      for (std::size_t i = 0; i < ft.size(); ++i) {
+        fi[3 * i] = static_cast<std::uint32_t>(ft[i][0]);
+        fi[3 * i + 1] = static_cast<std::uint32_t>(ft[i][1]);
+        fi[3 * i + 2] = static_cast<std::uint32_t>(ft[i][2]);
+      }
+      std::vector<double> dv;
+      std::vector<std::uint32_t> di;
+      // ~110x110 footprint cells, 40 height bins over the city bbox: fine enough to
+      // keep individual building footprints instead of melting them into blobs,
+      // still a fraction of the full tri count.
+      if (decimate_clustered(fv, fi, 110, 110, 40, dv, di) && di.size() >= 12) {
+        cvc::geometry farMesh;
+        auto &dp = farMesh.points();
+        dp.resize(dv.size() / 3);
+        for (std::size_t i = 0; i < dp.size(); ++i)
+          dp[i] = {dv[3 * i], dv[3 * i + 1], dv[3 * i + 2]};
+        auto &dt = farMesh.tris();
+        dt.resize(di.size() / 3);
+        for (std::size_t i = 0; i < dt.size(); ++i)
+          dt[i] = {di[3 * i], di[3 * i + 1], di[3 * i + 2]};
+        if (haveSat) {
+          auto &dc = farMesh.colors();
+          dc.resize(dp.size());
+          for (std::size_t i = 0; i < dp.size(); ++i) {
+            double r, g, b;
+            sat_rgb(dp[i][0], dp[i][1], r, g, b);
+            dc[i] = {0.30 + 0.70 * r, 0.30 + 0.70 * g, 0.32 + 0.68 * b};
+          }
+        }
+        farBuildings =
+            std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("buildings_far", farMesh));
+        if (farBuildings) {
+          farBuildings->setUseSingleColor(!haveSat);
+          if (!haveSat)
+            farBuildings->setColor(wall_rgb[0], wall_rgb[1], wall_rgb[2]);
+          farBuildings->setAmbient(0.35);
+          farBuildings->setDiffuse(0.80);
+          farBuildings->setSpecular(0.10);
+          if (farBuildings->prop())
+            farBuildings->prop()->SetVisibility(0); // shown only from altitude
+        }
+        std::printf("nav_city_swarm: building LOD — far mesh %zu tris (from %llu full)\n",
+                    dt.size(), (unsigned long long)cityMesh.num_tris());
+        std::fflush(stdout);
+      }
     }
   } else {
     sg.addGraphics("walls", navdemo::occupancy_to_walls(occ.data(), rows, cols, bounds, wall_h,
@@ -568,49 +756,80 @@ int main(int argc, char **argv) {
       agentNode->setTexture(vtexture, /*zeroCopy=*/false);
   }
 
-  // --- Agent distance LOD (--lod) ------------------------------------------
+  // --- Agent distance LOD (--lod): a real decimated-mesh CHAIN ---------------
   // The Austin demo is bottlenecked on the per-frame agent-body pack (N x an
   // 8k-tri Humvee, transformed and deep-copied through updateVertices every
-  // frame). Split the body into a CAPPED near-node of full Humvees plus a
-  // far-node of cheap arrows, partitioned each frame by on-screen size via
-  // cvc::lod. The per-frame vertex upload then scales with the near budget, not
-  // the whole swarm: enormous at a zoomed-out fly-over (few/no near agents),
-  // bounded at a chase cam. Only meaningful when a real vehicle mesh loaded
-  // (else the "near" glyph is already the cheap arrow). Opt-in so the default
-  // path is untouched.
-  const bool useLod = lod && haveVehicle;
-  const int NEAR_CAP = std::max(1, std::min(N, nearCap));
-  navdemo::AgentGlyphs nearGlyphs, farGlyphs;
-  std::shared_ptr<GeometryNode> nearNode, farNode;
-  std::vector<unsigned char> agentColorU8; // per-agent rgb, for the far-arrow colour gather
+  // frame). Rather than a binary full-Humvee/arrow snap, bake a CHAIN of
+  // decimated Humvee rungs (VTK quadric decimation, silhouette-preserving) from
+  // full detail down to a coarse ~4%-tri silhouette, and pick a rung per agent
+  // each frame by on-screen size via cvc::lod. Each rung is capped, and because
+  // most agents land on a cheap rung the TOTAL packed cost is lower than one
+  // near-node of full Humvees — while the vehicle stays a recognizable Humvee at
+  // every distance. Rung 0 keeps the baked texture; coarser rungs carry the
+  // per-agent group colour (re-gathered each frame). Only meaningful when a real
+  // vehicle mesh loaded; opt-in so the default path is untouched.
+  // LOD is on by default now (the demo is agent-bound); --no-lod is the perf
+  // control, --lod is a redundant force-on kept for older invocations.
+  const bool useLod = (lod || !noLod) && haveVehicle;
+  struct LodRung {
+    navdemo::AgentGlyphs glyphs;
+    std::shared_ptr<GeometryNode> node;
+    int cap = 0;
+    int vpi = 0;                    // verts per instance (for the colour re-gather)
+    bool textured = false;          // rung 0 only
+    std::vector<unsigned char> rgb; // per-frame colour scratch (coloured rungs)
+  };
+  std::vector<LodRung> rungs;
+  std::vector<unsigned char> agentColorU8; // per-agent rgb for the colour re-gather
   if (useLod) {
-    agentNode->setVisible(false); // replaced by the near + far nodes
-    cvc::geometry nearGeom =
-        nearGlyphs.build_template(app, NEAR_CAP, color.data(), vverts, vtris,
-                                  /*z=*/0.0, haveVehicleTexture ? &vuvs : nullptr);
-    nearNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents_near", nearGeom));
-    if (nearNode) {
-      nearNode->setUseSingleColor(false);
-      nearNode->setAmbient(0.32);
-      nearNode->setDiffuse(0.9);
-      nearNode->setSpecular(0.2);
-      nearNode->setSpecularPower(18.0);
-      if (haveVehicleTexture)
-        nearNode->setTexture(vtexture, /*zeroCopy=*/false);
-    }
-    cvc::geometry farGeom = farGlyphs.build(app, N, color.data(), gsz, 0.6);
-    farNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("agents_far", farGeom));
-    if (farNode) {
-      farNode->setUseSingleColor(false); // per-vertex group colour, re-gathered each frame
-      farNode->setAmbient(0.40);
-      farNode->setDiffuse(0.85);
-    }
+    agentNode->setVisible(false); // replaced by the rung nodes
     agentColorU8.resize(color.size());
     for (std::size_t i = 0; i < color.size(); ++i)
       agentColorU8[i] =
           static_cast<unsigned char>(std::lround(std::clamp(color[i], 0.0f, 1.0f) * 255.0f));
-    std::printf("nav_city_swarm: agent LOD on — near-cap %d Humvees + %d far arrows\n", NEAR_CAP,
-                N);
+    // (target reduction, cap) per rung, finest first. The last rung's cap is N so
+    // it always absorbs the remainder. nearCap tunes the full-detail budget.
+    struct Spec {
+      double reduction;
+      int cap;
+    };
+    const std::vector<Spec> specs = {
+        {0.00, std::max(1, std::min(N, nearCap))}, // full Humvee, textured (close-ups only)
+        {0.62, std::min(N, 28)},                   // ~38% tris
+        {0.88, std::min(N, 72)},                   // ~12% tris
+        {0.985, N},                                // ~1.5% tris — the far majority, cheap
+    };
+    rungs.resize(specs.size());
+    for (std::size_t r = 0; r < specs.size(); ++r) {
+      std::vector<double> rv = vverts;
+      std::vector<std::uint32_t> rt = vtris;
+      if (specs[r].reduction > 0.0 && !decimate_mesh(vverts, vtris, specs[r].reduction, rv, rt)) {
+        rv = vverts; // decimation collapsed the mesh: fall back to full detail
+        rt = vtris;
+      }
+      LodRung &rung = rungs[r];
+      rung.cap = std::max(1, specs[r].cap);
+      rung.textured = (r == 0) && haveVehicleTexture;
+      cvc::geometry g = rung.glyphs.build_template(app, rung.cap, color.data(), rv, rt, /*z=*/0.0,
+                                                   rung.textured ? &vuvs : nullptr);
+      rung.vpi = rung.glyphs.verts_per_instance();
+      rung.node = std::dynamic_pointer_cast<GeometryNode>(
+          sg.addGraphics("agents_lod_" + std::to_string(r), g));
+      if (rung.node) {
+        rung.node->setUseSingleColor(false);
+        rung.node->setAmbient(0.34);
+        rung.node->setDiffuse(0.9);
+        rung.node->setSpecular(0.18);
+        rung.node->setSpecularPower(18.0);
+        if (rung.textured)
+          rung.node->setTexture(vtexture, /*zeroCopy=*/false);
+        else
+          rung.rgb.assign(static_cast<std::size_t>(rung.cap) * rung.vpi * 3, 180);
+      }
+      std::printf("nav_city_swarm: LOD rung %zu: %zu tris x cap %d%s\n", r, rt.size() / 3, rung.cap,
+                  rung.textured ? " (textured)" : "");
+    }
+    std::fflush(stdout);
   }
 
   // Per-agent COLOR FLAG: a thin pole + rectangular flag flying above the vehicle,
@@ -1205,6 +1424,14 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Swarm controls");
     ImGui::Text("%d agents | %ld arrived | %.0f fps", N, arrived, ImGui::GetIO().Framerate);
+    { // periodic fps to stdout so benchmarking doesn't need a screenshot of the HUD
+      static int fpsTick = 0;
+      if ((++fpsTick % 120) == 30) {
+        std::printf("nav_city_swarm: %.1f fps | %d agents\n", ImGui::GetIO().Framerate, N);
+        std::fflush(stdout); // stdout is block-buffered when redirected; flush so a
+                             // killed benchmark run still yields its fps samples
+      }
+    }
     ImGui::Separator();
     ImGui::SliderInt("agents", &uiAgents, 32, 4000);
     const char *modes[] = {"shared", "grouped", "private"};
@@ -1295,17 +1522,15 @@ int main(int argc, char **argv) {
 
   // Agent-body pack, shared by the worker and inline sim branches. Non-LOD: the
   // original single-node pack. LOD: partition agents by projected size (cvc::lod)
-  // into a capped near-Humvee node + a far-arrow node so the per-frame vertex
-  // upload scales with the near budget, not the whole swarm.
+  // into per-rung index buckets (finest rung gets the biggest on-screen agents,
+  // bounded by its cap; the rest cascade down), so the vertex upload scales with
+  // the near budget, not the whole swarm.
   std::vector<std::pair<float, int>> lodScore;
-  std::vector<std::uint32_t> nearIdx, farIdx;
-  std::vector<unsigned char> farRgb;
-  const int vFar = useLod ? farGlyphs.verts_per_instance() : 0;
+  std::vector<std::vector<std::uint32_t>> rungIdx(rungs.size());
   if (useLod) {
     lodScore.reserve(N);
-    nearIdx.reserve(N);
-    farIdx.reserve(N);
-    farRgb.assign(static_cast<std::size_t>(N) * vFar * 3, 0);
+    for (auto &ri : rungIdx)
+      ri.reserve(N);
   }
   const double agentR = 0.5 * gsz; // vehicle bounding radius ~ half its length
   auto pack_bodies = [&](const float *pos, const float *head, const double *zo) {
@@ -1359,37 +1584,40 @@ int main(int argc, char **argv) {
       const double d = cvc::lod::bound_distance_m(c, agentR, vp);
       lodScore.push_back({static_cast<float>(cvc::lod::screen_radius_px(agentR, d, vp)), i});
     }
-    if (static_cast<int>(lodScore.size()) > NEAR_CAP)
-      std::nth_element(lodScore.begin(), lodScore.begin() + NEAR_CAP, lodScore.end(),
-                       [](const auto &a, const auto &b) { return a.first > b.first; });
-    const float near_px = 16.0f; // below ~16 px radius an arrow reads the same as a Humvee
-    nearIdx.clear();
-    farIdx.clear();
-    for (int s = 0; s < static_cast<int>(lodScore.size()); ++s) {
-      if (s < NEAR_CAP && lodScore[s].first >= near_px)
-        nearIdx.push_back(static_cast<std::uint32_t>(lodScore[s].second));
-      else
-        farIdx.push_back(static_cast<std::uint32_t>(lodScore[s].second));
-    }
-    if (nearNode)
-      nearNode->updateVertices(
-          nearGlyphs.pack_lod(pos, head, zo, nearIdx.data(), static_cast<int>(nearIdx.size())));
-    if (farNode) {
-      farNode->updateVertices(
-          farGlyphs.pack_lod(pos, head, zo, farIdx.data(), static_cast<int>(farIdx.size())));
-      // Re-gather far-arrow colours by slot so group identity survives the
-      // partition (cheap: N * vFar uchar triples, no transform).
-      const int fc = static_cast<int>(farIdx.size());
-      for (int s = 0; s < fc; ++s) {
-        const int a = farIdx[s];
-        for (int k = 0; k < vFar; ++k) {
-          const std::size_t o = (static_cast<std::size_t>(s) * vFar + k) * 3;
-          farRgb[o] = agentColorU8[3 * a];
-          farRgb[o + 1] = agentColorU8[3 * a + 1];
-          farRgb[o + 2] = agentColorU8[3 * a + 2];
+    // Biggest on-screen agents take the finest rung (bounded by its cap); the
+    // rest cascade down to coarser rungs. A full sort is cheap for N ~ a few k.
+    std::sort(lodScore.begin(), lodScore.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    const std::size_t vis = lodScore.size();
+    std::size_t s = 0;
+    for (std::size_t r = 0; r < rungs.size(); ++r) {
+      LodRung &rung = rungs[r];
+      std::vector<std::uint32_t> &idx = rungIdx[r];
+      idx.clear();
+      const bool last = (r + 1 == rungs.size());
+      const std::size_t take =
+          last ? (vis - s) : std::min(static_cast<std::size_t>(rung.cap), vis - s);
+      for (std::size_t k = 0; k < take; ++k, ++s)
+        idx.push_back(static_cast<std::uint32_t>(lodScore[s].second));
+      if (!rung.node)
+        continue;
+      rung.node->updateVertices(
+          rung.glyphs.pack_lod(pos, head, zo, idx.data(), static_cast<int>(idx.size())));
+      if (!rung.textured) {
+        // Re-gather this rung's colours by slot so group identity survives the
+        // partition (cheap: count * vpi uchar triples, no transform).
+        const int cnt = static_cast<int>(idx.size());
+        for (int j = 0; j < cnt; ++j) {
+          const int a = idx[j];
+          for (int k = 0; k < rung.vpi; ++k) {
+            const std::size_t o = (static_cast<std::size_t>(j) * rung.vpi + k) * 3;
+            rung.rgb[o] = agentColorU8[3 * a];
+            rung.rgb[o + 1] = agentColorU8[3 * a + 1];
+            rung.rgb[o + 2] = agentColorU8[3 * a + 2];
+          }
         }
+        rung.node->updateColors(rung.rgb);
       }
-      farNode->updateColors(farRgb);
     }
   };
 
@@ -1744,6 +1972,34 @@ int main(int argc, char **argv) {
       view.setCamera(eye[0], eye[1], eye[2], focal[0], focal[1], focal[2], 0, 0, 1, 30);
     } else {
       cam.update(dt);
+    }
+
+    // Building LOD swap: draw the full mesh up close, the coarse clustered skyline
+    // once the camera pulls back far enough that per-building detail is sub-pixel.
+    // Keyed on camera-to-focal distance (chase ~tens of m, overview ~thousands),
+    // with a hysteresis band so it doesn't flip-flap at the boundary. Toggling the
+    // vtkProp visibility flag is cheap and the PiP (which shares these props)
+    // follows automatically.
+    if (farBuildings && fullBuildings) {
+      if (vtkRenderer *r = view.renderer()) {
+        if (vtkCamera *ac = r->GetActiveCamera()) {
+          double e[3], f[3];
+          ac->GetPosition(e);
+          ac->GetFocalPoint(f);
+          const double dx = e[0] - f[0], dy = e[1] - f[1], dz = e[2] - f[2];
+          const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+          const double span2 = std::max(bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y);
+          static bool farOn = false;
+          if (!farOn && dist > 0.30 * span2)
+            farOn = true;
+          else if (farOn && dist < 0.22 * span2)
+            farOn = false;
+          if (auto *pf = fullBuildings->prop())
+            pf->SetVisibility(farOn ? 0 : 1);
+          if (auto *pr = farBuildings->prop())
+            pr->SetVisibility(farOn ? 1 : 0);
+        }
+      }
     }
 
     if (capturing) {
