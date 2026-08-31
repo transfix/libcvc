@@ -15,6 +15,7 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCellArray.h>
 #include <vtkCommand.h>
+#include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
@@ -524,8 +525,25 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
                        " in mesh) — ignoring; call setGeometry to change topology");
       return;
     }
-    for (size_t i = 0; i < n; ++i)
-      pts->SetPoint(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+    // Bulk raw-buffer write. vtkPoints::SetPoint is a per-point virtual +
+    // type-dispatch call; for the per-frame agent pack (N x a multi-thousand-vert
+    // Humvee streamed every frame) that loop dominates the CPU frame time. When the
+    // backing array is the common contiguous float or double 3-tuple layout,
+    // overwrite its buffer directly in one tight pass with no virtual dispatch;
+    // only fall back to SetPoint for an exotic array type. vtkPoints defaults to a
+    // vtkFloatArray, so the float path is the one that runs here.
+    vtkDataArray *da = pts->GetData();
+    const size_t n3 = n * 3;
+    if (auto *fa = vtkFloatArray::SafeDownCast(da)) {
+      float *dst = fa->GetPointer(0);
+      for (size_t i = 0; i < n3; ++i)
+        dst[i] = static_cast<float>(xyz[i]);
+    } else if (auto *dbl = vtkDoubleArray::SafeDownCast(da)) {
+      std::copy(xyz.begin(), xyz.end(), dbl->GetPointer(0));
+    } else {
+      for (size_t i = 0; i < n; ++i)
+        pts->SetPoint(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+    }
     pts->Modified();
     m_polyData->Modified();
     // Request a redraw the same way handleStateChanged does — never render
