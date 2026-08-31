@@ -1,11 +1,16 @@
 {
   "_comment": "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
-  "order": ["lsystem_forest", "nav_city_swarm", "nav_fog_ghost"],
+  "order": ["lsystem_forest", "lsystem_coast", "nav_city_swarm", "nav_fog_ghost"],
   "demos": {
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
       "blurb": "Fly over a procedural island: L-system trees swaying in the wind, a travelling-wave sea and a GPU ray-cast cloud volume, with shadow maps and a free orbit/fly camera. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_forest.jpg"
+    },
+    "lsystem_coast": {
+      "desc": "a procedural coastline with a GPU FFT ocean and breaking surf",
+      "blurb": "Sail a procedural coastline where a GPU FFT ocean rolls in: an FFT-synthesised wave spectrum evolved live on the GPU, an L-system shore, sky and sun, with a free orbit/fly camera. 100% procedural — nothing is downloaded.",
+      "thumb": "img/lsystem_coast.jpg"
     },
     "nav_city_swarm": {
       "desc": "the GRL-SNAM reactive swarm on a procedural city",

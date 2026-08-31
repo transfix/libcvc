@@ -114,10 +114,11 @@ jobs:
           workdir=$(mktemp -d)
           git worktree add --detach "$workdir" origin/gh-pages
           # Replace contents wholesale — the gallery is what we ship, not a diff.
-          shopt -s dotglob
-          rm -rf "$workdir"/*
+          # Wipe every top-level entry (dotfiles included) EXCEPT the worktree's
+          # own .git pointer file; deleting it detaches the worktree and the
+          # git commands below die with "fatal: not in a git directory".
+          find "$workdir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -R "$gallery"/. "$workdir"/
-          shopt -u dotglob
 
           cd "$workdir"
           git config user.name "libcvc-pages"
@@ -141,23 +142,35 @@ jobs:
         if: steps.push.outputs.changed == 'true'
         run: |
           # Curl on this runner has a libcurl symbol mismatch (same as sister
-          # workflow); use python's urllib. Give the pages CDN a beat to catch up.
-          sleep 30
+          # workflow); use python's urllib. A newly-added demo's path can take
+          # a few minutes to build+propagate on the pages CDN, so poll each URL
+          # with backoff rather than checking once — otherwise a fresh demo 404s
+          # while the already-cached ones pass.
           python3 - <<'PY'
-          import os, sys, urllib.request
-          ok = True
-          for d in os.environ["DEMOS"].split():
-              url = f"https://transfix.github.io/libcvc/{d}/{d}.wasm"
-              try:
-                  req = urllib.request.Request(
-                      url, method="HEAD",
-                      headers={"Accept-Encoding": "identity"})
-                  with urllib.request.urlopen(req, timeout=30) as r:
-                      live = int(r.headers.get("Content-Length", -1))
-              except Exception as e:
-                  print(f"  {d}: FAIL ({e})")
-                  ok = False
-                  continue
-              print(f"  {d}: {live} bytes live at {url}")
-          sys.exit(0 if ok else 1)
+          import os, sys, time, urllib.request
+          demos = os.environ["DEMOS"].split()
+          deadline = time.monotonic() + 360  # up to 6 min for propagation
+          pending = list(demos)
+          sizes = {}
+          while pending and time.monotonic() < deadline:
+              still = []
+              for d in pending:
+                  url = f"https://transfix.github.io/libcvc/{d}/{d}.wasm"
+                  try:
+                      req = urllib.request.Request(
+                          url, method="HEAD",
+                          headers={"Accept-Encoding": "identity"})
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          sizes[d] = int(r.headers.get("Content-Length", -1))
+                  except Exception:
+                      still.append(d)
+              pending = still
+              if pending:
+                  time.sleep(20)
+          for d in demos:
+              if d in sizes:
+                  print(f"  {d}: {sizes[d]} bytes live")
+              else:
+                  print(f"  {d}: FAIL (not live after propagation window)")
+          sys.exit(0 if not pending else 1)
           PY
