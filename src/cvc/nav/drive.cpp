@@ -172,13 +172,19 @@ bool drive_cuda_available() { return false; }
 // The crossover is around 4k agents, so that is the price of admission here.
 constexpr int kDriveMinItemsPerThread = 4096;
 
-template <class F> inline void drive_parallel_for(int n, int num_threads, F &&fn) {
-  detail::parallel_for(n, num_threads, std::forward<F>(fn), kDriveMinItemsPerThread);
+// With an injected pool the per-call cost is a wake + barrier (microseconds, no
+// std::thread spawn), so parallelising pays off immediately — pass grain 1 and let
+// the pool split the fan-out. Without a pool we're back to spawn-per-call, where
+// inline wins until ~kDriveMinItemsPerThread items (the table above).
+template <class F>
+inline void drive_parallel_for(thread_pool *pool, int n, int num_threads, F &&fn) {
+  detail::parallel_for(pool, n, num_threads, std::forward<F>(fn),
+                       pool ? 1 : kDriveMinItemsPerThread);
 }
 
 void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id, float *phi_out,
-                float *normal_out, int num_threads) {
-  drive_parallel_for(n, num_threads, [&](int i) {
+                float *normal_out, int num_threads, thread_pool *pool) {
+  drive_parallel_for(pool, n, num_threads, [&](int i) {
     const int plane = map_id ? map_id[i] : 0;
     float phi, nx, ny;
     sample_unit(f, plane, on[2 * i], on[2 * i + 1], phi, nx, ny);
@@ -190,10 +196,10 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads, const friction_field *grip, float mu_lookahead,
-                int mu_probes) {
+                int mu_probes, thread_pool *pool) {
   const bool has_grip = grip != nullptr && grip->data != nullptr;
   const std::size_t stride = has_grip ? 6 : 5;
-  drive_parallel_for(n, num_threads, [&](int i) {
+  drive_parallel_for(pool, n, num_threads, [&](int i) {
     const int plane = map_id ? map_id[i] : 0;
     float phi, nx, ny;
     sample_unit(f, plane, on[2 * i], on[2 * i + 1], phi, nx, ny);
@@ -236,7 +242,7 @@ namespace {
 void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                   const float *al, const float *be, const float *ga, int n, const int *map_id,
                   const veh_params &v, const material_drive *mat, float *minclr_out,
-                  int num_threads) {
+                  int num_threads, thread_pool *pool = nullptr) {
   const float hdt = v.dt / static_cast<float>(v.nsub);
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L;
   // t == 0 returns delta_max unchanged, so tan_dmax and every threshold built
@@ -249,7 +255,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
   const bool has_fp = v.n_body > 0 && v.body_offsets != nullptr;
   const bool has_grip = v.grip != nullptr && v.grip->data != nullptr;
 
-  drive_parallel_for(n, num_threads, [&](int i) {
+  drive_parallel_for(pool, n, num_threads, [&](int i) {
     const int plane = map_id ? map_id[i] : 0;
     float ox = o[2 * i], oy = o[2 * i + 1];
     float thi = th[i], spi = sp[i];
@@ -449,8 +455,9 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
 
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,
-                     const veh_params &v, float *minclr_out, int num_threads) {
-  rollout_impl(f, o, th, sp, goal, al, be, ga, n, map_id, v, nullptr, minclr_out, num_threads);
+                     const veh_params &v, float *minclr_out, int num_threads, thread_pool *pool) {
+  rollout_impl(f, o, th, sp, goal, al, be, ga, n, map_id, v, nullptr, minclr_out, num_threads,
+               pool);
 }
 
 void bicycle_rollout_material(const field_stack &f, float *o, float *th, float *sp,
@@ -463,10 +470,10 @@ void bicycle_rollout_material(const field_stack &f, float *o, float *th, float *
 
 void carrot_step(const float *o, const float *goal, const float *th, float *sp, const float *phi,
                  const float *nrm, const fsm_state &s, int n, const carrot_params &p,
-                 float *carrot_out, int num_threads) {
+                 float *carrot_out, int num_threads, thread_pool *pool) {
   (void)phi; // phi is sampled with nrm by the caller; the FSM uses only nrm
   constexpr int SEEK = 0, WALL = 1;
-  drive_parallel_for(n, num_threads, [&](int i) {
+  drive_parallel_for(pool, n, num_threads, [&](int i) {
     const float ox = o[2 * i], oy = o[2 * i + 1];
     const float gx = goal[2 * i], gy = goal[2 * i + 1];
     const float nx = nrm[2 * i], ny = nrm[2 * i + 1];
@@ -552,7 +559,7 @@ void carrot_step(const float *o, const float *goal, const float *th, float *sp, 
 
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                float *minclr_out, int num_threads) {
+                float *minclr_out, int num_threads, thread_pool *pool) {
   // sample + features -> coefficients -> rollout. The intermediate buffers are
   // O(n); a CUDA drive keeps them in registers and fuses this into one launch.
   // The feature stride is the MODEL's, never an assumption: a net widened for
@@ -567,9 +574,9 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
         "cvc::nav::drive_step: model takes 6 features but veh_params.grip is null");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
-             v.mu_lookahead, v.mu_probes);
+             v.mu_lookahead, v.mu_probes, pool);
   std::vector<float> coef(static_cast<std::size_t>(n) * 3);
-  model.forward(feat.data(), n, coef.data(), num_threads);
+  model.forward(feat.data(), n, coef.data(), num_threads, pool);
   std::vector<float> al(n), be(n), ga(n);
   for (int i = 0; i < n; ++i) {
     al[i] = coef[3 * i + 0];
@@ -577,7 +584,7 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
     ga[i] = coef[3 * i + 2];
   }
   bicycle_rollout(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v, minclr_out,
-                  num_threads);
+                  num_threads, pool);
 }
 
 void drive_step_material(const field_stack &f, float *o, float *th, float *sp, const float *carrot,

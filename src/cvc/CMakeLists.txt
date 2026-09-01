@@ -80,6 +80,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/state_exec/stdlib.h
   ../../inc/cvc/core/state_exec/exec_coordinator.h
   ../../inc/cvc/core/app.h
+  ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -101,6 +102,7 @@ set(SOURCE_FILES
   utility/algorithm.cpp
   processing/anisotropic_diffusion.cpp
   core/app.cpp
+  core/thread_pool.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp

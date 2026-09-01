@@ -44,6 +44,7 @@
 #include <cstdint>
 
 namespace cvc {
+class thread_pool; // fork-join executor, injected into the batched kernels below
 namespace nav {
 
 class coef_mlp;
@@ -86,7 +87,7 @@ struct friction_field {
 // nrm / (|nrm| + 1e-6). Agents are independent — threaded across `num_threads`
 // workers (<=0 => hardware concurrency).
 void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id, float *phi_out,
-                float *normal_out, int num_threads = 0);
+                float *normal_out, int num_threads = 0, thread_pool *pool = nullptr);
 
 // Local features for the coefficient net, float-equivalent to sdf_nav.coef_feats:
 // feat = [phi, |goal-o|, gdir_x, gdir_y, gdir . unit_normal] per agent, where
@@ -110,7 +111,7 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 // trained 5-feature net to one whose mu column is zero, output-identical at init.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads = 0, const friction_field *grip = nullptr,
-                float mu_lookahead = 0.3f, int mu_probes = 3);
+                float mu_lookahead = 0.3f, int mu_probes = 3, thread_pool *pool = nullptr);
 
 // Fixed vehicle + integration parameters for the bicycle rollout (the SdfNavigator
 // VEHICLE_DEFAULTS + meta): all float32 to match torch. `nsub` substeps per tick.
@@ -189,7 +190,8 @@ struct veh_params {
 // independent — threaded across `num_threads` workers.
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,
-                     const veh_params &v, float *minclr_out, int num_threads = 0);
+                     const veh_params &v, float *minclr_out, int num_threads = 0,
+                     thread_pool *pool = nullptr);
 
 // The whole per-agent drive for one tick, fused: sample -> coef_feats ->
 // coef_mlp -> bicycle_rollout(nsub substeps), given the carrot each agent is
@@ -198,7 +200,7 @@ void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const
 // sp[n] IN PLACE and writes minclr_out[n]. Agents are independent — threaded.
 void drive_step(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
-                float *minclr_out, int num_threads = 0);
+                float *minclr_out, int num_threads = 0, thread_pool *pool = nullptr);
 
 // ─── Carrot state machine (swarm.py._plan_carrot) ────────────────────────────
 
@@ -233,7 +235,7 @@ struct carrot_params {
 // branch). Writes carrot_out[n*2] (normalized). Parallel across agents.
 void carrot_step(const float *o, const float *goal, const float *th, float *sp, const float *phi,
                  const float *nrm, const fsm_state &s, int n, const carrot_params &p,
-                 float *carrot_out, int num_threads = 0);
+                 float *carrot_out, int num_threads = 0, thread_pool *pool = nullptr);
 
 // ─── CUDA drive (device-resident; validation on this box, bench on a GPU box) ──
 // Defined in nav/drive.cu, compiled only when CVC_ENABLE_CUDA. The nav .cu is

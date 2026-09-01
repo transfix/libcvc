@@ -44,6 +44,7 @@
 #include <vector>
 
 namespace cvc {
+class thread_pool; // injected fork-join executor
 namespace nav {
 
 class coef_mlp {
@@ -101,7 +102,8 @@ public:
   // feats: [n * in_features()] row-major; out: [n * out_features()] row-major
   // (alpha, beta, gamma). Threaded across the n independent agents
   // (num_threads <= 0 => hardware concurrency).
-  void forward(const float *feats, int n, float *out, int num_threads = 0) const;
+  void forward(const float *feats, int n, float *out, int num_threads = 0,
+               thread_pool *pool = nullptr) const;
 
   int in_features() const { return in_; }
   int out_features() const { return out_; }

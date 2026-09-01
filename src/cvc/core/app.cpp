@@ -24,6 +24,7 @@
 
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/utility/utility.h>
@@ -954,6 +955,13 @@ std::string app::mutexInfo(const std::string &name) {
 // Thread Pool Implementation
 // -------------------------
 // 12/25/2025 -- Joe R. -- Creation.
+
+cvc::thread_pool &app::computePool() {
+  boost::mutex::scoped_lock lock(_computePoolMutex);
+  if (!_computePool)
+    _computePool.reset(new cvc::thread_pool()); // hardware_concurrency()-1 workers
+  return *_computePool;
+}
 
 void app::setThreadPoolSize(unsigned int size) {
   boost::this_thread::interruption_point();

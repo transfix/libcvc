@@ -555,7 +555,7 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
                  double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
                  int kmax, const std::int32_t *mover_boxes, int n_movers,
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
-                 std::int32_t *flips_out, int num_threads) {
+                 std::int32_t *flips_out, int num_threads, thread_pool *pool) {
   const int N = ag.n;
 
   // Phase A — RAYCAST every agent in parallel. The raycast reads only `truth`
@@ -565,7 +565,7 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
   // single worker (K=1). Bit-identity is untouched — a plane-independent raycast
   // produces the same touched cells + counts regardless of when it runs.
   std::vector<agent_sense> res(N);
-  parallel_for(N, num_threads, [&](int i) {
+  parallel_for(pool, N, num_threads, [&](int i) {
     thread_local SenseScratch S;
     raycast_agent(i, truth, rows, cols, min_x, min_y, max_x, max_y, ag, peer_boxes, kmax,
                   mover_boxes, n_movers, S, res[i]);
@@ -584,7 +584,7 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
   // agents are ordered. This half is cheap, so shared mode's single-plane serial
   // fold costs almost nothing while its raycast just ran N-way parallel.
   const float clampf = static_cast<float>(l_clamp);
-  parallel_for(planes.K, num_threads, [&](int p) {
+  parallel_for(pool, planes.K, num_threads, [&](int p) {
     const long base = static_cast<long>(p) * rows * cols;
     const std::vector<int> *last_cells = nullptr; // final non-OOB agent's FoV
     for (int i : by_plane[p]) {

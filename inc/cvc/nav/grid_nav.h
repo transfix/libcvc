@@ -54,6 +54,7 @@
 #include <vector>
 
 namespace cvc {
+class thread_pool; // injected fork-join executor
 namespace nav {
 
 // ─── Exact Euclidean distance transform ─────────────────────────────────────
@@ -239,7 +240,7 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
                  double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
                  int kmax, const std::int32_t *mover_boxes, int n_movers,
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
-                 std::int32_t *flips_out, int num_threads = 0);
+                 std::int32_t *flips_out, int num_threads = 0, thread_pool *pool = nullptr);
 
 // ─── Fixed-radius neighbour search (CGAL Kd_tree) ────────────────────────────
 //

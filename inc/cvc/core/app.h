@@ -59,6 +59,9 @@
 #include <vector>
 
 namespace cvc {
+
+class thread_pool; // persistent-worker fork-join pool owned below (thread_pool.h)
+
 // --------
 // cvc::app
 // --------
@@ -380,6 +383,14 @@ public:
   unsigned int getActiveThreadCount() const;
   unsigned int getPendingThreadCount() const;
 
+  // The application's shared fork-join compute pool (persistent workers). This is
+  // distinct from the key-based background-task pool above (startThreadPooled):
+  // it is for tight data-parallel fan-out — split [0,n), run, join — such as the
+  // cvc::nav sim tick. Subsystems that want to parallelize borrow this by
+  // reference (e.g. sim_world::set_thread_pool). Lazily constructed on first use,
+  // sized to hardware_concurrency() - 1 background workers.
+  cvc::thread_pool &computePool();
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   class thread_info {
@@ -595,6 +606,11 @@ protected:
   unsigned int _activeWorkers;
   boost::mutex _threadPoolMutex;
   boost::condition_variable _threadPoolCondition;
+
+  // Shared fork-join compute pool (computePool()). Lazily built; the mutex guards
+  // that first construction. unique_ptr so app.h needs only a forward declaration.
+  std::unique_ptr<cvc::thread_pool> _computePool;
+  boost::mutex _computePoolMutex;
 
   static app_ptr instancePtr();
   static app_ptr _instance;
