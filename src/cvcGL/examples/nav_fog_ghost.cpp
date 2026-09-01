@@ -61,8 +61,20 @@ const double PI = std::acos(-1.0);
 // Belief paints on top as an LED grid: WALL red where belief & truth, GHOST
 // amber where belief & ~truth (the phantom — a wall the agent believes that
 // reality lacks). Cells are 3x3 texels with a 1px dark gutter so belief reads
-// as discretized KNOWLEDGE, not world. Pixel (3c+sx, 3r+sy) <- cell (r, c);
-// setTexture's V-flip handles orientation.
+// as discretized KNOWLEDGE, not world.
+//
+// ORIENTATION. setTexture takes a TOP-left-origin image and flips the TCoords' V
+// to reach VTK's bottom-left convention. The nav grid is the other way up: row 0
+// is min_y, the same convention occupancy_to_walls uses (yc = min_y + r/(rows-1)
+// * span) and the same one plan_route's waypoints use. Writing cell row r to
+// image row r therefore handed setTexture a BOTTOM-left image, and its flip --
+// correct for the input it documents -- mirrored the fog vertically. The walls,
+// the vehicle and the sensor ring are all placed straight from world coords, so
+// they stayed put while the belief slid to the wrong end of the map: the sensed
+// disc appeared reflected about the mid-line instead of under the agent.
+//
+// So write the image top-left-origin: cell row r goes to image row (rows-1-r),
+// and the flip lands it back where the world says it belongs.
 constexpr int kCellPx = 3;
 void fill_epistemic(unsigned char *px, const cvc::nav::sim_world &w, int rows, int cols) {
   const std::uint8_t *seen = w.ever_seen(0), *vis = w.last_visible(0);
@@ -88,9 +100,10 @@ void fill_epistemic(unsigned char *px, const cvc::nav::sim_world &w, int rows, i
       const unsigned char led[3] = {static_cast<unsigned char>(ghost ? 242 : 217),
                                     static_cast<unsigned char>(ghost ? 184 : 64),
                                     static_cast<unsigned char>(ghost ? 64 : 56)};
+      const int ir = rows - 1 - r; // cell row -> TOP-left-origin image row
       for (int sy = 0; sy < kCellPx; ++sy)
         for (int sx = 0; sx < kCellPx; ++sx) {
-          unsigned char *p = px + (static_cast<long>(kCellPx * r + sy) * W + kCellPx * c + sx) * 4;
+          unsigned char *p = px + (static_cast<long>(kCellPx * ir + sy) * W + kCellPx * c + sx) * 4;
           const bool gutter = (sx == kCellPx - 1) || (sy == kCellPx - 1);
           const unsigned char *col = (occ && !gutter) ? led : t;
           p[0] = col[0];
