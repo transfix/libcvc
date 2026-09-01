@@ -281,7 +281,7 @@ int main(int argc, char **argv) {
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
-       lite = false, lod = false, noLod = false, buildingLod = false;
+       lite = false, lod = false, noLod = false, buildingLod = false, noPip = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
   int nearCap = 10;    // --lod: full-detail (rung 0) Humvee budget; coarser rungs fill the rest
 
@@ -311,6 +311,9 @@ int main(int argc, char **argv) {
       "this helps only when the buildings are GPU-bound (weak/integrated GPU)")(
       "near-cap", po::value<int>(&nearCap)->default_value(10),
       "full-detail (rung 0) Humvee budget under --lod; coarser decimated rungs fill the rest")(
+      "no-pip", po::bool_switch(&noPip),
+      "disable the picture-in-picture minimap (perf diagnostic: it re-renders the "
+      "whole scene from a top-down camera every frame)")(
       "frames", po::value<long>(&frames)->default_value(0),
       "stop after N frames (0 = until closed)")("fps", po::value<double>(&fps)->default_value(30.0),
                                                 "capture frame rate")(
@@ -1280,8 +1283,10 @@ int main(int argc, char **argv) {
         pipRenderer->AddViewProp(dotsProp);
       }
     }
-    view.renderWindow()->SetNumberOfLayers(2);
-    view.renderWindow()->AddRenderer(pipRenderer);
+    if (!noPip) { // --no-pip skips activation so the PiP never renders (perf diagnostic)
+      view.renderWindow()->SetNumberOfLayers(2);
+      view.renderWindow()->AddRenderer(pipRenderer);
+    }
   }
   // Click-in-PiP → follow. We record the last click and, if it lands over the
   // PiP viewport, ortho-unproject it to a world (x,y), then pick the nearest
@@ -2007,7 +2012,43 @@ int main(int argc, char **argv) {
       std::snprintf(path, sizeof path, "%s/frame_%05ld.png", out.c_str(), frame);
       view.writePNG(path);
     } else {
-      view.render();
+      // Optional render-cost profiling (CVC_RENDER_PROFILE=1): time view.render()
+      // (main + shadow + PiP submission) vs the rest of the frame, averaged every
+      // 120 frames. Pair with --no-pip to attribute the PiP's share.
+      static const bool kRProf = [] {
+        const char *e = std::getenv("CVC_RENDER_PROFILE");
+        return e && e[0] && e[0] != '0';
+      }();
+      if (kRProf) {
+        using rclk = std::chrono::steady_clock;
+        static double accRender = 0.0;
+        static long rframes = 0;
+        static rclk::time_point prev{};
+        const auto t0 = rclk::now();
+        view.render();
+        const auto t1 = rclk::now();
+        accRender += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double frameMs = 0.0;
+        if (prev.time_since_epoch().count() != 0) // full frame = render-end to render-end
+          frameMs = std::chrono::duration<double, std::milli>(t1 - prev).count();
+        prev = t1;
+        static double accFrame = 0.0;
+        accFrame += frameMs;
+        if (++rframes >= 120) {
+          const double n = static_cast<double>(rframes);
+          std::fprintf(stderr,
+                       "CVC_RENDER_PROFILE pip=%s | avg over %ld frames: view.render()=%.1f ms | "
+                       "frame=%.1f ms (%.1f fps)\n",
+                       noPip ? "off" : "on", rframes, accRender / n, accFrame / n,
+                       accFrame > 0 ? 1000.0 * n / accFrame : 0.0);
+          std::fflush(stderr);
+          accRender = 0.0;
+          accFrame = 0.0;
+          rframes = 0;
+        }
+      } else {
+        view.render();
+      }
     }
 
 #ifdef __EMSCRIPTEN__

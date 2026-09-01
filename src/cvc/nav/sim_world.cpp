@@ -28,7 +28,10 @@
 // the M log-odds / occupancy / SDF blocks here.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/sim_world.h>
@@ -265,6 +268,28 @@ void sim_world::rebuild_all_fields() {
 
 void sim_world::step(int num_threads) {
   const long hw = static_cast<long>(rows_) * cols_;
+
+  // Optional per-phase profiling (set CVC_NAV_PROFILE=1). Accumulates wall-time
+  // per phase and dumps an averaged breakdown every 120 ticks. Zero behaviour
+  // change; the clock reads are a few ns each.
+  static const bool kProf = [] {
+    const char *e = std::getenv("CVC_NAV_PROFILE");
+    return e && e[0] && e[0] != '0';
+  }();
+  using clk = std::chrono::steady_clock;
+  static double accSense = 0, accRebuild = 0, accSdf = 0, accCarrot = 0, accSep = 0, accGate = 0,
+                accDrive = 0, accTotal = 0;
+  static long profTicks = 0, senseTicks = 0;
+  auto tphase = clk::now();
+  const auto tstart = tphase;
+  auto lap = [&](double &acc) {
+    if (!kProf)
+      return;
+    const auto n = clk::now();
+    acc += std::chrono::duration<double, std::milli>(n - tphase).count();
+    tphase = n;
+  };
+
   if (!cfg_.freeze_sense && (gstep_ % cfg_.sense_every == 0)) {
     // ── SENSE (each agent into its own plane map_id[i]) ──
     std::vector<double> pos(2 * n_), head(n_), rng(n_), fov(n_);
@@ -296,6 +321,8 @@ void sim_world::step(int num_threads) {
                 nullptr, 0, nullptr, 0, pl, cfg_.l_occ, cfg_.l_free, cfg_.l_clamp, flips.data(),
                 num_threads);
 
+    lap(accSense);
+
     // ── REBUILD each plane whose planning surface changed ──
     const double t_now = gstep_ * static_cast<double>(cfg_.veh.dt);
     const unknown_policy pol =
@@ -316,6 +343,8 @@ void sim_world::step(int num_threads) {
     }
     if (any)
       ++field_ver_;
+    lap(accRebuild);
+    ++senseTicks;
   }
 
   const field_stack fs = field_view();
@@ -323,6 +352,7 @@ void sim_world::step(int num_threads) {
   // ── SAMPLE at the start-of-tick pose (per-agent plane) for the carrot FSM ──
   std::vector<float> phi(n_), nrm(2 * n_);
   sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads);
+  lap(accSdf);
 
   // ── CARROT FSM ──
   fsm_state s;
@@ -347,6 +377,7 @@ void sim_world::step(int num_threads) {
   carrot_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   carrot_step(o_.data(), goal_.data(), th_.data(), sp_.data(), phi.data(), nrm.data(), s, n_, cp,
               carrot_.data(), num_threads);
+  lap(accCarrot);
 
   // ── INTER-AGENT SEPARATION (optional) ──
   // Nudge each agent's carrot away from peers within sep_radius so a crowd
@@ -383,6 +414,8 @@ void sim_world::step(int num_threads) {
       carrot_[2 * i + 1] += cfg_.sep_gain * sy;
     }
   }
+
+  lap(accSep);
 
   // ── MATERIAL GATE (optional): frame-wise witness per agent vs its own goal ──
   // The gate multiplies lam_soft ONLY; lam_hard is always on. Evaluated in
@@ -427,6 +460,8 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  lap(accGate);
+
   // ── DRIVE (fused sample -> coef_feats -> coef_mlp -> bicycle, per-agent plane) ──
   std::vector<float> minclr(n_);
   if (mat_on_) {
@@ -444,6 +479,8 @@ void sim_world::step(int num_threads) {
                cfg_.veh, minclr.data(), num_threads);
   }
 
+  lap(accDrive);
+
   // ── METRICS + REACHED/PARK (single-goal) ──
   for (int i = 0; i < n_; ++i) {
     const float dx = goal_[2 * i] - o_[2 * i], dy = goal_[2 * i + 1] - o_[2 * i + 1];
@@ -454,6 +491,24 @@ void sim_world::step(int num_threads) {
       parked_[i] = 1;
   }
   ++gstep_;
+
+  if (kProf) {
+    accTotal += std::chrono::duration<double, std::milli>(clk::now() - tstart).count();
+    if (++profTicks >= 120) {
+      const double n = static_cast<double>(profTicks);
+      const double sn = senseTicks > 0 ? static_cast<double>(senseTicks) : 1.0;
+      std::fprintf(stderr,
+                   "CVC_NAV_PROFILE n=%d M=%d grid=%dx%d | per-tick ms avg over %ld ticks "
+                   "(%ld sensed): total=%.3f | sense=%.3f rebuild=%.3f(%.3f/sense) sdf=%.3f "
+                   "carrot=%.3f sep=%.3f gate=%.3f drive=%.3f\n",
+                   n_, M_, rows_, cols_, profTicks, senseTicks, accTotal / n, accSense / n,
+                   accRebuild / n, accRebuild / sn, accSdf / n, accCarrot / n, accSep / n,
+                   accGate / n, accDrive / n);
+      std::fflush(stderr);
+      accSense = accRebuild = accSdf = accCarrot = accSep = accGate = accDrive = accTotal = 0;
+      profTicks = senseTicks = 0;
+    }
+  }
 }
 
 material_stack sim_world::material_view() const {
