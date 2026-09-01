@@ -457,6 +457,13 @@ target_link_libraries(nav_drive_refinements_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_clearance_cost_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_test
   PRIVATE
     cvc
