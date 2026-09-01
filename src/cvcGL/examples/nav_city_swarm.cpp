@@ -148,7 +148,18 @@ void fill_fleet_fog(unsigned char *px, const cvc::nav::sim_world &w, int rows, i
     if (!vis)
       for (int m = 0; m < M && !seen; ++m)
         seen = w.ever_seen(m)[i] != 0;
-    unsigned char *p = px + 4 * i;
+    // setTexture takes a TOP-left-origin image and flips the TCoords' V to reach
+    // VTK's bottom-left convention (GeometryNode.h). The nav grid is the other
+    // way up -- row 0 is min_y, as occupancy_to_walls and plan_route both read
+    // it -- so writing grid row r to image row r handed it a BOTTOM-left image
+    // and the flip mirrored the fog about the map's mid-line. Everything else on
+    // screen is placed from world coordinates and stayed put, which is what made
+    // it hard to see: the coverage was plausible, just on the wrong side. The
+    // satellite drapes correctly on this same node precisely because a PNG
+    // already IS top-left. Same defect and fix as nav_fog_ghost's
+    // fill_epistemic (#295).
+    const long r = i / cols, c = i % cols;
+    unsigned char *p = px + 4 * ((rows - 1 - r) * cols + c);
     if (vis) {
       p[0] = 62;
       p[1] = 68;
