@@ -28,12 +28,14 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/GridNode.h>
 #include <cvc/gl/ImGuiBinding.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <functional>
 #include <iostream>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -112,15 +114,16 @@ int main(int argc, char **argv) {
   int width = 1280, height = 720;
   long frames = 0;
   double fps = 30.0;
-  bool offscreen = false, no_shadows = false, no_ui = false;
+  bool offscreen = false, no_shadows = false, no_ui = false, no_grid = false;
   std::string png;
 
   po::options_description desc("bunny_shadow — a Stanford-bunny shadow/shader test in cvcGL");
   desc.add_options()("help,h", "show this help")("width",
                                                  po::value<int>(&width)->default_value(1280))(
-      "height", po::value<int>(&height)->default_value(720))(
-      "offscreen", po::bool_switch(&offscreen))("no-shadows", po::bool_switch(&no_shadows))(
-      "no-ui", po::bool_switch(&no_ui))("frames", po::value<long>(&frames)->default_value(0))(
+      "height", po::value<int>(&height)->default_value(720))("offscreen",
+                                                             po::bool_switch(&offscreen))(
+      "no-shadows", po::bool_switch(&no_shadows))("no-ui", po::bool_switch(&no_ui))(
+      "no-grid", po::bool_switch(&no_grid))("frames", po::value<long>(&frames)->default_value(0))(
       "fps", po::value<double>(&fps)->default_value(30.0))("png", po::value<std::string>(&png));
   po::variables_map vm;
   try {
@@ -183,6 +186,27 @@ int main(int argc, char **argv) {
   if (shadows) {
     sg.setShadowResolution(2048);
     sg.setShadowUpdateInterval(1); // static scene: bake every frame, no lag
+  }
+
+  // --no-grid strips the diagnostic chrome: the bounds grid, the origin axis
+  // marker, and the per-node bounding boxes with their corner coordinate
+  // readouts. All of it earns its keep while you are asking "why does this
+  // shadow look wrong?" and none of it belongs in a captured still — the axis
+  // marker in particular lands squarely on the bunny's chest from the default
+  // orbit. Presentation only; the scene and lighting are untouched.
+  if (no_grid) {
+    sg.setGridVisible(false);
+    sg.setAxisVisible(false);
+    std::function<void(const std::shared_ptr<GraphicsNode> &)> hide_bbox =
+        [&](const std::shared_ptr<GraphicsNode> &n) {
+          if (!n)
+            return;
+          n->setShowBBox(false);
+          n->setShowExtentLabels(false);
+          for (const auto &c : n->getGraphicsChildren())
+            hide_bbox(std::dynamic_pointer_cast<GraphicsNode>(c));
+        };
+    hide_bbox(sg.getGraphicsRoot());
   }
 
   CameraController cam(view);
