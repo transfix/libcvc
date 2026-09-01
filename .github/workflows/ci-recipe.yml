@@ -118,8 +118,21 @@ jobs:
             --config release --link shared
 
       # Build libcvc itself from the in-tree recipe against that prefix.
+      #
+      # CVC_BUILD_TESTS=ON so the recipe builds AND ctest-runs the suite before
+      # it installs (recipes/libcvc/build.sh). The gate has existed for a while
+      # and nothing switched it on here, which left a blind spot: a test target
+      # that does not compile, or is never registered with CTest, is invisible
+      # to every recipe job. Both mistakes reached this branch and only the
+      # package/* jobs caught them, one round apart.
+      #
+      # Tests are never installed -- no test target has an install() rule and
+      # package.files selects only lib/ and include/ -- so the published bundle
+      # is byte-identical to what this job produced before.
       - name: Build libcvc from its recipe
         shell: bash
+        env:
+          CVC_BUILD_TESTS: "ON"
         run: |
           set -euo pipefail
           config=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
