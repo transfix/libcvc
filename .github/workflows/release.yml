@@ -454,7 +454,17 @@ jobs:
 
   # ──────────────────────────── Windows ────────────────────────────
   windows:
-    runs-on: windows-latest
+    # windows-2022, not windows-latest -- matching ci.yml, which pins it and
+    # passes. The label rolled to Visual Studio 18 overnight on 2026-08-19 and
+    # CL.exe started crashing while compiling src/cvc/core/state_exec:
+    #     error MSB6006: "CL.exe" exited with code -1073741819
+    # which is 0xC0000005, an access violation -- the compiler itself, not the
+    # code. Same commit built clean on VS 2022 hours earlier in ci.yml, so the
+    # variable is the toolset. Nightly went 9-jobs red on the back of it.
+    #
+    # A release matrix should pin its toolchain anyway: unpinned, the artifacts
+    # this workflow publishes change compiler whenever GitHub rolls the image.
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
