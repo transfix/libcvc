@@ -612,11 +612,10 @@ protected:
   std::unique_ptr<cvc::thread_pool> _computePool;
   boost::mutex _computePoolMutex;
 
-  static app_ptr instancePtr();
-  static app_ptr _instance;
-  static boost::mutex _instanceMutex;
-
-  static void wait_for_threads();
+  // Interrupt and join this app's tracked threads (two-phase, per-thread
+  // timeout). Call it (or wait()) from main() before exit if you spawned work;
+  // there is no process-global auto-join — cvc::app carries no singleton.
+  void wait_for_threads();
 
 private:
   app(const app &);

@@ -60,57 +60,6 @@
 #include <set>
 
 namespace cvc {
-app::app_ptr app::_instance;
-boost::mutex app::_instanceMutex;
-
-// 07/15/2011 -- Joe R. -- Moved data type registration here
-// 07/22/2011 -- Joe R. -- Added Char enum
-// 09/09/2011 -- Joe R. -- Added Int and Int64 enum
-// 03/30/3012 -- Joe R. -- Registering bool.
-// 04/06/2012 -- Joe R. -- Registering some boost::shared_array types
-// 05/11/2012 -- Joe R. -- Adding state.
-app::app_ptr app::instancePtr() {
-  bool newly_created = false;
-  app_ptr result;
-  {
-    boost::mutex::scoped_lock lock(_instanceMutex);
-    if (!_instance) {
-      // Construct without handler registration so that _instance is
-      // assigned before any code that might re-enter app::instance()
-      // (e.g. handler constructors that touch cvcapp) runs.
-      _instance.reset(new app(no_init_t{}));
-      _instance->registerDefaultTypes();
-
-      // Register a call to wait for all child threads to finish before exiting
-      // the main thread.
-      std::atexit(wait_for_threads);
-
-#ifdef USING_LOG4CPLUS_DEFAULT
-      // Initialize log4cplus
-      std::ifstream testfile("log4cplus.properties");
-      if (testfile) {
-        testfile.close();
-        log4cplus::PropertyConfigurator::doConfigure("log4cplus.properties");
-      } else {
-        log4cplus::BasicConfigurator::doConfigure();
-      }
-      static log4cplus::Logger logger = log4cplus::Logger::getInstance("app");
-      LOG4CPLUS_ERROR(logger, "log4cplus initialized");
-#endif
-      newly_created = true;
-    }
-    result = _instance;
-  }
-
-  // Register default I/O handlers outside the instance mutex so that
-  // handler constructors that call app::instance() (via cvcapp) do not
-  // deadlock against the lock we just released.
-  if (newly_created)
-    result->registerDefaultHandlers();
-
-  return result;
-}
-
 // ---------------------
 // app::wait_for_threads
 // ---------------------
@@ -126,18 +75,10 @@ app::app_ptr app::instancePtr() {
 void app::wait_for_threads() {
   using namespace cvc;
 
-  // Atexit context: use the existing singleton if it's still alive
-  // rather than re-entering app::instance() (which would re-create
-  // the instance + register handlers after the runtime has already
-  // begun tearing things down).
-  app_ptr self;
-  {
-    boost::mutex::scoped_lock lock(_instanceMutex);
-    self = _instance;
-  }
-  if (!self)
-    return;
-  app &a = *self;
+  // Act on THIS app's own tracked threads. (Previously keyed off a process-wide
+  // app singleton, now removed — cvc::app carries no singleton, so callers wait
+  // on the instance they hold.)
+  app &a = *this;
 
   // Get all the threads
   thread_map map = a.threads();
