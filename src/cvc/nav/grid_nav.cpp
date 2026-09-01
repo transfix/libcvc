@@ -279,6 +279,17 @@ struct AStarScratch {
 
 } // namespace
 
+std::vector<double> clearance_cost(const std::uint8_t *occ, int rows, int cols, double d_safe,
+                                   double gamma) {
+  const std::vector<double> d2 = edt2_squared(occ, rows, cols);
+  std::vector<double> out(static_cast<std::size_t>(rows) * cols, 0.0);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    const double shortfall = d_safe - std::sqrt(d2[i]);
+    out[i] = shortfall > 0.0 ? gamma * shortfall : 0.0;
+  }
+  return out;
+}
+
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
                        int goal_r, int goal_c, const double *cost) {
   const std::pair<int, int> start = nearest_free(occ, rows, cols, start_r, start_c);
