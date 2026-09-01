@@ -156,29 +156,23 @@ struct Route {
   std::size_t idx = 0;
 };
 
-// Plan an A* route (string-pulled) over `planOcc` from world (sx,sy) to (gx,gy),
-// returned as world waypoints ending at the true goal. Straight-to-goal if blocked.
+// Plan the A* route spine, delegating to navdemo::plan_route so this demo and
+// the shared helper cannot drift -- this was a near-exact copy of it.
+//
+// `standoff_cells` prices proximity to a wall instead of dilating the occupancy.
+// The old comment here said a lightly-inflated occupancy was used because "too
+// much clearance seals narrow gaps": dilation is binary, so an alley thinner
+// than the radius stops existing. A surcharge never forbids a cell, so a tight
+// street just costs more and still routes. It also drops the string-pull, which
+// would otherwise straighten the spine back against the buildings it just paid
+// to round.
 Route plan_route(const std::vector<std::uint8_t> &planOcc, int rows, int cols,
-                 const navdemo::Bounds &b, double sx, double sy, double gx, double gy) {
-  auto w2c = [&](double x, double y, int &r, int &c) {
-    c = static_cast<int>(std::lround((x - b.min_x) / (b.max_x - b.min_x) * (cols - 1)));
-    r = static_cast<int>(std::lround((y - b.min_y) / (b.max_y - b.min_y) * (rows - 1)));
-    c = std::max(0, std::min(cols - 1, c));
-    r = std::max(0, std::min(rows - 1, r));
-  };
-  int sr, sc, gr, gc;
-  w2c(sx, sy, sr, sc);
-  w2c(gx, gy, gr, gc);
+                 const navdemo::Bounds &b, double sx, double sy, double gx, double gy,
+                 double standoff_cells) {
+  const navdemo::Route shared = navdemo::plan_route(planOcc.data(), rows, cols, b, sx, sy, gx, gy,
+                                                    /*inflate_cells=*/0, standoff_cells);
   Route rt;
-  const auto path = cvc::nav::astar(planOcc.data(), rows, cols, sr, sc, gr, gc);
-  if (path.size() >= 4) {
-    const auto sp = cvc::nav::simplify(planOcc.data(), rows, cols, path.data(),
-                                       static_cast<int>(path.size() / 2));
-    for (std::size_t i = 0; i + 1 < sp.size(); i += 2)
-      rt.wp.push_back({b.min_x + static_cast<double>(sp[i + 1]) / (cols - 1) * (b.max_x - b.min_x),
-                       b.min_y + static_cast<double>(sp[i]) / (rows - 1) * (b.max_y - b.min_y)});
-  }
-  rt.wp.push_back({gx, gy}); // always end at the true goal
+  rt.wp = shared.wp;
   return rt;
 }
 } // namespace
@@ -190,6 +184,7 @@ int main(int argc, char **argv) {
   long frames = 0;
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
+  double standoffCells = 4.0; // route standoff surcharge, in planning cells
   bool offscreen = false, no_shadows = false, no_minimap = false;
 
   po::options_description desc("nav_finale — the 8-vehicle Austin finale in cvcGL");
@@ -687,7 +682,8 @@ int main(int argc, char **argv) {
   world.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data()); // initial poses
   for (int i = 0; i < N; ++i) {
     const double gx = goal[2 * i] / sc + cfg.cx, gy = goal[2 * i + 1] / sc + cfg.cy;
-    routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], gx, gy);
+    routes[i] =
+        plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1], gx, gy, standoffCells);
   }
 
   while (!view.windowClosed()) {
@@ -780,7 +776,7 @@ int main(int argc, char **argv) {
       if ((frame - act2) % 15 == 0)
         for (int i = 0; i < N; ++i) {
           routes[i] = plan_route(planOcc, ny, nx, bounds, pos[2 * i], pos[2 * i + 1],
-                                 tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1]);
+                                 tgt[2 * (i % NT)], tgt[2 * (i % NT) + 1], standoffCells);
           curWp[i] = static_cast<std::size_t>(-1); // force a retarget onto the new route
         }
     }

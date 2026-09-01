@@ -104,6 +104,30 @@ bool line_of_sight(const std::uint8_t *occ, int rows, int cols, int ar, int ac, 
 std::pair<int, int> nearest_free(const std::uint8_t *occ, int rows, int cols, int r, int c,
                                  int max_radius = 12);
 
+// Per-cell A* surcharge that biases a route toward standoff from obstacles --
+// the `cost` argument astar() takes. Float-equivalent to sdf_nav.clearance_cost:
+//
+//     clearance = sqrt(edt2_squared(occ))            // cells to nearest blocked
+//     cost      = gamma * max(0, d_safe - clearance) // grid-step units
+//
+// A cell with >= `d_safe` cells of clearance pays nothing; the price ramps
+// linearly to `gamma * d_safe` at a wall. Because the surcharge is ADDITIVE and
+// never forbids a cell, a corridor narrower than `d_safe` throughout degrades to
+// the shortest path rather than stranding the agent.
+//
+// `d_safe` is in CELLS, so the same number is a different distance on every map
+// -- the procedural city's cells are ~2 m, a 1024-cell Austin raster's ~0.6 m.
+// State the standoff you want in metres and divide by the cell size.
+//
+// Measured (procedural city squad, route-guided reach, n=20 x 5 seeds): the
+// defaults lift reach ~0.80 -> ~0.90 and give visibly smoother, wall-avoiding
+// paths. Two costs to know before switching a demo to it: the standoff route is
+// LONGER, so it only pays when the tick budget can finish it, and a per-cell
+// cost makes each agent's search cost-specific, which disables A* batching
+// (measured on the Python squad: 119.9 -> 163.3 ms/tick at n=8, grid 192).
+std::vector<double> clearance_cost(const std::uint8_t *occ, int rows, int cols, double d_safe = 6.0,
+                                   double gamma = 1.5);
+
 // 8-connected A* with corner-cut prevention over the free cells of `occ`
 // (row-major rows×cols, nonzero = blocked). Reproduces Python heapq's
 // (f, g, node, parent) pop order, returning the byte-identical optimal path

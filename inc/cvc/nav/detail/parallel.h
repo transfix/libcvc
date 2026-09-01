@@ -48,11 +48,24 @@ namespace detail {
 // concurrency). The calling thread participates, so num_threads==1 runs inline.
 //
 // This spawn-per-call form is the FALLBACK, used when no thread pool is injected
-// (headless tools, the trainer, tests). In a hot loop it creates and joins
-// threads on every call — prefer the pool overload below whenever a
-// cvc::thread_pool is available (the sim path threads one through). See
-// docs/CVCNAV_CPP_PORT_ROADMAP.md.
-template <class F> void parallel_for(int n, int num_threads, F &&fn) {
+// (headless tools, the trainer, tests). It creates and joins threads on every
+// call, so `min_items_per_thread` -- the caller's estimate of how much work an
+// item is worth -- keeps a cheap fan-out inline: the spawn is ~180us per worker
+// on a 20-core box (~3.5ms of pure std::thread churn), a bargain for an A* batch
+// (each item is a whole search) and ruinous for a per-tick kernel whose items are
+// microseconds. Prefer the pool overload below when a cvc::thread_pool is
+// available (the sim path threads one through) -- it pays NO per-call spawn.
+//
+// Measured on the fused drive (nav_drive_step, 192^2 field, one f32 sample +
+// a 5-64-64-3 MLP + one bicycle step per agent), auto-threaded vs inline:
+//
+//     agents      5       8      64     256    1024    4096   16384
+//     auto     3.86    6.94   16.34   13.02   19.77   21.55   38.81  ms
+//     inline   0.41    0.91    2.52    2.36    9.24   20.37   76.75  ms
+//
+// Inline wins by ~9x at demo sizes and does not lose until ~4k agents. The
+// default of 1 is the historical behaviour, so no existing caller moves.
+template <class F> void parallel_for(int n, int num_threads, F &&fn, int min_items_per_thread = 1) {
   if (n <= 0)
     return;
   int nt = num_threads > 0 ? num_threads : static_cast<int>(std::thread::hardware_concurrency());
@@ -60,6 +73,10 @@ template <class F> void parallel_for(int n, int num_threads, F &&fn) {
     nt = 1;
   if (nt > n)
     nt = n;
+  if (min_items_per_thread > 1) {
+    const int afford = n / min_items_per_thread;
+    nt = afford < 1 ? 1 : (nt < afford ? nt : afford);
+  }
   if (nt == 1) {
     for (int i = 0; i < n; ++i)
       fn(i);
@@ -80,21 +97,29 @@ template <class F> void parallel_for(int n, int num_threads, F &&fn) {
 }
 
 // Pool-aware form: dispatch fn(i) for i in [0, n) through an INJECTED
-// cvc::thread_pool (persistent workers, no per-call thread spawn) when one is
+// cvc::thread_pool (persistent workers, NO per-call thread spawn) when one is
 // given; fall back to the spawn-per-call form above when `pool` is null. This is
 // what the sim hot path uses — the pool is owned elsewhere (e.g. cvc::app) and
 // passed down by reference, so the kernels stay free of any global/singleton
-// state. `num_threads > 0` becomes a per-call participant cap on the pool; <= 0
-// uses the whole pool.
-template <class F> void parallel_for(cvc::thread_pool *pool, int n, int num_threads, F &&fn) {
+// state. `min_items_per_thread` bounds the participant count for a cheap fan-out
+// exactly as the fallback does (a tiny fan-out runs on few workers, or inline),
+// and `num_threads > 0` further caps it; <= 0 (with a fine grain) uses the pool.
+template <class F>
+void parallel_for(cvc::thread_pool *pool, int n, int num_threads, F &&fn,
+                  int min_items_per_thread = 1) {
   if (n <= 0)
     return;
   if (pool) {
-    pool->parallel_for(n, std::function<void(int)>(std::forward<F>(fn)),
-                       num_threads > 0 ? num_threads : 0);
+    int cap = num_threads > 0 ? num_threads : 0; // 0 => whole pool
+    if (min_items_per_thread > 1) {
+      const int afford = n / min_items_per_thread;
+      const int grain = afford < 1 ? 1 : afford; // grain==1 => the pool runs it inline
+      cap = (cap <= 0) ? grain : (cap < grain ? cap : grain);
+    }
+    pool->parallel_for(n, std::function<void(int)>(std::forward<F>(fn)), cap);
     return;
   }
-  parallel_for(n, num_threads, std::forward<F>(fn));
+  parallel_for(n, num_threads, std::forward<F>(fn), min_items_per_thread);
 }
 
 } // namespace detail
