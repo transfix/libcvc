@@ -4,6 +4,7 @@
 // many calls (the whole reason the pool exists).
 
 #include <atomic>
+#include <chrono>
 #include <cvc/core/thread_pool.h>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -64,18 +65,27 @@ TEST(ThreadPool, SmallPoolAndMaxParStillCoverEveryIndex) {
     ASSERT_EQ(h, 1);
 }
 
-TEST(ThreadPool, ActuallyRunsOnMultipleThreads) {
+TEST(ThreadPool, RunsWorkOnMultipleThreads) {
   if (std::thread::hardware_concurrency() <= 1)
     GTEST_SKIP() << "single hardware thread";
   thread_pool pool;
+  // One task per participant, each of which BLOCKS briefly. Because the calling
+  // thread is stuck inside its own task while it sleeps, it cannot race ahead and
+  // drain the queue alone (the bug an earlier version of this test had with
+  // trivial work) — the workers must pick up the rest, so more than one distinct
+  // thread provably runs the work.
+  const int tasks = static_cast<int>(pool.concurrency());
   std::mutex m;
   std::unordered_set<std::size_t> ids;
-  pool.parallel_for(8000, [&](int) {
+  pool.parallel_for(tasks, [&](int) {
     const std::size_t id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    std::lock_guard<std::mutex> lk(m);
-    ids.insert(id);
+    {
+      std::lock_guard<std::mutex> lk(m);
+      ids.insert(id);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   });
-  EXPECT_GT(ids.size(), 1u);
+  EXPECT_GT(ids.size(), 1u) << "work did not spread beyond the calling thread";
 }
 
 TEST(ThreadPool, EmptyRangeIsANoop) {
