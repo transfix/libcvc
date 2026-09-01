@@ -1,18 +1,20 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
   # (linux), so the CLI-less SDK must publish as +cvc.2.
-  cvc_revision: 2
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "Center for Computational Visualization core C++ library (CUDA / GPU build) — volume voxels in CUDA unified memory for on-device zero-copy, same API as the CPU `libcvc` package."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, state, dsl, geometry, cuda, gpu]
 
 # Virtual-package selection (cvcpkg capability-provider resolution):

@@ -6,14 +6,16 @@ recipe:
   # pycvc-cp311 SUPERSEDES the published bare `pycvc`; it is a NEW catalog
   # name, so its revision restarts at 1.
   name: pycvc-cp311
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
+  # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-cp311 — SWIG Python bindings for libcvc, the CPython 3.11 (cp311) column: cvc::geometry / cvc::volume facades with zero-copy numpy views (and CUDA unified-memory when built against libcvc-cuda). The core, VTK-free bindings; the scriptable-scene bindings are the separate pycvc-gl-cp311 recipe."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, numpy, scientific, volumetric]
 
 # pycvc is deliberately its OWN package, separate from libcvc: a plain libcvc

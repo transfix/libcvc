@@ -5,20 +5,22 @@ recipe:
   # (<name>-cp311/-cp312/-cp313). Same sources as pycvc-cp311, built against
   # python312 + numpy-cp312. New catalog name — revision starts at 1.
   name: pycvc-cp312
-  upstream_version: "3.2.4"
-  # Bumped 1 -> 2: rebuild against libcvc +cvc.4 to ship the new cvc::nav material
-  # bindings in pycvc_nav.i — nav_material_build/sample, witness_gate(_batch),
+  upstream_version: "3.3.0"
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
+  # an upstream version, so a version bump restarts it. Supersedes the 3.2.4
+  # +cvc.2 rebuild that shipped the new cvc::nav material bindings in
+  # pycvc_nav.i — nav_material_build/sample, witness_gate(_batch),
   # bicycle_rollout_material, drive_step_material, integrate_surrogate_material,
   # matnet_forward, and the MaterialTrainer handle (nav_material_trainer_{create,
-  # step,save}). GRL-SNAM's material_train_native path (and test_material_train_native)
-  # stays skipped until this column republishes.
-  cvc_revision: 2
+  # step,save}). GRL-SNAM's material_train_native path (and
+  # test_material_train_native) stays skipped until this column republishes.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "pycvc-cp312 — SWIG Python bindings for libcvc, the CPython 3.12 (cp312) column: cvc::geometry / cvc::volume facades with zero-copy numpy views (and CUDA unified-memory when built against libcvc-cuda). The core, VTK-free bindings; the scriptable-scene bindings are the separate pycvc-gl-cp312 recipe."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [python, bindings, swig, numpy, scientific, volumetric]
 
 # pycvc is deliberately its OWN package, separate from libcvc: a plain libcvc

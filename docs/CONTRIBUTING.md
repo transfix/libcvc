@@ -292,7 +292,8 @@ make doc
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project.
+By contributing, you agree that your contributions will be licensed under the
+project's license, the GNU Lesser General Public License, version 2.1 (LGPL-2.1).
 
 ## Recognition
 

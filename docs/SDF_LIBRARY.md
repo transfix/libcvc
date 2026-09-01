@@ -1042,7 +1042,9 @@ for (int i = 0; i < n_geometries; i++) {
 
 ## License
 
-See [LICENSE](../../LICENSE) file in repository root.
+libcvc — including both SDF implementations — is licensed under the GNU Lesser
+General Public License, version 2.1 (LGPL-2.1). See [LICENSE](../LICENSE) in the
+repository root.
 
 ---
 

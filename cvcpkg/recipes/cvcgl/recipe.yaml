@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl
-  upstream_version: "3.2.4"
+  upstream_version: "3.3.0"
   # Bumped 1 -> 2: republish from post-#136 master. cvcGL gained the injected-app
   # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
   # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
@@ -15,16 +15,17 @@ recipe:
   # per-vertex colors as direct uchar (faithful colors, texture-ready), grew the
   # GraphicsNode API (transforms/bounds/parenting/metadata/callbacks) + world-bounds
   # recompute, and rebuilds against libcvc +cvc.3. Part of the family republish.
-  # Bumped 4 -> 5: family republish against libcvc +cvc.4 (material-aware nav).
-  # cvcGL source is unchanged; it rebuilds against the new libcvc so the
-  # tested-together family stays revision-consistent.
-  cvc_revision: 5
+  # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
+  # an upstream version, so a version bump restarts it. This supersedes the
+  # 3.2.4 +cvc.5 family republish — cvcGL source is unchanged; it rebuilds
+  # against the new libcvc so the tested-together family stays consistent.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
   description: "cvcGL — the Qt-free VTK scene-graph library extracted from volrover3: a reactive SceneGraph of GraphicsNode/GeometryNode/VolumeNode over cvc::state that renders cvc::geometry / cvc::volume via VTK. Ships libcvcGL.a + headers + a cmake package config; provides the cvcGL cmake package (cvc::cvcGL target). Consumed by pycvc-gl and other non-Qt scene consumers."
   homepage: https://github.com/transfix/libcvc
-  license: GPL-2.0-or-later
+  license: LGPL-2.1-only
   tags: [scientific, volumetric, scene, vtk, graphics]
 
 # cvcGL is its OWN package, separate from libcvc: a plain libcvc bundle is a
