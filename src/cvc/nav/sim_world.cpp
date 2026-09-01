@@ -319,7 +319,7 @@ void sim_world::step(int num_threads) {
     std::vector<std::int32_t> flips(n_);
     sense_batch(truth_.data(), rows_, cols_, cfg_.min_x, cfg_.min_y, cfg_.max_x, cfg_.max_y, ag,
                 nullptr, 0, nullptr, 0, pl, cfg_.l_occ, cfg_.l_free, cfg_.l_clamp, flips.data(),
-                num_threads);
+                num_threads, pool_);
 
     lap(accSense);
 
@@ -351,7 +351,7 @@ void sim_world::step(int num_threads) {
 
   // ── SAMPLE at the start-of-tick pose (per-agent plane) for the carrot FSM ──
   std::vector<float> phi(n_), nrm(2 * n_);
-  sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads);
+  sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads, pool_);
   lap(accSdf);
 
   // ── CARROT FSM ──
@@ -376,7 +376,7 @@ void sim_world::step(int num_threads) {
   // target (carrots_world) — the FSM's output, not just its consequence.
   carrot_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   carrot_step(o_.data(), goal_.data(), th_.data(), sp_.data(), phi.data(), nrm.data(), s, n_, cp,
-              carrot_.data(), num_threads);
+              carrot_.data(), num_threads, pool_);
   lap(accCarrot);
 
   // ── INTER-AGENT SEPARATION (optional) ──
@@ -476,7 +476,7 @@ void sim_world::step(int num_threads) {
                         map_id_.data(), cfg_.veh, md, minclr.data(), num_threads);
   } else {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
-               cfg_.veh, minclr.data(), num_threads);
+               cfg_.veh, minclr.data(), num_threads, pool_);
   }
 
   lap(accDrive);

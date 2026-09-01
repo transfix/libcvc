@@ -45,6 +45,7 @@
 #include <vector>
 
 namespace cvc {
+class thread_pool; // injected fork-join executor for step()
 namespace nav {
 
 class sim_world {
@@ -121,6 +122,12 @@ public:
   // Advance one fixed-dt tick: sense (gated) -> rebuild -> carrot FSM -> drive ->
   // reached/park. Threaded across agents / the sense fold.
   void step(int num_threads = 0);
+
+  // Inject the thread pool step()'s batched kernels fan out through. Borrowed, not
+  // owned (typically a cvc::app's pool); pass nullptr (the default) to fall back to
+  // the spawn-per-call path. No global/singleton — the caller owns the pool and
+  // hands it in. Set it once before stepping.
+  void set_thread_pool(cvc::thread_pool *pool) { pool_ = pool; }
 
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
@@ -207,6 +214,7 @@ private:
   int n_ = 0, rows_ = 0, cols_ = 0, M_ = 1;
   long gstep_ = 0;
   int field_ver_ = 0;
+  cvc::thread_pool *pool_ = nullptr; // borrowed executor for step() (may be null)
 
   coef_mlp model_;
   std::vector<std::uint8_t> truth_;

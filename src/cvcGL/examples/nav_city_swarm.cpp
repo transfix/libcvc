@@ -1351,6 +1351,10 @@ int main(int argc, char **argv) {
   const double *zoff_ptr = &zoff[0];
 
   // 4. Run: sim off-thread; render loop streams poses into the merged glyph mesh.
+  // Hand the sim the app's shared fork-join pool so each tick's kernels reuse
+  // persistent workers instead of spawning threads per call — and, sized to leave
+  // the render thread a core, stop the sim from starving it.
+  world.set_thread_pool(&app.computePool());
 #if CVC_NAV_DEMO_SIM_WORKER
   auto sim = std::make_unique<cvc::nav::sim_thread>(world, hz);
   sim->start();
@@ -1727,6 +1731,7 @@ int main(int argc, char **argv) {
       belief = uiBelief;
       fogOn = uiFog;
       *worldPtr = std::move(*newWorld);
+      world.set_thread_pool(&app.computePool()); // move-assign cleared it; re-inject
       N = world.size();
       grp = world.agent_planes();
       M = world.planes();

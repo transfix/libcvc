@@ -34,7 +34,10 @@
 #define __CVC_NAV_DETAIL_PARALLEL_H__
 
 #include <atomic>
+#include <cvc/core/thread_pool.h>
+#include <functional>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -43,6 +46,12 @@ namespace detail {
 
 // Run fn(i) for i in [0, n) across `num_threads` workers (<=0 => hardware
 // concurrency). The calling thread participates, so num_threads==1 runs inline.
+//
+// This spawn-per-call form is the FALLBACK, used when no thread pool is injected
+// (headless tools, the trainer, tests). In a hot loop it creates and joins
+// threads on every call — prefer the pool overload below whenever a
+// cvc::thread_pool is available (the sim path threads one through). See
+// docs/CVCNAV_CPP_PORT_ROADMAP.md.
 template <class F> void parallel_for(int n, int num_threads, F &&fn) {
   if (n <= 0)
     return;
@@ -68,6 +77,24 @@ template <class F> void parallel_for(int n, int num_threads, F &&fn) {
   worker();
   for (auto &th : pool)
     th.join();
+}
+
+// Pool-aware form: dispatch fn(i) for i in [0, n) through an INJECTED
+// cvc::thread_pool (persistent workers, no per-call thread spawn) when one is
+// given; fall back to the spawn-per-call form above when `pool` is null. This is
+// what the sim hot path uses — the pool is owned elsewhere (e.g. cvc::app) and
+// passed down by reference, so the kernels stay free of any global/singleton
+// state. `num_threads > 0` becomes a per-call participant cap on the pool; <= 0
+// uses the whole pool.
+template <class F> void parallel_for(cvc::thread_pool *pool, int n, int num_threads, F &&fn) {
+  if (n <= 0)
+    return;
+  if (pool) {
+    pool->parallel_for(n, std::function<void(int)>(std::forward<F>(fn)),
+                       num_threads > 0 ? num_threads : 0);
+    return;
+  }
+  parallel_for(n, num_threads, std::forward<F>(fn));
 }
 
 } // namespace detail

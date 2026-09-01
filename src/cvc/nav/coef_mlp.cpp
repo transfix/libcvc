@@ -338,8 +338,9 @@ std::string coef_mlp::default_weights_path() {
   return canonical; // load() will report it if absent
 }
 
-void coef_mlp::forward(const float *feats, int n, float *out, int num_threads) const {
-  detail::parallel_for(n, num_threads, [&](int s) {
+void coef_mlp::forward(const float *feats, int n, float *out, int num_threads,
+                       thread_pool *pool) const {
+  detail::parallel_for(pool, n, num_threads, [&](int s) {
     // Hidden width is small (<= 64 for the shipped net); keep activations on the
     // stack. load()/from_layers reject any layer wider than kMaxWidth, so these
     // fixed arrays never overflow.
