@@ -6,9 +6,11 @@
 
 #include "nav_common.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
+#include <cvc/nav/grid_nav.h>
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -125,4 +127,76 @@ TEST(NavCommonOccupancy, EmptyMeshAndDegenerateBoundsAreSafe) {
   EXPECT_EQ(navdemo::occupancy_from_model(g, ok, 8, 8, 0).size(), 64u);
   EXPECT_EQ(navdemo::occupancy_from_model(g, bad, 8, 8, 0).size(), 64u); // degenerate -> all free
   EXPECT_EQ(navdemo::occupancy_from_model(g, ok, 1, 1, 0).size(), 1u);   // too small -> no crash
+}
+
+// ── plan_route standoff ──────────────────────────────────────────────────────
+//
+// The global spine is what the reactive drive follows, so a spine that scrapes
+// the corners means the drive spends the whole run fighting its own barrier.
+
+namespace {
+
+// Cells to the nearest blocked cell, from the same EDT clearance_cost uses.
+std::vector<double> clearance_of(const std::vector<std::uint8_t> &occ, int rows, int cols) {
+  const auto d2 = cvc::nav::edt2_squared(occ.data(), rows, cols);
+  std::vector<double> out(d2.size());
+  for (std::size_t i = 0; i < d2.size(); ++i)
+    out[i] = std::sqrt(d2[i]);
+  return out;
+}
+
+// Worst clearance ALONG the polyline, sampled densely. Sampling only the
+// waypoints flatters a string-pulled route: it has few of them, so the minimum
+// skips the wall-hugging segments in between.
+double worst_along(const navdemo::Route &rt, const std::vector<double> &clr,
+                   const navdemo::Bounds &b, int rows, int cols) {
+  double worst = 1e9;
+  for (std::size_t k = 0; k + 1 < rt.wp.size(); ++k) {
+    const auto &p0 = rt.wp[k], &p1 = rt.wp[k + 1];
+    const int steps = 64;
+    for (int i = 0; i <= steps; ++i) {
+      const double t = static_cast<double>(i) / steps;
+      const double x = p0[0] + t * (p1[0] - p0[0]), y = p0[1] + t * (p1[1] - p0[1]);
+      int c = static_cast<int>(std::lround((x - b.min_x) / (b.max_x - b.min_x) * (cols - 1)));
+      int r = static_cast<int>(std::lround((y - b.min_y) / (b.max_y - b.min_y) * (rows - 1)));
+      c = std::max(0, std::min(cols - 1, c));
+      r = std::max(0, std::min(rows - 1, r));
+      worst = std::min(worst, clr[static_cast<std::size_t>(r) * cols + c]);
+    }
+  }
+  return worst;
+}
+
+} // namespace
+
+TEST(NavCommonRoute, StandoffKeepsMoreClearanceThanTheShortestSpine) {
+  const int N = 64;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(N) * N, 0);
+  for (int r = 20; r < 44; ++r)
+    for (int c = 28; c < 36; ++c)
+      occ[r * N + c] = 1;
+  const navdemo::Bounds b{0, 0, 64, 64};
+  const auto clr = clearance_of(occ, N, N);
+
+  const auto plain = navdemo::plan_route(occ.data(), N, N, b, 32, 5, 32, 58);
+  const auto stand = navdemo::plan_route(occ.data(), N, N, b, 32, 5, 32, 58, 0, 6.0, 1.5);
+  ASSERT_GE(plain.wp.size(), 2u);
+  ASSERT_GE(stand.wp.size(), 2u);
+  EXPECT_GT(worst_along(stand, clr, b, N, N), worst_along(plain, clr, b, N, N) + 1.0);
+}
+
+TEST(NavCommonRoute, StandoffRoutesAGapThatDilationWouldSeal) {
+  // The reason to prefer the surcharge over inflate_cells. A 4-cell alley with
+  // inflate_cells=6 stops existing; the surcharge just makes it expensive.
+  const int N = 40;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(N) * N, 0);
+  for (int r = 0; r < N; ++r)
+    for (int c = 0; c < N; ++c)
+      if (c < 18 || c >= 22)
+        occ[r * N + c] = 1;
+  const navdemo::Bounds b{0, 0, 40, 40};
+
+  const auto stand = navdemo::plan_route(occ.data(), N, N, b, 20, 1, 20, 38, 0, 6.0, 1.5);
+  // More than the bare goal fallback means A* actually found a way through.
+  EXPECT_GT(stand.wp.size(), 1u) << "the surcharge must not strand a sub-standoff corridor";
 }

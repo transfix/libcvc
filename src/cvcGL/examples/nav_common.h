@@ -251,8 +251,23 @@ struct Route {
 // spine — the piece a purely reactive port drops; the finale and fog demos plan
 // on their BELIEF occupancy so a believed wall bends the global plan, and a
 // sense that clears it replans straight. grid convention: r->y (row 0 = min_y).
+//
+// `standoff_cells` > 0 uses cvc::nav::clearance_cost instead: a per-cell A*
+// SURCHARGE that prices proximity to a wall rather than forbidding it. Prefer it
+// to `inflate_cells`. Dilation is binary, which is why it "seals narrow gaps" --
+// an alley thinner than the dilation radius simply stops existing and the route
+// either detours absurdly or fails. The surcharge never forbids a cell, so a
+// corridor tighter than `standoff_cells` throughout degrades to the shortest
+// path instead of vanishing.
+//
+// It also turns the line-of-sight string-pull OFF, and that is the point rather
+// than a side effect: simplification straightens the route back toward the walls
+// and gives away exactly what the surcharge just bought. Measured on a block
+// world, minimum clearance ALONG the path: 6.40 cells un-pulled, 1.00 pulled --
+// and 1.00 is what the plain shortest path scores.
 Route plan_route(const std::uint8_t *occ, int rows, int cols, const Bounds &b, double sx, double sy,
-                 double gx, double gy, int inflate_cells = 0);
+                 double gx, double gy, int inflate_cells = 0, double standoff_cells = 0.0,
+                 double standoff_gamma = 1.5);
 
 // Bounds-safe RGB compositing on a raw interleaved [dw*dh*3] u8 destination. EVERY
 // write is clipped to [0,dw) x [0,dh), so no input — an oversized source, an
