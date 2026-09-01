@@ -313,13 +313,13 @@ int main(int argc, char **argv) {
       "full-detail (rung 0) Humvee budget under --lod; coarser decimated rungs fill the rest")(
       "no-pip", po::bool_switch(&noPip),
       "disable the picture-in-picture minimap (perf diagnostic: it re-renders the "
-      "whole scene from a top-down camera every frame)")(
-      "frames", po::value<long>(&frames)->default_value(0),
-      "stop after N frames (0 = until closed)")("fps", po::value<double>(&fps)->default_value(30.0),
-                                                "capture frame rate")(
-      "hz", po::value<double>(&hz)->default_value(60.0),
-      "sim tick rate")("capture", po::value<std::string>(&capture)->default_value("none"),
-                       "none (interactive window) | orbit | fly | follow (chase --follow N)")(
+      "whole scene from a top-down camera every frame)")("frames",
+                                                         po::value<long>(&frames)->default_value(0),
+                                                         "stop after N frames (0 = until closed)")(
+      "fps", po::value<double>(&fps)->default_value(30.0),
+      "capture frame rate")("hz", po::value<double>(&hz)->default_value(60.0), "sim tick rate")(
+      "capture", po::value<std::string>(&capture)->default_value("none"),
+      "none (interactive window) | orbit | fly | follow (chase --follow N)")(
       "mouse-sensitivity", po::value<double>(&mouseSens)->default_value(0.25),
       "look speed, degrees per pixel of mouse motion")(
       "move-speed", po::value<double>(&moveSpeed)->default_value(0.0),
