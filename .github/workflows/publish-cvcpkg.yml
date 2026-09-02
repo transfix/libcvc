@@ -660,10 +660,21 @@ jobs:
           STAGE="$GITHUB_WORKSPACE/stage"
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          # Dear ImGui supplies the demos' control panels. Installed hermetically
+          # from cvcpkg (never apt) into its OWN prefix, joined to CVC_DEPS_PREFIX
+          # for THIS step only -- deliberately not the "cvcgl" SDK step above:
+          # cvcGL locates imgui with find_library, so an imgui on that step's
+          # prefix would bake this builder's absolute path into the published
+          # cvcGLTargets.cmake and break every downstream consumer, the same trap
+          # the X11 comment in src/cvcGL/CMakeLists.txt documents. (That export is
+          # now $<BUILD_INTERFACE>-guarded too, but keeping the prefixes separate
+          # means the SDK bundle cannot regress even if the guard is lost.)
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui"
+          cvcpkg install imgui --prefix "$IMGUI"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-cvcgl-examples"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-cvcgl-examples"
-          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$IMGUI;$DEPS"
           export CVC_BUILD_TYPE=Release
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/cvcgl-examples/build.sh

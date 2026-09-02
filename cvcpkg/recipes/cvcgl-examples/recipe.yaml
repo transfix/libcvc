@@ -6,7 +6,9 @@ recipe:
   # nav_finale) are now built and packaged alongside lsystem_forest (libcvc #203).
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 1
+  # Bumped 1 -> 2: added the imgui dependency, so the published demos ship with
+  # their control panels instead of silently compiled-out no-op overlays.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -47,6 +49,13 @@ depends:
       platforms: [linux, windows]
     - name: boost
       platforms: [linux, windows]
+    # The demos' control panels. cvcGL compiles ImGuiOverlay to inert stubs when
+    # imgui is absent, so WITHOUT this the published binaries have no UI at all
+    # -- they run, and every menu the demos define is silently compiled out.
+    # linux only: the windows column has no imgui bundle yet, and the wasm
+    # column links its own static closure below.
+    - name: imgui
+      platforms: [linux]
     # Wasm column — static deps for the Emscripten cross-build (env-wasm.sh
     # forces static; emsdk itself is auto-discovered from its cross_toolchain
     # declaration, never listed here). NOTE: needs the rendering-enabled vtk
@@ -73,6 +82,10 @@ depends:
       platforms: [linux, windows]
     - name: boost
       platforms: [linux, windows]
+    # imgui is published shared-only, so libimgui.so is a load-time dependency
+    # of the demo binaries even though cvcGL itself is linked static into them.
+    - name: imgui
+      platforms: [linux]
   host_tools:
     - cmake
     - ninja
