@@ -671,6 +671,37 @@ endif()
 # canonical cflags, which include the right `MAGICKCORE_QUANTUM_DEPTH`
 # and `MAGICKCORE_HDRI_ENABLE` defines. On Windows the cvcpkg imagemagick
 # bundle ships the official Q16-HDRI x64 build.
+# ── pkg-config hermeticity on Windows ────────────────────────────────────────
+# A Windows box with MSYS2 installed has C:\msys64\mingw64\bin on PATH, so
+# find_package(PkgConfig) picks up MSYS2's pkg-config.exe, and every
+# pkg_check_modules() below then also searches MSYS2's own .pc tree. That is how
+# the self-hosted CUDA runner ended up with
+#   -IC:\msys64\mingw64\bin\..\include\libpng16   -IC:\msys64\mingw64\bin\..\include
+# on the cvc target: MinGW's <stdlib.h>/<corecrt.h> shadowed the MSVC CRT and
+# every .cu failed with ~100 errors inside MinGW headers. (The GitHub-hosted
+# windows-2022 image has no MSYS2 pkg-config on PATH, which is the only reason
+# the ordinary Windows lane was unaffected — not a compiler difference.)
+#
+# PKG_CONFIG_LIBDIR REPLACES pkg-config's built-in default search path (unlike
+# PKG_CONFIG_PATH, which only prepends), so pointing it at the cvcpkg prefixes
+# makes the MSYS2 tree unreachable. Windows-only: on Linux/macOS the delegate
+# loop below does not even run (stock FindImageMagick supplies the imported
+# targets), and pinning the path there could hide a legitimately system-provided
+# .pc file.
+if(WIN32)
+  set(_cvc_pc_dirs "")
+  foreach(_pfx IN LISTS CMAKE_PREFIX_PATH)
+    file(TO_CMAKE_PATH "${_pfx}" _pfx)
+    list(APPEND _cvc_pc_dirs "${_pfx}/lib/pkgconfig" "${_pfx}/share/pkgconfig")
+  endforeach()
+  if(_cvc_pc_dirs)
+    # Native separator: pkg-config on Windows splits PKG_CONFIG_LIBDIR on ';'.
+    string(REPLACE ";" "\;" _cvc_pc_libdir "${_cvc_pc_dirs}")
+    set(ENV{PKG_CONFIG_LIBDIR} "${_cvc_pc_libdir}")
+    message(STATUS "pkg-config pinned to the cvcpkg prefixes: ${_cvc_pc_libdir}")
+  endif()
+endif()
+
 option(CVC_ENABLE_IMAGEMAGICK "Enable ImageMagick support for image I/O in volume_ops" ON)
 if(CVC_ENABLE_IMAGEMAGICK)
   set(CVC_IMAGEMAGICK_QUANTUM_DEPTH 16)
@@ -1077,6 +1108,31 @@ if(CVC_ENABLE_IMAGEMAGICK)
           # out of the exported interface.
           target_link_libraries(cvc PRIVATE ${${_im_var}_LIB})
         endif()
+      endif()
+    endforeach()
+  endif()
+endif()
+
+# Toolchain-contamination guard. A MinGW include directory reaching an MSVC
+# target is never right: MinGW's <stdlib.h>/<corecrt.h> shadow the MSVC CRT and
+# the compile dies deep inside system headers, with nothing naming the real
+# cause. nvcc is the first to fall over (its EDG frontend predefines neither
+# GCC's nor MinGW's macros), so this used to surface only as ~100 errors per .cu
+# in the CUDA lane. Fail at configure time, where the message can say what to fix.
+if(MSVC)
+  get_target_property(_cvc_incs cvc INCLUDE_DIRECTORIES)
+  if(_cvc_incs)
+    foreach(_inc IN LISTS _cvc_incs)
+      if(_inc MATCHES "[Mm]sys64|[Mm]in[Gg][Ww]")
+        message(FATAL_ERROR
+          "A MinGW/MSYS2 include directory leaked onto the MSVC target `cvc`:\n"
+          "    ${_inc}\n"
+          "Its headers will shadow the MSVC CRT (this breaks every .cu first). "
+          "Usual cause: a pkg-config on PATH from C:\\msys64\\mingw64\\bin, so "
+          "pkg_check_modules() resolved a dependency against the MSYS2 tree "
+          "instead of the cvcpkg prefix. PKG_CONFIG_LIBDIR is pinned to "
+          "CMAKE_PREFIX_PATH above for exactly this reason — check that "
+          "CMAKE_PREFIX_PATH actually points at the deps prefix.")
       endif()
     endforeach()
   endif()
