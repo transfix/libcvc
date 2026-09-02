@@ -47,6 +47,21 @@ bool wait_connected(cvc::state_transport_ipc &a, cvc::state_transport_ipc &b,
   return false;
 }
 
+// Spin until `pred` holds or timeout. Receive-side assertions need
+// this rather than wait_for_received(): that counter is incremented
+// by the reader thread when a frame is decoded, which is before
+// dispatch_inbound has ingested it, so it can be satisfied a moment
+// before the mutation is visible in the tree or the replica.
+template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to) {
+  auto deadline = std::chrono::steady_clock::now() + to;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------
@@ -78,7 +93,8 @@ TEST(StateReconnectResilienceTest, StopRestartReconnect) {
   cvc::state::instance(aA)("k").value(std::string("v1"));
   tA->pump_all();
   tA->flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("k").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v1");
 
   // -- Phase 2: stop A's transport (simulate crash / restart).
@@ -98,7 +114,9 @@ TEST(StateReconnectResilienceTest, StopRestartReconnect) {
   cvc::state::instance(aA)("k").value(std::string("v2_after_reconnect"));
   tA->pump_all();
   tA->flush();
-  tB.wait_for_received(2, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(
+      wait_until([&] { return cvc::state::instance(aB)("k").value() == "v2_after_reconnect"; },
+                 std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("k").value(), "v2_after_reconnect");
 
   tA->stop();
@@ -131,7 +149,8 @@ TEST(StateReconnectResilienceTest, PeerDisconnectNoHang) {
   cvc::state::instance(aA)("x").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
-  tB.wait_for_received(1, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("x").value() == "v1"; },
+                         std::chrono::milliseconds(2000)));
   EXPECT_EQ(cvc::state::instance(aB)("x").value(), "v1");
 
   // B goes away.
