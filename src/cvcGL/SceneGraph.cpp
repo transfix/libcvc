@@ -160,7 +160,35 @@ void SceneGraph::update() {
 
 void SceneGraph::setGridVisible(bool visible) { m_gridNode->setVisible(visible); }
 
+bool SceneGraph::gridVisible() const { return m_gridNode && m_gridNode->isVisible(); }
+
 void SceneGraph::setAxisVisible(bool visible) { m_axisNode->setVisible(visible); }
+
+// The axis node is private and had no accessor at all, so a control could set
+// axis visibility but never read it back to draw its own tick.
+bool SceneGraph::axisVisible() const { return m_axisNode && m_axisNode->isVisible(); }
+
+void SceneGraph::setBBoxesVisible(bool visible) {
+  // getAllGraphicsOfType<GraphicsNode>() already walks the whole tree from
+  // m_graphicsRoot INCLUSIVE, so this is a convenience wrapper over existing
+  // traversal rather than a second recursion to keep in step.
+  for (const auto &n : getAllGraphicsOfType<GraphicsNode>())
+    if (n)
+      n->setShowBBox(visible);
+}
+
+void SceneGraph::setExtentLabelsVisible(bool visible) {
+  for (const auto &n : getAllGraphicsOfType<GraphicsNode>())
+    if (n)
+      n->setShowExtentLabels(visible);
+}
+
+void SceneGraph::setDiagnosticChromeVisible(bool visible) {
+  setGridVisible(visible);
+  setAxisVisible(visible);
+  setBBoxesVisible(visible);
+  setExtentLabelsVisible(visible);
+}
 
 void SceneGraph::setGridColor(double r, double g, double b) { m_gridNode->setColor(r, g, b); }
 

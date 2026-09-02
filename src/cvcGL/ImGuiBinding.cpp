@@ -6,10 +6,13 @@
 // to observers and replicated peers, so per-frame writes are not free.
 
 #include <cvc/gl/ImGuiBinding.h>
+#include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/Settings.h>
 #include <cvc/gl/StageLighting.h>
 
 #ifdef CVC_ENABLE_IMGUI
 
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal.h asserts it)
@@ -315,6 +318,121 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
     ImGui::End();
 }
 
+void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen, bool *lightingPanelOpen) {
+  cvc::app &ctx = sg.appContext();
+  const std::string shadows = ShadowSettings::sceneStatePath(sg.getStatePrefix());
+
+  // Bound to state, not to a local mirror: setShadowsEnabled() can refuse (no
+  // render target yet) and a demo-side bool would keep a tick that lies.
+  ui::MenuItem(ctx, "Shadows", shadows + ".enabled");
+
+  ImGui::Separator();
+
+  // Chrome reads its own state back — there is no second copy to desync.
+  bool grid = sg.gridVisible();
+  if (ImGui::MenuItem("Grid", nullptr, &grid))
+    sg.setGridVisible(grid);
+  bool axis = sg.axisVisible();
+  if (ImGui::MenuItem("Origin axis", nullptr, &axis))
+    sg.setAxisVisible(axis);
+
+  // Scene-wide, unlike GraphicsNode::setShowBBox which is per-node. No getter
+  // exists for "are they all on", so these are actions rather than ticks.
+  if (ImGui::MenuItem("Bounding boxes on"))
+    sg.setBBoxesVisible(true);
+  if (ImGui::MenuItem("Bounding boxes off"))
+    sg.setBBoxesVisible(false);
+  if (ImGui::MenuItem("Extent labels on"))
+    sg.setExtentLabelsVisible(true);
+  if (ImGui::MenuItem("Extent labels off"))
+    sg.setExtentLabelsVisible(false);
+
+  ImGui::Separator();
+  if (ImGui::MenuItem("Hide all chrome"))
+    sg.setDiagnosticChromeVisible(false);
+  if (ImGui::MenuItem("Show all chrome"))
+    sg.setDiagnosticChromeVisible(true);
+
+  if (scenePanelOpen || lightingPanelOpen)
+    ImGui::Separator();
+  if (scenePanelOpen)
+    ImGui::MenuItem("Scene panel", nullptr, scenePanelOpen);
+  if (lightingPanelOpen)
+    ImGui::MenuItem("Stage lighting", nullptr, lightingPanelOpen);
+}
+
+void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
+  // Same close-box discipline as StageLightingPanel: ImGui clears *p_open but
+  // does not skip the window next frame, so honour it here.
+  if (open && !*open)
+    return;
+  if (ownWindow) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 388.0f, vp->WorkPos.y + 120.0f),
+                            ImGuiCond_FirstUseEver);
+    // 400, not the lighting panel's 340: the resolution radio row and the
+    // chrome buttons are laid out on one line each and clip below this.
+    ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Scene", open)) {
+      ImGui::End();
+      return;
+    }
+  }
+
+  cvc::app &ctx = sg.appContext();
+  const std::string shadows = ShadowSettings::sceneStatePath(sg.getStatePrefix());
+
+  ImGui::TextUnformatted("Shadows");
+  ui::Checkbox(ctx, "Enabled", shadows + ".enabled");
+  // Resolution is the knob you actually reach for when a shadow looks wrong:
+  // a tight light cone spends the whole map on the subject, a wide one wastes
+  // it. Powers of two only — the map is square and allocated per light.
+  static const int kRes[] = {512, 1024, 2048, 4096};
+  int res = sg.shadowResolution();
+  ImGui::TextUnformatted("Map resolution");
+  for (int i = 0; i < 4; ++i) {
+    if (i)
+      ImGui::SameLine();
+    char lbl[16];
+    std::snprintf(lbl, sizeof(lbl), "%d", kRes[i]);
+    if (ImGui::RadioButton(lbl, res == kRes[i]))
+      sg.setShadowResolution(kRes[i]);
+  }
+  ui::SliderInt(ctx, "Bake every", shadows + ".interval", 1, 30, 1);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Re-bake the shadow maps every N frames.\n"
+                      "Raise it when the lights and the geometry are both still — the bake"
+                      " is a whole extra scene pass per shadow-casting light.");
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Diagnostic chrome");
+  bool grid = sg.gridVisible();
+  if (ImGui::Checkbox("Grid", &grid))
+    sg.setGridVisible(grid);
+  ImGui::SameLine();
+  bool axis = sg.axisVisible();
+  if (ImGui::Checkbox("Origin axis", &axis))
+    sg.setAxisVisible(axis);
+  if (ImGui::Button("Boxes on"))
+    sg.setBBoxesVisible(true);
+  ImGui::SameLine();
+  if (ImGui::Button("Boxes off"))
+    sg.setBBoxesVisible(false);
+  if (ImGui::Button("Labels on"))
+    sg.setExtentLabelsVisible(true);
+  ImGui::SameLine();
+  if (ImGui::Button("Labels off"))
+    sg.setExtentLabelsVisible(false);
+  if (ImGui::Button("Hide all chrome"))
+    sg.setDiagnosticChromeVisible(false);
+  ImGui::SameLine();
+  if (ImGui::Button("Show all chrome"))
+    sg.setDiagnosticChromeVisible(true);
+
+  if (ownWindow)
+    ImGui::End();
+}
+
 } // namespace ui
 } // namespace gl
 } // namespace cvc
@@ -341,6 +459,8 @@ bool Combo(cvc::app &, const char *, const std::string &, const std::vector<std:
 }
 void Text(cvc::app &, const char *, const std::string &) {}
 void StageLightingPanel(StageLighting &, bool *, bool) {}
+void ScenePanel(SceneGraph &, bool *, bool) {}
+void SceneMenuItems(SceneGraph &, bool *, bool *) {}
 
 } // namespace ui
 } // namespace gl
