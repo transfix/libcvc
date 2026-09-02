@@ -548,6 +548,13 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &) : m_impl(new Impl) {}
 ImGuiOverlay::~ImGuiOverlay() = default;
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
 ImGuiContext *ImGuiOverlay::imguiContext() const { return nullptr; }
+// Every method in this block exists so consumers never need an #ifdef (see the
+// file header). attachCamera was the one omission: the nav demos call it
+// unguarded — exactly as the contract invites — so the three of them failed to
+// link in the only configuration that builds without imgui, the cvcgl-examples
+// publish lane. Nothing to do without an overlay: with no imgui there is no
+// input to hand off, so the camera never needs telling about it.
+void ImGuiOverlay::attachCamera(CameraController &) {}
 void ImGuiOverlay::setVisible(bool) {}
 bool ImGuiOverlay::visible() const { return false; }
 bool ImGuiOverlay::enabled() const { return false; }
