@@ -80,9 +80,13 @@ struct material_loss_config {
 
 // Forward-only loss. `frozen_eta` fixes the CVaR quantile (a NaN means "compute
 // it from J") — the gradcheck passes the base-point eta so the finite-difference
-// sees the SAME detached quantile the analytic gradient used.
+// sees the SAME detached quantile the analytic gradient used. This is the
+// VALIDATION entry point: scoring a held-out split needs the loss without paying
+// for (or perturbing) the backward. `use_cuda` routes the model forward and the
+// rollout forward through their device twins on the same terms as
+// material_loss_and_grad below.
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda = false);
 
 // Loss + weight gradients (ADDED into `grads`; zero it first for a fresh
 // gradient). Returns the scalar loss and, via `eta_out` (optional), the CVaR
@@ -93,8 +97,12 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 // integrate_surrogate_material_cuda/_vjp_cuda, backward_batch_cuda), keeping the
 // loss / seed-grad / multi-start glue on the CPU. Float-equivalent to the CPU path
 // (validated by nav_material_train_cuda_test). It silently falls back to the CPU
-// ops when the build has no CUDA or no device is present, so it is always safe to
-// pass true; the multi-start term (L_multi) stays on the CPU regardless.
+// ops when the build has no CUDA, when no device is present, and — for the rollout
+// VJP specifically — when max(H) exceeds material_rollout_cuda_max_horizon(), which
+// that kernel rejects outright rather than degrading. So it is always safe to pass
+// true: each device op falls back to its host twin instead of throwing. The
+// multi-start term (L_multi) stays on the CPU regardless (there is no
+// geom_rollout.cu), as does the loss/seed-grad glue.
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
                               float *eta_out = nullptr, bool use_cuda = false);

@@ -315,6 +315,8 @@ bool material_rollout_cuda_available() {
   return cudaGetDeviceCount(&c) == cudaSuccess && c > 0;
 }
 
+int material_rollout_cuda_max_horizon() { return MAX_H_CUDA; }
+
 void integrate_surrogate_material_cuda(
     float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
     const float *alphas, const float *beta, const float *gamma, const float *lam_soft,

@@ -338,5 +338,17 @@ void integrate_surrogate_material_vjp(
   });
 }
 
+// CVC_USING_CUDA, not CVC_ENABLE_CUDA: the latter is a CMake variable; the PUBLIC
+// compile define the cvc target gets is CVC_USING_CUDA (see the same note in
+// drive.cpp, where guarding on the wrong name double-defined the symbol).
+#ifndef CVC_USING_CUDA
+// CPU-only build: material_rollout.cu is never compiled, so supply the probes it
+// would have. Declaring them unconditionally in material.h and defining them only
+// in the .cu left any non-guarded caller (notably a pycvc binding that wants to
+// report device availability to Python) with an undefined symbol at link time.
+bool material_rollout_cuda_available() { return false; }
+int material_rollout_cuda_max_horizon() { return 0; }
+#endif
+
 } // namespace nav
 } // namespace cvc

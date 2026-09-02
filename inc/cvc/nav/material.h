@@ -243,9 +243,18 @@ void integrate_surrogate_material_vjp(
 // copy to/from the device). Validated float-equivalent + grad-parity against the
 // CPU by nav_material_rollout_cuda_test. Gated by material_rollout_cuda_available()
 // (built with CUDA AND a device present); the wrappers throw otherwise.
-// Horizon cap: max(H) must be <= 64 (the device backward stores the trajectory in
-// per-thread local memory).
+// Horizon cap: max(H) must be <= material_rollout_cuda_max_horizon() (the device
+// backward stores the trajectory in per-thread local memory).
+//
+// Both probes are ALWAYS defined — the .cu supplies the real ones, and
+// material_rollout.cpp a `false` / `0` stub for CPU-only builds — so a caller
+// (or a language binding) can ask without a CVC_USING_CUDA guard.
 bool material_rollout_cuda_available();
+
+// Largest max(H) integrate_surrogate_material_vjp_cuda accepts; it THROWS above
+// this rather than degrading, so callers wanting the silent CPU fallback must
+// check the batch against it (material_loss_and_grad does). 0 on a CPU-only build.
+int material_rollout_cuda_max_horizon();
 
 void integrate_surrogate_material_cuda(
     float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,

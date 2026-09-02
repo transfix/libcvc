@@ -48,6 +48,14 @@ struct fwd_cache {
   double eta = 0.0;
 };
 
+// Largest per-agent horizon in the batch — the quantity the device VJP caps.
+int max_horizon(const material_batch &b) {
+  int m = 0;
+  for (int i = 0; i < b.B; ++i)
+    m = std::max(m, b.H[i]);
+  return m;
+}
+
 // Run the model + rollout + loss; if `cache` non-null, fill it. `frozen_eta`
 // (NaN => compute from J) fixes the detached CVaR quantile.
 double compute_loss(const coef_energy_net &model, const material_batch &b,
@@ -165,8 +173,8 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
 } // namespace
 
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta) {
-  return compute_loss(model, b, cfg, frozen_eta, nullptr, /*use_cuda=*/false);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda) {
+  return compute_loss(model, b, cfg, frozen_eta, nullptr, use_cuda);
 }
 
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
@@ -217,7 +225,14 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
   std::vector<float> g_alphas(static_cast<std::size_t>(B) * N, 0.0f), g_beta(B, 0.0f),
       g_gamma(B, 0.0f), g_lam_soft(B, 0.0f), g_lam_hard(B, 0.0f);
 #ifdef CVC_USING_CUDA
-  if (use_cuda && material_rollout_cuda_available())
+  // The device VJP stores each agent's whole trajectory in per-thread local
+  // memory, so it only accepts max(H) <= material_rollout_cuda_max_horizon() and
+  // THROWS above it. use_cuda is documented as always safe, so check the batch
+  // here and fall back to the (float-equivalent) host adjoint rather than letting
+  // that throw escape. The device FORWARD carries no such cap, so a long-horizon
+  // batch still gets the GPU forward — only this one op degrades.
+  if (use_cuda && material_rollout_cuda_available() &&
+      max_horizon(b) <= material_rollout_cuda_max_horizon())
     integrate_surrogate_material_vjp_cuda(
         b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
         c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
@@ -318,6 +333,12 @@ void material_adam::step(coef_energy_net &model, const coef_energy_net::param_gr
     }
   }
 }
+
+#ifndef CVC_USING_CUDA
+// CPU-only build: material_train.cu supplies the real probe when there is one
+// (CVC_USING_CUDA, not CVC_ENABLE_CUDA — see the note in drive.cpp).
+bool material_train_cuda_available() { return false; }
+#endif
 
 } // namespace nav
 } // namespace cvc
