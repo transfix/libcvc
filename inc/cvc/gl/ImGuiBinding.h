@@ -13,6 +13,7 @@ class app;
 
 namespace gl {
 
+class CameraController;
 class StageLighting;
 
 // --------------------------
@@ -104,6 +105,21 @@ void ScenePanel(SceneGraph &sg, bool *open = nullptr, bool ownWindow = true);
 // have begun, so a host can put it wherever its menu bar already is.
 void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen = nullptr,
                     bool *lightingPanelOpen = nullptr);
+
+// Camera settings for a menu — look sensitivity, move speed, inverted pitch and
+// whether a primary drag pans. Call INSIDE a menu you have begun, same contract
+// as SceneMenuItems.
+//
+// Deliberately NOT a mode picker. Entering the 2-D map view means FRAMING it —
+// bounds, margin, the height to return to in 3-D — which only the app knows, so
+// a mode item here would leave the camera in Map with the app still drawing its
+// perspective framing, and the app's own "2-D map" tick reading the old value.
+// Mode stays with whoever owns the framing.
+//
+// moveSpeedMax/moveSpeedDefault vary per app (a city walk and a continent flyover
+// want different ranges), so they are parameters rather than baked in.
+void CameraMenuItems(CameraController &cam, double moveSpeedMax = 400.0,
+                     double moveSpeedDefault = 40.0);
 
 } // namespace ui
 } // namespace gl

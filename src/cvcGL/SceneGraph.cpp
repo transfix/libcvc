@@ -177,10 +177,24 @@ void SceneGraph::setBBoxesVisible(bool visible) {
       n->setShowBBox(visible);
 }
 
+bool SceneGraph::bboxesVisible() const {
+  for (const auto &n : const_cast<SceneGraph *>(this)->getAllGraphicsOfType<GraphicsNode>())
+    if (n && n->getShowBBox())
+      return true;
+  return false;
+}
+
 void SceneGraph::setExtentLabelsVisible(bool visible) {
   for (const auto &n : getAllGraphicsOfType<GraphicsNode>())
     if (n)
       n->setShowExtentLabels(visible);
+}
+
+bool SceneGraph::extentLabelsVisible() const {
+  for (const auto &n : const_cast<SceneGraph *>(this)->getAllGraphicsOfType<GraphicsNode>())
+    if (n && n->getShowExtentLabels())
+      return true;
+  return false;
 }
 
 void SceneGraph::setDiagnosticChromeVisible(bool visible) {
@@ -188,6 +202,10 @@ void SceneGraph::setDiagnosticChromeVisible(bool visible) {
   setAxisVisible(visible);
   setBBoxesVisible(visible);
   setExtentLabelsVisible(visible);
+}
+
+bool SceneGraph::diagnosticChromeVisible() const {
+  return gridVisible() || axisVisible() || bboxesVisible() || extentLabelsVisible();
 }
 
 void SceneGraph::setGridColor(double r, double g, double b) { m_gridNode->setColor(r, g, b); }

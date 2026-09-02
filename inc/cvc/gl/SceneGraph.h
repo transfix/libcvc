@@ -289,11 +289,23 @@ public:
   bool gridVisible() const;
   void setAxisVisible(bool visible);
   bool axisVisible() const;
-  // Applied to every graphics node, root included.
+  // Applied to every graphics node, root included. The matching getters are
+  // DERIVED from the nodes ("is any box drawn?") rather than mirroring the last
+  // value passed in: GraphicsNode observes its own `show_bbox` state key, so a
+  // script, a config or a replicated peer can turn one on without going through
+  // here, and a remembered flag would then be reporting a value nothing else
+  // agreed with. They exist so a checkbox can show real state instead of the
+  // pair of on/off actions this used to need.
   void setBBoxesVisible(bool visible);
+  bool bboxesVisible() const;
   void setExtentLabelsVisible(bool visible);
+  bool extentLabelsVisible() const;
   // All four at once — what a "presentation mode" or an offscreen capture wants.
+  // The getter is true when ANY of the four is showing, so a single master
+  // checkbox reads honestly ("something diagnostic is on screen") and clearing
+  // it clears everything.
   void setDiagnosticChromeVisible(bool visible);
+  bool diagnosticChromeVisible() const;
 
   // Scene element colors
   void setGridColor(double r, double g, double b);
