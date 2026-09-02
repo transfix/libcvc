@@ -1108,6 +1108,33 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     Py_RETURN_NONE;
   }
 
+  // Is material currently attached? The gate-active buffer is only sized inside
+  // set_material, so this is the precondition for reading it.
+  PyObject *nav_sim_world_has_material(PyObject *handle) {
+    return PyBool_FromLong(sim_world_from(handle)->has_material() ? 1 : 0);
+  }
+
+  // Belief-plane count M (1 = shared). Agents index their MATERIAL plane by the
+  // same map_id as their belief plane, so this is the bound set_material's
+  // `planes` argument must satisfy.
+  PyObject *nav_sim_world_planes(PyObject *handle) {
+    return PyLong_FromLong(sim_world_from(handle)->planes());
+  }
+
+  // [n] int32 per-agent belief/material plane id — the map_id set_material
+  // validates against, so a caller can build a correctly-sized plane stack.
+  PyObject *nav_sim_world_agent_planes(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const int n = sw->size();
+    npy_intp d1 = n;
+    PyObject *out = PyArray_SimpleNew(1, &d1, NPY_INT32);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_agent_planes: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->agent_planes(),
+                sizeof(int) * static_cast<std::size_t>(n));
+    return out;
+  }
+
   // Last tick's per-agent gate decision [n] bool (valid only while material set).
   PyObject *nav_sim_world_material_gate_active(PyObject *handle) {
     cvc::nav::sim_world *sw = sim_world_from(handle);
@@ -1663,11 +1690,16 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   // Batched witness gate over (N,2) f64 cell-coord positions/goals. Returns
   // (N,4) f64 [active, nominal, best, feasible_count]; byte-identical to N
   // serial gates. GIL released; threads across agents.
+  // Grouped planes: risk/gate_hard/clear_m may be rank-2 (H,W) for one shared
+  // surface, or rank-3 (M,H,W) with a [N] int32 `map_id` picking each agent's
+  // plane. A rank-3 stack WITHOUT map_id is refused rather than silently read as
+  // plane 0. Byte-identical to per-plane serial witness_gate calls either way.
   ArrayView nav_witness_gate_batch(PyObject *risk, PyObject *gate_hard, PyObject *clear_m,
                                    PyObject *pos_rc, PyObject *goal_rc, int horizon_cells,
                                    double hard_margin_m, int primitive_count,
                                    double improvement_margin, double material_trigger,
-                                   double progress_slack_cells, int num_threads = 0) {
+                                   double progress_slack_cells, PyObject *map_id = nullptr,
+                                   int num_threads = 0) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -1682,19 +1714,48 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
       hold.push_back(a);
       return a;
     };
-    PyArrayObject *ra = take(risk, NPY_FLOAT, 2);
-    PyArrayObject *ha = take(gate_hard, NPY_UINT8, 2);
-    PyArrayObject *ca = take(clear_m, NPY_FLOAT, 2);
+    // Accept (H,W) or (M,H,W) for the three surfaces; take() pins the rank, so
+    // probe the risk array first and use the same rank for all three.
+    auto take_any = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 2, 3, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_witness_gate_batch: an input array had the wrong dtype/rank "
+             "(want (H,W) or (M,H,W))");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ra = take_any(risk, NPY_FLOAT);
+    PyArrayObject *ha = take_any(gate_hard, NPY_UINT8);
+    PyArrayObject *ca = take_any(clear_m, NPY_FLOAT);
     PyArrayObject *pa = take(pos_rc, NPY_DOUBLE, 2);
     PyArrayObject *ga = take(goal_rc, NPY_DOUBLE, 2);
-    const int rows = static_cast<int>(PyArray_DIM(ra, 0));
-    const int cols = static_cast<int>(PyArray_DIM(ra, 1));
+    const int rank = PyArray_NDIM(ra);
+    if (PyArray_NDIM(ha) != rank || PyArray_NDIM(ca) != rank)
+      fail("pycvc.nav_witness_gate_batch: risk/gate_hard/clear_m must have the same rank");
+    const int Mplanes = (rank == 3) ? static_cast<int>(PyArray_DIM(ra, 0)) : 1;
+    const int rows = static_cast<int>(PyArray_DIM(ra, rank - 2));
+    const int cols = static_cast<int>(PyArray_DIM(ra, rank - 1));
     const int N = static_cast<int>(PyArray_DIM(pa, 0));
-    if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols || PyArray_DIM(ca, 0) != rows ||
-        PyArray_DIM(ca, 1) != cols)
-      fail("pycvc.nav_witness_gate_batch: risk/gate_hard/clear_m shapes differ");
+    for (PyArrayObject *a : {ha, ca})
+      if ((rank == 3 && PyArray_DIM(a, 0) != Mplanes) || PyArray_DIM(a, rank - 2) != rows ||
+          PyArray_DIM(a, rank - 1) != cols)
+        fail("pycvc.nav_witness_gate_batch: risk/gate_hard/clear_m shapes differ");
     if (PyArray_DIM(pa, 1) != 2 || PyArray_DIM(ga, 0) != N || PyArray_DIM(ga, 1) != 2)
       fail("pycvc.nav_witness_gate_batch: pos_rc/goal_rc must be (N,2)");
+    const int *mid = nullptr;
+    if (map_id && map_id != Py_None) {
+      PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+      if (PyArray_DIM(ma, 0) != N)
+        fail("pycvc.nav_witness_gate_batch: map_id must be (N,) int32");
+      mid = static_cast<const int *>(PyArray_DATA(ma));
+      for (int i = 0; i < N; ++i)
+        if (mid[i] < 0 || mid[i] >= Mplanes)
+          fail("pycvc.nav_witness_gate_batch: a map_id is outside [0, M)");
+    } else if (Mplanes > 1) {
+      fail("pycvc.nav_witness_gate_batch: grouped (M,H,W) surfaces need a map_id — without one "
+           "every agent would silently gate against plane 0");
+    }
     cvc::nav::gate_params gp;
     gp.primitive_count = primitive_count;
     gp.horizon_cells = horizon_cells;
@@ -1712,7 +1773,7 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     const double *gd = static_cast<const double *>(PyArray_DATA(ga));
     Py_BEGIN_ALLOW_THREADS cvc::nav::witness_gate_batch(rd, hd, cd, rows, cols, pd, gd, N, gp,
                                                         act.data(), nom.data(), best.data(),
-                                                        cnt.data(), num_threads);
+                                                        cnt.data(), num_threads, mid);
     Py_END_ALLOW_THREADS for (PyArrayObject *h : hold) Py_DECREF(h);
     std::vector<double> out(static_cast<std::size_t>(N) * 4);
     for (int i = 0; i < N; ++i) {
@@ -1727,9 +1788,13 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   // (M,6,H,W) f32 material stack sampled at (N,2) f32 normalized positions ->
   // (N,6) f32 [risk, phi_m, grad_rx, grad_ry, grad_px, grad_py]. FLOAT tier
   // (the sdf_sample op chain). GIL released.
+  // `map_id` ([N] int32, optional) picks each agent's material plane in the
+  // (M,6,H,W) stack. Omit it (None) ONLY for a shared single-plane field: the
+  // C++ reads plane 0 for every agent when map_id is null, so passing a grouped
+  // stack without it silently samples the wrong plane rather than failing.
   ArrayView nav_material_sample(PyObject *field, double min_x, double min_y, double max_x,
                                 double max_y, double cx, double cy, double scale, PyObject *on,
-                                int num_threads = 0) {
+                                PyObject *map_id = nullptr, int num_threads = 0) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -1751,9 +1816,23 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     const int N = static_cast<int>(PyArray_DIM(oa, 0));
     if (PyArray_DIM(oa, 1) != 2)
       fail("pycvc.nav_material_sample: on must be (N,2)");
+    const int Mplanes = static_cast<int>(PyArray_DIM(fa, 0));
+    const int *mid = nullptr;
+    if (map_id && map_id != Py_None) {
+      PyArrayObject *ma = take(map_id, NPY_INT32, 1);
+      if (PyArray_DIM(ma, 0) != N)
+        fail("pycvc.nav_material_sample: map_id must be (N,) int32");
+      mid = static_cast<const int *>(PyArray_DATA(ma));
+      for (int i = 0; i < N; ++i)
+        if (mid[i] < 0 || mid[i] >= Mplanes)
+          fail("pycvc.nav_material_sample: a map_id is outside [0, M)");
+    } else if (Mplanes > 1) {
+      fail("pycvc.nav_material_sample: field has M>1 planes but no map_id — every agent would "
+           "silently sample plane 0; pass map_id, or a single-plane (1,6,H,W) field");
+    }
     cvc::nav::material_stack ms;
     ms.data = static_cast<const float *>(PyArray_DATA(fa));
-    ms.M = static_cast<int>(PyArray_DIM(fa, 0));
+    ms.M = Mplanes;
     ms.H = static_cast<int>(PyArray_DIM(fa, 2));
     ms.W = static_cast<int>(PyArray_DIM(fa, 3));
     ms.mnx = min_x;
@@ -1766,7 +1845,7 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     std::vector<float> risk(N), phi(N), gr(static_cast<std::size_t>(2) * N),
         gp(static_cast<std::size_t>(2) * N);
     const float *ond = static_cast<const float *>(PyArray_DATA(oa));
-    Py_BEGIN_ALLOW_THREADS cvc::nav::material_sample(ms, ond, N, nullptr, risk.data(), phi.data(),
+    Py_BEGIN_ALLOW_THREADS cvc::nav::material_sample(ms, ond, N, mid, risk.data(), phi.data(),
                                                      gr.data(), gp.data(), num_threads);
     Py_END_ALLOW_THREADS for (PyArrayObject *h : hold) Py_DECREF(h);
     std::vector<float> out(static_cast<std::size_t>(N) * 6);
@@ -2291,6 +2370,7 @@ struct MaterialTrainer {
   cvc::nav::material_adam opt;
   cvc::nav::material_loss_config cfg;
   bool use_cuda = false;
+  float last_eta = 0.0f; // the detached CVaR quantile the last step used
   MaterialTrainer(cvc::nav::coef_energy_net m, float grad_clip)
       : model(std::move(m)), opt(model, grad_clip) {}
 };
@@ -2453,14 +2533,19 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
   MaterialBatchArgs ba;
   ba.bind("nav_material_trainer_step", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
           risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
-  t->cfg.num_threads = num_threads;
+  // Per-call, like nav_material_trainer_loss: writing num_threads onto t->cfg
+  // would make one threaded call change the default for every later step.
+  cvc::nav::material_loss_config cfg = t->cfg;
+  cfg.num_threads = num_threads;
 
   double L = 0.0;
+  float eta = 0.0f;
   Py_BEGIN_ALLOW_THREADS
   cvc::nav::coef_energy_net::param_grads grads = t->model.zero_grads();
-  L = cvc::nav::material_loss_and_grad(t->model, ba.b, t->cfg, grads, nullptr, t->use_cuda);
+  L = cvc::nav::material_loss_and_grad(t->model, ba.b, cfg, grads, &eta, t->use_cuda);
   t->opt.step(t->model, grads, static_cast<float>(lr));
   Py_END_ALLOW_THREADS
+  t->last_eta = eta; // read back via nav_material_trainer_last_eta
   return PyFloat_FromDouble(L);
 }
 
@@ -2491,6 +2576,14 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
 // What the handle will ACTUALLY use: true only when it was created with use_cuda
 // and the build+device can serve it. Lets a caller log the real path rather than
 // the request (material_loss_and_grad falls back silently per-op).
+// The DETACHED CVaR quantile the last nav_material_trainer_step used. Feed it
+// back as nav_material_trainer_loss's frozen_eta to reproduce the finite-
+// difference workflow material_train.h documents (the FD must see the same
+// quantile the analytic gradient did). 0.0 before the first step.
+PyObject *nav_material_trainer_last_eta(PyObject *handle) {
+  return PyFloat_FromDouble(static_cast<double>(material_trainer_from(handle)->last_eta));
+}
+
 PyObject *nav_material_trainer_cuda_active(PyObject *handle) {
   MaterialTrainer *t = material_trainer_from(handle);
   const bool on = t->use_cuda && cvc::nav::coef_energy_cuda_available() &&
