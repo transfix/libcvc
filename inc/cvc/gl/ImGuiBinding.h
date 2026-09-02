@@ -4,6 +4,10 @@
 #include <string>
 #include <vector>
 
+// SceneGraph is a global-scope type, not cvc::gl::SceneGraph — declaring it
+// inside the namespace below would name a different, never-defined class.
+class SceneGraph;
+
 namespace cvc {
 class app;
 
@@ -79,6 +83,27 @@ void Text(cvc::app &ctx, const char *label, const std::string &path);
 // from a script, a config file or a replicated peer. Pass ownWindow=false to
 // embed the controls in a window you already began.
 void StageLightingPanel(StageLighting &rig, bool *open = nullptr, bool ownWindow = true);
+
+// Control surface for the SceneGraph itself: shadows (on, map resolution, bake
+// interval) and the diagnostic chrome (grid, origin axis, per-node bounding
+// boxes, extent labels).
+//
+// Every demo was hand-rolling some subset of this — the same "Scene" menu with
+// the same Shadows item, plus a local bool mirroring sg.shadowsEnabled() that
+// could desync the moment setShadowsEnabled() returned false for want of a
+// render target. The shadow controls here bind cvc::state paths directly
+// (ShadowSettings::sceneStatePath), so a script, a config file or a replicated
+// peer moves the same knobs; the chrome controls read their own state back
+// rather than tracking a copy.
+//
+// Pass ownWindow=false to embed in a window you already began.
+void ScenePanel(SceneGraph &sg, bool *open = nullptr, bool ownWindow = true);
+
+// The standard "Scene" menu contents — shadows and the chrome toggles, plus an
+// optional tick that opens ScenePanel/StageLightingPanel. Call INSIDE a menu you
+// have begun, so a host can put it wherever its menu bar already is.
+void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen = nullptr,
+                    bool *lightingPanelOpen = nullptr);
 
 } // namespace ui
 } // namespace gl

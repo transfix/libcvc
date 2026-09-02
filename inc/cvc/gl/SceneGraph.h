@@ -273,9 +273,27 @@ public:
   void enableMultiVolumeRendering(bool enable);
   bool isMultiVolumeRenderingEnabled() const;
 
-  // Scene element visibility
+  // ---- diagnostic chrome ---------------------------------------------------
+  // The grid, the origin axis marker, and the per-node bounding boxes with their
+  // extent labels. Invaluable while you are asking "why does this look wrong?",
+  // and wrong in a captured frame or a shipped view.
+  //
+  // The bbox/label setters are SCENE-WIDE. GraphicsNode::setShowBBox() and
+  // setShowExtentLabels() touch only the node they are called on, which is a
+  // sharp edge: six call sites across the demos did
+  // `getGraphicsRoot()->setShowBBox(false)` and silently left every child's box
+  // AND every extent label switched on. That is also the world-bounds box the
+  // constructor turns on (m_nullGraphic IS the graphics root), which is why
+  // setGridVisible(false) alone never suppressed it.
   void setGridVisible(bool visible);
+  bool gridVisible() const;
   void setAxisVisible(bool visible);
+  bool axisVisible() const;
+  // Applied to every graphics node, root included.
+  void setBBoxesVisible(bool visible);
+  void setExtentLabelsVisible(bool visible);
+  // All four at once — what a "presentation mode" or an offscreen capture wants.
+  void setDiagnosticChromeVisible(bool visible);
 
   // Scene element colors
   void setGridColor(double r, double g, double b);
@@ -367,6 +385,12 @@ private:
   std::vector<boost::signals2::scoped_connection> m_boundsConns;
   void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
   void onGraphicsBoundsChanged();
+  // Authoritative world-bounds recompute, for when the SET of graphics changes
+  // (add/remove) rather than one of them moving. onGraphicsBoundsChanged() is
+  // deliberately grow-only so in-bounds animation cannot jitter the grid; that
+  // is wrong here — an added node must be enclosed even from a degenerate start,
+  // and a removed one should let the grid shrink back.
+  void refreshWorldBounds();
 
   // Multi-volume rendering state
   bool m_multiVolumeRenderingEnabled;

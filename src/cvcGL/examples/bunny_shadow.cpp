@@ -12,8 +12,9 @@
 // the subject.
 //
 // Run (navigable):            bunny_shadow
-//   Tab orbits/flies; drag to look; the Scene menu toggles shadows + the lighting
-//   panel (turn on gizmos to SEE each light's shadow cone).
+//   Tab orbits/flies; drag to look. The Scene menu carries shadows, shadow-map
+//   resolution and the diagnostic chrome (grid/axis/bounding boxes), plus the
+//   Scene and Stage lighting panels (turn on gizmos to SEE each shadow cone).
 // Verify (offscreen):         bunny_shadow --offscreen --frames 1 --png bunny.png
 
 #define _USE_MATH_DEFINES
@@ -35,7 +36,6 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
-#include <functional>
 #include <iostream>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -194,20 +194,8 @@ int main(int argc, char **argv) {
   // shadow look wrong?" and none of it belongs in a captured still — the axis
   // marker in particular lands squarely on the bunny's chest from the default
   // orbit. Presentation only; the scene and lighting are untouched.
-  if (no_grid) {
-    sg.setGridVisible(false);
-    sg.setAxisVisible(false);
-    std::function<void(const std::shared_ptr<GraphicsNode> &)> hide_bbox =
-        [&](const std::shared_ptr<GraphicsNode> &n) {
-          if (!n)
-            return;
-          n->setShowBBox(false);
-          n->setShowExtentLabels(false);
-          for (const auto &c : n->getGraphicsChildren())
-            hide_bbox(std::dynamic_pointer_cast<GraphicsNode>(c));
-        };
-    hide_bbox(sg.getGraphicsRoot());
-  }
+  if (no_grid)
+    sg.setDiagnosticChromeVisible(false);
 
   CameraController cam(view);
   cam.frameBounds(-2.2 * S, -2.2 * S, 0.0, 2.2 * S, 2.2 * S, 1.3 * S);
@@ -215,20 +203,26 @@ int main(int argc, char **argv) {
   TouchGestures touch(view, cam); // declared unconditionally: the loop uses it every frame
 
 #ifdef CVC_ENABLE_IMGUI
-  bool uiShadows = shadows, uiLighting = false;
+  // Both panels come from cvcGL, not from this file: the shadow and lighting
+  // knobs are properties of the SceneGraph and the rig, so every demo that has
+  // one should get the same controls without re-typing them.
+  bool uiScene = false, uiLighting = false;
   cvc::gl::ImGuiOverlay ui(view);
+  // imgui exports no symbols, so this .exe links its OWN static copy with its own
+  // null GImGui: the raw ImGui::* calls in the draw callback below would crash on
+  // the first frame without adopting the context the overlay made inside libcvc.
+  ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
   ui.setVisible(!no_ui && !capturing);
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {
-        if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
-          sg.setShadowsEnabled(uiShadows);
-        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
+        cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
     }
+    cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
   });
 #else
