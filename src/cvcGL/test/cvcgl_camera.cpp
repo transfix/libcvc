@@ -82,6 +82,55 @@ int main() {
   c.getPose(al, alf, u);
   check("look rotates view, not eye", dist(bl, al) < 1e-9 && dist(blf, alf) > 1e-3);
 
+  // Orbit DRAG was the one navigation path with no coverage at all — the
+  // mouseLook above runs in Fly mode — which is how an inverted vertical drag
+  // shipped. Sensitivity is 0.25 deg/px by default, so 60 px is 15 deg: well
+  // clear of the +/-89 clamp from a framed start.
+  printf("A2. orbit drag turns the scene WITH the pointer\n");
+  {
+    vtkNew<vtkCamera> ocam;
+    CameraController oc(ctx, "test.orbitdrag");
+    oc.setCamera(ocam);
+    oc.frameBounds(-50, -50, 0, 50, 50, 20);
+    oc.setMode(CameraController::Mode::Orbit);
+
+    double b[3], bf[3], bu[3];
+    oc.getPose(b, bf, bu);
+
+    // VTK display coords are origin-bottom-left, so a DOWNWARD drag arrives as
+    // a NEGATIVE dy. Pulling down must bring the subject's top toward the
+    // viewer, which lifts the eye — the opposite of what this used to do.
+    oc.beginDrag();
+    oc.mouseLook(0, -60);
+    oc.endDrag();
+    double d1[3], d1f[3];
+    oc.getPose(d1, d1f, bu);
+    check("drag DOWN lifts the eye over the subject", d1[2] > b[2] + 1e-6);
+    check("orbit drag swings the eye, not the focal point", dist(d1f, bf) < 1e-6);
+
+    // ...and the reverse drops it back below where it started.
+    oc.beginDrag();
+    oc.mouseLook(0, 120);
+    oc.endDrag();
+    double d2[3], d2f[3];
+    oc.getPose(d2, d2f, bu);
+    check("drag UP lowers the eye", d2[2] < b[2] - 1e-6);
+
+    // Horizontal drag was already correct, so this pins it against a
+    // well-meaning sign flip of the wrong axis.
+    oc.frameBounds(-50, -50, 0, 50, 50, 20);
+    double h0[3], h0f[3];
+    oc.getPose(h0, h0f, bu);
+    oc.beginDrag();
+    oc.mouseLook(80, 0);
+    oc.endDrag();
+    double h1[3], h1f[3];
+    oc.getPose(h1, h1f, bu);
+    check("drag RIGHT swings the eye horizontally, height unchanged",
+          dist(h1, h0) > 1e-3 && std::fabs(h1[2] - h0[2]) < 1e-6);
+    check("horizontal orbit keeps the focal point", dist(h1f, h0f) < 1e-6);
+  }
+
   printf("B. state -> camera (mode, orbit center)\n");
   // external write: switch to orbit via state
   root("test.camera.mode").value(0);

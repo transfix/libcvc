@@ -810,8 +810,13 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       syncConfigToState();
     }
   } else if (s.dragging) {
+    // ORBIT: the scene turns WITH the pointer, so dragging DOWN has to lift the
+    // eye up and over the subject — you pull its top toward you and see more of
+    // it — which is the OPPOSITE sign from Fly, where dragging down looks down.
+    // Both modes read the same dpitch (so invert_pitch still applies to both),
+    // so orbit negates it here rather than fighting over the shared value.
     s.orbitAzimuth -= dxPixels * s.sensitivity;
-    s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation + dpitch));
+    s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation - dpitch));
     applyToCamera();
   }
 }
