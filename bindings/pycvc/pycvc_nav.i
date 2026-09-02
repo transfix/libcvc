@@ -1698,8 +1698,8 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                                    PyObject *pos_rc, PyObject *goal_rc, int horizon_cells,
                                    double hard_margin_m, int primitive_count,
                                    double improvement_margin, double material_trigger,
-                                   double progress_slack_cells, PyObject *map_id = nullptr,
-                                   int num_threads = 0) {
+                                   double progress_slack_cells, int num_threads = 0,
+                                   PyObject *map_id = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -1794,7 +1794,7 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   // stack without it silently samples the wrong plane rather than failing.
   ArrayView nav_material_sample(PyObject *field, double min_x, double min_y, double max_x,
                                 double max_y, double cx, double cy, double scale, PyObject *on,
-                                PyObject *map_id = nullptr, int num_threads = 0) {
+                                int num_threads = 0, PyObject *map_id = nullptr) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
