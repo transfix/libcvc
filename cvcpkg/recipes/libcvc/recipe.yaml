@@ -35,7 +35,15 @@ recipe:
   # CoefEnergyNetMaterial forward+backward, and the self-supervised material
   # trainer) ship as part of 3.3.0 rather than as a 3.2.4 revision. The whole
   # family (libcvc/cvcgl/pycvc/pycvc-gl) rebuilds + republishes together.
-  cvc_revision: 1
+  # Bumped 1 -> 2: the +cvc.1 bundle STILL shipped without cvc::xmlrpc. The
+  # build.sh fix recorded above never reached the artifact, because the publish
+  # workflow does not run build.sh -- it inlines its own configure, which left
+  # CVC_USING_XMLRPC at its OFF default. The workflow now passes it on all four
+  # lanes, and lib/xmlrpc* is packed alongside lib/libxmlrpc* for the MSVC
+  # spelling. Verified against the published bundle: 0 occurrences of
+  # cvc::xmlrpc in cvcTargets.cmake and no archive, while include/xmlrpc/
+  # headers shipped.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -199,6 +207,12 @@ package:
     # listed explicitly or downstream links to cvc::xmlrpc fail with a missing
     # archive.
     - lib/libxmlrpc*
+    # ...and the MSVC spelling. add_library(xmlrpc STATIC) yields libxmlrpc.a on
+    # Unix but xmlrpc.lib on MSVC, which matches neither lib/libcvc* nor
+    # lib/cvc* nor the glob above -- the same reason lib/cvc* sits beside
+    # lib/libcvc* here. Without it the Windows bundle exports cvc::xmlrpc while
+    # shipping no archive for it.
+    - lib/xmlrpc*
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
