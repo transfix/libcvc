@@ -875,6 +875,10 @@ void CameraController::beginDrag() { m_impl->dragging = true; }
 void CameraController::endDrag() { m_impl->dragging = false; }
 
 // ---- tunables ----
+// _ctx is the protected app reference state_object already holds; a reference
+// member is unaffected by this method's constness, so no cast is needed.
+cvc::app &CameraController::appContext() const { return _ctx; }
+
 void CameraController::setMoveSpeed(double u) {
   m_impl->moveSpeed = u;
   syncConfigToState();

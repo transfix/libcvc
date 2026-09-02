@@ -1439,10 +1439,11 @@ int main(int argc, char **argv) {
         ImGui::EndMenu();
       }
       if (ImGui::BeginMenu("Camera")) {
-        namespace u = cvc::gl::ui;
-        const std::string cp = sg.getStatePrefix() + ".viewers.main.camera.settings.";
-        u::SliderDouble(app, "Look sens", cp + "mouse_sensitivity", 0.02, 2.0, 0.25);
-        u::SliderDouble(app, "Move speed", cp + "move_speed", 1.0, 400.0, 40.0);
+        // The library's menu, off the controller's own state path — this block
+        // used to splice ".viewers.main.camera.settings." as a literal in three
+        // demos, and it now also carries invert-pitch and drag-pans, which no
+        // demo exposed.
+        cvc::gl::ui::CameraMenuItems(cam, 400.0, 40.0);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();

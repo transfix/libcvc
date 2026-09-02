@@ -5,6 +5,7 @@
 // so a drag costs ONE state write instead of one per frame. State writes fan out
 // to observers and replicated peers, so per-frame writes are not free.
 
+#include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiBinding.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/Settings.h>
@@ -352,22 +353,26 @@ void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen, bool *lightingPanelOpe
   if (ImGui::MenuItem("Origin axis", nullptr, &axis))
     sg.setAxisVisible(axis);
 
-  // Scene-wide, unlike GraphicsNode::setShowBBox which is per-node. No getter
-  // exists for "are they all on", so these are actions rather than ticks.
-  if (ImGui::MenuItem("Bounding boxes on"))
-    sg.setBBoxesVisible(true);
-  if (ImGui::MenuItem("Bounding boxes off"))
-    sg.setBBoxesVisible(false);
-  if (ImGui::MenuItem("Extent labels on"))
-    sg.setExtentLabelsVisible(true);
-  if (ImGui::MenuItem("Extent labels off"))
-    sg.setExtentLabelsVisible(false);
+  // Scene-wide, unlike GraphicsNode::setShowBBox which is per-node. These read
+  // back as "is any box drawn?", which is what lets them be ticks at all: they
+  // were a pair of on/off actions each while SceneGraph had no getter.
+  bool boxes = sg.bboxesVisible();
+  if (ImGui::MenuItem("Bounding boxes", nullptr, &boxes))
+    sg.setBBoxesVisible(boxes);
+  // The labels are drawn BY the bbox node, so with boxes off they are invisible
+  // whatever this says. Disabled rather than silently ticked-but-not-showing.
+  bool labels = sg.extentLabelsVisible();
+  if (ImGui::MenuItem("Extent labels", nullptr, &labels, boxes))
+    sg.setExtentLabelsVisible(labels);
+  if (!boxes && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("Drawn by the bounding boxes - turn those on first.");
 
   ImGui::Separator();
-  if (ImGui::MenuItem("Hide all chrome"))
-    sg.setDiagnosticChromeVisible(false);
-  if (ImGui::MenuItem("Show all chrome"))
-    sg.setDiagnosticChromeVisible(true);
+  // Master toggle. Ticked when ANY of the four is showing, so clearing it always
+  // means "get all of this off my screen" and setting it brings everything back.
+  bool chrome = sg.diagnosticChromeVisible();
+  if (ImGui::MenuItem("All chrome", nullptr, &chrome))
+    sg.setDiagnosticChromeVisible(chrome);
 
   if (scenePanelOpen || lightingPanelOpen)
     ImGui::Separator();
@@ -375,6 +380,29 @@ void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen, bool *lightingPanelOpe
     ImGui::MenuItem("Scene panel", nullptr, scenePanelOpen);
   if (lightingPanelOpen)
     ImGui::MenuItem("Stage lighting", nullptr, lightingPanelOpen);
+}
+
+void CameraMenuItems(CameraController &cam, double moveSpeedMax, double moveSpeedDefault) {
+  cvc::app &ctx = cam.appContext();
+  // stateName() is the controller's OWN path, so this cannot drift from
+  // CameraController::viewerStatePath(). Three demos spliced
+  // `prefix + ".viewers.main.camera.settings."` as a literal instead.
+  const std::string p = cam.stateName("settings") + ".";
+
+  SliderDouble(ctx, "Look sens", p + "mouse_sensitivity", 0.02, 2.0, 0.25);
+  SliderDouble(ctx, "Move speed", p + "move_speed", 1.0, moveSpeedMax, moveSpeedDefault);
+  ui::Checkbox(ctx, "Invert pitch", p + "invert_pitch");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Flip vertical look. Applies to fly AND orbit.");
+
+  // Read off the controller rather than state: it is the object that acts on the
+  // value, and it already publishes every change back to that path.
+  bool pans = cam.primaryDragPans();
+  if (ImGui::MenuItem("Drag pans", nullptr, &pans))
+    cam.setPrimaryDragPans(pans);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Left-drag slides the view instead of turning it.\n"
+                      "The middle button always pans regardless.");
 }
 
 void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
@@ -433,21 +461,24 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
   bool axis = sg.axisVisible();
   if (ImGui::Checkbox("Origin axis", &axis))
     sg.setAxisVisible(axis);
-  if (ImGui::Button("Boxes on"))
-    sg.setBBoxesVisible(true);
+  bool boxes = sg.bboxesVisible();
+  if (ImGui::Checkbox("Bounding boxes", &boxes))
+    sg.setBBoxesVisible(boxes);
   ImGui::SameLine();
-  if (ImGui::Button("Boxes off"))
-    sg.setBBoxesVisible(false);
-  if (ImGui::Button("Labels on"))
-    sg.setExtentLabelsVisible(true);
-  ImGui::SameLine();
-  if (ImGui::Button("Labels off"))
-    sg.setExtentLabelsVisible(false);
-  if (ImGui::Button("Hide all chrome"))
-    sg.setDiagnosticChromeVisible(false);
-  ImGui::SameLine();
-  if (ImGui::Button("Show all chrome"))
-    sg.setDiagnosticChromeVisible(true);
+  // Same dependency as the menu: labels belong to the bbox node.
+  bool labels = sg.extentLabelsVisible();
+  ImGui::BeginDisabled(!boxes);
+  if (ImGui::Checkbox("Extent labels", &labels))
+    sg.setExtentLabelsVisible(labels);
+  ImGui::EndDisabled();
+  if (!boxes && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("Drawn by the bounding boxes - turn those on first.");
+  bool chrome = sg.diagnosticChromeVisible();
+  if (ImGui::Checkbox("All of it", &chrome))
+    sg.setDiagnosticChromeVisible(chrome);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Ticked while ANY of the four is showing. Clearing it takes "
+                      "grid, axis, boxes and labels off in one go.");
 
   if (ownWindow)
     ImGui::End();
@@ -481,6 +512,7 @@ void Text(cvc::app &, const char *, const std::string &) {}
 void StageLightingPanel(StageLighting &, bool *, bool) {}
 void ScenePanel(SceneGraph &, bool *, bool) {}
 void SceneMenuItems(SceneGraph &, bool *, bool *) {}
+void CameraMenuItems(CameraController &, double, double) {}
 
 } // namespace ui
 } // namespace gl

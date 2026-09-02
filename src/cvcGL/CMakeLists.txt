@@ -207,6 +207,12 @@ add_executable(cvcgl_grid_bounds test/cvcgl_grid_bounds.cpp)
 target_link_libraries(cvcgl_grid_bounds PRIVATE cvcGL)
 add_test(NAME cvcgl_grid_bounds COMMAND cvcgl_grid_bounds)
 
+# Scene-wide diagnostic chrome: the setters reach every node (not just the root),
+# and the getters are derived from the nodes so a checkbox can show real state.
+add_executable(cvcgl_scene_chrome test/cvcgl_scene_chrome.cpp)
+target_link_libraries(cvcgl_scene_chrome PRIVATE cvcGL)
+add_test(NAME cvcgl_scene_chrome COMMAND cvcgl_scene_chrome)
+
 # Scene-owned lighting: lights must survive setRenderer, so a second renderer
 # (offscreen capture, second window) lights the scene identically.
 add_executable(cvcgl_lighting test/cvcgl_lighting.cpp)
