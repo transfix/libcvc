@@ -33,6 +33,39 @@
 namespace cvc {
 namespace hdf5_utils {
 // --------------------
+// library_lock
+// --------------------
+// Purpose:
+//   Implements the process-wide HDF5 lock declared in hdf5_utils.h.
+// ---- Change History ----
+// 09/02/2026 -- Joe R. -- Creation.
+boost::mutex &library_lock::mutex() {
+  // Deliberately not a member of cvc::app: the state this guards belongs to
+  // the HDF5 library, which has exactly one copy per process no matter how
+  // many app instances exist.  Leaked on purpose so that a background thread
+  // still inside an HDF5 call at exit cannot lock a destroyed mutex.
+  static boost::mutex *m = new boost::mutex;
+  return *m;
+}
+
+library_lock::library_lock(app &ctx, const std::string &hdf5_filename, const std::string &info)
+    : _ctx(ctx), _lock(mutex()) {
+  try {
+    _ctx.mutexInfo(name(), _ctx.threadKey() + ": " + hdf5_filename + " :: " + info);
+  } catch (...) {
+    // mutexInfo() carries an interruption point.  Losing the diagnostic
+    // string is never a reason to give up the lock we just took.
+  }
+}
+
+library_lock::~library_lock() {
+  try {
+    _ctx.mutexInfo(name(), "");
+  } catch (...) {
+  }
+}
+
+// --------------------
 // getPredType
 // --------------------
 // Purpose:
@@ -264,7 +297,7 @@ bool hasAttribute(const H5::H5Object &obj, const std::string &name) {
 // 06/24/2011 -- Joe R. -- Creation.
 // 07/15/2011 -- Joe R. -- Using a mutex to protect file access
 bool isGroup(app &ctx, const std::string &hdf5_filename, const std::string &hdf5_objname) {
-  scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+  library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
   ctx.log(10, boost::str(boost::format("%1%: %2%, %3%\n") % BOOST_CURRENT_FUNCTION % hdf5_filename %
                          hdf5_objname));
 
@@ -292,7 +325,7 @@ bool isGroup(app &ctx, const std::string &hdf5_filename, const std::string &hdf5
 // 06/24/2011 -- Joe R. -- Creation.
 // 07/15/2011 -- Joe R. -- Using a mutex to protect file access
 bool isDataSet(app &ctx, const std::string &hdf5_filename, const std::string &hdf5_objname) {
-  scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+  library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
   ctx.log(10, boost::str(boost::format("%1%: %2%, %3%\n") % BOOST_CURRENT_FUNCTION % hdf5_filename %
                          hdf5_objname));
 
@@ -337,7 +370,7 @@ bool objectExists(app &ctx, const std::string &hdf5_filename, const std::string 
 void removeObject(app &ctx, const std::string &hdf5_filename, const std::string &hdf5_objname) {
   using namespace boost;
 
-  scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+  library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
   ctx.log(10, str(boost::format("%1%: %2%, %3%\n") % BOOST_CURRENT_FUNCTION % hdf5_filename %
                   hdf5_objname));
 
@@ -360,7 +393,7 @@ void removeObject(app &ctx, const std::string &hdf5_filename, const std::string 
 void createHDF5File(app &ctx, const std::string &hdf5_filename) {
   using namespace boost;
 
-  scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+  library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
   ctx.log(10, str(boost::format("%1%: %2%\n") % BOOST_CURRENT_FUNCTION % hdf5_filename));
 
   try {
@@ -396,7 +429,7 @@ void createGroup(app &ctx, const std::string &hdf5_filename, const std::string &
                                hdf5_objname % "object exists!"));
 
   {
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     try {
       boost::shared_ptr<H5::H5File> f = getH5File(hdf5_filename);
       boost::shared_ptr<H5::Group> g = getGroup(*f, hdf5_objname, true);
@@ -435,7 +468,7 @@ void createDataSet(app &ctx, const std::string &hdf5_filename, const std::string
                                hdf5_objname % "object exists!"));
 
   {
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     const dimension maxdim(256, 256, 256);
 
     typedef std::vector<std::string> split_vector_type;
@@ -970,7 +1003,7 @@ std::vector<std::string> getChildObjects(app &ctx, const std::string &hdf5_filen
                   hdf5_objname));
 
   {
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
 
     try {
       /*

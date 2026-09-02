@@ -32,6 +32,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1059,4 +1060,66 @@ TEST_F(Hdf5VolumeTest, UtilsPredTypeMapping) {
   EXPECT_TRUE(hdf5_utils::getPredType(Int64) == H5::PredType::NATIVE_INT64);
   EXPECT_THROW(hdf5_utils::getPredType(Undefined), hdf5_exception);
   EXPECT_THROW(hdf5_utils::getPredType(static_cast<data_type>(99)), hdf5_exception);
+}
+
+// ===========================================================================
+// hdf5_utils: concurrent entry into the HDF5 library
+// ===========================================================================
+
+// The hdf5 dependency is built without HDF5_ENABLE_THREADSAFE (that option is
+// mutually exclusive with the C++ wrapper libcvc uses), so hdf5_utils has to
+// serialize every call into the library itself -- see hdf5_utils::library_lock.
+// That guard used to be one mutex *per filename*, which left two holes:
+// threads working on different files were not serialized against each other at
+// all, and H5::Exception::dontPrint() was called before the lock was taken.
+// MultiVariableMultiTimestep tripped it intermittently in CI (SEGFAULT)
+// because its four writes each spawn a background hierarchy thread.
+//
+// Every write below targets its own file *and* its own object path, so the
+// volumes cannot interact through the data -- the only thing under test is
+// that concurrent entry into the HDF5 library is safe. Distinct object paths
+// matter: the hierarchy thread a write spawns is keyed off the object path, so
+// sharing one would make the workers cancel each other's threads instead.
+TEST_F(Hdf5VolumeTest, ConcurrentAccessToDistinctFiles) {
+  const int kWorkers = 4;
+  const int kRounds = 2;
+
+  std::vector<std::string> errors(kWorkers);
+  std::vector<std::thread> workers;
+  workers.reserve(kWorkers);
+
+  for (int t = 0; t < kWorkers; ++t) {
+    workers.push_back(std::thread([this, t, &errors]() {
+      try {
+        for (int r = 0; r < kRounds; ++r) {
+          const std::string tag = std::to_string(t) + "_" + std::to_string(r);
+          // The file must not exist yet: writeVolumeFile only auto-creates a
+          // missing target, and it honors the object path when it does.
+          const std::string url = path("concurrent" + tag + ".h5") + "|/cvc/volumes/w" + tag;
+          volume out = make_test_volume(ctx, 8, 8, 8, Float, double(10 * t + r));
+          writeVolumeFile(ctx, out, url);
+
+          volume in(ctx);
+          readVolumeFile(ctx, in, url);
+          if (in.XDim() != out.XDim() || in.YDim() != out.YDim() || in.ZDim() != out.ZDim())
+            throw std::runtime_error("dimension mismatch on " + url);
+          // gtest's fatal assertions are not usable off the main thread, so
+          // report through the error slot instead.
+          for (uint64 k = 0; k < out.ZDim(); ++k)
+            for (uint64 j = 0; j < out.YDim(); ++j)
+              for (uint64 i = 0; i < out.XDim(); ++i)
+                if (std::fabs(out(i, j, k) - in(i, j, k)) > 1e-4)
+                  throw std::runtime_error("voxel mismatch on " + url);
+        }
+      } catch (std::exception &e) {
+        errors[t] = e.what();
+      }
+    }));
+  }
+
+  for (std::vector<std::thread>::iterator i = workers.begin(); i != workers.end(); ++i)
+    i->join();
+
+  for (int t = 0; t < kWorkers; ++t)
+    EXPECT_TRUE(errors[t].empty()) << "worker " << t << ": " << errors[t];
 }
