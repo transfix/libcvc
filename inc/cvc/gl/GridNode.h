@@ -18,6 +18,11 @@ public:
   ~GridNode() override;
 
   void setBounds(const cvc::bounding_box &bounds);
+  // The extent the grid is DRAWN at. Deliberately not getBoundingBox(), which
+  // reports an empty box so the grid never contributes to scene bounds — a
+  // sensible design that also makes the drawn extent unobservable, so nothing
+  // could test whether the grid actually tracks the scene.
+  const cvc::bounding_box &bounds() const { return m_bounds; }
   void setColor(double r, double g, double b);
 
   // Per-plane colors

@@ -199,6 +199,14 @@ add_executable(cvcgl_traversal test/cvcgl_traversal.cpp)
 target_link_libraries(cvcgl_traversal PRIVATE cvcGL)
 add_test(NAME cvcgl_traversal COMMAND cvcgl_traversal)
 
+# The world grid must enclose the geometry actually in the scene. It was sized
+# only from GraphicsNode::transformChanged, so it tracked geometry that MOVED
+# and ignored geometry that was merely ADDED — every static scene drew a
+# degenerate grid at the origin while its bbox enclosed the real extent.
+add_executable(cvcgl_grid_bounds test/cvcgl_grid_bounds.cpp)
+target_link_libraries(cvcgl_grid_bounds PRIVATE cvcGL)
+add_test(NAME cvcgl_grid_bounds COMMAND cvcgl_grid_bounds)
+
 # Scene-owned lighting: lights must survive setRenderer, so a second renderer
 # (offscreen capture, second window) lights the scene identically.
 add_executable(cvcgl_lighting test/cvcgl_lighting.cpp)

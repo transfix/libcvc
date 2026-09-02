@@ -325,9 +325,10 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
   auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
   graphicsNode->setGeometry(geom);
 
-  // Add to lookup map
-  m_graphicsNodes[name] = graphicsNode;
-  trackNodeBounds(graphicsNode);
+  // One registration path for every node kind: it owns the lookup map, the
+  // bounds tracking AND the world-bounds refresh. Inlining those here is what
+  // let the grid miss added geometry for so long.
+  registerGraphics(name, graphicsNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();
@@ -358,9 +359,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
   // Create new empty geometry node using template factory (automatically creates proper state path)
   auto graphicsNode = m_graphicsRoot->addGraphicsChild<GeometryNode>(name);
 
-  // Add to lookup map
-  m_graphicsNodes[name] = graphicsNode;
-  trackNodeBounds(graphicsNode);
+  registerGraphics(name, graphicsNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();
@@ -415,6 +414,9 @@ void SceneGraph::removeGraphics(const std::string &name) {
 
   // If scene is now empty, add null graphic back
   ensureNullGraphicIfEmpty();
+
+  // The set of graphics changed: let the grid shrink back to what is left.
+  refreshWorldBounds();
 }
 
 std::shared_ptr<GraphicsNode> SceneGraph::getGraphics(const std::string &name) {
@@ -429,6 +431,9 @@ void SceneGraph::registerGraphics(const std::string &name, std::shared_ptr<Graph
   if (node) {
     m_graphicsNodes[name] = node;
     trackNodeBounds(node);
+    // The set of graphics changed: the grid must enclose the new node, and
+    // tracking alone would not do it (that only reacts to later MOVES).
+    refreshWorldBounds();
   }
 }
 
@@ -440,6 +445,29 @@ void SceneGraph::trackNodeBounds(const std::shared_ptr<GraphicsNode> &node) {
   // and dies with the SceneGraph, so the captured `this` is safe.
   m_boundsConns.push_back(node->transformChanged.connect(
       [this](GraphicsNode *) { postEvent([this]() { onGraphicsBoundsChanged(); }); }));
+}
+
+void SceneGraph::refreshWorldBounds() {
+  // The grid is sized ONLY from here and from onGraphicsBoundsChanged(). Before
+  // this existed the latter was the only caller, and it fires on
+  // GraphicsNode::transformChanged — so the grid tracked geometry that MOVED and
+  // was blind to geometry that was merely ADDED. A scene built once and never
+  // animated therefore drew a grid that did not enclose its own contents, while
+  // the graphics root's bbox (which auto-syncs to its children) did — which is
+  // how the two came to disagree on screen.
+  //
+  // Compounding it, addGraphics() did not call registerGraphics(): it inlined
+  // the same map-assign + trackNodeBounds pair, so four of five registration
+  // sites had drifted apart and a hook added to one of them reached none of the
+  // others. They all funnel through registerGraphics() now.
+  //
+  // Pinned by cvcgl_grid_bounds (8 failing checks before this change).
+  //
+  // Marshalled onto the owner thread: updateGrid() touches VTK actors.
+  postEvent([this]() {
+    updateGrid(computeGraphicsBounds());
+    m_renderNeeded = true;
+  });
 }
 
 void SceneGraph::onGraphicsBoundsChanged() {
@@ -476,9 +504,7 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
   auto volumeNode = m_graphicsRoot->addGraphicsChild<VolumeNode>(name);
   volumeNode->setVolume(vol);
 
-  // Add to lookup map
-  m_graphicsNodes[name] = volumeNode;
-  trackNodeBounds(volumeNode);
+  registerGraphics(name, volumeNode);
 
   // Remove null graphic since we now have real graphics
   removeNullGraphicIfPresent();

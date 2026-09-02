@@ -367,6 +367,12 @@ private:
   std::vector<boost::signals2::scoped_connection> m_boundsConns;
   void trackNodeBounds(const std::shared_ptr<GraphicsNode> &node);
   void onGraphicsBoundsChanged();
+  // Authoritative world-bounds recompute, for when the SET of graphics changes
+  // (add/remove) rather than one of them moving. onGraphicsBoundsChanged() is
+  // deliberately grow-only so in-bounds animation cannot jitter the grid; that
+  // is wrong here — an added node must be enclosed even from a degenerate start,
+  // and a removed one should let the grid shrink back.
+  void refreshWorldBounds();
 
   // Multi-volume rendering state
   bool m_multiVolumeRenderingEnabled;
