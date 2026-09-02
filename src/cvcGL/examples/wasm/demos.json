@@ -1,6 +1,6 @@
 {
   "_comment": "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
-  "order": ["lsystem_forest", "lsystem_coast", "nav_city_swarm", "nav_fog_ghost"],
+  "order": ["lsystem_forest", "lsystem_coast", "nav_city_swarm", "nav_fog_ghost", "bunny_shadow"],
   "demos": {
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
@@ -21,6 +21,11 @@
       "desc": "one agent detours a phantom wall, then senses it clear",
       "blurb": "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.",
       "thumb": "img/nav_fog_ghost.jpg"
+    },
+    "bunny_shadow": {
+      "desc": "the Stanford bunny under an aimed spot — shadow mapping, up close",
+      "blurb": "The smallest scene that tests a renderer honestly: one known-good mesh on a ground plane under a StageLighting rig. Shadow-map artefacts have nowhere to hide here — acne, peter-panning and a shadow in the wrong place are all obvious on a single caster. Toggle shadows and the lighting panel to watch a tight spot cone spend its texels where a directional light would waste them.",
+      "thumb": "img/bunny_shadow.jpg"
     }
   }
 }
