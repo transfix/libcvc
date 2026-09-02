@@ -1238,9 +1238,7 @@ int main(int argc, char **argv) {
   if (ortho)
     navdemo::set_ortho_topdown(view, bounds, 4.0,
                                capturing ? nullptr : &cam); // fixed 2-D top-down map
-  sg.setGridVisible(false);
-  sg.setAxisVisible(false);
-  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.setDiagnosticChromeVisible(false);
   sg.processEvents();
 
   // Picture-in-picture: an orthographic top-down overlay in the bottom-right
@@ -1399,13 +1397,18 @@ int main(int argc, char **argv) {
   bool uiPaused = false, uiStep = false, uiRestart = false, ui2D = ortho;
   int uiAgents = N;
   std::string uiBelief = belief;
-  bool uiFog = fogOn, uiShadows = shadows, uiTrails = true, uiGoals = true, uiFlags = true;
+  bool uiFog = fogOn, uiTrails = true, uiGoals = true, uiFlags = true;
   double uiHz = hz;
   float uiTrailW = 1.5f;                              // live path (trail) line width
   bool uiSeparate = true;                             // inter-agent avoidance on/off (live)
   float uiSepGain = 1.5f * static_cast<float>(ts.rr); // avoidance strength (live)
+  bool uiScene = false;                               // the library's ScenePanel window
   bool uiLighting = false;                            // the StageLightingPanel window
 #ifdef CVC_ENABLE_IMGUI
+  // imgui exports no symbols, so this .exe can link its own static copy with its
+  // own null GImGui. Adopt the overlay's context so the raw ImGui::* calls below
+  // and the cvc::gl::ui::* widgets inside libcvc share one.
+  ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Sim")) {
@@ -1426,8 +1429,13 @@ int main(int argc, char **argv) {
         ImGui::MenuItem("Trails", nullptr, &uiTrails);
         ImGui::MenuItem("Goals", nullptr, &uiGoals);
         ImGui::MenuItem("Flags", nullptr, &uiFlags);
-        ImGui::MenuItem("Shadows", nullptr, &uiShadows);
-        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Scene")) {
+        // The library's menu: shadows, shadow-map resolution, bake interval and
+        // the diagnostic chrome, all read back from the scene rather than from
+        // demo-side mirrors that can drift out of agreement with it.
+        cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
       }
       if (ImGui::BeginMenu("Camera")) {
@@ -1516,8 +1524,6 @@ int main(int argc, char **argv) {
       if (followAgent != followBefore)
         configure_track_params();
     }
-    ImGui::SameLine();
-    ImGui::Checkbox("Shadows", &uiShadows);
     ImGui::SliderFloat("path width", &uiTrailW, 0.5f, 6.0f, "%.1f");
     ImGui::Checkbox("Avoid others", &uiSeparate); // inter-agent separation (live)
     if (ImGui::IsItemHovered())
@@ -1536,6 +1542,7 @@ int main(int argc, char **argv) {
     // The library lighting panel — the same control surface as lsystem_forest,
     // driving this scene's StageLighting rig (key/fill/back/wash, shadows,
     // gizmos to debug the shadow cones).
+    cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(*rig, &uiLighting);
   });
 #endif
@@ -1673,10 +1680,6 @@ int main(int argc, char **argv) {
       }
     }
     // ---- apply UI actions ---------------------------------------------------
-    if (uiShadows != shadows) { // live toggles
-      shadows = sg.setShadowsEnabled(uiShadows) && uiShadows;
-      uiShadows = shadows;
-    }
     if (trailNode) {
       trailNode->setVisible(uiTrails);
       trailNode->setLineWidth(uiTrailW);

@@ -1306,9 +1306,7 @@ int main(int argc, char **argv) {
   // GL-init render below doesn't flash them, then render ONCE so the window's
   // OpenGLInit has run — vtkTextureObject only reports float-RT support after that
   // (otherwise Create2DFromRaw sees IF=0 and we would wrongly fall back to a flat sea).
-  sg.setGridVisible(false);
-  sg.setAxisVisible(false);
-  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.setDiagnosticChromeVisible(false);
   view.render();
 
   // Water knobs live in the state tree at coast.water.* / coast.clock.* — scriptable
@@ -1430,7 +1428,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
-  bool uiShadows = shadows;
+  bool uiScene = false;   // the library's ScenePanel window
   bool uiLighting = true; // the StageLightingPanel window
   // "Ocean" panel mirrors, seeded from the state knobs. The sliders write straight
   // back to the state tree (coast.water.* / coast.clock.*), so ImGui, Python and the
@@ -1445,9 +1443,10 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {
-        if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
-          sg.setShadowsEnabled(uiShadows);
-        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
+        // The library's menu: shadows, shadow-map resolution, bake interval and
+        // the diagnostic chrome, all read back from the scene rather than from
+        // demo-side mirrors that can drift out of agreement with it.
+        cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
@@ -1456,11 +1455,12 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("lsystem_coast");
     ImGui::Text("%zu trees", forest.size());
-    // Every control drives something and shadows are applied from whichever of the
-    // menu item or this checkbox you use (they stay in agreement).
+    // Tree wind is this demo's own knob. Shadows used to be duplicated here over
+    // the same local bool as the menu item, and BOTH discarded the return of
+    // setShadowsEnabled(), so either could leave a tick reading ON over a scene
+    // with shadows off. They now come from the library's Scene menu and panel,
+    // which read the scene back.
     ImGui::SliderFloat("tree wind", &uiWind, 0.0f, 3.0f);
-    if (ImGui::Checkbox("shadows", &uiShadows))
-      sg.setShadowsEnabled(uiShadows);
 
     // The water controls write straight to the state tree; the render loop reads
     // those knobs each frame (and rebuilds the FFT spectrum only when wind changes).
@@ -1484,6 +1484,7 @@ int main(int argc, char **argv) {
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
     // same call lights any cvcGL scene.
+    cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
   });
 #endif
@@ -1521,9 +1522,7 @@ int main(int argc, char **argv) {
 
   // This is an island, not a lab bench: hide cvcGL's default grid, axis, AND the
   // scene bounding box (the root NullGraphic shows its yellow bbox by default).
-  sg.setGridVisible(false);
-  sg.setAxisVisible(false);
-  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.setDiagnosticChromeVisible(false);
   sg.processEvents();
 
   std::printf("lsystem_coast: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",
