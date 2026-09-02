@@ -251,14 +251,17 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
   bool giz = rig.gizmosVisible();
   if (ImGui::Checkbox("Show lights", &giz))
     rig.setGizmosVisible(giz);
-  if (giz)
-    SliderLive(rig.appContext(), "Beam alpha", rig.statePath() + ".gizmo_beam_alpha", 0.0, 1.0,
-               0.18, "%.2f");
+  // Must sit directly under the Checkbox: IsItemHovered() names the LAST item
+  // submitted, so below the conditional slider it described the wrong widget
+  // whenever gizmos were on.
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Draw each light as a fixture, an aim line and its CONE.\n"
                       "The cone is the shadow-map frustum VTK bakes, so it shows\n"
                       "exactly what that light can shadow - and whether the map\n"
                       "is being spent on empty space.");
+  if (giz)
+    SliderLive(rig.appContext(), "Beam alpha", rig.statePath() + ".gizmo_beam_alpha", 0.0, 1.0,
+               0.18, "%.2f");
 
   cvc::app &ctx = rig.appContext();
   const std::string p = rig.statePath() + ".";
@@ -319,12 +322,25 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
 }
 
 void SceneMenuItems(SceneGraph &sg, bool *scenePanelOpen, bool *lightingPanelOpen) {
-  cvc::app &ctx = sg.appContext();
-  const std::string shadows = ShadowSettings::sceneStatePath(sg.getStatePrefix());
-
-  // Bound to state, not to a local mirror: setShadowsEnabled() can refuse (no
-  // render target yet) and a demo-side bool would keep a tick that lies.
-  ui::MenuItem(ctx, "Shadows", shadows + ".enabled");
+  // Driven through the scene, not through its state path, for two reasons that
+  // both end in a control that quietly does nothing.
+  //
+  // SceneGraph builds its ShadowSettings LAZILY, inside syncShadowState(), which
+  // only ever runs from a shadow setter. Until one has been called there is no
+  // subscriber on <prefix>.shadows.*, so writing the path is a no-op with no
+  // error and no log: `bunny_shadow --no-shadows` short-circuits
+  // setShadowsEnabled() entirely, and every shadow control here would be inert
+  // for the whole run.
+  //
+  // And setShadowsEnabled() can refuse — it returns false when there is no
+  // render target yet — without writing that refusal back to state, so a
+  // state-bound tick would read ON over a scene that has no shadows. Reading
+  // the scene back is what actually stops the tick lying; state-binding does
+  // not. The setters still publish to state, so Python and replicated peers see
+  // every change exactly as before.
+  bool shadowsOn = sg.shadowsEnabled();
+  if (ImGui::MenuItem("Shadows", nullptr, &shadowsOn))
+    sg.setShadowsEnabled(shadowsOn);
 
   ImGui::Separator();
 
@@ -379,11 +395,13 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
     }
   }
 
-  cvc::app &ctx = sg.appContext();
-  const std::string shadows = ShadowSettings::sceneStatePath(sg.getStatePrefix());
-
+  // Same as SceneMenuItems: through the scene, not through the state path, so
+  // the controls work on a scene that has never had a shadow setter called and
+  // the tick cannot outlive a refused enable.
   ImGui::TextUnformatted("Shadows");
-  ui::Checkbox(ctx, "Enabled", shadows + ".enabled");
+  bool shadowsOn = sg.shadowsEnabled();
+  if (ImGui::Checkbox("Enabled", &shadowsOn))
+    sg.setShadowsEnabled(shadowsOn);
   // Resolution is the knob you actually reach for when a shadow looks wrong:
   // a tight light cone spends the whole map on the subject, a wide one wastes
   // it. Powers of two only — the map is square and allocated per light.
@@ -398,7 +416,9 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
     if (ImGui::RadioButton(lbl, res == kRes[i]))
       sg.setShadowResolution(kRes[i]);
   }
-  ui::SliderInt(ctx, "Bake every", shadows + ".interval", 1, 30, 1);
+  int interval = sg.shadowUpdateInterval();
+  if (ImGui::SliderInt("Bake every", &interval, 1, 30))
+    sg.setShadowUpdateInterval(interval);
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Re-bake the shadow maps every N frames.\n"
                       "Raise it when the lights and the geometry are both still — the bake"
