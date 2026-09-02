@@ -1003,6 +1003,33 @@ jobs:
           build_type: Release
           link: shared
 
+      # swig for the pycvc-cp311-cuda / pycvc-gl-cp311-cuda steps below, FROM THE
+      # CATALOG — the same `swig` those recipes already declare under host_tools.
+      # fetch-libcvc-deps installs build+runtime deps only ("host_tools excluded —
+      # CI provides cmake/ninja"), which is true of the GitHub-hosted images but
+      # not of this bare nvidia/cuda container, and the runner host's swig is
+      # invisible from inside it. Both CUDA python columns were failing configure
+      # with "Could NOT find SWIG (missing: SWIG_EXECUTABLE SWIG_DIR python)".
+      #
+      # SWIG_LIB is mandatory, not belt-and-braces: the packaged swig binary has
+      # the builder's temp path baked in (`swig -swiglib` reports
+      # /tmp/cvcpkg-builder/...), so without it every invocation dies with
+      # "Unable to find 'swig.swg'". Point it at the installed share/swig/<ver>.
+      - name: Install swig (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HT="$GITHUB_WORKSPACE/host-tools"
+          cvcpkg install swig --prefix "$HT"
+          swiglib="$(find "$HT/share/swig" -maxdepth 1 -mindepth 1 -type d | head -1)"
+          if [ -z "$swiglib" ]; then
+            echo "::error::cvcpkg installed swig but no share/swig/<version> under $HT"
+            exit 1
+          fi
+          echo "$HT/bin" >> "$GITHUB_PATH"
+          echo "SWIG_LIB=$swiglib" >> "$GITHUB_ENV"
+          SWIG_LIB="$swiglib" "$HT/bin/swig" -version | sed -n '2,3p'
+
       - name: Configure (CUDA / Linux)
         shell: bash
         run: |
