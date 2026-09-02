@@ -112,6 +112,14 @@ turns the feature on for every subsequent `step()`. `clear_material()` turns
 it back off. `mc.gate.hard_margin_m <= 0` means "2 grid cells" (the source's
 margin at its own resolution).
 
+The trailing `planes` argument (default 1) takes grouped material: pass
+`[planes,rows,cols]` risk/hard stacks and each agent indexes its material plane
+by the **same** `map_id` as its belief plane, so every `map_id` must be
+`< planes` (it throws otherwise — the pycvc binding pre-validates this before
+releasing the GIL). `material_gate_active()` is only meaningful while material is
+attached; its buffer is sized inside `set_material`, so ask `has_material()`
+first.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
@@ -150,12 +158,33 @@ cross-language sweep lives in GRL-SNAM `tests/test_material_parity.py`.
 
 ## pycvc surface
 
-`nav_material_build`, `nav_witness_gate`, `nav_witness_gate_batch`,
-`nav_material_sample`, `nav_bicycle_rollout_material` — all NEW symbols
-(nothing re-signatured), so GRL-SNAM's capability flags (`HAS_MATERIAL`,
-`HAS_MATERIAL_DRIVE`) degrade cleanly against older pycvc builds. GRL-SNAM
-keeps pure Python as the feature default and opts into these via
-`GRL_SNAM_MATERIAL_BACKEND=native`.
+Field/gate kernels: `nav_material_build`, `nav_witness_gate`,
+`nav_witness_gate_batch`, `nav_material_sample`, `nav_bicycle_rollout_material`,
+`nav_drive_step_material`.
+
+`sim_world` material (grouped planes): `nav_sim_world_set_material`,
+`nav_sim_world_clear_material`, `nav_sim_world_material_gate_active`.
+
+Learned model + training: `nav_matnet_forward` (the `.cvcnm` coefficient net),
+`nav_integrate_surrogate_material` (the obstacle-list rollout), and the trainer
+handle `nav_material_trainer_create` / `_step` / `_loss` / `_save` /
+`_cuda_active`, plus the handle-free probes `nav_material_cuda_available` and
+`nav_material_cuda_max_horizon`.
+
+All NEW symbols (nothing re-signatured), so GRL-SNAM's capability flags
+(`HAS_MATERIAL`, `HAS_MATERIAL_DRIVE`, `HAS_MATNET`,
+`HAS_MATERIAL_ROLLOUT_INTEGRATOR`, `HAS_MATERIAL_TRAINER`) degrade cleanly
+against older pycvc builds. GRL-SNAM keeps pure Python as the feature default and
+opts into these via `GRL_SNAM_MATERIAL_BACKEND=native`.
+
+The trainer's `use_cuda` is a *request*, not a guarantee: each heavy op falls back
+to its host twin when the build has no CUDA, no device is present, or the batch
+exceeds a kernel's bound (the device rollout VJP caps `max(H)` at
+`material_rollout_cuda_max_horizon()`). `nav_material_trainer_cuda_active`
+reports what a handle will actually use. The three `*_cuda_available()` probes
+are defined on every build — the `.cu` supplies the real ones and the matching
+`.cpp` a `false` stub — so a binding can call them without a `CVC_USING_CUDA`
+guard.
 
 Binding gotcha, earned the hard way: a C++ exception thrown while the GIL is
 released (`Py_BEGIN_ALLOW_THREADS`) leaves the GIL unrestored and segfaults —
@@ -164,7 +193,26 @@ the release.
 
 ## Deferred
 
-`nav_sim_world_set_material` pycvc binding, CUDA material drive
-(`drive.cu` twin), grouped material planes (`M > 1` is plumbed through
-`material_stack`/`material_sample`; the shipped integrations use the single
-shared oracle plane).
+**CUDA material *inference* drive** — a `drive.cu` material twin
+(`drive_step_material` / `bicycle_rollout_material` on device) and
+`sim_world_cuda` material planes. Neither exists: `drive.cu`'s device path has no
+`material_stack`, no 6-channel sample and no `lam_soft`/`lam_hard` force terms.
+The device drive work that did land (`bicycle_rollout_cuda`, the device-resident
+`sim_world_cuda`, the fused grip feature) is the geometry/vehicle drive plus the
+`mu` friction raster, which `drive.h` keeps deliberately separate from the
+material planes — it is not progress on this item.
+
+Note this is *inference*. The material **training** stack is on the device: the
+model forward/backward (`coef_energy_net.cu`), the surrogate rollout forward/VJP
+(`material_rollout.cu`) and a device-resident Adam (`material_train.cu`), routed
+by `material_loss_and_grad(..., use_cuda=true)`. `L_multi`
+(`multi_start_penalty`, `geom_rollout.cpp`) is the one training op with no device
+twin and stays on the host regardless.
+
+Formerly deferred, now shipped: the `nav_sim_world_set_material` pycvc binding
+and grouped material planes (`M > 1`) — `witness_gate_batch` takes a `map_id`
+against `[M,H,W]` stacks and `sim_world::set_material(..., planes)` builds
+per-plane surfaces. What remains on the grouped-plane surface is Python-side:
+`nav_witness_gate_batch`, `nav_material_sample` and `nav_material_build` are
+still single-plane in the binding, and no GRL-SNAM wrapper attaches material to a
+`NativeSimWorld` yet.
