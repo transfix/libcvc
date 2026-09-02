@@ -405,5 +405,11 @@ void coef_energy_net::forward_batch(const float *obs_feats, const std::uint8_t *
   });
 }
 
+#ifndef CVC_USING_CUDA
+// CPU-only build: coef_energy_net.cu supplies the real probe when there is one
+// (CVC_USING_CUDA, not CVC_ENABLE_CUDA — see the note in drive.cpp).
+bool coef_energy_cuda_available() { return false; }
+#endif
+
 } // namespace nav
 } // namespace cvc

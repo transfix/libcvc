@@ -110,6 +110,9 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
 // owns a material_adam). It is reached only through the nav_material_trainer_*
 // handle functions, so SWIG must NOT try to wrap it as a Python class.
 %ignore pycvc::MaterialTrainer;
+// Internal numpy->material_batch marshaller (non-copyable, and its bind() takes 18
+// raw PyObject*). Reached only through the nav_material_trainer_* functions.
+%ignore pycvc::MaterialBatchArgs;
 
 %inline %{
   namespace pycvc {
@@ -1081,6 +1084,18 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     mc.gate.improvement_margin = improvement_margin;
     mc.gate.material_trigger = material_trigger;
     mc.gate.progress_slack_cells = progress_slack_cells;
+    // sim_world::set_material throws when any agent's map_id >= planes (each agent
+    // indexes its material plane by its BELIEF plane id). A C++ throw crossing
+    // Py_BEGIN_ALLOW_THREADS leaves the GIL unrestored and takes the interpreter
+    // down, so validate the precondition HERE, before the release — the house rule
+    // for every throwing kernel in this file.
+    if (planes > 1) {
+      const int *mid = sw->agent_planes();
+      for (int i = 0, n = sw->size(); i < n; ++i)
+        if (mid[i] >= planes)
+          fail("pycvc.nav_sim_world_set_material: an agent's map_id is >= planes (each agent "
+               "indexes its material plane by its belief plane id)");
+    }
     const float *rd = static_cast<const float *>(PyArray_DATA(r));
     const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(h));
     Py_BEGIN_ALLOW_THREADS sw->set_material(rd, hd, mc, planes);
@@ -1096,6 +1111,13 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   // Last tick's per-agent gate decision [n] bool (valid only while material set).
   PyObject *nav_sim_world_material_gate_active(PyObject *handle) {
     cvc::nav::sim_world *sw = sim_world_from(handle);
+    // material_gate_active() hands back mat_gate_active_.data(), and that vector is
+    // only sized inside set_material — on a world that never had material attached
+    // it is EMPTY, so the copy below would read N elements off a null/!dereferenceable
+    // pointer. Refuse instead of corrupting the interpreter.
+    if (!sw->has_material())
+      throw std::invalid_argument("pycvc.nav_sim_world_material_gate_active: no material attached "
+                                  "(call nav_sim_world_set_material first)");
     const int N = sw->size();
     npy_intp d1 = N;
     PyObject *out = PyArray_SimpleNew(1, &d1, NPY_BOOL);
@@ -2257,10 +2279,18 @@ PyObject *nav_integrate_surrogate_material(
 // weights matnet_export.py writes), drive it with numpy batches, save the
 // trained weights. The dataset stays in Python; only the material_batch arrays
 // cross into C++, where the whole loss+backward+Adam step runs GIL-free.
+// `use_cuda` routes the four heavy ops (model forward/backward, rollout
+// forward/VJP) through their device twins inside material_loss_and_grad. It is a
+// REQUEST, not a guarantee: each op falls back to its host twin when the build has
+// no CUDA, no device is present, or the batch exceeds a kernel's limits — so
+// nav_material_trainer_cuda_active() reports what the handle will actually use.
+// The Adam step stays on the host optimizer (material_adam), which owns the
+// weights the .cvcnm save writes.
 struct MaterialTrainer {
   cvc::nav::coef_energy_net model;
   cvc::nav::material_adam opt;
   cvc::nav::material_loss_config cfg;
+  bool use_cuda = false;
   MaterialTrainer(cvc::nav::coef_energy_net m, float grad_clip)
       : model(std::move(m)), opt(model, grad_clip) {}
 };
@@ -2275,6 +2305,102 @@ static MaterialTrainer *material_trainer_from(PyObject *cap) {
   return t;
 }
 
+// Marshals the 17 numpy arrays of a cvc::nav::material_batch, holding a reference
+// to each for the duration of the call (released by the destructor, so a throw
+// mid-validation cannot leak). Shared by the trainer's step (loss+backward) and
+// loss (forward-only) entry points so their shape contracts cannot drift apart.
+// Every check runs BEFORE the caller releases the GIL — a throw crossing
+// Py_BEGIN_ALLOW_THREADS would leave the GIL unrestored.
+struct MaterialBatchArgs {
+  std::vector<PyArrayObject *> hold;
+  cvc::nav::material_batch b;
+
+  MaterialBatchArgs() = default;
+  MaterialBatchArgs(const MaterialBatchArgs &) = delete;
+  MaterialBatchArgs &operator=(const MaterialBatchArgs &) = delete;
+  ~MaterialBatchArgs() {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+  }
+
+  void bind(const char *who, int model_patch_size, PyObject *obs_feats, PyObject *obs_mask,
+            PyObject *goal_feats, PyObject *risk_patch, PyObject *o0, PyObject *v0, PyObject *goal,
+            PyObject *C, PyObject *R, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
+            PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt, PyObject *gamma_o) {
+    auto oops = [&](const std::string &msg) {
+      throw std::invalid_argument(std::string("pycvc.") + who + ": " + msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        oops("an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ofa = take(obs_feats, NPY_FLOAT, 3);
+    PyArrayObject *oma = take(obs_mask, NPY_UINT8, 2);
+    PyArrayObject *gfa = take(goal_feats, NPY_FLOAT, 2);
+    PyArrayObject *rpa = take(risk_patch, NPY_FLOAT, 4);
+    PyArrayObject *o0a = take(o0, NPY_FLOAT, 2);
+    PyArrayObject *v0a = take(v0, NPY_FLOAT, 2);
+    PyArrayObject *ga = take(goal, NPY_FLOAT, 2);
+    PyArrayObject *Ca = take(C, NPY_FLOAT, 3);
+    PyArrayObject *Ra = take(R, NPY_FLOAT, 2);
+    PyArrayObject *rlpa = take(rollout_patch, NPY_FLOAT, 4);
+    PyArrayObject *rra = take(rr, NPY_FLOAT, 1);
+    PyArrayObject *dha = take(d_hat, NPY_FLOAT, 1);
+    PyArrayObject *dta = take(dt, NPY_FLOAT, 1);
+    PyArrayObject *Ha = take(H, NPY_INT32, 1);
+    PyArrayObject *ota = take(o_tgt, NPY_FLOAT, 2);
+    PyArrayObject *vta = take(v_tgt, NPY_FLOAT, 2);
+    PyArrayObject *goa = take(gamma_o, NPY_FLOAT, 1);
+
+    const int B = static_cast<int>(PyArray_DIM(o0a, 0));
+    const int N = static_cast<int>(PyArray_DIM(Ca, 1));
+    const int P = static_cast<int>(PyArray_DIM(rpa, 2));
+    const int Hp = static_cast<int>(PyArray_DIM(rlpa, 2)),
+              Wp = static_cast<int>(PyArray_DIM(rlpa, 3));
+    if (PyArray_DIM(ofa, 0) != B || PyArray_DIM(ofa, 1) != N || PyArray_DIM(ofa, 2) != 6 ||
+        PyArray_DIM(oma, 0) != B || PyArray_DIM(oma, 1) != N || PyArray_DIM(gfa, 0) != B ||
+        PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B || PyArray_DIM(rpa, 1) != 2 ||
+        PyArray_DIM(rpa, 3) != P || PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(v0a, 0) != B ||
+        PyArray_DIM(v0a, 1) != 2 || PyArray_DIM(ga, 0) != B || PyArray_DIM(ga, 1) != 2 ||
+        PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 || PyArray_DIM(Ra, 0) != B ||
+        PyArray_DIM(Ra, 1) != N || PyArray_DIM(rlpa, 0) != B || PyArray_DIM(rlpa, 1) != 6 ||
+        PyArray_DIM(rra, 0) != B || PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B ||
+        PyArray_DIM(Ha, 0) != B || PyArray_DIM(ota, 0) != B || PyArray_DIM(ota, 1) != 2 ||
+        PyArray_DIM(vta, 0) != B || PyArray_DIM(vta, 1) != 2 || PyArray_DIM(goa, 0) != B)
+      oops("batch shape mismatch");
+    if (model_patch_size != P)
+      oops("risk_patch P != model patch_size");
+
+    auto FD = [](PyArrayObject *a) { return static_cast<const float *>(PyArray_DATA(a)); };
+    b.B = B;
+    b.N = N;
+    b.P = P;
+    b.Hp = Hp;
+    b.Wp = Wp;
+    b.obs_feats = FD(ofa);
+    b.obs_mask = static_cast<const std::uint8_t *>(PyArray_DATA(oma));
+    b.goal_feats = FD(gfa);
+    b.risk_patch = FD(rpa);
+    b.o0 = FD(o0a);
+    b.v0 = FD(v0a);
+    b.goal = FD(ga);
+    b.C = FD(Ca);
+    b.R = FD(Ra);
+    b.rollout_patch = FD(rlpa);
+    b.rr = FD(rra);
+    b.d_hat = FD(dha);
+    b.dt = FD(dta);
+    b.H = static_cast<const int *>(PyArray_DATA(Ha));
+    b.o_tgt = FD(ota);
+    b.v_tgt = FD(vta);
+    b.gamma_o = FD(goa);
+  }
+};
+
 PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip = 5.0,
                                       double w_traj = 1.0, double w_vel = 0.5, double w_fric = 0.1,
                                       double w_clear = 5e-3, double w_lreg = 0.01,
@@ -2284,9 +2410,10 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
                                       double lam_hard_max = 10.0, double margin_factor = 0.5,
                                       double mass = 1.0, double d_hat_sdf = 3.0,
                                       double k_sharp = 5.0, double tau = 0.05, int ms_h = 3,
-                                      double ms_dt_mult = 4.0) {
+                                      double ms_dt_mult = 4.0, int use_cuda = 0) {
   cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(cvcnm_path); // throws on bad
   auto *t = new MaterialTrainer(std::move(model), static_cast<float>(grad_clip));
+  t->use_cuda = use_cuda != 0;
   auto &c = t->cfg;
   c.w_traj = (float)w_traj;
   c.w_vel = (float)w_vel;
@@ -2323,92 +2450,67 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
                                     PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
                                     PyObject *gamma_o, double lr, int num_threads = 0) {
   MaterialTrainer *t = material_trainer_from(handle);
-  std::vector<PyArrayObject *> hold;
-  auto fail = [&](const char *msg) {
-    for (PyArrayObject *h : hold)
-      Py_DECREF(h);
-    throw std::invalid_argument(msg);
-  };
-  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
-    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
-        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
-    if (!a)
-      fail("pycvc.nav_material_trainer_step: an input array had the wrong dtype/rank");
-    hold.push_back(a);
-    return a;
-  };
-  PyArrayObject *ofa = take(obs_feats, NPY_FLOAT, 3);
-  PyArrayObject *oma = take(obs_mask, NPY_UINT8, 2);
-  PyArrayObject *gfa = take(goal_feats, NPY_FLOAT, 2);
-  PyArrayObject *rpa = take(risk_patch, NPY_FLOAT, 4);
-  PyArrayObject *o0a = take(o0, NPY_FLOAT, 2);
-  PyArrayObject *v0a = take(v0, NPY_FLOAT, 2);
-  PyArrayObject *ga = take(goal, NPY_FLOAT, 2);
-  PyArrayObject *Ca = take(C, NPY_FLOAT, 3);
-  PyArrayObject *Ra = take(R, NPY_FLOAT, 2);
-  PyArrayObject *rlpa = take(rollout_patch, NPY_FLOAT, 4);
-  PyArrayObject *rra = take(rr, NPY_FLOAT, 1);
-  PyArrayObject *dha = take(d_hat, NPY_FLOAT, 1);
-  PyArrayObject *dta = take(dt, NPY_FLOAT, 1);
-  PyArrayObject *Ha = take(H, NPY_INT32, 1);
-  PyArrayObject *ota = take(o_tgt, NPY_FLOAT, 2);
-  PyArrayObject *vta = take(v_tgt, NPY_FLOAT, 2);
-  PyArrayObject *goa = take(gamma_o, NPY_FLOAT, 1);
-
-  const int B = static_cast<int>(PyArray_DIM(o0a, 0));
-  const int N = static_cast<int>(PyArray_DIM(Ca, 1));
-  const int P = static_cast<int>(PyArray_DIM(rpa, 2));
-  const int Hp = static_cast<int>(PyArray_DIM(rlpa, 2)), Wp = static_cast<int>(PyArray_DIM(rlpa, 3));
-  if (PyArray_DIM(ofa, 0) != B || PyArray_DIM(ofa, 1) != N || PyArray_DIM(ofa, 2) != 6 ||
-      PyArray_DIM(oma, 0) != B || PyArray_DIM(oma, 1) != N || PyArray_DIM(gfa, 0) != B ||
-      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B || PyArray_DIM(rpa, 1) != 2 ||
-      PyArray_DIM(rpa, 3) != P || PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(v0a, 0) != B ||
-      PyArray_DIM(v0a, 1) != 2 || PyArray_DIM(ga, 0) != B || PyArray_DIM(ga, 1) != 2 ||
-      PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 || PyArray_DIM(Ra, 0) != B ||
-      PyArray_DIM(Ra, 1) != N || PyArray_DIM(rlpa, 0) != B || PyArray_DIM(rlpa, 1) != 6 ||
-      PyArray_DIM(rra, 0) != B || PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B ||
-      PyArray_DIM(Ha, 0) != B || PyArray_DIM(ota, 0) != B || PyArray_DIM(ota, 1) != 2 ||
-      PyArray_DIM(vta, 0) != B || PyArray_DIM(vta, 1) != 2 || PyArray_DIM(goa, 0) != B)
-    fail("pycvc.nav_material_trainer_step: batch shape mismatch");
-  if (t->model.patch_size() != P)
-    fail("pycvc.nav_material_trainer_step: risk_patch P != model patch_size");
-
-  cvc::nav::material_batch b;
-  b.B = B;
-  b.N = N;
-  b.P = P;
-  b.Hp = Hp;
-  b.Wp = Wp;
-  auto FD = [](PyArrayObject *a) { return static_cast<const float *>(PyArray_DATA(a)); };
-  b.obs_feats = FD(ofa);
-  b.obs_mask = static_cast<const std::uint8_t *>(PyArray_DATA(oma));
-  b.goal_feats = FD(gfa);
-  b.risk_patch = FD(rpa);
-  b.o0 = FD(o0a);
-  b.v0 = FD(v0a);
-  b.goal = FD(ga);
-  b.C = FD(Ca);
-  b.R = FD(Ra);
-  b.rollout_patch = FD(rlpa);
-  b.rr = FD(rra);
-  b.d_hat = FD(dha);
-  b.dt = FD(dta);
-  b.H = static_cast<const int *>(PyArray_DATA(Ha));
-  b.o_tgt = FD(ota);
-  b.v_tgt = FD(vta);
-  b.gamma_o = FD(goa);
+  MaterialBatchArgs ba;
+  ba.bind("nav_material_trainer_step", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
+          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
   t->cfg.num_threads = num_threads;
 
   double L = 0.0;
   Py_BEGIN_ALLOW_THREADS
   cvc::nav::coef_energy_net::param_grads grads = t->model.zero_grads();
-  L = cvc::nav::material_loss_and_grad(t->model, b, t->cfg, grads, nullptr);
+  L = cvc::nav::material_loss_and_grad(t->model, ba.b, t->cfg, grads, nullptr, t->use_cuda);
   t->opt.step(t->model, grads, static_cast<float>(lr));
   Py_END_ALLOW_THREADS
-
-  for (PyArrayObject *h : hold)
-    Py_DECREF(h);
   return PyFloat_FromDouble(L);
+}
+
+// Forward-only loss over a batch — the VALIDATION entry point. Scores a held-out
+// split without running the backward or touching the optimizer, so the weights and
+// the Adam moments are unchanged. `frozen_eta` pins the detached CVaR quantile
+// (pass NaN, the default, to compute it from this batch's own costs).
+PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
+                                    PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
+                                    PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
+                                    PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
+                                    PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
+                                    PyObject *gamma_o, double frozen_eta, int num_threads = 0) {
+  MaterialTrainer *t = material_trainer_from(handle);
+  MaterialBatchArgs ba;
+  ba.bind("nav_material_trainer_loss", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
+          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  cvc::nav::material_loss_config cfg = t->cfg; // don't publish num_threads onto the handle
+  cfg.num_threads = num_threads;
+
+  double L = 0.0;
+  Py_BEGIN_ALLOW_THREADS
+  L = cvc::nav::material_loss(t->model, ba.b, cfg, static_cast<float>(frozen_eta), t->use_cuda);
+  Py_END_ALLOW_THREADS
+  return PyFloat_FromDouble(L);
+}
+
+// What the handle will ACTUALLY use: true only when it was created with use_cuda
+// and the build+device can serve it. Lets a caller log the real path rather than
+// the request (material_loss_and_grad falls back silently per-op).
+PyObject *nav_material_trainer_cuda_active(PyObject *handle) {
+  MaterialTrainer *t = material_trainer_from(handle);
+  const bool on = t->use_cuda && cvc::nav::coef_energy_cuda_available() &&
+                  cvc::nav::material_rollout_cuda_available();
+  return PyBool_FromLong(on ? 1 : 0);
+}
+
+// Device probes, independent of any handle (so a caller can decide before it
+// builds one). Always defined -- CPU-only builds link the `false` stubs.
+PyObject *nav_material_cuda_available() {
+  const bool on = cvc::nav::coef_energy_cuda_available() &&
+                  cvc::nav::material_rollout_cuda_available() &&
+                  cvc::nav::material_train_cuda_available();
+  return PyBool_FromLong(on ? 1 : 0);
+}
+
+// Largest max(H) the device rollout VJP accepts; above it that one op falls back
+// to the host adjoint. 0 on a CPU-only build.
+PyObject *nav_material_cuda_max_horizon() {
+  return PyLong_FromLong(cvc::nav::material_rollout_cuda_max_horizon());
 }
 
 PyObject *nav_material_trainer_save(PyObject *handle, const char *path) {
