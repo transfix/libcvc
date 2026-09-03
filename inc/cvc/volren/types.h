@@ -101,6 +101,19 @@ struct mat4 {
             m[8] * v.x + m[9] * v.y + m[10] * v.z};
   }
 
+  // Composition: (a * b) applies b first, then a (column-vector convention).
+  mat4 operator*(const mat4 &b) const {
+    mat4 out;
+    for (int r = 0; r < 4; ++r)
+      for (int c = 0; c < 4; ++c) {
+        double sum = 0.0;
+        for (int k = 0; k < 4; ++k)
+          sum += m[r * 4 + k] * b.m[k * 4 + c];
+        out.m[r * 4 + c] = sum;
+      }
+    return out;
+  }
+
   // Inverse of an affine transform.  Throws cvc::volren_error when the matrix
   // is not affine or its linear part is singular.
   mat4 affine_inverse() const;

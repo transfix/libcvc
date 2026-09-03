@@ -19,6 +19,10 @@ add_executable(bunny_shadow bunny_shadow.cpp)
 target_link_libraries(bunny_shadow PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS bunny_shadow MODULES ${VTK_LIBRARIES})
 
+add_executable(volren_bunny volren_bunny.cpp)
+target_link_libraries(volren_bunny PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS volren_bunny MODULES ${VTK_LIBRARIES})
+
 # lsystem_coast — island + GPU FFT-ocean trial. Hosts OceanFFT (the ABYSSAL port
 # target, docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md). A SEPARATE demo
 # from lsystem_forest by design: the forest stays the untouched perf control.
@@ -62,7 +66,7 @@ endif()
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by wasm/build-pages.py — no host page to hand-write.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow nav_city_swarm nav_fog_ghost)
+  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny nav_city_swarm nav_fog_ghost)
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
@@ -116,7 +120,7 @@ endif()
 # deps-prefix link dirs too, which cvcpkg's rewrite-install-paths relocates to
 # $ORIGIN-relative. cvcgl-examples is its own install COMPONENT so the recipe can
 # `cmake --install --component cvcgl-examples` and get only the bins (not the cvcGL SDK).
-set(_cvcgl_example_bins lsystem_forest lsystem_coast bunny_shadow nav_city_swarm nav_fog_ghost nav_finale)
+set(_cvcgl_example_bins lsystem_forest lsystem_coast bunny_shadow volren_bunny nav_city_swarm nav_fog_ghost nav_finale)
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
   INSTALL_RPATH_USE_LINK_PATH ON)

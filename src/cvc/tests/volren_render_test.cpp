@@ -719,6 +719,49 @@ TEST_F(VolrenRenderTest, NonFinitePoseOrTransformThrows) {
   EXPECT_THROW(rc.render(), cvc::volren_error);
 }
 
+// Regression: the isosurface path enumerates EVERY cell the ray crosses
+// (Amanatides-Woo DDA) instead of testing only sample-visited cells -- the
+// legacy point-sampling skipped corner-clipped cells and peppered silhouettes
+// with alpha-0 holes (worse at finer grids).  A closed sphere surface must
+// have zero interior holes at a deliberately coarse step count.
+TEST_F(VolrenRenderTest, IsosurfaceSilhouetteHasNoHoles) {
+  cvc::volume vol(ctx, cvc::dimension(48, 48, 48), cvc::Float,
+                  cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+  for (unsigned k = 0; k < 48; ++k)
+    for (unsigned j = 0; j < 48; ++j)
+      for (unsigned i = 0; i < 48; ++i) {
+        const double x = -1 + i * vol.XSpan();
+        const double y = -1 + j * vol.YSpan();
+        const double z = -1 + k * vol.ZSpan();
+        vol(i, j, k, std::sqrt(x * x + y * y + z * z) - 0.6);
+      }
+  volume_settings vs;
+  vs.shaded = false;
+  isosurface iso;
+  iso.value = 0.0;
+  iso.opacity = 1.0f;
+  vs.isosurfaces.push_back(iso);
+  raycaster rc(ctx);
+  rc.add_volume(vol, vs);
+  rc.view() = orthoCam();
+  rc.settings().steps = 96; // coarse: the legacy sampling model rioted here
+  rc.settings().two_sided_lighting = true;
+
+  const frame f = rc.render();
+
+  // Every pixel strictly inside the projected circle (radius 0.6 world =
+  // 0.6/1.0 * 32px silhouette) must be opaque.
+  const int r_px = int(0.6 * (kRaster / 2) * 0.85); // 15% safety band
+  int holes = 0;
+  for (int py = 0; py < kRaster; ++py)
+    for (int px = 0; px < kRaster; ++px) {
+      const int dx = px - kRaster / 2, dy = py - kRaster / 2;
+      if (dx * dx + dy * dy < r_px * r_px && pixel(f, px, py)[3] < 250)
+        ++holes;
+    }
+  EXPECT_EQ(holes, 0) << "isosurface silhouette has " << holes << " holes";
+}
+
 // Two raycasters rendering concurrently must not interfere: each defaults to
 // its own thread pool (cvc::thread_pool allows only one in-flight
 // parallel_for per pool).

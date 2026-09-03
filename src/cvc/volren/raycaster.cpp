@@ -257,9 +257,15 @@ frame raycaster::render() {
   // Per-tile scratch, reused across the tile's rays: the spline-gradient
   // neighborhood cache (valid across rays -- it is keyed on the cell index)
   // and the per-ray last-cell tracker.
+  struct iso_hit {
+    double t;
+    std::array<float, 3> color;
+    float opacity;
+  };
   struct tile_scratch {
     std::vector<detail::spline_gradient_cache> spline;
     std::vector<std::array<std::int64_t, 3>> last_cell;
+    std::vector<iso_hit> hits;
   };
 
   const auto render_ray = [&](int px, int py, tile_scratch &scratch) {
@@ -300,7 +306,144 @@ frame raycaster::render() {
       }
     };
 
+    // ---- Isosurface hits: exact per-cell ray traversal ---------------------
+    // The legacy tracer tested a cell only when a march SAMPLE landed in it,
+    // so cells the ray merely clipped (traversal shorter than one step) were
+    // skipped -- the famous black-speckle artifact, worse at finer grids.
+    // Here every cell the ray actually crosses is enumerated with an
+    // Amanatides-Woo DDA and MC-intersected exactly; the hits are then merged
+    // into the compositing stream at their ray parameter, preserving the
+    // front-to-back interleave with the transfer-function samples.
+    scratch.hits.clear();
+    for (std::size_t v = 0; v < nvol; ++v) {
+      const prepared_volume &p = prep[v];
+      const volume_settings &vs = *p.vs;
+      if (!p.any_iso)
+        continue;
+
+      const vec3d lorg = p.to_local_point(r.origin);
+      const vec3d ldir = p.to_local_vector(r.direction); // unnormalized: t preserved
+      const ray local_ray{lorg, ldir};
+
+      // Clip the world-t range to this volume's local box.
+      const cvc::bounding_box vbox(p.grid.minb.x, p.grid.minb.y, p.grid.minb.z,
+                                   p.grid.minb.x + p.grid.span.x * double(p.grid.dimx - 1),
+                                   p.grid.minb.y + p.grid.span.y * double(p.grid.dimy - 1),
+                                   p.grid.minb.z + p.grid.span.z * double(p.grid.dimz - 1));
+      double tv0 = 0.0, tv1 = 0.0;
+      if (!intersect_box(local_ray, vbox, tv0, tv1))
+        continue;
+      tv0 = std::max(tv0, t0);
+      tv1 = std::min(tv1, t1);
+      if (!(tv0 <= tv1))
+        continue;
+
+      // Start half a hair inside so the entry cell resolves.
+      const double t_start = tv0 + (tv1 - tv0) * 1e-9;
+      std::int64_t idx[3];
+      if (!p.grid.cell_index(lorg + ldir * t_start, idx))
+        continue;
+
+      const double ld[3] = {ldir.x, ldir.y, ldir.z};
+      const double lmin[3] = {p.grid.minb.x, p.grid.minb.y, p.grid.minb.z};
+      const double lspan[3] = {p.grid.span.x, p.grid.span.y, p.grid.span.z};
+      const std::int64_t dims[3] = {p.grid.dimx, p.grid.dimy, p.grid.dimz};
+      const double lorg_a[3] = {lorg.x, lorg.y, lorg.z};
+      std::int64_t stepc[3];
+      double t_max[3], t_delta[3];
+      for (int a = 0; a < 3; ++a) {
+        if (ld[a] > 0.0) {
+          stepc[a] = 1;
+          t_delta[a] = lspan[a] / ld[a];
+          t_max[a] = ((lmin[a] + double(idx[a] + 1) * lspan[a]) - lorg_a[a]) / ld[a];
+        } else if (ld[a] < 0.0) {
+          stepc[a] = -1;
+          t_delta[a] = -lspan[a] / ld[a];
+          t_max[a] = ((lmin[a] + double(idx[a]) * lspan[a]) - lorg_a[a]) / ld[a];
+        } else {
+          stepc[a] = 0;
+          t_delta[a] = std::numeric_limits<double>::infinity();
+          t_max[a] = std::numeric_limits<double>::infinity();
+        }
+      }
+
+      const std::int64_t max_cells = dims[0] + dims[1] + dims[2] + 3;
+      double t_cell = tv0;
+      for (std::int64_t n = 0; n < max_cells && t_cell <= tv1; ++n) {
+        float vals[8];
+        p.grid.corners(idx[0], idx[1], idx[2], vals);
+        float min_val = vals[0], max_val = vals[0];
+        for (int j = 1; j < 8; ++j) {
+          min_val = std::min(min_val, vals[j]);
+          max_val = std::max(max_val, vals[j]);
+        }
+
+        detail::mc_cell cell;
+        bool cell_filled = false;
+        for (const isosurface &surf : vs.isosurfaces) {
+          if (surf.value < min_val || surf.value > max_val)
+            continue;
+          if (!cell_filled) {
+            cell.id[0] = idx[0];
+            cell.id[1] = idx[1];
+            cell.id[2] = idx[2];
+            cell.orig = p.grid.minb;
+            cell.span = p.grid.span;
+            cell.from_binary_corners(vals);
+            cell_filled = true;
+          }
+          float w[3];
+          double t_hit = 0.0;
+          if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w,
+                                                    t_hit))
+            continue;
+          if (t_hit < t0 || t_hit > tv1 + unit_step)
+            continue;
+          if (!rs.cut_planes.empty() &&
+              culled_by_planes(rs.cut_planes, r.origin + r.direction * t_hit))
+            continue;
+          const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
+          const vec3d normal = normalized(p.normal_to_world(grad));
+          const std::array<float, 3> shaded =
+              detail::blinn_phong(surf.color, normal, view_vec, rs.lights,
+                                  rs.two_sided_lighting, rs.ambient, surf.shininess);
+          scratch.hits.push_back({t_hit, shaded, surf.opacity});
+        }
+
+        // Advance to the neighboring cell across the nearest boundary.
+        int axis = 0;
+        if (t_max[1] < t_max[axis])
+          axis = 1;
+        if (t_max[2] < t_max[axis])
+          axis = 2;
+        t_cell = t_max[axis];
+        idx[axis] += stepc[axis];
+        if (idx[axis] < 0 || idx[axis] > dims[axis] - 2)
+          break;
+        t_max[axis] += t_delta[axis];
+      }
+    }
+    std::stable_sort(scratch.hits.begin(), scratch.hits.end(),
+                     [](const iso_hit &a, const iso_hit &b) { return a.t < b.t; });
+    std::size_t hit_cursor = 0;
+
+    const auto composite_hits_up_to = [&](double t_limit) {
+      while (hit_cursor < scratch.hits.size() && scratch.hits[hit_cursor].t <= t_limit &&
+             acc_a < rs.opacity_cutoff) {
+        const iso_hit &h = scratch.hits[hit_cursor++];
+        // An isosurface hit latches the depth map on its own -- the frame
+        // contract is "first iso hit or first threshold-crossing sample,
+        // whichever comes first".
+        if (!depth_set) {
+          *dpx = float(h.t * z_scale);
+          depth_set = true;
+        }
+        composite(h.color, h.opacity, h.t);
+      }
+    };
+
     for (double t = t0; t <= t1 && acc_a < rs.opacity_cutoff; t += unit_step) {
+      composite_hits_up_to(t);
       const vec3d pnt = r.origin + r.direction * t;
       if (!rs.cut_planes.empty() && culled_by_planes(rs.cut_planes, pnt))
         continue;
@@ -334,42 +477,8 @@ frame raycaster::render() {
           have_corners = true;
         };
 
-        // 1. Isosurfaces (legacy ISO_SURFACE): MC intersection in this cell.
-        if (p.any_iso) {
-          fetch_corners();
-          detail::mc_cell cell;
-          cell.id[0] = idx[0];
-          cell.id[1] = idx[1];
-          cell.id[2] = idx[2];
-          cell.orig = p.grid.minb; // THIS volume's frame (legacy used env[0]'s)
-          cell.span = p.grid.span;
-          cell.from_binary_corners(vals);
-          // Intersect in local space.  The local direction is NOT normalized,
-          // so the affine map preserves the ray parameter: t_hit is directly
-          // comparable to the world-space march t (and the depth map).
-          const ray local_ray{p.to_local_point(r.origin), p.to_local_vector(r.direction)};
-          for (const isosurface &surf : vs.isosurfaces) {
-            if (surf.value < min_val || surf.value > max_val)
-              continue;
-            float w[3];
-            double t_hit = 0.0;
-            if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w, t_hit))
-              continue;
-            // An isosurface hit latches the depth map on its own -- the
-            // frame contract is "first iso hit or first threshold-crossing
-            // sample, whichever comes first".
-            if (!depth_set) {
-              *dpx = float(t_hit * z_scale);
-              depth_set = true;
-            }
-            const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
-            const vec3d normal = normalized(p.normal_to_world(grad));
-            const std::array<float, 3> shaded =
-                detail::blinn_phong(surf.color, normal, view_vec, rs.lights, rs.two_sided_lighting,
-                                    rs.ambient, surf.shininess);
-            composite(shaded, surf.opacity, t_hit);
-          }
-        }
+        // (Isosurface hits were collected exactly by the DDA above and are
+        // merged in by composite_hits_up_to.)
 
         // 2. Unshaded transfer function (legacy COL_DENSITY).
         if (vs.unshaded) {
@@ -407,6 +516,8 @@ frame raycaster::render() {
         }
       }
     }
+    // Hits between the last sample and the exit point.
+    composite_hits_up_to(t1);
 
     // Over-blend the remaining transparency with the background (replaces the
     // legacy divide-by-alpha normalization of saturated rays).
