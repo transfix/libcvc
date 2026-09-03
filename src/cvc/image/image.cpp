@@ -263,11 +263,40 @@ image read_image(const std::string &path) {
 
 void write_image(const image &img, const std::string &path, int quality) {
   ensure_defaults();
-  std::string ext = image_file_extension(path);
-  image_file_io::ptr h = image_file_io::for_write_ext(ext);
-  if (!h)
+  const std::string ext = image_file_extension(path);
+  // Candidates in write-priority order: last registered first (the same
+  // last-wins rule as for_write_ext), earlier registrations as fallbacks. A
+  // handler signals "can't encode this" by throwing — e.g. magick_image_io on
+  // an ImageMagick built without the target format's delegate — and the next
+  // candidate gets its chance (the stb encoder for png/jpg/bmp/tga), so a
+  // crippled preferred writer degrades to another encoder instead of an error.
+  // Collected under the lock, called outside it (a handler may re-enter I/O).
+  std::vector<image_file_io::ptr> candidates;
+  {
+    std::lock_guard<std::mutex> lk(registry_mutex());
+    const auto &r = registry();
+    for (auto it = r.rbegin(); it != r.rend(); ++it)
+      for (const auto &he : (*it)->extensions())
+        if (he == ext) {
+          candidates.push_back(*it);
+          break;
+        }
+  }
+  if (candidates.empty())
     throw std::runtime_error("cvc::write_image: no handler writes '." + ext + "'");
-  h->write(img, path, quality);
+  std::string errors;
+  for (const auto &h : candidates) {
+    try {
+      h->write(img, path, quality);
+      return;
+    } catch (const std::exception &e) {
+      if (!errors.empty())
+        errors += "; ";
+      errors += h->id() + ": " + e.what();
+    }
+  }
+  throw std::runtime_error("cvc::write_image: every handler for '." + ext + "' failed (" + errors +
+                           ")");
 }
 
 image image::load(const std::string &path) { return read_image(path); }

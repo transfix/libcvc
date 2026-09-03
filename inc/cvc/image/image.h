@@ -103,7 +103,12 @@ public:
 };
 
 // Free-function I/O (mirrors read/writeVolumeFile). Default handlers register
-// lazily on first call.
+// lazily on first call. write_image tries every handler declaring the
+// extension, most-recently-registered first (for_write_ext's last-wins rule),
+// falling back to the next when one throws; it throws only when none can
+// encode. That lets a handler refuse cleanly — e.g. magick_image_io linked
+// against an ImageMagick with no encoder for the target format — instead of
+// producing a mis-formatted file.
 image read_image(const std::string &path);
 void write_image(const image &img, const std::string &path, int quality = 90);
 

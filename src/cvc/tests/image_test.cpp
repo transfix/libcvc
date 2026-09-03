@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <cvc/image/image.h>
 #include <cvc/image/image.h> // include-twice: header must be idempotent
+#include <fstream>
 #include <gtest/gtest.h>
+#include <list>
+#include <stdexcept>
 #include <string>
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
@@ -202,6 +205,137 @@ TEST(ImageTest, ExtensionHelper) {
   EXPECT_EQ(cvc::image_file_extension("foo.tar.jpg"), "jpg");
   EXPECT_EQ(cvc::image_file_extension("noext"), "");
   EXPECT_EQ(cvc::image_file_extension("/a.dir/file"), "");
+}
+
+// ── write dispatch: fallback on handler failure ──────────────────────────────
+//
+// The real-world trigger is untestable here (an ImageMagick built without the
+// png/jpeg delegates makes magick_image_io's write throw its missing-encoder
+// error), so these pin the dispatch contract with synthetic handlers on
+// made-up extensions: write_image must try the preferred (last-registered)
+// handler first, fall back to earlier registrations when it throws, and
+// aggregate every failure when none succeeds. Registrations are process-global
+// and append-only, hence the unique extensions per test.
+
+namespace {
+
+class fake_write_io : public cvc::image_file_io {
+public:
+  fake_write_io(std::string id, std::string ext, bool fail)
+      : _id(std::move(id)), _exts{std::move(ext)}, _fail(fail) {}
+  std::string id() const override { return _id; }
+  const std::list<std::string> &extensions() const override { return _exts; }
+  bool can_read(const std::string &) const override { return false; }
+  image read(const std::string &) const override { throw std::runtime_error(_id + ": no read"); }
+  void write(const image &, const std::string &, int) const override {
+    ++writes;
+    if (_fail)
+      throw std::runtime_error(_id + ": simulated missing encoder");
+  }
+  mutable int writes = 0;
+
+private:
+  std::string _id;
+  std::list<std::string> _exts;
+  bool _fail;
+};
+
+} // namespace
+
+TEST(ImageTest, WriteDispatchFallsBackWhenPreferredHandlerThrows) {
+  boost::shared_ptr<fake_write_io> fallback(new fake_write_io("fallback_io", "cvcfbk1", false));
+  boost::shared_ptr<fake_write_io> preferred(new fake_write_io("preferred_io", "cvcfbk1", true));
+  cvc::image_file_io::add(fallback);
+  cvc::image_file_io::add(preferred); // registered last -> tried first
+  // for_write_ext still reports only the last-registered handler...
+  auto h = cvc::image_file_io::for_write_ext("cvcfbk1");
+  ASSERT_TRUE(h);
+  EXPECT_EQ(h->id(), "preferred_io");
+  // ...but when that one throws, write_image falls back to the earlier one.
+  cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk1");
+  EXPECT_EQ(preferred->writes, 1);
+  EXPECT_EQ(fallback->writes, 1);
+}
+
+TEST(ImageTest, WriteDispatchReportsEveryFailure) {
+  boost::shared_ptr<fake_write_io> a(new fake_write_io("fail_a_io", "cvcfbk2", true));
+  boost::shared_ptr<fake_write_io> b(new fake_write_io("fail_b_io", "cvcfbk2", true));
+  cvc::image_file_io::add(a);
+  cvc::image_file_io::add(b);
+  try {
+    cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk2");
+    FAIL() << "expected write_image to throw when every handler fails";
+  } catch (const std::exception &e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("fail_a_io"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("fail_b_io"), std::string::npos) << msg;
+  }
+  EXPECT_EQ(a->writes, 1);
+  EXPECT_EQ(b->writes, 1);
+}
+
+TEST(ImageTest, WriteDispatchUnknownExtensionThrows) {
+  EXPECT_ANY_THROW(cvc::write_image(make_rgba(2, 2), "x.nosuchext"));
+}
+
+// ── stb encoders (the write fallback) ────────────────────────────────────────
+//
+// stb is the handler write_image falls back to when magick refuses, so its
+// encoders must round-trip on their own. for_read is first-match and stb
+// registers first, so this also pins the read-dispatch order.
+
+TEST(ImageTest, StbHandlerEncodesPngRoundTrip) {
+  auto h = cvc::image_file_io::for_read("x.png");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  image a = make_rgba(5, 3);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_stb.png";
+  h->write(a, path, 90);
+  image b = h->read(path);
+  ASSERT_EQ(b.width(), 5);
+  ASSERT_EQ(b.height(), 3);
+  ASSERT_EQ(b.channels(), 4);
+  for (std::size_t i = 0; i < a.size_bytes(); ++i)
+    EXPECT_EQ(b.data()[i], a.data()[i]) << "byte " << i;
+}
+
+TEST(ImageTest, StbHandlerEncodesJpegDimensions) {
+  auto h = cvc::image_file_io::for_read("x.jpg");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  image a = make_rgba(6, 4);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_stb.jpg";
+  h->write(a, path, 90);
+  image b = h->read(path);
+  EXPECT_EQ(b.width(), 6);
+  EXPECT_EQ(b.height(), 4);
+}
+
+TEST(ImageTest, StbHandlerRefusesGifWrite) {
+  auto h = cvc::image_file_io::for_read("x.gif");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  EXPECT_ANY_THROW(
+      h->write(make_rgba(2, 2), std::string(::testing::TempDir()) + "/cvc_image_stb.gif", 90));
+}
+
+// Regression for the silent-MIFF corruption: with an ImageMagick built without
+// the png delegate, Magick::Image::write("out.png") did not throw — it fell
+// back to its native MIFF format and wrote "id=ImageMagick..." bytes under the
+// .png name. Whichever handler ends up encoding (magick, or stb after the
+// fallback), the bytes on disk must be real PNG.
+TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
+  image a = make_rgba(4, 4);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_magic.png";
+  a.save(path);
+  std::ifstream f(path, std::ios::binary);
+  ASSERT_TRUE(f.good());
+  unsigned char sig[8] = {0};
+  f.read(reinterpret_cast<char *>(sig), 8);
+  ASSERT_EQ(f.gcount(), 8);
+  const unsigned char png_sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+  for (int i = 0; i < 8; ++i)
+    EXPECT_EQ(sig[i], png_sig[i]) << "byte " << i << " — MIFF starts with \"id=ImageMagick\"";
 }
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
