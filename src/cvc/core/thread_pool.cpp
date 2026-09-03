@@ -30,6 +30,14 @@
 // workers' writes and the caller's return. The job lives on the caller's stack:
 // a worker only touches it between waking and its final decrement, and the caller
 // clears _job only after `remaining` hits 0, so no worker races the stack unwind.
+//
+// There is ONE job slot, so `remaining` can only drain if every enlisted worker
+// eventually wakes and adopts the job that is still in the slot. _post_mtx keeps
+// that invariant across orchestrator threads: a caller holds it from posting its
+// job until the job has drained and the slot is cleared, so a second concurrent
+// parallel_for blocks rather than overwriting _job/_epoch out from under a
+// slow-to-wake worker (which would strand the first caller in _done.wait), and a
+// finishing caller's `_job = nullptr` can never stomp a freshly posted job.
 
 #include <cvc/core/thread_pool.h>
 
@@ -110,6 +118,10 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
     t_active_pool = prev;
     return;
   }
+
+  // One posted job at a time: concurrent orchestrators serialize here, each
+  // holding the lock until its job has fully drained and the slot is cleared.
+  std::lock_guard<std::mutex> post_lk(_post_mtx);
 
   // Enlist workers besides the caller: capped by the pool size, by max_par (which
   // counts the caller), and by the work available (no idle wakeups).

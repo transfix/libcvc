@@ -387,7 +387,9 @@ public:
   // distinct from the key-based background-task pool above (startThreadPooled):
   // it is for tight data-parallel fan-out — split [0,n), run, join — such as the
   // cvc::nav sim tick. Subsystems that want to parallelize borrow this by
-  // reference (e.g. sim_world::set_thread_pool). Lazily constructed on first use,
+  // reference (e.g. sim_world::set_thread_pool); parallel_for is safe to call
+  // from several borrowers' threads at once (concurrent fan-outs serialize, one
+  // in flight at a time — see thread_pool.h). Lazily constructed on first use,
   // sized to hardware_concurrency() - 1 background workers.
   cvc::thread_pool &computePool();
 

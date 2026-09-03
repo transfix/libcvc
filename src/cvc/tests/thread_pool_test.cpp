@@ -1,10 +1,13 @@
 // Unit tests for cvc::thread_pool — the persistent-worker fork-join pool.
 // Concurrency correctness: every index runs exactly once, results are complete
-// and race-free, nested fan-outs don't deadlock, and workers are reused across
-// many calls (the whole reason the pool exists).
+// and race-free, nested fan-outs don't deadlock, concurrent orchestrator
+// threads all complete, and workers are reused across many calls (the whole
+// reason the pool exists).
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/core/thread_pool.h>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -86,6 +89,69 @@ TEST(ThreadPool, RunsWorkOnMultipleThreads) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   });
   EXPECT_GT(ids.size(), 1u) << "work did not spread beyond the calling thread";
+}
+
+TEST(ThreadPool, ConcurrentOrchestratorsAllComplete) {
+  // Regression: parallel_for posts into a single shared job slot. Before the
+  // orchestrator lock, two threads posting concurrently could overwrite each
+  // other's _job/_epoch before a slow-to-wake worker enlisted in the first job
+  // adopted it — its `remaining` count then never drained and the first caller
+  // blocked in _done.wait forever (and a finishing caller's `_job = nullptr`
+  // could likewise stomp a freshly posted job, stranding THAT caller). Four
+  // orchestrators looping small fan-outs over a 2-worker pool hung within a few
+  // iterations. Sizes cycle through 1..16 so inline (n == 1) and posted
+  // fan-outs interleave, exercising the post/drain/clear transitions.
+  thread_pool pool(2);
+  constexpr int kOrchestrators = 4;
+  constexpr int kIters = 250;
+  std::atomic<long long> total{0};
+  std::atomic<int> finished{0};
+  std::atomic<bool> exact{true};
+
+  std::vector<std::thread> orchestrators;
+  orchestrators.reserve(kOrchestrators);
+  for (int t = 0; t < kOrchestrators; ++t)
+    orchestrators.emplace_back([&, t] {
+      for (int r = 0; r < kIters; ++r) {
+        const int n = 1 + ((t + r) % 16);
+        std::vector<int> hits(n, 0);
+        pool.parallel_for(n, [&](int i) {
+          hits[i]++;
+          total.fetch_add(1, std::memory_order_relaxed);
+        });
+        for (int i = 0; i < n; ++i)
+          if (hits[i] != 1)
+            exact.store(false, std::memory_order_relaxed);
+      }
+      finished.fetch_add(1, std::memory_order_release);
+    });
+
+  // Watchdog: pre-fix, stranded orchestrators block inside parallel_for with no
+  // way to unwind, so joining them would hang the test runner (and gtest can't
+  // fail a test whose threads never return). Poll with a generous deadline and
+  // hard-exit with a diagnostic instead, so CI reports a failure, not a timeout.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (finished.load(std::memory_order_acquire) < kOrchestrators) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::fprintf(stderr,
+                   "ThreadPool.ConcurrentOrchestratorsAllComplete watchdog: "
+                   "%d/%d orchestrators finished after 60s (parallel_for hang), "
+                   "total tasks run: %lld\n",
+                   finished.load(), kOrchestrators, total.load());
+      std::fflush(stderr);
+      std::_Exit(EXIT_FAILURE);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  for (auto &th : orchestrators)
+    th.join();
+
+  EXPECT_TRUE(exact.load()) << "some index ran zero times or more than once";
+  long long expected = 0;
+  for (int t = 0; t < kOrchestrators; ++t)
+    for (int r = 0; r < kIters; ++r)
+      expected += 1 + ((t + r) % 16);
+  EXPECT_EQ(total.load(), expected);
 }
 
 TEST(ThreadPool, EmptyRangeIsANoop) {
