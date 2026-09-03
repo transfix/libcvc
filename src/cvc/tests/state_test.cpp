@@ -2227,36 +2227,66 @@ TEST_F(StateObjectFixture, StateObjectLockWithBatching) {
 // Test early unlock
 TEST_F(StateObjectFixture, StateObjectLockEarlyUnlock) {
   ConfigurationObject config(ctx);
-  std::atomic<bool> other_thread_ran(false);
 
-  boost::thread t1([&config, &other_thread_ran]() {
+  // Handshake rather than racing two fixed sleeps. This test used to have t1
+  // sleep 50ms after unlocking and then assert t2 had run, while t2 slept 10ms
+  // before starting -- so it asserted that a loaded machine schedules t2 inside
+  // a 40ms window. It flaked on the macOS runners and blocked unrelated PRs.
+  // The property under test is unchanged: t2 must be able to take the lock
+  // while t1 is still INSIDE the state_lock_scope, which is possible only
+  // because t1 released it early.
+  boost::mutex m;
+  boost::condition_variable cv;
+  bool t1_locked = false;
+  bool other_thread_ran = false;
+
+  boost::thread t1([&]() {
     state_lock_scope<ConfigurationObject> lock(config);
 
     config.getState("width").value(1000);
 
+    // Tell t2 the lock is actually held, so its acquisition below genuinely
+    // tests the early unlock instead of possibly beating t1 to the lock.
+    {
+      boost::lock_guard<boost::mutex> guard(m);
+      t1_locked = true;
+    }
+    cv.notify_all();
+
     // Release lock early
     lock.unlock();
 
-    // Do other work without lock
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
-
-    // Check if other thread ran (it should have, since we released early)
-    EXPECT_TRUE(other_thread_ran.load());
+    // Wait for the other thread instead of sleeping and hoping. Were unlock()
+    // a no-op, t2 would block on the lock until this scope exits and this wait
+    // would time out -- the same defect the sleeping version was meant to
+    // catch, minus the dependence on scheduler luck. The timeout is generous
+    // because it bounds only the FAILURE path; a passing run returns as soon
+    // as t2 signals.
+    boost::unique_lock<boost::mutex> guard(m);
+    EXPECT_TRUE(cv.wait_for(guard, boost::chrono::seconds(10), [&]() { return other_thread_ran; }));
   });
 
-  boost::thread t2([&config, &other_thread_ran]() {
-    boost::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  boost::thread t2([&]() {
+    {
+      boost::unique_lock<boost::mutex> guard(m);
+      cv.wait(guard, [&]() { return t1_locked; });
+    }
 
     // Should be able to acquire lock after t1 releases it early
     config.getState("height").value(2000);
-    other_thread_ran.store(true);
+    {
+      boost::lock_guard<boost::mutex> guard(m);
+      other_thread_ran = true;
+    }
+    cv.notify_all();
   });
 
   t1.join();
   t2.join();
   config.waitForHandlers();
 
-  EXPECT_TRUE(other_thread_ran.load());
+  // Both threads are joined, so an unguarded read is fine here.
+  EXPECT_TRUE(other_thread_ran);
 }
 
 // DataProcessor state_object example (from STATE_API.md)

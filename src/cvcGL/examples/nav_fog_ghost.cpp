@@ -533,9 +533,7 @@ int main(int argc, char **argv) {
                   R, C, speed);
     status.setText(st);
   }
-  sg.setGridVisible(false);
-  sg.setAxisVisible(false);
-  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.setDiagnosticChromeVisible(false);
   sg.processEvents();
 
   std::printf("nav_fog_ghost: scenario=%s, %d vehicle%s, %dx%d belief, %s\n", scenario.c_str(), NA,
@@ -561,9 +559,14 @@ int main(int argc, char **argv) {
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing);
   bool uiPaused = false, uiRestart = false, ui2D = ortho, uiCaptions = true;
+  bool uiScene = false; // the library's ScenePanel window
   std::string uiScenario = scenario;
   double uiSpeed = speed, uiRange = cfg.range_m;
 #ifdef CVC_ENABLE_IMGUI
+  // imgui exports no symbols, so this .exe can link its own static copy with its
+  // own null GImGui. Adopt the overlay's context so the raw ImGui::* calls below
+  // and the cvc::gl::ui::* widgets inside libcvc share one.
+  ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scenario")) {
@@ -586,15 +589,24 @@ int main(int argc, char **argv) {
         ImGui::MenuItem("Captions", nullptr, &uiCaptions);
         ImGui::EndMenu();
       }
+      if (ImGui::BeginMenu("Scene")) {
+        // The library's menu: shadows, shadow-map resolution, bake interval and
+        // the diagnostic chrome, all read back from the scene rather than from
+        // demo-side mirrors that can drift out of agreement with it.
+        cvc::gl::ui::SceneMenuItems(sg, &uiScene, nullptr);
+        ImGui::EndMenu();
+      }
       if (ImGui::BeginMenu("Camera")) {
-        namespace u = cvc::gl::ui;
-        const std::string cp = sg.getStatePrefix() + ".viewers.main.camera.settings.";
-        u::SliderDouble(app, "Look sens", cp + "mouse_sensitivity", 0.02, 2.0, 0.25);
-        u::SliderDouble(app, "Move speed", cp + "move_speed", 1.0, 400.0, 40.0);
+        // The library's menu, off the controller's own state path — this block
+        // used to splice ".viewers.main.camera.settings." as a literal in three
+        // demos, and it now also carries invert-pitch and drag-pans, which no
+        // demo exposed.
+        cvc::gl::ui::CameraMenuItems(cam, 400.0, 40.0);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
     }
+    cvc::gl::ui::ScenePanel(sg, &uiScene);
     ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Belief controls");

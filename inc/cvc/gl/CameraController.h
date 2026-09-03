@@ -166,6 +166,12 @@ public:
   void beginDrag();
   void endDrag();
 
+  // The app context this controller was built with. Together with the inherited
+  // stateName() it lets a UI bind widgets to "settings.*" without the caller
+  // hand-splicing the path — three demos spliced it as a literal, which would
+  // have gone quietly wrong if viewerStatePath()'s scheme ever changed.
+  cvc::app &appContext() const;
+
   // ---- tunables (mirrored to state "settings.*") ----
   void setMoveSpeed(double unitsPerSecond);
   void setSprintMultiplier(double factor);

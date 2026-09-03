@@ -1257,17 +1257,22 @@ int main(int argc, char **argv) {
   // so there is no widget tree to keep in sync.
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
+  // imgui exports no symbols, so this .exe can link its own static copy with its
+  // own null GImGui. Adopt the overlay's context so the raw ImGui::* calls below
+  // and the cvc::gl::ui::* widgets inside libcvc share one.
+  ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
   // A capture is a deliverable: no control panel in the frames unless asked.
   ui.setVisible(!no_ui && !capturing && !offscreen);
-  bool uiShadows = shadows;
+  bool uiScene = false;   // the library's ScenePanel window
   bool uiLighting = true; // the StageLightingPanel window
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {
-        if (ImGui::MenuItem("Shadows", nullptr, &uiShadows))
-          sg.setShadowsEnabled(uiShadows);
-        ImGui::MenuItem("Stage lighting", nullptr, &uiLighting);
+        // The library's menu: shadows, shadow-map resolution, bake interval and
+        // the diagnostic chrome, all read back from the scene rather than from
+        // demo-side mirrors that can drift out of agreement with it.
+        cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
@@ -1276,18 +1281,16 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("lsystem_forest");
     ImGui::Text("%zu trees", forest.size());
-    // Both of these used to be inert. The slider moved a float nothing read, and
-    // the checkbox flipped a bool without ever calling setShadowsEnabled — only
-    // the menu item applied it, so the two disagreed about the truth as soon as
-    // you touched the checkbox. Every control in this window now drives
-    // something, and shadows are applied from whichever of the two you use.
+    // Wind is this demo's own knob. Shadows used to be duplicated here as a
+    // second control over the same local bool; they now live in the library's
+    // Scene menu and panel, which read the scene back, so there is no second
+    // copy left to disagree with the first.
     ImGui::SliderFloat("wind", &uiWind, 0.0f, 3.0f);
-    if (ImGui::Checkbox("shadows", &uiShadows))
-      sg.setShadowsEnabled(uiShadows);
     ImGui::End();
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
     // same call lights any cvcGL scene.
+    cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
   });
 #endif
@@ -1325,9 +1328,7 @@ int main(int argc, char **argv) {
 
   // This is an island, not a lab bench: hide cvcGL's default grid, axis, AND the
   // scene bounding box (the root NullGraphic shows its yellow bbox by default).
-  sg.setGridVisible(false);
-  sg.setAxisVisible(false);
-  sg.getGraphicsRoot()->setShowBBox(false);
+  sg.setDiagnosticChromeVisible(false);
   sg.processEvents();
 
   std::printf("lsystem_forest: %s, terrain %dx%d, shadows %s. Tab=orbit/fly, WASD+mouse=fly.\n",

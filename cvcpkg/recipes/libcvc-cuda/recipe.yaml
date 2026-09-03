@@ -8,7 +8,9 @@ recipe:
   # (linux), so the CLI-less SDK must publish as +cvc.2.
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
-  cvc_revision: 1
+  # Bumped 1 -> 2: declare assimp (plus the fontconfig/expat/bzip2 delegate
+  # closure) so the published GPU bundle's libcvc.so can actually load.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -79,6 +81,29 @@ depends:
     - name: xz
     - name: freetype
     - name: libxml2
+    # Parity with the CPU libcvc recipe. libcvc-cuda's runtime list was a copy of
+    # libcvc's that drifted: these four were added there and never mirrored here.
+    #
+    # assimp is the ACTIVE breakage -- CVC_ENABLE_ASSIMP self-clears when assimp
+    # is missing, but the publish lane's prefix comes from fetch-libcvc-deps,
+    # which installs the closure of cvcpkg/recipes/libcvc (the CPU recipe), so
+    # the GPU build DOES find assimp and links it. Undeclared here, the published
+    # bundle then ships a libcvc.so with NEEDED libassimp.so.6 that no consumer
+    # prefix satisfies: `cvcpkg install libcvc-cuda` produced a libcvc.so that
+    # could not load at all (verified: exactly one unresolved library, assimp).
+    #
+    # fontconfig/expat/bzip2 are the ImageMagick/freetype delegate closure. They
+    # currently resolve transitively, so nothing is broken today -- they are
+    # declared for the same reason libcvc declares them: a transitive provider
+    # dropping one turns into "looks like a broken test harness, not a missing
+    # package". assimp has no such transitive provider, which is exactly why it
+    # was the one that broke.
+    - name: assimp
+      platforms: [linux, windows]
+    - name: fontconfig
+      platforms: [linux]
+    - name: expat
+    - name: bzip2
     - name: yaml
     - name: levmar
     - name: libiimod
@@ -114,6 +139,15 @@ package:
     # cvc-cli-cuda). This bundle is the pure SDK: libs, cmake config, headers.
     - lib/libcvc*
     - lib/cvc*
+    # The XMLRPC module installs its STATIC archive as lib/libxmlrpc.a, which
+    # matches neither lib/libcvc* nor lib/cvc*, so it must be listed explicitly
+    # or downstream links to cvc::xmlrpc fail with a missing archive -- the same
+    # reason the CPU libcvc recipe lists it. This bundle already shipped
+    # include/xmlrpc/ headers while packing no library and exporting no target.
+    - lib/libxmlrpc*
+    # ...and the MSVC spelling (xmlrpc.lib), which matches none of the globs
+    # above. libcvc-cuda builds windows, so this column needs it too.
+    - lib/xmlrpc*
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
@@ -121,6 +155,7 @@ package:
     - name: cvc
       targets:
         - cvc::cvc
+        - cvc::xmlrpc
 
 abi:
   cxx_std: 17

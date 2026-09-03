@@ -420,6 +420,13 @@ jobs:
           if [ -z "$extra_prefix" ]; then
             extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
+          # CVC_USING_XMLRPC: the recipe packs lib/libxmlrpc* and exports cvc::xmlrpc,
+          # and cvcpkg/recipes/libcvc/build.sh sets it -- but this workflow does not run
+          # that build.sh, it inlines the configure below, so the option sat at its OFF
+          # default and the bundle shipped include/xmlrpc/ headers with no library and no
+          # exported target. That regression already shipped once in +cvc.1 and broke
+          # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
+          # fail on an unmatched file glob, so it stayed silent both times.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
@@ -429,7 +436,8 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_USING_XMLRPC=ON
 
       - name: Configure (Windows)
         if: matrix.target.platform == 'windows'
@@ -444,6 +452,13 @@ jobs:
           # conflicting MSVC flags/headers that crashed CL.exe (0xC0000005) on
           # the CGAL translation units — ci.yml builds Windows WITH CGAL and
           # uncapped parallelism precisely because it doesn't use vcpkg.
+          # CVC_USING_XMLRPC: the recipe packs lib/libxmlrpc* and exports cvc::xmlrpc,
+          # and cvcpkg/recipes/libcvc/build.sh sets it -- but this workflow does not run
+          # that build.sh, it inlines the configure below, so the option sat at its OFF
+          # default and the bundle shipped include/xmlrpc/ headers with no library and no
+          # exported target. That regression already shipped once in +cvc.1 and broke
+          # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
+          # fail on an unmatched file glob, so it stayed silent both times.
           cmake -B build `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
@@ -454,7 +469,8 @@ jobs:
             -DDISABLE_CGAL=OFF `
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON `
+            -DCVC_USING_XMLRPC=ON
 
       - name: Build & install
         id: build-libcvc
@@ -463,6 +479,35 @@ jobs:
           set -euo pipefail
           cmake --build build --parallel --config "$CMAKE_CFG"
           cmake --install build --config "$CMAKE_CFG" --component libcvc
+
+      - name: Assert XMLRPC landed in the stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          # CVC_USING_XMLRPC has now silently defaulted OFF twice, and both times
+          # it published: `cvcpkg pack` does not fail on an unmatched file glob,
+          # so lib/libxmlrpc* simply matched nothing and include/xmlrpc/ headers
+          # shipped for a library that was never built. Fail HERE, before pack,
+          # rather than in a VolumeRover 2.x link months later.
+          stage="${STAGE_DIR:-$PWD/stage}"
+          # libxmlrpc.a on Unix, xmlrpc.lib on MSVC -- both are packed. nullglob
+          # so a non-matching pattern vanishes instead of surviving literally
+          # (and note `ls a* b*` exits non-zero when only ONE of them matches,
+          # which is the normal Unix case here -- hence the array, not ls).
+          shopt -s nullglob
+          found=( "$stage"/lib/libxmlrpc* "$stage"/lib/xmlrpc* )
+          shopt -u nullglob
+          if [ ${#found[@]} -eq 0 ]; then
+            echo "ERROR: no xmlrpc archive in $stage/lib -- CVC_USING_XMLRPC did not take." >&2
+            ls -la "$stage/lib" 2>/dev/null | head -30 >&2 || true
+            exit 1
+          fi
+          targets="$stage/lib/cmake/cvc/cvcTargets.cmake"
+          if ! grep -q "cvc::xmlrpc" "$targets" 2>/dev/null; then
+            echo "ERROR: cvc::xmlrpc absent from $targets -- the recipe exports it." >&2
+            exit 1
+          fi
+          echo "xmlrpc OK: ${found[*]}"
 
       - name: Pack archive
         id: pack
@@ -1014,6 +1059,33 @@ jobs:
           build_type: Release
           link: shared
 
+      # swig for the pycvc-cp311-cuda / pycvc-gl-cp311-cuda steps below, FROM THE
+      # CATALOG — the same `swig` those recipes already declare under host_tools.
+      # fetch-libcvc-deps installs build+runtime deps only ("host_tools excluded —
+      # CI provides cmake/ninja"), which is true of the GitHub-hosted images but
+      # not of this bare nvidia/cuda container, and the runner host's swig is
+      # invisible from inside it. Both CUDA python columns were failing configure
+      # with "Could NOT find SWIG (missing: SWIG_EXECUTABLE SWIG_DIR python)".
+      #
+      # SWIG_LIB is mandatory, not belt-and-braces: the packaged swig binary has
+      # the builder's temp path baked in (`swig -swiglib` reports
+      # /tmp/cvcpkg-builder/...), so without it every invocation dies with
+      # "Unable to find 'swig.swg'". Point it at the installed share/swig/<ver>.
+      - name: Install swig (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HT="$GITHUB_WORKSPACE/host-tools"
+          cvcpkg install swig --prefix "$HT"
+          swiglib="$(find "$HT/share/swig" -maxdepth 1 -mindepth 1 -type d | head -1)"
+          if [ -z "$swiglib" ]; then
+            echo "::error::cvcpkg installed swig but no share/swig/<version> under $HT"
+            exit 1
+          fi
+          echo "$HT/bin" >> "$GITHUB_PATH"
+          echo "SWIG_LIB=$swiglib" >> "$GITHUB_ENV"
+          SWIG_LIB="$swiglib" "$HT/bin/swig" -version | sed -n '2,3p'
+
       - name: Configure (CUDA / Linux)
         shell: bash
         run: |
@@ -1024,6 +1096,9 @@ jobs:
           fi
           # CVC_ENABLE_CUDA=ON is the ONLY delta from the CPU `build` job's
           # Configure (Linux/macOS) step — keep the rest in sync with it.
+          # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
+          # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
+          # library it did not contain.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
@@ -1033,7 +1108,8 @@ jobs:
             -DDISABLE_CGAL=OFF \
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON \
+            -DCVC_USING_XMLRPC=ON
 
       - name: Assert CUDA is actually enabled
         shell: bash
@@ -1083,6 +1159,35 @@ jobs:
           set -euo pipefail
           cmake --build build --parallel --config "$CMAKE_CFG"
           cmake --install build --config "$CMAKE_CFG" --component libcvc
+
+      - name: Assert XMLRPC landed in the stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          # CVC_USING_XMLRPC has now silently defaulted OFF twice, and both times
+          # it published: `cvcpkg pack` does not fail on an unmatched file glob,
+          # so lib/libxmlrpc* simply matched nothing and include/xmlrpc/ headers
+          # shipped for a library that was never built. Fail HERE, before pack,
+          # rather than in a VolumeRover 2.x link months later.
+          stage="${STAGE_DIR:-$PWD/stage}"
+          # libxmlrpc.a on Unix, xmlrpc.lib on MSVC -- both are packed. nullglob
+          # so a non-matching pattern vanishes instead of surviving literally
+          # (and note `ls a* b*` exits non-zero when only ONE of them matches,
+          # which is the normal Unix case here -- hence the array, not ls).
+          shopt -s nullglob
+          found=( "$stage"/lib/libxmlrpc* "$stage"/lib/xmlrpc* )
+          shopt -u nullglob
+          if [ ${#found[@]} -eq 0 ]; then
+            echo "ERROR: no xmlrpc archive in $stage/lib -- CVC_USING_XMLRPC did not take." >&2
+            ls -la "$stage/lib" 2>/dev/null | head -30 >&2 || true
+            exit 1
+          fi
+          targets="$stage/lib/cmake/cvc/cvcTargets.cmake"
+          if ! grep -q "cvc::xmlrpc" "$targets" 2>/dev/null; then
+            echo "ERROR: cvc::xmlrpc absent from $targets -- the recipe exports it." >&2
+            exit 1
+          fi
+          echo "xmlrpc OK: ${found[*]}"
 
       - name: Pack archive
         shell: bash
@@ -1601,6 +1706,9 @@ jobs:
           # on libcvc's C++20 TUs. Naming v143 keeps this job on the toolset the
           # rest of the Windows artifacts are built with, and guarantees a
           # generator that accepts -T at all.
+          # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
+          # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
+          # library it did not contain.
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
             -T "cuda=$env:CUDA_PATH" `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
@@ -1612,7 +1720,8 @@ jobs:
             -DDISABLE_CGAL=OFF `
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
-            -DCVC_ENABLE_SDF=ON
+            -DCVC_ENABLE_SDF=ON `
+            -DCVC_USING_XMLRPC=ON
 
       - name: Assert CUDA is actually enabled
         shell: pwsh
@@ -1655,6 +1764,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cmake --build failed ($LASTEXITCODE)" }
           cmake --install build --config $env:CMAKE_CFG --component libcvc
           if ($LASTEXITCODE -ne 0) { throw "cmake --install failed ($LASTEXITCODE)" }
+
+      - name: Assert XMLRPC landed in the stage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # See the CPU lane's copy of this guard: CVC_USING_XMLRPC defaulting
+          # OFF has published twice, because pack tolerates an unmatched glob.
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $arch = @(Get-ChildItem -Path "$stage/lib" -Filter '*xmlrpc*' -ErrorAction SilentlyContinue)
+          if ($arch.Count -eq 0) {
+            throw "no xmlrpc archive in $stage/lib -- CVC_USING_XMLRPC did not take."
+          }
+          $targets = "$stage/lib/cmake/cvc/cvcTargets.cmake"
+          if (-not (Select-String -Path $targets -Pattern 'cvc::xmlrpc' -Quiet -ErrorAction SilentlyContinue)) {
+            throw "cvc::xmlrpc absent from $targets -- the recipe exports it."
+          }
+          Write-Host "xmlrpc OK: $($arch.Name -join ' ')"
 
       - name: Pack archive
         shell: pwsh
