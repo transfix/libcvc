@@ -17,13 +17,18 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <cvc/core/types.h>
 #include <cvc/utility/cuda_utils.h>
 #include <cvc/volren/detail/mc_tables.h>
 #include <cvc/volren/raycaster_cuda.h>
+#include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <vector>
 
 namespace cvc {
 namespace volren {
@@ -130,22 +135,24 @@ __device__ inline double component(const dvec &v, int i) {
 // ---------------------------------------------------------------------------
 // Device-side request
 // ---------------------------------------------------------------------------
-// The camera is pre-expanded exactly like raycaster.cpp's ray_generator, and
-// the settings vectors are flat fixed arrays, so the whole thing rides in the
-// kernel parameter block (~1.5 KB, well inside the 4 KB limit) -- the
-// dev_field/dev_veh convention from nav/drive.cu, no __constant__ scene state.
-struct dev_request {
-  // Camera (ray_generator).
-  dvec eye, right, true_up, forward;
-  double tan_half, parallel_scale, aspect;
-  int perspective;
-  int width, height;
-
-  // Volume (detail::grid_sampler), device pointer.
+// One volume's marching state (detail::grid_sampler + its slice of
+// volume_settings), device pointers throughout.  These live in DEVICE MEMORY,
+// not in the kernel parameter block: at ~600 bytes each,
+// cuda_limits::max_volumes of them is ~10 KB and the parameter block caps at
+// 4 KB on every architecture this builds for.  dev_request therefore carries a
+// pointer plus a count, and the array is staged with one cudaMemcpy per render
+// (it is small and changes with the settings, unlike the voxels, which stay
+// resident -- see volume_cache below).
+struct dev_volume {
   const unsigned char *data;
   int type; // cvc::data_type
   long long dimx, dimy, dimz;
   dvec minb, span;
+  // Local-space cull box for the per-ray active test: grid_cell_index() can
+  // only succeed strictly inside it, plus a one-voxel margin per face so the
+  // rejection is immune to the rounding gap between solving for t on a face
+  // and dividing a marched point by span.
+  dvec cull_lo, cull_hi;
 
   // Scene-graph placement: world -> local affine inverse, row-major.
   int transformed;
@@ -163,10 +170,50 @@ struct dev_request {
 
   int iso_count;
   cuda_isosurface iso[cuda_limits::max_isosurfaces];
+
+  int shaded, unshaded, window_enabled;
+  double window_min, window_max;
+};
+
+// One built light-view shadow map, device pointer for its depth raster.  The
+// FRAME rides in the parameter block (~128 bytes) because every sample's
+// lookup reads all of it; only the raster lives in device memory.
+struct dev_shadow_map {
+  dvec eye, right, up, forward;
+  double parallel_scale, texel_world;
+  int width, height;
+  const float *depth;
+};
+
+// The camera is pre-expanded exactly like raycaster.cpp's ray_generator, and
+// the scene-level settings vectors are flat fixed arrays, so the request
+// itself still rides in the kernel parameter block (~1 KB) -- the
+// dev_field/dev_veh convention from nav/drive.cu, no __constant__ scene state.
+struct dev_request {
+  // Camera (ray_generator).
+  dvec eye, right, true_up, forward;
+  double tan_half, parallel_scale, aspect;
+  int perspective;
+  int width, height;
+
+  // The scene's volumes, in device memory, in the CPU march's fixed order.
+  const dev_volume *vols;
+  int nvol;
+
   int light_count;
   cuda_light lights[cuda_limits::max_lights];
   int plane_count;
   cuda_cut_plane planes[cuda_limits::max_cut_planes];
+
+  // Volumetric shadows.  shadow_count == 0 is the pre-shadow path: no lookup,
+  // and blinn_phong gets a null visibility array.
+  int shadow_count;
+  dev_shadow_map shadows[cuda_limits::max_shadow_maps];
+  // Light index -> index into `shadows`, or -1.  Resolved on the host so the
+  // kernel never scans the maps looking for a light.
+  int light_map[cuda_limits::max_lights];
+  float shadow_strength;
+  double shadow_bias_constant, shadow_slope_scale;
 
   dvec scene_min, scene_max;
   int steps;
@@ -175,83 +222,81 @@ struct dev_request {
   int two_sided;
   float background[3];
   float tf_shininess;
-
-  int shaded, unshaded, window_enabled;
-  double window_min, window_max;
+  int supersample; // sub-samples per pixel EDGE; the pixel marches its square
 };
 
 // ---------------------------------------------------------------------------
 // Sampling (detail::grid_sampler)
 // ---------------------------------------------------------------------------
 
-__device__ inline float grid_at(const dev_request &q, long long i, long long j, long long k) {
-  const std::size_t n = std::size_t(i) + std::size_t(j) * std::size_t(q.dimx) +
-                        std::size_t(k) * std::size_t(q.dimx) * std::size_t(q.dimy);
-  switch (q.type) {
+__device__ inline float grid_at(const dev_volume &V, long long i, long long j, long long k) {
+  const std::size_t n = std::size_t(i) + std::size_t(j) * std::size_t(V.dimx) +
+                        std::size_t(k) * std::size_t(V.dimx) * std::size_t(V.dimy);
+  switch (V.type) {
   case cvc::UChar:
-    return float(reinterpret_cast<const unsigned char *>(q.data)[n]);
+    return float(reinterpret_cast<const unsigned char *>(V.data)[n]);
   case cvc::UShort:
-    return float(reinterpret_cast<const std::uint16_t *>(q.data)[n]);
+    return float(reinterpret_cast<const std::uint16_t *>(V.data)[n]);
   case cvc::UInt:
-    return float(reinterpret_cast<const std::uint32_t *>(q.data)[n]);
+    return float(reinterpret_cast<const std::uint32_t *>(V.data)[n]);
   case cvc::Float:
-    return reinterpret_cast<const float *>(q.data)[n];
+    return reinterpret_cast<const float *>(V.data)[n];
   case cvc::Double:
-    return float(reinterpret_cast<const double *>(q.data)[n]);
+    return float(reinterpret_cast<const double *>(V.data)[n]);
   case cvc::UInt64:
-    return float(reinterpret_cast<const unsigned long long *>(q.data)[n]);
+    return float(reinterpret_cast<const unsigned long long *>(V.data)[n]);
   case cvc::Char:
-    return float(reinterpret_cast<const signed char *>(q.data)[n]);
+    return float(reinterpret_cast<const signed char *>(V.data)[n]);
   case cvc::Int:
-    return float(reinterpret_cast<const std::int32_t *>(q.data)[n]);
+    return float(reinterpret_cast<const std::int32_t *>(V.data)[n]);
   case cvc::Int64:
-    return float(reinterpret_cast<const long long *>(q.data)[n]);
+    return float(reinterpret_cast<const long long *>(V.data)[n]);
   default:
     return 0.f;
   }
 }
 
-__device__ inline float grid_at_clamped(const dev_request &q, long long i, long long j,
+__device__ inline float grid_at_clamped(const dev_volume &V, long long i, long long j,
                                         long long k) {
-  i = i < 0 ? 0 : (i > q.dimx - 1 ? q.dimx - 1 : i);
-  j = j < 0 ? 0 : (j > q.dimy - 1 ? q.dimy - 1 : j);
-  k = k < 0 ? 0 : (k > q.dimz - 1 ? q.dimz - 1 : k);
-  return grid_at(q, i, j, k);
+  i = i < 0 ? 0 : (i > V.dimx - 1 ? V.dimx - 1 : i);
+  j = j < 0 ? 0 : (j > V.dimy - 1 ? V.dimy - 1 : j);
+  k = k < 0 ? 0 : (k > V.dimz - 1 ? V.dimz - 1 : k);
+  return grid_at(V, i, j, k);
 }
 
 // The 8 corner values of a cell in BINARY order (bit0 = x, bit1 = y, bit2 = z).
-__device__ inline void grid_corners(const dev_request &q, long long ci, long long cj, long long ck,
+__device__ inline void grid_corners(const dev_volume &V, long long ci, long long cj, long long ck,
                                     float out[8]) {
-  out[0] = grid_at(q, ci, cj, ck);
-  out[1] = grid_at(q, ci + 1, cj, ck);
-  out[2] = grid_at(q, ci, cj + 1, ck);
-  out[3] = grid_at(q, ci + 1, cj + 1, ck);
-  out[4] = grid_at(q, ci, cj, ck + 1);
-  out[5] = grid_at(q, ci + 1, cj, ck + 1);
-  out[6] = grid_at(q, ci, cj + 1, ck + 1);
-  out[7] = grid_at(q, ci + 1, cj + 1, ck + 1);
+  out[0] = grid_at(V, ci, cj, ck);
+  out[1] = grid_at(V, ci + 1, cj, ck);
+  out[2] = grid_at(V, ci, cj + 1, ck);
+  out[3] = grid_at(V, ci + 1, cj + 1, ck);
+  out[4] = grid_at(V, ci, cj, ck + 1);
+  out[5] = grid_at(V, ci + 1, cj, ck + 1);
+  out[6] = grid_at(V, ci, cj + 1, ck + 1);
+  out[7] = grid_at(V, ci + 1, cj + 1, ck + 1);
 }
 
-__device__ inline void grid_local_weights(const dev_request &q, const dvec &p, long long ci,
+__device__ inline void grid_local_weights(const dev_volume &V, const dvec &p, long long ci,
                                           long long cj, long long ck, float w[3]) {
-  w[0] = float((p.x - (q.minb.x + double(ci) * q.span.x)) / q.span.x);
-  w[1] = float((p.y - (q.minb.y + double(cj) * q.span.y)) / q.span.y);
-  w[2] = float((p.z - (q.minb.z + double(ck) * q.span.z)) / q.span.z);
+  w[0] = float((p.x - (V.minb.x + double(ci) * V.span.x)) / V.span.x);
+  w[1] = float((p.y - (V.minb.y + double(cj) * V.span.y)) / V.span.y);
+  w[2] = float((p.z - (V.minb.z + double(ck) * V.span.z)) / V.span.z);
 }
 
 // Range-checked in the double domain BEFORE the cast, so NaN / huge quotients
 // fail the comparisons instead of hitting an undefined float->int conversion.
-__device__ inline bool grid_cell_index(const dev_request &q, const dvec &p, long long idx[3]) {
-  const double qx = (p.x - q.minb.x) / q.span.x;
-  const double qy = (p.y - q.minb.y) / q.span.y;
-  const double qz = (p.z - q.minb.z) / q.span.z;
-  if (!(qx > -1.0 && qx < double(q.dimx)) || !(qy > -1.0 && qy < double(q.dimy)) ||
-      !(qz > -1.0 && qz < double(q.dimz)))
+__device__ inline bool grid_cell_index(const dev_volume &V, const dvec &p, long long idx[3]) {
+  const double qx = (p.x - V.minb.x) / V.span.x;
+  const double qy = (p.y - V.minb.y) / V.span.y;
+  const double qz = (p.z - V.minb.z) / V.span.z;
+  if (!(qx > -1.0 && qx < double(V.dimx)) || !(qy > -1.0 && qy < double(V.dimy)) ||
+      !(qz > -1.0 && qz < double(V.dimz)))
     return false;
   idx[0] = (long long)qx; // truncation toward zero, matching the legacy (int) cast
   idx[1] = (long long)qy;
   idx[2] = (long long)qz;
-  return idx[0] <= q.dimx - 2 && idx[1] <= q.dimy - 2 && idx[2] <= q.dimz - 2;
+  return idx[0] <= V.dimx - 2 && idx[1] <= V.dimy - 2 && idx[2] <= V.dimz - 2;
 }
 
 // detail::trilinear -- lerps z, then y, then x (arithmetic order preserved).
@@ -274,22 +319,34 @@ __device__ inline float trilinear(const float w[3], const float v[8]) {
 // (including the padding the index dance never touches) so the two can be
 // diffed line for line.  The 4^3 neighborhood and difference tensors refresh
 // only when the cell index changes; the previous cell stays in registers.
+//
+// The CPU march carries ONE cache PER VOLUME (scratch.spline[v]); a thread here
+// carries a single cache whose key also names the volume.  The cache is pure
+// memoization of grid_at_clamped over a 4^3 neighborhood, so keying it on
+// (volume, cell) returns exactly what a per-volume cache would -- it only
+// re-reads more often when a ray alternates between volumes.  That costs
+// nothing in practice (the march re-evaluates only on entering a NEW cell, so
+// the cache misses either way) and it keeps per-thread local memory constant
+// instead of scaling with cuda_limits::max_volumes: 16 caches would be 13 KB
+// per thread.
 struct spline_cache {
+  int vol;
   long long cell[3];
   float val[4][4][4];
   float deriv[4][4][3][3];
 
   __device__ void reset() {
+    vol = -1;
     cell[0] = -1;
     cell[1] = -1;
     cell[2] = -1;
   }
 
-  __device__ void refresh(const dev_request &q) {
+  __device__ void refresh(const dev_volume &V) {
     for (int k = -1; k <= 2; ++k)
       for (int j = -1; j <= 2; ++j)
         for (int i = -1; i <= 2; ++i)
-          val[k + 1][j + 1][i + 1] = grid_at_clamped(q, cell[0] + i, cell[1] + j, cell[2] + k);
+          val[k + 1][j + 1][i + 1] = grid_at_clamped(V, cell[0] + i, cell[1] + j, cell[2] + k);
 
     for (int g = 0; g < 3; ++g)
       for (int a = 1; a < 3; ++a)
@@ -307,12 +364,13 @@ struct spline_cache {
           deriv[b][g][i][2] = val[i + 1][b][g] - val[i][b][g];
   }
 
-  __device__ dvec evaluate(const dev_request &q, const long long idx[3], const float w[3]) {
-    if (idx[0] != cell[0] || idx[1] != cell[1] || idx[2] != cell[2]) {
+  __device__ dvec evaluate(const dev_volume &V, int v, const long long idx[3], const float w[3]) {
+    if (v != vol || idx[0] != cell[0] || idx[1] != cell[1] || idx[2] != cell[2]) {
+      vol = v;
       cell[0] = idx[0];
       cell[1] = idx[1];
       cell[2] = idx[2];
-      refresh(q);
+      refresh(V);
     }
 
     float d[4][4][2];
@@ -490,9 +548,13 @@ __device__ inline bool intersect_isosurface_in_cell(const dvec &org, const dvec 
 
 // detail::blinn_phong, including the ported fixes: lights ACCUMULATE, each
 // channel uses its own light channel, the specular exponent is real, ambient
-// is a real term, and the 0.9 output gain is kept.
+// is a real term, and the 0.9 output gain is kept.  `vis`, when non-null, is
+// one shadow factor in [0,1] per light; it scales DIFFUSE and SPECULAR only,
+// so ambient survives and a shadowed region falls into shade rather than
+// crushing to black.
 __device__ inline void blinn_phong(const dev_request &q, const float base[3], const dvec &normal,
-                                   const dvec &view, float shininess, float out[3]) {
+                                   const dvec &view, float shininess, float out[3],
+                                   const float *vis = nullptr) {
   float r = q.ambient * base[0];
   float g = q.ambient * base[1];
   float b = q.ambient * base[2];
@@ -515,9 +577,10 @@ __device__ inline void blinn_phong(const dev_request &q, const float base[3], co
     }
 
     const float spec = ndoth > 0.f ? powf(ndoth, shininess) : 0.f;
-    r += base[0] * ndotl * l.color[0] + l.color[0] * spec;
-    g += base[1] * ndotl * l.color[1] + l.color[1] * spec;
-    b += base[2] * ndotl * l.color[2] + l.color[2] * spec;
+    const float v = vis ? vis[i] : 1.f;
+    r += (base[0] * ndotl * l.color[0] + l.color[0] * spec) * v;
+    g += (base[1] * ndotl * l.color[1] + l.color[1] * spec) * v;
+    b += (base[2] * ndotl * l.color[2] + l.color[2] * spec) * v;
   }
 
   const float gain = defaults::shading_gain;
@@ -526,21 +589,94 @@ __device__ inline void blinn_phong(const dev_request &q, const float base[3], co
   out[2] = fminf(gain * b, 1.f);
 }
 
+// ---------------------------------------------------------------------------
+// Volumetric shadows -- the device transcription of detail/shadow_map.h
+// ---------------------------------------------------------------------------
+// shadow_view::project: three dot products against the stored orthonormal
+// light-view frame.  No matrix and no near/far, because the light camera is
+// ORTHOGRAPHIC: its frame::depth stores exactly dot(p - eye, forward), the
+// same quantity computed here.  Range-checked in the double domain before the
+// int cast so NaN fails the test instead of converting undefined.
+__device__ inline bool shadow_project(const dev_shadow_map &m, const dvec &p, int &ix, int &iy,
+                                      double &depth) {
+  const dvec rel = p - m.eye;
+  const double s = dot(rel, m.right);
+  const double t = dot(rel, m.up);
+  depth = dot(rel, m.forward);
+  const double u = s / m.parallel_scale;
+  const double v = t / m.parallel_scale;
+  const double fx = (u + 1.0) * 0.5 * double(m.width);
+  const double fy = (1.0 - v) * 0.5 * double(m.height);
+  if (!(fx >= 0.0 && fx < double(m.width)) || !(fy >= 0.0 && fy < double(m.height)))
+    return false;
+  ix = int(fx); // fx >= 0, so truncation == floor
+  iy = int(fy);
+  return true;
+}
+
+// detail::shadow_bias + detail::shadow_visibility, fused: the constant term is
+// already folded host-side into q.shadow_bias_constant.  The cos floor of 0.1
+// caps tan at ~9.95 so a flat-gradient sample gets a conservative (LIT) bias
+// rather than a division by zero.
+__device__ inline float shadow_visibility(const dev_request &q, const dev_shadow_map &m,
+                                          const dvec &p, double n_dot_l) {
+  double cos_t = fabs(n_dot_l);
+  if (!(cos_t > 0.1)) // inverted: NaN floors too
+    cos_t = 0.1;
+  else if (cos_t > 1.0)
+    cos_t = 1.0;
+  const double tan_t = sqrt(1.0 - cos_t * cos_t) / cos_t;
+  const double bias = q.shadow_bias_constant + q.shadow_slope_scale * m.texel_world * tan_t;
+
+  int ix = 0, iy = 0;
+  double depth = 0.0;
+  if (!shadow_project(m, p, ix, iy, depth))
+    return 1.f; // outside the map: fail LIT, the non-destructive direction
+  const double map_depth = double(m.depth[std::size_t(iy) * std::size_t(m.width) + ix]);
+  // Inverted-NaN safe: +inf (the light ray hit nothing) never shadows.
+  return depth > map_depth + bias ? (1.f - q.shadow_strength) : 1.f;
+}
+
+// Fills `vis` with one factor per light and returns it, or returns null when
+// nothing casts -- which is what makes the shadows-off path bit-identical to
+// the kernel before shadows existed.
+__device__ inline const float *shadow_factors(const dev_request &q, const dvec &p,
+                                              const dvec &normal, float *vis) {
+  if (q.shadow_count == 0)
+    return nullptr;
+  for (int i = 0; i < q.light_count; ++i) {
+    vis[i] = 1.f;
+    const int m = q.light_map[i];
+    if (m < 0)
+      continue;
+    const dev_shadow_map &sm = q.shadows[m];
+    const dvec ldir = -sm.forward; // forward == -light direction
+    const double n_dot_l = dot(normal, ldir);
+    // A one-sided surface facing away from the light already gets neither
+    // diffuse nor specular from it, so there is nothing to attenuate -- and
+    // skipping the lookup deletes the whole grazing/back-facing acne class.
+    if (!q.two_sided && !(n_dot_l > 0.0))
+      continue;
+    vis[i] = shadow_visibility(q, sm, p, n_dot_l);
+  }
+  return vis;
+}
+
 // baked_transfer_function::sample -- nearest entry, clamped, NaN -> entry 0.
-__device__ inline void lut_sample(const dev_request &q, float value, float out[4]) {
-  if (!q.tf_active) {
+__device__ inline void lut_sample(const dev_volume &V, float value, float out[4]) {
+  if (!V.tf_active) {
     out[0] = out[1] = out[2] = out[3] = 0.f;
     return;
   }
-  double t = (double(value) - q.tf_lo) * q.tf_inv_width;
+  double t = (double(value) - V.tf_lo) * V.tf_inv_width;
   // The inverted test routes NaN (a NaN voxel in a Float volume) to entry 0
   // instead of computing an undefined index.
   if (!(t > 0.0))
     t = 0.0;
   else if (t > 1.0)
     t = 1.0;
-  const int i = int(t * double(q.lut_size - 1) + 0.5);
-  const float *e = q.lut + std::size_t(i) * 4;
+  const int i = int(t * double(V.lut_size - 1) + 0.5);
+  const float *e = V.lut + std::size_t(i) * 4;
   out[0] = e[0];
   out[1] = e[1];
   out[2] = e[2];
@@ -549,17 +685,17 @@ __device__ inline void lut_sample(const dev_request &q, float value, float out[4
 
 // gradient_opacity_ramp::factor -- NaN magnitude maps to 0; magnitudes above
 // ramp2 are cut off (the documented deviation from the legacy gradtbl).
-__device__ inline float gradient_factor(const dev_request &q, double magnitude) {
-  if (!q.ramp_enabled)
+__device__ inline float gradient_factor(const dev_volume &V, double magnitude) {
+  if (!V.ramp_enabled)
     return 1.0f;
-  if (!(magnitude >= q.ramp0) || magnitude > q.ramp2)
+  if (!(magnitude >= V.ramp0) || magnitude > V.ramp2)
     return 0.0f;
-  if (magnitude >= q.ramp1)
-    return float(q.ramp_plateau);
-  const double span = q.ramp1 - q.ramp0;
+  if (magnitude >= V.ramp1)
+    return float(V.ramp_plateau);
+  const double span = V.ramp1 - V.ramp0;
   if (span <= 0.0)
-    return float(q.ramp_plateau);
-  return float(q.ramp_plateau * (magnitude - q.ramp0) / span);
+    return float(V.ramp_plateau);
+  return float(V.ramp_plateau * (magnitude - V.ramp0) / span);
 }
 
 __device__ inline bool culled_by_planes(const dev_request &q, const dvec &p) {
@@ -610,28 +746,28 @@ __device__ inline bool intersect_box(const dvec &org, const dvec &dir, const dou
 // Scene-graph transform helpers (prepared_volume's to_local_*/normal_to_world)
 // ---------------------------------------------------------------------------
 
-__device__ inline dvec to_local_point(const dev_request &q, const dvec &p) {
-  if (!q.transformed)
+__device__ inline dvec to_local_point(const dev_volume &V, const dvec &p) {
+  if (!V.transformed)
     return p;
-  const double *m = q.w2l;
+  const double *m = V.w2l;
   return dv(m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3],
             m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
             m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]);
 }
 
-__device__ inline dvec to_local_vector(const dev_request &q, const dvec &v) {
-  if (!q.transformed)
+__device__ inline dvec to_local_vector(const dev_volume &V, const dvec &v) {
+  if (!V.transformed)
     return v;
-  const double *m = q.w2l;
+  const double *m = V.w2l;
   return dv(m[0] * v.x + m[1] * v.y + m[2] * v.z, m[4] * v.x + m[5] * v.y + m[6] * v.z,
             m[8] * v.x + m[9] * v.y + m[10] * v.z);
 }
 
 // transpose(inverse(A)) * n, using the already-inverted linear part.
-__device__ inline dvec normal_to_world(const dev_request &q, const dvec &n) {
-  if (!q.transformed)
+__device__ inline dvec normal_to_world(const dev_volume &V, const dvec &n) {
+  if (!V.transformed)
     return n;
-  const double *i = q.w2l;
+  const double *i = V.w2l;
   return dv(i[0] * n.x + i[4] * n.y + i[8] * n.z, i[1] * n.x + i[5] * n.y + i[9] * n.z,
             i[2] * n.x + i[6] * n.y + i[10] * n.z);
 }
@@ -715,50 +851,65 @@ __device__ inline void composite_hits_up_to(ray_accum &acc, const dev_request &q
 }
 
 // ---------------------------------------------------------------------------
-// The kernel
+// One ray -- the device transcription of raycaster.cpp's march_ray
 // ---------------------------------------------------------------------------
-
-__global__ void volren_raycast_kernel(const dev_request q, unsigned char *color, float *depth) {
-  const int px = int(blockIdx.x * blockDim.x + threadIdx.x);
-  const int py = int(blockIdx.y * blockDim.y + threadIdx.y);
-  if (px >= q.width || py >= q.height)
-    return;
-
-  const std::size_t pixel = std::size_t(py) * std::size_t(q.width) + std::size_t(px);
-  unsigned char *cpx = color + pixel * 4;
-
-  // ray_generator::at -- NDC through the pixel CENTER, v = +1 at the TOP row.
-  const double u = (double(px) + 0.5) / double(q.width) * 2.0 - 1.0;
-  const double v = 1.0 - (double(py) + 0.5) / double(q.height) * 2.0;
-  dvec org, dir;
-  if (q.perspective) {
-    org = q.eye;
-    dir = dnormalized(q.forward + q.right * (u * q.tan_half * q.aspect) +
-                      q.true_up * (v * q.tan_half));
-  } else {
-    org = q.eye + q.right * (u * q.parallel_scale * q.aspect) + q.true_up * (v * q.parallel_scale);
-    dir = q.forward;
-  }
+// Leaves the ASSOCIATED (premultiplied) accumulation and the latched depth in
+// `acc`; the background over-blend belongs to the resolve, so that a pixel's
+// sub-samples can be averaged after it (see the kernel).
+__device__ inline void march_ray(const dev_request &q, const dvec &org, const dvec &dir,
+                                 ray_accum &acc) {
+  acc.r = acc.g = acc.b = acc.a = 0.f;
+  acc.depth_set = false;
+  acc.depth = INFINITY;
 
   const double smin[3] = {q.scene_min.x, q.scene_min.y, q.scene_min.z};
   const double smax[3] = {q.scene_max.x, q.scene_max.y, q.scene_max.z};
   double t0 = 0.0, t1 = 0.0;
-  if (!intersect_box(org, dir, smin, smax, t0, t1)) {
-    depth[pixel] = INFINITY;
-    cpx[0] = to_byte(q.background[0]);
-    cpx[1] = to_byte(q.background[1]);
-    cpx[2] = to_byte(q.background[2]);
-    cpx[3] = 0;
+  if (!intersect_box(org, dir, smin, smax, t0, t1))
     return;
+
+  // ---- Per-ray volume culling --------------------------------------------
+  // The mirror of raycaster.cpp's active list: each volume's [t_enter, t_exit]
+  // against ITS box (through the model transform) is solved once, so a march
+  // step visits only the volumes whose window contains t instead of running
+  // to_local_point + grid_cell_index on every volume at every step.  Pure work
+  // elimination -- the cull box strictly contains grid_cell_index()'s
+  // acceptance region and the window is padded by one step.
+  int act[cuda_limits::max_volumes];
+  double act_lo[cuda_limits::max_volumes], act_hi[cuda_limits::max_volumes];
+  int nact = 0;
+  for (int v = 0; v < q.nvol; ++v) {
+    const dev_volume &V = q.vols[v];
+    const dvec lorg = to_local_point(V, org);
+    const dvec ldir = to_local_vector(V, dir); // unnormalized: t preserved
+    const double clo[3] = {V.cull_lo.x, V.cull_lo.y, V.cull_lo.z};
+    const double chi[3] = {V.cull_hi.x, V.cull_hi.y, V.cull_hi.z};
+    double tv0 = 0.0, tv1 = 0.0;
+    if (!intersect_box(lorg, ldir, clo, chi, tv0, tv1))
+      continue;
+    tv0 = tv0 > t0 ? tv0 : t0;
+    tv1 = tv1 < t1 ? tv1 : t1;
+    if (!(tv0 <= tv1))
+      continue;
+    act[nact] = v;
+    act_lo[nact] = tv0 - q.unit_step;
+    act_hi[nact] = tv1 + q.unit_step;
+    ++nact;
   }
+
+  // A ray that reaches no volume composites nothing, so the march below would
+  // walk every step to produce exactly this.
+  if (nact == 0)
+    return;
 
   const dvec view_vec = -dir; // toward the viewer, unit
   const double z_scale = dot(dir, q.forward);
 
-  ray_accum acc;
-  acc.r = acc.g = acc.b = acc.a = 0.f;
-  acc.depth_set = false;
-  acc.depth = INFINITY;
+  // Per-light shadow visibility for whichever sample is being shaded.  32
+  // bytes of per-thread local memory, against the ~2.2 KB the volume trackers
+  // and the hit buffer already carry, and untouched (shadow_factors returns
+  // null immediately) when nothing casts.
+  float vis[cuda_limits::max_lights];
 
   spline_cache spline;
   spline.reset();
@@ -767,18 +918,26 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
   // Every cell the ray actually crosses is enumerated with an Amanatides-Woo
   // DDA and MC-intersected exactly (the legacy tracer only tested cells a
   // march SAMPLE landed in -- the black-speckle artifact); the hits are then
-  // merged into the compositing stream at their ray parameter.
+  // merged into the compositing stream at their ray parameter.  Every volume
+  // feeds the SAME t-ordered buffer, exactly as the CPU path merges all
+  // volumes' hits into one stable-sorted vector.
   iso_hit hits[cuda_limits::max_iso_hits_per_ray];
   int nhits = 0;
 
-  if (q.iso_count > 0) {
-    const dvec lorg = to_local_point(q, org);
-    const dvec ldir = to_local_vector(q, dir); // unnormalized: t preserved
+  for (int a = 0; a < nact; ++a) {
+    const int v = act[a];
+    const dev_volume &V = q.vols[v];
+    if (V.iso_count == 0)
+      continue;
+    // Recomputed rather than carried per active volume: 24 flops beats the
+    // 768 bytes of extra per-thread local memory an lorg/ldir array costs.
+    const dvec lorg = to_local_point(V, org);
+    const dvec ldir = to_local_vector(V, dir); // unnormalized: t preserved
 
-    const double vmin[3] = {q.minb.x, q.minb.y, q.minb.z};
-    const double vmax[3] = {q.minb.x + q.span.x * double(q.dimx - 1),
-                            q.minb.y + q.span.y * double(q.dimy - 1),
-                            q.minb.z + q.span.z * double(q.dimz - 1)};
+    const double vmin[3] = {V.minb.x, V.minb.y, V.minb.z};
+    const double vmax[3] = {V.minb.x + V.span.x * double(V.dimx - 1),
+                            V.minb.y + V.span.y * double(V.dimy - 1),
+                            V.minb.z + V.span.z * double(V.dimz - 1)};
     double tv0 = 0.0, tv1 = 0.0;
     if (intersect_box(lorg, ldir, vmin, vmax, tv0, tv1)) {
       tv0 = tv0 > t0 ? tv0 : t0;
@@ -787,27 +946,27 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
         // Start half a hair inside so the entry cell resolves.
         const double t_start = tv0 + (tv1 - tv0) * 1e-9;
         long long idx[3];
-        if (grid_cell_index(q, lorg + ldir * t_start, idx)) {
+        if (grid_cell_index(V, lorg + ldir * t_start, idx)) {
           const double ld[3] = {ldir.x, ldir.y, ldir.z};
-          const double lmin[3] = {q.minb.x, q.minb.y, q.minb.z};
-          const double lspan[3] = {q.span.x, q.span.y, q.span.z};
-          const long long dims[3] = {q.dimx, q.dimy, q.dimz};
+          const double lmin[3] = {V.minb.x, V.minb.y, V.minb.z};
+          const double lspan[3] = {V.span.x, V.span.y, V.span.z};
+          const long long dims[3] = {V.dimx, V.dimy, V.dimz};
           const double lorg_a[3] = {lorg.x, lorg.y, lorg.z};
           long long stepc[3];
           double t_max[3], t_delta[3];
-          for (int a = 0; a < 3; ++a) {
-            if (ld[a] > 0.0) {
-              stepc[a] = 1;
-              t_delta[a] = lspan[a] / ld[a];
-              t_max[a] = ((lmin[a] + double(idx[a] + 1) * lspan[a]) - lorg_a[a]) / ld[a];
-            } else if (ld[a] < 0.0) {
-              stepc[a] = -1;
-              t_delta[a] = -lspan[a] / ld[a];
-              t_max[a] = ((lmin[a] + double(idx[a]) * lspan[a]) - lorg_a[a]) / ld[a];
+          for (int ax = 0; ax < 3; ++ax) {
+            if (ld[ax] > 0.0) {
+              stepc[ax] = 1;
+              t_delta[ax] = lspan[ax] / ld[ax];
+              t_max[ax] = ((lmin[ax] + double(idx[ax] + 1) * lspan[ax]) - lorg_a[ax]) / ld[ax];
+            } else if (ld[ax] < 0.0) {
+              stepc[ax] = -1;
+              t_delta[ax] = -lspan[ax] / ld[ax];
+              t_max[ax] = ((lmin[ax] + double(idx[ax]) * lspan[ax]) - lorg_a[ax]) / ld[ax];
             } else {
-              stepc[a] = 0;
-              t_delta[a] = INFINITY;
-              t_max[a] = INFINITY;
+              stepc[ax] = 0;
+              t_delta[ax] = INFINITY;
+              t_max[ax] = INFINITY;
             }
           }
 
@@ -815,7 +974,7 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
           double t_cell = tv0;
           for (long long n = 0; n < max_cells && t_cell <= tv1; ++n) {
             float vals[8];
-            grid_corners(q, idx[0], idx[1], idx[2], vals);
+            grid_corners(V, idx[0], idx[1], idx[2], vals);
             float min_val = vals[0], max_val = vals[0];
             for (int j = 1; j < 8; ++j) {
               // NOT fminf/fmaxf: those are IEEE fmin/fmax and return the
@@ -829,8 +988,8 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
 
             float func[8];
             bool cell_filled = false;
-            for (int s = 0; s < q.iso_count; ++s) {
-              const cuda_isosurface &surf = q.iso[s];
+            for (int s = 0; s < V.iso_count; ++s) {
+              const cuda_isosurface &surf = V.iso[s];
               if (surf.value < min_val || surf.value > max_val)
                 continue;
               if (!cell_filled) {
@@ -840,18 +999,25 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
               }
               float w[3];
               double t_hit = 0.0;
-              if (!intersect_isosurface_in_cell(lorg, ldir, float(surf.value), idx, q.minb, q.span,
+              if (!intersect_isosurface_in_cell(lorg, ldir, float(surf.value), idx, V.minb, V.span,
                                                 func, w, t_hit))
                 continue;
               if (t_hit < t0 || t_hit > tv1 + q.unit_step)
                 continue;
-              if (q.plane_count > 0 && culled_by_planes(q, org + dir * t_hit))
+              // One world hit point for the cut-plane test and the shadow
+              // lookup alike.
+              const dvec hit_p = org + dir * t_hit;
+              if (q.plane_count > 0 && culled_by_planes(q, hit_p))
                 continue;
-              const dvec grad = spline.evaluate(q, idx, w);
-              const dvec normal = dnormalized(normal_to_world(q, grad));
+              const dvec grad = spline.evaluate(V, v, idx, w);
+              const dvec normal = dnormalized(normal_to_world(V, grad));
               iso_hit h;
               h.t = t_hit;
-              blinn_phong(q, surf.color, normal, view_vec, surf.shininess, h.color);
+              // Shaded at COLLECTION time, and visibility depends only on
+              // (p, N) -- never on accumulated alpha -- so the lookup belongs
+              // here, exactly as on the CPU path.
+              blinn_phong(q, surf.color, normal, view_vec, surf.shininess, h.color,
+                          shadow_factors(q, hit_p, normal, vis));
               h.opacity = surf.opacity;
               push_hit(hits, nhits, h);
             }
@@ -874,7 +1040,14 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
   }
 
   int hit_cursor = 0;
-  long long last_cell[3] = {-1, -1, -1};
+  // One tracker per ACTIVE slot (not per scene volume): the march contributes
+  // at most once per cell entered, per volume.
+  long long last_cell[cuda_limits::max_volumes][3];
+  for (int a = 0; a < nact; ++a) {
+    last_cell[a][0] = -1;
+    last_cell[a][1] = -1;
+    last_cell[a][2] = -1;
+  }
 
   // The step count is bounded by construction (unit_step = scene diagonal /
   // steps, and a ray's span inside the box never exceeds that diagonal); the
@@ -888,79 +1061,153 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
     if (q.plane_count > 0 && culled_by_planes(q, pnt))
       continue;
 
-    // Sample in volume-local space (the scene-graph model transform).
-    const dvec lpnt = to_local_point(q, pnt);
-    long long idx[3];
-    if (!grid_cell_index(q, lpnt, idx))
-      continue;
-    if (idx[0] == last_cell[0] && idx[1] == last_cell[1] && idx[2] == last_cell[2])
-      continue; // one contribution per cell (the volren sampling model)
-    last_cell[0] = idx[0];
-    last_cell[1] = idx[1];
-    last_cell[2] = idx[2];
-
-    float vals[8];
-    float min_val = 0.f, max_val = 0.f;
-    bool have_corners = false;
-
-    // 2. Unshaded transfer function (legacy COL_DENSITY).
-    if (q.unshaded) {
-      grid_corners(q, idx[0], idx[1], idx[2], vals);
-      min_val = max_val = vals[0];
-      for (int j = 1; j < 8; ++j) {
-        // std::min/std::max semantics, not IEEE fmin/fmax -- see the DDA fold.
-        min_val = vals[j] < min_val ? vals[j] : min_val;
-        max_val = max_val < vals[j] ? vals[j] : max_val;
-      }
-      have_corners = true;
-      const bool in_window =
-          !q.window_enabled || (double(min_val) <= q.window_max && double(max_val) >= q.window_min);
-      if (in_window) {
-        float w[3];
-        grid_local_weights(q, lpnt, idx[0], idx[1], idx[2], w);
-        const float den = trilinear(w, vals);
-        float s[4];
-        lut_sample(q, den, s);
-        if (s[3] > 0.f)
-          composite(acc, q, s, s[3], t, z_scale);
-      }
-    }
-
-    // 3. Shaded transfer function (legacy RAY_CASTING).
-    if (q.shaded) {
-      if (!have_corners) {
-        grid_corners(q, idx[0], idx[1], idx[2], vals);
-        have_corners = true;
-      }
-      float w[3];
-      grid_local_weights(q, lpnt, idx[0], idx[1], idx[2], w);
-      const float den = trilinear(w, vals);
-      if (q.window_enabled && (double(den) < q.window_min || double(den) > q.window_max))
+    for (int a = 0; a < nact; ++a) {
+      // Skip the volumes whose slab window this step is outside of: the
+      // to_local_point + grid_cell_index below could only miss there.
+      if (t < act_lo[a] || t > act_hi[a])
         continue;
-      const dvec grad = spline.evaluate(q, idx, w);
-      float s[4];
-      lut_sample(q, den, s);
-      const float a = s[3] * gradient_factor(q, sqrt(dot(grad, grad)));
-      if (a > 0.f) {
-        const dvec normal = dnormalized(normal_to_world(q, grad));
-        float shaded[3];
-        blinn_phong(q, s, normal, view_vec, q.tf_shininess, shaded);
-        composite(acc, q, shaded, a, t, z_scale);
+      const int v = act[a];
+      const dev_volume &V = q.vols[v];
+
+      // Sample in volume-local space (the scene-graph model transform).
+      const dvec lpnt = to_local_point(V, pnt);
+      long long idx[3];
+      if (!grid_cell_index(V, lpnt, idx))
+        continue;
+      if (idx[0] == last_cell[a][0] && idx[1] == last_cell[a][1] && idx[2] == last_cell[a][2])
+        continue; // one contribution per cell (the volren sampling model)
+      last_cell[a][0] = idx[0];
+      last_cell[a][1] = idx[1];
+      last_cell[a][2] = idx[2];
+
+      float vals[8];
+      float min_val = 0.f, max_val = 0.f;
+      bool have_corners = false;
+
+      // 2. Unshaded transfer function (legacy COL_DENSITY).
+      if (V.unshaded) {
+        grid_corners(V, idx[0], idx[1], idx[2], vals);
+        min_val = max_val = vals[0];
+        for (int j = 1; j < 8; ++j) {
+          // std::min/std::max semantics, not IEEE fmin/fmax -- see the DDA fold.
+          min_val = vals[j] < min_val ? vals[j] : min_val;
+          max_val = max_val < vals[j] ? vals[j] : max_val;
+        }
+        have_corners = true;
+        const bool in_window = !V.window_enabled ||
+                               (double(min_val) <= V.window_max && double(max_val) >= V.window_min);
+        if (in_window) {
+          float w[3];
+          grid_local_weights(V, lpnt, idx[0], idx[1], idx[2], w);
+          const float den = trilinear(w, vals);
+          float s[4];
+          lut_sample(V, den, s);
+          if (s[3] > 0.f)
+            composite(acc, q, s, s[3], t, z_scale);
+        }
+      }
+
+      // 3. Shaded transfer function (legacy RAY_CASTING).
+      if (V.shaded) {
+        if (!have_corners) {
+          grid_corners(V, idx[0], idx[1], idx[2], vals);
+          have_corners = true;
+        }
+        float w[3];
+        grid_local_weights(V, lpnt, idx[0], idx[1], idx[2], w);
+        const float den = trilinear(w, vals);
+        if (V.window_enabled && (double(den) < V.window_min || double(den) > V.window_max))
+          continue;
+        const dvec grad = spline.evaluate(V, v, idx, w);
+        float s[4];
+        lut_sample(V, den, s);
+        const float aa = s[3] * gradient_factor(V, sqrt(dot(grad, grad)));
+        if (aa > 0.f) {
+          const dvec normal = dnormalized(normal_to_world(V, grad));
+          float shaded[3];
+          blinn_phong(q, s, normal, view_vec, q.tf_shininess, shaded,
+                      shadow_factors(q, pnt, normal, vis));
+          composite(acc, q, shaded, aa, t, z_scale);
+        }
       }
     }
   }
   // Hits between the last sample and the exit point.
   composite_hits_up_to(acc, q, hits, nhits, hit_cursor, t1, z_scale);
+}
 
-  depth[pixel] = acc.depth;
+// ---------------------------------------------------------------------------
+// The kernel
+// ---------------------------------------------------------------------------
+// One thread per PIXEL (not per sub-sample): a supersampled pixel marches its
+// q.supersample^2 rays serially and resolves them in registers, so the frame
+// buffers, the launch geometry and the per-thread footprint are all unchanged
+// by supersampling -- only the loop trip count moves.  Splitting sub-samples
+// across threads would need either an n^2-larger raster plus a reduction pass
+// or atomics, and would put the resolve's ordering at the mercy of the
+// scheduler; the renderer promises determinism.
 
-  // Over-blend the remaining transparency with the background (replaces the
-  // legacy divide-by-alpha normalization of saturated rays).
-  const float rest = 1.f - acc.a;
-  cpx[0] = to_byte(acc.r + q.background[0] * rest);
-  cpx[1] = to_byte(acc.g + q.background[1] * rest);
-  cpx[2] = to_byte(acc.b + q.background[2] * rest);
-  cpx[3] = to_byte(acc.a);
+__global__ void volren_raycast_kernel(const dev_request q, unsigned char *color, float *depth) {
+  const int px = int(blockIdx.x * blockDim.x + threadIdx.x);
+  const int py = int(blockIdx.y * blockDim.y + threadIdx.y);
+  if (px >= q.width || py >= q.height)
+    return;
+
+  const std::size_t pixel = std::size_t(py) * std::size_t(q.width) + std::size_t(px);
+  unsigned char *cpx = color + pixel * 4;
+
+  // The mirror of raycaster.cpp's supersampled resolve: a REGULAR n x n grid of
+  // sub-pixel offsets ((i+0.5)/n, (j+0.5)/n), an unweighted mean of the
+  // sub-samples' STRAIGHT (background-over-blended, not premultiplied) RGBA,
+  // and the NEAREST finite depth rather than an averaged one.  raycaster.cpp
+  // carries the reasoning for all three; the arithmetic here is written to
+  // match it expression for expression.
+  const int ss = q.supersample;
+  // In DOUBLE, matching raycaster.cpp: --use_fast_math would turn a float
+  // 1.f/9.f into an approximate reciprocal and hand the resolve a divisor the
+  // CPU never used, for no speed anywhere that matters (once per pixel).
+  const float inv_samples = float(1.0 / double(ss * ss));
+  float sum_r = 0.f, sum_g = 0.f, sum_b = 0.f, sum_a = 0.f;
+  float nearest = INFINITY;
+
+  for (int sj = 0; sj < ss; ++sj)
+    for (int si = 0; si < ss; ++si) {
+      // ray_generator::at -- NDC through the sub-sample, v = +1 at the TOP row.
+      // With ss == 1 the offset is 0.5 exactly, so this is the pixel center.
+      const double u = (double(px) + (double(si) + 0.5) / double(ss)) / double(q.width) * 2.0 - 1.0;
+      const double v =
+          1.0 - (double(py) + (double(sj) + 0.5) / double(ss)) / double(q.height) * 2.0;
+      dvec org, dir;
+      if (q.perspective) {
+        org = q.eye;
+        dir = dnormalized(q.forward + q.right * (u * q.tan_half * q.aspect) +
+                          q.true_up * (v * q.tan_half));
+      } else {
+        org = q.eye + q.right * (u * q.parallel_scale * q.aspect) +
+              q.true_up * (v * q.parallel_scale);
+        dir = q.forward;
+      }
+
+      ray_accum acc;
+      march_ray(q, org, dir, acc);
+
+      // Over-blend the remaining transparency with the background (replaces the
+      // legacy divide-by-alpha normalization of saturated rays), then
+      // accumulate the resolved straight RGBA.
+      const float rest = 1.f - acc.a;
+      sum_r += acc.r + q.background[0] * rest;
+      sum_g += acc.g + q.background[1] * rest;
+      sum_b += acc.b + q.background[2] * rest;
+      sum_a += acc.a;
+      if (acc.depth < nearest)
+        nearest = acc.depth;
+    }
+
+  depth[pixel] = nearest;
+  cpx[0] = to_byte(sum_r * inv_samples);
+  cpx[1] = to_byte(sum_g * inv_samples);
+  cpx[2] = to_byte(sum_b * inv_samples);
+  cpx[3] = to_byte(sum_a * inv_samples);
 }
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1245,254 @@ std::size_t voxel_size(cvc::data_type t) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Resident device volume cache
+// ---------------------------------------------------------------------------
+// Voxels are the only thing a render uploads that is both large and usually
+// unchanged, so they stay on the device between renders: a camera-only change
+// re-launches with zero H2D traffic.
+//
+// INVALIDATION RULE (also stated in raycaster_cuda.h):
+//   1. An entry is keyed on (device, host base pointer, byte length) and holds
+//      the caller's voxels::active_storage() handle, so the host block cannot
+//      be freed while cached and its address cannot be recycled by a different
+//      volume -- the classic free/re-malloc-at-the-same-address staleness is
+//      structurally impossible rather than merely unlikely.
+//   2. Because the cache CO-OWNS the block, every write through the supported
+//      cvc::volume API copy-on-writes to a different block (voxels::preWrite
+//      sees a non-unique buffer), which lands on a different key: a mutated
+//      volume is a cache miss by construction.
+//   3. The remaining hole is an in-place write through the unchecked legacy
+//      escape hatch voxels::data_ptr(), which no copy-on-write can see.  The
+//      owner announces those with raycaster::invalidate_device_volume(), which
+//      bumps cuda_volume::generation; a generation mismatch RETIRES the block
+//      and uploads a fresh one.  (Retire rather than rewrite in place: another
+//      render may be mid-kernel on that block.)  Two raycasters that disagree
+//      about a shared buffer's generation simply re-upload on alternate
+//      renders -- always current, never stale.
+// Eviction is least-recently-used against a byte budget; a block an in-flight
+// render is using is never freed, and the lease that marks it in-use is
+// released even when the render throws.
+struct cache_key {
+  int device = 0;
+  const void *host = nullptr;
+  std::size_t bytes = 0;
+
+  bool operator<(const cache_key &o) const {
+    if (device != o.device)
+      return device < o.device;
+    if (host != o.host)
+      return std::less<const void *>()(host, o.host);
+    return bytes < o.bytes;
+  }
+};
+
+// One device allocation.  Identified by a serial number rather than by its key
+// so a superseded block can outlive the key that used to name it: a render
+// already reading it keeps it alive until its lease drops.
+struct cache_block {
+  cache_key key;
+  void *dptr = nullptr;
+  std::size_t bytes = 0;
+  std::shared_ptr<void> pin; // co-owner of the host block -- see rule 1/2
+  std::uint64_t generation = 0;
+  std::uint64_t used_at = 0;
+  int in_flight = 0;
+  bool current = false; // still the block `key` resolves to
+};
+
+class volume_cache {
+public:
+  static volume_cache &instance() {
+    static volume_cache c;
+    return c;
+  }
+
+  // Device pointer holding the bytes of `key.host`, uploading only when the
+  // block is not resident or its generation moved.  Returns the block id; the
+  // caller must release() it.
+  std::uint64_t acquire(const cache_key &key, const std::shared_ptr<void> &pin,
+                        std::uint64_t generation, const unsigned char *&dev) {
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto indexed = _index.find(key);
+    if (indexed != _index.end()) {
+      cache_block &b = _blocks.at(indexed->second);
+      if (b.generation == generation) {
+        b.in_flight++;
+        b.used_at = ++_clock;
+        dev = static_cast<const unsigned char *>(b.dptr);
+        return indexed->second;
+      }
+      // Stale.  Retire rather than overwrite in place: another render may be
+      // mid-kernel on this very block, and rewriting its bytes underneath a
+      // live launch would be a data race for the sake of saving one
+      // allocation on a path that only runs when a volume actually changed.
+      retire_locked(indexed);
+    }
+
+    evict_locked(key.bytes);
+    void *dptr = nullptr;
+    cudaError_t err = cudaMalloc(&dptr, key.bytes);
+    if (err != cudaSuccess) {
+      // Out of device memory: drop everything not in flight and try once more
+      // before giving up (the caller degrades to the CPU march).
+      (void)cudaGetLastError();
+      evict_locked(std::size_t(-1));
+      CUDA_CHECK(cudaMalloc(&dptr, key.bytes));
+    }
+    try {
+      CUDA_CHECK(cudaMemcpy(dptr, key.host, key.bytes, cudaMemcpyHostToDevice));
+    } catch (...) {
+      // Nothing is recorded, so a failed upload leaves no half-written block
+      // behind for the next render to trust.
+      cudaFree(dptr);
+      throw;
+    }
+    _uploaded += key.bytes;
+
+    const std::uint64_t id = ++_next_id;
+    cache_block b;
+    b.key = key;
+    b.dptr = dptr;
+    b.bytes = key.bytes;
+    b.pin = pin;
+    b.generation = generation;
+    b.used_at = ++_clock;
+    b.in_flight = 1;
+    b.current = true;
+    _resident += key.bytes;
+    _blocks.emplace(id, std::move(b));
+    _index[key] = id;
+    dev = static_cast<const unsigned char *>(dptr);
+    return id;
+  }
+
+  void release(std::uint64_t id) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _blocks.find(id);
+    if (it == _blocks.end())
+      return;
+    if (it->second.in_flight > 0)
+      it->second.in_flight--;
+    if (it->second.in_flight == 0 && !it->second.current)
+      free_locked(it);
+  }
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    evict_locked(std::size_t(-1));
+  }
+
+  void set_budget(std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _budget = bytes;
+    evict_locked(0);
+  }
+  std::size_t budget() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _budget;
+  }
+  std::size_t resident() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _resident;
+  }
+  std::uint64_t uploaded() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _uploaded;
+  }
+
+private:
+  volume_cache() = default;
+  volume_cache(const volume_cache &) = delete;
+  volume_cache &operator=(const volume_cache &) = delete;
+
+  // Frees every device block at process teardown.  Errors are swallowed on
+  // purpose: by the time a function-local static is destroyed the primary
+  // context may already be gone, and cudaFree then reports a failure that
+  // nothing can act on.
+  ~volume_cache() {
+    for (auto &kv : _blocks)
+      cudaFree(kv.second.dptr);
+    (void)cudaGetLastError();
+  }
+
+  void free_locked(std::map<std::uint64_t, cache_block>::iterator it) {
+    cudaFree(it->second.dptr);
+    _resident -= it->second.bytes;
+    _blocks.erase(it);
+  }
+
+  // Unname a block: it stops answering lookups immediately, and its memory
+  // goes back as soon as the last render using it releases.
+  void retire_locked(std::map<cache_key, std::uint64_t>::iterator indexed) {
+    auto it = _blocks.find(indexed->second);
+    _index.erase(indexed);
+    if (it == _blocks.end())
+      return;
+    it->second.current = false;
+    if (it->second.in_flight == 0)
+      free_locked(it);
+  }
+
+  // Free least-recently-used blocks until `need` more bytes fit under the
+  // budget.  `need == size_t(-1)` means "free everything free-able".  Blocks
+  // an in-flight render is using are never freed -- exceeding the budget is
+  // strictly better than pulling a buffer out from under a live kernel.
+  void evict_locked(std::size_t need) {
+    const bool drop_all = need == std::size_t(-1);
+    for (;;) {
+      if (!drop_all && _resident + need <= _budget)
+        return;
+      auto victim = _blocks.end();
+      for (auto it = _blocks.begin(); it != _blocks.end(); ++it) {
+        if (it->second.in_flight > 0)
+          continue;
+        if (victim == _blocks.end() || it->second.used_at < victim->second.used_at)
+          victim = it;
+      }
+      if (victim == _blocks.end())
+        return; // nothing evictable
+      if (victim->second.current)
+        _index.erase(victim->second.key);
+      free_locked(victim);
+    }
+  }
+
+  std::mutex _mutex;
+  std::map<std::uint64_t, cache_block> _blocks; // every live allocation, by id
+  std::map<cache_key, std::uint64_t> _index;    // the CURRENT block per key
+  std::size_t _resident = 0;
+  std::size_t _budget = cuda_limits::default_cache_bytes;
+  std::uint64_t _clock = 0;
+  std::uint64_t _next_id = 0;
+  std::uint64_t _uploaded = 0; // voxel bytes ever pushed H2D
+};
+
+// Marks the blocks one render depends on as in-flight and releases them on the
+// way out -- including when the render throws partway through staging.
+class cache_lease {
+public:
+  cache_lease() = default;
+  cache_lease(const cache_lease &) = delete;
+  cache_lease &operator=(const cache_lease &) = delete;
+  ~cache_lease() {
+    for (std::uint64_t id : _held)
+      volume_cache::instance().release(id);
+  }
+
+  const unsigned char *acquire(const cache_key &key, const std::shared_ptr<void> &pin,
+                               std::uint64_t generation) {
+    const unsigned char *dev = nullptr;
+    const std::uint64_t id = volume_cache::instance().acquire(key, pin, generation, dev);
+    _held.push_back(id);
+    return dev;
+  }
+
+private:
+  std::vector<std::uint64_t> _held;
+};
+
 } // namespace
 
 bool raycast_cuda_available() {
@@ -1008,29 +1503,62 @@ bool raycast_cuda_available() {
 frame raycast_cuda(const raycast_cuda_request &req) {
   // Validate everything BEFORE the first allocation (the drive.cu convention),
   // so an invalid request never leaks device memory.
-  if (!req.data)
-    throw volren_error("raycast_cuda: null volume buffer");
-  if (req.dimx < 2 || req.dimy < 2 || req.dimz < 2)
-    throw volren_error("raycast_cuda: volumes need at least 2 voxels per axis");
-  if (!(req.span[0] > 0.0) || !(req.span[1] > 0.0) || !(req.span[2] > 0.0))
-    throw volren_error("raycast_cuda: volume span must be positive on every axis");
-  const std::size_t vsize = voxel_size(req.type);
-  if (vsize == 0)
-    throw volren_error("raycast_cuda: unsupported cvc::data_type");
+  if (req.volume_count < 1)
+    throw volren_error("raycast_cuda: no volumes in the request");
+  if (req.volume_count > cuda_limits::max_volumes)
+    throw volren_error("raycast_cuda: more volumes than cuda_limits::max_volumes");
   if (req.steps < 1)
     throw volren_error("raycast_cuda: steps must be >= 1");
   if (!(req.unit_step > 0.0) || !std::isfinite(req.unit_step))
     throw volren_error("raycast_cuda: unit_step must be positive and finite");
   if (!(req.opacity_cutoff > 0.f) || req.opacity_cutoff > 1.f)
     throw volren_error("raycast_cuda: opacity_cutoff must be in (0, 1]");
-  if (req.isosurface_count < 0 || req.isosurface_count > cuda_limits::max_isosurfaces)
-    throw volren_error("raycast_cuda: too many isosurfaces for the CUDA backend");
+  if (req.supersample < 1 || req.supersample > limits::max_supersample)
+    throw volren_error("raycast_cuda: supersample must be in [1, limits::max_supersample]");
   if (req.light_count < 0 || req.light_count > cuda_limits::max_lights)
     throw volren_error("raycast_cuda: too many lights for the CUDA backend");
   if (req.cut_plane_count < 0 || req.cut_plane_count > cuda_limits::max_cut_planes)
     throw volren_error("raycast_cuda: too many cut planes for the CUDA backend");
-  if (req.tf_active && (!req.lut || req.lut_size < 2))
-    throw volren_error("raycast_cuda: an active transfer function needs a LUT of >= 2 entries");
+  if (req.shadow_map_count < 0 || req.shadow_map_count > cuda_limits::max_shadow_maps)
+    throw volren_error("raycast_cuda: more shadow maps than cuda_limits::max_shadow_maps");
+  std::size_t shadow_offset[cuda_limits::max_shadow_maps];
+  std::size_t shadow_texels = 0;
+  for (int i = 0; i < req.shadow_map_count; ++i) {
+    const cuda_shadow_map &m = req.shadow_maps[i];
+    if (!m.depth || m.width < 1 || m.height < 1)
+      throw volren_error("raycast_cuda: a shadow map needs a depth raster and positive dimensions");
+    if (!(m.parallel_scale > 0.0) || !std::isfinite(m.parallel_scale))
+      throw volren_error("raycast_cuda: shadow map parallel_scale must be positive and finite");
+    if (m.light_index < 0 || m.light_index >= req.light_count)
+      throw volren_error("raycast_cuda: a shadow map names a light that is not in the request");
+    shadow_offset[i] = shadow_texels;
+    shadow_texels += std::size_t(m.width) * std::size_t(m.height);
+  }
+
+  std::size_t vsize[cuda_limits::max_volumes];
+  std::size_t volume_bytes[cuda_limits::max_volumes];
+  std::size_t lut_offset[cuda_limits::max_volumes];
+  std::size_t lut_floats = 0;
+  for (int v = 0; v < req.volume_count; ++v) {
+    const cuda_volume &s = req.volumes[v];
+    if (!s.data)
+      throw volren_error("raycast_cuda: null volume buffer");
+    if (s.dimx < 2 || s.dimy < 2 || s.dimz < 2)
+      throw volren_error("raycast_cuda: volumes need at least 2 voxels per axis");
+    if (!(s.span[0] > 0.0) || !(s.span[1] > 0.0) || !(s.span[2] > 0.0))
+      throw volren_error("raycast_cuda: volume span must be positive on every axis");
+    vsize[v] = voxel_size(s.type);
+    if (vsize[v] == 0)
+      throw volren_error("raycast_cuda: unsupported cvc::data_type");
+    if (s.isosurface_count < 0 || s.isosurface_count > cuda_limits::max_isosurfaces)
+      throw volren_error("raycast_cuda: too many isosurfaces for the CUDA backend");
+    if (s.tf_active && (!s.lut || s.lut_size < 2))
+      throw volren_error("raycast_cuda: an active transfer function needs a LUT of >= 2 entries");
+    volume_bytes[v] = std::size_t(s.dimx) * std::size_t(s.dimy) * std::size_t(s.dimz) * vsize[v];
+    lut_offset[v] = lut_floats;
+    if (s.tf_active)
+      lut_floats += std::size_t(s.lut_size) * 4;
+  }
 
   // basis() carries all the camera validation (raster, fov, degenerate pose)
   // and throws cvc::volren_error, matching the CPU entry point.
@@ -1039,6 +1567,9 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   const int height = req.cam.height;
 
   ensure_mc_tables();
+
+  int device = 0;
+  CUDA_CHECK(cudaGetDevice(&device));
 
   dev_request q = {};
   q.eye = {req.cam.eye[0], req.cam.eye[1], req.cam.eye[2]};
@@ -1051,38 +1582,37 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   q.perspective = req.cam.projection == camera::projection_type::perspective;
   q.width = width;
   q.height = height;
+  q.nvol = req.volume_count;
 
-  q.type = int(req.type);
-  q.dimx = req.dimx;
-  q.dimy = req.dimy;
-  q.dimz = req.dimz;
-  q.minb = {req.minb[0], req.minb[1], req.minb[2]};
-  q.span = {req.span[0], req.span[1], req.span[2]};
-
-  q.transformed = req.transformed ? 1 : 0;
-  for (int i = 0; i < 16; ++i)
-    q.w2l[i] = req.world_to_local[i];
-
-  q.tf_active = req.tf_active ? 1 : 0;
-  q.lut_size = req.lut_size;
-  q.tf_lo = req.tf_lo;
-  q.tf_inv_width = req.tf_hi > req.tf_lo ? 1.0 / (req.tf_hi - req.tf_lo) : 1.0;
-
-  q.ramp_enabled = req.gradient_ramp_enabled ? 1 : 0;
-  q.ramp0 = req.ramp0;
-  q.ramp1 = req.ramp1;
-  q.ramp2 = req.ramp2;
-  q.ramp_plateau = req.gradient_plateau;
-
-  q.iso_count = req.isosurface_count;
-  for (int i = 0; i < req.isosurface_count; ++i)
-    q.iso[i] = req.isosurfaces[i];
   q.light_count = req.light_count;
   for (int i = 0; i < req.light_count; ++i)
     q.lights[i] = req.lights[i];
   q.plane_count = req.cut_plane_count;
   for (int i = 0; i < req.cut_plane_count; ++i)
     q.planes[i] = req.cut_planes[i];
+
+  q.shadow_count = req.shadow_map_count;
+  q.shadow_strength = req.shadow_strength;
+  q.shadow_bias_constant = req.shadow_bias_constant;
+  q.shadow_slope_scale = req.shadow_slope_scale;
+  for (int i = 0; i < cuda_limits::max_lights; ++i)
+    q.light_map[i] = -1;
+  for (int i = 0; i < req.shadow_map_count; ++i) {
+    const cuda_shadow_map &m = req.shadow_maps[i];
+    dev_shadow_map &d = q.shadows[i];
+    d.eye = {m.eye[0], m.eye[1], m.eye[2]};
+    d.right = {m.right[0], m.right[1], m.right[2]};
+    d.up = {m.up[0], m.up[1], m.up[2]};
+    d.forward = {m.forward[0], m.forward[1], m.forward[2]};
+    d.parallel_scale = m.parallel_scale;
+    d.texel_world = m.texel_world;
+    d.width = m.width;
+    d.height = m.height;
+    d.depth = nullptr; // patched once the rasters are staged
+    // A repeated light index would be a caller bug; last one wins, matching
+    // the CPU path's map_of_light assignment.
+    q.light_map[m.light_index] = i;
+  }
 
   q.scene_min = {req.scene_min[0], req.scene_min[1], req.scene_min[2]};
   q.scene_max = {req.scene_max[0], req.scene_max[1], req.scene_max[2]};
@@ -1096,33 +1626,109 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   q.background[1] = req.background[1];
   q.background[2] = req.background[2];
   q.tf_shininess = req.tf_shininess;
-  q.shaded = req.shaded ? 1 : 0;
-  q.unshaded = req.unshaded ? 1 : 0;
-  q.window_enabled = req.window_enabled ? 1 : 0;
-  q.window_min = req.window_min;
-  q.window_max = req.window_max;
+  q.supersample = req.supersample;
 
-  // Per-render upload of the raw volume buffer and the LUT.  FUTURE WORK: a
-  // resident device-side volume cache (the sim_world_cuda model) keyed on the
-  // pinned host buffer, so a camera-only change re-launches without the H2D.
-  const std::size_t voxels = std::size_t(req.dimx) * std::size_t(req.dimy) * std::size_t(req.dimz);
-  const std::size_t volume_bytes = voxels * vsize;
+  // ---- staging -----------------------------------------------------------
+  // Voxels come from the resident cache (usually no H2D at all); the LUTs are
+  // small, change with the settings, and are staged contiguously so the whole
+  // scene's tables cost ONE copy.  The lease releases the cache entries even
+  // if anything below throws, and the transient buffers are RAII.
+  cache_lease lease;
+  std::vector<dev_volume> dv(req.volume_count);
+  std::vector<float> lut_host(lut_floats);
+
+  for (int v = 0; v < req.volume_count; ++v) {
+    const cuda_volume &s = req.volumes[v];
+    dev_volume &d = dv[v];
+    std::memset(&d, 0, sizeof(d));
+
+    cache_key key;
+    key.device = device;
+    key.host = s.data;
+    key.bytes = volume_bytes[v];
+    d.data = lease.acquire(key, s.pin, s.generation);
+
+    d.type = int(s.type);
+    d.dimx = s.dimx;
+    d.dimy = s.dimy;
+    d.dimz = s.dimz;
+    d.minb = {s.minb[0], s.minb[1], s.minb[2]};
+    d.span = {s.span[0], s.span[1], s.span[2]};
+    // The cull box: grid_cell_index() accepts local x in
+    // (minb - span, minb + span * (dim-1)); one extra voxel per face makes the
+    // per-ray rejection immune to face-vs-point rounding.
+    d.cull_lo = {s.minb[0] - 2.0 * s.span[0], s.minb[1] - 2.0 * s.span[1],
+                 s.minb[2] - 2.0 * s.span[2]};
+    d.cull_hi = {s.minb[0] + s.span[0] * double(s.dimx), s.minb[1] + s.span[1] * double(s.dimy),
+                 s.minb[2] + s.span[2] * double(s.dimz)};
+
+    d.transformed = s.transformed ? 1 : 0;
+    for (int i = 0; i < 16; ++i)
+      d.w2l[i] = s.world_to_local[i];
+
+    d.tf_active = s.tf_active ? 1 : 0;
+    d.lut_size = s.lut_size;
+    d.tf_lo = s.tf_lo;
+    d.tf_inv_width = s.tf_hi > s.tf_lo ? 1.0 / (s.tf_hi - s.tf_lo) : 1.0;
+    if (s.tf_active)
+      std::memcpy(lut_host.data() + lut_offset[v], s.lut,
+                  std::size_t(s.lut_size) * 4 * sizeof(float));
+
+    d.ramp_enabled = s.gradient_ramp_enabled ? 1 : 0;
+    d.ramp0 = s.ramp0;
+    d.ramp1 = s.ramp1;
+    d.ramp2 = s.ramp2;
+    d.ramp_plateau = s.gradient_plateau;
+
+    d.iso_count = s.isosurface_count;
+    for (int i = 0; i < s.isosurface_count; ++i)
+      d.iso[i] = s.isosurfaces[i];
+
+    d.shaded = s.shaded ? 1 : 0;
+    d.unshaded = s.unshaded ? 1 : 0;
+    d.window_enabled = s.window_enabled ? 1 : 0;
+    d.window_min = s.window_min;
+    d.window_max = s.window_max;
+  }
+
   const std::size_t color_bytes = std::size_t(width) * std::size_t(height) * 4;
   const std::size_t depth_bytes = std::size_t(width) * std::size_t(height) * sizeof(float);
 
-  device_buffer d_volume, d_lut, d_color, d_depth;
-  d_volume.alloc(volume_bytes);
-  CUDA_CHECK(cudaMemcpy(d_volume.p, req.data, volume_bytes, cudaMemcpyHostToDevice));
-  if (q.tf_active) {
-    const std::size_t lut_bytes = std::size_t(req.lut_size) * 4 * sizeof(float);
-    d_lut.alloc(lut_bytes);
-    CUDA_CHECK(cudaMemcpy(d_lut.p, req.lut, lut_bytes, cudaMemcpyHostToDevice));
+  device_buffer d_lut, d_vols, d_color, d_depth, d_shadow;
+  if (shadow_texels > 0) {
+    // One allocation for every map's raster, staged in map order.  At the
+    // default 512^2 that is 1 MB per map -- ~0.2 ms on this PCIe link against
+    // a ~13 ms pass, so keeping it device-resident is not worth the cache
+    // machinery.  (Same refactor as the "FUTURE WORK: resident device-side
+    // volume cache" note: when a map does become resident, it keys the same
+    // way.)
+    d_shadow.alloc(shadow_texels * sizeof(float));
+    for (int i = 0; i < req.shadow_map_count; ++i) {
+      const cuda_shadow_map &m = req.shadow_maps[i];
+      float *dst = static_cast<float *>(d_shadow.p) + shadow_offset[i];
+      CUDA_CHECK(cudaMemcpy(dst, m.depth,
+                            std::size_t(m.width) * std::size_t(m.height) * sizeof(float),
+                            cudaMemcpyHostToDevice));
+      q.shadows[i].depth = dst;
+    }
   }
+
+  if (lut_floats > 0) {
+    d_lut.alloc(lut_floats * sizeof(float));
+    CUDA_CHECK(
+        cudaMemcpy(d_lut.p, lut_host.data(), lut_floats * sizeof(float), cudaMemcpyHostToDevice));
+    for (int v = 0; v < req.volume_count; ++v)
+      if (dv[v].tf_active)
+        dv[v].lut = static_cast<const float *>(d_lut.p) + lut_offset[v];
+  }
+
+  d_vols.alloc(std::size_t(req.volume_count) * sizeof(dev_volume));
+  CUDA_CHECK(cudaMemcpy(d_vols.p, dv.data(), std::size_t(req.volume_count) * sizeof(dev_volume),
+                        cudaMemcpyHostToDevice));
+  q.vols = static_cast<const dev_volume *>(d_vols.p);
+
   d_color.alloc(color_bytes);
   d_depth.alloc(depth_bytes);
-
-  q.data = static_cast<const unsigned char *>(d_volume.p);
-  q.lut = static_cast<const float *>(d_lut.p);
 
   // One thread per pixel.  Default stream only: nothing else is in flight.
   const dim3 threads(16, 16);
@@ -1145,6 +1751,18 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   CUDA_CHECK(cudaMemcpy(out.depth.data(), d_depth.p, depth_bytes, cudaMemcpyDeviceToHost));
   return out;
 }
+
+void raycast_cuda_set_cache_budget(std::size_t bytes) {
+  volume_cache::instance().set_budget(bytes);
+}
+
+std::size_t raycast_cuda_cache_budget() { return volume_cache::instance().budget(); }
+
+std::size_t raycast_cuda_cache_bytes() { return volume_cache::instance().resident(); }
+
+std::uint64_t raycast_cuda_cache_upload_bytes() { return volume_cache::instance().uploaded(); }
+
+void raycast_cuda_clear_cache() { volume_cache::instance().clear(); }
 
 } // namespace volren
 } // namespace cvc

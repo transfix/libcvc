@@ -20,9 +20,16 @@
 // Controls: orbit camera (drag), 'f' toggles the FPS HUD, the Volume raycast
 // panel holds the rest.  CLI mirrors bunny_shadow:
 // --width/--height/--offscreen/--frames/--png/--no-shadows/--no-ui/--no-grid
-// plus --dim (SDF resolution), --scale (raycast resolution scale),
+// plus --dim (SDF resolution), --scale (raycast resolution scale, 0.05..2.0),
+// --supersample N (anti-aliasing, n x n rays per pixel, 1..4),
+// --volume-shadows (volumetric self/inter-volume shadows),
 // --bunnies N (initial count, 1..9), --shell (translucent outer shell),
 // --cpu (force the CPU backend).
+//
+// --no-shadows and --volume-shadows are different mechanisms and both are
+// real: the first turns off VTK's shadow pass (the ground's cast shadows,
+// which the raycast volume cannot participate in yet), the second turns on
+// cvc::volren's own light-view pass inside the raycast.
 
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -173,6 +180,12 @@ cvc::volren::volume_settings bunny_volume_settings(double shell_offset) {
   return vs;
 }
 
+// The stage key light, shared by the VTK rig and the raycaster (bunny_shadow's
+// values).  Azimuth is fixed; elevation is a live control -- see the comment
+// on apply_key_light.
+constexpr double kKeyAzimuth = -38.0;
+constexpr double kKeyElevation = 52.0;
+
 // Where the Nth bunny stands.  Slot 0 is the origin -- exactly where
 // bunny_shadow's mesh bunny stands -- and the rest ring outward on a 3x3 grid
 // whose pitch exceeds the bunny's footprint, so they never overlap.
@@ -194,23 +207,29 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options;
   int width = 1280, height = 720, frames = 0, fps = 30;
   unsigned dim = 64;
-  double scale = 0.5;
-  int bunnies = 1;
+  double scale = 0.5, light_elevation = kKeyElevation;
+  int bunnies = 1, supersample = 1;
   std::string png;
   bool offscreen = false, no_shadows = false, no_ui = false, no_grid = false, shell = false,
-       cpu_only = false;
+       cpu_only = false, volume_shadows = false, force_ui = false;
 
   po::options_description desc("volren_bunny options");
   desc.add_options()("help,h", "show help")("width", po::value<int>(&width))(
       "height", po::value<int>(&height))("offscreen", po::bool_switch(&offscreen))(
       "frames", po::value<int>(&frames))("fps", po::value<int>(&fps))(
       "png", po::value<std::string>(&png))("no-shadows", po::bool_switch(&no_shadows))(
-      "no-ui", po::bool_switch(&no_ui))("no-grid", po::bool_switch(&no_grid))(
-      "shell", po::bool_switch(&shell), "add the translucent offset shell")(
+      "no-ui", po::bool_switch(&no_ui))("ui", po::bool_switch(&force_ui),
+                                        "keep the panel visible while capturing (screenshots)")(
+      "no-grid", po::bool_switch(&no_grid))("shell", po::bool_switch(&shell),
+                                            "add the translucent offset shell")(
       "cpu", po::bool_switch(&cpu_only), "force the CPU backend")(
       "bunnies", po::value<int>(&bunnies), "initial bunny count 1..9 (default 1)")(
       "dim", po::value<unsigned>(&dim), "SDF volume resolution (default 64)")(
-      "scale", po::value<double>(&scale), "raycast resolution scale (default 0.5)");
+      "scale", po::value<double>(&scale), "raycast resolution scale 0.05..2.0 (default 0.5)")(
+      "supersample", po::value<int>(&supersample), "anti-aliasing: n x n rays per pixel, 1..4")(
+      "volume-shadows", po::bool_switch(&volume_shadows),
+      "volumetric shadows in the raycast")("light-elevation", po::value<double>(&light_elevation),
+                                           "key light elevation in degrees, 5..85 (default 52)");
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
   po::notify(vm);
@@ -255,16 +274,11 @@ int main(int argc, char **argv) {
   if (!cpu_only)
     volNode->setBackend(cvc::volren::backend::automatic);
   {
-    // Match the StageLighting key (azimuth -38 deg, elevation 52 deg) so the
-    // raycast shading agrees with the scene look.
     cvc::volren::render_settings rs = volNode->renderConfig();
-    const double az = -38.0 * M_PI / 180.0, el = 52.0 * M_PI / 180.0;
-    cvc::volren::light key;
-    key.color = {1.f, 1.f, 1.f};
-    key.direction = {std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)};
-    rs.lights = {key};
     rs.ambient = 0.25f;
     rs.steps = 384;
+    rs.supersample = std::min(std::max(supersample, 1), cvc::volren::limits::max_supersample);
+    rs.shadows.enabled = volume_shadows;
     volNode->setRenderConfig(rs);
   }
 
@@ -272,12 +286,37 @@ int main(int argc, char **argv) {
   StageLighting rig(sg);
   rig.setStage(0.0, 0.0, 0.5 * S, 0.62 * S);
   rig.applyPreset(StageLighting::Preset::ThreePoint);
-  rig.setKey(1.9, -38.0, 52.0, 34.0);
+  rig.setKey(1.9, kKeyAzimuth, kKeyElevation, 34.0);
   rig.setFill(0.85);
   rig.setBack(0.6);
   rig.setWarmth(0.3);
   rig.setEnvironment(0.7);
   rig.setAmbient(0.4);
+
+  // The raycaster's key light and the scene rig's key are ONE light: the
+  // raycast bunny and the VTK ground have to agree about where the sun is, or
+  // the composite reads as two scenes.  Every elevation change therefore
+  // drives both.
+  //
+  // Elevation is exposed because it is the knob that decides whether a
+  // volumetric shadow is VISIBLE at all here: a bunny of height h casts
+  // h/tan(elevation) across the ground, and the neighbouring bunny stands
+  // 1.35 h away, so above ~36 deg every shadow lands short of its neighbour
+  // and only the self-shadowed creases change.  At the rig's default 52 deg
+  // that reach is 0.78 h.
+  double keyElevation = std::min(std::max(light_elevation, 5.0), 85.0);
+  auto apply_key_light = [&](double el_deg) {
+    const double az = kKeyAzimuth * M_PI / 180.0, el = el_deg * M_PI / 180.0;
+    cvc::volren::render_settings rs = volNode->renderConfig();
+    cvc::volren::light key;
+    key.color = {1.f, 1.f, 1.f};
+    key.direction = {std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)};
+    rs.lights = {key};
+    volNode->setRenderConfig(rs);
+    rig.setKey(1.9, kKeyAzimuth, el_deg, 34.0);
+    rig.apply();
+  };
+  apply_key_light(keyElevation);
 
   // Placing the bunnies: slot 0 is the origin, the rest ring outward on a
   // grid whose pitch clears the bunny's ~S-wide footprint.  The stage (the
@@ -305,6 +344,7 @@ int main(int argc, char **argv) {
   // the main loop applies it before the next tick().
   int wantCount = bunnyCount;
   bool wantFrameAll = false, wantShellChange = false;
+  double wantElevation = keyElevation;
 
   SceneRenderer view(sg, width, height, capturing || offscreen, "main");
   const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
@@ -338,7 +378,9 @@ int main(int argc, char **argv) {
   cvc::gl::ImGuiOverlay ui(view);
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
-  ui.setVisible(!no_ui && !capturing);
+  // A capture normally hides the overlay so the frame is clean; --ui keeps it
+  // so the panel itself can be screenshotted.
+  ui.setVisible(!no_ui && (!capturing || force_ui));
   bool uiScene = false, uiLighting = false, uiVolren = true;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
@@ -355,6 +397,12 @@ int main(int argc, char **argv) {
 
     // The raycast panel: bunny count, then the performance knobs.
     if (uiVolren) {
+      // A new window auto-fits to its FIRST frame's content -- when every
+      // readout still says 0 and is at its shortest.  Ask for room for the
+      // longest line the panel can ever show (~62 characters) or the ray budget
+      // gets silently clipped once the numbers fill in; in font sizes, so the
+      // reservation follows the UI scale.  Height 0 keeps the auto-fit.
+      ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34.f, 0.f), ImGuiCond_FirstUseEver);
       if (ImGui::Begin("Volume raycast", &uiVolren)) {
         ImGui::Text("SDF %ux%ux%u  |  isosurface at distance 0", dim, dim, dim);
         ImGui::Separator();
@@ -376,25 +424,112 @@ int main(int argc, char **argv) {
           wantShellChange = true;
 
         ImGui::Separator();
+        cvc::volren::render_settings rset = volNode->renderConfig();
+        const int ss = rset.supersample;
         const double ms = volNode->lastRenderSeconds() * 1000.0;
-        const int rw = std::max(2, int(std::lround(width * volNode->resolutionScale())));
-        const int rh = std::max(2, int(std::lround(height * volNode->resolutionScale())));
+        // The raster the node actually marched, not width * scale re-derived:
+        // it is the one that rounded, floored at 2 and (in a resized window)
+        // used a viewport these CLI values no longer describe.
+        const int rw = volNode->raycastWidth(), rh = volNode->raycastHeight();
+        // Rays, not pixels: supersampling multiplies the ray count by its
+        // square, so a Mray/s figure that ignored it would read as a slowdown.
+        const double rays = double(rw) * rh * ss * ss;
         const bool onGpu = volNode->backendUsed() == cvc::volren::backend::cuda;
-        ImGui::Text("%s  |  %d x %d rays  |  %.1f ms  |  %.2f Mray/s", onGpu ? "CUDA" : "CPU", rw,
-                    rh, ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0);
-        ImGui::Text("%llu raycasts", (unsigned long long)volNode->framesRendered());
+        ImGui::Text("%s  |  %.2f ms  |  %.2f Mray/s  |  %llu raycasts", onGpu ? "CUDA" : "CPU", ms,
+                    ms > 0.0 ? (rays / (ms / 1000.0)) / 1e6 : 0.0,
+                    (unsigned long long)volNode->framesRendered());
+        // The whole cost model on one line: what the two quality knobs did to
+        // the ray budget, and the output that budget resolves to.  Kept under
+        // ~60 characters -- the panel does not auto-widen for text, so a longer
+        // line is silently clipped.  The output size comes from ImGui's own
+        // display size (the live viewport), not the CLI --width/--height, which
+        // a window resize makes stale.
+        const ImGuiIO &io = ImGui::GetIO();
+        ImGui::Text("raster %dx%d x%d ray/px = %.2f Mray -> %dx%d out", rw, rh, ss * ss, rays / 1e6,
+                    int(io.DisplaySize.x), int(io.DisplaySize.y));
 
+        // Knob 1 of 2: how many PIXELS get raycast.  Above 1.0 the raster is
+        // larger than the viewport and the quad's bilinear filter box-filters
+        // it back down, so the slider spans undersample -> 1:1 -> supersample.
         float rs = float(volNode->resolutionScale());
-        if (ImGui::SliderFloat("resolution", &rs, 0.05f, 1.0f, "%.2f"))
+        if (ImGui::SliderFloat("resolution", &rs, float(VolRenNode::MinResolutionScale),
+                               float(VolRenNode::MaxResolutionScale), "%.2f x viewport"))
           volNode->setResolutionScale(rs);
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Raster = viewport x this, rescaled onto the quad.  Costs\n"
+                            "scale^2 rays.  Below 1.0 it buys latency and blurs the WHOLE\n"
+                            "image; at 2.0 each screen pixel is an exact 2x2 box average\n"
+                            "of the raster, which anti-aliases without softening the\n"
+                            "interior.  2.0 is the cap because the bilinear filter reads\n"
+                            "4 texels: past 2x the extra rays would be thrown away.");
+
+        // Knob 2 of 2: how many RAYS each of those pixels averages.  Same
+        // price in rays, opposite trade -- this one leaves the output size
+        // alone and averages every ray it casts, at any raster.
+        int aa = ss - 1;
+        const char *kAaLabels[] = {"off (1 ray/px)", "2x2 (4 rays/px)", "3x3 (9 rays/px)",
+                                   "4x4 (16 rays/px)"};
+        static_assert(cvc::volren::limits::max_supersample == 4,
+                      "anti-aliasing combo labels must cover every supersample level");
+        if (ImGui::Combo("anti-aliasing", &aa, kAaLabels, IM_ARRAYSIZE(kAaLabels)))
+          volNode->setSupersample(aa + 1);
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("n x n rays per pixel on a regular sub-pixel grid, box-filtered:\n"
+                            "n^2 x the cost, output size unchanged.  Anti-aliases isosurface\n"
+                            "silhouettes while the interior stays as sharp as the raster\n"
+                            "allows, where 'resolution' below 1.0 blurs both.");
+
         bool cont = volNode->continuous();
         if (ImGui::Checkbox("re-raycast every frame", &cont))
           volNode->setContinuous(cont);
-        cvc::volren::render_settings rset = volNode->renderConfig();
         int steps = rset.steps;
         if (ImGui::SliderInt("steps", &steps, 32, 768)) {
           rset.steps = steps;
           volNode->setRenderConfig(rset);
+        }
+
+        ImGui::Separator();
+        // Volumetric shadows.  The cost model is unlike the two knobs above:
+        // the light-view pass is CAMERA-INDEPENDENT, so orbiting is free and
+        // only a scene change (Add/Remove, the shell toggle, the steps slider)
+        // pays for a rebuild.
+        bool shadows = volNode->shadowsEnabled();
+        if (ImGui::Checkbox("volumetric shadows", &shadows))
+          volNode->setShadowsEnabled(shadows);
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("One extra light-view raycast per casting light, CACHED across\n"
+                            "camera motion: orbiting costs nothing, a scene change costs\n"
+                            "one rebuild frame.  Inter-bunny shadows come free with it --\n"
+                            "one map over every registered volume makes 'A shadows B' and\n"
+                            "'A shadows itself' the same lookup.  The volume does NOT yet\n"
+                            "shadow the ground: that quad is scene geometry, lit by VTK.");
+        // Shared by the raycast and the VTK rig, and the knob that decides
+        // whether a shadow reaches anything but its own creases here.
+        float elev = float(keyElevation);
+        if (ImGui::SliderFloat("key elevation", &elev, 5.f, 85.f, "%.0f deg"))
+          wantElevation = elev;
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Drives BOTH the raycast key light and the scene rig.\n"
+                            "A bunny casts height/tan(elevation): below ~36 deg that\n"
+                            "reaches past the 1.35-height grid pitch and the bunnies\n"
+                            "start shadowing EACH OTHER, above it only their own creases.");
+
+        if (shadows) {
+          cvc::volren::shadow_settings sh = volNode->shadowConfig();
+          bool changed = false;
+          changed |= ImGui::SliderInt("shadow map", &sh.resolution,
+                                      cvc::volren::limits::min_shadow_resolution, 2048);
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Light-view raster edge: quadratic in rebuild cost,\n"
+                              "inversely linear in the slope bias.");
+          changed |= ImGui::SliderFloat("shadow strength", &sh.strength, 0.f, 1.f, "%.2f");
+          changed |= ImGui::SliderFloat("shadow bias", &sh.bias_scale, 0.f, 4.f, "%.2f");
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("In units of the light-view depth latch's own quantum.\n"
+                              "1.0 is the measured bound; drop it toward 0 to watch\n"
+                              "acne appear, raise it to peter-pan the crease shadows.");
+          if (changed)
+            volNode->setShadowConfig(sh);
         }
       }
       ImGui::End();
@@ -428,11 +563,10 @@ int main(int argc, char **argv) {
       wantCount = bunnyCount;
       wantShellChange = false;
       place_bunnies(bunnyCount, shellOn);
-
-      // The ImGui draw callback runs mid-render, so it only records intent here;
-      // the main loop applies it before the next tick().
-      int wantCount = bunnyCount;
-      bool wantFrameAll = false, wantShellChange = false;
+    }
+    if (wantElevation != keyElevation) {
+      keyElevation = wantElevation;
+      apply_key_light(keyElevation);
     }
     if (wantFrameAll) {
       wantFrameAll = false;
@@ -458,13 +592,16 @@ int main(int argc, char **argv) {
     if (since >= 1.0) {
       const std::uint64_t rendered = volNode->framesRendered();
       const double ms = volNode->lastRenderSeconds() * 1000.0;
-      const int rw = std::max(2, int(std::lround(width * scale)));
-      const int rh = std::max(2, int(std::lround(height * scale)));
+      // The live knobs, not the CLI seeds: both are editable in the panel, and
+      // the ray count is what the Mray/s figure has to be divided by.
+      const int ssn = volNode->supersample();
+      const int rw = volNode->raycastWidth(), rh = volNode->raycastHeight();
+      const double rays = double(rw) * rh * ssn * ssn;
       std::printf("[volren_bunny] %d bunny(s) | %s | scene %.1f fps | raycast %.1f ms "
-                  "(%.2f Mray/s, %dx%d) | %llu raycasts (+%llu)\n",
+                  "(%.2f Mray/s, %dx%d x%d ray/px%s) | %llu raycasts (+%llu)\n",
                   bunnyCount, volNode->backendUsed() == cvc::volren::backend::cuda ? "CUDA" : "CPU",
-                  hud.fps(), ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0, rw, rh,
-                  (unsigned long long)rendered,
+                  hud.fps(), ms, ms > 0.0 ? (rays / (ms / 1000.0)) / 1e6 : 0.0, rw, rh, ssn * ssn,
+                  volNode->shadowsEnabled() ? ", shadows" : "", (unsigned long long)rendered,
                   (unsigned long long)(rendered - last_report_frames));
       last_report_frames = rendered;
       last_report = now;

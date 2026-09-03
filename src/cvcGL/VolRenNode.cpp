@@ -54,6 +54,29 @@ const char *kDepthImpl =
     "    vrZ = (vrEyeDepth - volrenNear) / (volrenFar - volrenNear);\n"
     "  gl_FragDepth = clamp(vrZ, 0.0, 1.0);\n";
 
+// GLSL injected at //VTK::TCoord::Impl: undo the PREMULTIPLIED alpha of the
+// raycast texture, after VTK has sampled and modulated it.
+//
+// The raycaster's background is forced to black, so frame::color's RGB is the
+// volume's color already multiplied by its own alpha.  Uploading that verbatim
+// and dividing here -- rather than un-premultiplying on the CPU before the
+// upload -- is what makes the GL texture FILTER correct: bilinear interpolation
+// is only linear in premultiplied space.  Filtered straight alpha reads the
+// RGB=0 of a transparent texel as if it were black paint, so every silhouette
+// picks up a dark fringe: minified (resolution_scale > 1) a half-covered screen
+// pixel gets half the volume's color at half alpha and composites at a QUARTER,
+// magnified (scale < 1) the same halo appears smeared over several pixels.
+//
+// The anchor is re-emitted first (GeometryNode registers replacements with
+// replaceFirst=true, so dropping it would delete VTK's own texture sampling),
+// and the divide is by the FINAL fragment alpha -- which is the texture's alpha
+// exactly because the node draws this quad unlit at opacity 1 (see the
+// constructor).  A quad at any other opacity would have that opacity divided
+// straight back out.
+const char *kUnpremultiplyImpl = "//VTK::TCoord::Impl\n"
+                                 "  if (gl_FragData[0].a > 0.0)\n"
+                                 "    gl_FragData[0].rgb /= gl_FragData[0].a;\n";
+
 cvc::volren::mat4 to_mat4(vtkMatrix4x4 *m) {
   cvc::volren::mat4 out;
   if (m)
@@ -128,6 +151,14 @@ struct VolRenNode::worker {
       vs.model_transform = snap.node_world * vs.model_transform;
       rc.add_volume(snap.volumes[i], vs);
     }
+    // AFTER re-registering, never before: registration deliberately does not
+    // draw a fresh content generation (the node clears and re-adds every
+    // frame, so stamping there would make every frame a cache miss), which
+    // means clear_volumes() resets the generations an announcement has to
+    // bump.  Bumping them also busts the shadow-map fingerprint, which reads
+    // the same generations.
+    if (invalidate_pending.exchange(false, std::memory_order_acq_rel))
+      rc.invalidate_device_volumes();
     rc.settings() = snap.settings.settings;
     // Alpha carries all compositing; the scene provides the background.
     rc.settings().background = {0.f, 0.f, 0.f};
@@ -150,6 +181,9 @@ struct VolRenNode::worker {
   bool has_job = false;
   bool stopping = false;
   std::atomic<bool> in_flight{false};
+  // Armed by the owner thread (invalidateVolumeData), consumed by whichever
+  // thread runs the raycast; never touches the raycaster off-thread.
+  std::atomic<bool> invalidate_pending{false};
 
   // Set by the node; called from the worker thread with the finished frame.
   std::function<void(cvc::volren::frame, snapshot, double)> on_frame;
@@ -171,9 +205,16 @@ struct VolRenNode::worker {
         cvc::volren::frame f = run(snap, seconds);
         if (on_frame)
           on_frame(std::move(f), std::move(snap), seconds);
-      } catch (const std::exception &) {
-        // A raycast failure (e.g. settings made degenerate mid-flight) drops
+      } catch (...) {
+        // A raycast failure (e.g. a setting made degenerate mid-flight) drops
         // the frame; the node keeps showing the previous one.
+        //
+        // The catch-all is REQUIRED, not lazy: cvc::volren_error comes from
+        // CVC_DEF_EXCEPTION, and cvc::exception derives from boost::exception
+        // ALONE -- it is not a std::exception. Every throw out of
+        // raycaster::render() is one, so `catch (const std::exception &)` here
+        // caught nothing and let the exception escape the worker's
+        // std::thread, which is an immediate std::terminate().
       }
       in_flight.store(false, std::memory_order_release);
     }
@@ -217,6 +258,7 @@ VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::s
 
   addFragmentShaderReplacement("//VTK::CustomUniforms::Dec", kDepthUniformsDec);
   addFragmentShaderReplacement("//VTK::Depth::Impl", kDepthImpl);
+  addFragmentShaderReplacement("//VTK::TCoord::Impl", kUnpremultiplyImpl);
   setShaderUniformf("volrenNear", 0.1f);
   setShaderUniformf("volrenFar", 1000.f);
   setShaderUniformi("volrenPersp", 1);
@@ -298,10 +340,53 @@ void VolRenNode::setRenderConfig(const cvc::volren::render_settings &rs) {
 }
 
 void VolRenNode::setResolutionScale(double scale) {
-  getState("volren.resolution_scale").value(std::clamp(scale, 0.05, 1.0));
+  getState("volren.resolution_scale")
+      .value(std::clamp(scale, MinResolutionScale, MaxResolutionScale));
 }
 
 double VolRenNode::resolutionScale() const { return m_resolutionScale; }
+
+void VolRenNode::setSupersample(int n) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.supersample = n;
+  setRenderConfig(rs);
+}
+
+int VolRenNode::supersample() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.supersample;
+}
+
+void VolRenNode::setShadowsEnabled(bool on) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.shadows.enabled = on;
+  setRenderConfig(rs);
+}
+
+bool VolRenNode::shadowsEnabled() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows.enabled;
+}
+
+cvc::volren::shadow_settings VolRenNode::shadowConfig() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows;
+}
+
+void VolRenNode::setShadowConfig(const cvc::volren::shadow_settings &ss) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.shadows = ss;
+  setRenderConfig(rs);
+}
+
+void VolRenNode::invalidateVolumeData() {
+  m_worker->invalidate_pending.store(true, std::memory_order_release);
+  // The displayed frame is stale by definition, and nothing else changed, so
+  // bump the version to make tick() relaunch.  No state write: the voxels
+  // moved, not a setting, and the tree does not carry them.
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  ++m_settingsVersion;
+}
 
 void VolRenNode::setContinuous(bool on) { getState("volren.continuous").value(on ? 1 : 0); }
 
@@ -355,10 +440,14 @@ void VolRenNode::handleStateChanged(const std::string &childState) {
   if (childState.rfind("volren.", 0) == 0) {
     if (childState == "volren.resolution_scale" || childState == "volren.continuous") {
       try {
-        m_resolutionScale =
-            std::clamp(getState("volren.resolution_scale").value<double>(), 0.05, 1.0);
+        m_resolutionScale = std::clamp(getState("volren.resolution_scale").value<double>(),
+                                       MinResolutionScale, MaxResolutionScale);
         m_continuous = getState("volren.continuous").value<int>() != 0;
-      } catch (const std::exception &) {
+      } catch (...) {
+        // Partially-initialised state. Catch-all because the state tree throws
+        // BOTH boost::bad_lexical_cast (a std::exception) and
+        // cvc::type_conversion_error (CVC_DEF_EXCEPTION -> boost::exception,
+        // which is NOT a std::exception).
       }
     }
     // Everything else under volren.* belongs to the embedded state_settings
@@ -505,30 +594,19 @@ void VolRenNode::applyFrame(const cvc::volren::frame &f, const snapshot &snap) {
     updateVertices(xyz);
   }
 
-  // Color: un-premultiply into the persistent aliased buffer (straight alpha
-  // for VTK's standard translucent blending).
+  // Color: copy the frame VERBATIM into the persistent aliased buffer.  The
+  // raycaster's background is black, so its RGB is already premultiplied by
+  // alpha, and kUnpremultiplyImpl divides it back out in the fragment shader --
+  // AFTER the texture filter, which is the only place the division is
+  // interpolation-correct.  (The buffer is aliased zero-copy by the texture,
+  // so this writes through it rather than re-creating a texture per frame; the
+  // frame itself is a temporary the worker hands over.)
   if (m_colorImage.width() != w || m_colorImage.height() != h) {
     m_colorImage = cvc::image(w, h, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
     std::memset(m_colorImage.data(), 0, m_colorImage.size_bytes());
     setTexture(m_colorImage, /*zeroCopy=*/true);
   }
-  {
-    const unsigned char *src = color.data();
-    unsigned char *dst = m_colorImage.storage().get();
-    const std::size_t n = std::size_t(w) * h;
-    for (std::size_t i = 0; i < n; ++i) {
-      const unsigned char a = src[i * 4 + 3];
-      if (a == 0) {
-        dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = 0;
-      } else {
-        // rgb are premultiplied by alpha (black raycast background).
-        dst[i * 4 + 0] = (unsigned char)std::min(255, int(src[i * 4 + 0]) * 255 / int(a));
-        dst[i * 4 + 1] = (unsigned char)std::min(255, int(src[i * 4 + 1]) * 255 / int(a));
-        dst[i * 4 + 2] = (unsigned char)std::min(255, int(src[i * 4 + 2]) * 255 / int(a));
-      }
-      dst[i * 4 + 3] = a;
-    }
-  }
+  std::memcpy(m_colorImage.storage().get(), color.data(), std::size_t(w) * h * 4);
   texture_modified();
 
   // Depth: (re)upload as an R32F texture.  Needs a live, initialized GL
@@ -569,7 +647,9 @@ void VolRenNode::launchOrRun(const snapshot &snap) {
     applyFrame(f, snap);
     if (m_sceneGraph)
       m_sceneGraph->requestRender();
-  } catch (const std::exception &) {
+  } catch (...) {
+    // Same contract as the worker thread: drop the frame, keep the last one.
+    // Catch-all because cvc::volren_error is not a std::exception.
   }
 #else
   m_worker->submit(snap);

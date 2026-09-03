@@ -8,6 +8,7 @@
 #ifndef CVC_VOLREN_SETTINGS_H
 #define CVC_VOLREN_SETTINGS_H
 
+#include <cvc/volren/shadow.h>
 #include <cvc/volren/transfer_function.h>
 #include <cvc/volren/types.h>
 #include <vector>
@@ -72,12 +73,30 @@ struct render_settings {
   std::array<float, 3> background{0.f, 0.f, 0.f}; // [0,1]
   std::vector<light> lights;
   std::vector<cut_plane> cut_planes;
+  // Volumetric shadows (shadow.h).  OFF by default: with `enabled` false the
+  // renderer takes exactly the code path it took before shadows existed, on
+  // both backends.
+  shadow_settings shadows;
   bool two_sided_lighting = false; // legacy light_both
   float ambient = 0.0f;            // legacy zeroed ambient; now a real knob
   int steps = defaults::steps;     // samples along the scene bbox diagonal
   float opacity_cutoff = defaults::opacity_cutoff;
   float depth_alpha_threshold = defaults::depth_alpha_threshold;
   unsigned threads = 0; // 0 => thread pool default; 1 => serial
+
+  // Supersampled anti-aliasing: sub-samples per pixel EDGE.  n casts an n x n
+  // REGULAR grid of rays at sub-pixel offsets ((i+0.5)/n, (j+0.5)/n) and
+  // box-filters them into the one output pixel, so the cost is exactly n^2
+  // rays.  Named for the grid edge rather than "samples_per_pixel" because a
+  // pixel gets n^2 of those, not n.  Must be in [1, limits::max_supersample];
+  // 1 is a single ray through the pixel center -- bit-identical to the
+  // renderer before supersampling existed, on both backends.
+  //
+  // This is the EDGE-QUALITY knob and it is orthogonal to the raster size (the
+  // latency knob, cvc::gl::VolRenNode::setResolutionScale on the cvcGL side):
+  // supersampling sharpens silhouettes at a fixed output resolution, raster
+  // size trades output resolution for time.  See docs/VOLREN_API.md.
+  int supersample = defaults::supersample;
 };
 
 } // namespace volren

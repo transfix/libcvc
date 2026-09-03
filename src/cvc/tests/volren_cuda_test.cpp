@@ -60,6 +60,7 @@ TEST(VolrenCuda, SkippedNoCuda) { GTEST_SKIP() << "built without CVC_ENABLE_CUDA
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/raycaster_cuda.h>
@@ -184,6 +185,14 @@ mat4 rotateXThenTranslate(double degrees, double tx, double ty, double tz) {
   m.m[8] = 0.0;
   m.m[9] = s;
   m.m[10] = c;
+  m.m[11] = tz;
+  return m;
+}
+
+mat4 translate(double tx, double ty, double tz) {
+  mat4 m;
+  m.m[3] = tx;
+  m.m[7] = ty;
   m.m[11] = tz;
   return m;
 }
@@ -575,7 +584,7 @@ TEST_F(VolrenCudaTest, BackendDefaultsToCpu) {
   EXPECT_EQ(int(rc.backend_used()), int(backend::cuda));
 }
 
-TEST_F(VolrenCudaTest, TwoVolumesRejectedByCudaAndFallBackUnderAutomatic) {
+TEST_F(VolrenCudaTest, MoreVolumesThanTheCapFallBackUnderAutomatic) {
   raycaster rc(ctx);
   rc.view() = orthoCam();
   rc.settings().steps = 64;
@@ -584,11 +593,12 @@ TEST_F(VolrenCudaTest, TwoVolumesRejectedByCudaAndFallBackUnderAutomatic) {
   vs.unshaded = true;
   vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
   vs.tf_auto_domain = false;
-  rc.add_volume(makeSphereVolume(ctx, 16), vs);
-  rc.add_volume(makeSphereVolume(ctx, 16), vs);
+  const cvc::volume small = makeSphereVolume(ctx, 16);
+  for (int i = 0; i <= cvc::volren::cuda_limits::max_volumes; ++i)
+    rc.add_volume(small, vs);
 
-  // The v1 device path renders exactly one volume: an explicit request is an
-  // error (never a silent CPU march), automatic degrades quietly.
+  // One past the cap: an explicit request is an error (never a silent CPU
+  // march), automatic degrades quietly.
   rc.set_backend(backend::cuda);
   EXPECT_THROW(rc.render(), cvc::volren_error);
 
@@ -596,6 +606,675 @@ TEST_F(VolrenCudaTest, TwoVolumesRejectedByCudaAndFallBackUnderAutomatic) {
   const frame f = rc.render();
   EXPECT_EQ(int(rc.backend_used()), int(backend::cpu));
   EXPECT_EQ(f.color.width(), kRaster);
+}
+
+// ---------------------------------------------------------------------------
+// (g) Multi-volume parity.  Both scenes stack volumes ALONG the view direction
+//     so every ray crosses more than one: that is what exercises the merged
+//     per-ray hit stream, the per-volume cull windows, the shared
+//     (volume, cell)-keyed spline cache, and the per-volume LUT/settings
+//     indirection all at once.  A side-by-side layout would only prove the
+//     kernel can index an array.
+// ---------------------------------------------------------------------------
+
+// Two translucent spheres one behind the other from the camera, with
+// DIFFERENT per-volume settings (only the far one carries an isosurface, and
+// the two gradient ramps differ) so a volume reading its neighbour's block
+// shows up immediately.  Both use the gradient ramp for the same reason
+// ShadedTransferFunctionGradientRampParity does: an unramped high-alpha ramp
+// saturates a ray within a few cells, which puts most of the frame on the
+// depth-latch/specular knife edge and makes the metric measure fast-math
+// conditioning rather than multi-volume correctness (measured: the SAME scene
+// with one volume and no ramp already violates the budget on 8.7% of pixels).
+TEST_F(VolrenCudaTest, TwoVolumeParity) {
+  raycaster rc(ctx);
+  rc.view() = perspectiveCam(); // eye at +z, so ±z translations stack on a ray
+  rc.settings().steps = kSteps;
+  rc.settings().background = {0.05f, 0.05f, 0.08f};
+  rc.settings().ambient = 0.12f;
+  rc.settings().two_sided_lighting = true;
+  light l;
+  l.direction = {0.2, 0.5, 1.0};
+  rc.settings().lights.push_back(l);
+
+  volume_settings near;
+  near.tf = rampTF(0.0, 1.0, 0.9f, 0.4f, 0.3f, 0.7f);
+  near.tf_auto_domain = false;
+  near.gradient_ramp.enabled = true;
+  near.gradient_ramp.ramp0 = 0.0;
+  near.gradient_ramp.ramp1 = 0.5;
+  near.gradient_ramp.ramp2 = 4.0;
+  // A translucent surface on the near volume: an isosurface hit latches the
+  // depth map unconditionally, so most rays get a GEOMETRIC depth instead of
+  // an alpha-threshold one.  Without it a stack of two translucent volumes
+  // puts far more rays than a single one on the latch knife edge the file
+  // header describes (measured: 6.5% depth violations against a 5% budget) --
+  // conditioning, not disagreement, but not worth asserting through.
+  isosurface near_iso;
+  near_iso.value = 0.58;
+  near_iso.opacity = 0.35f;
+  near_iso.color = {0.4f, 1.f, 0.7f};
+  near_iso.shininess = 12.f;
+  near.isosurfaces.push_back(near_iso);
+  near.model_transform = translate(0.0, 0.0, 0.8);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), near);
+
+  volume_settings far;
+  far.tf = rampTF(0.0, 1.0, 0.3f, 0.6f, 0.95f, 0.6f);
+  far.tf_auto_domain = false;
+  far.gradient_ramp.enabled = true;
+  far.gradient_ramp.ramp0 = 0.1;
+  far.gradient_ramp.ramp1 = 0.8;
+  far.gradient_ramp.ramp2 = 3.0;
+  isosurface iso;
+  iso.value = 0.68;
+  iso.opacity = 0.5f;
+  iso.color = {1.f, 0.9f, 0.4f};
+  far.isosurfaces.push_back(iso);
+  far.model_transform = translate(0.0, 0.0, -0.8);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), far);
+
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000) << "the CPU reference drew nothing";
+  expectParity("two-volume", compare(f.cpu, f.gpu), kCellDiagonal);
+
+  // The far volume really is behind the near one on the central rays: drop it
+  // and the image must change, or "two volumes" was only ever one.
+  raycaster solo(ctx);
+  solo.view() = rc.view();
+  solo.settings() = rc.settings();
+  solo.add_volume(makeSphereVolume(ctx, kGrid), near);
+  const frame one = solo.render();
+  int differing = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x)
+      if (std::memcmp(pixel(one, x, y), pixel(f.cpu, x, y), 4) != 0)
+        ++differing;
+  EXPECT_GT(differing, 500) << "the second volume contributed nothing";
+}
+
+// Four volumes in two stacked columns: an isosurface pair and a shaded-TF
+// pair, so hits from different volumes interleave in the same ray's stream and
+// the two volumes' settings must not leak into each other.
+TEST_F(VolrenCudaTest, FourVolumeParity) {
+  raycaster rc(ctx);
+  rc.view() = perspectiveCam();
+  rc.settings().steps = kSteps;
+  rc.settings().background = {0.03f, 0.04f, 0.06f};
+  rc.settings().ambient = 0.1f;
+  rc.settings().two_sided_lighting = true;
+  light l;
+  l.direction = {0.3, 0.4, 1.0};
+  rc.settings().lights.push_back(l);
+
+  for (int column = 0; column < 2; ++column) {
+    const double tx = column == 0 ? -0.55 : 0.55;
+    for (int depth = 0; depth < 2; ++depth) {
+      const double tz = depth == 0 ? 0.7 : -0.7;
+      volume_settings vs;
+      if (column == 0) {
+        // Translucent isosurface shells: the merged hit buffer sees hits from
+        // both of this column's volumes on the same ray.
+        vs.shaded = false;
+        vs.unshaded = false;
+        isosurface iso;
+        iso.value = depth == 0 ? 0.62 : 0.7;
+        iso.opacity = 0.55f;
+        iso.color = {0.95f, 0.6f, 0.25f};
+        iso.shininess = 18.f;
+        vs.isosurfaces.push_back(iso);
+      } else {
+        vs.tf = rampTF(0.0, 1.0, 0.35f, 0.75f, 0.9f, 0.4f);
+        vs.tf_auto_domain = false;
+        vs.gradient_ramp.enabled = depth == 0; // different per volume on purpose
+        vs.gradient_ramp.ramp0 = 0.0;
+        vs.gradient_ramp.ramp1 = 0.5;
+        vs.gradient_ramp.ramp2 = 4.0;
+      }
+      vs.model_transform = translate(tx, 0.0, tz);
+      rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+    }
+  }
+  ASSERT_EQ(rc.volume_count(), std::size_t(4));
+
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000) << "the CPU reference drew nothing";
+  expectParity("four-volume", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+// The device cull box has to contain grid_cell_index()'s acceptance region
+// exactly like the host one does -- see volren_render_test's
+// SilhouetteKeepsTheLowSideVoxelOfCellSlack for why the region is asymmetric.
+// A GPU-only slip there costs one pixel column, which the fractional budgets
+// above would swallow, so the boundary is asserted directly.
+TEST_F(VolrenCudaTest, CullBoundaryMatchesTheHostSilhouette) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+
+  transfer_function flat;
+  flat.add(transfer_point{-1000.0, 1.f, 1.f, 1.f, 1.f});
+  flat.add(transfer_point{1000.0, 1.f, 1.f, 1.f, 1.f});
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = flat;
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+  // Off-screen, purely to widen scene_bounds so the low-side column reaches
+  // the per-volume window instead of being rejected by the scene slab.
+  volume_settings offscreen = vs;
+  offscreen.model_transform = translate(-2.0, 0.0, 0.0);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), offscreen);
+
+  const frame_pair f = renderBoth(rc);
+
+  const double span = 1.0 / double(kGrid - 1);
+  const int row = kRaster / 2;
+  const auto u = [](int px) { return (double(px) + 0.5) / double(kRaster) * 2.0 - 1.0; };
+  int first_lit_cpu = -1, first_lit_gpu = -1, last_lit_cpu = -1, last_lit_gpu = -1;
+  for (int x = 0; x < kRaster; ++x) {
+    if (pixel(f.cpu, x, row)[3] > 0) {
+      if (first_lit_cpu < 0)
+        first_lit_cpu = x;
+      last_lit_cpu = x;
+    }
+    if (pixel(f.gpu, x, row)[3] > 0) {
+      if (first_lit_gpu < 0)
+        first_lit_gpu = x;
+      last_lit_gpu = x;
+    }
+  }
+  std::printf("[volren-cuda cull-boundary] cpu=[%d,%d] gpu=[%d,%d]\n", first_lit_cpu, last_lit_cpu,
+              first_lit_gpu, last_lit_gpu);
+  std::fflush(stdout);
+
+  EXPECT_EQ(first_lit_gpu, first_lit_cpu) << "the device cull box clipped the low side differently";
+  EXPECT_EQ(last_lit_gpu, last_lit_cpu) << "the device cull box clipped the high side differently";
+  // And the shared boundary is the one cell_index() dictates: one voxel of
+  // slack below min, none above max.
+  ASSERT_GE(first_lit_cpu, 0);
+  EXPECT_GT(u(first_lit_cpu), -0.5 - span);
+  EXPECT_LT(u(first_lit_cpu - 1), -0.5 - span);
+  EXPECT_LT(u(last_lit_cpu), 0.5);
+  EXPECT_GT(u(last_lit_cpu + 1), 0.5);
+}
+
+// ---------------------------------------------------------------------------
+// (h) Resident device volume cache.  Voxels stay on the device between renders,
+//     so the thing worth proving is that a CHANGED volume is never served from
+//     a stale copy -- through both the automatic path (copy-on-write hands the
+//     renderer a different buffer) and the announced path (an in-place write
+//     through voxels::data_ptr(), which no copy-on-write can see).
+// ---------------------------------------------------------------------------
+
+int framesDiffer(const frame &a, const frame &b) {
+  const int w = a.color.width(), h = a.color.height();
+  int n = 0;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      const unsigned char *p = pixel(a, x, y);
+      const unsigned char *q = pixel(b, x, y);
+      if (p[0] != q[0] || p[1] != q[1] || p[2] != q[2] || p[3] != q[3])
+        ++n;
+    }
+  return n;
+}
+
+TEST_F(VolrenCudaTest, ResidentCacheSeesVoxelChanges) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().background = {0.f, 0.f, 0.f};
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 0.6f);
+  vs.tf_auto_domain = false; // never re-derive the domain from min()/max()
+
+  cvc::volume vol = makeSphereVolume(ctx, kGrid);
+  rc.add_volume(vol, vs);
+  rc.set_backend(backend::cuda);
+
+  const frame first = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  ASSERT_GT(countAlphaPositive(first), 1000);
+
+  // A re-render with nothing changed takes the cache-hit path and must be
+  // byte-identical -- a resident copy that drifted would show up here.
+  const frame again = rc.render();
+  EXPECT_EQ(framesDiffer(first, again), 0) << "a cache hit changed the image";
+
+  // (1) Mutation through the supported API.  The cache co-owns the voxel block,
+  // so preWrite() copy-on-writes into a NEW buffer: a different cache key, no
+  // announcement needed.  (clear_volumes() first, so the only co-owner left is
+  // the cache itself -- that is the case the pin exists for.)
+  const unsigned char *before_ptr = vol.data_ptr();
+  rc.clear_volumes();
+  for (unsigned k = 0; k < kGrid; ++k)
+    for (unsigned j = 0; j < kGrid; ++j)
+      for (unsigned i = 0; i < kGrid / 2; ++i)
+        vol(i, j, k, -1.0); // hollow out half the sphere
+  EXPECT_NE(vol.data_ptr(), before_ptr)
+      << "the cache did not co-own the block, so the write was in place";
+  rc.add_volume(vol, vs);
+
+  const frame hollowed = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  EXPECT_GT(framesDiffer(first, hollowed), 500)
+      << "the GPU re-rendered a stale resident copy of the volume";
+  {
+    // ... and it is the RIGHT new image, not merely a different one.
+    rc.set_backend(backend::cpu);
+    const frame reference = rc.render();
+    rc.set_backend(backend::cuda);
+    expectParity("cache-cow", compare(reference, hollowed), kCellDiagonal);
+  }
+
+  // (2) In-place mutation through the legacy escape hatch: data_ptr() skips
+  // preWrite(), so the buffer the renderer holds changes underneath it and only
+  // invalidate_device_volume() can tell the cache.
+  float *raw = reinterpret_cast<float *>(vol.data_ptr());
+  for (unsigned k = 0; k < kGrid; ++k)
+    for (unsigned j = 0; j < kGrid / 2; ++j)
+      for (unsigned i = 0; i < kGrid; ++i)
+        raw[i + std::size_t(j) * kGrid + std::size_t(k) * kGrid * kGrid] = -1.f;
+  rc.invalidate_device_volume(0);
+
+  const frame carved = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  EXPECT_GT(framesDiffer(hollowed, carved), 500)
+      << "invalidate_device_volume() did not force a re-upload";
+  rc.set_backend(backend::cpu);
+  const frame carved_cpu = rc.render();
+  rc.set_backend(backend::cuda);
+  expectParity("cache-invalidated", compare(carved_cpu, carved), kCellDiagonal);
+}
+
+// The point of the cache: a re-render that only moved the camera, and the
+// clear_volumes()/add_volume() rebuild cvcGL's VolRenNode does on EVERY frame,
+// must both cost zero host-to-device voxel traffic.
+TEST_F(VolrenCudaTest, ResidentCacheSkipsTheUploadOnCameraOnlyChanges) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = 64;
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  const cvc::volume vol = makeSphereVolume(ctx, kGrid);
+  rc.add_volume(vol, vs);
+  rc.set_backend(backend::cuda);
+
+  const std::uint64_t before_first = cvc::volren::raycast_cuda_cache_upload_bytes();
+  rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  const std::uint64_t after_first = cvc::volren::raycast_cuda_cache_upload_bytes();
+  const std::size_t volume_bytes = std::size_t(kGrid) * kGrid * kGrid * sizeof(float);
+  EXPECT_GE(after_first - before_first, volume_bytes) << "the first render did not upload";
+
+  // (1) Camera only.
+  camera moved = rc.view();
+  moved.eye = {0.4, 0.3, 4.0};
+  rc.view() = moved;
+  rc.render();
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_upload_bytes(), after_first)
+      << "a camera-only change re-uploaded the volume";
+
+  // (2) The VolRenNode rebuild: same voxel buffer, fresh registration.
+  rc.clear_volumes();
+  rc.add_volume(vol, vs);
+  rc.render();
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_upload_bytes(), after_first)
+      << "re-registering an unchanged volume re-uploaded it";
+
+  // (3) An announced in-place change must upload again.
+  rc.invalidate_device_volume(0);
+  rc.render();
+  EXPECT_GE(cvc::volren::raycast_cuda_cache_upload_bytes() - after_first, volume_bytes)
+      << "invalidate_device_volume() did not re-upload";
+}
+
+TEST_F(VolrenCudaTest, CacheBudgetEvictsAndStaysCorrect) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = 64;
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+  rc.set_backend(backend::cuda);
+
+  const frame warm = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  EXPECT_GT(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+
+  // A budget too small for the scene must not break it: the render exceeds the
+  // budget rather than freeing a block it is about to read.
+  const std::size_t saved = cvc::volren::raycast_cuda_cache_budget();
+  cvc::volren::raycast_cuda_set_cache_budget(1);
+  const frame squeezed = rc.render();
+  EXPECT_EQ(int(rc.backend_used()), int(backend::cuda));
+  EXPECT_EQ(framesDiffer(warm, squeezed), 0) << "eviction changed the image";
+  cvc::volren::raycast_cuda_set_cache_budget(saved);
+
+  cvc::volren::raycast_cuda_clear_cache();
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+  const frame reloaded = rc.render();
+  EXPECT_EQ(framesDiffer(warm, reloaded), 0) << "a re-upload changed the image";
+  EXPECT_GT(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+}
+
+// ---------------------------------------------------------------------------
+// Supersampled anti-aliasing: the resolve is per pixel, in one thread, so the
+// two backends have to agree on the sub-sample GRID as well as on the march.
+// ---------------------------------------------------------------------------
+//
+// A high-contrast opaque isosurface is the worst case on purpose: every
+// silhouette pixel's alpha is now a coverage COUNT, so one sub-sample landing
+// on the other side of the surface on one backend is a visible 1/n^2 step in
+// the alpha channel -- an off-by-one in the offsets, or a float-vs-double
+// sub-pixel coordinate, would blow the channel budget instead of hiding inside
+// the existing shading noise.  The depth resolve is min-over-sub-samples, so a
+// grid disagreement also shows up as depth mask flips.
+TEST_F(VolrenCudaTest, SupersampledIsosurfaceParity) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().background = {0.05f, 0.06f, 0.1f};
+  rc.settings().two_sided_lighting = true;
+  rc.settings().supersample = 2;
+  light l;
+  l.direction = {0.3, 0.4, 1.0};
+  l.color = {1.f, 0.95f, 0.85f};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  isosurface iso;
+  iso.value = 0.6;
+  iso.opacity = 1.0f;
+  iso.color = {0.9f, 0.5f, 0.2f};
+  iso.shininess = 24.0f;
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000) << "the CPU reference drew nothing";
+
+  // Both backends must actually have anti-aliased: alpha is binary on this
+  // scene at one sample per pixel, so a partially covered pixel can only come
+  // from the sub-sample grid.  Without this the parity check would pass
+  // trivially if supersample were silently ignored on one side.
+  int partial_cpu = 0, partial_gpu = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      const int a = int(pixel(f.cpu, x, y)[3]), b = int(pixel(f.gpu, x, y)[3]);
+      if (a > 0 && a < 255)
+        ++partial_cpu;
+      if (b > 0 && b < 255)
+        ++partial_gpu;
+    }
+  std::printf("[volren-cuda supersample-2] partially covered pixels cpu=%d gpu=%d\n", partial_cpu,
+              partial_gpu);
+  std::fflush(stdout);
+  EXPECT_GT(partial_cpu, 100) << "the CPU frame has no anti-aliased edge to compare";
+  EXPECT_GT(partial_gpu, 100) << "the CUDA path ignored render_settings::supersample";
+
+  expectParity("iso-sphere supersample=2", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+// The device path enforces the SAME closed range as the CPU one, so an
+// out-of-scope value is a loud error on both rather than a silent fallback.
+TEST_F(VolrenCudaTest, SupersampleOutOfRangeRejectedOnTheDevice) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = 64;
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+  rc.set_backend(backend::cuda);
+
+  rc.settings().supersample = cvc::volren::limits::max_supersample + 1;
+  EXPECT_THROW(rc.render(), cvc::volren_error);
+  rc.settings().supersample = 0;
+  EXPECT_THROW(rc.render(), cvc::volren_error);
+}
+
+// ---------------------------------------------------------------------------
+// Volumetric shadows (shadow.h)
+// ---------------------------------------------------------------------------
+// The maps themselves are DATA -- built by a nested render() that picks its own
+// backend -- so what these tests pin is that the two marchers CONSUME the same
+// map the same way.  Both scenes therefore run the identical raycaster twice,
+// switching only set_backend(), and assert backend_used() == cuda so a silent
+// fallback cannot make parity vacuous.
+
+// Two disjoint lobes in ONE volume, as a normalized distance field whose
+// 1.0-isosurface is the union of a radius-0.22 sphere at the origin and a
+// radius-0.10 sphere at (0, 0.38, 0.38).  Three deliberate properties:
+//  - the gradient points OUTWARD on both (makeSphereVolume's 1 - r field
+//    points inward, which lights the far side and leaves nothing to shadow);
+//  - the small lobe sits exactly on the (0, 1, 1) light ray through the big
+//    lobe, so it genuinely shadows it;
+//  - the two lobes do NOT overlap in SCREEN space under orthoCam().  They
+//    must not: two surfaces 0.2 world units apart in depth sharing a pixel
+//    would put that pixel's depth latch on a knife edge, and a fast-math
+//    epsilon there produces a depth disagreement of several cells that has
+//    nothing to do with shadows (the same reason TwoVolumeParity stacks its
+//    volumes along the view direction).
+cvc::volume makeTwoLobeVolume(cvc::app &ctx, unsigned n) {
+  cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float,
+                  cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5));
+  for (unsigned k = 0; k < n; ++k)
+    for (unsigned j = 0; j < n; ++j)
+      for (unsigned i = 0; i < n; ++i) {
+        const double x = -0.5 + double(i) * vol.XSpan();
+        const double y = -0.5 + double(j) * vol.YSpan();
+        const double z = -0.5 + double(k) * vol.ZSpan();
+        const double a = std::sqrt(x * x + y * y + z * z) / 0.22;
+        const double by = y - 0.38, bz = z - 0.38;
+        const double b = std::sqrt(x * x + by * by + bz * bz) / 0.10;
+        vol(i, j, k, std::min(a, b));
+      }
+  return vol;
+}
+
+// A ball whose value IS the radius, so the gradient points outward and the
+// isosurface is lit on the side facing the light.
+cvc::volume makeBallVolume(cvc::app &ctx, unsigned n) {
+  cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float,
+                  cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5));
+  for (unsigned k = 0; k < n; ++k)
+    for (unsigned j = 0; j < n; ++j)
+      for (unsigned i = 0; i < n; ++i) {
+        const double x = -0.5 + double(i) * vol.XSpan();
+        const double y = -0.5 + double(j) * vol.YSpan();
+        const double z = -0.5 + double(k) * vol.ZSpan();
+        vol(i, j, k, std::sqrt(x * x + y * y + z * z));
+      }
+  return vol;
+}
+
+int luminanceAt(const frame &f, int x, int y) {
+  const unsigned char *p = pixel(f, x, y);
+  return int(p[0]) + int(p[1]) + int(p[2]);
+}
+
+TEST_F(VolrenCudaTest, SelfShadowParity) {
+  // ONE volume shadowing ITSELF: the small lobe sits on the light ray through
+  // the big lobe's apex.  This exercises the device lookup at the isosurface
+  // shading site without needing a second volume.
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.15f;
+  light l;
+  l.direction = {0.0, 1.0, 1.0}; // through the small lobe onto the big one
+  l.color = {1.f, 0.95f, 0.85f};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  isosurface iso;
+  iso.value = 1.0;
+  iso.opacity = 1.0f;
+  iso.color = {0.9f, 0.5f, 0.2f};
+  iso.shininess = 24.0f;
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeTwoLobeVolume(ctx, kGrid), vs);
+
+  // Reference with shadows off, so "parity" cannot pass on two identically
+  // unshadowed images.
+  rc.set_backend(backend::cpu);
+  const frame unshadowed = rc.render();
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.resolution = 512;
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000) << "the CPU reference drew nothing";
+
+  int darkened = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      if (pixel(unshadowed, x, y)[3] == 0)
+        continue;
+      const int l0 = luminanceAt(unshadowed, x, y);
+      if (luminanceAt(f.gpu, x, y) < l0 - l0 / 10)
+        ++darkened;
+    }
+  EXPECT_GT(darkened, 100) << "the GPU render shows no shadow at all -- parity would be vacuous";
+
+  expectParity("shadow-self", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+TEST_F(VolrenCudaTest, InterVolumeShadowParity) {
+  // TWO volumes, one shadowing the other.  (The v1 device path was
+  // single-volume, which is why the design note said this scene could not run
+  // on the GPU; the multi-volume kernel landed since.  One map over the whole
+  // registered set is what makes "A shadows B" and "A shadows itself" the
+  // identical lookup.)
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.15f;
+  light l;
+  l.direction = {1.0, 0.0, 1.0}; // 45 degrees in the x-z plane
+  rc.settings().lights.push_back(l);
+
+  // Receiver: the r = 0.4 ball at the origin, dome facing the camera.
+  volume_settings receiver;
+  receiver.shaded = false;
+  receiver.unshaded = false;
+  isosurface iso;
+  iso.value = 0.4;
+  iso.opacity = 1.0f;
+  iso.color = {0.85f, 0.85f, 0.9f};
+  receiver.isosurfaces.push_back(iso);
+  rc.add_volume(makeBallVolume(ctx, kGrid), receiver);
+
+  // Occluder: the same ball moved up and along +x so that it sits ON the light
+  // ray through the receiver's apex, and OFF the receiver in screen space.
+  volume_settings occluder = receiver;
+  occluder.isosurfaces[0].color = {0.9f, 0.4f, 0.4f};
+  occluder.model_transform = translate(0.9, 0.0, 0.9);
+  rc.add_volume(makeBallVolume(ctx, kGrid), occluder);
+
+  rc.set_backend(backend::cpu);
+  const frame unshadowed = rc.render();
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.resolution = 512;
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000);
+
+  int darkened = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      // Receiver only: the occluder is nearer the camera (its dome tops out at
+      // z = 1.3, eye-space depth 2.7) and is itself unshadowed.
+      if (pixel(unshadowed, x, y)[3] == 0 || depthAt(unshadowed, x, y) < 3.55f)
+        continue;
+      const int l0 = luminanceAt(unshadowed, x, y);
+      if (luminanceAt(f.gpu, x, y) < l0 - l0 / 10)
+        ++darkened;
+    }
+  EXPECT_GT(darkened, 100) << "the occluder cast nothing on the GPU";
+
+  expectParity("shadow-inter-volume", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+TEST_F(VolrenCudaTest, ShadowedShadedTransferFunctionParity) {
+  // The other device shading site: a marched shaded-TF sample rather than an
+  // isosurface hit.  Both sites call the same shadow_factors(), but they pass
+  // different world points (a march sample versus an exact MC intersection),
+  // so a mix-up between them only shows up here.
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.2f;
+  light l;
+  l.direction = {0.6, 0.0, 0.8};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = true;
+  vs.tf_auto_domain = false;
+  vs.tf = rampTF(0.35, 0.65, 0.8f, 0.85f, 0.95f, 0.5f);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.resolution = 512;
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000);
+  expectParity("shadow-shaded-tf", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+TEST_F(VolrenCudaTest, ShadowsOffLeaveTheDevicePathUntouched) {
+  // The no-op contract on the GPU side: with shadows disabled the kernel takes
+  // the pre-shadow path, and the frame must be BYTE-identical to the one it
+  // produced before -- asserted here against itself across a render with
+  // strength 0, which drives the same branch from the other direction.
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  light l;
+  l.direction = {0.3, 0.4, 1.0};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  isosurface iso;
+  iso.value = 0.6;
+  iso.opacity = 1.0f;
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+
+  rc.set_backend(backend::cuda);
+  const frame off = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.strength = 0.f;
+  const frame zero = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+
+  const std::size_t cbytes = std::size_t(kRaster) * kRaster * 4;
+  const std::size_t dbytes = std::size_t(kRaster) * kRaster * sizeof(float);
+  EXPECT_EQ(std::memcmp(off.color.data(), zero.color.data(), cbytes), 0)
+      << "strength 0 changed the device image";
+  EXPECT_EQ(std::memcmp(off.depth.data(), zero.depth.data(), dbytes), 0);
 }
 
 } // namespace

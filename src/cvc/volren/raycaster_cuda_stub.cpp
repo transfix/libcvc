@@ -23,6 +23,15 @@ frame raycast_cuda(const raycast_cuda_request &) {
   throw volren_error("cvc::volren was built without CUDA support (no raycast_cuda backend)");
 }
 
+// The cache controls are no-ops rather than errors: raycaster::invalidate_
+// device_volume() and application teardown call them unconditionally, and a
+// CPU-only build simply has nothing resident to invalidate.
+void raycast_cuda_set_cache_budget(std::size_t) {}
+std::size_t raycast_cuda_cache_budget() { return 0; }
+std::size_t raycast_cuda_cache_bytes() { return 0; }
+std::uint64_t raycast_cuda_cache_upload_bytes() { return 0; }
+void raycast_cuda_clear_cache() {}
+
 #endif // !CVC_USING_CUDA
 
 } // namespace volren

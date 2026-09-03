@@ -3,10 +3,13 @@
 // Renders one or more cvc::volume objects through cvc::volren::raycaster and
 // composites the result into the VTK scene as a textured quad:
 //
-//  - COLOR: the raycast frame (straight-alpha RGBA8; the raycaster's internal
-//    background is forced to black so alpha carries all compositing) uploaded
-//    through GeometryNode's zero-copy texture path; the quad renders in the
-//    TRANSLUCENT pass so the scene shows through where the volume is thin.
+//  - COLOR: the raycast frame (RGBA8, PREMULTIPLIED -- the raycaster's internal
+//    background is forced to black, so alpha carries all compositing) uploaded
+//    verbatim through GeometryNode's zero-copy texture path and un-premultiplied
+//    in the fragment shader, after the texture filter, because bilinear
+//    interpolation is only linear in premultiplied space (filtering straight
+//    alpha darkens every silhouette).  The quad renders in the TRANSLUCENT pass
+//    so the scene shows through where the volume is thin.
 //  - DEPTH: the frame's eye-space depth map goes in as an R32F texture and a
 //    //VTK::Depth::Impl fragment replacement converts it to window z with the
 //    live camera's near/far (pushed as uniforms every tick), so volume pixels
@@ -64,10 +67,65 @@ public:
   cvc::volren::render_settings renderConfig() const;
   void setRenderConfig(const cvc::volren::render_settings &rs);
 
-  // Raycast raster = viewport * scale, clamped to [0.05, 1.0]; the quad
-  // upscales.  The main performance knob.  State key: volren.resolution_scale.
+  // Raycast raster = viewport * scale, clamped to
+  // [MinResolutionScale, MaxResolutionScale]; the quad rescales to fill the
+  // viewport either way.  The main performance knob.  State key:
+  // volren.resolution_scale.
+  //
+  // Above 1.0 it is an anti-aliasing knob too: the quad's texture filter is
+  // bilinear, so a 2x raster lands exactly four texels under each screen pixel
+  // and the two bilinear taps average all four (a screen pixel center falls on
+  // the midpoint between texel centers, weights 0.5/0.5 in both axes) -- an
+  // exact 2x2 box downsample.  That is why MaxResolutionScale is 2.0 and not
+  // more: at 3x, bilinear still reads 4 of the 9 texels under the pixel, so a
+  // third of the rays paid for would be discarded.  Past 2x, supersample is
+  // the knob that averages every ray it casts.
+  //
+  // Distinct from render_settings::supersample, the EDGE-QUALITY knob, which
+  // this node carries through the state tree like every other renderer
+  // setting: scale trades output resolution for latency (below 1.0 everything,
+  // edges included, gets blurrier), supersampling spends n^2 rays per pixel to
+  // anti-alias silhouettes at whatever raster the scale picked.  Both are
+  // priced in rays and they compose -- see docs/VOLREN_API.md.
+  static constexpr double MinResolutionScale = 0.05;
+  static constexpr double MaxResolutionScale = 2.0;
   void setResolutionScale(double scale);
   double resolutionScale() const;
+
+  // Thin accessors for the renderer settings a UI reaches for; each one is a
+  // read-modify-write of renderConfig() and therefore goes through the
+  // embedded state_settings (the source of truth) exactly like a full
+  // setRenderConfig() would.
+  //
+  // Anti-aliasing: n x n rays per pixel, n^2 x the cost, output size
+  // unchanged.  Must be in [1, cvc::volren::limits::max_supersample] --
+  // render() rejects anything else rather than silently clamping, so a bad
+  // value throws on the worker thread and the node keeps the previous frame.
+  void setSupersample(int n);
+  int supersample() const;
+
+  // Volumetric shadows.  Off by default; enabling costs one extra light-view
+  // raycast per casting light, CACHED across camera motion (the fingerprint
+  // excludes the camera), so orbiting is free and a scene change pays one
+  // rebuild frame.  The volume shadows itself and the other registered
+  // volumes; it does not yet cast onto cvcGL scene geometry (docs/VOLREN_API.md
+  // spells out the two VTK-side blockers).
+  void setShadowsEnabled(bool on);
+  bool shadowsEnabled() const;
+  cvc::volren::shadow_settings shadowConfig() const;
+  void setShadowConfig(const cvc::volren::shadow_settings &ss);
+
+  // Announce that a registered volume's voxels changed UNDER THE SAME BUFFER
+  // (an in-place write through the unchecked legacy voxels::data_ptr()).  The
+  // node re-copies its volumes into the raycaster every raycast, so every
+  // write through the supported cvc::volume API copy-on-writes and needs no
+  // announcement; this is the escape hatch for the one case that does not.
+  //
+  // Deferred, not immediate: the raycaster lives on the worker thread, so this
+  // only arms a flag that the worker consumes after re-registering the volumes
+  // and before marching.  It drops the CUDA resident blocks AND (through the
+  // content generation those blocks are stamped with) the cached shadow maps.
+  void invalidateVolumeData();
 
   // Re-raycast every tick instead of only when camera/transform/settings
   // change.  State key: volren.continuous.
@@ -89,6 +147,11 @@ public:
   // Perf/testing introspection.
   double lastRenderSeconds() const { return m_lastRenderSeconds.load(); }
   std::uint64_t framesRendered() const { return m_framesRendered.load(); }
+  // Raster of the last APPLIED frame, 0 before the first one.  This is the
+  // authoritative ray count for a readout: viewport * resolutionScale()
+  // rounded and floored the way buildSnapshot() does it, not re-derived.
+  int raycastWidth() const { return m_appliedW; }  // owner thread
+  int raycastHeight() const { return m_appliedH; } // owner thread
 
   // Union of the registered volumes' boxes under their model transforms
   // (this node's own scene transform is applied by the scene graph).

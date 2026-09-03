@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/volren/raycaster.h>
@@ -165,6 +166,21 @@ void state_settings::seedState(const snapshot &s) {
   getState("two_sided_lighting").value(rs.two_sided_lighting ? 1 : 0);
   getState("ambient").value(double(rs.ambient));
   getState("threads").value(int(rs.threads));
+  getState("supersample").value(rs.supersample);
+
+  const shadow_settings &sh = rs.shadows;
+  getState("shadows.enabled").value(sh.enabled ? 1 : 0);
+  getState("shadows.resolution").value(sh.resolution);
+  getState("shadows.strength").value(double(sh.strength));
+  getState("shadows.bias_scale").value(double(sh.bias_scale));
+  getState("shadows.slope_scale").value(double(sh.slope_scale));
+  getState("shadows.min_occluder_opacity").value(double(sh.min_occluder_opacity));
+  {
+    std::vector<double> indices;
+    for (const int i : sh.lights)
+      indices.push_back(double(i));
+    getState("shadows.lights").value(csv(indices));
+  }
 
   std::vector<double> flat;
   for (const light &l : rs.lights) {
@@ -245,6 +261,31 @@ bool state_settings::readAllFromState(snapshot &out) const {
     rs.two_sided_lighting = getState("two_sided_lighting").value<int>() != 0;
     rs.ambient = float(getState("ambient").value<double>());
     rs.threads = unsigned(std::max(0, getState("threads").value<int>()));
+    // Read raw, exactly like `steps`: render() is the single place that decides
+    // what is in range, so an out-of-range write round-trips and is rejected
+    // loudly there instead of being silently clamped into something that looks
+    // like it worked.
+    rs.supersample = getState("supersample").value<int>();
+
+    rs.shadows.enabled = getState("shadows.enabled").value<int>() != 0;
+    // Clamped on read, the way `threads` is: a light-view raster is an
+    // implementation resource with a defensible range, not a contract the
+    // caller can violate meaningfully.
+    rs.shadows.resolution =
+        std::max(limits::min_shadow_resolution,
+                 std::min(getState("shadows.resolution").value<int>(), limits::max_raster_dim));
+    rs.shadows.strength = float(getState("shadows.strength").value<double>());
+    rs.shadows.bias_scale = float(getState("shadows.bias_scale").value<double>());
+    rs.shadows.slope_scale = float(getState("shadows.slope_scale").value<double>());
+    rs.shadows.min_occluder_opacity =
+        float(getState("shadows.min_occluder_opacity").value<double>());
+    for (const double v : parse_csv(getState("shadows.lights").value())) {
+      // A light INDEX, so anything non-integral or negative is malformed
+      // state, not a value to round -- leave the object alone.
+      if (!(v == std::floor(v)) || v < 0.0 || v > double(limits::max_raster_dim))
+        return false;
+      rs.shadows.lights.push_back(int(v));
+    }
 
     std::vector<double> flat = parse_csv(getState("lights").value());
     if (flat.size() % 6 != 0)

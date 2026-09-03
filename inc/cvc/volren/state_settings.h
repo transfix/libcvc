@@ -20,6 +20,13 @@
 //   two_sided_lighting                         int 0/1
 //   ambient                                    double
 //   threads                                    int
+//   supersample                                int (sub-samples per pixel EDGE)
+//   shadows.enabled                            int 0/1
+//   shadows.lights                             flat CSV of ints; "" = all cast
+//   shadows.resolution                         int (light-view raster edge)
+//   shadows.strength | .bias_scale             double
+//   shadows.slope_scale                        double
+//   shadows.min_occluder_opacity               double
 //   volumes.count                              int
 //   volumes.<i>.shaded | .unshaded             int 0/1
 //   volumes.<i>.tf_auto_domain                 int 0/1
@@ -30,6 +37,11 @@
 //   volumes.<i>.window                         "" or "min,max"
 //   volumes.<i>.gradient_ramp                  "" or "r0,r1,r2[,plateau]"
 //   volumes.<i>.isosurfaces                    "value,opacity,r,g,b,shininess" x N
+//
+// `shadows.lights` is a SEPARATE index list rather than extra fields on the
+// `lights` key: the gradient_ramp trick of accepting 3 or 4 values cannot be
+// applied to a repeated list, since 42 values would be both 7 lights of 6
+// fields and 6 lights of 7.  An index list is the only unambiguous encoding.
 //
 // The transfer-function encoding (separate color and opacity point lists,
 // flat comma-separated doubles) deliberately matches cvcGL VolumeNode's

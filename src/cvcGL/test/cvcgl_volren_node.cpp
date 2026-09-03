@@ -9,7 +9,13 @@
 //     between the camera and the volume hides the volume's pixels on the
 //     wall's half of the screen while the other half still shows them;
 //   * the scene-graph transform reaches the raycaster (moving the node
-//     re-raycasts and moves the silhouette).
+//     re-raycasts and moves the silhouette);
+//   * the settings accessors (supersample, shadows, resolution scale and its
+//     clamps) reach the state-tree-bound snapshot the next raycast captures;
+//   * the composite filters PREMULTIPLIED color, so silhouettes carry no dark
+//     halo -- the one visible symptom of getting alpha wrong across the
+//     texture filter, and the reason resolution_scale above 1.0 is usable as
+//     an anti-aliasing knob at all.
 //
 // Offscreen; degrades to SKIP (exit 0) when the GL stack can't render
 // (llvmpipe+Xvfb covers Linux CI).
@@ -61,6 +67,8 @@ RGB pixelAt(const std::vector<unsigned char> &f, int x, int y_from_top) {
 
 bool isBackground(const RGB &p) { return p.r < 12 && p.g < 12 && p.b < 12; }
 
+int lum(const RGB &p) { return (p.r * 299 + p.g * 587 + p.b * 114) / 1000; }
+
 // Pump the scene until the node has applied >= want raycast frames.
 bool pumpUntilFrames(SceneRenderer &view, cvc::gl::VolRenNode &node, std::uint64_t want,
                      double timeout_s = 10.0) {
@@ -106,6 +114,11 @@ int main() {
   cvc::app app;
   SceneGraph sg(app, "volren_test");
 
+  // No grid/axes/bounds markers: they are drawn from the SCENE bounds, so they
+  // appear the moment this test adds a wall or a backdrop and then paint over
+  // the very pixels the assertions sample.
+  sg.setDiagnosticChromeVisible(false);
+
   auto node = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>("vol");
   sg.registerGraphics("vol", node);
 
@@ -130,6 +143,36 @@ int main() {
     rs.steps = 128;
     node->setRenderConfig(rs);
   }
+
+  // ── 0. the settings surface ────────────────────────────────────────────────
+  // The thin accessors are read-modify-writes of the state-tree-bound settings,
+  // so this also pins that a write is visible SYNCHRONOUSLY to the reader (the
+  // node's snapshot is what the next raycast captures).  No GL: these report
+  // even on a machine where everything below degrades to SKIP.
+  node->setSupersample(3);
+  assert(node->supersample() == 3 && "supersample did not reach the settings snapshot");
+  assert(node->renderConfig().supersample == 3 && "supersample must live in render_settings");
+  node->setShadowsEnabled(true);
+  assert(node->shadowsEnabled() && node->renderConfig().shadows.enabled);
+  {
+    cvc::volren::shadow_settings sh = node->shadowConfig();
+    sh.resolution = 256;
+    sh.strength = 0.5f;
+    node->setShadowConfig(sh);
+    assert(node->shadowConfig().resolution == 256);
+    assert(node->renderConfig().shadows.strength == 0.5f);
+  }
+  // The scale clamps at both ends; above 1.0 is legal now (the raster
+  // supersamples and the quad box-filters it back down).
+  node->setResolutionScale(2.0);
+  assert(node->resolutionScale() == 2.0 && "scale above 1.0 must be accepted");
+  node->setResolutionScale(9.0);
+  assert(node->resolutionScale() == cvc::gl::VolRenNode::MaxResolutionScale && "scale must clamp");
+  node->setResolutionScale(0.0);
+  assert(node->resolutionScale() == cvc::gl::VolRenNode::MinResolutionScale && "scale must clamp");
+  node->setSupersample(1); // back to the defaults the image checks expect
+  node->setShadowsEnabled(false);
+  node->setResolutionScale(1.0);
 
   try {
     SceneRenderer view(sg, W, H, /*offscreen=*/true);
@@ -261,17 +304,129 @@ int main() {
     assert(right.r > right.g + 20 && "volume (red) must still show right of the wall");
 
     // ── 3. scene transform drives the raycaster ─────────────────────────────
+    // 1.2 world units, NOT further: this camera's half-width is ~2.13 world
+    // units, so a bigger shift walks the r=0.55 sphere off the right edge and
+    // leaves nothing of it under any sample point.  x=1.2 lands its centre at
+    // screen column ~250, clear of the wall on the left half.
     const std::uint64_t before = node->framesRendered();
-    node->setPosition(2.5, 0.0, 0.0); // push the volume to screen right
+    node->setPosition(1.2, 0.0, 0.0); // push the volume to screen right
     if (!pumpUntilFrames(view, *node, before + 1) || !pumpUntilStable(view, *node)) {
       std::printf("SKIP-PARTIAL: transform re-raycast did not complete\n");
       return 0;
     }
     view.render();
     f = view.frameRGB();
-    const RGB movedRight = pixelAt(f, W - 40, H / 2);
-    std::printf("  after move: right-side (%d,%d,%d)\n", movedRight.r, movedRight.g, movedRight.b);
-    assert(movedRight.r > 40 && "moved volume should appear on the right side");
+    const RGB movedRight = pixelAt(f, 250, H / 2);
+    const RGB vacated = pixelAt(f, W / 2, H / 2);
+    std::printf("  after move: right-side (%d,%d,%d) vacated centre (%d,%d,%d)\n", movedRight.r,
+                movedRight.g, movedRight.b, vacated.r, vacated.g, vacated.b);
+    fflush(stdout);
+    // Both halves of "it moved": the volume is where it was sent AND is no
+    // longer where it was.  The colour test is what keeps the first half
+    // honest -- any red-dominant pixel there has to come from the volume.
+    assert(movedRight.r > 40 && movedRight.r > movedRight.g + 20 &&
+           "moved volume should appear on the right side");
+    assert(isBackground(vacated) && "the volume should have left the viewport centre");
+
+    // ── 4. the composite has no dark halo ──────────────────────────────────
+    // A silhouette pixel is a blend of the volume with whatever is behind it,
+    // so it can never be darker than BOTH.  The GL texture filter is what
+    // breaks that if the node hands VTK straight alpha: interpolating it reads
+    // a transparent texel's RGB=0 as black paint and rings every edge with it
+    // (worst at resolution_scale < 1, where one raycast texel is magnified over
+    // several screen pixels).  The node therefore uploads the raycaster's
+    // PREMULTIPLIED frame and divides alpha out in the fragment shader, after
+    // the filter.
+    //
+    // Checking that invariant needs a scene where a minimum is meaningful:
+    // a FLAT-lit body (ambient only -- a shaded sphere's dark limb would
+    // dominate any minimum) over a backdrop of similar luminance (a green
+    // backdrop would stay bright enough on its own to hide a halved red body).
+    {
+      cvc::volren::volume_settings vs2 = node->volumeConfig(0);
+      vs2.isosurfaces[0].color = {1.f, 1.f, 1.f};
+      // The isosurface alone: volume_settings::shaded defaults to TRUE, and
+      // while the default transfer function is fully transparent (which is why
+      // the checks above see only the isosurface), a minimum-luminance test
+      // should not depend on that.
+      vs2.shaded = false;
+      node->setVolumeConfig(0, vs2);
+      cvc::volren::render_settings rs = node->renderConfig();
+      rs.lights.clear(); // ambient only: no terminator, no specular
+      rs.ambient = 1.0f;
+      node->setRenderConfig(rs);
+      node->setPosition(0.0, 0.0, 0.0);
+      node->setResolutionScale(0.5); // magnification: where the halo is worst
+
+      cvc::geometry back;
+      const double bx[4] = {-12, 12, 12, -12}, by[4] = {-12, -12, 12, 12};
+      for (int i = 0; i < 4; ++i) {
+        cvc::geometry::point_t p;
+        p[0] = bx[i];
+        p[1] = by[i];
+        p[2] = -2.0;
+        back.points().push_back(p);
+      }
+      cvc::geometry::tri_t b1, b2;
+      b1[0] = 0;
+      b1[1] = 1;
+      b1[2] = 2;
+      b2[0] = 0;
+      b2[1] = 2;
+      b2[2] = 3;
+      back.tris().push_back(b1);
+      back.tris().push_back(b2);
+      auto backNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("backdrop", back));
+      backNode->setUseSingleColor(true);
+      backNode->setColor(0.6, 0.6, 0.6);
+      backNode->setAmbient(1.0);
+      backNode->setDiffuse(0.0);
+
+      if (pumpUntilFrames(view, *node, node->framesRendered() + 1) &&
+          pumpUntilStable(view, *node)) {
+        view.render();
+        const std::vector<unsigned char> halo = view.frameRGB();
+        // Right of the opaque wall's edge only -- the wall is still in the
+        // scene, covering screen-left.
+        int worstX = 0, worstY = 0, worst = 1000;
+        for (int y = 8; y < H - 8; ++y)
+          for (int x = W / 2 + 8; x < W - 8; ++x) {
+            const int l = lum(pixelAt(halo, x, y));
+            if (l < worst) {
+              worst = l;
+              worstX = x;
+              worstY = y;
+            }
+          }
+        // Both endpoints are MEASURED, not assumed: the backdrop's rendered
+        // luminance depends on the GL stack's lighting, and a hardcoded bound
+        // would either drift or stop separating the two cases.  Everything in
+        // the region is a blend of the body and the backdrop, so nothing may be
+        // darker than the darker endpoint -- the backdrop.
+        const RGB backdropPx = pixelAt(halo, W - 12, 12);    // pure backdrop
+        const RGB bodyPx = pixelAt(halo, W / 2 + 20, H / 2); // inside the sphere
+        const int backdropLum = lum(backdropPx), bodyLum = lum(bodyPx);
+        std::printf("  halo test: darkest %d at (%d,%d); backdrop %d, body %d\n", worst, worstX,
+                    worstY, backdropLum, bodyLum);
+        fflush(stdout);
+        assert(bodyLum > backdropLum + 15 &&
+               "halo scene mis-set: the body must be the brighter endpoint");
+        if (const char *dump = getenv("VOLREN_TEST_DUMP2")) {
+          FILE *fp = fopen(dump, "wb");
+          fprintf(fp, "P6\n%d %d\n255\n", W, H);
+          for (int y = H - 1; y >= 0; --y)
+            fwrite(halo.data() + std::size_t(y) * W * 3, 1, std::size_t(W) * 3, fp);
+          fclose(fp);
+        }
+        // -8 is u8 rounding slack, nothing more.  Measured on this box: 199
+        // (== the backdrop, i.e. no fringe at all) with the premultiplied
+        // upload, 160 with a straight-alpha one -- a half-covered pixel there
+        // contributes half the body's colour instead of all of it.
+        assert(worst >= backdropLum - 8 &&
+               "dark halo on the silhouette -- the composite is filtering "
+               "straight alpha instead of premultiplied");
+      }
+    }
 
     std::printf("cvcgl_volren_node: all checks passed (%llu raycasts, last %.1f ms)\n",
                 (unsigned long long)node->framesRendered(), node->lastRenderSeconds() * 1000.0);

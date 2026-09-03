@@ -107,6 +107,19 @@ TEST(VolrenStateSettings, SeedWritesDefaults) {
   EXPECT_EQ(treeKey(ctx, path, "background").value(), "0,0,0");
   EXPECT_NEAR(treeKey(ctx, path, "ambient").value<double>(), 0.0, 1e-12);
   EXPECT_EQ(treeKey(ctx, path, "threads").value<int>(), 0);
+  EXPECT_EQ(treeKey(ctx, path, "supersample").value<int>(), cvc::volren::defaults::supersample);
+
+  EXPECT_EQ(treeKey(ctx, path, "shadows.enabled").value<int>(), 0);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.lights").value(), "");
+  EXPECT_EQ(treeKey(ctx, path, "shadows.resolution").value<int>(),
+            cvc::volren::defaults::shadow_resolution);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.strength").value<double>(), 1.0, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.bias_scale").value<double>(),
+              double(cvc::volren::defaults::shadow_bias_scale), 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.slope_scale").value<double>(),
+              double(cvc::volren::defaults::shadow_slope_scale), 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.min_occluder_opacity").value<double>(),
+              double(cvc::volren::defaults::shadow_min_occluder_opacity), 1e-12);
 
   EXPECT_EQ(treeKey(ctx, path, "lights").value(), "");
   EXPECT_EQ(treeKey(ctx, path, "cut_planes").value(), "");
@@ -457,6 +470,60 @@ TEST(VolrenStateSettings, ApplyTo) {
 }
 
 // ============================================================================
+// supersample: both directions, and the deliberate absence of clamping.
+// ============================================================================
+
+TEST(VolrenStateSettings, SupersampleRoundTrips) {
+  cvc::app ctx;
+  const std::string path = "t9.volren";
+
+  int applied = 0;
+  state_settings::snapshot last;
+  state_settings ss(ctx, path, [&](const state_settings::snapshot &s) {
+    ++applied;
+    last = s;
+  });
+
+  // Object -> state.
+  state_settings::snapshot snap = ss.get();
+  snap.settings.supersample = 4;
+  ss.set(snap);
+  EXPECT_EQ(treeKey(ctx, path, "supersample").value<int>(), 4);
+  EXPECT_EQ(ss.get().settings.supersample, 4);
+  EXPECT_EQ(applied, 0) << "set() must not invoke apply (object -> state only)";
+
+  // State -> object, synchronously through the callback.
+  treeKey(ctx, path, "supersample").value(3);
+  EXPECT_EQ(applied, 1);
+  EXPECT_EQ(ss.get().settings.supersample, 3);
+  EXPECT_EQ(last.settings.supersample, 3);
+
+  // Out-of-range values are carried, NOT clamped: render() owns the range check
+  // (same as `steps`), so a bad write fails loudly at the renderer instead of
+  // silently becoming a value the writer never asked for.
+  treeKey(ctx, path, "supersample").value(99);
+  EXPECT_EQ(ss.get().settings.supersample, 99);
+
+  // ... and it really does reach a raycaster and get rejected there.
+  cvc::volume vol(ctx, cvc::dimension(8, 8, 8), cvc::Float,
+                  cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5));
+  for (int k = 0; k < 8; ++k)
+    for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < 8; ++i)
+        vol(i, j, k, double(i + j + k));
+  cvc::volren::raycaster rc(ctx);
+  rc.add_volume(vol);
+  ss.apply_to(rc);
+  EXPECT_EQ(rc.settings().supersample, 99);
+  EXPECT_THROW(rc.render(), cvc::volren_error);
+
+  treeKey(ctx, path, "supersample").value(2);
+  ss.apply_to(rc);
+  EXPECT_EQ(rc.settings().supersample, 2);
+  EXPECT_NO_THROW(rc.render());
+}
+
+// ============================================================================
 // TF encoding: the split color/opacity ramps match cvcGL VolumeNode's keys.
 // ============================================================================
 
@@ -487,4 +554,100 @@ TEST(VolrenStateSettings, TransferFunctionEncodingMatchesVolumeNode) {
   ASSERT_EQ(opacity.size(), expectedOpacity.size());
   for (std::size_t i = 0; i < opacity.size(); ++i)
     EXPECT_NEAR(opacity[i], expectedOpacity[i], 1e-12) << "opacity[" << i << "]";
+}
+
+// ============================================================================
+// Volumetric shadows (shadow.h): the seven keys, both directions.
+// ============================================================================
+
+TEST(VolrenStateSettings, ShadowSettingsRoundTrip) {
+  cvc::app ctx;
+  const std::string path = "t20.volren";
+  state_settings ss(ctx, path);
+
+  // Object -> state.
+  state_settings::snapshot snap = ss.get();
+  snap.settings.lights.resize(3);
+  snap.settings.shadows.enabled = true;
+  snap.settings.shadows.lights = {0, 2};
+  snap.settings.shadows.resolution = 1024;
+  snap.settings.shadows.strength = 0.625f;
+  snap.settings.shadows.bias_scale = 2.5f;
+  snap.settings.shadows.slope_scale = 0.25f;
+  snap.settings.shadows.min_occluder_opacity = 0.75f;
+  ss.set(snap);
+
+  EXPECT_EQ(treeKey(ctx, path, "shadows.enabled").value<int>(), 1);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.lights").value(), "0,2");
+  EXPECT_EQ(treeKey(ctx, path, "shadows.resolution").value<int>(), 1024);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.strength").value<double>(), 0.625, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.bias_scale").value<double>(), 2.5, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.slope_scale").value<double>(), 0.25, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.min_occluder_opacity").value<double>(), 0.75, 1e-12);
+
+  // State -> object, through an external write on each key.
+  cvc::state::instance(ctx)(path + ".shadows.strength").value(0.5);
+  EXPECT_NEAR(double(ss.get().settings.shadows.strength), 0.5, 1e-6);
+  cvc::state::instance(ctx)(path + ".shadows.bias_scale").value(3.0);
+  EXPECT_NEAR(double(ss.get().settings.shadows.bias_scale), 3.0, 1e-6);
+  cvc::state::instance(ctx)(path + ".shadows.slope_scale").value(0.125);
+  EXPECT_NEAR(double(ss.get().settings.shadows.slope_scale), 0.125, 1e-6);
+  cvc::state::instance(ctx)(path + ".shadows.min_occluder_opacity").value(0.2);
+  EXPECT_NEAR(double(ss.get().settings.shadows.min_occluder_opacity), 0.2, 1e-6);
+  cvc::state::instance(ctx)(path + ".shadows.enabled").value(0);
+  EXPECT_FALSE(ss.get().settings.shadows.enabled);
+
+  // "" means "every light casts" and must round-trip as an EMPTY list, not as
+  // a one-element list holding a parsed zero.
+  cvc::state::instance(ctx)(path + ".shadows.lights").value(std::string(""));
+  EXPECT_TRUE(ss.get().settings.shadows.lights.empty());
+  cvc::state::instance(ctx)(path + ".shadows.lights").value(std::string("1,0,2"));
+  EXPECT_EQ(ss.get().settings.shadows.lights, (std::vector<int>{1, 0, 2}));
+
+  // Malformed state leaves the object alone (the readAllFromState contract):
+  // a light index is an index, so junk, a negative, and a fraction are all
+  // rejected rather than rounded into something that looks like it worked.
+  for (const char *bad : {"0,x", "-1", "0.5", "1,,2"}) {
+    cvc::state::instance(ctx)(path + ".shadows.lights").value(std::string(bad));
+    EXPECT_EQ(ss.get().settings.shadows.lights, (std::vector<int>{1, 0, 2}))
+        << "malformed shadows.lights \"" << bad << "\" was accepted";
+  }
+
+  // Malformed state is STICKY until it is repaired: readAllFromState is
+  // all-or-nothing, so while shadows.lights is junk no later write to any key
+  // lands either.  Repair it before moving on.
+  cvc::state::instance(ctx)(path + ".shadows.lights").value(std::string("1,0,2"));
+
+  // resolution CLAMPS on read (the `threads` convention) rather than being
+  // rejected: a light-view raster is an implementation resource with a
+  // defensible range, not a contract the caller can violate meaningfully.
+  cvc::state::instance(ctx)(path + ".shadows.resolution").value(1);
+  EXPECT_EQ(ss.get().settings.shadows.resolution, cvc::volren::limits::min_shadow_resolution);
+  cvc::state::instance(ctx)(path + ".shadows.resolution").value(1 << 24);
+  EXPECT_EQ(ss.get().settings.shadows.resolution, cvc::volren::limits::max_raster_dim);
+}
+
+TEST(VolrenStateSettings, ShadowSettingsReachTheRaycasterThroughApplyTo) {
+  cvc::app ctx;
+  const std::string path = "t21.volren";
+  state_settings ss(ctx, path);
+
+  cvc::state::instance(ctx)(path + ".lights").value(std::string("1,1,1,0,0,1"));
+  cvc::state::instance(ctx)(path + ".shadows.enabled").value(1);
+  cvc::state::instance(ctx)(path + ".shadows.resolution").value(128);
+  cvc::state::instance(ctx)(path + ".shadows.strength").value(0.5);
+
+  cvc::volume vol(ctx, cvc::dimension(8, 8, 8), cvc::Float,
+                  cvc::bounding_box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5));
+  for (unsigned k = 0; k < 8; ++k)
+    for (unsigned j = 0; j < 8; ++j)
+      for (unsigned i = 0; i < 8; ++i)
+        vol(i, j, k, double(k));
+
+  cvc::volren::raycaster rc(ctx);
+  rc.add_volume(vol);
+  ss.apply_to(rc);
+  EXPECT_TRUE(rc.settings().shadows.enabled);
+  EXPECT_EQ(rc.settings().shadows.resolution, 128);
+  EXPECT_NEAR(double(rc.settings().shadows.strength), 0.5, 1e-6);
 }

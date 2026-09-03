@@ -10,8 +10,10 @@
 #include <cvc/volren/detail/cell_intersect.h>
 #include <cvc/volren/detail/mc_tables.h>
 #include <cvc/volren/detail/sampler.h>
+#include <cvc/volren/detail/shadow_map.h>
 #include <cvc/volren/detail/spline_gradient.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -560,4 +562,195 @@ TEST(IsosurfaceIntersect, DegenerateFlatInputsNeitherCrashNorYieldNan) {
   mc_triangle collapsed;
   collapsed.vert[0] = collapsed.vert[1] = collapsed.vert[2] = vec3d{1, 2, 3};
   EXPECT_FALSE(in_triangle(vec3d{1, 2, 3}, collapsed, vec3d{}));
+}
+
+// ============================================================================
+// Volumetric shadows: the light-view camera fit and the map lookup
+// (detail/shadow_map.h)
+// ============================================================================
+
+namespace {
+
+cvc::bounding_box boxOf(double x0, double y0, double z0, double x1, double y1, double z1) {
+  return cvc::bounding_box(x0, y0, z0, x1, y1, z1);
+}
+
+cvc::volren::light lightToward(double x, double y, double z) {
+  cvc::volren::light l;
+  l.direction = {x, y, z};
+  return l;
+}
+
+} // namespace
+
+TEST(ShadowMap, FitLightCameraCoversBounds) {
+  using cvc::volren::camera;
+  using cvc::volren::shadow_view;
+  using cvc::volren::detail::fit_light_camera;
+
+  // Both branches of the up-vector choice, straddling the 0.9 threshold, plus
+  // an off-center box so a missing re-centering would show up.
+  const std::array<std::array<double, 3>, 8> dirs = {{
+      {0, 0, 1},          // straight up: the +Y fallback branch
+      {0, 0, -1},         // straight down: the +Y fallback branch
+      {0.89, 0.0, 0.456}, // |z| just under 0.9: the +Z branch
+      {0.1, 0.0, 0.995},  // |z| just over 0.9: the +Y branch
+      {1, 0, 0},
+      {0, 1, 0},
+      {0.3, -0.6, 0.7},
+      {-0.5, 0.5, -0.7},
+  }};
+  const cvc::bounding_box b = boxOf(-2.0, 1.0, -0.5, 3.0, 4.0, 6.0);
+
+  for (const std::array<double, 3> &d : dirs) {
+    camera cam;
+    shadow_view v;
+    ASSERT_TRUE(fit_light_camera(lightToward(d[0], d[1], d[2]), b, 256, cam, v))
+        << "no fit for direction " << d[0] << "," << d[1] << "," << d[2];
+    ASSERT_NO_THROW(cam.basis()) << "the fitted camera is degenerate";
+    EXPECT_EQ(v.width, 256);
+    EXPECT_EQ(v.height, 256);
+    EXPECT_NEAR(v.texel_world, 2.0 * v.parallel_scale / 256.0, 1e-15);
+
+    // Every corner of the box must project INSIDE the map and sit in front of
+    // the light's eye plane -- that is what "the map covers the scene" means.
+    for (int corner = 0; corner < 8; ++corner) {
+      const std::array<double, 3> p = {corner & 1 ? b.maxx : b.minx, corner & 2 ? b.maxy : b.miny,
+                                       corner & 4 ? b.maxz : b.minz};
+      int ix = -1, iy = -1;
+      double depth = 0.0;
+      EXPECT_TRUE(v.project(p, ix, iy, depth)) << "a scene corner falls outside the shadow map";
+      EXPECT_GE(ix, 0);
+      EXPECT_LT(ix, 256);
+      EXPECT_GE(iy, 0);
+      EXPECT_LT(iy, 256);
+      EXPECT_GT(depth, 0.0) << "a scene corner is behind the light's eye plane";
+    }
+
+    // The frame is orthonormal and right-handed, and `forward` points AWAY
+    // from the light (a sign flip here inverts every shadow).
+    const cvc::volren::vec3d right(v.right), up(v.up), fwd(v.forward);
+    EXPECT_NEAR(dot(right, right), 1.0, 1e-12);
+    EXPECT_NEAR(dot(up, up), 1.0, 1e-12);
+    EXPECT_NEAR(dot(fwd, fwd), 1.0, 1e-12);
+    EXPECT_NEAR(dot(right, up), 0.0, 1e-12);
+    EXPECT_NEAR(dot(right, fwd), 0.0, 1e-12);
+    EXPECT_NEAR(dot(up, fwd), 0.0, 1e-12);
+    const cvc::volren::vec3d toward_light = normalized(cvc::volren::vec3d(d[0], d[1], d[2]));
+    EXPECT_NEAR(dot(fwd, toward_light), -1.0, 1e-12);
+  }
+
+  // Degenerate inputs cast nothing rather than throwing or producing a
+  // garbage frame.
+  camera cam;
+  cvc::volren::shadow_view v;
+  EXPECT_FALSE(fit_light_camera(lightToward(0, 0, 0), b, 256, cam, v));
+  EXPECT_FALSE(fit_light_camera(lightToward(std::numeric_limits<double>::quiet_NaN(), 0, 1), b, 256,
+                                cam, v));
+  EXPECT_FALSE(fit_light_camera(lightToward(0, 0, 1), boxOf(1, 1, 1, 1, 1, 1), 256, cam, v));
+
+  // Resolution clamps into [min_shadow_resolution, max_raster_dim].
+  ASSERT_TRUE(fit_light_camera(lightToward(0, 0, 1), b, 1, cam, v));
+  EXPECT_EQ(v.width, cvc::volren::limits::min_shadow_resolution);
+}
+
+TEST(ShadowMap, ProjectRoundTrips) {
+  using cvc::volren::camera;
+  using cvc::volren::shadow_view;
+  using cvc::volren::vec3d;
+  using cvc::volren::detail::fit_light_camera;
+
+  camera cam;
+  shadow_view v;
+  ASSERT_TRUE(
+      fit_light_camera(lightToward(0.3, -0.6, 0.7), boxOf(-1, -1, -1, 1, 1, 1), 64, cam, v));
+
+  // The world point at texel (ix, iy)'s CENTER must project back to exactly
+  // that texel.  project() inverts ray_generator::at, so this is the check
+  // that the two agree -- a half-texel slip or a v-flip fails it.
+  const vec3d eye(v.eye), right(v.right), up(v.up), fwd(v.forward);
+  for (const int ix : {0, 1, 17, 32, 62, 63})
+    for (const int iy : {0, 1, 17, 32, 62, 63}) {
+      const double u = (double(ix) + 0.5) / 64.0 * 2.0 - 1.0;
+      const double vv = 1.0 - (double(iy) + 0.5) / 64.0 * 2.0;
+      const vec3d p = eye + right * (u * v.parallel_scale) + up * (vv * v.parallel_scale) +
+                      fwd * 2.5; // any depth: the texel is depth-independent
+      int bx = -1, by = -1;
+      double depth = 0.0;
+      ASSERT_TRUE(v.project(p.to_array(), bx, by, depth));
+      EXPECT_EQ(bx, ix);
+      EXPECT_EQ(by, iy);
+      EXPECT_NEAR(depth, 2.5, 1e-12);
+    }
+
+  // One texel outside the map is a miss, not a wrapped index.
+  const vec3d outside = eye + right * (v.parallel_scale + 2.0 * v.texel_world) + fwd * 1.0;
+  int ix = 0, iy = 0;
+  double depth = 0.0;
+  EXPECT_FALSE(v.project(outside.to_array(), ix, iy, depth));
+
+  // NaN is rejected in the double domain, before any cast could be undefined.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(v.project({nan, 0.0, 0.0}, ix, iy, depth));
+  EXPECT_FALSE(v.project({0.0, nan, 0.0}, ix, iy, depth));
+  EXPECT_FALSE(v.project({std::numeric_limits<double>::infinity(), 0.0, 0.0}, ix, iy, depth));
+}
+
+TEST(ShadowMap, BiasFormulaAndVisibility) {
+  using cvc::volren::camera;
+  using cvc::volren::shadow_view;
+  using cvc::volren::vec3d;
+  using cvc::volren::detail::fit_light_camera;
+  using cvc::volren::detail::shadow_bias;
+  using cvc::volren::detail::shadow_visibility;
+
+  camera cam;
+  shadow_view v;
+  ASSERT_TRUE(fit_light_camera(lightToward(0, 0, 1), boxOf(-1, -1, -1, 1, 1, 1), 128, cam, v));
+
+  // At normal incidence the slope term vanishes and the bias is exactly the
+  // latch quantum times its scale.
+  EXPECT_DOUBLE_EQ(shadow_bias(v, 0.25, 1.0, 1.0, 1.0), 0.25);
+  EXPECT_DOUBLE_EQ(shadow_bias(v, 0.25, 2.0, 1.0, -1.0), 0.5); // |n.l|, so the sign is irrelevant
+  EXPECT_DOUBLE_EQ(shadow_bias(v, 0.25, 1.0, 0.0, 0.1), 0.25); // slope_scale 0 kills the slope term
+
+  // Monotone in the angle, and saturating at the cos floor rather than
+  // diverging: a flat-gradient sample must get a large-but-finite bias (i.e.
+  // read as LIT), never an infinity or a NaN.
+  double previous = shadow_bias(v, 0.25, 1.0, 1.0, 1.0);
+  for (const double ndotl : {0.9, 0.7, 0.5, 0.3, 0.15, 0.1, 0.05, 0.0}) {
+    const double b = shadow_bias(v, 0.25, 1.0, 1.0, ndotl);
+    EXPECT_GE(b, previous);
+    EXPECT_TRUE(std::isfinite(b));
+    previous = b;
+  }
+  const double floored = shadow_bias(v, 0.25, 1.0, 1.0, 0.1);
+  EXPECT_DOUBLE_EQ(shadow_bias(v, 0.25, 1.0, 1.0, 0.0), floored);
+  EXPECT_DOUBLE_EQ(shadow_bias(v, 0.25, 1.0, 1.0, std::numeric_limits<double>::quiet_NaN()),
+                   floored);
+
+  // The lookup itself, against a map written by hand.
+  std::vector<float> depth(std::size_t(v.width) * v.height, std::numeric_limits<float>::infinity());
+  const vec3d eye(v.eye), fwd(v.forward);
+  const vec3d probe = eye + fwd * 3.0; // dead center of the map, depth 3
+  int ix = 0, iy = 0;
+  double d = 0.0;
+  ASSERT_TRUE(v.project(probe.to_array(), ix, iy, d));
+  ASSERT_NEAR(d, 3.0, 1e-12);
+
+  // A texel the light ray missed is +inf: never shadows, at any bias.
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), probe, 0.0, 1.0f), 1.f);
+  // An occluder in front of the probe shadows it, scaled by strength.
+  depth[std::size_t(iy) * v.width + ix] = 2.0f;
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), probe, 0.0, 1.0f), 0.f);
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), probe, 0.0, 0.25f), 0.75f);
+  // ... unless the bias swallows the gap.
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), probe, 1.5, 1.0f), 1.f);
+  // An occluder BEHIND the probe never shadows it.
+  depth[std::size_t(iy) * v.width + ix] = 4.0f;
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), probe, 0.0, 1.0f), 1.f);
+  // A null map and a point off the map both fail LIT.
+  EXPECT_FLOAT_EQ(shadow_visibility(v, nullptr, probe, 0.0, 1.0f), 1.f);
+  const vec3d off = eye + vec3d(v.right) * (v.parallel_scale * 3.0) + fwd * 3.0;
+  EXPECT_FLOAT_EQ(shadow_visibility(v, depth.data(), off, 0.0, 1.0f), 1.f);
 }

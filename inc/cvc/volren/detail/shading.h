@@ -29,15 +29,22 @@ namespace detail {
 // `normal` must be unit length (callers normalize the spline gradient);
 // `view` is the unit vector from the sample TOWARD the viewer;
 // `base` is the material color (TF entry or isosurface color).
+// `light_visibility`, when non-null, is one factor in [0,1] per entry of
+// `lights` (volumetric shadows -- shadow.h).  It scales DIFFUSE and SPECULAR
+// only: ambient must survive, or a shadowed region crushes to black instead of
+// falling into shade.  Null means every light is fully visible, which is the
+// pre-shadow expression bit for bit.
 // Returns the shaded color, channels clamped to [0,1].
 inline std::array<float, 3> blinn_phong(const std::array<float, 3> &base, const vec3d &normal,
                                         const vec3d &view, const std::vector<light> &lights,
-                                        bool two_sided, float ambient, float shininess) {
+                                        bool two_sided, float ambient, float shininess,
+                                        const float *light_visibility = nullptr) {
   float r = ambient * base[0];
   float g = ambient * base[1];
   float b = ambient * base[2];
 
-  for (const light &l : lights) {
+  for (std::size_t i = 0; i < lights.size(); ++i) {
+    const light &l = lights[i];
     const vec3d ldir = normalized(vec3d(l.direction));
     const vec3d half = normalized(ldir + view);
     float ndotl = float(dot(normal, ldir));
@@ -54,12 +61,13 @@ inline std::array<float, 3> blinn_phong(const std::array<float, 3> &base, const 
     }
 
     const float spec = ndoth > 0.f ? std::pow(ndoth, shininess) : 0.f;
+    const float vis = light_visibility ? light_visibility[i] : 1.f;
     // Scale note: the legacy diffuse term was diffuse*xl*light/256 with
     // 0-255 channels; base*ndotl*light in 0-1 floats is a uniform 256/255
     // (+0.39%) of that -- visually identical.
-    r += base[0] * ndotl * l.color[0] + l.color[0] * spec;
-    g += base[1] * ndotl * l.color[1] + l.color[1] * spec;
-    b += base[2] * ndotl * l.color[2] + l.color[2] * spec;
+    r += (base[0] * ndotl * l.color[0] + l.color[0] * spec) * vis;
+    g += (base[1] * ndotl * l.color[1] + l.color[1] * spec) * vis;
+    b += (base[2] * ndotl * l.color[2] + l.color[2] * spec) * vis;
   }
 
   const float gain = defaults::shading_gain;

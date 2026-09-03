@@ -144,6 +144,23 @@ inline constexpr double gradient_plateau = 0.9;
 inline constexpr float shininess = 10.0f;
 // Vertical field of view in degrees (matches cvcGL/vtkCamera's default).
 inline constexpr double vfov_degrees = 30.0;
+// Sub-samples per pixel EDGE (render_settings::supersample).  1 is one ray
+// through the pixel center -- the historical behavior, kept as the default
+// because supersampling multiplies the ray count by its square.
+inline constexpr int supersample = 1;
+// Light-view shadow-map raster edge (shadow_settings::resolution).  512^2 is
+// 262k rays, the same order as one main pass at cvcGL VolRenNode's default
+// resolution_scale -- and the map is CACHED across camera motion, so it is
+// paid once per scene change, not once per frame.
+inline constexpr int shadow_resolution = 512;
+// Constant shadow bias, in units of the light-view depth latch's own quantum
+// (detail::shadow_bias -- the march step for an exact isosurface intersection,
+// two cells for a transfer-function latch).  1.0 is the measured bound.
+inline constexpr float shadow_bias_scale = 1.0f;
+// Slope-scaled shadow bias in units of texel_world * tan(theta).
+inline constexpr float shadow_slope_scale = 1.0f;
+// Minimum isosurface opacity for that surface to cast a shadow.
+inline constexpr float shadow_min_occluder_opacity = 0.5f;
 } // namespace defaults
 
 namespace limits {
@@ -151,6 +168,21 @@ namespace limits {
 // comfortably inside int range and rejects nonsense before allocating a
 // multi-terabyte frame.
 inline constexpr int max_raster_dim = 65536;
+// Largest render_settings::supersample.  4 already means 16 rays per pixel;
+// beyond that a larger raster buys strictly more information for the same rays
+// (supersampling only refines what one output pixel averages), so the cap is a
+// contract rather than an implementation limit -- neither backend carries
+// per-sub-sample state, and both enforce this same range.
+inline constexpr int max_supersample = 4;
+// Shadow-casting lights per scene.  Each one costs a full extra render pass,
+// and the CUDA kernel carries the maps' light-view frames by value in its
+// parameter block (cuda_limits::max_shadow_maps must match this).
+inline constexpr int max_shadow_maps = 4;
+// Smallest light-view raster edge shadow_settings::resolution clamps up to.
+// Below this the texel footprint is coarser than a march step on any scene the
+// renderer is driven with, so the slope bias would have to swallow the whole
+// object to keep the acne away.
+inline constexpr int min_shadow_resolution = 64;
 } // namespace limits
 
 } // namespace volren

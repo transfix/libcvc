@@ -6,6 +6,7 @@
 #include <cvc/volren/camera.h>
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/settings.h>
+#include <cvc/volren/shadow.h>
 #include <cvc/volren/state_settings.h>
 #include <cvc/volren/transfer_function.h>
 #include <cvc/volren/types.h>

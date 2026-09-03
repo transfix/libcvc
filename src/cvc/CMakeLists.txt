@@ -100,6 +100,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volren/camera.h
   ../../inc/cvc/volren/transfer_function.h
   ../../inc/cvc/volren/settings.h
+  ../../inc/cvc/volren/shadow.h
   ../../inc/cvc/volren/raycaster.h
   ../../inc/cvc/volren/raycaster_cuda.h
   ../../inc/cvc/volren/state_settings.h
@@ -108,6 +109,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volren/detail/spline_gradient.h
   ../../inc/cvc/volren/detail/cell_intersect.h
   ../../inc/cvc/volren/detail/shading.h
+  ../../inc/cvc/volren/detail/shadow_map.h
 )
 
 # Source files
