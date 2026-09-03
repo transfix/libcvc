@@ -193,7 +193,51 @@ void app::registerDefaultHandlers() {
   register_cvcraw_io(*this);
 }
 
-app::~app() {}
+// ---------
+// app::~app
+// ---------
+// Purpose:
+//   Nothing may still be running against this app's mutexes and maps once
+//   this returns.  Threads registered in _threads hold an app& (see
+//   thread_feedback / thread_info, whose destructors call back into the app
+//   as the worker winds down), so simply letting the map's shared_ptrs go
+//   would detach any live thread onto freed memory.  Best effort, and
+//   deliberately silent -- log() must not be called here (see app::log).
+// ---- Change History ----
+// 09/02/2026 -- Joe R. -- Creation; the body used to be empty, so a
+//                         fixture-owned app could be destroyed out from
+//                         under a running handler thread.
+app::~app() {
+  // Copy and clear under the lock, then join without it: a worker winding
+  // down takes _threadsMutex itself, so joining while holding it deadlocks.
+  thread_map remaining;
+  {
+    boost::mutex::scoped_lock lock(_threadsMutex);
+    remaining = _threads;
+    _threads.clear();
+  }
+
+  // Interrupt everything first, then join -- many algorithms have
+  // interruption checkpoints, so this is far quicker than serial joins.
+  BOOST_FOREACH (thread_map::value_type &val, remaining) {
+    if (!val.second)
+      continue;
+    try {
+      val.second->interrupt();
+    } catch (...) {
+    }
+  }
+
+  BOOST_FOREACH (thread_map::value_type &val, remaining) {
+    if (!val.second)
+      continue;
+    try {
+      if (val.second->joinable())
+        val.second->try_join_for(boost::chrono::seconds(5));
+    } catch (...) {
+    }
+  }
+}
 
 data_map app::data() {
   boost::this_thread::interruption_point();
@@ -663,14 +707,27 @@ void app::finishThreadProgress(const std::string &key) {
     }
 
     // Store 100% in the persistent key-based map
-    if (!threadKey.empty()) {
+    if (!threadKey.empty())
       _threadProgressByKey[threadKey] = 1.0;
 
-      // Clean up the thread from the map since it's finished
-      _threads.erase(threadKey);
-    }
+    // NOTE: do *not* erase _threads[threadKey] here.  This runs from
+    // ~thread_feedback, i.e. from inside the worker, which has not exited
+    // yet -- its own ~thread_info and boost's thread epilogue still come
+    // after us, and both dereference this app.  Erasing drops the last
+    // shared_ptr to a live boost::thread, and ~boost::thread() detaches it,
+    // after which nothing can ever join it.  Every consumer that discovers
+    // work by scanning _threads (app::wait_for_threads(),
+    // state_object::waitForHandlers(), ~state_object()) would then skip the
+    // thread and let the app die underneath it.  Reaping belongs to the
+    // thread's owner: startThread() joins and replaces a finished same-key
+    // entry, ~state_object() removes the handler keys it has joined, and
+    // ~app() sweeps whatever is left.
+    // 09/02/2026 -- Joe R. -- was erasing a still-running thread here; root
+    //                         cause of the intermittent SEGFAULT in
+    //                         StateObjectFixture.StateObjectMixedInstanceThreading.
 
-    // Clean up by thread ID
+    // Clean up by thread ID.  These are keyed by thread::id and get rebuilt
+    // from _threads by updateThreadKeys(), so they can go now.
     _threadKeys.erase(tid);
     _threadProgress.erase(tid);
     _threadInfo.erase(tid);
@@ -844,9 +901,12 @@ void app::updateThreadKeys() {
       // set the thread info to a default state if not already set
       if (_threadInfo[ptr->get_id()].empty())
         _threadInfo[ptr->get_id()] = "running";
-    }
 
-    currentIds.insert(ptr->get_id());
+      // Inside the null check: this used to sit outside it and would
+      // dereference a null thread_ptr if one ever reached _threads --
+      // threads(const thread_map&) copies its argument wholesale.
+      currentIds.insert(ptr->get_id());
+    }
   }
 
   // compute thread ids that need to be removed from the threadInfo map

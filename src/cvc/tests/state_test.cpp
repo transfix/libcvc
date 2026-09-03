@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <boost/chrono.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/thread.hpp>
 #include <cvc/core/state.h>
 #include <cvc/core/state_object.h>
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -4769,6 +4771,103 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreading) {
   obj1.getState().reset();
   obj2.getState().reset();
   obj3.getState().reset();
+}
+
+// ---------------------------------------------------------------------
+// Stress reproducer for the intermittent SEGFAULT on
+// StateObjectFixture.StateObjectMixedInstanceThreading (GitHub Actions
+// run 33663340579, "recipe / ubuntu-latest / Debug").
+//
+// The race lives in the app thread registry, not in state_object itself.
+// thread_feedback's destructor calls app::finishThreadProgress() from
+// inside the worker thread, and that used to erase _threads[key] there --
+// while the worker was still running. That drops the last shared_ptr to a
+// live boost::thread, which detaches it. Everything that discovers
+// handler threads by scanning _threads (waitForHandlers(),
+// ~state_object(), app::wait_for_threads()) then silently skips it, so a
+// handler can outlive both the state_object it captured and the app it
+// holds a reference to.
+//
+// Two things are checked, because the crash itself is timing-dependent
+// and would make a poor regression test on its own:
+//
+//   1. A handler thread must still be registered with the app once it has
+//      run. finishThreadProgress() used to evict it from _threads while it
+//      was still winding down, which is precisely what let it escape. This
+//      is deterministic and fails on the unfixed code.
+//   2. Each iteration owns its app on the heap and frees it the instant
+//      the state_objects are gone, so a handler thread that escaped
+//      ~state_object() lands on freed memory. That is the SEGFAULT.
+// ---------------------------------------------------------------------
+TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
+  const int iterations = enable_stress_tests ? 5000 : 100;
+  const int objectCount = 4;
+  const std::string logKey("stress_handler_log");
+
+  for (int iter = 0; iter < iterations; iter++) {
+    // Heap-allocated so the app's storage is really released below.
+    std::unique_ptr<cvc::app> localCtx(new cvc::app);
+
+    // Park this app's log in a data key rather than the console: handlers
+    // that dispatch during destruction reach the base handleStateChanged(),
+    // which logs, and 100 iterations of that is a lot of noise.
+    localCtx->data(logKey, std::string());
+    localCtx->properties("system.log_output", logKey);
+
+    {
+      state_object<ThreadingTestObject>::setUseThreading(false);
+
+      std::vector<std::unique_ptr<ThreadingTestObject> > objs;
+      for (int i = 0; i < objectCount; i++)
+        objs.push_back(
+            std::unique_ptr<ThreadingTestObject>(new ThreadingTestObject(*localCtx)));
+
+      // Mixed instance threading, as in StateObjectMixedInstanceThreading:
+      // even indices opt in, odd indices follow the disabled global flag.
+      for (int i = 0; i < objectCount; i++)
+        if (i % 2 == 0)
+          objs[i]->setInstanceThreading(true);
+
+      for (int i = 0; i < objectCount; i++)
+        objs[i]->getState("prop").value(boost::lexical_cast<std::string>(i));
+
+      for (int i = 0; i < objectCount; i++)
+        objs[i]->waitForHandlers();
+
+      for (int i = 0; i < objectCount; i++) {
+        EXPECT_EQ(objs[i]->handleCount.load(), 1)
+            << "iteration " << iter << ", object " << i;
+
+        // The handler thread must still be registered. waitForHandlers()
+        // and ~state_object() find handler threads only by scanning the
+        // app's thread map, so a thread that removed itself from that map
+        // before it finished is one neither of them can join -- it is free
+        // to outlive the object and the app. Only the threaded objects
+        // spawn a thread; the synchronous ones run on this thread.
+        if (i % 2 != 0)
+          continue;
+        std::string threadKey = objs[i]->stateName("prop") + "_stateChanged";
+        EXPECT_TRUE(localCtx->hasThread(threadKey))
+            << "iteration " << iter << ", object " << i
+            << ": handler thread de-registered itself while still running, so "
+               "nothing can join it";
+      }
+
+      // Re-enable threading and reset: this spawns a second handler thread
+      // under the same key as the first, and the objects are then
+      // destroyed immediately afterwards.
+      state_object<ThreadingTestObject>::setUseThreading(true);
+      for (int i = 0; i < objectCount; i++)
+        objs[i]->getState().reset();
+    } // every ThreadingTestObject destroyed here
+
+    // ~state_object() promises that no handler thread is still
+    // running. If that promise is broken, freeing the app pulls the mutex
+    // and the maps out from under the escapee.
+    localCtx.reset();
+  }
+
+  state_object<ThreadingTestObject>::setUseThreading(true);
 }
 
 TEST_F(StateObjectFixture, StateObjectClearInstanceThreading) {

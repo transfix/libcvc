@@ -1628,6 +1628,64 @@ TEST_F(AppTest, ThreadFeedbackExceptionSafety) {
       << "Progress should be 100% even when exception occurs (RAII cleanup)";
 }
 
+// A worker must stay in the thread registry -- and stay joinable -- for as
+// long as it is actually running.
+//
+// thread_feedback's destructor calls finishThreadProgress() from inside the
+// worker, and finishThreadProgress() used to erase _threads[key] right
+// there. That drops the last shared_ptr to a live boost::thread, and
+// ~boost::thread() detaches it (BOOST_THREAD_VERSION is not raised anywhere
+// in this tree), after which nothing can ever join it. Every consumer that
+// finds work by scanning _threads -- app::wait_for_threads(),
+// state_object::waitForHandlers(), ~state_object() -- then skipped the
+// thread, so it could go on dereferencing the app after the app was gone.
+// That is the intermittent SEGFAULT in
+// StateObjectFixture.StateObjectMixedInstanceThreading.
+//
+// finishThreadProgress() must record completion without evicting a thread
+// that has not exited yet.
+TEST_F(AppTest, FinishThreadProgressKeepsRunningThreadJoinable) {
+  std::string thread_key = "test.finish.keeps.live.thread";
+  std::atomic<bool> started(false);
+  std::atomic<bool> release(false);
+
+  ctx.startThread(thread_key, [&]() {
+    started = true;
+    while (!release.load())
+      boost::this_thread::yield();
+  });
+
+  while (!started.load())
+    boost::this_thread::yield();
+
+  // Exactly what ~thread_feedback does as a worker winds down -- except
+  // this worker is demonstrably still running.
+  ctx.finishThreadProgress(thread_key);
+
+  // Sample everything before releasing the worker, but assert afterwards:
+  // an ASSERT_* here would skip the release and hang the run.
+  bool present = ctx.hasThread(thread_key);
+  thread_ptr tptr = ctx.threads(thread_key);
+  bool joinable = tptr && tptr->joinable();
+  double progress = ctx.threadProgress(thread_key);
+
+  release = true;
+  if (tptr && tptr->joinable())
+    tptr->join();
+  else
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(250));
+
+  EXPECT_TRUE(present) << "a still-running thread was evicted from the registry; "
+                          "nothing can join it any more";
+  EXPECT_TRUE(joinable) << "the last shared_ptr was dropped while the thread ran, "
+                           "so ~boost::thread() detached it";
+
+  // Completion still has to be observable by key.
+  EXPECT_NEAR(progress, 1.0, 0.01);
+
+  ctx.removeThread(thread_key);
+}
+
 TEST_F(AppTest, ThreadProgressWithThreadInterruption) {
   std::string thread_key = "test.progress.interruption";
   std::atomic<bool> started(false);
