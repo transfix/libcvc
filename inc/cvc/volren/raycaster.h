@@ -36,6 +36,18 @@ struct frame {
   cvc::image depth;
 };
 
+// Which marcher render() runs.
+//   cpu       -- the portable software march (the DEFAULT: every existing
+//                behavior, test and byte-level guarantee is the CPU path's).
+//   cuda      -- require the GPU path; render() throws cvc::volren_error when
+//                there is no device or the scene is outside the v1 CUDA scope
+//                (see raycaster_cuda.h).
+//   automatic -- use the GPU when it is available AND the scene fits, else
+//                fall back to the CPU silently.
+// Either GPU mode falls back to the CPU (recording it in backend_used()) when
+// the device path itself fails with cvc::cuda_error.
+enum class backend { automatic, cpu, cuda };
+
 class raycaster {
 public:
   explicit raycaster(cvc::app &ctx);
@@ -67,6 +79,14 @@ public:
   // concurrently.  render_settings::threads == 1 forces serial.
   void set_thread_pool(cvc::thread_pool *pool) { _pool = pool; }
 
+  // Backend selection.  Defaults to backend::cpu, so the GPU path is strictly
+  // opt-in and no existing caller changes behavior.
+  void set_backend(backend b) { _backend = b; }
+  backend backend_selected() const { return _backend; }
+  // What the LAST render() actually ran on (backend::cpu before any render,
+  // and after a cvc::cuda_error fallback).
+  backend backend_used() const { return _backend_used; }
+
   // Union of the registered volumes' bounding boxes (the legacy metavolume,
   // without its zero-initialized-union bug).  Throws cvc::volren_error when
   // no volumes are registered.
@@ -85,6 +105,8 @@ private:
   std::vector<volume_settings> _volume_settings;
   cvc::thread_pool *_pool = nullptr;           // borrowed, may be null
   std::unique_ptr<cvc::thread_pool> _own_pool; // lazy default
+  backend _backend = backend::cpu;
+  backend _backend_used = backend::cpu;
 };
 
 } // namespace volren

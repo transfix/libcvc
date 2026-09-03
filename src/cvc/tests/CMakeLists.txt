@@ -98,6 +98,7 @@ add_executable(volren_tf_test volren_tf_test.cpp)
 add_executable(volren_kernels_test volren_kernels_test.cpp)
 add_executable(volren_render_test volren_render_test.cpp)
 add_executable(volren_state_test volren_state_test.cpp)
+add_executable(volren_cuda_test volren_cuda_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
@@ -223,6 +224,7 @@ set(TEST_TARGETS
   volren_kernels_test
   volren_render_test
   volren_state_test
+  volren_cuda_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -392,6 +394,14 @@ target_link_libraries(volren_state_test
     GTest::gtest_main
 )
 target_compile_features(volren_state_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_cuda_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_cuda_test PRIVATE cxx_std_17)
 
 if(TARGET geometry_test)
   target_link_libraries(geometry_test
@@ -1202,6 +1212,7 @@ if(CVC_ENABLE_CUDA)
   target_compile_definitions(nav_coef_energy_cuda_test PRIVATE CVC_ENABLE_CUDA)
   target_compile_definitions(nav_material_adam_cuda_test PRIVATE CVC_ENABLE_CUDA)
   target_compile_definitions(nav_material_train_cuda_test PRIVATE CVC_ENABLE_CUDA)
+  target_compile_definitions(volren_cuda_test PRIVATE CVC_ENABLE_CUDA)
 endif()
 target_compile_features(state_change_journal_test PRIVATE cxx_std_17)
 target_compile_features(state_subscription_router_test PRIVATE cxx_std_17)
@@ -1402,6 +1413,7 @@ cvc_discover_tests(volren_tf_test)
 cvc_discover_tests(volren_kernels_test)
 cvc_discover_tests(volren_render_test)
 cvc_discover_tests(volren_state_test)
+cvc_discover_tests(volren_cuda_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
 endif()

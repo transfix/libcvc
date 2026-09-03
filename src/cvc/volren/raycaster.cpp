@@ -7,14 +7,17 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/thread_pool.h>
+#include <cvc/utility/cuda_utils.h>
 #include <cvc/volren/detail/cell_intersect.h>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/detail/shading.h>
 #include <cvc/volren/detail/spline_gradient.h>
 #include <cvc/volren/raycaster.h>
+#include <cvc/volren/raycaster_cuda.h>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace cvc {
 namespace volren {
@@ -244,6 +247,150 @@ frame raycaster::render() {
                                 (scene.maxy - scene.miny) * (scene.maxy - scene.miny) +
                                 (scene.maxz - scene.minz) * (scene.maxz - scene.minz));
   const double unit_step = diag / double(_settings.steps);
+  const render_settings &rs = _settings;
+
+  // ---- CUDA backend ------------------------------------------------------
+  // Opt-in: the default is backend::cpu, so nothing here runs for an existing
+  // caller.  The device path covers the v1 scope only (raycaster_cuda.h); a
+  // scene outside it falls back silently under backend::automatic and throws
+  // under backend::cuda, so an explicit request never quietly costs a CPU
+  // march.  A device-side failure (cvc::cuda_error) always falls back.
+  _backend_used = backend::cpu;
+  if (_backend != backend::cpu) {
+    const char *reason = nullptr;
+    if (!raycast_cuda_available())
+      reason = "no usable CUDA device";
+    else if (prep.size() != 1)
+      reason = "the CUDA backend renders exactly one volume";
+    else if (prep[0].vs->isosurfaces.size() > std::size_t(cuda_limits::max_isosurfaces))
+      reason = "more isosurfaces than cuda_limits::max_isosurfaces";
+    else if (_settings.lights.size() > std::size_t(cuda_limits::max_lights))
+      reason = "more lights than cuda_limits::max_lights";
+    else if (_settings.cut_planes.size() > std::size_t(cuda_limits::max_cut_planes))
+      reason = "more cut planes than cuda_limits::max_cut_planes";
+
+    if (reason != nullptr) {
+      if (_backend == backend::cuda)
+        throw volren_error(std::string("render(): backend::cuda unusable -- ") + reason);
+    } else {
+      const prepared_volume &p = prep[0];
+      const volume_settings &vs = *p.vs;
+      raycast_cuda_request req;
+      req.cam = _camera;
+      // The buffer stays valid for the call: p.pin holds the voxel storage.
+      req.data = p.grid.data;
+      req.type = p.grid.type;
+      req.dimx = p.grid.dimx;
+      req.dimy = p.grid.dimy;
+      req.dimz = p.grid.dimz;
+      req.minb[0] = p.grid.minb.x;
+      req.minb[1] = p.grid.minb.y;
+      req.minb[2] = p.grid.minb.z;
+      req.span[0] = p.grid.span.x;
+      req.span[1] = p.grid.span.y;
+      req.span[2] = p.grid.span.z;
+      req.transformed = p.transformed;
+      for (int i = 0; i < 16; ++i)
+        req.world_to_local[i] = p.world_to_local.m[i];
+
+      // Flatten the baked LUT.  baked_transfer_function exposes no raw view,
+      // but entry i IS sample() at the i-th uniform domain value (the nearest-
+      // entry lookup round-trips exactly), so the table is reconstructed
+      // without touching the public transfer_function header.
+      std::vector<float> lut;
+      if (!p.tf.empty()) {
+        const std::size_t n = p.tf.size();
+        const double lo = p.tf.domain_min();
+        const double hi = p.tf.domain_max();
+        lut.resize(n * 4);
+        for (std::size_t i = 0; i < n; ++i) {
+          const rgba_f c = p.tf.sample(lo + (hi - lo) * double(i) / double(n - 1));
+          lut[i * 4 + 0] = c.r;
+          lut[i * 4 + 1] = c.g;
+          lut[i * 4 + 2] = c.b;
+          lut[i * 4 + 3] = c.a;
+        }
+        req.tf_active = true;
+        req.lut = lut.data();
+        req.lut_size = int(n);
+        req.tf_lo = lo;
+        req.tf_hi = hi;
+      }
+
+      req.gradient_ramp_enabled = vs.gradient_ramp.enabled;
+      req.ramp0 = vs.gradient_ramp.ramp0;
+      req.ramp1 = vs.gradient_ramp.ramp1;
+      req.ramp2 = vs.gradient_ramp.ramp2;
+      req.gradient_plateau = vs.gradient_ramp.plateau;
+
+      req.isosurface_count = int(vs.isosurfaces.size());
+      for (std::size_t i = 0; i < vs.isosurfaces.size(); ++i) {
+        const isosurface &s = vs.isosurfaces[i];
+        req.isosurfaces[i].value = s.value;
+        req.isosurfaces[i].opacity = s.opacity;
+        req.isosurfaces[i].color[0] = s.color[0];
+        req.isosurfaces[i].color[1] = s.color[1];
+        req.isosurfaces[i].color[2] = s.color[2];
+        req.isosurfaces[i].shininess = s.shininess;
+      }
+      req.light_count = int(rs.lights.size());
+      for (std::size_t i = 0; i < rs.lights.size(); ++i) {
+        for (int c = 0; c < 3; ++c) {
+          req.lights[i].color[c] = rs.lights[i].color[c];
+          req.lights[i].direction[c] = rs.lights[i].direction[c];
+        }
+      }
+      req.cut_plane_count = int(rs.cut_planes.size());
+      for (std::size_t i = 0; i < rs.cut_planes.size(); ++i) {
+        for (int c = 0; c < 3; ++c) {
+          req.cut_planes[i].point[c] = rs.cut_planes[i].point[c];
+          req.cut_planes[i].normal[c] = rs.cut_planes[i].normal[c];
+        }
+      }
+
+      req.scene_min[0] = scene.minx;
+      req.scene_min[1] = scene.miny;
+      req.scene_min[2] = scene.minz;
+      req.scene_max[0] = scene.maxx;
+      req.scene_max[1] = scene.maxy;
+      req.scene_max[2] = scene.maxz;
+      req.steps = rs.steps;
+      req.unit_step = unit_step;
+      req.opacity_cutoff = rs.opacity_cutoff;
+      req.depth_alpha_threshold = rs.depth_alpha_threshold;
+      req.ambient = rs.ambient;
+      req.two_sided = rs.two_sided_lighting;
+      req.background[0] = rs.background[0];
+      req.background[1] = rs.background[1];
+      req.background[2] = rs.background[2];
+      req.tf_shininess = defaults::shininess;
+      req.shaded = vs.shaded;
+      req.unshaded = vs.unshaded;
+      req.window_enabled = vs.window_enabled;
+      req.window_min = vs.window_min;
+      req.window_max = vs.window_max;
+
+      try {
+        frame gpu = raycast_cuda(req);
+        _backend_used = backend::cuda;
+        _ctx.threadProgress(1.0);
+        return gpu;
+      } catch (const cvc::cuda_error &) {
+        // A device-side failure is recoverable: fall through to the CPU march
+        // (voxels.cpp uses the same catch-and-degrade contract).
+        if (_backend == backend::cuda)
+          throw;
+        _backend_used = backend::cpu;
+      } catch (const cvc::volren_error &) {
+        // raycast_cuda validates the request itself and can reject a scene the
+        // host-side scope check above accepted.  backend::automatic promises a
+        // SILENT fallback, so only an explicit backend::cuda propagates.
+        if (_backend == backend::cuda)
+          throw;
+        _backend_used = backend::cpu;
+      }
+    }
+  }
 
   frame out;
   out.color = cvc::image(width, height, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
@@ -251,7 +398,6 @@ frame raycaster::render() {
   unsigned char *color_px = out.color.data();
   float *depth_px = reinterpret_cast<float *>(out.depth.data());
 
-  const render_settings &rs = _settings;
   const std::size_t nvol = prep.size();
 
   // Per-tile scratch, reused across the tile's rays: the spline-gradient
