@@ -48,9 +48,8 @@
 #include <emscripten.h>
 #endif
 
-#include <boost/program_options.hpp>
-
 #include <algorithm>
+#include <boost/program_options.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -178,8 +177,8 @@ cvc::volren::volume_settings bunny_volume_settings(double shell_offset) {
 // bunny_shadow's mesh bunny stands -- and the rest ring outward on a 3x3 grid
 // whose pitch exceeds the bunny's footprint, so they never overlap.
 constexpr int kMaxBunnies = 9;
-constexpr int kGrid[kMaxBunnies][2] = {{0, 0},  {1, 0},  {0, 1},  {-1, 0}, {0, -1},
-                                       {1, 1},  {-1, 1}, {-1, -1}, {1, -1}};
+constexpr int kGrid[kMaxBunnies][2] = {{0, 0}, {1, 0},  {0, 1},   {-1, 0}, {0, -1},
+                                       {1, 1}, {-1, 1}, {-1, -1}, {1, -1}};
 
 cvc::volren::mat4 translation(double tx, double ty, double tz) {
   cvc::volren::mat4 m;
@@ -323,8 +322,8 @@ int main(int argc, char **argv) {
     // single bunny, widened to hold the ring when --bunnies asks for more.
     double ring = 0.0;
     for (int i = 0; i < bunnyCount; ++i)
-      ring = std::max(ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] +
-                                             kGrid[i][1] * kGrid[i][1])) * pitch);
+      ring = std::max(
+          ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] + kGrid[i][1] * kGrid[i][1])) * pitch);
     const double r = ring + 2.2 * S;
     cam.frameBounds(-r, -r, 0.0, r, r, 1.3 * S);
   }
@@ -381,9 +380,8 @@ int main(int argc, char **argv) {
         const int rw = std::max(2, int(std::lround(width * volNode->resolutionScale())));
         const int rh = std::max(2, int(std::lround(height * volNode->resolutionScale())));
         const bool onGpu = volNode->backendUsed() == cvc::volren::backend::cuda;
-        ImGui::Text("%s  |  %d x %d rays  |  %.1f ms  |  %.2f Mray/s",
-                    onGpu ? "CUDA" : "CPU", rw, rh, ms,
-                    ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0);
+        ImGui::Text("%s  |  %d x %d rays  |  %.1f ms  |  %.2f Mray/s", onGpu ? "CUDA" : "CPU", rw,
+                    rh, ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0);
         ImGui::Text("%llu raycasts", (unsigned long long)volNode->framesRendered());
 
         float rs = float(volNode->resolutionScale());
@@ -431,17 +429,17 @@ int main(int argc, char **argv) {
       wantShellChange = false;
       place_bunnies(bunnyCount, shellOn);
 
-  // The ImGui draw callback runs mid-render, so it only records intent here;
-  // the main loop applies it before the next tick().
-  int wantCount = bunnyCount;
-  bool wantFrameAll = false, wantShellChange = false;
+      // The ImGui draw callback runs mid-render, so it only records intent here;
+      // the main loop applies it before the next tick().
+      int wantCount = bunnyCount;
+      bool wantFrameAll = false, wantShellChange = false;
     }
     if (wantFrameAll) {
       wantFrameAll = false;
       double ring = 0.0;
       for (int i = 0; i < bunnyCount; ++i)
-        ring = std::max(ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] +
-                                               kGrid[i][1] * kGrid[i][1])) * pitch);
+        ring = std::max(
+            ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] + kGrid[i][1] * kGrid[i][1])) * pitch);
       const double r = ring + 1.2 * S;
       cam.frameBounds(-r, -r, 0.0, r, r, 1.3 * S);
     }
@@ -464,10 +462,9 @@ int main(int argc, char **argv) {
       const int rh = std::max(2, int(std::lround(height * scale)));
       std::printf("[volren_bunny] %d bunny(s) | %s | scene %.1f fps | raycast %.1f ms "
                   "(%.2f Mray/s, %dx%d) | %llu raycasts (+%llu)\n",
-                  bunnyCount,
-                  volNode->backendUsed() == cvc::volren::backend::cuda ? "CUDA" : "CPU",
-                  hud.fps(), ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0, rw,
-                  rh, (unsigned long long)rendered,
+                  bunnyCount, volNode->backendUsed() == cvc::volren::backend::cuda ? "CUDA" : "CPU",
+                  hud.fps(), ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0, rw, rh,
+                  (unsigned long long)rendered,
                   (unsigned long long)(rendered - last_report_frames));
       last_report_frames = rendered;
       last_report = now;

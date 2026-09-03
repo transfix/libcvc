@@ -173,9 +173,18 @@ mat4 rotateXThenTranslate(double degrees, double tx, double ty, double tz) {
   const double a = degrees * M_PI / 180.0;
   const double c = std::cos(a), s = std::sin(a);
   mat4 m;
-  m.m[0] = 1.0;  m.m[1] = 0.0; m.m[2] = 0.0;  m.m[3] = tx;
-  m.m[4] = 0.0;  m.m[5] = c;   m.m[6] = -s;   m.m[7] = ty;
-  m.m[8] = 0.0;  m.m[9] = s;   m.m[10] = c;   m.m[11] = tz;
+  m.m[0] = 1.0;
+  m.m[1] = 0.0;
+  m.m[2] = 0.0;
+  m.m[3] = tx;
+  m.m[4] = 0.0;
+  m.m[5] = c;
+  m.m[6] = -s;
+  m.m[7] = ty;
+  m.m[8] = 0.0;
+  m.m[9] = s;
+  m.m[10] = c;
+  m.m[11] = tz;
   return m;
 }
 

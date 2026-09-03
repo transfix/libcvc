@@ -34,12 +34,11 @@
 #ifndef CVC_GL_VOLRENNODE_H
 #define CVC_GL_VOLRENNODE_H
 
+#include <atomic>
+#include <condition_variable>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/state_settings.h>
-
-#include <atomic>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -108,17 +107,17 @@ private:
   void seedOwnState();
   bool buildSnapshot(snapshot &out); // owner thread; false when not renderable yet
   void applyFrame(const cvc::volren::frame &f, const snapshot &snap); // owner thread
-  void pushDepthUniforms();          // owner thread, every tick
+  void pushDepthUniforms();                                           // owner thread, every tick
   void ensureQuad();
   void launchOrRun(const snapshot &snap);
 
-  mutable std::mutex m_configMutex; // guards m_snapshotSettings + m_volumes
+  mutable std::mutex m_configMutex;                         // guards m_snapshotSettings + m_volumes
   cvc::volren::state_settings::snapshot m_snapshotSettings; // settings source of truth
   std::vector<cvc::volume> m_volumes;
   std::unique_ptr<cvc::volren::state_settings> m_stateSettings;
   std::uint64_t m_settingsVersion = 0; // bumped on every settings/volume change
 
-  std::unique_ptr<worker> m_worker;   // owns the raycaster + render thread
+  std::unique_ptr<worker> m_worker; // owns the raycaster + render thread
   std::atomic<double> m_lastRenderSeconds{0.0};
   std::atomic<std::uint64_t> m_framesRendered{0};
 

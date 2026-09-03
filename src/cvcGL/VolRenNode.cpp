@@ -1,22 +1,19 @@
-#include <cvc/gl/VolRenNode.h>
-
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
-
+#include <cvc/gl/VolRenNode.h>
+#include <limits>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h>
-
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstring>
-#include <limits>
 
 namespace cvc {
 namespace gl {
@@ -186,8 +183,7 @@ struct VolRenNode::worker {
 VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GeometryNode(ctx, statePath, name) {
   m_stateSettings = std::make_unique<cvc::volren::state_settings>(
-      ctx, stateName("volren"),
-      [this](const cvc::volren::state_settings::snapshot &s) {
+      ctx, stateName("volren"), [this](const cvc::volren::state_settings::snapshot &s) {
         std::lock_guard<std::mutex> lock(m_configMutex);
         m_snapshotSettings = s;
         ++m_settingsVersion;
@@ -412,9 +408,9 @@ bool VolRenNode::buildSnapshot(snapshot &out) {
     out.version = m_settingsVersion;
   }
 
-  out.camera_key = {out.cam.eye[0],  out.cam.eye[1],  out.cam.eye[2],  out.cam.focal[0],
-                    out.cam.focal[1], out.cam.focal[2], out.cam.up[0],   out.cam.up[1],
-                    out.cam.up[2],   out.cam.vfov_degrees, out.cam.parallel_scale};
+  out.camera_key = {out.cam.eye[0],   out.cam.eye[1],       out.cam.eye[2],        out.cam.focal[0],
+                    out.cam.focal[1], out.cam.focal[2],     out.cam.up[0],         out.cam.up[1],
+                    out.cam.up[2],    out.cam.vfov_degrees, out.cam.parallel_scale};
   return true;
 }
 
@@ -526,12 +522,9 @@ void VolRenNode::applyFrame(const cvc::volren::frame &f, const snapshot &snap) {
         dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = 0;
       } else {
         // rgb are premultiplied by alpha (black raycast background).
-        dst[i * 4 + 0] =
-            (unsigned char)std::min(255, int(src[i * 4 + 0]) * 255 / int(a));
-        dst[i * 4 + 1] =
-            (unsigned char)std::min(255, int(src[i * 4 + 1]) * 255 / int(a));
-        dst[i * 4 + 2] =
-            (unsigned char)std::min(255, int(src[i * 4 + 2]) * 255 / int(a));
+        dst[i * 4 + 0] = (unsigned char)std::min(255, int(src[i * 4 + 0]) * 255 / int(a));
+        dst[i * 4 + 1] = (unsigned char)std::min(255, int(src[i * 4 + 1]) * 255 / int(a));
+        dst[i * 4 + 2] = (unsigned char)std::min(255, int(src[i * 4 + 2]) * 255 / int(a));
       }
       dst[i * 4 + 3] = a;
     }
@@ -547,9 +540,8 @@ void VolRenNode::applyFrame(const cvc::volren::frame &f, const snapshot &snap) {
         m_depthTexture = vtkSmartPointer<vtkTextureObject>::New();
         m_depthTexture->SetContext(oglWin);
       }
-      m_depthTexture->Create2DFromRaw(
-          static_cast<unsigned int>(w), static_cast<unsigned int>(h), 1, VTK_FLOAT,
-          const_cast<unsigned char *>(depth.data()));
+      m_depthTexture->Create2DFromRaw(static_cast<unsigned int>(w), static_cast<unsigned int>(h), 1,
+                                      VTK_FLOAT, const_cast<unsigned char *>(depth.data()));
       m_depthTexture->SetWrapS(vtkTextureObject::ClampToEdge);
       m_depthTexture->SetWrapT(vtkTextureObject::ClampToEdge);
       m_depthTexture->SetMinificationFilter(vtkTextureObject::Nearest);
@@ -592,13 +584,12 @@ bool VolRenNode::tick() {
   if (!buildSnapshot(snap))
     return false;
 
-  const bool camera_changed = snap.camera_key != m_appliedCamera ||
-                              snap.cam.width != m_appliedW || snap.cam.height != m_appliedH;
+  const bool camera_changed = snap.camera_key != m_appliedCamera || snap.cam.width != m_appliedW ||
+                              snap.cam.height != m_appliedH;
   const bool matrix_changed = snap.node_world.m != m_appliedMatrix;
   const bool settings_changed = snap.version != m_appliedVersion;
 
-  if ((m_continuous || camera_changed || matrix_changed || settings_changed) &&
-      !m_worker->busy()) {
+  if ((m_continuous || camera_changed || matrix_changed || settings_changed) && !m_worker->busy()) {
     launchOrRun(snap);
   }
   return m_frameAppliedSinceTick;

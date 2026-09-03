@@ -36,8 +36,7 @@ constexpr int W = 320, H = 240;
 
 // Analytic sphere SDF (inside negative), radius r, centered in a [-1,1]^3 box.
 cvc::volume sphereSdf(cvc::app &app, unsigned n, double r) {
-  cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
-                  cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+  cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float, cvc::bounding_box(-1, -1, -1, 1, 1, 1));
   for (unsigned k = 0; k < n; ++k)
     for (unsigned j = 0; j < n; ++j)
       for (unsigned i = 0; i < n; ++i) {
@@ -159,8 +158,8 @@ int main() {
     // specular highlight (upper right, given the off-axis light).
     const RGB body = pixelAt(f, W / 2 - 24, H / 2 + 18);
     const RGB corner = pixelAt(f, 4, 4);
-    std::printf("  center (%d,%d,%d) body (%d,%d,%d) corner (%d,%d,%d)\n", center.r,
-                center.g, center.b, body.r, body.g, body.b, corner.r, corner.g, corner.b);
+    std::printf("  center (%d,%d,%d) body (%d,%d,%d) corner (%d,%d,%d)\n", center.r, center.g,
+                center.b, body.r, body.g, body.b, corner.r, corner.g, corner.b);
     fflush(stdout);
     if (const char *dump = getenv("VOLREN_TEST_DUMP")) {
       FILE *fp = fopen(dump, "wb");
@@ -191,7 +190,10 @@ int main() {
         for (int y = 0; y < H; ++y)
           for (int x = 0; x < W; ++x) {
             const RGB p = pixelAt(lifted, x, y);
-            if (p.r > p.g + 20 && p.r > 60) { sumY += y; ++n; }
+            if (p.r > p.g + 20 && p.r > 60) {
+              sumY += y;
+              ++n;
+            }
           }
         assert(n > 200 && "lifted volume not visible");
         const double meanY = double(sumY) / double(n);
@@ -252,8 +254,8 @@ int main() {
     // Sample inside the sphere silhouette on each side of the wall edge.
     const RGB left = pixelAt(f, W / 2 - 24, H / 2 + 18);
     const RGB right = pixelAt(f, W / 2 + 24, H / 2 + 18);
-    std::printf("  wall test: left (%d,%d,%d) right (%d,%d,%d)\n", left.r, left.g, left.b,
-                right.r, right.g, right.b);
+    std::printf("  wall test: left (%d,%d,%d) right (%d,%d,%d)\n", left.r, left.g, left.b, right.r,
+                right.g, right.b);
     fflush(stdout);
     assert(left.g > left.r + 30 && "wall (green) must occlude the volume on the left");
     assert(right.r > right.g + 20 && "volume (red) must still show right of the wall");
@@ -268,13 +270,11 @@ int main() {
     view.render();
     f = view.frameRGB();
     const RGB movedRight = pixelAt(f, W - 40, H / 2);
-    std::printf("  after move: right-side (%d,%d,%d)\n", movedRight.r, movedRight.g,
-                movedRight.b);
+    std::printf("  after move: right-side (%d,%d,%d)\n", movedRight.r, movedRight.g, movedRight.b);
     assert(movedRight.r > 40 && "moved volume should appear on the right side");
 
     std::printf("cvcgl_volren_node: all checks passed (%llu raycasts, last %.1f ms)\n",
-                (unsigned long long)node->framesRendered(),
-                node->lastRenderSeconds() * 1000.0);
+                (unsigned long long)node->framesRendered(), node->lastRenderSeconds() * 1000.0);
   } catch (const std::exception &e) {
     std::printf("SKIP: %s\n", e.what());
     return 0;

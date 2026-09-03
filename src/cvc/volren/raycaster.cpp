@@ -540,8 +540,7 @@ frame raycaster::render() {
           }
           float w[3];
           double t_hit = 0.0;
-          if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w,
-                                                    t_hit))
+          if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w, t_hit))
             continue;
           if (t_hit < t0 || t_hit > tv1 + unit_step)
             continue;
@@ -551,8 +550,8 @@ frame raycaster::render() {
           const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
           const vec3d normal = normalized(p.normal_to_world(grad));
           const std::array<float, 3> shaded =
-              detail::blinn_phong(surf.color, normal, view_vec, rs.lights,
-                                  rs.two_sided_lighting, rs.ambient, surf.shininess);
+              detail::blinn_phong(surf.color, normal, view_vec, rs.lights, rs.two_sided_lighting,
+                                  rs.ambient, surf.shininess);
           scratch.hits.push_back({t_hit, shaded, surf.opacity});
         }
 
