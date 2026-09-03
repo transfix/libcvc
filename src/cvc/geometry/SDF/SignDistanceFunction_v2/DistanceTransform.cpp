@@ -36,8 +36,6 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// Include app.h BEFORE DistanceTransform.h to avoid macro conflicts
-// (reg3data.h defines error() as a macro which conflicts with cvc::app)
 #include <cvc/core/app.h>
 
 #include "DistanceTransform.h"

@@ -9,8 +9,6 @@
 
 #include "cubes.h"
 
-#define error(x) {fprintf(stderr, "%s\n", x); exit(1);}
-
 /**
  * Reg3Data: A class representing a scalar field on a regular 3D grid.
  *

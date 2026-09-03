@@ -2,19 +2,11 @@
 // mtxlib (vector2/3/4, matrix33/44), FaceVertSet3D, BufferedIO, the parsers
 // (Geom3DParser, RawivParser) and DistanceTransform construction + geometric
 // predicates.
-//
-// Include order matters here, and is enforced against clang-format. reg3data.h
-// (pulled in by DistanceTransform.h) defines a function-like macro `error(x)`.
-// boost/parameter/parameters.hpp — reached transitively through cvc/core/app.h
-// and gtest via boost.signals2 — contains a bare `error();` call, which that
-// macro clobbers into a syntax error. So the boost-pulling headers must be
-// parsed BEFORE the SDF v2 headers define the macro.
-//
-// The repo .clang-format is IncludeBlocks:Regroup with quoted includes sorted
-// ahead of angle-bracket ones, so it would hoist the SDF headers above the
-// cvc/boost includes and re-break the build — unless a non-include line splits
-// them into separate, individually-sorted blocks. The #undef barriers below do
-// exactly that (and are correct on their own merits). Do not merge these blocks.
+#include "DistanceTransform.h" // pulls in FaceVertSet3D.h, reg3data.h, RawivParser.h
+#include "Geom3DParser.h"
+#include "bufferedio.h"
+#include "mtxlib.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -23,20 +15,20 @@
 #include <string>
 #include <vector>
 
-#ifdef error
-#undef error // no-op here; keeps this block separate from the SDF block below
-#endif
-
-#include "DistanceTransform.h" // pulls in FaceVertSet3D.h, reg3data.h, RawivParser.h
-#include "Geom3DParser.h"
-#include "bufferedio.h"
-#include "mtxlib.h"
-
-#ifdef error
-#undef error // reg3data.h's error(x) macro must not leak into the test body
-#endif
-
 namespace {
+
+// Regression guard for the `error(x)` macro that reg3data.h used to define.
+// A function-like macro with that name escaping a header rewrites any later
+// declaration that uses the identifier. CGAL 6 is the case that broke the
+// build: CGAL/AABB_traits.h forwards to AABB_traits_3.h, which pulls in
+// Static_filter_error with a `double error() const` member, and `error()`
+// matches the one-parameter macro with an empty argument. boost.parameter and
+// cvc::app hit the same thing. This struct mirrors the CGAL declaration, so
+// reintroducing the macro anywhere reg3data.h can reach makes this file fail
+// to compile.
+struct StaticFilterErrorLookalike {
+  double error() const { return 1.0; }
+};
 
 const float kEps = 1e-5f;
 
@@ -100,6 +92,20 @@ void expectMat44Near(const matrix44 &a, const matrix44 &b, float tol) {
 }
 
 } // namespace
+
+// ===========================================================================
+// header hygiene
+// ===========================================================================
+
+// Compiles only while no reachable header defines `error` as a macro; see
+// StaticFilterErrorLookalike above.
+TEST(Reg3DataHeaderHygiene, ErrorIsNotAMacro) {
+#ifdef error
+  FAIL() << "a reachable header defines `error` as a macro again";
+#endif
+  const StaticFilterErrorLookalike probe;
+  EXPECT_DOUBLE_EQ(1.0, probe.error());
+}
 
 // ===========================================================================
 // vector2
