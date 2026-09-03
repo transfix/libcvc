@@ -28,6 +28,8 @@
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace cvc {
 // Forward declaration
@@ -228,28 +230,58 @@ public:
         &state_object<This>::stateChanged, this, boost::placeholders::_1));
   }
 
+  // NOTE: a handler thread that has been spawned but has not dispatched yet
+  // will still run while this destructor is joining it, and by then the
+  // derived subobject is gone -- so virtual dispatch lands on the base
+  // handleStateChanged() below rather than the override.  That is benign (the
+  // base only logs, and the base subobject is alive for the whole join), but
+  // it is inherent: a base destructor runs after the derived one, so it has no
+  // hook early enough to turn such a handler away.  A derived class that needs
+  // its override never called during teardown must call disconnectState() and
+  // waitForHandlers() from its own destructor, before its members go.
   ~state_object() {
-    _stateConnection.disconnect();
+    // A destructor is implicitly noexcept and almost everything below can
+    // throw: app::threads() and app::removeThread() both open with an
+    // interruption_point(), and join()/timed_join() throw if this thread has
+    // been interrupted.  Letting any of that escape calls std::terminate().
+    try {
+      _stateConnection.disconnect();
 
-    // Wait for handler threads to complete to avoid dangling references
-    // Handler threads are named as stateName(childState) + "_stateChanged"
-    std::string threadPrefix = stateName();
-    thread_map threads = _ctx.threads();
-    BOOST_FOREACH (thread_map::value_type &val, threads) {
-      // Check if this thread belongs to this state_object instance
-      if (val.first.find(threadPrefix) == 0 &&
-          val.first.find("_stateChanged") != std::string::npos) {
-        // Wait for this handler thread to complete
-        if (val.second && val.second->joinable()) {
-          if (!val.second->timed_join(boost::posix_time::milliseconds(5000))) {
-            _ctx.log(5, str(boost::format("state_object::~state_object(): thread %s did not finish "
-                                          "in time, interrupting") %
-                            val.first));
-            val.second->interrupt();
-            val.second->join();
+      // Wait for handler threads to complete to avoid dangling references
+      // Handler threads are named as stateName(childState) + "_stateChanged"
+      std::string threadPrefix = stateName();
+      std::vector<std::string> joined;
+      thread_map threads = _ctx.threads();
+      BOOST_FOREACH (thread_map::value_type &val, threads) {
+        // Check if this thread belongs to this state_object instance
+        if (val.first.find(threadPrefix) == 0 &&
+            val.first.find("_stateChanged") != std::string::npos) {
+          // Wait for this handler thread to complete
+          if (val.second && val.second->joinable()) {
+            if (!val.second->timed_join(boost::posix_time::milliseconds(5000))) {
+              _ctx.log(5, str(boost::format("state_object::~state_object(): thread %s did not "
+                                            "finish in time, interrupting") %
+                              val.first));
+              val.second->interrupt();
+              val.second->join();
+            }
           }
+          if (val.second)
+            joined.push_back(val.first);
         }
       }
+
+      // Reap what we joined.  app::finishThreadProgress() no longer evicts a
+      // thread that is still running, so the entry outlives the handler and it
+      // falls to the owning object to drop it -- otherwise the app's thread map
+      // keeps one entry per handled child state for the life of the app.  Safe
+      // here and only here: the signal is disconnected, so nothing can have
+      // registered a *new* thread under one of these keys.
+      threads.clear();
+      BOOST_FOREACH (const std::string &key, joined)
+        _ctx.removeThread(key);
+    } catch (...) {
+      // Nothing useful to do while unwinding a destructor.
     }
   }
 
