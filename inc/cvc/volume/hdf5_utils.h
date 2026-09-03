@@ -78,6 +78,44 @@ namespace hdf5_utils {
 const hsize_t ATTRIBUTE_STRING_MAXLEN = 256;
 
 // --------------------
+// library_lock
+// --------------------
+// Purpose:
+//   Serializes every entry into the HDF5 library.
+//
+//   The hdf5 dependency is built without HDF5_ENABLE_THREADSAFE (that option
+//   is mutually exclusive with the C++ wrapper used here), so the library's
+//   error stack, id registry and free lists are unsynchronized process-wide
+//   state.  A per-file mutex is not enough to protect them: two threads
+//   working on two *different* files, or one thread calling
+//   H5::Exception::dontPrint() while another is mid-read, race on that shared
+//   state and crash.  Every hdf5_utils entry point below therefore holds this
+//   one process-wide lock, and takes it *before* its first H5:: call.
+//
+//   The raw handle helpers -- getH5File, getGroup, getDataSet, unlink and the
+//   H5::H5Object overloads of get/setAttribute -- do not lock; they are
+//   called from regions that already hold it.
+// ---- Change History ----
+// 09/02/2026 -- Joe R. -- Creation, replacing the old per-filename lock.
+class library_lock {
+public:
+  library_lock(app &ctx, const std::string &hdf5_filename, const std::string &info);
+  ~library_lock();
+
+  // The name this lock reports itself under via app::mutexInfo().
+  static const char *name() { return "cvc::hdf5_utils"; }
+
+private:
+  library_lock(const library_lock &) = delete;
+  library_lock &operator=(const library_lock &) = delete;
+
+  static boost::mutex &mutex();
+
+  app &_ctx;
+  boost::mutex::scoped_lock _lock;
+};
+
+// --------------------
 // getPredType
 // --------------------
 // Purpose:
@@ -564,13 +602,13 @@ inline void readDataSet(app &ctx, const std::string &hdf5_filename, const std::s
     throw invalid_hdf5_file("Dimension and offset out of bounds");
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::DataSet> d;
 
@@ -697,13 +735,13 @@ readDataSet(app &ctx, const std::string &hdf5_filename, const std::string &hdf5_
   shared_array<T> data;
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::DataSet> d;
 
@@ -900,7 +938,7 @@ inline void writeDataSet(app &ctx, const std::string &hdf5_filename,
   dimension dimension = getObjectDimension(ctx, hdf5_filename, hdf5_objname);
 
   try {
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
 
     /*
      * Turn off the auto-printing when failure occurs so that we can
@@ -1053,13 +1091,13 @@ inline void getAttribute(app &ctx, const std::string &hdf5_filename,
   bool isdataset = isDataSet(ctx, hdf5_filename, hdf5_objname);
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::Group> g;
     boost::shared_ptr<H5::DataSet> d;
@@ -1142,13 +1180,13 @@ inline void getAttribute<std::string>(app &ctx, const std::string &hdf5_filename
   bool isdataset = isDataSet(ctx, hdf5_filename, hdf5_objname);
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::Group> g;
     boost::shared_ptr<H5::DataSet> d;
@@ -1195,13 +1233,13 @@ inline void setAttribute(app &ctx, const std::string &hdf5_filename,
   bool isdataset = isDataSet(ctx, hdf5_filename, hdf5_objname);
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::Group> g;
     boost::shared_ptr<H5::DataSet> d;
@@ -1285,13 +1323,13 @@ inline void setAttribute<std::string>(app &ctx, const std::string &hdf5_filename
   bool isdataset = isDataSet(ctx, hdf5_filename, hdf5_objname);
 
   try {
+    library_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
+
     /*
      * Turn off the auto-printing when failure occurs so that we can
      * handle the errors appropriately
      */
     H5::Exception::dontPrint();
-
-    scoped_lock lock(ctx, hdf5_filename, BOOST_CURRENT_FUNCTION);
     boost::shared_ptr<H5::H5File> f;
     boost::shared_ptr<H5::Group> g;
     boost::shared_ptr<H5::DataSet> d;
