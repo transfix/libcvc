@@ -668,8 +668,18 @@ bool VolRenNode::tick() {
                               snap.cam.height != m_appliedH;
   const bool matrix_changed = snap.node_world.m != m_appliedMatrix;
   const bool settings_changed = snap.version != m_appliedVersion;
+  const bool stale = camera_changed || matrix_changed || settings_changed;
 
-  if ((m_continuous || camera_changed || matrix_changed || settings_changed) && !m_worker->busy()) {
+  // Converged == what is ON SCREEN matches the live camera, transform and
+  // settings, and nothing is still cooking.  "No new frame arrived" is NOT the
+  // same thing: while a raycast is in flight tick() deliberately does not
+  // relaunch, so a slow frame looks exactly like a settled one from the
+  // outside.  Anything that waits for a finished image -- an offscreen PNG
+  // capture, a screenshot test -- must poll this, or under load it captures
+  // whatever stale frame happened to be applied first.
+  m_converged.store(!stale && !m_worker->busy(), std::memory_order_relaxed);
+
+  if ((m_continuous || stale) && !m_worker->busy()) {
     launchOrRun(snap);
   }
   return m_frameAppliedSinceTick;

@@ -144,6 +144,13 @@ public:
   // freshly raycast frame was applied to the quad since the previous tick.
   bool tick();
 
+  // True when the frame ON SCREEN was raycast from the current camera,
+  // transform and settings, and no further raycast is pending.  Updated by
+  // tick().  Poll this before capturing a frame: "no new frame this tick" is
+  // ambiguous between settled and still-working, and under load the latter is
+  // what you get.
+  bool converged() const { return m_converged.load(std::memory_order_relaxed); }
+
   // Perf/testing introspection.
   double lastRenderSeconds() const { return m_lastRenderSeconds.load(); }
   std::uint64_t framesRendered() const { return m_framesRendered.load(); }
@@ -187,6 +194,7 @@ private:
   double m_resolutionScale = 0.5;
   bool m_continuous = false;
   std::atomic<int> m_backendUsed{0}; // cvc::volren::backend ordinal of the last frame
+  std::atomic<bool> m_converged{false};
 
   // Last-applied raycast identity (owner thread only).
   std::uint64_t m_appliedVersion = ~0ull;

@@ -116,23 +116,24 @@ bool pumpUntilFrames(SceneRenderer &view, cvc::gl::VolRenNode &node, std::uint64
   return false;
 }
 
-// Pump until the raycast converges on the current camera: tick() launches a
-// re-raycast whenever the applied frame's camera differs from the live one,
-// so steady state = several consecutive cycles with no new frame applied and
-// no relaunch wanted.
-bool pumpUntilStable(SceneRenderer &view, cvc::gl::VolRenNode &node, double timeout_s = 10.0) {
+// Pump until the node reports the ON-SCREEN frame matches the live camera.
+//
+// Counting "ticks with no new frame" is NOT a convergence test: while a
+// raycast is in flight tick() deliberately does not relaunch, so a slow frame
+// is indistinguishable from a settled one.  Under a loaded machine (parallel
+// ctest) that let this test sample a stale pre-setCamera frame and the volume
+// measured a quarter of its true size.  VolRenNode::converged() answers the
+// real question.
+bool pumpUntilStable(SceneRenderer &view, cvc::gl::VolRenNode &node, double timeout_s = 30.0) {
   const auto start = std::chrono::steady_clock::now();
-  int quiet = 0;
-  std::uint64_t last = node.framesRendered();
+  int settled = 0;
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() <
          timeout_s) {
     view.processUIEvents();
     node.tick();
     view.render();
-    const std::uint64_t now = node.framesRendered();
-    quiet = (now == last) ? quiet + 1 : 0;
-    last = now;
-    if (quiet >= 8)
+    settled = node.converged() ? settled + 1 : 0;
+    if (settled >= 3)
       return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
