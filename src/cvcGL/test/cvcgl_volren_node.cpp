@@ -67,6 +67,37 @@ RGB pixelAt(const std::vector<unsigned char> &f, int x, int y_from_top) {
 
 bool isBackground(const RGB &p) { return p.r < 12 && p.g < 12 && p.b < 12; }
 
+// Where the volume actually landed, measured rather than assumed.
+//
+// Sampling at hard-coded pixel offsets ties a test to one platform's exact
+// framing: offsets tuned on Linux fell OUTSIDE the silhouette on macOS, where
+// the same scene projects smaller, and the run aborted on a black sample.  So
+// find the non-background pixels, and let callers probe relative to the
+// measured centroid and radius.
+struct Silhouette {
+  int n = 0;
+  double cx = 0, cy = 0; // centroid, pixels
+  double radius = 0;     // sqrt(area / pi): the radius of an equal-area disc
+};
+
+Silhouette measureSilhouette(const std::vector<unsigned char> &f) {
+  Silhouette s;
+  double sx = 0, sy = 0;
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x)
+      if (!isBackground(pixelAt(f, x, y))) {
+        ++s.n;
+        sx += x;
+        sy += y;
+      }
+  if (s.n > 0) {
+    s.cx = sx / s.n;
+    s.cy = sy / s.n;
+    s.radius = std::sqrt(double(s.n) / 3.14159265358979323846);
+  }
+  return s;
+}
+
 int lum(const RGB &p) { return (p.r * 299 + p.g * 587 + p.b * 114) / 1000; }
 
 // Pump the scene until the node has applied >= want raycast frames.
@@ -196,13 +227,19 @@ int main() {
       std::printf("SKIP: frameRGB unavailable\n");
       return 0;
     }
+    const Silhouette sil = measureSilhouette(f);
     const RGB center = pixelAt(f, W / 2, H / 2);
-    // Sample toward the shadowed lower-left of the silhouette, away from the
-    // specular highlight (upper right, given the off-axis light).
-    const RGB body = pixelAt(f, W / 2 - 24, H / 2 + 18);
+    // Probe INSIDE the measured silhouette, toward its shadowed lower-left and
+    // well clear of both the rim and the specular highlight (upper right,
+    // given the off-axis light) -- 45% of the equal-area radius.
+    const int bx = std::clamp(int(std::lround(sil.cx - 0.45 * sil.radius)), 0, W - 1);
+    const int by = std::clamp(int(std::lround(sil.cy + 0.34 * sil.radius)), 0, H - 1);
+    const RGB body = pixelAt(f, bx, by);
     const RGB corner = pixelAt(f, 4, 4);
-    std::printf("  center (%d,%d,%d) body (%d,%d,%d) corner (%d,%d,%d)\n", center.r, center.g,
-                center.b, body.r, body.g, body.b, corner.r, corner.g, corner.b);
+    std::printf("  silhouette n=%d centre (%.1f,%.1f) r=%.1f | center (%d,%d,%d) "
+                "body@(%d,%d) (%d,%d,%d) corner (%d,%d,%d)\n",
+                sil.n, sil.cx, sil.cy, sil.radius, center.r, center.g, center.b, bx, by, body.r,
+                body.g, body.b, corner.r, corner.g, corner.b);
     fflush(stdout);
     if (const char *dump = getenv("VOLREN_TEST_DUMP")) {
       FILE *fp = fopen(dump, "wb");
@@ -212,6 +249,12 @@ int main() {
       fclose(fp);
     }
     assert(!isBackground(center) && "sphere not visible at viewport center");
+    // The sphere is radius 0.55 in a parallel_scale 1.0 ortho view, so it
+    // should cover roughly 0.55 of the viewport half-height. Assert a wide but
+    // real band: this still catches a genuinely mis-scaled composite (the
+    // reason the fixed offsets failed on macOS) without pinning the framing.
+    assert(sil.radius > 0.15 * (H / 2) && sil.radius < 0.95 * (H / 2) &&
+           "composited volume is implausibly sized -- image/quad scale mismatch?");
     assert(body.r > body.g + 20 && "sphere body should be red-dominant");
     assert(isBackground(corner) && "background contaminated at the corner");
 
@@ -294,11 +337,14 @@ int main() {
       view.render();
     }
     f = view.frameRGB();
-    // Sample inside the sphere silhouette on each side of the wall edge.
-    const RGB left = pixelAt(f, W / 2 - 24, H / 2 + 18);
-    const RGB right = pixelAt(f, W / 2 + 24, H / 2 + 18);
-    std::printf("  wall test: left (%d,%d,%d) right (%d,%d,%d)\n", left.r, left.g, left.b, right.r,
-                right.g, right.b);
+    // Probe each side of the wall edge INSIDE the silhouette measured before
+    // the wall existed -- fixed offsets are what broke this test on macOS.
+    const int wy = std::clamp(int(std::lround(sil.cy + 0.34 * sil.radius)), 0, H - 1);
+    const int wdx = std::max(3, int(std::lround(0.45 * sil.radius)));
+    const RGB left = pixelAt(f, std::clamp(int(std::lround(sil.cx)) - wdx, 0, W - 1), wy);
+    const RGB right = pixelAt(f, std::clamp(int(std::lround(sil.cx)) + wdx, 0, W - 1), wy);
+    std::printf("  wall test @dx=%d: left (%d,%d,%d) right (%d,%d,%d)\n", wdx, left.r, left.g,
+                left.b, right.r, right.g, right.b);
     fflush(stdout);
     assert(left.g > left.r + 30 && "wall (green) must occlude the volume on the left");
     assert(right.r > right.g + 20 && "volume (red) must still show right of the wall");
@@ -316,11 +362,30 @@ int main() {
     }
     view.render();
     f = view.frameRGB();
-    const RGB movedRight = pixelAt(f, 250, H / 2);
+    // Where did it go?  Measure the red-dominant pixels rather than guessing a
+    // column: the mapping from world x to screen column depends on the
+    // viewport the platform actually gave us.
+    long rsx = 0;
+    int rn = 0;
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x) {
+        const RGB p = pixelAt(f, x, y);
+        if (p.r > 40 && p.r > p.g + 20) {
+          rsx += x;
+          ++rn;
+        }
+      }
+    const int mx = rn ? int(rsx / rn) : W / 2;
+    const RGB movedRight = pixelAt(f, mx, H / 2);
     const RGB vacated = pixelAt(f, W / 2, H / 2);
-    std::printf("  after move: right-side (%d,%d,%d) vacated centre (%d,%d,%d)\n", movedRight.r,
-                movedRight.g, movedRight.b, vacated.r, vacated.g, vacated.b);
+    std::printf("  after move: %d volume px, centroid col %d (was ~%.0f) -> (%d,%d,%d); "
+                "vacated centre (%d,%d,%d)\n",
+                rn, mx, sil.cx, movedRight.r, movedRight.g, movedRight.b, vacated.r, vacated.g,
+                vacated.b);
     fflush(stdout);
+    assert(rn > 100 && "moved volume vanished entirely");
+    assert(double(mx) > sil.cx + 0.5 * sil.radius &&
+           "volume moved in +x must render further RIGHT than it started");
     // Both halves of "it moved": the volume is where it was sent AND is no
     // longer where it was.  The colour test is what keeps the first half
     // honest -- any red-dominant pixel there has to come from the volume.
