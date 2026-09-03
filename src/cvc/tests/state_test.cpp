@@ -1313,7 +1313,8 @@ TEST_F(StateTestFixture, OnStartupRegistration) {
   // This used to capture a local `bool` BY REFERENCE. The later firing then
   // wrote true into a dead stack slot, corrupting whatever occupied it by then.
   // That was not theoretical: running
-  //   state_test --gtest_filter='StateTestFixture.OnStartupRegistration:StateTestFixture.WaitForValue'
+  //   state_test \
+  //     --gtest_filter='StateTestFixture.OnStartupRegistration:StateTestFixture.WaitForValue'
   // segfaulted every time, and it poisoned every subsequent test in the same
   // process -- which is why the damage always surfaced somewhere unrelated.
   //
