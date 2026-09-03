@@ -4817,10 +4817,9 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
     {
       state_object<ThreadingTestObject>::setUseThreading(false);
 
-      std::vector<std::unique_ptr<ThreadingTestObject> > objs;
+      std::vector<std::unique_ptr<ThreadingTestObject>> objs;
       for (int i = 0; i < objectCount; i++)
-        objs.push_back(
-            std::unique_ptr<ThreadingTestObject>(new ThreadingTestObject(*localCtx)));
+        objs.push_back(std::unique_ptr<ThreadingTestObject>(new ThreadingTestObject(*localCtx)));
 
       // Mixed instance threading, as in StateObjectMixedInstanceThreading:
       // even indices opt in, odd indices follow the disabled global flag.
@@ -4835,8 +4834,7 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
         objs[i]->waitForHandlers();
 
       for (int i = 0; i < objectCount; i++) {
-        EXPECT_EQ(objs[i]->handleCount.load(), 1)
-            << "iteration " << iter << ", object " << i;
+        EXPECT_EQ(objs[i]->handleCount.load(), 1) << "iteration " << iter << ", object " << i;
 
         // The handler thread must still be registered. waitForHandlers()
         // and ~state_object() find handler threads only by scanning the
