@@ -66,8 +66,22 @@ if(CVC_ENABLE_IMGUI)
      AND EXISTS "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
     target_sources(cvcGL PRIVATE "${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp")
     # PUBLIC: demos/consumers write ImGui::* in their draw callbacks.
-    target_include_directories(cvcGL PUBLIC "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>")
-    target_link_libraries(cvcGL PUBLIC "${CVC_IMGUI_LIBRARY}")
+    #
+    # Split BUILD_/INSTALL_INTERFACE for the SAME reason X11 is linked by name
+    # below: find_library hands back an ABSOLUTE builder path, and cvcGL is a
+    # static archive, so an unguarded entry is baked verbatim into the exported
+    # cvcGLTargets.cmake and breaks any consumer on another machine with
+    # "missing and no known rule to make it". This build keeps the exact library
+    # it found; the export carries a relocatable -limgui that the consumer's own
+    # linker resolves out of its prefix (where imgui is declared a dependency).
+    # The include dir needs the same treatment — a consumer of the INSTALLED
+    # cvcGL is told CVC_ENABLE_IMGUI is on, so it must be able to find imgui.h.
+    target_include_directories(cvcGL PUBLIC
+      "$<BUILD_INTERFACE:${CVC_IMGUI_INCLUDE_DIR}>"
+      "$<INSTALL_INTERFACE:include/imgui>")
+    target_link_libraries(cvcGL PUBLIC
+      "$<BUILD_INTERFACE:${CVC_IMGUI_LIBRARY}>"
+      "$<INSTALL_INTERFACE:imgui>")
     target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
     if(EMSCRIPTEN) # WebGL2 loader for the browser build
       set_source_files_properties("${CVC_IMGUI_INCLUDE_DIR}/backends/imgui_impl_opengl3.cpp"

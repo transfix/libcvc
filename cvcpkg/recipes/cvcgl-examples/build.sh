@@ -48,6 +48,27 @@ if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
 fi
 
 cmake "${CMAKE_ARGS[@]}"
+
+# UI guard (linux). cvcGL's imgui block degrades SILENTLY: when find_library
+# misses, ImGuiOverlay compiles to inert stubs and the demos still build, run and
+# publish -- with every control panel gone and nothing in the log saying so. That
+# is exactly how the published binaries shipped with no UI at all. imgui is a
+# declared dependency of this recipe on linux, so a miss here is a broken closure,
+# not a soft option: fail the build instead of quietly shipping a UI-less demo.
+# The wasm column links its own static closure and is not covered.
+if [[ "${CVC_PLATFORM:-}" == "linux" ]]; then
+  _imgui_lib=$(sed -n 's/^CVC_IMGUI_LIBRARY:FILEPATH=//p' "$CVC_BUILD_DIR/CMakeCache.txt")
+  case "${_imgui_lib}" in
+    ""|*NOTFOUND)
+      echo "ERROR: cvcGL configured WITHOUT imgui -- the demos would ship with no UI." >&2
+      echo "       CVC_IMGUI_LIBRARY='${_imgui_lib:-<unset>}'" >&2
+      echo "       imgui is a build dependency of cvcgl-examples on linux; ensure its" >&2
+      echo "       prefix is on CVC_DEPS_PREFIX ('cvcpkg install imgui --prefix ...')." >&2
+      exit 1 ;;
+  esac
+  echo "cvcgl-examples: imgui overlay ENABLED (${_imgui_lib})"
+fi
+
 # Build every example (lsystem_forest + the three nav demos) and install just the
 # cvcgl-examples component: the bin/ executables, $ORIGIN-rpath'd by
 # examples/CMakeLists.txt (NOT the cvcGL SDK, which shares this build tree).
