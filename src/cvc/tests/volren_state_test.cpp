@@ -14,9 +14,7 @@
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/state_settings.h>
 #include <cvc/volume/volume.h>
-
 #include <gtest/gtest.h>
-
 #include <sstream>
 #include <string>
 #include <vector>
@@ -47,7 +45,6 @@ std::vector<double> translationRowMajor(double tx, double ty, double tz) {
   return {1, 0, 0, tx, 0, 1, 0, ty, 0, 0, 1, tz, 0, 0, 0, 1};
 }
 
-
 // Regression (port review): the gradient ramp's plateau survives the state
 // round-trip -- both the 4-value encoding and a legacy 3-value string.
 TEST(VolrenStateSettings, GradientRampPlateauRoundTrips) {
@@ -74,8 +71,8 @@ TEST(VolrenStateSettings, GradientRampPlateauRoundTrips) {
   cvc::state::instance(ctx)(path + ".volumes.0.gradient_ramp").value(std::string("1,2,3,0.25"));
   EXPECT_NEAR(ss.get().volumes[0].gradient_ramp.plateau, 0.25, 1e-12);
   cvc::state::instance(ctx)(path + ".volumes.0.gradient_ramp").value(std::string("1,2,3"));
-  EXPECT_NEAR(ss.get().volumes[0].gradient_ramp.plateau,
-              cvc::volren::defaults::gradient_plateau, 1e-12);
+  EXPECT_NEAR(ss.get().volumes[0].gradient_ramp.plateau, cvc::volren::defaults::gradient_plateau,
+              1e-12);
 }
 
 } // namespace
@@ -219,8 +216,7 @@ TEST(VolrenStateSettings, SetWritesState) {
 
   // The ramp encodes as "r0,r1,r2,plateau" (plateau defaults when reading a
   // legacy 3-value string).
-  const std::vector<double> ramp =
-      parseCsv(treeKey(ctx, path, "volumes.0.gradient_ramp").value());
+  const std::vector<double> ramp = parseCsv(treeKey(ctx, path, "volumes.0.gradient_ramp").value());
   ASSERT_EQ(ramp.size(), 4u);
   EXPECT_NEAR(ramp[0], 0.0, 1e-12);
   EXPECT_NEAR(ramp[1], 5.0, 1e-12);
@@ -229,10 +225,10 @@ TEST(VolrenStateSettings, SetWritesState) {
 
   const std::vector<double> isos = parseCsv(treeKey(ctx, path, "volumes.0.isosurfaces").value());
   ASSERT_EQ(isos.size(), 6u);
-  EXPECT_NEAR(isos[0], 5.0, 1e-12);  // value
-  EXPECT_NEAR(isos[1], 0.5, 1e-6);   // opacity
-  EXPECT_NEAR(isos[2], 0.25, 1e-6);  // r
-  EXPECT_NEAR(isos[5], 12.0, 1e-6);  // shininess
+  EXPECT_NEAR(isos[0], 5.0, 1e-12); // value
+  EXPECT_NEAR(isos[1], 0.5, 1e-6);  // opacity
+  EXPECT_NEAR(isos[2], 0.25, 1e-6); // r
+  EXPECT_NEAR(isos[5], 12.0, 1e-6); // shininess
 }
 
 // ============================================================================
@@ -288,8 +284,7 @@ TEST(VolrenStateSettings, VolumeRoundTrip) {
   treeKey(ctx, path, "volumes.0.shaded").value(1);
   treeKey(ctx, path, "volumes.0.unshaded").value(1);
   treeKey(ctx, path, "volumes.0.tf_auto_domain").value(0);
-  treeKey(ctx, path, "volumes.0.matrix")
-      .value(std::string("1,0,0,4,0,1,0,5,0,0,1,6,0,0,0,1"));
+  treeKey(ctx, path, "volumes.0.matrix").value(std::string("1,0,0,4,0,1,0,5,0,0,1,6,0,0,0,1"));
   treeKey(ctx, path, "volumes.0.transfer_function.color").value(std::string("0,1,0,0,10,0,0,1"));
   treeKey(ctx, path, "volumes.0.transfer_function.opacity").value(std::string("0,0,10,1"));
   treeKey(ctx, path, "volumes.0.window").value(std::string("2,8"));
@@ -355,8 +350,7 @@ TEST(VolrenStateSettings, MalformedStateIgnored) {
   const std::string path = "t5.volren";
 
   int applied = 0;
-  state_settings ss(ctx, path,
-                    [&](const state_settings::snapshot &) { ++applied; });
+  state_settings ss(ctx, path, [&](const state_settings::snapshot &) { ++applied; });
 
   const int goodSteps = ss.get().settings.steps;
   EXPECT_EQ(goodSteps, cvc::volren::defaults::steps);

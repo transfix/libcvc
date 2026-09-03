@@ -49,7 +49,6 @@
 #include <cvc/core/state_object.h>
 #include <cvc/volren/camera.h>
 #include <cvc/volren/settings.h>
-
 #include <functional>
 #include <mutex>
 #include <string>

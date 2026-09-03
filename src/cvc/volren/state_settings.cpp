@@ -1,11 +1,9 @@
-#include <cvc/volren/state_settings.h>
-
+#include <algorithm>
+#include <cctype>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/volren/raycaster.h>
-
-#include <algorithm>
-#include <cctype>
+#include <cvc/volren/state_settings.h>
 #include <sstream>
 #include <stdexcept>
 
@@ -197,8 +195,7 @@ void state_settings::seedState(const snapshot &s) {
     getState(volume_key(i, "unshaded")).value(vs.unshaded ? 1 : 0);
     getState(volume_key(i, "tf_auto_domain")).value(vs.tf_auto_domain ? 1 : 0);
     getState(volume_key(i, "matrix"))
-        .value(csv(std::vector<double>(vs.model_transform.m.begin(),
-                                       vs.model_transform.m.end())));
+        .value(csv(std::vector<double>(vs.model_transform.m.begin(), vs.model_transform.m.end())));
 
     std::vector<double> color, opacity;
     split_ramps(vs.tf, color, opacity);
@@ -208,10 +205,9 @@ void state_settings::seedState(const snapshot &s) {
     getState(volume_key(i, "window"))
         .value(vs.window_enabled ? csv({vs.window_min, vs.window_max}) : std::string());
     getState(volume_key(i, "gradient_ramp"))
-        .value(vs.gradient_ramp.enabled
-                   ? csv({vs.gradient_ramp.ramp0, vs.gradient_ramp.ramp1, vs.gradient_ramp.ramp2,
-                          vs.gradient_ramp.plateau})
-                   : std::string());
+        .value(vs.gradient_ramp.enabled ? csv({vs.gradient_ramp.ramp0, vs.gradient_ramp.ramp1,
+                                               vs.gradient_ramp.ramp2, vs.gradient_ramp.plateau})
+                                        : std::string());
 
     flat.clear();
     for (const isosurface &s : vs.isosurfaces) {
@@ -297,8 +293,7 @@ bool state_settings::readAllFromState(snapshot &out) const {
         return false;
       }
 
-      const std::vector<double> ramp =
-          parse_csv(getState(volume_key(i, "gradient_ramp")).value());
+      const std::vector<double> ramp = parse_csv(getState(volume_key(i, "gradient_ramp")).value());
       if (ramp.size() == 3 || ramp.size() == 4) {
         vs.gradient_ramp.enabled = true;
         vs.gradient_ramp.ramp0 = ramp[0];

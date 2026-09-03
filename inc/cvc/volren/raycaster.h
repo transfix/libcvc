@@ -8,13 +8,12 @@
 #ifndef CVC_VOLREN_RAYCASTER_H
 #define CVC_VOLREN_RAYCASTER_H
 
+#include <cstddef>
 #include <cvc/image/image.h>
 #include <cvc/volren/camera.h>
 #include <cvc/volren/settings.h>
 #include <cvc/volren/types.h>
 #include <cvc/volume/volume.h>
-
-#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -84,8 +83,8 @@ private:
   render_settings _settings;
   std::vector<cvc::volume> _volumes;
   std::vector<volume_settings> _volume_settings;
-  cvc::thread_pool *_pool = nullptr;              // borrowed, may be null
-  std::unique_ptr<cvc::thread_pool> _own_pool;    // lazy default
+  cvc::thread_pool *_pool = nullptr;           // borrowed, may be null
+  std::unique_ptr<cvc::thread_pool> _own_pool; // lazy default
 };
 
 } // namespace volren

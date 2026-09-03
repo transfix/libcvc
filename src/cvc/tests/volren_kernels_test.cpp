@@ -5,39 +5,36 @@
 // All grids here are plain std::vector buffers viewed through grid_sampler
 // (a non-owning view), so no cvc::app / cvc::volume is needed.
 
+#include <cmath>
+#include <cstdint>
 #include <cvc/volren/detail/cell_intersect.h>
 #include <cvc/volren/detail/mc_tables.h>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/detail/spline_gradient.h>
-
 #include <gtest/gtest.h>
-
-#include <cmath>
-#include <cstdint>
 #include <random>
 #include <vector>
 
-using cvc::volren::vec3d;
 using cvc::volren::ray;
-using cvc::volren::detail::grid_sampler;
-using cvc::volren::detail::spline_gradient_cache;
-using cvc::volren::detail::mc_cell;
-using cvc::volren::detail::mc_triangle;
-using cvc::volren::detail::mc_edges;
-using cvc::volren::detail::mc_vertex_from_binary;
+using cvc::volren::vec3d;
 using cvc::volren::detail::cube_edges;
+using cvc::volren::detail::extract_contour;
+using cvc::volren::detail::grid_sampler;
+using cvc::volren::detail::in_triangle;
+using cvc::volren::detail::intersect_isosurface_in_cell;
+using cvc::volren::detail::intersect_triangle;
+using cvc::volren::detail::mc_cell;
+using cvc::volren::detail::mc_edges;
+using cvc::volren::detail::mc_triangle;
+using cvc::volren::detail::mc_vertex_from_binary;
+using cvc::volren::detail::spline_gradient_cache;
 using cvc::volren::detail::tri_cases;
 using cvc::volren::detail::trilinear;
-using cvc::volren::detail::extract_contour;
-using cvc::volren::detail::in_triangle;
-using cvc::volren::detail::intersect_triangle;
-using cvc::volren::detail::intersect_isosurface_in_cell;
 
 namespace {
 
 // Fill a 4x4x4 buffer of T with val(i,j,k) = base + i*si + j*sj + k*sk.
-template <typename T>
-std::vector<T> pattern4(double base, double si, double sj, double sk) {
+template <typename T> std::vector<T> pattern4(double base, double si, double sj, double sk) {
   std::vector<T> buf(4 * 4 * 4);
   for (int k = 0; k < 4; ++k)
     for (int j = 0; j < 4; ++j)
@@ -59,8 +56,7 @@ grid_sampler make_view(const void *data, cvc::data_type type, std::int64_t dim,
 
 // VTK MC vertex convention used by mc_edges / tri_cases.
 constexpr int kVtkVertexCoord[8][3] = {
-    {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
-    {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1},
+    {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1},
 };
 
 // A cell whose density is linear in local x: f = f0 + gain * x_local.
@@ -159,10 +155,9 @@ TEST(GridSampler, CornersFollowBinaryBitOrdering) {
 
 TEST(GridSampler, LocalWeightsMapWorldPointIntoUnitCube) {
   const auto buf = pattern4<float>(0, 1, 10, 100);
-  const grid_sampler g = make_view(buf.data(), cvc::Float, 4, {-0.5, -0.5, -0.5},
-                                   {0.25, 0.5, 0.125});
-  const vec3d p{-0.5 + (1 + 0.25) * 0.25, -0.5 + (2 + 0.75) * 0.5,
-                -0.5 + (0 + 0.5) * 0.125};
+  const grid_sampler g =
+      make_view(buf.data(), cvc::Float, 4, {-0.5, -0.5, -0.5}, {0.25, 0.5, 0.125});
+  const vec3d p{-0.5 + (1 + 0.25) * 0.25, -0.5 + (2 + 0.75) * 0.5, -0.5 + (0 + 0.5) * 0.125};
   float w[3];
   g.local_weights(p, 1, 2, 0, w);
   EXPECT_NEAR(w[0], 0.25f, 1e-6f);
@@ -189,15 +184,13 @@ TEST(GridSampler, CellIndexAcceptsCellsZeroThroughDimMinusTwo) {
   EXPECT_EQ(idx[2], 0);
 
   // Interior of the last cell (dim-2 = 2): ratio dim-1.5 truncates to dim-2.
-  ASSERT_TRUE(g.cell_index(vec3d{-0.5 + 2.5 * 0.25, -0.5 + 2.5 * 0.25, -0.5 + 2.5 * 0.25},
-                           idx));
+  ASSERT_TRUE(g.cell_index(vec3d{-0.5 + 2.5 * 0.25, -0.5 + 2.5 * 0.25, -0.5 + 2.5 * 0.25}, idx));
   EXPECT_EQ(idx[0], 2);
   EXPECT_EQ(idx[1], 2);
   EXPECT_EQ(idx[2], 2);
 
   // Mixed per-axis cells.
-  ASSERT_TRUE(g.cell_index(vec3d{-0.5 + 0.5 * 0.25, -0.5 + 1.5 * 0.25, -0.5 + 2.5 * 0.25},
-                           idx));
+  ASSERT_TRUE(g.cell_index(vec3d{-0.5 + 0.5 * 0.25, -0.5 + 1.5 * 0.25, -0.5 + 2.5 * 0.25}, idx));
   EXPECT_EQ(idx[0], 0);
   EXPECT_EQ(idx[1], 1);
   EXPECT_EQ(idx[2], 2);
@@ -253,8 +246,8 @@ TEST(Trilinear, ReproducesAffineFieldAtArbitraryWeights) {
   const float a = 1.5f, b = 2.25f, c = -3.5f, d = 0.75f;
   float v[8];
   for (int corner = 0; corner < 8; ++corner)
-    v[corner] = a + b * float(corner & 1) + c * float((corner >> 1) & 1) +
-                d * float((corner >> 2) & 1);
+    v[corner] =
+        a + b * float(corner & 1) + c * float((corner >> 1) & 1) + d * float((corner >> 2) & 1);
   for (int trial = 0; trial < 20; ++trial) {
     const float w[3] = {uni(rng), uni(rng), uni(rng)};
     const float expected = a + b * w[0] + c * w[1] + d * w[2];
@@ -383,8 +376,8 @@ TEST(McTables, VertexRemapMatchesVtkCornerCoordinates) {
   // mc_vertex_from_binary[v] must be the raster/binary index (x + 2y + 4z) of
   // MC vertex v's VTK coordinates.
   for (int v = 0; v < 8; ++v) {
-    const int binary = kVtkVertexCoord[v][0] + 2 * kVtkVertexCoord[v][1] +
-                       4 * kVtkVertexCoord[v][2];
+    const int binary =
+        kVtkVertexCoord[v][0] + 2 * kVtkVertexCoord[v][1] + 4 * kVtkVertexCoord[v][2];
     EXPECT_EQ(mc_vertex_from_binary[v], binary) << "MC vertex " << v;
   }
 }
@@ -410,8 +403,8 @@ TEST(McTables, TriCaseEdgesAppearInCubeEdgesAndTripleUp) {
       const int edge = tri_cases[code][t];
       ASSERT_GE(edge, 0) << "code " << code;
       ASSERT_LT(edge, 12) << "code " << code;
-      EXPECT_TRUE(present[edge])
-          << "code " << code << ": tri edge " << edge << " not in cube_edges";
+      EXPECT_TRUE(present[edge]) << "code " << code << ": tri edge " << edge
+                                 << " not in cube_edges";
     }
   }
 }

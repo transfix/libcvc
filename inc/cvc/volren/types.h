@@ -7,11 +7,10 @@
 #ifndef CVC_VOLREN_TYPES_H
 #define CVC_VOLREN_TYPES_H
 
-#include <cvc/core/exception.h>
-
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cvc/core/exception.h>
 
 namespace cvc {
 

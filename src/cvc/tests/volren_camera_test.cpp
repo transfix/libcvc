@@ -4,11 +4,9 @@
   conversion, and degenerate-pose error handling.
 */
 
-#include <cvc/volren/camera.h>
-
-#include <gtest/gtest.h>
-
 #include <cmath>
+#include <cvc/volren/camera.h>
+#include <gtest/gtest.h>
 
 using cvc::volren::camera;
 using cvc::volren::cross;
@@ -482,8 +480,7 @@ TEST(CameraErrors, GenerateRayPropagatesDegeneratePoseError) {
 
 TEST(DepthToWindowZ, HitsZeroAtNearAndOneAtFarForBothProjections) {
   using cvc::volren::depth_to_window_z;
-  for (auto proj : {camera::projection_type::perspective,
-                    camera::projection_type::orthographic}) {
+  for (auto proj : {camera::projection_type::perspective, camera::projection_type::orthographic}) {
     EXPECT_NEAR(depth_to_window_z(0.1, 0.1, 100.0, proj), 0.0, 1e-12);
     EXPECT_NEAR(depth_to_window_z(100.0, 0.1, 100.0, proj), 1.0, 1e-12);
   }

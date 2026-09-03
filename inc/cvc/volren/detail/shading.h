@@ -16,11 +16,10 @@
 #ifndef CVC_VOLREN_DETAIL_SHADING_H
 #define CVC_VOLREN_DETAIL_SHADING_H
 
-#include <cvc/volren/settings.h>
-#include <cvc/volren/types.h>
-
 #include <algorithm>
 #include <cmath>
+#include <cvc/volren/settings.h>
+#include <cvc/volren/types.h>
 #include <vector>
 
 namespace cvc {

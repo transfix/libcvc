@@ -5,13 +5,11 @@
 //   - depth_to_window_z (camera.h) ortho/perspective mapping, clamping, throws
 //   - gradient_opacity_ramp piecewise factor (transfer_function.h)
 
+#include <cmath>
 #include <cvc/volren/camera.h>
 #include <cvc/volren/transfer_function.h>
 #include <cvc/volren/types.h>
-
 #include <gtest/gtest.h>
-
-#include <cmath>
 #include <random>
 
 using namespace cvc::volren;
@@ -217,19 +215,17 @@ TEST(Mat4Transform, TransformVectorIgnoresTranslation) {
 
   // Under a general affine M, transform_vector is the linear part:
   // M*p - M*0 == transform_vector(p).
-  const mat4 M =
-      mat_mul(make_translation(1.0, 2.0, 3.0),
-              mat_mul(make_rotation_z(0.3), make_scale(2.0, 0.5, 1.5)));
+  const mat4 M = mat_mul(make_translation(1.0, 2.0, 3.0),
+                         mat_mul(make_rotation_z(0.3), make_scale(2.0, 0.5, 1.5)));
   const vec3d lhs = M.transform_point(p) - M.transform_point({0, 0, 0});
   expect_vec_near(lhs, M.transform_vector(p), 1e-12);
 }
 
 TEST(Mat4Transform, AffineInverseRoundTripsTranslationRotationScale) {
   // Compose translation * rotZ * rotX * nonuniform scale.
-  const mat4 M = mat_mul(
-      make_translation(0.75, -1.5, 2.0),
-      mat_mul(make_rotation_z(kPi / 5.0),
-              mat_mul(make_rotation_x(-kPi / 7.0), make_scale(2.0, 0.5, 3.0))));
+  const mat4 M = mat_mul(make_translation(0.75, -1.5, 2.0),
+                         mat_mul(make_rotation_z(kPi / 5.0),
+                                 mat_mul(make_rotation_x(-kPi / 7.0), make_scale(2.0, 0.5, 3.0))));
   const mat4 inv = M.affine_inverse();
 
   // M * M^-1 is the identity (entrywise).
@@ -300,8 +296,8 @@ TEST(Mat4Transform, TransformNormalEqualsRotationForPureRotation) {
 
   // Translation does not change the normal transform (linear part only).
   const mat4 TR = mat_mul(make_translation(5.0, 6.0, 7.0), R);
-  expect_vec_near(TR.transform_normal({1.0, -2.0, 0.5}),
-                  R.transform_vector({1.0, -2.0, 0.5}), 1e-12);
+  expect_vec_near(TR.transform_normal({1.0, -2.0, 0.5}), R.transform_vector({1.0, -2.0, 0.5}),
+                  1e-12);
 }
 
 TEST(Mat4Transform, TransformNormalKeepsScaledPlanePerpendicular) {
@@ -311,9 +307,8 @@ TEST(Mat4Transform, TransformNormalKeepsScaledPlanePerpendicular) {
   const vec3d n{3.0, 0.0, -1.0}; // dot(t, n) == 0
   ASSERT_DOUBLE_EQ(dot(t, n), 0.0);
 
-  const mat4 M = mat_mul(
-      make_translation(1.0, 2.0, 3.0),
-      mat_mul(make_rotation_z(kPi / 3.0), make_scale(2.0, 0.5, 4.0)));
+  const mat4 M = mat_mul(make_translation(1.0, 2.0, 3.0),
+                         mat_mul(make_rotation_z(kPi / 3.0), make_scale(2.0, 0.5, 4.0)));
 
   const vec3d t_w = M.transform_vector(t);
   const vec3d n_w = M.transform_normal(n);
@@ -387,8 +382,8 @@ TEST(DepthToWindowZ, ClampsDepthsOutsideClipRange) {
   const double n = 1.0, f = 10.0;
   for (const auto proj :
        {camera::projection_type::orthographic, camera::projection_type::perspective}) {
-    EXPECT_DOUBLE_EQ(depth_to_window_z(0.001, n, f, proj), 0.0); // in front of near
-    EXPECT_DOUBLE_EQ(depth_to_window_z(-5.0, n, f, proj), 0.0);  // behind the eye
+    EXPECT_DOUBLE_EQ(depth_to_window_z(0.001, n, f, proj), 0.0);  // in front of near
+    EXPECT_DOUBLE_EQ(depth_to_window_z(-5.0, n, f, proj), 0.0);   // behind the eye
     EXPECT_DOUBLE_EQ(depth_to_window_z(1000.0, n, f, proj), 1.0); // beyond far
   }
 }
@@ -463,8 +458,8 @@ TEST(GradientOpacityRamp, DegenerateRiseGivesImmediatePlateau) {
   ramp.ramp2 = 5.0;
 
   const float plateau = static_cast<float>(ramp.plateau);
-  EXPECT_FLOAT_EQ(ramp.factor(1.999), 0.0f);   // still zero below ramp0
-  EXPECT_FLOAT_EQ(ramp.factor(2.0), plateau);  // steps straight to the plateau
+  EXPECT_FLOAT_EQ(ramp.factor(1.999), 0.0f);  // still zero below ramp0
+  EXPECT_FLOAT_EQ(ramp.factor(2.0), plateau); // steps straight to the plateau
   EXPECT_FLOAT_EQ(ramp.factor(3.5), plateau);
   EXPECT_FLOAT_EQ(ramp.factor(5.0), plateau);
   EXPECT_FLOAT_EQ(ramp.factor(5.5), 0.0f);

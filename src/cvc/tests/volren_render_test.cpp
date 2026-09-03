@@ -8,15 +8,14 @@
 // v = 1-(py+0.5)/64*2 -- the 0.5-halfwidth volume box projects to the middle
 // 32x32 pixels.
 
-#include <cvc/core/app.h>
-#include <cvc/volren/raycaster.h>
-#include <cvc/volume/volume.h>
 #include <boost/thread/thread.hpp>
-#include <gtest/gtest.h>
-
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/core/app.h>
+#include <cvc/volren/raycaster.h>
+#include <cvc/volume/volume.h>
+#include <gtest/gtest.h>
 #include <limits>
 
 using cvc::volren::camera;
@@ -51,8 +50,8 @@ cvc::volume makeLinearVolume(cvc::app &ctx, unsigned n) {
 
 // val = 1 - r about the box center (center high, decreasing outward).
 cvc::volume makeSphereVolume(cvc::app &ctx, unsigned n,
-                             const cvc::bounding_box &box = cvc::bounding_box(-0.5, -0.5, -0.5,
-                                                                              0.5, 0.5, 0.5)) {
+                             const cvc::bounding_box &box = cvc::bounding_box(-0.5, -0.5, -0.5, 0.5,
+                                                                              0.5, 0.5)) {
   cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float, box);
   const double cx = 0.5 * (box.minx + box.maxx);
   const double cy = 0.5 * (box.miny + box.maxy);
@@ -210,8 +209,8 @@ TEST_F(VolrenRenderTest, MissedRaysAreBackground) {
 
   const frame f = rc.render();
 
-  const int corners[4][2] = {{0, 0}, {kRaster - 1, 0}, {0, kRaster - 1},
-                             {kRaster - 1, kRaster - 1}};
+  const int corners[4][2] = {
+      {0, 0}, {kRaster - 1, 0}, {0, kRaster - 1}, {kRaster - 1, kRaster - 1}};
   for (const auto &c : corners) {
     const unsigned char *px = pixel(f, c[0], c[1]);
     EXPECT_EQ(int(px[0]), expectedByte(0.25f)) << "corner " << c[0] << "," << c[1];
@@ -658,7 +657,7 @@ TEST_F(VolrenRenderTest, TranslucentIsosurfaceLatchesDepthAtFirstHit) {
   vs.shaded = false;
   vs.unshaded = false;
   isosurface iso;
-  iso.value = 0.6; // r = 0.4 sphere on the 1-r field
+  iso.value = 0.6;    // r = 0.4 sphere on the 1-r field
   iso.opacity = 0.2f; // two crossings accumulate to 0.36 < default 0.5 threshold
   vs.isosurfaces.push_back(iso);
   rc.add_volume(makeSphereVolume(ctx, 32), vs);

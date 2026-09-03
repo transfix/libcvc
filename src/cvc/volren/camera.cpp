@@ -1,9 +1,7 @@
-#include <cvc/volren/camera.h>
-
-#include <boost/math/constants/constants.hpp>
-
 #include <algorithm>
+#include <boost/math/constants/constants.hpp>
 #include <cmath>
+#include <cvc/volren/camera.h>
 
 namespace cvc {
 namespace volren {
@@ -16,8 +14,7 @@ view_basis camera::basis() const {
   for (int i = 0; i < 3; ++i)
     if (!std::isfinite(eye[i]) || !std::isfinite(focal[i]) || !std::isfinite(up[i]))
       throw volren_error("camera pose must be finite");
-  if (projection == projection_type::perspective &&
-      !(vfov_degrees > 0.0 && vfov_degrees < 180.0))
+  if (projection == projection_type::perspective && !(vfov_degrees > 0.0 && vfov_degrees < 180.0))
     throw volren_error("vertical fov must be in (0, 180) degrees");
   if (projection == projection_type::orthographic &&
       !(parallel_scale > 0.0 && std::isfinite(parallel_scale)))
@@ -43,12 +40,12 @@ ray camera::generate_ray(int px, int py) const {
   if (projection == projection_type::perspective) {
     const double tan_half =
         std::tan(0.5 * vfov_degrees * boost::math::constants::pi<double>() / 180.0);
-    const vec3d dir = normalized(forward + b.right * (u * tan_half * aspect()) +
-                                 b.true_up * (v * tan_half));
+    const vec3d dir =
+        normalized(forward + b.right * (u * tan_half * aspect()) + b.true_up * (v * tan_half));
     return {vec3d(eye), dir};
   }
-  const vec3d origin = vec3d(eye) + b.right * (u * parallel_scale * aspect()) +
-                       b.true_up * (v * parallel_scale);
+  const vec3d origin =
+      vec3d(eye) + b.right * (u * parallel_scale * aspect()) + b.true_up * (v * parallel_scale);
   return {origin, forward};
 }
 

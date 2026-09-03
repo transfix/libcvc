@@ -2,11 +2,10 @@
 // piecewise-linear transfer_function, the baked flat LUT the ray-marcher
 // samples, and the gradient-magnitude opacity ramp.
 
-#include <cvc/volren/transfer_function.h>
-#include <gtest/gtest.h>
-
 #include <algorithm>
 #include <cstddef>
+#include <cvc/volren/transfer_function.h>
+#include <gtest/gtest.h>
 #include <random>
 #include <vector>
 
@@ -83,7 +82,8 @@ TEST(TransferFunctionTest, AddKeepsPointsSortedRegardlessOfInsertionOrder) {
 }
 
 TEST(TransferFunctionTest, VectorConstructorSortsPointsByValue) {
-  transfer_function tf({make_point(5.0, 0.5f, 0.f, 0.f, 0.5f), make_point(-1.0, 0.f, 0.5f, 0.f, 0.1f),
+  transfer_function tf({make_point(5.0, 0.5f, 0.f, 0.f, 0.5f),
+                        make_point(-1.0, 0.f, 0.5f, 0.f, 0.1f),
                         make_point(2.0, 0.f, 0.f, 0.5f, 0.9f)});
   ASSERT_EQ(tf.points().size(), 3u);
   EXPECT_DOUBLE_EQ(tf.points()[0].value, -1.0);
@@ -119,21 +119,24 @@ TEST(TransferFunctionTest, AddPlacesDuplicateValueAfterExistingPoints) {
 }
 
 TEST(TransferFunctionTest, SampleClampsBelowFirstPoint) {
-  transfer_function tf({make_point(10.0, 0.25f, 0.5f, 0.75f, 1.f), make_point(20.0, 1.f, 0.f, 0.f, 0.f)});
+  transfer_function tf(
+      {make_point(10.0, 0.25f, 0.5f, 0.75f, 1.f), make_point(20.0, 1.f, 0.f, 0.f, 0.f)});
   expect_rgba_near(tf.sample(-1000.0), 0.25f, 0.5f, 0.75f, 1.f, 1e-6f);
   expect_rgba_near(tf.sample(9.999), 0.25f, 0.5f, 0.75f, 1.f, 1e-6f);
   expect_rgba_near(tf.sample(10.0), 0.25f, 0.5f, 0.75f, 1.f, 1e-6f);
 }
 
 TEST(TransferFunctionTest, SampleClampsAboveLastPoint) {
-  transfer_function tf({make_point(10.0, 0.25f, 0.5f, 0.75f, 1.f), make_point(20.0, 1.f, 0.f, 0.5f, 0.5f)});
+  transfer_function tf(
+      {make_point(10.0, 0.25f, 0.5f, 0.75f, 1.f), make_point(20.0, 1.f, 0.f, 0.5f, 0.5f)});
   expect_rgba_near(tf.sample(20.0), 1.f, 0.f, 0.5f, 0.5f, 1e-6f);
   expect_rgba_near(tf.sample(20.001), 1.f, 0.f, 0.5f, 0.5f, 1e-6f);
   expect_rgba_near(tf.sample(1e9), 1.f, 0.f, 0.5f, 0.5f, 1e-6f);
 }
 
 TEST(TransferFunctionTest, SampleInterpolatesLinearlyAtMidpointAllChannels) {
-  transfer_function tf({make_point(0.0, 0.f, 1.f, 0.2f, 0.f), make_point(2.0, 1.f, 0.f, 0.8f, 0.5f)});
+  transfer_function tf(
+      {make_point(0.0, 0.f, 1.f, 0.2f, 0.f), make_point(2.0, 1.f, 0.f, 0.8f, 0.5f)});
   // Midpoint: exact channel-wise average.
   expect_rgba_near(tf.sample(1.0), 0.5f, 0.5f, 0.5f, 0.25f, 1e-6f);
   // Quarter point: 25% blend toward the second point.
@@ -141,14 +144,15 @@ TEST(TransferFunctionTest, SampleInterpolatesLinearlyAtMidpointAllChannels) {
 }
 
 TEST(TransferFunctionTest, SampleAtInteriorControlPointReturnsThatPointColor) {
-  transfer_function tf({make_point(0.0, 0.f, 0.f, 0.f, 0.f), make_point(1.0, 0.3f, 0.6f, 0.9f, 0.4f),
+  transfer_function tf({make_point(0.0, 0.f, 0.f, 0.f, 0.f),
+                        make_point(1.0, 0.3f, 0.6f, 0.9f, 0.4f),
                         make_point(2.0, 1.f, 1.f, 1.f, 1.f)});
   expect_rgba_near(tf.sample(1.0), 0.3f, 0.6f, 0.9f, 0.4f, 1e-6f);
 }
 
 TEST(TransferFunctionTest, DuplicateValuePointsSampleUsesOneSide) {
   // Two coincident points at v=1: A (alpha 0.2) then B (alpha 0.8).
-  transfer_function tf({make_point(0.0, 0.f, 0.f, 0.f, 0.f),  // start
+  transfer_function tf({make_point(0.0, 0.f, 0.f, 0.f, 0.f),   // start
                         make_point(1.0, 0.2f, 0.f, 0.f, 0.2f), // A
                         make_point(1.0, 0.8f, 0.f, 0.f, 0.8f), // B
                         make_point(2.0, 1.f, 0.f, 0.f, 1.f)}); // end
@@ -290,7 +294,8 @@ TEST(BakedTransferFunctionTest, DefaultSizeIsDefaultsLutSize) {
 TEST(BakedTransferFunctionTest, AlphaRampRoundTripsAtMidpoint) {
   // Ramp alpha 0 -> 1 over [0, 255], baked at the default resolution: sampling
   // the middle of the domain must land very close to 0.5.
-  transfer_function tf({make_point(0.0, 0.f, 0.f, 0.f, 0.f), make_point(255.0, 1.f, 1.f, 1.f, 1.f)});
+  transfer_function tf(
+      {make_point(0.0, 0.f, 0.f, 0.f, 0.f), make_point(255.0, 1.f, 1.f, 1.f, 1.f)});
   baked_transfer_function baked(tf, 0.0, 255.0);
   ASSERT_FALSE(baked.empty());
   EXPECT_NEAR(baked.sample(128.0).a, 0.5f, 0.01f);
@@ -330,10 +335,10 @@ TEST(GradientOpacityRampTest, FactorRisesLinearlyBetweenRampZeroAndRampOne) {
   ramp.ramp1 = 2.0;
   ramp.ramp2 = 4.0;
   ramp.plateau = 0.8;
-  EXPECT_NEAR(ramp.factor(1.0), 0.f, 1e-6f);    // start of the rise
-  EXPECT_NEAR(ramp.factor(1.25), 0.2f, 1e-6f);  // quarter
-  EXPECT_NEAR(ramp.factor(1.5), 0.4f, 1e-6f);   // midpoint -> plateau/2
-  EXPECT_NEAR(ramp.factor(1.75), 0.6f, 1e-6f);  // three quarters
+  EXPECT_NEAR(ramp.factor(1.0), 0.f, 1e-6f);   // start of the rise
+  EXPECT_NEAR(ramp.factor(1.25), 0.2f, 1e-6f); // quarter
+  EXPECT_NEAR(ramp.factor(1.5), 0.4f, 1e-6f);  // midpoint -> plateau/2
+  EXPECT_NEAR(ramp.factor(1.75), 0.6f, 1e-6f); // three quarters
 }
 
 TEST(GradientOpacityRampTest, FactorHoldsPlateauBetweenRampOneAndRampTwo) {

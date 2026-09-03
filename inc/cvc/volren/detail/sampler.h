@@ -13,11 +13,10 @@
 #ifndef CVC_VOLREN_DETAIL_SAMPLER_H
 #define CVC_VOLREN_DETAIL_SAMPLER_H
 
+#include <cstddef>
+#include <cstdint>
 #include <cvc/core/types.h>
 #include <cvc/volren/types.h>
-
-#include <cstdint>
-#include <cstddef>
 
 namespace cvc {
 namespace volren {
@@ -30,13 +29,12 @@ struct grid_sampler {
   const unsigned char *data = nullptr;
   cvc::data_type type = cvc::UChar;
   std::int64_t dimx = 0, dimy = 0, dimz = 0;
-  vec3d minb;         // world position of voxel (0,0,0)
-  vec3d span;         // voxel spacing per axis (all > 0)
+  vec3d minb; // world position of voxel (0,0,0)
+  vec3d span; // voxel spacing per axis (all > 0)
 
   float at(std::int64_t i, std::int64_t j, std::int64_t k) const {
-    const std::size_t n =
-        std::size_t(i) + std::size_t(j) * std::size_t(dimx) +
-        std::size_t(k) * std::size_t(dimx) * std::size_t(dimy);
+    const std::size_t n = std::size_t(i) + std::size_t(j) * std::size_t(dimx) +
+                          std::size_t(k) * std::size_t(dimx) * std::size_t(dimy);
     switch (type) {
     case cvc::UChar:
       return float(reinterpret_cast<const unsigned char *>(data)[n]);

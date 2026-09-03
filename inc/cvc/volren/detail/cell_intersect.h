@@ -19,13 +19,12 @@
 #ifndef CVC_VOLREN_DETAIL_CELL_INTERSECT_H
 #define CVC_VOLREN_DETAIL_CELL_INTERSECT_H
 
+#include <cmath>
+#include <cstdint>
 #include <cvc/volren/camera.h>
 #include <cvc/volren/detail/mc_tables.h>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/types.h>
-
-#include <cmath>
-#include <cstdint>
 
 namespace cvc {
 namespace volren {

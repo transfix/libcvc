@@ -8,9 +8,8 @@
 #ifndef CVC_VOLREN_TRANSFER_FUNCTION_H
 #define CVC_VOLREN_TRANSFER_FUNCTION_H
 
-#include <cvc/volren/types.h>
-
 #include <cstddef>
+#include <cvc/volren/types.h>
 #include <vector>
 
 namespace cvc {
@@ -44,8 +43,7 @@ public:
   double domain_max() const;
 
   // Convenience: bake this function into the flat LUT the marcher indexes.
-  baked_transfer_function bake(double lo, double hi,
-                               std::size_t size = defaults::lut_size) const;
+  baked_transfer_function bake(double lo, double hi, std::size_t size = defaults::lut_size) const;
 
 private:
   std::vector<transfer_point> _points; // sorted by value

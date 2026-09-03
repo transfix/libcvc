@@ -10,7 +10,6 @@
 
 #include <cvc/volren/transfer_function.h>
 #include <cvc/volren/types.h>
-
 #include <vector>
 
 namespace cvc {
@@ -20,16 +19,16 @@ namespace volren {
 // commented "position" but shaded with the normalized vector directly).
 // Multiple lights ACCUMULATE -- the legacy overwrite bug is fixed.
 struct light {
-  std::array<float, 3> color{1.f, 1.f, 1.f};       // [0,1]
-  std::array<double, 3> direction{0.0, 0.0, 1.0};  // normalized on use
+  std::array<float, 3> color{1.f, 1.f, 1.f};      // [0,1]
+  std::array<double, 3> direction{0.0, 0.0, 1.0}; // normalized on use
 };
 
 // One isosurface rendered by per-cell marching-cubes ray intersection.
 struct isosurface {
-  double value = 0.0;                       // raw value domain
-  float opacity = 1.0f;                     // constant per surface (legacy contract)
+  double value = 0.0;   // raw value domain
+  float opacity = 1.0f; // constant per surface (legacy contract)
   std::array<float, 3> color{1.f, 1.f, 1.f};
-  float shininess = defaults::shininess;    // real exponent; legacy ignored its own
+  float shininess = defaults::shininess; // real exponent; legacy ignored its own
 };
 
 // Half-space clip: sample points with dot(p - point, normal) < 0 are culled.

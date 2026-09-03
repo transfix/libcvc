@@ -18,10 +18,9 @@
 #ifndef CVC_VOLREN_DETAIL_SPLINE_GRADIENT_H
 #define CVC_VOLREN_DETAIL_SPLINE_GRADIENT_H
 
+#include <cstdint>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/types.h>
-
-#include <cstdint>
 
 namespace cvc {
 namespace volren {
@@ -75,8 +74,7 @@ private:
     for (int k = -1; k <= 2; ++k)
       for (int j = -1; j <= 2; ++j)
         for (int i = -1; i <= 2; ++i)
-          _val[k + 1][j + 1][i + 1] =
-              grid.at_clamped(_cell[0] + i, _cell[1] + j, _cell[2] + k);
+          _val[k + 1][j + 1][i + 1] = grid.at_clamped(_cell[0] + i, _cell[1] + j, _cell[2] + k);
 
     // Forward-difference tensors, one per gradient axis, laid out exactly as
     // the legacy code stored them (the evaluate() index dance depends on it):

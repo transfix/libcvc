@@ -1,20 +1,17 @@
-#include <cvc/volren/raycaster.h>
-
+#include <algorithm>
+#include <atomic>
+#include <boost/current_function.hpp>
+#include <boost/math/constants/constants.hpp>
+#include <boost/thread/thread.hpp>
+#include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/volren/detail/cell_intersect.h>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/detail/shading.h>
 #include <cvc/volren/detail/spline_gradient.h>
-
-#include <boost/current_function.hpp>
-#include <boost/math/constants/constants.hpp>
-#include <boost/thread/thread.hpp>
-
-#include <algorithm>
-#include <atomic>
-#include <cmath>
-#include <cstring>
+#include <cvc/volren/raycaster.h>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -70,8 +67,7 @@ struct ray_generator {
     true_up = b.true_up;
     forward = -b.back;
     perspective = cam.projection == camera::projection_type::perspective;
-    tan_half =
-        std::tan(0.5 * cam.vfov_degrees * boost::math::constants::pi<double>() / 180.0);
+    tan_half = std::tan(0.5 * cam.vfov_degrees * boost::math::constants::pi<double>() / 180.0);
     parallel_scale = cam.parallel_scale;
     aspect = cam.aspect();
     width = cam.width;
@@ -82,11 +78,10 @@ struct ray_generator {
     const double u = (double(px) + 0.5) / double(width) * 2.0 - 1.0;
     const double v = 1.0 - (double(py) + 0.5) / double(height) * 2.0;
     if (perspective) {
-      return {eye, normalized(forward + right * (u * tan_half * aspect) +
-                              true_up * (v * tan_half))};
+      return {eye,
+              normalized(forward + right * (u * tan_half * aspect) + true_up * (v * tan_half))};
     }
-    return {eye + right * (u * parallel_scale * aspect) + true_up * (v * parallel_scale),
-            forward};
+    return {eye + right * (u * parallel_scale * aspect) + true_up * (v * parallel_scale), forward};
   }
 };
 
@@ -181,9 +176,9 @@ cvc::bounding_box raycaster::scene_bounds() const {
     const cvc::bounding_box &b = _volumes[i].boundingBox();
     const mat4 &mt = _volume_settings[i].model_transform;
     for (int corner = 0; corner < 8; ++corner) {
-      const vec3d p = mt.transform_point({corner & 1 ? b.maxx : b.minx,
-                                          corner & 2 ? b.maxy : b.miny,
-                                          corner & 4 ? b.maxz : b.minz});
+      const vec3d p =
+          mt.transform_point({corner & 1 ? b.maxx : b.minx, corner & 2 ? b.maxy : b.miny,
+                              corner & 4 ? b.maxz : b.minz});
       if (first) {
         out.minx = out.maxx = p.x;
         out.miny = out.maxy = p.y;
@@ -251,10 +246,8 @@ frame raycaster::render() {
   const double unit_step = diag / double(_settings.steps);
 
   frame out;
-  out.color = cvc::image(width, height, cvc::image::pixel_format::RGBA,
-                         cvc::image::data_type::u8);
-  out.depth = cvc::image(width, height, cvc::image::pixel_format::GRAY,
-                         cvc::image::data_type::f32);
+  out.color = cvc::image(width, height, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  out.depth = cvc::image(width, height, cvc::image::pixel_format::GRAY, cvc::image::data_type::f32);
   unsigned char *color_px = out.color.data();
   float *depth_px = reinterpret_cast<float *>(out.depth.data());
 
@@ -360,8 +353,7 @@ frame raycaster::render() {
               continue;
             float w[3];
             double t_hit = 0.0;
-            if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w,
-                                                      t_hit))
+            if (!detail::intersect_isosurface_in_cell(local_ray, float(surf.value), cell, w, t_hit))
               continue;
             // An isosurface hit latches the depth map on its own -- the
             // frame contract is "first iso hit or first threshold-crossing
@@ -373,8 +365,8 @@ frame raycaster::render() {
             const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
             const vec3d normal = normalized(p.normal_to_world(grad));
             const std::array<float, 3> shaded =
-                detail::blinn_phong(surf.color, normal, view_vec, rs.lights,
-                                    rs.two_sided_lighting, rs.ambient, surf.shininess);
+                detail::blinn_phong(surf.color, normal, view_vec, rs.lights, rs.two_sided_lighting,
+                                    rs.ambient, surf.shininess);
             composite(shaded, surf.opacity, t_hit);
           }
         }
@@ -382,9 +374,8 @@ frame raycaster::render() {
         // 2. Unshaded transfer function (legacy COL_DENSITY).
         if (vs.unshaded) {
           fetch_corners();
-          const bool in_window =
-              !vs.window_enabled ||
-              (double(min_val) <= vs.window_max && double(max_val) >= vs.window_min);
+          const bool in_window = !vs.window_enabled || (double(min_val) <= vs.window_max &&
+                                                        double(max_val) >= vs.window_min);
           if (in_window) {
             float w[3];
             p.grid.local_weights(lpnt, idx[0], idx[1], idx[2], w);
@@ -474,8 +465,7 @@ frame raycaster::render() {
     std::exception_ptr first_error;
     std::mutex error_mutex;
     const int slab = std::max(1, int(pool.concurrency()) * 4);
-    for (int base = 0; base < ntiles && !failed.load(std::memory_order_relaxed);
-         base += slab) {
+    for (int base = 0; base < ntiles && !failed.load(std::memory_order_relaxed); base += slab) {
       boost::this_thread::interruption_point();
       const int count = std::min(slab, ntiles - base);
       pool.parallel_for(
