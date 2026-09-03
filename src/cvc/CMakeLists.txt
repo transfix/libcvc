@@ -95,6 +95,18 @@ set(INCLUDE_FILES
   ../../inc/cvc/vis/reference.h
   ../../inc/cvc/vis/grid_index.h
   ../../inc/cvc/vis/mesh_tiler.h
+  ../../inc/cvc/volren/volren.h
+  ../../inc/cvc/volren/types.h
+  ../../inc/cvc/volren/camera.h
+  ../../inc/cvc/volren/transfer_function.h
+  ../../inc/cvc/volren/settings.h
+  ../../inc/cvc/volren/raycaster.h
+  ../../inc/cvc/volren/state_settings.h
+  ../../inc/cvc/volren/detail/mc_tables.h
+  ../../inc/cvc/volren/detail/sampler.h
+  ../../inc/cvc/volren/detail/spline_gradient.h
+  ../../inc/cvc/volren/detail/cell_intersect.h
+  ../../inc/cvc/volren/detail/shading.h
 )
 
 # Source files
@@ -198,6 +210,11 @@ set(SOURCE_FILES
   vis/reference.cpp
   vis/grid_index.cpp
   vis/mesh_tiler.cpp
+  volren/types.cpp
+  volren/camera.cpp
+  volren/transfer_function.cpp
+  volren/raycaster.cpp
+  volren/state_settings.cpp
 )
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian
