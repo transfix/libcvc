@@ -3,6 +3,7 @@
 // ImageMagick round-trip (guarded on CVC_ENABLE_IMAGEMAGICK).
 
 #include <cstdint>
+#include <cstdio>
 #include <cvc/image/image.h>
 #include <cvc/image/image.h> // include-twice: header must be idempotent
 #include <fstream>
@@ -356,6 +357,31 @@ TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
   const unsigned char png_sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
   for (int i = 0; i < 8; ++i)
     EXPECT_EQ(sig[i], png_sig[i]) << "byte " << i << " — MIFF starts with \"id=ImageMagick\"";
+}
+
+// Generalizes SavedPngHasPngMagicNotMiff across every registered extension —
+// including tif/webp, which have no stb fallback, and the TIF/JPG coder
+// aliases. For each one, save() must either succeed with a file that is NOT a
+// MIFF blob, or throw. Silently writing MIFF under another name is the bug.
+// Guards the extension list too: adding an extension whose uppercase form is
+// not a coder Magick knows would surface here rather than in a user's file.
+TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
+  const image a = make_rgba(4, 4);
+  for (const std::string &ext : cvc::image_file_io::known_extensions()) {
+    const std::string path = std::string(::testing::TempDir()) + "/cvc_image_notmiff." + ext;
+    std::remove(path.c_str());
+    try {
+      a.save(path);
+    } catch (const std::exception &) {
+      continue; // no encoder for this format in this build — the honest outcome
+    }
+    std::ifstream f(path, std::ios::binary);
+    ASSERT_TRUE(f.good()) << ext << ": save() reported success but wrote no file";
+    char head[14] = {0};
+    f.read(head, sizeof(head));
+    EXPECT_NE(std::string(head, static_cast<std::size_t>(f.gcount())).find("id=ImageMagick"), 0u)
+        << ext << ": wrote a MIFF blob under ." << ext;
+  }
 }
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
