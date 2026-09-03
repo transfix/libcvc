@@ -92,6 +92,12 @@ if(CVC_ENABLE_GRPC)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
+add_executable(volren_math_test volren_math_test.cpp)
+add_executable(volren_camera_test volren_camera_test.cpp)
+add_executable(volren_tf_test volren_tf_test.cpp)
+add_executable(volren_kernels_test volren_kernels_test.cpp)
+add_executable(volren_render_test volren_render_test.cpp)
+add_executable(volren_state_test volren_state_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
@@ -211,6 +217,12 @@ set(TEST_TARGETS
   vis_oracle_test
   vis_grid_test
   vis_tiler_test
+  volren_math_test
+  volren_camera_test
+  volren_tf_test
+  volren_kernels_test
+  volren_render_test
+  volren_state_test
 )
 
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
@@ -332,6 +344,54 @@ target_link_libraries(volume_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(volren_math_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_math_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_camera_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_camera_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_tf_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_tf_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_kernels_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_kernels_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_render_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_render_test PRIVATE cxx_std_17)
+
+target_link_libraries(volren_state_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(volren_state_test PRIVATE cxx_std_17)
 
 if(TARGET geometry_test)
   target_link_libraries(geometry_test
@@ -1336,6 +1396,12 @@ cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(voxels_test)
 cvc_discover_tests(volume_test)
+cvc_discover_tests(volren_math_test)
+cvc_discover_tests(volren_camera_test)
+cvc_discover_tests(volren_tf_test)
+cvc_discover_tests(volren_kernels_test)
+cvc_discover_tests(volren_render_test)
+cvc_discover_tests(volren_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
 endif()
