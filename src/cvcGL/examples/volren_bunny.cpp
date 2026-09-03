@@ -1,23 +1,28 @@
-// volren_bunny — the cvc::volren showcase: a signed-distance-field volume of
-// the Stanford bunny raycast on the CPU and dropped into a live cvcGL scene
-// through VolRenNode, next to the classic mesh bunny under the exact
-// bunny_shadow StageLighting rig.
+// volren_bunny — the cvc::volren showcase: bunny_shadow's scene with the mesh
+// bunny REPLACED by a signed-distance-field volume of the same bunny, raycast
+// by cvc::volren and composited through VolRenNode, under the identical
+// StageLighting rig.
 //
 // What it demonstrates:
-//  - cvc::sdf(bunny mesh) -> Float volume at startup (~0.4 s at 64^3);
-//  - VolRenNode: async CPU raycast (isosurface at distance 0 + a faint
-//    translucent shell), composited into the scene as a translucent quad
-//    whose gl_FragDepth comes from the raycast depth map — the volume
-//    occludes and is occluded per pixel (watch it pass behind the mesh
-//    bunny as it orbits);
-//  - the scene-graph transform feeding the raycaster: the volume bunny spins
-//    via the node's standard rotation key, re-raycasting as it moves;
-//  - FpsHud + per-raycast timing on stdout for the performance check.
+//  - cvc::sdf(bunny mesh) -> Float volume at startup (~0.4 s at 64^3), then
+//    rendered as an isosurface at distance 0 -- no mesh anywhere in the scene;
+//  - VolRenNode compositing: the raycast frame's depth map drives
+//    gl_FragDepth, so the volume occludes and is occluded per pixel by the
+//    ground plane and by other bunnies;
+//  - the scene-graph transform path: the Add/Remove buttons place up to 9
+//    bunnies on a 3x3 grid purely by per-volume model_transform, one raycaster
+//    handling them all;
+//  - CPU vs CUDA backends and the resolution knob, with a live Mray/s readout.
 //
-// Controls: orbit camera (drag), 'f' toggles the FPS HUD.  CLI mirrors
-// bunny_shadow: --width/--height/--offscreen/--frames/--png/--no-shadows/
-// --no-ui plus --dim (SDF resolution), --scale (raycast resolution scale),
-// --no-spin, --no-mesh.
+// The first bunny stands exactly where bunny_shadow's mesh bunny stands:
+// centred on the origin, base on the ground, not moving.
+//
+// Controls: orbit camera (drag), 'f' toggles the FPS HUD, the Volume raycast
+// panel holds the rest.  CLI mirrors bunny_shadow:
+// --width/--height/--offscreen/--frames/--png/--no-shadows/--no-ui/--no-grid
+// plus --dim (SDF resolution), --scale (raycast resolution scale),
+// --bunnies N (initial count, 1..9), --shell (translucent outer shell),
+// --cpu (force the CPU backend).
 
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -140,9 +145,14 @@ cvc::volume bunny_sdf(cvc::app &app, const cvc::geometry &standing, unsigned dim
 #endif
 }
 
-// Raycast settings for the SDF bunny: solid surface at distance 0 shaded by
-// the spline gradient, plus a faint cool shell 4 world units out so the
-// translucent compositing path is visible over the scene.
+// Raycast settings for the SDF bunny: the surface is the zero level set,
+// shaded from the spline gradient with bunny_shadow's material colour.
+//
+// The optional shell is a second isosurface at a POSITIVE distance, i.e. an
+// offset surface floating `shell_offset` world units outside the bunny in
+// every direction -- including below its feet, which reads as the bunny
+// hovering in a haze.  Off by default for that reason; it exists to show the
+// translucent compositing path.
 cvc::volren::volume_settings bunny_volume_settings(double shell_offset) {
   cvc::volren::volume_settings vs;
   vs.shaded = false;
@@ -150,16 +160,33 @@ cvc::volren::volume_settings bunny_volume_settings(double shell_offset) {
   cvc::volren::isosurface body;
   body.value = 0.0;
   body.opacity = 1.0f;
-  body.color = {0.92f, 0.86f, 0.98f};
+  body.color = {0.85f, 0.82f, 0.88f}; // bunny_shadow's mesh colour
   body.shininess = 24.0f;
   vs.isosurfaces.push_back(body);
-  cvc::volren::isosurface shell;
-  shell.value = shell_offset;
-  shell.opacity = 0.16f;
-  shell.color = {0.35f, 0.75f, 0.95f};
-  shell.shininess = 8.0f;
-  vs.isosurfaces.push_back(shell);
+  if (shell_offset > 0.0) {
+    cvc::volren::isosurface shell;
+    shell.value = shell_offset;
+    shell.opacity = 0.16f;
+    shell.color = {0.35f, 0.75f, 0.95f};
+    shell.shininess = 8.0f;
+    vs.isosurfaces.push_back(shell);
+  }
   return vs;
+}
+
+// Where the Nth bunny stands.  Slot 0 is the origin -- exactly where
+// bunny_shadow's mesh bunny stands -- and the rest ring outward on a 3x3 grid
+// whose pitch exceeds the bunny's footprint, so they never overlap.
+constexpr int kMaxBunnies = 9;
+constexpr int kGrid[kMaxBunnies][2] = {{0, 0},  {1, 0},  {0, 1},  {-1, 0}, {0, -1},
+                                       {1, 1},  {-1, 1}, {-1, -1}, {1, -1}};
+
+cvc::volren::mat4 translation(double tx, double ty, double tz) {
+  cvc::volren::mat4 m;
+  m.m[3] = tx;
+  m.m[7] = ty;
+  m.m[11] = tz;
+  return m;
 }
 
 } // namespace
@@ -169,9 +196,10 @@ int main(int argc, char **argv) {
   int width = 1280, height = 720, frames = 0, fps = 30;
   unsigned dim = 64;
   double scale = 0.5;
+  int bunnies = 1;
   std::string png;
-  bool offscreen = false, no_shadows = false, no_ui = false, no_spin = false, no_mesh = false,
-       no_grid = false;
+  bool offscreen = false, no_shadows = false, no_ui = false, no_grid = false, shell = false,
+       cpu_only = false;
 
   po::options_description desc("volren_bunny options");
   desc.add_options()("help,h", "show help")("width", po::value<int>(&width))(
@@ -179,9 +207,10 @@ int main(int argc, char **argv) {
       "frames", po::value<int>(&frames))("fps", po::value<int>(&fps))(
       "png", po::value<std::string>(&png))("no-shadows", po::bool_switch(&no_shadows))(
       "no-ui", po::bool_switch(&no_ui))("no-grid", po::bool_switch(&no_grid))(
-      "no-spin", po::bool_switch(&no_spin))(
-      "no-mesh", po::bool_switch(&no_mesh))("dim", po::value<unsigned>(&dim),
-                                            "SDF volume resolution (default 64)")(
+      "shell", po::bool_switch(&shell), "add the translucent offset shell")(
+      "cpu", po::bool_switch(&cpu_only), "force the CPU backend")(
+      "bunnies", po::value<int>(&bunnies), "initial bunny count 1..9 (default 1)")(
+      "dim", po::value<unsigned>(&dim), "SDF volume resolution (default 64)")(
       "scale", po::value<double>(&scale), "raycast resolution scale (default 0.5)");
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -199,23 +228,13 @@ int main(int argc, char **argv) {
   const double S = 100.0; // bunny height in world units
   const cvc::geometry standing = stand_bunny(S);
 
-  // The mesh bunny (classic renderer) to the left; the SDF volume bunny to
-  // the right, spun through the scene graph so occlusion + the transform path
-  // both show.
-  if (!no_mesh) {
-    auto mesh = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("bunny_mesh", standing));
-    mesh->setPosition(-0.62 * S, 0.0, 0.0);
-    mesh->setUseSingleColor(true);
-    mesh->setColor(0.85, 0.82, 0.88);
-    mesh->setAmbient(0.22);
-    mesh->setDiffuse(0.9);
-    mesh->setSpecular(0.25);
-    mesh->setSpecularPower(24.0);
-  }
-
+  // The ground is sized for the FULL 3x3 grid (bunnies can be added at
+  // runtime), not just the bunny on stage at startup, so nobody ever ends up
+  // standing off the edge.
   const double ground_rgb[3] = {0.32, 0.34, 0.38};
-  auto groundNode =
-      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("ground", ground(2.2 * S, ground_rgb)));
+  const double ground_half = std::max(2.2 * S, 1.35 * S * std::sqrt(2.0) + 1.2 * S);
+  auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
+      sg.addGraphics("ground", ground(ground_half, ground_rgb)));
   groundNode->setUseSingleColor(true);
   groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
   groundNode->setAmbient(0.35);
@@ -232,8 +251,10 @@ int main(int argc, char **argv) {
   auto volNode = sg.getGraphicsRoot()->addGraphicsChild<VolRenNode>("bunny_volume");
   sg.registerGraphics("bunny_volume", volNode);
   volNode->setResolutionScale(scale);
-  volNode->addVolume(sdf_vol, bunny_volume_settings(0.04 * S));
-  volNode->setPosition(no_mesh ? 0.0 : 0.62 * S, 0.0, 0.0);
+  // The node itself stays at the origin and never moves; each bunny is placed
+  // by its volume's own model_transform (see place_bunnies).
+  if (!cpu_only)
+    volNode->setBackend(cvc::volren::backend::automatic);
   {
     // Match the StageLighting key (azimuth -38 deg, elevation 52 deg) so the
     // raycast shading agrees with the scene look.
@@ -258,9 +279,33 @@ int main(int argc, char **argv) {
   rig.setWarmth(0.3);
   rig.setEnvironment(0.7);
   rig.setAmbient(0.4);
-  rig.apply();
 
-  bool spin = !no_spin; // live-toggleable from the UI panel
+  // Placing the bunnies: slot 0 is the origin, the rest ring outward on a
+  // grid whose pitch clears the bunny's ~S-wide footprint.  The stage (the
+  // aimed key/fill cones) widens with the ring so every bunny stays lit --
+  // for a single bunny this is bunny_shadow's rig unchanged.
+  const double pitch = 1.35 * S;
+  int bunnyCount = std::min(std::max(bunnies, 1), kMaxBunnies);
+  bool shellOn = shell;
+  auto place_bunnies = [&](int count, bool with_shell) {
+    volNode->clearVolumes();
+    double ring = 0.0;
+    for (int i = 0; i < count; ++i) {
+      cvc::volren::volume_settings vs = bunny_volume_settings(with_shell ? 0.04 * S : 0.0);
+      const double tx = kGrid[i][0] * pitch, ty = kGrid[i][1] * pitch;
+      vs.model_transform = translation(tx, ty, 0.0);
+      volNode->addVolume(sdf_vol, vs);
+      ring = std::max(ring, std::sqrt(tx * tx + ty * ty));
+    }
+    rig.setStage(0.0, 0.0, 0.5 * S, ring + 0.62 * S);
+    rig.apply();
+  };
+  place_bunnies(bunnyCount, shellOn);
+
+  // The ImGui draw callback runs mid-render, so it only records intent here;
+  // the main loop applies it before the next tick().
+  int wantCount = bunnyCount;
+  bool wantFrameAll = false, wantShellChange = false;
 
   SceneRenderer view(sg, width, height, capturing || offscreen, "main");
   const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
@@ -273,7 +318,16 @@ int main(int argc, char **argv) {
     sg.setDiagnosticChromeVisible(false);
 
   CameraController cam(view);
-  cam.frameBounds(-2.2 * S, -2.2 * S, 0.0, 2.2 * S, 2.2 * S, 1.3 * S);
+  {
+    // Frame whatever the demo starts with: bunny_shadow's exact framing for a
+    // single bunny, widened to hold the ring when --bunnies asks for more.
+    double ring = 0.0;
+    for (int i = 0; i < bunnyCount; ++i)
+      ring = std::max(ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] +
+                                             kGrid[i][1] * kGrid[i][1])) * pitch);
+    const double r = ring + 2.2 * S;
+    cam.frameBounds(-r, -r, 0.0, r, r, 1.3 * S);
+  }
   cam.setMode(CameraController::Mode::Orbit);
   cvc::gl::TouchGestures touch(view, cam);
 
@@ -300,25 +354,44 @@ int main(int argc, char **argv) {
     cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
 
-    // The raycast panel: resolution scale is the headline performance knob
-    // (the quad upscales, so lowering it trades sharpness for latency).
+    // The raycast panel: bunny count, then the performance knobs.
     if (uiVolren) {
       if (ImGui::Begin("Volume raycast", &uiVolren)) {
+        ImGui::Text("SDF %ux%ux%u  |  isosurface at distance 0", dim, dim, dim);
+        ImGui::Separator();
+
+        ImGui::Text("Bunnies: %d / %d", bunnyCount, kMaxBunnies);
+        ImGui::BeginDisabled(bunnyCount >= kMaxBunnies);
+        if (ImGui::Button("Add"))
+          wantCount = bunnyCount + 1;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(bunnyCount <= 1);
+        if (ImGui::Button("Remove"))
+          wantCount = bunnyCount - 1;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Frame all"))
+          wantFrameAll = true;
+        if (ImGui::Checkbox("translucent shell", &shellOn))
+          wantShellChange = true;
+
+        ImGui::Separator();
         const double ms = volNode->lastRenderSeconds() * 1000.0;
         const int rw = std::max(2, int(std::lround(width * volNode->resolutionScale())));
         const int rh = std::max(2, int(std::lround(height * volNode->resolutionScale())));
-        ImGui::Text("%d x %d rays  |  %.1f ms  |  %.2f Mray/s", rw, rh, ms,
+        const bool onGpu = volNode->backendUsed() == cvc::volren::backend::cuda;
+        ImGui::Text("%s  |  %d x %d rays  |  %.1f ms  |  %.2f Mray/s",
+                    onGpu ? "CUDA" : "CPU", rw, rh, ms,
                     ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0);
-        ImGui::Text("SDF %ux%ux%u  |  %llu raycasts", dim, dim, dim,
-                    (unsigned long long)volNode->framesRendered());
-        ImGui::Separator();
+        ImGui::Text("%llu raycasts", (unsigned long long)volNode->framesRendered());
+
         float rs = float(volNode->resolutionScale());
         if (ImGui::SliderFloat("resolution", &rs, 0.05f, 1.0f, "%.2f"))
           volNode->setResolutionScale(rs);
         bool cont = volNode->continuous();
         if (ImGui::Checkbox("re-raycast every frame", &cont))
           volNode->setContinuous(cont);
-        ImGui::Checkbox("spin", &spin);
         cvc::volren::render_settings rset = volNode->renderConfig();
         int steps = rset.steps;
         if (ImGui::SliderInt("steps", &steps, 32, 768)) {
@@ -350,12 +423,27 @@ int main(int argc, char **argv) {
     touch.update();
     cam.update(dt);
 
-    // Spin the VOLUME bunny through the scene graph: the node picks the new
-    // composed matrix up in tick() and re-raycasts.
-    if (spin) {
-      static double angle = 0.0;
-      angle += 12.0 * dt; // deg/s
-      volNode->setRotation(0.0, 0.0, angle);
+    // Apply anything the UI asked for since the last frame.  The bunnies are
+    // static: nothing here moves unless the user changes the layout.
+    if (wantCount != bunnyCount || wantShellChange) {
+      bunnyCount = std::min(std::max(wantCount, 1), kMaxBunnies);
+      wantCount = bunnyCount;
+      wantShellChange = false;
+      place_bunnies(bunnyCount, shellOn);
+
+  // The ImGui draw callback runs mid-render, so it only records intent here;
+  // the main loop applies it before the next tick().
+  int wantCount = bunnyCount;
+  bool wantFrameAll = false, wantShellChange = false;
+    }
+    if (wantFrameAll) {
+      wantFrameAll = false;
+      double ring = 0.0;
+      for (int i = 0; i < bunnyCount; ++i)
+        ring = std::max(ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] +
+                                               kGrid[i][1] * kGrid[i][1])) * pitch);
+      const double r = ring + 1.2 * S;
+      cam.frameBounds(-r, -r, 0.0, r, r, 1.3 * S);
     }
 
     volNode->tick();
@@ -374,8 +462,10 @@ int main(int argc, char **argv) {
       const double ms = volNode->lastRenderSeconds() * 1000.0;
       const int rw = std::max(2, int(std::lround(width * scale)));
       const int rh = std::max(2, int(std::lround(height * scale)));
-      std::printf("[volren_bunny] scene %.1f fps | raycast %.1f ms/frame (%.2f Mray/s, "
-                  "%dx%d) | %llu raycasts (+%llu)\n",
+      std::printf("[volren_bunny] %d bunny(s) | %s | scene %.1f fps | raycast %.1f ms "
+                  "(%.2f Mray/s, %dx%d) | %llu raycasts (+%llu)\n",
+                  bunnyCount,
+                  volNode->backendUsed() == cvc::volren::backend::cuda ? "CUDA" : "CPU",
                   hud.fps(), ms, ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0, rw,
                   rh, (unsigned long long)rendered,
                   (unsigned long long)(rendered - last_report_frames));

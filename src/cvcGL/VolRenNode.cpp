@@ -139,10 +139,12 @@ struct VolRenNode::worker {
     const auto start = std::chrono::steady_clock::now();
     cvc::volren::frame f = rc.render();
     seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    used_backend = static_cast<int>(rc.backend_used());
     return f;
   }
 
   cvc::volren::raycaster rc;
+  std::atomic<int> used_backend{0}; // backend ordinal of the last completed render
   std::unique_ptr<cvc::thread_pool> pool;
   std::thread thread;
   std::mutex mutex;
@@ -199,6 +201,7 @@ VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::s
   m_worker = std::make_unique<worker>(ctx);
   m_worker->on_frame = [this](cvc::volren::frame f, snapshot snap, double seconds) {
     m_lastRenderSeconds.store(seconds);
+    m_backendUsed.store(m_worker->used_backend.load());
     // Marshal to the owner thread; weak-guarded, so a dying node drops it.
     auto shared_f = std::make_shared<cvc::volren::frame>(std::move(f));
     auto shared_s = std::make_shared<snapshot>(std::move(snap));
@@ -305,6 +308,12 @@ void VolRenNode::setResolutionScale(double scale) {
 double VolRenNode::resolutionScale() const { return m_resolutionScale; }
 
 void VolRenNode::setContinuous(bool on) { getState("volren.continuous").value(on ? 1 : 0); }
+
+void VolRenNode::setBackend(cvc::volren::backend b) { m_worker->rc.set_backend(b); }
+
+cvc::volren::backend VolRenNode::backendUsed() const {
+  return static_cast<cvc::volren::backend>(m_backendUsed.load());
+}
 
 bool VolRenNode::continuous() const { return m_continuous; }
 
@@ -426,13 +435,21 @@ void VolRenNode::ensureQuad() {
   if (m_quadReady)
     return;
   // Placeholder unit quad; applyFrame() re-poses it to hug the raycast
-  // camera's frustum.  UVs 0..1 (GeometryNode flips V for the top-left-origin
-  // texture).
+  // camera's frustum, in the order {bottom-left, bottom-right, top-right,
+  // top-left}.
+  //
+  // UV orientation, the subtle bit: the raycast image is TOP-LEFT origin, so
+  // texture v=0 is its top row -- and GeometryNode flips V in the TCoords for
+  // exactly that reason (m_textureFlipV).  To land the image's top row on the
+  // screen's top edge we must therefore supply the INVERSE of the wanted
+  // mapping: v=0 on the bottom corners, v=1 on the top ones.  Getting this
+  // backwards renders the frame upside down -- invisible on a vertically
+  // symmetric test volume, glaring on a bunny.
   cvc::geometry quad(app());
   auto &pts = quad.points();
   pts = {{-0.5, -0.5, 0.0}, {0.5, -0.5, 0.0}, {0.5, 0.5, 0.0}, {-0.5, 0.5, 0.0}};
   auto &uvs = quad.uvs();
-  uvs = {{0.0, 1.0}, {1.0, 1.0}, {1.0, 0.0}, {0.0, 0.0}};
+  uvs = {{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
   auto &tris = quad.tris();
   tris = {{0, 1, 2}, {0, 2, 3}};
   quad.set_geometry_type(cvc::geometry::SURFACE_TRI);

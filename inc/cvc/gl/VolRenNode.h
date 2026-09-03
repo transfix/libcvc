@@ -75,6 +75,12 @@ public:
   void setContinuous(bool on);
   bool continuous() const;
 
+  // Which raycaster backend to ask for.  Defaults to the raycaster's own
+  // default (CPU); backend::automatic uses CUDA when the device and the scene
+  // both allow it and silently falls back otherwise.
+  void setBackend(cvc::volren::backend b);
+  cvc::volren::backend backendUsed() const;
+
   // Call once per frame BEFORE the viewer's render(): snapshots the live
   // camera + composed world transform, refreshes the depth-conversion
   // uniforms, and (a)synchronously raycasts when needed.  Returns true when a
@@ -118,6 +124,7 @@ private:
 
   double m_resolutionScale = 0.5;
   bool m_continuous = false;
+  std::atomic<int> m_backendUsed{0}; // cvc::volren::backend ordinal of the last frame
 
   // Last-applied raycast identity (owner thread only).
   std::uint64_t m_appliedVersion = ~0ull;

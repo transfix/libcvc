@@ -173,6 +173,41 @@ int main() {
     assert(body.r > body.g + 20 && "sphere body should be red-dominant");
     assert(isBackground(corner) && "background contaminated at the corner");
 
+    // ── 1b. VERTICAL orientation of the composited frame ───────────────────
+    // The raycast image is top-left origin and GeometryNode flips V, so the
+    // quad's UVs must invert that.  Getting it wrong renders every frame
+    // upside down -- which a vertically symmetric test volume cannot detect,
+    // so lift the volume and check the silhouette really moves UP the screen.
+    {
+      const std::uint64_t before = node->framesRendered();
+      // This camera sits at (0,0,6) looking down -z with up=+y, so SCREEN UP
+      // is world +y.  (Moving in +z would only approach the camera and, under
+      // an orthographic projection, not move on screen at all.)
+      node->setPosition(0.0, 0.9, 0.0);
+      if (pumpUntilFrames(view, *node, before + 1) && pumpUntilStable(view, *node)) {
+        view.render();
+        const std::vector<unsigned char> lifted = view.frameRGB();
+        long sumY = 0, n = 0;
+        for (int y = 0; y < H; ++y)
+          for (int x = 0; x < W; ++x) {
+            const RGB p = pixelAt(lifted, x, y);
+            if (p.r > p.g + 20 && p.r > 60) { sumY += y; ++n; }
+          }
+        assert(n > 200 && "lifted volume not visible");
+        const double meanY = double(sumY) / double(n);
+        std::printf("  lifted volume mean row %.1f (viewport centre %d)\n", meanY, H / 2);
+        fflush(stdout);
+        // 0.9 world units at parallel_scale 1.0 is ~54% of the half-height, so
+        // a correctly oriented frame puts the silhouette WELL above centre; an
+        // upside-down one puts it equally far below.
+        assert(meanY < double(H) / 2.0 - 30.0 &&
+               "volume raised in +y must render well ABOVE centre -- frame is upside down");
+      }
+      node->setPosition(0.0, 0.0, 0.0);
+      pumpUntilFrames(view, *node, node->framesRendered() + 1);
+      pumpUntilStable(view, *node);
+    }
+
     // ── 2. depth: an opaque wall in FRONT hides the volume behind it ────────
     // Wall covers the LEFT half of the view, at z=2 (between camera z=6 and
     // volume at origin).  Its pixels must win on the left; the sphere must
