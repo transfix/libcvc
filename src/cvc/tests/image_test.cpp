@@ -311,6 +311,26 @@ TEST(ImageTest, StbHandlerEncodesJpegDimensions) {
   EXPECT_EQ(b.height(), 4);
 }
 
+// bmp and tga are the other two stb encoders the fallback can land on; both are
+// lossless for RGBA u8 (stb gives a 4-channel bmp the V4 header with an alpha
+// mask, and tga 32bpp carries alpha), so assert exact round-trips.
+TEST(ImageTest, StbHandlerEncodesLosslessBmpAndTga) {
+  const image a = make_rgba(5, 3);
+  for (const char *ext : {"bmp", "tga"}) {
+    const std::string path =
+        std::string(::testing::TempDir()) + "/cvc_image_stb_lossless." + std::string(ext);
+    auto h = cvc::image_file_io::for_read(std::string("x.") + ext);
+    ASSERT_TRUE(h) << ext;
+    ASSERT_EQ(h->id(), "stb_image_io") << ext;
+    h->write(a, path, 90);
+    image b = h->read(path);
+    ASSERT_EQ(b.width(), 5) << ext;
+    ASSERT_EQ(b.height(), 3) << ext;
+    for (std::size_t i = 0; i < a.size_bytes(); ++i)
+      ASSERT_EQ(b.data()[i], a.data()[i]) << ext << " byte " << i;
+  }
+}
+
 TEST(ImageTest, StbHandlerRefusesGifWrite) {
   auto h = cvc::image_file_io::for_read("x.gif");
   ASSERT_TRUE(h);
