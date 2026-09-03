@@ -1,6 +1,6 @@
 {
   "_comment": "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here.",
-  "order": ["lsystem_forest", "lsystem_coast", "nav_city_swarm", "nav_fog_ghost", "bunny_shadow"],
+  "order": ["lsystem_forest", "lsystem_coast", "volren_bunny", "nav_city_swarm", "nav_fog_ghost", "bunny_shadow"],
   "demos": {
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
@@ -21,6 +21,11 @@
       "desc": "one agent detours a phantom wall, then senses it clear",
       "blurb": "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between three limited-belief scenarios — ghost, dynamic and traffic.",
       "thumb": "img/nav_fog_ghost.jpg"
+    },
+    "volren_bunny": {
+      "desc": "the Stanford bunny as a signed-distance volume, CPU-raycast live",
+      "blurb": "Two bunnies, two renderers: the classic mesh beside a signed-distance-field volume of the same bunny, raycast on the CPU by cvc::volren and composited into the scene with a per-pixel depth map — watch it occlude and be occluded as it spins. The SDF is computed live from the mesh at startup; the raycast image, its translucent shell and the raster resolution are all software, no GPU volume tricks.",
+      "thumb": "img/volren_bunny.jpg"
     },
     "bunny_shadow": {
       "desc": "the Stanford bunny under an aimed spot — shadow mapping, up close",

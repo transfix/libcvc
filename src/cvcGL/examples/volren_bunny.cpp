@@ -29,12 +29,13 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/VolRenNode.h>
+#include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <cvc/utility/algorithm.h>
 #include <cvc/volume/volume.h>
 
 #ifdef CVC_ENABLE_IMGUI
+#include <cvc/gl/ImGuiBinding.h>
 #include <cvc/gl/ImGuiOverlay.h>
-#include <cvc/gl/ui/Widgets.h>
 #include <imgui.h>
 #endif
 
@@ -259,6 +260,8 @@ int main(int argc, char **argv) {
   rig.setAmbient(0.4);
   rig.apply();
 
+  bool spin = !no_spin; // live-toggleable from the UI panel
+
   SceneRenderer view(sg, width, height, capturing || offscreen, "main");
   const bool shadows = !no_shadows && sg.setShadowsEnabled(true);
   if (shadows) {
@@ -283,17 +286,48 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
   ui.setVisible(!no_ui && !capturing);
-  bool uiScene = false, uiLighting = false;
+  bool uiScene = false, uiLighting = false, uiVolren = true;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("Scene")) {
         cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
+        ImGui::Separator();
+        ImGui::MenuItem("Volume raycast", nullptr, &uiVolren);
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();
     }
     cvc::gl::ui::ScenePanel(sg, &uiScene);
     cvc::gl::ui::StageLightingPanel(rig, &uiLighting);
+
+    // The raycast panel: resolution scale is the headline performance knob
+    // (the quad upscales, so lowering it trades sharpness for latency).
+    if (uiVolren) {
+      if (ImGui::Begin("Volume raycast", &uiVolren)) {
+        const double ms = volNode->lastRenderSeconds() * 1000.0;
+        const int rw = std::max(2, int(std::lround(width * volNode->resolutionScale())));
+        const int rh = std::max(2, int(std::lround(height * volNode->resolutionScale())));
+        ImGui::Text("%d x %d rays  |  %.1f ms  |  %.2f Mray/s", rw, rh, ms,
+                    ms > 0.0 ? (double(rw) * rh / (ms / 1000.0)) / 1e6 : 0.0);
+        ImGui::Text("SDF %ux%ux%u  |  %llu raycasts", dim, dim, dim,
+                    (unsigned long long)volNode->framesRendered());
+        ImGui::Separator();
+        float rs = float(volNode->resolutionScale());
+        if (ImGui::SliderFloat("resolution", &rs, 0.05f, 1.0f, "%.2f"))
+          volNode->setResolutionScale(rs);
+        bool cont = volNode->continuous();
+        if (ImGui::Checkbox("re-raycast every frame", &cont))
+          volNode->setContinuous(cont);
+        ImGui::Checkbox("spin", &spin);
+        cvc::volren::render_settings rset = volNode->renderConfig();
+        int steps = rset.steps;
+        if (ImGui::SliderInt("steps", &steps, 32, 768)) {
+          rset.steps = steps;
+          volNode->setRenderConfig(rset);
+        }
+      }
+      ImGui::End();
+    }
   });
 #endif
 
@@ -318,7 +352,7 @@ int main(int argc, char **argv) {
 
     // Spin the VOLUME bunny through the scene graph: the node picks the new
     // composed matrix up in tick() and re-raycasts.
-    if (!no_spin) {
+    if (spin) {
       static double angle = 0.0;
       angle += 12.0 * dt; // deg/s
       volNode->setRotation(0.0, 0.0, angle);

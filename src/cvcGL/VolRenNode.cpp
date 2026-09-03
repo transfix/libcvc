@@ -24,17 +24,31 @@ namespace gl {
 namespace {
 
 // GLSL injected at //VTK::CustomUniforms::Dec (top of the fragment shader).
+//
+// CRITICAL: the replacement RE-EMITS the anchor.  GeometryNode registers
+// replacements with replaceFirst=true, i.e. ahead of VTK's own substitutions,
+// so a replacement that drops the anchor also deletes whatever VTK would have
+// put there.  The desktop polydata mapper leaves this anchor empty, but
+// wasm's vtkOpenGLLowMemoryPolyDataMapper declares `primitiveSize` and
+// `usesEdgeValues` in it -- eating the anchor made every fragment shader fail
+// to compile in the browser while the desktop build stayed green.
 const char *kDepthUniformsDec = "uniform sampler2D volrenDepthTex;\n"
                                 "uniform float volrenNear;\n"
                                 "uniform float volrenFar;\n"
-                                "uniform int volrenPersp;\n";
+                                "uniform int volrenPersp;\n"
+                                "//VTK::CustomUniforms::Dec\n";
 
 // GLSL injected at //VTK::Depth::Impl: convert the raycaster's eye-space
 // depth to window z with the LIVE camera's clip range (VTK refits the range
 // every frame, so this must use uniforms, not baked values).  Misses carry
 // +inf eye depth -> clamps to 1.0, and their alpha-0 texels are discarded by
 // the template's alpha test anyway.
+//
+// The anchor is re-emitted FIRST (same reason as above) so any mapper-supplied
+// depth code still runs; ours follows and therefore wins the gl_FragDepth
+// write.
 const char *kDepthImpl =
+    "//VTK::Depth::Impl\n"
     "  float vrEyeDepth = texture(volrenDepthTex, tcoordVCVSOutput).r;\n"
     "  float vrZ;\n"
     "  if (volrenPersp == 1)\n"

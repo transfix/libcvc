@@ -41,7 +41,7 @@ jobs:
       # scene-austin-south-web + vehicle-humvee land here; the wasm build's
       # CMake --preload-file bakes this dir into nav_city_swarm.data.
       CVC_WASM_BUNDLE: /opt/cvc-wasm/deps-wasm-mt/share/cvc-scenes/austin_south
-      DEMOS: 'lsystem_forest lsystem_coast nav_city_swarm nav_fog_ghost'
+      DEMOS: 'lsystem_forest lsystem_coast volren_bunny nav_city_swarm nav_fog_ghost'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
