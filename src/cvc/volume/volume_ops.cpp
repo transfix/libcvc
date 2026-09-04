@@ -23,8 +23,11 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#ifdef CVC_ENABLE_FFTW
+#if defined(CVC_FFT_FFTW)
 #include <fftw3.h>
+#elif defined(CVC_FFT_POCKETFFT)
+#include <complex>
+#include <pocketfft_hdronly.h>
 #endif
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
@@ -32,6 +35,57 @@
 #endif
 
 namespace cvc {
+
+#if defined(CVC_FFT_FFTW) || defined(CVC_FFT_POCKETFFT)
+// In-place 2-D complex FFT on split re/im arrays, row-major nx x ny.
+//
+// Provider-neutral so the one caller (filtered back-projection) does not care
+// which transform is linked. Both providers are UNNORMALISED, matching FFTW's
+// convention, so the caller's 1/n after the inverse is correct either way.
+//
+// libcvc is LGPL-2.1 while FFTW is GPL-2.0-or-later, so linking FFTW makes the
+// library a combined work under the GPL. That is why PocketFFT (BSD-3) is the
+// default and FFTW is opt-in.
+static void cvc_fft2d(unsigned int nx, unsigned int ny, double *re, double *im, bool forward) {
+  const std::size_t n = static_cast<std::size_t>(nx) * ny;
+
+#if defined(CVC_FFT_FFTW)
+  fftw_complex *buf = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * n);
+  for (std::size_t i = 0; i < n; i++) {
+    buf[i][0] = re[i];
+    buf[i][1] = im[i];
+  }
+  fftw_plan p =
+      fftw_plan_dft_2d(nx, ny, buf, buf, forward ? FFTW_FORWARD : FFTW_BACKWARD, FFTW_ESTIMATE);
+  fftw_execute(p);
+  fftw_destroy_plan(p);
+  for (std::size_t i = 0; i < n; i++) {
+    re[i] = buf[i][0];
+    im[i] = buf[i][1];
+  }
+  fftw_free(buf);
+#else
+  std::vector<std::complex<double>> buf(n);
+  for (std::size_t i = 0; i < n; i++)
+    buf[i] = std::complex<double>(re[i], im[i]);
+
+  const pocketfft::shape_t shape{static_cast<std::size_t>(nx), static_cast<std::size_t>(ny)};
+  pocketfft::stride_t stride(2);
+  stride[1] = sizeof(std::complex<double>);
+  stride[0] = stride[1] * ny;
+  const pocketfft::shape_t axes{0, 1};
+
+  pocketfft::c2c(shape, stride, stride, axes, forward ? pocketfft::FORWARD : pocketfft::BACKWARD,
+                 buf.data(), buf.data(), 1.0);
+
+  for (std::size_t i = 0; i < n; i++) {
+    re[i] = buf[i].real();
+    im[i] = buf[i].imag();
+  }
+#endif
+}
+#endif
+
 // ── helpers ──
 
 static void check_dims_match(const volume &a, const volume &b) {
@@ -467,27 +521,29 @@ volume vol_back_project(const volume &projections, const std::vector<double> &an
   if (projections.ZDim() != na)
     throw dimension_mismatch("projections Z-dimension must equal number of angles");
 
-#ifdef CVC_ENABLE_FFTW
-  // Optional ramp filter via 2D FFT per angle slice
+#if defined(CVC_FFT_FFTW) || defined(CVC_FFT_POCKETFFT)
+  // Optional ramp filter via 2D FFT per angle slice.
+  //
+  // The transform is provider-neutral: the maths below is identical either
+  // way, and both providers are unnormalised, so the 1/n at the end applies
+  // to both. libcvc is LGPL-2.1 and FFTW is GPL-2.0-or-later, so PocketFFT
+  // (BSD-3) is the default and FFTW is opt-in -- see CVC_FFT_PROVIDER.
   volume filtered = projections;
   if (apply_filter) {
     filtered = make_like(projections);
     unsigned int nx = projections.XDim(), ny = projections.YDim();
     unsigned int n = nx * ny;
     for (unsigned int ai = 0; ai < na; ai++) {
-      fftw_complex *spatial = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * n);
-      fftw_complex *freq = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * n);
+      std::vector<double> re(n), im(n);
 
       for (unsigned int i = 0; i < nx; i++)
         for (unsigned int j = 0; j < ny; j++) {
           unsigned int idx = i * ny + j;
-          spatial[idx][0] = projections(i, j, ai);
-          spatial[idx][1] = 0;
+          re[idx] = projections(i, j, ai);
+          im[idx] = 0;
         }
 
-      fftw_plan fwd = fftw_plan_dft_2d(nx, ny, spatial, freq, FFTW_FORWARD, FFTW_ESTIMATE);
-      fftw_execute(fwd);
-      fftw_destroy_plan(fwd);
+      cvc_fft2d(nx, ny, re.data(), im.data(), /*forward=*/true);
 
       // ramp filter
       double max_r = std::sqrt((nx / 2.0) * (nx / 2.0) + (ny / 2.0) * (ny / 2.0));
@@ -498,26 +554,21 @@ volume vol_back_project(const volume &projections, const std::vector<double> &an
                                ((double)ny / 2 - j) * ((double)ny / 2 - j));
           double h = 4.0 * (1.0 - slope * r);
           unsigned int idx = i * ny + j;
-          freq[idx][0] *= h;
-          freq[idx][1] *= h;
+          re[idx] *= h;
+          im[idx] *= h;
         }
 
-      fftw_plan inv = fftw_plan_dft_2d(nx, ny, freq, spatial, FFTW_BACKWARD, FFTW_ESTIMATE);
-      fftw_execute(inv);
-      fftw_destroy_plan(inv);
+      cvc_fft2d(nx, ny, re.data(), im.data(), /*forward=*/false);
 
       for (unsigned int i = 0; i < nx; i++)
         for (unsigned int j = 0; j < ny; j++)
-          filtered(i, j, ai, spatial[i * ny + j][0] / n);
-
-      fftw_free(spatial);
-      fftw_free(freq);
+          filtered(i, j, ai, re[i * ny + j] / n);
     }
   }
 #else
   if (apply_filter)
-    throw std::runtime_error(
-        "FFTW not available; set apply_filter=false or enable CVC_ENABLE_FFTW");
+    throw std::runtime_error("No FFT provider available; set apply_filter=false or build with "
+                             "-DCVC_FFT_PROVIDER=pocketfft (default) or fftw");
   const volume &filtered = projections;
 #endif
 
