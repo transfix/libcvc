@@ -83,6 +83,37 @@ void test_external_write_still_moves_the_node() {
   std::printf("  ok: an external state write still moves the node\n");
 }
 
+// A flush landing BETWEEN two poses must not park the node on the older one.
+//
+// This is what the pump's barrier exists to prevent, reproduced without any
+// timing luck: stop the worker and flush by hand from another thread, so the
+// node's handler marshals into the queue instead of running inline, then pose
+// the node again before pumping. Draining alone ran that handler against a tree
+// still holding the OLD pose and moved the node back, and the echo of the new
+// pose was then taken for the node's own and dropped — leaving the node on a
+// pose it had already left, permanently, which no amount of waiting fixed.
+// processEvents() flushes before it drains, so the handler sees the newest
+// value and finds nothing to do.
+void test_pump_is_a_barrier_against_a_late_echo() {
+  cvc::app app;
+  SceneGraph sg(app);
+  sg.publisher().stop(); // every flush here is deliberate, none is a race
+  auto n = sg.addGraphics("pub5", dot());
+
+  n->setPosition(10.0, 0.0, 0.0);
+  // Off the owner thread, so the resulting handler is QUEUED rather than run
+  // inline — exactly what the publisher's own worker does.
+  std::thread([&sg]() { sg.publisher().flush(); }).join();
+
+  n->setPosition(-4.0, 0.0, 0.0); // the node moves on before that handler runs
+  sg.processEvents();
+
+  auto w = n->getWorldTransform();
+  assert(std::abs(w->GetElement(0, 3) + 4.0) < 1e-9);
+  assert(read(app, n->getState("position").fullName()) == "-4,0,0");
+  std::printf("  ok: a late echo cannot park a node on a pose it has left\n");
+}
+
 // The background flusher drains without anyone calling flush().
 void test_background_flush() {
   cvc::app app;
@@ -196,6 +227,7 @@ int main() {
   test_position_reaches_state();
   test_coalescing_keeps_the_last_value();
   test_external_write_still_moves_the_node();
+  test_pump_is_a_barrier_against_a_late_echo();
   test_background_flush();
   test_back_pressure_sheds_without_starving();
   test_two_scenes_one_app();

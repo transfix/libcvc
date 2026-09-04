@@ -108,6 +108,29 @@ void SceneGraph::postEvent(std::function<void()> callback) {
 }
 
 void SceneGraph::processEvents() {
+  // Flush BEFORE draining: the pump is a barrier, not just a queue drain.
+  //
+  // The queue is fed BY the publisher's writes, so draining alone was half a
+  // pump. A pose published but not yet flushed left the tree holding the
+  // PREVIOUS pose while the handler for that previous write sat in the queue;
+  // the drain ran it against the stale tree and moved the node back, and the
+  // flush that should have corrected it then arrived looking like the node's
+  // own echo and was ignored. The node stayed on a pose it had already left —
+  // not late, wrong, and permanently so, which is why waiting never fixed it.
+  // Flushing first closes the window: a marshalled handler always runs against
+  // a tree that already holds the newest published value.
+  //
+  // This does not add work, it moves it: the writes are coalesced either way,
+  // and whichever of the pump and the publisher's worker arrives first does
+  // them. One flush and one drain, in that order, is the whole barrier —
+  // flushing here runs the resulting handlers INLINE (we are the owner thread),
+  // so a flush never leaves anything behind for the drain to pick up, and
+  // looping for a fixed point would only pull in work that arrived DURING the
+  // pump. That is next frame's work; draining it here just starves the render
+  // path of the frames it was about to show.
+  if (m_publisher)
+    m_publisher->flush();
+
   // Process all pending events on the main thread
   // Extract all events while holding the lock, then execute without lock
   std::queue<std::function<void()>> events;

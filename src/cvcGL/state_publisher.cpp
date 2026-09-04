@@ -55,6 +55,13 @@ void state_publisher::publish(const std::string &path, std::string value) {
 }
 
 void state_publisher::flush() {
+  // One flusher at a time, for the whole take-then-write. The worker and the
+  // scene pump both flush, and without this they can write the same path out of
+  // publish order and strand the tree on a superseded value — see the header.
+  // publish() only takes m_mutex, so writers are never blocked by a flush in
+  // progress; they just land in the next batch.
+  std::lock_guard<std::mutex> flushing(m_flushMutex);
+
   std::unordered_map<std::string, std::string> batch;
   {
     std::lock_guard<std::mutex> lock(m_mutex);

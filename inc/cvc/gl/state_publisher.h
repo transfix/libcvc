@@ -70,7 +70,15 @@ public:
   void publish(const std::string &path, std::string value);
 
   // Apply everything queued, on the CALLING thread. Used by the worker, and by
-  // anyone who needs the tree current right now (tests, teardown).
+  // anyone who needs the tree current right now (the scene pump, tests, teardown).
+  //
+  // Concurrent flushes are SERIALIZED, and that is load-bearing rather than mere
+  // tidiness. Taking the batch and writing it are two steps, so two flushers can
+  // interleave as: A takes {p: v1}, a writer publishes v2, B takes {p: v2}, B
+  // writes v2, A writes v1 — and the tree is left holding v1 for good. Coalescing
+  // cannot save this; the two values were never in the map at the same time. One
+  // flush at a time keeps the writes for a path in publish order, so the last
+  // write is always the last value published.
   void flush();
 
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
@@ -120,6 +128,9 @@ private:
 
   cvc::app &m_ctx;
   mutable std::mutex m_mutex;
+  // Held across take-batch AND write, so flushes cannot interleave (see flush()).
+  // Always acquired BEFORE m_mutex, never while holding it.
+  std::mutex m_flushMutex;
   std::unordered_map<std::string, std::string> m_pending;
   // Pending keys, kept alongside the map purely so eviction can be O(1) AND
   // uniform. Probing random hash buckets does not work: the map keeps a large

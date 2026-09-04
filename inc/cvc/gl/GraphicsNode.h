@@ -199,6 +199,18 @@ protected:
   // Apply clip planes to this node's mapper/prop - subclasses override if they support clipping
   virtual void applyClipPlanes(vtkPlaneCollection *planes);
 
+  // This node's translation in the exact form setPosition publishes, so an
+  // incoming "position" can be compared against what the node already holds.
+  //
+  // The node is the source of truth for its own transform, so the publisher's
+  // write coming back through handleStateChanged must be recognised as an echo
+  // and ignored — otherwise every pose runs the whole cascade a second time.
+  // Recognising it means asking whether the node already holds the value, not
+  // remembering what was last published: a remembered string cannot tell a
+  // current echo from a stale one, and gets both wrong. An EXTERNAL write (the
+  // dashboard, a script) is a value the node does not hold, and still applies.
+  std::string positionString() const;
+
   // Protected members for subclass access
   std::string m_name;
   vtkSmartPointer<vtkMatrix4x4> m_transform;
@@ -211,12 +223,6 @@ protected:
   // Full state paths for the transform keys, resolved ONCE. getState(name) costs
   // ~8 us per call, which was a third of the price of moving a node.
   std::string m_pathPosition, m_pathRotation, m_pathScale, m_pathMatrix;
-  // The last value this node published for each key. The node is the source of
-  // truth for its own transform, so when the publisher's write comes back
-  // through handleStateChanged it must be recognised as an echo and ignored —
-  // otherwise every pose runs the whole cascade a second time. An EXTERNAL write
-  // (the dashboard, a script) differs from what we published and still applies.
-  std::string m_echoPosition, m_echoRotation, m_echoScale, m_echoMatrix;
   vtkSmartPointer<vtkTransform> m_worldXf;
   vtkSmartPointer<vtkTransform> m_vtkTransform; // VTK transform wrapper for m_transform
   std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;

@@ -137,19 +137,27 @@ void GraphicsNode::setPosition(double x, double y, double z) {
   // the publisher's cadence and coalesced, so posing a node no longer pays for a
   // path lookup, a signal, and the echo-driven second cascade.
   if (!m_pathPosition.empty()) {
-    std::ostringstream oss;
-    oss << x << "," << y << "," << z;
-    m_echoPosition = oss.str();
+    const std::string value = positionString();
     // Publish through THIS scene's publisher (no process-wide singleton). A node
     // not yet attached to a scene has no publisher, so it writes state directly —
     // the slow path, but such a node is not on the animation hot loop.
     if (SceneGraph *sg = getSceneGraph())
-      sg->publisher().publish(m_pathPosition, m_echoPosition);
+      sg->publisher().publish(m_pathPosition, value);
     else
-      cvc::state::instance(app())(m_pathPosition).value(m_echoPosition);
+      cvc::state::instance(app())(m_pathPosition).value(value);
   }
 
   updateTransform();
+}
+
+std::string GraphicsNode::positionString() const {
+  // The translation column, formatted exactly as setPosition publishes it, so
+  // the two can be compared as strings and a value that survived the round trip
+  // through the state tree still compares equal.
+  std::ostringstream oss;
+  oss << m_transform->GetElement(0, 3) << "," << m_transform->GetElement(1, 3) << ","
+      << m_transform->GetElement(2, 3);
+  return oss.str();
 }
 
 void GraphicsNode::setRotation(double x, double y, double z) {
@@ -360,8 +368,17 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     } else if (childState == "position") {
       try {
         std::string posStr = getState("position").value<std::string>();
-        if (posStr == m_echoPosition)
-          return; // our own published value coming back; the node already has it
+        // Skip only what is genuinely nothing to do: a value the node ALREADY
+        // HOLDS. Comparing against the last value published instead looked the
+        // same whenever the echo arrived promptly, and inverted the meaning
+        // whenever it did not — a late echo of an older pose failed the test and
+        // was applied, moving the node backwards, and the echo of the current
+        // pose then passed it and was dropped, so the node never came back. The
+        // node is the source of truth for its transform, so anything it is not
+        // already showing is a real change and gets applied; an external write
+        // (the dashboard, a script) still lands, exactly as before.
+        if (posStr == positionString())
+          return;
         std::istringstream iss(posStr);
         double x, y, z;
         char comma;
