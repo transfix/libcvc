@@ -13,6 +13,8 @@
 #include <atomic>
 #include <boost/chrono.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/make_shared.hpp>
+#include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
 #include <cvc/core/state.h>
 #include <cvc/core/state_object.h>
@@ -1304,13 +1306,27 @@ TEST_F(StateTestFixture, FullNameConstruction) {
 // ===========================
 
 TEST_F(StateTestFixture, OnStartupRegistration) {
-  bool startup_called = false;
+  // The startup registry is static and process-lifetime, and its callbacks fire
+  // once per app -- that is, during some LATER test, long after this one's
+  // stack frame is gone.
+  //
+  // This used to capture a local `bool` BY REFERENCE. The later firing then
+  // wrote true into a dead stack slot, corrupting whatever occupied it by then.
+  // That was not theoretical: running
+  //   state_test \
+  //     --gtest_filter='StateTestFixture.OnStartupRegistration:StateTestFixture.WaitForValue'
+  // segfaulted every time, and it poisoned every subsequent test in the same
+  // process -- which is why the damage always surfaced somewhere unrelated.
+  //
+  // Own the flag and capture the owner BY VALUE, so the callback stays valid
+  // for exactly as long as the registry holds it.
+  boost::shared_ptr<bool> startup_called = boost::make_shared<bool>(false);
 
-  state::on_startup(state::nullary_func([&startup_called]() { startup_called = true; }));
+  state::on_startup(state::nullary_func([startup_called]() { *startup_called = true; }));
 
-  // Startup functions are called on first instance creation
-  // We can't easily test this without restarting, but we can verify registration
-  // The function is registered if no exception is thrown
+  // This fixture's app already created its root state, so the callbacks have
+  // fired for it; there is nothing to observe here beyond registration itself
+  // completing without throwing.
   SUCCEED();
 }
 
