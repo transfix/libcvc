@@ -48,9 +48,9 @@
       "thumb": "img/bunny_shadow.jpg"
     },
     "volslice_bunny": {
-      "desc": "the Stanford bunny through VolumeRover2's slice-based volume renderer",
+      "desc": "the Stanford bunny (x9) through VolumeRover2's slice-based volume renderer",
       "blurb":
-          "The classic view-aligned slice compositor from VolumeRover2, ported to cvc::volslice: the bunny's signed-distance volume windowed into a byte texture and colored by a 256-entry transfer function, hundreds of camera-facing slices blended back to front. Quality, near-plane peel, value window and the spacing-corrected opacity deviation are all live in the panel.",
+          "The classic view-aligned slice compositor from VolumeRover2, ported to cvc::volslice: the bunny's signed-distance volume windowed into a byte texture and colored by a 256-entry transfer function, hundreds of camera-facing slices blended back to front. Add up to nine bunnies — each is its own scene-graph volume node, depth-sorted per frame — and drive quality, near-plane peel, the value window and spacing-corrected opacity live in the panel.",
       "thumb": "img/volslice_bunny.jpg"
     }
   }

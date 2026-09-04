@@ -1,5 +1,6 @@
 // VolSliceNode -- the cvcGL node for cvc::volslice (see the header for the
 // architecture and the OIT note).
+#include <algorithm>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
@@ -12,6 +13,7 @@
 #include <vtkMatrix4x4.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h>
@@ -339,6 +341,66 @@ void VolSliceNode::rebuildSliceGeometry(const cvc::volslice::mat4 &localToClip,
     }
   }
   setShaderUniformf("volsliceAlphaExp", alphaExp);
+}
+
+void VolSliceNode::depthSortSliceProps(vtkRenderer *renderer,
+                                       const std::vector<VolSliceNode *> &nodes) {
+  if (!renderer || nodes.size() < 2)
+    return;
+  vtkCamera *cam = renderer->GetActiveCamera();
+  if (!cam)
+    return;
+  double pos[3], dop[3];
+  cam->GetPosition(pos);
+  cam->GetDirectionOfProjection(dop);
+
+  // View depth of each node's transformed box center.
+  struct entry {
+    double depth;
+    VolSliceNode *node;
+  };
+  std::vector<entry> order;
+  order.reserve(nodes.size());
+  for (VolSliceNode *n : nodes) {
+    if (!n)
+      continue;
+    const cvc::bounding_box bb = n->getBoundingBox();
+    double c[4] = {(bb.minx + bb.maxx) * 0.5, (bb.miny + bb.maxy) * 0.5, (bb.minz + bb.maxz) * 0.5,
+                   1.0};
+    if (vtkMatrix4x4 *w = n->getWorldTransform())
+      w->MultiplyPoint(c, c);
+    const double d = (c[0] - pos[0]) * dop[0] + (c[1] - pos[1]) * dop[1] + (c[2] - pos[2]) * dop[2];
+    order.push_back({d, n});
+  }
+  // Back to front: FARTHEST first in the prop list.
+  std::stable_sort(order.begin(), order.end(),
+                   [](const entry &a, const entry &b) { return a.depth > b.depth; });
+
+  // Only touch the renderer when the relative order actually changed --
+  // Remove+Add is how VTK exposes reordering, and it dirties the renderer.
+  bool sorted = true;
+  int lastIndex = -1;
+  vtkPropCollection *props = renderer->GetViewProps();
+  for (const entry &e : order) {
+    vtkProp *p = e.node->getProp();
+    const int idx = props->IsItemPresent(p); // 1-based; 0 = absent
+    if (idx == 0 || idx <= lastIndex) {
+      sorted = false;
+      break;
+    }
+    lastIndex = idx;
+  }
+  if (sorted)
+    return;
+  for (const entry &e : order) {
+    vtkProp *p = e.node->getProp();
+    if (renderer->GetViewProps()->IsItemPresent(p)) {
+      p->Register(renderer); // keep alive across the Remove/Add hop
+      renderer->RemoveViewProp(p);
+      renderer->AddViewProp(p);
+      p->UnRegister(renderer);
+    }
+  }
 }
 
 bool VolSliceNode::tick() {
