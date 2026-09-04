@@ -155,6 +155,74 @@ public:
   cvc::volren::shadow_settings shadowConfig() const;
   void setShadowConfig(const cvc::volren::shadow_settings &ss);
 
+  // What one light-view texel stores, and therefore what a shadow can say.
+  // hard (the default) is one depth: every occluder is opaque and every shadow
+  // is binary.  deep is a transmittance profile, so a translucent occluder
+  // casts a partial shadow and stacked occluders multiply -- at
+  // `deepShadowSlices() + 1` floats per texel per casting light on the host AND
+  // the device (17.8 MB at the shipped 512^2 x 16), which is why it is opt-in.
+  // An OPAQUE occluder renders identically in either mode, by construction.
+  void setShadowMode(cvc::volren::shadow_mode m);
+  cvc::volren::shadow_mode shadowMode() const;
+  // Knots in that profile; clamped by state_settings into
+  // [limits::min_shadow_depth_slices, limits::max_shadow_depth_slices] and
+  // ignored in hard mode.  Memory is linear in it.
+  void setDeepShadowSlices(int slices);
+  int deepShadowSlices() const;
+
+  // Percentage-closer filtering, the SOFTNESS knob, orthogonal to the mode
+  // above (either representation can be filtered).  `radiusTexels` sets the
+  // penumbra WIDTH in light-map texels -- 0, the default, is the single-tap
+  // comparison the renderer has always taken, evaluated bit for bit -- and
+  // `taps` sets how many levels that band resolves into, at taps^2 texel reads
+  // per shaded sample (each of them TWO loads in deep mode).  Both are clamped
+  // by state_settings; taps is inert at radius 0.  Set as a PAIR because a tap
+  // count with no radius does nothing and a radius with one tap is not a
+  // filter, so the two are one decision.
+  void setSoftShadows(float radiusTexels, int taps);
+  float softShadowRadius() const;
+  int softShadowTaps() const;
+
+  // ---- the ambient/lighting rig ------------------------------------------
+  // All of these are read-modify-writes of renderConfig() like the shadow
+  // accessors above, and all of them are neutral at their defaults.
+  //
+  // NAMING, deliberately not setAmbient/setSpecular: GeometryNode already owns
+  // those names for the QUAD's VTK material (the constructor sets ambient 1 /
+  // specular 0 to show the raycast image unlit), and overloading them here
+  // would silently give one call site two meanings.  These knobs belong to the
+  // raycaster's shading model, not to the polygon the frame is pasted on.
+
+  // The flat ambient constant added to every sample.  It is also the ceiling on
+  // what the two knobs below can do: the hemisphere only TINTS this term and
+  // occlusion only ATTENUATES it, so at ambient 0 -- the renderer's own default
+  // -- both are invisible by arithmetic rather than by being switched off.
+  void setAmbientLevel(float a);
+  float ambientLevel() const;
+
+  // Shape that constant by a sky/ground hemisphere mixed by the sample's own
+  // normal.  Neutral with both colours white for any normal, so enabling it
+  // with the defaults changes no pixel.
+  cvc::volren::hemisphere_ambient hemisphereConfig() const;
+  void setHemisphereConfig(const cvc::volren::hemisphere_ambient &h);
+
+  // SDF cone-traced ambient occlusion.  Applies to isosurface hits on volumes
+  // whose volumeConfig(i).distance_field is set; strength 0 (the default)
+  // skips the cone entirely.
+  cvc::volren::ao_settings occlusionConfig() const;
+  void setOcclusionConfig(const cvc::volren::ao_settings &ao);
+
+  // Output gain over the whole shaded colour (the legacy 0.9 damping, which
+  // also scales ambient) and the scene-level specular reflectance multiplying
+  // every light's highlight (1.0 is the legacy no-material-term expression).
+  // Neither is range-checked here for the same reason state_settings does not
+  // check them: a gain above 1 is an exposure choice the per-channel clamp
+  // already handles.
+  void setShadingGain(float g);
+  float shadingGain() const;
+  void setSpecularLevel(float s);
+  float specularLevel() const;
+
   // Announce that a registered volume's voxels changed UNDER THE SAME BUFFER
   // (an in-place write through the unchecked legacy voxels::data_ptr()).  The
   // node re-copies its volumes into the raycaster every raycast, so every

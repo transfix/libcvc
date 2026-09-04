@@ -19,6 +19,12 @@
 //   opacity_cutoff | depth_alpha_threshold     double
 //   two_sided_lighting                         int 0/1
 //   ambient                                    double
+//   ambient_hemisphere.enabled                 int 0/1
+//   ambient_hemisphere.sky | .ground           "r,g,b" in [0,1]
+//   ambient_hemisphere.up                      "x,y,z"
+//   ao.strength | ao.radius                    double
+//   ao.samples                                 int (CLAMPED on read)
+//   shading_gain | specular                    double
 //   threads                                    int
 //   supersample                                int (sub-samples per pixel EDGE)
 //   shadows.enabled                            int 0/1
@@ -27,8 +33,14 @@
 //   shadows.strength | .bias_scale             double
 //   shadows.slope_scale                        double
 //   shadows.min_occluder_opacity               double
+//   shadows.mode                               int (0 hard, 1 deep)
+//   shadows.depth_slices                       int (deep profile knots;
+//                                              CLAMPED on read, like resolution)
+//   shadows.pcf_radius                         double (texels; CLAMPED)
+//   shadows.pcf_taps                           int (per edge; CLAMPED)
 //   volumes.count                              int
 //   volumes.<i>.shaded | .unshaded             int 0/1
+//   volumes.<i>.distance_field                 int 0/1
 //   volumes.<i>.tf_auto_domain                 int 0/1
 //   volumes.<i>.matrix                         16 row-major doubles (the cvcGL
 //                                              GraphicsNode "matrix" encoding)

@@ -161,6 +161,37 @@ inline constexpr float shadow_bias_scale = 1.0f;
 inline constexpr float shadow_slope_scale = 1.0f;
 // Minimum isosurface opacity for that surface to cast a shadow.
 inline constexpr float shadow_min_occluder_opacity = 0.5f;
+// Percentage-closer filter half-width over a light-view shadow map, in light-map
+// TEXELS (shadow_settings::pcf_radius).  0 is the single-tap comparison, which
+// is the historical behavior and stays the default: a filtered shadow is a
+// different image, and this renderer's contract is that a new knob at its
+// default changes nothing.
+inline constexpr float shadow_pcf_radius = 0.0f;
+// Taps per EDGE of that filter's square grid (shadow_settings::pcf_taps).  3 is
+// 9 taps, which is the smallest grid that has a CENTER plus a full ring -- 2
+// would place every tap off-center and shift the shadow by half a tap spacing.
+inline constexpr int shadow_pcf_taps = 3;
+// Scene-level specular reflectance (render_settings::specular).  1.0 is the
+// legacy expression, which has no material specular term at all.
+inline constexpr float specular = 1.0f;
+// Ambient-occlusion strength (ao_settings::strength).  0 is off, and off is the
+// default: AO costs sample taps per shaded hit and darkens the image.
+inline constexpr float ao_strength = 0.0f;
+// AO cone half-length, in the volume's LOCAL units (ao_settings::radius).  0 is
+// off for the same reason strength 0 is.
+inline constexpr double ao_radius = 0.0;
+// Taps along one AO cone (ao_settings::samples).  5 resolves a crevice a couple
+// of cells wide on the 64^3 content this renderer is driven with while keeping
+// the per-hit cost below one spline gradient.
+inline constexpr int ao_samples = 5;
+// Depth slices in a DEEP shadow map's per-texel transmittance profile
+// (shadow_settings::depth_slices; ignored by the default hard mode).  16 costs
+// 17 floats (68 bytes) per texel per light -- 17.8 MB at the 512^2 default resolution --
+// and puts a knot every 1/16th of the scene's light-depth extent, which is
+// finer than the cell quantum the receiver sample itself is subject to on the
+// content this renderer is driven with.  Opaque occluders do NOT consume
+// slices: they ride the profile's exact terminal-depth scalar (shadow.h).
+inline constexpr int shadow_depth_slices = 16;
 } // namespace defaults
 
 namespace limits {
@@ -183,6 +214,36 @@ inline constexpr int max_shadow_maps = 4;
 // renderer is driven with, so the slope bias would have to swallow the whole
 // object to keep the acne away.
 inline constexpr int min_shadow_resolution = 64;
+// Range shadow_settings::depth_slices clamps into.  The floor is 1 (one knot:
+// the whole light-depth extent is a single linear ramp) rather than 0, which
+// would mean "no profile at all" -- that is what shadow_mode::hard is for.  The
+// ceiling is a MEMORY bound, not an algorithmic one: the profile is
+// resolution^2 * (slices + 1) floats per casting light on the host AND on the
+// device, so 64 slices at the 512^2 default is 68 MB per light per side.
+// Neither backend carries a per-ray slice array (the light pass streams each
+// knot straight to its output), so nothing here bounds per-thread state.
+inline constexpr int min_shadow_depth_slices = 1;
+inline constexpr int max_shadow_depth_slices = 64;
+// Range shadow_settings::pcf_taps clamps into.  1 is a legal value and means
+// "one tap, at the filter's center" -- identical to the unfiltered lookup, so
+// the knob degrades to the historical behavior from either end (taps 1 or
+// radius 0).  The ceiling is a COST bound and a hard one: the tap count is its
+// SQUARE, and in deep mode each tap is two loads, so 7 already means 98 loads
+// per shaded contribution per light.
+inline constexpr int min_pcf_taps = 1;
+inline constexpr int max_pcf_taps = 7;
+// Largest shadow_settings::pcf_radius, in light-map texels.  The filter's cost
+// does not depend on the radius (only on the tap count), so this is not a
+// resource bound: past 64 texels the footprint exceeds an eighth of the map at
+// the default resolution, at which point the taps have stopped describing a
+// penumbra and started averaging unrelated parts of the scene -- and the
+// radius-scaled bias below has swallowed every contact shadow to pay for it.
+inline constexpr float max_pcf_radius = 64.0f;
+// Range ao_settings::samples clamps into.  Every tap is one trilinear fetch (8
+// voxels) at a shaded isosurface hit; 16 is four times the default and already
+// costs twice the 4^3 spline gradient the same hit pays for its normal.
+inline constexpr int min_ao_samples = 1;
+inline constexpr int max_ao_samples = 16;
 } // namespace limits
 
 } // namespace volren

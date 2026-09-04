@@ -236,9 +236,24 @@ VolRenNode::VolRenNode(cvc::app &ctx, const std::string &statePath, const std::s
   seedOwnState();
 
   m_worker = std::make_unique<worker>(ctx);
-  m_worker->on_frame = [this](cvc::volren::frame f, snapshot snap, double seconds) {
+  // The callback reaches the worker through a RAW pointer, never through
+  // m_worker.  ~VolRenNode calls m_worker.reset(), and reset() stores nullptr
+  // into the unique_ptr BEFORE it runs the deleter -- that is, before
+  // ~worker() joins the render thread.  A raycast still in flight at that
+  // moment therefore returns into this callback with m_worker already null,
+  // and `m_worker->used_backend` is a null dereference.  `w` is safe for
+  // exactly the same reason the reach-back was not: the callback runs inside
+  // worker::loop(), which is what the join is waiting for, so the worker
+  // OBJECT outlives every call even though the unique_ptr no longer names it.
+  //
+  // Reproduced (SIGSEGV, 3/3 runs) on volren_bunny --bunnies 9 --volume-shadows
+  // --deep-shadows --shell --soft-shadows 4 --ao 0.7 --rig --continuous, where
+  // a 220 ms raycast makes "a frame in flight at teardown" the normal case
+  // rather than a narrow race; lighter scenes finish first and hide it.
+  worker *const w = m_worker.get();
+  m_worker->on_frame = [this, w](cvc::volren::frame f, snapshot snap, double seconds) {
     m_lastRenderSeconds.store(seconds);
-    m_backendUsed.store(m_worker->used_backend.load());
+    m_backendUsed.store(w->used_backend.load());
     // Marshal to the owner thread; weak-guarded, so a dying node drops it.
     auto shared_f = std::make_shared<cvc::volren::frame>(std::move(f));
     auto shared_s = std::make_shared<snapshot>(std::move(snap));
@@ -377,6 +392,100 @@ void VolRenNode::setShadowConfig(const cvc::volren::shadow_settings &ss) {
   cvc::volren::render_settings rs = renderConfig();
   rs.shadows = ss;
   setRenderConfig(rs);
+}
+
+void VolRenNode::setShadowMode(cvc::volren::shadow_mode m) {
+  cvc::volren::shadow_settings sh = shadowConfig();
+  sh.mode = m;
+  setShadowConfig(sh);
+}
+
+cvc::volren::shadow_mode VolRenNode::shadowMode() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows.mode;
+}
+
+void VolRenNode::setDeepShadowSlices(int slices) {
+  cvc::volren::shadow_settings sh = shadowConfig();
+  sh.depth_slices = slices;
+  setShadowConfig(sh);
+}
+
+int VolRenNode::deepShadowSlices() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows.depth_slices;
+}
+
+void VolRenNode::setSoftShadows(float radiusTexels, int taps) {
+  cvc::volren::shadow_settings sh = shadowConfig();
+  sh.pcf_radius = radiusTexels;
+  sh.pcf_taps = taps;
+  setShadowConfig(sh);
+}
+
+float VolRenNode::softShadowRadius() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows.pcf_radius;
+}
+
+int VolRenNode::softShadowTaps() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shadows.pcf_taps;
+}
+
+void VolRenNode::setAmbientLevel(float a) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.ambient = a;
+  setRenderConfig(rs);
+}
+
+float VolRenNode::ambientLevel() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.ambient;
+}
+
+cvc::volren::hemisphere_ambient VolRenNode::hemisphereConfig() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.ambient_hemisphere;
+}
+
+void VolRenNode::setHemisphereConfig(const cvc::volren::hemisphere_ambient &h) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.ambient_hemisphere = h;
+  setRenderConfig(rs);
+}
+
+cvc::volren::ao_settings VolRenNode::occlusionConfig() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.ao;
+}
+
+void VolRenNode::setOcclusionConfig(const cvc::volren::ao_settings &ao) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.ao = ao;
+  setRenderConfig(rs);
+}
+
+void VolRenNode::setShadingGain(float g) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.shading_gain = g;
+  setRenderConfig(rs);
+}
+
+float VolRenNode::shadingGain() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.shading_gain;
+}
+
+void VolRenNode::setSpecularLevel(float s) {
+  cvc::volren::render_settings rs = renderConfig();
+  rs.specular = s;
+  setRenderConfig(rs);
+}
+
+float VolRenNode::specularLevel() const {
+  std::lock_guard<std::mutex> lock(m_configMutex);
+  return m_snapshotSettings.settings.specular;
 }
 
 void VolRenNode::invalidateVolumeData() {

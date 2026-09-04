@@ -173,6 +173,11 @@ struct dev_volume {
 
   int shaded, unshaded, window_enabled;
   double window_min, window_max;
+
+  // cuda_volume::ao_ok -- this volume is a signed distance field AND the scene
+  // asked for ambient occlusion.  0 keeps its isosurface hits on the pre-AO
+  // shading path exactly.
+  int ao_ok;
 };
 
 // One built light-view shadow map, device pointer for its depth raster.  The
@@ -183,6 +188,11 @@ struct dev_shadow_map {
   double parallel_scale, texel_world;
   int width, height;
   const float *depth;
+  // shadow_mode::deep: `slices` 0 keeps the hard lookup, which is what makes a
+  // hard-mode frame bit-identical to the kernel before deep maps existed.
+  int slices;
+  double depth_min, slice_dz;
+  const float *profile;
 };
 
 // The camera is pre-expanded exactly like raycaster.cpp's ray_generator, and
@@ -214,15 +224,62 @@ struct dev_request {
   int light_map[cuda_limits::max_lights];
   float shadow_strength;
   double shadow_bias_constant, shadow_slope_scale;
+  // Percentage-closer filtering, resolved on the host: `shadow_pcf_half` 0 is
+  // the single-tap lookup and therefore the pre-PCF instruction stream.
+  int shadow_pcf_half;
+  double shadow_pcf_radius, shadow_pcf_widen;
 
   dvec scene_min, scene_max;
   int steps;
   double unit_step;
   float opacity_cutoff, depth_alpha_threshold, ambient;
   int two_sided;
+  // Ambient shaping (detail::ambient_scale + detail::sdf_occlusion).
+  // `ambient_shaped` 0 makes every shading site pass the flat
+  // {ambient, ambient, ambient} triple, which is the pre-shaping expression bit
+  // for bit -- and with it the whole hemisphere/AO tail is dead code the
+  // scheduler drops.
+  int ambient_shaped, ambient_hemisphere;
+  float ambient_sky[3], ambient_ground[3];
+  dvec ambient_up;
+  float ao_strength;
+  double ao_radius;
+  int ao_samples;
+  float shading_gain;
   float background[3];
   float tf_shininess;
+  float specular;
   int supersample; // sub-samples per pixel EDGE; the pixel marches its square
+  // Does ANY volume in the scene ask for a transfer-function sample?  Resolved
+  // on the host so the kernel can drop the whole `steps`-long march loop for an
+  // isosurface-only scene, where every iteration of it does the window test,
+  // to_local_point and grid_cell_index and then composites nothing.  The
+  // isosurface hits still composite -- see march_ray's tail.
+  int any_tf;
+
+  // ---- deep-shadow profile capture (raycast_cuda_request) ----------------
+  // Read only by the CAPTURE == 1 kernel instantiation; the ordinary render
+  // never touches these.  `prof_out` is DEVICE memory, (prof_slices + 1) floats
+  // per pixel, pre-filled by the kernel itself before the march.
+  float *prof_out;
+  int prof_slices;
+  double prof_z0, prof_dz;
+};
+
+// Per-ray capture state.  It exists ONLY inside the CAPTURE == 1
+// instantiation: composite() takes it by pointer and the compile-time flag
+// discards every reference to it in the ordinary kernel, so there is no per-ray
+// slice array, no extra predicate in the compositing recurrence, and no change
+// to the ordinary path's per-thread frame.  Contributions arrive in
+// non-decreasing t, so one forward cursor streams the knots straight to global
+// memory, each written exactly once.
+struct prof_state {
+  float *out;        // this ray's terminal slot; knot k+1 is out[(1+k) * plane]
+  std::size_t plane; // width * height (the payload is PLANE-major)
+  int slices;
+  double z0, dz;
+  int cursor;
+  bool done;
 };
 
 // ---------------------------------------------------------------------------
@@ -546,18 +603,80 @@ __device__ inline bool intersect_isosurface_in_cell(const dvec &org, const dvec 
 // Shading, transfer function, clipping -- detail::shading + transfer_function.h
 // ---------------------------------------------------------------------------
 
+// detail::ambient_scale -- the per-channel ambient scale for one sample: the
+// flat constant, optionally tinted by the sky/ground hemisphere and attenuated
+// by `occlusion` (1 == fully open).  Callers take the `ambient_shaped == 0`
+// branch for every scene that asked for neither, and that branch writes the
+// same triple the kernel used to inline.
+__device__ inline void ambient_scale(const dev_request &q, const dvec &normal, float occlusion,
+                                     float out[3]) {
+  float r = q.ambient, g = q.ambient, b = q.ambient;
+  if (q.ambient_hemisphere) {
+    // A degenerate `up` normalizes to {0,0,0}, putting every normal at the
+    // equator: a flat 50/50 blend rather than a special case.
+    const dvec up = dnormalized(q.ambient_up);
+    const float f = float(0.5 + 0.5 * dot(normal, up));
+    r *= q.ambient_ground[0] + (q.ambient_sky[0] - q.ambient_ground[0]) * f;
+    g *= q.ambient_ground[1] + (q.ambient_sky[1] - q.ambient_ground[1]) * f;
+    b *= q.ambient_ground[2] + (q.ambient_sky[2] - q.ambient_ground[2]) * f;
+  }
+  out[0] = r * occlusion;
+  out[1] = g * occlusion;
+  out[2] = b * occlusion;
+}
+
+// detail::sdf_occlusion -- the ambient-occlusion cone over a signed distance
+// field, transcribed term for term (the host header carries the reasoning: why
+// one fetch measures a whole sphere, why the falloff is 1/i and not 1/2^i, and
+// why a tap that leaves the grid counts as unoccluded at full weight).
+__device__ inline float sdf_occlusion(const dev_volume &V, const dvec &p, const dvec &n, double iso,
+                                      double radius, int samples) {
+  // No direction, no cone -- the host header carries why a degenerate normal
+  // must read as UNOCCLUDED rather than as sealed.
+  if (!(dot(n, n) > 0.0))
+    return 0.f;
+  double occ = 0.0, wsum = 0.0;
+  for (int i = 1; i <= samples; ++i) {
+    const double h = radius * double(i) / double(samples);
+    const double w = 1.0 / double(i);
+    wsum += w;
+    const dvec qp = p + n * h;
+    long long idx[3];
+    if (!grid_cell_index(V, qp, idx))
+      continue; // outside the volume: nothing there to occlude with
+    float vals[8], w3[3];
+    grid_corners(V, idx[0], idx[1], idx[2], vals);
+    grid_local_weights(V, qp, idx[0], idx[1], idx[2], w3);
+    const double d = double(trilinear(w3, vals)) - iso;
+    double frac = (h - d) / h;
+    if (!(frac > 0.0)) // inverted: a NaN voxel reads as UNOCCLUDED, not as dark
+      frac = 0.0;
+    else if (frac > 1.0) // d < 0: the tap is inside geometry
+      frac = 1.0;
+    occ += w * frac;
+  }
+  return wsum > 0.0 ? float(occ / wsum) : 0.f;
+}
+
+// detail::local_outward -- the outward unit direction in the volume's LOCAL
+// frame.  The span divide is what the shading normal deliberately skips; the AO
+// cone cannot skip it because it marches along this vector.
+__device__ inline dvec local_outward(const dev_volume &V, const dvec &grad) {
+  return dnormalized(dv(grad.x / V.span.x, grad.y / V.span.y, grad.z / V.span.z));
+}
+
 // detail::blinn_phong, including the ported fixes: lights ACCUMULATE, each
-// channel uses its own light channel, the specular exponent is real, ambient
-// is a real term, and the 0.9 output gain is kept.  `vis`, when non-null, is
-// one shadow factor in [0,1] per light; it scales DIFFUSE and SPECULAR only,
-// so ambient survives and a shadowed region falls into shade rather than
-// crushing to black.
+// channel uses its own light channel, the specular exponent is real, ambient is
+// a real per-channel term, and the legacy 0.9 output gain survives as
+// q.shading_gain's default.  `vis`, when non-null, is one shadow factor in
+// [0,1] per light; it scales DIFFUSE and SPECULAR only, so ambient survives and
+// a shadowed region falls into shade rather than crushing to black.
 __device__ inline void blinn_phong(const dev_request &q, const float base[3], const dvec &normal,
-                                   const dvec &view, float shininess, float out[3],
-                                   const float *vis = nullptr) {
-  float r = q.ambient * base[0];
-  float g = q.ambient * base[1];
-  float b = q.ambient * base[2];
+                                   const dvec &view, const float ambient[3], float shininess,
+                                   float out[3], const float *vis = nullptr) {
+  float r = ambient[0] * base[0];
+  float g = ambient[1] * base[1];
+  float b = ambient[2] * base[2];
 
   for (int i = 0; i < q.light_count; ++i) {
     const cuda_light &l = q.lights[i];
@@ -576,14 +695,16 @@ __device__ inline void blinn_phong(const dev_request &q, const float base[3], co
       ndoth = 0.f;
     }
 
-    const float spec = ndoth > 0.f ? powf(ndoth, shininess) : 0.f;
+    // q.specular folds into the lobe, so at its 1.0 default the multiply is
+    // exact and the expression is unchanged.
+    const float spec = ndoth > 0.f ? powf(ndoth, shininess) * q.specular : 0.f;
     const float v = vis ? vis[i] : 1.f;
     r += (base[0] * ndotl * l.color[0] + l.color[0] * spec) * v;
     g += (base[1] * ndotl * l.color[1] + l.color[1] * spec) * v;
     b += (base[2] * ndotl * l.color[2] + l.color[2] * spec) * v;
   }
 
-  const float gain = defaults::shading_gain;
+  const float gain = q.shading_gain;
   out[0] = fminf(gain * r, 1.f);
   out[1] = fminf(gain * g, 1.f);
   out[2] = fminf(gain * b, 1.f);
@@ -618,6 +739,58 @@ __device__ inline bool shadow_project(const dev_shadow_map &m, const dvec &p, in
 // already folded host-side into q.shadow_bias_constant.  The cos floor of 0.1
 // caps tan at ~9.95 so a flat-gradient sample gets a conservative (LIT) bias
 // rather than a division by zero.
+// One texel's answer, hard or deep -- detail::shadow_tap / shadow_tap_deep.
+__device__ inline float shadow_tap(const dev_request &q, const dev_shadow_map &m, int tx, int ty,
+                                   double depth, double bias) {
+  if (tx < 0 || tx >= m.width || ty < 0 || ty >= m.height)
+    return 1.f; // the filter reached off the map: that tap is LIT
+
+  // ---- shadow_mode::deep: detail::shadow_visibility_deep ------------------
+  // Two channels: the exact terminal depth in slot 0 (tested with the SAME
+  // expression the hard path uses below, so an opaque occluder agrees with it
+  // exactly), then a piecewise-linear reconstruction of accumulated alpha over
+  // the knot grid.  Interpolated linearly in ALPHA against light-space DEPTH --
+  // the host header carries the reasoning.
+  if (m.slices > 0) {
+    // PLANE-major (detail::shadow_visibility_deep carries the layout and why):
+    // neighbouring threads hold neighbouring texels, so each load below is one
+    // coalesced transaction per warp.
+    const std::size_t plane = std::size_t(m.width) * std::size_t(m.height);
+    const float *cell = m.profile + std::size_t(ty) * std::size_t(m.width) + std::size_t(tx);
+    if (depth > double(cell[0]) + bias)
+      return 1.f - q.shadow_strength;
+    const double u = (depth - bias - m.depth_min) / m.slice_dz;
+    if (!(u > 0.0)) // in front of the first knot; NaN lands here too
+      return 1.f;
+    float alpha;
+    if (u >= double(m.slices)) {
+      alpha = cell[std::size_t(m.slices) * plane];
+    } else {
+      const int i = int(u); // u > 0 and u < slices, so i is in [0, slices)
+      const double f = u - double(i);
+      // Knot 0 is implicit: nothing accumulates before the scene box.
+      const double a0 = i == 0 ? 0.0 : double(cell[std::size_t(i) * plane]);
+      const double a1 = double(cell[std::size_t(i + 1) * plane]);
+      alpha = float(a0 + (a1 - a0) * f);
+    }
+    return 1.f - q.shadow_strength * alpha;
+  }
+
+  const double map_depth = double(m.depth[std::size_t(ty) * std::size_t(m.width) + tx]);
+  // Inverted-NaN safe: +inf (the light ray hit nothing) never shadows.
+  return depth > map_depth + bias ? (1.f - q.shadow_strength) : 1.f;
+}
+
+// detail::pcf_offset -- tap i of a k-half-width grid, as an integer texel
+// offset, rounded to nearest and AWAY FROM ZERO at a half so the footprint stays
+// exactly symmetric about the receiver (the host header carries why that
+// matters).
+__device__ inline int pcf_offset(int i, int k, double radius) {
+  const double x = double(i) * radius / double(k);
+  const double m = floor(fabs(x) + 0.5);
+  return x < 0.0 ? -int(m) : int(m);
+}
+
 __device__ inline float shadow_visibility(const dev_request &q, const dev_shadow_map &m,
                                           const dvec &p, double n_dot_l) {
   double cos_t = fabs(n_dot_l);
@@ -626,15 +799,29 @@ __device__ inline float shadow_visibility(const dev_request &q, const dev_shadow
   else if (cos_t > 1.0)
     cos_t = 1.0;
   const double tan_t = sqrt(1.0 - cos_t * cos_t) / cos_t;
-  const double bias = q.shadow_bias_constant + q.shadow_slope_scale * m.texel_world * tan_t;
+  // The PCF widening factor is 1.0 exactly for an unfiltered render, so this is
+  // the pre-PCF expression there.
+  const double bias =
+      q.shadow_bias_constant + q.shadow_slope_scale * m.texel_world * tan_t * q.shadow_pcf_widen;
 
   int ix = 0, iy = 0;
   double depth = 0.0;
   if (!shadow_project(m, p, ix, iy, depth))
     return 1.f; // outside the map: fail LIT, the non-destructive direction
-  const double map_depth = double(m.depth[std::size_t(iy) * std::size_t(m.width) + ix]);
-  // Inverted-NaN safe: +inf (the light ray hit nothing) never shadows.
-  return depth > map_depth + bias ? (1.f - q.shadow_strength) : 1.f;
+
+  // ONE projection, many texels: the light camera is orthographic, so the
+  // receiver's light-space depth is the same whichever texel it is compared
+  // against.  The taps offset the MAP index, never the query point.
+  const int k = q.shadow_pcf_half;
+  if (k == 0)
+    return shadow_tap(q, m, ix, iy, depth, bias);
+  float sum = 0.f;
+  for (int j = -k; j <= k; ++j) {
+    const int ty = iy + pcf_offset(j, k, q.shadow_pcf_radius);
+    for (int i = -k; i <= k; ++i)
+      sum += shadow_tap(q, m, ix + pcf_offset(i, k, q.shadow_pcf_radius), ty, depth, bias);
+  }
+  return sum / float((2 * k + 1) * (2 * k + 1));
 }
 
 // Fills `vis` with one factor per light and returns it, or returns null when
@@ -789,9 +976,28 @@ struct ray_accum {
 };
 
 // Front-to-back associated-color compositing; also latches the depth map the
-// first time accumulated alpha crosses the threshold.
+// first time accumulated alpha crosses the threshold.  CAPTURE == 1 adds the
+// deep-shadow profile emission, and CAPTURE == 0 compiles to exactly the
+// function that existed before deep maps -- `pc` is a null pointer no
+// instruction ever reads.
+template <int CAPTURE>
 __device__ inline void composite(ray_accum &acc, const dev_request &q, const float c[3], float a,
-                                 double t, double z_scale) {
+                                 double t, double z_scale, prof_state *pc) {
+  // The light-space depth is computed inside the capture branches, mirroring
+  // raycaster.cpp: with CAPTURE == 0 nothing here is even written down.
+  // t * z_scale rather than plain t so the terminal depth is the SAME
+  // expression frame::depth latches -- which is what lets an opaque occluder's
+  // deep lookup agree with the hard map exactly.
+  if (CAPTURE && !pc->done) {
+    // Every knot strictly in front of this contribution closes at the alpha
+    // accumulated so far.
+    const double zd = t * z_scale;
+    while (pc->cursor < pc->slices && pc->z0 + double(pc->cursor + 1) * pc->dz < zd) {
+      pc->out[std::size_t(1 + pc->cursor) * pc->plane] = acc.a;
+      ++pc->cursor;
+    }
+  }
+  const float pre = acc.a; // read before the update; used only when capturing
   const float ratio = a * (1.f - acc.a);
   acc.r += c[0] * ratio;
   acc.g += c[1] * ratio;
@@ -801,10 +1007,23 @@ __device__ inline void composite(ray_accum &acc, const dev_request &q, const flo
     acc.depth = float(t * z_scale);
     acc.depth_set = true;
   }
+  if (CAPTURE && !pc->done && acc.a >= q.opacity_cutoff) {
+    // The light ray is done here, at an EXACT depth.  Freeze the remaining
+    // knots at the alpha from BEFORE this contribution: the slices describe
+    // only what lies strictly in front of the terminal depth, so a receiver
+    // ahead of an opaque occluder is never dimmed by the interpolation ramping
+    // into the step.
+    pc->out[0] = float(t * z_scale);
+    while (pc->cursor < pc->slices) {
+      pc->out[std::size_t(1 + pc->cursor) * pc->plane] = pre;
+      ++pc->cursor;
+    }
+    pc->done = true;
+  }
 }
 
 // Insert one hit keeping the buffer sorted by t.  DEVIATION from the CPU path,
-// which collects an unbounded std::vector and stable_sorts it: the per-thread
+// which keeps an unbounded per-ray hit list: the per-thread
 // buffer is capped at cuda_limits::max_iso_hits_per_ray and on overflow the
 // FARTHEST hit is dropped, keeping the NEAREST ones.
 //
@@ -820,24 +1039,29 @@ __device__ inline void composite(ray_accum &acc, const dev_request &q, const flo
 //
 // Insertion stops at equal t, so the order of equal-t hits matches the CPU
 // stable_sort.
-__device__ inline void push_hit(iso_hit *hits, int &n, const iso_hit &h) {
+//
+// Returns the index the hit landed at, or `cap` when it was dropped.  The DDA
+// needs that to know whether its occlusion scan cursor is still valid.
+__device__ inline int push_hit(iso_hit *hits, int &n, const iso_hit &h) {
   constexpr int cap = cuda_limits::max_iso_hits_per_ray;
   int pos = n;
   while (pos > 0 && hits[pos - 1].t > h.t)
     --pos;
   if (pos >= cap)
-    return; // buffer full and this hit is farther than everything kept
+    return cap; // buffer full and this hit is farther than everything kept
   const int last = n < cap ? n : cap - 1;
   for (int i = last; i > pos; --i)
     hits[i] = hits[i - 1];
   hits[pos] = h;
   if (n < cap)
     ++n;
+  return pos;
 }
 
+template <int CAPTURE>
 __device__ inline void composite_hits_up_to(ray_accum &acc, const dev_request &q,
                                             const iso_hit *hits, int nhits, int &cursor,
-                                            double t_limit, double z_scale) {
+                                            double t_limit, double z_scale, prof_state *pc) {
   while (cursor < nhits && hits[cursor].t <= t_limit && acc.a < q.opacity_cutoff) {
     const iso_hit &h = hits[cursor++];
     // An isosurface hit latches the depth map on its own -- the frame contract
@@ -846,7 +1070,7 @@ __device__ inline void composite_hits_up_to(ray_accum &acc, const dev_request &q
       acc.depth = float(h.t * z_scale);
       acc.depth_set = true;
     }
-    composite(acc, q, h.color, h.opacity, h.t, z_scale);
+    composite<CAPTURE>(acc, q, h.color, h.opacity, h.t, z_scale, pc);
   }
 }
 
@@ -856,8 +1080,9 @@ __device__ inline void composite_hits_up_to(ray_accum &acc, const dev_request &q
 // Leaves the ASSOCIATED (premultiplied) accumulation and the latched depth in
 // `acc`; the background over-blend belongs to the resolve, so that a pixel's
 // sub-samples can be averaged after it (see the kernel).
+template <int CAPTURE>
 __device__ inline void march_ray(const dev_request &q, const dvec &org, const dvec &dir,
-                                 ray_accum &acc) {
+                                 ray_accum &acc, prof_state *pc) {
   acc.r = acc.g = acc.b = acc.a = 0.f;
   acc.depth_set = false;
   acc.depth = INFINITY;
@@ -906,9 +1131,9 @@ __device__ inline void march_ray(const dev_request &q, const dvec &org, const dv
   const double z_scale = dot(dir, q.forward);
 
   // Per-light shadow visibility for whichever sample is being shaded.  32
-  // bytes of per-thread local memory, against the ~2.2 KB the volume trackers
-  // and the hit buffer already carry, and untouched (shadow_factors returns
-  // null immediately) when nothing casts.
+  // bytes of per-thread local memory, against the 3232-byte frame the volume
+  // trackers, the spline cache and the hit buffer already carry, and untouched
+  // (shadow_factors returns null immediately) when nothing casts.
   float vis[cuda_limits::max_lights];
 
   spline_cache spline;
@@ -970,9 +1195,40 @@ __device__ inline void march_ray(const dev_request &q, const dvec &org, const dv
             }
           }
 
+          // ---- Occlusion cutoff for this walk ---------------------------
+          // Collection and compositing are separate phases, so the march
+          // loop's opacity cutoff -- which bounds VISIBLE work -- cannot bound
+          // the DDA: without this the ray walks every cell of every volume
+          // even when the very first surface it crossed is opaque.  `hits` is
+          // kept sorted by t, so the alpha that the strictly-nearer hits will
+          // already have accumulated by the time anything found from here on
+          // composites is just a forward scan over that prefix, run with the
+          // exact recurrence composite() uses.  Once it reaches the cutoff,
+          // composite_hits_up_to would refuse every remaining hit of this
+          // walk, so the rest of the walk is provably invisible.  Alpha only
+          // ever grows (later volumes and transfer-function samples add to
+          // it), so a prefix that saturates now still saturates then.
+          int sat_cursor = 0;
+          float sat_alpha = 0.f;
+
           const long long max_cells = dims[0] + dims[1] + dims[2] + 3;
           double t_cell = tv0;
           for (long long n = 0; n < max_cells && t_cell <= tv1; ++n) {
+            // Hits found from here on have t >= t_cell, so everything already
+            // recorded strictly nearer than t_cell composites ahead of them.
+            while (sat_cursor < nhits && hits[sat_cursor].t < t_cell) {
+              const float a = hits[sat_cursor++].opacity;
+              sat_alpha += a * (1.f - sat_alpha);
+            }
+            if (sat_alpha >= q.opacity_cutoff)
+              break;
+            // Same argument for the CAP: the buffer keeps the nearest hits and
+            // hits[cap-1].t only falls as this walk inserts, so once the cell
+            // starts at or past it, push_hit would discard everything left.
+            if (nhits == cuda_limits::max_iso_hits_per_ray &&
+                t_cell >= hits[cuda_limits::max_iso_hits_per_ray - 1].t)
+              break;
+
             float vals[8];
             grid_corners(V, idx[0], idx[1], idx[2], vals);
             float min_val = vals[0], max_val = vals[0];
@@ -1013,13 +1269,31 @@ __device__ inline void march_ray(const dev_request &q, const dvec &org, const dv
               const dvec normal = dnormalized(normal_to_world(V, grad));
               iso_hit h;
               h.t = t_hit;
+              // Ambient occlusion, in the volume's LOCAL frame: the cone marches
+              // a signed distance field, and both the hit point and the outward
+              // direction are already local here.
+              float ao_vis = 1.f;
+              if (V.ao_ok)
+                ao_vis = 1.f - q.ao_strength * sdf_occlusion(V, lorg + ldir * t_hit,
+                                                             local_outward(V, grad), surf.value,
+                                                             q.ao_radius, q.ao_samples);
+              float amb[3] = {q.ambient, q.ambient, q.ambient};
+              if (q.ambient_shaped)
+                ambient_scale(q, normal, ao_vis, amb);
               // Shaded at COLLECTION time, and visibility depends only on
               // (p, N) -- never on accumulated alpha -- so the lookup belongs
               // here, exactly as on the CPU path.
-              blinn_phong(q, surf.color, normal, view_vec, surf.shininess, h.color,
+              blinn_phong(q, surf.color, normal, view_vec, amb, surf.shininess, h.color,
                           shadow_factors(q, hit_p, normal, vis));
               h.opacity = surf.opacity;
-              push_hit(hits, nhits, h);
+              if (push_hit(hits, nhits, h) < sat_cursor) {
+                // The hit landed BEHIND the occlusion scan cursor, which the
+                // walk's monotone t only allows if the cell solve returned a t
+                // a hair below the cell's own entry parameter.  sat_alpha no
+                // longer describes hits[0, sat_cursor), so rebuild it.
+                sat_cursor = 0;
+                sat_alpha = 0.f;
+              }
             }
 
             // Advance to the neighboring cell across the nearest boundary.
@@ -1040,100 +1314,124 @@ __device__ inline void march_ray(const dev_request &q, const dvec &org, const dv
   }
 
   int hit_cursor = 0;
-  // One tracker per ACTIVE slot (not per scene volume): the march contributes
-  // at most once per cell entered, per volume.
-  long long last_cell[cuda_limits::max_volumes][3];
-  for (int a = 0; a < nact; ++a) {
-    last_cell[a][0] = -1;
-    last_cell[a][1] = -1;
-    last_cell[a][2] = -1;
-  }
 
-  // The step count is bounded by construction (unit_step = scene diagonal /
-  // steps, and a ray's span inside the box never exceeds that diagonal); the
-  // guard is a watchdog so a pathological request cannot hang the device.
-  const int max_iterations = q.steps + 16;
-  int iteration = 0;
-  for (double t = t0; t <= t1 && acc.a < q.opacity_cutoff && iteration < max_iterations;
-       t += q.unit_step, ++iteration) {
-    composite_hits_up_to(acc, q, hits, nhits, hit_cursor, t, z_scale);
-    const dvec pnt = org + dir * t;
-    if (q.plane_count > 0 && culled_by_planes(q, pnt))
-      continue;
-
+  // An isosurface-only scene has nothing for the march loop to composite: its
+  // body would run the window test, to_local_point and grid_cell_index at
+  // every one of `steps` samples and take neither transfer-function branch.
+  // Skipping straight to the tail composites the same hits in the same order
+  // against the same t limit, so the frame is byte-identical.
+  if (q.any_tf) {
+    // One tracker per ACTIVE slot (not per scene volume): the march contributes
+    // at most once per cell entered, per volume.
+    long long last_cell[cuda_limits::max_volumes][3];
     for (int a = 0; a < nact; ++a) {
-      // Skip the volumes whose slab window this step is outside of: the
-      // to_local_point + grid_cell_index below could only miss there.
-      if (t < act_lo[a] || t > act_hi[a])
+      last_cell[a][0] = -1;
+      last_cell[a][1] = -1;
+      last_cell[a][2] = -1;
+    }
+
+    // The step count is bounded by construction (unit_step = scene diagonal /
+    // steps, and a ray's span inside the box never exceeds that diagonal); the
+    // guard is a watchdog so a pathological request cannot hang the device.
+    const int max_iterations = q.steps + 16;
+    int iteration = 0;
+    for (double t = t0; t <= t1 && acc.a < q.opacity_cutoff && iteration < max_iterations;
+         t += q.unit_step, ++iteration) {
+      composite_hits_up_to<CAPTURE>(acc, q, hits, nhits, hit_cursor, t, z_scale, pc);
+      const dvec pnt = org + dir * t;
+      if (q.plane_count > 0 && culled_by_planes(q, pnt))
         continue;
-      const int v = act[a];
-      const dev_volume &V = q.vols[v];
 
-      // Sample in volume-local space (the scene-graph model transform).
-      const dvec lpnt = to_local_point(V, pnt);
-      long long idx[3];
-      if (!grid_cell_index(V, lpnt, idx))
-        continue;
-      if (idx[0] == last_cell[a][0] && idx[1] == last_cell[a][1] && idx[2] == last_cell[a][2])
-        continue; // one contribution per cell (the volren sampling model)
-      last_cell[a][0] = idx[0];
-      last_cell[a][1] = idx[1];
-      last_cell[a][2] = idx[2];
+      for (int a = 0; a < nact; ++a) {
+        // Skip the volumes whose slab window this step is outside of: the
+        // to_local_point + grid_cell_index below could only miss there.
+        if (t < act_lo[a] || t > act_hi[a])
+          continue;
+        const int v = act[a];
+        const dev_volume &V = q.vols[v];
 
-      float vals[8];
-      float min_val = 0.f, max_val = 0.f;
-      bool have_corners = false;
+        // Sample in volume-local space (the scene-graph model transform).
+        const dvec lpnt = to_local_point(V, pnt);
+        long long idx[3];
+        if (!grid_cell_index(V, lpnt, idx))
+          continue;
+        if (idx[0] == last_cell[a][0] && idx[1] == last_cell[a][1] && idx[2] == last_cell[a][2])
+          continue; // one contribution per cell (the volren sampling model)
+        last_cell[a][0] = idx[0];
+        last_cell[a][1] = idx[1];
+        last_cell[a][2] = idx[2];
 
-      // 2. Unshaded transfer function (legacy COL_DENSITY).
-      if (V.unshaded) {
-        grid_corners(V, idx[0], idx[1], idx[2], vals);
-        min_val = max_val = vals[0];
-        for (int j = 1; j < 8; ++j) {
-          // std::min/std::max semantics, not IEEE fmin/fmax -- see the DDA fold.
-          min_val = vals[j] < min_val ? vals[j] : min_val;
-          max_val = max_val < vals[j] ? vals[j] : max_val;
+        float vals[8];
+        float min_val = 0.f, max_val = 0.f;
+        bool have_corners = false;
+
+        // 2. Unshaded transfer function (legacy COL_DENSITY).
+        if (V.unshaded) {
+          grid_corners(V, idx[0], idx[1], idx[2], vals);
+          min_val = max_val = vals[0];
+          for (int j = 1; j < 8; ++j) {
+            // std::min/std::max semantics, not IEEE fmin/fmax -- see the DDA fold.
+            min_val = vals[j] < min_val ? vals[j] : min_val;
+            max_val = max_val < vals[j] ? vals[j] : max_val;
+          }
+          have_corners = true;
+          const bool in_window = !V.window_enabled || (double(min_val) <= V.window_max &&
+                                                       double(max_val) >= V.window_min);
+          if (in_window) {
+            float w[3];
+            grid_local_weights(V, lpnt, idx[0], idx[1], idx[2], w);
+            const float den = trilinear(w, vals);
+            float s[4];
+            lut_sample(V, den, s);
+            if (s[3] > 0.f)
+              composite<CAPTURE>(acc, q, s, s[3], t, z_scale, pc);
+          }
         }
-        have_corners = true;
-        const bool in_window = !V.window_enabled ||
-                               (double(min_val) <= V.window_max && double(max_val) >= V.window_min);
-        if (in_window) {
+
+        // 3. Shaded transfer function (legacy RAY_CASTING).
+        if (V.shaded) {
+          if (!have_corners) {
+            grid_corners(V, idx[0], idx[1], idx[2], vals);
+            have_corners = true;
+          }
           float w[3];
           grid_local_weights(V, lpnt, idx[0], idx[1], idx[2], w);
           const float den = trilinear(w, vals);
+          if (V.window_enabled && (double(den) < V.window_min || double(den) > V.window_max))
+            continue;
+          const dvec grad = spline.evaluate(V, v, idx, w);
           float s[4];
           lut_sample(V, den, s);
-          if (s[3] > 0.f)
-            composite(acc, q, s, s[3], t, z_scale);
-        }
-      }
-
-      // 3. Shaded transfer function (legacy RAY_CASTING).
-      if (V.shaded) {
-        if (!have_corners) {
-          grid_corners(V, idx[0], idx[1], idx[2], vals);
-          have_corners = true;
-        }
-        float w[3];
-        grid_local_weights(V, lpnt, idx[0], idx[1], idx[2], w);
-        const float den = trilinear(w, vals);
-        if (V.window_enabled && (double(den) < V.window_min || double(den) > V.window_max))
-          continue;
-        const dvec grad = spline.evaluate(V, v, idx, w);
-        float s[4];
-        lut_sample(V, den, s);
-        const float aa = s[3] * gradient_factor(V, sqrt(dot(grad, grad)));
-        if (aa > 0.f) {
-          const dvec normal = dnormalized(normal_to_world(V, grad));
-          float shaded[3];
-          blinn_phong(q, s, normal, view_vec, q.tf_shininess, shaded,
-                      shadow_factors(q, pnt, normal, vis));
-          composite(acc, q, shaded, aa, t, z_scale);
+          const float aa = s[3] * gradient_factor(V, sqrt(dot(grad, grad)));
+          if (aa > 0.f) {
+            const dvec normal = dnormalized(normal_to_world(V, grad));
+            // NO ambient-occlusion cone here -- a shaded transfer-function
+            // sample fires once per CELL ENTERED, and a medium with no surface
+            // has no "distance to the surface".  The hemisphere still applies.
+            float amb[3] = {q.ambient, q.ambient, q.ambient};
+            if (q.ambient_shaped)
+              ambient_scale(q, normal, 1.f, amb);
+            float shaded[3];
+            blinn_phong(q, s, normal, view_vec, amb, q.tf_shininess, shaded,
+                        shadow_factors(q, pnt, normal, vis));
+            composite<CAPTURE>(acc, q, shaded, aa, t, z_scale, pc);
+          }
         }
       }
     }
   }
   // Hits between the last sample and the exit point.
-  composite_hits_up_to(acc, q, hits, nhits, hit_cursor, t1, z_scale);
+  composite_hits_up_to<CAPTURE>(acc, q, hits, nhits, hit_cursor, t1, z_scale, pc);
+
+  // The ray ended without saturating: every remaining knot sees the whole
+  // accumulation.  (A ray that returned early above never got here and keeps
+  // the kernel's pre-filled zeros, which is the same statement.)
+  if (CAPTURE && !pc->done) {
+    while (pc->cursor < pc->slices) {
+      pc->out[std::size_t(1 + pc->cursor) * pc->plane] = acc.a;
+      ++pc->cursor;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1445,13 @@ __device__ inline void march_ray(const dev_request &q, const dvec &org, const dv
 // or atomics, and would put the resolve's ordering at the mercy of the
 // scheduler; the renderer promises determinism.
 
+//
+// CAPTURE == 1 is the light-view instantiation that also emits the deep-shadow
+// transmittance profile.  A separate instantiation rather than a runtime `if
+// (q.prof_out)`: the ordinary render is the hot one, it is issue-bound, and a
+// predicate inside the compositing recurrence plus live capture state would be
+// paid by every scene to serve a pass that runs once per shadow rebuild.
+template <int CAPTURE>
 __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color, float *depth) {
   const int px = int(blockIdx.x * blockDim.x + threadIdx.x);
   const int py = int(blockIdx.y * blockDim.y + threadIdx.y);
@@ -1155,6 +1460,28 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
 
   const std::size_t pixel = std::size_t(py) * std::size_t(q.width) + std::size_t(px);
   unsigned char *cpx = color + pixel * 4;
+
+  // Pre-fill this ray's payload so a ray that returns early out of march_ray --
+  // missed the scene box, reached no volume -- is already correct: nothing
+  // occludes it, which is zero alpha everywhere and a +inf terminal.  Mirrors
+  // raycaster.cpp, which pre-fills the whole image on the host.
+  prof_state pc;
+  pc.out = nullptr;
+  pc.plane = 0;
+  pc.slices = 0;
+  pc.z0 = pc.dz = 0.0;
+  pc.cursor = 0;
+  pc.done = false;
+  if (CAPTURE) {
+    pc.out = q.prof_out + pixel;
+    pc.plane = std::size_t(q.width) * std::size_t(q.height);
+    pc.slices = q.prof_slices;
+    pc.z0 = q.prof_z0;
+    pc.dz = q.prof_dz;
+    pc.out[0] = INFINITY;
+    for (int k = 0; k < pc.slices; ++k)
+      pc.out[std::size_t(1 + k) * pc.plane] = 0.f;
+  }
 
   // The mirror of raycaster.cpp's supersampled resolve: a REGULAR n x n grid of
   // sub-pixel offsets ((i+0.5)/n, (j+0.5)/n), an unweighted mean of the
@@ -1189,7 +1516,7 @@ __global__ void volren_raycast_kernel(const dev_request q, unsigned char *color,
       }
 
       ray_accum acc;
-      march_ray(q, org, dir, acc);
+      march_ray<CAPTURE>(q, org, dir, acc, &pc);
 
       // Over-blend the remaining transparency with the background (replaces the
       // legacy divide-by-alpha normalization of saturated rays), then
@@ -1425,6 +1752,26 @@ private:
 
   // Unname a block: it stops answering lookups immediately, and its memory
   // goes back as soon as the last render using it releases.
+public:
+  // Retire every entry staged from `host`, whatever its length or device.
+  // Used when the owner is about to drop the host buffer itself (a rebuilt
+  // shadow raster), where the usual same-key/new-generation retire cannot
+  // fire because the replacement lands at a different address.
+  void forget_host(const void *host) {
+    if (host == nullptr)
+      return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (auto it = _index.begin(); it != _index.end();) {
+      if (it->first.host == host) {
+        auto victim = it++;
+        retire_locked(victim);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+private:
   void retire_locked(std::map<cache_key, std::uint64_t>::iterator indexed) {
     auto it = _blocks.find(indexed->second);
     _index.erase(indexed);
@@ -1521,8 +1868,6 @@ frame raycast_cuda(const raycast_cuda_request &req) {
     throw volren_error("raycast_cuda: too many cut planes for the CUDA backend");
   if (req.shadow_map_count < 0 || req.shadow_map_count > cuda_limits::max_shadow_maps)
     throw volren_error("raycast_cuda: more shadow maps than cuda_limits::max_shadow_maps");
-  std::size_t shadow_offset[cuda_limits::max_shadow_maps];
-  std::size_t shadow_texels = 0;
   for (int i = 0; i < req.shadow_map_count; ++i) {
     const cuda_shadow_map &m = req.shadow_maps[i];
     if (!m.depth || m.width < 1 || m.height < 1)
@@ -1531,8 +1876,32 @@ frame raycast_cuda(const raycast_cuda_request &req) {
       throw volren_error("raycast_cuda: shadow map parallel_scale must be positive and finite");
     if (m.light_index < 0 || m.light_index >= req.light_count)
       throw volren_error("raycast_cuda: a shadow map names a light that is not in the request");
-    shadow_offset[i] = shadow_texels;
-    shadow_texels += std::size_t(m.width) * std::size_t(m.height);
+    if (m.slices > 0) {
+      if (m.slices > limits::max_shadow_depth_slices)
+        throw volren_error("raycast_cuda: more depth slices than limits::max_shadow_depth_slices");
+      if (!m.profile)
+        throw volren_error("raycast_cuda: a deep shadow map needs a transmittance profile");
+      if (!(m.slice_dz > 0.0) || !std::isfinite(m.slice_dz) || !std::isfinite(m.depth_min))
+        throw volren_error("raycast_cuda: deep shadow map knot grid must be positive and finite");
+    }
+  }
+
+  // Deep-shadow profile CAPTURE (the light-view pass).  A ray parameter is a
+  // light-space depth only under an orthographic camera with one ray per
+  // texel, so anything else is refused rather than silently mis-binned -- the
+  // caller falls back to the CPU marcher, which produces the same data.
+  if (req.profile_slices < 0 || req.profile_slices > limits::max_shadow_depth_slices)
+    throw volren_error("raycast_cuda: profile_slices out of range");
+  if (req.profile_slices > 0) {
+    if (!req.profile_out)
+      throw volren_error("raycast_cuda: profile capture needs an output buffer");
+    if (req.supersample != 1)
+      throw volren_error("raycast_cuda: profile capture requires supersample == 1");
+    if (req.cam.projection != camera::projection_type::orthographic)
+      throw volren_error("raycast_cuda: profile capture requires an orthographic camera");
+    if (!(req.profile_dz > 0.0) || !std::isfinite(req.profile_dz) ||
+        !std::isfinite(req.profile_z_near))
+      throw volren_error("raycast_cuda: profile knot grid must be positive and finite");
   }
 
   std::size_t vsize[cuda_limits::max_volumes];
@@ -1595,6 +1964,9 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   q.shadow_strength = req.shadow_strength;
   q.shadow_bias_constant = req.shadow_bias_constant;
   q.shadow_slope_scale = req.shadow_slope_scale;
+  q.shadow_pcf_half = req.shadow_pcf_half;
+  q.shadow_pcf_radius = req.shadow_pcf_radius;
+  q.shadow_pcf_widen = req.shadow_pcf_widen;
   for (int i = 0; i < cuda_limits::max_lights; ++i)
     q.light_map[i] = -1;
   for (int i = 0; i < req.shadow_map_count; ++i) {
@@ -1609,6 +1981,10 @@ frame raycast_cuda(const raycast_cuda_request &req) {
     d.width = m.width;
     d.height = m.height;
     d.depth = nullptr; // patched once the rasters are staged
+    d.slices = m.slices;
+    d.depth_min = m.depth_min;
+    d.slice_dz = m.slice_dz;
+    d.profile = nullptr; // ditto
     // A repeated light index would be a caller bug; last one wins, matching
     // the CPU path's map_of_light assignment.
     q.light_map[m.light_index] = i;
@@ -1622,11 +1998,33 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   q.depth_alpha_threshold = req.depth_alpha_threshold;
   q.ambient = req.ambient;
   q.two_sided = req.two_sided ? 1 : 0;
+  q.ambient_shaped = req.ambient_shaped ? 1 : 0;
+  q.ambient_hemisphere = req.ambient_hemisphere ? 1 : 0;
+  for (int i = 0; i < 3; ++i) {
+    q.ambient_sky[i] = req.ambient_sky[i];
+    q.ambient_ground[i] = req.ambient_ground[i];
+  }
+  q.ambient_up = {req.ambient_up[0], req.ambient_up[1], req.ambient_up[2]};
+  q.ao_strength = req.ao_strength;
+  q.ao_radius = req.ao_radius;
+  q.ao_samples = req.ao_samples;
+  q.shading_gain = req.shading_gain;
+  q.specular = req.specular;
   q.background[0] = req.background[0];
   q.background[1] = req.background[1];
   q.background[2] = req.background[2];
   q.tf_shininess = req.tf_shininess;
   q.supersample = req.supersample;
+  // Resolved once here rather than per ray: an isosurface-only scene skips the
+  // whole march loop on the device (see march_ray).
+  q.any_tf = 0;
+  for (int v = 0; v < req.volume_count; ++v)
+    if (req.volumes[v].shaded || req.volumes[v].unshaded)
+      q.any_tf = 1;
+  q.prof_out = nullptr; // patched once the output buffer is allocated
+  q.prof_slices = req.profile_slices;
+  q.prof_z0 = req.profile_z_near;
+  q.prof_dz = req.profile_dz;
 
   // ---- staging -----------------------------------------------------------
   // Voxels come from the resident cache (usually no H2D at all); the LUTs are
@@ -1689,27 +2087,35 @@ frame raycast_cuda(const raycast_cuda_request &req) {
     d.window_enabled = s.window_enabled ? 1 : 0;
     d.window_min = s.window_min;
     d.window_max = s.window_max;
+    d.ao_ok = s.ao_ok ? 1 : 0;
   }
 
   const std::size_t color_bytes = std::size_t(width) * std::size_t(height) * 4;
   const std::size_t depth_bytes = std::size_t(width) * std::size_t(height) * sizeof(float);
 
-  device_buffer d_lut, d_vols, d_color, d_depth, d_shadow;
-  if (shadow_texels > 0) {
-    // One allocation for every map's raster, staged in map order.  At the
-    // default 512^2 that is 1 MB per map -- ~0.2 ms on this PCIe link against
-    // a ~13 ms pass, so keeping it device-resident is not worth the cache
-    // machinery.  (Same refactor as the "FUTURE WORK: resident device-side
-    // volume cache" note: when a map does become resident, it keys the same
-    // way.)
-    d_shadow.alloc(shadow_texels * sizeof(float));
-    for (int i = 0; i < req.shadow_map_count; ++i) {
-      const cuda_shadow_map &m = req.shadow_maps[i];
-      float *dst = static_cast<float *>(d_shadow.p) + shadow_offset[i];
-      CUDA_CHECK(cudaMemcpy(dst, m.depth,
-                            std::size_t(m.width) * std::size_t(m.height) * sizeof(float),
-                            cudaMemcpyHostToDevice));
-      q.shadows[i].depth = dst;
+  device_buffer d_lut, d_vols, d_color, d_depth, d_prof_out;
+  // Shadow rasters ride the RESIDENT block cache, exactly like voxels: the maps
+  // are rebuilt only when the light pass's own inputs change, so a steady-state
+  // frame (all camera motion) must not re-stage them.  That was a defensible
+  // 1 MB per map while a map was one depth raster; a deep map's profile is
+  // 17.8 MB at the defaults and re-staging it per frame measured at +6.7 ms
+  // against a 6 ms pass.  The lease releases the entries even if anything below
+  // throws.
+  for (int i = 0; i < req.shadow_map_count; ++i) {
+    const cuda_shadow_map &m = req.shadow_maps[i];
+    const std::size_t texels = std::size_t(m.width) * std::size_t(m.height);
+    cache_key dk;
+    dk.device = device;
+    dk.host = m.depth;
+    dk.bytes = texels * sizeof(float);
+    q.shadows[i].depth = reinterpret_cast<const float *>(lease.acquire(dk, m.pin, m.generation));
+    if (m.slices > 0) {
+      cache_key pk;
+      pk.device = device;
+      pk.host = m.profile;
+      pk.bytes = texels * std::size_t(m.slices + 1) * sizeof(float);
+      q.shadows[i].profile =
+          reinterpret_cast<const float *>(lease.acquire(pk, m.pin, m.generation));
     }
   }
 
@@ -1730,6 +2136,15 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   d_color.alloc(color_bytes);
   d_depth.alloc(depth_bytes);
 
+  const std::size_t prof_out_floats =
+      req.profile_slices > 0
+          ? std::size_t(width) * std::size_t(height) * std::size_t(req.profile_slices + 1)
+          : 0;
+  if (prof_out_floats > 0) {
+    d_prof_out.alloc(prof_out_floats * sizeof(float));
+    q.prof_out = static_cast<float *>(d_prof_out.p);
+  }
+
   // One thread per pixel.  Default stream only: nothing else is in flight.
   const dim3 threads(16, 16);
   const dim3 blocks((unsigned(width) + threads.x - 1) / threads.x,
@@ -1739,8 +2154,14 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   // without this a failure some other libcvc code already handled would be
   // attributed to our launch and force a spurious CPU fallback.
   (void)cudaGetLastError();
-  volren_raycast_kernel<<<blocks, threads>>>(q, static_cast<unsigned char *>(d_color.p),
-                                             static_cast<float *>(d_depth.p));
+  // The capture instantiation is a DIFFERENT kernel, so the ordinary render
+  // launches exactly the code it launched before deep shadows existed.
+  if (req.profile_slices > 0)
+    volren_raycast_kernel<1><<<blocks, threads>>>(q, static_cast<unsigned char *>(d_color.p),
+                                                  static_cast<float *>(d_depth.p));
+  else
+    volren_raycast_kernel<0><<<blocks, threads>>>(q, static_cast<unsigned char *>(d_color.p),
+                                                  static_cast<float *>(d_depth.p));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1749,6 +2170,9 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   out.depth = cvc::image(width, height, cvc::image::pixel_format::GRAY, cvc::image::data_type::f32);
   CUDA_CHECK(cudaMemcpy(out.color.data(), d_color.p, color_bytes, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(out.depth.data(), d_depth.p, depth_bytes, cudaMemcpyDeviceToHost));
+  if (prof_out_floats > 0)
+    CUDA_CHECK(cudaMemcpy(req.profile_out, d_prof_out.p, prof_out_floats * sizeof(float),
+                          cudaMemcpyDeviceToHost));
   return out;
 }
 
@@ -1761,6 +2185,10 @@ std::size_t raycast_cuda_cache_budget() { return volume_cache::instance().budget
 std::size_t raycast_cuda_cache_bytes() { return volume_cache::instance().resident(); }
 
 std::uint64_t raycast_cuda_cache_upload_bytes() { return volume_cache::instance().uploaded(); }
+
+void raycast_cuda_forget_host_buffer(const void *host) {
+  volume_cache::instance().forget_host(host);
+}
 
 void raycast_cuda_clear_cache() { volume_cache::instance().clear(); }
 

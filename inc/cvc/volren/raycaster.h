@@ -112,9 +112,20 @@ public:
   // contract as frame::depth: GRAY f32, eye-space depth measured from the
   // light's orthographic eye plane, +inf where the light ray hit nothing.
   std::size_t shadow_map_count() const { return _shadow_views.size(); }
-  // Both throw cvc::volren_error for an out-of-range index.
+  // All three throw cvc::volren_error for an out-of-range index.
   cvc::image shadow_map_depth(std::size_t i) const;
   const shadow_view &shadow_map_view(std::size_t i) const;
+  // The DEEP transmittance profile of map `i` (shadow_mode::deep), or an empty
+  // image for a hard map.  GRAY f32, PLANE-major: `shadow_view::slices + 1`
+  // planes of the light-view raster stacked into one image, so
+  //   width  = shadow_view::width
+  //   height = shadow_view::height * (slices + 1)
+  //   plane j, texel (x, y) = index j * width * height + y * width + x
+  // detail::shadow_visibility_deep documents each plane's contents and why the
+  // layout is plane-major.  Public for the same reason shadow_view is: a
+  // consumer can evaluate the map at its OWN points (a ground decal, a debug
+  // overlay) without reaching into detail/.
+  cvc::image shadow_map_profile(std::size_t i) const;
 
   // The maps are cached and rebuilt only when the light pass's own inputs
   // change (lights, volumes, model transforms, per-volume settings, cut
@@ -150,9 +161,30 @@ private:
 
   // Cached light-view depth maps, one per shadow-casting light, plus the
   // fingerprint of the inputs they were built from (0 == nothing built).
+  // _shadow_profile is parallel to them and empty in shadow_mode::hard.
   std::vector<shadow_view> _shadow_views;
   std::vector<cvc::image> _shadow_depth;
+  std::vector<cvc::image> _shadow_profile;
   std::uint64_t _shadow_key = 0;
+
+  // ---- deep-shadow profile capture (INTERNAL) -----------------------------
+  // The transmittance profile is a new OUTPUT of the marcher, but it is not a
+  // user-facing render setting: it is meaningful only for the orthographic
+  // light-view pass, whose ray parameter t IS the light-space depth.  So it is
+  // requested by ensure_shadow_maps() writing this on the temporary light-pass
+  // raycaster (same class, so private access is legitimate) and read back out
+  // of _profile_out, instead of widening render_settings and frame for a mode
+  // no caller can use correctly on its own camera.
+  //
+  // slices == 0 (the default, and every user-driven render) makes render() take
+  // exactly the code path it took before deep shadows existed.
+  struct profile_request {
+    int slices = 0;
+    double z_near = 0.0; // light-space depth of knot 0
+    double dz = 0.0;     // knot spacing
+  };
+  profile_request _profile_req;
+  cvc::image _profile_out; // filled by render() iff _profile_req.slices > 0
 
   // Rebuild _shadow_views/_shadow_depth if `scene` or any light-pass input
   // moved since they were built.  Called by render() before it marches.

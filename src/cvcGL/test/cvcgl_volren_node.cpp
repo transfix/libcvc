@@ -194,6 +194,60 @@ int main() {
     assert(node->shadowConfig().resolution == 256);
     assert(node->renderConfig().shadows.strength == 0.5f);
   }
+  // The deep/soft/rig accessors, same contract: each is a read-modify-write of
+  // the state-tree-bound settings, so it must land in render_settings AND be
+  // visible to its own getter immediately.  Asserted one at a time and then
+  // TOGETHER, because the failure mode a read-modify-write invites is one
+  // setter clobbering an earlier one's field with a stale copy.
+  node->setShadowMode(cvc::volren::shadow_mode::deep);
+  assert(node->shadowMode() == cvc::volren::shadow_mode::deep);
+  assert(node->renderConfig().shadows.mode == cvc::volren::shadow_mode::deep);
+  node->setDeepShadowSlices(24);
+  assert(node->deepShadowSlices() == 24 && node->renderConfig().shadows.depth_slices == 24);
+  node->setSoftShadows(3.5f, 5);
+  assert(node->softShadowRadius() == 3.5f && node->softShadowTaps() == 5);
+  assert(node->renderConfig().shadows.pcf_radius == 3.5f);
+  node->setAmbientLevel(0.45f);
+  assert(node->ambientLevel() == 0.45f && node->renderConfig().ambient == 0.45f);
+  {
+    cvc::volren::hemisphere_ambient h = node->hemisphereConfig();
+    h.enabled = true;
+    h.sky = {0.5f, 0.6f, 1.0f};
+    node->setHemisphereConfig(h);
+    assert(node->hemisphereConfig().enabled && node->hemisphereConfig().sky[2] == 1.0f);
+    cvc::volren::ao_settings ao = node->occlusionConfig();
+    ao.strength = 0.75f;
+    ao.radius = 0.2;
+    ao.samples = 8;
+    node->setOcclusionConfig(ao);
+    assert(node->occlusionConfig().strength == 0.75f && node->occlusionConfig().samples == 8);
+    assert(node->renderConfig().ao.radius == 0.2);
+  }
+  node->setShadingGain(1.0f);
+  node->setSpecularLevel(0.35f);
+  assert(node->shadingGain() == 1.0f && node->specularLevel() == 0.35f);
+  {
+    // Nothing above was lost on the way through: the LAST writer did not carry
+    // a stale snapshot of the earlier fields back into the tree.
+    const cvc::volren::render_settings rs = node->renderConfig();
+    assert(rs.shadows.mode == cvc::volren::shadow_mode::deep && rs.shadows.depth_slices == 24);
+    assert(rs.shadows.pcf_radius == 3.5f && rs.shadows.pcf_taps == 5);
+    assert(rs.ambient == 0.45f && rs.ambient_hemisphere.enabled && rs.ao.strength == 0.75f);
+    assert(rs.shading_gain == 1.0f && rs.specular == 0.35f);
+    // ... and the shadow accessors written BEFORE them are still intact too.
+    assert(rs.shadows.enabled && rs.shadows.resolution == 256 && rs.shadows.strength == 0.5f);
+  }
+  // Back to the renderer's own defaults: everything below is an image check
+  // against the shading expression these knobs are all neutral in.
+  node->setShadowMode(cvc::volren::shadow_mode::hard);
+  node->setDeepShadowSlices(cvc::volren::defaults::shadow_depth_slices);
+  node->setSoftShadows(cvc::volren::defaults::shadow_pcf_radius,
+                       cvc::volren::defaults::shadow_pcf_taps);
+  node->setHemisphereConfig(cvc::volren::hemisphere_ambient());
+  node->setOcclusionConfig(cvc::volren::ao_settings());
+  node->setShadingGain(cvc::volren::defaults::shading_gain);
+  node->setSpecularLevel(cvc::volren::defaults::specular);
+  node->setAmbientLevel(0.5f); // what the image checks below were tuned at
   // The scale clamps at both ends; above 1.0 is legal now (the raster
   // supersamples and the quad box-filters it back down).
   node->setResolutionScale(2.0);
@@ -492,6 +546,42 @@ int main() {
                "dark halo on the silhouette -- the composite is filtering "
                "straight alpha instead of premultiplied");
       }
+    }
+
+    // ── 9. teardown with a raycast IN FLIGHT ───────────────────────────────
+    // The worker's completion callback runs on the render thread while
+    // ~VolRenNode is inside m_worker.reset(), and reset() nulls the unique_ptr
+    // BEFORE running the deleter that joins that thread -- so a callback that
+    // reached the worker back through m_worker dereferenced null.  It only
+    // shows when a frame is genuinely still in flight, which needs a raycast
+    // slow enough to outlast the destructor: hence a deliberately expensive
+    // node (dense volume, 4x4 rays per pixel, many steps) dropped one tick
+    // after its job is submitted.
+    //
+    // The assertion is that the process survives; there is nothing else to
+    // check, and a regression here is a SIGSEGV, not a wrong pixel.
+    {
+      auto doomed = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>("doomed");
+      cvc::volren::volume_settings dvs;
+      dvs.isosurfaces.push_back(iso);
+      doomed->addVolume(sphereSdf(app, 64, 0.55), dvs);
+      doomed->setResolutionScale(cvc::gl::VolRenNode::MaxResolutionScale);
+      doomed->setSupersample(cvc::volren::limits::max_supersample);
+      {
+        cvc::volren::render_settings drs = doomed->renderConfig();
+        drs.steps = 768;
+        drs.threads = 1; // serial: the point is a LONG raycast, not a fast one
+        doomed->setRenderConfig(drs);
+      }
+      view.processUIEvents();
+      doomed->tick(); // submits; the worker is now marching
+      view.render();
+      const bool inFlight = !doomed->converged();
+      sg.getGraphicsRoot()->removeGraphicsChild(doomed);
+      doomed.reset(); // last reference -> ~VolRenNode -> join, mid-raycast
+      std::printf("  teardown with a raycast in flight: survived (in flight: %s)\n",
+                  inFlight ? "yes" : "no -- it finished first, weaker check");
+      fflush(stdout);
     }
 
     std::printf("cvcgl_volren_node: all checks passed (%llu raycasts, last %.1f ms)\n",

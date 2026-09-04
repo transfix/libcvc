@@ -627,6 +627,56 @@ TEST(VolrenStateSettings, ShadowSettingsRoundTrip) {
   EXPECT_EQ(ss.get().settings.shadows.resolution, cvc::volren::limits::max_raster_dim);
 }
 
+// ---- shadow_mode::deep: the two payload keys ------------------------------
+
+TEST(VolrenStateSettings, DeepShadowSettingsRoundTrip) {
+  cvc::app ctx;
+  const std::string path = "t20d.volren";
+  state_settings ss(ctx, path);
+
+  // The DEFAULT is hard: seeded state must say so, or a consumer that only
+  // reads the tree would come up in the wrong mode.
+  EXPECT_EQ(treeKey(ctx, path, "shadows.mode").value<int>(), 0);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.depth_slices").value<int>(),
+            cvc::volren::defaults::shadow_depth_slices);
+
+  // Object -> state.
+  state_settings::snapshot snap = ss.get();
+  snap.settings.shadows.enabled = true;
+  snap.settings.shadows.mode = cvc::volren::shadow_mode::deep;
+  snap.settings.shadows.depth_slices = 24;
+  ss.set(snap);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.mode").value<int>(), 1);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.depth_slices").value<int>(), 24);
+
+  // State -> object.
+  cvc::state::instance(ctx)(path + ".shadows.mode").value(0);
+  EXPECT_TRUE(ss.get().settings.shadows.mode == cvc::volren::shadow_mode::hard);
+  cvc::state::instance(ctx)(path + ".shadows.mode").value(1);
+  EXPECT_TRUE(ss.get().settings.shadows.mode == cvc::volren::shadow_mode::deep);
+  cvc::state::instance(ctx)(path + ".shadows.depth_slices").value(8);
+  EXPECT_EQ(ss.get().settings.shadows.depth_slices, 8);
+
+  // `mode` is an ENUM, so a value outside its domain is malformed state and
+  // leaves the object alone (the shadows.lights discipline) rather than being
+  // clamped into a mode the caller did not ask for.
+  for (const int bad : {-1, 2, 7}) {
+    cvc::state::instance(ctx)(path + ".shadows.mode").value(bad);
+    EXPECT_TRUE(ss.get().settings.shadows.mode == cvc::volren::shadow_mode::deep)
+        << "shadows.mode " << bad << " was accepted";
+    EXPECT_EQ(ss.get().settings.shadows.depth_slices, 8)
+        << "a malformed shadows.mode let a sibling key through";
+  }
+  cvc::state::instance(ctx)(path + ".shadows.mode").value(1); // repair
+
+  // depth_slices CLAMPS on read (the `resolution` convention): it bounds the
+  // map's MEMORY, so any value has a defensible nearest meaning.
+  cvc::state::instance(ctx)(path + ".shadows.depth_slices").value(0);
+  EXPECT_EQ(ss.get().settings.shadows.depth_slices, cvc::volren::limits::min_shadow_depth_slices);
+  cvc::state::instance(ctx)(path + ".shadows.depth_slices").value(1 << 20);
+  EXPECT_EQ(ss.get().settings.shadows.depth_slices, cvc::volren::limits::max_shadow_depth_slices);
+}
+
 TEST(VolrenStateSettings, ShadowSettingsReachTheRaycasterThroughApplyTo) {
   cvc::app ctx;
   const std::string path = "t21.volren";
@@ -650,4 +700,130 @@ TEST(VolrenStateSettings, ShadowSettingsReachTheRaycasterThroughApplyTo) {
   EXPECT_TRUE(rc.settings().shadows.enabled);
   EXPECT_EQ(rc.settings().shadows.resolution, 128);
   EXPECT_NEAR(double(rc.settings().shadows.strength), 0.5, 1e-6);
+}
+
+// ============================================================================
+// The lighting rig: soft shadows, ambient occlusion, hemisphere ambient, gain
+// ============================================================================
+
+TEST(VolrenStateSettings, LightingRigSettingsRoundTrip) {
+  cvc::app ctx;
+  const std::string path = "t22.volren";
+  state_settings ss(ctx, path);
+
+  // Seeded DEFAULTS.  Every one of these must read as "off / neutral", because
+  // a consumer that drives the renderer from the tree alone would otherwise
+  // come up with a different image than one that uses the C++ defaults.
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.pcf_radius").value<double>(), 0.0, 1e-12);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.pcf_taps").value<int>(),
+            cvc::volren::defaults::shadow_pcf_taps);
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.enabled").value<int>(), 0);
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.sky").value(), "1,1,1");
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.ground").value(), "1,1,1");
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.up").value(), "0,0,1");
+  EXPECT_NEAR(treeKey(ctx, path, "ao.strength").value<double>(), 0.0, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "ao.radius").value<double>(), 0.0, 1e-12);
+  EXPECT_EQ(treeKey(ctx, path, "ao.samples").value<int>(), cvc::volren::defaults::ao_samples);
+  EXPECT_NEAR(treeKey(ctx, path, "shading_gain").value<double>(),
+              cvc::volren::defaults::shading_gain, 1e-12);
+  EXPECT_NEAR(treeKey(ctx, path, "specular").value<double>(), cvc::volren::defaults::specular,
+              1e-12);
+
+  // Object -> state.
+  state_settings::snapshot snap = ss.get();
+  snap.settings.shadows.pcf_radius = 2.5f;
+  snap.settings.shadows.pcf_taps = 5;
+  snap.settings.ambient_hemisphere.enabled = true;
+  snap.settings.ambient_hemisphere.sky = {0.25f, 0.5f, 1.f};
+  snap.settings.ambient_hemisphere.ground = {0.5f, 0.25f, 0.f};
+  snap.settings.ambient_hemisphere.up = {0.0, 1.0, 0.0};
+  snap.settings.ao.strength = 0.75f;
+  snap.settings.ao.radius = 1.5;
+  snap.settings.ao.samples = 8;
+  snap.settings.shading_gain = 1.0f;
+  snap.settings.specular = 0.35f;
+  ss.set(snap);
+  EXPECT_NEAR(treeKey(ctx, path, "shadows.pcf_radius").value<double>(), 2.5, 1e-6);
+  EXPECT_EQ(treeKey(ctx, path, "shadows.pcf_taps").value<int>(), 5);
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.enabled").value<int>(), 1);
+  EXPECT_EQ(treeKey(ctx, path, "ambient_hemisphere.up").value(), "0,1,0");
+  EXPECT_NEAR(treeKey(ctx, path, "ao.radius").value<double>(), 1.5, 1e-12);
+  EXPECT_EQ(treeKey(ctx, path, "ao.samples").value<int>(), 8);
+  EXPECT_NEAR(treeKey(ctx, path, "specular").value<double>(), 0.35, 1e-6);
+
+  // State -> object.
+  cvc::state::instance(ctx)(path + ".shadows.pcf_radius").value(4.0);
+  EXPECT_NEAR(ss.get().settings.shadows.pcf_radius, 4.f, 1e-6f);
+  cvc::state::instance(ctx)(path + ".shadows.pcf_taps").value(7);
+  EXPECT_EQ(ss.get().settings.shadows.pcf_taps, 7);
+  cvc::state::instance(ctx)(path + ".ambient_hemisphere.sky").value(std::string("0.1,0.2,0.3"));
+  EXPECT_NEAR(ss.get().settings.ambient_hemisphere.sky[1], 0.2f, 1e-6f);
+  cvc::state::instance(ctx)(path + ".ao.strength").value(0.5);
+  EXPECT_NEAR(ss.get().settings.ao.strength, 0.5f, 1e-6f);
+  cvc::state::instance(ctx)(path + ".shading_gain").value(0.75);
+  EXPECT_NEAR(ss.get().settings.shading_gain, 0.75f, 1e-6f);
+
+  // CLAMPED on read, the `shadows.resolution` convention: the filter footprint,
+  // the tap count and the cone's sample count are all implementation resources
+  // with a defensible nearest meaning, so an out-of-range write round-trips into
+  // the range instead of poisoning the whole snapshot.
+  cvc::state::instance(ctx)(path + ".shadows.pcf_radius").value(-3.0);
+  EXPECT_NEAR(ss.get().settings.shadows.pcf_radius, 0.f, 1e-12f);
+  cvc::state::instance(ctx)(path + ".shadows.pcf_radius").value(1e9);
+  EXPECT_NEAR(ss.get().settings.shadows.pcf_radius, cvc::volren::limits::max_pcf_radius, 1e-6f);
+  cvc::state::instance(ctx)(path + ".shadows.pcf_taps").value(-5);
+  EXPECT_EQ(ss.get().settings.shadows.pcf_taps, cvc::volren::limits::min_pcf_taps);
+  cvc::state::instance(ctx)(path + ".shadows.pcf_taps").value(1 << 20);
+  EXPECT_EQ(ss.get().settings.shadows.pcf_taps, cvc::volren::limits::max_pcf_taps);
+  cvc::state::instance(ctx)(path + ".ao.samples").value(0);
+  EXPECT_EQ(ss.get().settings.ao.samples, cvc::volren::limits::min_ao_samples);
+  cvc::state::instance(ctx)(path + ".ao.samples").value(1 << 20);
+  EXPECT_EQ(ss.get().settings.ao.samples, cvc::volren::limits::max_ao_samples);
+
+  // `ao.strength` is read RAW, like `supersample`: render() is the one place
+  // that decides what is in range, and it throws there rather than silently
+  // clamping into something that looks like it worked.
+  cvc::state::instance(ctx)(path + ".ao.strength").value(3.0);
+  EXPECT_NEAR(ss.get().settings.ao.strength, 3.f, 1e-6f);
+}
+
+TEST(VolrenStateSettings, DistanceFieldRoundTripsAndOlderTreesStillParse) {
+  cvc::app ctx;
+  const std::string path = "t23.volren";
+  state_settings ss(ctx, path);
+
+  state_settings::snapshot snap = ss.get();
+  cvc::volren::volume_settings vs;
+  vs.distance_field = true;
+  snap.volumes.push_back(vs);
+  ss.set(snap);
+  EXPECT_EQ(treeKey(ctx, path, "volumes.0.distance_field").value<int>(), 1);
+  cvc::state::instance(ctx)(path + ".volumes.0.distance_field").value(0);
+  ASSERT_EQ(ss.get().volumes.size(), 1u);
+  EXPECT_FALSE(ss.get().volumes[0].distance_field);
+  cvc::state::instance(ctx)(path + ".volumes.0.distance_field").value(1);
+  EXPECT_TRUE(ss.get().volumes[0].distance_field);
+
+  // A tree written before this key existed has no node for it.  That must
+  // resolve to the DEFAULT, not reject the whole snapshot -- a per-volume key
+  // exists only once something seeded it, so "absent" is the ordinary state of
+  // a hand-driven or older tree, and one missing field must not silently
+  // discard the fifteen that parsed.
+  cvc::app older;
+  const std::string p2 = "t23b.volren";
+  state_settings older_ss(older, p2);
+  treeKey(older, p2, "volumes.0.shaded").value(1);
+  treeKey(older, p2, "volumes.0.unshaded").value(0);
+  treeKey(older, p2, "volumes.0.tf_auto_domain").value(1);
+  treeKey(older, p2, "volumes.0.matrix").value(std::string(""));
+  treeKey(older, p2, "volumes.0.transfer_function.color").value(std::string(""));
+  treeKey(older, p2, "volumes.0.transfer_function.opacity").value(std::string(""));
+  treeKey(older, p2, "volumes.0.window").value(std::string(""));
+  treeKey(older, p2, "volumes.0.gradient_ramp").value(std::string(""));
+  treeKey(older, p2, "volumes.0.isosurfaces").value(std::string("5,0.5,1,1,1,10"));
+  treeKey(older, p2, "volumes.count").value(1);
+  ASSERT_EQ(older_ss.get().volumes.size(), 1u)
+      << "a volume without the distance_field key was rejected outright";
+  EXPECT_FALSE(older_ss.get().volumes[0].distance_field);
+  ASSERT_EQ(older_ss.get().volumes[0].isosurfaces.size(), 1u);
 }

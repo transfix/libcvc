@@ -9,6 +9,7 @@
 #include <cvc/core/thread_pool.h>
 #include <cvc/utility/cuda_utils.h>
 #include <cvc/volren/detail/cell_intersect.h>
+#include <cvc/volren/detail/occlusion.h>
 #include <cvc/volren/detail/sampler.h>
 #include <cvc/volren/detail/shading.h>
 #include <cvc/volren/detail/shadow_map.h>
@@ -35,6 +36,11 @@ struct prepared_volume {
   const volume_settings *vs = nullptr;
   baked_transfer_function tf;
   bool any_iso = false;
+  // This volume's isosurface hits get an ambient-occlusion cone: the scene asked
+  // for AO (strength, radius and ambient all non-zero) AND the volume declares
+  // itself a signed distance field, which is what makes the cone's field
+  // subtraction a distance.
+  bool ao_ok = false;
   // Scene-graph placement: world -> volume-local inverse of the model matrix.
   bool transformed = false;
   mat4 world_to_local;
@@ -205,6 +211,17 @@ struct fingerprint {
   std::uint64_t value() const { return h == 0 ? 1 : h; }
 };
 
+// Co-owner handed to the CUDA backend's resident block cache for one shadow
+// map's two rasters.  cvc::image is a refcounted copy-on-write buffer, so a
+// held copy is exactly the guarantee cuda_volume::pin gives for voxels: the
+// bytes cannot be freed or moved while the device holds a block keyed on their
+// address.  One object for both rasters because they are rebuilt together.
+struct shadow_map_pin {
+  cvc::image depth;
+  cvc::image profile;
+  shadow_map_pin(cvc::image d, cvc::image p) : depth(std::move(d)), profile(std::move(p)) {}
+};
+
 // Everything the shadow lookup needs, resolved once per render() and shared
 // (const) by every tile -- no per-tile scratch beyond the visibility buffer,
 // and no allocation inside the march.
@@ -212,6 +229,9 @@ struct shadow_context {
   struct entry {
     const shadow_view *view = nullptr;
     const float *depth = nullptr;
+    // Non-null exactly for a deep map; view->slices then says how long each
+    // texel's payload is.
+    const float *profile = nullptr;
   };
   bool active = false;
   bool two_sided = false;
@@ -222,6 +242,10 @@ struct shadow_context {
   double bias_scale = 0.0;
   double slope_scale = 0.0;
   float strength = 1.f;
+  // Percentage-closer filter, resolved (clamped) once per render.  radius 0
+  // leaves every lookup on its historical single-tap expression.
+  float pcf_radius = 0.f;
+  int pcf_taps = 1;
   std::vector<entry> maps;
   // Light index -> index into `maps`, or -1 for a light that never casts.
   std::vector<int> map_of_light;
@@ -247,9 +271,16 @@ struct shadow_context {
       // class at negative cost.
       if (!two_sided && !(n_dot_l > 0.0))
         continue;
+      // Effective, not raw: with taps == 1 the lookup below is single-tap, so
+      // widening the bias for a filter footprint that is not there would break
+      // the documented "byte-identical from either end" contract.
       const double bias =
-          detail::shadow_bias(*e.view, latch_quantum, bias_scale, slope_scale, n_dot_l);
-      out[i] = detail::shadow_visibility(*e.view, e.depth, p, bias, strength);
+          detail::shadow_bias(*e.view, latch_quantum, bias_scale, slope_scale, n_dot_l,
+                              double(detail::pcf_effective_radius(pcf_radius, pcf_taps)));
+      out[i] = e.profile != nullptr ? detail::shadow_visibility_deep(*e.view, e.profile, p, bias,
+                                                                     strength, pcf_radius, pcf_taps)
+                                    : detail::shadow_visibility(*e.view, e.depth, p, bias, strength,
+                                                                pcf_radius, pcf_taps);
     }
   }
 };
@@ -368,6 +399,14 @@ const shadow_view &raycaster::shadow_map_view(std::size_t i) const {
   return _shadow_views[i];
 }
 
+cvc::image raycaster::shadow_map_profile(std::size_t i) const {
+  if (i >= _shadow_views.size())
+    throw volren_error("shadow map index out of range");
+  // Parallel to _shadow_views, but empty in shadow_mode::hard -- so index it
+  // only after the size check above has vouched for `i`.
+  return i < _shadow_profile.size() ? _shadow_profile[i] : cvc::image();
+}
+
 void raycaster::invalidate_shadow_maps() { _shadow_key = 0; }
 
 void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
@@ -375,6 +414,7 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
   if (!sh.enabled) {
     _shadow_views.clear();
     _shadow_depth.clear();
+    _shadow_profile.clear();
     _shadow_key = 0;
     return;
   }
@@ -392,6 +432,12 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
   }
   const int resolution =
       std::max(limits::min_shadow_resolution, std::min(sh.resolution, limits::max_raster_dim));
+  const bool deep = sh.mode == shadow_mode::deep;
+  // 0 == hard: fit_light_camera leaves the view's knot grid empty and the light
+  // pass captures no profile.
+  const int slices = deep ? std::max(limits::min_shadow_depth_slices,
+                                     std::min(sh.depth_slices, limits::max_shadow_depth_slices))
+                          : 0;
 
   // ---- cache key ---------------------------------------------------------
   // Everything the light pass reads, and deliberately NOT the camera: the maps
@@ -400,7 +446,14 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
   // MAIN march, not by the light pass, so they are absent here on purpose.
   fingerprint fp;
   fp.add(resolution);
-  fp.add(sh.min_occluder_opacity);
+  // The payload's shape is part of the map's identity: flipping the mode or the
+  // slice count has to rebuild, not reinterpret bytes laid out for the other.
+  fp.add(int(slices));
+  // Only hard mode consumes it -- deep mode represents a low-opacity surface
+  // rather than filtering it -- so hashing it in deep mode would rebuild for a
+  // knob the light pass did not read.
+  if (!deep)
+    fp.add(sh.min_occluder_opacity);
   fp.add(int(casters.size()));
   for (const int c : casters) {
     fp.add(c);
@@ -482,31 +535,37 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
 
   std::vector<shadow_view> views;
   std::vector<cvc::image> depths;
+  std::vector<cvc::image> profiles;
   for (const int li : casters) {
     camera light_cam;
     shadow_view sv;
     // A degenerate light direction simply casts no shadow -- consistent with
     // blinn_phong, where it already contributes nothing (ndotl == 0).
     if (!detail::fit_light_camera(_settings.lights[std::size_t(li)], scene, resolution, light_cam,
-                                  sv))
+                                  sv, slices))
       continue;
     sv.light_index = li;
 
     raycaster light_rc(_ctx);
     for (std::size_t v = 0; v < _volumes.size(); ++v) {
       volume_settings cs = _volume_settings[v];
-      // Only surfaces opaque enough to be believable occluders cast: the depth
-      // latch fires on the FIRST isosurface hit whatever that surface's
-      // opacity, so an unfiltered decorative shell (volren_bunny --shell, at
-      // opacity 0.16 and four world units out) would become the occluder and
-      // drop the entire body it wraps into its own shadow -- an offset no
-      // bias can rescue.  Transfer-function volumes still cast through the
-      // alpha latch and are not filtered.
-      cs.isosurfaces.erase(std::remove_if(cs.isosurfaces.begin(), cs.isosurfaces.end(),
-                                          [&](const isosurface &s) {
-                                            return !(s.opacity >= sh.min_occluder_opacity);
-                                          }),
-                           cs.isosurfaces.end());
+      // HARD mode only: keep just the surfaces opaque enough to be believable
+      // occluders.  The depth latch fires on the FIRST isosurface hit whatever
+      // that surface's opacity, so an unfiltered decorative shell (volren_bunny
+      // --shell, at opacity 0.16 and four world units out) would become the
+      // occluder and drop the entire body it wraps into its own shadow -- an
+      // offset no bias can rescue.  Transfer-function volumes still cast
+      // through the alpha latch and are not filtered.
+      //
+      // DEEP mode keeps every surface: the profile records a 0.16 surface as a
+      // 0.16 step and dims what it wraps by 16%.  Filtering there would delete
+      // an occluder the payload can represent exactly.
+      if (!deep)
+        cs.isosurfaces.erase(std::remove_if(cs.isosurfaces.begin(), cs.isosurfaces.end(),
+                                            [&](const isosurface &s) {
+                                              return !(s.opacity >= sh.min_occluder_opacity);
+                                            }),
+                             cs.isosurfaces.end());
       light_rc.add_volume(_volumes[v], std::move(cs));
     }
     // Inherit the content stamps, or a volume the owner announced as changed
@@ -519,12 +578,26 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
     // light pass would change nothing and cost a Blinn-Phong evaluation per
     // contribution.  Clearing the lights makes that explicit.
     ls.lights.clear();
+    // Same argument, with teeth: an ambient-occlusion cone is `samples`
+    // trilinear fetches per isosurface hit, and the light pass would pay them
+    // to compute a COLOUR it discards.  Clearing them keeps the map's cost
+    // independent of the ambient rig -- and cannot change the map, which is a
+    // function of accumulated alpha alone.
+    ls.ao = ao_settings();
+    ls.ambient_hemisphere = hemisphere_ambient();
     // A depth map has no color to filter, and the supersampled resolve keeps
     // the NEAREST sub-sample depth -- which would dilate every occluder by
     // half a pixel of its silhouette.  One ray per texel center.
     ls.supersample = 1;
     light_rc.settings() = std::move(ls);
     light_rc.view() = light_cam;
+    // Ask the light pass for the transmittance profile.  Sound only because
+    // light_cam is ORTHOGRAPHIC: every ray shares direction == forward and
+    // starts on the eye plane, so a contribution's ray parameter t IS its
+    // light-space depth -- the same quantity shadow_view::project() returns.
+    light_rc._profile_req.slices = slices;
+    light_rc._profile_req.z_near = sv.depth_min;
+    light_rc._profile_req.dz = sv.slice_dz;
     // NEVER backend::cuda (strict), even when the parent asked for it: the
     // light pass is an INTERNAL pass and can fall outside the device scope for
     // reasons the caller cannot control, and failing the whole frame because
@@ -542,10 +615,26 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
     frame lf = light_rc.render();
     views.push_back(sv);
     depths.push_back(lf.depth);
+    profiles.push_back(light_rc._profile_out);
   }
+
+  // Drop the superseded rasters from the resident device cache BEFORE letting
+  // go of them.  The cache retires a stale block only when the same key
+  // (device, host pointer, length) comes back with a new generation, and a
+  // rebuild allocates fresh cvc::images -- so the replacement never lands on
+  // the old address and that check can never fire for shadow maps.  Left
+  // alone the dead block sits in the budget, evicting live volume blocks and
+  // pinning a host raster nobody will read again.
+  for (const cvc::image &d : _shadow_depth)
+    if (!d.empty())
+      raycast_cuda_forget_host_buffer(d.data());
+  for (const cvc::image &pr : _shadow_profile)
+    if (!pr.empty())
+      raycast_cuda_forget_host_buffer(pr.data());
 
   _shadow_views = std::move(views);
   _shadow_depth = std::move(depths);
+  _shadow_profile = std::move(profiles);
   _shadow_key = key;
 }
 
@@ -558,6 +647,11 @@ frame raycaster::render() {
     throw volren_error("render_settings::opacity_cutoff must be in (0, 1]");
   if (_settings.supersample < 1 || _settings.supersample > limits::max_supersample)
     throw volren_error("render_settings::supersample must be in [1, limits::max_supersample]");
+  // Refused loudly, like shadows.strength and for the same reason: a strength
+  // above 1 would drive the ambient term NEGATIVE, which is not a look, it is a
+  // caller bug.  `radius` and `samples` are resources and are clamped instead.
+  if (!(_settings.ao.strength >= 0.f) || _settings.ao.strength > 1.f)
+    throw volren_error("render_settings::ao.strength must be in [0, 1]");
   if (_settings.shadows.enabled) {
     const shadow_settings &sh = _settings.shadows;
     std::size_t casters = _settings.lights.size(); // empty list == every light casts
@@ -625,6 +719,27 @@ frame raycaster::render() {
   const double unit_step = diag / double(_settings.steps);
   const render_settings &rs = _settings;
 
+  // ---- ambient shaping: hemisphere + ambient occlusion --------------------
+  // Both shape the AMBIENT term and nothing else (detail::ambient_scale carries
+  // why), so both are inert when `ambient` is exactly 0 -- and AO is skipped
+  // outright there rather than run and multiplied away, which is the difference
+  // between "free" and "several trilinear fetches per hit for nothing".
+  const int ao_samples =
+      std::max(limits::min_ao_samples, std::min(rs.ao.samples, limits::max_ao_samples));
+  // Inverted comparisons: a NaN strength or radius leaves AO off.
+  const bool ao_active =
+      rs.ao.strength > 0.f && rs.ao.radius > 0.0 && rs.ambient != 0.f && !std::isnan(rs.ambient);
+  for (prepared_volume &p : prep)
+    p.ao_ok = ao_active && p.vs->distance_field && p.any_iso;
+  // With neither shaping term live, every shading site passes the SAME flat
+  // triple -- built once here, outside the ray loop -- so the ambient
+  // expression is `ambient * base` exactly as it has always been.
+  bool ambient_shaped = rs.ambient_hemisphere.enabled;
+  for (const prepared_volume &p : prep)
+    ambient_shaped = ambient_shaped || p.ao_ok;
+  const std::array<float, 3> flat_ambient{rs.ambient, rs.ambient, rs.ambient};
+  const float gain = rs.shading_gain;
+
   // ---- volumetric shadows -------------------------------------------------
   // Built (or reused) BEFORE the backend split, so both marchers consume the
   // same maps: a shadow map is data, and the parity contract between the two
@@ -674,6 +789,14 @@ frame raycaster::render() {
     shadows.bias_scale = double(rs.shadows.bias_scale);
     shadows.slope_scale = double(rs.shadows.slope_scale);
     shadows.strength = rs.shadows.strength;
+    // Clamped here, once, so the per-sample lookup carries no validation and
+    // both backends filter with the same numbers.  An out-of-range radius is an
+    // implementation resource with a defensible range (like `resolution`), not
+    // a contract the caller can violate meaningfully.
+    shadows.pcf_radius = !(rs.shadows.pcf_radius > 0.f) // inverted: NaN -> 0
+                             ? 0.f
+                             : std::min(rs.shadows.pcf_radius, limits::max_pcf_radius);
+    shadows.pcf_taps = rs.shadows.pcf_taps;
     shadows.maps.resize(_shadow_views.size());
     shadows.map_of_light.assign(rs.lights.size(), -1);
     for (std::size_t i = 0; i < _shadow_views.size(); ++i) {
@@ -681,12 +804,50 @@ frame raycaster::render() {
       const cvc::image &img = _shadow_depth[i];
       shadows.maps[i].view = &_shadow_views[i];
       shadows.maps[i].depth = reinterpret_cast<const float *>(img.data());
+      if (_shadow_views[i].slices > 0 && i < _shadow_profile.size() &&
+          _shadow_profile[i].width() > 0) {
+        const cvc::image &prof = _shadow_profile[i]; // const: no COW detach
+        shadows.maps[i].profile = reinterpret_cast<const float *>(prof.data());
+      }
       const int li = _shadow_views[i].light_index;
       if (li >= 0 && std::size_t(li) < shadows.map_of_light.size())
         shadows.map_of_light[std::size_t(li)] = int(i);
     }
   }
   const std::size_t nlights = rs.lights.size();
+
+  // ---- deep-shadow profile capture ----------------------------------------
+  // A new OUTPUT of the marcher, requested only by ensure_shadow_maps() on the
+  // orthographic light-view pass (raycaster.h::profile_request).  slices == 0
+  // -- every user-driven render -- leaves `prof_px` null and both marchers on
+  // exactly the pre-deep-shadow code path.
+  //
+  // The buffer is ALLOCATED before the backend split so the device path fills
+  // the same host image: a shadow map is data, and which marcher produced it is
+  // not part of the contract.  It is PRE-FILLED only for the CPU march, below;
+  // the capture kernel writes every slot of its own pixel before it marches, so
+  // pre-filling here would cost a 17.8 MB host memset the device path throws
+  // away (7 ms at 64 slices, on a rebuild that is already the expensive frame).
+  //
+  // Pre-filling at all -- rather than relying on the march to write every slot
+  // -- is what makes the rays that return early (missed the scene box, reached
+  // no volume) correct for free: nothing occludes them, which is exactly zero
+  // alpha everywhere and a +inf terminal.
+  const int prof_slices = _profile_req.slices;
+  const double prof_z0 = _profile_req.z_near; // light-space depth of knot 0
+  const double prof_dz = _profile_req.dz;     // knot spacing
+  const std::size_t prof_plane = std::size_t(width) * std::size_t(height);
+  float *prof_px = nullptr;
+  if (prof_slices > 0) {
+    // PLANE-major (detail::shadow_visibility_deep): one width x height plane
+    // for the terminal depth, then one per knot, stacked into a single GRAY f32
+    // image of height * (slices + 1) rows.
+    _profile_out = cvc::image(width, height * (prof_slices + 1), cvc::image::pixel_format::GRAY,
+                              cvc::image::data_type::f32);
+    prof_px = reinterpret_cast<float *>(_profile_out.data());
+  } else {
+    _profile_out = cvc::image();
+  }
 
   // ---- CUDA backend ------------------------------------------------------
   // Opt-in: the default is backend::cpu, so nothing here runs for an existing
@@ -808,6 +969,7 @@ frame raycaster::render() {
         cv.window_enabled = vs.window_enabled;
         cv.window_min = vs.window_min;
         cv.window_max = vs.window_max;
+        cv.ao_ok = p.ao_ok;
       }
 
       req.light_count = int(rs.lights.size());
@@ -837,11 +999,30 @@ frame raycaster::render() {
       req.depth_alpha_threshold = rs.depth_alpha_threshold;
       req.ambient = rs.ambient;
       req.two_sided = rs.two_sided_lighting;
+      req.ambient_shaped = ambient_shaped;
+      req.ambient_hemisphere = rs.ambient_hemisphere.enabled;
+      for (int c = 0; c < 3; ++c) {
+        req.ambient_sky[c] = rs.ambient_hemisphere.sky[c];
+        req.ambient_ground[c] = rs.ambient_hemisphere.ground[c];
+        req.ambient_up[c] = rs.ambient_hemisphere.up[c];
+      }
+      req.ao_strength = rs.ao.strength;
+      req.ao_radius = rs.ao.radius;
+      req.ao_samples = ao_samples;
+      req.shading_gain = gain;
+      req.specular = rs.specular;
       req.background[0] = rs.background[0];
       req.background[1] = rs.background[1];
       req.background[2] = rs.background[2];
       req.tf_shininess = defaults::shininess;
       req.supersample = rs.supersample;
+
+      // Deep-shadow profile capture: the device writes the same host image the
+      // CPU marcher would have.  Only ever set on the light-view pass.
+      req.profile_slices = prof_slices;
+      req.profile_z_near = prof_z0;
+      req.profile_dz = prof_dz;
+      req.profile_out = prof_px;
 
       // The maps ride as HOST pointers into _shadow_depth, which outlives the
       // call; raycast_cuda stages them into one device allocation like `lut`.
@@ -862,12 +1043,37 @@ frame raycaster::render() {
           cm.height = sv.height;
           cm.light_index = sv.light_index;
           cm.depth = shadows.maps[i].depth;
+          // A deep map rides as one more host raster, staged exactly like the
+          // depth one; `profile` null keeps the kernel on the hard lookup.
+          cm.profile = shadows.maps[i].profile;
+          cm.slices = shadows.maps[i].profile != nullptr ? sv.slices : 0;
+          cm.depth_min = sv.depth_min;
+          cm.slice_dz = sv.slice_dz;
+          // Both rasters go into the resident device cache.  The pin co-owns
+          // the host images the same way cuda_volume::pin co-owns a voxel
+          // block: cvc::image is refcounted copy-on-write, so while the cache
+          // holds a copy the bytes cannot move under it and a rebuild -- which
+          // always allocates fresh images -- lands on a different key.  The
+          // fingerprint rides as the generation so the entry is invalidated by
+          // content, not only by address, at zero cost.
+          cm.generation = _shadow_key;
+          cm.pin = std::make_shared<shadow_map_pin>(
+              _shadow_depth[i], i < _shadow_profile.size() ? _shadow_profile[i] : cvc::image());
         }
         req.shadow_strength = shadows.strength;
         // The constant term is scene-scaled, not view-scaled, so it is folded
         // host-side and the kernel only adds the per-sample slope term.
         req.shadow_bias_constant = shadows.bias_scale * shadows.latch_quantum;
         req.shadow_slope_scale = shadows.slope_scale;
+        // The filter's clamped half-width and its bias widening factor, both
+        // frame constants, folded here so the kernel re-derives neither.  A
+        // half-width of 0 keeps the device on the single-tap lookup.
+        req.shadow_pcf_half = detail::pcf_half_width(shadows.pcf_radius, shadows.pcf_taps);
+        req.shadow_pcf_radius = double(shadows.pcf_radius);
+        // Same effective-radius rule as the CPU path (detail::shadow_bias):
+        // taps == 1 is a single-tap lookup, so it must not widen the bias.
+        req.shadow_pcf_widen =
+            1.0 + 2.0 * double(detail::pcf_effective_radius(shadows.pcf_radius, shadows.pcf_taps));
       }
 
       try {
@@ -892,6 +1098,14 @@ frame raycaster::render() {
     }
   }
 
+  // The CPU march reached: pre-fill the profile it is about to write into (see
+  // the allocation above for why this is not done before the backend split).
+  if (prof_px != nullptr) {
+    for (std::size_t i = 0; i < prof_plane; ++i)
+      prof_px[i] = std::numeric_limits<float>::infinity();
+    std::fill(prof_px + prof_plane, prof_px + prof_plane * std::size_t(prof_slices + 1), 0.f);
+  }
+
   frame out;
   out.color = cvc::image(width, height, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   out.depth = cvc::image(width, height, cvc::image::pixel_format::GRAY, cvc::image::data_type::f32);
@@ -899,6 +1113,13 @@ frame raycaster::render() {
   float *depth_px = reinterpret_cast<float *>(out.depth.data());
 
   const std::size_t nvol = prep.size();
+
+  // Does ANY volume ask for a transfer-function sample?  An isosurface-only
+  // scene has nothing for the march loop to composite, so it is skipped
+  // wholesale below -- the hits still merge in through composite_hits_up_to.
+  bool any_tf = false;
+  for (const prepared_volume &p : prep)
+    any_tf = any_tf || p.vs->shaded || p.vs->unshaded;
 
   // Per-tile scratch, reused across the tile's rays: the spline-gradient
   // neighborhood cache (valid across rays -- it is keyed on the cell index)
@@ -934,7 +1155,10 @@ frame raycaster::render() {
     float depth;
   };
 
-  const auto march_ray = [&](const ray &r, tile_scratch &scratch, ray_result &out) {
+  // `prof` is this ray's slot in the pre-filled deep-shadow payload -- the
+  // terminal depth, with knot k+1 at prof[(1 + k) * prof_plane] -- or null for
+  // every ordinary render.
+  const auto march_ray = [&](const ray &r, tile_scratch &scratch, ray_result &out, float *prof) {
     out.r = out.g = out.b = out.a = 0.f;
     out.depth = std::numeric_limits<float>::infinity();
 
@@ -985,14 +1209,39 @@ frame raycaster::render() {
     float acc_r = 0.f, acc_g = 0.f, acc_b = 0.f, acc_a = 0.f;
     bool depth_set = false;
 
+    // ---- deep-shadow profile capture state --------------------------------
+    // Contributions reach composite() in non-decreasing t (the march loop is
+    // monotone and composite_hits_up_to drains the hit stream ahead of each
+    // step), so the profile streams out with a single forward cursor -- no
+    // per-ray slice array on either backend, and each knot written exactly
+    // once.  `prof_done` freezes it at the terminal depth.
+    int prof_cursor = 0;
+    bool prof_done = false;
+
     // Only the reachable volumes need resetting -- the rest are never visited
-    // by this ray, so their tracker is never read.
-    for (const active_volume &a : scratch.active)
-      scratch.last_cell[a.index] = {-1, -1, -1};
+    // by this ray, so their tracker is never read.  (An isosurface-only scene
+    // never runs the march loop at all, so it never reads them either.)
+    if (any_tf)
+      for (const active_volume &a : scratch.active)
+        scratch.last_cell[a.index] = {-1, -1, -1};
 
     // Front-to-back associated-color compositing; also latches the depth map
     // the first time accumulated alpha crosses the threshold.
     const auto composite = [&](const std::array<float, 3> &c, float a, double t) {
+      // The deep-shadow capture is written so that an ordinary render evaluates
+      // NOTHING extra here: the light-space depth is computed inside the capture
+      // branches, not hoisted above them.  `t * z_scale` rather than plain t so
+      // the terminal depth below is the SAME expression frame::depth latches,
+      // which is what lets an opaque occluder's deep lookup agree with the hard
+      // map bit for bit.
+      if (prof != nullptr && !prof_done) {
+        // Every knot strictly in front of this contribution closes at the alpha
+        // accumulated so far.
+        const double zd = t * z_scale;
+        while (prof_cursor < prof_slices && prof_z0 + double(prof_cursor + 1) * prof_dz < zd)
+          prof[std::size_t(1 + prof_cursor++) * prof_plane] = acc_a;
+      }
+      const float pre = acc_a; // read before the update; used only when capturing
       const float ratio = a * (1.f - acc_a);
       acc_r += c[0] * ratio;
       acc_g += c[1] * ratio;
@@ -1001,6 +1250,17 @@ frame raycaster::render() {
       if (!depth_set && acc_a >= rs.depth_alpha_threshold) {
         out.depth = float(t * z_scale);
         depth_set = true;
+      }
+      if (prof != nullptr && !prof_done && acc_a >= rs.opacity_cutoff) {
+        // The light ray is done here, at an EXACT depth.  Record it, and freeze
+        // the remaining knots at the alpha from BEFORE this contribution: the
+        // slices describe only what lies strictly in front of the terminal
+        // depth, so a receiver ahead of an opaque occluder is never dimmed by
+        // the interpolation ramping into the step.
+        prof[0] = float(t * z_scale);
+        while (prof_cursor < prof_slices)
+          prof[std::size_t(1 + prof_cursor++) * prof_plane] = pre;
+        prof_done = true;
       }
     };
 
@@ -1013,6 +1273,21 @@ frame raycaster::render() {
     // into the compositing stream at their ray parameter, preserving the
     // front-to-back interleave with the transfer-function samples.
     scratch.hits.clear();
+
+    // Insert keeping `hits` sorted by t, AFTER any equal-t entry.  That is
+    // exactly the order the collect-then-stable_sort this replaces produced
+    // (insertion sort and stable_sort agree on the unique stable ordering),
+    // but it is available DURING collection, which is what lets the DDA below
+    // ask "is everything nearer than this cell already opaque?".  Returns the
+    // index the hit landed at.
+    const auto push_hit = [&](const iso_hit &h) {
+      std::size_t pos = scratch.hits.size();
+      while (pos > 0 && scratch.hits[pos - 1].t > h.t)
+        --pos;
+      scratch.hits.insert(scratch.hits.begin() + std::ptrdiff_t(pos), h);
+      return pos;
+    };
+
     for (const active_volume &av : scratch.active) {
       const std::size_t v = av.index;
       const prepared_volume &p = prep[v];
@@ -1069,9 +1344,33 @@ frame raycaster::render() {
         }
       }
 
+      // ---- Occlusion cutoff for this walk ---------------------------------
+      // Collection and compositing are separate phases, so the march loop's
+      // opacity cutoff -- which bounds VISIBLE work -- cannot bound the DDA:
+      // without this the ray walks every cell of every volume even when the
+      // very first surface it crossed is opaque.  `hits` is kept sorted, so
+      // the alpha the strictly-nearer hits will already have accumulated by
+      // the time anything found from here on composites is just a forward scan
+      // over that prefix, run with the exact recurrence composite() uses.
+      // Once it reaches the cutoff, composite_hits_up_to would refuse every
+      // remaining hit of this walk.  Alpha only ever grows (later volumes and
+      // transfer-function samples add to it), so a prefix that saturates now
+      // still saturates then.
+      std::size_t sat_cursor = 0;
+      float sat_alpha = 0.f;
+
       const std::int64_t max_cells = dims[0] + dims[1] + dims[2] + 3;
       double t_cell = tv0;
       for (std::int64_t n = 0; n < max_cells && t_cell <= tv1; ++n) {
+        // Hits found from here on have t >= t_cell, so everything already
+        // recorded strictly nearer than t_cell composites ahead of them.
+        while (sat_cursor < scratch.hits.size() && scratch.hits[sat_cursor].t < t_cell) {
+          const float a = scratch.hits[sat_cursor++].opacity;
+          sat_alpha += a * (1.f - sat_alpha);
+        }
+        if (sat_alpha >= rs.opacity_cutoff)
+          break;
+
         float vals[8];
         p.grid.corners(idx[0], idx[1], idx[2], vals);
         float min_val = vals[0], max_val = vals[0];
@@ -1115,10 +1414,31 @@ frame raycaster::render() {
             shadows.visibility(hit_p, normal, scratch.vis.data(), nlights);
             vis = scratch.vis.data();
           }
+          // Ambient occlusion, in the volume's LOCAL frame: the cone marches a
+          // signed distance field, and the hit point and the outward direction
+          // are already local here (the DDA solved the ray there), so no
+          // round trip through world space is needed or wanted.
+          float ao_vis = 1.f;
+          if (p.ao_ok)
+            ao_vis =
+                1.f - rs.ao.strength * detail::sdf_occlusion(p.grid, lorg + ldir * t_hit,
+                                                             detail::local_outward(p.grid, grad),
+                                                             surf.value, rs.ao.radius, ao_samples);
+          const std::array<float, 3> amb =
+              ambient_shaped
+                  ? detail::ambient_scale(rs.ambient, rs.ambient_hemisphere, normal, ao_vis)
+                  : flat_ambient;
           const std::array<float, 3> shaded =
               detail::blinn_phong(surf.color, normal, view_vec, rs.lights, rs.two_sided_lighting,
-                                  rs.ambient, surf.shininess, vis);
-          scratch.hits.push_back({t_hit, shaded, surf.opacity});
+                                  amb, surf.shininess, gain, rs.specular, vis);
+          if (push_hit({t_hit, shaded, surf.opacity}) < sat_cursor) {
+            // The hit landed BEHIND the occlusion scan cursor, which the
+            // walk's monotone t only allows if the cell solve returned a t a
+            // hair below the cell's own entry parameter.  sat_alpha no longer
+            // describes hits[0, sat_cursor), so rebuild it.
+            sat_cursor = 0;
+            sat_alpha = 0.f;
+          }
         }
 
         // Advance to the neighboring cell across the nearest boundary.
@@ -1134,8 +1454,9 @@ frame raycaster::render() {
         t_max[axis] += t_delta[axis];
       }
     }
-    std::stable_sort(scratch.hits.begin(), scratch.hits.end(),
-                     [](const iso_hit &a, const iso_hit &b) { return a.t < b.t; });
+    // No sort here: push_hit already maintains the stable t order the
+    // stable_sort this replaces produced, because the occlusion cutoff above
+    // has to read the ordering while collection is still running.
     std::size_t hit_cursor = 0;
 
     const auto composite_hits_up_to = [&](double t_limit) {
@@ -1153,92 +1474,115 @@ frame raycaster::render() {
       }
     };
 
-    for (double t = t0; t <= t1 && acc_a < rs.opacity_cutoff; t += unit_step) {
-      composite_hits_up_to(t);
-      const vec3d pnt = r.origin + r.direction * t;
-      if (!rs.cut_planes.empty() && culled_by_planes(rs.cut_planes, pnt))
-        continue;
-
-      for (const active_volume &av : scratch.active) {
-        // Skip the volumes whose slab window this step is outside of: the
-        // to_local_point + cell_index below could only miss there.
-        if (t < av.t_lo || t > av.t_hi)
+    // An isosurface-only scene has nothing for the march loop to composite: its
+    // body would run the window test, to_local_point and cell_index at every
+    // one of `steps` samples and take neither transfer-function branch.
+    // Skipping straight to the tail composites the same hits in the same order
+    // against the same t limit, so the frame is byte-identical.
+    if (any_tf) {
+      for (double t = t0; t <= t1 && acc_a < rs.opacity_cutoff; t += unit_step) {
+        composite_hits_up_to(t);
+        const vec3d pnt = r.origin + r.direction * t;
+        if (!rs.cut_planes.empty() && culled_by_planes(rs.cut_planes, pnt))
           continue;
-        const std::size_t v = av.index;
-        const prepared_volume &p = prep[v];
-        const volume_settings &vs = *p.vs;
 
-        // Sample in volume-local space (the scene-graph model transform).
-        const vec3d lpnt = p.to_local_point(pnt);
-        std::int64_t idx[3];
-        if (!p.grid.cell_index(lpnt, idx))
-          continue;
-        std::array<std::int64_t, 3> &last = scratch.last_cell[v];
-        if (idx[0] == last[0] && idx[1] == last[1] && idx[2] == last[2])
-          continue; // one contribution per cell (the volren sampling model)
-        last = {idx[0], idx[1], idx[2]};
+        for (const active_volume &av : scratch.active) {
+          // Skip the volumes whose slab window this step is outside of: the
+          // to_local_point + cell_index below could only miss there.
+          if (t < av.t_lo || t > av.t_hi)
+            continue;
+          const std::size_t v = av.index;
+          const prepared_volume &p = prep[v];
+          const volume_settings &vs = *p.vs;
 
-        float vals[8];
-        float min_val = 0.f, max_val = 0.f;
-        bool have_corners = false;
-        const auto fetch_corners = [&] {
-          if (have_corners)
-            return;
-          p.grid.corners(idx[0], idx[1], idx[2], vals);
-          min_val = max_val = vals[0];
-          for (int j = 1; j < 8; ++j) {
-            min_val = std::min(min_val, vals[j]);
-            max_val = std::max(max_val, vals[j]);
+          // Sample in volume-local space (the scene-graph model transform).
+          const vec3d lpnt = p.to_local_point(pnt);
+          std::int64_t idx[3];
+          if (!p.grid.cell_index(lpnt, idx))
+            continue;
+          std::array<std::int64_t, 3> &last = scratch.last_cell[v];
+          if (idx[0] == last[0] && idx[1] == last[1] && idx[2] == last[2])
+            continue; // one contribution per cell (the volren sampling model)
+          last = {idx[0], idx[1], idx[2]};
+
+          float vals[8];
+          float min_val = 0.f, max_val = 0.f;
+          bool have_corners = false;
+          const auto fetch_corners = [&] {
+            if (have_corners)
+              return;
+            p.grid.corners(idx[0], idx[1], idx[2], vals);
+            min_val = max_val = vals[0];
+            for (int j = 1; j < 8; ++j) {
+              min_val = std::min(min_val, vals[j]);
+              max_val = std::max(max_val, vals[j]);
+            }
+            have_corners = true;
+          };
+
+          // (Isosurface hits were collected exactly by the DDA above and are
+          // merged in by composite_hits_up_to.)
+
+          // 2. Unshaded transfer function (legacy COL_DENSITY).
+          if (vs.unshaded) {
+            fetch_corners();
+            const bool in_window = !vs.window_enabled || (double(min_val) <= vs.window_max &&
+                                                          double(max_val) >= vs.window_min);
+            if (in_window) {
+              float w[3];
+              p.grid.local_weights(lpnt, idx[0], idx[1], idx[2], w);
+              const float den = detail::trilinear(w, vals);
+              const rgba_f s = p.tf.sample(den);
+              if (s.a > 0.f)
+                composite({s.r, s.g, s.b}, s.a, t);
+            }
           }
-          have_corners = true;
-        };
 
-        // (Isosurface hits were collected exactly by the DDA above and are
-        // merged in by composite_hits_up_to.)
-
-        // 2. Unshaded transfer function (legacy COL_DENSITY).
-        if (vs.unshaded) {
-          fetch_corners();
-          const bool in_window = !vs.window_enabled || (double(min_val) <= vs.window_max &&
-                                                        double(max_val) >= vs.window_min);
-          if (in_window) {
+          // 3. Shaded transfer function (legacy RAY_CASTING).
+          if (vs.shaded) {
+            fetch_corners();
             float w[3];
             p.grid.local_weights(lpnt, idx[0], idx[1], idx[2], w);
             const float den = detail::trilinear(w, vals);
+            if (vs.window_enabled && (double(den) < vs.window_min || double(den) > vs.window_max))
+              continue;
+            const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
             const rgba_f s = p.tf.sample(den);
-            if (s.a > 0.f)
-              composite({s.r, s.g, s.b}, s.a, t);
-          }
-        }
-
-        // 3. Shaded transfer function (legacy RAY_CASTING).
-        if (vs.shaded) {
-          fetch_corners();
-          float w[3];
-          p.grid.local_weights(lpnt, idx[0], idx[1], idx[2], w);
-          const float den = detail::trilinear(w, vals);
-          if (vs.window_enabled && (double(den) < vs.window_min || double(den) > vs.window_max))
-            continue;
-          const vec3d grad = scratch.spline[v].evaluate(p.grid, idx, w);
-          const rgba_f s = p.tf.sample(den);
-          const float a = s.a * vs.gradient_ramp.factor(length(grad));
-          if (a > 0.f) {
-            const vec3d normal = normalized(p.normal_to_world(grad));
-            const float *vis = nullptr;
-            if (shadows.active) {
-              shadows.visibility(pnt, normal, scratch.vis.data(), nlights);
-              vis = scratch.vis.data();
+            const float a = s.a * vs.gradient_ramp.factor(length(grad));
+            if (a > 0.f) {
+              const vec3d normal = normalized(p.normal_to_world(grad));
+              const float *vis = nullptr;
+              if (shadows.active) {
+                shadows.visibility(pnt, normal, scratch.vis.data(), nlights);
+                vis = scratch.vis.data();
+              }
+              // NO ambient-occlusion cone here: a shaded transfer-function
+              // sample fires once per CELL ENTERED -- hundreds of times along a
+              // ray, against one or two isosurface hits -- and "distance to the
+              // surface" has no meaning for a medium with no surface.  The
+              // hemisphere still applies; it costs a dot product.
+              const std::array<float, 3> amb =
+                  ambient_shaped
+                      ? detail::ambient_scale(rs.ambient, rs.ambient_hemisphere, normal, 1.f)
+                      : flat_ambient;
+              const std::array<float, 3> shaded = detail::blinn_phong(
+                  {s.r, s.g, s.b}, normal, view_vec, rs.lights, rs.two_sided_lighting, amb,
+                  defaults::shininess, gain, rs.specular, vis);
+              composite(shaded, a, t);
             }
-            const std::array<float, 3> shaded =
-                detail::blinn_phong({s.r, s.g, s.b}, normal, view_vec, rs.lights,
-                                    rs.two_sided_lighting, rs.ambient, defaults::shininess, vis);
-            composite(shaded, a, t);
           }
         }
       }
     }
     // Hits between the last sample and the exit point.
     composite_hits_up_to(t1);
+
+    // The ray ended without saturating: every remaining knot sees the whole
+    // accumulation.  (A ray that returned early above never got here and keeps
+    // the pre-filled zeros, which is the same statement.)
+    if (prof != nullptr && !prof_done)
+      while (prof_cursor < prof_slices)
+        prof[std::size_t(1 + prof_cursor++) * prof_plane] = acc_a;
 
     out.r = acc_r;
     out.g = acc_g;
@@ -1292,6 +1636,9 @@ frame raycaster::render() {
   const auto render_ray = [&](int px, int py, tile_scratch &scratch) {
     unsigned char *cpx = color_px + (std::size_t(py) * width + px) * 4;
     float *dpx = depth_px + (std::size_t(py) * width + px);
+    // The light pass forces supersample == 1, so a captured pixel owns exactly
+    // one ray and one payload -- there is no resolve to define for a profile.
+    float *prof = prof_px ? prof_px + std::size_t(py) * width + px : nullptr;
 
     float sum_r = 0.f, sum_g = 0.f, sum_b = 0.f, sum_a = 0.f;
     float nearest = std::numeric_limits<float>::infinity();
@@ -1300,7 +1647,7 @@ frame raycaster::render() {
       for (int si = 0; si < ss; ++si) {
         ray_result rr;
         march_ray(rays.at(px, py, (double(si) + 0.5) / double(ss), (double(sj) + 0.5) / double(ss)),
-                  scratch, rr);
+                  scratch, rr, prof);
         // Over-blend the remaining transparency with the background (replaces
         // the legacy divide-by-alpha normalization of saturated rays), then
         // accumulate the resolved straight RGBA.

@@ -65,13 +65,22 @@ inline constexpr int max_iso_hits_per_ray = 32;
 // Why 16 and not more: the per-volume block (its transform, LUT descriptor and
 // isosurface table) is ~600 bytes, so 16 of them no longer fit in the 4 KB
 // kernel parameter limit -- they live in device memory and the kernel takes a
-// pointer (see dev_volume in raycast.cu).  What 16 really buys is bounded
-// PER-THREAD state: the march needs a last-cell tracker and a cull window per
-// volume, i.e. 16 * (3 * 8 + 2 * 8) = 640 bytes of local memory per ray on top
-// of the spline cache and the hit buffer, for ~2.2 KB per thread.  Doubling
-// the cap doubles that tail and costs occupancy on every scene, including
-// single-volume ones; 16 covers the scenes this renderer is actually driven
-// with (VolRenNode's 3x3 instancing grid tops out at 9) with headroom.
+// pointer (see dev_volume in raycast.cu).  It also bounds PER-THREAD state:
+// the march needs a last-cell tracker and a cull window per volume, i.e.
+// 16 * (3 * 8 + 2 * 8) = 640 bytes of local memory per ray on top of the
+// spline cache and the hit buffer.  The measured frame on sm_75 is 3232 bytes
+// per thread, 255 registers, 12 bytes of spill.
+//
+// What this comment used to claim -- that a bigger tail "costs occupancy on
+// every scene" and is therefore the reason for 16 -- is measurably wrong on
+// this hardware, and is left corrected here rather than deleted because it is
+// a tempting thing to re-derive.  Dropping the 576-byte deriv tensor from the
+// spline cache (frame 3232 -> 2656) moved a 9-volume frame by 1.006x: nothing.
+// The kernel is issue-bound, not occupancy-bound, and forcing occupancy the
+// other way is actively harmful -- -maxrregcount=64 spills 5284 bytes and runs
+// 4.9x SLOWER.  So raising the cap would be nearly free; 16 stands because it
+// covers the scenes this renderer is actually driven with (VolRenNode's 3x3
+// instancing grid tops out at 9) with headroom, not because of occupancy.
 inline constexpr int max_volumes = 16;
 // Default byte budget of the resident device volume cache.  One 512^3 UShort
 // volume is 256 MB, so this holds a couple of large volumes or a whole grid of
@@ -111,7 +120,9 @@ struct cuda_cut_plane {
 
 // One built light-view shadow map: the flattened shadow_view plus a HOST
 // pointer to its raw f32 depth raster.  The host stages every map's raster
-// into one device allocation, so `depth` need only stay valid for the call.
+// into one device allocation, but `pin` must co-own the host bytes for as long as the caller keeps
+// handing the same pointers in -- the rasters go through the RESIDENT block
+// cache, which keys on the host pointer (see `pin`/`generation` below).
 struct cuda_shadow_map {
   double eye[3] = {0.0, 0.0, 0.0};   // on the light's eye PLANE
   double right[3] = {1.0, 0.0, 0.0}; // orthonormal light-view basis
@@ -122,6 +133,26 @@ struct cuda_shadow_map {
   int width = 0, height = 0;
   int light_index = -1;         // index into lights[]
   const float *depth = nullptr; // width*height floats, row-major, +inf on a miss
+
+  // Both rasters go through the RESIDENT device block cache (see below), which
+  // is what keeps a steady-state frame free of shadow-map traffic.  `pin` must
+  // co-own the host bytes for as long as the caller keeps handing the same
+  // pointers in -- a `cvc::image` copy does, since the image is a refcounted
+  // copy-on-write buffer.  `generation` is bumped by the caller whenever the
+  // maps were rebuilt; the raycaster passes its shadow-map fingerprint.
+  std::shared_ptr<void> pin;
+  std::uint64_t generation = 0;
+
+  // ---- shadow_mode::deep (shadow.h) ---------------------------------------
+  // `slices` 0 leaves the kernel on the hard single-scalar lookup -- and on
+  // exactly the instruction stream it ran before deep maps existed.  Otherwise
+  // `profile` is a HOST pointer to width*height*(slices+1) floats, staged into
+  // device memory alongside `depth`, and the knot grid is uniform in
+  // light-space depth: knot j at depth_min + j * slice_dz.  Layout and per-slot
+  // meaning: detail::shadow_visibility_deep.
+  int slices = 0;
+  double depth_min = 0.0, slice_dz = 0.0;
+  const float *profile = nullptr;
 };
 
 // One volume of the scene, resolved on the host exactly the way
@@ -171,6 +202,11 @@ struct cuda_volume {
   bool window_enabled = false;
   double window_min = 0.0;
   double window_max = 0.0;
+
+  // volume_settings::distance_field AND the scene's AO settings being live --
+  // resolved on the host so the kernel needs no second predicate.  False keeps
+  // this volume's isosurface hits on the pre-AO shading path exactly.
+  bool ao_ok = false;
 };
 
 // Everything one device render needs.
@@ -195,9 +231,20 @@ struct raycast_cuda_request {
   float shadow_strength = 1.0f;
   // bias_scale * latch_quantum, folded on the host because it is scene-scaled and
   // constant over the frame; the kernel adds only the per-sample slope term
-  // shadow_slope_scale * texel_world * tan(theta).
+  // shadow_slope_scale * texel_world * tan(theta) * shadow_pcf_widen.
   double shadow_bias_constant = 0.0;
   double shadow_slope_scale = 1.0;
+  // ---- soft shadows (shadow_settings::pcf_radius / pcf_taps) --------------
+  // `shadow_pcf_half` 0 -- the default and every unfiltered render -- keeps the
+  // kernel on the single-tap comparison, i.e. on exactly the instruction stream
+  // it ran before PCF existed.  Otherwise the lookup box-averages
+  // (2 * half + 1)^2 taps spread over +/- shadow_pcf_radius texels.  The half
+  // width and the bias widening factor (1 + 2 * radius) are BOTH folded on the
+  // host: they are frame constants, and the kernel should not be re-deriving a
+  // clamp per sample.
+  int shadow_pcf_half = 0;
+  double shadow_pcf_radius = 0.0;
+  double shadow_pcf_widen = 1.0;
 
   // ---- march / compositing ------------------------------------------------
   double scene_min[3] = {0.0, 0.0, 0.0}; // scene_bounds(), the marched AABB
@@ -208,6 +255,23 @@ struct raycast_cuda_request {
   float depth_alpha_threshold = defaults::depth_alpha_threshold;
   float ambient = 0.0f;
   bool two_sided = false;
+  // ---- ambient shaping (settings.h hemisphere_ambient / ao_settings) -------
+  // `ambient_shaped` 0 -- neither the hemisphere nor AO live -- makes every
+  // shading site pass the flat {ambient, ambient, ambient} triple, which is the
+  // pre-shaping expression bit for bit.  The AO fields are read only by volumes
+  // whose cuda_volume::ao_ok is set.
+  bool ambient_shaped = false;
+  bool ambient_hemisphere = false;
+  float ambient_sky[3] = {1.f, 1.f, 1.f};
+  float ambient_ground[3] = {1.f, 1.f, 1.f};
+  double ambient_up[3] = {0.0, 0.0, 1.0}; // normalized on use
+  float ao_strength = 0.0f;
+  double ao_radius = 0.0;
+  int ao_samples = defaults::ao_samples; // already clamped by the caller
+  // Output gain, then the per-channel clamp (render_settings::shading_gain).
+  float shading_gain = defaults::shading_gain;
+  // Scene-level specular reflectance (render_settings::specular).
+  float specular = defaults::specular;
   float background[3] = {0.f, 0.f, 0.f};
   // Shininess used for shaded TF samples (isosurfaces carry their own).
   float tf_shininess = defaults::shininess;
@@ -216,6 +280,25 @@ struct raycast_cuda_request {
   // marches supersample^2 rays through it, so nothing about the device path's
   // per-thread footprint or its scope limits depends on this value.
   int supersample = defaults::supersample;
+
+  // ---- deep-shadow profile capture (the LIGHT-VIEW pass only) -------------
+  // > 0 asks the kernel for a second output: per ray, (profile_slices + 1)
+  // floats in the detail::shadow_visibility_deep layout, written straight into
+  // `profile_out` (a HOST buffer of width*height*(profile_slices+1) floats,
+  // NOT pre-filled: the kernel writes every terminal and alpha itself.
+  // (The CPU path fills its own buffer after the CUDA branch has returned,
+  // because pre-filling before the split would cost a host memset the device
+  // path throws away.)).  Requires
+  // supersample == 1 and an ORTHOGRAPHIC camera -- a ray parameter is a
+  // light-space depth only there -- and raycast_cuda() rejects anything else.
+  //
+  // Capture is a KERNEL TEMPLATE PARAMETER, not a runtime branch: the ordinary
+  // render launches the same instantiation it always did, with no capture state
+  // in registers, no extra predicate in the compositing recurrence and an
+  // unchanged per-thread frame.
+  int profile_slices = 0;
+  double profile_z_near = 0.0, profile_dz = 0.0;
+  float *profile_out = nullptr;
 };
 
 // False when libcvc was built without CUDA, or when no CUDA device is usable.
@@ -229,7 +312,7 @@ bool raycast_cuda_available();
 frame raycast_cuda(const raycast_cuda_request &req);
 
 // ---------------------------------------------------------------------------
-// Device volume cache
+// Resident device block cache
 // ---------------------------------------------------------------------------
 // Voxel blocks stay resident on the device across renders and across raycaster
 // instances, keyed on (device, host pointer, byte length) and validated
@@ -243,18 +326,46 @@ frame raycast_cuda(const raycast_cuda_request &req);
 // unchecked legacy escape hatch (voxels::data_ptr()), which the owner must
 // announce with raycaster::invalidate_device_volume().
 //
+// SHADOW-MAP RASTERS share this cache, under the same key and the same
+// argument (a cvc::image is likewise a refcounted copy-on-write buffer).  They
+// used to be re-staged every render, which was defensible while a map was one
+// 1 MB depth raster; a deep map's transmittance profile is 17.8 MB at the
+// defaults, and re-staging it per frame measured at +6.7 ms against a 6 ms
+// pass -- the map is rebuilt only when the LIGHT PASS's inputs change, so
+// paying for it per frame was paying for nothing.  The accessors below
+// therefore report voxels AND shadow rasters, and the two compete for one
+// budget under one LRU.
+//
 // Entries are evicted least-recently-used once the resident total would exceed
 // the budget; an entry in use by an in-flight render is never evicted.
 void raycast_cuda_set_cache_budget(std::size_t bytes);
 std::size_t raycast_cuda_cache_budget();
 // Bytes currently resident across every device (0 without CUDA).
 std::size_t raycast_cuda_cache_bytes();
-// Voxel bytes actually pushed host-to-device since process start.  A render
+// Bytes actually pushed host-to-device since process start.  This counts
+// EVERY block the resident cache stages, not only voxels: shadow-map depth
+// rasters and deep profiles share the same cache and the same counter.  A render
 // that only moved the camera adds nothing to it -- which is the whole claim
 // the cache makes, so it is worth being able to assert.
 std::uint64_t raycast_cuda_cache_upload_bytes();
 // Free every cached block not in use by an in-flight render.  Safe to call
 // without a device; never throws.
+// Retire any resident block staged from `host`, releasing both its device
+// bytes and the co-owning `pin` on the host buffer.
+//
+// The cache retires a stale entry only when the SAME key (device, host
+// pointer, length) reappears with a new generation.  A shadow-map rebuild
+// allocates fresh cvc::image rasters, so the new map can never land on the old
+// address -- the key changes with the generation and the superseded entry is
+// never reached by that check.  Left alone it sits in the budget until LRU
+// eviction, meanwhile evicting live volume blocks and pinning a host raster
+// nobody will read again.  The owner therefore forgets the old rasters
+// explicitly before dropping them.
+//
+// A block still in flight is retired logically and freed when its last user
+// releases, so this is safe to call while another render is mid-kernel.
+void raycast_cuda_forget_host_buffer(const void *host);
+
 void raycast_cuda_clear_cache();
 
 } // namespace volren
