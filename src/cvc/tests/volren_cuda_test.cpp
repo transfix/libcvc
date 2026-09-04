@@ -593,9 +593,12 @@ TEST_F(VolrenCudaTest, MoreVolumesThanTheCapFallBackUnderAutomatic) {
   vs.unshaded = true;
   vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
   vs.tf_auto_domain = false;
-  const cvc::volume small = makeSphereVolume(ctx, 16);
+  // NOT named `small`: the Windows SDK's rpcndr.h has `#define small char`,
+  // so `cvc::volume small` becomes `cvc::volume char` and MSVC rejects the
+  // whole translation unit (this is how it first broke the Windows build).
+  const cvc::volume tiny = makeSphereVolume(ctx, 16);
   for (int i = 0; i <= cvc::volren::cuda_limits::max_volumes; ++i)
-    rc.add_volume(small, vs);
+    rc.add_volume(tiny, vs);
 
   // One past the cap: an explicit request is an error (never a silent CPU
   // march), automatic degrades quietly.
@@ -1214,6 +1217,164 @@ TEST_F(VolrenCudaTest, InterVolumeShadowParity) {
   expectParity("shadow-inter-volume", compare(f.cpu, f.gpu), kCellDiagonal);
 }
 
+TEST_F(VolrenCudaTest, DeepShadowParity) {
+  // shadow_mode::deep changes BOTH sides of the device path: the light pass
+  // runs the capture instantiation of the kernel (a second output per ray) and
+  // the main pass runs the two-channel profile lookup.  The scene is chosen so
+  // both are exercised and neither can be vacuous -- a TRANSLUCENT occluder, so
+  // the terminal channel alone cannot answer, over an opaque receiver.
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.15f;
+  light l;
+  l.direction = {1.0, 0.0, 1.0}; // 45 degrees in the x-z plane
+  l.color = {0.5f, 0.5f, 0.5f};  // dim enough that the receiver does not clamp
+  rc.settings().lights.push_back(l);
+
+  volume_settings receiver;
+  receiver.shaded = false;
+  receiver.unshaded = false;
+  isosurface iso;
+  iso.value = 0.4;
+  iso.opacity = 1.0f;
+  iso.color = {0.85f, 0.85f, 0.9f};
+  receiver.isosurfaces.push_back(iso);
+  rc.add_volume(makeBallVolume(ctx, kGrid), receiver);
+
+  volume_settings occluder = receiver;
+  occluder.isosurfaces[0].opacity = 0.5f; // TRANSLUCENT: the profile must carry it
+  occluder.isosurfaces[0].color = {0.9f, 0.4f, 0.4f};
+  occluder.model_transform = translate(0.9, 0.0, 0.9);
+  rc.add_volume(makeBallVolume(ctx, kGrid), occluder);
+
+  rc.set_backend(backend::cpu);
+  const frame unshadowed = rc.render();
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.resolution = 512;
+  rc.settings().shadows.mode = cvc::volren::shadow_mode::deep;
+  rc.settings().shadows.depth_slices = cvc::volren::defaults::shadow_depth_slices;
+
+  // renderBoth() renders the same raycaster twice, and the shadow-map cache is
+  // keyed on the light pass's inputs -- which do not include the backend -- so
+  // the CUDA pass CONSUMES the map the CPU pass built.  That is the point here:
+  // this test isolates the lookup.  Parity of the map PRODUCTION is a separate
+  // question, pinned by DeepShadowProfileProducedOnEitherBackendAgrees below.
+  const frame_pair f = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(f.cpu), 1000);
+
+  // Not vacuous in either direction: the deep shadow must darken the receiver,
+  // and it must NOT darken it all the way to the hard answer.
+  rc.set_backend(backend::cpu);
+  rc.settings().shadows.mode = cvc::volren::shadow_mode::hard;
+  // Below the 0.5 default the translucent occluder is dropped from the HARD
+  // light pass entirely, and there would be no fully-shadowed end to compare
+  // against.  (Deep mode ignores this knob.)
+  rc.settings().shadows.min_occluder_opacity = 0.2f;
+  const frame hard = rc.render();
+
+  int darkened = 0, partial = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      // Receiver only: the occluder is nearer the camera and is itself unshadowed.
+      if (pixel(unshadowed, x, y)[3] == 0 || depthAt(unshadowed, x, y) < 3.55f)
+        continue;
+      const int l0 = luminanceAt(unshadowed, x, y);
+      const int ld = luminanceAt(f.gpu, x, y);
+      const int lh = luminanceAt(hard, x, y);
+      if (!(lh < l0 - l0 / 10))
+        continue; // not shadowed by the hard map either
+      if (ld < l0 - l0 / 20)
+        ++darkened;
+      if (ld > lh + 2)
+        ++partial; // strictly lighter than the fully-shadowed answer
+    }
+  EXPECT_GT(darkened, 100) << "the GPU deep render shows no shadow at all";
+  EXPECT_GT(partial, 100)
+      << "the GPU deep shadow is as dark as the hard one -- the profile was ignored";
+
+  expectParity("shadow-deep", compare(f.cpu, f.gpu), kCellDiagonal);
+}
+
+TEST_F(VolrenCudaTest, DeepShadowProfileProducedOnEitherBackendAgrees) {
+  // The light pass is an ordinary render(), so its profile can be produced by
+  // either marcher.  Build the SAME map both ways and compare the payload
+  // itself -- the strongest statement about the new kernel output, and the one
+  // an image-level parity check cannot make (a wrong knot deep inside an opaque
+  // occluder is invisible in the frame).
+  const auto build = [&](backend b) {
+    raycaster rc(ctx);
+    rc.set_backend(b);
+    rc.view() = orthoCam();
+    rc.settings().steps = kSteps;
+    rc.settings().ambient = 0.15f;
+    light l;
+    l.direction = {1.0, 0.0, 1.0};
+    rc.settings().lights.push_back(l);
+
+    volume_settings vs;
+    vs.shaded = false;
+    vs.unshaded = false;
+    isosurface iso;
+    iso.value = 0.4;
+    iso.opacity = 0.5f; // translucent: the knots carry real values
+    iso.color = {0.85f, 0.85f, 0.9f};
+    vs.isosurfaces.push_back(iso);
+    rc.add_volume(makeBallVolume(ctx, kGrid), vs);
+
+    rc.settings().shadows.enabled = true;
+    rc.settings().shadows.resolution = 256;
+    rc.settings().shadows.mode = cvc::volren::shadow_mode::deep;
+    rc.settings().shadows.depth_slices = 16;
+    rc.render();
+    EXPECT_EQ(int(rc.backend_used()), int(b));
+    return rc.shadow_map_profile(0);
+  };
+
+  const cvc::image cpu = build(backend::cpu);
+  const cvc::image gpu = build(backend::cuda);
+  ASSERT_EQ(cpu.width(), gpu.width());
+  ASSERT_EQ(cpu.height(), gpu.height());
+  ASSERT_GT(cpu.width(), 0);
+
+  const float *a = reinterpret_cast<const float *>(cpu.data());
+  const float *b = reinterpret_cast<const float *>(gpu.data());
+  const std::size_t n = std::size_t(cpu.width()) * std::size_t(cpu.height());
+  const std::size_t plane = n / 17; // slices + 1 planes
+  double worst_alpha = 0.0, worst_term = 0.0;
+  int nonzero = 0, term_mismatch = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const bool is_terminal = i < plane;
+    if (is_terminal) {
+      // The terminal is +inf almost everywhere here (nothing saturates a 0.5
+      // surface crossed twice); where it is finite the two must agree to well
+      // inside a cell.
+      const bool ia = std::isinf(a[i]), ib = std::isinf(b[i]);
+      if (ia != ib)
+        ++term_mismatch;
+      else if (!ia)
+        worst_term = std::max(worst_term, double(std::fabs(a[i] - b[i])));
+      continue;
+    }
+    if (a[i] > 0.f || b[i] > 0.f)
+      ++nonzero;
+    worst_alpha = std::max(worst_alpha, double(std::fabs(a[i] - b[i])));
+  }
+  std::printf("[volren-cuda shadow-deep-profile] knots=%zu nonzero=%d worst_alpha_diff=%.3e "
+              "worst_terminal_diff=%.3e terminal_mask_mismatch=%d\n",
+              n - plane, nonzero, worst_alpha, worst_term, term_mismatch);
+  std::fflush(stdout);
+
+  ASSERT_GT(nonzero, 1000) << "the profile is empty -- the comparison would be vacuous";
+  // Accumulated alpha is a product of float opacities on both sides; --use_fast_math
+  // moves the LAST bits, not the value.
+  EXPECT_LE(worst_alpha, 1e-4) << "the two backends built different transmittance profiles";
+  EXPECT_LE(worst_term, kCellDiagonal) << "the two backends terminated at different depths";
+  EXPECT_LE(term_mismatch, int(0.001 * double(plane)))
+      << "the two backends disagree about WHETHER the light ray terminated";
+}
+
 TEST_F(VolrenCudaTest, ShadowedShadedTransferFunctionParity) {
   // The other device shading site: a marched shaded-TF sample rather than an
   // isosurface hit.  Both sites call the same shadow_factors(), but they pass
@@ -1275,6 +1436,181 @@ TEST_F(VolrenCudaTest, ShadowsOffLeaveTheDevicePathUntouched) {
   EXPECT_EQ(std::memcmp(off.color.data(), zero.color.data(), cbytes), 0)
       << "strength 0 changed the device image";
   EXPECT_EQ(std::memcmp(off.depth.data(), zero.depth.data(), dbytes), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The lighting rig: soft shadows, ambient occlusion, hemisphere ambient
+// ---------------------------------------------------------------------------
+// Each of these turns ONE new term on and renders the identical raycaster on
+// both backends.  The point is narrow and worth stating: every one of them adds
+// a new arithmetic path to the device kernel (a tap loop, a trilinear cone, a
+// normal-dependent tint), and a transcription slip in any of them is a
+// systematic image difference, not a rounding one.
+
+TEST_F(VolrenCudaTest, SoftShadowParity) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.15f;
+  light l;
+  l.direction = {0.0, 1.0, 1.0}; // the SelfShadowParity geometry
+  l.color = {1.f, 0.95f, 0.85f};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  isosurface iso;
+  iso.value = 1.0;
+  iso.opacity = 1.0f;
+  iso.color = {0.9f, 0.85f, 0.8f};
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeTwoLobeVolume(ctx, kGrid), vs);
+
+  rc.settings().shadows.enabled = true;
+  rc.settings().shadows.resolution = 256;
+
+  // Every combination of payload and filter shape, because the tap loop wraps
+  // BOTH lookups and the two payloads reach it by different branches.
+  for (const cvc::volren::shadow_mode mode :
+       {cvc::volren::shadow_mode::hard, cvc::volren::shadow_mode::deep}) {
+    rc.settings().shadows.mode = mode;
+    rc.settings().shadows.depth_slices = 16;
+    for (const int taps : {3, 5, 7}) {
+      rc.settings().shadows.pcf_radius = 3.f;
+      rc.settings().shadows.pcf_taps = taps;
+      const frame_pair p = renderBoth(rc);
+      ASSERT_GT(countAlphaPositive(p.cpu), 200);
+      char label[64];
+      std::snprintf(label, sizeof(label), "soft-shadow-%s-taps%d",
+                    mode == cvc::volren::shadow_mode::deep ? "deep" : "hard", taps);
+      expectParity(label, compare(p.cpu, p.gpu), kCellDiagonal);
+    }
+  }
+}
+
+TEST_F(VolrenCudaTest, AmbientOcclusionParity) {
+  // The cone is `samples` trilinear fetches per hit in the volume's LOCAL
+  // frame; the sweep over sample counts is what would catch an off-by-one in
+  // the falloff or in the tap spacing rather than a wholesale mistake.
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.6f; // AO attenuates AMBIENT, so give it something
+  light l;
+  l.direction = {0.3, 0.4, 1.0};
+  l.color = {0.6f, 0.6f, 0.6f};
+  rc.settings().lights.push_back(l);
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  // makeTwoLobeVolume's field is a distance NORMALIZED by each lobe's radius,
+  // so `f - 1` is the true distance over-reported by 1/0.22.  That is not the
+  // exact SDF the estimator is documented against, and it is deliberate here:
+  // this test is about the two backends agreeing on the same arithmetic, and a
+  // field whose distances are stretched simply under-occludes -- the "it
+  // actually did something" check below is what keeps that from being vacuous.
+  vs.distance_field = true;
+  isosurface iso;
+  iso.value = 1.0;
+  iso.opacity = 1.0f;
+  iso.color = {0.9f, 0.85f, 0.8f};
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeTwoLobeVolume(ctx, kGrid), vs);
+
+  rc.settings().ao.strength = 1.0f;
+  for (const int samples : {1, 5, 16}) {
+    for (const double radius : {0.15, 0.5}) {
+      rc.settings().ao.samples = samples;
+      rc.settings().ao.radius = radius;
+      const frame_pair p = renderBoth(rc);
+      ASSERT_GT(countAlphaPositive(p.cpu), 200);
+      char label[64];
+      std::snprintf(label, sizeof(label), "ao-n%d-r%.2f", samples, radius);
+      expectParity(label, compare(p.cpu, p.gpu), kCellDiagonal);
+    }
+  }
+
+  // And the cone must actually have DONE something, or the parity above is a
+  // statement about two identical no-ops.
+  rc.settings().ao.samples = 5;
+  rc.settings().ao.radius = 0.5;
+  rc.set_backend(backend::cuda);
+  const frame with_ao = rc.render();
+  ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+  rc.settings().ao.strength = 0.f;
+  const frame without = rc.render();
+  int darkened = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x)
+      if (pixel(without, x, y)[3] > 0 &&
+          luminanceAt(with_ao, x, y) < luminanceAt(without, x, y) - 3)
+        ++darkened;
+  EXPECT_GT(darkened, 20) << "the device AO cone changed nothing, so its parity is vacuous";
+
+  // Turning it off on the DEVICE is byte-exact, not merely close: the kernel
+  // takes the flat-ambient branch, which is the pre-AO expression.
+  rc.settings().ao.strength = 1.f;
+  rc.settings().ao.radius = 0.0;
+  const frame radius_zero = rc.render();
+  const std::size_t cbytes = std::size_t(kRaster) * kRaster * 4;
+  EXPECT_EQ(std::memcmp(without.color.data(), radius_zero.color.data(), cbytes), 0)
+      << "radius 0 changed the device image";
+  rc.settings().ao.radius = 0.5;
+  rc.volume_config(0).distance_field = false;
+  EXPECT_EQ(std::memcmp(without.color.data(), rc.render().color.data(), cbytes), 0)
+      << "a volume that is not a distance field still ran the device cone";
+}
+
+TEST_F(VolrenCudaTest, AmbientRigParity) {
+  raycaster rc(ctx);
+  rc.view() = orthoCam();
+  rc.settings().steps = kSteps;
+  rc.settings().ambient = 0.5f;
+  rc.settings().shading_gain = 1.0f;
+  rc.settings().specular = 0.25f;
+  rc.settings().ambient_hemisphere.enabled = true;
+  rc.settings().ambient_hemisphere.sky = {0.55f, 0.7f, 1.f};
+  rc.settings().ambient_hemisphere.ground = {0.42f, 0.32f, 0.22f};
+  rc.settings().ambient_hemisphere.up = {0.0, 1.0, 0.0}; // orthoCam's screen up
+  // Two lights of different colours, so the accumulation and the per-channel
+  // specular are both exercised.
+  light key, fill;
+  key.direction = {0.3, 0.4, 1.0};
+  key.color = {0.8f, 0.76f, 0.7f};
+  fill.direction = {-0.7, -0.2, 0.4};
+  fill.color = {0.2f, 0.26f, 0.4f};
+  rc.settings().lights = {key, fill};
+
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  isosurface iso;
+  iso.value = 0.6;
+  iso.opacity = 1.0f;
+  iso.color = {0.9f, 0.85f, 0.8f};
+  vs.isosurfaces.push_back(iso);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), vs);
+
+  frame_pair p = renderBoth(rc);
+  ASSERT_GT(countAlphaPositive(p.cpu), 200);
+  expectParity("ambient-rig-isosurface", compare(p.cpu, p.gpu), kCellDiagonal);
+
+  // The same rig on a SHADED transfer-function volume, whose shading site is a
+  // different call in both marchers.
+  raycaster tf(ctx);
+  tf.view() = orthoCam();
+  tf.settings() = rc.settings();
+  volume_settings tvs;
+  tvs.shaded = true;
+  tvs.unshaded = false;
+  tvs.tf = rampTF(0.0, 1.0, 0.9f, 0.7f, 0.5f, 0.6f);
+  tvs.tf_auto_domain = false;
+  tf.add_volume(makeSphereVolume(ctx, kGrid), tvs);
+  p = renderBoth(tf);
+  ASSERT_GT(countAlphaPositive(p.cpu), 200);
+  expectParity("ambient-rig-shaded-tf", compare(p.cpu, p.gpu), kCellDiagonal);
 }
 
 } // namespace

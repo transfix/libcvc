@@ -1398,8 +1398,9 @@ TEST_F(VolrenRenderTest, SelfShadowingHasNoAcne) {
   // thick translucent medium is a different problem and no bias fixes it: the
   // map records the light direction's 50%-transmittance surface, which really
   // is a different surface from the view direction's, and the gap grows with
-  // thickness and obliquity.  That is what deep/opacity shadow maps are for
-  // (docs/VOLREN_API.md, future work); `bias_scale` is the knob until then.
+  // thickness and obliquity.  `bias_scale` is the knob in HARD mode;
+  // shadow_mode::deep is the actual fix, and 8.7 measures it.  This test stays
+  // on hard deliberately -- it is what pins the bias.
   const cvc::volume sphere = makeBallVolume(ctx, 64, 0.5);
   transfer_function tf;
   tf.add(transfer_point{0.0, 0.9f, 0.9f, 0.9f, 0.0f});
@@ -1425,6 +1426,14 @@ TEST_F(VolrenRenderTest, SelfShadowingHasNoAcne) {
       }
       render_settings rs = on.settings();
       rs.shadows.enabled = true;
+      // A 128-texel light map, not the 512 default.  This test builds four of
+      // them, and at the default the light pass alone is 16x the main pass
+      // (512^2 vs 128^2 rays) -- enough to blow CI's 300 s per-test budget in a
+      // Debug build, which is exactly how it first failed.  Cutting resolution
+      // makes an ACNE test stricter, not weaker: coarser texels mean a larger
+      // depth step per texel and so more chance for a surface to shadow
+      // itself, which is the artifact being ruled out.
+      rs.shadows.resolution = 128;
       on.settings() = rs;
 
       const frame a = off.render(), b = on.render();
@@ -1666,6 +1675,390 @@ TEST_F(VolrenRenderTest, TooManyShadowLightsThrows) {
   EXPECT_THROW(rc.shadow_map_depth(1), cvc::volren_error);
 }
 
+// ---------------------------------------------------------------------------
+// 8.7 DEEP shadow maps (shadow_mode::deep)
+// ---------------------------------------------------------------------------
+// The plate-and-ball geometry is reused unchanged; only the OCCLUDER's opacity
+// and the shadow mode move, which is what makes these tests about the payload
+// rather than about the geometry (that is 8.2-8.3's job).
+//
+// Every measurement below is a VISIBILITY, recovered exactly rather than eyed:
+// a shaded pixel's luminance is affine in the light's visibility factor
+// (L = ambient_term + vis * (diffuse + specular)), so for three renders of the
+// SAME scene differing only in the shadow mode,
+//
+//     vis_deep = (L_deep - L_hard) / (L_lit - L_hard)
+//
+// because the hard render pins vis = 0 on those pixels and the unshadowed one
+// pins vis = 1.  All three register the same volumes, so scene_bounds -- and
+// therefore unit_step and the whole receiver-side march -- is identical and
+// cancels.
+//
+// That relation holds only while nothing CLAMPS: blinn_phong saturates its
+// output at 1, and 8.2's white key lights this plate to pure 255 -- which flattens
+// the vis = 1 end and inflates every recovered visibility (measured: it put the
+// half-strength check 0.067 out, and quietly biased the full-strength one).  So
+// the deep tests dim the key and assert that no measured pixel reached 255.
+
+// 8.2's scene with a key dim enough that the lit plate stays well inside the
+// [0, 255] range blinn_phong clamps to.
+render_settings deepSceneSettings(double elevation_deg = 45.0) {
+  render_settings rs = shadowSceneSettings(elevation_deg);
+  rs.lights[0].color = {0.5f, 0.5f, 0.5f};
+  return rs;
+}
+
+// Highest channel anywhere the frame drew something: 255 means the shading
+// clamped and the visibility recovery below is not valid.
+int peakChannel(const frame &f) {
+  int peak = 0;
+  for (int y = 0; y < kShadowRaster; ++y)
+    for (int x = 0; x < kShadowRaster; ++x)
+      for (int c = 0; c < 3; ++c)
+        peak = std::max(peak, int(pixel(f, x, y)[c]));
+  return peak;
+}
+
+// A ball whose r = kBallRadius isosurface is TRANSLUCENT.  A closed surface, so
+// a light ray through it crosses TWICE: the front-to-back accumulation is
+// a + a(1-a), which is the number every expectation below is built from.
+volume_settings translucentBall(float opacity) {
+  volume_settings bs = opaqueIso(kBallRadius, opacity);
+  bs.isosurfaces[0].color = {0.9f, 0.4f, 0.4f};
+  bs.model_transform = translation(kBallHeight, 0.0, kBallHeight);
+  return bs;
+}
+
+// Mean recovered visibility over the pixels the HARD render actually shadowed,
+// and how many those were.
+double meanShadowVisibility(const frame &lit, const frame &hard, const frame &probe, int &count) {
+  double sum = 0.0;
+  count = 0;
+  for (int y = 0; y < kShadowRaster; ++y)
+    for (int x = 0; x < kShadowRaster; ++x) {
+      if (pixel(lit, x, y)[3] == 0)
+        continue;
+      const double l_lit = luminance(lit, x, y);
+      const double l_hard = luminance(hard, x, y);
+      if (!(l_hard < l_lit - l_lit / 10.0)) // not meaningfully shadowed
+        continue;
+      ++count;
+      sum += (luminance(probe, x, y) - l_hard) / (l_lit - l_hard);
+    }
+  return count > 0 ? sum / count : 0.0;
+}
+
+TEST_F(VolrenRenderTest, DeepShadowsAreOptInAndOpaqueOccludersMatchHardExactly) {
+  // The default is hard, so no existing scene moves.  Pinned here rather than
+  // trusted, because it is the whole no-op guarantee.
+  EXPECT_TRUE(cvc::volren::shadow_settings().mode == cvc::volren::shadow_mode::hard);
+
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  raycaster hard_rc(ctx), deep_rc(ctx);
+  for (raycaster *rc : {&hard_rc, &deep_rc}) {
+    buildPlateAndBall(*rc, plate, ball, true); // an OPAQUE ball
+    render_settings rs = rc->settings();
+    rs.shadows.enabled = true;
+    rc->settings() = rs;
+  }
+  render_settings deep_rs = deep_rc.settings();
+  deep_rs.shadows.mode = cvc::volren::shadow_mode::deep;
+  deep_rc.settings() = deep_rs;
+
+  const frame hard = hard_rc.render();
+  const frame deep = deep_rc.render();
+
+  // BYTE-identical, not merely close.  An opaque occluder saturates the light
+  // ray at an exactly known depth, the profile's terminal channel records that
+  // depth, and the terminal comparison is written as the same expression the
+  // hard lookup uses -- so the two lookups are the same function here.
+  EXPECT_TRUE(framesIdentical(hard, deep))
+      << "an opaque occluder rendered differently in deep mode";
+
+  // The payload is exposed, with the documented plane-major shape.
+  ASSERT_EQ(deep_rc.shadow_map_count(), 1u);
+  const shadow_view &v = deep_rc.shadow_map_view(0);
+  EXPECT_EQ(v.slices, cvc::volren::defaults::shadow_depth_slices);
+  EXPECT_GT(v.slice_dz, 0.0);
+  const cvc::image prof = deep_rc.shadow_map_profile(0);
+  EXPECT_EQ(prof.width(), v.width);
+  EXPECT_EQ(prof.height(), v.height * (v.slices + 1));
+
+  // ... and a HARD map carries none of it.
+  ASSERT_EQ(hard_rc.shadow_map_count(), 1u);
+  EXPECT_EQ(hard_rc.shadow_map_view(0).slices, 0);
+  EXPECT_EQ(hard_rc.shadow_map_profile(0).width(), 0);
+  EXPECT_THROW(hard_rc.shadow_map_profile(1), cvc::volren_error);
+}
+
+TEST_F(VolrenRenderTest, TranslucentOccluderCastsAPartialShadow) {
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  // 0.6 is ABOVE the default min_occluder_opacity, so the ball casts in hard
+  // mode too -- which is what gives the comparison a fully-shadowed end.
+  const float opacity = 0.6f;
+  const auto build = [&](raycaster &rc, int mode) {
+    rc.add_volume(plate, opaqueIso(0.0));
+    rc.add_volume(ball, translucentBall(opacity));
+    rc.view() = plateCam();
+    render_settings rs = deepSceneSettings();
+    if (mode >= 0) {
+      rs.shadows.enabled = true;
+      rs.shadows.mode = mode == 1 ? cvc::volren::shadow_mode::deep : cvc::volren::shadow_mode::hard;
+    }
+    rc.settings() = rs;
+  };
+
+  raycaster lit_rc(ctx), hard_rc(ctx), deep_rc(ctx);
+  build(lit_rc, -1);
+  build(hard_rc, 0);
+  build(deep_rc, 1);
+  const frame lit = lit_rc.render(), hard = hard_rc.render(), deep = deep_rc.render();
+  ASSERT_LT(peakChannel(lit), 255)
+      << "the lit reference clamped -- the visibility recovery is not valid";
+
+  int n = 0;
+  const double vis = meanShadowVisibility(lit, hard, deep, n);
+  ASSERT_GT(n, 500) << "the hard render cast no shadow to compare against";
+
+  // STRICTLY between the two ends: that is the entire claim of a deep map.
+  EXPECT_GT(vis, 0.02) << "the deep shadow is as dark as the hard one";
+  EXPECT_LT(vis, 0.98) << "the deep shadow does not darken at all";
+
+  // And it is not merely "somewhere in between": a closed translucent surface
+  // is crossed twice, so the light ray accumulates a + a(1-a) and the receiver
+  // must see exactly the remaining transmittance.
+  const double alpha = double(opacity) + double(opacity) * (1.0 - double(opacity));
+  EXPECT_NEAR(vis, 1.0 - alpha, 0.005)
+      << "the partial shadow is not the two-crossing transmittance " << (1.0 - alpha);
+
+  // The same measurement on the HARD render recovers 0 by construction, and on
+  // the unshadowed one recovers 1 -- the ends the ratio is calibrated against.
+  int m = 0;
+  EXPECT_NEAR(meanShadowVisibility(lit, hard, hard, m), 0.0, 1e-9);
+  EXPECT_NEAR(meanShadowVisibility(lit, hard, lit, m), 1.0, 1e-9);
+
+  // strength still scales the whole thing, deep or hard.
+  raycaster half_rc(ctx);
+  build(half_rc, 1);
+  render_settings hs = half_rc.settings();
+  hs.shadows.strength = 0.5f;
+  half_rc.settings() = hs;
+  const double half = meanShadowVisibility(lit, hard, half_rc.render(), m);
+  EXPECT_NEAR(half, 1.0 - 0.5 * alpha, 0.005) << "strength does not scale the deep attenuation";
+}
+
+TEST_F(VolrenRenderTest, DeepShadowsStackOccluderLayersThatHardShadowsCannot) {
+  // The documented hard-mode limit -- "ONE occluder layer per light ray, so a
+  // point behind two thin sheets is exactly as dark as behind one" -- is the
+  // thing deep maps exist to remove.  Two identical translucent balls on the
+  // SAME light ray: hard cannot tell them apart, deep must square the
+  // transmittance.
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  // 0.4 per surface: a closed ball accumulates 0.4 + 0.4*0.6 = 0.64, and TWO of
+  // them reach 0.8704 -- still under opacity_cutoff, so the light ray does not
+  // terminate and the second layer is carried by the SLICES rather than by the
+  // terminal channel.  (The saturating case is pinned separately below.)
+  const float opacity = 0.4f;
+  const double one = double(opacity) + double(opacity) * (1.0 - double(opacity));
+
+  // Both centres lie on the 45-degree light ray through the origin, so both
+  // shadow the SAME patch of plate.  `second_opacity` 0 keeps the far ball
+  // registered -- scene_bounds, unit_step and the whole receiver-side march
+  // stay identical across every render here -- while removing it from the
+  // light's way.
+  const auto build = [&](raycaster &rc, float first_opacity, float second_opacity, int mode) {
+    rc.add_volume(plate, opaqueIso(0.0));
+    // NOT `near`/`far`: minwindef.h defines both as empty macros, so those
+    // names vanish under MSVC and the declarations become syntax errors.
+    volume_settings nearBall = translucentBall(first_opacity);
+    rc.add_volume(ball, nearBall);
+    volume_settings farBall = translucentBall(second_opacity);
+    farBall.model_transform = translation(kBallHeight * 2, 0.0, kBallHeight * 2);
+    rc.add_volume(ball, farBall);
+    rc.view() = plateCam();
+    render_settings rs = deepSceneSettings();
+    if (mode >= 0) {
+      rs.shadows.enabled = true;
+      rs.shadows.mode = mode == 1 ? cvc::volren::shadow_mode::deep : cvc::volren::shadow_mode::hard;
+      // Below the 0.5 default these surfaces would be dropped from the HARD
+      // light pass entirely and there would be no vis = 0 end to calibrate
+      // against.  Deep mode ignores this knob (pinned by its own test).
+      rs.shadows.min_occluder_opacity = 0.2f;
+    }
+    rc.settings() = rs;
+  };
+
+  const auto renderWith = [&](float a1, float a2, int mode) {
+    raycaster rc(ctx);
+    build(rc, a1, a2, mode);
+    return rc.render();
+  };
+
+  const frame lit = renderWith(opacity, 0.f, -1);
+  const frame hard1 = renderWith(opacity, 0.f, 0);
+  const frame hard2 = renderWith(opacity, opacity, 0);
+  const frame deep1 = renderWith(opacity, 0.f, 1);
+  const frame deep2 = renderWith(opacity, opacity, 1);
+  ASSERT_LT(peakChannel(lit), 255)
+      << "the lit reference clamped -- the visibility recovery is not valid";
+
+  int n = 0;
+  const double v_hard1 = meanShadowVisibility(lit, hard1, hard1, n);
+  ASSERT_GT(n, 500) << "the hard render cast no shadow to compare against";
+  const double v_hard2 = meanShadowVisibility(lit, hard1, hard2, n);
+  const double v_deep1 = meanShadowVisibility(lit, hard1, deep1, n);
+  const double v_deep2 = meanShadowVisibility(lit, hard1, deep2, n);
+
+  // Hard: the second layer changes nothing -- it is already fully dark.
+  EXPECT_NEAR(v_hard2, v_hard1, 1e-9)
+      << "hard shadows suddenly grew a second occluder layer; this test's premise is stale";
+
+  // Deep: two layers multiply.  One closed surface leaves 1 - (a + a(1-a));
+  // two of them leave the SQUARE of that.
+  EXPECT_NEAR(v_deep1, 1.0 - one, 0.005);
+  EXPECT_NEAR(v_deep2, (1.0 - one) * (1.0 - one), 0.005)
+      << "a second translucent layer did not compose";
+  EXPECT_LT(v_deep2, v_deep1 - 0.05) << "the second layer did not darken anything";
+
+  // ... and the documented ceiling on that composition: once the light ray's
+  // accumulation reaches opacity_cutoff the profile records a TERMINAL depth and
+  // everything behind it is fully blocked, discarding the residual
+  // 1 - opacity_cutoff.  Two 0.6 balls accumulate 0.9744, past the 0.95 cutoff,
+  // so deep collapses onto the hard answer exactly.
+  const frame sat_lit = renderWith(0.6f, 0.f, -1);
+  const frame sat_hard = renderWith(0.6f, 0.6f, 0);
+  const frame sat_deep = renderWith(0.6f, 0.6f, 1);
+  int sn = 0;
+  const double v_sat = meanShadowVisibility(sat_lit, sat_hard, sat_deep, sn);
+  ASSERT_GT(sn, 500);
+  EXPECT_NEAR(v_sat, 0.0, 1e-9)
+      << "an accumulation past opacity_cutoff did not collapse to the hard answer";
+}
+
+TEST_F(VolrenRenderTest, DeepShadowProfileIsTheLightRaysAccumulation) {
+  // Read the payload back and check it against the accumulation computed by
+  // hand.  This is the strongest statement available about the map itself,
+  // independent of how the main march consumes it.
+  //
+  // ONE volume: a 0.5-radius ball carrying a translucent r = 0.3 isosurface,
+  // lit straight down +z.  The centre texel's light ray enters at z = +0.3 and
+  // leaves at z = -0.3, so its profile has to be a two-step staircase.
+  const cvc::volume ball = makeBallVolume(ctx, 64, 0.5);
+  const float opacity = 0.6f;
+
+  raycaster rc(ctx);
+  volume_settings vs = opaqueIso(0.3, opacity);
+  rc.add_volume(ball, vs);
+  rc.view() = plateCam();
+  render_settings rs = shadowSceneSettings(90.0); // straight overhead
+  rs.shadows.enabled = true;
+  rs.shadows.mode = cvc::volren::shadow_mode::deep;
+  rs.shadows.resolution = 64; // this test is about the payload, not its detail
+  rs.shadows.depth_slices = 16;
+  rc.settings() = rs;
+  rc.render();
+
+  ASSERT_EQ(rc.shadow_map_count(), 1u);
+  const shadow_view &v = rc.shadow_map_view(0);
+  ASSERT_EQ(v.slices, 16);
+  const cvc::image prof = rc.shadow_map_profile(0); // const: no COW detach
+  const float *p = reinterpret_cast<const float *>(prof.data());
+  const std::size_t plane = std::size_t(v.width) * std::size_t(v.height);
+
+  const std::size_t centre = std::size_t(v.height / 2) * std::size_t(v.width) + v.width / 2;
+  const auto knot = [&](int j) { return double(p[std::size_t(j) * plane + centre]); };
+
+  // Nothing saturates a 0.6 + 0.6*(1-0.6) = 0.84 accumulation, so the ray never
+  // terminates and slot 0 stays +inf.
+  EXPECT_TRUE(std::isinf(p[centre])) << "the light ray terminated where nothing is opaque";
+
+  const double one = double(opacity);
+  const double two = one + one * (1.0 - one);
+  // Monotone, starting at 0, ending at the two-crossing accumulation, and only
+  // ever sitting on one of the three exact levels -- the profile stores the
+  // staircase's SAMPLES, so no knot may hold an interpolated value.
+  double previous = 0.0;
+  bool saw_one = false;
+  for (int j = 1; j <= v.slices; ++j) {
+    const double a = knot(j);
+    EXPECT_GE(a, previous - 1e-6) << "knot " << j << " went backwards";
+    const bool exact =
+        std::fabs(a) < 1e-6 || std::fabs(a - one) < 1e-6 || std::fabs(a - two) < 1e-6;
+    EXPECT_TRUE(exact) << "knot " << j << " holds " << a << ", which is none of {0, " << one << ", "
+                       << two << "}";
+    saw_one = saw_one || std::fabs(a - one) < 1e-6;
+    previous = a;
+  }
+  EXPECT_NEAR(knot(1), 0.0, 1e-6) << "the first knot is inside the ball";
+  EXPECT_NEAR(knot(v.slices), two, 1e-6) << "the last knot missed the far crossing";
+  EXPECT_TRUE(saw_one) << "no knot landed between the two crossings";
+
+  // A texel whose ray misses the ball entirely accumulates nothing at all.
+  const std::size_t corner = 0;
+  EXPECT_TRUE(std::isinf(p[corner]));
+  for (int j = 1; j <= v.slices; ++j)
+    EXPECT_FLOAT_EQ(p[std::size_t(j) * plane + corner], 0.f) << "corner knot " << j;
+}
+
+TEST_F(VolrenRenderTest, DeepShadowsIgnoreMinOccluderOpacity) {
+  // min_occluder_opacity exists only because a hard latch cannot represent a
+  // low-opacity surface at all: it would treat a 0.16 decorative shell as a
+  // full occluder, so the shell is DELETED from the light pass instead.  A deep
+  // map represents it, so the knob is deliberately inert -- and a surface below
+  // the threshold casts its true 0.16 rather than nothing.
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  const auto renderWith = [&](float min_occluder) {
+    raycaster rc(ctx);
+    buildPlateAndBall(rc, plate, ball, true, 0.16f);
+    render_settings rs = rc.settings();
+    rs.shadows.enabled = true;
+    rs.shadows.mode = cvc::volren::shadow_mode::deep;
+    rs.shadows.min_occluder_opacity = min_occluder;
+    rc.settings() = rs;
+    return rc.render();
+  };
+
+  raycaster base(ctx);
+  buildPlateAndBall(base, plate, ball, true, 0.16f);
+  const frame unshadowed = base.render();
+
+  const frame at_default = renderWith(cvc::volren::defaults::shadow_min_occluder_opacity);
+  const frame at_low = renderWith(0.1f);
+  EXPECT_TRUE(framesIdentical(at_default, at_low))
+      << "min_occluder_opacity changed a deep render -- it is documented as ignored there";
+
+  // And the shell really does cast: measurably darker than unshadowed, but far
+  // from the black a hard map would have produced.
+  int lit = 0, darkened = 0;
+  double sum_ratio = 0.0;
+  for (int y = 0; y < kShadowRaster; ++y)
+    for (int x = 0; x < kShadowRaster; ++x) {
+      if (pixel(unshadowed, x, y)[3] == 0)
+        continue;
+      const double l0 = luminance(unshadowed, x, y);
+      if (!(l0 > 0.0))
+        continue;
+      ++lit;
+      const double l1 = luminance(at_default, x, y);
+      if (l1 < l0 - 1.0) {
+        ++darkened;
+        sum_ratio += l1 / l0;
+      }
+    }
+  ASSERT_GT(lit, 500);
+  EXPECT_GT(darkened, 100) << "a 0.16-opacity surface cast nothing in deep mode";
+  EXPECT_GT(sum_ratio / darkened, 0.5)
+      << "a 0.16-opacity surface cast a near-total shadow -- that is the hard-mode bug";
+}
+
 TEST_F(VolrenRenderTest, ShadowMapIsCachedAcrossCameraMovesAndRebuiltOnSceneChanges) {
   const cvc::volume plate = makeLinearVolume(ctx, 48);
   const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
@@ -1721,6 +2114,534 @@ TEST_F(VolrenRenderTest, ShadowMapIsCachedAcrossCameraMovesAndRebuiltOnSceneChan
   rc.settings() = rs;
   rc.render();
   EXPECT_EQ(rc.shadow_map_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// 9. Soft shadows (shadow_settings::pcf_radius / pcf_taps)
+// ---------------------------------------------------------------------------
+// Same plate-and-ball scene as section 8, because the thing being measured is
+// the EDGE of the shadow it already casts.  The camera window shows only the
+// plate (the ball is parked outside it), so every pixel with alpha > 0 is a
+// flat, uniformly shaded receiver and any luminance strictly between the lit
+// and umbra plateaus is penumbra -- not curvature, not silhouette.
+
+// Lit / umbra plateaus and the count of pixels between them.
+struct penumbra_census {
+  int lit = 0, umbra = 0, partial = 0, levels = 0;
+};
+
+penumbra_census censusPenumbra(const frame &f) {
+  penumbra_census c;
+  c.lit = 0;
+  c.umbra = 1 << 30;
+  std::vector<int> values;
+  for (int y = 0; y < kShadowRaster; ++y)
+    for (int x = 0; x < kShadowRaster; ++x) {
+      if (pixel(f, x, y)[3] == 0)
+        continue;
+      const int l = luminance(f, x, y);
+      values.push_back(l);
+      c.lit = std::max(c.lit, l);
+      c.umbra = std::min(c.umbra, l);
+    }
+  for (const int l : values)
+    if (l > c.umbra + 2 && l < c.lit - 2)
+      ++c.partial;
+  std::sort(values.begin(), values.end());
+  values.erase(std::unique(values.begin(), values.end()), values.end());
+  c.levels = int(values.size());
+  return c;
+}
+
+TEST_F(VolrenRenderTest, SoftShadowsAreOptInAndTheTapCountIsInertWithoutARadius) {
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  raycaster plain(ctx), taps(ctx), zero_radius(ctx), one_tap(ctx);
+  for (raycaster *rc : {&plain, &taps, &zero_radius, &one_tap}) {
+    buildPlateAndBall(*rc, plate, ball, true);
+    rc->settings().shadows.enabled = true;
+  }
+  // Every one of these must reproduce the unfiltered render BIT FOR BIT: the
+  // filter is inert from either knob, and both callers branch to the
+  // historical single-tap expression rather than averaging one value.
+  taps.settings().shadows.pcf_taps = 7;
+  zero_radius.settings().shadows.pcf_radius = 0.f;
+  zero_radius.settings().shadows.pcf_taps = 5;
+  one_tap.settings().shadows.pcf_radius = 8.f;
+  one_tap.settings().shadows.pcf_taps = 1;
+
+  const frame a = plain.render();
+  EXPECT_TRUE(framesIdentical(a, taps.render()))
+      << "pcf_taps moved a pixel at radius 0 -- the filter is not inert";
+  EXPECT_TRUE(framesIdentical(a, zero_radius.render()));
+  EXPECT_TRUE(framesIdentical(a, one_tap.render())) << "a single tap is not the unfiltered lookup";
+
+  // A negative or NaN radius is inert too, rather than throwing or filtering.
+  raycaster negative(ctx);
+  buildPlateAndBall(negative, plate, ball, true);
+  negative.settings().shadows.enabled = true;
+  negative.settings().shadows.pcf_radius = -4.f;
+  EXPECT_TRUE(framesIdentical(a, negative.render()));
+  negative.settings().shadows.pcf_radius = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_TRUE(framesIdentical(a, negative.render()));
+}
+
+TEST_F(VolrenRenderTest, SoftShadowRadiusSetsThePenumbraWidthAndTapsSetItsSmoothness) {
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  for (const cvc::volren::shadow_mode mode :
+       {cvc::volren::shadow_mode::hard, cvc::volren::shadow_mode::deep}) {
+    raycaster rc(ctx);
+    buildPlateAndBall(rc, plate, ball, true);
+    rc.settings().shadows.enabled = true;
+    rc.settings().shadows.mode = mode;
+    rc.settings().shadows.depth_slices = 16;
+    const char *label = mode == cvc::volren::shadow_mode::deep ? "deep" : "hard";
+
+    // Unfiltered: the comparison is binary, so the plate has exactly two
+    // levels and nothing between them.
+    rc.settings().shadows.pcf_radius = 0.f;
+    const penumbra_census sharp = censusPenumbra(rc.render());
+    ASSERT_GT(sharp.lit, sharp.umbra + 20) << label << ": the scene casts no measurable shadow";
+    EXPECT_EQ(sharp.partial, 0) << label << ": an unfiltered shadow has a penumbra";
+    EXPECT_EQ(sharp.levels, 2) << label << ": an unfiltered shadow is not two-valued";
+
+    // RADIUS is the width knob: the band of partly-lit pixels grows with it,
+    // and it is a BAND -- the umbra and the lit plateau are still there.
+    int previous = 0;
+    for (const float radius : {1.f, 2.f, 4.f}) {
+      rc.settings().shadows.pcf_radius = radius;
+      rc.settings().shadows.pcf_taps = 3;
+      const penumbra_census c = censusPenumbra(rc.render());
+      EXPECT_GT(c.partial, previous)
+          << label << ": radius " << radius << " did not widen the penumbra";
+      EXPECT_EQ(c.lit, sharp.lit) << label << ": the filter moved the LIT plateau";
+      EXPECT_EQ(c.umbra, sharp.umbra) << label << ": the filter moved the UMBRA";
+      previous = c.partial;
+    }
+
+    // TAPS is the smoothness knob, and it is INDEPENDENT of the width: at a
+    // fixed radius more taps resolve the same band into more levels.
+    rc.settings().shadows.pcf_radius = 4.f;
+    int levels3 = 0, width3 = 0;
+    for (const int taps : {3, 5, 7}) {
+      rc.settings().shadows.pcf_taps = taps;
+      const penumbra_census c = censusPenumbra(rc.render());
+      if (taps == 3) {
+        levels3 = c.levels;
+        width3 = c.partial;
+      } else {
+        EXPECT_GT(c.levels, levels3) << label << ": " << taps << " taps added no levels";
+        // The band's WIDTH is set by the radius alone, so it must not move
+        // more than the level quantization can explain.
+        EXPECT_NEAR(c.partial, width3, width3 / 4 + 4)
+            << label << ": the tap count changed the penumbra WIDTH";
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 10. Ambient occlusion (ao_settings, volume_settings::distance_field)
+// ---------------------------------------------------------------------------
+// Two overlapping balls in ONE signed distance field: the seam where they meet
+// is a crease with a known geometry, and the outer caps are open surface.  The
+// scene is lit by AMBIENT ALONE (no lights at all), which turns the test into
+// arithmetic: every pixel is gain * ambient * base * ao, so the occlusion
+// factor can be read straight off the image instead of inferred.
+
+constexpr double kSeamBallOffset = 0.32;
+constexpr double kSeamBallRadius = 0.4;
+
+cvc::volume makeTwoBallSdf(cvc::app &ctx, unsigned n) {
+  cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float,
+                  cvc::bounding_box(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0));
+  for (unsigned k = 0; k < n; ++k)
+    for (unsigned j = 0; j < n; ++j)
+      for (unsigned i = 0; i < n; ++i) {
+        const double x = -1.0 + double(i) * vol.XSpan();
+        const double y = -1.0 + double(j) * vol.YSpan();
+        const double z = -1.0 + double(k) * vol.ZSpan();
+        const double a = std::sqrt((x + kSeamBallOffset) * (x + kSeamBallOffset) + y * y + z * z) -
+                         kSeamBallRadius;
+        const double b = std::sqrt((x - kSeamBallOffset) * (x - kSeamBallOffset) + y * y + z * z) -
+                         kSeamBallRadius;
+        vol(i, j, k, std::min(a, b));
+      }
+  return vol;
+}
+
+// Looking along +y at the seam, up = +z: screen x is world x, screen y is -z.
+camera seamCam() {
+  camera c;
+  c.eye = {0.0, -3.0, 0.0};
+  c.focal = {0.0, 0.0, 0.0};
+  c.up = {0.0, 0.0, 1.0};
+  c.projection = camera::projection_type::orthographic;
+  c.parallel_scale = 0.8;
+  c.width = c.height = kRaster;
+  return c;
+}
+
+void buildSeamScene(raycaster &rc, const cvc::volume &vol, bool distance_field) {
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = false;
+  vs.distance_field = distance_field;
+  isosurface s;
+  s.value = 0.0;
+  s.opacity = 1.0f;
+  s.color = {0.8f, 0.8f, 0.8f};
+  vs.isosurfaces.push_back(s);
+  rc.add_volume(vol, vs);
+  rc.view() = seamCam();
+  render_settings rs;
+  rs.lights.clear(); // ambient ONLY: the image IS the occlusion factor
+  rs.ambient = 1.0f;
+  rs.shading_gain = 1.0f;
+  rs.steps = 256;
+  rc.settings() = rs;
+}
+
+TEST_F(VolrenRenderTest, AmbientOcclusionDarkensACreaseAndLeavesOpenSurfaceBitwiseAlone) {
+  const cvc::volume vol = makeTwoBallSdf(ctx, 48);
+
+  raycaster off(ctx), on(ctx);
+  buildSeamScene(off, vol, true);
+  buildSeamScene(on, vol, true);
+  on.settings().ao.strength = 1.0f;
+  on.settings().ao.radius = 0.3; // well short of the far ball (0.53 away)
+  on.settings().ao.samples = 5;
+
+  const frame a = off.render();
+  const frame b = on.render();
+
+  // Unlit, so every visible pixel is exactly gain * ambient * base.
+  const int seam_x = kRaster / 2, cap_x = 10, row = kRaster / 2;
+  ASSERT_GT(pixel(a, seam_x, row)[3], 0);
+  ASSERT_GT(pixel(a, cap_x, row)[3], 0);
+  const int flat = expectedByte(0.8f);
+  EXPECT_EQ(int(pixel(a, seam_x, row)[1]), flat);
+  EXPECT_EQ(int(pixel(a, cap_x, row)[1]), flat);
+
+  // The crease loses a real fraction of its ambient...
+  const int seam = int(pixel(b, seam_x, row)[1]);
+  EXPECT_LT(seam, flat - 20) << "the crease did not darken";
+  EXPECT_GT(seam, 0) << "the crease went black -- occlusion above 1";
+  // ...and the open cap keeps its value to within ONE level.  Not bitwise, and
+  // the reason is worth stating: the estimator reads the DISCRETIZED field, and
+  // trilinear reconstruction of a curved distance field cuts chords across the
+  // level sets, so f(p + n*h) comes back a hair SHORT of h on a convex surface.
+  // At 48^3 over a 0.4-radius ball that is a few tenths of a percent of
+  // occlusion -- one 0-255 level out of the crease's twenty-plus, i.e. the
+  // localization is a property of the geometry and not of the tolerance.
+  EXPECT_LE(flat - int(pixel(b, cap_x, row)[1]), 1) << "an exposed surface darkened materially";
+
+  // Alpha never moves: occlusion is a shading term, not a compositing one.
+  int alpha_changes = 0, darkened = 0, brightened = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      if (pixel(a, x, y)[3] != pixel(b, x, y)[3])
+        ++alpha_changes;
+      if (pixel(a, x, y)[3] == 0)
+        continue;
+      const int d = int(pixel(a, x, y)[1]) - int(pixel(b, x, y)[1]);
+      if (d > 0)
+        ++darkened;
+      if (d < 0)
+        ++brightened;
+    }
+  EXPECT_EQ(alpha_changes, 0) << "occlusion leaked into the alpha channel";
+  EXPECT_EQ(brightened, 0) << "occlusion made a pixel BRIGHTER";
+  EXPECT_GT(darkened, 20);
+
+  // Where the REAL darkening is: every pixel that lost more than 4 levels sits
+  // in the seam column, not scattered over the caps.
+  int strong = 0, strong_max_dx = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      if (pixel(a, x, y)[3] == 0)
+        continue;
+      if (int(pixel(a, x, y)[1]) - int(pixel(b, x, y)[1]) > 4) {
+        ++strong;
+        strong_max_dx = std::max(strong_max_dx, std::abs(x - seam_x));
+      }
+    }
+  EXPECT_GT(strong, 20) << "the crease darkening is a handful of pixels, not a band";
+  EXPECT_LE(strong_max_dx, 12) << "occlusion reached " << strong_max_dx
+                               << " px from the seam -- it is not localized";
+
+  // Strength scales the whole term linearly, so half the strength is half the
+  // darkening (to within the byte quantization).
+  on.settings().ao.strength = 0.5f;
+  const int half = int(pixel(on.render(), seam_x, row)[1]);
+  EXPECT_NEAR(double(flat - half), 0.5 * double(flat - seam), 1.5);
+}
+
+TEST_F(VolrenRenderTest, AmbientOcclusionIsOffUnlessEveryPreconditionHolds) {
+  const cvc::volume vol = makeTwoBallSdf(ctx, 48);
+
+  raycaster reference(ctx);
+  buildSeamScene(reference, vol, true);
+  const frame a = reference.render();
+
+  // Each of these must be BYTE-IDENTICAL to the no-AO render, because each
+  // removes one of the four things the cone needs.
+  struct variant {
+    const char *why;
+    bool distance_field;
+    float strength;
+    double radius;
+    float ambient;
+  };
+  const variant variants[] = {
+      {"the volume is not declared a distance field", false, 1.f, 0.3, 1.f},
+      {"strength is 0", true, 0.f, 0.3, 1.f},
+      {"the radius is 0", true, 1.f, 0.0, 1.f},
+      {"the radius is negative", true, 1.f, -0.3, 1.f},
+  };
+  for (const variant &v : variants) {
+    raycaster rc(ctx);
+    buildSeamScene(rc, vol, v.distance_field);
+    rc.settings().ao.strength = v.strength;
+    rc.settings().ao.radius = v.radius;
+    rc.settings().ao.samples = 5;
+    rc.settings().ambient = v.ambient;
+    EXPECT_TRUE(framesIdentical(a, rc.render())) << "AO ran when " << v.why;
+  }
+
+  // With ambient exactly 0 there is nothing for AO to attenuate, so it is
+  // skipped outright rather than run and multiplied away -- and the proof is
+  // that a LIT render is unchanged by it.
+  raycaster lit_off(ctx), lit_on(ctx);
+  for (raycaster *rc : {&lit_off, &lit_on}) {
+    buildSeamScene(*rc, vol, true);
+    light key;
+    key.color = {1.f, 1.f, 1.f};
+    key.direction = {0.0, -1.0, 0.0};
+    rc->settings().lights = {key};
+    rc->settings().ambient = 0.f;
+  }
+  lit_on.settings().ao.strength = 1.f;
+  lit_on.settings().ao.radius = 0.3;
+  EXPECT_TRUE(framesIdentical(lit_off.render(), lit_on.render()))
+      << "AO changed an image whose ambient term is zero";
+
+  // An out-of-range strength is refused loudly (the shadows.strength rule),
+  // because it would drive the ambient term negative.
+  raycaster bad(ctx);
+  buildSeamScene(bad, vol, true);
+  bad.settings().ao.strength = 1.5f;
+  EXPECT_THROW(bad.render(), cvc::volren_error);
+  bad.settings().ao.strength = -0.5f;
+  EXPECT_THROW(bad.render(), cvc::volren_error);
+  bad.settings().ao.strength = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_THROW(bad.render(), cvc::volren_error);
+
+  // `samples` is a resource and is CLAMPED, not refused: 0 and a huge value
+  // both render, and both land on the in-range answer.
+  raycaster clamp_lo(ctx), clamp_hi(ctx), in_range_lo(ctx), in_range_hi(ctx);
+  const int lo = cvc::volren::limits::min_ao_samples;
+  const int hi = cvc::volren::limits::max_ao_samples;
+  const int counts[4] = {0, lo, 10000, hi};
+  raycaster *rcs[4] = {&clamp_lo, &in_range_lo, &clamp_hi, &in_range_hi};
+  frame rendered[4];
+  for (int i = 0; i < 4; ++i) {
+    buildSeamScene(*rcs[i], vol, true);
+    rcs[i]->settings().ao.strength = 1.f;
+    rcs[i]->settings().ao.radius = 0.3;
+    rcs[i]->settings().ao.samples = counts[i];
+    rendered[i] = rcs[i]->render();
+  }
+  EXPECT_TRUE(framesIdentical(rendered[0], rendered[1]));
+  EXPECT_TRUE(framesIdentical(rendered[2], rendered[3]));
+}
+
+// ---------------------------------------------------------------------------
+// 11. Energy: shadows and occlusion attenuate DIFFERENT terms
+// ---------------------------------------------------------------------------
+
+TEST_F(VolrenRenderTest, ShadowsAndOcclusionDoNotDoubleDarken) {
+  // The identity: shading is L = A*ao + D*vis, with A the ambient term and D
+  // the direct term.  A*ao and D*vis are attenuated by DIFFERENT factors, so L
+  // is affine in (ao, vis) and therefore
+  //     L(ao, vis) + L(1, 1) == L(ao, 1) + L(1, vis)
+  // EXACTLY.  If either factor ever multiplied the other's term -- the whole
+  // failure mode this test exists for -- the product term breaks the identity
+  // by exactly the amount of the double attenuation.
+  // The two-ball field is the right scene for this: it has a CREASE for the
+  // occlusion cone and, lit from the side, one ball is an occluder for the
+  // other, so both attenuations land on the same visible pixels.
+  const cvc::volume vol = makeTwoBallSdf(ctx, 48);
+
+  const auto build = [&](raycaster &rc, bool shadows_on, bool ao_on) {
+    buildSeamScene(rc, vol, true);
+    render_settings rs = rc.settings();
+    light key;
+    key.color = {0.55f, 0.55f, 0.55f};
+    key.direction = {0.82, -0.3, 0.49};
+    rs.lights = {key};
+    rs.ambient = 0.4f;
+    rs.shading_gain = 0.9f;
+    // No specular: the identity is about the LINEAR part of the model, and a
+    // clamped highlight is the one thing that could break it for a reason that
+    // is not double-darkening.
+    rs.specular = 0.f;
+    rs.shadows.enabled = shadows_on;
+    rs.shadows.resolution = 256;
+    rs.ao.strength = ao_on ? 1.0f : 0.f;
+    rs.ao.radius = 0.3;
+    rs.ao.samples = 5;
+    rc.settings() = rs;
+  };
+
+  raycaster none(ctx), ao_only(ctx), shadow_only(ctx), both(ctx);
+  build(none, false, false);
+  build(ao_only, false, true);
+  build(shadow_only, true, false);
+  build(both, true, true);
+  const frame f_none = none.render(), f_ao = ao_only.render();
+  const frame f_shadow = shadow_only.render(), f_both = both.render();
+
+  int checked = 0, worst = 0, ao_effect = 0, shadow_effect = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      if (pixel(f_none, x, y)[3] == 0)
+        continue;
+      ++checked;
+      for (int c = 0; c < 3; ++c) {
+        const int n = pixel(f_none, x, y)[c], a = pixel(f_ao, x, y)[c];
+        const int s = pixel(f_shadow, x, y)[c], b = pixel(f_both, x, y)[c];
+        worst = std::max(worst, std::abs((b + n) - (a + s)));
+        ao_effect = std::max(ao_effect, n - a);
+        shadow_effect = std::max(shadow_effect, n - s);
+      }
+    }
+  ASSERT_GT(checked, 500);
+  // Both effects have to be REAL for the identity to say anything.
+  EXPECT_GT(ao_effect, 8) << "the AO cone did nothing on this scene";
+  EXPECT_GT(shadow_effect, 20) << "the shadow did nothing on this scene";
+  // Four independently rounded renders, so the identity can only hold to the
+  // quantization: two roundings on each side, 1 LSB each.
+  EXPECT_LE(worst, 2) << "shadows and occlusion attenuate the same term somewhere: the affine "
+                         "identity is off by "
+                      << worst << " levels, against an AO effect of " << ao_effect
+                      << " and a shadow effect of " << shadow_effect;
+}
+
+// ---------------------------------------------------------------------------
+// 12. The light rig: hemisphere ambient, output gain, specular reflectance
+// ---------------------------------------------------------------------------
+
+TEST_F(VolrenRenderTest, HemisphereAmbientIsNeutralUntilItsColoursDiffer) {
+  const cvc::volume vol = makeTwoBallSdf(ctx, 48);
+
+  raycaster off(ctx), neutral(ctx), tinted(ctx), flipped(ctx);
+  for (raycaster *rc : {&off, &neutral, &tinted, &flipped})
+    buildSeamScene(*rc, vol, true);
+  neutral.settings().ambient_hemisphere.enabled = true; // both colours white
+  tinted.settings().ambient_hemisphere.enabled = true;
+  tinted.settings().ambient_hemisphere.sky = {0.f, 0.f, 1.f};
+  tinted.settings().ambient_hemisphere.ground = {1.f, 0.f, 0.f};
+  flipped.settings().ambient_hemisphere = tinted.settings().ambient_hemisphere;
+  flipped.settings().ambient_hemisphere.up = {0.0, 0.0, -1.0};
+
+  const frame a = off.render();
+  EXPECT_TRUE(framesIdentical(a, neutral.render()))
+      << "the hemisphere is not a no-op with sky == ground; a0 == a1 must make the mix exact";
+
+  // Up-facing surface -> sky, down-facing -> ground.  The rows are FOUND by
+  // scanning the column rather than computed, so the test states a fact about
+  // normals and not about where the silhouette happens to land.
+  const frame t = tinted.render();
+  const int ball_x = 10;
+  int first = -1, last = -1;
+  for (int y = 0; y < kRaster; ++y)
+    if (pixel(t, ball_x, y)[3] > 0) {
+      if (first < 0)
+        first = y;
+      last = y;
+    }
+  ASSERT_GE(last - first, 12) << "the probe column misses the ball";
+  const int top_y = first + 4, bottom_y = last - 4;
+  EXPECT_GT(int(pixel(t, ball_x, top_y)[2]), int(pixel(t, ball_x, top_y)[0]))
+      << "the up-facing surface is not sky-coloured";
+  EXPECT_GT(int(pixel(t, ball_x, bottom_y)[0]), int(pixel(t, ball_x, bottom_y)[2]))
+      << "the down-facing surface is not ground-coloured";
+
+  // Inverting `up` swaps them, which is the sharpest statement that the mix is
+  // driven by the normal and not by anything else.
+  const frame fl = flipped.render();
+  EXPECT_EQ(int(pixel(fl, ball_x, top_y)[0]), int(pixel(t, ball_x, bottom_y)[0]));
+  EXPECT_EQ(int(pixel(fl, ball_x, bottom_y)[2]), int(pixel(t, ball_x, top_y)[2]));
+}
+
+TEST_F(VolrenRenderTest, ShadingGainAndSpecularAreNeutralAtTheirDefaults) {
+  const cvc::volume plate = makeLinearVolume(ctx, 48);
+  const cvc::volume ball = makeBallVolume(ctx, 48, 0.25);
+
+  raycaster reference(ctx), explicit_defaults(ctx);
+  buildPlateAndBall(reference, plate, ball, true);
+  buildPlateAndBall(explicit_defaults, plate, ball, true);
+  explicit_defaults.settings().shading_gain = cvc::volren::defaults::shading_gain;
+  explicit_defaults.settings().specular = cvc::volren::defaults::specular;
+  const frame a = reference.render();
+  EXPECT_TRUE(framesIdentical(a, explicit_defaults.render()))
+      << "writing the defaults back is not a no-op -- the knobs are not folded exactly";
+
+  // The gain is a pure output scale, so below the clamp it is exactly linear:
+  // halving it halves every channel.  Ambient only (no lights) keeps the
+  // scene far from the clamp so the linearity is testable at all.
+  const cvc::volume seam = makeTwoBallSdf(ctx, 48);
+  raycaster full(ctx), half(ctx);
+  buildSeamScene(full, seam, true);
+  buildSeamScene(half, seam, true);
+  full.settings().shading_gain = 0.8f;
+  half.settings().shading_gain = 0.4f;
+  const frame ff = full.render(), fh = half.render();
+  int compared = 0;
+  for (int y = 0; y < kRaster; ++y)
+    for (int x = 0; x < kRaster; ++x) {
+      if (pixel(ff, x, y)[3] == 0)
+        continue;
+      ++compared;
+      EXPECT_NEAR(int(pixel(ff, x, y)[1]), 2 * int(pixel(fh, x, y)[1]), 2);
+    }
+  ASSERT_GT(compared, 100);
+
+  // Specular scales the highlight and NOTHING else: with the light exactly
+  // behind the camera the plate carries a strong lobe, and driving the
+  // reflectance to 0 must darken the highlight without touching the ambient
+  // floor of a pixel the light cannot reach.
+  raycaster spec_on(ctx), spec_off(ctx);
+  for (raycaster *rc : {&spec_on, &spec_off}) {
+    buildPlateAndBall(*rc, plate, ball, false);
+    render_settings rs = rc->settings();
+    rs.lights[0].direction = {0.0, 0.0, 1.0}; // straight down the view axis
+    rs.lights[0].color = {0.3f, 0.3f, 0.3f};  // dim, so nothing clamps
+    rs.ambient = 0.2f;
+    rc->settings() = rs;
+  }
+  spec_off.settings().specular = 0.f;
+  const frame s_on = spec_on.render(), s_off = spec_off.render();
+  const int cx = kShadowRaster / 2;
+  ASSERT_GT(pixel(s_on, cx, cx)[3], 0);
+  EXPECT_GT(int(pixel(s_on, cx, cx)[1]), int(pixel(s_off, cx, cx)[1]) + 10)
+      << "specular 0 did not remove the highlight";
+  // Nothing got BRIGHTER, and the diffuse+ambient floor survives.
+  int brightened = 0, lowest = 255;
+  for (int y = 0; y < kShadowRaster; ++y)
+    for (int x = 0; x < kShadowRaster; ++x) {
+      if (pixel(s_on, x, y)[3] == 0)
+        continue;
+      if (int(pixel(s_off, x, y)[1]) > int(pixel(s_on, x, y)[1]))
+        ++brightened;
+      lowest = std::min(lowest, int(pixel(s_off, x, y)[1]));
+    }
+  EXPECT_EQ(brightened, 0);
+  EXPECT_GT(lowest, 0) << "removing the specular crushed the surface to black";
 }
 
 } // namespace
