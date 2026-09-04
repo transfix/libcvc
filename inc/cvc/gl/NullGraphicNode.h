@@ -11,6 +11,8 @@ namespace cvc {
 class state;
 }
 
+namespace cvc {
+namespace gl {
 /**
  * @brief A graphics node that has no visual data, only a bounding box
  *
@@ -21,6 +23,7 @@ class state;
  * Primary use case: Default graphic when scene is empty, showing only
  * a bounding box to define the coordinate system and scene extents.
  */
+
 class NullGraphicNode : public GraphicsNode {
 public:
   NullGraphicNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "null");
@@ -66,5 +69,8 @@ private:
   bool m_includeOwnBounds;                // Whether to include own bounds in combined bbox
   bool m_syncBoundsWithChildren;          // Whether to auto-update bounds to match children
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // NULLGRAPHICNODE_H

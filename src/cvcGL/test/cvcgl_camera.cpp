@@ -17,6 +17,9 @@
 #include <vtkCamera.h>
 #include <vtkNew.h>
 
+using cvc::gl::GraphicsNode;
+using cvc::gl::SceneGraph;
+
 using cvc::gl::CameraController;
 
 static int failures = 0;

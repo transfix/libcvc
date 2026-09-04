@@ -19,11 +19,11 @@ class vtkObject;                 // VTK (global namespace)
 class vtkRenderer;               // VTK (global namespace)
 class vtkRenderWindow;           // VTK (global namespace)
 class vtkRenderWindowInteractor; // VTK (global namespace)
-class SceneRenderer;             // cvcGL (global namespace)
 
 namespace cvc {
 class app;
 namespace gl {
+class SceneRenderer;
 
 // -------
 // FpsHud

@@ -9,6 +9,10 @@
 
 class vtkProp;
 class vtkRenderer;
+
+namespace cvc {
+namespace gl {
+
 class SceneGraph;
 
 // Lifetime / threading contract
@@ -76,5 +80,8 @@ protected:
   vtkRenderer *m_renderer;
   SceneGraph *m_sceneGraph; // Non-owning pointer to parent SceneGraph
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // SCENENODE_H

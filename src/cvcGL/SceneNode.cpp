@@ -6,6 +6,9 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
+namespace cvc {
+namespace gl {
+
 void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
   m_sceneGraph = sceneGraph;
 
@@ -148,3 +151,6 @@ void SceneNode::handleStateChanged(const std::string &childState) {
     }
   });
 }
+
+} // namespace gl
+} // namespace cvc

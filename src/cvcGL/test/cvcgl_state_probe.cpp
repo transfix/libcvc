@@ -8,6 +8,9 @@
 #include <cvc/gl/SceneGraph.h>
 #include <sstream>
 
+using cvc::gl::GeometryNode;
+using cvc::gl::SceneGraph;
+
 template <typename F> double ms(int reps, F f) {
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < reps; ++i)

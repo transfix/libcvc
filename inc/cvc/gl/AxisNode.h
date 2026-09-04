@@ -7,6 +7,9 @@
 
 class vtkAxesActor;
 
+namespace cvc {
+namespace gl {
+
 class AxisNode : public GraphicsNode {
 public:
   AxisNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "axis");
@@ -27,5 +30,8 @@ protected:
 private:
   vtkSmartPointer<vtkAxesActor> m_axesActor;
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // AXISNODE_H

@@ -15,9 +15,13 @@
 #include <string>
 #include <vector>
 
-class SceneGraph;      // cvcGL (global namespace)
 class vtkRenderer;     // VTK (global namespace)
 class vtkRenderWindow; // VTK (global namespace)
+
+namespace cvc {
+namespace gl {
+
+class SceneGraph;
 
 // ---------------
 // SceneRenderer
@@ -130,5 +134,8 @@ private:
   struct impl;
   std::unique_ptr<impl> m_impl;
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // __CVC_GL_SCENE_RENDERER_H__

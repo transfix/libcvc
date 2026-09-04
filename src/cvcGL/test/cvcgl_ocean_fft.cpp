@@ -28,6 +28,9 @@
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 namespace {
 int g_fail = 0;
 void check(bool ok, const char *msg) {

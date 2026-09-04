@@ -6,12 +6,12 @@
 
 // SceneGraph is a global-scope type, not cvc::gl::SceneGraph — declaring it
 // inside the namespace below would name a different, never-defined class.
-class SceneGraph;
 
 namespace cvc {
 class app;
 
 namespace gl {
+class SceneGraph;
 
 class CameraController;
 class StageLighting;

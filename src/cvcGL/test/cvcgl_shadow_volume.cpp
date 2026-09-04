@@ -38,6 +38,10 @@
 #include <vtkSequencePass.h>
 #include <vtkVolumetricPass.h>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+using cvc::gl::VolumeNode;
+
 namespace {
 
 // Walk a render-pass tree (cameraPass -> sequencePass -> {...}) for a volumetric

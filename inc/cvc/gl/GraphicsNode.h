@@ -14,15 +14,16 @@
 #include <vtkTransform.h>
 
 class vtkActor2D;
-class BBoxNode;
 class vtkPlane;
-class VolumeNode;
-class NullGraphicNode;
 
 namespace cvc {
 class geometry;
 class volume;
 } // namespace cvc
+
+namespace cvc {
+namespace gl {
+class BBoxNode;
 
 /**
  * @brief Abstract base class for all graphics objects in the scene
@@ -41,6 +42,7 @@ class volume;
  * - getProp() - return the VTK prop for rendering
  * - handleStateChanged() - respond to state tree changes
  */
+
 class GraphicsNode : public SceneNode {
 public:
   GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "");
@@ -238,5 +240,8 @@ protected:
   // State change handler override
   virtual void handleStateChanged(const std::string &childState) override;
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // GRAPHICSNODE_H

@@ -12,6 +12,9 @@ class vtkRenderer;
 class vtkActor2D;
 class vtkTextMapper;
 
+namespace cvc {
+namespace gl {
+
 class GridNode : public GraphicsNode {
 public:
   GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "grid");
@@ -122,5 +125,8 @@ private:
 
   vtkRenderer *m_renderer; // Track current renderer
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // GRIDNODE_H

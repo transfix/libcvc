@@ -28,6 +28,9 @@
 #include <cvc/volume/volume.h>
 #include <vector>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::VolumeNode;
+
 namespace {
 
 constexpr int N = 8;

@@ -17,6 +17,9 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
+namespace cvc {
+namespace gl {
+
 BBoxNode::BBoxNode()
     : m_actor(vtkSmartPointer<vtkActor>::New()),
       m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New()), m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
@@ -267,3 +270,6 @@ void BBoxNode::createCoordinateLabels() {
     }
   }
 }
+
+} // namespace gl
+} // namespace cvc

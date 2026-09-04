@@ -36,6 +36,10 @@
 #include <thread>
 #include <vector>
 
+using cvc::gl::GeometryNode;
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 namespace {
 
 constexpr int W = 320, H = 240;

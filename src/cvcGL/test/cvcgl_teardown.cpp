@@ -24,6 +24,8 @@
 #include <vtkNew.h>
 #include <vtkRenderer.h>
 
+using cvc::gl::SceneGraph;
+
 static cvc::geometry makeTri() {
   cvc::geometry tri;
   cvc::geometry::point_t p;

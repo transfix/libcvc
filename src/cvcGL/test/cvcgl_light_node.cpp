@@ -18,6 +18,11 @@
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkRenderer.h>
+
+using cvc::gl::GraphicsNode;
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 static int fails = 0;
 static void chk(bool ok, const std::string &w) {
   printf("  %s  %s\n", ok ? "PASS" : "FAIL", w.c_str());

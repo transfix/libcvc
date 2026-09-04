@@ -201,11 +201,11 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // GraphicsNode::addGraphicsChild / SceneGraph::getGraphics). Declaring the
 // hierarchy shared_ptr-managed makes getGraphics()/addGraphics() return a proxy
 // that CO-OWNS the live node, so Python can hold and mutate it safely.
-%shared_ptr(SceneNode)
-%shared_ptr(GraphicsNode)
-%shared_ptr(GeometryNode)
-%shared_ptr(VolumeNode)
-%shared_ptr(SceneGraph)
+%shared_ptr(cvc::gl::SceneNode)
+%shared_ptr(cvc::gl::GraphicsNode)
+%shared_ptr(cvc::gl::GeometryNode)
+%shared_ptr(cvc::gl::VolumeNode)
+%shared_ptr(cvc::gl::SceneGraph)
 
 // ── directors: Python-defined scene node types ──────────────────────────────
 // With directors on the node classes, Python can SUBCLASS a scene node and have
@@ -216,57 +216,57 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // they are overridable. The concrete leaves carry C++ impls of the pure virtuals
 // (getProp / getBoundingBox), so a Python subclass need only override what it
 // wants to customize.
-%feature("director") GraphicsNode;
-%feature("director") GeometryNode;
-%feature("director") VolumeNode;
+%feature("director") cvc::gl::GraphicsNode;
+%feature("director") cvc::gl::GeometryNode;
+%feature("director") cvc::gl::VolumeNode;
 
 // A Python-CONSTRUCTED node (a director subclass built as MyNode(app, path,
 // name)) must keep its app alive too — its ~SceneNode touches the app's state
 // tree by raw reference. args[0] is the app the node ctor takes. (Nodes obtained
 // from a SceneGraph get this via the SceneGraph appends below instead.)
-%pythonappend GraphicsNode::GraphicsNode %{
+%pythonappend cvc::gl::GraphicsNode::GraphicsNode %{
     if args: self._pycvc_app = args[0]
 %}
-%pythonappend GeometryNode::GeometryNode %{
+%pythonappend cvc::gl::GeometryNode::GeometryNode %{
     if args: self._pycvc_app = args[0]
 %}
-%pythonappend VolumeNode::VolumeNode %{
+%pythonappend cvc::gl::VolumeNode::VolumeNode %{
     if args: self._pycvc_app = args[0]
 %}
 
 // ── SceneNode (abstract base): trim VTK / threading internals ───────────────
-%ignore SceneNode::addToRenderer;
-%ignore SceneNode::removeFromRenderer;
-%ignore SceneNode::runOnMainThread;
-%ignore SceneNode::setSceneGraph;
-%ignore SceneNode::getSceneGraph;
+%ignore cvc::gl::SceneNode::addToRenderer;
+%ignore cvc::gl::SceneNode::removeFromRenderer;
+%ignore cvc::gl::SceneNode::runOnMainThread;
+%ignore cvc::gl::SceneNode::setSceneGraph;
+%ignore cvc::gl::SceneNode::getSceneGraph;
 %include "cvc/gl/SceneNode.h"
 
 // ── GraphicsNode: keep transform / material / label; ignore VTK/any/templates ─
-%ignore GraphicsNode::setTransform(vtkMatrix4x4 *);
-%ignore GraphicsNode::setTransform(const double[16]); // replaced by the vector<double> %extend
-%ignore GraphicsNode::getTransform;
-%ignore GraphicsNode::getWorldTransform;
-%ignore GraphicsNode::getClipPlanes;
-%ignore GraphicsNode::setMetadata;
-%ignore GraphicsNode::getMetadata;
-%ignore GraphicsNode::hasMetadata;
-%ignore GraphicsNode::getAllMetadata;
-%ignore GraphicsNode::getGraphicsChildren;      // vector<shared_ptr<...>> return
+%ignore cvc::gl::GraphicsNode::setTransform(vtkMatrix4x4 *);
+%ignore cvc::gl::GraphicsNode::setTransform(const double[16]); // replaced by the vector<double> %extend
+%ignore cvc::gl::GraphicsNode::getTransform;
+%ignore cvc::gl::GraphicsNode::getWorldTransform;
+%ignore cvc::gl::GraphicsNode::getClipPlanes;
+%ignore cvc::gl::GraphicsNode::setMetadata;
+%ignore cvc::gl::GraphicsNode::getMetadata;
+%ignore cvc::gl::GraphicsNode::hasMetadata;
+%ignore cvc::gl::GraphicsNode::getAllMetadata;
+%ignore cvc::gl::GraphicsNode::getGraphicsChildren;      // vector<shared_ptr<...>> return
 // bounding_box (generic_bounding_box<double>) is opaque here; its greedy
 // templated converting ctor mis-binds SWIG's SwigValueWrapper on a by-value
 // return, so every bounding_box-returning method is ignored (as in pycvc.i).
-%ignore GraphicsNode::getBoundingBox;
-%ignore GraphicsNode::getCombinedBoundingBox;
-%ignore GraphicsNode::getBBoxColor;             // out-ref params
-%ignore GraphicsNode::getLabelColor;
-%ignore GraphicsNode::getExtentLabelColor;
-%ignore GraphicsNode::addToRenderer;
-%ignore GraphicsNode::removeFromRenderer;
-%ignore GraphicsNode::addGraphicsChild;         // templates + shared_ptr overload
-%ignore GraphicsNode::createChild;
-%ignore GraphicsNode::transformChanged;         // public boost::signals2::signal member
-%extend GraphicsNode {
+%ignore cvc::gl::GraphicsNode::getBoundingBox;
+%ignore cvc::gl::GraphicsNode::getCombinedBoundingBox;
+%ignore cvc::gl::GraphicsNode::getBBoxColor;             // out-ref params
+%ignore cvc::gl::GraphicsNode::getLabelColor;
+%ignore cvc::gl::GraphicsNode::getExtentLabelColor;
+%ignore cvc::gl::GraphicsNode::addToRenderer;
+%ignore cvc::gl::GraphicsNode::removeFromRenderer;
+%ignore cvc::gl::GraphicsNode::addGraphicsChild;         // templates + shared_ptr overload
+%ignore cvc::gl::GraphicsNode::createChild;
+%ignore cvc::gl::GraphicsNode::transformChanged;         // public boost::signals2::signal member
+%extend cvc::gl::GraphicsNode {
   // Row-major 4x4 transform from a 16-element list (the vtkMatrix4x4 overload is
   // ignored; this is the Python-friendly path). Full rotate/scale/translate.
   void setTransform(const std::vector<double>& m) {
@@ -348,11 +348,11 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // the opaque-by-value bbox override needs ignoring. setTexture / clearTexture /
 // texture_modified auto-wrap (cvc::image is %import'd from pycvc.i); the snake
 // aliases below match the pycvc image/texture demo surface.
-%ignore GeometryNode::getBoundingBox;
+%ignore cvc::gl::GeometryNode::getBoundingBox;
 // Replace the std::vector<double> updateVertices with a numpy-direct one (below) so
 // the per-frame deform path reads the buffer directly instead of via .tolist().
-%ignore GeometryNode::updateVertices(const std::vector<double> &);
-%extend GeometryNode {
+%ignore cvc::gl::GeometryNode::updateVertices(const std::vector<double> &);
+%extend cvc::gl::GeometryNode {
   // Zero-copy texture (default): the vtkTexture aliases img's RGBA8 buffer, so a
   // later img.numpy() pixel edit + texture_modified() shows live with no re-copy.
   void set_texture(const cvc::image& img) { $self->setTexture(img, /*zeroCopy=*/true); }
@@ -386,27 +386,27 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %include "cvc/gl/GeometryNode.h"
 
 // ── VolumeNode: transfer function (vector<double>) + rendering props ────────
-%ignore VolumeNode::addToRenderer;
-%ignore VolumeNode::getBoundingBox;
+%ignore cvc::gl::VolumeNode::addToRenderer;
+%ignore cvc::gl::VolumeNode::getBoundingBox;
 %include "cvc/gl/VolumeNode.h"
 
 // ── SceneGraph: the top-level graph. App injected explicitly (no singleton). ─
-%ignore SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
-%ignore SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
-%ignore SceneGraph::setRenderer;
+%ignore cvc::gl::SceneGraph::SceneGraph(const std::string &);           // process-wide singleton ctor
+%ignore cvc::gl::SceneGraph::SceneGraph(cvc::app &, const std::string &); // re-exposed via shared_ptr factory
+%ignore cvc::gl::SceneGraph::setRenderer;
 // SceneGraph::postEvent(std::function<void()>) is NOT ignored — the callable
 // typemap above marshals a Python function to the std::function, so Python can
 // post work onto the scene's owner thread.
-%ignore SceneGraph::getGridNode;
-%ignore SceneGraph::getAllGraphics;
-%ignore SceneGraph::getAllGraphicsOfType;
-%ignore SceneGraph::getAllVolumeGraphics;
-%ignore SceneGraph::getAllGeometryGraphics;
-%ignore SceneGraph::updateTransferFunction;
-%ignore SceneGraph::updateGrid;
-%ignore SceneGraph::computeGraphicsBounds;
-%ignore SceneGraph::computeVolumeBounds;
-%ignore SceneGraph::graphicsChanged; // public boost::signals2::signal member
+%ignore cvc::gl::SceneGraph::getGridNode;
+%ignore cvc::gl::SceneGraph::getAllGraphics;
+%ignore cvc::gl::SceneGraph::getAllGraphicsOfType;
+%ignore cvc::gl::SceneGraph::getAllVolumeGraphics;
+%ignore cvc::gl::SceneGraph::getAllGeometryGraphics;
+%ignore cvc::gl::SceneGraph::updateTransferFunction;
+%ignore cvc::gl::SceneGraph::updateGrid;
+%ignore cvc::gl::SceneGraph::computeGraphicsBounds;
+%ignore cvc::gl::SceneGraph::computeVolumeBounds;
+%ignore cvc::gl::SceneGraph::graphicsChanged; // public boost::signals2::signal member
 // Keep the app alive for at least as long as the SceneGraph proxy: SceneGraph
 // holds the app by RAW reference (cvc::app& m_ctx), so without this the app
 // could be torn down first (at GC / interpreter shutdown) and ~SceneGraph would
@@ -416,7 +416,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // *args)` and the sole ctor is the injected-app factory, so the app is args[0].
 // (In the adopt case the host owns app+scene for the whole session, so the raw
 // scene_from_capsule proxy needs no stash; grl_snam_lab.Lab holds the app too.)
-%pythonappend SceneGraph::SceneGraph %{
+%pythonappend cvc::gl::SceneGraph::SceneGraph %{
     if args:
         self._pycvc_app = args[0]
 %}
@@ -442,43 +442,43 @@ def _typed_node(sg, name):
         n = sg.volume_node(name)
     return n
 %}
-%pythonappend SceneGraph::getGraphics %{
+%pythonappend cvc::gl::SceneGraph::getGraphics %{
     if val is not None:
         _t = _typed_node(self, name)
         if _t is not None: val = _t
         val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::getGraphicsRoot %{
+%pythonappend cvc::gl::SceneGraph::getGraphicsRoot %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::addGraphics %{
+%pythonappend cvc::gl::SceneGraph::addGraphics %{
     if val is not None:
         _t = _typed_node(self, args[0])
         if _t is not None: val = _t
         val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::geometry_node %{
+%pythonappend cvc::gl::SceneGraph::geometry_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 // The child-adders return live node proxies too, so they need the same app
 // keep-alive as getGraphics/addGraphics: a node proxy that outlives the app
 // would lock a destroyed state mutex in ~SceneNode.
-%pythonappend SceneGraph::add_child_group %{
+%pythonappend cvc::gl::SceneGraph::add_child_group %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::add_group %{
+%pythonappend cvc::gl::SceneGraph::add_group %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::add_child_geometry %{
+%pythonappend cvc::gl::SceneGraph::add_child_geometry %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::add_child_volume %{
+%pythonappend cvc::gl::SceneGraph::add_child_volume %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%pythonappend SceneGraph::volume_node %{
+%pythonappend cvc::gl::SceneGraph::volume_node %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
-%extend SceneGraph {
+%extend cvc::gl::SceneGraph {
   // Standalone factory: build a scene under an EXPLICIT injected app (no
   // singleton), mirroring pycvc.volume(app). `app` must outlive the scene.
   SceneGraph(std::shared_ptr<cvc::app> app, const std::string& prefix = "cvcgl") {
@@ -604,7 +604,7 @@ def _typed_node(sg, name):
 // std::vector<unsigned char> wrapper would hand back a list of ints (slow and
 // enormous), so map it to bytes — the form an encoder actually wants. Must
 // precede the %include.
-%typemap(out) std::vector<unsigned char> SceneRenderer::frameRGB {
+%typemap(out) std::vector<unsigned char> cvc::gl::SceneRenderer::frameRGB {
   $result = PyBytes_FromStringAndSize(reinterpret_cast<const char *>($1.data()),
                                       static_cast<Py_ssize_t>($1.size()));
 }
@@ -647,7 +647,7 @@ def _typed_node(sg, name):
 // already carries its own app (cvc::app& m_ctx), so it isn't needed to adopt.
 %inline %{
 namespace pycvc {
-std::shared_ptr<SceneGraph> scene_from_capsule(PyObject *app_cap, PyObject *scene_cap) {
+std::shared_ptr<cvc::gl::SceneGraph> scene_from_capsule(PyObject *app_cap, PyObject *scene_cap) {
   if (!scene_cap || !PyCapsule_CheckExact(scene_cap))
     throw std::invalid_argument("pycvc_gl.scene_from_capsule: scene arg is not a PyCapsule");
   void *sp = PyCapsule_GetPointer(scene_cap, "cvc.scenegraph");
@@ -661,7 +661,7 @@ std::shared_ptr<SceneGraph> scene_from_capsule(PyObject *app_cap, PyObject *scen
           "pycvc_gl.scene_from_capsule: app arg is not a \"cvc.app\" PyCapsule");
     }
   }
-  return *static_cast<std::shared_ptr<SceneGraph> *>(sp);
+  return *static_cast<std::shared_ptr<cvc::gl::SceneGraph> *>(sp);
 }
 } // namespace pycvc
 %}
@@ -678,7 +678,7 @@ static vtkProp* identity_prop(vtkProp* p) { return p; }
 // polymorphism) — the definition of a working director.
 %inline %{
 namespace pycvc {
-void poke_update(const std::shared_ptr<GraphicsNode> &node) {
+void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
   if (node)
     node->update();
 }

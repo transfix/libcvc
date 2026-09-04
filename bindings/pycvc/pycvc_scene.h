@@ -11,14 +11,19 @@
 #include <memory>
 #include <string>
 
-class SceneGraph; // cvcGL (global namespace)
-class vtkProp;    // VTK (global namespace) — bridged via vtkPythonUtil typemaps
+class vtkProp; // VTK (global namespace) — bridged via vtkPythonUtil typemaps
 
 namespace cvc {
 class app;
+namespace gl {
+class SceneGraph;
+} // namespace gl
 } // namespace cvc
 
 namespace pycvc {
+
+// SceneGraph lives in cvc::gl; name it inside pycvc rather than at global scope.
+using cvc::gl::SceneGraph;
 
 // ── Standalone render helpers over a REAL SceneGraph ─────────────────────────
 // The embedded case (volrover3) never uses these — the host owns the render

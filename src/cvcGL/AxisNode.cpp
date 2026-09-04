@@ -5,6 +5,9 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
+namespace cvc {
+namespace gl {
+
 AxisNode::AxisNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_axesActor(vtkSmartPointer<vtkAxesActor>::New()) {
   // Set axis length
@@ -157,3 +160,6 @@ void AxisNode::handleStateChanged(const std::string &childState) {
     GraphicsNode::handleStateChanged(childState);
   }
 }
+
+} // namespace gl
+} // namespace cvc

@@ -26,6 +26,9 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <string>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 static int fails = 0;
 static void chk(bool ok, const std::string &w) {
   std::printf("  %s  %s\n", ok ? "PASS" : "FAIL", w.c_str());

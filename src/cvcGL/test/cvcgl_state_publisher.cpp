@@ -19,6 +19,9 @@
 #include <string>
 #include <thread>
 
+using cvc::gl::GraphicsNode;
+using cvc::gl::SceneGraph;
+
 namespace {
 
 cvc::geometry dot() {

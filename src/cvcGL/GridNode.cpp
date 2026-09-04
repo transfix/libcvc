@@ -17,6 +17,9 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
+namespace cvc {
+namespace gl {
+
 GridNode::GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
       m_xzActor(vtkSmartPointer<vtkActor>::New()), m_xyActor(vtkSmartPointer<vtkActor>::New()),
@@ -895,3 +898,6 @@ void GridNode::updateTickLabelsInRenderer() {
     }
   }
 }
+
+} // namespace gl
+} // namespace cvc

@@ -38,6 +38,9 @@
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
 
+namespace cvc {
+namespace gl {
+
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_hasGeometry(false),
       m_renderMode(GeometryRenderMode::TRIS), m_useSingleColor(false),
@@ -1177,3 +1180,6 @@ void GeometryNode::onDataChanged() {
     }
   }
 }
+
+} // namespace gl
+} // namespace cvc

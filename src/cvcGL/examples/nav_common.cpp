@@ -21,6 +21,9 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 namespace navdemo {
 
 namespace {

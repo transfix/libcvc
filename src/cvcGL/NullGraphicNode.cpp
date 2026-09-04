@@ -8,6 +8,9 @@
 #include <sstream>
 #include <vtkActor.h>
 
+namespace cvc {
+namespace gl {
+
 NullGraphicNode::NullGraphicNode(cvc::app &ctx, const std::string &statePath,
                                  const std::string &name)
     : GraphicsNode(ctx, statePath, name),
@@ -217,3 +220,6 @@ void NullGraphicNode::handleStateChanged(const std::string &childState) {
     GraphicsNode::handleStateChanged(childState);
   }
 }
+
+} // namespace gl
+} // namespace cvc

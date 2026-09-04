@@ -19,6 +19,9 @@
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
 
+namespace cvc {
+namespace gl {
+
 GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldMatrix(vtkSmartPointer<vtkMatrix4x4>::New()),
@@ -1014,3 +1017,6 @@ void GraphicsNode::applyClipPlanes(vtkPlaneCollection *planes) {
   // Subclasses that support clipping (GeometryNode, VolumeNode, GridNode)
   // override this
 }
+
+} // namespace gl
+} // namespace cvc
