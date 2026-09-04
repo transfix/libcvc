@@ -1347,8 +1347,21 @@ static int cmd_serve(int argc, char **argv) {
     std::cout << "\n";
   }
 
+  // Install the shutdown handlers BEFORE join() binds the listening socket.
+  // The socket appearing is what tells the outside world this server exists,
+  // so anything watching for it can signal us the instant it shows up. With
+  // the handlers installed afterwards there is a window -- join() returning,
+  // through delegation parsing and exec-coordinator startup, to the old
+  // install site below -- in which SIGINT still had its default disposition
+  // and killed the process outright, discarding the buffered log with it.
+  std::signal(SIGINT, serve_signal_handler);
+  std::signal(SIGTERM, serve_signal_handler);
+
   auto session = cvc::distributed_state_session::join(app, cfg);
-  std::cout << "Server running.\n";
+  // Flush the readiness banner: stdout is fully buffered when it is a file or
+  // a pipe, so without this the startup lines exist only in memory and are
+  // lost if the process is later killed hard.
+  std::cout << "Server running." << std::endl;
 
   // Process delegations
   if (vm.count("delegate")) {
@@ -1391,10 +1404,8 @@ static int cmd_serve(int argc, char **argv) {
     std::cout << "  exec coordinator: enabled\n";
   }
 
-  // Block until SIGINT/SIGTERM
-  std::signal(SIGINT, serve_signal_handler);
-  std::signal(SIGTERM, serve_signal_handler);
-  std::cout << "Press Ctrl+C to stop.\n";
+  // Block until SIGINT/SIGTERM (handlers were installed before join() above).
+  std::cout << "Press Ctrl+C to stop." << std::endl;
   while (g_serve_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // If exec enabled, step the scheduler

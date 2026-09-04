@@ -43,6 +43,7 @@
 #define CVC_POPEN(cmd, mode) _popen(cmd, mode)
 #define CVC_PCLOSE(fp) _pclose(fp)
 #else
+#include <cerrno>
 #include <csignal>
 #include <unistd.h>
 #define CVC_GETPID() ::getpid()
@@ -130,10 +131,20 @@ static pid_t start_background_server(const std::string &cvc_bin, const std::stri
 
 // Poll for the server's AF_UNIX socket, up to ~`tries` * 50ms. Returns true if
 // it appeared. Callers that need the banner should stop_server() + slurp(logf).
-static bool wait_for_socket(const std::string &sock, int tries = 100) {
+//
+// `pid` (optional) lets this give up as soon as the server is gone instead of
+// waiting out the full timeout: a server that died during startup never binds,
+// so the remaining polls only delay a failure that has already happened, and
+// the resulting message is a bare timeout that says nothing about the cause.
+// The server is started through a shell that backgrounds it, so it has been
+// reparented away from us -- waitpid() would not see it, and kill(pid, 0) is
+// how we ask whether it is still alive.
+static bool wait_for_socket(const std::string &sock, int tries = 100, pid_t pid = -1) {
   for (int i = 0; i < tries; ++i) {
     if (fs::exists(sock))
       return true;
+    if (pid > 0 && ::kill(pid, 0) != 0 && errno == ESRCH)
+      return false; // server exited before binding -- the log says why
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   return false;
@@ -1921,7 +1932,7 @@ TEST_F(CvcCliTest, ServeIpcRunAndShutdown) {
           path("blobs") + " --tls-cert " + pem + " --tls-key " + pem + " --tls-ca " + pem +
           " --tls-require-client-auth");
   ASSERT_GT(pid, 0);
-  bool up = wait_for_socket(sock);
+  bool up = wait_for_socket(sock, 100, pid);
   stop_server(pid);
   std::string out = slurp(logf);
   ::unlink(sock.c_str());
@@ -1937,7 +1948,7 @@ TEST_F(CvcCliTest, ServeExecCoordinatorRunAndShutdown) {
       cvc_bin, sock, logf, pidf,
       "--cluster-id testcluster --node-id node2 --sync-mode authoritative --enable-exec");
   ASSERT_GT(pid, 0);
-  bool up = wait_for_socket(sock);
+  bool up = wait_for_socket(sock, 100, pid);
   stop_server(pid);
   std::string out = slurp(logf);
   ::unlink(sock.c_str());
@@ -1954,7 +1965,7 @@ TEST_F(CvcCliTest, ServeDelegateValidSpec) {
                                       "sub:remotecluster:" +
                                           path("remote.sock") + ":1");
   ASSERT_GT(pid, 0);
-  bool up = wait_for_socket(sock);
+  bool up = wait_for_socket(sock, 100, pid);
   stop_server(pid);
   std::string out = slurp(logf);
   ::unlink(sock.c_str());
@@ -1986,14 +1997,14 @@ TEST_F(CvcCliTest, ServeSeedPeerHandshake) {
   pid_t peer = start_background_server(cvc_bin, peer_sock, peer_log, peer_pid,
                                        "--cluster-id testcluster --node-id peerseed");
   ASSERT_GT(peer, 0);
-  ASSERT_TRUE(wait_for_socket(peer_sock)) << slurp(peer_log);
+  ASSERT_TRUE(wait_for_socket(peer_sock, 100, peer)) << slurp(peer_log);
 
   std::string sock = spath("peer_b.sock");
   std::string logf = path("peer_b.log"), pidf = path("peer_b.pid");
   pid_t joiner = start_background_server(
       cvc_bin, sock, logf, pidf, "--cluster-id testcluster --node-id peerb --seed " + peer_sock);
   ASSERT_GT(joiner, 0);
-  bool up = wait_for_socket(sock);
+  bool up = wait_for_socket(sock, 100, joiner);
   stop_server(joiner);
   std::string out = slurp(logf);
   stop_server(peer);
