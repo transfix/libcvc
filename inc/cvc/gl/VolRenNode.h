@@ -34,6 +34,46 @@
 //     auto node = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolRenNode>("vol");
 //     node->addVolume(sdf_volume, settings);
 //     ... in the render loop: node->tick();
+//
+// ---------------------------------------------------------------------------
+// WHY THIS DERIVES FROM GeometryNode AND NOT FROM VolumeNode
+// ---------------------------------------------------------------------------
+// The name says "volume", so VolumeNode looks like the obvious base.  It is
+// not, because VolumeNode is not a general volume abstraction: it is a thin
+// wrapper around vtkSmartVolumeMapper, i.e. VTK's OWN GPU raycaster.  Its
+// whole job is to hand a vtkImageData plus transfer functions to VTK and let
+// VTK render them.
+//
+// By the time this node draws, the rendering is already done: cvc::volren has
+// produced a finished 2D RGBA image and a depth map on the CPU or in CUDA.
+// There is nothing left for a volume mapper to consume.  What the node needs
+// instead is exactly the machinery GeometryNode already has, and VolumeNode
+// has none of:
+//
+//   - setTexture(img, zeroCopy) + texture_modified(): per-frame color upload
+//     that ALIASES the cvc::image buffer instead of copying it;
+//   - addFragmentShaderReplacement(): how the gl_FragDepth write and the
+//     un-premultiply are injected into VTK's shader;
+//   - setShaderTexture(): binding the R32F depth map;
+//   - updateVertices(): re-posing the quad across the camera frustum.
+//
+// Deriving from VolumeNode would mean inheriting a vtkVolume prop and a mapper
+// that would then have to be actively suppressed, in exchange for nothing.
+// The class models a volume, but its VTK-side representation is an image on a
+// quad -- and a textured quad is a GeometryNode.
+//
+// KNOWN WART of that choice: public inheritance also exposes GeometryNode's
+// mesh API -- setGeometry(), updateVertices(), updateColors(), setRenderMode()
+// and friends -- which are meaningless here and will corrupt the quad if
+// called.  They are NOT part of this node's contract; treat them as private.
+// The clean alternatives both cost more than they are worth today: private
+// inheritance breaks addGraphicsChild<T>(), which needs a public GraphicsNode
+// for the shared_ptr conversion, and composition would mean duplicating the
+// texture/shader plumbing listed above.
+//
+// What IS deliberately shared with VolumeNode is the settings encoding: the
+// transfer function round-trips through the same "transfer_function.color" /
+// ".opacity" flat-CSV state keys, so one editor drives either renderer.
 #ifndef CVC_GL_VOLRENNODE_H
 #define CVC_GL_VOLRENNODE_H
 
