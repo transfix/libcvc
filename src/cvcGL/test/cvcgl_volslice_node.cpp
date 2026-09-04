@@ -65,8 +65,9 @@ Silhouette measureSilhouette(const std::vector<unsigned char> &f) {
 
 // A radial density ball: 1 at the center falling linearly to 0 at r=0.8 (of
 // the box half-extent), 0 outside.  Node-centered grid over [-1,1]^3.
-cvc::volume makeBallVolume(cvc::app &ctx, unsigned n) {
-  cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float, cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+cvc::volume makeBallVolume(cvc::app &ctx, unsigned n,
+                           cvc::bounding_box box = cvc::bounding_box(-1, -1, -1, 1, 1, 1)) {
+  cvc::volume vol(ctx, cvc::dimension(n, n, n), cvc::Float, box);
   for (unsigned k = 0; k < n; ++k)
     for (unsigned j = 0; j < n; ++j)
       for (unsigned i = 0; i < n; ++i) {
@@ -236,6 +237,29 @@ int main() {
     // renderer had the same characteristic -- one reason its transfer
     // functions used chunky alphas.
     assert(std::abs(on_high - on_low) < (off_high - off_low) * 2 / 3);
+  }
+
+  // ---- REGRESSION: a volume whose bounding box is NOT centered on the
+  // origin.  VTK's mapper AUTO shift-scale re-centers VBO coordinates for
+  // boxes offset from the origin and compensates in MCDCMatrix -- which
+  // silently breaks a shader that derives texcoords from vertexMC.  The node
+  // disables shift-scale; this is the scene that caught it (the demo bunny,
+  // z in [0,100], rendered ZERO pixels while the origin-centered ball above
+  // passed).
+  {
+    node->setConfig(redSettings(0.35f));
+    node->setVolume(makeBallVolume(app, 32, cvc::bounding_box(-1, 0.2, -1, 1, 2.2, 1)));
+    pump(sg, view, *node);
+    std::vector<unsigned char> f = view.frameRGB();
+    const Silhouette sil = measureSilhouette(f);
+    std::printf("off-origin silhouette: n=%d c=(%.1f,%.1f)\n", sil.n, sil.cx, sil.cy);
+    assert(sil.n > 1000 && "an off-origin volume must still render (VBO shift-scale)");
+    // The box center is at y=+1.2 and screen up is +y, so the silhouette
+    // must sit ABOVE the image center.
+    assert(sil.cy < H / 2 - 10);
+    // And it is still RED: texcoords must address the volume, not a corner.
+    const RGB p = pixelAt(f, int(sil.cx), int(sil.cy));
+    assert(p.r > 100 && p.g < 40 && p.b < 40);
   }
 
   std::printf("cvcgl_volslice_node: all assertions passed\n");

@@ -8,8 +8,10 @@
 #include <cvc/volslice/slicer.h>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h>
@@ -35,9 +37,14 @@ const char *kVertexPositionImpl = "//VTK::PositionVC::Impl\n"
                                   "  volsliceSTP = vertexMC.xyz * volsliceTexScale"
                                   " + volsliceTexOffset;\n";
 
+// `highp` on the samplers is for GLES3/WebGL2, where sampler3D has NO default
+// precision (unqualified fails to compile) and sampler2D defaults to lowp --
+// whose 8-bit fraction cannot address the LUT's 1/512-texel centers.  Desktop
+// GLSL accepts the qualifiers as no-ops, so the native build cannot catch
+// either mistake (the VOLREN_API.md wasm-shader lesson again).
 const char *kFragmentUniformsDec = "//VTK::CustomUniforms::Dec\n"
-                                   "uniform sampler3D volsliceVolumeTex;\n"
-                                   "uniform sampler2D volsliceTfTex;\n"
+                                   "uniform highp sampler3D volsliceVolumeTex;\n"
+                                   "uniform highp sampler2D volsliceTfTex;\n"
                                    "uniform float volsliceAlphaExp;\n"
                                    "in vec3 volsliceSTP;\n";
 
@@ -94,8 +101,20 @@ VolSliceNode::VolSliceNode(cvc::app &ctx, const std::string &statePath, const st
   // The slice stack must blend sequentially; an "opaque" classification would
   // give it depth writes and no blending at all.  There is no vtkTexture on
   // the actor and opacity is 1.0, so VTK needs telling explicitly.
-  if (auto *actor = vtkActor::SafeDownCast(getProp()))
+  if (auto *actor = vtkActor::SafeDownCast(getProp())) {
     actor->ForceTranslucentOn();
+    // The vertex shader computes the volume texcoord from vertexMC, which is
+    // only the TRUE model coordinate while the mapper's AUTO shift-scale is
+    // off: with it on (it engages for boxes big enough or far enough from
+    // the origin -- a volume at z in [0,100] triggered it, the unit ball in
+    // the tests did not), the VBO holds re-centered coordinates and the
+    // compensation lives in MCDCMatrix, so the texcoord map reads garbage
+    // and the whole stack samples one corner of the volume.  Found as "the
+    // demo bunny is invisible but the test ball renders" -- density 0 at the
+    // sampled corner made every slice fully transparent.
+    if (auto *pdm = vtkPolyDataMapper::SafeDownCast(actor->GetMapper()))
+      pdm->SetVBOShiftScaleMethod(vtkPolyDataMapper::ShiftScaleMethodType::DISABLE_SHIFT_SCALE);
+  }
 }
 
 VolSliceNode::~VolSliceNode() = default;
