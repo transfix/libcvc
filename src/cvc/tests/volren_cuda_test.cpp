@@ -640,13 +640,13 @@ TEST_F(VolrenCudaTest, TwoVolumeParity) {
   l.direction = {0.2, 0.5, 1.0};
   rc.settings().lights.push_back(l);
 
-  volume_settings near;
-  near.tf = rampTF(0.0, 1.0, 0.9f, 0.4f, 0.3f, 0.7f);
-  near.tf_auto_domain = false;
-  near.gradient_ramp.enabled = true;
-  near.gradient_ramp.ramp0 = 0.0;
-  near.gradient_ramp.ramp1 = 0.5;
-  near.gradient_ramp.ramp2 = 4.0;
+  volume_settings nearVol;
+  nearVol.tf = rampTF(0.0, 1.0, 0.9f, 0.4f, 0.3f, 0.7f);
+  nearVol.tf_auto_domain = false;
+  nearVol.gradient_ramp.enabled = true;
+  nearVol.gradient_ramp.ramp0 = 0.0;
+  nearVol.gradient_ramp.ramp1 = 0.5;
+  nearVol.gradient_ramp.ramp2 = 4.0;
   // A translucent surface on the near volume: an isosurface hit latches the
   // depth map unconditionally, so most rays get a GEOMETRIC depth instead of
   // an alpha-threshold one.  Without it a stack of two translucent volumes
@@ -658,24 +658,24 @@ TEST_F(VolrenCudaTest, TwoVolumeParity) {
   near_iso.opacity = 0.35f;
   near_iso.color = {0.4f, 1.f, 0.7f};
   near_iso.shininess = 12.f;
-  near.isosurfaces.push_back(near_iso);
-  near.model_transform = translate(0.0, 0.0, 0.8);
-  rc.add_volume(makeSphereVolume(ctx, kGrid), near);
+  nearVol.isosurfaces.push_back(near_iso);
+  nearVol.model_transform = translate(0.0, 0.0, 0.8);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), nearVol);
 
-  volume_settings far;
-  far.tf = rampTF(0.0, 1.0, 0.3f, 0.6f, 0.95f, 0.6f);
-  far.tf_auto_domain = false;
-  far.gradient_ramp.enabled = true;
-  far.gradient_ramp.ramp0 = 0.1;
-  far.gradient_ramp.ramp1 = 0.8;
-  far.gradient_ramp.ramp2 = 3.0;
+  volume_settings farVol;
+  farVol.tf = rampTF(0.0, 1.0, 0.3f, 0.6f, 0.95f, 0.6f);
+  farVol.tf_auto_domain = false;
+  farVol.gradient_ramp.enabled = true;
+  farVol.gradient_ramp.ramp0 = 0.1;
+  farVol.gradient_ramp.ramp1 = 0.8;
+  farVol.gradient_ramp.ramp2 = 3.0;
   isosurface iso;
   iso.value = 0.68;
   iso.opacity = 0.5f;
   iso.color = {1.f, 0.9f, 0.4f};
-  far.isosurfaces.push_back(iso);
-  far.model_transform = translate(0.0, 0.0, -0.8);
-  rc.add_volume(makeSphereVolume(ctx, kGrid), far);
+  farVol.isosurfaces.push_back(iso);
+  farVol.model_transform = translate(0.0, 0.0, -0.8);
+  rc.add_volume(makeSphereVolume(ctx, kGrid), farVol);
 
   const frame_pair f = renderBoth(rc);
   ASSERT_GT(countAlphaPositive(f.cpu), 1000) << "the CPU reference drew nothing";
@@ -686,7 +686,7 @@ TEST_F(VolrenCudaTest, TwoVolumeParity) {
   raycaster solo(ctx);
   solo.view() = rc.view();
   solo.settings() = rc.settings();
-  solo.add_volume(makeSphereVolume(ctx, kGrid), near);
+  solo.add_volume(makeSphereVolume(ctx, kGrid), nearVol);
   const frame one = solo.render();
   int differing = 0;
   for (int y = 0; y < kRaster; ++y)
