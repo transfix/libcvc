@@ -479,12 +479,17 @@ def _typed_node(sg, name):
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
 %}
 %extend cvc::gl::SceneGraph {
+  // NOTE: swig parses the DECLARATIONS below in cvc::gl scope (so a bare
+  // `GeometryNode` return type resolves), but emits each BODY verbatim as a
+  // free function at global scope. Bodies therefore have to name cvcGL types
+  // fully qualified — unqualified ones broke the wrapper's compile when these
+  // classes moved into cvc::gl, with no swig diagnostic at generation time.
   // Standalone factory: build a scene under an EXPLICIT injected app (no
   // singleton), mirroring pycvc.volume(app). `app` must outlive the scene.
   SceneGraph(std::shared_ptr<cvc::app> app, const std::string& prefix = "cvcgl") {
     if (!app)
       throw std::invalid_argument("pycvc_gl.SceneGraph: null app handle");
-    return new SceneGraph(*app, prefix);
+    return new cvc::gl::SceneGraph(*app, prefix);
   }
   // Node count (getAllGraphics() is ignored for the Python surface but callable
   // here in C++).
@@ -494,10 +499,10 @@ def _typed_node(sg, name):
   // Python — getGraphics() alone yields the GraphicsNode base. Null if `name` is
   // absent or not of that type.
   std::shared_ptr<GeometryNode> geometry_node(const std::string& name) {
-    return std::dynamic_pointer_cast<GeometryNode>($self->getGraphics(name));
+    return std::dynamic_pointer_cast<cvc::gl::GeometryNode>($self->getGraphics(name));
   }
   std::shared_ptr<VolumeNode> volume_node(const std::string& name) {
-    return std::dynamic_pointer_cast<VolumeNode>($self->getGraphics(name));
+    return std::dynamic_pointer_cast<cvc::gl::VolumeNode>($self->getGraphics(name));
   }
   // Insert a caller-constructed node (e.g. a Python DIRECTOR subclass of
   // GraphicsNode/GeometryNode) into the render tree under `name`. This is the
@@ -550,13 +555,13 @@ def _typed_node(sg, name):
     auto p = $self->getGraphics(parent);
     if (!p)
       throw std::invalid_argument("add_child_group: no parent node named '" + parent + "'");
-    auto child = p->addGraphicsChild<NullGraphicNode>(name);
+    auto child = p->addGraphicsChild<cvc::gl::NullGraphicNode>(name);
     $self->registerGraphics(name, child);
     return child;
   }
   // The same, at the top of the graph.
   std::shared_ptr<GraphicsNode> add_group(const std::string& name) {
-    auto child = $self->getGraphicsRoot()->addGraphicsChild<NullGraphicNode>(name);
+    auto child = $self->getGraphicsRoot()->addGraphicsChild<cvc::gl::NullGraphicNode>(name);
     $self->registerGraphics(name, child);
     return child;
   }
@@ -568,7 +573,7 @@ def _typed_node(sg, name):
     auto p = $self->getGraphics(parent);
     if (!p)
       throw std::invalid_argument("add_child_geometry: no parent node named '" + parent + "'");
-    auto child = p->addGraphicsChild<GeometryNode>(name);
+    auto child = p->addGraphicsChild<cvc::gl::GeometryNode>(name);
     child->setGeometry(g);
     $self->registerGraphics(name, child);
     return child;
@@ -578,7 +583,7 @@ def _typed_node(sg, name):
     auto p = $self->getGraphics(parent);
     if (!p)
       throw std::invalid_argument("add_child_volume: no parent node named '" + parent + "'");
-    auto child = p->addGraphicsChild<VolumeNode>(name);
+    auto child = p->addGraphicsChild<cvc::gl::VolumeNode>(name);
     child->setData(v);
     $self->registerGraphics(name, child);
     return child;
