@@ -18,6 +18,8 @@ class volume;
 class state;
 } // namespace cvc
 
+namespace cvc {
+namespace gl {
 /**
  * @brief VolumeNode renders cvc::volume objects with full transform support
  *
@@ -33,6 +35,7 @@ class state;
  * - Bounding box display
  * - Hierarchical structure
  */
+
 class VolumeNode : public GraphicsNode {
 public:
   VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "volume");
@@ -156,5 +159,8 @@ private:
   boost::signals2::connection m_sampleDistanceConnection;
   boost::signals2::connection m_autoAdjustSampleDistancesConnection;
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // VOLUMENODE_H

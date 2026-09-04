@@ -11,6 +11,9 @@
 #include <vtkRenderer.h>
 #include <vtkWindowToImageFilter.h>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 static void addQuad(SceneGraph &sg, const char *n, double s, double z) {
   cvc::geometry g;
   const double xs[4] = {-s, s, s, -s}, ys[4] = {-s, -s, s, s};

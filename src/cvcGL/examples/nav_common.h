@@ -20,10 +20,10 @@
 namespace cvc {
 class app;
 }
-class SceneRenderer; // cvcGL (global namespace)
-class SceneGraph;    // cvcGL (global namespace)
 namespace cvc {
 namespace gl {
+class SceneRenderer;
+class SceneGraph;
 class CameraController;
 class StageLighting;
 } // namespace gl
@@ -48,6 +48,11 @@ class StageLighting;
 #endif
 
 namespace navdemo {
+
+// The scene-graph types live in cvc::gl; pull just the two this header names
+// into navdemo rather than polluting the global namespace from a header.
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
 
 // World rect an occupancy grid maps onto (matches sim_world::config bounds).
 struct Bounds {

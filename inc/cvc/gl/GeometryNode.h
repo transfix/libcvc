@@ -25,6 +25,8 @@ class image;
 class state;
 } // namespace cvc
 
+namespace cvc {
+namespace gl {
 /**
  * @brief Geometry rendering modes
  */
@@ -51,6 +53,7 @@ enum class GeometryRenderMode {
  * - Bounding box display
  * - Hierarchical structure
  */
+
 class GeometryNode : public GraphicsNode {
 public:
   GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name = "geometry");
@@ -225,5 +228,8 @@ private:
   static void onUpdateShader(vtkObject *caller, unsigned long eid, void *clientData,
                              void *callData);
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // GEOMETRYNODE_H

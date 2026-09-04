@@ -80,6 +80,11 @@
 #include <vtkRenderer.h>
 
 using cvc::gl::CameraController;
+using cvc::gl::GeometryNode;
+using cvc::gl::GeometryRenderMode;
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+using cvc::gl::VolumeNode;
 
 namespace {
 

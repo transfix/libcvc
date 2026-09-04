@@ -16,6 +16,11 @@
 
 namespace pycvc {
 
+// The scene-graph types live in cvc::gl; name them here rather than at global
+// scope so this translation unit's own namespace stays self-contained.
+using cvc::gl::GraphicsNode;
+using cvc::gl::SceneGraph;
+
 namespace {
 // A concrete GraphicsNode that renders a caller-supplied vtkProp (e.g. a
 // Python-built vtkActor). cvcGL's GraphicsNode is abstract (getProp/getBoundingBox

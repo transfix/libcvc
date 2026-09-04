@@ -24,6 +24,10 @@
 #include <string>
 #include <vector>
 
+using cvc::gl::GeometryNode;
+using cvc::gl::GraphicsNode;
+using cvc::gl::SceneGraph;
+
 namespace {
 
 constexpr int TREES = 70;

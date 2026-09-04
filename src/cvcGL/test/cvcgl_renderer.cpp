@@ -26,6 +26,9 @@
 #include <string>
 #include <vector>
 
+using cvc::gl::SceneGraph;
+using cvc::gl::SceneRenderer;
+
 namespace {
 
 void addQuad(SceneGraph &sg, const std::string &name, double x0, double y0, double x1, double y1,

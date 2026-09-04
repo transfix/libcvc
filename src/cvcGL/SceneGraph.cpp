@@ -33,6 +33,9 @@
 #include <vtkTranslucentPass.h>
 #include <vtkVolumetricPass.h>
 
+namespace cvc {
+namespace gl {
+
 SceneGraph::SceneGraph(cvc::app &ctx, const std::string &statePrefix)
     : m_renderer(nullptr), m_ctx(ctx), m_statePrefix(statePrefix),
       m_ownerThread(std::this_thread::get_id()), m_gridNode(nullptr), m_axisNode(nullptr),
@@ -1149,3 +1152,6 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
   requestRender();
   return true;
 }
+
+} // namespace gl
+} // namespace cvc

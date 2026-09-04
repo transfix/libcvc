@@ -5,11 +5,11 @@
 #include <memory>
 #include <string>
 
-class vtkRenderer;   // VTK (global namespace)
-class SceneRenderer; // cvcGL (global namespace)
+class vtkRenderer; // VTK (global namespace)
 
 namespace cvc {
 namespace gl {
+class SceneRenderer;
 
 // --------------
 // ScreenTextHud

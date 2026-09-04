@@ -19,6 +19,8 @@
 #include <vtkPolyData.h>
 #include <vtkTexture.h>
 
+using cvc::gl::GeometryNode;
+
 using namespace cvc;
 
 // Expose the protected getProp() so the test can inspect the VTK actor/polydata.

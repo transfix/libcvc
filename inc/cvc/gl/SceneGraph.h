@@ -19,11 +19,6 @@
 class vtkRenderer;
 class vtkMultiVolume;
 class vtkShadowMapBakerPass;
-class SceneNode;
-class NullGraphicNode;
-class GridNode;
-class AxisNode;
-class BBoxNode;
 
 namespace cvc {
 class app;
@@ -34,8 +29,12 @@ namespace gl {
 class state_publisher;
 class ShadowSettings;
 class LightNode;
-} // namespace gl
-} // namespace cvc
+
+class SceneNode;
+class NullGraphicNode;
+class GridNode;
+class AxisNode;
+class BBoxNode;
 
 class SceneGraph {
 public:
@@ -417,5 +416,8 @@ private:
   void ensureNullGraphicIfEmpty();
   void removeNullGraphicIfPresent();
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // SCENEGRAPH_H

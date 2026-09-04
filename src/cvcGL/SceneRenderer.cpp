@@ -22,6 +22,9 @@
 #include <vtkUnsignedCharArray.h>
 #include <vtkWindowToImageFilter.h>
 
+namespace cvc {
+namespace gl {
+
 struct SceneRenderer::impl {
   SceneGraph *scene = nullptr;
   std::string name = "main";
@@ -229,3 +232,6 @@ vtkRenderWindow *SceneRenderer::renderWindow() const {
 
 SceneGraph &SceneRenderer::scene() const { return *m_impl->scene; }
 const std::string &SceneRenderer::name() const { return m_impl->name; }
+
+} // namespace gl
+} // namespace cvc

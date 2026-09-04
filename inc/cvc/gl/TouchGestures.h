@@ -5,12 +5,11 @@
 #include <memory>
 #include <string>
 
-class SceneRenderer; // cvcGL (global namespace)
-
 namespace cvc {
 class app;
 
 namespace gl {
+class SceneRenderer;
 
 class CameraController;
 

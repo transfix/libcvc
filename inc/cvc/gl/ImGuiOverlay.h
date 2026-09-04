@@ -4,12 +4,12 @@
 #include <functional>
 #include <memory>
 
-class SceneRenderer; // cvcGL (global namespace)
 struct ImGuiContext; // Dear ImGui (global namespace) — forward-declared so this
                      // header stays imgui-free for consumers that don't draw UI.
 
 namespace cvc {
 namespace gl {
+class SceneRenderer;
 
 // --------------
 // ImGuiOverlay

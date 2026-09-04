@@ -13,6 +13,8 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/SceneGraph.h>
 
+using cvc::gl::SceneGraph;
+
 int main() {
   cvc::app app;
   SceneGraph sg(app);

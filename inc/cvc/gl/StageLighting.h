@@ -6,12 +6,11 @@
 #include <string>
 #include <vector>
 
-class SceneGraph;
-
 namespace cvc {
 class app;
 
 namespace gl {
+class SceneGraph;
 
 // ----------------
 // StageLighting

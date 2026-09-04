@@ -11,6 +11,9 @@ class vtkActor2D;
 class vtkRenderer;
 class vtkMatrix4x4;
 
+namespace cvc {
+namespace gl {
+
 // Simple VTK wrapper for bounding box visualization
 // Not a SceneNode - controlled by parent GraphicsNode's show_bbox state
 class BBoxNode {
@@ -56,5 +59,8 @@ private:
   int m_coordinateLabelFontSize;
   vtkRenderer *m_renderer; // Store renderer to re-add labels when recreated
 };
+
+} // namespace gl
+} // namespace cvc
 
 #endif // BBOXNODE_H
