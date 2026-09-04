@@ -50,18 +50,29 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
   }
 }
 
-// Per-path edit cache for continuous widgets, held in the ImGui CONTEXT's own
-// storage (ImGui::GetStateStorage) rather than a file-static map: a static would
-// be a process-wide singleton shared by every viewer and every ImGui context,
-// and it would outlive them. This lives and dies with the context that owns the
-// widget, and two viewers cannot collide.
+// Per-path edit cache for continuous widgets, held in ImGui's storage rather than
+// a file-static map: a static would be a process-wide singleton shared by every
+// viewer and every context, and it would outlive them.
+//
+// GetStateStorage() is the current WINDOW's storage, not the context's
+// (imgui_internal.h: "Current persistent per-window storage", backed by
+// ImGuiWindow::StateStorage) — so it lives and dies with the window, and the same
+// state path drawn in two windows keeps two independent caches. That is fine for
+// an in-progress drag, which is what this holds.
+//
+// It does mean ImGui's OWN keys share this map — a CollapsingHeader's open flag
+// is stored in the same window under ImHashStr of its label — so the key is
+// salted to keep a state path from ever landing on one of them.
 //
 // The cache holds the in-progress edit; while the widget is NOT being dragged it
 // follows state, so an external write (script, config, replicated peer) moves
 // the widget. Returns a pointer into ImGui's storage, stable for the frame.
+// Salt for the cache keys — anything nonzero that ImGui itself will not use.
+constexpr ImGuiID kCacheSalt = 0x63766367; // 'cvcg'
+
 float *cache_float(const std::string &path, float seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
-  const ImGuiID key = ImHashStr(path.c_str(), path.size());
+  const ImGuiID key = ImHashStr(path.c_str(), path.size(), kCacheSalt);
   float *slot = store->GetFloatRef(key, seed);
   if (!active)
     *slot = seed;
@@ -69,7 +80,7 @@ float *cache_float(const std::string &path, float seed, bool active) {
 }
 int *cache_int(const std::string &path, int seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
-  const ImGuiID key = ImHashStr(path.c_str(), path.size());
+  const ImGuiID key = ImHashStr(path.c_str(), path.size(), kCacheSalt);
   int *slot = store->GetIntRef(key, seed);
   if (!active)
     *slot = seed;
@@ -209,7 +220,9 @@ void StageLightingPanel(StageLighting &rig, bool *open, bool ownWindow) {
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 24.0f, vp->WorkPos.y + 120.0f),
                             ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Stage lighting", open)) {
+    // Same per-rig scoping as ScenePanel — see there.
+    const std::string id = "Stage lighting###cvcgl.rig." + rig.statePath();
+    if (!ImGui::Begin(id.c_str(), open)) {
       ImGui::End();
       return;
     }
@@ -417,7 +430,11 @@ void ScenePanel(SceneGraph &sg, bool *open, bool ownWindow) {
     // 400, not the lighting panel's 340: the resolution radio row and the
     // chrome buttons are laid out on one line each and clip below this.
     ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Scene", open)) {
+    // "###" keeps the visible title "Scene" while making the window ID unique per
+    // scene. SceneGraph deliberately has no default ctor because a process can
+    // run several; with a fixed name they all drew into ONE merged window.
+    const std::string id = "Scene###cvcgl.scene." + sg.getStatePrefix();
+    if (!ImGui::Begin(id.c_str(), open)) {
       ImGui::End();
       return;
     }
