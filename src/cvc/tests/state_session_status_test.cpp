@@ -136,18 +136,36 @@ TEST_F(StateSessionStatusTest, ConflictAutoPublish) {
 
   EXPECT_GT(session->shard().total_conflicts_detected(), 0u);
 
-  // Let pump run enough cycles for auto-publish (every 100 cycles).
-  // At 1ms interval, 100 cycles ≈ 100ms. Wait generously for CI.
-  for (int i = 0; i < 50; ++i) {
-    auto s = session->status();
-    if (s.pump_cycles >= 110)
+  // Wait for the pump's periodic conflict publish (every 100 pump cycles).
+  //
+  // Poll the published value itself, NOT the pump_cycles proxy. The old wait
+  // was `pump_cycles >= 110` within 50 x 20ms, on the premise recorded in its
+  // comment: "At 1ms interval, 100 cycles ~= 100ms". That premise is wrong.
+  // pump_interval_ms is a sleep FLOOR, not a rate, and Windows' ~15.6ms
+  // scheduler tick stretches sleep_for(1ms) to a full tick -- so 100 cycles
+  // takes ~1.55s there, and sleep_for(20ms) costs two ticks, capping the loop
+  // at ~1.56s. The two deadlines land within one tick of each other, so the
+  // loop would exhaust, the value would be read one tick early, and the test
+  // failed on an auto-vivified empty node roughly one Windows run in ten.
+  // Linux exits here in ~130ms and macOS in ~1.0s, which is why only the
+  // windows-2022 lane ever saw it.
+  //
+  // Polling the value is correct on any timer granularity: it leaves as soon
+  // as the publish lands, so the common case is no slower than before.
+  const std::string prefix = "__system.distributed.test_cluster.conflicts.recent.0.path";
+  std::string val;
+  for (int i = 0; i < 400; ++i) {
+    val = cvc::state::instance(ctx)(prefix).value();
+    if (!val.empty())
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 
-  // Verify conflict metrics appear in the state tree.
-  std::string prefix = "__system.distributed.test_cluster.conflicts.recent.0.path";
-  std::string val = cvc::state::instance(ctx)(prefix).value();
+  // Fatal, and it reports the pump counter: a future timeout should say
+  // "never published, pump_cycles=N" rather than the misleading
+  // `"" != "conflict.key"` that sent this one to the wrong suspect.
+  ASSERT_FALSE(val.empty()) << "conflict metrics never auto-published; pump_cycles="
+                            << session->status().pump_cycles;
   EXPECT_EQ(val, "conflict.key");
 
   session->stop();
