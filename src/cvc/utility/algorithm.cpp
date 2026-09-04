@@ -24,7 +24,6 @@
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 
-// CGAL headers must come before SDF headers due to macro conflicts
 #ifndef DISABLE_CGAL
 #include <CGAL/Bbox_3.h>
 #include <CGAL/Point_3.h>

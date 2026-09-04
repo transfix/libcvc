@@ -350,15 +350,17 @@ jobs:
           # same root cause as ci.yml's package-windows failures after the
           # image flip). Revisit when the v180 toolset stabilizes.
           - { os: windows-2022,     platform: windows, arch: x86_64 }
-        exclude:
-          # Windows debug is unsound to publish here: the catalog has no
-          # windows-debug dep bundles, so a Debug libcvc would link against
-          # Release MSVC deps — a debug/release CRT mismatch producing a
-          # broken artifact. Restore once debug Windows dep bundles exist
-          # (via the remote-builder fleet). Linux/macOS have no such issue:
-          # a Debug libcvc links the Release (shared, ABI-stable) deps fine.
-          - config: debug
-            target: { os: windows-2022, platform: windows, arch: x86_64 }
+        # No windows-debug exclusion any more. It used to be unsound because
+        # the catalog had no windows-debug dep bundles, so a Debug libcvc
+        # would have linked Release MSVC deps — a debug/release CRT mismatch
+        # producing a broken artifact. The gap was measured across libcvc's
+        # 34 runtime deps and closed by publishing the ten that were missing:
+        # gmp, mpfr, gsl, tiff, libiimod, assimp, levmar, grpc, cgal and
+        # imagemagick. (fontconfig is scoped linux/macos, so it never
+        # applied.) A windows-debug libcvc bundle is what lets downstream
+        # consumers run a Debug matrix lane at all — transfix/F2Dock builds
+        # Debug and Release on all three platforms and now takes libcvc from
+        # the catalog rather than compiling it.
         include:
           # Extra pycvc-column jobs (linux x86_64, release only): each builds
           # libcvc + cvcgl locally to link against, then packs+publishes ONLY

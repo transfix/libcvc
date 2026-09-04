@@ -12,6 +12,22 @@
 #include "reg3data.h"
 #include "bio.h"
 
+namespace {
+
+// Was a function-like macro named `error(x)` in reg3data.h. A macro by that
+// name escaping a header collides with any later declaration that uses the
+// identifier -- CGAL 6's Static_filter_error::error(), boost.parameter's
+// error(), cvc::app -- which is why three separate call sites carried
+// include-ordering workarounds. Kept as a file-local function so the name
+// cannot leave this translation unit.
+void reg3_fatal(const char *msg)
+{
+	fprintf(stderr, "%s\n", msg);
+	exit(1);
+}
+
+} // namespace
+
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
@@ -45,7 +61,7 @@ bool RawivParser::parse(Reg3Data<float>* data, const char* fname)
 	
 	DiskIO *pio = new BufferedIO(fname);
 	if(!pio->open()) {
-		error("Data File Open Failed");
+		reg3_fatal("Data File Open Failed");
 	}
 
 	pio->get(minext, 3);
@@ -78,7 +94,7 @@ bool RawivParser::write(const Reg3Data<float>& data, const char* fname)
 {
 	DiskIO *pio = new BufferedIO(fname, DiskIO::WRITE);
 	if(!pio->open()) {
-		error("Cannot Open Data File to write");
+		reg3_fatal("Cannot Open Data File to write");
 		return false;
 	}
 	float maxext[3];
