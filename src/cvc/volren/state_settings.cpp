@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/state.h>
 #include <cvc/volren/raycaster.h>
@@ -164,7 +165,35 @@ void state_settings::seedState(const snapshot &s) {
   getState("depth_alpha_threshold").value(double(rs.depth_alpha_threshold));
   getState("two_sided_lighting").value(rs.two_sided_lighting ? 1 : 0);
   getState("ambient").value(double(rs.ambient));
+  getState("ambient_hemisphere.enabled").value(rs.ambient_hemisphere.enabled ? 1 : 0);
+  getState("ambient_hemisphere.sky").value(triple(rs.ambient_hemisphere.sky));
+  getState("ambient_hemisphere.ground").value(triple(rs.ambient_hemisphere.ground));
+  getState("ambient_hemisphere.up").value(triple(rs.ambient_hemisphere.up));
+  getState("ao.strength").value(double(rs.ao.strength));
+  getState("ao.radius").value(rs.ao.radius);
+  getState("ao.samples").value(rs.ao.samples);
+  getState("shading_gain").value(double(rs.shading_gain));
+  getState("specular").value(double(rs.specular));
   getState("threads").value(int(rs.threads));
+  getState("supersample").value(rs.supersample);
+
+  const shadow_settings &sh = rs.shadows;
+  getState("shadows.enabled").value(sh.enabled ? 1 : 0);
+  getState("shadows.resolution").value(sh.resolution);
+  getState("shadows.strength").value(double(sh.strength));
+  getState("shadows.bias_scale").value(double(sh.bias_scale));
+  getState("shadows.slope_scale").value(double(sh.slope_scale));
+  getState("shadows.min_occluder_opacity").value(double(sh.min_occluder_opacity));
+  getState("shadows.mode").value(sh.mode == shadow_mode::deep ? 1 : 0);
+  getState("shadows.depth_slices").value(sh.depth_slices);
+  getState("shadows.pcf_radius").value(double(sh.pcf_radius));
+  getState("shadows.pcf_taps").value(sh.pcf_taps);
+  {
+    std::vector<double> indices;
+    for (const int i : sh.lights)
+      indices.push_back(double(i));
+    getState("shadows.lights").value(csv(indices));
+  }
 
   std::vector<double> flat;
   for (const light &l : rs.lights) {
@@ -194,6 +223,7 @@ void state_settings::seedState(const snapshot &s) {
     getState(volume_key(i, "shaded")).value(vs.shaded ? 1 : 0);
     getState(volume_key(i, "unshaded")).value(vs.unshaded ? 1 : 0);
     getState(volume_key(i, "tf_auto_domain")).value(vs.tf_auto_domain ? 1 : 0);
+    getState(volume_key(i, "distance_field")).value(vs.distance_field ? 1 : 0);
     getState(volume_key(i, "matrix"))
         .value(csv(std::vector<double>(vs.model_transform.m.begin(), vs.model_transform.m.end())));
 
@@ -244,7 +274,74 @@ bool state_settings::readAllFromState(snapshot &out) const {
     rs.depth_alpha_threshold = float(getState("depth_alpha_threshold").value<double>());
     rs.two_sided_lighting = getState("two_sided_lighting").value<int>() != 0;
     rs.ambient = float(getState("ambient").value<double>());
+    rs.ambient_hemisphere.enabled = getState("ambient_hemisphere.enabled").value<int>() != 0;
+    rs.ambient_hemisphere.sky = parse_triple_f(getState("ambient_hemisphere.sky").value());
+    rs.ambient_hemisphere.ground = parse_triple_f(getState("ambient_hemisphere.ground").value());
+    rs.ambient_hemisphere.up = parse_triple(getState("ambient_hemisphere.up").value());
+    // Read raw, like `supersample`: render() is the single place that decides
+    // what is in range, so an out-of-range strength round-trips and is rejected
+    // loudly there instead of being silently clamped into something that looks
+    // like it worked.  `radius` has no range to violate (<= 0 is simply off).
+    rs.ao.strength = float(getState("ao.strength").value<double>());
+    rs.ao.radius = getState("ao.radius").value<double>();
+    // Clamped on read like `shadows.resolution`: the tap count along the cone is
+    // an implementation resource with a defensible range, not a contract.
+    rs.ao.samples = std::max(limits::min_ao_samples,
+                             std::min(getState("ao.samples").value<int>(), limits::max_ao_samples));
+    // Neither is range-checked, for the same reason `ambient` is not: a gain
+    // above 1 is an exposure choice and the per-channel clamp handles it.
+    rs.shading_gain = float(getState("shading_gain").value<double>());
+    rs.specular = float(getState("specular").value<double>());
     rs.threads = unsigned(std::max(0, getState("threads").value<int>()));
+    // Read raw, exactly like `steps`: render() is the single place that decides
+    // what is in range, so an out-of-range write round-trips and is rejected
+    // loudly there instead of being silently clamped into something that looks
+    // like it worked.
+    rs.supersample = getState("supersample").value<int>();
+
+    rs.shadows.enabled = getState("shadows.enabled").value<int>() != 0;
+    // Clamped on read, the way `threads` is: a light-view raster is an
+    // implementation resource with a defensible range, not a contract the
+    // caller can violate meaningfully.
+    rs.shadows.resolution =
+        std::max(limits::min_shadow_resolution,
+                 std::min(getState("shadows.resolution").value<int>(), limits::max_raster_dim));
+    rs.shadows.strength = float(getState("shadows.strength").value<double>());
+    rs.shadows.bias_scale = float(getState("shadows.bias_scale").value<double>());
+    rs.shadows.slope_scale = float(getState("shadows.slope_scale").value<double>());
+    rs.shadows.min_occluder_opacity =
+        float(getState("shadows.min_occluder_opacity").value<double>());
+    // An ENUM, so anything outside its domain is malformed state rather than a
+    // value to clamp -- the shadows.lights discipline, not the resolution one.
+    {
+      const int m = getState("shadows.mode").value<int>();
+      if (m != 0 && m != 1)
+        return false;
+      rs.shadows.mode = m == 1 ? shadow_mode::deep : shadow_mode::hard;
+    }
+    // Clamped on read like `resolution`, and for the same reason: the slice
+    // count is an implementation resource with a defensible range (it bounds
+    // the map's memory), not a contract the caller can violate meaningfully.
+    rs.shadows.depth_slices = std::max(
+        limits::min_shadow_depth_slices,
+        std::min(getState("shadows.depth_slices").value<int>(), limits::max_shadow_depth_slices));
+    // Both clamped on read like `resolution`: the filter's footprint and tap
+    // count are implementation resources with defensible ranges.  A negative
+    // radius clamps to 0, which is "unfiltered" -- the same thing render() does
+    // with it, so the state and the renderer agree about what it means.
+    rs.shadows.pcf_radius =
+        float(std::max(0.0, std::min(getState("shadows.pcf_radius").value<double>(),
+                                     double(limits::max_pcf_radius))));
+    rs.shadows.pcf_taps =
+        std::max(limits::min_pcf_taps,
+                 std::min(getState("shadows.pcf_taps").value<int>(), limits::max_pcf_taps));
+    for (const double v : parse_csv(getState("shadows.lights").value())) {
+      // A light INDEX, so anything non-integral or negative is malformed
+      // state, not a value to round -- leave the object alone.
+      if (!(v == std::floor(v)) || v < 0.0 || v > double(limits::max_raster_dim))
+        return false;
+      rs.shadows.lights.push_back(int(v));
+    }
 
     std::vector<double> flat = parse_csv(getState("lights").value());
     if (flat.size() % 6 != 0)
@@ -274,6 +371,14 @@ bool state_settings::readAllFromState(snapshot &out) const {
       vs.shaded = getState(volume_key(i, "shaded")).value<int>() != 0;
       vs.unshaded = getState(volume_key(i, "unshaded")).value<int>() != 0;
       vs.tf_auto_domain = getState(volume_key(i, "tf_auto_domain")).value<int>() != 0;
+      // Read TOLERANTLY, unlike the per-volume keys above, because this one is
+      // NEW: a per-volume key exists in the tree only once something seeded it,
+      // so a tree written by an older build -- or by a peer that drives
+      // `volumes.<i>.*` by hand -- simply has no node here, and value<int>() on
+      // an empty node throws, which would reject the WHOLE snapshot rather than
+      // one field.  Absent means the default; junk still throws and is rejected.
+      const std::string df = getState(volume_key(i, "distance_field")).value();
+      vs.distance_field = df.empty() ? false : parse_csv(df).at(0) != 0.0;
 
       const std::vector<double> matrix = parse_csv(getState(volume_key(i, "matrix")).value());
       if (matrix.size() == 16)

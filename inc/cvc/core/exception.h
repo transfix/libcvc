@@ -26,11 +26,24 @@
 #include <boost/exception/exception.hpp>
 #include <boost/format.hpp>
 #include <cvc/core/namespace.h>
+#include <exception>
 #include <string>
 
 namespace cvc {
 /***** Exceptions ****/
-class exception : public boost::exception {
+// Deriving from std::exception as well as boost::exception is load-bearing,
+// not decoration.  Every cvc exception used to be a boost::exception ONLY, so
+// the ubiquitous `catch (const std::exception &)` did not catch any of them --
+// and an exception that escapes a std::thread's function is an immediate
+// std::terminate().  cvcGL's volren worker hit exactly that: a rejected render
+// setting aborted the process instead of dropping a frame.
+//
+// boost::exception carries no data members and std::exception's what() is
+// virtual, so the existing what()/what_str() contract is unchanged; this only
+// widens which handlers see these types.  Note the consequence for catch
+// ORDER: a `catch (const std::exception &)` ahead of a cvc-specific handler
+// now wins, where before it did not.
+class exception : public std::exception, public boost::exception {
 public:
   exception() {}
   virtual ~exception() throw() {}
