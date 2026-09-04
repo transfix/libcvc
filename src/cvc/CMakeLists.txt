@@ -251,10 +251,22 @@ if(NOT CVC_STATE_MEMORY_MANAGER)
   list(REMOVE_ITEM SOURCE_FILES core/state_memory_manager.cpp core/state_eviction_store.cpp)
 endif()
 
-# The libcvc version number
-set(CVC_VERSION_MAJOR 3)
-set(CVC_VERSION_MINOR 0)
-set(CVC_VERSION ${CVC_VERSION_MAJOR}.${CVC_VERSION_MINOR})
+# The libcvc version number, derived from project(libcvc VERSION ...) in the
+# top-level CMakeLists so the two cannot drift apart.
+#
+# They had: this was hardcoded 3.0 while the project said 3.3.0, so every
+# published bundle exported a cvcConfigVersion.cmake reading
+# PACKAGE_VERSION "3.0" with COMPATIBILITY SameMajorVersion. Any downstream
+# find_package(cvc 3.x.y) with y > 0 therefore failed the version check no
+# matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
+# never matched, and silently fell back to building libcvc from source.
+#
+# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
+# is unchanged and no consumer relinks. Only the full VERSION suffix
+# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+set(CVC_VERSION       ${PROJECT_VERSION})
+set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 message(STATUS "libcvc version: ${CVC_VERSION}")
 
 set(CVC_LINK_LIBS "")
