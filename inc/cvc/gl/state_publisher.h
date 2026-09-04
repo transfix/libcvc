@@ -71,6 +71,15 @@ public:
 
   // Apply everything queued, on the CALLING thread. Used by the worker, and by
   // anyone who needs the tree current right now (tests, teardown).
+  //
+  // Flushers SERIALIZE against each other, because the worker is not the only
+  // one: a host can drain by hand from its frame loop while the worker runs
+  // (examples/bunny_shadow.cpp and volren_bunny.cpp both do). Taking the batch
+  // and writing it are two steps, so without this two flushers can interleave
+  // between them — one takes "5", the other takes "6" and writes it, then the
+  // first writes "5" back over it. Coalescing cannot save that; the two values
+  // were never in the map at the same time. Nothing afterwards disagrees with
+  // the tree, so it stays on the superseded value for good.
   void flush();
 
   // True while the CALLING thread is inside flush() — i.e. a state change you
@@ -140,6 +149,15 @@ private:
 
   cvc::app &m_ctx;
   mutable std::mutex m_mutex;
+  // Held by flush() across BOTH taking the batch and writing it, so concurrent
+  // flushers cannot invert write order (see flush()). Deliberately not m_mutex:
+  // that one guards the queue and has to stay free while the writes run, or
+  // every publisher blocks for the length of a flush — and a handler that
+  // publishes from inside one would deadlock against itself. Recursive because
+  // a handler fired by a write is allowed to drain again (see in_flush(), which
+  // counts nesting rather than flagging it); on one thread program order
+  // already orders those writes.
+  std::recursive_mutex m_flushMutex;
   std::unordered_map<std::string, std::string> m_pending;
   // Pending keys, kept alongside the map purely so eviction can be O(1) AND
   // uniform. Probing random hash buckets does not work: the map keeps a large

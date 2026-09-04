@@ -7,6 +7,7 @@
 // The publisher is scene-owned (SceneGraph::publisher()), running under the
 // scene's app — there is no process-wide instance().
 #undef NDEBUG
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -190,6 +191,70 @@ void test_publisher_independent_of_pool() {
   std::printf("  ok: publisher is independent of the app pool (size 1, two scenes)\n");
 }
 
+// Two flushers must not put an older value on the tree after a newer one.
+//
+// The worker is not the only flusher: a host can drain by hand from its frame
+// loop while the worker runs (src/cvcGL/examples/bunny_shadow.cpp and
+// volren_bunny.cpp both do). Taking the batch and writing it are two steps, so
+// two flushers can interleave between them — one takes "5", the other takes "6"
+// and writes it, then the first writes "5" over it. Coalescing cannot save that:
+// the two values were never in the map at the same time. And nothing afterwards
+// disagrees, so the tree stays on the superseded value for good.
+//
+// Checked as a MONOTONICITY invariant rather than by trying to hit the
+// interleaving: the published counter only ever goes up, so the value on the
+// tree must never go down. One inversion is one violation.
+void test_concurrent_flushers_keep_write_order() {
+  cvc::app app;
+  cvc::gl::state_publisher pub(app); // no worker: this test provides both flushers
+  const std::string path = "flushorder.counter";
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> inversions{0};
+  std::atomic<int> highest{0};
+
+  // Two hand flushers, exactly the shape of "the worker plus a frame loop".
+  auto flusher = [&] {
+    while (!stop.load(std::memory_order_relaxed))
+      pub.flush();
+  };
+  // A reader that only ever needs to see the value climb.
+  auto watcher = [&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      const std::string v = read(app, path);
+      if (v.empty())
+        continue;
+      const int seen = std::stoi(v);
+      int prev = highest.load(std::memory_order_relaxed);
+      while (seen < prev) { // went BACKWARDS: an older write landed last
+        inversions.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+      while (seen > prev && !highest.compare_exchange_weak(prev, seen))
+        ;
+    }
+  };
+
+  // Publish a whole batch per round, not one path. The inversion window is the
+  // gap between a flusher taking the batch and finishing its writes, so a fat
+  // batch widens it from one state write to sixty-odd and turns a rare
+  // interleaving into a reliable one. Only path 0 is watched; the rest are
+  // there to make the window real.
+  std::thread f1(flusher), f2(flusher), w(watcher);
+  for (int round = 1; round <= 4000; ++round) {
+    pub.publish(path, std::to_string(round));
+    for (int k = 1; k < 64; ++k)
+      pub.publish("flushorder.pad" + std::to_string(k), std::to_string(round));
+  }
+  stop.store(true);
+  f1.join();
+  f2.join();
+  w.join();
+
+  assert(inversions.load() == 0 && "a flush must not write an older value over a newer one");
+  std::printf("  ok: two concurrent flushers never invert write order\n");
+}
+
 } // namespace
 
 int main() {
@@ -201,6 +266,7 @@ int main() {
   test_two_scenes_one_app();
   test_teardown_joins_worker();
   test_publisher_independent_of_pool();
+  test_concurrent_flushers_keep_write_order();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }
