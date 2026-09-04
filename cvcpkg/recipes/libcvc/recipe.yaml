@@ -43,7 +43,27 @@ recipe:
   # spelling. Verified against the published bundle: 0 occurrences of
   # cvc::xmlrpc in cvcTargets.cmake and no archive, while include/xmlrpc/
   # headers shipped.
-  cvc_revision: 2
+  # Bumped 2 -> 4 (not 3: the catalog already has 3.3.0+cvc.3, and a revision
+  # at or below the published max is a silent no-op / 409). The +cvc.3 bundle
+  # STILL ships include/xmlrpc/ headers with no lib/libxmlrpc* archive and no
+  # cvc::xmlrpc in cvcTargets.cmake -- verified by installing it:
+  #     cvcpkg install libcvc --prefix p --config release --link shared
+  #     grep -c cvc::xmlrpc p/lib/cmake/cvc/cvcTargets.cmake   ->  0
+  #     ls p/lib | grep -i xmlrpc                              ->  (nothing)
+  # publish-cvcpkg.yml now passes -DCVC_USING_XMLRPC=ON on every lane AND hard-
+  # fails when the archive or the exported target is missing, but +cvc.3 was
+  # published before those guards landed, so the artifact never picked them up.
+  # This bump is what actually carries the fix to consumers.
+  #
+  # It is load-bearing downstream: transfix/F2Dock hard-requires cvc::xmlrpc
+  # (src/CMakeLists.txt FATAL_ERRORs without it, and its _libcvc_check_usable
+  # rejects any libcvc package lacking it). That rejection is why F2Dock has
+  # always fallen through to building libcvc FROM SOURCE -- which is the only
+  # reason CGAL and the platform toolchains enter its build at all, and hence
+  # why CGAL 6.2 (macOS/Windows) and the VS18 v180 CL.exe crash (Windows) break
+  # it. A bundle that actually exports cvc::xmlrpc removes the source build,
+  # and those failures with it.
+  cvc_revision: 4
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
