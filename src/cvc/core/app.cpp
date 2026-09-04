@@ -589,8 +589,28 @@ void app::threads(const std::string &key, const thread_ptr &val) {
     thread_ptr tptr = threads(key);
     // Check if tptr is valid - it may have been removed by another thread
     // between hasThread() and threads() calls (race condition)
-    if (tptr)
+    if (tptr) {
       tptr->interrupt();
+      // JOIN, not just interrupt. Replacing (or erasing) the entry below drops
+      // the last shared_ptr to this boost::thread, and ~thread() DETACHES a
+      // joinable thread rather than stopping it. The detached thread keeps
+      // running while no longer appearing in _threads -- and a state_object
+      // handler thread holds a pointer to its object, so ~state_object() can no
+      // longer find it to join and the object is freed underneath it. That is a
+      // use-after-free, and it surfaces later as heap corruption far from here.
+      // interrupt() alone does not close the window: it only raises at the next
+      // interruption point, which may be many instructions away or never.
+      //
+      // Never self-join -- a thread reassigning its own key would deadlock --
+      // and bound the wait so a wedged handler degrades to the old behaviour
+      // instead of hanging the process.
+      if (tptr->joinable() && tptr->get_id() != boost::this_thread::get_id()) {
+        if (!tptr->timed_join(boost::posix_time::milliseconds(5000)))
+          log(5, str(boost::format("app::threads(): thread %s did not stop in 5s; "
+                                   "replacing its entry while it still runs") %
+                     key));
+      }
+    }
   }
 
   {

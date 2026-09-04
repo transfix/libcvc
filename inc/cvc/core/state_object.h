@@ -35,6 +35,59 @@ namespace cvc {
 // Forward declaration
 template <class This> class state_object;
 
+namespace detail {
+
+// Tracks the handler threads a state_object has in flight, so the object's
+// destructor can wait for them.
+//
+// Why this exists rather than joining app::threads(): the handler lambda wraps
+// itself in a cvc::app::thread_feedback whose destructor calls
+// finishThreadProgress(), and that ERASES the thread's own entry from the app's
+// _threads map -- from inside the still-running thread. Erasing drops the last
+// shared_ptr to the boost::thread, whose destructor DETACHES it. So by the time
+// ~state_object() takes its snapshot of the map, a live handler thread can be
+// invisible: never joined, still running, and free to touch this object after
+// it is gone. That is a use-after-free, and it corrupts the heap
+// ("malloc_consolidate(): unaligned fastbin chunk") well away from the cause.
+//
+// The gate is owned by a shared_ptr the lambda captures BY VALUE, so it stays
+// alive even if everything else does not, and it counts handlers rather than
+// identifying threads -- no name prefixes, no map lookups, nothing to miss.
+struct handler_gate {
+  boost::mutex mutex;
+  boost::condition_variable done;
+  int inflight;
+  bool shutting_down;
+  handler_gate() : inflight(0), shutting_down(false) {}
+};
+
+// RAII: decrement on EVERY exit path, including boost::thread_interrupted --
+// startThread() interrupts a thread whose key it is about to reuse, and a
+// handler killed that way must still be accounted for or the destructor hangs.
+class handler_scope {
+public:
+  explicit handler_scope(const boost::shared_ptr<handler_gate> &gate) : _gate(gate) {
+    boost::mutex::scoped_lock lock(_gate->mutex);
+    _cancelled = _gate->shutting_down;
+  }
+  ~handler_scope() {
+    boost::mutex::scoped_lock lock(_gate->mutex);
+    if (--_gate->inflight <= 0) {
+      _gate->inflight = 0;
+      _gate->done.notify_all();
+    }
+  }
+  // The object began destruction before this handler got to run. Skip the
+  // virtual call: the derived subobject may already be gone.
+  bool cancelled() const { return _cancelled; }
+
+private:
+  boost::shared_ptr<handler_gate> _gate;
+  bool _cancelled;
+};
+
+} // namespace detail
+
 // -------------------------
 // cvc::state_lock_scope
 // -------------------------
@@ -213,12 +266,13 @@ private:
 // 05/27/2012 -- Joe R. -- Creation.
 // 12/23/2025 -- Joe R. -- Added batching support to avoid thread floods.
 template <class This> // This should be the type of the inheriting class
+
 class state_object {
 public:
   // Constructor with explicit app context
   state_object(app &ctx, const std::string state_path = std::string())
       : _ctx(ctx), _batchDepth(0), _initDepth(0), _hasInstanceThreading(false),
-        _instanceThreading(false),
+        _instanceThreading(false), _handlerGate(boost::make_shared<detail::handler_gate>()),
         _state_path(state_path.empty() ? _ctx.dataTypeName<This>() + cvc::state::SEPARATOR +
                                              boost::lexical_cast<std::string>(this)
                                        : state_path) {
@@ -246,6 +300,27 @@ public:
     // been interrupted.  Letting any of that escape calls std::terminate().
     try {
       _stateConnection.disconnect();
+
+      // Quiesce in-flight handlers FIRST. This is the authoritative wait: it
+      // counts handlers this object actually spawned, so it cannot miss one
+      // that has already removed itself from the app's thread map (see
+      // detail::handler_gate). Bounded by the same 5s budget the map scan
+      // below uses, so a wedged handler degrades to the old interrupt path
+      // instead of hanging a process forever.
+      {
+        boost::mutex::scoped_lock lock(_handlerGate->mutex);
+        _handlerGate->shutting_down = true;
+        boost::system_time deadline =
+            boost::get_system_time() + boost::posix_time::milliseconds(5000);
+        while (_handlerGate->inflight > 0) {
+          if (!_handlerGate->done.timed_wait(lock, deadline)) {
+            _ctx.log(5, str(boost::format("state_object::~state_object(): %d handler(s) still "
+                                          "running after 5s; falling back to interrupt") %
+                            _handlerGate->inflight));
+            break;
+          }
+        }
+      }
 
       // Wait for handler threads to complete to avoid dangling references
       // Handler threads are named as stateName(childState) + "_stateChanged"
@@ -341,10 +416,26 @@ public:
     bool useThreading = _hasInstanceThreading ? _instanceThreading : _useThreading;
     if (useThreading) {
       // Threading enabled - spawn threads for each change
+      boost::shared_ptr<detail::handler_gate> gate = _handlerGate;
+      cvc::app *ctxp = &_ctx;
       BOOST_FOREACH (const std::string &childState, pendingCopy) {
-        _ctx.startThread(
-            stateName(childState) + "_stateChanged",
-            boost::bind(&state_object<This>::handleStateChanged, boost::ref(*this), childState));
+        std::string threadKey = stateName(childState) + "_stateChanged";
+        {
+          boost::mutex::scoped_lock g(gate->mutex);
+          if (gate->shutting_down)
+            break;
+          ++gate->inflight;
+        }
+        // Was a bare boost::bind on handleStateChanged with no gate and no
+        // thread_feedback -- the batched path had the same use-after-free as
+        // the single-change path above.
+        _ctx.startThread(threadKey, [this, ctxp, childState, threadKey, gate]() {
+          detail::handler_scope scope(gate);
+          cvc::app::thread_feedback feedback(*ctxp, threadKey);
+          if (scope.cancelled())
+            return;
+          this->handleStateChanged(childState);
+        });
       }
     } else {
       // Threading disabled - call synchronously
@@ -356,6 +447,15 @@ public:
 
   // Wait for all handler threads to complete
   void waitForHandlers() {
+    // Wait on the gate first -- same reason the destructor does: a handler that
+    // has already erased its own app::threads() entry is invisible to the scan
+    // below, so the scan alone can report "done" while a handler still runs.
+    {
+      boost::mutex::scoped_lock lock(_handlerGate->mutex);
+      while (_handlerGate->inflight > 0)
+        _handlerGate->done.wait(lock);
+    }
+
     std::string threadPrefix = stateName();
     thread_map threads = _ctx.threads();
     BOOST_FOREACH (thread_map::value_type &val, threads) {
@@ -400,6 +500,11 @@ protected:
   std::string _state_path;
 
   boost::signals2::connection _stateConnection;
+
+  // Handler-thread lifetime. See detail::handler_gate: the destructor waits on
+  // this rather than trusting app::threads(), which a finishing handler removes
+  // itself from while still running.
+  boost::shared_ptr<detail::handler_gate> _handlerGate;
 
   // Batching support
   mutable boost::mutex _batchMutex;
@@ -453,8 +558,24 @@ private:
         // Threading enabled - spawn thread (unlock first to avoid holding lock)
         lock.unlock();
         std::string threadKey = stateName(childState) + "_stateChanged";
-        _ctx.startThread(threadKey, [this, childState, threadKey]() {
-          cvc::app::thread_feedback feedback(_ctx, threadKey);
+        // Register with the gate BEFORE spawning, so the destructor can never
+        // observe inflight==0 while a handler is on its way in.
+        boost::shared_ptr<detail::handler_gate> gate = _handlerGate;
+        {
+          boost::mutex::scoped_lock g(gate->mutex);
+          if (gate->shutting_down)
+            return;
+          ++gate->inflight;
+        }
+        // Capture the app by pointer, not through `this`: if the object is
+        // already going away, the handler must be able to build its
+        // thread_feedback and unwind without dereferencing a dead object.
+        cvc::app *ctxp = &_ctx;
+        _ctx.startThread(threadKey, [this, ctxp, childState, threadKey, gate]() {
+          detail::handler_scope scope(gate);
+          cvc::app::thread_feedback feedback(*ctxp, threadKey);
+          if (scope.cancelled())
+            return;
           this->handleStateChanged(childState);
         });
       } else {
