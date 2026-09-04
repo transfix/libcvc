@@ -35,19 +35,105 @@ find_package(SWIG 4.0 REQUIRED COMPONENTS python)
 include(UseSWIG)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
+# ── SWIG regeneration dependencies (derived, never hand-listed) ──────────────
+# swig parses every file a .i pulls in with %include / %import, so all of them
+# have to be dependencies of the GENERATE step. A missing one is invisible: the
+# stale <module>_wrap.cxx still compiles and links, and the only symptom is a
+# Python API that silently reflects the PREVIOUS version of the header. Being
+# an ordinary compile dependency of the generated wrapper is NOT enough — that
+# recompiles the stale wrapper, it does not regenerate it.
+#
+# So scan the set out of the interface files rather than hand-listing it: the
+# hand-written list drifted, and every directly-wrapped libcvc/cvcGL header
+# (geometry.h, volume.h, cvc/gl/*.h, ...) was missing from it.
+
+# cvc_swig_interface_deps(<out-var> <entry .i> [SEARCH_DIRS <dir>...])
+#   Absolute paths of the project files <entry .i> pulls in via %include /
+#   %import (and quoted #include, for the headers pasted into the wrapper's
+#   %{ %} block), following nested .i files. Every scanned file also becomes a
+#   CMAKE_CONFIGURE_DEPENDS, so adding a %include re-runs the scan by itself.
+function(cvc_swig_interface_deps outvar entry)
+  cmake_parse_arguments(PARSE_ARGV 2 _arg "" "" "SEARCH_DIRS")
+  set(_pending "${entry}")
+  set(_scanned "")
+  set(_deps "")
+  while(_pending)
+    list(POP_FRONT _pending _file)
+    if("${_file}" IN_LIST _scanned)
+      continue()
+    endif()
+    list(APPEND _scanned "${_file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+    # %include "x.h" / %import(module="m") "x.i" / #include "x.h"
+    file(STRINGS "${_file}" _refs REGEX "^[ \t]*[%#](include|import)[^\"]*\"[^\"]+\"")
+    foreach(_ref IN LISTS _refs)
+      # the LAST quoted token on the line is the file (%import may carry
+      # quoted options ahead of it).
+      string(REGEX MATCH "\"([^\"]+)\"[^\"]*$" _match "${_ref}")
+      set(_rel "${CMAKE_MATCH_1}")
+      set(_resolved "")
+      foreach(_dir IN LISTS _arg_SEARCH_DIRS)
+        if(EXISTS "${_dir}/${_rel}")
+          get_filename_component(_resolved "${_dir}/${_rel}" ABSOLUTE)
+          break()
+        endif()
+      endforeach()
+      if(NOT _resolved)
+        # Not one of ours (VTK, Python, ...) — the compiler tracks those for
+        # the wrapper's own compilation. A %include'd one is a real gap though,
+        # since swig reads it to build the wrapper.
+        if(_ref MATCHES "^[ \t]*%")
+          message(AUTHOR_WARNING
+            "pycvc: '${_rel}' (pulled in by ${_file}) is outside the SWIG search "
+            "dirs, so editing it will not regenerate the wrapper.")
+        endif()
+        continue()
+      endif()
+      if(NOT "${_resolved}" IN_LIST _deps)
+        list(APPEND _deps "${_resolved}")
+        if(_resolved MATCHES "\\.i$")
+          list(APPEND _pending "${_resolved}")
+        endif()
+      endif()
+    endforeach()
+  endwhile()
+  list(REMOVE_ITEM _deps "${entry}")  # already swig's MAIN_DEPENDENCY
+  set(${outvar} "${_deps}" PARENT_SCOPE)
+endfunction()
+
+# Header roots of the resolved libcvc/cvcGL targets, so the scan finds the
+# wrapped headers in a standalone build (installed SDK) too. In-tree targets
+# carry $<BUILD_INTERFACE:...> genexes; unwrap those and drop anything else
+# that is still a genex.
+function(cvc_target_header_dirs outvar)
+  set(_dirs "")
+  foreach(_tgt IN LISTS ARGN)
+    if(NOT TARGET ${_tgt})
+      continue()
+    endif()
+    get_target_property(_inc ${_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+    foreach(_dir IN LISTS _inc)
+      string(REGEX REPLACE "^\\$<BUILD_INTERFACE:(.+)>$" "\\1" _dir "${_dir}")
+      if(NOT _dir MATCHES "\\$<" AND IS_DIRECTORY "${_dir}")
+        list(APPEND _dirs "${_dir}")
+      endif()
+    endforeach()
+  endforeach()
+  set(${outvar} "${_dirs}" PARENT_SCOPE)
+endfunction()
+
+# pycvc_*.h/.i sit next to this file; the wrapped libcvc headers come from the
+# source tree in-tree and from the installed SDK standalone.
+cvc_target_header_dirs(_PYCVC_CVC_HEADER_DIRS ${_PYCVC_CVC_TARGET})
+set(_PYCVC_SWIG_SEARCH_DIRS "${CMAKE_CURRENT_SOURCE_DIR}" ${_PYCVC_CVC_HEADER_DIRS})
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  list(INSERT _PYCVC_SWIG_SEARCH_DIRS 1 "${CMAKE_CURRENT_SOURCE_DIR}/../../inc")
+endif()
+
 set_property(SOURCE pycvc.i PROPERTY CPLUSPLUS ON)
-# Re-run SWIG when a helper header the interface pulls in changes (ninja
-# otherwise keeps a stale wrapper). The directly-wrapped libcvc headers are
-# tracked as ordinary compile dependencies of the generated wrapper.
-set_property(SOURCE pycvc.i PROPERTY DEPENDS
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_buffer.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_context.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_algorithm.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_state.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_exec.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_image.i
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_model.i
-  ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_nav.i)
+cvc_swig_interface_deps(_PYCVC_SWIG_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/pycvc.i"
+  SEARCH_DIRS ${_PYCVC_SWIG_SEARCH_DIRS})
+set_property(SOURCE pycvc.i PROPERTY DEPENDS ${_PYCVC_SWIG_DEPS})
 
 # Shared by both modules — defined before either option block so the scene
 # module can install/test even when the core module isn't built in this run.
@@ -146,10 +232,13 @@ if(CVC_BUILD_PYCVC_GL)
     set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
   endif()
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
-  # Re-run SWIG when the render-helper header (or the %import'd pycvc.i) changes.
-  set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc_scene.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/pycvc.i)
+  # Same derived dependency scan as the core module (see above). Recursing
+  # through the %import'd pycvc.i means the cvcGL headers wrapped here AND the
+  # core headers whose types cross the module boundary all retrigger swig.
+  cvc_target_header_dirs(_PYCVC_CVCGL_HEADER_DIRS ${_PYCVC_CVCGL_TARGET})
+  cvc_swig_interface_deps(_PYCVC_GL_SWIG_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/pycvc_gl.i"
+    SEARCH_DIRS ${_PYCVC_SWIG_SEARCH_DIRS} ${_PYCVC_CVCGL_HEADER_DIRS})
+  set_property(SOURCE pycvc_gl.i PROPERTY DEPENDS ${_PYCVC_GL_SWIG_DEPS})
   # pycvc_scene.cpp holds only the standalone VTK render helpers + the Python
   # vtkProp bridge (free functions); the scene model itself is the directly
   # %include'd cvcGL headers, which cross cvc::geometry/cvc::volume in via %import.
