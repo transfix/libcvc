@@ -79,8 +79,8 @@ VolSliceNode::VolSliceNode(cvc::app &ctx, const std::string &statePath, const st
   m_stateSettings = std::make_unique<cvc::volslice::state_settings>(
       ctx, stateName("volslice"), [this](const cvc::volslice::render_settings &) {
         ++m_settingsVersion;
-        if (m_sceneGraph)
-          m_sceneGraph->requestRender();
+        if (SceneGraph *sg = getSceneGraph())
+          sg->requestRender();
       });
 
   // Unlit: the fragment replacement overwrites the color, and white
@@ -127,8 +127,8 @@ void VolSliceNode::setVolume(const cvc::volume &vol) {
     m_volume = vol; // shallow copy (copy-on-write buffers)
     ++m_volumeVersion;
   }
-  if (m_sceneGraph)
-    m_sceneGraph->requestRender();
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
 }
 
 bool VolSliceNode::hasVolume() const {
@@ -141,8 +141,8 @@ cvc::volslice::render_settings VolSliceNode::config() const { return m_stateSett
 void VolSliceNode::setConfig(const cvc::volslice::render_settings &s) {
   m_stateSettings->set(s);
   ++m_settingsVersion;
-  if (m_sceneGraph)
-    m_sceneGraph->requestRender();
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
 }
 
 cvc::bounding_box VolSliceNode::getBoundingBox() const {
