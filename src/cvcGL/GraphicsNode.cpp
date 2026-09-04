@@ -343,6 +343,28 @@ void GraphicsNode::updateBoundingBoxNode() {
 }
 
 void GraphicsNode::handleStateChanged(const std::string &childState) {
+  // Recognise our own pose coming back BEFORE marshalling anything.
+  //
+  // The echo check further down (posStr == m_echoPosition) cannot do it. That
+  // lambda runs whenever the owner thread next pumps, which may be several
+  // poses later, and it compares the value the tree holds NOW against the
+  // node's LATEST published value. Pose a node twice with a publisher flush
+  // landing in between and those are two different poses: the guard reads a
+  // mismatch, concludes a script moved the node, and rewinds it onto the older
+  // pose — dragging the subtree with it. That is one-run-in-six flakiness in
+  // anything that moves a group twice between pumps.
+  //
+  // Here we are still inside the write, so the question is answerable exactly:
+  // the publisher's queue holds nothing but what nodes published, so a position
+  // write arriving during a flush is this node's own, stale or not. Dropping it
+  // loses nothing — setPosition() already applied the pose to m_transform.
+  //
+  // Everything else keeps going through the check below: only position
+  // publishes (see setPosition), and a node with no scene writes state directly
+  // and echoes back inline on this same thread, where the values do line up.
+  if (childState == "position" && state_publisher::in_flush())
+    return;
+
   // Marshal to main thread via event queue
   runOnMainThread([this, childState]() {
     // Handle state changes for graphics-specific fields

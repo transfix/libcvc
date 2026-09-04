@@ -73,6 +73,26 @@ public:
   // anyone who needs the tree current right now (tests, teardown).
   void flush();
 
+  // True while the CALLING thread is inside flush() — i.e. a state change you
+  // are reacting to right now came out of a publisher's queue rather than from
+  // a script, a dashboard or a host.
+  //
+  // Node handlers need this to recognise their own pose coming back. The queue
+  // only ever holds what nodes published, so a position write seen during a
+  // flush is by construction that node's own — however old it is. Comparing the
+  // value instead cannot tell "mine, stale" from "somebody else's": a node that
+  // has been posed again since the flush was queued sees its OWN earlier pose
+  // as a foreign write, and rewinds itself onto it (see
+  // GraphicsNode::handleStateChanged, and test/cvcgl_pose_echo.cpp).
+  //
+  // Thread-local rather than per-instance because flush() runs its writes on
+  // the calling thread, so a handler those writes fire is on that same thread;
+  // and a publisher only ever writes paths its own scene's nodes published, so
+  // there is no cross-scene confusion to disambiguate. Nesting is counted, not
+  // flagged, so a flush reached from inside a flush still reports correctly on
+  // the way back out.
+  static bool in_flush();
+
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
   // world clock's rate keeps state updates in step with simulation ticks rather
   // than with however fast the renderer happens to be running.
