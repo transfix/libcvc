@@ -14,6 +14,12 @@
 // linear/nearest filtering, the value window — plus the port's one opt-in
 // deviation, spacing-corrected opacity (see cvc/volslice/types.h).
 //
+// Up to NINE bunnies (volren_bunny's grid), each its OWN VolSliceNode -- the
+// one-volume-per-node model composing in the scene graph.  Multi-node scenes
+// need VolSliceNode::depthSortSliceProps() each frame: with UseOIT off, VTK
+// renders translucent props in ADD order, so without the sort a bunny added
+// later paints over a nearer one (measured; regression-tested).
+//
 // KNOWN LIMITS, by design of the pass it renders in: the slice bunny casts
 // no shadow (the shadow baker consumes opaque geometry only), and adding the
 // node flips its renderer to sequential translucency (UseOITOff — see
@@ -136,6 +142,13 @@ cvc::volume bunny_sdf(cvc::app &app, const cvc::geometry &standing, unsigned dim
 #endif
 }
 
+// Where the Nth bunny stands: slot 0 at the origin, the rest ringing outward
+// on a 3x3 grid whose pitch clears the bunny's footprint (volren_bunny's
+// layout, so the two demos frame identically).
+constexpr int kMaxBunnies = 9;
+constexpr int kGrid[kMaxBunnies][2] = {{0, 0}, {1, 0},  {0, 1},   {-1, 0}, {0, -1},
+                                       {1, 1}, {-1, 1}, {-1, -1}, {1, -1}};
+
 // The TF over the RAW SDF domain for a window of half-width `w` (world
 // units): amber interior fading through a warm shell to transparent just
 // outside the surface.  Authored at the default quality; the panel's
@@ -156,7 +169,7 @@ cvc::volslice::render_settings bunny_settings(double w) {
 
 int main(int argc, char **argv) {
   namespace po = boost::program_options;
-  int width = 1280, height = 720, frames = 0;
+  int width = 1280, height = 720, frames = 0, bunnies = 1;
   unsigned dim = 64;
   double quality = cvc::volslice::defaults::quality;
   std::string png;
@@ -167,9 +180,10 @@ int main(int argc, char **argv) {
       "height", po::value<int>(&height))("offscreen", po::bool_switch(&offscreen))(
       "frames", po::value<int>(&frames))("png", po::value<std::string>(&png))(
       "dim", po::value<unsigned>(&dim), "SDF volume resolution (default 64)")(
-      "quality", po::value<double>(&quality),
-      "slice density 0..1 (default 0.5)")("no-ui", po::bool_switch(&no_ui))(
-      "no-grid", po::bool_switch(&no_grid))("no-shadows", po::bool_switch(&no_shadows));
+      "quality", po::value<double>(&quality), "slice density 0..1 (default 0.5)")(
+      "no-ui", po::bool_switch(&no_ui))("no-grid", po::bool_switch(&no_grid))(
+      "no-shadows", po::bool_switch(&no_shadows))("bunnies", po::value<int>(&bunnies),
+                                                  "initial bunny count 1..9 (default 1)");
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
   po::notify(vm);
@@ -189,8 +203,11 @@ int main(int argc, char **argv) {
   const cvc::geometry standing = stand_bunny(S);
 
   const double ground_rgb[3] = {0.32, 0.34, 0.38};
+  // Sized for the FULL 3x3 grid (bunnies can be added at runtime), not just
+  // the one on stage at startup (volren_bunny's formula).
+  const double ground_half = std::max(2.2 * S, 1.35 * S * std::sqrt(2.0) + 1.2 * S);
   auto groundNode = std::dynamic_pointer_cast<GeometryNode>(
-      sg.addGraphics("ground", ground(2.2 * S, ground_rgb)));
+      sg.addGraphics("ground", ground(ground_half, ground_rgb)));
   groundNode->setUseSingleColor(true);
   groundNode->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
   groundNode->setAmbient(0.35);
@@ -203,16 +220,33 @@ int main(int argc, char **argv) {
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
               sdf_vol.min(), sdf_vol.max());
 
-  auto volNode = sg.getGraphicsRoot()->addGraphicsChild<VolSliceNode>("bunny_volume");
-  sg.registerGraphics("bunny_volume", volNode);
-  volNode->setVolume(sdf_vol);
-
+  // One VolSliceNode per grid slot, all sharing the SAME volume (shallow
+  // copies; each node owns its 3D texture -- 9 x 256KB at 64^3, negligible).
+  // Pre-created and visibility-gated rather than added/removed live, so the
+  // panel buttons are cheap and teardown-order questions never arise.
+  const double pitch = 1.35 * S;
   double windowHalf = 0.06 * S;
+  int bunnyCount = std::min(std::max(bunnies, 1), kMaxBunnies);
+  std::vector<std::shared_ptr<VolSliceNode>> volNodes;
+  for (int i = 0; i < kMaxBunnies; ++i) {
+    const std::string name = "bunny_volume_" + std::to_string(i);
+    auto n = sg.getGraphicsRoot()->addGraphicsChild<VolSliceNode>(name);
+    sg.registerGraphics(name, n);
+    n->setVolume(sdf_vol);
+    n->setPosition(kGrid[i][0] * pitch, kGrid[i][1] * pitch, 0.0);
+    n->setVisible(i < bunnyCount);
+    volNodes.push_back(n);
+  }
+  auto applyConfigToAll = [&](const cvc::volslice::render_settings &s) {
+    for (auto &n : volNodes)
+      n->setConfig(s);
+  };
   {
     cvc::volslice::render_settings s = bunny_settings(windowHalf);
     s.slices.quality = std::min(std::max(quality, 0.0), 1.0);
-    volNode->setConfig(s);
+    applyConfigToAll(s);
   }
+  VolSliceNode *volNode = volNodes[0].get(); // slot 0: the panel's readout node
 
   // The bunny_shadow rig for the ground and chrome; the slices are unlit by
   // design (the legacy unshaded path — shading is phase-2 work).
@@ -235,7 +269,15 @@ int main(int argc, char **argv) {
     sg.setDiagnosticChromeVisible(false);
 
   CameraController cam(view);
-  cam.frameBounds(-2.2 * S, -2.2 * S, 0.0, 2.2 * S, 2.2 * S, 1.3 * S);
+  auto frameAll = [&]() {
+    double ring = 0.0;
+    for (int i = 0; i < bunnyCount; ++i)
+      ring = std::max(
+          ring, std::sqrt(double(kGrid[i][0] * kGrid[i][0] + kGrid[i][1] * kGrid[i][1])) * pitch);
+    const double r = ring + 2.2 * S;
+    cam.frameBounds(-r, -r, 0.0, r, r, 1.3 * S);
+  };
+  frameAll();
   cam.setMode(CameraController::Mode::Orbit);
   cvc::gl::TouchGestures touch(view, cam);
 
@@ -245,7 +287,8 @@ int main(int argc, char **argv) {
 
   // Panel intents, applied in the loop (the ImGui callback runs mid-render).
   double wantQuality = quality, wantNear = 0.0, wantWindow = windowHalf;
-  bool wantCorrection = false, wantNearest = false;
+  bool wantCorrection = false, wantNearest = false, wantFrameAll = false;
+  int wantCount = bunnyCount;
 
 #ifdef CVC_ENABLE_IMGUI
   cvc::gl::ImGuiOverlay ui(view);
@@ -257,6 +300,21 @@ int main(int argc, char **argv) {
     ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("volslice — VolumeRover2 slice renderer")) {
+      ImGui::Text("bunnies: %d / %d", bunnyCount, kMaxBunnies);
+      ImGui::SameLine();
+      if (ImGui::Button("Add") && wantCount < kMaxBunnies)
+        wantCount = bunnyCount + 1;
+      ImGui::SameLine();
+      if (ImGui::Button("Remove") && wantCount > 1)
+        wantCount = bunnyCount - 1;
+      ImGui::SameLine();
+      if (ImGui::Button("Frame all"))
+        wantFrameAll = true;
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Each bunny is its OWN VolSliceNode -- the scene graph composes\n"
+                          "them, depth-sorted per frame (VTK renders translucent props in\n"
+                          "add order; see VolSliceNode::depthSortSliceProps).");
+      ImGui::Separator();
       float q = float(wantQuality);
       if (ImGui::SliderFloat("quality", &q, 0.f, 1.f, "%.2f"))
         wantQuality = q;
@@ -286,7 +344,10 @@ int main(int argc, char **argv) {
       if (ImGui::Checkbox("nearest-neighbor filter", &nn))
         wantNearest = nn;
       ImGui::Separator();
-      ImGui::Text("planes: %zu", volNode->planesRendered());
+      std::size_t totalPlanes = 0;
+      for (int i = 0; i < bunnyCount; ++i)
+        totalPlanes += volNodes[i]->planesRendered();
+      ImGui::Text("planes: %zu (%d node%s)", totalPlanes, bunnyCount, bunnyCount == 1 ? "" : "s");
       ImGui::Text("scene: %.1f fps", hud.fps());
     }
     ImGui::End();
@@ -314,6 +375,16 @@ int main(int argc, char **argv) {
     cam.update(dt);
 
     // Apply the panel's intents.
+    if (wantCount != bunnyCount) {
+      bunnyCount = std::min(std::max(wantCount, 1), kMaxBunnies);
+      wantCount = bunnyCount;
+      for (int i = 0; i < kMaxBunnies; ++i)
+        volNodes[i]->setVisible(i < bunnyCount);
+    }
+    if (wantFrameAll) {
+      wantFrameAll = false;
+      frameAll();
+    }
     {
       cvc::volslice::render_settings s = volNode->config();
       const bool windowChanged = std::fabs(wantWindow - windowHalf) > 1e-9;
@@ -332,18 +403,28 @@ int main(int argc, char **argv) {
         s.opacity_correction = wantCorrection;
         s.filter = wantNearest ? cvc::volslice::interpolation::nearest
                                : cvc::volslice::interpolation::linear;
-        volNode->setConfig(s);
+        applyConfigToAll(s);
       }
     }
 
     sg.processEvents();
-    volNode->tick();
+    std::vector<VolSliceNode *> active;
+    for (int i = 0; i < bunnyCount; ++i) {
+      volNodes[i]->tick();
+      active.push_back(volNodes[i].get());
+    }
+    // Node-vs-node compositing: reorder the actors back to front for the
+    // current camera (no-op when the order is already right).
+    VolSliceNode::depthSortSliceProps(view.renderer(), active);
 
     if (!png.empty() && ticks >= 5) {
       view.render();
       view.writePNG(png);
-      std::printf("[volslice_bunny] wrote %s (%zu planes)\n", png.c_str(),
-                  volNode->planesRendered());
+      std::size_t totalPlanes = 0;
+      for (int i = 0; i < bunnyCount; ++i)
+        totalPlanes += volNodes[i]->planesRendered();
+      std::printf("[volslice_bunny] wrote %s (%d bunnies, %zu planes)\n", png.c_str(), bunnyCount,
+                  totalPlanes);
       break;
     }
     if (capturing && ticks > kCaptureTickLimit)
@@ -352,8 +433,11 @@ int main(int argc, char **argv) {
 
     const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(now - last_report).count() >= 1.0) {
-      std::printf("[volslice_bunny] %zu planes | scene %.1f fps | q=%.2f%s\n",
-                  volNode->planesRendered(), hud.fps(), wantQuality,
+      std::size_t totalPlanes = 0;
+      for (int i = 0; i < bunnyCount; ++i)
+        totalPlanes += volNodes[i]->planesRendered();
+      std::printf("[volslice_bunny] %d bunny(s) | %zu planes | scene %.1f fps | q=%.2f%s\n",
+                  bunnyCount, totalPlanes, hud.fps(), wantQuality,
                   wantCorrection ? " | corrected" : "");
       last_report = now;
     }

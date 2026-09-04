@@ -61,6 +61,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 class vtkTextureObject;
 
@@ -92,6 +93,16 @@ public:
 
   cvc::bounding_box getBoundingBox() const override;
   void addToRenderer(vtkRenderer *renderer) override;
+
+  // MULTI-NODE scenes: with UseOIT off, VTK renders translucent props in ADD
+  // order, not depth order (measured -- the "traditional depth sorting" the
+  // UseOIT docs mention does not reorder props), so a slice volume added
+  // earlier is painted over by one added later even when it is nearer.  This
+  // reorders the given nodes' actors inside `renderer`'s prop list so they
+  // draw back to front for the CURRENT camera.  Call it each frame (cheap:
+  // it re-adds actors only when the order actually changed) before
+  // rendering a scene with more than one slice node.
+  static void depthSortSliceProps(vtkRenderer *renderer, const std::vector<VolSliceNode *> &nodes);
 
 private:
   void rebuildSliceGeometry(const cvc::volslice::mat4 &localToClip,

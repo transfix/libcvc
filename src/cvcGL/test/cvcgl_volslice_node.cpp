@@ -262,6 +262,86 @@ int main() {
     assert(p.r > 100 && p.g < 40 && p.b < 40);
   }
 
+  // ---- Two slice nodes in one scene: does the TRANSLUCENT PASS order the
+  // PROPS back to front?  Each node's own slices are ordered by construction,
+  // but node-vs-node ordering is VTK's job once UseOIT is off.  A green ball
+  // in front of a red ball (disjoint boxes along the view axis): if props
+  // render back to front, the center composites green-over-red (green wins);
+  // if they render in ADD order with green added first, red blends on top.
+  // The demo's multi-bunny grid depends on the answer.
+  {
+    node->setVisible(false); // retire the ball from the sections above
+
+    auto back = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolSliceNode>("back");
+    sg.registerGraphics("back", back);
+    back->setVolume(makeBallVolume(app, 32, cvc::bounding_box(-1, -1, -2.2, 1, 1, -0.2)));
+    back->setConfig(redSettings(0.6f));
+
+    // Deliberately added SECOND: green is nearer, so add order (green after
+    // red? no -- back was added first) disagrees with depth order only if
+    // the sort is missing.  To make the failure mode unambiguous, the FRONT
+    // node is added first in a second scene... keeping one scene, the front
+    // node added AFTER the back one matches both hypotheses, so instead add
+    // front FIRST is impossible here; assert the composite is green-dominant
+    // and leave the add-order permutation to the swap below.
+    auto front = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolSliceNode>("front");
+    sg.registerGraphics("front", front);
+    front->setVolume(makeBallVolume(app, 32, cvc::bounding_box(-1, -1, 0.2, 1, 1, 2.2)));
+    {
+      cvc::volslice::render_settings s;
+      s.tf.add({0.0, 0.f, 1.f, 0.f, 0.f});
+      s.tf.add({1.0, 0.f, 1.f, 0.f, 0.6f});
+      front->setConfig(s);
+    }
+
+    for (int i = 0; i < 4; ++i) {
+      sg.processEvents();
+      back->tick();
+      front->tick();
+      view.render();
+    }
+    std::vector<unsigned char> f = view.frameRGB();
+    const RGB center = pixelAt(f, W / 2, H / 2);
+    std::printf("two-node center (green in front of red): %d %d %d\n", center.r, center.g,
+                center.b);
+    // Green is nearer: correct prop ordering composites green over red.
+    assert(center.g > center.r && "front slice node must composite over the back one");
+
+    // The adversarial permutation: make the NEARER volume the FIRST-added
+    // node ('back' hops in front).  If VTK only renders translucent props in
+    // add order, the second-added 'front' node would now wrongly paint over
+    // the nearest volume.
+    back->setVolume(makeBallVolume(app, 32, cvc::bounding_box(-1, -1, 2.4, 1, 1, 4.4)));
+    for (int i = 0; i < 4; ++i) {
+      sg.processEvents();
+      back->tick();
+      front->tick();
+      view.render();
+    }
+    f = view.frameRGB();
+    const RGB unsortedCenter = pixelAt(f, W / 2, H / 2);
+    std::printf("two-node center (red hops in front, NO sort): %d %d %d\n", unsortedCenter.r,
+                unsortedCenter.g, unsortedCenter.b);
+    // MEASURED VTK behavior, pinned so a change in VTK is noticed: without
+    // help, translucent props render in ADD order -- the later-added green
+    // node still paints over the now-nearer red one.  This is exactly why
+    // depthSortSliceProps() exists.
+    assert(unsortedCenter.g > unsortedCenter.r && "VTK renders translucent props in add order");
+
+    // With the per-frame sort, depth wins: red is nearest, red shows.
+    for (int i = 0; i < 4; ++i) {
+      sg.processEvents();
+      back->tick();
+      front->tick();
+      VolSliceNode::depthSortSliceProps(view.renderer(), {back.get(), front.get()});
+      view.render();
+    }
+    f = view.frameRGB();
+    const RGB sorted = pixelAt(f, W / 2, H / 2);
+    std::printf("two-node center (red in front, sorted): %d %d %d\n", sorted.r, sorted.g, sorted.b);
+    assert(sorted.r > sorted.g && "depthSortSliceProps must restore depth ordering");
+  }
+
   std::printf("cvcgl_volslice_node: all assertions passed\n");
   return 0;
 }
