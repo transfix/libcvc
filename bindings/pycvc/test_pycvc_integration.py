@@ -67,14 +67,29 @@ def test_full_pipeline_on_one_app():
         assert pycvc.state_get(app, "dsl.done") == "yes"
 
     # Phase 5a: drop the meshes into a scene bound to the SAME app (no cvcGL
-    # singleton). num_graphics reflects what we added.
+    # singleton). pycvc_gl wraps the real cvcGL objects rather than a facade, so
+    # addGraphics hands back the LIVE node; num_graphics reflects what we added.
     import pycvc_gl
 
-    scene = pycvc_gl.Scene(app)
-    scene.add_geometry("surface", surf)
-    scene.add_geometry("sphere", sphere)
+    scene = pycvc_gl.SceneGraph(app)
+    surf_node = scene.addGraphics("surface", surf)
+    scene.addGraphics("sphere", sphere)
+    assert surf_node is not None
     assert scene.num_graphics() == 2
-    assert scene.has("surface")
+    assert scene.hasGraphics("surface") and scene.hasGraphics("sphere")
+    assert not scene.hasGraphics("nope")
+
+    # Posing that live node is an in-place mutation, not a rebuild: same node,
+    # same count. And a group node's transform composes onto what the graph
+    # parents under it, so the scene really is a graph and not a flat list.
+    surf_node.setPosition(1.0, 0.0, 0.0)
+    rig = scene.add_group("rig")
+    held = scene.add_child_geometry("rig", "held", surf)
+    rig.setPosition(0.0, 0.0, 7.0)
+    scene.processEvents()
+    assert scene.num_graphics() == 4
+    assert abs(surf_node.get_world_transform()[3] - 1.0) < 1e-9
+    assert abs(held.get_world_transform()[11] - 7.0) < 1e-9
 
     print("  ok: full app -> sdf -> mesh -> state/observer -> DSL -> scene pipeline")
 
