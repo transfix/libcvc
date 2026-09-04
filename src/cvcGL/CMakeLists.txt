@@ -273,6 +273,10 @@ add_executable(cvcgl_volren_node test/cvcgl_volren_node.cpp)
 target_link_libraries(cvcgl_volren_node PRIVATE cvcGL)
 add_test(NAME cvcgl_volren_node COMMAND cvcgl_volren_node)
 
+add_executable(cvcgl_volslice_node test/cvcgl_volslice_node.cpp)
+target_link_libraries(cvcgl_volslice_node PRIVATE cvcGL)
+add_test(NAME cvcgl_volslice_node COMMAND cvcgl_volslice_node)
+
 # The publisher keeps the state tree correct while keeping writes off the render
 # path: the value arrives (after a flush), the last write wins, and an external
 # write still drives the node.
