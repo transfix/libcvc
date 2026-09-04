@@ -55,9 +55,15 @@ public:
   void addChild(std::shared_ptr<SceneNode> child);
   void removeChild(std::shared_ptr<SceneNode> child);
 
-  // SceneGraph association (set when node is added to a scene graph)
+  // SceneGraph association (set when node is added to a scene graph).
   void setSceneGraph(SceneGraph *sceneGraph);
-  SceneGraph *getSceneGraph() const { return m_sceneGraph; }
+  // The scene this node belongs to, or nullptr if it has none — never attached,
+  // or attached to a scene that has since been destroyed. A node can outlive its
+  // scene (removeGraphics() hands ownership back to the caller; a script may
+  // keep the node past the scene itself), so the back-pointer alone is not
+  // enough: it is paired with a weak handle on the scene's lifetime and only
+  // handed out while that handle is live. ALWAYS reach the scene through here.
+  SceneGraph *getSceneGraph() const;
 
   // Public accessor for the node's primary VTK prop. Needed by callers that
   // manage multiple vtkRenderers (e.g. a picture-in-picture overlay) and need
@@ -78,7 +84,13 @@ protected:
   bool m_visible;
   std::vector<std::shared_ptr<SceneNode>> m_children;
   vtkRenderer *m_renderer;
-  SceneGraph *m_sceneGraph; // Non-owning pointer to parent SceneGraph
+
+private:
+  // Non-owning pointer to the parent SceneGraph, meaningful only while
+  // m_sceneAlive is unexpired. Private on purpose: getSceneGraph() is the only
+  // read that can tell "detached" from "dangling", so subclasses go through it.
+  SceneGraph *m_sceneGraph;
+  std::weak_ptr<void> m_sceneAlive; // SceneGraph::aliveToken() of m_sceneGraph
 };
 
 } // namespace gl

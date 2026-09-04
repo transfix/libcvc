@@ -95,10 +95,14 @@ SceneGraph::~SceneGraph() {
     }
   }
 
-  // Clear SceneGraph reference from all nodes
-  for (auto &node : m_rootNodes) {
-    node->setSceneGraph(nullptr);
-  }
+  // Detach every node from this scene. Dropping the lifetime token does it in one
+  // move and, unlike walking m_rootNodes, it reaches the nodes that are NOT in
+  // the graph any more: removeGraphics() hands a node back to its caller, and a
+  // caller that outlives the scene (a Python proxy, say) would otherwise be left
+  // holding a back-pointer to freed memory — a later setPosition() then locks the
+  // destroyed publisher's mutex. From here on those nodes see no scene and take
+  // their own no-scene path (GraphicsNode::setPosition writes state directly).
+  m_alive.reset();
 }
 
 void SceneGraph::postEvent(std::function<void()> callback) {

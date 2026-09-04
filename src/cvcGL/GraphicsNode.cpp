@@ -87,7 +87,21 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
   }
 }
 
-GraphicsNode::~GraphicsNode() {}
+GraphicsNode::~GraphicsNode() {
+  // Orphan the graphics children before they are released. m_parent is a raw
+  // back-pointer used by updateTransform() to compose the world matrix, and a
+  // child can outlive its parent: the scene's own destruction drops the graphics
+  // root while a host still holds one of its nodes. Without this, that node's
+  // next setPosition() multiplies through a freed parent — the same dangling
+  // back-pointer the SceneGraph handle closes, one level down. Children that
+  // nothing else holds die immediately after; the rest carry on as roots, which
+  // is what they now are. No updateTransform() here: the cached world matrix
+  // stays put until the next pose write recomputes it parentless.
+  for (auto &child : m_graphicsChildren) {
+    if (child)
+      child->m_parent = nullptr;
+  }
+}
 
 void GraphicsNode::setTransform(vtkMatrix4x4 *matrix) {
   if (matrix) {
@@ -490,8 +504,8 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     // once per frame via checkAndResetRenderNeeded(). The synchronous fallback
     // remains only for a node used without a SceneGraph, where nothing drains
     // the flag.
-    if (m_sceneGraph) {
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph()) {
+      sg->requestRender();
     } else if (m_renderer && m_renderer->GetRenderWindow()) {
       m_renderer->GetRenderWindow()->Render();
     }
@@ -509,7 +523,7 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   child->m_parent = this;
 
   // Propagate SceneGraph reference to child
-  child->setSceneGraph(m_sceneGraph);
+  child->setSceneGraph(getSceneGraph());
 
   // Also add as SceneNode child so it gets rendered
   addChild(child);
