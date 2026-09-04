@@ -3,9 +3,13 @@
 // ImageMagick round-trip (guarded on CVC_ENABLE_IMAGEMAGICK).
 
 #include <cstdint>
+#include <cstdio>
 #include <cvc/image/image.h>
 #include <cvc/image/image.h> // include-twice: header must be idempotent
+#include <fstream>
 #include <gtest/gtest.h>
+#include <list>
+#include <stdexcept>
 #include <string>
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
@@ -202,6 +206,182 @@ TEST(ImageTest, ExtensionHelper) {
   EXPECT_EQ(cvc::image_file_extension("foo.tar.jpg"), "jpg");
   EXPECT_EQ(cvc::image_file_extension("noext"), "");
   EXPECT_EQ(cvc::image_file_extension("/a.dir/file"), "");
+}
+
+// ── write dispatch: fallback on handler failure ──────────────────────────────
+//
+// The real-world trigger is untestable here (an ImageMagick built without the
+// png/jpeg delegates makes magick_image_io's write throw its missing-encoder
+// error), so these pin the dispatch contract with synthetic handlers on
+// made-up extensions: write_image must try the preferred (last-registered)
+// handler first, fall back to earlier registrations when it throws, and
+// aggregate every failure when none succeeds. Registrations are process-global
+// and append-only, hence the unique extensions per test.
+
+namespace {
+
+class fake_write_io : public cvc::image_file_io {
+public:
+  fake_write_io(std::string id, std::string ext, bool fail)
+      : _id(std::move(id)), _exts{std::move(ext)}, _fail(fail) {}
+  std::string id() const override { return _id; }
+  const std::list<std::string> &extensions() const override { return _exts; }
+  bool can_read(const std::string &) const override { return false; }
+  image read(const std::string &) const override { throw std::runtime_error(_id + ": no read"); }
+  void write(const image &, const std::string &, int) const override {
+    ++writes;
+    if (_fail)
+      throw std::runtime_error(_id + ": simulated missing encoder");
+  }
+  mutable int writes = 0;
+
+private:
+  std::string _id;
+  std::list<std::string> _exts;
+  bool _fail;
+};
+
+} // namespace
+
+TEST(ImageTest, WriteDispatchFallsBackWhenPreferredHandlerThrows) {
+  boost::shared_ptr<fake_write_io> fallback(new fake_write_io("fallback_io", "cvcfbk1", false));
+  boost::shared_ptr<fake_write_io> preferred(new fake_write_io("preferred_io", "cvcfbk1", true));
+  cvc::image_file_io::add(fallback);
+  cvc::image_file_io::add(preferred); // registered last -> tried first
+  // for_write_ext still reports only the last-registered handler...
+  auto h = cvc::image_file_io::for_write_ext("cvcfbk1");
+  ASSERT_TRUE(h);
+  EXPECT_EQ(h->id(), "preferred_io");
+  // ...but when that one throws, write_image falls back to the earlier one.
+  cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk1");
+  EXPECT_EQ(preferred->writes, 1);
+  EXPECT_EQ(fallback->writes, 1);
+}
+
+TEST(ImageTest, WriteDispatchReportsEveryFailure) {
+  boost::shared_ptr<fake_write_io> a(new fake_write_io("fail_a_io", "cvcfbk2", true));
+  boost::shared_ptr<fake_write_io> b(new fake_write_io("fail_b_io", "cvcfbk2", true));
+  cvc::image_file_io::add(a);
+  cvc::image_file_io::add(b);
+  try {
+    cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk2");
+    FAIL() << "expected write_image to throw when every handler fails";
+  } catch (const std::exception &e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("fail_a_io"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("fail_b_io"), std::string::npos) << msg;
+  }
+  EXPECT_EQ(a->writes, 1);
+  EXPECT_EQ(b->writes, 1);
+}
+
+TEST(ImageTest, WriteDispatchUnknownExtensionThrows) {
+  EXPECT_ANY_THROW(cvc::write_image(make_rgba(2, 2), "x.nosuchext"));
+}
+
+// ── stb encoders (the write fallback) ────────────────────────────────────────
+//
+// stb is the handler write_image falls back to when magick refuses, so its
+// encoders must round-trip on their own. for_read is first-match and stb
+// registers first, so this also pins the read-dispatch order.
+
+TEST(ImageTest, StbHandlerEncodesPngRoundTrip) {
+  auto h = cvc::image_file_io::for_read("x.png");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  image a = make_rgba(5, 3);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_stb.png";
+  h->write(a, path, 90);
+  image b = h->read(path);
+  ASSERT_EQ(b.width(), 5);
+  ASSERT_EQ(b.height(), 3);
+  ASSERT_EQ(b.channels(), 4);
+  for (std::size_t i = 0; i < a.size_bytes(); ++i)
+    EXPECT_EQ(b.data()[i], a.data()[i]) << "byte " << i;
+}
+
+TEST(ImageTest, StbHandlerEncodesJpegDimensions) {
+  auto h = cvc::image_file_io::for_read("x.jpg");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  image a = make_rgba(6, 4);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_stb.jpg";
+  h->write(a, path, 90);
+  image b = h->read(path);
+  EXPECT_EQ(b.width(), 6);
+  EXPECT_EQ(b.height(), 4);
+}
+
+// bmp and tga are the other two stb encoders the fallback can land on; both are
+// lossless for RGBA u8 (stb gives a 4-channel bmp the V4 header with an alpha
+// mask, and tga 32bpp carries alpha), so assert exact round-trips.
+TEST(ImageTest, StbHandlerEncodesLosslessBmpAndTga) {
+  const image a = make_rgba(5, 3);
+  for (const char *ext : {"bmp", "tga"}) {
+    const std::string path =
+        std::string(::testing::TempDir()) + "/cvc_image_stb_lossless." + std::string(ext);
+    auto h = cvc::image_file_io::for_read(std::string("x.") + ext);
+    ASSERT_TRUE(h) << ext;
+    ASSERT_EQ(h->id(), "stb_image_io") << ext;
+    h->write(a, path, 90);
+    image b = h->read(path);
+    ASSERT_EQ(b.width(), 5) << ext;
+    ASSERT_EQ(b.height(), 3) << ext;
+    for (std::size_t i = 0; i < a.size_bytes(); ++i)
+      ASSERT_EQ(b.data()[i], a.data()[i]) << ext << " byte " << i;
+  }
+}
+
+TEST(ImageTest, StbHandlerRefusesGifWrite) {
+  auto h = cvc::image_file_io::for_read("x.gif");
+  ASSERT_TRUE(h);
+  ASSERT_EQ(h->id(), "stb_image_io");
+  EXPECT_ANY_THROW(
+      h->write(make_rgba(2, 2), std::string(::testing::TempDir()) + "/cvc_image_stb.gif", 90));
+}
+
+// Regression for the silent-MIFF corruption: with an ImageMagick built without
+// the png delegate, Magick::Image::write("out.png") did not throw — it fell
+// back to its native MIFF format and wrote "id=ImageMagick..." bytes under the
+// .png name. Whichever handler ends up encoding (magick, or stb after the
+// fallback), the bytes on disk must be real PNG.
+TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
+  image a = make_rgba(4, 4);
+  const std::string path = std::string(::testing::TempDir()) + "/cvc_image_magic.png";
+  a.save(path);
+  std::ifstream f(path, std::ios::binary);
+  ASSERT_TRUE(f.good());
+  unsigned char sig[8] = {0};
+  f.read(reinterpret_cast<char *>(sig), 8);
+  ASSERT_EQ(f.gcount(), 8);
+  const unsigned char png_sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+  for (int i = 0; i < 8; ++i)
+    EXPECT_EQ(sig[i], png_sig[i]) << "byte " << i << " — MIFF starts with \"id=ImageMagick\"";
+}
+
+// Generalizes SavedPngHasPngMagicNotMiff across every registered extension —
+// including tif/webp, which have no stb fallback, and the TIF/JPG coder
+// aliases. For each one, save() must either succeed with a file that is NOT a
+// MIFF blob, or throw. Silently writing MIFF under another name is the bug.
+// Guards the extension list too: adding an extension whose uppercase form is
+// not a coder Magick knows would surface here rather than in a user's file.
+TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
+  const image a = make_rgba(4, 4);
+  for (const std::string &ext : cvc::image_file_io::known_extensions()) {
+    const std::string path = std::string(::testing::TempDir()) + "/cvc_image_notmiff." + ext;
+    std::remove(path.c_str());
+    try {
+      a.save(path);
+    } catch (const std::exception &) {
+      continue; // no encoder for this format in this build — the honest outcome
+    }
+    std::ifstream f(path, std::ios::binary);
+    ASSERT_TRUE(f.good()) << ext << ": save() reported success but wrote no file";
+    char head[14] = {0};
+    f.read(head, sizeof(head));
+    EXPECT_NE(std::string(head, static_cast<std::size_t>(f.gcount())).find("id=ImageMagick"), 0u)
+        << ext << ": wrote a MIFF blob under ." << ext;
+  }
 }
 
 #ifdef CVC_ENABLE_IMAGEMAGICK

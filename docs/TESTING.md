@@ -906,6 +906,7 @@ inlined into instrumented TUs), minus:
 - Vendored XmlRpc++ (`src/xmlrpc/`)
 - Vendored contour-spectrum code (`src/cvc/geometry/cvc-mesher/contour/`),
   per `docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md` §4 Option A
+- Vendored stb single-file headers (`src/cvc/image/third_party/`)
 
 The local `coverage` CMake target applies the identical filter, so
 numbers from `./generate_coverage.sh` are directly comparable to the

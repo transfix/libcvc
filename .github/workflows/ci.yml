@@ -460,13 +460,15 @@ jobs:
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
           # Drop test code itself plus vendored trees we don't ship as a
-          # supported API surface: XmlRpc++ (src/xmlrpc) and the
+          # supported API surface: XmlRpc++ (src/xmlrpc), the
           # UT-Austin contour-spectrum code
-          # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A).
+          # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A),
+          # and the stb single-file headers (src/cvc/image/third_party).
           lcov --remove build/coverage_filtered.info \
             '*/test/*' '*/tests/*' '*_test.cpp' \
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
+            '*/cvc/image/third_party/*' \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
           genhtml build/coverage_filtered.info \

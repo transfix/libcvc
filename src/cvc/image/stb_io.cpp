@@ -9,10 +9,14 @@
 // stb_image is a single self-contained header; it has none of that machinery
 // and just decodes bytes -> pixels.
 //
-// image.cpp registers handlers "last wins" (the reader iterates the registry
-// and takes the LAST matching handler), so registering stb AFTER magick makes
-// stb win for its declared extensions (png/jpg/jpeg/bmp/tga/gif). Formats stb
-// does not cover (tif/webp/etc.) still fall through to magick_image_io.
+// Dispatch (see image.cpp): for_read takes the FIRST can_read match, so stb —
+// registered first — wins reads for its declared extensions
+// (png/jpg/jpeg/bmp/tga/gif); tif/webp/etc. fall through to magick_image_io.
+// Writes prefer the LAST extension match, so magick stays the primary writer
+// and write_image falls back to the stb_image_write encoders below when it
+// throws — e.g. an ImageMagick built without the png/jpeg delegates, whose
+// magick_image_io write path detects the missing encoder instead of silently
+// emitting a MIFF blob under the requested name (see magick_io.cpp).
 
 #include <cvc/image/image.h>
 
@@ -30,6 +34,10 @@
 #define STBI_NO_PNM
 #define STBI_NO_PSD
 #include "third_party/stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "third_party/stb_image_write.h"
 
 namespace cvc {
 
@@ -66,12 +74,33 @@ public:
     return out;
   }
 
-  void write(const image & /*img*/, const std::string &path, int /*quality*/) const override {
-    // stb_image is read-only in this handler; refuse writes so callers fall
-    // back to whatever write handler image.cpp finds (magick_image_io on
-    // native, nothing on wasm — the wasm demos never write images).
-    throw std::runtime_error(std::string("cvc::image stb write '") + path +
-                             "': not supported (read-only fast path)");
+  void write(const image &img, const std::string &path, int quality) const override {
+    const std::string e = image_file_extension(path);
+    // GIF is decode-only in stb; throw so write_image can hand it to another
+    // handler (or fail loudly) rather than emit a mis-formatted file.
+    if (e != "png" && e != "jpg" && e != "jpeg" && e != "bmp" && e != "tga")
+      throw std::runtime_error(std::string("cvc::image stb write '") + path +
+                               "': no stb encoder for '." + e + "'");
+    // stb_image_write encodes interleaved u8; convert like magick_image_io
+    // does so both writers accept any cvc::image. `const` so data() takes the
+    // no-detach overload (no needless buffer copy when img is already RGBA u8).
+    const image src =
+        (img.format() == image::pixel_format::RGBA && img.type() == image::data_type::u8)
+            ? img
+            : img.converted(image::pixel_format::RGBA, image::data_type::u8);
+    const int w = src.width(), h = src.height();
+    int ok = 0;
+    if (e == "png")
+      ok = stbi_write_png(path.c_str(), w, h, 4, src.data(), w * 4);
+    else if (e == "jpg" || e == "jpeg") // alpha ignored by the jpeg encoder
+      ok = stbi_write_jpg(path.c_str(), w, h, 4, src.data(),
+                          (quality >= 1 && quality <= 100) ? quality : 90);
+    else if (e == "bmp")
+      ok = stbi_write_bmp(path.c_str(), w, h, 4, src.data());
+    else
+      ok = stbi_write_tga(path.c_str(), w, h, 4, src.data());
+    if (!ok)
+      throw std::runtime_error(std::string("cvc::image stb write '") + path + "': encode failed");
   }
 
 private:
@@ -81,7 +110,7 @@ private:
 } // namespace
 
 // Called from register_default_image_handlers (defined in magick_io.cpp) —
-// registered AFTER magick_image_io so image_file_io::for_read (last-wins)
+// registered BEFORE magick_image_io so image_file_io::for_read (first-wins)
 // picks stb for its declared extensions. Missing formats fall through.
 void register_stb_image_handler() {
   image_file_io::add(image_file_io::ptr(new stb_image_io()));

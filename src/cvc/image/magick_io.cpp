@@ -11,14 +11,16 @@
 // magick_image_io — the catch-all cvc::image handler backed by ImageMagick
 // Magick++ (already linked PUBLIC into libcvc core; VTK-free). Loads to / saves
 // from 8-bit interleaved RGBA; Magick's CharPixel storage down-converts the
-// Q16-HDRI internal quantum, invisible to callers. Registered as the default
-// (and, for now, only) image handler; a zero-dependency stb fast-path handler
-// can be registered AHEAD of it later for png/jpg/bmp/tga.
+// Q16-HDRI internal quantum, invisible to callers. The zero-dependency stb
+// handler (stb_io.cpp) sits AHEAD of it for png/jpg/bmp/tga/gif reads and
+// BEHIND it as the write fallback when this Magick lacks the target encoder.
 
 #include <cvc/image/image.h>
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
 #include <Magick++.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <list>
 #include <mutex>
@@ -161,8 +163,8 @@ void init_magick_once() {
     // was being DCEd in the wasm build).
     using RegFn = std::size_t (*)(void);
     static volatile RegFn keep[] = {
-      &RegisterPNGImage,  &RegisterJPEGImage, &RegisterTIFFImage, &RegisterWEBPImage,
-      &RegisterBMPImage,  &RegisterGIFImage,  &RegisterMIFFImage,
+        &RegisterPNGImage, &RegisterJPEGImage, &RegisterTIFFImage, &RegisterWEBPImage,
+        &RegisterBMPImage, &RegisterGIFImage,  &RegisterMIFFImage,
     };
     volatile std::size_t magick_reg_sink = 0;
     for (auto &fn : keep)
@@ -213,6 +215,28 @@ public:
 
   void write(const image &img, const std::string &path, int quality) const override {
     init_magick_once();
+    // Resolve the target coder from the extension UP FRONT and refuse when this
+    // ImageMagick cannot encode it. Image::write(filename) does NOT fail on a
+    // missing encoder (seen with a deps-prefix ImageMagick built without the
+    // png/jpeg delegates): the format stays unresolved and WriteImage silently
+    // falls back to Magick's native MIFF, so save("out.png") wrote a MIFF blob
+    // ("id=ImageMagick...") under the .png name. Throwing here instead lets
+    // write_image fall back to the stb encoder for png/jpg/bmp/tga.
+    std::string fmt = image_file_extension(path);
+    std::transform(fmt.begin(), fmt.end(), fmt.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    bool writable = false;
+    try {
+      // CoderInfo throws on a coder Magick does not know at all (never built,
+      // or its module failed to load); isWritable() is false for decode-only
+      // coders. Either way the encoder is unusable.
+      writable = !fmt.empty() && Magick::CoderInfo(fmt).isWritable();
+    } catch (const Magick::Exception &) {
+      writable = false;
+    }
+    if (!writable)
+      throw std::runtime_error("cvc::image magick write '" + path + "': this ImageMagick has no '" +
+                               fmt + "' encoder (missing delegate?)");
     // Magick's CharPixel constructor expects 8-bit interleaved RGBA.
     image src = (img.format() == image::pixel_format::RGBA && img.type() == image::data_type::u8)
                     ? img
@@ -222,7 +246,8 @@ public:
                        Magick::CharPixel, src.data());
       if (quality >= 0 && quality <= 100)
         mi.quality(static_cast<size_t>(quality));
-      mi.write(path); // format inferred from the path extension
+      mi.magick(fmt); // explicit format — never let write() re-infer (and miss)
+      mi.write(path);
     } catch (const Magick::Exception &e) {
       throw std::runtime_error(std::string("cvc::image magick write '") + path + "': " + e.what());
     }
@@ -245,8 +270,11 @@ void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
 //     must be added FIRST to beat magick on png/jpg/bmp/tga/gif reads (the
 //     ImageMagick libtool-dup-static-state trap on wasm makes those reads
 //     throw NoDecodeDelegate — see src/cvc/image/stb_io.cpp).
-//   for_write_ext walks and takes the LAST extension match, so magick must
-//     be added LAST to keep write() working — stb is read-only.
+//   Writes prefer the LAST extension match (for_write_ext and write_image's
+//     first candidate), so magick must be added LAST — it covers every
+//     extension and honors quality/format options stb does not. write_image
+//     falls back to stb's png/jpg/bmp/tga encoders when magick throws (e.g.
+//     an ImageMagick built without the target format's delegate).
 void register_default_image_handlers() {
   register_stb_image_handler();
 #ifdef CVC_ENABLE_IMAGEMAGICK

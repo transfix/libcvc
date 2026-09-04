@@ -301,6 +301,7 @@ if(CVC_ENABLE_COVERAGE)
           '*_test.cpp'
           '${CMAKE_SOURCE_DIR}/src/xmlrpc/*'
           '*/geometry/cvc-mesher/contour/*'
+          '*/cvc/image/third_party/*'
           --output-file coverage_filtered.info
           --ignore-errors unused
 
