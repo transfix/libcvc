@@ -68,13 +68,24 @@ def test_full_pipeline_on_one_app():
 
     # Phase 5a: drop the meshes into a scene bound to the SAME app (no cvcGL
     # singleton). num_graphics reflects what we added.
+    #
+    # pycvc_gl wraps the REAL cvcGL classes; the Scene facade this used to go
+    # through is gone (see the header of pycvc_scene.h). addGraphics returns the
+    # LIVE node, so the mesh below can be posed and recoloured in place.
     import pycvc_gl
 
-    scene = pycvc_gl.Scene(app)
-    scene.add_geometry("surface", surf)
-    scene.add_geometry("sphere", sphere)
+    scene = pycvc_gl.SceneGraph(app)
+    surf_node = scene.addGraphics("surface", surf)
+    scene.addGraphics("sphere", sphere)
     assert scene.num_graphics() == 2
-    assert scene.has("surface")
+    assert scene.hasGraphics("surface")
+
+    # The capstone is about the layers composing, so go one step past "it was
+    # added": what came back is the LIVE node, and posing it moves the real
+    # scene-graph transform rather than a copy.
+    surf_node.setPosition(1.0, 2.0, 3.0)
+    w = surf_node.get_world_transform()  # row-major 4x4
+    assert (w[3], w[7], w[11]) == (1.0, 2.0, 3.0)
 
     print("  ok: full app -> sdf -> mesh -> state/observer -> DSL -> scene pipeline")
 
