@@ -1473,7 +1473,13 @@ cvc_discover_tests(state_message_test)
 cvc_discover_tests(state_bounded_queue_test)
 cvc_discover_tests(state_transport_inproc_test)
 if(NOT WIN32)
-  cvc_discover_tests(state_transport_ipc_test)
+  # Same fork()+IPC timing profile as state_exec_multiprocess_test and
+  # state_multiprocess_ipc_test, both of which #121 moved off the parallel
+  # scheduler for exactly this reason. This suite was missed: it drives real
+  # Unix-domain sockets with poll() timeouts, so a loaded scheduler can starve
+  # a connect/replication window and fail an assertion that has nothing wrong
+  # with it. TwoEndpointConvergence is the one that surfaces it most often.
+  cvc_discover_tests(state_transport_ipc_test PROPERTIES RUN_SERIAL TRUE)
   cvc_discover_tests(state_reconnect_resilience_test)
 endif()
 cvc_discover_tests(state_blob_transport_integration_test)
