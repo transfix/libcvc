@@ -219,6 +219,8 @@ set(SOURCE_FILES
   volren/raycaster.cpp
   volren/raycaster_cuda_stub.cpp
   volren/state_settings.cpp
+  volslice/slicer.cpp
+  volslice/state_settings.cpp
 )
 
 # material.cpp is a BIT-identical twin of a Python reference whose gaussian
