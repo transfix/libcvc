@@ -54,6 +54,14 @@ namespace cvc {
 // indices so uneven per-item cost self-balances. It is re-entrant: a parallel_for
 // invoked from inside a pool task runs inline instead of deadlocking on workers
 // that are busy with the outer job.
+//
+// parallel_for() is safe to call from any number of threads concurrently — the
+// intended use for a shared pool like app::computePool(). The pool runs ONE
+// fan-out at a time: concurrent orchestrators serialize, each later caller
+// blocking until the in-flight job drains before its own is posted (they do not
+// lend their thread to the in-flight job while they wait). Total throughput is
+// bounded by the pool's workers either way; the serialization only adds latency
+// when several threads fan out at once.
 class thread_pool {
 public:
   // Create `n_workers` background workers. 0 (the default) picks
@@ -88,6 +96,7 @@ private:
   };
 
   std::vector<std::thread> _workers;
+  std::mutex _post_mtx; // serializes orchestrators: held from job post to drain+clear
   std::mutex _mtx;
   std::condition_variable _wake; // workers park here until a job is posted
   std::condition_variable _done; // parallel_for parks here until the job drains
