@@ -279,8 +279,8 @@ void GeometryNode::updateRenderModeVTK() {
   // Request a render update — flag-only; see GraphicsNode::handleStateChanged
   // for why a synchronous Render() here is catastrophic under per-frame
   // property animation (setColor alone writes three state keys).
-  if (m_sceneGraph) {
-    m_sceneGraph->requestRender();
+  if (SceneGraph *sg = getSceneGraph()) {
+    sg->requestRender();
   } else if (m_renderer && m_renderer->GetRenderWindow()) {
     m_renderer->GetRenderWindow()->Render();
   }
@@ -551,8 +551,8 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
     m_polyData->Modified();
     // Request a redraw the same way handleStateChanged does — never render
     // synchronously here (see GraphicsNode). The host frame loop drains it.
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -580,8 +580,8 @@ void GeometryNode::updateColors(const std::vector<unsigned char> &rgb) {
     std::memcpy(colors->GetPointer(0), rgb.data(), rgb.size());
     colors->Modified();
     m_polyData->Modified();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -611,8 +611,8 @@ void GeometryNode::updateNormals(const std::vector<double> &xyz) {
       normals->SetTuple3(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
     normals->Modified();
     m_polyData->Modified();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -621,8 +621,8 @@ void GeometryNode::setRenderLinesAsTubes(bool on) {
     if (!m_actor)
       return;
     m_actor->GetProperty()->SetRenderLinesAsTubes(on);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -631,8 +631,8 @@ void GeometryNode::setRenderPointsAsSpheres(bool on) {
     if (!m_actor)
       return;
     m_actor->GetProperty()->SetRenderPointsAsSpheres(on);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -646,8 +646,8 @@ void GeometryNode::setDepthOffset(double units) {
     m_mapper->SetRelativeCoincidentTopologyPolygonOffsetParameters(0.0, -units);
     m_mapper->SetRelativeCoincidentTopologyLineOffsetParameters(0.0, -units);
     m_mapper->SetRelativeCoincidentTopologyPointOffsetParameter(-units); // point form is units-only
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -656,8 +656,8 @@ void GeometryNode::addVertexShaderReplacement(const std::string &original,
   runOnMainThread([this, original, replacement]() {
     if (m_actor && m_actor->GetShaderProperty())
       m_actor->GetShaderProperty()->AddVertexShaderReplacement(original, true, replacement, false);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -667,8 +667,8 @@ void GeometryNode::addFragmentShaderReplacement(const std::string &original,
     if (m_actor && m_actor->GetShaderProperty())
       m_actor->GetShaderProperty()->AddFragmentShaderReplacement(original, true, replacement,
                                                                  false);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -678,8 +678,8 @@ void GeometryNode::clearShaderReplacements() {
       m_actor->GetShaderProperty()->ClearAllVertexShaderReplacements();
       m_actor->GetShaderProperty()->ClearAllFragmentShaderReplacements();
     }
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -694,8 +694,8 @@ void GeometryNode::disableCoordinateShiftScale() {
     // received coordinates scaled to ~[-1,1] and rendered dead flat / wrong.
     if (m_mapper)
       m_mapper->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -704,24 +704,24 @@ void GeometryNode::setShaderUniformf(const std::string &name, float v) {
   runOnMainThread([this, name, v]() {
     m_uniformsF[name] = v;
     ensureShaderTexObserver();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 void GeometryNode::setShaderUniformi(const std::string &name, int v) {
   runOnMainThread([this, name, v]() {
     m_uniformsI[name] = v;
     ensureShaderTexObserver();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y, float z) {
   runOnMainThread([this, name, x, y, z]() {
     m_uniforms3F[name] = {x, y, z};
     ensureShaderTexObserver();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 
@@ -767,8 +767,8 @@ void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *t
     else
       m_shaderTextures.erase(name);
     ensureShaderTexObserver();
-    if (m_sceneGraph)
-      m_sceneGraph->requestRender();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
   });
 }
 

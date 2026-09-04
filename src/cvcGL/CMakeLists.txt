@@ -252,6 +252,14 @@ add_executable(cvcgl_teardown test/cvcgl_teardown.cpp)
 target_link_libraries(cvcgl_teardown PRIVATE cvcGL)
 add_test(NAME cvcgl_teardown COMMAND cvcgl_teardown)
 
+# A node can outlive the scene that made it (removeGraphics hands it back; a
+# Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
+# used to dangle in that window -- SceneGraph* (a pose write locked the freed
+# publisher's mutex) and the parent GraphicsNode*.
+add_executable(cvcgl_node_outlives_scene test/cvcgl_node_outlives_scene.cpp)
+target_link_libraries(cvcgl_node_outlives_scene PRIVATE cvcGL)
+add_test(NAME cvcgl_node_outlives_scene COMMAND cvcgl_node_outlives_scene)
+
 # Phase-4 texture support: geometry UVs -> SetTCoords + setTexture(cvc::image).
 add_executable(cvcgl_texture test/cvcgl_texture.cpp)
 target_link_libraries(cvcgl_texture PRIVATE cvcGL)

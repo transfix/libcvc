@@ -11,11 +11,22 @@ namespace gl {
 
 void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
   m_sceneGraph = sceneGraph;
+  // Take a weak handle on the scene alongside the raw pointer. The scene resets
+  // its token in ~SceneGraph, which is how a node that outlives its scene finds
+  // out — see getSceneGraph().
+  m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
 
   // Propagate to all children so they marshal through the same pump.
   for (auto &child : m_children) {
     child->setSceneGraph(sceneGraph);
   }
+}
+
+SceneGraph *SceneNode::getSceneGraph() const {
+  // The back-pointer is only good while the scene that installed it is alive.
+  // expired() is a single atomic load, so this stays cheap enough for the pose
+  // hot path (GraphicsNode::setPosition consults it per call).
+  return m_sceneAlive.expired() ? nullptr : m_sceneGraph;
 }
 
 void SceneNode::runOnMainThread(std::function<void()> func) {
@@ -24,7 +35,8 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   // immediately and in order. This matters for teardown: removing a node runs
   // its removeFromRenderer() synchronously, pulling its prop from the renderer
   // *before* the node is destroyed — never leaving a dangling prop behind.
-  if (!m_sceneGraph || m_sceneGraph->onOwnerThread()) {
+  SceneGraph *sg = getSceneGraph();
+  if (!sg || sg->onOwnerThread()) {
     func();
     return;
   }
@@ -35,7 +47,7 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   // dereferencing a freed `this`. This keeps cross-thread marshalling safe
   // across teardown: a destroyed node's still-queued callbacks become no-ops.
   std::weak_ptr<SceneNode> weak = weak_from_this();
-  m_sceneGraph->postEvent([weak, func = std::move(func)]() {
+  sg->postEvent([weak, func = std::move(func)]() {
     if (auto self = weak.lock()) {
       func();
     }

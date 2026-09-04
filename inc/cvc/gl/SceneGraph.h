@@ -59,6 +59,16 @@ public:
   // scene and running under appContext(); never a process-wide singleton.
   cvc::gl::state_publisher &publisher() { return *m_publisher; }
 
+  // A weak handle on this scene's lifetime, for the node back-pointers.
+  //
+  // Nodes can outlive the scene: removeGraphics() drops the scene's reference
+  // but a caller (a Python proxy, a local shared_ptr) may still hold one, and
+  // that node's raw SceneGraph* would then outlive what it points at. ~SceneGraph
+  // resets this token, so every node — attached or long since removed — reads
+  // SceneNode::getSceneGraph() == nullptr instead of dereferencing a freed scene
+  // (and, through it, a freed publisher mutex). See SceneNode::setSceneGraph.
+  std::weak_ptr<void> aliveToken() const { return m_alive; }
+
   void setRenderer(vtkRenderer *renderer);
 
   // ── lighting ──────────────────────────────────────────────────────────────
@@ -370,6 +380,9 @@ private:
   void applyLights();
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::unique_ptr<cvc::gl::state_publisher> m_publisher; // scene-owned, runs under m_ctx
+  // Owned half of aliveToken(). Held by nothing else, and reset in ~SceneGraph,
+  // which is what detaches every node at once.
+  std::shared_ptr<void> m_alive = std::make_shared<char>();
   std::string m_statePrefix;
   std::thread::id m_ownerThread; // thread that owns the scene / drives the pump
 
