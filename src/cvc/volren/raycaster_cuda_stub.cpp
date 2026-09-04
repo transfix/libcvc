@@ -30,6 +30,7 @@ void raycast_cuda_set_cache_budget(std::size_t) {}
 std::size_t raycast_cuda_cache_budget() { return 0; }
 std::size_t raycast_cuda_cache_bytes() { return 0; }
 std::uint64_t raycast_cuda_cache_upload_bytes() { return 0; }
+void raycast_cuda_forget_host_buffer(const void *) {}
 void raycast_cuda_clear_cache() {}
 
 #endif // !CVC_USING_CUDA
