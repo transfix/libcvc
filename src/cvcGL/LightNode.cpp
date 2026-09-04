@@ -89,12 +89,31 @@ void LightNode::readAllFromState() {
 void LightNode::handleStateChanged(const std::string &childState) {
   // Pose keys are the base class's business; anything else is ours.
   GraphicsNode::handleStateChanged(childState);
-  if (m_impl->inStateApply)
-    return;
-  m_impl->inStateApply = true;
-  readAllFromState();
-  m_impl->inStateApply = false;
-  notifyScene();
+
+  // MARSHALLED, for exactly the reason notifyScene() below already gives — just
+  // one step earlier than it used to be. Everything here was running on
+  // WHATEVER thread wrote the state, and this is reachable off the owner thread:
+  // a pose write goes through the scene's state_publisher, whose worker flushes
+  // on its own thread; that flush fires childChanged, and SceneNode disables
+  // instance threading, so handleStateChanged lands on THAT thread.
+  //
+  // readAllFromState() then rewrote m_impl while the owner thread could be
+  // reading those same fields in SceneGraph::applyLights(), and inStateApply —
+  // a plain bool — was torn between the two, so the re-entry guard itself was
+  // unreliable. That is the intermittent segfault in cvcgl_stage_caster_truth:
+  // this handler on the publisher's thread with the owner thread inside VTK.
+  //
+  // runOnMainThread() runs inline when we are already on the owner thread, so
+  // nothing about the single-threaded path changes; only the racing one defers.
+  // It is weak-guarded, so a light destroyed before the pump drains is skipped.
+  runOnMainThread([this]() {
+    if (m_impl->inStateApply)
+      return;
+    m_impl->inStateApply = true;
+    readAllFromState();
+    m_impl->inStateApply = false;
+    notifyScene();
+  });
 }
 
 void LightNode::notifyScene() {

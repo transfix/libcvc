@@ -252,6 +252,12 @@ add_executable(cvcgl_teardown test/cvcgl_teardown.cpp)
 target_link_libraries(cvcgl_teardown PRIVATE cvcGL)
 add_test(NAME cvcgl_teardown COMMAND cvcgl_teardown)
 
+# A LightNode must apply state only on its scene's owner thread -- the handler is
+# reachable from the publisher's flush thread, where it used to race applyLights().
+add_executable(cvcgl_light_state_thread test/cvcgl_light_state_thread.cpp)
+target_link_libraries(cvcgl_light_state_thread PRIVATE cvcGL)
+add_test(NAME cvcgl_light_state_thread COMMAND cvcgl_light_state_thread)
+
 # A node's own pose, published and flushed back from off the owner thread, must
 # not rewind it. Guards the echo check in GraphicsNode::handleStateChanged.
 add_executable(cvcgl_pose_echo test/cvcgl_pose_echo.cpp)
